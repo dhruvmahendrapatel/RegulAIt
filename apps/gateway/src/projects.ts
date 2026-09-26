@@ -45,6 +45,7 @@ import {
   createTeamSchema,
   deleteTeamSchema,
   detectPII,
+  type InternationalPiiCategory,
   patchProjectMemberSchema,
   promoteContextSchema,
   reclassifySchema,
@@ -60,7 +61,17 @@ import {
   type InstanceState,
   type WorkflowDefinition,
 } from "@regulait/workflow-kernel";
-import { loadOrgSettings, orgDefaultPiiMode, retentionFloor, runAuditPruneOnce } from "./org-settings.js";
+import {
+  loadOrgSettings,
+  orgDefaultPiiMode,
+  piiInternationalCategories,
+  retentionFloor,
+  runAuditPruneOnce,
+} from "./org-settings.js";
+import { ConfigVersionUnresolvableError, resolveRuleVersions } from "./rule-versions.js";
+// ADR-0074: a compliance-profile UPDATE rewrites twelve versioned fields, so it
+// goes through the one choke point rather than straight at the read-model.
+import { applyRuleEdit, isRuleEditRefusal } from "./rule-writes.js";
 
 type ProjectRow = typeof projects.$inferSelect;
 
@@ -387,10 +398,40 @@ export async function complianceProfilesForTags(
   return profilesForTags(db, tags);
 }
 
+/**
+ * ADR-0073 — a compliance profile's ACTIVE VERSION governs, not its table row.
+ *
+ * This is the ONE funnel every §8.3 cascade consumer goes through
+ * (`projectPiiMode`, `projectMcpMode`, `complianceProfilesForTags` for the
+ * guardrail floor and the pillar-3 infra floors), so wiring it here wires all
+ * of them without any of them learning about `config_versions` — the same
+ * single-choke-point discipline `executeGovernedDispatch` gives the prompt path.
+ *
+ * A profile with no version rows resolves to its own row: byte-identical
+ * pre-ADR-0073 behaviour. A profile with version rows but NO active version
+ * REFUSES — dropping a compliance profile would relax `piiMode`,
+ * `mcpDefaultMode` and every floor it carries, which is precisely the direction
+ * this may never fail in.
+ *
+ * NOTE ON THE SHADOW: a compliance-profile candidate's effect is a pure
+ * function of the profile bodies and the project's tags — it does not vary per
+ * request. Evaluating it here would write one identical observation row per
+ * call, so it is computed instead where it is read, over the real projects, by
+ * `GET /v1/config-versions/:type/:id/divergence` — which since B8b also
+ * PERSISTS each per-project comparison (deduplicated by fingerprint) into
+ * `config_canary_observations`, so the history survives the page refresh.
+ * Stated rather than implied.
+ */
 async function profilesForTags(db: Db, tags: string[]): Promise<ComplianceProfileRow[]> {
   if (tags.length === 0) return [];
   const rows = await db.select().from(complianceProfiles);
-  return rows.filter((p) => tags.includes(p.tag));
+  const matched = rows.filter((p) => tags.includes(p.tag));
+  if (matched.length === 0) return matched;
+  const resolved = await resolveRuleVersions(db, "compliance_profile", matched, tags.slice().sort().join(","));
+  if (resolved.unresolvable.length > 0) {
+    throw new ConfigVersionUnresolvableError(resolved.unresolvable[0]!.reason);
+  }
+  return resolved.served;
 }
 
 // --- §8.4 PII enforcement (pillar 3) -------------------------------------
@@ -399,21 +440,30 @@ async function profilesForTags(db: Db, tags: string[]): Promise<ComplianceProfil
 
 export type PiiMode = "block" | "warn" | "log";
 
-/** The effective piiMode a project's classifications force. When the project
- * is unclassified / has no matching compliance profile, the ORG DEFAULT
- * (ADR-0021 defaultPiiMode) applies — 'none' (the default) maps to null and
- * keeps today's no-enforcement behaviour byte-identical. A classified,
- * matched project keeps its cascade's mode: the org default fills the gap,
- * it never overrides a compliance framework. Unattributed calls (no
- * projectId) stay unenforced — there is no project policy to enforce. */
+/** The effective piiMode for a dispatch, resolved through ONE rule: an
+ * explicit compliance framework governs where one matches; EVERYWHERE ELSE
+ * the ORG DEFAULT (ADR-0021 defaultPiiMode) is the deployment-wide floor.
+ * "Everywhere else" now genuinely means everywhere — an unclassified project,
+ * a project whose tags match no profile, an UNATTRIBUTED call (no projectId at
+ * all), and even a dangling projectId that names no project. The last two are
+ * the 2026-08-13 amendment (owner decision): before it, omitting the
+ * projectId was a one-keystroke exit from PII enforcement — the same
+ * attribution dodge the semantic-cache fix closed for replays, still open for
+ * the original call. A dangling id falls to the floor too, because a made-up
+ * project must never be WEAKER than no project.
+ *
+ * 'none' (the shipped default) maps to null, so a deployment that never set
+ * the org default keeps the old no-enforcement behaviour byte-identical. And
+ * the org default still never overrides a matched compliance framework — it
+ * is the floor under the frameworks, not a ceiling over them. */
 export async function projectPiiMode(
   db: Db,
   projectId: string | null | undefined,
 ): Promise<PiiMode | null> {
-  if (!projectId) return null;
-  const [project] = await db.select().from(projects).where(eq(projects.id, projectId));
-  if (!project) return null;
   const fallback = async () => orgDefaultPiiMode(await loadOrgSettings(db));
+  if (!projectId) return fallback();
+  const [project] = await db.select().from(projects).where(eq(projects.id, projectId));
+  if (!project) return fallback();
   const tags = (project.classifications ?? []) as string[];
   if (tags.length === 0) return fallback();
   const profiles = await profilesForTags(db, tags);
@@ -451,6 +501,12 @@ export async function projectMcpMode(
   };
 }
 
+/** ADR-0117: re-exported here so every dispatch path resolves BOTH halves of
+ * the §8.4 decision — the mode and the jurisdiction set — from the one module
+ * it already imports `projectPiiMode`/`enforcePII` from. Nothing enforcing PII
+ * should have to know that one half lives in `org-settings.ts`. */
+export { piiInternationalCategories };
+
 export interface PiiEnforcement {
   action: "allow" | "warn" | "block";
   hits: PiiHit[];
@@ -479,14 +535,23 @@ export function piiWithheldMarker(hits: PiiHit[]): string {
  *  - log  : hits present -> 'allow' (proceed silently; the caller records the
  *    category counts in its usage/audit detail).
  * No hits (or no mode) -> 'allow', so a clean payload on a classified project
- * stays byte-identical to the pre-enforcement behaviour. Pure over its args. */
+ * stays byte-identical to the pre-enforcement behaviour. Pure over its args.
+ *
+ * ADR-0117: `international` names the national-identifier jurisdictions the
+ * deployment has switched on (`piiInternationalCategories`, shipped empty).
+ * It is REQUIRED rather than defaulted precisely because this function is the
+ * §8.4 choke point: a dispatch path added later that forgot the argument would
+ * enforce LESS than the org configured, silently, and only on that one path —
+ * so the compiler is made to ask. Pass `[]` where a caller genuinely has no
+ * org context, and say why at the call site. */
 export function enforcePII(
   mode: PiiMode,
   io: { input?: string | undefined; output?: string | undefined },
+  international: readonly InternationalPiiCategory[],
 ): PiiEnforcement {
   const phase: "input" | "output" = io.output !== undefined ? "output" : "input";
   const text = phase === "output" ? (io.output ?? "") : (io.input ?? "");
-  const hits = detectPII(text);
+  const hits = detectPII(text, international);
   if (hits.length === 0) return { action: "allow", hits, phase };
   const action = mode === "block" ? "block" : mode === "warn" ? "warn" : "allow";
   return { action, hits, phase };
@@ -927,6 +992,83 @@ export async function applyProjectApprovalDecision(
  * route. */
 const ROLE_RANK: Record<string, number> = { viewer: 0, contributor: 1, owner: 2 };
 
+/**
+ * B8c (ADR-0056 amendment 2026-08-22) — the `PATCH /v1/projects/:projectId`
+ * handler core, extracted so the copilot's consent-gated applier executes a
+ * `budget_adjustment` proposal through EXACTLY the write an admin's own PATCH
+ * performs (the pattern `grant-revocation.ts` set): merge over the current
+ * row, re-check the budget-requires-approver invariant against the MERGED row,
+ * write, audit as `project-updated`. Validation stays the route's own —
+ * `updateProjectSchema` — and EVERY caller parses with it before calling this;
+ * this function never widens what the route would accept.
+ *
+ * `auditDetail` merges route-specific fields into the `project-updated` audit
+ * row's detail (the same courtesy `applyRuleEdit` extends), so the copilot
+ * apply can stamp its proposal id onto the very row an admin edit writes.
+ */
+export type ProjectPatchResult =
+  | { ok: true; row: ProjectRow; changed: Record<string, unknown> }
+  | { ok: false; status: 404 | 422; error: string; detail: string };
+
+export async function applyProjectPatch(
+  db: Db,
+  args: {
+    projectId: string;
+    patch: z.infer<typeof updateProjectSchema>;
+    actorUserId: string | null;
+    auditDetail?: Record<string, unknown>;
+  },
+): Promise<ProjectPatchResult> {
+  const { projectId, patch: body } = args;
+  const [project] = await db.select().from(projects).where(eq(projects.id, projectId));
+  if (!project) {
+    return {
+      ok: false,
+      status: 404,
+      error: "unknown_project",
+      detail: `no project with id ${projectId} exists`,
+    };
+  }
+  const merged = {
+    name: body.name ?? project.name,
+    costCenter: body.costCenter === undefined ? project.costCenter : body.costCenter,
+    budgetUsd: body.budgetUsd === undefined ? project.budgetUsd : body.budgetUsd,
+    budgetApproverUserId:
+      body.budgetApproverUserId === undefined
+        ? project.budgetApproverUserId
+        : body.budgetApproverUserId,
+    budgetPeriod: body.budgetPeriod === undefined ? project.budgetPeriod : body.budgetPeriod,
+    alertThresholdPct:
+      body.alertThresholdPct === undefined ? project.alertThresholdPct : body.alertThresholdPct,
+    arbiterUserId: body.arbiterUserId === undefined ? project.arbiterUserId : body.arbiterUserId,
+    initiativeId: body.initiativeId === undefined ? project.initiativeId : body.initiativeId,
+  };
+  // the create-time invariant, held against the row this patch would leave
+  if (merged.budgetUsd != null && merged.budgetApproverUserId == null) {
+    return {
+      ok: false,
+      status: 422,
+      error: "budget_requires_approver",
+      detail: "a project budget requires a budgetApproverUserId",
+    };
+  }
+  const [row] = await db.update(projects).set(merged).where(eq(projects.id, projectId)).returning();
+  const changed = Object.fromEntries(
+    Object.entries(body).filter(([, v]) => v !== undefined),
+  ) as Record<string, unknown>;
+  await db.insert(auditLog).values({
+    userId: args.actorUserId ?? project.budgetApproverUserId ?? projectId,
+    objectType: "project",
+    objectId: projectId,
+    detail: { phase: "update", changed, ...(args.auditDetail ?? {}) },
+    effect: "allow",
+    ruleId: "project-updated",
+    ruleChain: [],
+    reason: `project '${project.name}' updated: ${Object.keys(changed).join(", ")}`,
+  });
+  return { ok: true, row: row!, changed };
+}
+
 export function registerProjectRoutes(app: FastifyInstance, db: Db) {
   /** §9.3: per-user, per-Shared-Project access — viewer reads, contributor+
    * writes, owner administers membership. Admins bypass. Returns the
@@ -1025,49 +1167,24 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
   // Post-creation edits (admin-only by the default gate): budget, approver,
   // arbiter, cost center, name. Classifications never ride this route — a
   // reclassification is a governed diff-then-approve change (§8.3), and a
-  // PATCH that could slip one through would bypass that review.
+  // PATCH that could slip one through would bypass that review. B8c: the
+  // handler core lives in `applyProjectPatch` so the copilot's
+  // `budget_adjustment` applier rides this exact write.
   app.patch("/v1/projects/:projectId", async (req, reply) => {
     const { projectId } = projectIdParam.parse(req.params);
     const body = updateProjectSchema.parse(req.body);
-    const [project] = await db.select().from(projects).where(eq(projects.id, projectId));
-    if (!project) return reply.status(404).send({ error: "unknown_project" });
-    const merged = {
-      name: body.name ?? project.name,
-      costCenter: body.costCenter === undefined ? project.costCenter : body.costCenter,
-      budgetUsd: body.budgetUsd === undefined ? project.budgetUsd : body.budgetUsd,
-      budgetApproverUserId:
-        body.budgetApproverUserId === undefined
-          ? project.budgetApproverUserId
-          : body.budgetApproverUserId,
-      budgetPeriod: body.budgetPeriod === undefined ? project.budgetPeriod : body.budgetPeriod,
-      alertThresholdPct:
-        body.alertThresholdPct === undefined ? project.alertThresholdPct : body.alertThresholdPct,
-      arbiterUserId: body.arbiterUserId === undefined ? project.arbiterUserId : body.arbiterUserId,
-      initiativeId:
-        body.initiativeId === undefined ? project.initiativeId : body.initiativeId,
-    };
-    // the create-time invariant, held against the row this patch would leave
-    if (merged.budgetUsd != null && merged.budgetApproverUserId == null) {
-      return reply.status(422).send({
-        error: "budget_requires_approver",
-        detail: "a project budget requires a budgetApproverUserId",
-      });
-    }
-    const [row] = await db.update(projects).set(merged).where(eq(projects.id, projectId)).returning();
-    const changed = Object.fromEntries(
-      Object.entries(body).filter(([, v]) => v !== undefined),
-    ) as Record<string, unknown>;
-    await db.insert(auditLog).values({
-      userId: req.authCtx.userId ?? project.budgetApproverUserId ?? projectId,
-      objectType: "project",
-      objectId: projectId,
-      detail: { phase: "update", changed },
-      effect: "allow",
-      ruleId: "project-updated",
-      ruleChain: [],
-      reason: `project '${project.name}' updated: ${Object.keys(changed).join(", ")}`,
+    const res = await applyProjectPatch(db, {
+      projectId,
+      patch: body,
+      actorUserId: req.authCtx.userId ?? null,
     });
-    return row;
+    if (!res.ok) {
+      // byte-identical to the pre-B8c responses: the 404 carried no detail
+      return reply
+        .status(res.status)
+        .send(res.status === 404 ? { error: res.error } : { error: res.error, detail: res.detail });
+    }
+    return res.row;
   });
 
   // ---------------------------------------------------------------------------
@@ -1928,13 +2045,62 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
       // ADR-0042: the guardrail FLOOR this framework forces. MAX-composed with
       // every other setting downstream, so it can only ever raise a layer.
       guardrailModes: body.guardrailModes ?? null,
+      // ADR-0068 §5: the framework's red-team opinion — gating classes, a floor
+      // on trials per probe, and a severity floor. Null = no opinion, which is
+      // every pre-0080 row and leaves a run exactly as the caller asked for it.
+      redteamGatingClasses: body.redteamGatingClasses ?? null,
+      redteamMinTrials: body.redteamMinTrials ?? null,
+      redteamFailOnSeverity: body.redteamFailOnSeverity ?? null,
     };
-    const [row] = await db
+    // ADR-0074 — THIS ROUTE IS CREATE-*OR-UPDATE*, and the update half was a
+    // silent no-op for enforcement.
+    //
+    // `tag` is UNIQUE, so the `onConflictDoUpdate` this used to be is the ONLY
+    // edit path a compliance profile has (there is no PATCH). Every field it
+    // rewrites except `tag` is a VERSIONED field, and `profilesForTags` resolves
+    // compliance profiles through `config_versions` — so tightening `piiMode`
+    // on an already-versioned framework profile returned 201, showed the new
+    // value in the list and in the SPA, and changed nothing about what was
+    // enforced. One profile edit cascades into PII handling, MCP data-scope
+    // defaults, retention, budget ceilings, guardrail floors and red-team
+    // gating at once, which makes it the highest-blast-radius writer of the set.
+    //
+    // The two halves are now separated explicitly rather than left to ON
+    // CONFLICT. CREATE stays a plain insert (a brand-new row cannot have
+    // versions, so its row is what the kernel resolves — invariant 4). UPDATE
+    // goes through the one choke point. `onConflictDoNothing` closes the race:
+    // if a concurrent request created the row between the two statements, this
+    // one falls through to the edit path instead of clobbering it.
+    const [created] = await db
       .insert(complianceProfiles)
       .values(values)
-      .onConflictDoUpdate({ target: complianceProfiles.tag, set: values })
+      .onConflictDoNothing({ target: complianceProfiles.tag })
       .returning();
-    return reply.status(201).send(row);
+    if (created) return reply.status(201).send(created);
+
+    const [existing] = await db
+      .select({ id: complianceProfiles.id })
+      .from(complianceProfiles)
+      .where(eq(complianceProfiles.tag, body.tag));
+    if (!existing) return reply.status(409).send({ error: "compliance_profile_write_conflict" });
+
+    // Every versioned field is passed, including the explicit nulls — this
+    // route's semantics have always been TOTAL REPLACE, and expressing that as
+    // a version keeps it visible and rollback-able instead of changing it.
+    const { tag: _tag, ...versioned } = values;
+    const res = await applyRuleEdit<ComplianceProfileRow>(db, {
+      artifactType: "compliance_profile",
+      artifactId: existing.id,
+      patch: versioned,
+      actorUserId: req.authCtx.userId ?? null,
+      label: `compliance profile '${body.tag}' set via POST /v1/compliance/profiles`,
+      auditObjectType: "compliance_profile",
+      auditRuleId: "compliance-profile-upserted",
+    });
+    if (isRuleEditRefusal(res)) {
+      return reply.status(res.status).send({ error: res.error, detail: res.detail });
+    }
+    return reply.status(201).send({ ...res.row, versionMinted: res.mintedVersion, note: res.note });
   });
 
   app.get("/v1/compliance/profiles", async () => ({

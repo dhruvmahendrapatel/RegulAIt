@@ -6,9 +6,8 @@
  * composes the phase-1 kit — no new dependencies.
  */
 import { useMemo, useState, type ReactNode } from "react";
-import { Navigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { api } from "../../api/client";
+import { ApiError, api } from "../../api/client";
 import type {
   AdminAgent,
   AdminProject,
@@ -24,17 +23,41 @@ import type {
 } from "../../api/adminTypes";
 import { fmtUsd } from "../../api/format";
 import { useSession } from "../../session/SessionContext";
-import { Badge, Button, Card, EmptyState, Input, Modal, SkeletonBlock } from "../../ui/kit";
+import { Badge, Button, Card, EmptyState, ErrorState, Input, Modal, SkeletonBlock, Table } from "../../ui/kit";
 import { useToast } from "../../ui/toast";
 import a from "./admin.module.css";
 import v from "../views.module.css";
 
 // ---- admin gate -----------------------------------------------------------
 
+/**
+ * The admin boundary. Default-deny, and it says so.
+ *
+ * This used to bounce a non-admin silently to Home, which is not a refusal —
+ * it is a disappearance, and the person who typed the URL is left unable to
+ * tell "I am not allowed" from "that page does not exist". Every governed
+ * refusal in this product names itself; the client-side one now does too. The
+ * gateway refuses these routes independently (they are absent from
+ * `NON_ADMIN_ROUTES`), so this is the readable half of a two-sided deny, never
+ * the enforcement.
+ */
 export function RequireAdmin(props: { children: ReactNode }) {
   const { auth } = useSession();
   if (auth === undefined) return <SkeletonBlock lines={4} />;
-  if (!auth?.isAdmin) return <Navigate to="/" replace />;
+  if (!auth?.isAdmin) {
+    return (
+      <Card>
+        <ErrorState
+          access
+          message={
+            "This is an administrative surface and your account does not hold the administrator role. " +
+            "It is not listed in your navigation for the same reason. The server refuses these endpoints " +
+            "independently of this screen, so nothing here was hidden from you and then left reachable."
+          }
+        />
+      </Card>
+    );
+  }
   return <>{props.children}</>;
 }
 
@@ -165,6 +188,142 @@ export function useAction() {
     }
   };
   return { busy, error, setError, run };
+}
+
+// ---- one async action at a time, KEEPING the refusal's structure ----------
+
+/**
+ * `useAction`'s sibling for surfaces whose whole product is the refusal.
+ *
+ * `useAction` flattens an error to one string, which is right for a save
+ * button. It is wrong for an importer: a 422 from ADR-0069/ADR-0071 carries the
+ * refused LINE NUMBERS, and a 402 from ADR-0066 carries the budget it hit.
+ * Throwing that away and printing "something went wrong" is precisely the
+ * failure these three slices were built not to have — so this keeps the status,
+ * the error code and the whole payload, and the caller renders them.
+ */
+export interface ApiOutcome {
+  ok: boolean;
+  /** the gateway's own `error` identifier, e.g. `malformed_rows` */
+  code: string | null;
+  status: number | null;
+  /** the gateway's own sentence — never a paraphrase, never a generic message */
+  reason: string;
+  /** the full body, so a caller can render `refusals[]`, `issues[]`, … */
+  payload: Record<string, unknown> | null;
+}
+
+export function useApiAction() {
+  const { toast } = useToast();
+  const invalidate = useAdminInvalidate();
+  const [busy, setBusy] = useState(false);
+  const [outcome, setOutcome] = useState<ApiOutcome | null>(null);
+
+  const run = async <T,>(fn: () => Promise<T>, okMsg: string): Promise<T | null> => {
+    setBusy(true);
+    setOutcome(null);
+    try {
+      const value = await fn();
+      setOutcome({
+        ok: true,
+        code: null,
+        status: null,
+        reason: okMsg,
+        payload: (value ?? null) as Record<string, unknown> | null,
+      });
+      toast(okMsg, "success");
+      invalidate();
+      return value;
+    } catch (e) {
+      if (e instanceof ApiError) {
+        const reason =
+          (typeof e.payload.detail === "string" && e.payload.detail) ||
+          (typeof e.payload.message === "string" && e.payload.message) ||
+          e.message;
+        const o: ApiOutcome = {
+          ok: false,
+          code: typeof e.payload.error === "string" ? e.payload.error : null,
+          status: e.status,
+          reason,
+          payload: e.payload as Record<string, unknown>,
+        };
+        setOutcome(o);
+        toast(`${o.code ?? `HTTP ${e.status}`} — ${reason}`, "error");
+      } else {
+        const msg = e instanceof Error ? e.message : String(e);
+        setOutcome({ ok: false, code: null, status: null, reason: msg, payload: null });
+        toast(msg, "error");
+      }
+      invalidate();
+      return null;
+    } finally {
+      setBusy(false);
+    }
+  };
+  return { busy, outcome, setOutcome, run };
+}
+
+/**
+ * The refusal/acceptance panel. `aria-live` because the reason IS the answer: a
+ * screen-reader user must not have to go hunting for why the platform said no.
+ */
+export function OutcomePanel(props: { outcome: ApiOutcome | null; testId?: string; children?: ReactNode }) {
+  const o = props.outcome;
+  return (
+    <div aria-live="polite" data-testid={props.testId}>
+      {o && (
+        <div
+          className={[a.outcome, o.ok ? a.outcomeOk : a.outcomeDeny].join(" ")}
+          role={o.ok ? undefined : "alert"}
+        >
+          <div className={v.row}>
+            <span className={a.effectWord}>{o.ok ? "Accepted" : "Refused"}</span>
+            {o.code && <Badge tone={o.ok ? "ok" : "danger"}>{o.code}</Badge>}
+            {o.status !== null && <span className={v.faint}>HTTP {o.status}</span>}
+          </div>
+          <div className={a.snippet} data-testid="outcome-reason">
+            {o.reason}
+          </div>
+          {props.children}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * A per-row refusal list. Every entry NAMES ITS 1-BASED FILE LINE — ADR-0069
+ * and ADR-0071 both make that a contract rather than a nicety, and a refusal
+ * with no locus is an apology instead of a report.
+ */
+export interface RowRefusal {
+  row: number;
+  reason: string;
+  field?: string;
+}
+
+export function RefusalList(props: { refusals: RowRefusal[] | undefined; truncated?: boolean; testId?: string }) {
+  const rows = props.refusals ?? [];
+  if (rows.length === 0) return null;
+  return (
+    <div className={v.stackTight} data-testid={props.testId}>
+      <div className={v.sectionTitle}>Refused lines ({rows.length})</div>
+      <Table<RowRefusal>
+        rows={rows}
+        rowKey={(r) => `${r.row}:${r.field ?? ""}:${r.reason.slice(0, 40)}`}
+        columns={[
+          { key: "line", header: "File line", width: "110px", render: (r) => <span className={v.num}>{r.row}</span> },
+          { key: "field", header: "Field", render: (r) => (r.field ? <code>{r.field}</code> : <span className={v.faint}>—</span>) },
+          { key: "reason", header: "Why it was refused", render: (r) => <span className={v.dim}>{r.reason}</span> },
+        ]}
+      />
+      {props.truncated && (
+        <p className={v.faint}>
+          Only the first refusals are listed — the import record holds the bounded list the gateway stored.
+        </p>
+      )}
+    </div>
+  );
 }
 
 // ---- loading / error wrappers ---------------------------------------------
@@ -319,6 +478,12 @@ export function ReasonModal(props: {
   confirmLabel?: string;
   placeholder?: string;
   danger?: boolean;
+  /**
+   * ADR-0124 — a floor the SERVER also enforces, checked here so a reason
+   * typed under incident pressure is rejected while the operator is still
+   * looking at the box rather than after the round trip.
+   */
+  minLength?: number;
   onConfirm: (reason: string) => void;
   onCancel: () => void;
 }) {
@@ -332,6 +497,13 @@ export function ReasonModal(props: {
   const go = () => {
     if (!reason.trim()) {
       setErr("A reason is required — it becomes the audited record.");
+      return;
+    }
+    if (props.minLength && reason.trim().length < props.minLength) {
+      setErr(
+        `Say a little more — at least ${props.minLength} characters. Whoever reads this later, ` +
+          "including whoever undoes it, has only this sentence to go on.",
+      );
       return;
     }
     const r = reason.trim();

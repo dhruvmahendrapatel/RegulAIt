@@ -33,12 +33,17 @@
  */
 import { runMigrations, type Db } from "@regulait/db";
 import { buildApp, type BuildAppOptions } from "./app.js";
+import { RATE_LIMIT_COUNTER_RETENTION_MS, pruneRateLimitCounters } from "./rate-limit-store.js";
 import { describeTrustProxy, resolveTrustProxy } from "./trusted-proxy.js";
 import { describeHsts, resolveHsts } from "./hsts.js";
 import { describeEgressPosture, resolveDeployMode } from "./deploy-posture.js";
 import { describeDataKey, verifyDataKeyOnBoot, type DataKeyBootResult } from "./data-key.js";
 import { Scheduler, resolveSchedulerConfig, syncSchedulerJobs } from "./scheduler.js";
 import { schedulerJobRegistry } from "./scheduler-jobs.js";
+import { captureAnchor, flushPendingAnchors, resolveAnchorSink } from "./audit-chain.js";
+
+/** ADR-0035: how often the chain head is captured when anchoring is on. */
+const DEFAULT_ANCHOR_INTERVAL_MS = 15 * 60_000;
 
 export interface StartGatewayOptions extends BuildAppOptions {
   db: Db;
@@ -108,7 +113,80 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
     if (scheduler) await scheduler.stop();
   });
 
+  // Audit anchoring is DEFAULT-ON and deliberately does NOT ride the ADR-0064
+  // scheduler. Two reasons, both load-bearing:
+  //
+  //  1. The scheduler is off by default because its six sweeps MUTATE governed
+  //     state and one of them (ADR-0057 red-team) costs real money per run.
+  //     Anchoring only ever READS the chain head and appends an anchor row, so
+  //     it does not need that ceremony — and folding it in would have meant
+  //     "turn on anchoring" silently also meant "start running red-team sweeps".
+  //  2. An install with the scheduler off would otherwise anchor nothing, which
+  //     is the exact state this default exists to end.
+  //
+  // Forced off under vitest for the same reason the scheduler is: a stray timer
+  // must not run underneath the suite.
+  let anchorTimer: NodeJS.Timeout | null = null;
+  let rateLimitPruneTimer: NodeJS.Timeout | null = null;
+  app.addHook("onClose", async () => {
+    if (anchorTimer) clearInterval(anchorTimer);
+    if (rateLimitPruneTimer) clearInterval(rateLimitPruneTimer);
+  });
+
   const address = await app.listen({ port, host });
+
+  // Capture the chain head on a timer. Started AFTER listen so a slow first
+  // write cannot delay coming into service, and the first capture is deferred
+  // by one interval rather than fired at boot for the same reason.
+  //
+  // A failure here is recorded on the anchor row (`status: 'failed'` +
+  // `lastError`) and must never take the gateway down: an install on a
+  // read-only filesystem still gets the hash chain, which is what catches
+  // everything short of a full recompute.
+  const anchorSink = resolveAnchorSink(env);
+  const anchorUnderTest = env.VITEST !== undefined || env.NODE_ENV === "test";
+  const anchorEveryMs = Math.max(
+    60_000,
+    Number(env.REGULAIT_AUDIT_ANCHOR_INTERVAL_MS ?? DEFAULT_ANCHOR_INTERVAL_MS) ||
+      DEFAULT_ANCHOR_INTERVAL_MS,
+  );
+  if (anchorSink && !anchorUnderTest) {
+    anchorTimer = setInterval(() => {
+      void (async () => {
+        try {
+          await captureAnchor(db, anchorSink, null);
+          await flushPendingAnchors(db, anchorSink);
+        } catch (err) {
+          app.log.warn({ err }, "audit anchor capture failed — the hash chain is unaffected");
+        }
+      })();
+    }, anchorEveryMs);
+    anchorTimer.unref();
+  }
+
+  // ADR-0125 — housekeeping for the shared rate-limit counters. Rows are
+  // bounded by DISTINCT CALLERS rather than by requests, and a stale row is
+  // already harmless because every read compares the window before trusting
+  // the count. So this is HYGIENE, NOT ENFORCEMENT — which is what lets it be
+  // a plain timer at all: ADR-0064's rule is that no ceiling may depend on a
+  // sweep having run, and none does here. Skipping it entirely would cost
+  // disk, never correctness.
+  //
+  // The retention is deliberately far longer than any configured window (the
+  // widest default is the 5-minute auth bucket): deleting a row whose window
+  // is still live would reset that caller's count to zero mid-window, turning
+  // a cleanup job into a way around the limit.
+  if (!anchorUnderTest) {
+    rateLimitPruneTimer = setInterval(
+      () => {
+        void pruneRateLimitCounters(db, RATE_LIMIT_COUNTER_RETENTION_MS).catch((err: unknown) => {
+          app.log.warn({ err }, "rate-limit counter prune failed — limits are unaffected");
+        });
+      },
+      Math.max(60_000, RATE_LIMIT_COUNTER_RETENTION_MS / 4),
+    );
+    rateLimitPruneTimer.unref();
+  }
 
   // ADR-0064 — the tick loop. OFF unless REGULAIT_SCHEDULER says on, in every
   // environment including production: enabling a background loop that mutates

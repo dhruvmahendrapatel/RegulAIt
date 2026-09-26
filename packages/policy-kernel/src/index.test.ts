@@ -8,6 +8,12 @@ import {
   type ToolRef,
 } from "./index.js";
 
+/** ADR-0124 — the shipped posture: the dial adds nothing to any decision.
+ * Declared here rather than exported from the kernel on purpose: a public
+ * "normal" constant is an affordance for a gateway call site to bypass the
+ * dial with, and the gateway must always resolve it from org_settings. */
+const EXEC = { mode: "normal" } as const;
+
 const USER = "user-a";
 const OTHER_USER = "user-b";
 const SERVER = "server-1";
@@ -26,7 +32,8 @@ function serverGrant(overrides: Partial<ServerGrant> = {}): ServerGrant {
 
 describe("evaluate", () => {
   it("denies by default with no grants at all", () => {
-    const d = evaluate({ userId: USER, serverId: SERVER, tool: readTool, toolGrants: [], serverGrants: [] });
+    const d = evaluate({
+    execution: EXEC, userId: USER, serverId: SERVER, tool: readTool, toolGrants: [], serverGrants: [] });
     expect(d.effect).toBe("deny");
     expect(d.ruleId).toBe(DEFAULT_DENY_RULE_ID);
     expect(d.ruleChain.map((t) => t.rule)).toEqual([
@@ -49,7 +56,8 @@ describe("evaluate", () => {
 
   it("allows a tool on the user's explicit allow-list", () => {
     const g = toolGrant();
-    const d = evaluate({ userId: USER, serverId: SERVER, tool: readTool, toolGrants: [g], serverGrants: [] });
+    const d = evaluate({
+    execution: EXEC, userId: USER, serverId: SERVER, tool: readTool, toolGrants: [g], serverGrants: [] });
     expect(d.effect).toBe("allow");
     expect(d.ruleId).toBe(g.id);
     expect(d.ruleChain).toEqual([
@@ -62,25 +70,29 @@ describe("evaluate", () => {
 
   it("explicit allow-list works for write tools too", () => {
     const g = toolGrant({ toolName: "drop_table" });
-    const d = evaluate({ userId: USER, serverId: SERVER, tool: writeTool, toolGrants: [g], serverGrants: [] });
+    const d = evaluate({
+    execution: EXEC, userId: USER, serverId: SERVER, tool: writeTool, toolGrants: [g], serverGrants: [] });
     expect(d.effect).toBe("allow");
   });
 
   it("does not leak grants across users", () => {
     const g = toolGrant({ userId: OTHER_USER });
-    const d = evaluate({ userId: USER, serverId: SERVER, tool: readTool, toolGrants: [g], serverGrants: [] });
+    const d = evaluate({
+    execution: EXEC, userId: USER, serverId: SERVER, tool: readTool, toolGrants: [g], serverGrants: [] });
     expect(d.effect).toBe("deny");
   });
 
   it("does not leak grants across servers", () => {
     const g = toolGrant({ serverId: OTHER_SERVER });
-    const d = evaluate({ userId: USER, serverId: SERVER, tool: readTool, toolGrants: [g], serverGrants: [] });
+    const d = evaluate({
+    execution: EXEC, userId: USER, serverId: SERVER, tool: readTool, toolGrants: [g], serverGrants: [] });
     expect(d.effect).toBe("deny");
   });
 
   it("read-only-all server grant allows read tools", () => {
     const g = serverGrant();
-    const d = evaluate({ userId: USER, serverId: SERVER, tool: readTool, toolGrants: [], serverGrants: [g] });
+    const d = evaluate({
+    execution: EXEC, userId: USER, serverId: SERVER, tool: readTool, toolGrants: [], serverGrants: [g] });
     expect(d.effect).toBe("allow");
     expect(d.ruleId).toBe(g.id);
     expect(d.ruleChain).toContainEqual({
@@ -92,21 +104,24 @@ describe("evaluate", () => {
 
   it("read-only-all server grant denies write tools", () => {
     const g = serverGrant();
-    const d = evaluate({ userId: USER, serverId: SERVER, tool: writeTool, toolGrants: [], serverGrants: [g] });
+    const d = evaluate({
+    execution: EXEC, userId: USER, serverId: SERVER, tool: writeTool, toolGrants: [], serverGrants: [g] });
     expect(d.effect).toBe("deny");
     expect(d.ruleId).toBe(DEFAULT_DENY_RULE_ID);
   });
 
   it("readOnlyAll=false grants nothing", () => {
     const g = serverGrant({ readOnlyAll: false });
-    const d = evaluate({ userId: USER, serverId: SERVER, tool: readTool, toolGrants: [], serverGrants: [g] });
+    const d = evaluate({
+    execution: EXEC, userId: USER, serverId: SERVER, tool: readTool, toolGrants: [], serverGrants: [g] });
     expect(d.effect).toBe("deny");
   });
 
   it("explicit tool grant wins before the server-wide rule (ruleChain shows short-circuit)", () => {
     const tg = toolGrant();
     const sg = serverGrant();
-    const d = evaluate({ userId: USER, serverId: SERVER, tool: readTool, toolGrants: [tg], serverGrants: [sg] });
+    const d = evaluate({
+    execution: EXEC, userId: USER, serverId: SERVER, tool: readTool, toolGrants: [tg], serverGrants: [sg] });
     expect(d.ruleId).toBe(tg.id);
     // grant phase short-circuits: no server-read-only-all trace when the
     // explicit tool grant already matched
@@ -119,7 +134,8 @@ describe("evaluate", () => {
   });
 
   it("every decision carries a human-readable reason", () => {
-    const deny = evaluate({ userId: USER, serverId: SERVER, tool: readTool, toolGrants: [], serverGrants: [] });
+    const deny = evaluate({
+    execution: EXEC, userId: USER, serverId: SERVER, tool: readTool, toolGrants: [], serverGrants: [] });
     expect(deny.reason).toContain("default-deny");
   });
 });
@@ -183,6 +199,7 @@ function rateLimit(overrides: Partial<RateLimit> = {}): RateLimit {
 describe("approval rules", () => {
   it("granted call matching an approval rule returns require_approval with the named approver", () => {
     const d = evaluate({
+    execution: EXEC,
       userId: USER, serverId: SERVER, tool: readTool,
       toolGrants: [toolGrant()], serverGrants: [],
       approvalRules: [approvalRule()],
@@ -197,6 +214,7 @@ describe("approval rules", () => {
 
   it("an approval rule never rescues an ungranted call — default-deny still wins", () => {
     const d = evaluate({
+    execution: EXEC,
       userId: USER, serverId: SERVER, tool: readTool,
       toolGrants: [], serverGrants: [],
       approvalRules: [approvalRule()],
@@ -208,12 +226,14 @@ describe("approval rules", () => {
   it("writeOnly approval rule skips read tools but pauses write tools", () => {
     const rule = approvalRule({ writeOnly: true });
     const read = evaluate({
+    execution: EXEC,
       userId: USER, serverId: SERVER, tool: readTool,
       toolGrants: [toolGrant()], serverGrants: [], approvalRules: [rule],
     });
     expect(read.effect).toBe("allow");
 
     const write = evaluate({
+    execution: EXEC,
       userId: USER, serverId: SERVER, tool: writeTool,
       toolGrants: [toolGrant({ toolName: "drop_table" })], serverGrants: [], approvalRules: [rule],
     });
@@ -223,6 +243,7 @@ describe("approval rules", () => {
   it("tool-scoped approval rule only pauses that tool", () => {
     const rule = approvalRule({ toolName: "drop_table" });
     const other = evaluate({
+    execution: EXEC,
       userId: USER, serverId: SERVER, tool: readTool,
       toolGrants: [toolGrant()], serverGrants: [], approvalRules: [rule],
     });
@@ -231,6 +252,7 @@ describe("approval rules", () => {
 
   it("an approved approval satisfies the rule for that evaluation and is traced", () => {
     const d = evaluate({
+    execution: EXEC,
       userId: USER, serverId: SERVER, tool: readTool,
       toolGrants: [toolGrant()], serverGrants: [],
       approvalRules: [approvalRule()],
@@ -247,6 +269,7 @@ describe("approval rules", () => {
 describe("rate limits", () => {
   it("allows under the cap and denies at the cap", () => {
     const under = evaluate({
+    execution: EXEC,
       userId: USER, serverId: SERVER, tool: readTool,
       toolGrants: [toolGrant()], serverGrants: [],
       rateLimits: [rateLimit({ currentCount: 2 })],
@@ -254,6 +277,7 @@ describe("rate limits", () => {
     expect(under.effect).toBe("allow");
 
     const at = evaluate({
+    execution: EXEC,
       userId: USER, serverId: SERVER, tool: readTool,
       toolGrants: [toolGrant()], serverGrants: [],
       rateLimits: [rateLimit({ currentCount: 3 })],
@@ -265,6 +289,7 @@ describe("rate limits", () => {
 
   it("tool-scoped limit does not throttle other tools", () => {
     const d = evaluate({
+    execution: EXEC,
       userId: USER, serverId: SERVER, tool: readTool,
       toolGrants: [toolGrant()], serverGrants: [],
       rateLimits: [rateLimit({ toolName: "drop_table", currentCount: 99 })],
@@ -274,6 +299,7 @@ describe("rate limits", () => {
 
   it("an exhausted rate limit denies even when an approved approval is in hand", () => {
     const d = evaluate({
+    execution: EXEC,
       userId: USER, serverId: SERVER, tool: readTool,
       toolGrants: [toolGrant()], serverGrants: [],
       approvalRules: [approvalRule()],
@@ -286,6 +312,7 @@ describe("rate limits", () => {
 
   it("another user's rate limit does not apply", () => {
     const d = evaluate({
+    execution: EXEC,
       userId: USER, serverId: SERVER, tool: readTool,
       toolGrants: [toolGrant()], serverGrants: [],
       rateLimits: [rateLimit({ userId: OTHER_USER, currentCount: 99 })],
@@ -326,6 +353,7 @@ describe("data-scope rules", () => {
     tool: readTool,
     toolGrants: [toolGrant()],
     serverGrants: [],
+    execution: EXEC,
   };
 
   it("allows an in-scope argument value and traces the check", () => {
@@ -351,7 +379,8 @@ describe("data-scope rules", () => {
   });
 
   it("fails closed when the argument is missing or not a scalar", () => {
-    const missing = evaluate({ ...base, dataScopeRules: [dataScopeRule()], args: {} });
+    const missing = evaluate({
+    ...base, dataScopeRules: [dataScopeRule()], args: {} });
     expect(missing.effect).toBe("deny");
     expect(missing.reason).toMatch(/fails closed/);
 
@@ -433,6 +462,7 @@ describe("role-derived entitlements (§5)", () => {
 
   it("a role tool grant allows and is traced with the role grant id", () => {
     const d = evaluate({
+    execution: EXEC,
       userId: USER, serverId: SERVER, tool: readTool, ...none,
       roleToolGrants: [roleToolGrant()],
     });
@@ -446,6 +476,7 @@ describe("role-derived entitlements (§5)", () => {
 
   it("a direct user grant wins before the role grant (chain shows the short-circuit)", () => {
     const d = evaluate({
+    execution: EXEC,
       userId: USER, serverId: SERVER, tool: readTool,
       toolGrants: [toolGrant()], serverGrants: [],
       roleToolGrants: [roleToolGrant()],
@@ -456,6 +487,7 @@ describe("role-derived entitlements (§5)", () => {
 
   it("a revocation suppresses a role tool grant and is traced with the revocation id", () => {
     const d = evaluate({
+    execution: EXEC,
       userId: USER, serverId: SERVER, tool: readTool, ...none,
       roleToolGrants: [roleToolGrant()],
       revocations: [revocation()],
@@ -469,6 +501,7 @@ describe("role-derived entitlements (§5)", () => {
 
   it("a direct user grant survives a revocation of the same tool", () => {
     const d = evaluate({
+    execution: EXEC,
       userId: USER, serverId: SERVER, tool: readTool,
       toolGrants: [toolGrant()], serverGrants: [],
       roleToolGrants: [roleToolGrant()],
@@ -480,6 +513,7 @@ describe("role-derived entitlements (§5)", () => {
 
   it("role read-only-all allows read tools, never write tools", () => {
     const read = evaluate({
+    execution: EXEC,
       userId: USER, serverId: SERVER, tool: readTool, ...none,
       roleServerGrants: [roleServerGrant()],
     });
@@ -487,6 +521,7 @@ describe("role-derived entitlements (§5)", () => {
     expect(read.ruleId).toBe("rsg-1");
 
     const write = evaluate({
+    execution: EXEC,
       userId: USER, serverId: SERVER, tool: writeTool, ...none,
       roleServerGrants: [roleServerGrant()],
     });
@@ -495,6 +530,7 @@ describe("role-derived entitlements (§5)", () => {
 
   it("a server-wide revocation (toolName null) suppresses all role-derived access", () => {
     const d = evaluate({
+    execution: EXEC,
       userId: USER, serverId: SERVER, tool: readTool, ...none,
       roleToolGrants: [roleToolGrant()],
       roleServerGrants: [roleServerGrant()],
@@ -505,6 +541,7 @@ describe("role-derived entitlements (§5)", () => {
 
   it("a tool-scoped revocation also suppresses role read-only-all for that tool only", () => {
     const revoked = evaluate({
+    execution: EXEC,
       userId: USER, serverId: SERVER, tool: readTool, ...none,
       roleServerGrants: [roleServerGrant()],
       revocations: [revocation()],
@@ -512,6 +549,7 @@ describe("role-derived entitlements (§5)", () => {
     expect(revoked.effect).toBe("deny");
 
     const other = evaluate({
+    execution: EXEC,
       userId: USER, serverId: SERVER,
       tool: { serverId: SERVER, name: "list_schemas", kind: "read" }, ...none,
       roleServerGrants: [roleServerGrant()],
@@ -522,6 +560,7 @@ describe("role-derived entitlements (§5)", () => {
 
   it("another user's revocation does not suppress this user's role grants", () => {
     const d = evaluate({
+    execution: EXEC,
       userId: USER, serverId: SERVER, tool: readTool, ...none,
       roleToolGrants: [roleToolGrant()],
       revocations: [revocation({ userId: OTHER_USER })],
@@ -531,12 +570,14 @@ describe("role-derived entitlements (§5)", () => {
 
   it("grants from multiple roles union together", () => {
     const d1 = evaluate({
+    execution: EXEC,
       userId: USER, serverId: SERVER, tool: readTool, ...none,
       roleToolGrants: [roleToolGrant(), roleToolGrant({ id: "rtg-2", roleId: "role-other", toolName: "drop_table" })],
     });
     expect(d1.effect).toBe("allow");
 
     const d2 = evaluate({
+    execution: EXEC,
       userId: USER, serverId: SERVER, tool: writeTool, ...none,
       roleToolGrants: [roleToolGrant(), roleToolGrant({ id: "rtg-2", roleId: "role-other", toolName: "drop_table" })],
     });
@@ -587,13 +628,15 @@ function connectorGrant(overrides: Partial<ConnectorGrant> = {}): ConnectorGrant
 
 describe("evaluateAgent (§4)", () => {
   it("denies by default without a grant, even for an enabled agent", () => {
-    const d = evaluateAgent({ userId: USER, agent: AGENT, mode: "plan", agentGrants: [] });
+    const d = evaluateAgent({
+    execution: EXEC, userId: USER, agent: AGENT, mode: "plan", agentGrants: [] });
     expect(d.effect).toBe("deny");
     expect(d.ruleId).toBe(DEFAULT_DENY_RULE_ID);
   });
 
   it("denies a platform-disabled agent even when granted", () => {
     const d = evaluateAgent({
+    execution: EXEC,
       userId: USER,
       agent: { ...AGENT, enabled: false },
       mode: "plan",
@@ -605,6 +648,7 @@ describe("evaluateAgent (§4)", () => {
 
   it("allows a granted agent and traces the grant", () => {
     const d = evaluateAgent({
+    execution: EXEC,
       userId: USER, agent: AGENT, mode: "execute", agentGrants: [agentGrant()],
     });
     expect(d.effect).toBe("allow");
@@ -616,10 +660,12 @@ describe("evaluateAgent (§4)", () => {
 
   it("mode-level restriction on top of agent-level restriction (§4)", () => {
     const grant = agentGrant({ allowedModes: ["plan"] });
-    const plan = evaluateAgent({ userId: USER, agent: AGENT, mode: "plan", agentGrants: [grant] });
+    const plan = evaluateAgent({
+    execution: EXEC, userId: USER, agent: AGENT, mode: "plan", agentGrants: [grant] });
     expect(plan.effect).toBe("allow");
 
     const exec = evaluateAgent({
+    execution: EXEC,
       userId: USER, agent: AGENT, mode: "execute", agentGrants: [grant],
     });
     expect(exec.effect).toBe("deny");
@@ -628,11 +674,13 @@ describe("evaluateAgent (§4)", () => {
 
   it("ceiling denies agents above the user's tier ceiling, allows at the ceiling", () => {
     const at = evaluateAgent({
+    execution: EXEC,
       userId: USER, agent: AGENT, mode: "plan", agentGrants: [agentGrant()], ceilingTier: 3,
     });
     expect(at.effect).toBe("allow");
 
     const above = evaluateAgent({
+    execution: EXEC,
       userId: USER, agent: AGENT, mode: "plan", agentGrants: [agentGrant()], ceilingTier: 2,
     });
     expect(above.effect).toBe("deny");
@@ -641,6 +689,7 @@ describe("evaluateAgent (§4)", () => {
 
   it("another user's grant does not apply", () => {
     const d = evaluateAgent({
+    execution: EXEC,
       userId: USER, agent: AGENT, mode: "plan",
       agentGrants: [agentGrant({ userId: OTHER_USER })],
     });
@@ -651,6 +700,7 @@ describe("evaluateAgent (§4)", () => {
 describe("evaluateConnector (§2)", () => {
   it("denies by default without a grant", () => {
     const d = evaluateConnector({
+    execution: EXEC,
       userId: USER, connectorId: CONNECTOR, operation: "read", connectorGrants: [],
     });
     expect(d.effect).toBe("deny");
@@ -659,12 +709,14 @@ describe("evaluateConnector (§2)", () => {
 
   it("read-only grant allows reads and denies writes", () => {
     const read = evaluateConnector({
+    execution: EXEC,
       userId: USER, connectorId: CONNECTOR, operation: "read",
       connectorGrants: [connectorGrant()],
     });
     expect(read.effect).toBe("allow");
 
     const write = evaluateConnector({
+    execution: EXEC,
       userId: USER, connectorId: CONNECTOR, operation: "write",
       connectorGrants: [connectorGrant()],
     });
@@ -674,6 +726,7 @@ describe("evaluateConnector (§2)", () => {
 
   it("readwrite grant allows writes", () => {
     const d = evaluateConnector({
+    execution: EXEC,
       userId: USER, connectorId: CONNECTOR, operation: "write",
       connectorGrants: [connectorGrant({ mode: "readwrite" })],
     });
@@ -683,18 +736,21 @@ describe("evaluateConnector (§2)", () => {
   it("object scope allows listed objects, denies others, fails closed when unnamed", () => {
     const grant = connectorGrant({ allowedObjects: ["accounts", "contacts"] });
     const ok = evaluateConnector({
+    execution: EXEC,
       userId: USER, connectorId: CONNECTOR, operation: "read", object: "accounts",
       connectorGrants: [grant],
     });
     expect(ok.effect).toBe("allow");
 
     const outside = evaluateConnector({
+    execution: EXEC,
       userId: USER, connectorId: CONNECTOR, operation: "read", object: "payroll",
       connectorGrants: [grant],
     });
     expect(outside.effect).toBe("deny");
 
     const unnamed = evaluateConnector({
+    execution: EXEC,
       userId: USER, connectorId: CONNECTOR, operation: "read",
       connectorGrants: [grant],
     });
@@ -704,6 +760,7 @@ describe("evaluateConnector (§2)", () => {
 
   it("another user's connector grant does not apply", () => {
     const d = evaluateConnector({
+    execution: EXEC,
       userId: USER, connectorId: CONNECTOR, operation: "read",
       connectorGrants: [connectorGrant({ userId: OTHER_USER })],
     });
@@ -724,6 +781,7 @@ function roleConnectorGrant(overrides: Partial<RoleConnectorGrant> = {}): RoleCo
 describe("role-bundled agent grants (§5, ADR-0014)", () => {
   it("(a) a role-only agent grant allows and traces role-agent-allow-list", () => {
     const d = evaluateAgent({
+    execution: EXEC,
       userId: USER, agent: AGENT, mode: "execute",
       agentGrants: [],
       roleAgentGrants: [roleAgentGrant()],
@@ -738,6 +796,7 @@ describe("role-bundled agent grants (§5, ADR-0014)", () => {
 
   it("(b) a direct agent grant wins and the role grant is never consulted", () => {
     const d = evaluateAgent({
+    execution: EXEC,
       userId: USER, agent: AGENT, mode: "execute",
       agentGrants: [agentGrant()],
       roleAgentGrants: [roleAgentGrant()],
@@ -752,6 +811,7 @@ describe("role-bundled agent grants (§5, ADR-0014)", () => {
 
   it("(c) the per-user tier ceiling narrows a role grant (agent-ceiling deny)", () => {
     const d = evaluateAgent({
+    execution: EXEC,
       userId: USER, agent: AGENT, mode: "plan",
       agentGrants: [],
       roleAgentGrants: [roleAgentGrant()],
@@ -763,6 +823,7 @@ describe("role-bundled agent grants (§5, ADR-0014)", () => {
 
   it("(d) a role grant's allowedModes excludes the mode → agent-mode deny", () => {
     const d = evaluateAgent({
+    execution: EXEC,
       userId: USER, agent: AGENT, mode: "execute",
       agentGrants: [],
       roleAgentGrants: [roleAgentGrant({ allowedModes: ["plan"] })],
@@ -774,9 +835,11 @@ describe("role-bundled agent grants (§5, ADR-0014)", () => {
 
   it("no role grants passed → byte-identical default-deny (direct-only unchanged)", () => {
     const withEmpty = evaluateAgent({
+    execution: EXEC,
       userId: USER, agent: AGENT, mode: "plan", agentGrants: [], roleAgentGrants: [],
     });
-    const without = evaluateAgent({ userId: USER, agent: AGENT, mode: "plan", agentGrants: [] });
+    const without = evaluateAgent({
+    execution: EXEC, userId: USER, agent: AGENT, mode: "plan", agentGrants: [] });
     expect(withEmpty).toEqual(without);
   });
 });
@@ -784,6 +847,7 @@ describe("role-bundled agent grants (§5, ADR-0014)", () => {
 describe("role-bundled connector grants (§5, ADR-0014, UNION-MAX)", () => {
   it("(e1) a role-only connector grant allows and traces role-connector-allow-list", () => {
     const d = evaluateConnector({
+    execution: EXEC,
       userId: USER, connectorId: CONNECTOR, operation: "read",
       connectorGrants: [],
       roleConnectorGrants: [roleConnectorGrant()],
@@ -798,6 +862,7 @@ describe("role-bundled connector grants (§5, ADR-0014, UNION-MAX)", () => {
 
   it("(e2) a role grant mode 'read' + write op → connector-mode deny", () => {
     const d = evaluateConnector({
+    execution: EXEC,
       userId: USER, connectorId: CONNECTOR, operation: "write",
       connectorGrants: [],
       roleConnectorGrants: [roleConnectorGrant({ mode: "read" })],
@@ -808,6 +873,7 @@ describe("role-bundled connector grants (§5, ADR-0014, UNION-MAX)", () => {
 
   it("(e3) a role grant allowedObjects excludes the object → object-scope deny", () => {
     const d = evaluateConnector({
+    execution: EXEC,
       userId: USER, connectorId: CONNECTOR, operation: "read", object: "payroll",
       connectorGrants: [],
       roleConnectorGrants: [roleConnectorGrant({ allowedObjects: ["accounts"] })],
@@ -819,6 +885,7 @@ describe("role-bundled connector grants (§5, ADR-0014, UNION-MAX)", () => {
     // direct read-only + role readwrite, write op → the union ALLOWS via the
     // role grant. A direct-first short-circuit would have wrongly denied here.
     const d = evaluateConnector({
+    execution: EXEC,
       userId: USER, connectorId: CONNECTOR, operation: "write",
       connectorGrants: [connectorGrant({ mode: "read" })],
       roleConnectorGrants: [roleConnectorGrant({ mode: "readwrite" })],
@@ -832,6 +899,7 @@ describe("role-bundled connector grants (§5, ADR-0014, UNION-MAX)", () => {
 
   it("union across object scope: a broader role object-scope rescues a narrow direct one", () => {
     const d = evaluateConnector({
+    execution: EXEC,
       userId: USER, connectorId: CONNECTOR, operation: "read", object: "payroll",
       connectorGrants: [connectorGrant({ allowedObjects: ["accounts"] })],
       roleConnectorGrants: [roleConnectorGrant({ allowedObjects: ["payroll"] })],
@@ -842,10 +910,12 @@ describe("role-bundled connector grants (§5, ADR-0014, UNION-MAX)", () => {
 
   it("no role grants passed → byte-identical to the direct-only evaluation", () => {
     const withEmpty = evaluateConnector({
+    execution: EXEC,
       userId: USER, connectorId: CONNECTOR, operation: "read",
       connectorGrants: [connectorGrant()], roleConnectorGrants: [],
     });
     const without = evaluateConnector({
+    execution: EXEC,
       userId: USER, connectorId: CONNECTOR, operation: "read",
       connectorGrants: [connectorGrant()],
     });
@@ -857,11 +927,13 @@ describe("agent declared modes (review fix)", () => {
   it("the registry's declared modes bound every grant, even allowedModes null", () => {
     const declared: AgentRef = { id: "agent-claude", tier: 3, enabled: true, modes: ["plan"] };
     const ok = evaluateAgent({
+    execution: EXEC,
       userId: USER, agent: declared, mode: "plan", agentGrants: [agentGrant()],
     });
     expect(ok.effect).toBe("allow");
 
     const undeclared = evaluateAgent({
+    execution: EXEC,
       userId: USER, agent: declared, mode: "execute", agentGrants: [agentGrant()],
     });
     expect(undeclared.effect).toBe("deny");
@@ -879,6 +951,7 @@ describe("display names in reason prose (demo finding 5)", () => {
       modes: null,
     } satisfies AgentRef;
     const d = evaluateAgent({
+    execution: EXEC,
       userId: USER,
       agent: named,
       mode: "plan",
@@ -894,6 +967,7 @@ describe("display names in reason prose (demo finding 5)", () => {
 
   it("without a display name the old id-quoting format is unchanged", () => {
     const d = evaluateAgent({
+    execution: EXEC,
       userId: USER, agent: AGENT, mode: "plan", agentGrants: [agentGrant()], ceilingTier: 2,
     });
     expect(d.reason).toContain(`agent '${AGENT.id}' (tier 3) exceeds user's ceiling (tier 2)`);
@@ -901,6 +975,7 @@ describe("display names in reason prose (demo finding 5)", () => {
 
   it("evaluate() names server, user, and approver when the caller passes names in", () => {
     const d = evaluate({
+    execution: EXEC,
       userId: USER,
       userName: "Dana Developer",
       serverId: SERVER,
@@ -927,6 +1002,7 @@ describe("display names in reason prose (demo finding 5)", () => {
     expect(d.approverName).toBe("Avery Approver");
 
     const deny = evaluate({
+    execution: EXEC,
       userId: USER,
       userName: "Dana Developer",
       serverId: SERVER,
@@ -941,6 +1017,7 @@ describe("display names in reason prose (demo finding 5)", () => {
 
   it("evaluateConnector names the connector when a display name is passed", () => {
     const d = evaluateConnector({
+    execution: EXEC,
       userId: USER,
       connectorId: CONNECTOR,
       connectorName: "salesforce",
@@ -959,6 +1036,7 @@ describe("display names in reason prose (demo finding 5)", () => {
 describe("evaluateAgent Team-Lead ceiling (§5.1)", () => {
   it("allows a granted agent that is inside the lead ceiling", () => {
     const d = evaluateAgent({
+    execution: EXEC,
       userId: USER, agent: AGENT, mode: "execute",
       agentGrants: [agentGrant()], ceilingAgentIds: ["agent-claude", "agent-gpt"],
     });
@@ -968,6 +1046,7 @@ describe("evaluateAgent Team-Lead ceiling (§5.1)", () => {
 
   it("DENIES a granted agent that the lead ceiling excludes (narrows, not relabels)", () => {
     const d = evaluateAgent({
+    execution: EXEC,
       userId: USER, agent: AGENT, mode: "execute",
       agentGrants: [agentGrant()], ceilingAgentIds: ["agent-gpt"], // claude granted but not in ceiling
     });
@@ -978,6 +1057,7 @@ describe("evaluateAgent Team-Lead ceiling (§5.1)", () => {
 
   it("does not rescue an UNgranted agent — an empty grant stays default-deny even if the ceiling lists it", () => {
     const d = evaluateAgent({
+    execution: EXEC,
       userId: USER, agent: AGENT, mode: "execute",
       agentGrants: [], ceilingAgentIds: ["agent-claude"],
     });
@@ -988,6 +1068,7 @@ describe("evaluateAgent Team-Lead ceiling (§5.1)", () => {
 
   it("an empty ceiling forbids every agent (nothing allowed)", () => {
     const d = evaluateAgent({
+    execution: EXEC,
       userId: USER, agent: AGENT, mode: "execute",
       agentGrants: [agentGrant()], ceilingAgentIds: [],
     });
@@ -997,6 +1078,7 @@ describe("evaluateAgent Team-Lead ceiling (§5.1)", () => {
 
   it("a null/absent ceiling changes nothing (flat run) and adds no trace entry", () => {
     const d = evaluateAgent({
+    execution: EXEC,
       userId: USER, agent: AGENT, mode: "execute", agentGrants: [agentGrant()], ceilingAgentIds: null,
     });
     expect(d.effect).toBe("allow");
@@ -1007,6 +1089,7 @@ describe("evaluateAgent Team-Lead ceiling (§5.1)", () => {
 describe("evaluate tool Team-Lead ceiling (§5.1)", () => {
   it("allows a granted tool inside the ceiling", () => {
     const d = evaluate({
+    execution: EXEC,
       userId: USER, serverId: SERVER, tool: readTool,
       toolGrants: [toolGrant()], serverGrants: [], ceilingTools: ["query_database", "list_rows"],
     });
@@ -1016,6 +1099,7 @@ describe("evaluate tool Team-Lead ceiling (§5.1)", () => {
 
   it("DENIES a granted tool the ceiling excludes, with ruleId lead-ceiling (narrows)", () => {
     const d = evaluate({
+    execution: EXEC,
       userId: USER, serverId: SERVER, tool: readTool,
       toolGrants: [toolGrant()], serverGrants: [], ceilingTools: ["some_other_tool"],
     });
@@ -1025,6 +1109,7 @@ describe("evaluate tool Team-Lead ceiling (§5.1)", () => {
 
   it("does NOT rescue an ungranted tool — stays default-deny before the ceiling is consulted", () => {
     const d = evaluate({
+    execution: EXEC,
       userId: USER, serverId: SERVER, tool: writeTool, // not granted
       toolGrants: [toolGrant()], serverGrants: [], ceilingTools: ["drop_table"],
     });
@@ -1035,6 +1120,7 @@ describe("evaluate tool Team-Lead ceiling (§5.1)", () => {
 
   it("a null/absent ceiling changes nothing and adds no trace entry (137 proxy tests stay green)", () => {
     const d = evaluate({
+    execution: EXEC,
       userId: USER, serverId: SERVER, tool: readTool, toolGrants: [toolGrant()], serverGrants: [],
     });
     expect(d.effect).toBe("allow");
@@ -1067,6 +1153,7 @@ describe("rule scoping (pillar 1): fleet/role/team restrictions", () => {
 
   it("a FLEET approval rule pauses a granted call by a user with NO user-specific rule", () => {
     const d = evaluate({
+    execution: EXEC,
       userId: USER, serverId: SERVER, tool: readTool,
       toolGrants: [toolGrant()], serverGrants: [],
       approvalRules: [fleetApproval()],
@@ -1086,6 +1173,7 @@ describe("rule scoping (pillar 1): fleet/role/team restrictions", () => {
     };
     // role rule alone → pauses
     const d1 = evaluate({
+    execution: EXEC,
       userId: USER, serverId: SERVER, tool: readTool,
       toolGrants: [toolGrant()], serverGrants: [], approvalRules: [roleRule],
     });
@@ -1094,6 +1182,7 @@ describe("rule scoping (pillar 1): fleet/role/team restrictions", () => {
     // adding a user-scoped rule too — still require_approval, never relaxed
     const userRule = approvalRule({ id: "ar-user" });
     const d2 = evaluate({
+    execution: EXEC,
       userId: USER, serverId: SERVER, tool: readTool,
       toolGrants: [toolGrant()], serverGrants: [], approvalRules: [userRule, roleRule],
     });
@@ -1112,15 +1201,19 @@ describe("rule scoping (pillar 1): fleet/role/team restrictions", () => {
     const base = {
       userId: USER, serverId: SERVER, tool: readTool,
       toolGrants: [toolGrant()], serverGrants: [], dataScopeRules: [userDs, fleetDs],
+      execution: EXEC,
     };
     // in BOTH allow-lists → allowed
-    expect(evaluate({ ...base, args: { schema: "reporting" } }).effect).toBe("allow");
+    expect(evaluate({
+    ...base, args: { schema: "reporting" } }).effect).toBe("allow");
     // only in the user rule → the fleet rule denies it
-    const dA = evaluate({ ...base, args: { schema: "analytics" } });
+    const dA = evaluate({
+    ...base, args: { schema: "analytics" } });
     expect(dA.effect).toBe("deny");
     expect(dA.ruleId).toBe("ds-fleet");
     // only in the fleet rule → the user rule denies it
-    const dO = evaluate({ ...base, args: { schema: "ops" } });
+    const dO = evaluate({
+    ...base, args: { schema: "ops" } });
     expect(dO.effect).toBe("deny");
     expect(dO.ruleId).toBe("ds-user");
   });
@@ -1136,6 +1229,7 @@ describe("rule scoping (pillar 1): fleet/role/team restrictions", () => {
     };
     // fleet exhausted, user not → fleet denies
     const d = evaluate({
+    execution: EXEC,
       userId: USER, serverId: SERVER, tool: readTool,
       toolGrants: [toolGrant()], serverGrants: [], rateLimits: [userRl, fleetRl],
     });
@@ -1143,6 +1237,7 @@ describe("rule scoping (pillar 1): fleet/role/team restrictions", () => {
     expect(d.ruleId).toBe("rl-fleet");
     // neither exhausted → allowed
     const ok = evaluate({
+    execution: EXEC,
       userId: USER, serverId: SERVER, tool: readTool,
       toolGrants: [toolGrant()], serverGrants: [],
       rateLimits: [{ ...userRl }, { ...fleetRl, currentCount: 0 }],
@@ -1150,6 +1245,7 @@ describe("rule scoping (pillar 1): fleet/role/team restrictions", () => {
     expect(ok.effect).toBe("allow");
     // user exhausted instead → user denies
     const du = evaluate({
+    execution: EXEC,
       userId: USER, serverId: SERVER, tool: readTool,
       toolGrants: [toolGrant()], serverGrants: [],
       rateLimits: [{ ...userRl, currentCount: 5 }, { ...fleetRl, currentCount: 0 }],
@@ -1161,6 +1257,7 @@ describe("rule scoping (pillar 1): fleet/role/team restrictions", () => {
   it("THE INVARIANT: a fleet/role restriction NEVER rescues an ungranted call — default-deny still wins", () => {
     // fleet approval on an ungranted tool
     const dApproval = evaluate({
+    execution: EXEC,
       userId: USER, serverId: SERVER, tool: readTool,
       toolGrants: [], serverGrants: [], approvalRules: [fleetApproval()],
     });
@@ -1172,6 +1269,7 @@ describe("rule scoping (pillar 1): fleet/role/team restrictions", () => {
       serverScope: "server", toolName: null, argPath: "schema", allowedValues: ["analytics"],
     };
     const dScope = evaluate({
+    execution: EXEC,
       userId: USER, serverId: SERVER, tool: readTool,
       toolGrants: [], serverGrants: [], dataScopeRules: [roleDs], args: { schema: "analytics" },
     });
@@ -1182,6 +1280,7 @@ describe("rule scoping (pillar 1): fleet/role/team restrictions", () => {
   it("a user-scoped rule still binds to its own user id — another user's fleet-free rule never applies", () => {
     // legacy/user rule for OTHER_USER is not applied to USER (subject check kept)
     const d = evaluate({
+    execution: EXEC,
       userId: USER, serverId: SERVER, tool: readTool,
       toolGrants: [toolGrant()], serverGrants: [],
       approvalRules: [approvalRule({ userId: OTHER_USER })],
@@ -1212,6 +1311,7 @@ function connectorRevocation(
 describe("per-user agent revocation (ADR-0019)", () => {
   it("(a) a ROLE-granted agent + a revocation denies with ruleId 'agent-revoked'", () => {
     const d = evaluateAgent({
+    execution: EXEC,
       userId: USER, agent: AGENT, mode: "execute",
       agentGrants: [],
       roleAgentGrants: [roleAgentGrant()],
@@ -1231,6 +1331,7 @@ describe("per-user agent revocation (ADR-0019)", () => {
 
   it("(b) a DIRECT grant + a revocation also denies — a revocation beats both grant kinds", () => {
     const d = evaluateAgent({
+    execution: EXEC,
       userId: USER, agent: AGENT, mode: "execute",
       agentGrants: [agentGrant()],
       agentRevocations: [agentRevocation()],
@@ -1241,6 +1342,7 @@ describe("per-user agent revocation (ADR-0019)", () => {
 
   it("(c) THE INVARIANT: a revocation with NO grant still denies with the ORIGINAL default-deny ruleId — never 'rescued', never re-labelled", () => {
     const withRevocation = evaluateAgent({
+    execution: EXEC,
       userId: USER, agent: AGENT, mode: "execute",
       agentGrants: [],
       agentRevocations: [agentRevocation()],
@@ -1252,6 +1354,7 @@ describe("per-user agent revocation (ADR-0019)", () => {
     );
     // and it is byte-identical to the same call with no revocation at all
     const without = evaluateAgent({
+    execution: EXEC,
       userId: USER, agent: AGENT, mode: "execute", agentGrants: [],
     });
     expect(withRevocation).toEqual(without);
@@ -1259,20 +1362,24 @@ describe("per-user agent revocation (ADR-0019)", () => {
 
   it("(d) NO revocation input is byte-identical to the pre-ADR-0019 evaluation", () => {
     const before = evaluateAgent({
+    execution: EXEC,
       userId: USER, agent: AGENT, mode: "execute", agentGrants: [agentGrant()],
     });
     const emptyList = evaluateAgent({
+    execution: EXEC,
       userId: USER, agent: AGENT, mode: "execute", agentGrants: [agentGrant()],
       agentRevocations: [],
     });
     expect(emptyList).toEqual(before);
     // a revocation for a DIFFERENT agent, or a DIFFERENT user, changes nothing
     const otherAgent = evaluateAgent({
+    execution: EXEC,
       userId: USER, agent: AGENT, mode: "execute", agentGrants: [agentGrant()],
       agentRevocations: [agentRevocation({ agentId: "agent-other" })],
     });
     expect(otherAgent).toEqual(before);
     const otherUser = evaluateAgent({
+    execution: EXEC,
       userId: USER, agent: AGENT, mode: "execute", agentGrants: [agentGrant()],
       agentRevocations: [agentRevocation({ userId: OTHER_USER })],
     });
@@ -1281,6 +1388,7 @@ describe("per-user agent revocation (ADR-0019)", () => {
 
   it("(e) the deny reason names the revocation and carries the admin's stated reason", () => {
     const d = evaluateAgent({
+    execution: EXEC,
       userId: USER, agent: AGENT, mode: "execute",
       agentGrants: [agentGrant()],
       agentRevocations: [agentRevocation({ reason: "left the payments team" })],
@@ -1292,6 +1400,7 @@ describe("per-user agent revocation (ADR-0019)", () => {
 
   it("(f) a revocation cannot rescue a platform-disabled agent either — registry check still wins", () => {
     const d = evaluateAgent({
+    execution: EXEC,
       userId: USER, agent: { ...AGENT, enabled: false }, mode: "execute",
       agentGrants: [agentGrant()],
       agentRevocations: [agentRevocation()],
@@ -1304,6 +1413,7 @@ describe("per-user agent revocation (ADR-0019)", () => {
 describe("per-user connector revocation (ADR-0019)", () => {
   it("(a) a ROLE-granted connector + a revocation denies with ruleId 'connector-revoked'", () => {
     const d = evaluateConnector({
+    execution: EXEC,
       userId: USER, connectorId: CONNECTOR, operation: "read",
       connectorGrants: [],
       roleConnectorGrants: [roleConnectorGrant()],
@@ -1318,6 +1428,7 @@ describe("per-user connector revocation (ADR-0019)", () => {
 
   it("(b) a DIRECT grant + a revocation also denies — including a readwrite grant", () => {
     const d = evaluateConnector({
+    execution: EXEC,
       userId: USER, connectorId: CONNECTOR, operation: "write",
       connectorGrants: [connectorGrant({ mode: "readwrite" })],
       connectorRevocations: [connectorRevocation()],
@@ -1328,6 +1439,7 @@ describe("per-user connector revocation (ADR-0019)", () => {
 
   it("(c) THE INVARIANT: a revocation with NO grant still denies with the ORIGINAL default-deny ruleId", () => {
     const withRevocation = evaluateConnector({
+    execution: EXEC,
       userId: USER, connectorId: CONNECTOR, operation: "read",
       connectorGrants: [],
       connectorRevocations: [connectorRevocation()],
@@ -1338,6 +1450,7 @@ describe("per-user connector revocation (ADR-0019)", () => {
       expect.objectContaining({ rule: "connector-revoked" }),
     );
     const without = evaluateConnector({
+    execution: EXEC,
       userId: USER, connectorId: CONNECTOR, operation: "read", connectorGrants: [],
     });
     expect(withRevocation).toEqual(without);
@@ -1345,17 +1458,20 @@ describe("per-user connector revocation (ADR-0019)", () => {
 
   it("(d) NO revocation input is byte-identical to the pre-ADR-0019 evaluation", () => {
     const before = evaluateConnector({
+    execution: EXEC,
       userId: USER, connectorId: CONNECTOR, operation: "read",
       connectorGrants: [connectorGrant()],
     });
     expect(
       evaluateConnector({
+    execution: EXEC,
         userId: USER, connectorId: CONNECTOR, operation: "read",
         connectorGrants: [connectorGrant()], connectorRevocations: [],
       }),
     ).toEqual(before);
     expect(
       evaluateConnector({
+    execution: EXEC,
         userId: USER, connectorId: CONNECTOR, operation: "read",
         connectorGrants: [connectorGrant()],
         connectorRevocations: [connectorRevocation({ connectorId: "connector-other" })],
@@ -1363,6 +1479,7 @@ describe("per-user connector revocation (ADR-0019)", () => {
     ).toEqual(before);
     expect(
       evaluateConnector({
+    execution: EXEC,
         userId: USER, connectorId: CONNECTOR, operation: "read",
         connectorGrants: [connectorGrant()],
         connectorRevocations: [connectorRevocation({ userId: OTHER_USER })],
@@ -1373,12 +1490,14 @@ describe("per-user connector revocation (ADR-0019)", () => {
   it("(e) a revocation bounds ADR-0014's UNION-MAX: a broad role grant beside a narrow direct one is revoked too", () => {
     // without the revocation the union allows a write via the role grant
     const allowed = evaluateConnector({
+    execution: EXEC,
       userId: USER, connectorId: CONNECTOR, operation: "write",
       connectorGrants: [connectorGrant({ mode: "read" })],
       roleConnectorGrants: [roleConnectorGrant({ mode: "readwrite" })],
     });
     expect(allowed.effect).toBe("allow");
     const revoked = evaluateConnector({
+    execution: EXEC,
       userId: USER, connectorId: CONNECTOR, operation: "write",
       connectorGrants: [connectorGrant({ mode: "read" })],
       roleConnectorGrants: [roleConnectorGrant({ mode: "readwrite" })],
@@ -1413,9 +1532,11 @@ describe("ADR-0040 ABAC — the invariants, locked", () => {
     // No grant of any kind. Feed the kernel the most permissive ABAC verdict
     // there is and assert the decision is still the plain default-deny.
     const withoutAbac = evaluate({
+    execution: EXEC,
       userId: USER, serverId: SERVER, tool: readTool, toolGrants: [], serverGrants: [],
     });
     const withPermit = evaluate({
+    execution: EXEC,
       userId: USER, serverId: SERVER, tool: readTool, toolGrants: [], serverGrants: [],
       abacDecision: { effect: "permit" },
     });
@@ -1428,6 +1549,7 @@ describe("ADR-0040 ABAC — the invariants, locked", () => {
 
   it("(1) not even a forbid changes an ungranted call — ABAC is not an extra gate, it is a step on the allow path", () => {
     const d = evaluate({
+    execution: EXEC,
       userId: USER, serverId: SERVER, tool: readTool, toolGrants: [], serverGrants: [],
       abacDecision: FORBID,
     });
@@ -1437,6 +1559,7 @@ describe("ADR-0040 ABAC — the invariants, locked", () => {
 
   it("(1) a lead-ceiling deny still wins — ABAC cannot override an earlier terminal deny", () => {
     const d = evaluate({
+    execution: EXEC,
       userId: USER, serverId: SERVER, tool: readTool,
       toolGrants: [abacToolGrant], serverGrants: [],
       ceilingTools: ["something_else"],
@@ -1451,10 +1574,13 @@ describe("ADR-0040 ABAC — the invariants, locked", () => {
     const base = {
       userId: USER, serverId: SERVER, tool: readTool,
       toolGrants: [abacToolGrant], serverGrants: [],
+      execution: EXEC,
     };
     const today = evaluate(base);
-    expect(evaluate({ ...base, abacDecision: null })).toEqual(today);
-    expect(evaluate({ ...base, abacDecision: undefined })).toEqual(today);
+    expect(evaluate({
+    ...base, abacDecision: null })).toEqual(today);
+    expect(evaluate({
+    ...base, abacDecision: undefined })).toEqual(today);
     // the full Decision, ruleChain included — not merely the effect
     expect(today).toEqual({
       effect: "allow",
@@ -1470,9 +1596,10 @@ describe("ADR-0040 ABAC — the invariants, locked", () => {
   });
 
   it("(2) absent abacDecision is byte-identical — representative DENY", () => {
-    const base = { userId: USER, serverId: SERVER, tool: writeTool, toolGrants: [], serverGrants: [] };
+    const base = { userId: USER, serverId: SERVER, tool: writeTool, toolGrants: [], serverGrants: [], execution: EXEC };
     const today = evaluate(base);
-    expect(evaluate({ ...base, abacDecision: null })).toEqual(today);
+    expect(evaluate({
+    ...base, abacDecision: null })).toEqual(today);
     expect(today).toEqual({
       effect: "deny",
       ruleId: DEFAULT_DENY_RULE_ID,
@@ -1491,13 +1618,16 @@ describe("ADR-0040 ABAC — the invariants, locked", () => {
     const base = {
       userId: USER, serverId: SERVER, tool: readTool,
       toolGrants: [abacToolGrant], serverGrants: [],
+      execution: EXEC,
     };
-    expect(evaluate({ ...base, abacDecision: { effect: "permit" } })).toEqual(evaluate(base));
+    expect(evaluate({
+    ...base, abacDecision: { effect: "permit" } })).toEqual(evaluate(base));
   });
 
   // -- FORBID -> DENY ------------------------------------------------------
   it("a forbid DENIES a granted call, naming the policy in ruleId and abac-forbid in the chain", () => {
     const d = evaluate({
+    execution: EXEC,
       userId: USER, serverId: SERVER, tool: readTool,
       toolGrants: [abacToolGrant], serverGrants: [],
       abacDecision: FORBID,
@@ -1514,6 +1644,7 @@ describe("ADR-0040 ABAC — the invariants, locked", () => {
 
   it("a forbid beats data-scope, rate-limit and approval — it is terminal like the lead ceiling", () => {
     const d = evaluate({
+    execution: EXEC,
       userId: USER, serverId: SERVER, tool: readTool,
       toolGrants: [abacToolGrant], serverGrants: [],
       dataScopeRules: [
@@ -1534,6 +1665,7 @@ describe("ADR-0040 ABAC — the invariants, locked", () => {
   // -- REQUIRE APPROVAL -> THE SAME QUEUE ----------------------------------
   it("require_approval pauses the call through the ordinary require_approval effect + approver", () => {
     const d = evaluate({
+    execution: EXEC,
       userId: USER, serverId: SERVER, tool: readTool,
       toolGrants: [abacToolGrant], serverGrants: [],
       abacDecision: {
@@ -1558,6 +1690,7 @@ describe("ADR-0040 ABAC — the invariants, locked", () => {
 
   it("an already-approved queue entry satisfies an ABAC pause — the SAME mechanism, not a second one", () => {
     const d = evaluate({
+    execution: EXEC,
       userId: USER, serverId: SERVER, tool: readTool,
       toolGrants: [abacToolGrant], serverGrants: [],
       approvedApprovalId: "approval-99",
@@ -1573,6 +1706,7 @@ describe("ADR-0040 ABAC — the invariants, locked", () => {
 
   it("a require_approval with NO approver FAILS CLOSED to a deny — never a silent allow", () => {
     const d = evaluate({
+    execution: EXEC,
       userId: USER, serverId: SERVER, tool: readTool,
       toolGrants: [abacToolGrant], serverGrants: [],
       abacDecision: { effect: "require_approval", policyId: "pol-3" },
@@ -1587,6 +1721,7 @@ describe("ADR-0040 ABAC — the invariants, locked", () => {
       effect: "require_approval" as const, policyId: "pol-4", approverUserId: "approver-1",
     };
     const scoped = evaluate({
+    execution: EXEC,
       userId: USER, serverId: SERVER, tool: readTool,
       toolGrants: [abacToolGrant], serverGrants: [],
       dataScopeRules: [
@@ -1598,6 +1733,7 @@ describe("ADR-0040 ABAC — the invariants, locked", () => {
     expect(scoped.effect).toBe("deny");
     expect(scoped.ruleId).toBe("ds-2");
     const limited = evaluate({
+    execution: EXEC,
       userId: USER, serverId: SERVER, tool: readTool,
       toolGrants: [abacToolGrant], serverGrants: [],
       rateLimits: [
@@ -1611,6 +1747,7 @@ describe("ADR-0040 ABAC — the invariants, locked", () => {
 
   it("an ABAC pause takes precedence over a rule-driven approval, and both name a real approver", () => {
     const d = evaluate({
+    execution: EXEC,
       userId: USER, serverId: SERVER, tool: readTool,
       toolGrants: [abacToolGrant], serverGrants: [],
       approvalRules: [

@@ -50,6 +50,7 @@ import {
   projectClassifications,
   requiredTemplateIdsFor,
 } from "./projects.js";
+import { refuseIfFeatureNotLicensed } from "./licensing.js";
 import { decryptSecret, encryptSecret as encryptTokenOnce } from "./secrets.js";
 import { guardConnectionCall, refuseConnectionEgressWrite } from "./connection-egress.js";
 // ADR-0062 — the compiled git endpoint, adjudicated under a strict posture.
@@ -60,6 +61,7 @@ import {
   loadCompiledEgressContext,
 } from "./compiled-egress.js";
 import { loadOrgSettings } from "./org-settings.js";
+import { finishTrace, recordSpan, traceForRoot } from "./tracing.js";
 import { activeDelegatorsFor } from "./delegations.js";
 import {
   advanceStageSchema,
@@ -124,7 +126,7 @@ async function applyEvent(
   // re-opens, and aborts serialize instead of racing read-modify-write. When
   // the caller already holds a transaction (the decide endpoint), this nests
   // as a savepoint so the whole flow commits or rolls back together.
-  return inTransaction(db, async (tx) => {
+  const applied = await inTransaction(db, async (tx) => {
     const [instance] = await tx
       .select()
       .from(workflowInstances)
@@ -182,8 +184,114 @@ async function applyEvent(
         }
       }
     }
-    return { state, effects };
+    return {
+      state,
+      effects,
+      span: {
+        userId: instance.initiatorUserId,
+        projectId: instance.projectId,
+        status: state.status,
+      },
+    };
   });
+  await recordWorkflowStageSpan(db, instanceId, event, applied);
+  return applied;
+}
+
+/**
+ * ADR-0070 amendment (2026-08-15) — THE `workflow_stage` SPAN.
+ *
+ * `workflow_stage` was a DECLARED span kind with no writer. It is emitted here,
+ * at `applyEvent`, for the same reason the dispatch span is emitted at the one
+ * dispatch core: **this is the ONE choke point every workflow state change goes
+ * through.** Sign-off, abort, artifact submission, a failing required check, a
+ * blocked deploy, a rollback, a nested-run completion — all of them are an
+ * `applyEvent` call, and none of them mentions tracing. A fifteenth event kind
+ * added to the kernel tomorrow is traced without anybody remembering to.
+ *
+ * ONE TRACE PER INSTANCE, not one per event: `traceForRoot` reuses the
+ * instance's tree, so a multi-day workflow reads as one thing (its `session_id`
+ * is the instance id) and each transition is a sibling span in `seq` order.
+ * That is what makes "where did this change stall, and who stopped it"
+ * answerable off the indentation instead of by reading the event table.
+ *
+ * WHAT IS A REFUSAL HERE, and why. `approval_denied`, `abort`, `check_failed`
+ * and `deploy_blocked` are DECISIONS — a human or a required gate refused to
+ * let the change proceed, which is the workflow engine WORKING. They are
+ * `denied` spans carrying the reason. `execution_failed` is the one
+ * non-decision: it is a git/build/deploy fault and records as `error`, exactly
+ * as `model_dispatch_failed` does in the dispatch core. Scoring a gate that
+ * held as a failure is the ADR-0057/0072 inversion, and this is the third
+ * place in the product where the line has to be drawn deliberately.
+ *
+ * A SKIPPED transition (the precondition said the event no longer applies)
+ * writes NOTHING: nothing changed, so there is nothing to say.
+ */
+async function recordWorkflowStageSpan(
+  db: DbOrTx,
+  instanceId: string,
+  event: WorkflowEvent,
+  applied: {
+    state: InstanceState;
+    skipped?: boolean;
+    span?: { userId: string; projectId: string | null; status: string };
+  },
+): Promise<void> {
+  if (applied.skipped || !applied.span) return;
+  const stageId = "stageId" in event ? event.stageId : null;
+  const decided: Record<string, string> = {
+    approval_denied: "stage approval was DENIED by an approver",
+    abort: "the workflow instance was aborted",
+  };
+  let status: "ok" | "denied" | "error" = "ok";
+  let reason: string | null = null;
+  if (event.kind === "execution_failed") {
+    // the ONE non-decision: a git/build/deploy fault, not a verdict
+    status = "error";
+    reason = event.error;
+  } else if (event.kind === "check_failed") {
+    status = "denied";
+    reason = `required checks failed, stage is blocked: ${event.failures.join(", ")}`;
+  } else if (event.kind === "deploy_blocked") {
+    status = "denied";
+    reason = event.reason;
+  } else if (decided[event.kind]) {
+    status = "denied";
+    reason = decided[event.kind]!;
+  }
+  const at = new Date();
+  const ctx = await traceForRoot(db, {
+    kind: "workflow",
+    name: `workflow ${instanceId}`,
+    userId: applied.span.userId,
+    projectId: applied.span.projectId,
+    sessionId: instanceId,
+    rootRefId: instanceId,
+  });
+  if (!ctx) return;
+  await recordSpan(db, ctx, {
+    kind: "workflow_stage",
+    name: stageId ? `${stageId}: ${event.kind}` : event.kind,
+    status,
+    statusReason: reason,
+    startedAt: at,
+    endedAt: at,
+    attributes: {
+      event: event.kind,
+      ...(stageId ? { stageId } : {}),
+      instanceStatus: applied.span.status,
+      // the rule id the SAME transition wrote onto the audit trail, so the two
+      // records name each other rather than each inventing a vocabulary
+      ruleId: `workflow:${event.kind}`,
+      ...(applied.span.projectId ? { projectId: applied.span.projectId } : {}),
+    },
+  });
+  // The instance's trace closes when the INSTANCE does — not when one of its
+  // transitions returns, exactly as a run's trace closes with the run.
+  const terminal = ["completed", "denied", "aborted", "rolled_back"];
+  if (terminal.includes(applied.span.status)) {
+    await finishTrace(db, ctx, applied.span.status === "completed" ? "ok" : "denied");
+  }
 }
 
 /**
@@ -278,6 +386,13 @@ export async function applyWorkflowApprovalDecision(
 export interface WorkflowRouteOptions {
   /** hex AES-256 key for git-connection tokens; absent = git features refused */
   dataKey?: string;
+  /** ADR-0080: called (post-transition, best-effort ordering with the response)
+   * after a human-driven route moves an instance — artifact submit, advance,
+   * abort — so a dependent object (the AI use-case registry) can mirror the
+   * instance's status. The DECIDE path is covered separately inside the one
+   * approvals transaction in app.ts; this hook exists because those three
+   * routes live here and app.ts composes the modules (no import cycle). */
+  onInstanceTransition?: (db: Db, instanceId: string, actorUserId: string | null) => Promise<void>;
 }
 
 /** §8 nesting: called from the orchestration run-event funnel when a run
@@ -1001,6 +1116,157 @@ ${latestArtifact.content}`
   return lastEffects;
 }
 
+/**
+ * ADR-0077 — THE ONE TEMPLATE-CREATION PATH.
+ *
+ * Extracted verbatim from `POST /v1/workflows/templates` so the gallery's
+ * "create from gallery" route (template-gallery.ts) instantiates through the
+ * exact same validation an admin-authored definition gets: kernel definition
+ * validation, approver resolution (a bad approver id must fail template
+ * creation, not brick an instance mid-flight), and nested-run-graph validation
+ * (a template must never promise a graph the orchestration engine can't run).
+ * A zod definition failure THROWS (ZodError → the global 400 mapping), exactly
+ * as the route always behaved.
+ */
+export async function createWorkflowTemplateValidated(
+  db: Db,
+  body: { name: string; definition?: unknown },
+): Promise<
+  | { ok: true; row: typeof workflowTemplates.$inferSelect }
+  | { ok: false; status: number; body: Record<string, unknown> }
+> {
+  const definition = validateDefinition(body.definition);
+  const named = definition.stages
+    .flatMap((st) => st.approvers ?? [])
+    .filter((a) => a !== "requesting_user");
+  if (named.length > 0) {
+    const uuidCheck = z.string().uuid();
+    if (named.some((a) => !uuidCheck.safeParse(a).success)) {
+      return { ok: false, status: 422, body: { error: "invalid_approver" } };
+    }
+    const found = await db.select({ id: users.id }).from(users).where(inArray(users.id, named));
+    if (found.length !== new Set(named).size) {
+      return { ok: false, status: 422, body: { error: "invalid_approver" } };
+    }
+  }
+  // §8: nested run graphs must be valid NOW. Their escalation approvers
+  // resolve at template time too (same fail-fast rule as stage approvers).
+  const nestedApprovers: string[] = [];
+  for (const st of definition.stages) {
+    if (st.type !== "automated_build" || st.run === undefined) continue;
+    try {
+      nestedApprovers.push(validateGraph(st.run).escalationApproverUserId);
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        return {
+          ok: false,
+          status: 422,
+          body: { error: "invalid_run_graph", stageId: st.id, issues: err.issues },
+        };
+      }
+      throw err;
+    }
+  }
+  if (nestedApprovers.length > 0) {
+    const found = await db
+      .select({ id: users.id })
+      .from(users)
+      .where(inArray(users.id, nestedApprovers));
+    if (found.length !== new Set(nestedApprovers).size) {
+      return { ok: false, status: 422, body: { error: "invalid_approver" } };
+    }
+  }
+  const [row] = await db
+    .insert(workflowTemplates)
+    .values({ name: body.name, definition })
+    .returning();
+  return { ok: true, row: row! };
+}
+
+/**
+ * THE ONE INSTANCE-CREATION PATH, extracted (ADR-0080) so the AI use-case
+ * front-door starts its intake instance through EXACTLY the code
+ * `POST /v1/workflows/instances` runs — retired-template refusal, ordered
+ * merge, ADR-0011 attribution, kernel `start` and stage execution included.
+ * The caller is responsible for HOW `templateIds` was chosen (assignment
+ * rules + the §8.3 cascade union for the route; the intake template for the
+ * use-case registry) — everything after that choice lives here, once.
+ */
+export async function startWorkflowInstanceWithTemplates(
+  db: Db,
+  dataKey: string | undefined,
+  input: {
+    templateIds: string[];
+    initiatorUserId: string;
+    change: Record<string, unknown>;
+    projectId?: string | null;
+    isAdmin?: boolean;
+  },
+): Promise<
+  | { ok: true; instance: { id: string; status: string; state: unknown } }
+  | { ok: false; status: number; body: Record<string, unknown> }
+> {
+  const { templateIds, initiatorUserId, change } = input;
+  const templates = await db
+    .select()
+    .from(workflowTemplates)
+    .where(inArray(workflowTemplates.id, templateIds));
+  if (templates.length !== templateIds.length) {
+    return { ok: false, status: 400, body: { error: "invalid_reference" } };
+  }
+  // ADR-0022 retire: a RETIRED template starting a new instance is refused
+  // LOUDLY, never silently skipped — silently dropping a routed (possibly
+  // compliance-required) template would let the change through ungoverned.
+  const retired = templates.filter((t) => t.retiredAt !== null);
+  if (retired.length > 0) {
+    return {
+      ok: false,
+      status: 422,
+      body: {
+        error: "template_retired",
+        templates: retired.map((t) => t.name),
+        detail: `workflow template(s) ${retired.map((t) => `'${t.name}'`).join(", ")} are retired and start no new instances — an admin must route this change to an active template`,
+      },
+    };
+  }
+  // merge in matched order (deterministic: matchTemplates preserves rule order)
+  const ordered = templateIds.map((id) => templates.find((t) => t.id === id)!);
+  const merged = mergeDefinitions(ordered.map((t) => t.definition as WorkflowDefinition));
+
+  if (input.projectId) {
+    // ADR-0011: the initiator must be allowed to bill this project
+    const attribution = await assertProjectAttribution(
+      db,
+      input.projectId,
+      initiatorUserId,
+      input.isAdmin ?? false,
+    );
+    if (!attribution.ok) {
+      return { ok: false, status: attribution.status, body: { error: attribution.error } };
+    }
+  }
+  const [instance] = await db
+    .insert(workflowInstances)
+    .values({
+      templateIds,
+      definition: merged,
+      initiatorUserId,
+      change,
+      projectId: input.projectId ?? null,
+      state: initialState(merged),
+      status: "running",
+    })
+    .returning();
+
+  const first = await applyEvent(db, instance!.id, { kind: "start" }, initiatorUserId);
+  await runGitExecutions(db, instance!.id, first.effects, initiatorUserId, dataKey);
+  const [fresh] = await db
+    .select()
+    .from(workflowInstances)
+    .where(eq(workflowInstances.id, instance!.id));
+  return { ok: true, instance: { id: instance!.id, status: fresh!.status, state: fresh!.state } };
+}
+
 export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: WorkflowRouteOptions = {}) {
   // Git connections: admin-only; tokens encrypted at rest, never returned.
   app.post("/v1/git/connections", async (req, reply) => {
@@ -1084,6 +1350,22 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
   };
   app.post("/v1/deploy/targets", async (req, reply) => {
     const body = createDeployTargetSchema.parse(req.body);
+    // ADR-0052 §4: air-gapped mode is a TIER FEATURE, enforced at the one
+    // in-product act that SELECTS it — creating a deploy target whose mode is
+    // air_gapped. hosted/byoc targets are untouched, and every air-gapped
+    // target that already exists keeps deploying (committed footprint, §5).
+    // The RUNNING process mode is REGULAIT_DEPLOY_MODE (ADR-0062) — an
+    // operator env var, deliberately not an API act, so there is nothing to
+    // gate there; recorded-vs-actual `deploymentMode` cross-checking is its
+    // own decision (ADR-0052 amendment) and is deliberately not smuggled in.
+    if (body.mode === "air_gapped") {
+      const flagRefusal = await refuseIfFeatureNotLicensed(db, {
+        actorUserId: req.authCtx.userId,
+        feature: "airgapped_mode",
+        what: "creating an air-gapped deploy target",
+      });
+      if (flagRefusal) return reply.status(flagRefusal.status).send(flagRefusal.body);
+    }
     if (body.credential && !opts.dataKey) {
       return reply.status(503).send({ error: "no_data_key", detail: "set REGULAIT_DATA_KEY to store a deploy credential" });
     }
@@ -1122,53 +1404,9 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
 
   app.post("/v1/workflows/templates", async (req, reply) => {
     const body = createWorkflowTemplateSchema.parse(req.body);
-    const definition = validateDefinition(body.definition);
-    // Approvers must be resolvable NOW — a bad approver id must fail template
-    // creation, not brick an instance mid-flight.
-    const named = definition.stages
-      .flatMap((st) => st.approvers ?? [])
-      .filter((a) => a !== "requesting_user");
-    if (named.length > 0) {
-      const uuidCheck = z.string().uuid();
-      if (named.some((a) => !uuidCheck.safeParse(a).success)) {
-        return reply.status(422).send({ error: "invalid_approver" });
-      }
-      const found = await db.select({ id: users.id }).from(users).where(inArray(users.id, named));
-      if (found.length !== new Set(named).size) {
-        return reply.status(422).send({ error: "invalid_approver" });
-      }
-    }
-    // §8: nested run graphs must be valid NOW — a template must never promise
-    // a graph the orchestration engine can't run. Their escalation approvers
-    // resolve at template time too (same fail-fast rule as stage approvers).
-    const nestedApprovers: string[] = [];
-    for (const st of definition.stages) {
-      if (st.type !== "automated_build" || st.run === undefined) continue;
-      try {
-        nestedApprovers.push(validateGraph(st.run).escalationApproverUserId);
-      } catch (err) {
-        if (err instanceof z.ZodError) {
-          return reply
-            .status(422)
-            .send({ error: "invalid_run_graph", stageId: st.id, issues: err.issues });
-        }
-        throw err;
-      }
-    }
-    if (nestedApprovers.length > 0) {
-      const found = await db
-        .select({ id: users.id })
-        .from(users)
-        .where(inArray(users.id, nestedApprovers));
-      if (found.length !== new Set(nestedApprovers).size) {
-        return reply.status(422).send({ error: "invalid_approver" });
-      }
-    }
-    const [row] = await db
-      .insert(workflowTemplates)
-      .values({ name: body.name, definition })
-      .returning();
-    return reply.status(201).send(row);
+    const result = await createWorkflowTemplateValidated(db, body);
+    if (!result.ok) return reply.status(result.status).send(result.body);
+    return reply.status(201).send(result.row);
   });
 
   app.get("/v1/workflows/templates", async () => ({
@@ -1300,53 +1538,15 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
       return reply.status(422).send({ error: "no_workflow_matches_change" });
     }
 
-    const templates = await db
-      .select()
-      .from(workflowTemplates)
-      .where(inArray(workflowTemplates.id, templateIds));
-    if (templates.length !== templateIds.length) {
-      return reply.status(400).send({ error: "invalid_reference" });
-    }
-    // ADR-0022 retire: a RETIRED template starting a new instance is refused
-    // LOUDLY, never silently skipped — silently dropping a routed (possibly
-    // compliance-required) template would let the change through ungoverned.
-    const retired = templates.filter((t) => t.retiredAt !== null);
-    if (retired.length > 0) {
-      return reply.status(422).send({
-        error: "template_retired",
-        templates: retired.map((t) => t.name),
-        detail: `workflow template(s) ${retired.map((t) => `'${t.name}'`).join(", ")} are retired and start no new instances — an admin must route this change to an active template`,
-      });
-    }
-    // merge in matched order (deterministic: matchTemplates preserves rule order)
-    const ordered = templateIds.map((id) => templates.find((t) => t.id === id)!);
-    const merged = mergeDefinitions(ordered.map((t) => t.definition as WorkflowDefinition));
-
-    if (body.projectId) {
-      // ADR-0011: the initiator must be allowed to bill this project
-      const attribution = await assertProjectAttribution(db, body.projectId, userId, req.authCtx.isAdmin);
-      if (!attribution.ok) return reply.status(attribution.status).send({ error: attribution.error });
-    }
-    const [instance] = await db
-      .insert(workflowInstances)
-      .values({
-        templateIds,
-        definition: merged,
-        initiatorUserId: userId,
-        change,
-        projectId: body.projectId ?? null,
-        state: initialState(merged),
-        status: "running",
-      })
-      .returning();
-
-    const first = await applyEvent(db, instance!.id, { kind: "start" }, userId);
-    await runGitExecutions(db, instance!.id, first.effects, userId, opts.dataKey);
-    const [fresh] = await db
-      .select()
-      .from(workflowInstances)
-      .where(eq(workflowInstances.id, instance!.id));
-    return reply.status(201).send({ id: instance!.id, status: fresh!.status, state: fresh!.state });
+    const started = await startWorkflowInstanceWithTemplates(db, opts.dataKey, {
+      templateIds,
+      initiatorUserId: userId,
+      change,
+      projectId: body.projectId ?? null,
+      isAdmin: req.authCtx.isAdmin,
+    });
+    if (!started.ok) return reply.status(started.status).send(started.body);
+    return reply.status(201).send(started.instance);
   });
 
   type LoadResult =
@@ -1447,6 +1647,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
       createdBy: req.authCtx.userId!,
     });
     await runGitExecutions(db, instance.id, effects, req.authCtx.userId, opts.dataKey);
+    await opts.onInstanceTransition?.(db, instance.id, req.authCtx.userId);
     const [fresh] = await db
       .select({ status: workflowInstances.status })
       .from(workflowInstances)
@@ -1489,6 +1690,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
       );
       await runGitExecutions(db, loaded.instance.id, r.effects, req.authCtx.userId, opts.dataKey);
     }
+    await opts.onInstanceTransition?.(db, loaded.instance.id, req.authCtx.userId);
     const [fresh] = await db
       .select()
       .from(workflowInstances)
@@ -1606,12 +1808,44 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     const loaded = await loadInstanceFor(req, instanceId);
     if (loaded.error) return sendLoadError(reply, loaded.error);
     if (!req.authCtx.userId) return reply.status(403).send({ error: "bootstrap_cannot_drive" });
+    // Separation of duties on the manual-deploy handoff, same rule the
+    // Approvals Queue applies to a self-review. This endpoint clears a stage
+    // that parked precisely BECAUSE governance found no authorized way to
+    // deploy — so "it went out another way" is an attestation, and when the
+    // person attesting is the one who asked for the change in the first
+    // place, there is no second party in it at all. Still permitted (an
+    // operator is not always on hand, and refusing outright would strand the
+    // instance) but never silent: a recorded reason, and an audit row that
+    // says plainly it was self-attested. An arm's-length admin clearing
+    // someone else's handoff stays a one-click action.
+    const selfAttested = req.authCtx.userId === loaded.instance.initiatorUserId;
+    if (selfAttested && !body.reason?.trim()) {
+      return reply.status(400).send({
+        error: "deploy_override_reason_required",
+        detail:
+          "you initiated this change, so clearing its own deploy gate is a self-attestation; record why it is safe to advance (e.g. how it was actually deployed)",
+      });
+    }
     const r = await applyEvent(
       db,
       loaded.instance.id,
       { kind: "deploy_override", stageId: body.stageId },
       req.authCtx.userId,
     );
+    if (selfAttested || body.reason?.trim()) {
+      await db.insert(auditLog).values({
+        userId: req.authCtx.userId,
+        objectType: "workflow",
+        objectId: loaded.instance.id,
+        detail: { stageId: body.stageId, selfAttested, initiatorUserId: loaded.instance.initiatorUserId },
+        effect: "allow",
+        ruleId: "workflow:deploy-override-attested",
+        ruleChain: [],
+        reason: selfAttested
+          ? `initiator cleared their own parked deploy: ${body.reason!.trim()}`
+          : `operator cleared a parked deploy: ${body.reason!.trim()}`,
+      });
+    }
     await runGitExecutions(db, loaded.instance.id, r.effects, req.authCtx.userId, opts.dataKey);
     const [fresh] = await db
       .select()
@@ -1626,6 +1860,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     if (loaded.error) return sendLoadError(reply, loaded.error);
     if (!req.authCtx.userId) return reply.status(403).send({ error: "bootstrap_cannot_drive" });
     const { state } = await applyEvent(db, loaded.instance.id, { kind: "abort" }, req.authCtx.userId);
+    await opts.onInstanceTransition?.(db, loaded.instance.id, req.authCtx.userId);
     return { status: state.status };
   });
 
@@ -1648,7 +1883,14 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
       db
         .select()
         .from(approvals)
-        .where(and(eq(approvals.instanceId, instanceId), eq(approvals.status, "pending"))),
+        .where(and(eq(approvals.instanceId, instanceId), eq(approvals.status, "pending")))
+        // Ordered on purpose. Without an ORDER BY, Postgres is free to return
+        // these rows in any order it likes, and under a quorum of `all` there
+        // is one pending row PER approver — so "the first pending gate" is a
+        // different approval from one request to the next. That is a wart for
+        // anything rendering the queue, and it silently broke a test that had
+        // been reading the first row as though it were the caller's own.
+        .orderBy(approvals.requestedAt, approvals.id),
     ]);
     // name the approver on each pending gate so "awaiting <who>" is renderable
     const approverIds = [...new Set(pendingApprovals.map((a) => a.approverUserId))];

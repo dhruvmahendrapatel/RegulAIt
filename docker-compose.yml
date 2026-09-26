@@ -1,7 +1,8 @@
 # One command to a usable product:  docker compose up --build
-# Then open http://localhost:3000/ui (the React SPA — ADR-0026; the legacy
-# shells stay at /app and /admin). Demo API keys and one-time passwords are
-# printed once in the gateway container log (docker compose logs gateway).
+# Then open http://localhost:3000/ui — the React SPA, and the WHOLE product
+# surface. The single-file /app and /admin shells were deleted by ADR-0033 and
+# those paths now 404. One-time sign-in passwords and demo API keys are printed
+# once, at the end of the first-boot log (docker compose logs gateway).
 # The image build stage runs `pnpm -r build`, which includes the web bundle,
 # so /ui is always built inside the container.
 #
@@ -15,6 +16,14 @@
 #                                                       # local proof, self-signed CA
 #
 # See docs/ops/TLS.md.
+#
+# Audit anchoring (ADR-0060): the `minio` + `minio-init` services give this
+# stack a REAL S3 Object Lock bucket in COMPLIANCE mode on the first
+# `docker compose up --build` — no AWS account, no manual bucket creation, no
+# profile to remember. The gateway anchors its audit-chain head there and
+# reports what the bucket itself says it enforces, so `/v1/audit/verify` can
+# answer `tamperResistant: true` on a laptop for the same reason it can in a
+# customer's cloud: because the medium was asked, not because a flag was set.
 services:
   db:
     image: postgres:16
@@ -44,11 +53,111 @@ services:
     stop_grace_period: 60s
     networks: [regulait]
 
+  # --- WORM anchor store (ADR-0060) ------------------------------------------
+  #
+  # ON BY DEFAULT, deliberately NOT behind a compose profile like `tls` is.
+  # `tls` is off by default because turning it on has a cost outside this box
+  # (a failed ACME challenge burns a Let's Encrypt rate limit). This has no such
+  # cost, and the thing it fixes is that a default install's only integrity
+  # evidence lived in the same database an attacker edits. An audit anchor that
+  # requires an extra flag is an audit anchor most installs will not have.
+  #
+  # MinIO is here because Object Lock is an S3 API contract, not an AWS feature.
+  # The gateway's S3ObjectLockSink talks to this container with exactly the same
+  # code it uses against real AWS S3 or a customer's on-prem store — endpoint,
+  # region, credentials and path-style are configuration. See
+  # infra/modules/audit-anchor-worm-s3/ for the AWS-side equivalent.
+  minio:
+    # Not pinned by default: MinIO publishes timestamped RELEASE tags with no
+    # stable major line to follow, so a pin here rots rather than protecting
+    # anyone. Set REGULAIT_MINIO_IMAGE to a RELEASE tag anywhere reproducibility
+    # matters.
+    image: ${REGULAIT_MINIO_IMAGE:-minio/minio:latest}
+    command: server /data --address :9000 --console-address :9001
+    environment:
+      # DEV-GRADE CREDENTIALS, exactly like REGULAIT_DATA_KEY above. They are
+      # here so `docker compose up --build` needs no setup; they are not a
+      # secret and must be overridden anywhere shared. Nothing off-box can
+      # reach this service — no ports are published, so it is reachable only
+      # from the compose network.
+      #
+      # Deliberately the SAME two variables the gateway reads below, rather
+      # than a separate MINIO_* pair: two names for one credential is how an
+      # operator ends up rotating one half, and a gateway that cannot
+      # authenticate writes `failed` anchor rows nobody reads.
+      MINIO_ROOT_USER: ${REGULAIT_AUDIT_ANCHOR_S3_ACCESS_KEY_ID:-regulait}
+      MINIO_ROOT_PASSWORD: ${REGULAIT_AUDIT_ANCHOR_S3_SECRET_ACCESS_KEY:-regulait-dev-minio}
+    healthcheck:
+      # `mc ready` is MinIO's own readiness probe and ships in the image; the
+      # image has no curl, so the usual /minio/health/live curl does not work.
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - minio_data:/data
+    networks: [regulait]
+
+  # One-shot: create the anchor bucket WITH OBJECT LOCK, then exit.
+  #
+  # `--with-lock` is not a detail — Object Lock is a CREATE-TIME property of a
+  # bucket and cannot be enabled afterwards. A bucket made without it can only
+  # be fixed by making a different bucket, which is why this runs before the
+  # gateway rather than leaving an operator to do it by hand and discover the
+  # mistake months later, when the anchors turn out to be deletable.
+  #
+  # The default retention is COMPLIANCE, not GOVERNANCE, because GOVERNANCE can
+  # be bypassed by a principal holding s3:BypassGovernanceRetention — i.e. by
+  # exactly the hostile administrator ADR-0060 is written against. The gateway
+  # OBSERVES which of the two this bucket reports and will say `tamperResistant:
+  # false` if this ever comes up GOVERNANCE, so weakening this line does not
+  # weaken the claim silently; it changes what /v1/audit/verify says.
+  #
+  # Consequence, stated because it surprises people: for the retention period
+  # these objects cannot be deleted from inside the container by anyone. To
+  # reclaim the space on a dev box, drop the volume — `docker compose down -v`.
+  minio-init:
+    image: ${REGULAIT_MC_IMAGE:-minio/mc:latest}
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${REGULAIT_AUDIT_ANCHOR_S3_ACCESS_KEY_ID:-regulait}
+      MINIO_ROOT_PASSWORD: ${REGULAIT_AUDIT_ANCHOR_S3_SECRET_ACCESS_KEY:-regulait-dev-minio}
+      ANCHOR_BUCKET: ${REGULAIT_AUDIT_ANCHOR_S3_BUCKET:-regulait-audit-anchors}
+      ANCHOR_RETENTION_DAYS: ${REGULAIT_AUDIT_ANCHOR_S3_RETENTION_DAYS:-365}
+    entrypoint: ["/bin/sh", "-c"]
+    # A one-item LIST holding a block scalar, not a bare string: compose
+    # shell-splits a string `command` into argv words, and `sh -c` would then
+    # take only the first word as the script and silently do nothing. This form
+    # passes the whole script as a single argument.
+    #
+    # `$$` is compose's escape for a literal `$` — these expand in the shell
+    # inside the container, not at compose-render time.
+    command:
+      - |
+        set -e
+        mc alias set worm http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"
+        mc mb --with-lock --ignore-existing "worm/$$ANCHOR_BUCKET"
+        mc retention set --default COMPLIANCE "$${ANCHOR_RETENTION_DAYS}d" "worm/$$ANCHOR_BUCKET"
+        mc retention info --default "worm/$$ANCHOR_BUCKET"
+    restart: "no"
+    networks: [regulait]
+
   gateway:
     build: .
     depends_on:
       db:
         condition: service_healthy
+      # Waits for the bucket, but `required: false` — the gateway must NOT be
+      # held hostage by its anchor store. The hash chain is computed locally and
+      # catches everything short of a full recompute with or without an anchor,
+      # and a sink that cannot be written records the anchor row as `failed`
+      # with the reason on it. A stack that refuses to serve because MinIO could
+      # not be pulled would be a worse failure than a disclosed weaker one.
+      minio-init:
+        condition: service_completed_successfully
+        required: false
     environment:
       # ADR-0041: every value below is `${VAR:-<dev default>}` so that
       # scripts/install.sh can parameterise a customer deployment purely by
@@ -91,6 +200,38 @@ services:
       # `scripts/install.sh --mode` writes this into the rendered .env, so an
       # installed deployment gets its real mode without anyone editing a file.
       REGULAIT_DEPLOY_MODE: ${REGULAIT_DEPLOY_MODE:-}
+      # ADR-0060 — WHERE THE AUDIT-CHAIN HEAD IS ANCHORED. Naming a bucket is
+      # the whole opt-in: with it set the gateway uses the S3 Object-Lock sink,
+      # without it the local `./audit-anchors` buffer, and
+      # REGULAIT_AUDIT_ANCHOR=off disables anchoring entirely (disclosed, not
+      # silent). Pointing these at a real AWS bucket, or at a customer's own
+      # object store in a BYOC/air-gapped install, is a .env change and nothing
+      # else — the sink is the same code either way.
+      #
+      # NOTE what this does NOT do: it does not set `tamperResistant`. The
+      # gateway calls GetObjectLockConfiguration and grades the bucket by what
+      # it answers — COMPLIANCE is the only answer that earns `true`, and a
+      # GOVERNANCE, unlocked or unreachable bucket is reported `false` on every
+      # /v1/audit/verify response. There is no env var that can set that flag,
+      # by design: a boolean that lies here is worse than no anchor at all.
+      REGULAIT_AUDIT_ANCHOR_S3_ENDPOINT: ${REGULAIT_AUDIT_ANCHOR_S3_ENDPOINT:-http://minio:9000}
+      REGULAIT_AUDIT_ANCHOR_S3_BUCKET: ${REGULAIT_AUDIT_ANCHOR_S3_BUCKET:-regulait-audit-anchors}
+      REGULAIT_AUDIT_ANCHOR_S3_REGION: ${REGULAIT_AUDIT_ANCHOR_S3_REGION:-us-east-1}
+      REGULAIT_AUDIT_ANCHOR_S3_PREFIX: ${REGULAIT_AUDIT_ANCHOR_S3_PREFIX:-audit-anchors}
+      # Retention must MATCH OR EXCEED the audit-log retention the deployment's
+      # classification requires: an anchor that expires before the rows it pins
+      # leaves those rows unprovable. Same default as `retention_days` in
+      # infra/modules/audit-anchor-worm-s3 so the two cannot drift.
+      REGULAIT_AUDIT_ANCHOR_S3_RETENTION_DAYS: ${REGULAIT_AUDIT_ANCHOR_S3_RETENTION_DAYS:-365}
+      # DEV-GRADE: the MinIO root credential, so a laptop needs no setup. A real
+      # deployment should hand the gateway a scoped user that can PUT under the
+      # prefix and nothing else — the MinIO equivalent of the writer grant in
+      # infra/modules/audit-anchor-worm-s3, which deliberately withholds delete,
+      # retention-shortening and lock-weakening permissions. Leave both empty to
+      # fall through to the SDK's provider chain (an instance role in BYOC),
+      # which is the posture where no long-lived key exists to steal.
+      REGULAIT_AUDIT_ANCHOR_S3_ACCESS_KEY_ID: ${REGULAIT_AUDIT_ANCHOR_S3_ACCESS_KEY_ID:-regulait}
+      REGULAIT_AUDIT_ANCHOR_S3_SECRET_ACCESS_KEY: ${REGULAIT_AUDIT_ANCHOR_S3_SECRET_ACCESS_KEY:-regulait-dev-minio}
       # ADR-0036 (SAML 2.0 SSO) — both OPTIONAL, both bounded:
       #  - REGULAIT_SAML_ENTITY_ID pins the deployment-global SP entity id.
       #    Unset, it is derived from the request host (like the OIDC
@@ -184,5 +325,13 @@ networks:
 
 volumes:
   pgdata:
+  # The anchor store. Named, so anchors survive `docker compose down` — the
+  # whole point of an anchor is that it outlives the thing it is evidence
+  # about. `down -v` destroys it, which is the honest limit of a local WORM
+  # store: compliance-mode Object Lock stops an anchor being edited or forged,
+  # it cannot stop someone with host access destroying the volume wholesale.
+  # That is a different attack and a LOUD one — verification then reports the
+  # anchor missing rather than matching.
+  minio_data:
   caddy_data:
   caddy_config:

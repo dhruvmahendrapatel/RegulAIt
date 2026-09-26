@@ -54,7 +54,11 @@ You no longer have to *hope* the key you filed away is the right one.
   every decryption days later — and an admin re-entering credentials in the meantime leaves rows
   under two keys that neither can fully read. The one legitimate mismatch, a deliberate rotation,
   has an explicit override (`REGULAIT_DATA_KEY_ROTATED_FROM=<the old fingerprint>`) that is audited
-  with both values.
+  with both values — and, when you still hold BOTH keys, a genuine re-encryption walk
+  (`REGULAIT_DATA_KEY=<new> REGULAIT_DATA_KEY_OLD=<old> pnpm --filter @regulait/gateway reencrypt`)
+  that rewrites every ciphertext row under the new key, resumable after a crash and honest about
+  any row it could not read (see the runbook's section III-b). Keep the old key until the walk
+  reports completed; destroy it after.
 
 - **Attest custody.** Once the key is filed out of band, record that fact:
 

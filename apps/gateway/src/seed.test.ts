@@ -14,7 +14,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import {
+  and,
+  approvals,
   asc,
+  auditLog,
   conversationMessages,
   conversations,
   createDb,
@@ -30,7 +33,13 @@ import { closeAll, dropScratchDatabase } from "./testing/scratch-db.js";
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
 
-const SCRATCH_DB = "regulait_seed_test";
+// Per-RUN unique name (pid + timestamp), not a fixed one: a fixed name is
+// shared by every concurrent run on the host, and beforeAll's
+// DROP ... WITH (FORCE) then terminates the other run's backends mid-suite —
+// two concurrent runs destroy each other (PENDING §5). afterAll drops the
+// database, so nothing accumulates on a normal exit; a run killed hard enough
+// to skip afterAll leaves a uniquely-named orphan an operator can drop cold.
+const SCRATCH_DB = `regulait_seed_test_${process.pid}_${Date.now()}`;
 const scratchUrl = (() => {
   const u = new URL(DATABASE_URL);
   u.pathname = "/" + SCRATCH_DB;
@@ -147,6 +156,51 @@ describe("seed script", () => {
     const ctx = rolled!.context as Record<string, { reverted?: string; deployId?: string }>;
     expect(ctx["deploy:deploy"]?.deployId).toBeDefined();
     expect(ctx["rollback:undo"]?.reverted).toBe(ctx["deploy:deploy"]!.deployId);
+  });
+
+  // Item 4 (§8.3 headline): the cascade story must be live out of the box.
+  it("parks ONE instance at the cascade-forced compliance-signoff, pending in Avery's inbox", async () => {
+    const rows = (await scratch.select().from(workflowInstances)).filter(
+      (i) => (i.change as { description?: string }).description ===
+        "Redact and export the oncology cohort (PHI)",
+    );
+    // the seeder ran twice in beforeAll — a duplicate here is an idempotency bug
+    expect(rows).toHaveLength(1);
+    const inst = rows[0]!;
+    expect(inst.status).toBe("blocked_on_approval");
+    // the CURRENT stage is the one the tag cascaded in — no assignment rule
+    // routes 'compliance-signoff'; it exists only because hipaa-project is
+    // classified. That is the §8.3 headline in one row.
+    const def = inst.definition as { stages: Array<{ id: string }> };
+    const state = inst.state as { currentStageIndex: number };
+    expect(def.stages[state.currentStageIndex]!.id).toBe("compliance-signoff");
+    // and Avery can act on it: exactly one live approval row on that stage
+    const [avery] = await scratch
+      .select()
+      .from(users)
+      .where(eq(users.email, "avery@regulait.local"));
+    const pending = await scratch
+      .select()
+      .from(approvals)
+      .where(
+        and(
+          eq(approvals.instanceId, inst.id),
+          eq(approvals.stageId, "compliance-signoff"),
+          eq(approvals.status, "pending"),
+        ),
+      );
+    expect(pending).toHaveLength(1);
+    expect(pending[0]!.approverUserId).toBe(avery!.id);
+  });
+
+  it("seeds the cascade's PII block exactly once — a deny before any model ran", async () => {
+    // the same tag's piiMode 'block' half of the headline: one 'pii-blocked'
+    // audit deny from the seeded SSN dispatch, not duplicated by the re-run
+    const denies = await scratch
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.ruleId, "pii-blocked"), eq(auditLog.effect, "deny")));
+    expect(denies).toHaveLength(1);
   });
 
   // ADR-0030: the owner must be able to sign in as `admin` straight out of the

@@ -65,36 +65,62 @@
  */
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 import {
   agents,
   aiEndpointSignatures,
   and,
   auditLog,
+  customModelProviders,
   desc,
   eq,
   inArray,
+  modelCredentials,
   shadowAiFindings,
   shadowAiImports,
   sql,
+  userModelCredentials,
   workflowInstances,
   type Db,
+  mcpServers,
 } from "@regulait/db";
 import {
   DEFAULT_AI_SIGNATURES,
+  DiscoveryParseError,
+  EVIDENCE_ADAPTER_POSTURE,
   EVIDENCE_MAX_BYTES,
+  EVIDENCE_MAX_ROWS,
+  EvidenceFormatError,
+  SHADOW_AI_CATALOG_V1,
+  SHADOW_AI_CATALOG_VERSION,
   SHADOW_AI_DISPOSITIONS,
+  SHADOW_DISCOVERY_POSTURE,
+  SHADOW_DISCOVERY_SOURCE_KINDS,
   analyzeImport,
   catalogueSignatureSchema,
+  classifyDiscoveryContent,
+  classifyObservation,
   confidenceFor,
   coverageScorecard,
+  describeEvidenceAdapters,
   evidenceImportSchema,
+  getEvidenceAdapter,
+  normalizeEvidenceHost,
+  findMcpEndpoints,
+  MCP_DISCOVERY_POSTURE,
+  rawEvidenceImportRequestSchema,
   screenEvidencePayload,
   type AiSignature,
   type CorrelatedFinding,
+  type EvidenceImport,
   type EvidenceKind,
+  type EvidenceRowRefusal,
+  type Observation,
   type ShadowAiSeverity,
 } from "@regulait/shared";
+import { defaultBaseUrlFor } from "@regulait/model-provider";
+import { ENV_FALLBACK_PROVIDERS, platformEnvKey } from "./agents-connectors.js";
+import { envFallbackAllowed, loadOrgSettings } from "./org-settings.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
@@ -108,8 +134,22 @@ export const SHADOW_AI_RULE_IDS = {
   importRejected: "shadow-ai-import-rejected",
   importPrivilegeRefused: "shadow-ai-import-privilege-refused",
   importTooLarge: "shadow-ai-import-too-large",
+  /** ADR-0071: a raw file the adapter could not read AT ALL (wrong adapter,
+   * missing `#Fields:`, unmappable columns) — distinct from a per-row refusal */
+  rawUnreadable: "shadow-ai-raw-import-unreadable",
+  /** ADR-0071: the file parsed, but line(s) in it did not, and the caller asked
+   * for the default posture of refusing the whole file rather than accepting a
+   * quietly smaller inventory */
+  rawMalformedRows: "shadow-ai-raw-import-malformed-rows",
   findingDisposition: "shadow-ai-finding-disposition",
   findingRemediationLinked: "shadow-ai-finding-remediation-linked",
+  /** ADR-0083: a first-party discovery classification that produced nothing to
+   * ingest — audited anyway, because "we looked and found no shadow candidate"
+   * is itself a governance event an operator will want to point at */
+  discoveryClassified: "shadow-ai-discovery-classified",
+  /** ADR-0083: the operator's pasted input was unreadable as a whole (a
+   * package.json that is not JSON) — refused loudly, nothing written */
+  discoveryUnreadable: "shadow-ai-discovery-unreadable",
 } as const;
 
 const SEVERITY_RANK: Record<ShadowAiSeverity, number> = { low: 0, medium: 1, high: 2, critical: 3 };
@@ -127,6 +167,35 @@ const dispositionSchema = z
   });
 
 const remediateSchema = z.object({ instanceId: z.string().uuid() }).strict();
+
+// --- ADR-0083: first-party discovery -----------------------------------------
+
+const discoveryRequestSchema = z
+  .object({
+    sourceKind: z.enum(SHADOW_DISCOVERY_SOURCE_KINDS),
+    /** the operator's pasted text — a log excerpt or a dependency manifest */
+    content: z.string().min(1),
+    /** what the input BELONGS to. Required for manifests (it becomes the
+     * code_scan `repo` — a finding without one points at nothing); optional
+     * for logs, where it becomes the egress rows' sourceIdentity (a coarse,
+     * operator-asserted label like "office-dns", never an inference). */
+    subject: z.string().min(1).max(200).optional(),
+    mode: z.enum(["dry_run", "apply"]).default("dry_run"),
+  })
+  .strict();
+
+/** the honest-limits sentence the catalogue route and the SPA print verbatim */
+export const SHADOW_DISCOVERY_LIMITS =
+  "The compiled catalogue is FROZEN at version " +
+  SHADOW_AI_CATALOG_VERSION +
+  " and is inherently incomplete and dated: it names the providers its authors knew of on its freeze date, and a " +
+  "provider it does not name is invisible to this classifier (the admin catalogue, which is data, needs no release " +
+  "to grow). Only generic input shapes are read — DNS/proxy log LINES and package.json / requirements.txt / go.mod " +
+  "manifests; for real log grammars with per-row attribution and timestamps use the format adapters. The line " +
+  "scanner attributes traffic to nobody and reads no timestamps. A hit proves an artifact MENTIONED a provider, " +
+  "never that traffic flowed; encrypted or DNS-over-HTTPS traffic that bypasses the exported log is invisible. " +
+  "governed_via_gateway means this deployment is CONFIGURED to reach the host — a log line cannot tell gateway " +
+  "traffic from a rogue client's. Nothing runs continuously: every classification is operator-initiated.";
 
 /** the catalogue row shape the matcher wants, read out of the DB row */
 function toSignature(r: typeof aiEndpointSignatures.$inferSelect): AiSignature {
@@ -167,6 +236,91 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
 
   const loadCatalogue = async (): Promise<AiSignature[]> =>
     (await db.select().from(aiEndpointSignatures)).map(toSignature);
+
+  /**
+   * THE ONE IMPORT PIPELINE (ADR-0055), now with two front doors.
+   *
+   * Everything from the analysis onward — the pure `analyzeImport`, the
+   * `shadow_ai_imports` row, the dry-run/apply split, the audit row and the
+   * finding upsert — lives here and NOWHERE ELSE. `POST /v1/shadow-ai/imports`
+   * (rows already normalised) and ADR-0071's `POST /v1/shadow-ai/imports/raw`
+   * (a raw vendor file put through a format adapter) both end up in this
+   * function with an `EvidenceImport` in hand.
+   *
+   * That is the whole shape of ADR-0071: an adapter LAYER, not a second
+   * pipeline. A raw import cannot reach a code path the JSON import does not,
+   * cannot skip the escalation screen or the strict row schemas, and cannot
+   * write anything the JSON import could not write.
+   */
+  const processEvidenceImport = async (
+    req: FastifyRequest,
+    imp: EvidenceImport,
+    fingerprint: string,
+    extraSummary: Record<string, unknown>,
+  ) => {
+    const catalogue = await loadCatalogue();
+    const analysis = analyzeImport(imp, catalogue);
+
+    const summary = {
+      ...extraSummary,
+      observed: analysis.observed,
+      matched: analysis.matched,
+      unmatched: analysis.unmatched,
+      dropped: analysis.dropped,
+      findings: analysis.findings.map((f) => ({
+        subjectKind: f.subjectKind,
+        subject: f.subject,
+        provider: f.provider,
+        severity: f.severity,
+        confidence: f.confidence,
+      })),
+    };
+
+    if (imp.mode === "dry_run") {
+      const [row] = await db
+        .insert(shadowAiImports)
+        .values({
+          kind: imp.kind,
+          mode: "dry_run",
+          status: "planned",
+          source: imp.source ?? null,
+          payloadSha256: fingerprint,
+          rowCount: imp.rows.length,
+          summary,
+          ruleId: SHADOW_AI_RULE_IDS.importPlanned,
+          reason: `dry run: ${analysis.matched} of ${analysis.observed} observation(s) matched the catalogue, producing ${analysis.findings.length} finding(s); nothing was written to the inventory`,
+          requestedByUserId: req.authCtx.userId ?? null,
+        })
+        .returning();
+      await audit(req.authCtx.userId, "shadow_ai_import", row!.id, SHADOW_AI_RULE_IDS.importPlanned, "allow",
+        row!.reason, { kind: imp.kind, payloadSha256: fingerprint, ...summary });
+      return { importId: row!.id, mode: "dry_run" as const, ...analysis };
+    }
+
+    // APPLY. The ONLY write an import can make is into shadow_ai_findings.
+    const [importRow] = await db
+      .insert(shadowAiImports)
+      .values({
+        kind: imp.kind,
+        mode: "apply",
+        status: "applied",
+        source: imp.source ?? null,
+        payloadSha256: fingerprint,
+        rowCount: imp.rows.length,
+        summary,
+        ruleId: SHADOW_AI_RULE_IDS.importApplied,
+        reason: `applied: ${analysis.matched} of ${analysis.observed} observation(s) matched, producing ${analysis.findings.length} correlated finding(s)`,
+        requestedByUserId: req.authCtx.userId ?? null,
+        appliedAt: new Date(),
+      })
+      .returning();
+
+    const result = await upsertFindings(db, analysis.findings, importRow!.id);
+    await audit(req.authCtx.userId, "shadow_ai_import", importRow!.id, SHADOW_AI_RULE_IDS.importApplied, "allow",
+      importRow!.reason, { kind: imp.kind, payloadSha256: fingerprint, ...summary, ...result });
+
+    return { importId: importRow!.id, mode: "apply" as const, ...analysis, ...result };
+  };
 
   // =======================================================================
   // THE CATALOGUE — data, not code
@@ -367,70 +521,602 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
     }
     const imp = parsed.data;
 
-    // WALL 3 — the analysis itself is a PURE function of (rows, catalogue).
-    // Same call for a dry run and an apply, so the preview cannot disagree with
-    // what the apply then does.
-    const catalogue = await loadCatalogue();
-    const analysis = analyzeImport(imp, catalogue);
+    // WALL 3 — the analysis itself is a PURE function of (rows, catalogue),
+    // and it lives in the ONE pipeline both import routes feed. Same call for a
+    // dry run and an apply, so the preview cannot disagree with what the apply
+    // then does.
+    return reply.status(200).send(await processEvidenceImport(req, imp, fingerprint, {}));
+  });
 
-    const summary = {
-      observed: analysis.observed,
-      matched: analysis.matched,
-      unmatched: analysis.unmatched,
-      dropped: analysis.dropped,
-      findings: analysis.findings.map((f) => ({
-        subjectKind: f.subjectKind,
-        subject: f.subject,
-        provider: f.provider,
-        severity: f.severity,
-        confidence: f.confidence,
-      })),
-    };
+  // =======================================================================
+  // ADR-0071 — THE FORMAT ADAPTERS: the same untrusted path, one layer lower
+  // =======================================================================
 
-    if (imp.mode === "dry_run") {
+  app.get("/v1/shadow-ai/adapters", async () => ({
+    adapters: describeEvidenceAdapters(),
+    posture: EVIDENCE_ADAPTER_POSTURE,
+    pipeline:
+      "An adapter turns a raw file into the SAME evidence rows POST /v1/shadow-ai/imports already accepts, and hands " +
+      "them to the SAME dry-run/apply pipeline. It is a layer, not a second importer: it cannot reach a code path " +
+      "the row-shaped import cannot, cannot skip the escalation screen or the strict row schemas, and cannot write " +
+      "anything the row-shaped import could not write.",
+  }));
+
+  /**
+   * RAW FILE IN, ADR-0055 ROWS OUT.
+   *
+   * The walls, in order, and why each is where it is:
+   *   0. SIZE, on the raw bytes, before anything is scanned.
+   *   1. THE ADAPTER, whose whole-file failure ("this is not a W3C log") is
+   *      reported once rather than as five thousand identical row errors.
+   *   2. MALFORMED ROWS. The DEFAULT refuses the entire file, because the
+   *      specific failure this route must not have is a quietly smaller
+   *      inventory that looks complete. `report_and_continue` is the opt-in, and
+   *      it still returns every refusal with its file line number.
+   *   3. THE ESCALATION SCREEN and the STRICT ROW SCHEMAS — ADR-0055's own,
+   *      re-run over the adapter's output. They cannot fire on file content,
+   *      because an adapter's output vocabulary is fixed by those same schemas;
+   *      running them anyway is what makes that a property rather than a claim.
+   *   4. THE ONE PIPELINE.
+   */
+  app.post("/v1/shadow-ai/imports/raw", async (req, reply) => {
+    const raw = req.body;
+
+    const parsedReq = rawEvidenceImportRequestSchema.safeParse(raw);
+    if (!parsedReq.success) {
+      return reply.status(400).send({
+        error: "invalid_request",
+        issues: parsedReq.error.issues.slice(0, 10).map((i) => ({ path: i.path.join("."), message: i.message })),
+      });
+    }
+    const body = parsedReq.data;
+
+    const adapter = getEvidenceAdapter(body.adapter);
+    if (!adapter) {
+      return reply.status(400).send({
+        error: "unknown_adapter",
+        detail: `no evidence-format adapter named '${body.adapter}'`,
+        available: describeEvidenceAdapters().map((a) => a.id),
+      });
+    }
+    if (!adapter.formats.includes(body.format)) {
+      return reply.status(400).send({
+        error: "unsupported_format",
+        detail: `adapter '${adapter.id}' does not read ${body.format}; it reads ${adapter.formats.join(", ")}`,
+      });
+    }
+
+    const fingerprint = sha256(body.content);
+    // the kind a refusal is RECORDED against before the adapter has run: the
+    // only kind this adapter can produce when it produces exactly one, and
+    // otherwise the ADR-0055 default. A refusal row must exist even when we
+    // never learned what the file was.
+    const fallbackKind: EvidenceKind =
+      adapter.capabilities.kinds.length === 1 ? adapter.capabilities.kinds[0]! : "egress_log";
+
+    const recordRefusal = async (ruleId: string, reason: string, summary: Record<string, unknown>) => {
       const [row] = await db
         .insert(shadowAiImports)
         .values({
-          kind: imp.kind,
-          mode: "dry_run",
-          status: "planned",
-          source: imp.source ?? null,
+          kind: fallbackKind,
+          mode: body.mode,
+          status: "refused",
+          source: body.source ?? null,
           payloadSha256: fingerprint,
-          rowCount: imp.rows.length,
-          summary,
-          ruleId: SHADOW_AI_RULE_IDS.importPlanned,
-          reason: `dry run: ${analysis.matched} of ${analysis.observed} observation(s) matched the catalogue, producing ${analysis.findings.length} finding(s); nothing was written to the inventory`,
+          rowCount: 0,
+          summary: { adapter: adapter.id, format: body.format, ...summary },
+          ruleId,
+          reason,
           requestedByUserId: req.authCtx.userId ?? null,
         })
         .returning();
-      await audit(req.authCtx.userId, "shadow_ai_import", row!.id, SHADOW_AI_RULE_IDS.importPlanned, "allow",
-        row!.reason, { kind: imp.kind, payloadSha256: fingerprint, ...summary });
-      return reply.status(200).send({ importId: row!.id, mode: "dry_run", ...analysis });
+      await audit(req.authCtx.userId, "shadow_ai_import", row!.id, ruleId, "deny", reason, {
+        adapter: adapter.id,
+        payloadSha256: fingerprint,
+        ...summary,
+      });
+      return row!;
+    };
+
+    // WALL 0 — SIZE, on the raw bytes.
+    if (body.content.length > EVIDENCE_MAX_BYTES) {
+      const reason =
+        `evidence file of ${body.content.length} bytes exceeds the ${EVIDENCE_MAX_BYTES}-byte import bound — chunk the export`;
+      const row = await recordRefusal(SHADOW_AI_RULE_IDS.importTooLarge, reason, { bytes: body.content.length });
+      return reply.status(413).send({ error: "evidence_too_large", importId: row.id, detail: reason });
     }
 
-    // APPLY. The ONLY write an import can make is into shadow_ai_findings.
-    const [importRow] = await db
-      .insert(shadowAiImports)
-      .values({
-        kind: imp.kind,
-        mode: "apply",
-        status: "applied",
-        source: imp.source ?? null,
-        payloadSha256: fingerprint,
-        rowCount: imp.rows.length,
-        summary,
-        ruleId: SHADOW_AI_RULE_IDS.importApplied,
-        reason: `applied: ${analysis.matched} of ${analysis.observed} observation(s) matched, producing ${analysis.findings.length} correlated finding(s)`,
-        requestedByUserId: req.authCtx.userId ?? null,
-        appliedAt: new Date(),
+    // WALL 1 — THE ADAPTER.
+    let parsed;
+    try {
+      parsed = adapter.parse({ content: body.content, format: body.format, config: body.config });
+    } catch (e) {
+      if (e instanceof EvidenceFormatError) {
+        const row = await recordRefusal(SHADOW_AI_RULE_IDS.rawUnreadable, e.message, {
+          adapterError: e.code,
+          ...e.detail,
+        });
+        return reply.status(422).send({ error: e.code, importId: row.id, detail: e.message, ...e.detail });
+      }
+      if (e instanceof z.ZodError) {
+        const detail = `adapter '${adapter.id}' rejected its configuration: ${e.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`;
+        const row = await recordRefusal(SHADOW_AI_RULE_IDS.rawUnreadable, detail, { adapterError: "invalid_config" });
+        return reply.status(422).send({
+          error: "invalid_adapter_config",
+          importId: row.id,
+          detail,
+          issues: e.issues.slice(0, 10).map((i) => ({ path: i.path.join("."), message: i.message })),
+        });
+      }
+      throw e;
+    }
+
+    const boundedRefusals = parsed.refusals.slice(0, 50) as unknown as Array<Record<string, unknown>>;
+    const parseSummary = {
+      adapter: adapter.id,
+      format: body.format,
+      formatBasis: adapter.formatBasis,
+      fieldsUsed: parsed.fieldsUsed,
+      rowsParsed: parsed.rowsParsed,
+      rowsAccepted: parsed.rows.length,
+      rowsRefused: parsed.refusals.length,
+      rowsWithoutTimestamp: parsed.rowsWithoutTimestamp,
+      refusals: boundedRefusals,
+    };
+
+    // WALL 2 — MALFORMED ROWS. Default: refuse the file.
+    if (parsed.refusals.length > 0 && body.onMalformedRow === "refuse_file") {
+      const first = parsed.refusals[0] as EvidenceRowRefusal;
+      const reason =
+        `evidence import refused: ${parsed.refusals.length} of ${parsed.rowsParsed} line(s) could not be read, ` +
+        `starting at line ${first.row} (${first.reason}). Accepting the remaining ${parsed.rows.length} line(s) would ` +
+        `hand you a SMALLER inventory that looks complete, so the whole file is refused. Fix the export, or re-send ` +
+        `with onMalformedRow='report_and_continue' to accept the readable lines with every refusal listed.`;
+      const row = await recordRefusal(SHADOW_AI_RULE_IDS.rawMalformedRows, reason, parseSummary);
+      return reply.status(422).send({
+        error: "malformed_rows",
+        importId: row.id,
+        detail: reason,
+        rowsParsed: parsed.rowsParsed,
+        rowsAccepted: 0,
+        rowsRefused: parsed.refusals.length,
+        refusals: parsed.refusals.slice(0, 50),
+      });
+    }
+
+    if (parsed.rows.length === 0) {
+      const reason =
+        `evidence import refused: the adapter '${adapter.id}' read ${parsed.rowsParsed} candidate line(s) and produced ` +
+        `no usable evidence rows. Nothing was written.`;
+      const row = await recordRefusal(SHADOW_AI_RULE_IDS.rawUnreadable, reason, parseSummary);
+      return reply.status(422).send({
+        error: "no_rows",
+        importId: row.id,
+        detail: reason,
+        rowsParsed: parsed.rowsParsed,
+        rowsRefused: parsed.refusals.length,
+        refusals: parsed.refusals.slice(0, 50),
+      });
+    }
+
+    // WALL 3 — ADR-0055's OWN screens, re-run over the adapter's output. These
+    // cannot fire on file content (the output vocabulary is fixed by the very
+    // schemas below), which is exactly why they are run rather than assumed.
+    const imp: EvidenceImport = {
+      kind: parsed.kind,
+      mode: body.mode,
+      ...(body.source ? { source: body.source } : {}),
+      rows: parsed.rows,
+    } as EvidenceImport;
+
+    const escalation = screenEvidencePayload(imp);
+    if (escalation.length > 0) {
+      const reason =
+        `evidence import refused: the rows adapter '${adapter.id}' produced carry governance-shaped field(s) ` +
+        `${escalation.slice(0, 5).map((e) => `'${e.path}'`).join(", ")}. An evidence file describes observed usage; ` +
+        `it is never an instruction to the platform.`;
+      const row = await recordRefusal(SHADOW_AI_RULE_IDS.importPrivilegeRefused, reason, {
+        ...parseSummary,
+        escalation: escalation.slice(0, 20),
+      });
+      return reply.status(422).send({ error: "privilege_escalation_refused", importId: row.id, detail: reason });
+    }
+
+    const validated = evidenceImportSchema.safeParse(imp);
+    if (!validated.success) {
+      const reason =
+        `evidence import refused: adapter '${adapter.id}' produced rows that ADR-0055's row schema rejects ` +
+        `(${validated.error.issues.length} issue(s)). This is an adapter defect, not a file defect — nothing was written.`;
+      const row = await recordRefusal(SHADOW_AI_RULE_IDS.importRejected, reason, {
+        ...parseSummary,
+        issues: validated.error.issues.slice(0, 10).map((i) => ({ path: i.path.join("."), message: i.message })),
+      });
+      return reply.status(422).send({
+        error: "adapter_output_rejected",
+        importId: row.id,
+        detail: reason,
+        issues: validated.error.issues.slice(0, 10).map((i) => ({ path: i.path.join("."), message: i.message })),
+      });
+    }
+
+    // WALL 4 — THE ONE PIPELINE.
+    const result = await processEvidenceImport(req, validated.data, fingerprint, parseSummary);
+    return reply.status(200).send({
+      ...result,
+      adapter: adapter.id,
+      kind: parsed.kind,
+      rowsParsed: parsed.rowsParsed,
+      rowsAccepted: parsed.rows.length,
+      rowsRefused: parsed.refusals.length,
+      rowsWithoutTimestamp: parsed.rowsWithoutTimestamp,
+      refusals: parsed.refusals.slice(0, 50),
+      fieldsUsed: parsed.fieldsUsed,
+      limits: adapter.limits,
+      verification: adapter.verification,
+      posture: EVIDENCE_ADAPTER_POSTURE,
+    });
+  });
+
+  // =======================================================================
+  // ADR-0083 — FIRST-PARTY DISCOVERY: a classifier, not a collector
+  // =======================================================================
+
+  /**
+   * THE HOSTS THIS GATEWAY LEGITIMATELY FRONTS, from live configuration and
+   * nothing else: stored platform/user model credentials (their baseUrl
+   * override, or the provider's compiled default endpoint), the env-var
+   * credential fallback where org settings allow it, and enabled custom
+   * providers. Computed at request time — a credential added five minutes ago
+   * moves the governed/shadow line five minutes ago.
+   *
+   * Deliberately NOT included: `egress_allow_hosts`. That table answers "may
+   * this deployment reach X" for connectors, git, Slack — an allow-listed
+   * host is not a host the gateway FRONTS AI TRAFFIC to, and using it here
+   * would launder ordinary egress permissions into "governed AI".
+   */
+  const loadGovernedHosts = async (): Promise<Map<string, string>> => {
+    const governed = new Map<string, string>();
+    const put = (rawUrl: string | null | undefined, reason: string) => {
+      if (!rawUrl) return;
+      const host = normalizeEvidenceHost(rawUrl);
+      if (host && !governed.has(host)) governed.set(host, reason);
+    };
+    for (const row of await db.select().from(modelCredentials)) {
+      put(
+        row.baseUrl ?? defaultBaseUrlFor(row.provider),
+        `this deployment holds a platform model credential for provider '${row.provider}' and dispatches to this host`,
+      );
+    }
+    for (const row of await db
+      .select({ provider: userModelCredentials.provider, baseUrl: userModelCredentials.baseUrl })
+      .from(userModelCredentials)) {
+      put(
+        row.baseUrl ?? defaultBaseUrlFor(row.provider),
+        `a user's own (BYO) model credential for provider '${row.provider}' dispatches to this host through the gateway`,
+      );
+    }
+    const org = await loadOrgSettings(db);
+    for (const provider of ENV_FALLBACK_PROVIDERS) {
+      if (!envFallbackAllowed(org, provider)) continue;
+      const envKey = platformEnvKey(provider);
+      if (!envKey) continue;
+      put(
+        envKey.baseUrl ?? defaultBaseUrlFor(provider),
+        `the '${provider}' platform env-var credential fallback is active on this deployment`,
+      );
+    }
+    for (const row of await db.select().from(customModelProviders)) {
+      if (!row.enabled) continue;
+      put(row.baseUrl, `enabled custom model provider '${row.name}' — this deployment's own governed endpoint`);
+    }
+    return governed;
+  };
+
+  app.get("/v1/shadow-ai/discovery/catalog", async () => {
+    const governed = await loadGovernedHosts();
+    return {
+      catalogVersion: SHADOW_AI_CATALOG_VERSION,
+      total: SHADOW_AI_CATALOG_V1.length,
+      endpoints: SHADOW_AI_CATALOG_V1.filter((e) => e.kind === "endpoint").length,
+      sdks: SHADOW_AI_CATALOG_V1.filter((e) => e.kind === "sdk").length,
+      entries: SHADOW_AI_CATALOG_V1,
+      /** what THIS deployment fronts right now — the shadow/governed line */
+      governedHosts: [...governed.entries()]
+        .map(([host, reason]) => ({ host, reason }))
+        .sort((a, b) => a.host.localeCompare(b.host)),
+      posture: SHADOW_DISCOVERY_POSTURE,
+      limits: SHADOW_DISCOVERY_LIMITS,
+    };
+  });
+
+  /**
+   * CLASSIFY OPERATOR-SUPPLIED TEXT, then (on apply) ingest the SHADOW hits
+   * through THE ONE PIPELINE — the same `processEvidenceImport` both existing
+   * front doors end in. The walls, in ADR-0071's order:
+   *   0. SIZE, on the raw text.
+   *   1. THE CLASSIFIER (pure; a whole-file parse failure refuses loudly).
+   *   2. THE GOVERNED SCREEN — hits on hosts this gateway fronts are labelled
+   *      governed_via_gateway and NEVER forwarded: filing the deployment's own
+   *      sanctioned traffic as shadow findings would manufacture findings.
+   *   3. THE ONE PIPELINE, over shadow hits only. Findings are still computed
+   *      by the ADMIN catalogue there; a compiled hit the admin catalogue does
+   *      not know is returned as a GAP with the row that would close it,
+   *      never silently promoted into a finding.
+   * The pasted content itself is NEVER persisted — only its SHA-256, the
+   * bounded classification summary and any evidence rows survive the request.
+   */
+  /**
+   * ADR-0122 — MCP-SERVER DISCOVERY, AND THE REGISTRY DIFF THAT MAKES IT MEAN
+   * SOMETHING.
+   *
+   * Finding an MCP endpoint in a log is half a capability. The half that
+   * matters to an operator is "and it is not one of mine" — which this
+   * deployment can answer exactly, because it HAS a registry. A host that
+   * appears in supplied evidence and matches no `mcp_servers` row is
+   * UNREGISTERED, and that is a precise claim about two things we hold rather
+   * than a claim to have searched anyone's estate.
+   *
+   * Read-only by default. `mode: "apply"` is a separate, explicit act.
+   */
+  app.post("/v1/shadow-ai/mcp-discovery", async (req, reply) => {
+    const body = z
+      .object({
+        // the SAME bound the evidence-import front door uses -- one size rule
+        // for supplied evidence, not a second one that drifts from it
+        content: z.string().min(1).max(EVIDENCE_MAX_BYTES),
+        mode: z.enum(["preview", "apply"]).default("preview"),
       })
-      .returning();
+      .safeParse(req.body);
+    if (!body.success) {
+      return reply.status(400).send({
+        error: "invalid_request",
+        issues: body.error.issues.slice(0, 10).map((i) => ({ path: i.path.join("."), message: i.message })),
+      });
+    }
 
-    const result = await upsertFindings(db, analysis.findings, importRow!.id);
-    await audit(req.authCtx.userId, "shadow_ai_import", importRow!.id, SHADOW_AI_RULE_IDS.importApplied, "allow",
-      importRow!.reason, { kind: imp.kind, payloadSha256: fingerprint, ...summary, ...result });
+    const observations = findMcpEndpoints(body.data.content);
 
-    return reply.status(200).send({ importId: importRow!.id, mode: "apply", ...analysis, ...result });
+    // THE REGISTRY, normalized through the SAME host normalizer the evidence
+    // went through — comparing a raw URL to a parsed host is how a registered
+    // server gets reported as shadow.
+    const registered = new Map<string, string>();
+    for (const row of await db.select().from(mcpServers)) {
+      const host = normalizeEvidenceHost(row.url);
+      if (host) registered.set(host, row.name);
+    }
+
+    const results = observations.map((o) => {
+      const match = registered.get(o.host) ?? null;
+      return {
+        ...o,
+        registered: match !== null,
+        registeredAs: match,
+        // Said in words as well as a boolean: this is the sentence an operator
+        // will read out, and it should carry its own limits.
+        verdict:
+          match !== null
+            ? `governed — this host is registered in this deployment as MCP server '${match}', so its tool calls go through the gate`
+            : `UNREGISTERED — this host appears in your evidence and matches no MCP server in this deployment's registry, so nothing about its tool calls is governed here`,
+      };
+    });
+
+    const unregistered = results.filter((r) => !r.registered);
+
+    if (body.data.mode === "apply" && unregistered.length > 0) {
+      // One audited record of the act, and nothing silent. The findings
+      // themselves ride the existing evidence pipeline's vocabulary.
+      await audit(
+        req.authCtx.userId ?? null,
+        "shadow_ai_finding",
+        null,
+        "mcp-discovery-applied",
+        "allow",
+        `MCP discovery over supplied evidence: ${unregistered.length} unregistered host(s) of ` +
+          `${results.length} observed — ${unregistered.map((u) => u.host).join(", ")}`,
+        { observed: results.length, unregistered: unregistered.length },
+      );
+    }
+
+    return {
+      posture: MCP_DISCOVERY_POSTURE,
+      observed: results.length,
+      unregistered: unregistered.length,
+      registryCount: registered.size,
+      results,
+    };
+  });
+
+  app.post("/v1/shadow-ai/discovery", async (req, reply) => {
+    const parsedReq = discoveryRequestSchema.safeParse(req.body);
+    if (!parsedReq.success) {
+      return reply.status(400).send({
+        error: "invalid_request",
+        issues: parsedReq.error.issues.slice(0, 10).map((i) => ({ path: i.path.join("."), message: i.message })),
+      });
+    }
+    const body = parsedReq.data;
+    const fingerprint = sha256(body.content);
+    const isManifest = body.sourceKind !== "dns_log" && body.sourceKind !== "proxy_log";
+    const fallbackKind: EvidenceKind = isManifest ? "code_scan" : "egress_log";
+
+    const recordRefusal = async (ruleId: string, reason: string, summary: Record<string, unknown>) => {
+      const [row] = await db
+        .insert(shadowAiImports)
+        .values({
+          kind: fallbackKind,
+          mode: body.mode,
+          status: "refused",
+          source: `first_party_discovery:v${SHADOW_AI_CATALOG_VERSION}:${body.sourceKind}`,
+          payloadSha256: fingerprint,
+          rowCount: 0,
+          summary: { firstPartyDiscovery: true, sourceKind: body.sourceKind, catalogVersion: SHADOW_AI_CATALOG_VERSION, ...summary },
+          ruleId,
+          reason,
+          requestedByUserId: req.authCtx.userId ?? null,
+        })
+        .returning();
+      await audit(req.authCtx.userId, "shadow_ai_import", row!.id, ruleId, "deny", reason, {
+        sourceKind: body.sourceKind,
+        catalogVersion: SHADOW_AI_CATALOG_VERSION,
+        payloadSha256: fingerprint,
+        ...summary,
+      });
+      return row!;
+    };
+
+    // WALL 0 — SIZE, on the raw text.
+    if (body.content.length > EVIDENCE_MAX_BYTES) {
+      const reason = `discovery input of ${body.content.length} bytes exceeds the ${EVIDENCE_MAX_BYTES}-byte bound — chunk the export`;
+      const row = await recordRefusal(SHADOW_AI_RULE_IDS.importTooLarge, reason, { bytes: body.content.length });
+      return reply.status(413).send({ error: "evidence_too_large", importId: row.id, detail: reason });
+    }
+    if (isManifest && !body.subject) {
+      return reply.status(400).send({
+        error: "subject_required",
+        detail:
+          "a manifest classification needs `subject` — the repo or service the manifest belongs to. It becomes the code_scan finding's repo; a finding without one points at nothing.",
+      });
+    }
+
+    // WALL 1+2 — THE CLASSIFIER, with the deployment's own governed hosts.
+    const governedHosts = await loadGovernedHosts();
+    let classification;
+    try {
+      classification = classifyDiscoveryContent({ sourceKind: body.sourceKind, content: body.content, governedHosts });
+    } catch (e) {
+      if (e instanceof DiscoveryParseError) {
+        const reason = `first-party discovery refused: ${e.message}`;
+        const row = await recordRefusal(SHADOW_AI_RULE_IDS.discoveryUnreadable, reason, {});
+        return reply.status(422).send({ error: e.code, importId: row.id, detail: e.message });
+      }
+      throw e;
+    }
+
+    const boundedMatches = classification.shadow.slice(0, 50).map((c) => ({
+      value: c.value,
+      kind: c.kind,
+      entryId: c.entryId,
+      provider: c.provider,
+      occurrences: c.occurrences,
+      origins: c.origins,
+    }));
+    const boundedGoverned = classification.governed.slice(0, 50).map((c) => ({
+      value: c.value,
+      kind: c.kind,
+      entryId: c.entryId,
+      provider: c.provider,
+      occurrences: c.occurrences,
+      governedReason: c.governedReason,
+    }));
+    const summaryBase = {
+      catalogVersion: classification.catalogVersion,
+      sourceKind: body.sourceKind,
+      ...(body.subject ? { subject: body.subject } : {}),
+      linesScanned: classification.linesScanned,
+      candidateCount: classification.candidateCount,
+      shadowCount: classification.shadow.length,
+      governedCount: classification.governed.length,
+      unmatchedCount: classification.unmatchedCount,
+    };
+    const classificationView = {
+      ...summaryBase,
+      unmatchedOccurrences: classification.unmatchedOccurrences,
+      unmatchedSample: classification.unmatchedSample,
+    };
+    /** what every response says about the upload itself */
+    const retention =
+      "The pasted content was not stored. Only its SHA-256 fingerprint, this bounded classification summary and any ingested evidence rows persist.";
+
+    if (classification.shadow.length === 0) {
+      // NOTHING TO INGEST — a legitimate, auditable outcome, not an error.
+      await audit(
+        req.authCtx.userId,
+        "shadow_ai_import",
+        null,
+        SHADOW_AI_RULE_IDS.discoveryClassified,
+        "allow",
+        `first-party discovery classified ${classification.candidateCount} candidate(s): 0 shadow, ` +
+          `${classification.governed.length} governed via gateway, ${classification.unmatchedCount} unmatched — nothing to ingest`,
+        { payloadSha256: fingerprint, ...summaryBase },
+      );
+      return reply.status(200).send({
+        mode: body.mode,
+        classification: classificationView,
+        matches: [],
+        governed: boundedGoverned,
+        deploymentCatalogueGaps: [],
+        ingest: null,
+        rawContentStored: false,
+        retention,
+        posture: SHADOW_DISCOVERY_POSTURE,
+      });
+    }
+
+    // THE GAP REPORT — which compiled hits would the ADMIN catalogue (the only
+    // thing that can mint a finding) NOT match. Computed with ADR-0055's own
+    // pure classifier so this cannot drift from what the pipeline will do.
+    const adminCatalogue = await loadCatalogue();
+    const nowIso = new Date().toISOString();
+    const deploymentCatalogueGaps = classification.shadow
+      .filter((c) => {
+        const obs: Observation =
+          c.kind === "endpoint"
+            ? { subjectKind: "host", subject: "gap-probe", signalSource: "egress_log", observedAt: nowIso, count: 1, host: c.value }
+            : { subjectKind: "repo", subject: "gap-probe", signalSource: "code_scan", observedAt: nowIso, count: 1, packageName: c.value };
+        return !classifyObservation(obs, adminCatalogue).matched;
+      })
+      .slice(0, 50)
+      .map((c) => ({ value: c.value, kind: c.kind, provider: c.provider, entryId: c.entryId }));
+
+    // WALL 3 — THE ONE PIPELINE, shadow hits only. Rows are aggregated per
+    // distinct host/package so the count is bounded in practice by the
+    // catalogue; the slice is the hard bound a hostile input cannot exceed.
+    const truncated = classification.shadow.length > EVIDENCE_MAX_ROWS;
+    const shadowRows = classification.shadow.slice(0, EVIDENCE_MAX_ROWS);
+    const source = `first_party_discovery:v${SHADOW_AI_CATALOG_VERSION}:${body.sourceKind}`;
+    const imp: EvidenceImport = isManifest
+      ? {
+          kind: "code_scan",
+          mode: body.mode,
+          source,
+          rows: shadowRows.map((c) => ({ repo: body.subject!, packageName: c.value })),
+        }
+      : {
+          kind: "egress_log",
+          mode: body.mode,
+          source,
+          rows: shadowRows.map((c) => ({
+            destinationHost: c.value,
+            requestCount: c.occurrences,
+            ...(body.subject ? { sourceIdentity: body.subject } : {}),
+          })),
+        };
+
+    const result = await processEvidenceImport(req, imp, fingerprint, {
+      firstPartyDiscovery: {
+        ...summaryBase,
+        ...(truncated ? { ingestTruncatedTo: EVIDENCE_MAX_ROWS } : {}),
+        matches: boundedMatches,
+        governed: boundedGoverned,
+      },
+    });
+
+    return reply.status(200).send({
+      mode: body.mode,
+      classification: classificationView,
+      matches: boundedMatches,
+      governed: boundedGoverned,
+      deploymentCatalogueGaps,
+      gapNote:
+        deploymentCatalogueGaps.length > 0
+          ? `${deploymentCatalogueGaps.length} compiled-catalogue hit(s) will produce NO finding on this deployment, because its admin signature catalogue has no row for them. Detection is data: add the row via POST /v1/shadow-ai/catalogue to close the gap — the compiled catalogue only suggests, it never mints a finding.`
+          : null,
+      ...(truncated ? { ingestTruncatedTo: EVIDENCE_MAX_ROWS } : {}),
+      ingest: result,
+      rawContentStored: false,
+      retention,
+      posture: SHADOW_DISCOVERY_POSTURE,
+    });
   });
 
   app.get("/v1/shadow-ai/imports", async () => {

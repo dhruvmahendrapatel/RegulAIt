@@ -294,3 +294,89 @@ artifact, stamped with pack version and effective project ids). Plus
 `report_definitions.pack_id`, which retires ADR-0047's placeholder catalogue.
 `audit_log.object_type` gains `compliance_pack` as a TS-only widening — the
 column has no DB CHECK, so there is no DDL for it.
+
+---
+
+## Amendment (2026-08-20) — seventh seed pack: SOC 2 (Security / Common Criteria)
+
+The Credo AI gap analysis (`docs/product/GAP_ANALYSIS_CREDO_AI_2026-08.md`, item
+L3) named pack-curation breadth as a real gap even though the *mechanism* above
+already existed. First curation increment: a **SOC 2 — Security (Common
+Criteria)** pack is appended to `DEFAULT_COMPLIANCE_PACKS`, taking the seed set
+from six frameworks to seven (`soc-2` added to `COMPLIANCE_PACK_FRAMEWORKS`).
+
+Scope and honesty posture, consistent with everything above:
+
+- **Security (common criteria) only.** No Availability, Processing Integrity,
+  Confidentiality, or Privacy category controls are mapped; the pack title says
+  so. Provenance records that the mapping was authored from the public AICPA
+  Trust Services Criteria (2017, rev. 2022) and has **not been reviewed by a CPA
+  firm** — `reviewedBy` stays null, which the shared test suite pins for every
+  pack.
+- **Ten controls, honestly graded.** Three are `enforced` and evidenced by
+  queries over real ledgers (CC6.1 logical-access denials via `audit_decisions`
+  with `effect: "deny"`; CC6.6 boundary/egress denials via the `egress` rule-id
+  prefix; CC8.1 change authorization via approved workflow `approvals`). Three
+  are `evidenced` (CC6.2 user provisioning/deprovisioning audit rows; CC6.7
+  semantic-DLP guardrail configuration; CC7.2 prompt-injection detection at
+  `block`). CC6.3 is `partial` — the rows exist but the review cadence is an
+  organisational process. CC7.4 (incident response), CC9.2 (vendor risk — the
+  owner note names the deliberately deferred L5 vendor portal), and CC1.4
+  (competence/HR) are attestation-required: they are organisational controls the
+  platform cannot query, and pretending otherwise would be exactly the tick-box
+  this ADR exists to refuse.
+- **`cascadeTag` is null.** SOC 2 is an attestation framework about the service
+  organisation, not a data-sensitivity regime like HIPAA/PCI; it forces no
+  cascade profile.
+- The shared enumeration test now pins seven frameworks, and every generic pack
+  invariant (parses under the API schema, at least one attestation-required
+  control, no claimed counsel review) applies to it unchanged.
+
+---
+
+## Amendment (2026-08-22, batch B1) — the §8.3 preset half SHIPS: activation seeds the cascade profile
+
+*Appended; nothing above is edited. Migration 0096 (`compliance_packs.cascade_preset`, jsonb,
+nullable). Verified by `compliance-pack-cascade.test.ts` (9 cases, on custom packs so the launch
+packs' tags are never contended with other suites) plus new shared schema cases — and by
+reverting the creation (M-002): with `ensureCascadeProfile` no-opped, 7 of the 9 cases redden,
+including the end-to-end cascade proof.*
+
+The residual above — *"this release wires no automatic creation of a `compliance_profiles` row
+from a pack; the preset half of §2 does not ship"* — is closed:
+
+- **A pack carries its preset AS DATA** (`cascadePreset`, a partial map of enforcing
+  `compliance_profiles` columns on the pack row), honouring this ADR's own "a new framework is
+  rows, no deploy" principle — a customer's pack can carry a preset the same way the launch packs
+  do. The preset is validated at the edge with the SAME
+  `validateRuleVersionBody('compliance_profile', …)` check every profile version body passes
+  (only enforcing columns, correctly typed, `tag` refused), and a preset without a `cascadeTag`
+  is refused outright — a profile preset with no tag to hang it on is a claim about nothing.
+- **Activation FIND-OR-CREATES the profile**, idempotently, audited
+  (`compliance-pack-cascade-profile-created` / `-preserved`), and the activation response says
+  which of four things happened: `created` (no profile existed — one is created from the preset,
+  and the §8.3 cascade then genuinely enforces it, proved end-to-end through
+  `GET /v1/projects/:id/compliance`, i.e. `profilesForTags` → `effectiveCompliancePolicy`, the
+  one funnel every cascade consumer uses); `exists_preserved` (**a profile is NEVER
+  overwritten** — an admin may have tuned it, and a pack activation silently replacing tuned
+  floors would be ADR-0074's silent-write class arriving through a wizard; the "presets not
+  applied" note rides the response and the ledger); `no_preset` (tagged pack, no preset — the
+  pre-B1 behaviour, now SAID instead of silently unwired); `none` (null `cascadeTag`, e.g.
+  SOC 2 — nothing to seed, and the response says why).
+- **Four launch packs gained presets** (eu-ai-act → `eu-ai-act-high-risk`, hipaa, pci-dss,
+  finra), each value citing the framework text that makes it defensible and each still a
+  STARTING POINT, not legal advice. Closing a loop worth naming: the FINRA pack's own
+  `17a-4-record-retention` control is evidenced by `compliance_profile_cascade` with the
+  retention aspect — activation now seeds the very profile that control looks for.
+- **Retirement, supersession and DELETION of a pack never delete the profile.** The profile is
+  live enforcement over every project carrying the tag; removing enforcement as a side effect of
+  withdrawing a REPORTING artifact is the silent-revocation class this project refuses. The
+  delete response says the profile is deliberately kept; an admin who wants the floors gone
+  deletes the profile as its own explicit act.
+
+**Still open from the residual list above**: red-team gating presets (ADR-0057's consumer) are
+still not shipped by packs — note ADR-0068 §5 since put the red-team opinion on the profile row,
+so a pack preset COULD now carry `redteamGatingClasses` et al. through this same mechanism, but
+the launch packs deliberately do not until the gating values get domain review; multi-pack
+conflict surfacing is still not built; pack rows that predate migration 0096 carry no preset and
+activation says `no_preset`; and `provenance.reviewedBy` stays null on every launch pack.

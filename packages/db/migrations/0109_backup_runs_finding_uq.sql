@@ -1,0 +1,105 @@
+-- ADR-0110 — THE CONSTRAINT ADR-0109 REFUSED, NOW THAT THE WRITING CODE
+-- DESERVES IT.
+--
+-- WHAT THIS IS. ADR-0109 added nine unique indexes for reads that ask the
+-- database for one row without asking for an order, and it REFUSED a tenth. It
+-- was right to refuse. The claim — one `backup_runs` row per finding — was
+-- contradicted by the lifecycle in apps/gateway/src/infra.ts:
+--
+--   1. a scan raises finding F and inserts a (F, kind='backup',
+--      status='missed') row, guarded by a read FILTERED TO status='missed';
+--   2. an operator proposes a restore; THE SAME ROW moves to
+--      status='restore_proposed';
+--   3. a re-scan of F now matches nothing and inserts a SECOND 'missed' row —
+--      legal, because the first is no longer 'missed';
+--   4. the operator DENIES the restore, and the deny path UPDATEs row 1 back to
+--      'missed'.
+--
+-- With a unique index in place, STEP 4 RAISES 23505 AND THE DENIAL ROLLS BACK:
+-- the operator cannot refuse a restore. A constraint that blocks a governance
+-- decision is worse than the duplicate it prevents, so ADR-0109 left the claim
+-- unenforced, shipped the check as ADVISORY, and recorded that the real fix was
+-- a BEHAVIOUR CHANGE it had no mandate to make:
+--
+--     "does a re-scan re-open a miss while a restore is pending?"
+--
+-- THE OWNER ANSWERED THAT QUESTION: **YES, IT SHOULD.**
+--
+-- ============================================================================
+-- THE WRITING CODE WAS FIXED FIRST; THIS INDEX ONLY RECORDS THE RESULT.
+-- ============================================================================
+-- `syncFindingLedger`'s backup branch no longer filters on status. It reads the
+-- finding's row WHATEVER state it is in and RE-OPENS it in place:
+--
+--   'missed'            RE-OPENS — already open; detection metadata refreshed.
+--   'restore_proposed'  RE-OPENS — the backup is STILL absent, so the gap is
+--                       live. The pending proposal is SUPERSEDED and the row
+--                       returns to 'missed' (re-proposable). This is AUDITED,
+--                       not silent: an `infra-restore-proposal-superseded` row
+--                       says why the operator's proposal went away.
+--   'restored'          DOES NOT re-open — the governed restore EXECUTED.
+--   'success'/'failed'  DO NOT re-open — not a miss. Unreachable for a
+--                       finding-keyed row (the scheduler's verified rows carry a
+--                       NULL finding_id), refused defensively anyway.
+--
+-- Step 3 therefore never happens, so step 4's UPDATE has nothing to collide
+-- with, and the DENY THAT ADR-0109 PROTECTED STILL WORKS. That is asserted
+-- directly — `backup-rescan-reopen.test.ts` runs propose -> re-scan -> deny and
+-- fails on a 23505.
+--
+-- The restore EXECUTION path also now closes its source row to 'restored'.
+-- Before ADR-0110 it stayed at 'restore_proposed' for ever, which was already
+-- wrong (the proposal is not pending, it executed) and would have made an
+-- executed restore indistinguishable from an outstanding one — the re-open rule
+-- above would then have "superseded" work that was already done.
+--
+-- ============================================================================
+-- ADDS AND REFUSES. NEVER REPAIRS.
+-- ============================================================================
+-- Same posture as 0108, for the same reason: a unique index is a CLAIM ABOUT
+-- DATA THAT ALREADY EXISTS. A deployment that ran the old code and holds two
+-- 'missed' rows for one finding will see this `CREATE UNIQUE INDEX` FAIL with
+-- SQLSTATE 23505 and the upgrade STOP. There is no DELETE, no ON CONFLICT and
+-- no DISTINCT ON rewrite here. Two rows recording that a governed backup was
+-- missing are two observations of a compliance gap; deciding which is the real
+-- one is a product question with a human in it, and a migration may not answer
+-- it on their behalf (ADR-0104's refusal to backfill a consent digest, and
+-- ADR-0105's refusal to invent an expiry, are the same argument).
+--
+-- WHAT AN OPERATOR DOES INSTEAD — and unlike 0108's advisory entry, the
+-- pre-flight now BLOCKS on this one:
+--
+--     node scripts/preflight-unique-constraints.mjs "$DATABASE_URL"
+--
+-- It reports how many findings hold more than one backup row and names them.
+-- For each: keep the row whose status reflects what actually happened (a
+-- 'restore_proposed' or 'restored' row records a governed decision and outranks
+-- a bare duplicate 'missed'), remove or re-key the other, then upgrade.
+--
+-- ============================================================================
+-- PARTIAL, AND EXACTLY AS PARTIAL AS THE CLAIM IS.
+-- ============================================================================
+-- ADR-0107 recorded that MISREADING A PARTIAL INDEX CAUSED A REAL BUG, so the
+-- predicate is spelled out rather than inferred:
+--
+--   * `kind = 'backup'` is LOAD-BEARING, not decoration. An executed restore
+--     appends a `kind='restore'`, `status='restored'` row carrying the SAME
+--     finding_id by design — that is the record of the restore itself. A total
+--     index on finding_id would refuse it and break the approve path, which is
+--     precisely the class of failure (a constraint blocking a governance
+--     decision) that ADR-0109 refused this index over in the first place.
+--   * `finding_id IS NOT NULL` does not change WHICH rows conflict — Postgres
+--     already treats NULLs as distinct — but the scheduler's verified
+--     `kind='backup'`, `status='success'` rows have no finding at all, and it is
+--     better to say they are outside the claim than to leave the reader to
+--     recall a NULL-handling rule.
+--
+-- Status is deliberately NOT in the predicate. The whole point of ADR-0110 is
+-- that ONE row carries the finding through its entire lifecycle — a
+-- status-scoped index would re-admit exactly the second row this removes.
+--
+-- NO DATA IS WRITTEN, NO COLUMN IS ADDED, NOTHING IS DROPPED. One index.
+
+CREATE UNIQUE INDEX IF NOT EXISTS "backup_runs_finding_uq"
+  ON "backup_runs" ("finding_id")
+  WHERE "kind" = 'backup' AND "finding_id" IS NOT NULL;

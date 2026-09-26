@@ -6,6 +6,13 @@ export default defineConfig({
     // race on migrations and seed data.
     fileParallelism: false,
 
+    // ADR-0106: completes light-my-request's MockSocket against the part of the
+    // net.Socket contract @hono/node-server's drainIncoming() actually calls, so
+    // a 500ms drain timer can no longer throw an unhandled TypeError from the
+    // timer queue and turn an all-green run into a non-zero exit. Read that file
+    // first — it carries the whole causal chain.
+    setupFiles: ["./src/testing/mock-socket-contract.ts"],
+
     // Vitest's default is 5s. Nearly every test here is a real HTTP round trip
     // against a real Postgres — build an app, run a migration-checked schema,
     // insert fixtures, assert — and the whole suite runs SEQUENTIALLY because

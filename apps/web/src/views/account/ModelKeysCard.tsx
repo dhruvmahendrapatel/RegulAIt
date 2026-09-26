@@ -323,7 +323,7 @@ function CustodyNotice(props: { isAdmin: boolean }) {
       }}
     >
       <strong>This deployment enforces key custody.</strong> The organisation holds the vendor
-      keys and developers hold only RegulAIt keys, so per-user BYO credentials cannot be added or
+      keys and developers hold only regulAIt keys, so per-user BYO credentials cannot be added or
       replaced here — the attempt is refused and audited. Every dispatch of yours resolves to the
       organisation&apos;s platform credential for the provider.
       <div style={{ marginTop: "var(--s1)" }}>

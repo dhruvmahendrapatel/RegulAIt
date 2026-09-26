@@ -170,7 +170,7 @@ export default function DataKeyPage() {
 
           <Card title="Attest custody">
             <div className={v.faint}>
-              This records a <strong>claim</strong>, not a verification. RegulAIt cannot reach into a password
+              This records a <strong>claim</strong>, not a verification. regulAIt cannot reach into a password
               manager, a KMS or a safe, and it will never tell you the key is safe because you ticked a box. What it
               does guarantee is that the <em>absence</em> of this claim is visible — on the gateway boot line, on this
               page, and in every backup run's own output and metric.

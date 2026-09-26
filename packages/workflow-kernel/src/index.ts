@@ -432,6 +432,13 @@ export type InstanceStatus =
   | "running"
   | "blocked_on_approval"
   | "blocked_on_artifact"
+  // §2 stage 2 (ADR-0079): the instance is RESTING at a `planning` stage. This
+  // is what makes "forced planning-only reasoning first — no code/state
+  // mutation possible in this stage" enforceable: before ADR-0079 a planning
+  // stage auto-completed, so an instance never sat here and no consumer could
+  // ever observe the marker. Leaving it is an explicit act (human_trigger /
+  // stage_completed on the planning stage), exactly like the other human gates.
+  | "blocked_on_plan"
   | "awaiting_trigger"
   | "awaiting_execution"
   // §2 automated checks that actually FAIL: a required check reported a failing
@@ -483,6 +490,11 @@ export type WorkflowEvent =
 export type Effect =
   | { kind: "request_approval"; stageId: string; approvers: string[] }
   | { kind: "await_artifact"; stageId: string; output: string }
+  // §2 stage 2 (ADR-0079): the instance is parked in plan-only mode. The
+  // gateway surfaces this the way it surfaces the other blocking effects, and
+  // — the point of the stage — REFUSES mutating work attributed to the
+  // instance while it holds.
+  | { kind: "await_plan"; stageId: string }
   | { kind: "await_human_trigger"; stageId: string }
   | { kind: "execute_stage"; stageId: string }
   // §2 a required check failed — the gateway surfaces this (audit + PM mirror +
@@ -512,6 +524,35 @@ export function initialState(def: WorkflowDefinition): InstanceState {
 
 function stageAt(def: WorkflowDefinition, index: number): Stage | undefined {
   return def.stages[index];
+}
+
+/**
+ * §2 stage 2 (ADR-0079) — THE PLAN-ONLY PREDICATE, owned by the kernel.
+ *
+ * Returns the `planning` stage an instance is currently RESTING at, or null.
+ * The gateway's enforcement point calls this rather than re-deriving "is it
+ * planning?" from a status string, so there is exactly one definition of the
+ * plan-only condition and it lives with the state machine that produces it.
+ *
+ * Deliberately keyed on the stage TYPE at `currentStageIndex` and not on
+ * `status === "blocked_on_plan"` alone: an instance persisted before ADR-0079
+ * (or driven by a future path that parks differently) is still honestly "at a
+ * planning stage", and a terminal instance is never at one.
+ */
+export function currentPlanningStage(
+  def: WorkflowDefinition,
+  state: InstanceState,
+): Stage | null {
+  if (
+    state.status === "completed" ||
+    state.status === "aborted" ||
+    state.status === "denied" ||
+    state.status === "rolled_back"
+  ) {
+    return null;
+  }
+  const stage = stageAt(def, state.currentStageIndex);
+  return stage?.type === "planning" ? stage : null;
 }
 
 /**
@@ -550,11 +591,21 @@ function runForward(def: WorkflowDefinition, state: InstanceState): TransitionRe
     }
     s.stageStatuses[s.currentStageIndex] = "active";
 
-    if (stage.type === "trigger" || stage.type === "planning") {
-      // trigger fired at start; planning is a mode marker, not a blocker here
+    if (stage.type === "trigger") {
+      // the trigger already fired — that is what started the instance
       s.stageStatuses[s.currentStageIndex] = "completed";
       s.currentStageIndex += 1;
       continue;
+    }
+    // §2 stage 2 (ADR-0079): a planning stage BLOCKS. It used to auto-complete
+    // ("planning is a mode marker, not a blocker here"), which made the spec's
+    // "no code/state mutation possible in this stage" unenforceable — an
+    // instance never rested at the marker, so nothing could consume it. Now it
+    // rests, and leaving it is an explicit human act like every other gate.
+    if (stage.type === "planning") {
+      s.status = "blocked_on_plan";
+      effects.push({ kind: "await_plan", stageId: stage.id });
+      return { state: s, effects };
     }
     if (stage.type === "artifact_generation") {
       const submitted = s.artifactVersions[stage.output!] !== undefined;
@@ -806,7 +857,14 @@ export function transition(
     if (!current || current.id !== event.stageId) {
       throw new WorkflowStateError(`instance is not waiting on stage '${event.stageId}'`);
     }
-    if (current.type !== "automated_build" && current.type !== "automated_check") {
+    if (
+      current.type !== "automated_build" &&
+      current.type !== "automated_check" &&
+      // §2 stage 2 (ADR-0079): a planning stage is left by the same explicit
+      // act — "planning is finished" is a decision, and the decision is the
+      // only thing that lifts the plan-only refusal.
+      current.type !== "planning"
+    ) {
       throw new WorkflowStateError(`stage '${event.stageId}' is not triggerable`);
     }
     if (current.type === "automated_build" && current.run !== undefined) {

@@ -103,6 +103,7 @@ import {
   type ReportAccessDecision,
 } from "@regulait/shared";
 import { callerProjectIds, callerTeamIds, resolveScopeProjectIds } from "./reporting.js";
+import { complianceProfilesForTags, effectiveCompliancePolicy } from "./projects.js";
 import { resolveSchedulerConfig } from "./scheduler.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
@@ -400,6 +401,14 @@ export async function evaluateProjectAnomalies(
     projectName: string;
     budgetApproverUserId: string | null;
     policy: Awaited<ReturnType<typeof effectivePolicy>>;
+    /** ADR-0049 §4 / ADR-0027 §9: the compliance cascade's budgetEnforcement
+     * for this project's tags, mapped to `decideEnforcement`'s floor
+     * vocabulary ('block' | 'warn' | null). Resolved by the caller from the
+     * SAME `complianceProfilesForTags` funnel the dispatch gate reads, so a
+     * `block`-mandating framework tightens the anomaly response and can never
+     * be relaxed by a softer policy action. An untagged project passes null
+     * and is byte-identical to before. */
+    frameworkFloor: "warn" | "block" | null;
     now: Date;
     actorUserId: string | null;
   },
@@ -569,7 +578,7 @@ export async function evaluateProjectAnomalies(
     // missing approver declines the escalation rather than inventing one.
     const enforcement = decideEnforcement({
       action: policy.action,
-      frameworkFloor: null,
+      frameworkFloor: args.frameworkFloor,
       hasApprover: Boolean(args.budgetApproverUserId),
     });
 
@@ -623,7 +632,11 @@ export async function evaluateProjectAnomalies(
         explanation: verdict.explanation,
         action: enforcement.effect,
         approvalId,
-        detail: { enforcement: enforcement.ruleId, enforcementReason: enforcement.reason },
+        detail: {
+          enforcement: enforcement.ruleId,
+          enforcementReason: enforcement.reason,
+          frameworkFloor: args.frameworkFloor,
+        },
       })
       .onConflictDoNothing()
       .returning({ id: spendAnomalies.id });
@@ -706,6 +719,7 @@ export async function runSpendAnomalyEvaluation(
       id: projects.id,
       name: projects.name,
       budgetApproverUserId: projects.budgetApproverUserId,
+      classifications: projects.classifications,
     })
     .from(projects)
     .where(opts.projectId ? eq(projects.id, opts.projectId) : undefined);
@@ -713,11 +727,29 @@ export async function runSpendAnomalyEvaluation(
   const results: EvaluatedProject[] = [];
   for (const p of rows) {
     const policy = await effectivePolicy(db, p.id);
+    // ADR-0049 §4: source the framework cost floor from ADR-0027 §9's cascade —
+    // the SAME funnel `preDispatchProjectGate` reads, so the two enforcement
+    // points cannot diverge. An untagged project resolves with NO query
+    // (`profilesForTags([])` short-circuits) and stays byte-identical; a
+    // profile with versions but no active one throws the same
+    // config-version-unresolvable the dispatch path refuses on, loudly, rather
+    // than guessing a floor. `budgetEnforcement` maps onto `decideEnforcement`'s
+    // floor vocabulary: block -> 'block' (tightens), warn_only -> 'warn'
+    // (no-op by design — only 'block' raises the response), absent -> null.
+    const tags = (p.classifications ?? []) as string[];
+    const budgetEnforcement = effectiveCompliancePolicy(
+      await complianceProfilesForTags(db, tags),
+    ).budgetEnforcement;
+    const frameworkFloor =
+      budgetEnforcement === "block" ? ("block" as const)
+      : budgetEnforcement === "warn_only" ? ("warn" as const)
+      : null;
     const out = await evaluateProjectAnomalies(db, {
       projectId: p.id,
       projectName: p.name,
       budgetApproverUserId: p.budgetApproverUserId,
       policy,
+      frameworkFloor,
       now,
       actorUserId: opts.actorUserId,
     });

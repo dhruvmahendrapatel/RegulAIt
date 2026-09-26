@@ -1,5 +1,6 @@
 /**
- * ADR-0064 — THE SIX JOBS.
+ * ADR-0064 — THE SCHEDULED JOBS (six at ADR-0064; a seventh at ADR-0065; an
+ * eighth at ADR-0076; an eleventh at ADR-0100).
  *
  * This file is deliberately thin, and that is the whole point of it. Every
  * entry here CALLS the function the corresponding endpoint already calls.
@@ -37,6 +38,12 @@ import { runDueReportSchedules } from "./reporting.js";
 import { runSpendAnomalyEvaluation } from "./spend-monitor.js";
 import { runEvalDriftSweep } from "./evals.js";
 import { runScheduledRedTeamSweep } from "./redteam.js";
+import { runTrainingJobPollSweep } from "./regulait-llm.js";
+import { runCostReconciliation } from "./cost-reconcile.js";
+import { runCampaignExpirySweep } from "./grant-certification.js";
+import { runCanaryObservationPrune } from "./config-versions.js";
+import { runMcpAdmissionRescan } from "./mcp-admission-rescan.js";
+import { runMcpRegistrySync } from "./mcp-registry.js";
 import { toRegistry, type SchedulerJobDefinition, type SchedulerJobRegistry } from "./scheduler.js";
 
 const HOUR = 3600;
@@ -57,6 +64,12 @@ export const SCHEDULER_JOB_NAMES = {
   spendAnomalies: "spend-anomaly-sweep",
   evalDrift: "eval-drift-sweep",
   redteam: "redteam-sweep",
+  trainingPoll: "training-job-poll-sweep",
+  costReconciliation: "cost-reconciliation-sweep",
+  certificationExpiry: "certification-expiry-sweep",
+  canaryObservationPrune: "canary-observation-prune-sweep",
+  mcpAdmissionRescan: "mcp-admission-rescan-sweep",
+  mcpRegistrySync: "mcp-registry-sync-sweep",
 } as const;
 
 export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): SchedulerJobDefinition[] {
@@ -182,6 +195,223 @@ export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): Schedu
             ran: out.ran.length,
             regressions: out.ran.filter((r) => r.regression).length,
             skipped: out.skipped.length,
+          },
+        };
+      },
+    },
+    {
+      // ADR-0065 — the seventh, and the first one that is not a sweep over
+      // stored state. A REMOTE training job runs for hours on somebody else's
+      // compute, so something has to ask how it is getting on and settle it
+      // when it finishes. That something is a scheduler job and not a
+      // setInterval, for the reason ADR-0064 was written: a module-level timer
+      // double-fires the moment there are two gateway instances, and is
+      // invisible when it stops.
+      //
+      // It makes NO model dispatch and mints no identity: it polls a job the
+      // initiating user already started and writes the outcome back. In-process
+      // (local/mock) jobs are never polled — they are finished by the time
+      // their start call returns.
+      name: SCHEDULER_JOB_NAMES.trainingPoll,
+      description:
+        "Poll every RegulAIt-LLM training job still running on a REMOTE backend and settle the ones that " +
+        "finished. In-process jobs are never polled; they complete synchronously.",
+      adr: "ADR-0065",
+      defaultIntervalSeconds: 5 * 60,
+      run: async (ctx) => {
+        const out = await runTrainingJobPollSweep(ctx.db, { dataKey: opts.dataKey });
+        return {
+          itemsProcessed: out.polled.length,
+          detail: { polled: out.polled.length, skipped: out.skipped.length },
+        };
+      },
+    },
+    {
+      // ADR-0076 — the eighth, closing ADR-0069's disclosed cross-chunk
+      // double-count gap. Marks (never deletes) cross-batch duplicate imported
+      // cost lines so consolidated reads stop counting the same vendor fact
+      // twice; ambiguity is reported and left alone. NOT a control: the
+      // consolidated read discloses its own exclusions whether or not this has
+      // ever run, and the manual endpoint runs the same function. Makes no
+      // dispatch, mints no identity, and — per ADR-0069 — polls no vendor:
+      // it re-examines rows we already hold.
+      name: SCHEDULER_JOB_NAMES.costReconciliation,
+      description:
+        "Mark cross-batch duplicate imported cost lines as superseded (never deleted) so a consolidated " +
+        "read cannot count the same vendor fact twice. Ambiguous duplicates are reported, never guessed at.",
+      adr: "ADR-0076",
+      defaultIntervalSeconds: DAY,
+      run: async (ctx) => {
+        const out = await runCostReconciliation(ctx.db, {
+          actorUserId: ctx.actorUserId,
+          now: ctx.now,
+          trigger: "schedule",
+        });
+        return {
+          itemsProcessed: out.supersededLines,
+          detail: {
+            runId: out.runId,
+            scannedLines: out.scannedLines,
+            duplicateGroups: out.duplicateGroups,
+            supersededLines: out.supersededLines,
+            ambiguousGroups: out.ambiguousGroups,
+            overlapWarnings: out.overlapWarnings,
+          },
+        };
+      },
+    },
+    {
+      // ADR-0090 amendment (batch B2a) — the ninth, and the most deliberately
+      // inert: it CHANGES NO DECISION AND NO STATUS. Campaign expiry stays a
+      // read-time fact (ADR-0090's breach-on-read posture, unchanged) and
+      // undecided items stay undecided forever; this job only writes ONE
+      // audited campaign-expired-incomplete row per campaign the first time
+      // it is observed past due, so the audit trail carries the expiry even
+      // if nobody ever opens the campaigns page. Idempotent by data (the
+      // audit row is the marker); re-runs add nothing. NOT a control.
+      name: SCHEDULER_JOB_NAMES.certificationExpiry,
+      description:
+        "Record — once, into the audit log — each certification campaign that passed its due date with " +
+        "items undecided. Decides nothing: expiry stays computed on read, and undecided stays undecided.",
+      adr: "ADR-0090",
+      defaultIntervalSeconds: HOUR,
+      run: async (ctx) => {
+        const out = await runCampaignExpirySweep(ctx.db, { actorUserId: ctx.actorUserId, now: ctx.now });
+        return { itemsProcessed: out.observed, detail: { observed: out.observed, campaignIds: out.campaignIds } };
+      },
+    },
+    {
+      // ADR-0073 amendment (batch B7c) — the tenth, closing disclosure 5's
+      // "no pruning" for `config_canary_observations`. Prunes shadow-canary
+      // OBSERVATIONS older than the org-settings retention window
+      // (`canaryObservationRetentionDays`, default 90d) and NOTHING else:
+      // `config_versions` are the audit substrate and are never pruned by
+      // anything, and an observation whose candidate is a LIVE canary is kept
+      // regardless of age — an active canary's evidence is live evidence.
+      // NOT a control: nothing enforces from observations; they are the
+      // operator's promote-or-abandon evidence, and the manual endpoint
+      // (POST /v1/config-versions/observations/prune) runs the same function.
+      // Reconciles stored state only — no dispatch, no identity minted.
+      name: SCHEDULER_JOB_NAMES.canaryObservationPrune,
+      description:
+        "Prune shadow-canary observation rows older than the org retention window. Never touches " +
+        "config_versions (version history is the audit substrate) and never an observation of a LIVE canary.",
+      adr: "ADR-0073",
+      defaultIntervalSeconds: DAY,
+      run: async (ctx) => {
+        const out = await runCanaryObservationPrune(ctx.db, {
+          actorUserId: ctx.actorUserId,
+          now: ctx.now,
+        });
+        return {
+          itemsProcessed: out.pruned,
+          detail: {
+            pruned: out.pruned,
+            retainedDays: out.retainedDays,
+            cutoff: out.cutoff,
+            keptLiveCanary: out.keptLiveCanary,
+          },
+        };
+      },
+    },
+    {
+      // ADR-0100 — the eleventh, closing ADR-0097's own disclosed residue
+      // ("it does not re-scan on a schedule ... a compromised server that is
+      // never called is never caught", plus the indefinitely-trusted
+      // grandfathered row). Re-fetches the manifest of every server in an
+      // eligible admission state and drives THE LIVE PATH over it —
+      // `connectUpstream` then `syncUpstreamTools`, which is
+      // `recordManifestScan`, which owns the scan, the threshold, the digest
+      // and the state rule. There is deliberately no second adjudication here.
+      //
+      // Daily by default and deliberately so: unlike every other reconcile
+      // sweep, each pass of this one makes OUTBOUND calls (one tools/list per
+      // examined server, bounded per pass), all of them through ADR-0043's
+      // egress guard.
+      //
+      // Doubly opt-in: the scheduler is off by default AND the pass adjudicates
+      // nothing while `org_settings.mcp_admission_mode` is `off`.
+      name: SCHEDULER_JOB_NAMES.mcpAdmissionRescan,
+      description:
+        "Re-fetch and re-adjudicate the tool manifest of every MCP server in an eligible admission state " +
+        "(grandfathered/unscanned/clean/cleared), so a server nobody calls is still caught. Never " +
+        "re-examines a held server (nothing auto-clears) and never re-holds a cleared server on the " +
+        "unchanged manifest an admin signed for. Makes outbound calls; adjudicates nothing while " +
+        "mcp_admission_mode is off.",
+      adr: "ADR-0100",
+      defaultIntervalSeconds: DAY,
+      run: async (ctx) => {
+        const out = await runMcpAdmissionRescan(ctx.db, {
+          actorUserId: ctx.actorUserId,
+          now: ctx.now,
+        });
+        return {
+          itemsProcessed: out.examined,
+          detail: {
+            mode: out.mode,
+            skipped: out.skipped,
+            eligible: out.eligible,
+            examined: out.examined,
+            capped: out.capped,
+            adjudicated: out.adjudicated,
+            held: out.held,
+            reheld: out.reheld,
+            clean: out.clean,
+            clearedUnchanged: out.clearedUnchanged,
+            unreachable: out.unreachable,
+            reason: out.reason,
+          },
+        };
+      },
+    },
+    {
+      // ADR-0101 — the twelfth. Pulls each ENABLED upstream MCP registry and
+      // refreshes the CATALOGUE (`mcp_registry_entries`) — and nothing else. It
+      // creates no `mcp_servers` row, no grant and no tool inventory, because
+      // turning a directory entry into a governed object is an explicit,
+      // audited operator act, not something a timer does on the estate's
+      // behalf. That is the whole difference between this and the federation
+      // design ADR-0101 declined to copy.
+      //
+      // Triply opt-in: the scheduler is off by default, a fresh install has no
+      // registry rows at all, and a registry row is `enabled = false` until an
+      // operator flips it. On an air-gapped deployment the pass refuses before
+      // reading a row or opening a socket.
+      name: SCHEDULER_JOB_NAMES.mcpRegistrySync,
+      description:
+        "Pull each enabled upstream MCP registry and refresh the federated CATALOGUE. Creates no " +
+        "server and no grant — importing an entry is a separate explicit operator act. Bounded per " +
+        "pass; refuses outright on an air-gapped deployment; never deletes a local server an upstream " +
+        "stopped listing.",
+      adr: "ADR-0101",
+      defaultIntervalSeconds: 6 * HOUR,
+      run: async (ctx) => {
+        const out = await runMcpRegistrySync(ctx.db, {
+          actorUserId: ctx.actorUserId,
+          now: ctx.now,
+        });
+        return {
+          itemsProcessed: out.entriesSeen,
+          detail: {
+            deployMode: out.deployMode,
+            skipped: out.skipped,
+            eligible: out.eligible,
+            examined: out.examined,
+            capped: out.capped,
+            ok: out.ok,
+            refused: out.refused,
+            failed: out.failed,
+            entriesSeen: out.entriesSeen,
+            created: out.created,
+            updated: out.updated,
+            remote: out.remote,
+            catalogueOnly: out.catalogueOnly,
+            markedMissing: out.markedMissing,
+            driftDetected: out.driftDetected,
+            conflicts: out.conflicts,
+            serversCreated: out.serversCreated,
+            grantsCreated: out.grantsCreated,
+            reason: out.reason,
           },
         };
       },

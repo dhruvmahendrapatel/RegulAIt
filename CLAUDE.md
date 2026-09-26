@@ -1,5 +1,17 @@
 # RegulAIt — Operating Instructions for Claude Code
 
+<!-- suite-rules:start -->
+> **Suite rules apply — read them before acting.**
+> `C:\Users\dhruv\Documents\regulAIt - Product Suite\SUITE_RULES.md` binds every regulAIt
+> repository and takes precedence over this file. Where the two conflict, **stop and escalate
+> to the suite agent** — do not pick a side, and do not edit either document.
+> Check `MODULE_REGISTRY.md` (status, ports, brand) and `CAPABILITY_MAP.md` (who owns which
+> capability) in that same folder before building anything that may already exist elsewhere.
+>
+> This block is generated from the suite repo. If a `git pull` removes it, restore it with
+> `node scripts/suite-header.mjs --install` from the suite root rather than retyping it.
+<!-- suite-rules:end -->
+
 ## What this project is
 
 RegulAIt is a from-scratch build of an AI-native agent/development platform in the spirit of
@@ -84,9 +96,19 @@ individual task seems to imply — always ask before crossing that line.
 
 1. Read this file (you just did).
 2. Read [project-state/STATE.md](project-state/STATE.md) in full.
-3. Skim [docs/decisions/README.md](docs/decisions/README.md) for any ADR not yet reflected in
+3. Read [mistakes.md](mistakes.md) — the append-only ledger of this agent's own past
+   process errors, each with an extractable rule. Owner-mandated (2026-08-13): the point of
+   the file is that no logged mistake is ever made twice.
+4. Skim [docs/decisions/README.md](docs/decisions/README.md) for any ADR not yet reflected in
    `STATE.md`'s decisions table — if you find drift, reconcile it before doing anything else.
-4. Give the user a one-paragraph recap of current phase/status and **confirm direction before
+5. **If any other session may be working this repo** (a second Claude Code session, cloud or
+   local, or a human at a checkout), read
+   [docs/CONTRIBUTING_PARALLEL_SESSIONS.md](docs/CONTRIBUTING_PARALLEL_SESSIONS.md) and
+   **establish which surface you own before editing anything**. Its §4 lists collisions git
+   merges without a conflict — a same-numbered migration, a lost ADR index row, and a
+   `drizzle-kit generate` timestamp that silently stops every later migration from ever
+   applying. When in doubt about whether you are alone, assume you are not.
+6. Give the user a one-paragraph recap of current phase/status and **confirm direction before
    acting** — do not assume and start building. This mirrors the product's own forced
    Plan-mode-before-build pattern at the meta level.
 

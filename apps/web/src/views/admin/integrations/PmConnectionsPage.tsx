@@ -127,7 +127,7 @@ export default function PmConnectionsPage() {
             </div>
           )}
           <p className={v.faint}>
-            Every provider kind is implemented — generic_webhook speaks RegulAIt's signed normalized event
+            Every provider kind is implemented — generic_webhook speaks regulAIt's signed normalized event
             contract (HMAC-SHA256 in x-regulait-signature) to any HTTP receiver at its base URL. jira,
             azure_devops and generic_webhook need their base URL. The api version select applies to jira
             only: v2 (default) sends plain-text descriptions/comments; v3 sends ADF rich text. The demo

@@ -38,10 +38,18 @@ import {
  */
 
 describe("scorer registry", () => {
-  it("declares exactly one model-backed scorer and states limits for every kind", () => {
+  it("declares exactly the model-backed scorers and states limits for every kind", () => {
     const reg = evalScorerRegistry();
-    expect(reg).toHaveLength(7);
-    expect(reg.filter((s) => s.modelBacked).map((s) => s.id)).toEqual(["llm_as_judge"]);
+    // ADR-0044 shipped seven; ADR-0067 added six more (four locally computable
+    // groundedness metrics and two judge-backed ones that refuse rather than
+    // degrade). The count is asserted so a kind can never be added to
+    // EVAL_SCORER_KINDS without an entry here stating its limits.
+    expect(reg).toHaveLength(13);
+    expect(reg.filter((s) => s.modelBacked).map((s) => s.id)).toEqual([
+      "llm_as_judge",
+      "groundedness_judge",
+      "answer_relevance_judge",
+    ]);
     for (const s of reg) {
       expect(s.limits.length).toBeGreaterThan(20);
       expect(s.deterministic).toBe(!s.modelBacked);

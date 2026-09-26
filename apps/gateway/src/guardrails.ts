@@ -279,12 +279,15 @@ export async function recordGuardrailDecision(
     /** extra context for the violations view (surface, agent, tool, …) */
     detail?: Record<string, unknown>;
   },
-): Promise<void> {
+  // ADR-0070: the audit row's id is returned so a trace span can REFERENCE the
+  // guardrail decision rather than restating it. null = there was nothing to
+  // record (no findings), which is the overwhelmingly common case.
+): Promise<string | null> {
   const { evaluation, outcome } = args;
-  if (evaluation.findings.length === 0) return;
+  if (evaluation.findings.length === 0) return null;
   const relevant = outcome === "blocked" ? evaluation.blocking : evaluation.findings;
   const categories = guardrailCategoryList(relevant);
-  await db.insert(auditLog).values({
+  const [row] = await db.insert(auditLog).values({
     userId: args.userId,
     objectType: args.objectType,
     objectId: args.objectId,
@@ -309,7 +312,8 @@ export async function recordGuardrailDecision(
         : outcome === "warned"
           ? `guardrail hit on ${evaluation.phase} (${categories}) — warned, call proceeded`
           : `guardrail hit on ${evaluation.phase} (${categories}) — observed in log mode, call proceeded`,
-  });
+  }).returning({ id: auditLog.id });
+  return row?.id ?? null;
 }
 
 /** The outcome verb an evaluation's action maps to for the audit row. */

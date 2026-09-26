@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { generateKeyPairSync, sign as cryptoSign, type KeyObject } from "node:crypto";
+import { generateKeyPairSync, randomBytes, sign as cryptoSign, type KeyObject } from "node:crypto";
 import { createRequire } from "node:module";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -7,13 +7,21 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   auditLog,
+  compliancePacks,
+  connectors,
   createDb,
+  customModelProviders,
+  deployTargets,
   eq,
   inArray,
   isNull,
   licenseVerifications,
   licenses,
+  mcpServers,
+  pmConnections,
   runMigrations,
+  samlProviders,
+  scimTokens,
   users,
   type Db,
 } from "@regulait/db";
@@ -519,6 +527,359 @@ describe("ADR-0052 — seats count ACTIVE users and never punish existing ones",
   });
 });
 
+describe("ADR-0052 §4 — tier flags are ENFORCED at their creation routes, not only reported", () => {
+  // PEM-shaped is all creation validates (the crypto bites at sign-in, which
+  // is deliberately not what these tests exercise) — a synthetic cert keeps
+  // this suite free of openssl.
+  const FAKE_CERT =
+    "-----BEGIN CERTIFICATE-----\nMIIBfakefakefakefakefakefakefakefake\n-----END CERTIFICATE-----";
+  const samlPayload = (name: string) => ({
+    name,
+    entityId: `https://lic-flag.example/${name}`,
+    idpSsoUrl: "https://lic-flag.example/sso",
+    idpSigningCerts: [FAKE_CERT],
+  });
+
+  it("a tier WITHOUT the flag is refused BY NAME at both points — and reporting agrees", async () => {
+    // `team` tier: real license, sso_saml and scim_provisioning deliberately absent
+    const r = await install(artifact(makeDoc({ tier: "team", features: ["airgapped_mode"] })));
+    expect(r.statusCode).toBe(201);
+    const s = await status();
+    expect(s.features.sso_saml).toBe(false);
+    expect(s.features.scim_provisioning).toBe(false);
+
+    const saml = await app.inject({
+      method: "POST", url: "/v1/auth/saml-providers", headers: AUTH,
+      payload: samlPayload("lic-flag-refused-idp"),
+    });
+    expect(saml.statusCode, saml.body).toBe(403);
+    expect(saml.json()).toMatchObject({
+      error: "license_feature_not_licensed",
+      ruleId: "license-feature-not-granted",
+      feature: "sso_saml",
+      tier: "team",
+      state: "valid",
+    });
+    expect(saml.json().detail).toMatch(/tier 'team'/);
+    // nothing was created under the refused name
+    expect(
+      await db.select().from(samlProviders).where(eq(samlProviders.name, "lic-flag-refused-idp")),
+    ).toHaveLength(0);
+
+    const scim = await app.inject({
+      method: "POST", url: "/v1/scim/tokens", headers: AUTH,
+      payload: { name: "lic-flag-refused-token" },
+    });
+    expect(scim.statusCode, scim.body).toBe(403);
+    expect(scim.json()).toMatchObject({
+      error: "license_feature_not_licensed",
+      ruleId: "license-feature-not-granted",
+      feature: "scim_provisioning",
+      tier: "team",
+    });
+    expect(
+      await db.select().from(scimTokens).where(eq(scimTokens.name, "lic-flag-refused-token")),
+    ).toHaveLength(0);
+
+    // both refusals are audited as denies with the flag reader's own ruleId
+    const denies = (await audits("license-feature-not-granted")).filter((a) => a.effect === "deny");
+    const gated = denies.map((a) => (a.detail as { feature?: string }).feature);
+    expect(gated).toContain("sso_saml");
+    expect(gated).toContain("scim_provisioning");
+  });
+
+  it("ABSENT closes the flag at the enforcement point exactly as the status API has always reported", async () => {
+    // afterEach cleared the tables — the deployment is UNLICENSED here
+    const s = await status();
+    expect(s.state).toBe("absent");
+    expect(s.features.sso_saml).toBe(false);
+    const saml = await app.inject({
+      method: "POST", url: "/v1/auth/saml-providers", headers: AUTH,
+      payload: samlPayload("lic-flag-absent-idp"),
+    });
+    expect(saml.statusCode, saml.body).toBe(403);
+    expect(saml.json()).toMatchObject({
+      error: "license_feature_not_licensed",
+      ruleId: "license-absent-feature-closed",
+      feature: "sso_saml",
+      state: "absent",
+      tier: null,
+    });
+    const scim = await app.inject({
+      method: "POST", url: "/v1/scim/tokens", headers: AUTH,
+      payload: { name: "lic-flag-absent-token" },
+    });
+    expect(scim.statusCode, scim.body).toBe(403);
+    expect(scim.json().ruleId).toBe("license-absent-feature-closed");
+  });
+
+  it("a tier WITH the flags is unchanged: both creation routes succeed", async () => {
+    const suffix = randomBytes(3).toString("hex");
+    const r = await install(
+      artifact(makeDoc({ features: ["sso_saml", "scim_provisioning"] })),
+    );
+    expect(r.statusCode).toBe(201);
+    const saml = await app.inject({
+      method: "POST", url: "/v1/auth/saml-providers", headers: AUTH,
+      payload: samlPayload(`lic-flag-granted-idp-${suffix}`),
+    });
+    expect(saml.statusCode, saml.body).toBe(201);
+    const scim = await app.inject({
+      method: "POST", url: "/v1/scim/tokens", headers: AUTH,
+      payload: { name: `lic-flag-granted-token-${suffix}` },
+    });
+    expect(scim.statusCode, scim.body).toBe(201);
+    // clean up what this test created on the SHARED database
+    await db.delete(samlProviders).where(eq(samlProviders.id, saml.json().id as string));
+    await db.delete(scimTokens).where(eq(scimTokens.id, scim.json().id as string));
+  });
+});
+
+describe("ADR-0052 §4 (B7b) — the remaining four tier flags are ENFORCED at their enabling acts", () => {
+  const B7B_FLAGS = [
+    "compliance_packs",
+    "advanced_orchestration",
+    "airgapped_mode",
+    "custom_model_providers",
+  ] as const;
+
+  /** authoring is deliberately NOT the enabling act — a pack is a DRAFT that
+   * "evaluates nothing until activated", so creation must succeed even where
+   * activation is refused */
+  const packPayload = (framework: string) => ({
+    framework,
+    version: 1,
+    title: "licensing-suite pack (inert draft until activated)",
+    provenance: { source: "authored by licensing.test.ts" },
+    cascadeTag: null,
+    controls: [
+      {
+        controlRef: "lic:1.1-decisions-are-logged",
+        title: "Every governed decision is recorded",
+        coverage: "enforced" as const,
+        collector: "audit_decisions" as const,
+      },
+    ],
+  });
+  const decomposePayload = { goal: "a goal long enough to pass schema validation" };
+  const airTargetPayload = (name: string) => ({ name, provider: "mock", mode: "air_gapped" });
+  const providerPayload = (name: string) => ({
+    name,
+    wireProtocol: "openai_chat",
+    baseUrl: "http://127.0.0.1:9/v1",
+  });
+
+  async function makeDraftPack(framework: string): Promise<string> {
+    const created = await app.inject({
+      method: "POST", url: "/v1/compliance/packs", headers: AUTH,
+      payload: packPayload(framework),
+    });
+    expect(created.statusCode, created.body).toBe(201);
+    return created.json().pack.id as string;
+  }
+
+  afterEach(async () => {
+    // every object this block can create is removed so no other suite sees it
+    await db.delete(compliancePacks).where(eq(compliancePacks.framework, "lic-flag-acme"));
+    await db.delete(deployTargets).where(inArray(deployTargets.name, ["lic-flag-air", "lic-flag-hosted"]));
+    await db.delete(customModelProviders).where(eq(customModelProviders.name, "lic-flag-prov"));
+  });
+
+  it("a tier WITHOUT the flags is refused BY NAME at all four enabling acts, audited, nothing enabled", async () => {
+    // real `team`-tier license, all four B7b flags deliberately absent
+    const r = await install(artifact(makeDoc({ tier: "team", features: ["sso_saml"] })));
+    expect(r.statusCode).toBe(201);
+    const s = await status();
+    for (const f of B7B_FLAGS) expect(s.features[f], f).toBe(false);
+
+    // compliance_packs — authoring a DRAFT stays open; ACTIVATION is refused
+    const packId = await makeDraftPack("lic-flag-acme");
+    const act = await app.inject({
+      method: "POST", url: `/v1/compliance/packs/${packId}/activate`, headers: AUTH, payload: {},
+    });
+    expect(act.statusCode, act.body).toBe(403);
+    expect(act.json()).toMatchObject({
+      error: "license_feature_not_licensed",
+      ruleId: "license-feature-not-granted",
+      feature: "compliance_packs",
+      tier: "team",
+      state: "valid",
+    });
+    const [pack] = await db.select().from(compliancePacks).where(eq(compliancePacks.id, packId));
+    expect(pack!.status).toBe("draft"); // the refusal enabled nothing
+
+    // advanced_orchestration — the fan-out entry point refuses by name
+    const dec = await app.inject({
+      method: "POST", url: "/v1/runs/decompose", headers: AUTH, payload: decomposePayload,
+    });
+    expect(dec.statusCode, dec.body).toBe(403);
+    expect(dec.json()).toMatchObject({
+      error: "license_feature_not_licensed",
+      ruleId: "license-feature-not-granted",
+      feature: "advanced_orchestration",
+      tier: "team",
+    });
+
+    // airgapped_mode — the air-gapped SETTING act refuses; hosted is untouched
+    const air = await app.inject({
+      method: "POST", url: "/v1/deploy/targets", headers: AUTH, payload: airTargetPayload("lic-flag-air"),
+    });
+    expect(air.statusCode, air.body).toBe(403);
+    expect(air.json()).toMatchObject({
+      error: "license_feature_not_licensed",
+      ruleId: "license-feature-not-granted",
+      feature: "airgapped_mode",
+      tier: "team",
+    });
+    expect(await db.select().from(deployTargets).where(eq(deployTargets.name, "lic-flag-air"))).toHaveLength(0);
+    const hosted = await app.inject({
+      method: "POST", url: "/v1/deploy/targets", headers: AUTH,
+      payload: { name: "lic-flag-hosted", provider: "mock", mode: "hosted" },
+    });
+    expect(hosted.statusCode, hosted.body).toBe(201);
+
+    // custom_model_providers — registration refuses by name
+    const prov = await app.inject({
+      method: "POST", url: "/v1/custom-model-providers", headers: AUTH, payload: providerPayload("lic-flag-prov"),
+    });
+    expect(prov.statusCode, prov.body).toBe(403);
+    expect(prov.json()).toMatchObject({
+      error: "license_feature_not_licensed",
+      ruleId: "license-feature-not-granted",
+      feature: "custom_model_providers",
+      tier: "team",
+    });
+    expect(
+      await db.select().from(customModelProviders).where(eq(customModelProviders.name, "lic-flag-prov")),
+    ).toHaveLength(0);
+
+    // every refusal is audited as a deny with the flag reader's own ruleId
+    const denies = (await audits("license-feature-not-granted")).filter((a) => a.effect === "deny");
+    const gated = denies.map((a) => (a.detail as { feature?: string }).feature);
+    for (const f of B7B_FLAGS) expect(gated, f).toContain(f);
+  });
+
+  it("ABSENT closes all four flags at their enforcement points exactly as the status API has always reported", async () => {
+    // afterEach cleared the tables — the deployment is UNLICENSED here
+    const s = await status();
+    expect(s.state).toBe("absent");
+    const packId = await makeDraftPack("lic-flag-acme"); // authoring stays open even unlicensed
+    for (const [url, payload] of [
+      [`/v1/compliance/packs/${packId}/activate`, {}],
+      ["/v1/runs/decompose", decomposePayload],
+      ["/v1/deploy/targets", airTargetPayload("lic-flag-air")],
+      ["/v1/custom-model-providers", providerPayload("lic-flag-prov")],
+    ] as const) {
+      const res = await app.inject({ method: "POST", url, headers: AUTH, payload });
+      expect(res.statusCode, `${url}: ${res.body}`).toBe(403);
+      expect(res.json().ruleId, url).toBe("license-absent-feature-closed");
+      expect(res.json().tier, url).toBeNull();
+    }
+  });
+
+  it("a tier WITH the flags gets past the gate at every point (and the cheap acts genuinely succeed)", async () => {
+    const r = await install(artifact(makeDoc({ features: [...B7B_FLAGS] })));
+    expect(r.statusCode).toBe(201);
+
+    // compliance pack activation SUCCEEDS end to end
+    const packId = await makeDraftPack("lic-flag-acme");
+    const act = await app.inject({
+      method: "POST", url: `/v1/compliance/packs/${packId}/activate`, headers: AUTH, payload: {},
+    });
+    expect(act.statusCode, act.body).toBe(200);
+    expect(act.json().pack.status).toBe("active");
+
+    // air-gapped deploy target creation SUCCEEDS end to end
+    const air = await app.inject({
+      method: "POST", url: "/v1/deploy/targets", headers: AUTH, payload: airTargetPayload("lic-flag-air"),
+    });
+    expect(air.statusCode, air.body).toBe(201);
+    expect(air.json().mode).toBe("air_gapped");
+
+    // decompose passes the LICENSE gate: the route's OWN next check answers
+    // (bootstrap has no identity to decompose as). The full 200 happy path is
+    // decompose.test.ts, which now runs under a license fixture granting this
+    // flag — that suite is the licensed-succeeds proof for the whole surface.
+    const dec = await app.inject({
+      method: "POST", url: "/v1/runs/decompose", headers: AUTH, payload: decomposePayload,
+    });
+    expect(dec.json()).toMatchObject({ error: "bootstrap_cannot_decompose" });
+
+    // provider registration passes the LICENSE gate: the next gate (egress
+    // preflight of a non-allow-listed loopback URL) answers instead. The full
+    // 201 lives in custom-providers.test.ts under its license fixture.
+    const prov = await app.inject({
+      method: "POST", url: "/v1/custom-model-providers", headers: AUTH, payload: providerPayload("lic-flag-prov"),
+    });
+    expect(prov.statusCode, prov.body).toBe(400);
+    expect(prov.json().error).toBe("egress_blocked");
+  });
+});
+
+describe("ADR-0052 (B7b) — connector / MCP-server / PM-connection creation are wired EXPANSION points", () => {
+  const NAMES = ["lic-exp-connector", "lic-exp-server", "lic-exp-pm"] as const;
+  const posts = () =>
+    [
+      ["/v1/connectors", { name: "lic-exp-connector", kind: "data" }],
+      ["/v1/servers", { name: "lic-exp-server", url: "http://127.0.0.1:9" }],
+      ["/v1/pm/connections", { name: "lic-exp-pm", provider: "mock", project: "LIC-EXP", token: "mock-token" }],
+    ] as const;
+
+  afterEach(async () => {
+    await db.delete(connectors).where(eq(connectors.name, NAMES[0]));
+    await db.delete(mcpServers).where(eq(mcpServers.name, NAMES[1]));
+    await db.delete(pmConnections).where(eq(pmConnections.name, NAMES[2]));
+  });
+
+  it("UNLICENSED leaves them open — absence caps nothing, exactly like user.provision", async () => {
+    expect((await status()).state).toBe("absent");
+    for (const [url, payload] of posts()) {
+      const res = await app.inject({ method: "POST", url, headers: AUTH, payload });
+      expect(res.statusCode, `${url}: ${res.body}`).toBe(201);
+    }
+  });
+
+  it("EXPIRED past grace refuses all three (and the model_provider.connect point via its flag), audited, nothing created", async () => {
+    const r = await install(
+      artifact(
+        makeDoc({
+          licenseId: "lic-exp-expired",
+          notBefore: "2026-01-01T00:00:00.000Z",
+          expiresAt: "2026-02-01T00:00:00.000Z",
+          graceDays: 1,
+          features: ["custom_model_providers"],
+        }),
+      ),
+    );
+    expect(r.statusCode).toBe(201);
+    expect((await status()).state).toBe("expired");
+
+    for (const [url, payload] of posts()) {
+      const res = await app.inject({ method: "POST", url, headers: AUTH, payload });
+      expect(res.statusCode, `${url}: ${res.body}`).toBe(403);
+      expect(res.json(), url).toMatchObject({
+        error: "license_expansion_refused",
+        ruleId: "license-expired-no-expansion",
+      });
+    }
+    expect(await db.select().from(connectors).where(eq(connectors.name, NAMES[0]))).toHaveLength(0);
+    expect(await db.select().from(mcpServers).where(eq(mcpServers.name, NAMES[1]))).toHaveLength(0);
+    expect(await db.select().from(pmConnections).where(eq(pmConnections.name, NAMES[2]))).toHaveLength(0);
+
+    // model_provider.connect composes the same expansion posture through its
+    // tier flag: even though this expired license GRANTS the flag, expiry
+    // closes it with the expansion ruleId
+    const prov = await app.inject({
+      method: "POST", url: "/v1/custom-model-providers", headers: AUTH,
+      payload: { name: "lic-exp-prov", wireProtocol: "openai_chat", baseUrl: "http://127.0.0.1:9/v1" },
+    });
+    expect(prov.statusCode, prov.body).toBe(403);
+    expect(prov.json().ruleId).toBe("license-expired-no-expansion");
+
+    expect((await audits("license-expired-no-expansion")).some((a) => a.effect === "deny")).toBe(true);
+  });
+});
+
 describe("ADR-0052 — admin gating, disclosure and audit", () => {
   it("refuses a non-admin every licensing route", async () => {
     for (const [method, url, payload] of [
@@ -540,7 +901,19 @@ describe("ADR-0052 — admin gating, disclosure and audit", () => {
     expect(s.phoneHome).toBe(false);
     expect(s.schedulerPresent).toBe(false);
     expect(s.keyring.pinnedKeyIds).toContain(KEY_ID);
-    expect(s.enforcementPointsWired).toEqual(["user.provision", "agent.create"]);
+    expect(s.enforcementPointsWired).toEqual([
+      "user.provision",
+      "agent.create",
+      "connector.create",
+      "mcp_server.create",
+      "pm_connection.create",
+      "feature.sso_saml (saml_provider.create)",
+      "feature.scim_provisioning (scim_token.create)",
+      "feature.compliance_packs (compliance_pack.activate)",
+      "feature.advanced_orchestration (run.decompose)",
+      "feature.airgapped_mode (deploy_target.create[mode=air_gapped])",
+      "feature.custom_model_providers (model_provider.connect)",
+    ]);
     expect(s.note).toMatch(/no network call of any kind/);
     // ADR-0064: a scheduler exists; licence re-verification deliberately has no
     // job on it, and the disclosure names that rather than denying the scheduler

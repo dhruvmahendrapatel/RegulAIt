@@ -533,6 +533,279 @@
       "when": 1785011000000,
       "tag": "0076_scheduler",
       "breakpoints": true
+    },
+    {
+      "idx": 77,
+      "version": "7",
+      "when": 1785012000000,
+      "tag": "0077_regulait_llm",
+      "breakpoints": true
+    },
+    {
+      "idx": 78,
+      "version": "7",
+      "when": 1785013000000,
+      "tag": "0078_gateway_parity",
+      "breakpoints": true
+    },
+    {
+      "idx": 79,
+      "version": "7",
+      "when": 1785014000000,
+      "tag": "0079_groundedness",
+      "breakpoints": true
+    },
+    {
+      "idx": 80,
+      "version": "7",
+      "when": 1785015000000,
+      "tag": "0080_redteam_depth",
+      "breakpoints": true
+    },
+    {
+      "idx": 81,
+      "version": "7",
+      "when": 1785016000000,
+      "tag": "0081_cross_vendor_cost",
+      "breakpoints": true
+    },
+    {
+      "idx": 82,
+      "version": "7",
+      "when": 1785017000000,
+      "tag": "0082_trace_observability",
+      "breakpoints": true
+    },
+    {
+      "idx": 83,
+      "version": "7",
+      "when": 1785018000000,
+      "tag": "0083_scoring_semantics",
+      "breakpoints": true
+    },
+    {
+      "idx": 84,
+      "version": "7",
+      "when": 1785019000000,
+      "tag": "0084_rules_engine_versioning",
+      "breakpoints": true
+    },
+    {
+      "idx": 85,
+      "version": "7",
+      "when": 1785020000000,
+      "tag": "0085_cost_reconciliation",
+      "breakpoints": true
+    },
+    {
+      "idx": 86,
+      "version": "7",
+      "when": 1785021000000,
+      "tag": "0086_ai_use_cases",
+      "breakpoints": true
+    },
+    {
+      "idx": 87,
+      "version": "7",
+      "when": 1785022000000,
+      "tag": "0087_ai_risks",
+      "breakpoints": true
+    },
+    {
+      "idx": 88,
+      "version": "7",
+      "when": 1785023000000,
+      "tag": "0088_ai_vendors",
+      "breakpoints": true
+    },
+    {
+      "idx": 89,
+      "version": "7",
+      "when": 1785024000000,
+      "tag": "0089_use_case_eu_tier",
+      "breakpoints": true
+    },
+    {
+      "idx": 90,
+      "version": "7",
+      "when": 1785025000000,
+      "tag": "0090_external_scorers",
+      "breakpoints": true
+    },
+    {
+      "idx": 91,
+      "version": "7",
+      "when": 1785026000000,
+      "tag": "0091_agent_ownership",
+      "breakpoints": true
+    },
+    {
+      "idx": 92,
+      "version": "7",
+      "when": 1785027000000,
+      "tag": "0092_grant_certification",
+      "breakpoints": true
+    },
+    {
+      "idx": 93,
+      "version": "7",
+      "when": 1785028000000,
+      "tag": "0093_sod_rules",
+      "breakpoints": true
+    },
+    {
+      "idx": 94,
+      "version": "7",
+      "when": 1785029000000,
+      "tag": "0094_recommendation_campaign_scope",
+      "breakpoints": true
+    },
+    {
+      "idx": 95,
+      "version": "7",
+      "when": 1785030000000,
+      "tag": "0095_rule_delete_tombstone",
+      "breakpoints": true
+    },
+    {
+      "idx": 96,
+      "version": "7",
+      "when": 1785031000000,
+      "tag": "0096_pack_cascade_preset",
+      "breakpoints": true
+    },
+    {
+      "idx": 97,
+      "version": "7",
+      "when": 1785032000000,
+      "tag": "0097_sod_rule_sides",
+      "breakpoints": true
+    },
+    {
+      "idx": 98,
+      "version": "7",
+      "when": 1785033000000,
+      "tag": "0098_enforcement_opt_ins",
+      "breakpoints": true
+    },
+    {
+      "idx": 99,
+      "version": "7",
+      "when": 1785034000000,
+      "tag": "0099_data_key_reencryption",
+      "breakpoints": true
+    },
+    {
+      "idx": 100,
+      "version": "7",
+      "when": 1785035000000,
+      "tag": "0100_copilot_apply_and_judged_recommendations",
+      "breakpoints": true
+    },
+    {
+      "idx": 101,
+      "version": "7",
+      "when": 1785036000000,
+      "tag": "0101_dispatch_attribution_required",
+      "breakpoints": true
+    },
+    {
+      "idx": 102,
+      "version": "7",
+      "when": 1785037000000,
+      "tag": "0102_config_version_residuals",
+      "breakpoints": true
+    },
+    {
+      "idx": 103,
+      "version": "7",
+      "when": 1785038000000,
+      "tag": "0103_mcp_admission_scanning",
+      "breakpoints": true
+    },
+    {
+      "idx": 104,
+      "version": "7",
+      "when": 1785039000000,
+      "tag": "0104_api_key_expiry",
+      "breakpoints": true
+    },
+    {
+      "idx": 105,
+      "version": "7",
+      "when": 1785040000000,
+      "tag": "0105_mcp_registry_federation",
+      "breakpoints": true
+    },
+    {
+      "idx": 106,
+      "version": "7",
+      "when": 1785041000000,
+      "tag": "0106_approval_payload_binding",
+      "breakpoints": true
+    },
+    {
+      "idx": 107,
+      "version": "7",
+      "when": 1785042000000,
+      "tag": "0107_consent_context_and_expiry",
+      "breakpoints": true
+    },
+    {
+      "idx": 108,
+      "version": "7",
+      "when": 1785043000000,
+      "tag": "0108_deferred_unique_constraints",
+      "breakpoints": true
+    },
+    {
+      "idx": 109,
+      "version": "7",
+      "when": 1785044000000,
+      "tag": "0109_backup_runs_finding_uq",
+      "breakpoints": true
+    },
+    {
+      "idx": 110,
+      "version": "7",
+      "when": 1785045000000,
+      "tag": "0110_pii_international_categories",
+      "breakpoints": true
+    },
+    {
+      "idx": 111,
+      "version": "7",
+      "when": 1785046000000,
+      "tag": "0111_policy_simulation_rule_candidates",
+      "breakpoints": true
+    },
+    {
+      "idx": 112,
+      "version": "7",
+      "when": 1785047000000,
+      "tag": "0112_chatops_outlook_send_only",
+      "breakpoints": true
+    },
+    {
+      "idx": 113,
+      "version": "7",
+      "when": 1785048000000,
+      "tag": "0113_simulation_flip_decision_rule_id",
+      "breakpoints": true
+    },
+    {
+      "idx": 114,
+      "version": "7",
+      "when": 1785049000000,
+      "tag": "0114_execution_kill_switch",
+      "breakpoints": true
+    },
+    {
+      "idx": 115,
+      "version": "7",
+      "when": 1785050000000,
+      "tag": "0115_rate_limit_counters",
+      "breakpoints": true
     }
   ]
 }

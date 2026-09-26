@@ -19,6 +19,7 @@ import {
   type Db,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { installLicenseFixture, removeLicenseFixture } from "./testing/license-fixture.js";
 import { PROJECT_HEADER } from "./mcp-proxy.js";
 
 /**
@@ -188,6 +189,10 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  // ADR-0052 §4: this suite exercises a route now tier-gated on
+  // `advanced_orchestration` — run under a real signed license granting it
+  // (removed in afterAll; the deployment ends UNLICENSED as it started).
+  await installLicenseFixture(app, { features: ["advanced_orchestration"], auth: AUTH });
   gatewayUrl = await app.listen({ port: 0, host: "127.0.0.1" });
   upstream = await startUpstream();
 
@@ -282,6 +287,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await removeLicenseFixture(db);
   app.server.closeAllConnections();
   await app.close();
   await upstream.close();
@@ -618,7 +624,16 @@ describe("G3 MCP PII enforcement", () => {
     // the spend is honest: the tool really ran
     const after = await usageRows(blockProject);
     expect(after.length).toBe(before.length + 1);
-    const row = after[after.length - 1]!;
+    // The new row is identified by IDENTITY, not by position. `usageRows` is an
+    // unordered SELECT, so "the last element" is whatever Postgres happened to
+    // hand back last — not the row this call just wrote. That distinction is
+    // invisible until the physical row order changes, which is exactly how this
+    // failed in CI while passing locally: the tail element was an `agent` row
+    // from an earlier test in the same project.
+    const seen = new Set(before.map((r) => r.id));
+    const fresh = after.filter((r) => !seen.has(r.id));
+    expect(fresh).toHaveLength(1);
+    const row = fresh[0]!;
     expect(row.objectType).toBe("mcp_tool");
     expect((row.detail as { pii?: { action: string } }).pii?.action).toBe("block");
     expect(JSON.stringify(row.detail)).not.toContain(SSN);

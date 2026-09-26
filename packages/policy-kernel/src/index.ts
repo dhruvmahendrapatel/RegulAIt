@@ -1,6 +1,208 @@
 export type ToolKind = "read" | "write";
 export type DecisionEffect = "allow" | "deny" | "require_approval";
 
+// ---------------------------------------------------------------------------
+// ADR-0124 — THE KILL SWITCH AND SAFE MODES
+// ---------------------------------------------------------------------------
+//
+// WHY THIS LIVES IN THE KERNEL, FIRST, AND AS A REQUIRED INPUT.
+//
+// An emergency stop is only worth having if it cannot be bypassed. There are
+// three governed entry points — `evaluate` (MCP tools), `evaluateAgent` (model
+// dispatch) and `evaluateConnector` — and every effectful path in the product
+// reaches one of them. Putting the check inside those three, ahead of every
+// other rule, means a new caller inherits it without knowing it exists.
+//
+// `execution` is a REQUIRED field on all three inputs, deliberately. It could
+// have been optional with a safe default, and that is exactly the shape that
+// rots: a future call site omits it, the deployment believes it is halted, and
+// one path keeps running. Required means the COMPILER enumerates the call
+// sites, now and for every call site added later. That is the whole design.
+//
+// The kernel stays pure: it is handed the resolved posture and decides. It
+// never reads a database, so "is this deployment halted?" is resolved once, by
+// the gateway, in one helper.
+
+/**
+ * What the deployment is permitted to execute, as ONE dial with four
+ * positions. Ordered from permissive to restrictive.
+ *
+ *  - `normal`            what every deployment ships as. Nothing is added to
+ *                        any decision — an upgrade changes no behaviour.
+ *  - `read_only`         reads pass, writes are refused. The "safe degradation"
+ *                        an operator wants when something is wrong but the
+ *                        business still needs answers.
+ *  - `require_approval`  nothing executes unattended: anything that would have
+ *                        been allowed becomes an approval request instead. The
+ *                        work is not lost, it is queued behind a human.
+ *  - `halted`            the kill switch. Every governed call is refused.
+ */
+export const EXECUTION_MODES = ["normal", "read_only", "require_approval", "halted"] as const;
+export type ExecutionMode = (typeof EXECUTION_MODES)[number];
+
+/**
+ * Agent modes that do not mutate anything, so `read_only` lets them through.
+ * This is the vocabulary ADR-0059's plan-only stages already used; it lives
+ * here now because it is a POLICY judgement about what counts as a write, and
+ * two copies of that judgement would eventually disagree.
+ */
+export const PLAN_SAFE_MODES = ["plan", "review", "chat", "ask", "read"] as const;
+const PLAN_SAFE = new Set<string>(PLAN_SAFE_MODES);
+/** the ONE definition of "this agent mode does not mutate anything" */
+export function isPlanSafeMode(mode: string): boolean {
+  return PLAN_SAFE.has(mode.trim().toLowerCase());
+}
+
+/**
+ * An individual subject stopped on its own, without stopping the deployment.
+ * ISACA asks for "global AND per-capability kill switches" for a good reason:
+ * an incident confined to one tool should not cost you the business.
+ */
+export interface SubjectHalt {
+  readonly scope: "agent" | "tool";
+  /** what the subject is, for the refusal prose */
+  readonly label: string;
+  /** REQUIRED — an emergency stop with no stated reason is an outage of
+   * unknown cause, and the person who lifts it is usually not the person who
+   * threw it. */
+  readonly reason: string;
+  readonly haltedAt: string;
+}
+
+/**
+ * The resolved posture for ONE evaluation. Built by the gateway from
+ * `org_settings` plus the subject's own row; handed to the kernel whole.
+ */
+export interface ExecutionPosture {
+  readonly mode: ExecutionMode;
+  /**
+   * Who signs off while `require_approval` is set. REQUIRED for that mode and
+   * meaningless for the others.
+   *
+   * "Nothing runs unattended" has to say who is attending: `approvals` has a
+   * NOT NULL approver, and an approval nobody is named on is one nobody is
+   * accountable for deciding. The route refuses to set the mode without one.
+   */
+  readonly approverUserId?: string | null;
+  /** set when THIS agent or tool is individually halted. Independent of
+   * `mode`: a halted tool is refused even while the deployment is `normal`. */
+  readonly subjectHalt?: SubjectHalt | null;
+}
+
+/** the stable rule ids an operator alerts on — one per reason, never shared */
+export const EXECUTION_RULE_IDS = {
+  halted: "execution-halted",
+  subjectHalted: "execution-subject-halted",
+  readOnly: "execution-read-only",
+  requireApproval: "execution-require-approval",
+} as const;
+
+/**
+ * THE GATE. Pure, and the same three lines of reasoning on every path.
+ *
+ * Returns the effect this posture forces, or `null` to mean "this posture has
+ * nothing to say — carry on with the ordinary rules". It never turns a deny
+ * into an allow: it is consulted first and can only ever restrict, so no
+ * posture can widen what a grant permits.
+ *
+ * `isWrite` is the caller's read/write classification for the specific action:
+ * a tool's `kind`, a connector's `operation`, or whether an agent's mode is
+ * plan-safe. That judgement belongs to the path; the arithmetic belongs here.
+ */
+/**
+ * A rule trace records `allow` / `deny` / `no-match`, and a `require_approval`
+ * gate is none of those — it is a deny of UNATTENDED execution. It traces as
+ * `deny` so the chain stays readable, while the DECISION carries
+ * `require_approval`; the effect and the trace answer different questions and
+ * the queue reads the effect.
+ */
+function traceOutcome(effect: DecisionEffect): "allow" | "deny" {
+  return effect === "allow" ? "allow" : "deny";
+}
+
+export function executionGate(
+  execution: ExecutionPosture,
+  isWrite: boolean,
+  subjectLabel: string,
+  /**
+   * Can THIS path queue a per-call approval?
+   *
+   * Only the MCP tool path can: `evaluate` returns `require_approval` and the
+   * proxy queues it. `AgentDecision` and `ConnectorDecision` cannot even
+   * EXPRESS the effect — their unions are `allow | deny` — and their routes
+   * have no per-call approval queue to hand the work to.
+   *
+   * So `require_approval` mode REFUSES on those two paths, and says why. That
+   * asymmetry is real and is surfaced on the dial itself rather than left to
+   * be discovered during an incident: a mode that silently denied where it
+   * claimed to queue would be worse than not offering the mode.
+   */
+  canQueue: boolean,
+): { effect: DecisionEffect; ruleId: string; reason: string; approverUserId?: string } | null {
+  // A SUBJECT HALT OUTRANKS THE DIAL. It is narrower and more specific, and an
+  // operator who stopped one tool during an incident means it regardless of
+  // what the deployment as a whole is doing.
+  const halt = execution.subjectHalt;
+  if (halt) {
+    return {
+      effect: "deny",
+      ruleId: EXECUTION_RULE_IDS.subjectHalted,
+      reason:
+        `${halt.scope} ${halt.label} is HALTED (since ${halt.haltedAt}): ${halt.reason}. ` +
+        "This is an emergency stop on this one subject, not a missing grant — the rest of the " +
+        "deployment is unaffected, and lifting it is an audited admin action.",
+    };
+  }
+
+  switch (execution.mode) {
+    case "halted":
+      return {
+        effect: "deny",
+        ruleId: EXECUTION_RULE_IDS.halted,
+        reason:
+          `this deployment is HALTED — every governed call is refused, including ${subjectLabel}. ` +
+          "Nothing was executed and nothing was billed. Reading the audit trail, the approvals " +
+          "queue and the posture page is unaffected, so the halt can be investigated and lifted.",
+      };
+    case "read_only":
+      // reads pass untouched — that is the entire point of a safe mode
+      if (!isWrite) return null;
+      return {
+        effect: "deny",
+        ruleId: EXECUTION_RULE_IDS.readOnly,
+        reason:
+          `this deployment is in READ-ONLY mode and ${subjectLabel} is a write. Reads continue to ` +
+          "be served; nothing that changes state is executed.",
+      };
+    case "require_approval":
+      if (canQueue) {
+        // The work is queued behind a human rather than lost. Returning
+        // `require_approval` hands it to the SAME approvals machinery an
+        // ordinary rule would, so nothing downstream is special-cased.
+        return {
+          effect: "require_approval",
+          ruleId: EXECUTION_RULE_IDS.requireApproval,
+          ...(execution.approverUserId ? { approverUserId: execution.approverUserId } : {}),
+          reason:
+            "this deployment requires human approval for every governed call, including " +
+            `${subjectLabel}. Nothing runs unattended while this mode is set; the call is queued, ` +
+            "not refused.",
+        };
+      }
+      return {
+        effect: "deny",
+        ruleId: EXECUTION_RULE_IDS.requireApproval,
+        reason:
+          `this deployment requires human approval for every governed call, and ${subjectLabel} ` +
+          "is on a path with NO per-call approval queue — model dispatch and connector calls " +
+          "cannot be queued for sign-off the way an MCP tool call can. It is therefore REFUSED " +
+          "rather than queued. Use read-only mode instead if reads should keep flowing.",
+      };
+    case "normal":
+      return null;
+  }
+}
+
 export interface ToolGrant {
   id: string;
   userId: string;
@@ -99,6 +301,17 @@ export interface ApprovalRule {
   deployMode?: RuleDeployMode | null;
   toolName: string | null;
   writeOnly: boolean;
+  /**
+   * ADR-0104: what a consent granted under this rule is BOUND TO. 'action'
+   * binds it to the exact call arguments the approver signed for; 'tool' is the
+   * escape hatch that makes it reusable across differing arguments. Absent
+   * reads as 'action' — the strict default — so an older rule body that carries
+   * no scope can never be the loose one. The kernel itself does not branch on
+   * this: the gateway resolves the strictest scope across the MATCHED rules
+   * (see `matchingApprovalRules` below) and uses it to decide whether an
+   * already-approved queue entry has to fingerprint-match this call.
+   */
+  approvalScope?: "action" | "tool" | null;
   approverUserId: string;
   /** optional display name for the approver — used in reason prose only */
   approverName?: string | null;
@@ -195,6 +408,12 @@ export interface AbacDecision {
 export interface EvaluationInput {
   userId: string;
   serverId: string;
+  /**
+   * ADR-0124 — REQUIRED. The resolved kill-switch / safe-mode posture for this
+   * evaluation. Required rather than optional so the compiler, not a reviewer,
+   * guarantees every call site supplies it.
+   */
+  execution: ExecutionPosture;
   /** optional display names for reason prose; ids stay authoritative */
   userName?: string | null;
   serverName?: string | null;
@@ -278,6 +497,14 @@ export interface RuleTrace {
 }
 
 export type RuleName =
+  /** ADR-0124 — the kill switch and safe modes, consulted before every other
+   * rule. Four distinct names so an operator can alert on each reason
+   * separately: a deployment-wide stop is a different event from one tool
+   * being pulled. */
+  | "execution-halted"
+  | "execution-subject-halted"
+  | "execution-read-only"
+  | "execution-require-approval"
   | "tool-allow-list"
   | "role-tool-allow-list"
   | "server-read-only-all"
@@ -384,6 +611,35 @@ function argAtPath(args: Record<string, unknown> | undefined, path: string): unk
 }
 
 /**
+ * The approval-rule MATCH predicate, extracted so there is exactly one.
+ *
+ * `evaluate` uses it to find the rule that pauses a call; ADR-0104's gateway
+ * matcher uses it to read the strictest `approvalScope` across the rules that
+ * bound THIS call, so "which rules govern this approval" is one answer computed
+ * once, not two answers that can disagree. Order is preserved: the first
+ * element is the rule `evaluate` reports as the pausing rule, exactly as the
+ * previous `.find` did.
+ */
+export function matchingApprovalRules(
+  rules: readonly ApprovalRule[],
+  ctx: {
+    userId: string;
+    serverId: string;
+    tool: ToolRef;
+    deployContext?: readonly string[] | null | undefined;
+  },
+): ApprovalRule[] {
+  return rules.filter(
+    (r) =>
+      ruleAppliesToSubject(r, ctx.userId) &&
+      ruleAppliesToServer(r, ctx.serverId) &&
+      ruleAppliesToDeployMode(r, ctx.deployContext ?? null) &&
+      matchesScope(r.toolName, ctx.tool.name) &&
+      (!r.writeOnly || ctx.tool.kind === "write"),
+  );
+}
+
+/**
  * Pure, zero-I/O policy evaluation. Rules run in fixed order; the first
  * terminal match wins and everything evaluated is recorded in ruleChain for
  * the audit log.
@@ -394,6 +650,23 @@ function argAtPath(args: Record<string, unknown> | undefined, path: string): unk
  * signed off) and approval rules before the final allow.
  */
 export function evaluate(input: EvaluationInput): Decision {
+  // ADR-0124 — FIRST, ahead of every grant, rule, limit and scope. A stop that
+  // ran after entitlement resolution would still be a stop, but it would also
+  // be one more thing to get right in the wrong order later.
+  const toolLabel = `tool '${input.tool.name}'`;
+  const gated = executionGate(input.execution, input.tool.kind === "write", toolLabel, true);
+  if (gated) {
+    return {
+      effect: gated.effect,
+      ruleId: gated.ruleId,
+      ruleChain: [{ rule: gated.ruleId as RuleName, outcome: traceOutcome(gated.effect) }],
+      reason: gated.reason,
+      // carried through so the queued approval names a real human — see
+      // ExecutionPosture.approverUserId
+      ...(gated.approverUserId ? { approverUserId: gated.approverUserId } : {}),
+    };
+  }
+
   const { userId, serverId, tool } = input;
   // prose labels only — every id field below still carries the full id
   const serverRef = refLabel(serverId, input.serverName);
@@ -659,14 +932,16 @@ export function evaluate(input: EvaluationInput): Decision {
 
   // PILLAR 1: first matching approval rule across any scope pauses the call —
   // a broader fleet/role/team rule requires sign-off just as a user rule does.
-  const approvalRule = (input.approvalRules ?? []).find(
-    (r) =>
-      ruleAppliesToSubject(r, userId) &&
-      ruleAppliesToServer(r, serverId) &&
-      ruleAppliesToDeployMode(r, input.deployContext) &&
-      matchesScope(r.toolName, tool.name) &&
-      (!r.writeOnly || tool.kind === "write"),
-  );
+  // The MATCH itself lives in `matchingApprovalRules` (above) because ADR-0104
+  // needs the same predicate outside the kernel, to read the strictest
+  // `approvalScope` off exactly the rules that bound this call. Two copies of
+  // that predicate could drift into governing different rule sets.
+  const approvalRule = matchingApprovalRules(input.approvalRules ?? [], {
+    userId,
+    serverId,
+    tool,
+    deployContext: input.deployContext,
+  })[0];
   if (approvalRule) {
     if (input.approvedApprovalId) {
       chain.push({
@@ -726,7 +1001,24 @@ export function visibleTools(
   return tools.filter(
     (tool) =>
       tool.serverId === serverId &&
-      evaluate({ userId, serverId, tool, ...entitlements }).effect !== "deny",
+      evaluate({
+        userId,
+        serverId,
+        tool,
+        ...entitlements,
+        /**
+         * ADR-0124 — VISIBILITY IS NOT EXECUTION, and this one deliberately
+         * ignores the dial.
+         *
+         * Visibility answers "what is this user entitled to?". The dial
+         * answers "may it run right now?". Evaluating discovery under a halt
+         * would empty every tool list, which looks exactly like entitlements
+         * having been revoked — the worst possible thing to show an operator
+         * mid-incident. A halted deployment still shows you what you hold and
+         * refuses to run it, naming the halt in the refusal.
+         */
+        execution: { mode: "normal" },
+      }).effect !== "deny",
   );
 }
 
@@ -807,6 +1099,12 @@ export interface ConnectorRevocation {
 
 export interface EvaluateAgentInput {
   userId: string;
+  /**
+   * ADR-0124 — REQUIRED. The resolved kill-switch / safe-mode posture for this
+   * evaluation. Required rather than optional so the compiler, not a reviewer,
+   * guarantees every call site supplies it.
+   */
+  execution: ExecutionPosture;
   /** optional display name for the user — reason prose only */
   userName?: string | null;
   agent: AgentRef;
@@ -831,6 +1129,14 @@ export interface EvaluateAgentInput {
 }
 
 export type AgentRuleName =
+  /** ADR-0124 — the kill switch and safe modes, consulted before every other
+   * rule. Four distinct names so an operator can alert on each reason
+   * separately: a deployment-wide stop is a different event from one tool
+   * being pulled. */
+  | "execution-halted"
+  | "execution-subject-halted"
+  | "execution-read-only"
+  | "execution-require-approval"
   | "agent-registry-enabled"
   | "agent-allow-list"
   | "role-agent-allow-list"
@@ -862,6 +1168,22 @@ export function evaluateAgent(input: EvaluateAgentInput): AgentDecision {
   const { userId, agent, mode } = input;
   const agentRef = refLabel(agent.id, agent.name);
   const chain: AgentRuleTrace[] = [];
+
+  // ADR-0124 — ahead of the registry-enabled check and everything after it.
+  // A dispatch is a write when its MODE mutates: `plan`/`review`/`chat` reason
+  // about the world, `execute` acts on it. Read-only mode therefore still
+  // answers questions, which is the point of a safe mode rather than a stop.
+  const gatedAgent = executionGate(input.execution, !isPlanSafeMode(mode), `agent ${agentRef}`, false);
+  if (gatedAgent) {
+    chain.push({ rule: gatedAgent.ruleId as AgentRuleName, outcome: traceOutcome(gatedAgent.effect) });
+    return {
+      // never `require_approval` here — `canQueue: false` above rules it out
+      effect: gatedAgent.effect === "require_approval" ? "deny" : gatedAgent.effect,
+      ruleId: gatedAgent.ruleId,
+      ruleChain: chain,
+      reason: gatedAgent.reason,
+    };
+  }
 
   if (!agent.enabled) {
     chain.push({ rule: "agent-registry-enabled", outcome: "deny" });
@@ -1026,6 +1348,12 @@ export interface RoleConnectorGrant {
 
 export interface EvaluateConnectorInput {
   userId: string;
+  /**
+   * ADR-0124 — REQUIRED. The resolved kill-switch / safe-mode posture for this
+   * evaluation. Required rather than optional so the compiler, not a reviewer,
+   * guarantees every call site supplies it.
+   */
+  execution: ExecutionPosture;
   /** optional display names — reason prose only */
   userName?: string | null;
   connectorName?: string | null;
@@ -1042,6 +1370,14 @@ export interface EvaluateConnectorInput {
 }
 
 export type ConnectorRuleName =
+  /** ADR-0124 — the kill switch and safe modes, consulted before every other
+   * rule. Four distinct names so an operator can alert on each reason
+   * separately: a deployment-wide stop is a different event from one tool
+   * being pulled. */
+  | "execution-halted"
+  | "execution-subject-halted"
+  | "execution-read-only"
+  | "execution-require-approval"
   | "connector-allow-list"
   | "role-connector-allow-list"
   | "connector-revoked"
@@ -1068,6 +1404,24 @@ export interface ConnectorDecision {
  * (fail closed when scoped and no object is named) → allow.
  */
 export function evaluateConnector(input: EvaluateConnectorInput): ConnectorDecision {
+  // ADR-0124 — the connector path's own copy of the same first question. The
+  // read/write classification is already on the wire here (`operation`), so a
+  // read-only deployment keeps serving reads through connectors too.
+  const gatedConnector = executionGate(
+    input.execution,
+    input.operation === "write",
+    `connector ${refLabel(input.connectorId, input.connectorName)} (${input.operation})`,
+    false,
+  );
+  if (gatedConnector) {
+    return {
+      effect: gatedConnector.effect === "require_approval" ? "deny" : gatedConnector.effect,
+      ruleId: gatedConnector.ruleId,
+      ruleChain: [{ rule: gatedConnector.ruleId as ConnectorRuleName, outcome: traceOutcome(gatedConnector.effect) }],
+      reason: gatedConnector.reason,
+    };
+  }
+
   const { userId, connectorId, operation } = input;
   const connectorRef = refLabel(connectorId, input.connectorName);
   const chain: ConnectorRuleTrace[] = [];

@@ -3,6 +3,7 @@ import {
   agentGrants,
   agents,
   approvals,
+  asc,
   auditLog,
   and,
   costEvents,
@@ -12,12 +13,16 @@ import {
   orchestrationRunEvents,
   orchestrationRuns,
   projectContextItems,
+  traceSpans,
+  traces,
   userAgentPolicies,
   users,
   workflowArtifacts,
   workflowInstances,
   type Db,
+  type TraceStatus,
 } from "@regulait/db";
+import { agentHaltOf, loadExecutionMode, postureOf } from "./execution-posture.js";
 import type { WorkflowDefinition } from "@regulait/workflow-kernel";
 import { evaluateAgent, type AgentDecision } from "@regulait/policy-kernel";
 import {
@@ -61,9 +66,20 @@ import {
   executeGovernedDispatch,
   type SkippedCandidate,
 } from "./agents-connectors.js";
+// ADR-0070 — the run's trace tree: run -> node -> model turn -> tool call.
+import {
+  childContext,
+  closeSpan,
+  finishTrace,
+  openSpan,
+  traceForRoot,
+  type TraceContext,
+} from "./tracing.js";
 import { executeGovernedToolCall, resolveNodeToolContext } from "./mcp-proxy.js";
 import { loadAgentRevocations, loadRoleAgentGrants } from "./entitlements.js";
 import { assertProjectAttribution, projectPiiMode } from "./projects.js";
+// ADR-0079: the plan-only gate, shared verbatim with the invoke path.
+import { guardInstanceAttributedCall, isPlanSafeMode } from "./plan-only.js";
 import { loadInterceptionSettings } from "./compat-core.js";
 import { mirrorNodeStatus } from "./pm.js";
 import { handleNestedRunCompletion } from "./workflows.js";
@@ -518,7 +534,139 @@ function composeSystem(a: string | undefined, b: string | undefined): string | u
   return parts.length === 0 ? undefined : parts.join("\n\n");
 }
 
+/**
+ * ADR-0070 — THE RUN'S TREE.
+ *
+ * An orchestration run is the shape a trace exists for: a DAG of nodes, each of
+ * which is a bounded agentic loop of model turns and governed tool calls. Until
+ * now that structure lived in `orchestration_run_events` (an append-only list)
+ * and in `state.nodeStatuses` (a map). Neither is a causal tree, and neither
+ * says which model turn asked for which tool call.
+ *
+ * So: one `run` span per run (created once, reused by every node), one
+ * `run_node` span per node dispatch under it, one `llm` span per TURN of that
+ * node's loop under THAT, and every tool call the turn made under the turn.
+ * Four real levels, from four real relationships — not a flat list relabelled.
+ *
+ * Every early return below (unknown node, not in progress, entitlement denied,
+ * budget blocked, dispatch failed) closes the node span with its own status and
+ * reason. A node that never ran is a `denied` span saying why, because the
+ * whole point is that the tree explains an absence.
+ */
+/** The run's own display name: the graph's `run` label (its title), falling
+ * back to a short id. */
+function runSpanName(run: RunRow): string {
+  const label = (run.graph as TaskGraph).run;
+  return typeof label === "string" && label.length > 0 ? label : `run ${run.id.slice(0, 8)}`;
+}
+
+async function ensureRunSpan(
+  db: Db,
+  ctx: TraceContext | null,
+  run: RunRow,
+): Promise<string | null> {
+  if (!ctx) return null;
+  try {
+    // ADR-0109 (migration 0108): `trace_spans_run_uq` UNIQUE (trace_id, run_id)
+    // WHERE kind = 'run' AND run_id IS NOT NULL covers this predicate exactly,
+    // so this insert-if-absent guard is single-row by constraint.
+    //
+    // NOTE THE CONTRAST WITH `closeRunSpan` BELOW, which ADR-0107 fixed with
+    // `asc(seq)`. That read names NO run id — a trace can carry more than one
+    // run span — so it is genuinely multi-row and keeps its order. This one
+    // names ONE run, and that is what the index constrains. The two do not
+    // contradict each other.
+    const [existing] = await db
+      .select({ id: traceSpans.id })
+      .from(traceSpans)
+      .where(
+        and(eq(traceSpans.traceId, ctx.traceId), eq(traceSpans.kind, "run"), eq(traceSpans.runId, run.id)),
+      )
+      .limit(1);
+    if (existing) return existing.id;
+  } catch {
+    return null;
+  }
+  return openSpan(db, ctx, {
+    kind: "run",
+    name: runSpanName(run),
+    startedAt: run.createdAt ?? new Date(),
+    runId: run.id,
+    attributes: { initiatingUserId: run.initiatingUserId, ...(run.projectId ? { projectId: run.projectId } : {}) },
+  });
+}
+
 async function dispatchRunNode(
+  db: Db,
+  dataKey: string | undefined,
+  run: RunRow,
+  nodeId: string,
+  args: {
+    input?: string | undefined;
+    maxTokens?: number | undefined;
+    maxTurns?: number | undefined;
+    onDelta?: ((text: string) => void) | undefined;
+    contextKeys?: string[] | undefined;
+  },
+  actorUserId: string,
+): Promise<NodeDispatchOutcome> {
+  const runCtx = await traceForRoot(db, {
+    kind: "run",
+    name: runSpanName(run),
+    userId: run.initiatingUserId,
+    projectId: run.projectId ?? null,
+    sessionId: run.id,
+    rootRefId: run.id,
+  });
+  const runSpanId = await ensureRunSpan(db, runCtx, run);
+  const nodeCtx = childContext(runCtx, runSpanId);
+  const nodeSpanId = await openSpan(db, nodeCtx, {
+    kind: "run_node",
+    name: nodeId,
+    startedAt: new Date(),
+    runId: run.id,
+    nodeId,
+  });
+  const outcome = await dispatchRunNodeInner(
+    db,
+    dataKey,
+    run,
+    nodeId,
+    args,
+    actorUserId,
+    childContext(nodeCtx, nodeSpanId),
+  );
+  // Every non-ok outcome is a DECISION about this node, so the node span says
+  // which one, verbatim, rather than merely ending.
+  const [status, reason]: [TraceStatus, string | null] =
+    outcome.kind === "ok"
+      ? ["ok", null]
+      : outcome.kind === "dispatch_failed"
+        ? ["error", `${outcome.error}${outcome.detail ? `: ${outcome.detail}` : ""}`]
+        : outcome.kind === "entitlement_denied"
+          ? ["denied", outcome.decision.reason]
+          : outcome.kind === "budget_blocked_measured"
+            ? [
+                "denied",
+                `run measured spend $${outcome.measuredSpentUsd} is at or over the $${outcome.capUsd} cap; ` +
+                  `further dispatches are blocked until the overage is approved`,
+              ]
+            : outcome.kind === "node_budget_blocked_measured"
+              ? [
+                  "denied",
+                  `node measured spend $${outcome.measuredNodeUsd} is at or over its delegated ` +
+                    `per-node cap of $${outcome.nodeCapUsd}`,
+                ]
+              : outcome.kind === "unknown_node"
+                ? ["error", `node '${nodeId}' is not in this run's graph`]
+                : outcome.kind === "unknown_agent"
+                  ? ["error", `node '${nodeId}' owner agent no longer exists`]
+                  : ["error", `node '${nodeId}' is not in progress`];
+  await closeSpan(db, nodeSpanId, status, reason);
+  return outcome;
+}
+
+async function dispatchRunNodeInner(
   db: Db,
   dataKey: string | undefined,
   run: RunRow,
@@ -538,6 +686,9 @@ async function dispatchRunNode(
     contextKeys?: string[] | undefined;
   },
   actorUserId: string,
+  /** ADR-0070 — the node's span; every model turn and tool call below hangs
+   * from it. Null when tracing is off, and every use of it then no-ops. */
+  nodeTrace: TraceContext | null,
 ): Promise<NodeDispatchOutcome> {
   const graph = run.graph as TaskGraph;
   const state = run.state as RunState;
@@ -711,6 +862,9 @@ async function dispatchRunNode(
       baseline: null,
       input: firstInput,
       messages,
+      // ADR-0070: this turn's `llm` span is a CHILD of the node span.
+      trace: nodeTrace,
+      traceSpanName: `turn ${turn + 1}: ${servedAgent?.name ?? node.ownerAgentId}`,
       ...(systemPrompt !== undefined ? { system: systemPrompt } : {}),
       ...(toolDefs.length > 0 ? { tools: toolDefs } : {}),
       maxTokens: args.maxTokens,
@@ -756,14 +910,24 @@ async function dispatchRunNode(
     // escalates immediately into the one approvals queue; the per-turn
     // pre-gate above then blocks the next turn. Never silently exceeded (§7).
     if (budget) {
-      runningMeasured = Number((runningMeasured + (outcome.result.costUsd ?? 0)).toFixed(6));
-      // §5.2 accumulate this node's OWN measured spend alongside the run total.
-      runningNodeMeasured = Number((runningNodeMeasured + (outcome.result.costUsd ?? 0)).toFixed(6));
+      // ROADMAP G1 / ADR-0125. This USED TO BE a read-modify-write: the loop
+      // held its own running totals and overwrote the whole budget JSONB with
+      // them. That is correct for exactly one worker. Two nodes of the same run
+      // dispatching concurrently — which is the entire point of pillar 7's
+      // parallel task graph — each wrote an absolute computed from the value
+      // they read at loop start, so whichever landed second ERASED the other's
+      // charges. A run could spend well past its cap with the ledger showing it
+      // under, and the per-node ceilings inherited the same hole.
+      //
+      // Now the loop posts a DELTA and the database does the addition, under a
+      // row lock, and hands back the authoritative totals the escalation checks
+      // below then use. The local accumulators are still updated from that
+      // answer rather than from their own arithmetic, so they can no longer
+      // drift from what is stored.
+      const charged = await chargeRunBudget(db, run.id, nodeId, outcome.result.costUsd ?? 0);
+      runningMeasured = charged.measuredSpentUsd;
+      runningNodeMeasured = charged.nodeMeasuredUsd;
       measuredPerNode[nodeId] = runningNodeMeasured;
-      await db
-        .update(orchestrationRuns)
-        .set({ budget: { ...budget, measuredSpentUsd: runningMeasured, measuredPerNodeUsd: measuredPerNode } })
-        .where(eq(orchestrationRuns.id, run.id));
       // §5.2 first-crossing escalate on the NODE's transitive ceiling — the same
       // pattern as the run cap, into the SAME approvals queue, with a DISTINCT
       // sentinel and ruleId so it is never confused with a run-cap breach.
@@ -857,6 +1021,11 @@ async function dispatchRunNode(
       }
     }
 
+    // ADR-0070: every tool call this turn makes hangs from THIS turn's span, so
+    // the tree answers "which model turn asked for this tool" rather than
+    // merely "this run touched this tool at some point".
+    const turnTrace = childContext(nodeTrace, outcome.trace?.spanId ?? null);
+
     const toolCalls = outcome.result.stopReason === "tool_use" ? (outcome.result.toolCalls ?? []) : [];
     if (toolCalls.length === 0) break; // a final text answer — the loop is done
 
@@ -902,6 +1071,8 @@ async function dispatchRunNode(
           // already attribution-checked when the run was created, so no second
           // membership check is needed here.
           projectId: run.projectId ?? null,
+          trace: turnTrace,
+          toolCallId: tc.id,
         });
         switch (toolOut.kind) {
           case "allowed":
@@ -955,6 +1126,23 @@ async function dispatchRunNode(
             };
             traceStatus = "guardrail_blocked";
             break;
+          // ADR-0103: the run's PROJECT budget (pillar 5) is exhausted, so a
+          // paid tool call is refused pre-call — nothing executed, nothing
+          // billed. Surfaced exactly like a governed denial so a delegated
+          // worker cannot spend what a direct caller cannot. Distinct from the
+          // run/node budget gated by `gateNodeStartBudget` above: that is the
+          // run's own ledger, this is the project's.
+          case "budget_blocked":
+            block = {
+              type: "tool_result",
+              toolUseId: tc.id,
+              content:
+                `blocked by governance: ${toolOut.error}` +
+                (toolOut.detail ? ` — ${toolOut.detail}` : ""),
+              isError: true,
+            };
+            traceStatus = "budget_blocked";
+            break;
           case "approval_required":
             block = {
               type: "tool_result",
@@ -974,6 +1162,50 @@ async function dispatchRunNode(
               isError: true,
             };
             traceStatus = "approval_consumed_race";
+            break;
+          // ADR-0105 — the two consent-freshness refusals, surfaced to the
+          // worker as error tool_results exactly like every other governance
+          // outcome. A worker whose consent lapsed or whose governing policy
+          // moved is PAUSED for the replacement approval, the same treatment
+          // `approval_required` gets: the alternative is a worker that keeps
+          // burning turns retrying a call it can no longer make.
+          case "approval_expired":
+            block = {
+              type: "tool_result",
+              toolUseId: tc.id,
+              content:
+                `approval ${toolOut.supersededApprovalIds.join(", ")} expired before it was used and ` +
+                `has been superseded` +
+                (toolOut.requeuedApprovalId
+                  ? ` — approval '${toolOut.requeuedApprovalId}' has been raised in its place and this ` +
+                    `worker is paused until it is decided`
+                  : ` — retry to raise a fresh approval`),
+              isError: true,
+            };
+            traceStatus = "approval_expired";
+            if (toolOut.requeuedApprovalId) {
+              breakForApproval = true;
+              toolApprovalPending = true;
+            }
+            break;
+          case "approval_context_stale":
+            block = {
+              type: "tool_result",
+              toolUseId: tc.id,
+              content:
+                `approval ${toolOut.supersededApprovalIds.join(", ")} was granted under a policy context ` +
+                `that has since changed and has been superseded` +
+                (toolOut.requeuedApprovalId
+                  ? ` — approval '${toolOut.requeuedApprovalId}' has been raised under the current policy ` +
+                    `and this worker is paused until it is decided`
+                  : ` — retry to raise a fresh approval`),
+              isError: true,
+            };
+            traceStatus = "approval_context_stale";
+            if (toolOut.requeuedApprovalId) {
+              breakForApproval = true;
+              toolApprovalPending = true;
+            }
             break;
           case "unknown_tool":
             block = {
@@ -1207,6 +1439,11 @@ async function evaluateNodeOwner(
   return {
     decision: evaluateAgent({
       userId,
+      // ADR-0124 — a pillar-7 worker is a real dispatch under the initiating
+      // user's entitlements. It inherits the halt for the same reason it
+      // inherits every other ceiling: a delegated run must never be able to do
+      // what a direct caller cannot.
+      execution: postureOf(await loadExecutionMode(db), agentHaltOf(agent)),
       agent: { id: agent.id, tier: agent.tier, enabled: agent.enabled, modes: agent.modes ?? null },
       mode,
       agentGrants: grants,
@@ -1217,6 +1454,50 @@ async function evaluateNodeOwner(
     }),
     unknownAgent: false,
   };
+}
+
+/**
+ * ROADMAP G1 / ADR-0125 — add one node's measured cost to a run's budget
+ * ATOMICALLY, and return what the run has actually spent.
+ *
+ * The addition happens in the database, under `FOR UPDATE` on the run row,
+ * because the caller cannot be trusted to know the current total: pillar 7 runs
+ * independent nodes of one graph in parallel, and two workers that each read,
+ * add and write back an absolute figure silently lose one another's charges.
+ * The lock is the same blocking `FOR UPDATE` the run-event transition already
+ * uses a few lines below — deliberately not `SKIP LOCKED`, because the second
+ * writer must WAIT and then add, never step over.
+ *
+ * Returns the stored totals rather than void so the caller escalates on what
+ * the ledger says, not on its own arithmetic.
+ */
+export async function chargeRunBudget(
+  dbx: Db,
+  runId: string,
+  nodeId: string,
+  deltaUsd: number,
+): Promise<{ measuredSpentUsd: number; nodeMeasuredUsd: number }> {
+  return dbx.transaction(async (tx) => {
+    const [row] = await tx
+      .select({ budget: orchestrationRuns.budget })
+      .from(orchestrationRuns)
+      .where(eq(orchestrationRuns.id, runId))
+      .for("update");
+    const current = (row?.budget ?? null) as RunBudget | null;
+    if (!current) return { measuredSpentUsd: 0, nodeMeasuredUsd: 0 };
+
+    const measuredSpentUsd = Number(((current.measuredSpentUsd ?? 0) + deltaUsd).toFixed(6));
+    const perNode = { ...(current.measuredPerNodeUsd ?? {}) };
+    const nodeMeasuredUsd = Number(((perNode[nodeId] ?? 0) + deltaUsd).toFixed(6));
+    perNode[nodeId] = nodeMeasuredUsd;
+
+    await tx
+      .update(orchestrationRuns)
+      .set({ budget: { ...current, measuredSpentUsd, measuredPerNodeUsd: perNode } })
+      .where(eq(orchestrationRuns.id, runId));
+
+    return { measuredSpentUsd, nodeMeasuredUsd };
+  });
 }
 
 /** Transactionally apply one run event: kernel transition under FOR UPDATE,
@@ -1333,7 +1614,49 @@ async function applyRunEvent(
   const applied = await applyRunEventTx(db, runId, event, actorUserId);
   const postCommit = nestedCompletionPostCommit(applied.run, actorUserId, dataKey);
   if (postCommit) await postCommit(db);
+  // ADR-0070 — a run's trace and its root span close when the RUN turns
+  // terminal, not when one of its dispatches returns. A run that is still going
+  // therefore reads as `running` rather than as `ok` after its first node, and
+  // a `completed` run's trace duration is the run's elapsed time.
+  await closeRunTrace(db, applied.run);
   return applied;
+}
+
+/** Close the run's trace + root `run` span on a terminal transition. Silent and
+ * best-effort (recorder rule 2): observability never fails the run it observes. */
+export async function closeRunTrace(db: Db, run: RunRow): Promise<void> {
+  if (run.status !== "completed" && run.status !== "aborted") return;
+  const status: TraceStatus = run.status === "completed" ? "ok" : "error";
+  try {
+    const [t] = await db
+      .select({ id: traces.id })
+      .from(traces)
+      .where(and(eq(traces.kind, "run"), eq(traces.rootRefId, run.id)))
+      .orderBy(desc(traces.startedAt))
+      .limit(1);
+    if (!t) return;
+    // ADR-0107 (F01): a trace can carry more than one `run` span (a sub-run
+    // opened under the same trace), and nothing constrains it to one. The span
+    // being closed here is the ROOT one, so it is asked for by POSITION rather
+    // than left to the planner: `seq` is the trace's own monotonic ordering
+    // column (it backs `trace_spans_trace_idx`), and the lowest one in a trace
+    // is the span that opened it.
+    const [rootSpan] = await db
+      .select({ id: traceSpans.id })
+      .from(traceSpans)
+      .where(and(eq(traceSpans.traceId, t.id), eq(traceSpans.kind, "run")))
+      .orderBy(asc(traceSpans.seq), asc(traceSpans.id))
+      .limit(1);
+    await closeSpan(
+      db,
+      rootSpan?.id ?? null,
+      status,
+      run.status === "aborted" ? "run aborted" : null,
+    );
+    await finishTrace(db, { traceId: t.id, parentSpanId: null, sessionId: run.id, policy: { enabled: true, captureContent: false, previewMaxChars: 0 } }, status);
+  } catch {
+    /* recorder rule 2 */
+  }
 }
 
 /** Decide-endpoint hook (§3): approving an escalated node re-opens it for
@@ -1395,7 +1718,8 @@ export async function applyRunApprovalDecision(
 }
 
 export type PlanRunResult =
-  | { ok: false; status: 400 | 422; body: Record<string, unknown> }
+  // 409 (ADR-0079): the named workflow instance is at a plan-only stage
+  | { ok: false; status: 400 | 403 | 409 | 422; body: Record<string, unknown> }
   | {
       ok: true;
       run: RunRow;
@@ -1442,6 +1766,33 @@ export async function planRun(
       return { ok: false, status: attribution.status as 400 | 422, body: { error: attribution.error } };
     }
   }
+  // PILLAR 2 §2 stage 2 (ADR-0079): a run NAMING a workflow instance is
+  // attributed to it, and a run is execution. The same gate as the invoke path,
+  // applied per node because a graph declares one mode per node: while the
+  // instance rests at a planning stage, any node with a mutating mode refuses
+  // the whole plan (planning half a graph would be worse than refusing it).
+  // The nested build-stage call passes the instance's OWN id and initiator, and
+  // a build stage is never a planning stage, so that path is untouched — and
+  // the instance link, previously unvalidated on POST /v1/runs, is now checked
+  // like `projectId` is instead of failing later on a foreign key.
+  if (workflowInstanceId) {
+    const mutating = graph.nodes.filter((n) => !isPlanSafeMode(n.mode));
+    const gate = await guardInstanceAttributedCall(db, {
+      instanceId: workflowInstanceId,
+      userId,
+      isAdmin: false,
+      mode: mutating[0]?.mode ?? "plan",
+      detail: { phase: "run-plan", run: graph.run, nodes: graph.nodes.map((n) => n.id) },
+      what:
+        mutating.length > 0
+          ? `run '${graph.run}' node${mutating.length > 1 ? "s" : ""} ` +
+            mutating.map((n) => `'${n.id}' (mode '${n.mode}')`).join(", ")
+          : undefined,
+    });
+    if (!gate.ok) {
+      return { ok: false, status: gate.status, body: { error: gate.error, detail: gate.detail } };
+    }
+  }
 
   const [grants, roleAgentGrantsForUser, agentRevocationsForUser, [policy], agentRows] =
     await Promise.all([
@@ -1460,6 +1811,7 @@ export async function planRun(
     if (policy?.ceilingAgentId) {
       ceilingTier = agentById.get(policy.ceilingAgentId)?.tier ?? null;
     }
+    const ownerExecutionMode = await loadExecutionMode(db);
     const evalOwner = (
       agentId: string,
       mode: string,
@@ -1469,6 +1821,8 @@ export async function planRun(
       if (!agent) return null;
       return evaluateAgent({
         userId,
+        // ADR-0124 — same rule as every other worker dispatch.
+        execution: postureOf(ownerExecutionMode, agentHaltOf(agent)),
         agent: { id: agent.id, tier: agent.tier, enabled: agent.enabled, modes: agent.modes ?? null },
         mode,
         agentGrants: grants,

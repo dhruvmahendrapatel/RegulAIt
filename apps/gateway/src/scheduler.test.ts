@@ -81,7 +81,10 @@ import { closeAll, dropScratchDatabase } from "./testing/scratch-db.js";
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
 
-const SCRATCH_DB = "regulait_scheduler_adr0064_test";
+// Per-RUN unique (pid + timestamp): a fixed name plus beforeAll's
+// DROP ... WITH (FORCE) lets two concurrent runs on one host destroy each
+// other's database (PENDING §5); afterAll drops this one, so nothing persists.
+const SCRATCH_DB = `regulait_sched_adr0064_${process.pid}_${Date.now()}`;
 const scratchUrl = (() => {
   const u = new URL(DATABASE_URL);
   u.pathname = "/" + SCRATCH_DB;
@@ -648,20 +651,50 @@ describe("clean shutdown", () => {
 });
 
 // ===========================================================================
-// 6. THE SIX JOBS — registered, and (for four of them) wired end to end
+// 6. THE REGISTERED JOBS — six from ADR-0064, plus the ones later ADRs added
 // ===========================================================================
 
-describe("all six sweeps are registered", () => {
-  it("the registry names exactly the six, each with an ADR and a cadence", async () => {
+describe("every sweep is registered", () => {
+  it("the registry names exactly them, each with an ADR and a cadence", async () => {
     const registry = schedulerJobRegistry({ dataKey: DATA_KEY });
     expect([...registry.keys()].sort()).toEqual(
       [
         SCHEDULER_JOB_NAMES.approvalSla,
+        // ADR-0073 amendment (B7c): prunes shadow-canary OBSERVATIONS older
+        // than the org retention window — never config_versions (the audit
+        // substrate), never a live canary's evidence. Driven end-to-end in
+        // canary-observation-prune.test.ts; this list pins its registration.
+        SCHEDULER_JOB_NAMES.canaryObservationPrune,
+        // ADR-0090 amendment (B2a): records campaign expiry into the audit
+        // log, once per campaign — decides NOTHING (expiry stays computed on
+        // read). Driven end-to-end in grant-certification-ops.test.ts; this
+        // list pins its registration.
+        SCHEDULER_JOB_NAMES.certificationExpiry,
+        // ADR-0076: reconciles cross-batch duplicate imported cost lines —
+        // marked, never deleted. Driven end-to-end in cost-reconcile.test.ts;
+        // this list pins its registration.
+        SCHEDULER_JOB_NAMES.costReconciliation,
         SCHEDULER_JOB_NAMES.evalDrift,
+        // ADR-0100: re-fetches and re-adjudicates MCP tool manifests so a
+        // server nobody calls is still caught. Drives the LIVE path
+        // (connectUpstream + syncUpstreamTools + recordManifestScan) — there
+        // is no second adjudication. Driven end-to-end in
+        // mcp-admission-rescan.test.ts; this list pins its registration.
+        SCHEDULER_JOB_NAMES.mcpAdmissionRescan,
+        // ADR-0101: pulls each ENABLED upstream MCP registry and refreshes the
+        // federated CATALOGUE — and nothing else. It creates no server row and
+        // no grant, because turning a directory entry into a governed object is
+        // an explicit operator act, not something a timer does on the estate's
+        // behalf. Driven end-to-end in mcp-registry.test.ts; this list pins its
+        // registration.
+        SCHEDULER_JOB_NAMES.mcpRegistrySync,
         SCHEDULER_JOB_NAMES.mrmExpiry,
         SCHEDULER_JOB_NAMES.redteam,
         SCHEDULER_JOB_NAMES.reportSchedules,
         SCHEDULER_JOB_NAMES.spendAnomalies,
+        // ADR-0065: remote training jobs run on somebody else's compute for
+        // hours; polling them is a scheduler job, never a setInterval.
+        SCHEDULER_JOB_NAMES.trainingPoll,
       ].sort(),
     );
     for (const def of registry.values()) {

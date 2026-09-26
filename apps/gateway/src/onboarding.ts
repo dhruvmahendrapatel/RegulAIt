@@ -104,6 +104,11 @@ import { ENV_FALLBACK_PROVIDERS, platformEnvKey } from "./agents-connectors.js";
 import { envFallbackAllowed, loadOrgSettings } from "./org-settings.js";
 import { refuseIfSeatCapReached } from "./licensing.js";
 import { reconcileGroupRoles } from "./group-roles.js";
+// ADR-0074: a pack RE-APPLY over an existing profile is an edit of twelve
+// versioned fields, so it goes through the one choke point.
+import { applyRuleEdit, isRuleEditRefusal } from "./rule-writes.js";
+
+type ComplianceProfileRow = typeof complianceProfiles.$inferSelect;
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
@@ -464,6 +469,20 @@ export function registerOnboardingRoutes(
     // A pack IS a compliance-profile upsert — the SAME row shape
     // `POST /v1/compliance/profiles` writes. There is no parallel path, so the
     // §8.3 cascade picks it up with no knowledge that a wizard was involved.
+    //
+    // ADR-0074: which means it inherited the SAME defect. This route computes
+    // `plan.profile: 'update' | 'create'` above, so it knows perfectly well when
+    // it is about to overwrite an existing profile — and it wrote the row bare,
+    // so re-applying a pack over a profile somebody had versioned reported
+    // `mode: 'apply'`, wrote an audit row saying the pack was applied, and left
+    // enforcement on the old active version. It is now split the same way: a
+    // genuine create is a plain insert, an update goes through the choke point.
+    //
+    // Note the deliberate asymmetry with `/v1/compliance/profiles`: this pack
+    // does NOT name `redteamGatingClasses` / `redteamMinTrials` /
+    // `redteamFailOnSeverity`, so those three are left ALONE — exactly as they
+    // survived the old row-level upsert. Passing only the fields a route means
+    // to write is what preserves each route's own semantics.
     const values = {
       tag: pack.tag,
       requiredTemplateIds: null,
@@ -476,11 +495,37 @@ export function registerOnboardingRoutes(
       budgetEnforcement: null,
       guardrailModes: pack.profile.guardrailModes as never,
     };
-    const [profile] = await db
+    let profile: ComplianceProfileRow | undefined;
+    let versionMinted: number | null = null;
+    const [created] = await db
       .insert(complianceProfiles)
       .values(values)
-      .onConflictDoUpdate({ target: complianceProfiles.tag, set: values })
+      .onConflictDoNothing({ target: complianceProfiles.tag })
       .returning();
+    if (created) {
+      profile = created;
+    } else {
+      const [row] = await db
+        .select({ id: complianceProfiles.id })
+        .from(complianceProfiles)
+        .where(eq(complianceProfiles.tag, pack.tag));
+      if (!row) return reply.status(409).send({ error: "compliance_profile_write_conflict" });
+      const { tag: _tag, ...versioned } = values;
+      const edit = await applyRuleEdit<ComplianceProfileRow>(db, {
+        artifactType: "compliance_profile",
+        artifactId: row.id,
+        patch: versioned,
+        actorUserId: req.authCtx.userId ?? null,
+        label: `'${pack.label}' pack applied via POST /v1/onboarding/compliance-pack`,
+        auditObjectType: "compliance_profile",
+        auditRuleId: ONBOARDING_RULE_IDS.packApplied,
+      });
+      if (isRuleEditRefusal(edit)) {
+        return reply.status(edit.status).send({ error: edit.error, detail: edit.detail });
+      }
+      profile = edit.row;
+      versionMinted = edit.mintedVersion;
+    }
 
     if (project && !alreadyClassified) {
       await db
@@ -499,10 +544,24 @@ export function registerOnboardingRoutes(
       pack: pack.tag,
       plan,
       profile,
+      // ADR-0074 AMENDMENT (2026-08-09): `classifiedProject` was dropped when
+      // `versionMinted` was added, which is an unannounced response-shape
+      // change on a shipped route. No consumer reads it today — the wizard SPA
+      // renders `plan.classification` — but "nobody uses it" is not a reason to
+      // remove a field silently, and the ADR's change list did not mention it.
+      // Restored; `versionMinted` is ADDITIVE beside it.
       classifiedProject: project && !alreadyClassified ? project.name : null,
+      // ADR-0074: null on a create (nothing to version) and on a re-apply that
+      // changed nothing; a version number when the pack genuinely moved an
+      // enforcing field on a profile somebody had already versioned.
+      versionMinted,
       note:
         "a pack is a STARTING POINT the cascade composes strictest-wins with your org and project settings — " +
-        "it can only ever raise a floor, never relax one, and it is not a certification.",
+        "it can only ever raise a floor, never relax one, and it is not a certification." +
+        (versionMinted
+          ? ` This profile is VERSIONED, so the pack was applied as version ${versionMinted} and activated — ` +
+            `writing the row alone would have left enforcement on the previous version.`
+          : ""),
     };
   });
 

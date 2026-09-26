@@ -31,6 +31,21 @@ export const MODEL_PROVIDER_KINDS = [
   // internal gateway). It is a KIND, not a vendor — which endpoint is a
   // separate FK on the agent row, so this stays a closed vocabulary.
   "custom",
+  // ADR-0065: a model TRAINED BY THIS DEPLOYMENT — a RegulAIt-LLM artifact
+  // registered for inference. It is a kind rather than a vendor for the same
+  // reason 'custom' is: which artifact serves is a separate FK on the agent
+  // row, so this stays a closed vocabulary. It makes NO network call of its
+  // own (the artifact is queried in-process), which is why
+  // `defaultBaseUrlFor` returns null for it and why the credential path skips
+  // it entirely — there is no vendor to hold a key for.
+  //
+  // `resolveTrainingBackend`'s `ArtifactModelProvider` (in
+  // @regulait/training-provider) is the implementation; this package
+  // deliberately does not import it, because the artifact has to be LOADED
+  // from the database before it can be served and only the gateway can do
+  // that. `resolveModelProvider` therefore refuses this kind explicitly
+  // rather than silently returning something inert — see the case below.
+  "regulait_llm",
   "mock",
 ] as const;
 export type ModelProviderKind = (typeof MODEL_PROVIDER_KINDS)[number];
@@ -2124,6 +2139,24 @@ export class MockModelProvider implements ModelProvider {
       };
     }
 
+    // ADR-0066 §4 test/demo affordance: a genuine UPSTREAM/TRANSPORT failure,
+    // the ONLY class of failure that may trigger a provider fallback chain.
+    // Deliberately a thrown `ModelProviderError` and NOT a refusal — the whole
+    // point of ADR-0066's rule 1 is that those two are different, and a suite
+    // proving "a refusal does not fall back, an upstream error does" needs both
+    // reachable without a network. Same sentinel discipline as `<<refuse>>` and
+    // `<<emit-ssn>>` above: the mock never invents this.
+    //
+    // TWO FORMS, because a fallback test needs the primary to fail and the hop
+    // to succeed on the SAME prompt (the chain re-sends the caller's input
+    // verbatim, which is itself the correct behaviour):
+    //   `<<upstream-error>>`            — every model fails (chain exhaustion)
+    //   `<<upstream-error:some-model>>` — only that model id fails
+    const scopedFailure = /<<upstream-error:([^>]+)>>/.exec(lastUser);
+    if (scopedFailure ? scopedFailure[1]!.trim() === req.model : lastUser.includes("<<upstream-error>>")) {
+      throw new ModelProviderError(`mock: simulated upstream failure for model '${req.model}'`, 503);
+    }
+
     // ADR-0020 long tail: deterministic extended-thinking support so the
     // whole thinking path (blocks, signature, SSE deltas, ledger) is testable
     // with zero external keys. The thinking tokens are counted as OUTPUT
@@ -2387,6 +2420,18 @@ export function resolveModelProvider(
         wireProtocol: config.wireProtocol,
         ...(fetchImpl ? { fetchImpl } : {}),
       });
+    // ADR-0065 — a locally trained artifact. It CANNOT be built from a config
+    // object: serving it needs the artifact payload, which lives in the
+    // database. The gateway loads it and constructs `ArtifactModelProvider`
+    // itself, exactly as it does for a guarded 'custom' endpoint. Reaching
+    // this line means an agent claimed the kind without the gateway having
+    // resolved its artifact, and the honest answer is to say so loudly rather
+    // than hand back something that would answer nothing.
+    case "regulait_llm":
+      throw new ModelProviderError(
+        "regulait_llm agents are served from a stored training artifact, which the gateway resolves " +
+          "before dispatch — this registry cannot construct one from configuration alone",
+      );
     case "mock":
       return sharedMock;
   }
@@ -2457,6 +2502,12 @@ export function defaultBaseUrlFor(
     case "xai":
       return XAI_DEFAULT_BASE;
     case "custom":
+    // ADR-0065: an artifact this deployment trained is queried IN-PROCESS.
+    // There is no compiled vendor endpoint behind it, so there is nothing for
+    // the ADR-0062 strict posture to adjudicate — the same answer `mock` gets,
+    // and for the same reason. This is what makes a home-trained model usable
+    // on an air-gapped install.
+    case "regulait_llm":
     case "mock":
       return null;
     default:

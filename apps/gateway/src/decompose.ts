@@ -27,6 +27,7 @@ import {
   userAgentPolicies,
   type Db,
 } from "@regulait/db";
+import { agentHaltOf, loadExecutionMode, postureOf } from "./execution-posture.js";
 import { evaluateAgent, visibleTools, type AgentDecision, type ToolRef } from "@regulait/policy-kernel";
 import { validateGraph } from "@regulait/orchestration-kernel";
 import { isModelProviderKind, TASK_DECOMPOSITION_SENTINEL } from "@regulait/model-provider";
@@ -35,8 +36,10 @@ import {
   agentProviderToken,
   configuredProviders,
   executeGovernedDispatch,
+  mockShadowedByLive,
   type AgentRow,
 } from "./agents-connectors.js";
+import { refuseIfFeatureNotLicensed } from "./licensing.js";
 import { loadAgentRevocations, loadEntitlements, loadRoleAgentGrants } from "./entitlements.js";
 import { assertProjectAttribution } from "./projects.js";
 import { z } from "zod";
@@ -281,6 +284,19 @@ export function registerDecomposeRoutes(
   opts: { dataKey?: string } = {},
 ) {
   app.post("/v1/runs/decompose", async (req, reply) => {
+    // ADR-0052 §4: this is the flag the ADR names "advanced orchestration
+    // fan-out", enforced at its enabling act. Agent-driven decomposition IS
+    // the pillar-7 fan-out entry point — a LEAD agent drafting a parallel
+    // task graph of worker agents. Hand-authored runs through POST /v1/runs,
+    // and every run that already exists (events/dispatch/auto), stay open:
+    // basic orchestration is not tier-gated, and an existing run is committed
+    // footprint (§5).
+    const flagRefusal = await refuseIfFeatureNotLicensed(db, {
+      actorUserId: req.authCtx.userId,
+      feature: "advanced_orchestration",
+      what: "agent-driven task decomposition (orchestration fan-out)",
+    });
+    if (flagRefusal) return reply.status(flagRefusal.status).send(flagRefusal.body);
     const body = decomposeGoalSchema.parse(req.body);
     const userId = req.authCtx.userId;
     if (!userId) return reply.status(403).send({ error: "bootstrap_cannot_decompose" });
@@ -311,9 +327,13 @@ export function registerDecomposeRoutes(
     if (policy?.ceilingAgentId) {
       ceilingTier = registry.find((a) => a.id === policy.ceilingAgentId)?.tier ?? null;
     }
+    const decomposeExecutionMode = await loadExecutionMode(db);
     const evalFor = (a: AgentRow, mode: string): AgentDecision =>
       evaluateAgent({
         userId,
+        // ADR-0124 — decomposition dispatches a lead agent to draft the graph,
+        // so it is execution and is gated.
+        execution: postureOf(decomposeExecutionMode, agentHaltOf(a)),
         agent: { id: a.id, name: a.name, tier: a.tier, enabled: a.enabled, modes: a.modes ?? null },
         mode,
         agentGrants: grants,
@@ -331,7 +351,7 @@ export function registerDecomposeRoutes(
     // construction. The human can still reassign to any granted agent in the
     // editor before planning.
     const configured = await configuredProviders(db, opts.dataKey, userId);
-    const roster = registry.filter(
+    const entitledDispatchable = registry.filter(
       (a) =>
         a.enabled &&
         a.model &&
@@ -339,16 +359,40 @@ export function registerDecomposeRoutes(
         configured.has(agentProviderToken(a)) &&
         evalFor(a, WORKER_MODE).effect === "allow",
     );
+    // B6a (ADR-0095's own recorded residual, now closed): the WORKER roster
+    // obeys the same `mockShadowedByLive` predicate the invoke path's routing
+    // roster obeys. A mock worker in a plan is a node that will answer with
+    // canned prose; a mock LEAD writes the plan itself, so the whole task
+    // graph is nonsense — quieter than the routing defect the owner hit, and
+    // the same disease. Nothing is shadowed unless a live worker-entitled
+    // agent can genuinely serve, so the keyless demo (roster is all mocks) is
+    // byte-identical: `shadowedMocks` is empty and `roster === entitledDispatchable`.
+    const shadowedMocks = mockShadowedByLive(entitledDispatchable, () => true);
+    const roster = entitledDispatchable.filter((a) => !shadowedMocks.has(a.id));
+    const skippedCandidates = entitledDispatchable
+      .filter((a) => shadowedMocks.has(a.id))
+      .map((a) => ({ agentId: a.id, name: a.name, reason: "mock_shadowed_by_live" as const }));
 
-    // Lead = explicit pick ?? the caller's default agent ?? cheapest granted
-    // mock (always dispatchable with zero external keys).
-    const cheapestMock = roster
-      .filter((a) => a.provider === "mock")
-      .sort(
+    const cheapest = (pool: readonly AgentRow[]) =>
+      [...pool].sort(
         (a, b) =>
           (a.costPerMTokOut ?? Infinity) - (b.costPerMTokOut ?? Infinity) || a.tier - b.tier,
       )[0];
-    const leadId = body.leadAgentId ?? policy?.defaultAgentId ?? cheapestMock?.id ?? null;
+    // Lead = explicit pick ?? the caller's default agent ?? cheapest granted
+    // mock (always dispatchable with zero external keys).
+    //
+    // B6a: when mocks are shadowed the implicit fallback becomes the cheapest
+    // agent of the SURVIVING (all-live) roster under the identical sort,
+    // rather than the mock it used to be. Two facts make that surgical: the
+    // narrowed roster is all-mock or all-live and never both (a dispatchable
+    // live member is exactly what triggers shadowing), so with nothing
+    // shadowed this expression IS the old `cheapestMock`; and an EXPLICIT lead
+    // (`body.leadAgentId`) is resolved from the full registry below and is
+    // therefore never shadowed — an explicit choice is not routing.
+    const implicitLead = shadowedMocks.size
+      ? cheapest(roster)
+      : cheapest(roster.filter((a) => a.provider === "mock"));
+    const leadId = body.leadAgentId ?? policy?.defaultAgentId ?? implicitLead?.id ?? null;
     const lead = leadId ? registry.find((a) => a.id === leadId) : undefined;
     if (body.leadAgentId && !lead) return reply.status(404).send({ error: "unknown_agent" });
     if (!lead) {
@@ -381,7 +425,7 @@ export function registerDecomposeRoutes(
     const fallbackOwner =
       roster.find((a) => a.id === policy?.defaultAgentId) ??
       roster.find((a) => a.id === lead.id) ??
-      cheapestMock ??
+      implicitLead ??
       roster[0];
     if (!fallbackOwner) {
       return reply.status(422).send({
@@ -499,6 +543,9 @@ export function registerDecomposeRoutes(
         retried,
         costUsd: totals.costKnown ? totals.costUsd : null,
         ...(substitutions.length > 0 ? { substitutions } : {}),
+        // B6a: a worker candidate that was NOT offered to the lead is as
+        // explainable as one that was — same reason string as routing's.
+        ...(skippedCandidates.length > 0 ? { skippedCandidates } : {}),
       },
       effect: "allow",
       ruleId: "run-decomposed",
@@ -515,6 +562,7 @@ export function registerDecomposeRoutes(
         tokens: { inputTokens: totals.tokensIn, outputTokens: totals.tokensOut },
       },
       retried,
+      ...(skippedCandidates.length > 0 ? { skippedCandidates } : {}),
     };
   });
 }

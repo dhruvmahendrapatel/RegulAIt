@@ -4,6 +4,7 @@
  * own pending approvals, recent runs and spend. Every card links somewhere
  * real — nothing decorative.
  */
+import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../api/client";
@@ -17,6 +18,7 @@ import type {
 import { ago, approvalStageLabel, fmtUsd } from "../../api/format";
 import { useSession } from "../../session/SessionContext";
 import { PageHeader } from "../../shell/AppShell";
+import { SUITES, SuiteGlyph, suiteHome } from "../../shell/suites";
 import {
   Badge,
   Button,
@@ -40,6 +42,8 @@ export default function HomePage() {
         sub="Your governed AI delivery workspace — everything below is live."
       />
       <div className={v.stack}>
+        {auth?.isAdmin && <OrientationCard />}
+        {auth?.isAdmin && <SuiteLauncher />}
         {auth?.isAdmin && <SetupCard />}
         <div className={v.grid2}>
           <ApprovalsCard />
@@ -51,6 +55,184 @@ export default function HomePage() {
         </div>
       </div>
     </>
+  );
+}
+
+/**
+ * First-run orientation (ADR-0093). An admin landing on the console for the
+ * first time should understand the product in one screen: what the gateway is
+ * enforcing right now, the headline numbers, and where to start. Dismissal is
+ * a per-browser convenience stored in localStorage — it must never gate
+ * anything, and a cleared browser simply shows the card again.
+ */
+const ORIENTATION_KEY = "rg.homeOrientationDismissed";
+const readDismissed = () => {
+  try {
+    return localStorage.getItem(ORIENTATION_KEY) === "1";
+  } catch {
+    return false;
+  }
+};
+
+function OrientationCard() {
+  const [dismissed, setDismissed] = useState(readDismissed);
+  // deduped against the cards below — same query keys, no extra fetches
+  const approvals = useQuery({
+    queryKey: ["approvals"],
+    queryFn: () => api.get<{ approvals: Approval[] }>("/v1/approvals"),
+  });
+  const usage = useQuery({
+    queryKey: ["usage-events"],
+    queryFn: () => api.get<UsageEventsResponse>("/v1/usage-events?limit=100"),
+  });
+  const setup = useQuery({
+    queryKey: ["setup-status"],
+    queryFn: () => api.get<SetupStatusResponse>("/v1/setup/status"),
+  });
+  const pending = (approvals.data?.approvals ?? []).filter((a) => a.status === "pending").length;
+  const totals = usage.data?.totals ?? {};
+  // Dismissal hides the ORIENTATION (prose + start-here links), never the live
+  // numbers — those are a dashboard, not onboarding (owner feedback, 2026-08-21).
+  // "Show orientation" restores it; the choice stays a per-browser convenience.
+  const setStored = (on: boolean) => {
+    try {
+      if (on) localStorage.setItem(ORIENTATION_KEY, "1");
+      else localStorage.removeItem(ORIENTATION_KEY);
+    } catch {
+      /* storage unavailable — the toggle still works for this view */
+    }
+    setDismissed(on);
+  };
+  return (
+    <Card
+      title={dismissed ? "Governance at a glance" : "Start here — what this console governs"}
+      actions={
+        <Button
+          size="sm"
+          variant="ghost"
+          aria-label={dismissed ? "Show orientation" : "Dismiss orientation"}
+          onClick={() => setStored(!dismissed)}
+        >
+          {dismissed ? "Show orientation" : "Dismiss"}
+        </Button>
+      }
+    >
+      <div className={v.stack}>
+        {!dismissed && (
+          <p className={v.dim} style={{ maxWidth: "70ch" }}>
+            Every agent, connector and MCP call in this workspace passes through one gateway:
+            default-deny entitlements, human approvals, content guardrails, per-project cost
+            attribution and a full audit trail — enforced at the call, not reported after it.
+          </p>
+        )}
+        <div className={v.grid3}>
+          <div className={v.stat}>
+            <span className={v.statValue}>{pending}</span>
+            <span className={v.statLabel}>decisions waiting on a human</span>
+          </div>
+          <div className={v.stat}>
+            <span className={v.statValue}>{totals.events ?? 0}</span>
+            <span className={v.statLabel}>governed calls metered</span>
+          </div>
+          <div className={v.stat}>
+            <span className={v.statValue}>{fmtUsd(totals.costUsd)}</span>
+            <span className={v.statLabel}>attributed spend</span>
+          </div>
+        </div>
+        {!dismissed && (
+        <div className={v.row} style={{ flexWrap: "wrap" }}>
+          <Link to="/admin/posture">See your governance posture</Link>
+          <span className={v.faint} aria-hidden>
+            ·
+          </span>
+          <Link to="/admin/use-cases">Propose an AI use case</Link>
+          <span className={v.faint} aria-hidden>
+            ·
+          </span>
+          <Link to="/admin/inventory">Open the agent inventory</Link>
+          <span className={v.faint} aria-hidden>
+            ·
+          </span>
+          <Link to="/admin/cost">Open the cost dashboard</Link>
+        </div>
+        )}
+      </div>
+    </Card>
+  );
+}
+
+/**
+ * ADR-0094 — the product launcher. One tile per suite, rendered from the SAME
+ * array that scopes the sidebar (suites.tsx), so the launcher can never drift
+ * from the navigation. A tile shows a live number only where a query this page
+ * ALREADY runs can supply one (deduped by query key — no per-tile fetches); a
+ * suite without a cheap number shows none rather than inventing one.
+ */
+function SuiteLauncher() {
+  const approvals = useQuery({
+    queryKey: ["approvals"],
+    queryFn: () => api.get<{ approvals: Approval[] }>("/v1/approvals"),
+  });
+  const usage = useQuery({
+    queryKey: ["usage-events"],
+    queryFn: () => api.get<UsageEventsResponse>("/v1/usage-events?limit=100"),
+  });
+  const setup = useQuery({
+    queryKey: ["setup-status"],
+    queryFn: () => api.get<SetupStatusResponse>("/v1/setup/status"),
+  });
+  const runs = useQuery({
+    queryKey: ["runs"],
+    queryFn: () => api.get<{ runs: RunSummary[] }>("/v1/runs"),
+  });
+
+  const pending = (approvals.data?.approvals ?? []).filter((a) => a.status === "pending").length;
+  const stat = (suiteId: string): { value: string; label: string } | null => {
+    switch (suiteId) {
+      case "workspace":
+        return runs.data ? { value: String(runs.data.runs.length), label: "runs" } : null;
+      case "approvals-audit":
+        return approvals.data ? { value: String(pending), label: "waiting on a human" } : null;
+      case "cost-optimization":
+        return usage.data ? { value: fmtUsd(usage.data.totals?.costUsd), label: "attributed spend" } : null;
+      case "settings":
+        return setup.data
+          ? { value: `${setup.data.doneCount}/${setup.data.totalCount}`, label: "setup steps done" }
+          : null;
+      default:
+        return null;
+    }
+  };
+
+  return (
+    <div>
+      <h2 className={v.sectionTitle}>Products</h2>
+      <div className={v.tileGrid}>
+        {SUITES.map((su) => {
+          const n = stat(su.id);
+          return (
+            <Link
+              key={su.id}
+              to={su.id === "workspace" ? "/chat" : suiteHome(su)}
+              className={v.tile}
+              data-testid={`suite-tile-${su.id}`}
+            >
+              <span className={v.tileGlyph}>
+                <SuiteGlyph suiteId={su.id} />
+              </span>
+              <span className={v.tileName}>{su.name}</span>
+              <span className={v.tileDesc}>{su.purpose}</span>
+              {n && (
+                <span className={v.tileStat}>
+                  <span className={v.tileStatValue}>{n.value}</span>
+                  <span className={v.tileStatLabel}>{n.label}</span>
+                </span>
+              )}
+            </Link>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 

@@ -268,7 +268,7 @@ export default function LoginPage() {
           <summary>Sign in with an API key instead</summary>
           <form className={`${s.detailsBody} ${s.form}`} onSubmit={submitKey}>
             <p className={s.sub}>
-              Exchanges your RegulAIt API key for a browser session — the key never
+              Exchanges your regulAIt API key for a browser session — the key never
               lives in web storage.
             </p>
             <Field label="API key">

@@ -59,6 +59,7 @@ import { z } from "zod";
 import {
   agentProviderToken,
   configuredProviders,
+  enforceProjectCachedOutputPii,
   executeGovernedDispatch,
   type AgentRow,
   type DispatchOutcome,
@@ -66,7 +67,23 @@ import {
 import { loadAgentRevocations, loadRoleAgentGrants } from "./entitlements.js";
 import { assertProjectAttribution, projectPiiMode } from "./projects.js";
 import { PROJECT_HEADER } from "./mcp-proxy.js";
+// ADR-0070 — the compat surfaces' entitlement refusal gets a `policy` deny span
+// too: an SDK pointed at this gateway has no RegulAIt UI to look in.
+import { beginTrace, finishTrace, recordSpan } from "./tracing.js";
 import { effectiveTechniqueMode, loadOrgSettings } from "./org-settings.js";
+import {
+  lookupSemanticCache,
+  semanticCacheKey,
+  semanticCacheSavings,
+  storeSemanticCache,
+} from "./semantic-cache-shared.js";
+import { agentHaltOf, loadExecutionMode, postureOf } from "./execution-posture.js";
+import {
+  loadVirtualKeyContext,
+  virtualKeyAdmits,
+  virtualKeyAllowListRefusal,
+  type VirtualKeyContext,
+} from "./virtual-keys.js";
 
 export { PROJECT_HEADER };
 
@@ -87,18 +104,32 @@ export const COMPAT_MODE = "execute";
 export const COMPAT_ANTHROPIC_ROUTE = "POST /v1/messages";
 export const COMPAT_OPENAI_ROUTE = "POST /v1/chat/completions";
 export const MCP_PROXY_ROUTE = "POST /mcp/:serverId";
+/** ADR-0066 §1 — the discovery endpoint both provider SDKs call at setup.
+ * ONE route serving TWO envelopes, chosen by the `anthropic-version` header. */
+export const COMPAT_MODELS_ROUTE = "GET /v1/models";
 
 /** Routes that additionally accept the RegulAIt API key in `x-api-key`. Not a
  * weaker credential — the SAME key, under the header name Anthropic clients
- * send, so an `ANTHROPIC_BASE_URL`-based tool authenticates unmodified. */
-export const API_KEY_HEADER_ROUTES: ReadonlySet<string> = new Set([COMPAT_ANTHROPIC_ROUTE]);
+ * send, so an `ANTHROPIC_BASE_URL`-based tool authenticates unmodified.
+ * ADR-0066 adds `GET /v1/models`: the Anthropic SDK sends the same header on
+ * its model-list call, and a discovery endpoint that refused the credential the
+ * very next call will use would be a strange place to stop. */
+export const API_KEY_HEADER_ROUTES: ReadonlySet<string> = new Set([
+  COMPAT_ANTHROPIC_ROUTE,
+  COMPAT_MODELS_ROUTE,
+]);
 
 /** Routes whose existence is admin-configurable (ADR-0020). A disabled surface
  * answers Fastify's own 404 body, so it is indistinguishable from a route that
- * was never registered — we do not advertise a surface the admin turned off. */
+ * was never registered — we do not advertise a surface the admin turned off.
+ *
+ * ADR-0066 gates `GET /v1/models` the same way, on EITHER compat surface being
+ * enabled: a deployment that intercepts nothing should not answer a discovery
+ * call, and a client that can list models must be able to call one. */
 export const INTERCEPTION_GATED_ROUTES: ReadonlySet<string> = new Set([
   COMPAT_ANTHROPIC_ROUTE,
   COMPAT_OPENAI_ROUTE,
+  COMPAT_MODELS_ROUTE,
   MCP_PROXY_ROUTE,
 ]);
 
@@ -443,6 +474,15 @@ export interface CompatPrepared {
   /** COMPAT_IGNORED_FIELDS actually present on this request — accepted, not
    * honoured, and disclosed rather than dropped in silence. */
   ignoredFields: string[];
+  /** ADR-0066 §2/§3: the virtual key this compat call arrived on, threaded to
+   * the dispatch core so the key's allow-list and budget bind here exactly as
+   * they bind on the native invoke path. null on an ordinary API key. */
+  virtualKey: VirtualKeyContext | null;
+  /** ADR-0119: the caller's effective optimizer mode, resolved during prepare
+   * (where the user policy row is already read) so the dispatch step does not
+   * re-query it. `passthrough` disables the semantic cache here exactly as it
+   * does on the invoke path. */
+  routingMode: string;
 }
 
 export type CompatError = { status: number; error: string; detail: string };
@@ -610,9 +650,13 @@ export async function prepareCompatCall(
       .where(eq(agents.id, policy.ceilingAgentId));
     ceilingTier = ceiling?.tier ?? null;
   }
+  const compatExecutionMode = await loadExecutionMode(db);
   const evalFor = (a: AgentRow) =>
     evaluateAgent({
       userId,
+      // ADR-0124 — the IDE surface is a dispatch path and is gated like one.
+      // Developers' traffic is exactly what a halt is usually thrown for.
+      execution: postureOf(compatExecutionMode, agentHaltOf(a)),
       agent: { id: a.id, name: a.name, tier: a.tier, enabled: a.enabled, modes: a.modes ?? null },
       mode: COMPAT_MODE,
       agentGrants: grants,
@@ -621,9 +665,39 @@ export async function prepareCompatCall(
       ceilingTier,
     });
 
+  // ADR-0066 §3 — THE PER-KEY ALLOW-LIST AT THE COMPAT SURFACE. Loaded once
+  // here and threaded onto `prepared`, so the dispatch core sees it too and the
+  // two surfaces cannot diverge. Checked against the REQUESTED agent BEFORE
+  // routing, so the refusal names what the client asked for; the core re-checks
+  // the SERVED agent, which is what stops a router override or a fallback hop
+  // from becoming a way past the list.
+  const virtualKey = await loadVirtualKeyContext(db, req);
+  if (virtualKey) {
+    const refusal = virtualKeyAllowListRefusal(virtualKey, requested);
+    if (refusal) {
+      await db.insert(auditLog).values({
+        userId,
+        objectType: "virtual_key",
+        objectId: virtualKey.id,
+        detail: {
+          surface: "compat",
+          requestedModel: args.requestedModel,
+          agentId: requested.id,
+          agentName: requested.name,
+          ...(projectId ? { projectId } : {}),
+        },
+        effect: "deny",
+        ruleId: refusal.ruleId,
+        ruleChain: [],
+        reason: refusal.detail,
+      });
+      return { ok: false, status: refusal.status, error: refusal.error, detail: refusal.detail };
+    }
+  }
+
   const decision = evalFor(requested);
   if (decision.effect !== "allow") {
-    await db.insert(auditLog).values({
+    const [row] = await db.insert(auditLog).values({
       userId,
       objectType: "agent",
       objectId: requested.id,
@@ -638,7 +712,40 @@ export async function prepareCompatCall(
       ruleId: decision.ruleId,
       ruleChain: decision.ruleChain,
       reason: decision.reason,
+    }).returning({ id: auditLog.id });
+    // ADR-0070 — an entitlement refusal on a COMPAT surface gets the same
+    // `policy` deny span the native invoke path's does. An off-the-shelf SDK
+    // pointed at this gateway is precisely the caller most likely to be
+    // confused by "why did nothing happen", and it has no RegulAIt UI to check.
+    const denyTrace = await beginTrace(db, {
+      kind: "dispatch",
+      name: `denied: ${requested.name}`,
+      userId,
+      projectId,
     });
+    if (denyTrace) {
+      const at = new Date();
+      await recordSpan(db, denyTrace, {
+        kind: "policy",
+        name: `entitlement: ${requested.name}`,
+        status: "denied",
+        statusReason: decision.reason,
+        startedAt: at,
+        endedAt: at,
+        agentId: requested.id,
+        auditLogId: row?.id ?? null,
+        provider: requested.provider,
+        model: requested.model,
+        attributes: {
+          surface: "compat",
+          mode: COMPAT_MODE,
+          requestedModel: args.requestedModel,
+          ruleId: decision.ruleId,
+          effect: decision.effect,
+        },
+      });
+      await finishTrace(db, denyTrace, "denied", at);
+    }
     return { ok: false, status: 403, error: "agent_denied", detail: decision.reason };
   }
 
@@ -650,7 +757,15 @@ export async function prepareCompatCall(
   let served = requested;
   let routerOverrode = false;
   if (mode === "router_decides") {
-    const entitled = registry.filter((a) => evalFor(a).effect === "allow");
+    // ADR-0066: the router chooses only among targets the caller is entitled to
+    // AND — on a virtual key — that the key admits. Filtering here rather than
+    // letting the core refuse afterwards means a key's allow-list narrows the
+    // routing search space instead of turning a legitimate downroute into a 403.
+    const entitled = registry.filter(
+      (a) =>
+        evalFor(a).effect === "allow" &&
+        (!virtualKey || virtualKeyAdmits(virtualKey, { id: a.id, model: a.model })),
+    );
     const configured = await configuredProviders(db, dataKey, userId);
     const candidateRows = entitled.filter(
       (a) =>
@@ -737,6 +852,8 @@ export async function prepareCompatCall(
       streamingSuppressed,
       useStream: args.stream && !streamingSuppressed,
       ignoredFields: args.ignoredFields ?? [],
+      virtualKey,
+      routingMode: effectiveTechniqueMode(org, org.routingEnabled, policy?.routingMode ?? null),
     },
   };
 }
@@ -779,6 +896,131 @@ export async function executeCompatCall(
     )
     .join("\n");
 
+  // -------------------------------------------------------------------------
+  // ADR-0119 — THE SEMANTIC CACHE ON THE IDE PATH.
+  //
+  // Slide 10 sold "seven techniques applied automatically on every call" while
+  // this surface ran exactly one of them. The cache is the technique that most
+  // obviously belongs here: an IDE re-asks the same question constantly, and a
+  // hit means no provider call at all.
+  //
+  // TWO THINGS ARE DELIBERATELY DIFFERENT FROM THE INVOKE PATH, and both are
+  // consequences of the wire format rather than choices:
+  //
+  //  * `opt_in` CANNOT ENGAGE HERE. On the invoke path `opt_in` means the
+  //    caller sets `semanticCache: true`. An Anthropic- or OpenAI-shaped
+  //    request has no such field and inventing one would break wire
+  //    compatibility, so this surface honours `always` and, under `opt_in`,
+  //    behaves exactly as it does today. The posture read (ADR-0118) already
+  //    reports the policy, so an operator can see why.
+  //  * A TOOL-BEARING TURN IS NEVER CACHED. The answer to a request carrying
+  //    tools is not a pure function of the prompt — the model may call a tool
+  //    whose result differs every time — so serving a previous answer would be
+  //    wrong rather than merely stale.
+  // -------------------------------------------------------------------------
+  const org = await loadOrgSettings(db);
+  const wantCache =
+    org.semanticCachePolicy === "always" &&
+    prepared.routingMode !== "passthrough" &&
+    !args.tools &&
+    flatText.length > 0;
+  const cacheKey = wantCache ? semanticCacheKey(flatText) : null;
+
+  if (cacheKey) {
+    const hit = await lookupSemanticCache(db, {
+      userId: prepared.userId,
+      // scoped to what the CALLER asked for, not what routing served — the
+      // same scoping the invoke path uses, or the two would disagree about
+      // whose cache a routed call reads.
+      agentId: prepared.requested.id,
+      key: cacheKey,
+      ttlSeconds: org.semanticCacheTtlSeconds,
+    });
+    if (hit) {
+      // The input was gated upstream, but the CACHED OUTPUT may carry PII it
+      // acquired under a different, ungated attribution. Re-gate it rather
+      // than serve it onto a block-mode project.
+      const outputBlock = await enforceProjectCachedOutputPii(
+        db,
+        prepared.userId,
+        prepared.requested.id,
+        prepared.projectId,
+        hit.outputText,
+      );
+      if (outputBlock) {
+        return {
+          ok: false,
+          status: outputBlock.status,
+          error: outputBlock.error,
+          ...(outputBlock.detail ? { detail: outputBlock.detail } : {}),
+          ...(outputBlock.pii ? { pii: outputBlock.pii } : {}),
+        };
+      }
+      // A streaming caller still gets a stream: the cached answer is emitted
+      // as one delta, so the wire contract is unchanged and an IDE cannot tell
+      // a hit from a very fast model.
+      args.onText?.(hit.outputText);
+      const savings = semanticCacheSavings(prepared.requested, hit);
+      await db.insert(costEvents).values({
+        userId: prepared.userId,
+        objectType: "agent",
+        objectId: prepared.requested.id,
+        technique: "semantic_caching",
+        requestedAgentId: prepared.requested.id,
+        servedAgentId: prepared.requested.id,
+        baselineAgentId: prepared.requested.id,
+        estimatedTokensIn: hit.inputTokens,
+        estimatedTokensOut: hit.outputTokens,
+        estimatedTokensSaved: savings.savedTokens,
+        estimatedCostSavedUsd: savings.estimatedCostSavedUsd,
+        estimationBasis:
+          "semantic-caching: whole call served from the per-(user,agent) exact-match cache — " +
+          "full cached input+output tokens saved at the requested agent's list price",
+        ruleId: "semantic-cache-hit",
+        projectId: prepared.projectId,
+        detail: { model: hit.model, surface: `compat_${args.surface}` },
+      });
+      await db.insert(auditLog).values({
+        userId: prepared.userId,
+        objectType: "agent",
+        objectId: prepared.requested.id,
+        detail: {
+          surface: `compat_${args.surface}`,
+          mode: COMPAT_MODE,
+          semanticCache: "hit",
+          ...(prepared.projectId ? { projectId: prepared.projectId } : {}),
+        },
+        effect: "allow",
+        ruleId: "compat-semantic-cache-hit",
+        ruleChain: [],
+        reason:
+          `intercepted ${args.surface}-shaped call served from the semantic cache — ` +
+          `no provider was contacted and nothing was billed`,
+      });
+      // No usage_events: nothing was spent. The cost ledger records the SAVING,
+      // which is the only number a cache hit legitimately produces.
+      return {
+        ok: true,
+        result: {
+          servedAgentId: prepared.requested.id,
+          // the model that PRODUCED the cached answer, which is the honest
+          // thing to report; falling back to the requested model string only
+          // when the row predates model recording, so the wire response always
+          // carries a valid identifier.
+          model: hit.model ?? prepared.resolution.requestedModel,
+          outputText: hit.outputText,
+          stopReason: "end_turn",
+          refusal: false,
+          usage: { inputTokens: hit.inputTokens, outputTokens: hit.outputTokens },
+          costUsd: 0,
+          measuredCostSavedUsd: savings.estimatedCostSavedUsd,
+          credentialSource: "none",
+          projectBudgetAlerted: false,
+        },
+      };
+    }
+  }
+
   const outcome = await executeGovernedDispatch(db, dataKey, {
     userId: prepared.userId,
     served: prepared.served,
@@ -796,6 +1038,8 @@ export async function executeCompatCall(
     projectId: prepared.projectId,
     ...(args.onText ? { onText: args.onText } : {}),
     ...(args.onThinking ? { onThinking: args.onThinking } : {}),
+    virtualKey: prepared.virtualKey,
+    mode: COMPAT_MODE,
     detail: {
       surface: `compat_${args.surface}`,
       mode: COMPAT_MODE,
@@ -837,6 +1081,24 @@ export async function executeCompatCall(
       ? `intercepted ${args.surface}-shaped call served by agent ${prepared.served.name} (${prepared.resolution.servedModel})`
       : `intercepted ${args.surface}-shaped call failed: ${outcome.error}`,
   });
+
+  // ADR-0119 — store on a clean miss. Never a refusal, an empty answer, a
+  // PII-withheld marker or a tool-calling turn: each of those would make a
+  // transient or withheld state permanent for the whole TTL.
+  if (cacheKey && outcome.ok) {
+    const r = outcome.result;
+    if (!r.refusal && r.outputText && !r.pii?.withheld && !r.toolCalls?.length) {
+      await storeSemanticCache(db, {
+        userId: prepared.userId,
+        agentId: prepared.requested.id,
+        key: cacheKey,
+        outputText: r.outputText,
+        model: r.model,
+        inputTokens: r.usage.inputTokens,
+        outputTokens: r.usage.outputTokens,
+      });
+    }
+  }
 
   return outcome;
 }

@@ -19,11 +19,9 @@
 import type { FastifyInstance } from "fastify";
 import {
   and,
-  approvalRules,
   auditLog,
   complianceProfiles,
   connectorRevocations,
-  dataScopeRules,
   eq,
   isNull,
   lt,
@@ -32,14 +30,16 @@ import {
   count,
   orgSettings,
   ORG_SETTINGS_ID,
-  rateLimits,
   revocations,
+  traces,
   users,
   type Db,
   type OrgSettingsRow,
   type SQL,
 } from "@regulait/db";
 import {
+  INTERNATIONAL_PII_CATEGORIES,
+  type InternationalPiiCategory,
   revocationKindParamSchema,
   ruleKindParamSchema,
   setRevocationScopeSchema,
@@ -47,6 +47,13 @@ import {
   updateOrgSettingsSchema,
 } from "@regulait/shared";
 import { z } from "zod";
+// ADR-0070: the OTLP export endpoint is an admin-typed outbound URL and takes
+// the SAME write-time egress adjudication every other one takes (ADR-0043).
+import { checkCredentialBaseUrl } from "./credential-egress.js";
+// ADR-0074: `deployMode` is a VERSIONED field on all three restriction-rule
+// types, so this PATCH may not write the row directly — it goes through the one
+// choke point, which mints and activates a version when the rule is versioned.
+import { applyRuleEdit, currentEffectiveBody, isRuleEditRefusal } from "./rule-writes.js";
 import { recordSchedulerFailure, recordSchedulerSuccess } from "./scheduler-health.js";
 import { evaluateIpEnvelope, isValidCidr } from "./net-policy.js";
 import { countEnabledSsoProviders } from "./sso-providers.js";
@@ -100,6 +107,33 @@ export function effectiveTechniqueMode(
  * no-enforcement. */
 export function orgDefaultPiiMode(org: OrgSettingsRow): "block" | "warn" | "log" | null {
   return org.defaultPiiMode === "none" ? null : org.defaultPiiMode;
+}
+
+/**
+ * ADR-0117: the international national-identifier jurisdictions this
+ * deployment detects, filtered to the ones this build actually implements.
+ *
+ * The filter is not defensive decoration. The column is jsonb and a
+ * deployment can be rolled BACK to a build that knows fewer categories than
+ * the row lists; an unknown string must then be ignored rather than silently
+ * widening or narrowing anything, and it must never reach a detector lookup
+ * that would return undefined. Ships empty, so a deployment that has not
+ * opted in gets `[]` and `detectPII` never enters the international module.
+ */
+export function orgPiiInternationalCategories(
+  org: OrgSettingsRow,
+): readonly InternationalPiiCategory[] {
+  const raw = org.piiInternationalCategories ?? [];
+  return INTERNATIONAL_PII_CATEGORIES.filter((c) => raw.includes(c));
+}
+
+/** ADR-0117: the same value, resolved from the database. This is what the
+ * dispatch paths call — one indexed singleton read, exactly as
+ * `orgDefaultPiiMode`'s caller already does. */
+export async function piiInternationalCategories(
+  db: Db,
+): Promise<readonly InternationalPiiCategory[]> {
+  return orgPiiInternationalCategories(await loadOrgSettings(db));
 }
 
 /** ADR-0021: whether the platform-key ENV fallback may engage for `provider`.
@@ -219,10 +253,16 @@ export async function runAuditPruneOnce(
   db: Db,
   actorUserId: string | null,
   auto: boolean,
-): Promise<{ deleted: number; retainedDays: number | null; floorSource: string[] }> {
+): Promise<{
+  deleted: number;
+  /** ADR-0070: traces removed under the SAME §8.3 floor, in the same pass */
+  tracesDeleted: number;
+  retainedDays: number | null;
+  floorSource: string[];
+}> {
   const f = await retentionFloor(db);
   if (f.retainedDays == null || f.cutoff == null) {
-    return { deleted: 0, retainedDays: null, floorSource: [] };
+    return { deleted: 0, tracesDeleted: 0, retainedDays: null, floorSource: [] };
   }
   // A4: prune under the COMPOSED floor — the global cutoff, minus rows a
   // longer per-mode override still retains (MAX-only: never shortens).
@@ -255,7 +295,36 @@ export async function runAuditPruneOnce(
     ruleChain: [],
     reason: `pruned ${deleted.length} audit row(s) older than ${f.retainedDays}d (floor from [${f.floorSource.join(", ")}])${auto ? " — scheduled auto-prune" : ""}`,
   });
-  return { deleted: deleted.length, retainedDays: f.retainedDays, floorSource: f.floorSource };
+  // ADR-0070 — TRACES PRUNE ON THE SAME FLOOR, IN THE SAME PASS.
+  //
+  // This is why migration 0082 added no trace-retention knob. A span carries
+  // prompts, tool arguments and outputs — the most sensitive data in this
+  // system — and a separate dial would let an operator keep them for a year
+  // under a framework whose cascade says ninety days. So trace retention IS the
+  // §8.3 audit-retention floor, composed exactly the same way, applied here.
+  //
+  // The per-deploy-mode overrides above are deliberately NOT applied: they key
+  // off `audit_log.deploy_mode`, which a trace has no equivalent of, and
+  // inventing one would mean guessing. The global floor is used, which is the
+  // SHORTER of the two and therefore the safe direction. Spans go with their
+  // trace by ON DELETE CASCADE — one delete, no orphans.
+  let tracesDeleted = 0;
+  try {
+    const removed = await db
+      .delete(traces)
+      .where(lt(traces.startedAt, f.cutoff))
+      .returning({ id: traces.id });
+    tracesDeleted = removed.length;
+  } catch {
+    // never let trace pruning fail the audit prune it rides along with
+    tracesDeleted = 0;
+  }
+  return {
+    deleted: deleted.length,
+    tracesDeleted,
+    retainedDays: f.retainedDays,
+    floorSource: f.floorSource,
+  };
 }
 
 /**
@@ -326,10 +395,27 @@ export function envKeyPresence(): Array<{ provider: string; envVar: string; pres
  * from NON_ADMIN_ROUTES, exactly like the interception settings endpoints.
  * PUT is a partial update; every write is audited (objectType org_settings)
  * with the changed keys in the detail. */
+/**
+ * ADR-0070 — the ONE redaction this settings surface performs. An OTLP
+ * collector header is conventionally a bearer token, and this endpoint is
+ * admin-readable, so the VALUES never leave: the key names do (an operator has
+ * to be able to see which headers are set) and each value renders as a fixed
+ * marker. Same discipline as every credential surface in this codebase — the
+ * write is accepted, the read never returns the secret.
+ */
+export function redactSettings(row: OrgSettingsRow): OrgSettingsRow {
+  const headers = row.tracingOtlpHeaders as Record<string, string> | null;
+  if (!headers) return row;
+  return {
+    ...row,
+    tracingOtlpHeaders: Object.fromEntries(Object.keys(headers).map((k) => [k, "[redacted]"])),
+  };
+}
+
 export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db) {
   app.get("/v1/org/settings", async () => {
     const settings = await loadOrgSettings(db);
-    return { settings, envKeys: envKeyPresence() };
+    return { settings: redactSettings(settings), envKeys: envKeyPresence() };
   });
 
   app.put("/v1/org/settings", async (req, reply) => {
@@ -404,6 +490,46 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db) {
         }
       }
     }
+    // ADR-0098 — the two API-key lifetime dials must stay coherent WITH EACH
+    // OTHER AND WITH THE ROW ALREADY SAVED. A PATCH that lowers the ceiling
+    // below an existing default (or raises the default above an existing
+    // ceiling) would leave every no-argument issuance refusing itself, so the
+    // check runs over the MERGED values, not just the submitted ones. The
+    // database holds the same rule as a CHECK constraint; this is the honest
+    // 422 an admin sees instead of a 500.
+    if (body.apiKeyDefaultTtlDays !== undefined || body.apiKeyMaxTtlDays !== undefined) {
+      const nextDefault =
+        body.apiKeyDefaultTtlDays !== undefined ? body.apiKeyDefaultTtlDays : before.apiKeyDefaultTtlDays;
+      const nextMax =
+        body.apiKeyMaxTtlDays !== undefined ? body.apiKeyMaxTtlDays : before.apiKeyMaxTtlDays;
+      if (nextDefault !== null && nextMax !== null && nextDefault > nextMax) {
+        return reply.status(422).send({
+          error: "api_key_ttl_ordering",
+          detail:
+            `apiKeyDefaultTtlDays (${nextDefault}) cannot exceed apiKeyMaxTtlDays (${nextMax}) — ` +
+            `every key issued with no explicit expiry would be refused by the ceiling it was given. Nothing was saved.`,
+        });
+      }
+    }
+    // ADR-0070 — THE OTLP ENDPOINT IS AN ADMIN-TYPED OUTBOUND URL, so it goes
+    // behind ADR-0043's guard at WRITE time exactly as `mcp_servers.url` and
+    // `oidc_providers.issuerUrl` do. Refusing here means an operator learns the
+    // host is not allow-listed while they are configuring it, rather than at
+    // 3am when an export silently 403s. It is re-adjudicated on every export
+    // anyway (DNS can be re-pointed, an allow entry can be withdrawn) — this is
+    // the early, honest failure, not the enforcement point.
+    if (body.tracingOtlpEndpoint) {
+      const { decision } = await checkCredentialBaseUrl(db, body.tracingOtlpEndpoint);
+      if (!decision.ok) {
+        return reply.status(400).send({
+          error: "egress_blocked",
+          detail:
+            `the OTLP endpoint was refused by the egress guard: ${decision.reason}. Nothing was saved. ` +
+            `Add the host to the egress allow-list first — RegulAIt does not open an outbound ` +
+            `telemetry connection to a destination no admin approved.`,
+        });
+      }
+    }
     const [row] = await db
       .update(orgSettings)
       .set({
@@ -434,7 +560,7 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db) {
           ? `org settings updated: ${Object.keys(changed).join(", ")}`
           : "org settings written with no effective change",
     });
-    return reply.send({ settings: after });
+    return reply.send({ settings: redactSettings(after) });
   });
 
   // -------------------------------------------------------------------------
@@ -444,10 +570,20 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db) {
   // mode scope is a policy-posture edit, and this keeps the rule-creation
   // endpoints byte-identical (default = mode-unscoped = today).
   // -------------------------------------------------------------------------
-  const RULE_TABLES = {
-    approvals: approvalRules,
-    "rate-limits": rateLimits,
-    "data-scopes": dataScopeRules,
+  /**
+   * ADR-0074 — the rule kind an admin names in the URL, mapped to the
+   * `config_versions` ARTIFACT TYPE rather than to a drizzle table.
+   *
+   * The table map this used to be was the reason the defect was invisible to a
+   * naive `.update(approvalRules)` grep: the write went through a local
+   * variable. `deployMode` is a VERSIONED field for all three types, so the
+   * write now goes through the one choke point and mints a version when the
+   * artifact is versioned.
+   */
+  const RULE_ARTIFACT_TYPES = {
+    approvals: "approval_rule",
+    "rate-limits": "rate_limit",
+    "data-scopes": "data_scope_rule",
   } as const;
 
   app.patch("/v1/rules/:kind/:ruleId/deploy-mode", async (req, reply) => {
@@ -455,33 +591,34 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db) {
       .object({ kind: ruleKindParamSchema, ruleId: z.string().uuid() })
       .parse(req.params);
     const body = setRuleDeployModeSchema.parse(req.body);
-    const table = RULE_TABLES[kind];
-    const [before] = await db.select().from(table).where(eq(table.id, ruleId));
-    if (!before) return reply.status(404).send({ error: "unknown_rule" });
-    const [row] = await db
-      .update(table)
-      .set({ deployMode: body.deployMode })
-      .where(eq(table.id, ruleId))
-      .returning();
-    await db.insert(auditLog).values({
-      userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
-      objectType: "restriction_rule",
-      objectId: ruleId,
-      detail: {
-        phase: "rule-deploy-mode",
-        ruleKind: kind,
-        before: before.deployMode ?? null,
-        after: body.deployMode,
-      },
-      effect: "allow",
-      ruleId: "rule-deploy-mode-set",
-      ruleChain: [],
+    // read the current scope first, so the audit row keeps the before/after
+    // pair A4 shipped — the choke point adds the versioning half beside it
+    // rather than replacing a record somebody already reads
+    const beforeMode =
+      ((await currentEffectiveBody(db, RULE_ARTIFACT_TYPES[kind], ruleId))?.deployMode as string | null) ?? null;
+    const res = await applyRuleEdit<{ id: string; deployMode: string | null }>(db, {
+      artifactType: RULE_ARTIFACT_TYPES[kind],
+      artifactId: ruleId,
+      patch: { deployMode: body.deployMode ?? null },
+      actorUserId: req.authCtx.userId ?? null,
+      label: `deploy-mode set via PATCH /v1/rules/${kind}/:id/deploy-mode`,
       reason:
         body.deployMode == null
-          ? `${kind} rule '${ruleId}' deploy-mode scope cleared (mode-unscoped — applies to every call)`
-          : `${kind} rule '${ruleId}' scoped to deploy mode '${body.deployMode}' — it now binds only to calls whose attributed work lands on a ${body.deployMode} deploy target`,
+          ? `${kind} rule deploy-mode scope cleared (mode-unscoped — applies to every call)`
+          : `${kind} rule scoped to deploy mode '${body.deployMode}'`,
+      auditObjectType: "restriction_rule",
+      auditRuleId: "rule-deploy-mode-set",
+      auditDetail: {
+        phase: "rule-deploy-mode",
+        ruleKind: kind,
+        before: beforeMode,
+        after: body.deployMode ?? null,
+      },
     });
-    return reply.send(row);
+    if (isRuleEditRefusal(res)) {
+      return reply.status(res.status).send({ error: res.error, detail: res.detail });
+    }
+    return reply.send({ ...res.row, versionMinted: res.mintedVersion, note: res.note });
   });
 
   // -------------------------------------------------------------------------

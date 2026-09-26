@@ -87,6 +87,10 @@ interface ModelCard {
 interface StatusView {
   enforced: boolean;
   warnDays: number;
+  /** ADR-0086 §3's follow-up (batch B3): staleness-forces-recertification —
+   * off by default; deepens the dispatch gate and only bites while enforced */
+  stalenessRecertEnabled: boolean;
+  stalenessRecertThreshold: number;
   posture: "enforced" | "declared" | "absent";
   label: string;
   cards: number;
@@ -102,6 +106,83 @@ interface ExpiringView {
   warnDays: number;
   items: Array<SignOff & { cardId: string; intendedUse: string | null }>;
 }
+
+/** ADR-0086 — the ledger-computed block on the detail read. Rendered apart
+ * from the manually attached evidence, always; the two never blend. */
+interface AutofillView {
+  computedAt: string;
+  window: { days: number };
+  note: string;
+  sections: {
+    evals: {
+      runsEver: number;
+      runsInWindow: number;
+      latestRun: { id: string; passRate: number | null; cases: number; startedAt: string } | null;
+      groundedness: {
+        runsInWindow: number;
+        latestRun: { scorerKind: string; passRate: number | null } | null;
+        note?: string;
+      };
+      note?: string;
+    };
+    redteam: {
+      measured: boolean;
+      runsEver: number;
+      latestRun: {
+        asr: number | null;
+        asrLower: number | null;
+        asrUpper: number | null;
+        asrTrials: number;
+        measurementQuality: string | null;
+        startedAt: string;
+      } | null;
+      note: string;
+    };
+    guardrails: {
+      orgDefault: { modes: Record<string, string> } | null;
+      agentOverrides: Array<{ agentId: string | null; modes: Record<string, string> }>;
+      note: string;
+    };
+    usage: {
+      dispatchesInWindow: number;
+      costUsdInWindow: number;
+      lastDispatchAt: string | null;
+      note?: string;
+    };
+    grants: {
+      effectiveHolders: number;
+      directUsers: number;
+      grantingRoles: string[];
+      revokedUsers: number;
+      note: string;
+    };
+    drift: {
+      baselinesPinned: number;
+      latestScheduledRun: { regression: boolean | null; scoreDelta: number | null; startedAt: string } | null;
+      regressionsInWindow: number;
+      note?: string;
+    };
+    links: {
+      useCases: Array<{ id: string; name: string; status: string }>;
+      risks: Array<{ id: string; title: string; status: string; category: string }>;
+      vendors: Array<{ id: string; name: string; status: string }>;
+      note: string;
+    };
+  };
+}
+interface StalenessView {
+  certified: boolean;
+  lastCertifiedAt: string | null;
+  changesSinceCertification: Record<string, number> | null;
+  drifted: boolean;
+  summary: string | null;
+  note: string;
+}
+
+const modeSummary = (modes: Record<string, string>) =>
+  Object.entries(modes)
+    .map(([k, v2]) => `${k}=${v2}`)
+    .join(", ");
 
 const stateTone = (s: CardState) =>
   s === "approved" ? "ok" : s === "expiring" ? "warn" : s === "pending" ? "info" : "danger";
@@ -124,27 +205,42 @@ export default function ModelRiskPage() {
     queryFn: () => api.get<ExpiringView>("/v1/mrm/expiring"),
   });
 
+
   const [newAgent, setNewAgent] = useState("");
   const [newUse, setNewUse] = useState("");
   const [newLimits, setNewLimits] = useState("");
   const [newClaims, setNewClaims] = useState("");
   const [newRefs, setNewRefs] = useState("");
   const [openCard, setOpenCard] = useState<string | null>(null);
+  // ADR-0086 — the DETAIL read is the one that fills itself from the ledgers;
+  // it is fetched per open card (the list read stays cheap on purpose)
+  const cardDetail = useQuery({
+    queryKey: ["admin", "mrm-card", openCard],
+    enabled: openCard !== null,
+    queryFn: () =>
+      api.get<{ card: ModelCard & { autofill: AutofillView; staleness: StalenessView } }>(
+        `/v1/mrm/cards/${openCard}`,
+      ),
+  });
   const [approver, setApprover] = useState("");
   const [validUntil, setValidUntil] = useState("");
   const [evidenceRun, setEvidenceRun] = useState("");
+  // ADR-0086 B3: the staleness-recert threshold edit buffer (null = untouched)
+  const [stalenessThreshold, setStalenessThreshold] = useState<string | null>(null);
 
   const refreshAll = async () => {
-    await Promise.all([status.refetch(), cards.refetch(), expiring.refetch()]);
+    await Promise.all([status.refetch(), cards.refetch(), expiring.refetch(), cardDetail.refetch()]);
   };
 
   const detail = (cards.data?.cards ?? []).find((c) => c.id === openCard) ?? null;
+  const autofill = openCard === cardDetail.data?.card.id ? cardDetail.data.card.autofill : null;
+  const staleness = openCard === cardDetail.data?.card.id ? cardDetail.data.card.staleness : null;
 
   return (
     <>
       <PageHeader
         title="Model risk"
-        sub="A model card is one risk position on one model for one stated purpose: intended use, provider-stated data claims, known limitations, a recorded bias/fairness assessment, linked evidence, a named human sign-off, and the date that sign-off lapses. RegulAIt records and expires these; it does NOT measure bias or fairness — that requires running the model against a purpose-built dataset."
+        sub="A model card is one risk position on one model for one stated purpose: intended use, provider-stated data claims, known limitations, a recorded bias/fairness assessment, linked evidence, a named human sign-off, and the date that sign-off lapses. regulAIt records and expires these; it does NOT measure bias or fairness — that requires running the model against a purpose-built dataset."
       />
       <div className={v.stack}>
         <QueryGate
@@ -200,6 +296,65 @@ export default function ModelRiskPage() {
                     Run sweep
                   </Button>
                 </Field>
+              </div>
+              {/* ADR-0086 §3's follow-up (batch B3) — staleness forces
+                  recertification: a per-org opt-in DEEPENING the dispatch
+                  gate above. Off (default) = staleness informs and gates
+                  nothing, exactly as ADR-0086 shipped. */}
+              <div className={a.formRow}>
+                <Field label="Staleness forces recertification">
+                  <Select
+                    value={status.data?.stalenessRecertEnabled ? "on" : "off"}
+                    onChange={(e) =>
+                      void act.run(async () => {
+                        await api.post("/v1/mrm/enforcement", {
+                          enforced: status.data?.enforced ?? false,
+                          stalenessRecertEnabled: e.target.value === "on",
+                        });
+                        await refreshAll();
+                      }, "Staleness-recertification setting updated")
+                    }
+                  >
+                    <option value="off">off — drift informs, nothing more (default)</option>
+                    <option value="on">on — a certified card that drifted past the threshold refuses dispatch</option>
+                  </Select>
+                </Field>
+                <Field label="Drift threshold (ledger changes since certification)">
+                  <Input
+                    type="number"
+                    min={1}
+                    value={stalenessThreshold ?? status.data?.stalenessRecertThreshold ?? 1}
+                    onChange={(e) => setStalenessThreshold(e.target.value)}
+                  />
+                </Field>
+                {/* OUTSIDE a Field on purpose: a <label>-wrapped button
+                    inherits the label text as its accessible name */}
+                <div style={{ alignSelf: "flex-end" }}>
+                  <Button
+                    disabled={act.busy || stalenessThreshold === null}
+                    onClick={() =>
+                      void act.run(async () => {
+                        await api.post("/v1/mrm/enforcement", {
+                          enforced: status.data?.enforced ?? false,
+                          stalenessRecertThreshold: Number(stalenessThreshold),
+                        });
+                        setStalenessThreshold(null);
+                        await refreshAll();
+                      }, "Drift threshold saved")
+                    }
+                  >
+                    Save threshold
+                  </Button>
+                </div>
+              </div>
+              <div className={v.faint}>
+                Staleness-forces-recertification only bites while the dispatch gate above is on — it
+                deepens that gate, it creates none of its own. When armed, a card with a LIVE
+                sign-off whose ledgers have moved (eval runs, red-team runs, guardrail/grant/risk
+                changes, drift regressions — the same counts the card&apos;s certification-drift
+                banner shows) at least this many times since the last granting decision refuses
+                dispatch on the same 409 the expiry gate uses, naming the drift; a recertification
+                resets the clock. Off keeps drift purely informational.
               </div>
               <div className={v.faint}>{status.data?.note}</div>
               <div className={a.formRow}>
@@ -390,6 +545,112 @@ export default function ModelRiskPage() {
                   </span>
                 </div>
 
+                {/* ADR-0086 — staleness first: a certified card whose world
+                    moved says so before anything else on the card */}
+                {staleness?.drifted && (
+                  <div>
+                    <Badge tone="warn">certification drift</Badge>{" "}
+                    <strong>{staleness.summary}</strong>
+                    <div className={v.faint}>{staleness.note}</div>
+                  </div>
+                )}
+
+                {/* ADR-0086 — the computed block. Everything below this label
+                    is a query over the ledgers, never something an author
+                    typed, and it is rendered APART from the manually attached
+                    evidence further down. */}
+                {autofill && (
+                  <div className={v.stack}>
+                    <div>
+                      <Badge tone="info">Computed from ledgers at read time</Badge>{" "}
+                      <span className={v.faint}>
+                        window: last {autofill.window.days} days · nothing here is stored on the card
+                        or editable by its author
+                      </span>
+                    </div>
+                    <div>
+                      <strong>Evaluations:</strong> {autofill.sections.evals.runsEver} run
+                      {autofill.sections.evals.runsEver === 1 ? "" : "s"} recorded (
+                      {autofill.sections.evals.runsInWindow} in window)
+                      {autofill.sections.evals.latestRun?.passRate != null &&
+                        ` · latest pass rate ${Math.round(autofill.sections.evals.latestRun.passRate * 100)}%`}
+                      {autofill.sections.evals.note && (
+                        <span className={v.faint}> — {autofill.sections.evals.note}</span>
+                      )}
+                    </div>
+                    <div>
+                      <strong>Groundedness (ADR-0067):</strong>{" "}
+                      {autofill.sections.evals.groundedness.latestRun
+                        ? `latest ${autofill.sections.evals.groundedness.latestRun.scorerKind}` +
+                          (autofill.sections.evals.groundedness.latestRun.passRate != null
+                            ? ` pass rate ${Math.round(autofill.sections.evals.groundedness.latestRun.passRate * 100)}%`
+                            : "")
+                        : (autofill.sections.evals.groundedness.note ?? "unmeasured")}
+                    </div>
+                    <div>
+                      <strong>Red team (ADR-0068):</strong>{" "}
+                      {autofill.sections.redteam.measured && autofill.sections.redteam.latestRun ? (
+                        <>
+                          latest ASR{" "}
+                          {autofill.sections.redteam.latestRun.asr != null
+                            ? `${(autofill.sections.redteam.latestRun.asr * 100).toFixed(1)}%`
+                            : "—"}{" "}
+                          (95% CI{" "}
+                          {autofill.sections.redteam.latestRun.asrLower != null
+                            ? `${(autofill.sections.redteam.latestRun.asrLower * 100).toFixed(1)}%`
+                            : "—"}
+                          –
+                          {autofill.sections.redteam.latestRun.asrUpper != null
+                            ? `${(autofill.sections.redteam.latestRun.asrUpper * 100).toFixed(1)}%`
+                            : "—"}
+                          , n={autofill.sections.redteam.latestRun.asrTrials},{" "}
+                          {autofill.sections.redteam.latestRun.measurementQuality ?? "unlabelled"})
+                        </>
+                      ) : (
+                        <span>{autofill.sections.redteam.note}</span>
+                      )}
+                    </div>
+                    <div>
+                      <strong>Guardrails in force (ADR-0042):</strong>{" "}
+                      {autofill.sections.guardrails.orgDefault
+                        ? `org default ${modeSummary(autofill.sections.guardrails.orgDefault.modes)}`
+                        : "no org default configured"}
+                      {autofill.sections.guardrails.agentOverrides.length > 0 &&
+                        ` · agent override ${autofill.sections.guardrails.agentOverrides
+                          .map((o) => modeSummary(o.modes))
+                          .join(" · ")}`}
+                    </div>
+                    <div>
+                      <strong>Usage:</strong> {autofill.sections.usage.dispatchesInWindow} governed
+                      dispatch{autofill.sections.usage.dispatchesInWindow === 1 ? "" : "es"} in window ·
+                      ${autofill.sections.usage.costUsdInWindow.toFixed(4)}
+                      {autofill.sections.usage.lastDispatchAt &&
+                        ` · last ${ago(autofill.sections.usage.lastDispatchAt)}`}
+                    </div>
+                    <div>
+                      <strong>Entitlement standing:</strong>{" "}
+                      {autofill.sections.grants.effectiveHolders} user
+                      {autofill.sections.grants.effectiveHolders === 1 ? "" : "s"} may invoke this
+                      subject
+                      {autofill.sections.grants.grantingRoles.length > 0 &&
+                        ` (roles: ${autofill.sections.grants.grantingRoles.join(", ")})`}
+                    </div>
+                    <div>
+                      <strong>Drift standing (ADR-0044 §5):</strong>{" "}
+                      {autofill.sections.drift.baselinesPinned > 0
+                        ? `${autofill.sections.drift.baselinesPinned} baseline(s) pinned · ${autofill.sections.drift.regressionsInWindow} regression(s) in window`
+                        : (autofill.sections.drift.note ?? "no baseline pinned")}
+                    </div>
+                    <div>
+                      <strong>Linked governance objects:</strong>{" "}
+                      {autofill.sections.links.useCases.length} use case(s) ·{" "}
+                      {autofill.sections.links.risks.length} risk(s) ·{" "}
+                      {autofill.sections.links.vendors.length} vendor(s)
+                    </div>
+                    <div className={v.faint}>{autofill.note}</div>
+                  </div>
+                )}
+
                 <div className={v.faint}>
                   <strong>Bias / fairness:</strong> {detail.completeness.bias.declared} declared,{" "}
                   {detail.completeness.bias.assessed} assessed, {detail.completeness.bias.waived} waived,{" "}
@@ -502,7 +763,16 @@ export default function ModelRiskPage() {
                   </div>
                 )}
 
-                {/* evidence */}
+                {/* evidence — the MANUAL half, deliberately labelled apart
+                    from the computed block above (ADR-0086: the two never
+                    blend) */}
+                <div>
+                  <Badge tone="neutral">Attached evidence (manual)</Badge>{" "}
+                  <span className={v.faint}>
+                    what a human chose to cite — separate from, and never summed into, the computed
+                    block above
+                  </span>
+                </div>
                 <form
                   className={a.formRow}
                   onSubmit={(e) => {

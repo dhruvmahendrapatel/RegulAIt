@@ -115,8 +115,89 @@
   font-size: var(--text-sm);
 }
 
+/* An inline note next to a control, explaining what it will actually do.
+   `--rg-ink-muted` is the lowest ink step that is still AA for body copy —
+   anything fainter is decorative and must not carry meaning. */
+.hint {
+  color: var(--rg-ink-muted);
+  font-size: var(--text-sm);
+  max-width: 46ch;
+  align-self: center;
+}
+
 .divider {
   border: none;
   border-top: 1px solid var(--border);
   margin: var(--s2) 0;
+}
+
+/* ---- ADR-0094: the home launcher's suite tiles ----
+   One tile per product suite; the grid packs and stacks responsively (one
+   column at phone widths via auto-fill). A tile is a Link: its visible text is
+   its accessible name, so it carries no aria-label. */
+.tileGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: var(--s2);
+}
+.tile {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+  padding: var(--s2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  color: var(--text);
+  text-decoration: none;
+  transition: border-color var(--rg-dur-fast) var(--rg-ease),
+    box-shadow var(--rg-dur-fast) var(--rg-ease);
+}
+.tile:hover {
+  border-color: var(--rg-signal);
+  box-shadow: var(--shadow-md);
+  text-decoration: none;
+  color: var(--text);
+}
+.tileGlyph {
+  color: var(--rg-ink-muted);
+}
+.tile:hover .tileGlyph {
+  color: var(--rg-signal-700);
+}
+.tileName {
+  font-weight: 650;
+  font-size: var(--text-md);
+}
+.tileDesc {
+  font-size: var(--text-sm);
+  color: var(--text-dim);
+}
+.tileStat {
+  margin-top: auto;
+  padding-top: var(--s1);
+  display: flex;
+  align-items: baseline;
+  gap: var(--s1);
+}
+.tileStatValue {
+  font-size: var(--text-lg);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.tileStatLabel {
+  font-size: var(--text-xs);
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+/* A responsive row of stat tiles. `v.grid` is referenced by a dozen admin
+   screens (TracesPage, the cost dashboards, …) but had never been defined, so
+   those rows rendered as unstyled stacked blocks. Defining it here fixes every
+   one of them at once rather than editing each call site. */
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--s2);
 }

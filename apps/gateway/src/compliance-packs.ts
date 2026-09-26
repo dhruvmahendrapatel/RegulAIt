@@ -85,14 +85,18 @@ import {
   buildPackScorecard,
   createCompliancePackSchema,
   evaluatePackSchema,
+  diffCompliancePacks,
   evaluateReportAccess,
   packAttestationSchema,
   resolveReportPeriod,
+  VERSIONED_RULE_FIELDS,
   type CollectorParams,
   type EvidenceCollectorId,
   type PackControlAssessment,
   type PackScorecard,
+  type PackVersionSnapshot,
 } from "@regulait/shared";
+import { refuseIfFeatureNotLicensed } from "./licensing.js";
 import { callerProjectIds, callerTeamIds, resolveScopeProjectIds } from "./reporting.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
@@ -110,7 +114,10 @@ export const COMPLIANCE_PACK_RULE_IDS = {
   packRetired: "compliance-pack-retired",
   packDeleted: "compliance-pack-deleted",
   attestationRecorded: "compliance-pack-attestation-recorded",
+  cascadeProfileCreated: "compliance-pack-cascade-profile-created",
+  cascadeProfilePreserved: "compliance-pack-cascade-profile-preserved",
   evaluated: "compliance-pack-evaluated",
+  diffComputed: "compliance-pack-diff-computed",
   evaluationDenied: "compliance-pack-evaluation-denied",
   reportReadDenied: "compliance-pack-report-read-denied",
 } as const;
@@ -486,6 +493,7 @@ async function insertPack(
       description: input.description ?? null,
       provenance: input.provenance as Record<string, unknown>,
       cascadeTag: input.cascadeTag ?? null,
+      cascadePreset: input.cascadePreset ?? null,
       status: "draft",
       createdByUserId,
     })
@@ -505,6 +513,168 @@ async function insertPack(
     })),
   );
   return pack!;
+}
+
+// ---------------------------------------------------------------------------
+// Batch B1 (ADR-0058 §2's preset half) — pack activation seeds its cascade
+// profile.
+// ---------------------------------------------------------------------------
+
+export type CascadeProfileAction = "created" | "exists_preserved" | "no_preset" | "none";
+
+export interface CascadeProfileOutcome {
+  action: CascadeProfileAction;
+  tag: string | null;
+  profileId: string | null;
+  note: string;
+}
+
+/**
+ * FIND-OR-CREATE the `compliance_profiles` row a pack's cascade tag keys on,
+ * from the pack's own stored preset. The four cases, each honest in the
+ * response AND on the audit ledger:
+ *
+ *   none              cascadeTag is null (SOC 2): the framework forces no
+ *                     data-sensitivity cascade, so nothing is seeded and the
+ *                     response says why.
+ *   no_preset         the pack names a tag but carries no preset (every pack
+ *                     row that predates migration 0096, and any admin pack
+ *                     authored without one): behaviour is exactly pre-B1 — the
+ *                     admin authors the profile — but the activation now SAYS
+ *                     that instead of leaving the §8.3 half silently unwired.
+ *   created           no profile exists for the tag: one is created from the
+ *                     preset. A create cannot have `config_versions` rows at
+ *                     the instant it is written (the same invariant-4
+ *                     reasoning as every other create in this codebase), so
+ *                     no version is minted.
+ *   exists_preserved  a profile already exists: it is NEVER overwritten — an
+ *                     admin may have tuned it, and a pack activation quietly
+ *                     replacing tuned floors would be ADR-0074's silent-write
+ *                     class arriving through a wizard. The response and the
+ *                     ledger both carry the "presets not applied" note.
+ *
+ * IDEMPOTENT by construction: re-activation finds the profile it created and
+ * lands in `exists_preserved`; a concurrent activation loses the
+ * `onConflictDoNothing` race and lands there too.
+ *
+ * DEACTIVATION/RETIREMENT/DELETION OF A PACK NEVER DELETES THE PROFILE. The
+ * profile is live enforcement over every project carrying the tag; removing
+ * enforcement as a side effect of housekeeping on a REPORTING artifact is the
+ * silent-revocation class this project refuses (the same reason ADR-0019
+ * revocations are explicit acts). An admin who wants the floors gone deletes
+ * the profile deliberately.
+ */
+export async function ensureCascadeProfile(
+  db: Db,
+  pack: CompliancePackRow,
+  actorUserId: string | null,
+): Promise<CascadeProfileOutcome> {
+  if (!pack.cascadeTag) {
+    return {
+      action: "none",
+      tag: null,
+      profileId: null,
+      note:
+        "This framework forces no §8.3 cascade (cascadeTag is null) — it is an attestation framework " +
+        "about the organisation, not a data-sensitivity regime — so no compliance profile is seeded.",
+    };
+  }
+  const tag = pack.cascadeTag;
+  const [existing] = await db
+    .select({ id: complianceProfiles.id })
+    .from(complianceProfiles)
+    .where(eq(complianceProfiles.tag, tag));
+
+  const preset = (pack.cascadePreset ?? null) as Record<string, unknown> | null;
+  if (!preset) {
+    return {
+      action: "no_preset",
+      tag,
+      profileId: existing?.id ?? null,
+      note: existing
+        ? `This pack carries no cascade preset; the existing compliance profile '${tag}' is untouched.`
+        : `This pack names cascade tag '${tag}' but carries no preset, so no profile was created — ` +
+          `author one via POST /v1/compliance/profiles or classifying with '${tag}' will enforce nothing.`,
+    };
+  }
+
+  const preserved = (profileId: string): CascadeProfileOutcome => ({
+    action: "exists_preserved",
+    tag,
+    profileId,
+    note:
+      `Compliance profile '${tag}' already exists — the pack's presets were NOT applied over it. A ` +
+      `profile an admin may have tuned is never overwritten by pack activation; apply changes ` +
+      `deliberately via POST /v1/compliance/profiles, which versions them when the profile is versioned.`,
+  });
+
+  if (existing) {
+    await db.insert(auditLogTable).values({
+      userId: actorUserId ?? NO_IDENTITY,
+      objectType: "compliance_profile",
+      objectId: existing.id,
+      detail: { phase: "pack-cascade-profile", packId: pack.id, framework: pack.framework, packVersion: pack.version, tag },
+      effect: "allow",
+      ruleId: COMPLIANCE_PACK_RULE_IDS.cascadeProfilePreserved,
+      ruleChain: [],
+      reason:
+        `activation of compliance pack '${pack.framework}' v${pack.version} found an existing compliance ` +
+        `profile for '${tag}' and left it untouched — a pack activation never overwrites a profile an ` +
+        `admin may have tuned`,
+    });
+    return preserved(existing.id);
+  }
+
+  // Only the versionable profile columns can come from a preset — the create
+  // schema already validated that, and filtering here means a pre-validation
+  // row (or a hand-edited one) still cannot smuggle `tag`/identity columns.
+  const values: Record<string, unknown> = { tag };
+  for (const f of VERSIONED_RULE_FIELDS["compliance_profile"] ?? []) {
+    if (Object.prototype.hasOwnProperty.call(preset, f)) values[f] = preset[f];
+  }
+  const [created] = await db
+    .insert(complianceProfiles)
+    .values(values as typeof complianceProfiles.$inferInsert)
+    .onConflictDoNothing({ target: complianceProfiles.tag })
+    .returning({ id: complianceProfiles.id });
+  if (!created) {
+    // lost a concurrent-create race — the winner's profile stands, unedited
+    const [row] = await db
+      .select({ id: complianceProfiles.id })
+      .from(complianceProfiles)
+      .where(eq(complianceProfiles.tag, tag));
+    return preserved(row?.id ?? "");
+  }
+  await db.insert(auditLogTable).values({
+    userId: actorUserId ?? NO_IDENTITY,
+    objectType: "compliance_profile",
+    objectId: created.id,
+    detail: {
+      phase: "pack-cascade-profile",
+      packId: pack.id,
+      framework: pack.framework,
+      packVersion: pack.version,
+      tag,
+      preset,
+    },
+    effect: "allow",
+    ruleId: COMPLIANCE_PACK_RULE_IDS.cascadeProfileCreated,
+    ruleChain: [],
+    reason:
+      `activation of compliance pack '${pack.framework}' v${pack.version} created compliance profile ` +
+      `'${tag}' from the pack's preset — every Initiative/project classified '${tag}' now inherits its ` +
+      `floors through the existing §8.3 cascade (strictest-wins: a preset can only ever raise a floor)`,
+  });
+  return {
+    action: "created",
+    tag,
+    profileId: created.id,
+    note:
+      `Compliance profile '${tag}' was created from the pack's preset. Classifying an Initiative/project ` +
+      `with '${tag}' now drives the existing §8.3 cascade — PII mode, MCP default, retention and the other ` +
+      `floors the preset states. A preset is a starting point the cascade composes strictest-wins with your ` +
+      `org and project settings; it can only ever raise a floor, and it is not a certification.`,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -648,15 +818,227 @@ export function registerCompliancePackRoutes(app: FastifyInstance, db: Db): void
     return { pack, controls, attestations, disclaimer: COMPLIANCE_PACK_DISCLAIMER };
   });
 
+  // --- ADR-0087: the version diff + impact preview -------------------------
+
+  /**
+   * WHAT A FRAMEWORK REVISION CHANGES, REVIEWABLE BEFORE IT ACTIVATES.
+   *
+   * Two halves, deliberately distinct in kind:
+   *  - `diff` — the STRUCTURED DIFF of the two versions as authored
+   *    (shared `diffCompliancePacks`). Declared coverage classes are the
+   *    mapping author's CLAIMS, so this half diffs claims against claims.
+   *  - `impact` — the MEASURED half: both versions run through the SAME
+   *    evaluation machinery (`evaluatePack`, which is `runCollector` over the
+   *    real ledgers) against THIS deployment's CURRENT ledgers, and every
+   *    control whose computed status would move is reported ("CC6.6
+   *    satisfied→unsatisfied under v2's higher threshold"). If the two
+   *    versions evaluate identically, the response SAYS so rather than
+   *    implying change.
+   *
+   * READ-ONLY BY DESIGN: nothing activates, no report row is stored, no pack
+   * state moves. The ONE write is an append-only audit row
+   * (`compliance-pack-diff-computed`) — that row is what lets the activation
+   * audit later record honestly whether a diff was computed for its from→to
+   * pair, and an unrecorded read could not do that. Viewing the diff is NOT
+   * a precondition for activation — that would be ceremony, not control.
+   *
+   * Admin-only via the default gate. The impact preview is therefore always
+   * the org-wide (admin) view of the ledgers; it reflects the ledgers AT
+   * REQUEST TIME and predicts nothing about future evidence.
+   */
+  app.get("/v1/compliance-packs/:framework/diff", async (req, reply) => {
+    const { framework } = z.object({ framework: z.string().min(1).max(64) }).parse(req.params);
+    const q = z
+      .object({
+        from: z.coerce.number().int().min(1).max(10_000),
+        to: z.coerce.number().int().min(1).max(10_000),
+        period: z
+          .enum(["current_month", "last_month", "current_quarter", "last_quarter", "last_30_days"])
+          .default("current_quarter"),
+      })
+      .parse(req.query ?? {});
+
+    const loadVersion = async (version: number) => {
+      const [pack] = await db
+        .select()
+        .from(compliancePacks)
+        .where(and(eq(compliancePacks.framework, framework), eq(compliancePacks.version, version)));
+      if (!pack) return null;
+      const controls = await db
+        .select()
+        .from(compliancePackControls)
+        .where(eq(compliancePackControls.packId, pack.id))
+        .orderBy(compliancePackControls.controlRef);
+      return { pack, controls };
+    };
+
+    const fromV = await loadVersion(q.from);
+    if (!fromV) {
+      return reply
+        .status(404)
+        .send({ error: "invalid_reference", detail: `no '${framework}' pack at version ${q.from}` });
+    }
+    const toV = await loadVersion(q.to);
+    if (!toV) {
+      return reply
+        .status(404)
+        .send({ error: "invalid_reference", detail: `no '${framework}' pack at version ${q.to}` });
+    }
+
+    const snapshot = (v: NonNullable<typeof fromV>): PackVersionSnapshot => ({
+      title: v.pack.title,
+      description: v.pack.description,
+      provenance: v.pack.provenance,
+      cascadeTag: v.pack.cascadeTag,
+      controls: v.controls.map((c) => ({
+        controlRef: c.controlRef,
+        title: c.title,
+        description: c.description,
+        coverage: c.coverage,
+        collector: c.collector,
+        collectorParams: c.collectorParams,
+        minEvidenceCount: c.minEvidenceCount,
+        attestationRequired: c.attestationRequired,
+        ownerNote: c.ownerNote,
+      })),
+    });
+
+    const diff = diffCompliancePacks(snapshot(fromV), snapshot(toV));
+
+    // THE IMPACT PREVIEW — both versions through the SAME machinery, against
+    // the CURRENT ledgers. Reused, never reimplemented: two `evaluatePack`
+    // calls are the whole computation.
+    const now = new Date();
+    const resolved = resolveReportPeriod(q.period, now);
+    const evaluate = (v: NonNullable<typeof fromV>) =>
+      evaluatePack(db, {
+        pack: v.pack,
+        controls: v.controls,
+        projectIds: null, // admin-only route: the org-wide view
+        periodStart: resolved.start,
+        periodEnd: resolved.end,
+        period: q.period,
+        periodLabel: resolved.label,
+        scopeKind: "org",
+        scopeId: null,
+        now,
+      });
+    const fromCard = await evaluate(fromV);
+    const toCard = await evaluate(toV);
+
+    const fromByRef = new Map(fromCard.controls.map((c) => [c.controlRef, c]));
+    const toByRef = new Map(toCard.controls.map((c) => [c.controlRef, c]));
+    const changedRefs = new Set(diff.controlsChanged.map((c) => c.controlRef));
+    const addedRefs = new Set(diff.controlsAdded.map((c) => c.controlRef));
+    const removedRefs = new Set(diff.controlsRemoved.map((c) => c.controlRef));
+    const refs = [...new Set([...fromByRef.keys(), ...toByRef.keys()])].sort();
+
+    const controls = refs.map((ref) => {
+      const f = fromByRef.get(ref) ?? null;
+      const t = toByRef.get(ref) ?? null;
+      const definitionChange = addedRefs.has(ref)
+        ? ("added" as const)
+        : removedRefs.has(ref)
+          ? ("removed" as const)
+          : changedRefs.has(ref)
+            ? ("changed" as const)
+            : ("unchanged" as const);
+      const moved = (f?.status ?? null) !== (t?.status ?? null);
+      return {
+        controlRef: ref,
+        title: t?.title ?? f?.title ?? ref,
+        definitionChange,
+        fromStatus: f?.status ?? null,
+        toStatus: t?.status ?? null,
+        fromEvidenceCount: f?.evidenceCount ?? null,
+        toEvidenceCount: t?.evidenceCount ?? null,
+        moved,
+        detail: moved
+          ? t === null
+            ? `'${ref}' (${f!.status} under v${q.from}) is REMOVED in v${q.to} — its coverage claim disappears from the scorecard`
+            : f === null
+              ? `'${ref}' is NEW in v${q.to} and computes ${t.status} against the current ledgers`
+              : `'${ref}' ${f.status} under v${q.from} → ${t.status} under v${q.to} against the same current ledgers`
+          : null,
+      };
+    });
+    const moved = controls.filter((c) => c.moved);
+    const evaluationIdentical = moved.length === 0;
+
+    // The one write: an append-only audit row. It records that THIS from→to
+    // diff was computed, which is what the activation audit later consults.
+    await audit(
+      req.authCtx.userId ?? null,
+      toV.pack.id,
+      COMPLIANCE_PACK_RULE_IDS.diffComputed,
+      `pack diff computed for '${framework}' v${q.from} → v${q.to}: ${diff.summary.controlsAdded} ` +
+        `control(s) added, ${diff.summary.controlsRemoved} removed, ${diff.summary.controlsChanged} ` +
+        `changed${diff.summary.cascadeTagChanged ? ", CASCADE TAG CHANGED (high consequence)" : ""}; ` +
+        `impact preview against the current ledgers: ${moved.length} computed status(es) would move. ` +
+        `Read-only — nothing was activated`,
+      {
+        framework,
+        fromVersion: q.from,
+        toVersion: q.to,
+        summary: diff.summary,
+        statusesMoved: moved.length,
+      },
+    );
+
+    return {
+      framework,
+      from: { id: fromV.pack.id, version: fromV.pack.version, title: fromV.pack.title, status: fromV.pack.status },
+      to: { id: toV.pack.id, version: toV.pack.version, title: toV.pack.title, status: toV.pack.status },
+      diff,
+      impact: {
+        period: { period: q.period, label: resolved.label, start: resolved.start.toISOString(), end: resolved.end.toISOString() },
+        scope: "org",
+        fromTotals: fromCard.totals,
+        toTotals: toCard.totals,
+        controls,
+        statusesMoved: moved.length,
+        evaluationIdentical,
+        note: evaluationIdentical
+          ? `Both versions evaluate IDENTICALLY against this deployment's current ledgers for ` +
+            `${resolved.label} — the revision changes no computed status today. That is a statement ` +
+            `about the ledgers at request time, not a guarantee about any future period.`
+          : `${moved.length} control status(es) would move under v${q.to}, computed by running both ` +
+            `versions through the same evaluator against this deployment's CURRENT ledgers for ` +
+            `${resolved.label}. This reflects the ledgers at request time, not the future. ` +
+            `Attestations are recorded per pack version and do not carry over to a new version.`,
+      },
+      disclaimer: COMPLIANCE_PACK_DISCLAIMER,
+    };
+  });
+
   /** ACTIVATION IS THE VERSION SWITCH. Retiring the previous active version of
    * the same framework happens HERE, in the same request, because the partial
    * unique index would otherwise refuse the second active row — the database
    * enforces "one answer to which mapping evidenced this report". */
   app.post("/v1/compliance/packs/:id/activate", async (req, reply) => {
+    // ADR-0052 §4: compliance packs are a TIER FEATURE, enforced where the
+    // capability is ENABLED. ACTIVATION is the enabling act — it makes the
+    // pack the mapping reports use AND seeds the §8.3 cascade profile.
+    // Authoring stays open on purpose: POST /v1/compliance/packs and /seed
+    // produce DRAFT rows that "evaluate nothing until activated" (their own
+    // audit rows say so), and a pack already active keeps working (committed
+    // footprint, §5) — as do retire/delete, which only ever narrow.
+    const flagRefusal = await refuseIfFeatureNotLicensed(db, {
+      actorUserId: req.authCtx.userId,
+      feature: "compliance_packs",
+      what: "activating a compliance pack",
+    });
+    if (flagRefusal) return reply.status(flagRefusal.status).send(flagRefusal.body);
     const { id } = idParam.parse(req.params);
     const [pack] = await db.select().from(compliancePacks).where(eq(compliancePacks.id, id));
     if (!pack) return reply.status(404).send({ error: "unknown_compliance_pack" });
-    if (pack.status === "active") return { pack, retired: null, note: "already active" };
+    if (pack.status === "active") {
+      // batch B1 — re-activation is IDEMPOTENT including its cascade half: the
+      // profile is found-or-created here too, so re-running the gesture
+      // repairs a missing profile and never duplicates or overwrites one.
+      const cascadeProfile = await ensureCascadeProfile(db, pack, req.authCtx.userId ?? null);
+      return { pack, retired: null, cascadeProfile, note: "already active" };
+    }
     const now = new Date();
     const [previous] = await db
       .select()
@@ -682,16 +1064,51 @@ export function registerCompliancePackRoutes(app: FastifyInstance, db: Db): void
       .set({ status: "active", activatedAt: now })
       .where(eq(compliancePacks.id, id))
       .returning();
+    // ADR-0087, honest and NULLABLE: did anyone compute the v(previous)→v(new)
+    // diff before this activation? Recorded as a fact on the audit row — never
+    // as a gate. Requiring the diff to be VIEWED would be ceremony, not
+    // control; recording whether it was computed keeps the review story
+    // auditable without pretending a page-load is diligence. Null when there
+    // was no previous active version, because then there was nothing to diff.
+    let diffComputed: boolean | null = null;
+    if (previous) {
+      const [d] = await db
+        .select({ n: count() })
+        .from(auditLog)
+        .where(
+          and(
+            eq(auditLog.ruleId, COMPLIANCE_PACK_RULE_IDS.diffComputed),
+            sql`${auditLog.detail} ->> 'framework' = ${pack.framework}`,
+            sql`(${auditLog.detail} ->> 'fromVersion')::int = ${previous.version}`,
+            sql`(${auditLog.detail} ->> 'toVersion')::int = ${pack.version}`,
+          ),
+        );
+      diffComputed = (d?.n ?? 0) > 0;
+    }
+    // batch B1 — the §8.3 preset half. Runs AFTER the pack is active so the
+    // ledger reads in cause→effect order, and its outcome rides both the
+    // response and the activation audit row.
+    const cascadeProfile = await ensureCascadeProfile(db, activated!, req.authCtx.userId ?? null);
     await audit(
       req.authCtx.userId ?? null,
       id,
       COMPLIANCE_PACK_RULE_IDS.packActivated,
       `compliance pack '${pack.framework}' v${pack.version} activated${previous ? `, superseding v${previous.version}` : ""} ` +
-        `— activation makes it the mapping REPORTS use. It changes no enforcement by itself: the ` +
-        `cascade tag '${pack.cascadeTag ?? "(none)"}' is what an Initiative must carry for §8.3 to act`,
-      { framework: pack.framework, version: pack.version, supersededVersion: previous?.version ?? null },
+        `— activation makes it the mapping REPORTS use. Enforcement comes from the §8.3 cascade: ` +
+        `${cascadeProfile.note}`,
+      {
+        framework: pack.framework,
+        version: pack.version,
+        supersededVersion: previous?.version ?? null,
+        diffComputed,
+        cascadeProfile: { action: cascadeProfile.action, tag: cascadeProfile.tag, profileId: cascadeProfile.profileId },
+      },
     );
-    return { pack: activated, retired: previous ? { id: previous.id, version: previous.version } : null };
+    return {
+      pack: activated,
+      retired: previous ? { id: previous.id, version: previous.version } : null,
+      cascadeProfile,
+    };
   });
 
   app.delete("/v1/compliance/packs/:id", async (req, reply) => {
@@ -699,17 +1116,31 @@ export function registerCompliancePackRoutes(app: FastifyInstance, db: Db): void
     const [pack] = await db.select().from(compliancePacks).where(eq(compliancePacks.id, id));
     if (!pack) return reply.status(404).send({ error: "unknown_compliance_pack" });
     await db.delete(compliancePacks).where(eq(compliancePacks.id, id));
+    // batch B1 — deleting a pack NEVER deletes the compliance profile its tag
+    // seeded. The profile is live enforcement over every project carrying the
+    // tag; removing enforcement as a side effect of withdrawing a REPORTING
+    // artifact is the silent-revocation class this project refuses. The
+    // response says so instead of leaving the admin to wonder.
+    const profileNote = pack.cascadeTag
+      ? ` The compliance profile for '${pack.cascadeTag}' (if one exists) is deliberately KEPT — it is ` +
+        `live enforcement, and withdrawing a mapping must not silently relax floors. Delete the profile ` +
+        `deliberately if that is what you intend.`
+      : "";
     await audit(
       req.authCtx.userId ?? null,
       id,
       COMPLIANCE_PACK_RULE_IDS.packDeleted,
       `admin deleted compliance pack '${pack.framework}' v${pack.version} — its controls and ` +
         `attestations cascade with it; already-generated pack REPORTS survive, because an artifact an ` +
-        `auditor holds must not vanish when the mapping is withdrawn`,
-      { framework: pack.framework, version: pack.version },
+        `auditor holds must not vanish when the mapping is withdrawn.${profileNote}`,
+      { framework: pack.framework, version: pack.version, cascadeTag: pack.cascadeTag },
       "deny",
     );
-    return { deleted: true };
+    return {
+      deleted: true,
+      note:
+        `Already-generated reports survive; controls and attestations cascade with the pack.${profileNote}`,
+    };
   });
 
   /** the ONLY human-recordable input — and it is `attested`, never `satisfied` */

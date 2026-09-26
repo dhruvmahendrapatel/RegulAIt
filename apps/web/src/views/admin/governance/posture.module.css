@@ -1,0 +1,36 @@
+/* ADR-0082 — the boardroom posture one-pager. Board-shaped and PRINT-FRIENDLY
+ * with CSS only (no PDF dependency — the ADR-0047 §3 rendering decision stays
+ * unresolved on purpose): printing the page hides the app chrome and lets the
+ * one-pager flow as a document. Tokens only, like every other admin surface. */
+
+.headline {
+  font-size: calc(var(--text-xl) * 1.35);
+  font-weight: 750;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+
+.oneLiner {
+  color: var(--text-dim);
+  font-size: var(--text-sm);
+  max-width: 60ch;
+}
+
+.sectionLink {
+  font-size: var(--text-xs);
+}
+
+@media print {
+  /* hide the app chrome — the posture content IS the document */
+  :global(aside),
+  :global(header) {
+    display: none !important;
+  }
+  :global(main) {
+    padding: 0 !important;
+    overflow: visible !important;
+  }
+  .noPrint {
+    display: none !important;
+  }
+}

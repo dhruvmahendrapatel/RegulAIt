@@ -1,8 +1,26 @@
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { and, auditLog, createDb, eq, runMigrations, usageEvents, type Db } from "@regulait/db";
+import { and, auditLog, costEvents, createDb, eq, runMigrations, usageEvents, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
+
+/**
+ * The most recent row by `at`.
+ *
+ * NEVER index a bare SELECT's result by position. Postgres does not promise
+ * insertion order without an ORDER BY, and two CI failures in this repo came
+ * from exactly that: a test read `rows[rows.length - 1]` as "the row just
+ * written", passed locally for months, and failed the first time the physical
+ * row order came back the other way round. Sorting by the column that actually
+ * carries the ordering makes the assertion mean what it says.
+ */
+function latestRow<T extends { at: Date }>(rows: readonly T[]): T {
+  const sorted = [...rows].sort((a, b) => a.at.getTime() - b.at.getTime());
+  const last = sorted[sorted.length - 1];
+  if (!last) throw new Error("latestRow: no rows");
+  return last;
+}
+
 
 /**
  * §8.4 PII ENFORCEMENT (pillar 3) — the compliance cascade's piiMode turned
@@ -169,7 +187,7 @@ describe("§8.4 model dispatch PII enforcement", () => {
     expect(await usageCount(blockProj)).toBe(before + 1);
     // and the withheld usage row records COUNTS only, never the substring
     const rows = await db.select().from(usageEvents).where(eq(usageEvents.projectId, blockProj));
-    const latest = rows[rows.length - 1]!;
+    const latest = latestRow(rows);
     const detail = latest.detail as { pii?: { action: string; outputHits: unknown[] } };
     expect(detail.pii?.action).toBe("block");
     expect(JSON.stringify(detail)).not.toContain(SSN);
@@ -211,7 +229,7 @@ describe("§8.4 model dispatch PII enforcement", () => {
     expect(d.outputText).not.toContain("output withheld"); // no user-visible change
     expect(await usageCount(logProj)).toBe(before + 1);
     const rows = await db.select().from(usageEvents).where(eq(usageEvents.projectId, logProj));
-    const detail = rows[rows.length - 1]!.detail as { pii?: { action: string; inputHits: unknown[] } };
+    const detail = latestRow(rows).detail as { pii?: { action: string; inputHits: unknown[] } };
     expect(detail.pii?.action).toBe("log");
     expect(JSON.stringify(detail)).not.toContain(SSN); // counts only
   });
@@ -314,5 +332,203 @@ describe("§8.4 audit-log retention pruning", () => {
     // the prune itself is audited (a keep-forever meta row)
     const meta = await db.select().from(auditLog).where(eq(auditLog.ruleId, "audit-log-pruned"));
     expect(meta.length).toBeGreaterThan(0);
+  });
+});
+
+describe("§8.4 the semantic cache must not become a PII bypass", () => {
+  // Found driving pillar 3 end-to-end: a cache HIT returned the cached output
+  // and the request never reached dispatchAttempt, where the only PII gate
+  // lived. So a PII prompt cached under an ungated (no-project) call was served
+  // verbatim on a block-classified replay. These two tests pin that shut, and
+  // are written to FAIL if the gates are removed (verified by reverting).
+
+  it("a PII prompt cached with NO project is refused when replayed on a block project", async () => {
+    const shared = `please summarise: my SSN is ${SSN}`;
+    // 1. fill the cache under NO project — legitimately ungated
+    const fill = await invokeCache(shared, undefined);
+    expect(fill.statusCode).toBe(200);
+
+    // 2. replay the identical prompt attributed to the block project
+    const replay = await invokeCache(shared, blockProj);
+    expect(replay.statusCode, "the cached PII prompt must NOT be served on a block project").toBe(403);
+    expect(replay.json().error).toBe("pii_blocked");
+
+    // NON-VACUOUS: the SAME prompt on a plain project still serves from cache,
+    // so 403 is the gate biting, not the cache being broken.
+    const plainReplay = await invokeCache(shared, plainProj);
+    expect(plainReplay.statusCode).toBe(200);
+  });
+
+  it("a blocked cache replay writes NO estimate cost_events row for the project", async () => {
+    const shared = `cache me: contact SSN ${SSN}`;
+    await invokeCache(shared, undefined); // fill, ungated
+    // DELTAS around the blocked replay, not absolute counts: earlier tests in
+    // this file legitimately bill blockProj (the block-OUTPUT case writes a
+    // usage row), so what this asserts is that the REFUSAL itself adds nothing.
+    const costBefore = (
+      await db.select().from(costEvents).where(eq(costEvents.projectId, blockProj))
+    ).length;
+    const usageBefore = await usageCount(blockProj);
+
+    const replay = await invokeCache(shared, blockProj);
+    expect(replay.statusCode).toBe(403);
+
+    const costAfter = (
+      await db.select().from(costEvents).where(eq(costEvents.projectId, blockProj))
+    ).length;
+    // the estimate ledger must not gain a phantom row for a call that was refused
+    expect(costAfter, "a blocked call must not leave a semantic_caching estimate row").toBe(costBefore);
+    // and no NEW measured spend either
+    expect(await usageCount(blockProj), "a blocked call must not bill the project").toBe(usageBefore);
+  });
+});
+
+async function invokeCache(input: string, projectId: string | undefined) {
+  return app.inject({
+    method: "POST",
+    url: `/v1/agents/${agentId}/invoke`,
+    headers: danaAuth,
+    payload: {
+      mode: "execute",
+      input,
+      dispatch: true,
+      semanticCache: true,
+      ...(projectId ? { projectId } : {}),
+    },
+  });
+}
+
+describe("§8.4 the deployment-wide floor: omitting the project is no longer an exit", () => {
+  // ADR-0021 amendment (owner decision, 2026-08-13). Before it,
+  // `projectPiiMode(db, null)` returned null by design — so the SAME prompt
+  // that a block project refused sailed through when the caller simply left
+  // `projectId` off the body. One keystroke of omission undid the whole §8.4
+  // gate. Now an unattributed dispatch resolves to the org defaultPiiMode:
+  // 'none' (the shipped default) keeps old behaviour byte-identical, and an
+  // org that sets 'block' gets a floor with no attribution dodge under it.
+
+  const setFloor = async (mode: "none" | "log" | "warn" | "block") => {
+    const r = await app.inject({
+      method: "PUT", url: "/v1/org/settings", headers: AUTH,
+      payload: { defaultPiiMode: mode },
+    });
+    expect(r.statusCode).toBe(200);
+  };
+  const invokeUnattributed = (input: string, extra: Record<string, unknown> = {}) =>
+    app.inject({
+      method: "POST",
+      url: `/v1/agents/${agentId}/invoke`,
+      headers: danaAuth,
+      payload: { mode: "execute", input, dispatch: true, ...extra },
+    });
+
+  afterAll(async () => {
+    // org_settings is shared by every file after this one — leave it as found
+    await setFloor("none");
+  });
+
+  it("floor unset (the default): an unattributed PII prompt still runs — old behaviour byte-identical", async () => {
+    const r = await invokeUnattributed(`my SSN is ${SSN}, summarise this`);
+    expect(r.statusCode).toBe(200);
+  });
+
+  it("floor 'block': the identical unattributed prompt is refused BEFORE the provider, audited without a projectId", async () => {
+    await setFloor("block");
+    const before = (await db.select().from(usageEvents).where(eq(usageEvents.userId, danaId))).length;
+
+    const r = await invokeUnattributed(`my SSN is ${SSN}, summarise this floor-test`);
+    expect(r.statusCode).toBe(403);
+    expect(r.json().error).toBe("pii_blocked");
+
+    // no model call, no bill
+    const after = (await db.select().from(usageEvents).where(eq(usageEvents.userId, danaId))).length;
+    expect(after, "a floor block must not bill the user").toBe(before);
+
+    // the deny is in the one audit trail, and carries NO projectId — the
+    // absence is the point: this row exists precisely because nothing else
+    // governed the call
+    const denies = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.userId, danaId), eq(auditLog.ruleId, "pii-blocked"), eq(auditLog.effect, "deny")));
+    const floorDeny = latestRow(denies);
+    expect((floorDeny.detail as { projectId?: string }).projectId).toBeUndefined();
+
+    // clean input still runs — the floor enforces a MODE, not a lockout
+    const clean = await invokeUnattributed("nothing personal in here at all");
+    expect(clean.statusCode).toBe(200);
+  });
+
+  it("floor 'block' closes the cache's remaining leg: fill ungated, replay STILL unattributed, refused", async () => {
+    // The earlier cache fix stopped an ungated fill from serving an ATTRIBUTED
+    // block-project replay. The leg it left open: fill ungated, replay ungated
+    // — no project ever enters the picture, so only a floor can bite.
+    await setFloor("none");
+    const shared = `cache-under-no-floor: SSN ${SSN}`;
+    expect((await invokeCache(shared, undefined)).statusCode).toBe(200); // fill, legitimately ungated
+
+    await setFloor("block");
+    const replay = await invokeCache(shared, undefined);
+    expect(replay.statusCode, "the cached PII must not be served under the floor").toBe(403);
+    expect(replay.json().error).toBe("pii_blocked");
+  });
+
+  it("floor 'warn': proceeds with the pii warning attached, never refused", async () => {
+    await setFloor("warn");
+    const r = await invokeUnattributed(`ssn ${SSN} in a warn-floor dispatch`);
+    expect(r.statusCode).toBe(200);
+    expect(r.json().dispatch.pii).toMatchObject({ mode: "warn", action: "warn" });
+  });
+
+  it("the connector path is under the same floor — the old ternary bypass is gone", async () => {
+    await setFloor("block");
+    const r = await app.inject({
+      method: "POST",
+      url: `/v1/connectors/${connectorId}/invoke`,
+      headers: danaAuth,
+      payload: { operation: "write", object: "records", payload: { note: `ssn ${SSN}` } }, // no projectId
+    });
+    expect(r.statusCode).toBe(403);
+    expect(r.json().error).toBe("pii_blocked");
+  });
+
+  it("a matched compliance framework still WINS over the floor — floor 'block' does not harden a warn project", async () => {
+    await setFloor("block");
+    // warnProj's cascade says warn; the floor never overrides a framework
+    const r = await invoke(`ssn ${SSN} on the warn project under a block floor`, warnProj);
+    expect(r.statusCode).toBe(200);
+    expect(r.json().dispatch.pii).toMatchObject({ mode: "warn" });
+  });
+
+  it("floor 'block' suppresses an UNATTRIBUTED delta stream — buffered JSON, disclosed", async () => {
+    // ADR-0019's rule, now under the floor: an output-phase block cannot decide
+    // until it has the whole text, and SSE deltas would put raw model bytes on
+    // the wire first. A block PROJECT already suppressed the stream; a block
+    // FLOOR must do the same for the stream that names no project at all.
+    await setFloor("block");
+    const r = await invokeUnattributed("stream me something ordinary", { stream: true });
+    expect(r.statusCode).toBe(200);
+    expect(r.headers["content-type"]).toContain("application/json"); // not SSE
+    expect(r.json().streamingSuppressed).toBe(true);
+
+    // floor off → the same request streams again (SSE), proving the
+    // suppression above came from the floor and not from a broken stream path
+    await setFloor("none");
+    const streams = await invokeUnattributed("stream me something ordinary", { stream: true });
+    expect(streams.statusCode).toBe(200);
+    expect(streams.headers["content-type"]).toContain("text/event-stream");
+  });
+
+  it("a DANGLING projectId is refused at the attribution boundary — a made-up project is never an exit", async () => {
+    await setFloor("block");
+    const r = await invokeUnattributed(`ssn ${SSN} on a bogus project`, {
+      projectId: "00000000-0000-4000-8000-000000000000",
+    });
+    // assertProjectAttribution 400s an unknown project before the PII
+    // resolver runs, so this path can never reach a dispatch at all. The
+    // resolver's own dangling→floor fallback is defense-in-depth behind this
+    // gate, for any future call site that forgets the attribution check.
+    expect(r.statusCode).toBe(400);
+    expect(r.json().error).toBe("invalid_reference");
   });
 });

@@ -22,6 +22,7 @@ import {
   connectorRevocations,
   connectors,
   dataScopeRules,
+  grantCertificationItems,
   inArray,
   isNull,
   mcpServers,
@@ -40,6 +41,7 @@ import {
   roleToolGrants,
   roles,
   serverGrants,
+  sodOverrideRequests,
   sql,
   teamMembers,
   teams,
@@ -53,13 +55,16 @@ import {
   csvBatchRows,
   csvMaxRows,
   resolveCsvWindow,
+  collectCsv,
   streamCsv,
+  type CsvStreamSpec,
 } from "./csv-export.js";
 import { afterCursorDesc, atTextSql, decodeCursor, encodeCursor } from "./pagination.js";
 import { resolveTrustProxy, type TrustProxySetting } from "./trusted-proxy.js";
 import { resolveHsts } from "./hsts.js";
 import fastifyRateLimit from "@fastify/rate-limit";
 import { schedulerHealth } from "./scheduler-health.js";
+import { SharedRateLimitStore } from "./rate-limit-store.js";
 import {
   rateLimitKey,
   rateLimitMax,
@@ -92,7 +97,13 @@ import {
   decideApprovalSchema,
   deleteRoleSchema,
   evaluateRequestSchema,
+  ruleKindParamSchema,
+  RULE_IDENTITY_FIELDS,
+  RULE_SELECTION_FIELDS,
   setUserAdminSchema,
+  updateApprovalRuleSchema,
+  updateDataScopeRuleSchema,
+  updateRateLimitSchema,
   updateServerSchema,
   updateUserSchema,
 } from "@regulait/shared";
@@ -100,10 +111,12 @@ import { governedEvaluate } from "./governed-evaluate.js";
 import { refuseMcpServerWrite } from "./mcp-egress.js";
 import { loadEntitlements } from "./entitlements.js";
 import {
+  AUTH_REFUSAL_DETAIL,
   CSRF_HEADER,
   SESSION_COOKIE,
   authenticate,
   clearSessionCookie,
+  isAuthRefusal,
   generateToken,
   governingIpPolicy,
   readCookie,
@@ -122,11 +135,53 @@ import { registerEvalRoutes } from "./evals.js";
 import { applyModelCardApprovalDecision, registerMrmRoutes } from "./mrm.js";
 import { registerRedTeamRoutes } from "./redteam.js";
 import { registerReportingRoutes } from "./reporting.js";
-import { registerConfigVersionRoutes } from "./config-versions.js";
+import { registerPostureRoutes } from "./posture.js";
+import { registerPosturePresetRoutes } from "./posture-preset.js";
+import { registerExecutionControlRoutes } from "./execution-control.js";
+import { registerInventoryRoutes } from "./inventory.js";
+// ADR-0090 — grant certification campaigns: the decide-path hooks (the ONE
+// queue carries the keep/revoke decisions) and the campaign CRUD routes.
+import {
+  GRANT_CERT_PREFIX,
+  applyGrantCertificationDecision,
+  precheckGrantCertificationDecision,
+  registerGrantCertificationRoutes,
+} from "./grant-certification.js";
+// ADR-0092 — access recommendations (gap L24): deterministic rules over the
+// ledgers, computed at read time, read-only — the campaign feed above is the
+// only action path.
+import { registerAccessRecommendationRoutes } from "./access-recommendations.js";
+// ADR-0091 — toxic-combination SoD (gap L23): the mint-time gate every
+// grant-creating endpoint calls, the decide-path hooks for an escalated
+// override (the ONE queue carries the decision), and the rules/override CRUD.
+import {
+  SOD_OVERRIDE_PREFIX,
+  applySodOverrideDecision,
+  precheckSodOverrideDecision,
+  refuseSodMint,
+  registerSodRoutes,
+} from "./sod.js";
+import {
+  deleteRoleAgentGrantById,
+  deleteRoleConnectorGrantById,
+  deleteRoleServerGrantById,
+  deleteRoleToolGrantById,
+  deleteServerGrantById,
+  deleteToolGrantById,
+} from "./grant-revocation.js";
+import { deleteRuleArtifact, registerConfigVersionRoutes } from "./config-versions.js";
+import { applyRuleEdit, isRuleEditRefusal } from "./rule-writes.js";
+import { createApprovalRuleRow, scopedRuleColumns } from "./rule-creates.js";
+import { ConfigVersionUnresolvableError } from "./rule-versions.js";
 import { registerSpendMonitorRoutes } from "./spend-monitor.js";
 import { registerLineageRoutes } from "./lineage.js";
 import { registerBillingRoutes } from "./billing.js";
-import { refuseIfSeatCapReached, registerLicensingRoutes } from "./licensing.js";
+import {
+  refuseIfExpansionBlocked,
+  refuseIfSeatCapReached,
+  registerLicensingRoutes,
+  resolveLicense,
+} from "./licensing.js";
 import { registerAuditChainRoutes, type AnchorSink } from "./audit-chain.js";
 import {
   assignedApprovalIdsFor,
@@ -171,14 +226,28 @@ export interface BuildAppOptions {
    * Exposed so a test can drive a real WORM buffer without touching the
    * environment. */
   auditAnchorSink?: AnchorSink | null;
+  /** L6a TEST SEAM (ADR-0056 amendment): inject a deterministic copilot
+   * narrator instead of the real, governed `ModelBackedNarrator`. Absent =
+   * the real path. */
+  copilotNarrator?: CopilotNarrator | null;
+  /** L6c TEST SEAM (ADR-0092 amendment): inject a deterministic
+   * recommendation judge instead of the real, governed, org-configured one.
+   * Absent = the real path, which still requires the org knob to be ON. */
+  recommendationJudge?: RecommendationJudge | null;
 }
 import { z } from "zod";
 import { registerMcpProxy } from "./mcp-proxy.js";
 import { registerAgentConnectorRoutes } from "./agents-connectors.js";
 import { registerCustomProviderRoutes } from "./custom-providers.js";
+import { registerExternalScorerRoutes } from "./external-scorers.js";
+import {
+  applyTrainingJobApprovalDecision,
+  registerRegulAItLlmRoutes,
+} from "./regulait-llm.js";
 import {
   API_KEY_HEADER_ROUTES,
   COMPAT_ANTHROPIC_ROUTE,
+  COMPAT_MODELS_ROUTE,
   INTERCEPTION_GATED_ROUTES,
   MCP_PROXY_ROUTE,
   PROJECT_HEADER,
@@ -190,6 +259,23 @@ import {
 } from "./compat-core.js";
 import { registerAnthropicCompat } from "./compat-anthropic.js";
 import { registerOpenAiCompat } from "./compat-openai.js";
+import { registerModelsDiscovery } from "./compat-models.js";
+import { registerVirtualKeyRoutes, VIRTUAL_KEY_ALLOWED_ROUTES } from "./virtual-keys.js";
+// ADR-0097 — the tool-poisoning admission gate (part A) and the RFC 9728
+// protected-resource metadata + WWW-Authenticate challenge (part B).
+import {
+  admissionHidesTools,
+  registerMcpAdmissionRoutes,
+  REGISTRATION_ADMISSION_STATE,
+} from "./mcp-admission.js";
+// ADR-0101 — federated MCP registries. Admin-only through the default gate;
+// a sync writes only the catalogue and an import is an explicit operator act.
+import { registerMcpRegistryRoutes } from "./mcp-registry.js";
+import {
+  MCP_PROXY_ROUTE_URL,
+  registerMcpAuthMetadata,
+  wwwAuthenticateFor,
+} from "./mcp-auth-metadata.js";
 import { registerConversationRoutes } from "./conversations.js";
 import { applyProjectApprovalDecision, registerProjectRoutes } from "./projects.js";
 import { applyInfraApprovalDecision, registerInfraRoutes } from "./infra.js";
@@ -199,6 +285,17 @@ import { registerDecomposeRoutes } from "./decompose.js";
 import { mirrorApprovalDecision, registerPmRoutes } from "./pm.js";
 import { RunStateError } from "@regulait/orchestration-kernel";
 import { applyWorkflowApprovalDecision, registerWorkflowRoutes } from "./workflows.js";
+import { registerTemplateGalleryRoutes } from "./template-gallery.js";
+// ADR-0080 — the AI use-case registry (L1 front-door) and its lifecycle join.
+import { registerUseCaseRoutes, syncUseCaseForInstance } from "./use-cases.js";
+import { registerVendorRoutes, syncVendorForInstance } from "./vendors.js";
+// ADR-0081 — the AI risk register (gap L2): evidence computed from the real
+// ledgers at read time; acceptance is an audited record.
+import { registerRiskRoutes } from "./risks.js";
+// ADR-0098 — API-key lifetime: the pure arithmetic (issuance resolution
+// against the org's default/ceiling, and the lifecycle state a listing shows).
+// Enforcement itself is in auth.ts's `authenticate()`.
+import { apiKeyState, resolveIssuedExpiry } from "./api-key-expiry.js";
 import {
   loadOrgSettings,
   registerOrgSettingsRoutes,
@@ -208,6 +305,7 @@ import { registerSetupStatusRoutes } from "./setup-status.js";
 import { registerSchedulerRoutes } from "./scheduler-api.js";
 import { schedulerJobRegistry } from "./scheduler-jobs.js";
 import { registerDataKeyRoutes } from "./data-key.js";
+import { registerDataKeyReencryptionRoutes } from "./data-key-reencrypt.js";
 import { WEB_UI_ROUTES, defaultWebDistDir, registerWebServing } from "./web-serving.js";
 // ADR-0053 — the auth-class sets the two gates below branch on. They live in
 // their own module so the published OpenAPI document derives each route's
@@ -216,11 +314,20 @@ import { AUTH_EXEMPT_ROUTES, NON_ADMIN_ROUTES } from "./route-classes.js";
 import { registerOpenApiRoutes, type RouteInventoryEntry } from "./openapi.js";
 import { registerOnboardingRoutes } from "./onboarding.js";
 import { registerShadowAiRoutes } from "./shadow-ai.js";
+import { registerCostImportRoutes } from "./cost-import.js";
+import { registerCostReconciliationRoutes } from "./cost-reconcile.js";
+import { registerTracingRoutes } from "./tracing.js";
 import { registerCompliancePackRoutes } from "./compliance-packs.js";
 import { registerCopilotRoutes } from "./copilot.js";
+import type { CopilotNarrator, RecommendationJudge } from "@regulait/shared";
 import { registerChatOpsRoutes } from "./chatops.js";
 import path from "node:path";
 import { registerSpaInlineScripts, securityHeaders } from "./security-headers.js";
+import {
+  buildExportBundle,
+  exportBundleMaxCsvRows,
+  resolveExportSigningKey,
+} from "./export-bundle.js";
 import { MergeConflictError, WorkflowStateError } from "@regulait/workflow-kernel";
 
 const uuidParam = z.object({ serverId: z.string().uuid() });
@@ -228,6 +335,32 @@ const visibleToolsParams = z.object({
   userId: z.string().uuid(),
   serverId: z.string().uuid(),
 });
+
+/**
+ * A server grant is ONLY ever a read-only-all grant: the kernel matches it at
+ * `server-read-only-all` / `role-server-read-only-all`, both of which require
+ * `readOnlyAll` AND a read-kind tool. So `readOnlyAll: false` writes a row that
+ * confers nothing — and, worse, one that then LISTS as a grant in
+ * `GET /v1/roles/:id/grants`, so an admin building a bundle sees "1 server
+ * grant" and reasonably concludes the role opens that server. It does not.
+ *
+ * That is the same defect this product already refuses to ship elsewhere:
+ * ADR-0038's group→role mapping makes an inert mapping VISIBLE rather than
+ * letting it read as an entitlement. Here there is nothing worth recording, so
+ * the honest answer is to refuse the write rather than store a lie — a refusal
+ * is a fact an operator can act on; a grant that grants nothing is not.
+ *
+ * Scope of a grant is expressed by TOOL grants; `readOnlyAll: false` has no
+ * meaning to express.
+ */
+const INERT_SERVER_GRANT = {
+  error: "inert_server_grant",
+  reason:
+    "a server grant with readOnlyAll=false confers nothing — the kernel only matches a " +
+    "server grant for read-kind tools when readOnlyAll is true, so this row would list as " +
+    "a grant while granting no access. Send readOnlyAll: true for read-all on this server, " +
+    "or grant individual tools with POST /v1/grants/tools (or the role's /grants/tools).",
+} as const;
 /** ADR-0031: documented ceiling on one /v1/audit page. A caller that wants more
  * than this pages with `cursor`, or takes the streamed CSV export. */
 export const AUDIT_MAX_PAGE_SIZE = 1000;
@@ -395,6 +528,16 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // registered after the plugin finishes loading, and `register()` defers that
   // to ready() — long after every route below is in place. Driving it from a
   // hook added here, before any route, makes coverage order-independent.
+  //
+  // ADR-0125 / ROADMAP G1 — the counters live in POSTGRES, not in this
+  // process. The plugin's default store is a per-process Map, which meant that
+  // with two replicas each one admitted the full ceiling: N processes enforced
+  // N x the configured limit while the posture page still reported the
+  // configured number. Every other enforcement counter in this product was
+  // already shared because it was already SQL; this was the one exception.
+  // `SharedRateLimitStore` keeps a local pre-filter in front of the database
+  // so a flood cannot be turned into a write storm — see the header of
+  // rate-limit-store.ts, which is where the reasoning lives.
   const rateCfg = resolveRateLimitConfig(process.env, opts.rateLimit ?? {});
   if (rateCfg.enabled) {
     app.register(fastifyRateLimit, {
@@ -405,6 +548,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       // a load balancer's liveness poll must never be throttled into a false
       // "gateway is down"
       allowList: (req) => req.url === "/health",
+      // The plugin constructs this itself and hands it the whole options
+      // object, so the db arrives through the closure rather than through a
+      // constructor argument we control.
+      store: class extends SharedRateLimitStore {
+        constructor() {
+          super(db);
+        }
+      } as unknown as NonNullable<Parameters<typeof fastifyRateLimit>[1]>["store"],
     });
     let limiter: ReturnType<typeof app.createRateLimit> | null = null;
     app.addHook("onRequest", async (req, reply) => {
@@ -443,6 +594,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     }
     if (err instanceof MergeConflictError) {
       return reply.status(422).send({ error: "template_merge_conflict", detail: err.message });
+    }
+    // ADR-0073: a governance artifact has stored versions but none is active.
+    // A real refusal with the reason stated, never a call that proceeds with the
+    // rule/profile silently absent.
+    if (err instanceof ConfigVersionUnresolvableError) {
+      return reply.status(409).send({ error: "config_version_unresolvable", detail: err.message });
     }
     const pgCode = (err as { cause?: { code?: string } }).cause?.code;
     if (pgCode === "23505") return reply.status(409).send({ error: "conflict" });
@@ -486,6 +643,36 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       reply.getHeader("strict-transport-security") === undefined
     ) {
       reply.header("strict-transport-security", hsts);
+    }
+    // ADR-0097 part B — THE RFC 9728 CHALLENGE, and the 401/403 line it draws.
+    //
+    // It rides here, on the response, rather than at each refusal site, because
+    // the MCP path can 401 from five different places (no credential, invalid
+    // credential, deactivated owner, revoked/expired virtual key, IP envelope)
+    // and a challenge that only some of them carried would be worse than none —
+    // a client cannot discover anything from a header that is sometimes absent.
+    //
+    // 401 ONLY. A missing or invalid CREDENTIAL is 401 and carries the
+    // challenge; an authenticated caller who lacks ENTITLEMENT (the bootstrap
+    // token, which has no user identity; a virtual key out of its route
+    // ceiling; a user without a tool grant) stays 403 and carries NOTHING.
+    // RFC 6750 would permit a challenge on a 403 `insufficient_scope`, but it
+    // would be noise here: a challenge says "authenticate differently, here is
+    // where to learn how", and for those callers there IS no different
+    // credential to fetch — the answer is a grant an admin makes, not a token
+    // an authorization server issues. Set-if-absent, like every header above.
+    if (
+      reply.statusCode === 401 &&
+      (req.routeOptions.url ?? "") === MCP_PROXY_ROUTE_URL &&
+      reply.getHeader("www-authenticate") === undefined
+    ) {
+      reply.header(
+        "www-authenticate",
+        wwwAuthenticateFor(req, {
+          credentialPresented:
+            typeof req.headers.authorization === "string" && req.headers.authorization.length > 0,
+        }),
+      );
     }
     return payload;
   });
@@ -535,8 +722,16 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       }
       return;
     }
+    // ADR-0066: `GET /v1/models` is the discovery endpoint for BOTH shims, so
+    // it exists when EITHER is enabled. A deployment that intercepts nothing
+    // still answers the same indistinguishable 404, and a client that can list
+    // models can always call at least one of them.
     const orgEnabled =
-      route === COMPAT_ANTHROPIC_ROUTE ? settings.anthropicCompatEnabled : settings.openaiCompatEnabled;
+      route === COMPAT_MODELS_ROUTE
+        ? settings.anthropicCompatEnabled || settings.openaiCompatEnabled
+        : route === COMPAT_ANTHROPIC_ROUTE
+          ? settings.anthropicCompatEnabled
+          : settings.openaiCompatEnabled;
     if (!(await interceptionScopeRulesExist(db))) {
       if (!orgEnabled) return reply.status(404).send(notFoundBody(req.method, req.url));
       return;
@@ -547,13 +742,22 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       if (typeof alt === "string" && alt.length > 0) authorization = `Bearer ${alt}`;
     }
     const ctx = await authenticate(db, opts.bootstrapToken, authorization);
-    const userId = ctx && ctx !== "disabled" ? ctx.userId : null;
+    // ADR-0066: `authenticate` may now answer with a refusal STRING for a
+    // credential that exists but may not be used (deactivated owner, revoked or
+    // expired virtual key). None of those resolves to an identity, so scope
+    // rules fall back to the org level exactly as an invalid token does — a
+    // probe still cannot detect that scope rules exist.
+    const userId = typeof ctx === "object" && ctx !== null ? ctx.userId : null;
     const projectHeader = req.headers[PROJECT_HEADER];
     const projectId =
       typeof projectHeader === "string" && UUID_ANY_RE.test(projectHeader) ? projectHeader : null;
     const policy = await resolveInterceptionPolicy(db, { userId, projectId }, settings);
     const enabled =
-      route === COMPAT_ANTHROPIC_ROUTE ? policy.anthropicCompatEnabled : policy.openaiCompatEnabled;
+      route === COMPAT_MODELS_ROUTE
+        ? policy.anthropicCompatEnabled || policy.openaiCompatEnabled
+        : route === COMPAT_ANTHROPIC_ROUTE
+          ? policy.anthropicCompatEnabled
+          : policy.openaiCompatEnabled;
     if (!enabled) {
       return reply.status(404).send(notFoundBody(req.method, req.url));
     }
@@ -698,6 +902,17 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         detail: "this account has been deactivated — an admin can reactivate it",
       });
     }
+    // ADR-0066: a virtual key that really exists but is revoked or expired says
+    // so, rather than reading as a bad token. Only someone holding the real
+    // token ever sees this, so it leaks nothing.
+    // ADR-0098: `api_key_expired` and `api_key_revoked` join the set on the
+    // same terms and the same 401 — expiry rides the front door every other
+    // credential state already rides, which is what makes the MCP proxy's
+    // RFC 6750 challenge (ADR-0097, in the onSend hook above) cover it with no
+    // new code at all: it fires on any 401 from that route.
+    if (isAuthRefusal(ctx)) {
+      return reply.status(401).send({ error: ctx, detail: AUTH_REFUSAL_DETAIL[ctx] });
+    }
     if (!ctx) return reply.status(401).send({ error: "unauthenticated" });
     // ADR-0039: header API-key auth under api_key_ip_policy. Each request
     // presents the credential anew, so ANY enforcing level checks every
@@ -705,7 +920,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // nothing to revoke — the deny IS the whole enforcement). The bootstrap
     // header is the break-glass path and is never IP-restricted; the human
     // knob never touches this path in either direction.
-    if (ctx.via === "api-key") {
+    // ADR-0066: a virtual key is a programmatic header credential like an API
+    // key, so it answers to the SAME api_key_ip_policy. Leaving it out would
+    // have made "issue a virtual key" a way around the network envelope.
+    if (ctx.via === "api-key" || ctx.via === "virtual-key") {
       const org = await loadOrgSettings(db);
       if (org.apiKeyIpPolicy !== "off") {
         const decision = evaluateIpEnvelope(org.sessionIpAllowlist, req.ip ?? null);
@@ -735,6 +953,29 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       }
     }
     req.authCtx = ctx;
+  });
+
+  // ADR-0066 — THE VIRTUAL-KEY ROUTE CEILING. Runs BEFORE the admin gate,
+  // because it is a stricter statement than "is this caller an admin": a
+  // virtual key reaches the dispatch surfaces and nothing else, whatever its
+  // owner may reach with their own credential.
+  //
+  // It is an ALLOW-LIST, not a deny-list, and that is the whole design. A route
+  // added tomorrow is unreachable on a virtual key until someone deliberately
+  // names it here — so the failure mode of forgetting is a 403, not a hole. The
+  // routes most worth keeping out are the ones that would dissolve the ceiling:
+  // minting credentials, editing grants, and reading model credentials.
+  app.addHook("preHandler", async (req, reply) => {
+    if (req.authCtx.via !== "virtual-key") return;
+    const route = `${req.method} ${req.routeOptions.url ?? ""}`;
+    if (!VIRTUAL_KEY_ALLOWED_ROUTES.has(route)) {
+      return reply.status(403).send({
+        error: "virtual_key_scope",
+        detail:
+          `a virtual key may only reach this deployment's model-dispatch surfaces (${[...VIRTUAL_KEY_ALLOWED_ROUTES].join(", ")}); ` +
+          `'${route}' is not one of them. Use the owner's own API key or session for anything else.`,
+      });
+    }
   });
 
   // Everything is admin-only except the routes where a non-admin identity is
@@ -999,13 +1240,55 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         detail: "this account is deactivated — reactivate it before issuing keys",
       });
     }
+    // ADR-0098 — THE LIFETIME. Three inputs with three meanings (absent = "you
+    // decide", a timestamp = an explicit request, explicit null = "never
+    // expires"), adjudicated against the org's default and ceiling in one
+    // place. A request over the ceiling — including the `null` one — is
+    // REFUSED BY NAME rather than clamped: a clamp hands back a credential
+    // with a lifetime nobody asked for and nobody was told about.
+    const org = await loadOrgSettings(db);
+    const resolved = resolveIssuedExpiry(
+      body.expiresAt === undefined ? undefined : body.expiresAt === null ? null : new Date(body.expiresAt),
+      { defaultTtlDays: org.apiKeyDefaultTtlDays, maxTtlDays: org.apiKeyMaxTtlDays },
+    );
+    if (!resolved.ok) {
+      await db.insert(auditLog).values({
+        userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+        objectType: "api_key",
+        objectId: null,
+        detail: {
+          phase: "issue-refused",
+          targetUserId: userId,
+          name: body.name,
+          requestedExpiresAt: body.expiresAt ?? null,
+          requestedNeverExpires: body.expiresAt === null,
+          maxTtlDays: org.apiKeyMaxTtlDays,
+          error: resolved.refusal.error,
+        },
+        effect: "deny",
+        ruleId: resolved.refusal.error,
+        ruleChain: [],
+        reason: resolved.refusal.detail,
+      });
+      return reply.status(resolved.refusal.status).send({
+        error: resolved.refusal.error,
+        detail: resolved.refusal.detail,
+      });
+    }
     const { token, tokenHash } = generateToken();
     const [row] = await db
       .insert(apiKeys)
-      .values({ userId, name: body.name, tokenHash })
-      .returning({ id: apiKeys.id, name: apiKeys.name, createdAt: apiKeys.createdAt });
-    // The plaintext token is returned exactly once and never stored.
-    return reply.status(201).send({ ...row, token });
+      .values({ userId, name: body.name, tokenHash, expiresAt: resolved.expiresAt })
+      .returning({
+        id: apiKeys.id,
+        name: apiKeys.name,
+        createdAt: apiKeys.createdAt,
+        expiresAt: apiKeys.expiresAt,
+      });
+    // The plaintext token is returned exactly once and never stored. The
+    // EXPIRY is returned with it, always — including the null that means
+    // "never", so a caller never has to infer what it was given.
+    return reply.status(201).send({ ...row, expirySource: resolved.source, token });
   });
 
   app.get("/v1/keys", async (req) => {
@@ -1018,10 +1301,18 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         createdAt: apiKeys.createdAt,
         lastUsedAt: apiKeys.lastUsedAt,
         revokedAt: apiKeys.revokedAt,
+        expiresAt: apiKeys.expiresAt,
       })
       .from(apiKeys)
       .where(userId ? eq(apiKeys.userId, userId) : undefined);
-    return { keys: rows };
+    // ADR-0098 — THE LIFECYCLE READ. `state` is derived here rather than left
+    // to every caller to re-implement: active / expiring / expired / revoked,
+    // with REVOKED winning over expired (a key somebody killed is revoked
+    // whatever its clock says). An admin looking at this list can see what is
+    // about to break BEFORE it breaks, which is the whole point of shipping a
+    // lifetime rather than just an enforcement.
+    const now = new Date();
+    return { keys: rows.map((k) => ({ ...k, state: apiKeyState(k, now) })) };
   });
 
   app.post("/v1/keys/:keyId/revoke", async (req, reply) => {
@@ -1037,6 +1328,18 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
 
   app.post("/v1/servers", async (req, reply) => {
     const body = createServerSchema.parse(req.body);
+    // ADR-0052 — THE EXPANSION GATE (inventory: `mcp_server.create`, "a new
+    // tool surface is a wider footprint"). Refused once the license has
+    // lapsed past its grace window; permitted in every other state including
+    // absent (no tier flag in the §4 matrix covers MCP servers — recorded in
+    // the ADR amendment rather than invented). Calling tools on a server that
+    // already exists is governance-class and stays open.
+    const licenseRefusal = await refuseIfExpansionBlocked(db, {
+      actorUserId: req.authCtx.userId ?? null,
+      objectType: "mcp_server",
+      what: `registering MCP server '${body.name}'`,
+    });
+    if (licenseRefusal) return reply.status(licenseRefusal.status).send(licenseRefusal.body);
     // ADR-0043: WRITE-TIME egress check — a bad destination is an honest 400
     // at the moment somebody types it, audited, not a surprise at first tool
     // call. (Write-time is not sufficient — connectUpstream re-checks every
@@ -1049,7 +1352,16 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       label: `MCP server '${body.name}' url`,
     });
     if (refusal) return reply.status(400).send(refusal);
-    const [row] = await db.insert(mcpServers).values(body).returning();
+    // ADR-0097: the registration path sets the admission state EXPLICITLY
+    // rather than inheriting migration 0103's DEFAULT. The default exists for
+    // rows that predate the scanner ('grandfathered' — trusted because they
+    // already were, scanned on their next manifest sync); a row this code
+    // creates says what it means, and 'unscanned' is a different fact the
+    // review queue shows separately.
+    const [row] = await db
+      .insert(mcpServers)
+      .values({ ...body, admissionState: REGISTRATION_ADMISSION_STATE })
+      .returning();
     return reply.status(201).send(row);
   });
 
@@ -1094,6 +1406,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
 
   app.get("/v1/servers/:serverId/tools", async (req) => {
     const { serverId } = uuidParam.parse(req.params);
+    // ADR-0097: a HELD server contributes NOTHING to discovery under enforce.
+    // This route reads the stored inventory and never connects, so the
+    // connect-time gate cannot cover it — without this, a manifest synced
+    // before the server was held would still be readable here.
+    if (await admissionHidesTools(db, serverId)) return { tools: [] };
     return { tools: await db.select().from(mcpTools).where(eq(mcpTools.serverId, serverId)) };
   });
 
@@ -1109,12 +1426,27 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
 
   app.post("/v1/grants/tools", async (req, reply) => {
     const body = createToolGrantSchema.parse(req.body);
+    // ADR-0091: the SoD mint gate — refused 409 by name, audited, no row
+    const sod = await refuseSodMint(
+      db,
+      { kind: "tool", userId: body.userId, serverId: body.serverId, toolName: body.toolName },
+      req.authCtx.userId,
+    );
+    if (sod) return reply.status(409).send(sod);
     const [row] = await db.insert(toolGrants).values(body).returning();
     return reply.status(201).send(row);
   });
 
   app.post("/v1/grants/servers", async (req, reply) => {
     const body = createServerGrantSchema.parse(req.body);
+    if (!body.readOnlyAll) return reply.status(400).send(INERT_SERVER_GRANT);
+    // ADR-0091: the SoD mint gate
+    const sod = await refuseSodMint(
+      db,
+      { kind: "server", userId: body.userId, serverId: body.serverId },
+      req.authCtx.userId,
+    );
+    if (sod) return reply.status(409).send(sod);
     const [row] = await db.insert(serverGrants).values(body).returning();
     return reply.status(201).send(row);
   });
@@ -1125,6 +1457,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     if (!req.authCtx.isAdmin && req.authCtx.userId !== userId) {
       return reply.status(403).send({ error: "forbidden" });
     }
+    // ADR-0097: the same hold, on the visibleTools preview — "must not appear
+    // in tool discovery for ANYONE" includes the admin looking at somebody
+    // else's entitlements.
+    if (await admissionHidesTools(db, serverId)) return { tools: [] };
     const [tools, entitlements] = await Promise.all([
       db.select().from(mcpTools).where(eq(mcpTools.serverId, serverId)),
       loadEntitlements(db, userId, serverId),
@@ -1150,6 +1486,15 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   app.post("/v1/roles/:roleId/grants/tools", async (req, reply) => {
     const { roleId } = z.object({ roleId: z.string().uuid() }).parse(req.params);
     const body = createRoleToolGrantSchema.parse(req.body);
+    // ADR-0091: granting to a role confers on EVERY current assignee — the
+    // SoD gate checks each of them (a role with no assignees confers
+    // nothing yet; the assignment gate below catches it then)
+    const sod = await refuseSodMint(
+      db,
+      { kind: "role_tool", roleId, serverId: body.serverId, toolName: body.toolName },
+      req.authCtx.userId,
+    );
+    if (sod) return reply.status(409).send(sod);
     const [row] = await db
       .insert(roleToolGrants)
       .values({ roleId, serverId: body.serverId, toolName: body.toolName })
@@ -1160,6 +1505,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   app.post("/v1/roles/:roleId/grants/servers", async (req, reply) => {
     const { roleId } = z.object({ roleId: z.string().uuid() }).parse(req.params);
     const body = createRoleServerGrantSchema.parse(req.body);
+    if (!body.readOnlyAll) return reply.status(400).send(INERT_SERVER_GRANT);
+    // ADR-0091: the SoD mint gate, per current assignee
+    const sod = await refuseSodMint(
+      db,
+      { kind: "role_server", roleId, serverId: body.serverId },
+      req.authCtx.userId,
+    );
+    if (sod) return reply.status(409).send(sod);
     const [row] = await db
       .insert(roleServerGrants)
       .values({ roleId, serverId: body.serverId, readOnlyAll: body.readOnlyAll })
@@ -1172,6 +1525,13 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   app.post("/v1/roles/:roleId/grants/agents", async (req, reply) => {
     const { roleId } = z.object({ roleId: z.string().uuid() }).parse(req.params);
     const body = createRoleAgentGrantSchema.parse(req.body);
+    // ADR-0091: the SoD mint gate, per current assignee
+    const sod = await refuseSodMint(
+      db,
+      { kind: "role_agent", roleId, agentId: body.agentId },
+      req.authCtx.userId,
+    );
+    if (sod) return reply.status(409).send(sod);
     const [row] = await db
       .insert(roleAgentGrants)
       .values({ roleId, agentId: body.agentId, allowedModes: body.allowedModes ?? null })
@@ -1182,6 +1542,13 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   app.post("/v1/roles/:roleId/grants/connectors", async (req, reply) => {
     const { roleId } = z.object({ roleId: z.string().uuid() }).parse(req.params);
     const body = createRoleConnectorGrantSchema.parse(req.body);
+    // ADR-0091: the SoD mint gate, per current assignee
+    const sod = await refuseSodMint(
+      db,
+      { kind: "role_connector", roleId, connectorId: body.connectorId, mode: body.mode },
+      req.authCtx.userId,
+    );
+    if (sod) return reply.status(409).send(sod);
     const [row] = await db
       .insert(roleConnectorGrants)
       .values({
@@ -1244,15 +1611,16 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     return { tools, servers, agents: roleAgents, connectors: roleConnectors };
   });
 
+  // ADR-0090: the removal itself lives in grant-revocation.ts — ONE
+  // implementation per grant kind, shared with a certification campaign's
+  // revoke decision so the campaign can never grow a parallel delete.
   app.delete("/v1/roles/:roleId/grants/agents/:grantId", async (req, reply) => {
     const { roleId, grantId } = z
       .object({ roleId: z.string().uuid(), grantId: z.string().uuid() })
       .parse(req.params);
-    const deleted = await db
-      .delete(roleAgentGrants)
-      .where(and(eq(roleAgentGrants.id, grantId), eq(roleAgentGrants.roleId, roleId)))
-      .returning({ id: roleAgentGrants.id });
-    if (deleted.length === 0) return reply.status(404).send({ error: "unknown_grant" });
+    if (!(await deleteRoleAgentGrantById(db, grantId, roleId))) {
+      return reply.status(404).send({ error: "unknown_grant" });
+    }
     return { removed: true };
   });
 
@@ -1260,11 +1628,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     const { roleId, grantId } = z
       .object({ roleId: z.string().uuid(), grantId: z.string().uuid() })
       .parse(req.params);
-    const deleted = await db
-      .delete(roleConnectorGrants)
-      .where(and(eq(roleConnectorGrants.id, grantId), eq(roleConnectorGrants.roleId, roleId)))
-      .returning({ id: roleConnectorGrants.id });
-    if (deleted.length === 0) return reply.status(404).send({ error: "unknown_grant" });
+    if (!(await deleteRoleConnectorGrantById(db, grantId, roleId))) {
+      return reply.status(404).send({ error: "unknown_grant" });
+    }
     return { removed: true };
   });
 
@@ -1275,6 +1641,17 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   app.post("/v1/users/:userId/roles", async (req, reply) => {
     const { userId } = z.object({ userId: z.string().uuid() }).parse(req.params);
     const body = assignRoleSchema.parse(req.body);
+    // ADR-0091: assigning a role confers its WHOLE bundle — the SoD gate
+    // checks the bundle against the assignee's effective holdings AND for
+    // bundle-internal toxic pairs. (IdP-driven group assignments do NOT pass
+    // through here — a stated ADR-0091 limit: they surface as violations,
+    // never as a broken directory sync.)
+    const sod = await refuseSodMint(
+      db,
+      { kind: "role_assignment", userId, roleId: body.roleId },
+      req.authCtx.userId,
+    );
+    if (sod) return reply.status(409).send(sod);
     const [row] = await db
       .insert(roleAssignments)
       .values({ userId, roleId: body.roleId, origin: "direct" })
@@ -1405,11 +1782,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     const { roleId, grantId } = z
       .object({ roleId: z.string().uuid(), grantId: z.string().uuid() })
       .parse(req.params);
-    const deleted = await db
-      .delete(roleToolGrants)
-      .where(and(eq(roleToolGrants.id, grantId), eq(roleToolGrants.roleId, roleId)))
-      .returning({ id: roleToolGrants.id });
-    if (deleted.length === 0) return reply.status(404).send({ error: "unknown_grant" });
+    if (!(await deleteRoleToolGrantById(db, grantId, roleId))) {
+      return reply.status(404).send({ error: "unknown_grant" });
+    }
     return { removed: true };
   });
 
@@ -1417,11 +1792,32 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     const { roleId, grantId } = z
       .object({ roleId: z.string().uuid(), grantId: z.string().uuid() })
       .parse(req.params);
-    const deleted = await db
-      .delete(roleServerGrants)
-      .where(and(eq(roleServerGrants.id, grantId), eq(roleServerGrants.roleId, roleId)))
-      .returning({ id: roleServerGrants.id });
-    if (deleted.length === 0) return reply.status(404).send({ error: "unknown_grant" });
+    if (!(await deleteRoleServerGrantById(db, grantId, roleId))) {
+      return reply.status(404).send({ error: "unknown_grant" });
+    }
+    return { removed: true };
+  });
+
+  // ADR-0090: the direct MCP tool/server grant deletes that never existed —
+  // every other grant kind was removable through an admin endpoint, these two
+  // were not (and an ADR-0019 revocation row deliberately does NOT beat a
+  // direct grant in the kernel, so there was genuinely no removal path). A
+  // certification campaign's revoke decision needs one, and it must be THE
+  // path rather than a campaign-private delete — so the endpoints exist too,
+  // sharing the one implementation in grant-revocation.ts.
+  app.delete("/v1/grants/tools/:grantId", async (req, reply) => {
+    const { grantId } = z.object({ grantId: z.string().uuid() }).parse(req.params);
+    if (!(await deleteToolGrantById(db, grantId))) {
+      return reply.status(404).send({ error: "unknown_grant" });
+    }
+    return { removed: true };
+  });
+
+  app.delete("/v1/grants/servers/:grantId", async (req, reply) => {
+    const { grantId } = z.object({ grantId: z.string().uuid() }).parse(req.params);
+    if (!(await deleteServerGrantById(db, grantId))) {
+      return reply.status(404).send({ error: "unknown_grant" });
+    }
     return { removed: true };
   });
 
@@ -1691,37 +2087,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   }));
 
   // PILLAR 1 rule scoping: the discriminant is already validated by the shared
-  // superRefine (mirrors the DB CHECK). We null out every off-scope subject/
-  // server field so the row is clean and the DB CHECK always passes — a
-  // role-scoped rule stores only roleId, a fleet rule stores none, an
-  // all-servers rule stores no serverId.
-  const scopedRuleColumns = (body: {
-    scope: "user" | "role" | "team" | "fleet";
-    serverScope: "server" | "all";
-    userId?: string | null;
-    roleId?: string | null;
-    teamId?: string | null;
-    serverId?: string | null;
-  }) => ({
-    scope: body.scope,
-    serverScope: body.serverScope,
-    userId: body.scope === "user" ? body.userId! : null,
-    roleId: body.scope === "role" ? body.roleId! : null,
-    teamId: body.scope === "team" ? body.teamId! : null,
-    serverId: body.serverScope === "server" ? body.serverId! : null,
-  });
-
+  // superRefine (mirrors the DB CHECK). `scopedRuleColumns` (rule-creates.ts)
+  // nulls out every off-scope subject/server field so the row is clean and the
+  // DB CHECK always passes. B8c: the approvals create itself moved to
+  // `createApprovalRuleRow` so the copilot's `rule_to_approval` applier rides
+  // the exact create this route performs — never a parallel insert.
   app.post("/v1/rules/approvals", async (req, reply) => {
     const body = createApprovalRuleSchema.parse(req.body);
-    const [row] = await db
-      .insert(approvalRules)
-      .values({
-        ...scopedRuleColumns(body),
-        toolName: body.toolName ?? null,
-        writeOnly: body.writeOnly ?? false,
-        approverUserId: body.approverUserId,
-      })
-      .returning();
+    const row = await createApprovalRuleRow(db, body);
     return reply.status(201).send(row);
   });
 
@@ -1751,6 +2124,89 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       })
       .returning();
     return reply.status(201).send(row);
+  });
+
+  // -------------------------------------------------------------------------
+  // Batch B1 (ADR-0073 residual, ADR-0074's pattern) — the ordinary CRUD
+  // UPDATE/DELETE surface for the three restriction-rule kinds. Until now the
+  // surface was create + list only, plus the field-specific deploy-mode PATCH;
+  // an admin could not edit a rule body or remove a rule through the API at
+  // all (a rule only vanished when its subject cascaded away). Both routes are
+  // honest about versioning from their first day:
+  //
+  //   PATCH  goes through `applyRuleEdit`, ADR-0074's one choke point — a
+  //          versioned rule's enforcing edit MINTS + ACTIVATES a version in
+  //          one transaction (so the 200 tells the truth about enforcement),
+  //          an unversioned rule keeps the plain row write byte-identical to
+  //          pre-ADR-0073 behaviour, an unresolvable artifact refuses with the
+  //          remedy named, and a no-op mints nothing.
+  //   DELETE goes through `deleteRuleArtifact` — the row is deleted, the
+  //          version HISTORY is kept, and the active/canary pointers are
+  //          demoted to 'retired' with an 'artifact_deleted' ledger entry, so
+  //          no version is left claiming to enforce for an artifact that no
+  //          longer exists (the tombstone ADR-0074 §5 scoped).
+  // -------------------------------------------------------------------------
+  const RULE_CRUD = {
+    approvals: { artifactType: "approval_rule", schema: updateApprovalRuleSchema },
+    "rate-limits": { artifactType: "rate_limit", schema: updateRateLimitSchema },
+    "data-scopes": { artifactType: "data_scope_rule", schema: updateDataScopeRuleSchema },
+  } as const;
+
+  app.patch("/v1/rules/:kind/:ruleId", async (req, reply) => {
+    const { kind, ruleId } = z
+      .object({ kind: ruleKindParamSchema, ruleId: z.string().uuid() })
+      .parse(req.params);
+    const crud = RULE_CRUD[kind];
+    // ADR-0073 §2's scope line, refused with the reason NAMED rather than as a
+    // generic strict-parse error: the selection columns decide WHICH callers a
+    // rule is loaded for, and rebinding a rule to a different subject is a NEW
+    // rule, never an edit of an old one.
+    const offending = Object.keys((req.body ?? {}) as Record<string, unknown>).filter(
+      (k) => RULE_SELECTION_FIELDS.includes(k) || RULE_IDENTITY_FIELDS.includes(k),
+    );
+    if (offending.length > 0) {
+      return reply.status(422).send({
+        error: "selection_field_not_editable",
+        detail:
+          `'${offending.join("', '")}' selects WHICH callers this rule is loaded for (or is its identity); ` +
+          `it is not part of what the rule does and cannot be edited. Create a new rule bound to the new ` +
+          `subject (POST /v1/rules/${kind}) and delete this one instead.`,
+      });
+    }
+    const patch = crud.schema.parse(req.body ?? {});
+    const res = await applyRuleEdit(db, {
+      artifactType: crud.artifactType,
+      artifactId: ruleId,
+      patch,
+      actorUserId: req.authCtx.userId ?? null,
+      label: `edited via PATCH /v1/rules/${kind}/:ruleId`,
+      auditObjectType: "restriction_rule",
+      auditRuleId: "rule-crud-edited",
+      auditDetail: { phase: "rule-crud-edit", ruleKind: kind, patch },
+    });
+    if (isRuleEditRefusal(res)) {
+      return reply.status(res.status).send({ error: res.error, detail: res.detail });
+    }
+    return reply.send({ ...res.row, versionMinted: res.mintedVersion, note: res.note });
+  });
+
+  app.delete("/v1/rules/:kind/:ruleId", async (req, reply) => {
+    const { kind, ruleId } = z
+      .object({ kind: ruleKindParamSchema, ruleId: z.string().uuid() })
+      .parse(req.params);
+    const res = await deleteRuleArtifact(db, {
+      artifactType: RULE_CRUD[kind].artifactType,
+      artifactId: ruleId,
+      actorUserId: req.authCtx.userId ?? null,
+      routeLabel: `DELETE /v1/rules/${kind}/:ruleId`,
+    });
+    if (!res.ok) return reply.status(res.status).send({ error: res.error, detail: res.detail });
+    return reply.send({
+      deleted: true,
+      versionsRetired: res.versionsRetired,
+      versionCount: res.versionCount,
+      note: res.note,
+    });
   });
 
   // --- ADR-0022 approver delegation (admin-managed) -------------------------
@@ -2107,6 +2563,51 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         : "custom provider";
       return `model risk sign-off · ${subject} · ${card.intendedUse}`;
     };
+    // ADR-0090: a certification item's queue row says WHOSE grant on WHAT it
+    // reviews — same stageId-sentinel enrichment as the model-card rows.
+    const certItemIds = ids(
+      rows.map((r) =>
+        r.stageId?.startsWith(GRANT_CERT_PREFIX) && uuidOk(r.stageId.slice(GRANT_CERT_PREFIX.length))
+          ? r.stageId.slice(GRANT_CERT_PREFIX.length)
+          : null,
+      ),
+    );
+    const certItems = certItemIds.length
+      ? await db
+          .select({
+            id: grantCertificationItems.id,
+            holderLabel: grantCertificationItems.holderLabel,
+            objectLabel: grantCertificationItems.objectLabel,
+          })
+          .from(grantCertificationItems)
+          .where(inArray(grantCertificationItems.id, certItemIds))
+      : [];
+    const certItemById = new Map(certItems.map((i) => [i.id, i]));
+    const grantCertLabelFor = (stageId: string | null): string | null => {
+      if (!stageId?.startsWith(GRANT_CERT_PREFIX)) return null;
+      const item = certItemById.get(stageId.slice(GRANT_CERT_PREFIX.length));
+      return item ? `grant certification · ${item.holderLabel} · ${item.objectLabel}` : null;
+    };
+    // ADR-0091: an SoD override's queue row says whose mint despite which
+    // rule — the request row precomputed the label at escalation time.
+    const sodOverrideIds = ids(
+      rows.map((r) =>
+        r.stageId?.startsWith(SOD_OVERRIDE_PREFIX) && uuidOk(r.stageId.slice(SOD_OVERRIDE_PREFIX.length))
+          ? r.stageId.slice(SOD_OVERRIDE_PREFIX.length)
+          : null,
+      ),
+    );
+    const sodOverrideRows = sodOverrideIds.length
+      ? await db
+          .select({ id: sodOverrideRequests.id, label: sodOverrideRequests.label })
+          .from(sodOverrideRequests)
+          .where(inArray(sodOverrideRequests.id, sodOverrideIds))
+      : [];
+    const sodOverrideById = new Map(sodOverrideRows.map((r) => [r.id, r.label]));
+    const sodOverrideLabelFor = (stageId: string | null): string | null => {
+      if (!stageId?.startsWith(SOD_OVERRIDE_PREFIX)) return null;
+      return sodOverrideById.get(stageId.slice(SOD_OVERRIDE_PREFIX.length)) ?? null;
+    };
     const delegatedFor = new Set(delegators);
     const contextConflictFor = (r: (typeof rows)[number]) => {
       if (!r.stageId?.startsWith(CONFLICT_PREFIX)) return {};
@@ -2131,10 +2632,22 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     return {
       approvals: rows.map((r) => ({
         ...r,
-        // Finding-6 separation-of-duties surface: the approver IS the user
-        // who triggered the governed action — the UI badges it, deciding it
-        // requires a recorded reason.
-        selfReview: r.userId === r.approverUserId,
+        // Finding-6 separation-of-duties surface: the person who would sign
+        // IS the user who triggered the governed action — the UI badges it,
+        // deciding it requires a recorded reason. Three ways that happens,
+        // matching the decide-time test in `decideOneApproval`:
+        //   · the template named the requester as the approver outright;
+        //   · it is ALREADY decided and the requester is who signed it —
+        //     historical fact, so an admin or auditor reading the row back
+        //     sees the badge too, not just the person who did it;
+        //   · it is still pending and reached THIS viewer, who is the
+        //     requester, through a delegation from the named approver.
+        // The last one is viewer-relative on purpose: the same row is an
+        // ordinary arm's-length gate in everyone else's inbox.
+        selfReview:
+          r.userId === r.approverUserId ||
+          (r.decidedBy !== null && r.decidedBy === r.userId) ||
+          (r.status === "pending" && r.userId === me && delegatedFor.has(r.approverUserId)),
         requestedByName: nameOf.get(r.userId) ?? null,
         approverName: nameOf.get(r.approverUserId) ?? null,
         decidedByName: r.decidedBy ? (nameOf.get(r.decidedBy) ?? null) : null,
@@ -2144,6 +2657,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           (r.projectId ? projectLabel.get(r.projectId) : null) ??
           (r.objectType === "infra_operation" ? infraLabelFor(r.stageId) : null) ??
           (r.objectType === "model_card" ? modelCardLabelFor(r.stageId) : null) ??
+          (r.objectType === "grant_certification" ? grantCertLabelFor(r.stageId) : null) ??
+          (r.objectType === "sod_override" ? sodOverrideLabelFor(r.stageId) : null) ??
           r.toolName ??
           null,
         // ADR-0022: this row reached the caller via an active delegation —
@@ -2255,11 +2770,42 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         });
       }
     }
-    // Separation-of-duties guard: the named approver IS the user who
+    // ADR-0090 — grant certification guards, refused BY NAME before anything
+    // is written: `campaign_expired` (a past-due campaign's undecided items
+    // stay undecided forever — expiry is a visible posture fact, never a
+    // late decision) and `cannot_certify_own_grant` (keyed on the DECIDER,
+    // so a holder cannot reach their own item through delegation or the
+    // admin override above — attesting one's own access is not a review).
+    // Sitting in the one decide path means bulk and ChatOps inherit both.
+    if (row.objectType === "grant_certification") {
+      const refusal = await precheckGrantCertificationDecision(db, row, deciderUserId);
+      if (refusal) return fail(refusal.status, refusal.body);
+    }
+    // ADR-0091 — SoD override guards, refused BY NAME before anything is
+    // written: `cannot_approve_own_sod_override` (keyed on the DECIDER, so
+    // the requester cannot reach their own escalation through delegation or
+    // the admin override above — signing one's own override is not an
+    // arm's-length review) and, on approve, a re-check that no OTHER enabled
+    // rule now conflicts with the stored mint (this override names ONE rule;
+    // a second conflict needs its own escalation). Sitting in the one decide
+    // path means bulk and ChatOps inherit both.
+    if (row.objectType === "sod_override") {
+      const refusal = await precheckSodOverrideDecision(db, row, deciderUserId, body.decision);
+      if (refusal) return fail(refusal.status, refusal.body);
+    }
+    // Separation-of-duties guard: the person deciding IS the person who
     // triggered the governed action. Still decidable (alternate-approver
     // routing is deliberately out of scope) but never silently — a recorded
     // reason is required and the audit row is stamped selfReview.
-    const selfReview = row.userId === row.approverUserId;
+    //
+    // Both disjuncts are load-bearing. The named-approver one is the shape a
+    // template writes directly (`approvers: ["requesting_user"]`). The
+    // DECIDER one closes the delegation route around it: an approver who
+    // delegates to the requester hands them their own gate, and comparing
+    // only requester-to-named-approver reads that as an arm's-length review.
+    // Separation of duties is a property of who actually signed, so this
+    // asks that question of the identity that actually signed.
+    const selfReview = row.userId === row.approverUserId || row.userId === deciderUserId;
     if (selfReview && !body.reason?.trim()) {
       return fail(400, {
         error: "self_review_reason_required",
@@ -2351,6 +2897,17 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       // Workflow sign-offs advance their instance through the same one inbox (§5).
       if (updated.objectType === "workflow") {
         postCommit = await applyWorkflowApprovalDecision(tx, updated, body.decision, deciderUserId, opts.dataKey);
+        // ADR-0080: if this instance governs an AI use case, its terminal
+        // decision flips the use case (completed -> approved, denied ->
+        // rejected) HERE, inside the decision's own transaction — so
+        // "approval registers the use case" commits or rolls back with the
+        // decision, and inherits every separation-of-duties guard above.
+        await syncUseCaseForInstance(tx as unknown as Db, updated.instanceId, deciderUserId);
+        // ADR-0084: same discipline for a vendor whose ASSESSMENT this
+        // instance governs — the terminal decision flips the vendor inside
+        // the decision's own transaction. Approving records a sign-off on
+        // the vendor's attested answers, never a verification of them.
+        await syncVendorForInstance(tx as unknown as Db, updated.instanceId, deciderUserId);
       }
       // Orchestration escalations (§3): approve = another attempt, deny = abort.
       if (updated.objectType === "run") {
@@ -2377,6 +2934,44 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           body.decision,
           deciderUserId,
         );
+      }
+      // ADR-0065 RegulAIt-LLM: an over-threshold training job. Same reasoning
+      // as the MRM sign-off above — model training does not get a second
+      // inbox, so the decision lands HERE, inside the one decide path, and
+      // inherits every separation-of-duties guard it applies (named approver,
+      // admin-override reason, self-review reason, delegation). The job's
+      // actual START is the returned post-commit closure: training makes a
+      // network call on a remote backend, and holding the approvals
+      // transaction open across it would lock the one queue every other
+      // governed action shares.
+      if (updated.objectType === "training_job") {
+        postCommit = await applyTrainingJobApprovalDecision(
+          tx as unknown as Db,
+          updated,
+          body.decision,
+          deciderUserId,
+        );
+      }
+      // ADR-0090 grant certification: approved = keep (attested), denied =
+      // revoke — and the revoke EXECUTES the same per-kind grant removal the
+      // admin delete endpoints use, HERE inside the decision's transaction,
+      // so a decision can never commit as attested-but-unenforced. The last
+      // decided item flips its campaign to completed in the same tx.
+      if (updated.objectType === "grant_certification") {
+        await applyGrantCertificationDecision(
+          tx as unknown as Db,
+          updated,
+          body.decision,
+          deciderUserId,
+        );
+      }
+      // ADR-0091 SoD override: approved = the STORED refused mint executes
+      // HERE, inside the decision's own transaction, with the overridden
+      // rule recorded in the grant's audit detail (`sodOverride: {ruleId,
+      // approvalId}`); denied = nothing minted, the request records the
+      // denial. Never a second mint endpoint.
+      if (updated.objectType === "sod_override") {
+        await applySodOverrideDecision(tx as unknown as Db, updated, body.decision, deciderUserId);
       }
       return { updated, postCommit };
     });
@@ -2587,6 +3182,42 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // that set, so a report can never show spend or audit data the caller could
   // not see directly.
   registerReportingRoutes(app, db);
+  // ADR-0082 — the boardroom posture one-pager beside the reports it rides on:
+  // one org-wide JSON document (packs %, risks, ASR, spend vs budget,
+  // governance activity, anchoring, use-case pipeline), every number a SELECT
+  // over the real ledgers at request time — no rollup, no snapshot. Admin-only
+  // through the default gate, the ADR-0047 position for an org-scoped report.
+  // The anchor sink rides in so tamper resistance is OBSERVED, never config.
+  registerPostureRoutes(app, db, ...(opts.auditAnchorSink !== undefined ? [{ sink: opts.auditAnchorSink }] : []));
+  // ADR-0082 — the standing agent dependency inventory: per registered agent,
+  // GRANTED (what the entitlement rows allow) vs OBSERVED (what run/usage/
+  // trace history recorded), never blended — an aggregation over existing
+  // ledgers, no new collection. Admin-only via the default gate: it names
+  // users, grants, and org-wide run history, the audit log's record class.
+  registerInventoryRoutes(app, db);
+  // ADR-0090 — grant certification campaigns (campaign CRUD only; the
+  // keep/revoke decisions ride the one approvals decide path above).
+  registerGrantCertificationRoutes(app, db);
+  // ADR-0092 — access recommendations, the deterministic half: every
+  // recommendation a stated, versioned rule over the ledgers, computed at
+  // read time with evidence attached. READ-ONLY — nothing executes; the
+  // action path is a from_recommendations certification campaign (above) or
+  // the ordinary revocation endpoints. Admin-only via the default gate: the
+  // payload names users, grants and org-wide usage, the inventory's record
+  // class. The model-judged half stays credential-blocked (L6), not
+  // approximated.
+  registerAccessRecommendationRoutes(app, db, {
+    dataKey: opts.dataKey,
+    // L6c: absent = the org-configured, credential-checked governed judge
+    judge: opts.recommendationJudge ?? null,
+  });
+  // ADR-0091 — toxic-combination SoD rules + override escalations. Admin-only
+  // through the DEFAULT gate: declaring two capabilities toxic (and lifting
+  // that with an override) is org-wide entitlement policy, the same class of
+  // record as the rules engine. Enforcement itself is not a route — it is the
+  // `refuseSodMint` gate inside every grant-creating endpoint above, and
+  // override DECISIONS ride the one approvals decide path.
+  registerSodRoutes(app, db);
   // ADR-0048 — immutable versioning, canary rollout and one-click rollback for
   // the governance artifacts the gateway reads. Following ADR-0040's precedent:
   // immutable version rows plus an active pointer, activation is a pointer
@@ -2667,6 +3298,20 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // that makes their admin-suppliable baseUrl safe to have. Every route is
   // admin-only via the global gate (none appear in NON_ADMIN_ROUTES).
   registerCustomProviderRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0088 — registered EXTERNAL EVAL SCORERS (the L14 adapter). Registered
+  // beside custom providers because it is the same shape of decision — an
+  // admin-typed outbound endpoint under the same egress guard and the same
+  // register → test → enable lifecycle — applied to a measuring instrument
+  // instead of a model. Admin-only via the global gate.
+  registerExternalScorerRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0065 — REGULAIT-LLM. Registered next to the custom-provider surface
+  // because it answers the adjacent question: that one is "which model that we
+  // do not own may our people reach?", this one is "which model may our people
+  // BUILD, from what data, and under whose sign-off?". Everything except
+  // POST /v1/llm/jobs is admin-only through the default gate; that one route is
+  // in NON_ADMIN_ROUTES because its gate is the caller's own entitlement to the
+  // base agent, checked inside the handler exactly as an invoke would check it.
+  registerRegulAItLlmRoutes(app, db, { dataKey: opts.dataKey });
   registerConversationRoutes(app, db);
   registerProjectRoutes(app, db);
   registerInfraRoutes(app, db, opts.dataKey);
@@ -2675,9 +3320,45 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerDecomposeRoutes(app, db, { dataKey: opts.dataKey });
   registerPmRoutes(app, db, { dataKey: opts.dataKey });
 
-  registerWorkflowRoutes(app, db, { dataKey: opts.dataKey });
+  registerWorkflowRoutes(app, db, {
+    dataKey: opts.dataKey,
+    // ADR-0080/0084: artifact submit / advance / abort can move an instance
+    // that governs an AI use case or an AI vendor assessment (e.g.
+    // questionnaire submitted -> under review/assessment, aborted ->
+    // rejected); mirror both. The decide path is handled inside the one
+    // approvals transaction above.
+    onInstanceTransition: async (d, instanceId, actorUserId) => {
+      await syncUseCaseForInstance(d, instanceId, actorUserId);
+      await syncVendorForInstance(d, instanceId, actorUserId);
+    },
+  });
+  // ADR-0077 — the cascade-annotated template gallery (admin-gated by default)
+  registerTemplateGalleryRoutes(app, db);
+  registerUseCaseRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0084 — the AI vendor registry beside the use-case registry whose
+  // rails it copies. Propose/list/detail/edit/attest are non-admin
+  // (owner-or-admin in-handler); RETIRE stays admin through the default gate.
+  registerVendorRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0081 — the AI risk register beside the use-case registry it can
+  // reference. Register/list/detail/edit/transition are non-admin
+  // (owner-or-admin in-handler, exactly the use-case scoping); ACCEPTANCE is
+  // admin-only through the default gate, because signing off residual risk on
+  // the org's behalf is precisely the act a non-admin must not reach.
+  registerRiskRoutes(app, db);
 
   registerMcpProxy(app, db);
+  // ADR-0097 part A — the admission review queue and the reason-required,
+  // audited clear. Admin-only through the default gate, like the MCP registry
+  // writes it sits beside.
+  registerMcpAdmissionRoutes(app, db);
+  // ADR-0101 — configure an upstream MCP registry, pull its catalogue, and
+  // import ONE entry as a federated `mcp_servers` row that is `unscanned`,
+  // ungranted and subject to the same ADR-0097 admission and ADR-0043 egress
+  // gates as any hand-registered server.
+  registerMcpRegistryRoutes(app, db);
+  // ADR-0097 part B — RFC 9728. Both routes are AUTH_EXEMPT by design: a
+  // client with no credential is exactly the one that needs to read them.
+  registerMcpAuthMetadata(app);
 
   // ADR-0020 (Batch H) — IDE / existing-agent interception. The two
   // provider-shaped shims are OFF by default and gated by the onRequest hook
@@ -2688,6 +3369,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // GET/PUT routes are admin-only (deliberately NOT in NON_ADMIN_ROUTES); the
   // audit auto-prune scheduler is OFF by default and unref'd, stopped on close.
   registerOrgSettingsRoutes(app, db);
+  registerPosturePresetRoutes(app, db);
+  // ADR-0124 — the kill switch and safe modes
+  registerExecutionControlRoutes(app, db);
 
   // Getting-started journey (admin-only via the default gate): one read-only
   // aggregation of real readiness signals the /admin checklist card renders.
@@ -2701,6 +3385,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // service, and a control that fired on construction is one every fixture
   // would have to work around.
   registerDataKeyRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0063 §4 follow-up (batch B4): STATUS ONLY. The walk itself runs as a
+  // CLI (`pnpm --filter @regulait/gateway reencrypt`) — a full-table
+  // re-encryption inside an HTTP request invites a proxy timeout mid-walk and
+  // an operator retry racing the first attempt, so HTTP gets the read, never
+  // the drive.
+  registerDataKeyReencryptionRoutes(app, db);
   // ADR-0054 — the IN-PRODUCT first-run experience (the installer, ADR-0041,
   // owns deployment bring-up; nothing here duplicates it) plus the
   // migration/import tooling. Admin-only through the DEFAULT gate: every route
@@ -2714,6 +3404,30 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // The subsystem makes NO outbound request and can write only its own three
   // tables — an evidence file cannot mint a user, role, grant or approval.
   registerShadowAiRoutes(app, db);
+  // ADR-0069 — CROSS-VENDOR COST CONSOLIDATION. Admin-only by default: the ONLY
+  // route here in NON_ADMIN_ROUTES is `GET /v1/users/:userId/cost-consolidated`,
+  // which refuses in-handler unless the caller IS that user. Uploading a file
+  // that restates a named colleague's spend, asserting that a vendor account is
+  // a particular human, and reading fleet-wide spend are all operator authority.
+  // The subsystem makes NO outbound request and can write only its own four
+  // tables plus `users.cost_center`; imported money lives in a separate table
+  // under a CHECK that pins `basis = 'imported'`, so nothing it writes can ever
+  // be read back as metered.
+  registerCostImportRoutes(app, db);
+  // ADR-0076 — COST RECONCILIATION. Admin-only through the default gate: the
+  // "run now" endpoint and the health/report read. Marks (never deletes)
+  // cross-batch duplicate imported lines so a consolidated read cannot count
+  // the same vendor fact twice; the scheduled pass (scheduler-jobs.ts) runs
+  // the identical function.
+  registerCostReconciliationRoutes(app, db);
+  // ADR-0070 — TRACE / SPAN OBSERVABILITY. The read surface for the trees the
+  // dispatch core, the MCP tool path and the orchestration path record, plus
+  // the opt-in OTLP exporter. Listing and reading traces is default-deny with a
+  // SELF exception applied in-handler (`NON_ADMIN_ROUTES` above); configuring
+  // and firing the exporter is admin-only through the default gate. No trace
+  // route can change anything a governance decision depends on — it is a read
+  // surface over rows other subsystems already wrote.
+  registerTracingRoutes(app, db);
   // ADR-0058 — REGULATORY COMPLIANCE PACKS. Authoring/activating a pack and
   // recording an attestation are admin (not in NON_ADMIN_ROUTES); EVALUATING a
   // pack is reachable by a non-admin and runs ADR-0047's own
@@ -2732,7 +3446,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // treated as UNTRUSTED INPUT through ADR-0042's guardrails; and it has no
   // mutating tools at all — its only route to a change is a proposal that opens
   // an ordinary Approvals-Queue item for a named human.
-  registerCopilotRoutes(app, db, { dataKey: opts.dataKey });
+  registerCopilotRoutes(app, db, {
+    dataKey: opts.dataKey,
+    narrator: opts.copilotNarrator ?? null,
+  });
   // ADR-0053 — the published contract: the OpenAPI document, the versioning /
   // deprecation policy, and the RFC-8594 Deprecation/Sunset headers. Registered
   // here (rather than first) only for readability; the inventory hook at the top
@@ -2750,6 +3467,15 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   app.addHook("onClose", async () => stopAuditPruneScheduler());
   registerAnthropicCompat(app, db, { dataKey: opts.dataKey });
   registerOpenAiCompat(app, db, { dataKey: opts.dataKey });
+  // ADR-0066 §1 — `GET /v1/models`. Gated by the same onRequest hook as the two
+  // shims (on EITHER being enabled), and entitlement-filtered per caller inside
+  // the handler, so what a client can list is exactly what it can call.
+  registerModelsDiscovery(app, db);
+  // ADR-0066 §2 — virtual keys. `GET/POST/PATCH/DELETE /v1/virtual-keys*` are
+  // in NON_ADMIN_ROUTES because a user may issue and revoke keys for THEMSELVES
+  // (a strict narrowing of their own entitlements); the handlers enforce
+  // owner-or-admin per row, and the admin-only fields refuse in-handler.
+  registerVirtualKeyRoutes(app, db);
 
   // ADR-0031 item 2: the audit read surface used to be hard-capped at 100 rows
   // with a userId filter (plus PR #79's deployMode) and nothing else — for a
@@ -2822,6 +3548,13 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
 
   app.get("/v1/audit.csv", async (req, reply) => {
     const q = auditCsvQuery.parse(req.query);
+    // ADR-0116. `signed=1` wraps THE SAME bytes in an offline-verifiable
+    // bundle. It is a separate parse because auditFilterQuery is shared with
+    // the JSON list route, which has no bundle form.
+    const wantsBundle = (() => {
+      const raw = (req.query as Record<string, unknown> | undefined)?.signed;
+      return raw === "1" || raw === "true";
+    })();
     const win = resolveCsvWindow(q.from, q.to);
     const filters = auditFilters(q, win.from, win.to);
     const where = filters.length ? and(...filters) : undefined;
@@ -2851,12 +3584,17 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // with different filters never collide in a downloads folder
     const suffix = `${q.userId ? `-${q.userId.slice(0, 8)}` : ""}${q.deployMode ? `-${q.deployMode}` : ""}`;
     type Row = typeof auditLog.$inferSelect & { atText: string };
-    await streamCsv<Row>(reply, {
+    // A bundle is held in memory to be hashed and signed, so it takes its own
+    // (lower, and DISCLOSED) ceiling rather than the streaming one. The
+    // truncation notice `emitCsv` appends is inside the signed bytes, so a
+    // short bundle says it is short.
+    const bundleMaxRows = exportBundleMaxCsvRows();
+    const spec: CsvStreamSpec<Row> = {
       filename: `audit-log${suffix}.csv`,
       header: AUDIT_CSV_HEADER,
       eol: "\n",
       batchSize: csvBatchRows(),
-      maxRows: csvMaxRows(),
+      maxRows: wantsBundle ? Math.min(csvMaxRows(), bundleMaxRows) : csvMaxRows(),
       window: win,
       fetchPage: async (after, limit) => {
         const pageWhere = after
@@ -2901,7 +3639,105 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           .limit(1);
         return rows.length > 0;
       },
+    };
+
+    if (!wantsBundle) {
+      await streamCsv<Row>(reply, spec);
+      return;
+    }
+
+    const collected = await collectCsv<Row>(spec);
+    await db.insert(auditLog).values({
+      userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+      objectType: "audit_export",
+      objectId: null,
+      effect: "allow",
+      ruleId: "audit-export-signed",
+      ruleChain: [],
+      reason:
+        `the audit trail was exported as a SIGNED, offline-verifiable bundle (${collected.rows} row(s)` +
+        `${collected.truncated ? ", TRUNCATED at the bundle row ceiling" : ""}) — the whole point of ` +
+        "the bundle is that it leaves the platform and is checked without it, so the act of producing " +
+        "one is itself a chained record",
+      detail: {
+        rows: collected.rows,
+        truncated: collected.truncated,
+        disclosed: collected.disclosed,
+        maxRows: spec.maxRows,
+        windowSource: win.source,
+      },
     });
+    const license = await resolveLicense(db);
+    const bundle = await buildExportBundle({
+      db,
+      subject: {
+        kind: "audit-log",
+        id: null,
+        descriptor: {
+          filters: {
+            userId: q.userId ?? null,
+            objectType: q.objectType ?? null,
+            effect: q.effect ?? null,
+            deployMode: q.deployMode ?? null,
+          },
+          windowFrom: win.from ? win.from.toISOString() : null,
+          windowTo: win.to ? win.to.toISOString() : null,
+          windowSource: win.source,
+          rows: collected.rows,
+          rowCeiling: spec.maxRows,
+          truncated: collected.truncated,
+          disclosureRowAppended: collected.disclosed,
+        },
+      },
+      content: [
+        { name: spec.filename, contentType: "text/csv", body: Buffer.from(collected.csv, "utf8") },
+      ],
+      actor: { userId: req.authCtx.userId ?? null, via: req.authCtx.via },
+      licenseId: license.document?.licenseId ?? null,
+    });
+    if (!bundle.ok) {
+      return reply.status(409).send({ error: bundle.ruleId, detail: bundle.reason });
+    }
+    for (const [k, v] of Object.entries(securityHeaders("application/gzip"))) reply.header(k, v);
+    reply.header("content-type", "application/gzip");
+    reply.header("content-disposition", `attachment; filename="${bundle.filename}"`);
+    reply.header("x-regulait-export-signing-key-id", bundle.keyId);
+    reply.header("x-regulait-export-signing-key-fingerprint", bundle.fingerprint);
+    reply.header("x-regulait-export-row-limit", String(spec.maxRows));
+    return reply.send(bundle.archive);
+  });
+
+  /**
+   * ADR-0116 — the OUT-OF-BAND publication point for the export trust root.
+   *
+   * This is the value an admin reads once and hands to their auditor through a
+   * channel the auditor already trusts. It is deliberately NOT what
+   * `scripts/verify-export-bundle.sh` fetches: a verifier that phoned this
+   * endpoint would be back to "verification requires the product running",
+   * which is the thing the bundle exists to escape.
+   */
+  app.get("/v1/exports/signing-key", async (_req, reply) => {
+    const key = resolveExportSigningKey();
+    if (!key.ok) {
+      return reply.status(409).send({
+        configured: false,
+        error: key.ruleId,
+        detail: key.reason,
+      });
+    }
+    return {
+      configured: true,
+      keyId: key.keyId,
+      fingerprint: key.fingerprint,
+      publicKeyPem: key.publicKeyPem,
+      algorithm: "ed25519",
+      reproduce: "openssl pkey -pubin -in <key>.pub -outform DER | sha256sum",
+      note:
+        "Give this fingerprint to your auditor ONCE, through a channel they already trust. They pass " +
+        "it to scripts/verify-export-bundle.sh --fingerprint and never need to contact this " +
+        "deployment, or the vendor, again. The key is held by THIS deployment; the vendor does not " +
+        "have it and cannot verify on your behalf.",
+    };
   });
 
   return app;

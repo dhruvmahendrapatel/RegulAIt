@@ -11,10 +11,16 @@ import {
   MockConnectorProvider,
   SlackConnectorProvider,
   SnowflakeConnectorProvider,
+  TEAMS_DEFAULT_BASE_URL,
+  TeamsConnectorProvider,
+  OutlookConnectorProvider,
+  parseOutlookCredential,
   WebhookConnectorProvider,
   buildSnowflakeJwt,
+  connectorDefaultBaseUrl,
   isConnectorProviderKind,
   parseSnowflakeCredential,
+  parseTeamsCredential,
   resolveConnectorProvider,
 } from "./index.js";
 
@@ -1133,5 +1139,398 @@ describe("snowflake adapter (fake upstream)", () => {
     expect((sf as unknown as { base: string }).base).toBe("https://acme-x1.snowflakecomputing.com");
     const overridden = new SnowflakeConnectorProvider({ credential: CRED, baseUrl: "http://127.0.0.1:9/" });
     expect((overridden as unknown as { base: string }).base).toBe("http://127.0.0.1:9");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ADR-0113 — Microsoft Teams adapter (Bot Framework Connector REST API)
+//
+// The fake upstream plays BOTH roles a Teams post needs: the Microsoft Entra
+// login service (`/{tenant}/oauth2/v2.0/token`) and the Bot Connector service
+// (`/v3/conversations/…`). That is the point — Teams is the first adapter here
+// that touches two hosts, and these tests assert both requests go out, in
+// order, with the right method/path/headers/body.
+// ---------------------------------------------------------------------------
+
+const TEAMS_CRED = JSON.stringify({ appId: "app-1111", appPassword: "pw-2222" });
+const CONV = "19:abc123@thread.tacv2";
+
+/** the two-role handler: token first, then the connector call */
+function teamsUpstream(connectorReply: (req: CapturedRequest, res: ServerResponse) => void) {
+  return (req: CapturedRequest, res: ServerResponse) => {
+    if (req.url.includes("/oauth2/v2.0/token")) {
+      reply(res, 200, { token_type: "Bearer", expires_in: 3600, access_token: "minted-jwt" });
+      return;
+    }
+    connectorReply(req, res);
+  };
+}
+
+describe("teams adapter (fake upstream: login service + Bot Connector)", () => {
+  it("mints an app-only token, THEN sends the Activity to the governed conversation", async () => {
+    await withUpstream(
+      teamsUpstream((_req, res) => reply(res, 201, { id: "1785000000123" })),
+      async (up) => {
+        const teams = new TeamsConnectorProvider({
+          credential: parseTeamsCredential(JSON.stringify({ appId: "app-1111", appPassword: "pw-2222", loginBaseUrl: up.url })),
+          baseUrl: up.url,
+        });
+        const res = await teams.invoke({
+          operation: "write",
+          object: CONV,
+          payload: { text: "deploy approved", attachments: [{ contentType: "application/vnd.microsoft.card.adaptive", content: { type: "AdaptiveCard" } }] },
+        });
+
+        // TWO requests, in order — the token exchange is not optional
+        expect(up.requests).toHaveLength(2);
+
+        const tok = up.requests[0]!;
+        expect(tok.method).toBe("POST");
+        // multi-tenant default: the documented `botframework.com` segment
+        expect(tok.url).toBe("/botframework.com/oauth2/v2.0/token");
+        expect(String(tok.headers["content-type"])).toContain("application/x-www-form-urlencoded");
+        const form = new URLSearchParams(tok.body);
+        expect(form.get("grant_type")).toBe("client_credentials");
+        expect(form.get("client_id")).toBe("app-1111");
+        expect(form.get("client_secret")).toBe("pw-2222");
+        expect(form.get("scope")).toBe("https://api.botframework.com/.default");
+
+        const post = up.requests[1]!;
+        expect(post.method).toBe("POST");
+        expect(post.url).toBe(`/v3/conversations/${encodeURIComponent(CONV)}/activities`);
+        // the MINTED token, not the app password
+        expect(post.headers.authorization).toBe("Bearer minted-jwt");
+        expect(String(post.headers.authorization)).not.toContain("pw-2222");
+        const activity = JSON.parse(post.body) as Record<string, unknown>;
+        expect(activity.type).toBe("message");
+        expect(activity.text).toBe("deploy approved");
+        expect(activity.conversation).toEqual({ id: CONV });
+
+        // the ResourceResponse id is what comes back
+        expect(res.status).toBe(201);
+        expect(res.body).toMatchObject({ id: "1785000000123" });
+      },
+    );
+  });
+
+  it("a single-tenant credential uses the DIRECTORY tenant segment, not botframework.com", async () => {
+    await withUpstream(
+      teamsUpstream((_req, res) => reply(res, 201, { id: "x" })),
+      async (up) => {
+        const teams = new TeamsConnectorProvider({
+          credential: parseTeamsCredential(
+            JSON.stringify({ appId: "a", appPassword: "b", tenantId: "contoso-tenant-id", loginBaseUrl: up.url }),
+          ),
+          baseUrl: up.url,
+        });
+        await teams.invoke({ operation: "write", object: CONV, payload: { text: "hi" } });
+        expect(up.requests[0]!.url).toBe("/contoso-tenant-id/oauth2/v2.0/token");
+      },
+    );
+  });
+
+  it("the conversation comes from the GOVERNED OBJECT — a payload conversation cannot redirect it", async () => {
+    await withUpstream(
+      teamsUpstream((_req, res) => reply(res, 201, { id: "x" })),
+      async (up) => {
+        const teams = new TeamsConnectorProvider({
+          credential: parseTeamsCredential(JSON.stringify({ appId: "a", appPassword: "b", loginBaseUrl: up.url })),
+          baseUrl: up.url,
+        });
+        await teams.invoke({
+          operation: "write",
+          object: CONV,
+          payload: { text: "hi", conversation: { id: "19:EVIL@thread.tacv2" } },
+        });
+        const post = up.requests[1]!;
+        expect(post.url).toBe(`/v3/conversations/${encodeURIComponent(CONV)}/activities`);
+        expect(post.url).not.toContain("EVIL");
+        expect((JSON.parse(post.body) as Record<string, unknown>).conversation).toEqual({ id: CONV });
+      },
+    );
+  });
+
+  it("replyToActivity posts to the reply endpoint for that activity", async () => {
+    await withUpstream(
+      teamsUpstream((_req, res) => reply(res, 200, { id: "y" })),
+      async (up) => {
+        const teams = new TeamsConnectorProvider({
+          credential: parseTeamsCredential(JSON.stringify({ appId: "a", appPassword: "b", loginBaseUrl: up.url })),
+          baseUrl: up.url,
+        });
+        await teams.invoke({
+          operation: "write",
+          object: CONV,
+          payload: { op: "conversations.replyToActivity", replyToId: "act-77", text: "retired" },
+        });
+        expect(up.requests[1]!.url).toBe(`/v3/conversations/${encodeURIComponent(CONV)}/activities/act-77`);
+      },
+    );
+  });
+
+  it("read with an object GETs the conversation members", async () => {
+    await withUpstream(
+      teamsUpstream((_req, res) => reply(res, 200, [{ id: "29:u1", name: "Dana" }])),
+      async (up) => {
+        const teams = new TeamsConnectorProvider({
+          credential: parseTeamsCredential(JSON.stringify({ appId: "a", appPassword: "b", loginBaseUrl: up.url })),
+          baseUrl: up.url,
+        });
+        const res = await teams.invoke({ operation: "read", object: CONV });
+        expect(up.requests[1]!.method).toBe("GET");
+        expect(up.requests[1]!.url).toBe(`/v3/conversations/${encodeURIComponent(CONV)}/members`);
+        expect(res.body).toMatchObject([{ id: "29:u1" }]);
+      },
+    );
+  });
+
+  it("the BARE read is REFUSED rather than guessed — Teams has no get-conversations endpoint", async () => {
+    await withUpstream(
+      teamsUpstream((_req, res) => reply(res, 200, {})),
+      async (up) => {
+        const teams = new TeamsConnectorProvider({
+          credential: parseTeamsCredential(JSON.stringify({ appId: "a", appPassword: "b", loginBaseUrl: up.url })),
+          baseUrl: up.url,
+        });
+        const err = (await teams.invoke({ operation: "read" }).catch((e: unknown) => e)) as ConnectorProviderError;
+        expect(err).toBeInstanceOf(ConnectorProviderError);
+        expect(err.status).toBe(400);
+        expect(err.message).toMatch(/Direct Line and Web Chat/);
+        // M-033: pair the negative with a positive — the SAME adapter against
+        // the SAME upstream DOES reach it when given an object, so "no request"
+        // is about the refusal and not about a dead harness
+        expect(up.requests).toHaveLength(0);
+        await teams.invoke({ operation: "read", object: CONV });
+        expect(up.requests.length).toBeGreaterThan(0);
+      },
+    );
+  });
+
+  it("a write with no object is refused before any socket is opened", async () => {
+    await withUpstream(
+      teamsUpstream((_req, res) => reply(res, 201, { id: "x" })),
+      async (up) => {
+        const teams = new TeamsConnectorProvider({
+          credential: parseTeamsCredential(JSON.stringify({ appId: "a", appPassword: "b", loginBaseUrl: up.url })),
+          baseUrl: up.url,
+        });
+        const err = (await teams
+          .invoke({ operation: "write", payload: { text: "hi" } })
+          .catch((e: unknown) => e)) as ConnectorProviderError;
+        expect(err.status).toBe(400);
+        expect(up.requests).toHaveLength(0);
+        // positive pair: the same call WITH an object does open sockets
+        await teams.invoke({ operation: "write", object: CONV, payload: { text: "hi" } });
+        expect(up.requests).toHaveLength(2);
+      },
+    );
+  });
+
+  it("a FAILED token exchange never opens a socket to the service host", async () => {
+    await withUpstream(
+      (req, res) => {
+        if (req.url.includes("/oauth2/v2.0/token")) {
+          reply(res, 401, { error: "invalid_client", error_description: "bad secret" });
+          return;
+        }
+        reply(res, 201, { id: "should-never-happen" });
+      },
+      async (up) => {
+        const teams = new TeamsConnectorProvider({
+          credential: parseTeamsCredential(JSON.stringify({ appId: "a", appPassword: "wrong", loginBaseUrl: up.url })),
+          baseUrl: up.url,
+        });
+        const err = (await teams
+          .invoke({ operation: "write", object: CONV, payload: { text: "hi" } })
+          .catch((e: unknown) => e)) as ConnectorProviderError;
+        expect(err).toBeInstanceOf(ConnectorProviderError);
+        expect(err.status).toBe(401);
+        // exactly ONE request — the token attempt. Nothing reached the
+        // connector path. (Positive half: the one request IS the token call.)
+        expect(up.requests).toHaveLength(1);
+        expect(up.requests[0]!.url).toContain("/oauth2/v2.0/token");
+      },
+    );
+  });
+
+  it("an ErrorResponse from the connector surfaces its code and the real HTTP status", async () => {
+    await withUpstream(
+      teamsUpstream((_req, res) => reply(res, 403, { error: { code: "BotNotInConversationRoster", message: "no" } })),
+      async (up) => {
+        const teams = new TeamsConnectorProvider({
+          credential: parseTeamsCredential(JSON.stringify({ appId: "a", appPassword: "b", loginBaseUrl: up.url })),
+          baseUrl: up.url,
+        });
+        const err = (await teams
+          .invoke({ operation: "write", object: CONV, payload: { text: "hi" } })
+          .catch((e: unknown) => e)) as ConnectorProviderError;
+        expect(err.status).toBe(403);
+        expect(err.message).toContain("BotNotInConversationRoster");
+      },
+    );
+  });
+
+  it("HTTP 429 from the connector becomes the typed rate-limit error with Retry-After", async () => {
+    await withUpstream(
+      teamsUpstream((_req, res) => reply(res, 429, { error: { code: "Throttled" } }, { "retry-after": "17" })),
+      async (up) => {
+        const teams = new TeamsConnectorProvider({
+          credential: parseTeamsCredential(JSON.stringify({ appId: "a", appPassword: "b", loginBaseUrl: up.url })),
+          baseUrl: up.url,
+        });
+        const err = (await teams
+          .invoke({ operation: "write", object: CONV, payload: { text: "hi" } })
+          .catch((e: unknown) => e)) as ConnectorRateLimitError;
+        expect(err).toBeInstanceOf(ConnectorRateLimitError);
+        expect(err.status).toBe(429);
+        expect(err.retryAfterSeconds).toBe(17);
+      },
+    );
+  });
+
+  it("REFUSES a raw bearer token as the credential — it would work once and then rot", () => {
+    expect(() => parseTeamsCredential("eyJhbGciOiJIUzI1Ni.some.jwt")).toThrow(/non-JSON token/);
+    expect(() => parseTeamsCredential(JSON.stringify({ appId: "a" }))).toThrow(/appPassword/);
+    // positive pair: a well-formed credential parses
+    expect(parseTeamsCredential(TEAMS_CRED).appId).toBe("app-1111");
+  });
+
+  it("the registry resolves kind=teams and refuses it with no credential", () => {
+    expect(resolveConnectorProvider({ kind: "teams", token: TEAMS_CRED }).kind).toBe("teams");
+    expect(() => resolveConnectorProvider({ kind: "teams" })).toThrow(/token/);
+    expect(isConnectorProviderKind("teams")).toBe(true);
+    // teams has a COMPILED destination, so ADR-0062's posture gate can
+    // adjudicate it — it is not an exempt `undefined`
+    expect(connectorDefaultBaseUrl("teams")).toBe(TEAMS_DEFAULT_BASE_URL);
+  });
+});
+
+const OUTLOOK_CRED = JSON.stringify({
+  appId: "app-3333",
+  appPassword: "pw-4444",
+  tenantId: "contoso.onmicrosoft.com",
+  senderUpn: "regulait-approvals@contoso.com",
+});
+
+describe("outlook adapter (fake upstream: Entra login + Microsoft Graph)", () => {
+  it("mints an app-only token, THEN sends to the governed recipient", async () => {
+    await withUpstream(
+      teamsUpstream((_req, res) => reply(res, 202, {})),
+      async (up) => {
+        const outlook = new OutlookConnectorProvider({
+          credential: parseOutlookCredential(
+            JSON.stringify({ ...JSON.parse(OUTLOOK_CRED), loginBaseUrl: up.url }),
+          ),
+          baseUrl: up.url,
+        });
+        const res = await outlook.invoke({
+          operation: "write",
+          object: "ana@acme.com",
+          payload: { subject: "Approval needed", body: { contentType: "HTML", content: "<p>hi</p>" } },
+        });
+        expect(res.status).toBe(202);
+
+        const token = up.requests.find((r) => r.url.includes("/oauth2/v2.0/token"));
+        const send = up.requests.find((r) => r.url.includes("/sendMail"));
+        expect(token).toBeTruthy();
+        expect(send).toBeTruthy();
+        // the token is minted BEFORE the Graph call, so a bad credential never
+        // opens a socket to the mail service
+        expect(up.requests.indexOf(token!)).toBeLessThan(up.requests.indexOf(send!));
+        // app-only client credentials against the named tenant, Graph scope
+        expect(token!.body).toContain("grant_type=client_credentials");
+        expect(token!.body).toContain(encodeURIComponent("https://graph.microsoft.com/.default"));
+        expect(token!.url).toContain(encodeURIComponent("contoso.onmicrosoft.com"));
+        // sent FROM the credential's mailbox
+        expect(send!.url).toContain(encodeURIComponent("regulait-approvals@contoso.com"));
+        expect(send!.headers.authorization).toBe("Bearer minted-jwt");
+      },
+    );
+  });
+
+  it("takes the recipient from the GOVERNED OBJECT — a crafted payload cannot redirect it", async () => {
+    await withUpstream(
+      teamsUpstream((_req, res) => reply(res, 202, {})),
+      async (up) => {
+        const outlook = new OutlookConnectorProvider({
+          credential: parseOutlookCredential(
+            JSON.stringify({ ...JSON.parse(OUTLOOK_CRED), loginBaseUrl: up.url }),
+          ),
+          baseUrl: up.url,
+        });
+        await outlook.invoke({
+          operation: "write",
+          object: "ana@acme.com",
+          payload: {
+            subject: "Approval needed",
+            toRecipients: [{ emailAddress: { address: "attacker@evil.test" } }],
+            ccRecipients: [{ emailAddress: { address: "cc@evil.test" } }],
+            bccRecipients: [{ emailAddress: { address: "bcc@evil.test" } }],
+          },
+        });
+        const send = up.requests.find((r) => r.url.includes("/sendMail"))!;
+        const sent = JSON.parse(send.body) as {
+          message: { toRecipients: Array<{ emailAddress: { address: string } }> };
+        };
+        // the governed object won, and the crafted recipients are GONE rather
+        // than merely outranked — a cc would have delivered just as well
+        expect(sent.message.toRecipients).toEqual([{ emailAddress: { address: "ana@acme.com" } }]);
+        expect(send.body).not.toContain("evil.test");
+      },
+    );
+  });
+
+  it("REFUSES read outright — a mailbox read is not what delivering an approval needs", async () => {
+    const outlook = new OutlookConnectorProvider({
+      credential: parseOutlookCredential(OUTLOOK_CRED),
+    });
+    await expect(
+      outlook.invoke({ operation: "read", object: "ana@acme.com" }),
+    ).rejects.toThrow(/send-only/i);
+  });
+
+  it("refuses a write with no recipient, and an unknown op", async () => {
+    const outlook = new OutlookConnectorProvider({
+      credential: parseOutlookCredential(OUTLOOK_CRED),
+    });
+    await expect(outlook.invoke({ operation: "write", object: null })).rejects.toThrow(/recipient/i);
+    await expect(
+      outlook.invoke({ operation: "write", object: "ana@acme.com", payload: { op: "deleteMail" } }),
+    ).rejects.toThrow(/sendMail/);
+  });
+
+  it("refuses a credential that is not the app registration JSON, and one missing the tenant", () => {
+    expect(() => parseOutlookCredential("a-raw-bearer-token")).toThrow(/non-JSON token/);
+    // tenantId is required here even though Teams allows a multi-tenant bot:
+    // Graph app-only mints for ONE tenant and there is nothing to guess
+    expect(() =>
+      parseOutlookCredential(
+        JSON.stringify({ appId: "a", appPassword: "b", senderUpn: "x@y.com" }),
+      ),
+    ).toThrow(/tenantId/);
+    expect(() =>
+      parseOutlookCredential(JSON.stringify({ appId: "a", appPassword: "b", tenantId: "t" })),
+    ).toThrow(/senderUpn/);
+  });
+
+  it("reports Graph's empty 202 honestly — accepted for delivery is not delivered", async () => {
+    await withUpstream(
+      teamsUpstream((_req, res) => reply(res, 202, {})),
+      async (up) => {
+        const outlook = new OutlookConnectorProvider({
+          credential: parseOutlookCredential(
+            JSON.stringify({ ...JSON.parse(OUTLOOK_CRED), loginBaseUrl: up.url }),
+          ),
+          baseUrl: up.url,
+        });
+        const res = await outlook.invoke({
+          operation: "write",
+          object: "ana@acme.com",
+          payload: { subject: "s" },
+        });
+        expect(res.status).toBe(202);
+        expect(JSON.stringify(res.body)).not.toMatch(/delivered/i);
+      },
+    );
   });
 });

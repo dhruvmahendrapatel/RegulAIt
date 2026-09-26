@@ -19,6 +19,10 @@
  * already module-level.
  */
 import { SCIM_ROUTES } from "./scim.js";
+import {
+  PROTECTED_RESOURCE_METADATA_MCP_PATH,
+  PROTECTED_RESOURCE_METADATA_PATH,
+} from "./mcp-auth-metadata.js";
 import { WEB_UI_ROUTES } from "./web-serving.js";
 
 export const AUTH_EXEMPT_ROUTES = new Set([
@@ -56,6 +60,16 @@ export const AUTH_EXEMPT_ROUTES = new Set([
   "/auth/saml/:providerId/start",
   "/auth/saml/:providerId/acs",
   "/auth/saml/:providerId/metadata",
+  // ADR-0097 — RFC 9728 protected-resource metadata. Unauthenticated BY
+  // DEFINITION: the whole point of the document is to tell a client that has
+  // no credential yet how to get one, and RFC 9728 §3 places it at a
+  // well-known path a client fetches before any authenticated call. Same
+  // posture, and the same reasoning, as the SAML metadata document above: it
+  // contains no secret and names no fact an unauthenticated caller could not
+  // already observe. The scoped variant deliberately does not check whether
+  // the server id exists — a 404 there would enumerate the registry.
+  PROTECTED_RESOURCE_METADATA_PATH,
+  PROTECTED_RESOURCE_METADATA_MCP_PATH,
   // ADR-0037 — SCIM is a SEPARATE TRUST PATH, and this exemption is what
   // makes that true rather than aspirational. These routes must never
   // authenticate via a human session cookie or a user's API key: they
@@ -71,10 +85,24 @@ export const AUTH_EXEMPT_ROUTES = new Set([
 ]);
 
 export const NON_ADMIN_ROUTES = new Set([
+  // ADR-0097 — RFC 9728 protected-resource metadata. A route must be BOTH
+  // auth-exempt (above) and non-admin (here) to be reachable with no
+  // credential — either gate refusing is a refusal — and a discovery document
+  // a client can only read once it is already authenticated discovers nothing.
+  `GET ${PROTECTED_RESOURCE_METADATA_PATH}`,
+  `GET ${PROTECTED_RESOURCE_METADATA_MCP_PATH}`,
   "POST /v1/approvals/:approvalId/decide",
   "GET /v1/users/:userId/servers/:serverId/tools",
   "POST /mcp/:serverId",
   "POST /v1/agents/:agentId/invoke",
+  // ADR-0065 — creating a training job. Its gate is the caller's OWN
+  // entitlement to the base agent the customisation is anchored to, checked
+  // inside the handler by the same `evaluateAgent` path an invoke takes: a
+  // person who may not use a model may not train a derivative of it. Every
+  // other RegulAIt-LLM route stays admin-only through the default gate, because
+  // uploading a corpus, configuring a backend credential and promoting an
+  // artifact to a dispatchable agent are all org-wide acts.
+  "POST /v1/llm/jobs",
   // ADR-0020: the provider-shaped compatibility surfaces are the DEVELOPER's
   // path — a non-admin calling from their IDE — exactly like the MCP proxy
   // above. Their governance is the ordinary evaluateAgent entitlement check
@@ -82,6 +110,23 @@ export const NON_ADMIN_ROUTES = new Set([
   // deliberately NOT here: writing the posture stays admin-only.
   "POST /v1/messages",
   "POST /v1/chat/completions",
+  // ADR-0066 §1 — the discovery endpoint. Non-admin for exactly the reason the
+  // two shims above are: it is the DEVELOPER's setup call, and its governance
+  // is the per-caller entitlement filter inside the handler, not admin-ness.
+  // The list is scoped to the caller, so a non-admin learns nothing about
+  // models they were not granted — an ungranted model is ABSENT, not 403'd.
+  "GET /v1/models",
+  // ADR-0066 §2 — a user may issue, inspect and revoke virtual keys for
+  // THEMSELVES. That is a strict narrowing of their own entitlements and needs
+  // no admin. Issuing on behalf of another user, and pinning which platform
+  // credential a key burns, both refuse in-handler unless the caller is admin.
+  // Note these are NOT in VIRTUAL_KEY_ALLOWED_ROUTES: a virtual key cannot
+  // reach them, so a key can never mint another key.
+  "POST /v1/virtual-keys",
+  "GET /v1/virtual-keys",
+  "GET /v1/virtual-keys/:keyId/usage",
+  "PATCH /v1/virtual-keys/:keyId",
+  "DELETE /v1/virtual-keys/:keyId",
   "POST /v1/connectors/:connectorId/invoke",
   "POST /v1/conversations",
   "GET /v1/conversations",
@@ -89,6 +134,53 @@ export const NON_ADMIN_ROUTES = new Set([
   "DELETE /v1/conversations/:conversationId",
   "GET /v1/users/:userId/agents",
   "GET /v1/users/:userId/connectors",
+  // ADR-0080 — the AI use-case FRONT-door. Non-admin for the same reason
+  // starting a workflow instance is: the person proposing an AI use case is
+  // the requester, not an admin. List/detail/edit are self-scoped INSIDE the
+  // handler (owner-or-admin, exactly like the traces routes above refuse a
+  // cross-user read). Conspicuously NOT here: the RETIRE endpoint — taking a
+  // registered use case out of service is an org-wide act and stays admin —
+  // and there is no status-writing route at all, because approved/rejected
+  // exist only as decisions of the linked intake instance on the one queue.
+  "POST /v1/use-cases",
+  "GET /v1/use-cases",
+  "GET /v1/use-cases/:useCaseId",
+  // ADR-0058 mapping view. Non-admin for the same reason the detail route is:
+  // it is the owner's own use case. The EVIDENCE half is separately gated by
+  // evaluateReportAccess, so a non-admin owner sees the control mapping and
+  // only the counts their report entitlement already permits.
+  "GET /v1/use-cases/:useCaseId/frameworks",
+  // ADR-0124 — the execution read is NOT admin-only, on purpose. It is the
+  // endpoint somebody opens when their work starts being refused, and "the
+  // deployment is halted" is a far better answer than a silent denial that
+  // looks like lost access. It exposes no secret and no other user's data.
+  "GET /v1/execution",
+  "PATCH /v1/use-cases/:useCaseId",
+  // ADR-0081 — the AI risk register, the same shape as the use-case routes
+  // above: naming a risk is a front-door act, and list/detail/edit/transition
+  // are owner-or-admin INSIDE the handler. Conspicuously NOT here: the ACCEPT
+  // endpoint — recording that the org accepts a residual risk is an org-wide
+  // act and stays admin — and there is no status-writing PATCH at all
+  // (transitions are their own audited endpoint, acceptance its own record).
+  "POST /v1/risks",
+  "GET /v1/risks",
+  "GET /v1/risks/library",
+  "GET /v1/risks/:riskId",
+  "PATCH /v1/risks/:riskId",
+  "POST /v1/risks/:riskId/transition",
+  // ADR-0084 — the AI vendor registry, the same shape again: proposing a
+  // vendor is a front-door act, and list/detail/edit are owner-or-admin
+  // INSIDE the handler. Recording a vendor ATTESTATION is owner-or-admin too
+  // (it records a claim, it enforces nothing and satisfies nothing).
+  // Conspicuously NOT here: the RETIRE endpoint — taking a vendor out of the
+  // registry is an org-wide act and stays admin — and there is no
+  // status-writing route at all, because approved/rejected exist only as
+  // decisions of the linked assessment instance on the one queue.
+  "POST /v1/vendors",
+  "GET /v1/vendors",
+  "GET /v1/vendors/:vendorId",
+  "PATCH /v1/vendors/:vendorId",
+  "POST /v1/vendors/:vendorId/attestations",
   "POST /v1/workflows/instances",
   "POST /v1/workflows/instances/:instanceId/artifacts",
   "POST /v1/workflows/instances/:instanceId/advance",
@@ -112,6 +204,25 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /v1/approvals/views",
   "POST /v1/approvals/views",
   "DELETE /v1/approvals/views/:id",
+  // ADR-0069 — a person may read THEIR OWN consolidated (metered + imported)
+  // spend. The handler refuses unless the caller IS that user, so this widens
+  // nothing: cross-user cost visibility stays an admin surface, because a
+  // colleague's imported per-seat spend is exactly the figure that must not
+  // leak sideways. Every other cost-import route — uploading a file, asserting
+  // an identity mapping, reading fleet-wide — is absent here on purpose.
+  "GET /v1/users/:userId/cost-consolidated",
+  // ADR-0070 — a person may list and read THEIR OWN traces, and only their own.
+  // Every one of these four is self-scoped INSIDE the handler: a non-admin who
+  // passes `userId` for somebody else gets a 403 rather than a silently-ignored
+  // parameter, and a non-admin reading another person's trace id gets a 403
+  // naming why. A trace carries prompts, tool arguments and outputs — the most
+  // sensitive data in this system — so this is default-deny with a self
+  // exception, exactly like the consolidated-cost route directly above it. The
+  // exporter routes (`/v1/tracing/*`) are conspicuously NOT here: configuring
+  // and firing an outbound telemetry pipe is an admin act.
+  "GET /v1/traces",
+  "GET /v1/traces/:traceId",
+  "GET /v1/sessions",
   "GET /v1/cost-events",
   "GET /v1/usage-events",
   // ADR-0047: a team lead generating and reading THEIR OWN scorecard. Every

@@ -679,7 +679,15 @@ describe("ADR-0048 — admin gating and the honest shadow boundary", () => {
     expect((await versionsOf(agentId)).length).toBe(before);
   });
 
-  it("declares a rule-type canary as SHADOW and says plainly that nothing evaluates it yet", async () => {
+  /**
+   * REWRITTEN by ADR-0073, not deleted. It used to assert the endpoint said
+   * "shadow evaluation for rule types is NOT yet wired" — which was the honest
+   * disclosure while the rules kernels read their own tables. ADR-0073 wired
+   * them, so that sentence became false and the test now pins the opposite
+   * claim, plus the one thing that must NOT have changed with it: a rule canary
+   * still does not SERVE. See rule-versioning.test.ts for the behaviour.
+   */
+  it("declares a rule-type canary as SHADOW-BUT-EVALUATED, and still never live", async () => {
     const res = await app.inject({
       method: "GET",
       url: `/v1/config-versions/approval_rule/${agentId}`,
@@ -687,7 +695,10 @@ describe("ADR-0048 — admin gating and the honest shadow boundary", () => {
     });
     expect(res.statusCode).toBe(200);
     expect(res.json().canaryMode).toBe("shadow");
-    expect(res.json().note).toMatch(/NOT yet wired/);
+    expect(res.json().canaryIsLive).toBe(false);
+    expect(res.json().canaryIsEvaluated).toBe(true);
+    expect(res.json().note).toMatch(/genuinely evaluated in parallel/);
+    expect(res.json().note).not.toMatch(/NOT yet wired/);
   });
 
   it("exposes the lineage: versions, pointers and the append-only history", async () => {

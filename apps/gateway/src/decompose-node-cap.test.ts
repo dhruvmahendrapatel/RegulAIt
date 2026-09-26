@@ -1,8 +1,9 @@
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createDb, runMigrations, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { installLicenseFixture, removeLicenseFixture } from "./testing/license-fixture.js";
 
 /**
  * PILLAR 7 §5.2 (B2) — a lead may SUGGEST a per-node budget cap at decompose;
@@ -51,6 +52,10 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "d".repeat(64) });
+  // ADR-0052 §4: decompose is tier-gated on `advanced_orchestration`, now
+  // enforced at the route — run under a license granting it (removed in
+  // afterAll; the deployment ends UNLICENSED exactly as it started).
+  await installLicenseFixture(app, { features: ["advanced_orchestration"], auth: AUTH });
   const ap = await makeUser("dnc-approver@example.com");
   approverId = ap.id;
   const dee = await makeUser("dnc-dee@example.com");
@@ -77,6 +82,11 @@ beforeAll(async () => {
   // suggested per-node cap
   await app.inject({ method: "POST", headers: AUTH, url: `/v1/users/${poor.id}/agent-policy`,
     payload: { defaultAgentId: balancedId, runBudgetUsd: 0.0000001, runBudgetBreachAction: "approve" } });
+});
+
+afterAll(async () => {
+  // `licenses` is an org singleton — leave the deployment UNLICENSED
+  await removeLicenseFixture(db);
 });
 
 describe("suggested per-node cap round-trips + is enforced (B2)", () => {

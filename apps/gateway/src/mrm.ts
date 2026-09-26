@@ -47,6 +47,7 @@ import {
   customModelProviders,
   desc,
   eq,
+  evalResults,
   evalRuns,
   inArray,
   lte,
@@ -61,6 +62,7 @@ import {
   type ModelCardRow,
 } from "@regulait/db";
 import {
+  SCORING_SEMANTICS_VERSION,
   assessCardCompleteness,
   attachModelCardEvidenceSchema,
   cardState,
@@ -71,12 +73,20 @@ import {
   mrmPosture,
   requestModelCardSignOffSchema,
   revokeModelCardApprovalSchema,
+  scoringSemanticsSummary,
   updateModelCardSchema,
   type BiasFairnessEntryInput,
   type MrmGateCard,
   type MrmGateDecision,
 } from "@regulait/shared";
 import { loadOrgSettings } from "./org-settings.js";
+import { summarizeGroundedness } from "./evals.js";
+import { installPresentationScrub } from "./conversation-presentation.js";
+import {
+  computeCardAutofill,
+  computeCardStaleness,
+  summarizeAutofillForSnapshot,
+} from "./mrm-autofill.js";
 
 const ORG_SETTINGS_ID = "singleton";
 /** the audit row's actor when the caller is the identity-less bootstrap token —
@@ -163,7 +173,77 @@ export async function mrmDispatchGate(
     cards: [...cards, ...providerCards],
     now,
   });
-  if (decision.allowed) return null;
+  if (decision.allowed) {
+    // ADR-0086 §3's named follow-up (batch B3) — STALENESS FORCES
+    // RECERTIFICATION, as an org opt-in DEEPENING this same gate rather than
+    // forking a second one. Default off = ADR-0086 exactly as shipped
+    // (staleness informs, gates nothing), and the knob is meaningful only
+    // here, inside the mrmEnforced gate — with enforcement off there is no
+    // gate to deepen. When armed: the live card's ledger drift since its
+    // last granting decision (computeCardStaleness — the ONE staleness
+    // computation, never re-derived) reaching the threshold refuses on the
+    // SAME 409 path expiry uses, with the staleness evidence named, and a
+    // recertification (new superseding sign-off) resets the clock.
+    if (!org.mrmStalenessRecertEnabled || decision.reason !== "approved" || !decision.cardId) {
+      return null;
+    }
+    const [liveCard] = await db.select().from(modelCards).where(eq(modelCards.id, decision.cardId));
+    if (!liveCard) return null;
+    const chain = await db
+      .select()
+      .from(modelCardApprovals)
+      .where(eq(modelCardApprovals.cardId, liveCard.id));
+    const staleness = await computeCardStaleness(db, liveCard, chain, now);
+    if (!staleness.certified || !staleness.drifted || !staleness.changesSinceCertification) {
+      return null;
+    }
+    const totalChanges = Object.values(staleness.changesSinceCertification).reduce(
+      (a, b) => a + b,
+      0,
+    );
+    if (totalChanges < org.mrmStalenessRecertThreshold) return null;
+    const detail =
+      `the risk sign-off on model card '${liveCard.intendedUse}' is live but STALE: ` +
+      `${staleness.summary} (${totalChanges} ledger change(s) since certification on ` +
+      `${staleness.lastCertifiedAt}, threshold ${org.mrmStalenessRecertThreshold}). ` +
+      `Staleness-forces-recertification is enabled — recertify (a new sign-off superseding ` +
+      `the current one) to restore dispatch`;
+    await db.insert(auditLog).values({
+      userId: ctx.userId,
+      objectType: "model_card",
+      objectId: liveCard.id,
+      detail: {
+        phase: "dispatch",
+        agentId: ctx.agentId,
+        agentName: ctx.agentName,
+        model: ctx.model,
+        customProviderId: ctx.customProviderId,
+        mrmReason: "staleness_recert_required",
+        modelCardId: liveCard.id,
+        modelCardApprovalId: decision.approvalId,
+        stalenessThreshold: org.mrmStalenessRecertThreshold,
+        staleness: {
+          lastCertifiedAt: staleness.lastCertifiedAt,
+          changesSinceCertification: staleness.changesSinceCertification,
+          totalChanges,
+          summary: staleness.summary,
+        },
+        ...(ctx.projectId ? { projectId: ctx.projectId } : {}),
+      },
+      effect: "deny",
+      ruleId: "mrm-staleness-recert-required",
+      ruleChain: [],
+      reason: detail,
+    });
+    return {
+      status: 409,
+      // the SAME stable caller-facing code every MRM refusal carries — the
+      // remediation is the same family ("recertify"); the audit ruleId is
+      // where this case is distinguishable (the ADR-0045 deviation-1 rule)
+      error: "mrm_approval_required",
+      detail,
+    };
+  }
 
   await db.insert(auditLog).values({
     userId: ctx.userId,
@@ -218,6 +298,10 @@ export async function applyModelCardApprovalDecision(
   decision: "approved" | "denied",
   deciderUserId: string,
 ): Promise<void> {
+  // ADR-0109 (migration 0108): `model_card_approvals_approval_uq` UNIQUE
+  // (approval_id) WHERE approval_id IS NOT NULL makes this single-row. ADR-0107
+  // deferred it here rather than ordering it, because a second sign-off request
+  // on one queue row is a bug, not a tie to break.
   const [record] = await tx
     .select()
     .from(modelCardApprovals)
@@ -235,6 +319,18 @@ export async function applyModelCardApprovalDecision(
     .where(and(eq(modelCardApprovals.id, record.id), eq(modelCardApprovals.status, "pending")))
     .returning();
   if (!updated) return;
+
+  // ADR-0086 — THE ONE HONEST WRITE OF THE AUTOFILL LAYER. The card's
+  // ledger-computed block is recomputed HERE, inside the decision's own
+  // transaction, and its compact form is frozen into this decision's audit
+  // detail — the ADR-0081 acceptance-freeze pattern: the record shows what
+  // the decider saw, and later ledger movement never rewrites it. It lives in
+  // `audit_log.detail` jsonb, deliberately NOT in a card column — no
+  // migration, and nothing an author or admin could edit afterwards.
+  const [cardRow] = await tx.select().from(modelCards).where(eq(modelCards.id, updated.cardId));
+  const autofillSnapshot = cardRow
+    ? summarizeAutofillForSnapshot(await computeCardAutofill(tx, cardRow, new Date()))
+    : null;
 
   if (decision === "approved" && updated.supersedesId) {
     await tx
@@ -259,6 +355,7 @@ export async function applyModelCardApprovalDecision(
       decision,
       validUntil: updated.validUntil?.toISOString() ?? null,
       supersedesId: updated.supersedesId,
+      autofillSnapshot,
     },
     effect: decision === "approved" ? "allow" : "deny",
     ruleId: decision === "approved" ? "mrm-sign-off-approved" : "mrm-sign-off-denied",
@@ -348,11 +445,59 @@ async function cardView(db: Db, card: ModelCardRow, now: Date, warnDays: number)
     .from(modelCardApprovals)
     .where(eq(modelCardApprovals.cardId, card.id))
     .orderBy(desc(modelCardApprovals.requestedAt));
-  const evidence = await db
+  const evidenceRows = await db
     .select()
     .from(modelCardEvidence)
     .where(eq(modelCardEvidence.cardId, card.id))
     .orderBy(asc(modelCardEvidence.attachedAt));
+  // ADR-0067 — A MODEL CARD THAT CITES AN EVAL RUN NOW CARRIES ITS
+  // GROUNDEDNESS FIGURES. "Hallucination rate" is the number a regulated
+  // reviewer looks for on a model card, and before this it was measurable but
+  // not readable from the artifact the sign-off actually rests on. The
+  // `method` field on every metric says whether a MODEL judged it or a lexical
+  // method estimated it — a card must never let those two be confused.
+  //
+  // ADR-0072 — A CITED RUN ALSO CARRIES THE SEMANTICS THAT PRODUCED IT. A model
+  // card is the artifact a sign-off rests on, and ADR-0072 changed what an eval
+  // number MEANS without changing its shape. A card citing a pre-correction run
+  // must say so on its face; otherwise the one place a reviewer looks is the
+  // one place the change is invisible.
+  const evidence = await Promise.all(
+    evidenceRows.map(async (e) => {
+      if (!e.evalRunId) return { ...e, groundedness: null, scoringSemantics: null };
+      const results = await db
+        .select()
+        .from(evalResults)
+        .where(eq(evalResults.runId, e.evalRunId));
+      const [run] = await db
+        .select({ v: evalRuns.scoringSemantics })
+        .from(evalRuns)
+        .where(eq(evalRuns.id, e.evalRunId));
+      const version = run?.v ?? null;
+      return {
+        ...e,
+        groundedness: summarizeGroundedness(results),
+        scoringSemantics:
+          version === null
+            ? null
+            : {
+                version,
+                current: SCORING_SEMANTICS_VERSION,
+                comparableToCurrent: version === SCORING_SEMANTICS_VERSION,
+                summary: scoringSemanticsSummary(version),
+                ...(version === SCORING_SEMANTICS_VERSION
+                  ? {}
+                  : {
+                      note:
+                        "This evidence predates ADR-0072's scoring-semantics correction. The figures are " +
+                        "exactly what was measured at the time and have not been altered — but they are not " +
+                        "comparable to a run scored under the current semantics, and must not be presented " +
+                        "as though they were.",
+                    }),
+              },
+      };
+    }),
+  );
   const state = cardState(chain, now, warnDays);
   return {
     ...card,
@@ -392,6 +537,10 @@ export function registerMrmRoutes(app: FastifyInstance, db: Db) {
     return {
       enforced: org.mrmEnforced,
       warnDays: org.mrmExpiryWarnDays,
+      /** ADR-0086 §3's follow-up (batch B3): off by default; deepens the
+       * dispatch gate (mrmEnforced) — with enforcement off it gates nothing */
+      stalenessRecertEnabled: org.mrmStalenessRecertEnabled,
+      stalenessRecertThreshold: org.mrmStalenessRecertThreshold,
       ...mrmPosture({ enforced: org.mrmEnforced, cardCount: cards.length, approvedCount }),
       cards: cards.length,
       approved: count("approved"),
@@ -409,135 +558,173 @@ export function registerMrmRoutes(app: FastifyInstance, db: Db) {
     };
   });
 
-  app.get("/v1/mrm/cards", async () => {
-    const org = await loadOrgSettings(db);
-    const now = new Date();
-    const rows = await db.select().from(modelCards).orderBy(desc(modelCards.createdAt));
-    const agentRows = await db.select({ id: agents.id, name: agents.name, model: agents.model }).from(agents);
-    const providerRows = await db
-      .select({ id: customModelProviders.id, name: customModelProviders.name })
-      .from(customModelProviders);
-    const agentName = new Map(agentRows.map((a) => [a.id, a.name]));
-    const agentModel = new Map(agentRows.map((a) => [a.id, a.model]));
-    const providerName = new Map(providerRows.map((p) => [p.id, p.name]));
-    const cards = [];
-    for (const row of rows) {
+  /**
+   * ADR-0115 — THE MODEL-CARD PRESENTATION SCOPE.
+   *
+   * `cardView` re-derives `groundedness.unsupportedClaims[].claim` from
+   * `eval_results.detail` for every cited eval run, so a credential the judge
+   * quoted into a per-claim verdict travels out on the card as well as on the
+   * eval run. Measured, not inferred: the S22 probe attached a run whose judge
+   * claims named `AKIAIOSFODNN7EXAMPLE` and found it on BOTH `GET /v1/mrm/
+   * cards/:id` and the `GET /v1/mrm/cards` list.
+   *
+   * All four `cardView` callers are inside this scope — the two reads and the
+   * create/edit routes that echo a freshly-built view back — because a guard
+   * that covers some of a value's producers and not the rest passes while the
+   * rest stay open (M-035). `POST /v1/mrm/cards/:id/sign-off`, `revoke`, the
+   * evidence routes and the sweeps are outside: none of them calls `cardView`
+   * or reads `eval_results`.
+   */
+  app.register(async (scope) => {
+    installPresentationScrub(scope);
+
+
+    scope.get("/v1/mrm/cards", async () => {
+      const org = await loadOrgSettings(db);
+      const now = new Date();
+      const rows = await db.select().from(modelCards).orderBy(desc(modelCards.createdAt));
+      const agentRows = await db.select({ id: agents.id, name: agents.name, model: agents.model }).from(agents);
+      const providerRows = await db
+        .select({ id: customModelProviders.id, name: customModelProviders.name })
+        .from(customModelProviders);
+      const agentName = new Map(agentRows.map((a) => [a.id, a.name]));
+      const agentModel = new Map(agentRows.map((a) => [a.id, a.model]));
+      const providerName = new Map(providerRows.map((p) => [p.id, p.name]));
+      const cards = [];
+      for (const row of rows) {
+        const view = await cardView(db, row, now, org.mrmExpiryWarnDays);
+        cards.push({
+          ...view,
+          subjectKind: row.agentId ? "agent" : "custom_provider",
+          subjectName: row.agentId
+            ? (agentName.get(row.agentId) ?? null)
+            : (providerName.get(row.customProviderId ?? "") ?? null),
+          subjectModel: row.agentId ? (agentModel.get(row.agentId) ?? null) : null,
+        });
+      }
+      return { cards, enforced: org.mrmEnforced };
+    });
+
+    /**
+     * THE DETAIL READ — and, since ADR-0086, the WINDOW. The card's
+     * evidence-shaped sections arrive filled from the ledgers at request time
+     * (`autofill`), visibly apart from the manually attached `evidence`, plus a
+     * `staleness` block saying what has moved since the last certification.
+     * Read-time only, deliberately: nothing here writes a card row, an audit
+     * row, or a cache — the one write is the decide-path snapshot (see
+     * `applyModelCardApprovalDecision`).
+     */
+    scope.get("/v1/mrm/cards/:id", async (req, reply) => {
+      const { id } = idParam.parse(req.params);
+      const org = await loadOrgSettings(db);
+      const [row] = await db.select().from(modelCards).where(eq(modelCards.id, id));
+      if (!row) return reply.status(404).send({ error: "unknown_model_card" });
+      const now = new Date();
       const view = await cardView(db, row, now, org.mrmExpiryWarnDays);
-      cards.push({
-        ...view,
-        subjectKind: row.agentId ? "agent" : "custom_provider",
-        subjectName: row.agentId
-          ? (agentName.get(row.agentId) ?? null)
-          : (providerName.get(row.customProviderId ?? "") ?? null),
-        subjectModel: row.agentId ? (agentModel.get(row.agentId) ?? null) : null,
-      });
-    }
-    return { cards, enforced: org.mrmEnforced };
-  });
-
-  app.get("/v1/mrm/cards/:id", async (req, reply) => {
-    const { id } = idParam.parse(req.params);
-    const org = await loadOrgSettings(db);
-    const [row] = await db.select().from(modelCards).where(eq(modelCards.id, id));
-    if (!row) return reply.status(404).send({ error: "unknown_model_card" });
-    return { card: await cardView(db, row, new Date(), org.mrmExpiryWarnDays) };
-  });
-
-  app.post("/v1/mrm/cards", async (req, reply) => {
-    const body = createModelCardSchema.parse(req.body);
-    if (body.agentId) {
-      const [a] = await db.select({ id: agents.id }).from(agents).where(eq(agents.id, body.agentId));
-      if (!a) return reply.status(404).send({ error: "unknown_agent" });
-    } else if (body.customProviderId) {
-      const [p] = await db
-        .select({ id: customModelProviders.id })
-        .from(customModelProviders)
-        .where(eq(customModelProviders.id, body.customProviderId));
-      if (!p) return reply.status(404).send({ error: "unknown_custom_provider" });
-    }
-    const [existing] = await db
-      .select({ id: modelCards.id })
-      .from(modelCards)
-      .where(
-        and(
-          body.agentId ? eq(modelCards.agentId, body.agentId) : eq(modelCards.customProviderId, body.customProviderId!),
-          eq(modelCards.intendedUse, body.intendedUse),
-        ),
-      );
-    if (existing) {
-      return reply.status(409).send({
-        error: "model_card_exists",
-        detail:
-          "a card already records a risk position on this model for this intended use — edit it, or " +
-          "author a card for a DIFFERENT intended use",
-      });
-    }
-    const [row] = await db
-      .insert(modelCards)
-      .values({
-        agentId: body.agentId ?? null,
-        customProviderId: body.customProviderId ?? null,
-        intendedUse: body.intendedUse,
-        dataClaims: body.dataClaims,
-        limitations: body.limitations ?? null,
-        biasFairness: body.biasFairness,
-        standardRefs: body.standardRefs,
-        note: body.note ?? null,
-        createdByUserId: req.authCtx.userId ?? null,
-      })
-      .returning();
-    await db.insert(auditLog).values({
-      userId: req.authCtx.userId ?? NO_IDENTITY,
-      objectType: "model_card",
-      objectId: row!.id,
-      detail: {
-        phase: "authoring",
-        action: "create",
-        agentId: row!.agentId,
-        customProviderId: row!.customProviderId,
-        intendedUse: row!.intendedUse,
-        standardRefs: row!.standardRefs,
-      },
-      effect: "allow",
-      ruleId: "mrm-card-created",
-      ruleChain: [],
-      reason: `model card authored for intended use '${row!.intendedUse}' — a card enforces NOTHING until it carries an approved sign-off`,
+      const [autofill, staleness] = await Promise.all([
+        computeCardAutofill(db, row, now),
+        computeCardStaleness(db, row, view.approvals, now),
+      ]);
+      return { card: { ...view, autofill, staleness } };
     });
-    const org = await loadOrgSettings(db);
-    return reply.status(201).send({ card: await cardView(db, row!, new Date(), org.mrmExpiryWarnDays) });
+
+    scope.post("/v1/mrm/cards", async (req, reply) => {
+      const body = createModelCardSchema.parse(req.body);
+      if (body.agentId) {
+        const [a] = await db.select({ id: agents.id }).from(agents).where(eq(agents.id, body.agentId));
+        if (!a) return reply.status(404).send({ error: "unknown_agent" });
+      } else if (body.customProviderId) {
+        const [p] = await db
+          .select({ id: customModelProviders.id })
+          .from(customModelProviders)
+          .where(eq(customModelProviders.id, body.customProviderId));
+        if (!p) return reply.status(404).send({ error: "unknown_custom_provider" });
+      }
+      const [existing] = await db
+        .select({ id: modelCards.id })
+        .from(modelCards)
+        .where(
+          and(
+            body.agentId ? eq(modelCards.agentId, body.agentId) : eq(modelCards.customProviderId, body.customProviderId!),
+            eq(modelCards.intendedUse, body.intendedUse),
+          ),
+        );
+      if (existing) {
+        return reply.status(409).send({
+          error: "model_card_exists",
+          detail:
+            "a card already records a risk position on this model for this intended use — edit it, or " +
+            "author a card for a DIFFERENT intended use",
+        });
+      }
+      const [row] = await db
+        .insert(modelCards)
+        .values({
+          agentId: body.agentId ?? null,
+          customProviderId: body.customProviderId ?? null,
+          intendedUse: body.intendedUse,
+          dataClaims: body.dataClaims,
+          limitations: body.limitations ?? null,
+          biasFairness: body.biasFairness,
+          standardRefs: body.standardRefs,
+          note: body.note ?? null,
+          createdByUserId: req.authCtx.userId ?? null,
+        })
+        .returning();
+      await db.insert(auditLog).values({
+        userId: req.authCtx.userId ?? NO_IDENTITY,
+        objectType: "model_card",
+        objectId: row!.id,
+        detail: {
+          phase: "authoring",
+          action: "create",
+          agentId: row!.agentId,
+          customProviderId: row!.customProviderId,
+          intendedUse: row!.intendedUse,
+          standardRefs: row!.standardRefs,
+        },
+        effect: "allow",
+        ruleId: "mrm-card-created",
+        ruleChain: [],
+        reason: `model card authored for intended use '${row!.intendedUse}' — a card enforces NOTHING until it carries an approved sign-off`,
+      });
+      const org = await loadOrgSettings(db);
+      return reply.status(201).send({ card: await cardView(db, row!, new Date(), org.mrmExpiryWarnDays) });
+    });
+
+    scope.patch("/v1/mrm/cards/:id", async (req, reply) => {
+      const { id } = idParam.parse(req.params);
+      const body = updateModelCardSchema.parse(req.body);
+      const [row] = await db.select().from(modelCards).where(eq(modelCards.id, id));
+      if (!row) return reply.status(404).send({ error: "unknown_model_card" });
+      const [updated] = await db
+        .update(modelCards)
+        .set({
+          ...(body.intendedUse !== undefined ? { intendedUse: body.intendedUse } : {}),
+          ...(body.dataClaims !== undefined ? { dataClaims: body.dataClaims } : {}),
+          ...(body.limitations !== undefined ? { limitations: body.limitations ?? null } : {}),
+          ...(body.biasFairness !== undefined ? { biasFairness: body.biasFairness } : {}),
+          ...(body.standardRefs !== undefined ? { standardRefs: body.standardRefs } : {}),
+          ...(body.note !== undefined ? { note: body.note ?? null } : {}),
+          updatedAt: new Date(),
+        })
+        .where(eq(modelCards.id, id))
+        .returning();
+      await db.insert(auditLog).values({
+        userId: req.authCtx.userId ?? NO_IDENTITY,
+        objectType: "model_card",
+        objectId: id,
+        detail: { phase: "authoring", action: "update", fields: Object.keys(body) },
+        effect: "allow",
+        ruleId: "mrm-card-updated",
+        ruleChain: [],
+        reason: "model card edited",
+      });
+      const org = await loadOrgSettings(db);
+      return { card: await cardView(db, updated!, new Date(), org.mrmExpiryWarnDays) };
+    });
   });
 
-  app.patch("/v1/mrm/cards/:id", async (req, reply) => {
-    const { id } = idParam.parse(req.params);
-    const body = updateModelCardSchema.parse(req.body);
-    const [row] = await db.select().from(modelCards).where(eq(modelCards.id, id));
-    if (!row) return reply.status(404).send({ error: "unknown_model_card" });
-    const [updated] = await db
-      .update(modelCards)
-      .set({
-        ...(body.intendedUse !== undefined ? { intendedUse: body.intendedUse } : {}),
-        ...(body.dataClaims !== undefined ? { dataClaims: body.dataClaims } : {}),
-        ...(body.limitations !== undefined ? { limitations: body.limitations ?? null } : {}),
-        ...(body.biasFairness !== undefined ? { biasFairness: body.biasFairness } : {}),
-        ...(body.standardRefs !== undefined ? { standardRefs: body.standardRefs } : {}),
-        ...(body.note !== undefined ? { note: body.note ?? null } : {}),
-        updatedAt: new Date(),
-      })
-      .where(eq(modelCards.id, id))
-      .returning();
-    await db.insert(auditLog).values({
-      userId: req.authCtx.userId ?? NO_IDENTITY,
-      objectType: "model_card",
-      objectId: id,
-      detail: { phase: "authoring", action: "update", fields: Object.keys(body) },
-      effect: "allow",
-      ruleId: "mrm-card-updated",
-      ruleChain: [],
-      reason: "model card edited",
-    });
-    const org = await loadOrgSettings(db);
-    return { card: await cardView(db, updated!, new Date(), org.mrmExpiryWarnDays) };
-  });
 
   app.delete("/v1/mrm/cards/:id", async (req, reply) => {
     const { id } = idParam.parse(req.params);
@@ -819,13 +1006,29 @@ export function registerMrmRoutes(app: FastifyInstance, db: Db) {
    * PUT, because turning it on can hard-stop production and the act deserves
    * its own audit row. */
   app.post("/v1/mrm/enforcement", async (req, reply) => {
-    const body = z.object({ enforced: z.boolean(), warnDays: z.number().int().min(0).max(3650).optional() }).parse(req.body);
+    const body = z
+      .object({
+        enforced: z.boolean(),
+        warnDays: z.number().int().min(0).max(3650).optional(),
+        /** ADR-0086 §3's follow-up (batch B3): staleness-forces-
+         * recertification. Per-org, default off, meaningful only while
+         * `enforced` is on (it deepens this gate; it creates none). */
+        stalenessRecertEnabled: z.boolean().optional(),
+        stalenessRecertThreshold: z.number().int().min(1).max(100000).optional(),
+      })
+      .parse(req.body);
     const org = await loadOrgSettings(db);
     const [updated] = await db
       .update(orgSettings)
       .set({
         mrmEnforced: body.enforced,
         ...(body.warnDays !== undefined ? { mrmExpiryWarnDays: body.warnDays } : {}),
+        ...(body.stalenessRecertEnabled !== undefined
+          ? { mrmStalenessRecertEnabled: body.stalenessRecertEnabled }
+          : {}),
+        ...(body.stalenessRecertThreshold !== undefined
+          ? { mrmStalenessRecertThreshold: body.stalenessRecertThreshold }
+          : {}),
         updatedBy: req.authCtx.userId ?? null,
         updatedAt: new Date(),
       })
@@ -835,16 +1038,43 @@ export function registerMrmRoutes(app: FastifyInstance, db: Db) {
       userId: req.authCtx.userId ?? NO_IDENTITY,
       objectType: "org_settings",
       objectId: null,
-      detail: { phase: "mrm", from: org.mrmEnforced, to: body.enforced, warnDays: updated!.mrmExpiryWarnDays },
+      detail: {
+        phase: "mrm",
+        from: org.mrmEnforced,
+        to: body.enforced,
+        warnDays: updated!.mrmExpiryWarnDays,
+        ...(body.stalenessRecertEnabled !== undefined || body.stalenessRecertThreshold !== undefined
+          ? {
+              stalenessRecert: {
+                from: {
+                  enabled: org.mrmStalenessRecertEnabled,
+                  threshold: org.mrmStalenessRecertThreshold,
+                },
+                to: {
+                  enabled: updated!.mrmStalenessRecertEnabled,
+                  threshold: updated!.mrmStalenessRecertThreshold,
+                },
+              },
+            }
+          : {}),
+      },
       effect: body.enforced ? "deny" : "allow",
       ruleId: body.enforced ? "mrm-enforcement-enabled" : "mrm-enforcement-disabled",
       ruleChain: [],
       reason: body.enforced
-        ? "mrmEnforced ON — dispatch of a model with no unexpired approved card is now REFUSED"
+        ? "mrmEnforced ON — dispatch of a model with no unexpired approved card is now REFUSED" +
+          (updated!.mrmStalenessRecertEnabled
+            ? `; staleness-forces-recertification armed (threshold ${updated!.mrmStalenessRecertThreshold} ledger change(s) since certification)`
+            : "")
         : "mrmEnforced OFF — model cards are recorded but no dispatch is refused",
     });
     if (!updated) return reply.status(500).send({ error: "org_settings_missing" });
-    return { enforced: updated.mrmEnforced, warnDays: updated.mrmExpiryWarnDays };
+    return {
+      enforced: updated.mrmEnforced,
+      warnDays: updated.mrmExpiryWarnDays,
+      stalenessRecertEnabled: updated.mrmStalenessRecertEnabled,
+      stalenessRecertThreshold: updated.mrmStalenessRecertThreshold,
+    };
   });
 }
 

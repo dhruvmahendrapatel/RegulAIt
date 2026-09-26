@@ -24,6 +24,7 @@ import type { FastifyInstance } from "fastify";
 import {
   and,
   approvals,
+  asc,
   auditLog,
   backupRuns,
   certInventory,
@@ -89,11 +90,18 @@ const backupIdParam = z.object({ backupId: z.string().uuid() });
 
 /** ADR-0017 — after a finding is upserted on scan, upsert its durable ledger
  * row and stamp the finding's ref_table/ref_id back-link. Idempotent by
- * construction (patch via UNIQUE(resource,cve); cert by (resource,commonName);
- * backup by (finding, missed)), so a re-scan never duplicates a ledger row.
- * drift has no ledger — its ref stays null. */
+ * construction (patch via UNIQUE(resource,cve); cert by
+ * `cert_inventory_resource_cn_uq`; backup by `backup_runs_finding_uq` — ONE row
+ * per finding, ADR-0110/migration 0109, which is why the backup branch now
+ * RE-OPENS its row rather than inserting a second one), so a re-scan never
+ * duplicates a ledger row. drift has no ledger — its ref stays null.
+ *
+ * `actorId` is the scanning actor: the backup branch can write an audit row of
+ * its own when a re-scan supersedes a pending restore proposal, and an audited
+ * fact with no actor on it is not much of an audit row. */
 async function syncFindingLedger(
   db: Db,
+  actorId: string,
   resource: InfraResourceRow,
   findingId: string,
   report: InfraFindingReport,
@@ -131,6 +139,11 @@ async function syncFindingLedger(
   if (report.kind === "cert_expiring") {
     const commonName = String(d.commonName ?? resource.name);
     const notAfter = d.notAfter ? new Date(String(d.notAfter)) : new Date();
+    // ADR-0109 (migration 0108): `cert_inventory_resource_cn_uq` UNIQUE
+    // (resource_id, common_name) — TOTAL, since both columns are NOT NULL. The
+    // idempotency this function's header claims ("cert by (resource,
+    // commonName)") is now enforced rather than conventional, so this read is
+    // single-row without an order.
     const [existing] = await db
       .select()
       .from(certInventory)
@@ -167,20 +180,84 @@ async function syncFindingLedger(
     return;
   }
   if (report.kind === "backup_missed") {
-    // one 'missed' run per finding — idempotent on re-scan.
+    // ADR-0110 (migration 0109): `backup_runs_finding_uq` UNIQUE (finding_id)
+    // WHERE kind = 'backup' — EXACTLY ONE backup ledger row per finding, and
+    // this read is therefore single-row without an order.
+    //
+    // WHY THIS READ NO LONGER FILTERS ON STATUS. ADR-0109 REFUSED this
+    // constraint, and it was right to on the code as it then stood: the read
+    // was `status='missed'`, a restore proposal moved the row to
+    // 'restore_proposed', a re-scan of the same finding then matched nothing
+    // and inserted a SECOND 'missed' row, and the DENY path's UPDATE of the
+    // FIRST row back to 'missed' would have raised 23505 — a constraint that
+    // blocks an operator from refusing a restore is worse than the duplicate
+    // it prevents.
+    //
+    // The owner answered the behaviour question ADR-0109 left open — *should a
+    // re-scan re-open a miss while a restore is pending?* — with YES. So the
+    // read is keyed on the FINDING ALONE and the existing row is RE-OPENED in
+    // place instead of duplicated. The second row is never written, so the
+    // deny's UPDATE has nothing to collide with.
+    //
+    // WHICH STATUSES RE-OPEN, AND WHICH DO NOT (ADR-0110 §2):
+    //   'missed'           RE-OPENS — already open; the detection metadata is
+    //                      refreshed, nothing else changes.
+    //   'restore_proposed' RE-OPENS — the backup is STILL absent, so the gap is
+    //                      live and the pending proposal is SUPERSEDED. That is
+    //                      a visible fact, not a silent one: an
+    //                      `infra-restore-proposal-superseded` audit row records
+    //                      why the operator's proposal went away. The row
+    //                      returns to 'missed', which is re-proposable.
+    //   'restored'         DOES NOT re-open — the governed restore EXECUTED.
+    //                      Re-opening a completed restore would rewrite history.
+    //   'success'/'failed' DO NOT re-open — not a miss at all. Unreachable for a
+    //                      finding-keyed row today (the scheduler's verified
+    //                      'success' rows carry a NULL finding_id and so are
+    //                      outside the index), and refused defensively rather
+    //                      than assumed away.
     const [existing] = await db
-      .select({ id: backupRuns.id })
+      .select({ id: backupRuns.id, status: backupRuns.status })
       .from(backupRuns)
-      .where(
-        and(
-          eq(backupRuns.findingId, findingId),
-          eq(backupRuns.kind, "backup"),
-          eq(backupRuns.status, "missed"),
-        ),
-      );
+      .where(and(eq(backupRuns.findingId, findingId), eq(backupRuns.kind, "backup")));
     let runId: string;
     if (existing) {
       runId = existing.id;
+      if (existing.status === "missed" || existing.status === "restore_proposed") {
+        const supersededProposal = existing.status === "restore_proposed";
+        await db
+          .update(backupRuns)
+          .set({
+            status: "missed",
+            retentionUntil: d.retentionUntil ? new Date(String(d.retentionUntil)) : null,
+          })
+          .where(eq(backupRuns.id, runId));
+        if (supersededProposal) {
+          await db.insert(auditLog).values({
+            userId: actorId,
+            objectType: "infra_operation",
+            objectId: findingId,
+            detail: {
+              phase: "scan",
+              resource: resource.name,
+              kind: report.kind,
+              signature: report.signature,
+              ledgerId: runId,
+              supersededStatus: "restore_proposed",
+              reopenedStatus: "missed",
+            },
+            effect: "allow",
+            ruleId: "infra-restore-proposal-superseded",
+            ruleChain: [],
+            reason:
+              `re-scan still observed the backup missing on ${resource.name}; the pending restore ` +
+              `proposal on backup run ${runId} was SUPERSEDED and the miss re-opened as 'missed' ` +
+              `(the proposal can be re-made). ADR-0110: a live gap is never hidden behind a ` +
+              `pending proposal.`,
+          });
+        }
+      }
+      // 'restored' (and the two statuses a finding-keyed row cannot hold) are
+      // left exactly as they are — see the table above.
     } else {
       const [row] = await db
         .insert(backupRuns)
@@ -328,9 +405,24 @@ async function effectiveInfraPolicy(db: Db, resource: InfraResourceRow, policies
  * bootstrap-token call (the seeder) does not — fall back to a real admin. */
 async function resolveActor(db: Db, userId: string | null): Promise<string> {
   if (userId) return userId;
-  const [admin] = await db.select({ id: users.id }).from(users).where(eq(users.isAdmin, true)).limit(1);
+  // ADR-0107 (F01): `is_admin` is not unique and neither is "any user", so
+  // WHICH HUMAN an unattributed infra act was recorded against was arbitrary —
+  // an audit trail that names a different person on two identical runs is not
+  // an audit trail. Oldest account wins in both fallbacks: the first admin a
+  // deployment ever had is its bootstrap operator, and that is a stable,
+  // explainable answer rather than a stable-looking accident.
+  const [admin] = await db
+    .select({ id: users.id })
+    .from(users)
+    .where(eq(users.isAdmin, true))
+    .orderBy(asc(users.createdAt), asc(users.id))
+    .limit(1);
   if (admin) return admin.id;
-  const [any] = await db.select({ id: users.id }).from(users).limit(1);
+  const [any] = await db
+    .select({ id: users.id })
+    .from(users)
+    .orderBy(asc(users.createdAt), asc(users.id))
+    .limit(1);
   if (!any) throw new Error("no user to attribute the infra operation to");
   return any.id;
 }
@@ -471,10 +563,19 @@ async function applyInfraActionDecision(
   const [resource] = await tx.select().from(infraResources).where(eq(infraResources.id, resourceId!));
   const refTable =
     action === "cert_rotate" ? "cert_inventory" : action === "patch_apply" ? "patch_records" : "backup_runs";
+  // ADR-0107 (F01): the natural key of `infra_findings` is
+  // (resource_id, kind, detail->>'signature') — NOT (ref_table, ref_id). Two
+  // findings of the same kind whose signatures differ (a re-scan that observed
+  // a changed expiry, say) both point at the same ledger row, so this
+  // predicate can match several. The code then reads `status`/`signature` and
+  // MUTATES the row it got. Newest-detected wins: the live finding is the one
+  // the latest scan raised.
   const [finding] = await tx
     .select()
     .from(infraFindings)
-    .where(and(eq(infraFindings.refTable, refTable), eq(infraFindings.refId, ledgerId)));
+    .where(and(eq(infraFindings.refTable, refTable), eq(infraFindings.refId, ledgerId)))
+    .orderBy(desc(infraFindings.detectedAt), desc(infraFindings.id))
+    .limit(1);
   // A4: one lookup serves both the boundary check and the audit-mode stamp
   const deployMode = await resourceDeployMode(tx, resource?.deployTargetId ?? null);
   const airGapped = deployMode === "air_gapped";
@@ -628,6 +729,17 @@ async function applyInfraActionDecision(
         finishedAt: now,
         retentionUntil: backupRow!.retentionUntil ?? null,
       });
+      // ADR-0110: CLOSE the miss row the restore was proposed against. Before
+      // this it stayed at 'restore_proposed' for ever — which was already a
+      // lie (the proposal is not pending, it EXECUTED) and becomes a harmful
+      // one now that a re-scan re-opens a pending proposal: an executed
+      // restore and an outstanding one would be indistinguishable on the row,
+      // and syncFindingLedger would "supersede" work that had already been
+      // done. 'restored' is the terminal state, and it is the one status the
+      // re-open rule refuses to touch. The kind='restore' row inserted just
+      // above remains the record of the restore ITSELF; this one records that
+      // the MISS is closed.
+      await tx.update(backupRuns).set({ status: "restored" }).where(eq(backupRuns.id, backupRow!.id));
     }
     if (finding) {
       await tx.update(infraFindings).set({ status: "remediated" }).where(eq(infraFindings.id, finding.id));
@@ -735,13 +847,17 @@ async function auditDetection(
 }
 
 /** Scan one resource: detect (idempotent by signature) then, for each NEW
- * finding, apply the auto-vs-gate decision. */
+ * finding, apply the auto-vs-gate decision.
+ *
+ * ADR-0114: a re-scan that observes the SAME signature on a finding whose
+ * status CLAIMS the problem is resolved RE-OPENS it and audits the
+ * contradiction (`reopened`). See the block comment on the re-scan branch. */
 async function scanResource(
   db: Db,
   resource: InfraResourceRow,
   policies: InfraPolicyRow[],
   actorId: string,
-): Promise<{ created: number; autoRemediated: number; refreshed: number }> {
+): Promise<{ created: number; autoRemediated: number; refreshed: number; reopened: number }> {
   const provider = resolveInfraProvider(providerConfig(resource));
   const reports = await provider.scan({
     id: resource.id,
@@ -754,6 +870,7 @@ async function scanResource(
   let created = 0;
   let autoRemediated = 0;
   let refreshed = 0;
+  let reopened = 0;
   for (const report of reports) {
     const [existing] = await db
       .select()
@@ -766,15 +883,117 @@ async function scanResource(
         ),
       );
     if (existing) {
-      // idempotent re-scan: refresh detected_at + the report payload; status is
-      // NEVER reset (a remediated/approved finding stays that way) and no new
-      // remediation is triggered.
+      // Idempotent re-scan: refresh detected_at + the report payload, and never
+      // trigger a second remediation (auto-remediation fires on NEW findings
+      // only — see below). What a re-scan does to `status` is ADR-0114's
+      // decision, and it replaces the rule that used to live in this comment:
+      //
+      //   "status is NEVER reset (a remediated/approved finding stays that
+      //    way)".
+      //
+      // THAT RULE WAS NEVER ADR-0017's. ADR-0017 says only that a re-scan
+      // never duplicates a LEDGER row; the blanket "status is never reset"
+      // was this comment and nothing else. ADR-0110's Honest limits cited it
+      // as "pre-existing ADR-0017 behaviour" — a mis-attribution ADR-0114
+      // corrects, because it matters where a product rule actually lives.
+      //
+      // WHAT IT COSTS. ADR-0110 made the backup LEDGER row re-open when a
+      // re-scan still observes the miss. The FINDING did not follow, so a
+      // restore that reported success over a gap that is still live left the
+      // finding reading `remediated` — the product showing an operator a
+      // CLOSED finding over a LIVE gap, on the surface they trust most.
+      //
+      // THE PRECEDENT. This file already re-opens a finding when a cert
+      // rotation FAILS at the provider (`infra-cert-rotation-failed`, above):
+      // "re-proposable: the finding goes back to open, never silently closed."
+      // A remediation that reported success while the SAME signature is still
+      // observable is not a scanner disagreeing — it is evidence the decision
+      // did not take effect. The two cases now behave the same way.
+      //
+      // WHICH STATUSES RE-OPEN, AND WHICH DO NOT (ADR-0114 §2):
+      //   'remediated'           RE-OPENS — a governed remediation reported
+      //                          success and the gap is demonstrably still
+      //                          there. The contradiction this rule exists for.
+      //   'auto_remediated'      RE-OPENS — same claim, made by automation
+      //                          instead of a human. If anything the case is
+      //                          stronger: nobody looked.
+      //   'accepted_risk'        DOES NOT re-open — a human decided to LIVE
+      //                          with a known problem. The scan still seeing it
+      //                          is the expected outcome, not news; re-opening
+      //                          would nag an operator for doing exactly what
+      //                          the product asked of them.
+      //   'remediation_proposed' DOES NOT re-open — it claims the problem is
+      //                          BEING worked, not that it is resolved, so
+      //                          there is no contradiction to report. The
+      //                          finding surface already shows the gap as
+      //                          unresolved. Re-opening would destroy an
+      //                          operator's in-flight proposal and buy no
+      //                          honesty. (This is where ADR-0114 parts from
+      //                          ADR-0110 §2, and deliberately: on the LEDGER,
+      //                          'restore_proposed' was the state that stopped
+      //                          the row saying the gap was live.)
+      //   'open'                 nothing to do — already open, and NO
+      //                          contradiction row: there is no closed claim to
+      //                          contradict. Re-opening an open finding on
+      //                          every scan would turn the audit log into a
+      //                          duplicate of the scan log.
+      //   'approved'             DOES NOT re-open — and it is UNREACHABLE: the
+      //                          enum carries it but no write path in this repo
+      //                          sets it (enumerated in ADR-0114 §2). Were it
+      //                          reachable it would mean a decision taken whose
+      //                          outcome is not yet written — in flight, like
+      //                          'remediation_proposed'. Refused defensively
+      //                          rather than assumed away, the posture
+      //                          ADR-0110 took with 'success'/'failed'.
+      const reopens = existing.status === "remediated" || existing.status === "auto_remediated";
+      const priorStatus = existing.status;
+      const priorDetectedAt = existing.detectedAt;
       await db
         .update(infraFindings)
-        .set({ detectedAt: new Date(), detail: report.detail, severity: report.severity })
+        .set({
+          detectedAt: new Date(),
+          detail: report.detail,
+          severity: report.severity,
+          ...(reopens ? { status: "open" as const } : {}),
+        })
         .where(eq(infraFindings.id, existing.id));
-      // keep the durable ledger + back-link current (idempotent — no dup rows)
-      await syncFindingLedger(db, resource, existing.id, report);
+      if (reopens) {
+        // The contradiction is an AUDITED fact, never a silent one (ADR-0110
+        // §3's rule, same shape and same vocabulary): what was CLAIMED
+        // (priorStatus), what was OBSERVED (the same signature, again), and
+        // when the finding was last seen before that claim closed it.
+        await db.insert(auditLog).values({
+          userId: actorId,
+          objectType: "infra_operation",
+          objectId: existing.id,
+          detail: {
+            phase: "scan",
+            resource: resource.name,
+            kind: report.kind,
+            severity: report.severity,
+            signature: report.signature,
+            priorStatus,
+            reopenedStatus: "open",
+            priorDetectedAt: priorDetectedAt.toISOString(),
+          },
+          effect: "allow",
+          ruleId: "infra-finding-reopened",
+          ruleChain: [],
+          reason:
+            `re-scan observed the SAME signature '${report.signature}' on ${resource.name} while ` +
+            `the finding read '${priorStatus}' — the remediation reported success but the gap is ` +
+            `still live, so the finding is RE-OPENED as 'open' (re-proposable). Last observed ` +
+            `before it was closed: ${priorDetectedAt.toISOString()}. ADR-0114: a finding is never ` +
+            `silently closed over a problem the scanner can still see.`,
+        });
+        reopened++;
+      }
+      // keep the durable ledger + back-link current (idempotent — no dup rows).
+      // ADR-0114 deliberately does NOT touch the ledger paths ADR-0110 built:
+      // a `restored` backup row stays `restored` (a restore really did run —
+      // that is history) while the finding says the gap is open (that is the
+      // alert). ADR-0017's split of the two surfaces is what makes both true.
+      await syncFindingLedger(db, actorId, resource, existing.id, report);
       await auditDetection(db, actorId, resource, report, existing.id);
       refreshed++;
       continue;
@@ -791,7 +1010,7 @@ async function scanResource(
       .returning();
     created++;
     // materialize the durable ledger row + stamp the finding's ref back-link
-    await syncFindingLedger(db, resource, inserted!.id, report);
+    await syncFindingLedger(db, actorId, resource, inserted!.id, report);
     await auditDetection(db, actorId, resource, report, inserted!.id);
 
     // THE AUTO-VS-GATE DECISION on a NEW finding. critical is never auto (the
@@ -832,7 +1051,7 @@ async function scanResource(
       autoRemediated++;
     }
   }
-  return { created, autoRemediated, refreshed };
+  return { created, autoRemediated, refreshed, reopened };
 }
 
 /** ADR-0017 — the shared propose path for the three operator verbs. Mirrors the
@@ -846,10 +1065,13 @@ async function proposeInfraAction(
   approverUserId: string,
   actorId: string,
 ): Promise<string> {
+  // ADR-0107 (F01): see the note on `applyInfraActionDecision` — newest-detected wins.
   const [finding] = await db
     .select()
     .from(infraFindings)
-    .where(and(eq(infraFindings.refTable, ledger.refTable), eq(infraFindings.refId, ledger.id)));
+    .where(and(eq(infraFindings.refTable, ledger.refTable), eq(infraFindings.refId, ledger.id)))
+    .orderBy(desc(infraFindings.detectedAt), desc(infraFindings.id))
+    .limit(1);
   const [resource] = await db
     .select()
     .from(infraResources)
@@ -1146,6 +1368,7 @@ export function registerInfraRoutes(app: FastifyInstance, db: Db, _dataKey?: str
     let created = 0;
     let autoRemediated = 0;
     let refreshed = 0;
+    let reopened = 0; // ADR-0114
     const skipped: Array<{ resource: string; reason: string }> = [];
     for (const resource of resources) {
       try {
@@ -1153,6 +1376,7 @@ export function registerInfraRoutes(app: FastifyInstance, db: Db, _dataKey?: str
         created += r.created;
         autoRemediated += r.autoRemediated;
         refreshed += r.refreshed;
+        reopened += r.reopened;
       } catch (err) {
         // an un-built cloud provider (501) or a provider error must not fail the
         // whole fleet scan — record it and move on
@@ -1168,6 +1392,7 @@ export function registerInfraRoutes(app: FastifyInstance, db: Db, _dataKey?: str
       created,
       autoRemediated,
       refreshed,
+      reopened, // ADR-0114 — findings whose closed status the scan contradicted
       ...(skipped.length ? { skipped } : {}),
     });
   });
@@ -1271,10 +1496,15 @@ export function registerInfraRoutes(app: FastifyInstance, db: Db, _dataKey?: str
     // O6: the attempt's own ledger row, created AT PROPOSE (status
     // 'proposed'); the /decide hook advances it to rotated/denied/failed —
     // every attempt leaves a durable, reasoned record.
+    // ADR-0107 (F01): see the note on `applyInfraActionDecision` — the rotation
+    // attempt is stamped with the finding that is currently live, not with
+    // whichever of several the planner reached first.
     const [linkedFinding] = await db
       .select({ id: infraFindings.id })
       .from(infraFindings)
-      .where(and(eq(infraFindings.refTable, "cert_inventory"), eq(infraFindings.refId, certId)));
+      .where(and(eq(infraFindings.refTable, "cert_inventory"), eq(infraFindings.refId, certId)))
+      .orderBy(desc(infraFindings.detectedAt), desc(infraFindings.id))
+      .limit(1);
     await db.insert(certRotations).values({
       certId,
       findingId: linkedFinding?.id ?? null,

@@ -37,6 +37,7 @@ import {
 } from "../../../ui/kit";
 import {
   QueryGate,
+  Stat,
   agentOpts,
   optionEls,
   projectOpts,
@@ -54,6 +55,12 @@ interface ScorerInfo {
   summary: string;
   limits: string;
 }
+/** ADR-0088 — the registered external instruments, listed WITH the disclosure */
+interface ExternalScorerListing {
+  scorers: Array<{ name: string; scorerKinds: string[]; enabled: boolean; lastTestedAt: string | null }>;
+  disclosure: string;
+  note: string;
+}
 interface DatasetRow {
   id: string;
   name: string;
@@ -70,6 +77,9 @@ interface CaseRow {
   id: string;
   input: string;
   expected: unknown;
+  /** ADR-0067 — the retrieved/reference context this case is scored against */
+  context?: string[];
+  contextInPrompt?: boolean;
   scorerKind: string | null;
   tags: string[];
 }
@@ -117,6 +127,29 @@ interface ResultRow {
   judgeRationale: string | null;
   error: string | null;
   input: string | null;
+  /** the row's stored evidence — `detail.method` is the provenance stamp
+   * (lexical algorithm name / 'model-judged' / 'external:<name>', ADR-0088) */
+  detail?: Record<string, unknown>;
+}
+
+/** ADR-0072's `GET /v1/evals/scoring-semantics` */
+interface StrandedBaseline {
+  runId: string;
+  agentId: string;
+  agentName: string;
+  datasetId: string;
+  datasetName: string | null;
+  datasetVersion: number;
+  scoringSemantics: number;
+  startedAt: string;
+  action: string;
+}
+interface ScoringSemantics {
+  current: number;
+  versions: Array<{ version: number; adr: string; summary: string }>;
+  evalRuns: Array<{ version: number; runs: number; comparableToCurrent: boolean }>;
+  stalePinnedBaselines: StrandedBaseline[];
+  note: string;
 }
 
 const pct = (n: number | null | undefined) => (n == null ? "—" : `${Math.round(n * 100)}%`);
@@ -130,7 +163,10 @@ export default function EvalsPage() {
 
   const scorers = useQuery({
     queryKey: ["admin", "eval-scorers"],
-    queryFn: () => api.get<{ scorers: ScorerInfo[]; note: string }>("/v1/evals/scorers"),
+    queryFn: () =>
+      api.get<{ scorers: ScorerInfo[]; note: string; externalScorers?: ExternalScorerListing }>(
+        "/v1/evals/scorers",
+      ),
   });
   const datasets = useQuery({
     queryKey: ["admin", "eval-datasets"],
@@ -139,6 +175,13 @@ export default function EvalsPage() {
   const runs = useQuery({
     queryKey: ["admin", "eval-runs"],
     queryFn: () => api.get<{ runs: RunRow[] }>("/v1/evals/runs?limit=100"),
+  });
+  // ADR-0072 — which stored measurements are STRANDED by the scoring-semantics
+  // correction. An operator has to be able to SEE this, not discover it as a
+  // 422 the next time a gate runs.
+  const semantics = useQuery({
+    queryKey: ["admin", "eval-scoring-semantics"],
+    queryFn: () => api.get<ScoringSemantics>("/v1/evals/scoring-semantics"),
   });
 
   const [selectedDataset, setSelectedDataset] = useState<string>("");
@@ -172,6 +215,11 @@ export default function EvalsPage() {
   const [caseExpected, setCaseExpected] = useState("");
   const [caseScorer, setCaseScorer] = useState("");
   const [caseConfig, setCaseConfig] = useState("");
+  // ADR-0067: the retrieved/reference context a groundedness metric scores
+  // against. Blank-line-separated, because CHUNK BOUNDARIES are the metric —
+  // a claim stitched out of two chunks is the fabrication it exists to catch.
+  const [caseContext, setCaseContext] = useState("");
+  const [caseContextInPrompt, setCaseContextInPrompt] = useState(true);
 
   // --- run form
   const [runAgent, setRunAgent] = useState("");
@@ -186,6 +234,93 @@ export default function EvalsPage() {
         sub="Golden datasets, scored runs, and the baseline comparison the workflow check gate blocks on. Every eval dispatch goes through the same governed core as any other call — entitlements, budget, PII and guardrails all apply, and the spend lands in the one usage ledger. An eval is not a bypass."
       />
       <div className={v.stack}>
+        {/* ------- ADR-0072: what the numbers MEAN, and what is stranded ---- */}
+        <Card title="Scoring semantics — which stored measurements are still comparable">
+          <QueryGate
+            loading={semantics.isLoading}
+            error={semantics.error}
+            onRetry={() => void semantics.refetch()}
+          >
+            {semantics.data && (
+              <div className={v.stack}>
+                <p className={v.dim}>{semantics.data.note}</p>
+
+                <div className={a.statRow}>
+                  <Stat value={`v${semantics.data.current}`} label="Current semantics" />
+                  {semantics.data.evalRuns.map((r) => (
+                    <Stat
+                      key={r.version}
+                      value={r.runs}
+                      label={
+                        r.comparableToCurrent
+                          ? `runs on v${r.version} — comparable`
+                          : `runs on v${r.version} — NOT comparable to today`
+                      }
+                    />
+                  ))}
+                  <Stat
+                    value={semantics.data.stalePinnedBaselines.length}
+                    label="Pinned baselines that are stranded"
+                  />
+                </div>
+
+                <div className={v.sectionTitle}>What changed, and when</div>
+                <Table<{ version: number; adr: string; summary: string }>
+                  rows={semantics.data.versions}
+                  rowKey={(r) => String(r.version)}
+                  columns={[
+                    {
+                      key: "version",
+                      header: "Version",
+                      render: (r) => (
+                        <Badge tone={r.version === semantics.data!.current ? "ok" : "neutral"}>
+                          v{r.version}
+                          {r.version === semantics.data!.current ? " (current)" : ""}
+                        </Badge>
+                      ),
+                    },
+                    { key: "adr", header: "Decided in", render: (r) => <code>{r.adr}</code> },
+                    { key: "summary", header: "What a score MEANT", render: (r) => <span className={v.dim}>{r.summary}</span> },
+                  ]}
+                />
+
+                {semantics.data.stalePinnedBaselines.length === 0 ? (
+                  <p className={v.faint}>
+                    No pinned baseline is stranded. Every pinned run was scored under the current semantics,
+                    so every gate can produce a comparable delta.
+                  </p>
+                ) : (
+                  <>
+                    <div className={v.errLine} role="alert" data-testid="stranded-baselines">
+                      {semantics.data.stalePinnedBaselines.length} pinned baseline(s) were scored under older
+                      semantics. Until each one is re-pinned, its dataset/agent pair produces{" "}
+                      <strong>no comparable delta</strong>: the gate FAILS and names the run to re-pin rather
+                      than silently swapping in a different baseline, and pinning a v1 run is refused
+                      outright with <code>baseline_semantics_stale</code>.
+                    </div>
+                    <Table<StrandedBaseline>
+                      rows={semantics.data.stalePinnedBaselines}
+                      rowKey={(r) => r.runId}
+                      columns={[
+                        { key: "agent", header: "Agent", render: (r) => r.agentName },
+                        {
+                          key: "dataset",
+                          header: "Dataset",
+                          render: (r) => `${r.datasetName ?? r.datasetId} v${r.datasetVersion}`,
+                        },
+                        { key: "sem", header: "Scored under", render: (r) => <Badge tone="danger">v{r.scoringSemantics}</Badge> },
+                        { key: "when", header: "Run at", render: (r) => ago(r.startedAt) },
+                        { key: "run", header: "Run id", render: (r) => <code>{r.runId}</code> },
+                        { key: "action", header: "What to do", render: (r) => <span className={v.dim}>{r.action}</span> },
+                      ]}
+                    />
+                  </>
+                )}
+              </div>
+            )}
+          </QueryGate>
+        </Card>
+
         <QueryGate
           loading={scorers.isLoading || datasets.isLoading}
           error={scorers.error ?? datasets.error}
@@ -221,6 +356,36 @@ export default function EvalsPage() {
                 },
               ]}
             />
+            {/* ADR-0088 — the external option, with its disclosure ON the page
+                where the choice is made. Registration lives under
+                Integrations → External scorers. */}
+            {(scorers.data?.externalScorers?.scorers ?? []).length > 0 && (
+              <div style={{ marginTop: "var(--s3)" }}>
+                <h3 style={{ marginBottom: "var(--s2)" }}>External scorers (registered instruments)</h3>
+                <div className={v.faint} style={{ marginBottom: "var(--s2)" }}>
+                  {scorers.data?.externalScorers?.disclosure} {scorers.data?.externalScorers?.note}
+                </div>
+                <Table
+                  rows={scorers.data?.externalScorers?.scorers ?? []}
+                  rowKey={(r) => r.name}
+                  columns={[
+                    { key: "name", header: "Name", render: (r) => <code>external:{r.name}</code> },
+                    {
+                      key: "kinds",
+                      header: "Claims to serve",
+                      render: (r) => <span className={v.faint}>{r.scorerKinds.join(", ")}</span>,
+                    },
+                    {
+                      key: "state",
+                      header: "State",
+                      render: (r) => (
+                        <Badge tone={r.enabled ? "ok" : "warn"}>{r.enabled ? "enabled" : "disabled"}</Badge>
+                      ),
+                    },
+                  ]}
+                />
+              </div>
+            )}
           </Card>
 
           {/* ---------------- datasets ---------------- */}
@@ -342,9 +507,15 @@ export default function EvalsPage() {
                         ...(caseConfig
                           ? { scorerConfig: JSON.parse(caseConfig) as Record<string, unknown> }
                           : {}),
+                        context: caseContext
+                          .split(/\n\s*\n/)
+                          .map((c) => c.trim())
+                          .filter(Boolean),
+                        contextInPrompt: caseContextInPrompt,
                       });
                       setCaseInput("");
                       setCaseExpected("");
+                      setCaseContext("");
                       await detail.refetch();
                       await datasets.refetch();
                     }, "Case added");
@@ -358,6 +529,27 @@ export default function EvalsPage() {
                       required
                     />
                   </Field>
+                  <Field label="Retrieved / reference context — one chunk per blank-line-separated block (groundedness metrics only)">
+                    <Textarea
+                      value={caseContext}
+                      onChange={(e) => setCaseContext(e.target.value)}
+                      rows={3}
+                    />
+                  </Field>
+                  <div className={v.faint}>
+                    Chunk boundaries matter: each claim is scored against the single best-matching
+                    chunk, so a claim that only holds up when fragments of two chunks are stitched
+                    together is correctly reported as unsupported.{" "}
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={caseContextInPrompt}
+                        onChange={(e) => setCaseContextInPrompt(e.target.checked)}
+                      />{" "}
+                      Include the context in the prompt (uncheck to hold it back and score against it
+                      only)
+                    </label>
+                  </div>
                   <div className={a.formRow}>
                     <Field label="Expected / reference" grow>
                       <Input value={caseExpected} onChange={(e) => setCaseExpected(e.target.value)} />
@@ -392,6 +584,14 @@ export default function EvalsPage() {
                         : typeof r.expected === "string"
                           ? r.expected.slice(0, 80)
                           : JSON.stringify(r.expected).slice(0, 80),
+                  },
+                  {
+                    key: "context",
+                    header: "Context",
+                    render: (r) =>
+                      (r.context ?? []).length === 0
+                        ? "—"
+                        : `${(r.context ?? []).length} chunk(s)${r.contextInPrompt === false ? " (scoring only)" : ""}`,
                   },
                   { key: "scorer", header: "Scorer", render: (r) => <code>{r.scorerKind ?? "(default)"}</code> },
                 ]}
@@ -561,6 +761,23 @@ export default function EvalsPage() {
                   columns={[
                     { key: "input", header: "Case", render: (r) => (r.input ?? "").slice(0, 80) },
                     { key: "scorer", header: "Scorer", render: (r) => <code>{r.scorerKind}</code> },
+                    {
+                      key: "method",
+                      // ADR-0088: WHO produced this number — a local
+                      // algorithm, a governed model judge, or a registered
+                      // external instrument (external:<name>). Rendered on
+                      // every row so a vendor's opinion can never read as a
+                      // model's entailment judgement, or either as ours.
+                      header: "Method",
+                      render: (r) => {
+                        const m = typeof r.detail?.method === "string" ? r.detail.method : null;
+                        return m ? (
+                          <Badge tone={m.startsWith("external:") ? "info" : "neutral"}>{m}</Badge>
+                        ) : (
+                          <span className={v.faint}>—</span>
+                        );
+                      },
+                    },
                     { key: "score", header: "Score", render: (r) => r.score.toFixed(3) },
                     {
                       key: "passed",

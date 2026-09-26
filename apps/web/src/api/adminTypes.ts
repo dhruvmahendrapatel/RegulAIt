@@ -251,6 +251,25 @@ export interface CustomModelProvider {
   createdAt: string;
 }
 
+/** ADR-0088 — a registered external eval scorer: the operator's own
+ * Fiddler-class scoring endpoint, governed by the same egress guard and the
+ * same register → test → enable lifecycle as a custom provider. The secret is
+ * write-only; only `hasApiKey` comes back. */
+export interface ExternalScorer {
+  id: string;
+  name: string;
+  baseUrl: string;
+  /** the judge-backed scorer kinds this instrument CLAIMS to serve */
+  scorerKinds: string[];
+  allowPlaintextHttp: boolean;
+  enabled: boolean;
+  lastTestedAt: string | null;
+  lastTestError: string | null;
+  hasApiKey?: boolean;
+  createdBy: string | null;
+  createdAt: string;
+}
+
 /** One granted egress destination. A bare host — no scheme, port, path or
  * wildcard: the guard matches it exactly against the normalized destination. */
 export interface EgressAllowHost {
@@ -634,6 +653,26 @@ export interface WorkflowTemplate {
     costSensitivity?: string;
     stages?: Array<{ id: string; type: string }>;
   };
+}
+
+/** ADR-0077 — the cascade-annotated template gallery */
+export interface TemplateGalleryEntry {
+  galleryId: string;
+  title: string;
+  description: string;
+  source: "built_in" | "compliance_profile";
+  profileTag?: string | null;
+  definition: { workflow?: string; stages?: Array<{ id: string; type: string }> };
+  stageAnnotations: Array<{ stageId: string; demandedByTags: string[] }>;
+}
+
+export interface TemplateGalleryProfile {
+  tag: string;
+  piiMode: string;
+  auditRetentionDays: number | null;
+  mcpDefaultMode: string;
+  requiredTemplates: Array<{ id: string; name: string; retired: boolean; stageIds: string[] }>;
+  forcedStageIds: string[];
 }
 
 export interface AssignmentRule {

@@ -324,3 +324,44 @@ Three things about that are worth stating here rather than only in ADR-0064:
 3. **Timeliness is bounded by the box being up.** [ADR-0032](0032-scheduled-power-off-dev-infra.md)
    powers this deployment's infrastructure off nightly; a sweep due inside the off-window does not
    run, is not queued, and is picked up once — late — on the first tick after power-on.
+
+---
+
+## Amendment (2026-08-22) — §4's framework cost floor is now SOURCED, not just wired
+
+Deviation 2 above ("wired but not sourced") is closed. `decideEnforcement` still takes the same
+`frameworkFloor` it always took; what changed is that the gateway now passes the genuine value
+instead of `null` at its one call site (the anomaly evaluator in `spend-monitor.ts`).
+
+**Where the value comes from.** ADR-0027 §9's per-framework cost profile, read through the SAME
+funnel `preDispatchProjectGate` reads — `complianceProfilesForTags` (the ADR-0073 versioned
+resolution) composed by `effectiveCompliancePolicy`, whose `budgetEnforcement` is the §9
+strictest-wins floor (`block` beats `warn_only` beats no-opinion). One funnel, two consumers: the
+dispatch gate and the anomaly response cannot disagree about what a framework mandates. The
+mapping onto `decideEnforcement`'s vocabulary is `block → 'block'`, `warn_only → 'warn'` (a
+deliberate no-op — only `block` raises the response), no opinion → `null`.
+
+**Cost of the read.** An untagged project resolves with NO query (`profilesForTags([])`
+short-circuits) and its evaluation is byte-identical to before; a tagged project pays one profile
+read per evaluator pass — the same price the dispatch gate pays per dispatch. A profile with
+versions but no active version throws the same `config-version-unresolvable` the dispatch path
+refuses on: loud, fail-closed, never a guessed floor.
+
+**Proven, not asserted** (three same-baseline/same-spike projects differing only in
+classification, in `spend-monitor.test.ts`): a `block`-mandating profile RAISES an `alert` policy
+to `require_approval` — a real item on the one approvals queue, the anomaly row pointing at it,
+disclosed with ruleId `spend-anomaly-enforced-framework-floor` and the floor recorded in the row's
+`detail.frameworkFloor`; an untagged project's `alert` stays an alert with no queue item; a tag
+with NO profile resolves a null cascade byte-identically to untagged. Non-vacuity was proven by
+reverting the pass-through to `null`: exactly the tightening test reddened (23/24) and both
+controls stayed green.
+
+**Still open from the original follow-ups, deliberately untouched here:**
+
+- **The inline `cost_events`-based acceleration gate (§3)** — unchanged; it needs the cached
+  rolling counter, and `preDispatchProjectGate` remains untouched.
+- **Per-USER baselines (§2, deviation 5)** — still project-level only. This is a separable and
+  larger slice (a second baseline dimension through the evaluator, the storage keying, and the
+  entitlement scoping for user-addressed flags), not a parameter of the floor wiring, so it was
+  left rather than half-shipped alongside it.
+- Seasonal/ML forecasting, the alerting transport, and retention/pruning — unchanged.

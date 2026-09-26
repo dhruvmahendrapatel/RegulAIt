@@ -2,9 +2,20 @@
 
 ![CI](https://github.com/dhruvmahendrapatel/RegulAIt/workflows/CI/badge.svg)
 
-RegulAIt is an AI-native agent/development platform, currently in its infrastructure bootstrap
-phase. Long-term vision, architecture decisions, and live project status are tracked in this
-repo rather than in any one conversation, so work can be picked up by anyone (or any AI session)
+**RegulAIt is AI governance that enforces itself.** The policy pack, the approval, and the
+budget are not documents *about* your AI — they are the control plane your AI actually runs
+through. One compliance tag cascades into required sign-off stages, PII blocking, and audit
+retention; every pack control is evidenced by a **query over real ledgers, never a tick-box**
+(ADR-0058); the audit chain anchors to write-once storage whose tamper resistance is
+**observed at runtime, never assumed from config** (ADR-0060). Governance platforms review
+traces after the fact; gateways proxy calls without a compliance vocabulary; RegulAIt is the
+one plane where the control and its enforcement are the same object — vendor-neutral across
+models, clouds, git hosts, and PM tools by construction.
+
+Every claim above links to an ADR and the adversarial test that pins it — see
+[docs/product/POSITIONING.md](docs/product/POSITIONING.md) and the market/gap analyses beside
+it. Long-term vision, architecture decisions, and live project status are tracked in this repo
+rather than in any one conversation, so work can be picked up by anyone (or any AI session)
 cold.
 
 - **Start here if you're a human:** [project-state/STATE.md](project-state/STATE.md) for current
@@ -21,21 +32,36 @@ The fastest path (Docker):
 
 ```bash
 docker compose up --build
-# demo API keys are printed once in the gateway log:
-docker compose logs gateway | grep rgl_
+# one-time sign-in passwords AND demo API keys are printed once, at the end of
+# the gateway's first-boot log:
+docker compose logs gateway | grep -A20 "demo data"
 ```
 
-Then open **http://localhost:3000/app** and sign in:
+Then open **http://localhost:3000/ui** and sign in with a username (not an email)
+plus the one-time password from that log. Each persona is forced to set a real
+password on first sign-in.
 
-- **dana** (requester) — start in the **Playground**: the mock agents reply instantly with
-  streamed output and a full governance/routing/cost trace, no external API keys needed.
-  Then check **Runs** (auto-advance the seeded multi-agent run) and **Workflows**.
-- **avery** (approver) — the **Inbox** has a real sign-off waiting.
-- **admin** — **http://localhost:3000/admin** for the governance console and the
-  Cost & Projects dashboard. Add a model credential there (anthropic/openai/google/xai)
-  and the corresponding seeded agents start doing real dispatches. On a self-hosted box
-  you can skip the paste and set the provider's API-key env var instead (below) — the
-  Playground then defaults to Claude automatically.
+The headline is the **compliance cascade** (§8.3): one `hipaa` tag on a project forces a
+sign-off stage, blocks PII, and floors audit retention — nobody configured any of it per-change.
+
+- **dana** (requester) — start in **Chat** billed to *hipaa-project*: paste a prompt with an
+  SSN (e.g. 123-45-6789) and watch it **denied before the model runs** (red "PII blocked"
+  badge, zero cost) — that's the tag's `piiMode`. The mock agents need no external API keys.
+  Then check **Runs** and **Workflows**.
+- **avery** (approver) — the **Inbox** holds the cascade story: *"Redact and export the
+  oncology cohort (PHI)"* is parked at **compliance-signoff**, a stage no rule routed — the
+  tag cascaded it into an ordinary feature change. Two more sign-offs wait behind it.
+- **admin** — the whole governance console lives in the same shell: **Rules engine**,
+  **Approvals queue**, **Audit log** (see the seeded `pii-blocked` deny; retention floored
+  at the tag's 2555 days), **Cost dashboard**, and under **Workflows** a **template gallery**
+  whose stages are annotated live with which compliance profiles demand them. Add a model
+  credential under **Model credentials** (anthropic/openai/google/xai) and the corresponding
+  seeded agents start doing real dispatches; on a self-hosted box set the provider's API-key
+  env var instead (below).
+
+> **`/ui` is the whole product surface.** The single-file `/app` and `/admin` shells were
+> deleted by [ADR-0033](docs/decisions/0033-delete-legacy-template-literal-uis.md); those paths
+> now 404 rather than redirect, deliberately, so a stale bookmark fails loudly.
 
 Without Docker:
 
@@ -55,6 +81,101 @@ pnpm --filter @regulait/gateway start   # migrations run on boot
 ```
 
 Tests (`pnpm -r test`) need `DATABASE_URL` pointing at a scratch database.
+
+### Verifying a clean checkout
+
+Run this — verbatim — before trusting a fresh clone, a rebase, or a dependency
+change. It is the same sequence CI runs (`.github/workflows/ci.yml`) — build,
+test, then the unique-constraint pre-flight — plus a repo-wide `--noEmit`
+typecheck and an explicitly disposable database, and it is the only sequence
+whose result is meaningful: anything that skips a step below can go green on a
+tree that does not actually build.
+
+```bash
+# 0. Use the package manager this repo pins. package.json declares
+#    "packageManager": "pnpm@10.33.0"; corepack is what makes your shell honour
+#    it. Skipping this is the single most common cause of a "broken clone"
+#    report that the repo cannot reproduce — a mismatched pnpm resolves a
+#    different tree from the same lockfile.
+corepack enable
+corepack prepare --activate          # activates the pinned pnpm, no version to retype
+
+# 1. Install EXACTLY the locked tree. --frozen-lockfile fails rather than
+#    silently rewriting pnpm-lock.yaml, so a verification run can never be the
+#    thing that changes what it is verifying. (CI installs the same way, via
+#    pnpm/action-setup@v4, which reads the packageManager field above.)
+pnpm install --frozen-lockfile
+
+# 2. Build every workspace. This also typechecks and bundles the React SPA.
+pnpm -r build
+
+# 3. Typecheck every workspace against SOURCE, not dist/. Step 2 can pass on a
+#    stale dist/; this cannot.
+pnpm -r exec tsc --noEmit
+
+# 4. Tests, against a database created for this run and thrown away after.
+#    The suites are NOT re-runnable against a populated database — a run
+#    reporting mass SKIPS is a dirty database, not a pass — so the drop is part
+#    of the procedure, not cleanup.
+export PGDATABASE_VERIFY=regulait_verify
+dropdb --if-exists "$PGDATABASE_VERIFY" && createdb "$PGDATABASE_VERIFY"
+export DATABASE_URL="postgres://regulait:regulait@localhost:5432/$PGDATABASE_VERIFY"
+# 64-hex fixture key, the shape secrets.ts asserts. Not a secret.
+export REGULAIT_DATA_KEY=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+pnpm -r test
+
+# 5. Pre-flight the unique constraints, against the database step 4 just
+#    migrated AND populated. It reports, per constraint, how many duplicate
+#    groups would block migration 0108 or 0109 from applying, with example
+#    keys. Exit 0 clean, 1 blocked, 2 could not run.
+#
+#    Run it HERE and not before: on an empty freshly-migrated database every
+#    check is trivially zero, whereas after the suite the tables hold rows the
+#    product's own write paths wrote. Migrations 0108/0109 ADD constraints and
+#    REFUSE — they never repair, merge or delete — so this is the report that
+#    tells an operator what a failed upgrade would have been about, before the
+#    upgrade fails. See ADR-0109 and ADR-0110. CI runs this same step.
+node scripts/preflight-unique-constraints.mjs "$DATABASE_URL"
+
+dropdb --if-exists "$PGDATABASE_VERIFY"
+```
+
+**The exit code is the result.** `pnpm -r test` exits non-zero for a failed
+assertion *and* for an unhandled error thrown outside any assertion — the
+second kind is the one that used to make this suite's exit code
+non-deterministic on an all-green run, closed by
+[ADR-0106](docs/decisions/0106-mock-socket-net-contract.md). Do not read the
+"N passed" line and stop; read `echo $?`.
+
+### Tamper-evident audit anchoring (no cloud account needed)
+
+The compose stack brings up **MinIO with a real S3 Object Lock bucket in
+COMPLIANCE mode**, created automatically before the gateway starts. Nothing to
+configure — `docker compose up --build` gets it. The audit hash chain's head is
+anchored there, and for the retention period no principal can delete or alter a
+written anchor, so a full-recompute forgery diverges from a head nobody can
+rewrite.
+
+```bash
+curl -s localhost:3000/v1/audit/verify -H "authorization: Bearer dev-bootstrap" | jq .anchor
+# → { "source": "worm_sink", "sinkMode": "compliance", "tamperResistant": true, "disclosure": "…" }
+```
+
+`tamperResistant` is read from the bucket at runtime (`GetObjectLockConfiguration`),
+never from configuration — a GOVERNANCE-mode bucket, a missing default retention,
+or an unreadable lock config all report `false` with a disclosure saying why.
+Point it at real S3 (or any S3-compatible endpoint) by setting
+`REGULAIT_AUDIT_ANCHOR_S3_BUCKET` and friends; `REGULAIT_AUDIT_ANCHOR=off`
+disables anchoring entirely. Decision:
+[ADR-0060](docs/decisions/0060-tamper-evident-audit.md).
+
+> Object Lock protects a **version**, not a name: a later write to the same key
+> adds a version rather than replacing it, so verification deliberately reads
+> the *first* version. It stops edit and forgery — it does not stop the whole
+> volume being destroyed, which is a different and much louder attack.
+>
+> On a dev box those anchors genuinely cannot be deleted for the retention
+> period. To reclaim the space, drop the volume: `docker compose down -v`.
 
 ### TLS
 

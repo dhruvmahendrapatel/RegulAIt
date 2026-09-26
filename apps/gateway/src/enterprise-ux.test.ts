@@ -21,6 +21,7 @@ import { fileURLToPath } from "node:url";
 import { and, auditLog, createDb, eq, runMigrations, type Db } from "@regulait/db";
 import { IMPLEMENTED_GIT_PROVIDERS } from "@regulait/git-provider";
 import { buildApp } from "./app.js";
+import { installLicenseFixture, removeLicenseFixture } from "./testing/license-fixture.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -91,6 +92,10 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "d".repeat(64) });
+  // ADR-0052 §4: creating an air_gapped deploy target is now tier-gated on
+  // `airgapped_mode` — run under a real signed license granting it (removed
+  // in afterAll; the deployment ends UNLICENSED as it started).
+  await installLicenseFixture(app, { features: ["airgapped_mode"], auth: AUTH });
   ({ id: piaId, auth: piaAuth } = await mkUser("ux-pia@example.com", "UX Pia"));
   ({ id: anaId, auth: anaAuth } = await mkUser("ux-ana@example.com", "UX Ana"));
   ({ id: deeId, auth: deeAuth } = await mkUser("ux-dee@example.com", "UX Dee"));
@@ -98,6 +103,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await removeLicenseFixture(db);
   await app.close();
 });
 
@@ -338,10 +344,12 @@ describe("#79c dry-run deploy honesty", () => {
     expect(inst.status).toBe("blocked_on_deploy");
     expect(inst.context["deploy:deploy"].dryRun).toBe(true);
     expect(inst.context.lastError).toContain("dry-run deploy cannot satisfy a production deploy gate");
-    // the governed escape: the operator confirms an out-of-band deploy
+    // the governed escape: an out-of-band deploy is confirmed by hand. pia
+    // initiated this instance, so it is a self-attestation and the reason is
+    // mandatory (see the deploy-override separation-of-duties tests below).
     const ov = await app.inject({
       method: "POST", headers: piaAuth, url: `/v1/workflows/instances/${id}/deploy-override`,
-      payload: { stageId: "deploy" },
+      payload: { stageId: "deploy", reason: "shipped through the standard release pipeline out-of-band" },
     });
     expect(ov.statusCode).toBe(200);
     expect((await view(id)).status).toBe("completed");

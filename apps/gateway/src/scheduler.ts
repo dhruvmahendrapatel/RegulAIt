@@ -78,6 +78,7 @@
 import { randomUUID } from "node:crypto";
 import {
   and,
+  asc,
   auditLog,
   desc,
   eq,
@@ -433,7 +434,13 @@ async function releaseJob(
 async function schedulerActor(db: Db, preferred: string | null): Promise<string> {
   if (preferred) return preferred;
   try {
-    const [admin] = await db.select({ id: users.id }).from(users).where(eq(users.isAdmin, true)).limit(1);
+    // ADR-0107 (F01): see scheduler-health.ts — oldest admin, deterministically.
+    const [admin] = await db
+      .select({ id: users.id })
+      .from(users)
+      .where(eq(users.isAdmin, true))
+      .orderBy(asc(users.createdAt), asc(users.id))
+      .limit(1);
     return admin?.id ?? SCHEDULER_SYSTEM_ACTOR;
   } catch {
     return SCHEDULER_SYSTEM_ACTOR;

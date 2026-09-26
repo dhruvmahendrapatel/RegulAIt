@@ -138,34 +138,51 @@
  * "nobody has ever said they have this key" stops being invisible.
  */
 
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { timingSafeEqual } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import {
   DATA_KEY_ATTESTATION_METHODS,
   auditLog,
   dataKeyAttestations,
+  dataKeyReencryptionRuns,
   dataKeyState,
+  desc,
   eq,
   sql,
   users,
   type DataKeyAttestationMethod,
   type DataKeyAttestationRow,
+  type DataKeyReencryptionRunRow,
   type DataKeyStateRow,
   type Db,
 } from "@regulait/db";
-import { decryptSecret } from "./secrets.js";
+import {
+  FINGERPRINT_BYTES,
+  FINGERPRINT_DOMAIN,
+  FINGERPRINT_PREFIX,
+  dataKeyFingerprint,
+  dataKeyFormatError,
+  decryptSecret,
+} from "./secrets.js";
 
 export const DATA_KEY_ENV = "REGULAIT_DATA_KEY";
 export const DATA_KEY_ROTATION_ENV = "REGULAIT_DATA_KEY_ROTATED_FROM";
+/** the OLD key's FULL 64 hex chars — the re-encryption walk needs a key that
+ * can decrypt, and DATA_KEY_ROTATION_ENV holds only a fingerprint (a PRF
+ * output, which cannot). Defined here (not in data-key-reencrypt.ts) so the
+ * boot path can name it without a circular import. */
+export const DATA_KEY_OLD_ENV = "REGULAIT_DATA_KEY_OLD";
+/** the one command that starts — or resumes — the ADR-0063 §4 re-encryption
+ * walk. Printed by the CLI, the boot warning and the status endpoint from
+ * this single definition, so they can never drift apart. */
+export const REENCRYPT_COMMAND =
+  `${DATA_KEY_ENV}=<new key> ${DATA_KEY_OLD_ENV}=<old key> pnpm --filter @regulait/gateway reencrypt`;
 
-/** the fixed domain-separation string. Changing it invalidates every recorded
- * fingerprint on every deployment — hence the `dk1:` version tag beside it. */
-export const FINGERPRINT_DOMAIN = "regulait/data-key-fingerprint/v1";
-export const FINGERPRINT_PREFIX = "dk1:";
-/** 128 bits. Collision-irrelevant here (we compare one value to one value) and
- * short enough that a human can read it off a screen and compare it. */
-export const FINGERPRINT_BYTES = 16;
+// The derivation itself moved to secrets.ts (batch B4) so the envelope can
+// embed the fingerprint of its encrypting key without a circular import — the
+// public surface here is unchanged.
+export { FINGERPRINT_BYTES, FINGERPRINT_DOMAIN, FINGERPRINT_PREFIX, dataKeyFingerprint };
 
 const NIL_USER = "00000000-0000-0000-0000-000000000000";
 
@@ -173,6 +190,7 @@ const NIL_USER = "00000000-0000-0000-0000-000000000000";
 export const DATA_KEY_RULE_IDS = {
   recorded: "data-key-fingerprint-recorded",
   verified: "data-key-fingerprint-verified",
+  malformed: "data-key-malformed",
   mismatch: "data-key-fingerprint-mismatch",
   undecryptable: "data-key-ciphertext-undecryptable",
   keyMissing: "data-key-missing",
@@ -183,23 +201,6 @@ export const DATA_KEY_RULE_IDS = {
 // ---------------------------------------------------------------------------
 // 1. THE FINGERPRINT
 // ---------------------------------------------------------------------------
-
-/** Same validation the envelope itself applies, so a key that cannot encrypt
- * can never acquire a fingerprint either. */
-function keyBytes(dataKeyHex: string): Buffer {
-  const key = Buffer.from(dataKeyHex, "hex");
-  if (key.length !== 32) throw new Error("data key must be 32 bytes (64 hex chars)");
-  return key;
-}
-
-/**
- * The non-secret, non-invertible identifier for a data key. See the module
- * header §1 for the derivation and why publishing it is safe.
- */
-export function dataKeyFingerprint(dataKeyHex: string): string {
-  const digest = createHmac("sha256", keyBytes(dataKeyHex)).update(FINGERPRINT_DOMAIN, "utf8").digest();
-  return FINGERPRINT_PREFIX + digest.subarray(0, FINGERPRINT_BYTES).toString("hex");
-}
 
 /** `null` for "this process has no key at all", which is a legitimate state
  * (secret writes are simply refused) and not a misconfiguration on its own. */
@@ -237,12 +238,21 @@ export const CIPHERTEXT_COLUMNS: ReadonlyArray<{ table: string; column: string; 
   { table: "model_credentials", column: "key_ciphertext", what: "platform model API keys" },
   { table: "user_model_credentials", column: "key_ciphertext", what: "per-user model API keys" },
   { table: "custom_model_providers", column: "key_ciphertext", what: "custom provider API keys" },
+  // ADR-0088: the auth secret an external eval scorer sends as a bearer —
+  // same custody rules as every other admin-registered endpoint credential.
+  { table: "external_scorers", column: "key_ciphertext", what: "external eval scorer auth secrets" },
   { table: "connector_credentials", column: "token_ciphertext", what: "connector tokens" },
   { table: "git_connections", column: "token_ciphertext", what: "git provider tokens" },
   { table: "pm_connections", column: "token_ciphertext", what: "PM tool tokens" },
   { table: "pm_connections", column: "webhook_secret_ciphertext", what: "PM webhook secrets" },
   { table: "deploy_targets", column: "credential_ciphertext", what: "deploy-target credentials" },
   { table: "chatops_connections", column: "signing_secret_ciphertext", what: "ChatOps signing secrets" },
+  // ADR-0065: the credential a REMOTE training backend needs before it will do
+  // anything. It belongs on this list for the same reason every other entry
+  // does — a restore onto a box that does not hold the key its ciphertext was
+  // written under must be detectable, and a column missing from here is a
+  // credential the custody probe would silently never look at.
+  { table: "training_backend_configs", column: "key_ciphertext", what: "training backend API keys" },
 ];
 
 export interface CiphertextProbe {
@@ -299,6 +309,7 @@ export async function probeCiphertext(
 // ---------------------------------------------------------------------------
 
 export type DataKeyBootCode =
+  | "malformed_key"
   | "no_key_configured"
   | "recorded"
   | "verified"
@@ -316,6 +327,11 @@ export interface DataKeyBootDecision {
 }
 
 export interface DataKeyBootInput {
+  /** why the configured key is unusable as a key AT ALL (wrong encoding, wrong
+   * length), or null when it is well-formed or absent. Checked FIRST, because
+   * every other question in this matrix is about WHICH key this is, and a value
+   * that cannot be parsed is not a key to ask that about. */
+  malformed: string | null;
   /** fingerprint of the key this process is running with, or null for none */
   current: string | null;
   /** fingerprint this deployment's ciphertext was written under, or null */
@@ -332,7 +348,28 @@ export interface DataKeyBootInput {
  * only through an integration path that has to arrange a real restore.
  */
 export function decideDataKeyBoot(input: DataKeyBootInput): DataKeyBootDecision {
-  const { current, recorded, rotatedFrom, probe } = input;
+  const { malformed, current, recorded, rotatedFrom, probe } = input;
+
+  // FIRST, ahead of everything. A malformed key has no fingerprint, so it
+  // cannot be compared to the recorded one; before this branch existed the
+  // attempt threw out of `keyBytes` three frames down and `main.ts` re-raised
+  // it as a stack trace — bypassing the one place in this product written to
+  // say something useful to an operator mid-restore. The refusal was correct;
+  // the message was not.
+  if (malformed !== null) {
+    return {
+      code: "malformed_key",
+      ok: false,
+      message:
+        `REFUSING TO START: ${DATA_KEY_ENV} is set, but ${malformed}\n\n` +
+        `  This is a configuration error, not a key-custody problem: the value cannot be used ` +
+        `as an AES-256 key at all, so this deployment's real key — whatever it is — has not been ` +
+        `consulted and nothing has been recorded or changed.\n\n` +
+        `  Fix the value and start again. If you are minting a NEW key for a fresh deployment: ` +
+        `\`openssl rand -hex 32\`. If this deployment already has stored secrets, use the key ` +
+        `whose fingerprint this database records — see docs/ops/DB_BACKUP.md.`,
+    };
+  }
 
   if (current === null) {
     if (recorded === null) {
@@ -464,9 +501,22 @@ export interface DataKeyBootResult extends DataKeyBootDecision {
   probe: CiphertextProbe | null;
   /** false when nobody has ever attested custody of the CURRENT fingerprint */
   attested: boolean;
+  /** an ADR-0063 §4 re-encryption walk left `running` (killed mid-walk, or
+   * still in progress on another process) — ciphertext exists under two keys
+   * until it is resumed to completion. Null after a completed walk, which is
+   * why a boot under the new key alone then succeeds with no caveat. */
+  pendingReencryption: DataKeyReencryptionRunRow | null;
 }
 
 async function readState(db: Db): Promise<DataKeyStateRow | undefined> {
+  // ADR-0107 listed `data_key_state` as "a singleton by CONVENTION only" and
+  // deferred it for a one-row constraint. ADR-0109 checked `pg_constraint` on a
+  // migrated database and found that entry is WRONG: migration 0075 already
+  // created this table with `id text PRIMARY KEY DEFAULT 'singleton'` AND
+  // `CHECK (id = 'singleton')` — a primary key over a column a CHECK pins to
+  // one value admits at most one row, which is the same shape `org_settings`
+  // and `interception_settings` use. So this unordered `limit(1)` is already
+  // provably single-row and 0108 adds nothing here.
   const [row] = await db.select().from(dataKeyState).limit(1);
   return row;
 }
@@ -510,18 +560,56 @@ export async function verifyDataKeyOnBoot(
   dataKeyHex: string | undefined | null,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<DataKeyBootResult> {
-  const current = fingerprintOrNull(dataKeyHex);
+  // Format BEFORE fingerprint. `fingerprintOrNull` hashes `Buffer.from(x,
+  // "hex")` and `keyBytes` throws on anything that is not 32 bytes, so asking
+  // for a fingerprint first is what used to turn a one-character typo into an
+  // unhandled stack trace out of `main.ts`. Ask the authority instead, and let
+  // the matrix refuse in words.
+  const malformed =
+    dataKeyHex === undefined || dataKeyHex === null || dataKeyHex.trim() === ""
+      ? null // no key at all is a separate, legitimate state — see `no_key_configured`
+      : dataKeyFormatError(dataKeyHex);
+  const current = malformed === null ? fingerprintOrNull(dataKeyHex) : null;
   const state = await readState(db);
   const recorded = state?.fingerprint ?? null;
   const rotatedRaw = env[DATA_KEY_ROTATION_ENV];
   const rotatedFrom = rotatedRaw && rotatedRaw.trim() !== "" ? rotatedRaw.trim() : null;
+
+  // ADR-0063 §4 follow-up: an interrupted re-encryption walk means ciphertext
+  // exists under TWO keys right now. It never blocks a boot on its own — the
+  // walk is resumable by design — but every outcome below reports it, and the
+  // mismatch refusal names the resume command instead of sending the operator
+  // down the abandon-the-old-ciphertext path.
+  const [pendingReencryption = null] = await db
+    .select()
+    .from(dataKeyReencryptionRuns)
+    .where(eq(dataKeyReencryptionRuns.status, "running"))
+    .orderBy(desc(dataKeyReencryptionRuns.startedAt))
+    .limit(1);
 
   // The probe only matters on the "nothing recorded yet" branch: everywhere
   // else the recorded fingerprint is the stronger, cheaper answer.
   const probe =
     current !== null && recorded === null ? await probeCiphertext(db, (dataKeyHex as string).trim()) : null;
 
-  const decision = decideDataKeyBoot({ current, recorded, rotatedFrom, probe });
+  const decision = decideDataKeyBoot({ malformed, current, recorded, rotatedFrom, probe });
+
+  if (
+    decision.code === "mismatch" &&
+    pendingReencryption &&
+    fingerprintsMatch(pendingReencryption.toFingerprint, current) &&
+    fingerprintsMatch(pendingReencryption.fromFingerprint, recorded)
+  ) {
+    // The mismatch is not a mystery restore — it is a walk that was killed
+    // mid-flight. Point at the resume command, because the generic remedy
+    // ("declare a rotation, re-enter everything by hand") would abandon
+    // ciphertext the walk can still genuinely re-encrypt.
+    decision.message +=
+      `\n\n  AN UNFINISHED RE-ENCRYPTION WALK (run ${pendingReencryption.id}) from ${recorded} ` +
+      `to ${current} explains this mismatch: it was interrupted before every row was rewritten. ` +
+      `Do NOT declare a rotation — resume the walk instead; it continues from its exact watermark:\n` +
+      `         ${REENCRYPT_COMMAND}`;
+  }
 
   switch (decision.code) {
     case "recorded":
@@ -601,12 +689,36 @@ export async function verifyDataKeyOnBoot(
       });
       throw new DataKeyBootError(decision, recorded, current);
 
+    // A configuration error, not a custody event: no fingerprint was derived,
+    // the recorded key was never compared against anything, and nothing was
+    // written. It is still filed, for the same reason the other three are —
+    // "why did this deployment not come up" belongs in the trail and not only
+    // in a console nobody was watching. The key itself is never in the detail.
+    case "malformed_key":
+      await audit(db, {
+        ruleId: DATA_KEY_RULE_IDS.malformed,
+        effect: "deny",
+        reason: decision.message,
+        detail: { problem: malformed, recorded },
+      });
+      throw new DataKeyBootError(decision, recorded, current);
+
     case "no_key_configured":
       break;
+
+    default: {
+      // Exhaustiveness. This switch decides whether a deployment starts, and a
+      // new DataKeyBootCode that nobody adds a case for would otherwise fall
+      // straight through and BOOT — `decision.ok` being false changes nothing
+      // here, because the throw is what stops it. That is exactly how adding
+      // `malformed_key` nearly turned a refusal into a silent acceptance.
+      const unreachable: never = decision.code;
+      throw new Error(`unhandled data-key boot code: ${String(unreachable)}`);
+    }
   }
 
   const attested = current === null ? false : await hasAttestation(db, current);
-  return { ...decision, recorded, current, probe, attested };
+  return { ...decision, recorded, current, probe, attested, pendingReencryption };
 }
 
 /** one line an operator can read in the boot log, beside proxy/HSTS/egress */
@@ -615,7 +727,11 @@ export function describeDataKey(result: DataKeyBootResult): string {
   const custody = result.attested
     ? "custody attested"
     : "NO CUSTODY ATTESTATION ON FILE — nobody has recorded that this key is stored anywhere but this box";
-  return `${result.current} [${result.code}] — ${custody}`;
+  const walk = result.pendingReencryption
+    ? ` — RE-ENCRYPTION WALK INCOMPLETE (${result.pendingReencryption.fromFingerprint} -> ` +
+      `${result.pendingReencryption.toFingerprint}): ciphertext exists under two keys; resume with: ${REENCRYPT_COMMAND}`
+    : "";
+  return `${result.current} [${result.code}] — ${custody}${walk}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -744,6 +860,19 @@ export async function dataKeyPosture(db: Db, dataKeyHex: string | undefined | nu
       `NO CUSTODY ATTESTATION on file for ${target}. Nobody has recorded that this key exists ` +
         `anywhere other than this machine — which means a backup of this deployment may not be ` +
         `restorable. The key is deliberately NOT in the backup (ADR-0035).`,
+    );
+  }
+  const [pendingWalk] = await db
+    .select()
+    .from(dataKeyReencryptionRuns)
+    .where(eq(dataKeyReencryptionRuns.status, "running"))
+    .orderBy(desc(dataKeyReencryptionRuns.startedAt))
+    .limit(1);
+  if (pendingWalk) {
+    warnings.push(
+      `A key re-encryption walk (${pendingWalk.fromFingerprint} -> ${pendingWalk.toFingerprint}, ` +
+        `run ${pendingWalk.id}) is INCOMPLETE — ciphertext currently exists under two keys. ` +
+        `Resume it: ${REENCRYPT_COMMAND}. Keep BOTH keys available until it completes.`,
     );
   }
 

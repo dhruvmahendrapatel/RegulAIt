@@ -34,7 +34,7 @@
  */
 import { createHmac, timingSafeEqual } from "node:crypto";
 
-export const CHATOPS_PROVIDERS = ["slack", "teams"] as const;
+export const CHATOPS_PROVIDERS = ["slack", "teams", "outlook"] as const;
 export type ChatOpsProvider = (typeof CHATOPS_PROVIDERS)[number];
 
 /** Slack's own recommendation, and the value we enforce. */
@@ -55,7 +55,12 @@ export type ChatSignatureFailure =
   | "future_timestamp"
   | "bad_signature"
   | "body_too_large"
-  | "unsupported_provider";
+  | "unsupported_provider"
+  /** ADR-0121: the provider exists and is registrable, but takes no inbound —
+   * distinct from `unsupported_provider`, which means we do not know it at all.
+   * A reader of this union should be able to tell "refused by decision" from
+   * "not implemented". */
+  | "inbound_unsupported_by_design";
 
 export interface ChatSignatureOk {
   ok: true;
@@ -158,6 +163,29 @@ export function verifyChatSignature(input: ChatSignatureInput): ChatSignatureRes
     return { ok: true, provider: "teams", replayWindowEnforced: false };
   }
 
+  if (input.provider === "outlook") {
+    // ADR-0121 — A DECISION, NOT A GAP, stated here because this is where
+    // someone will look for it.
+    //
+    // Chat inbound is accepted because the PLATFORM signs it: Slack HMACs the
+    // body, the Bot Connector authenticates the caller. Email has no such
+    // thing. An inbound message asserting it is from an approver is exactly
+    // that — an assertion — and SPF/DKIM/DMARC would only move the trust onto
+    // a relay's header parsing. Accepting a governance decision on that basis
+    // would be worse than having no email channel at all, because it would
+    // LOOK like a verified one.
+    //
+    // Microsoft Actionable Messages is the cryptographic path (a
+    // Microsoft-signed bearer token, verifiable against their JWKS) and is how
+    // this would become decide-from-inbox. It needs an originator id
+    // registered per tenant — a deployment fact this codebase cannot hold or
+    // verify for a customer — so it is not pretended at here.
+    return refuse(
+      "inbound_unsupported_by_design",
+      "outlook is a send-only ChatOps provider: an inbound email is an unauthenticated assertion, not a " +
+        "signed callback, so a decision is never taken from one. Decide from the portal link in the message.",
+    );
+  }
   return refuse("unsupported_provider", `unknown chat provider '${String(input.provider)}'`);
 }
 
@@ -284,11 +312,48 @@ export interface ApprovalCardInput {
   decidable: boolean;
 }
 
+/**
+ * ONE semantic decide button, provider-neutral. ADR-0113 added this so a second
+ * chat provider renders its OWN buttons from the SAME decision rather than
+ * re-deriving one: `actions` is empty exactly when `chatDecidable` said no, so
+ * a renderer cannot accidentally offer a tap the fence forbade. The payload is
+ * still only the OPAQUE approval id plus the verb — nothing replayable into
+ * authority, on either provider.
+ */
+export interface ApprovalCardAction {
+  /** the Slack `action_id`; Teams carries the verb in `data.action` instead */
+  id: "regulait_approve" | "regulait_reject";
+  label: string;
+  approvalId: string;
+  action: ChatOpsAction;
+}
+
 export interface ApprovalCard {
   text: string;
   blocks: Array<Record<string, unknown>>;
   /** true when the card deliberately omits the gated action's details */
   redacted: boolean;
+  /** where the human goes to decide it properly — carried on EVERY card */
+  portalUrl: string;
+  /** EMPTY when the sensitivity fence (or a decided card) forbids deciding
+   * from chat. A renderer that emits a button when this is empty is a bug. */
+  actions: ApprovalCardAction[];
+  /** the sentence shown in place of the buttons when `actions` is empty */
+  inAppOnlyNote: string | null;
+}
+
+const IN_APP_ONLY_NOTE =
+  "This approval is in-app only: a chat tap is not a re-authenticated session, and this approval's " +
+  "sensitivity classification requires deciding it in the portal.";
+
+/** the decide buttons this card is allowed to offer — the ONE place that turns
+ * `decidable` into actions, for every provider */
+function approvalCardActions(approvalId: string, decidable: boolean): ApprovalCardAction[] {
+  if (!decidable) return [];
+  return [
+    { id: "regulait_approve", label: "Approve", approvalId, action: "approve" },
+    { id: "regulait_reject", label: "Reject", approvalId, action: "reject" },
+  ];
 }
 
 /**
@@ -319,32 +384,36 @@ export function composeApprovalCard(input: ApprovalCardInput): ApprovalCard {
     blocks.push({ type: "section", text: { type: "mrkdwn", text: `<${input.portalUrl}|Open in RegulAIt>` } });
   }
 
-  if (input.decidable) {
+  const actions = approvalCardActions(input.approvalId, input.decidable);
+  if (actions.length > 0) {
     // THE BUTTON CARRIES ONLY THE OPAQUE APPROVAL ID. No user id, no role, no
     // signed grant — nothing that could be replayed into authority. The value
     // is a *request* to decide.
     blocks.push({
       type: "actions",
-      elements: [
-        { type: "button", action_id: "regulait_approve", style: "primary", text: { type: "plain_text", text: "Approve" }, value: input.approvalId },
-        { type: "button", action_id: "regulait_reject", style: "danger", text: { type: "plain_text", text: "Reject" }, value: input.approvalId },
-      ],
+      elements: actions.map((a) => ({
+        type: "button",
+        action_id: a.id,
+        style: a.action === "approve" ? "primary" : "danger",
+        text: { type: "plain_text", text: a.label },
+        value: a.approvalId,
+      })),
     });
   } else {
     blocks.push({
       type: "context",
-      elements: [
-        {
-          type: "mrkdwn",
-          text:
-            "_This approval is in-app only: a chat tap is not a re-authenticated session, and this approval's " +
-            "sensitivity classification requires deciding it in the portal._",
-        },
-      ],
+      elements: [{ type: "mrkdwn", text: `_${IN_APP_ONLY_NOTE}_` }],
     });
   }
 
-  return { text, blocks, redacted: input.fenced };
+  return {
+    text,
+    blocks,
+    redacted: input.fenced,
+    portalUrl: input.portalUrl,
+    actions,
+    inAppOnlyNote: actions.length > 0 ? null : IN_APP_ONLY_NOTE,
+  };
 }
 
 /** the card a decided approval is edited down to — the buttons are retired */
@@ -357,5 +426,149 @@ export function composeDecidedCard(input: { approvalId: string; decision: string
       { type: "section", text: { type: "mrkdwn", text: `<${input.portalUrl}|View in RegulAIt>` } },
     ],
     redacted: false,
+    portalUrl: input.portalUrl,
+    // a DECIDED card never offers a decide button again, on any provider
+    actions: [],
+    inAppOnlyNote: null,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0113 — RENDERING THE SAME CARD FOR TEAMS
+// ---------------------------------------------------------------------------
+//
+// Teams cannot render Slack Block Kit, so a second renderer is unavoidable. The
+// thing that must NOT be duplicated is the DECISION about what the card is
+// allowed to say and offer, because a second copy of that is a second place for
+// the sensitivity fence to drift. So this function takes the ALREADY-COMPOSED
+// `ApprovalCard` and re-renders it: `text` is reused byte-for-byte (modulo the
+// bold-marker conversion below), and the buttons come from `card.actions`,
+// which `composeApprovalCard` already emptied if the fence said so. A fenced
+// approval therefore produces a Teams card with a link and no Action.Submit for
+// the same reason and by the same code path as on Slack.
+//
+// The Action.Submit `data` is exactly what `parseTeamsInteraction` reads back:
+// `{approvalId, action}` arrives as the inbound Activity's `value`.
+//
+// FIDELITY, STATED RATHER THAN IMPLIED. Adaptive Cards support a smaller
+// markdown subset than Slack mrkdwn. Bold is spelled `**x**` instead of `*x*`,
+// so that one marker is converted. Slack's backtick code spans have no Adaptive
+// Cards equivalent and are LEFT ALONE — they render as literal backticks in
+// Teams. That is a cosmetic difference in a card whose content is otherwise
+// identical, and it is recorded in ADR-0113 rather than papered over.
+export const TEAMS_ADAPTIVE_CARD_CONTENT_TYPE = "application/vnd.microsoft.card.adaptive";
+/** the schema version pinned for the card body — 1.4 is broadly supported by
+ * shipped Teams clients; 1.5 is not uniformly rendered */
+export const TEAMS_ADAPTIVE_CARD_VERSION = "1.4";
+
+/** Slack mrkdwn `*bold*` → Adaptive Cards `**bold**`. Deliberately narrow: it
+ * only touches a `*…*` run that contains no `*` and no newline. */
+function toAdaptiveMarkdown(text: string): string {
+  return text.replace(/(^|[\s(])\*([^*\n]+)\*(?=$|[\s.,;:!?)])/g, (_m, lead: string, inner: string) => `${lead}**${inner}**`);
+}
+
+export interface TeamsActivityPayload {
+  text: string;
+  attachments: Array<{ contentType: string; content: Record<string, unknown> }>;
+}
+
+/**
+ * Render an already-composed `ApprovalCard` as the Bot Framework Activity
+ * fields a Teams post carries. Pure: no clock, no network, no db.
+ */
+export interface OutlookMessagePayload {
+  subject: string;
+  body: { contentType: "HTML"; content: string };
+}
+
+/** Minimal HTML escaping — this content reaches a mail client, and a tool name
+ * or approver label is operator-supplied text, not markup. */
+function escapeHtml(v: string): string {
+  return v
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+/**
+ * ADR-0121 — render an already-composed `ApprovalCard` as the mail fields a
+ * Graph `sendMail` carries. Pure: no clock, no network, no db.
+ *
+ * THERE ARE NO DECIDE ACTIONS HERE, AND THAT IS THE POINT. `card.actions` is
+ * deliberately not rendered. ADR-0061's fence reasons that a chat tap is not a
+ * re-authenticated session; an email is weaker still — it forwards, it sits in
+ * an unlocked mailbox, it survives in archives and backups, and anyone holding
+ * a copy holds whatever the copy can do. So the message carries the SAME
+ * content and the portal link, and the decision is taken where the approver is
+ * authenticated. A deployment cannot opt out with `allowFencedDecide`: that
+ * switch loosens the FENCE, not this channel's own limits.
+ */
+export function outlookMessageForCard(card: ApprovalCard): OutlookMessagePayload {
+  const lines = [`<p>${escapeHtml(card.text).replace(/\n/g, "<br/>")}</p>`];
+  if (/^https?:\/\//i.test(card.portalUrl)) {
+    lines.push(`<p><a href="${escapeHtml(card.portalUrl)}">Open in RegulAIt to decide</a></p>`);
+  } else {
+    // no public base URL configured: say where to go rather than emit a dead
+    // link, exactly as the Teams renderer declines a dead Action.OpenUrl
+    lines.push(`<p>Decide in RegulAIt: ${escapeHtml(card.portalUrl)}</p>`);
+  }
+  if (card.inAppOnlyNote) {
+    lines.push(`<p><em>${escapeHtml(card.inAppOnlyNote)}</em></p>`);
+  }
+  lines.push(
+    "<p><small>Approvals are decided in RegulAIt, never by replying to this message — " +
+      "a reply is not a signed instruction and will not be acted on.</small></p>",
+  );
+  return {
+    subject: card.redacted
+      ? "RegulAIt: an approval needs you (content withheld)"
+      : "RegulAIt: an approval needs you",
+    body: { contentType: "HTML", content: lines.join("\n") },
+  };
+}
+
+export function teamsActivityForCard(card: ApprovalCard): TeamsActivityPayload {
+  const body: Array<Record<string, unknown>> = [
+    { type: "TextBlock", text: toAdaptiveMarkdown(card.text), wrap: true },
+    // The link is carried as TEXT as well as (when absolute) an action, so a
+    // fenced card always still says WHERE to go even on a client that drops
+    // the action bar. This is the "a link, not the content" half of the fence.
+    { type: "TextBlock", text: card.portalUrl, wrap: true, isSubtle: true },
+  ];
+  if (card.inAppOnlyNote) {
+    body.push({ type: "TextBlock", text: `_${card.inAppOnlyNote}_`, wrap: true, isSubtle: true });
+  }
+
+  const actions: Array<Record<string, unknown>> = [];
+  // Action.OpenUrl needs an ABSOLUTE url; a deployment that has not configured
+  // its public base URL gets the path as text above and no dead button.
+  if (/^https?:\/\//i.test(card.portalUrl)) {
+    actions.push({ type: "Action.OpenUrl", title: "Open in RegulAIt", url: card.portalUrl });
+  }
+  for (const a of card.actions) {
+    // SAME rule as the Slack button: the payload is the opaque approval id and
+    // a verb, nothing that could be replayed into authority.
+    actions.push({
+      type: "Action.Submit",
+      title: a.label,
+      data: { approvalId: a.approvalId, action: a.action },
+    });
+  }
+
+  return {
+    text: card.text,
+    attachments: [
+      {
+        contentType: TEAMS_ADAPTIVE_CARD_CONTENT_TYPE,
+        content: {
+          $schema: "http://adaptivecards.io/schemas/adaptive-card.json",
+          type: "AdaptiveCard",
+          version: TEAMS_ADAPTIVE_CARD_VERSION,
+          body,
+          ...(actions.length > 0 ? { actions } : {}),
+        },
+      },
+    ],
   };
 }

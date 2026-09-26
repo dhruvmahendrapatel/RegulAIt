@@ -474,10 +474,11 @@ describe("sign-off rides the ONE Approvals Queue — there is no second inbox", 
     expect(record!.status).toBe("approved");
     expect(record!.decidedBy).toBe(rikaId);
     expect(record!.validUntil).toBeTruthy();
-    const rows = await audits("mrm-sign-off-approved");
+    // scoped to THIS card (M-008): another suite's sign-off decisions may
+    // legitimately add rows under the same rule id
+    const rows = (await audits("mrm-sign-off-approved")).filter((r) => r.objectId === cardId);
     expect(rows.length).toBe(1);
     expect(rows[0]!.objectType).toBe("model_card");
-    expect(rows[0]!.objectId).toBe(cardId);
   });
 
   it("the card now reads approved", async () => {

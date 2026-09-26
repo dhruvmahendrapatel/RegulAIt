@@ -197,17 +197,67 @@ describe("deploy → verify → rollback", () => {
     await approveGate(id);
     let inst = await view(id);
     expect(inst.status).toBe("blocked_on_deploy");
-    // operator resolves the handoff
-    const ov = await app.inject({
+    // pia INITIATED this instance, so clearing its own deploy gate is a
+    // self-attestation: refused outright until a reason is on the record
+    const bare = await app.inject({
       method: "POST",
       headers: piaAuth,
       url: `/v1/workflows/instances/${id}/deploy-override`,
       payload: { stageId: "deploy" },
     });
+    expect(bare.statusCode).toBe(400);
+    expect(bare.json().error).toBe("deploy_override_reason_required");
+    expect((await view(id)).status).toBe("blocked_on_deploy"); // nothing moved
+    // with the reason recorded it advances
+    const ov = await app.inject({
+      method: "POST",
+      headers: piaAuth,
+      url: `/v1/workflows/instances/${id}/deploy-override`,
+      payload: { stageId: "deploy", reason: "released by hand from the ops runbook; ticket OPS-411" },
+    });
     expect(ov.statusCode).toBe(200);
     inst = await view(id);
     // advanced past deploy → verify auto-passes → final gate
     expect(inst.status).toBe("blocked_on_approval");
+    // and the trail says who attested, and that it was their own change
+    const audit = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.objectType, "workflow"), eq(auditLog.objectId, id)));
+    const attested = audit.find((a) => a.ruleId === "workflow:deploy-override-attested");
+    expect(attested).toBeTruthy();
+    expect((attested!.detail as { selfAttested: boolean }).selfAttested).toBe(true);
+    expect(attested!.reason).toContain("OPS-411");
+  });
+
+  it("an arm's-length admin clears someone else's parked deploy without a reason", async () => {
+    await registerTemplate("wd-adm", "wd-adm-change", "wd-nonexistent2");
+    const id = await start("wd-adm-change"); // initiated by pia
+    await approveGate(id);
+    expect((await view(id)).status).toBe("blocked_on_deploy");
+    // an admin who is NOT the initiator — no self-attestation, so the reason
+    // stays optional and the one-click operator path is unchanged
+    const opsUser = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/users",
+      payload: { email: "wd-ops@example.com", displayName: "WD Ops", isAdmin: true },
+    });
+    expect(opsUser.statusCode).toBe(201);
+    const opsKey = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: `/v1/users/${opsUser.json().id}/keys`,
+      payload: { name: "ops" },
+    });
+    const ov = await app.inject({
+      method: "POST",
+      headers: { authorization: `Bearer ${opsKey.json().token}` },
+      url: `/v1/workflows/instances/${id}/deploy-override`,
+      payload: { stageId: "deploy" },
+    });
+    expect(ov.statusCode).toBe(200);
+    expect((await view(id)).status).toBe("blocked_on_approval");
   });
 
   it("a deploy whose condition is unmet parks at blocked_on_deploy", async () => {

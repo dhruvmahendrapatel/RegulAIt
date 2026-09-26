@@ -148,6 +148,9 @@ export function statusTone(status: string): Tone {
       return "info";
     case "blocked_on_approval":
     case "blocked_on_artifact":
+    // ADR-0079: plan-only is a normal, expected resting state, not a failure —
+    // same tone as the other "waiting on a human" statuses.
+    case "blocked_on_plan":
     case "awaiting_trigger":
     case "in_review":
     case "pending":
@@ -167,6 +170,31 @@ export function statusTone(status: string): Tone {
 }
 export function StatusBadge(props: { status: string }) {
   return <Badge tone={statusTone(props.status)}>{props.status.replaceAll("_", " ")}</Badge>;
+}
+
+/**
+ * The one severity vocabulary. The brand ships a four-step severity scale
+ * (critical / high / medium / low) as tokens — 16% tint fill, deep-step text —
+ * and this is the single component that renders it. Before this existed, two
+ * pages mapped the same word to different colours (red-team said high=danger,
+ * shadow-AI said high=warn); a severity word must mean one colour everywhere.
+ * Unknown classes fall back to a neutral Badge so a new vocabulary word shows
+ * up unstyled rather than silently mis-coloured.
+ */
+const sevClass: Record<string, string> = {
+  critical: s.sevCritical!,
+  high: s.sevHigh!,
+  medium: s.sevMedium!,
+  low: s.sevLow!,
+};
+export function SeverityBadge(props: { severity: string; title?: string }) {
+  const cls = sevClass[props.severity];
+  if (!cls) return <Badge title={props.title}>{props.severity}</Badge>;
+  return (
+    <span className={`${s.badge} ${cls}`} title={props.title}>
+      {props.severity}
+    </span>
+  );
 }
 
 // ---- Table ----------------------------------------------------------------

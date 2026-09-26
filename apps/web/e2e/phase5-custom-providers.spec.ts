@@ -157,6 +157,8 @@ test.describe("ADR-0034 custom LLM providers — the admin surface", () => {
   });
 
   const gotoPage = async () => {
+    // ADR-0094: the sidebar is suite-scoped; the "/" filter reaches any suite
+    await page.getByLabel("Filter navigation").fill("Custom LLM providers");
     await page.getByRole("link", { name: "Custom LLM providers", exact: true }).click();
     await expect(page.getByRole("heading", { name: "Custom LLM providers", exact: true })).toBeVisible();
   };
@@ -326,6 +328,7 @@ test.describe("ADR-0034 custom LLM providers — the admin surface", () => {
   });
 
   test("a disabled endpoint is NOT selectable when binding an agent", async () => {
+    await page.getByLabel("Filter navigation").fill("Agents");
     await page.getByRole("link", { name: "Agents", exact: true }).click();
     await expect(page.getByRole("heading", { name: "Agents", exact: true })).toBeVisible();
     await page.getByTestId("agent-provider").selectOption("custom");
@@ -364,6 +367,7 @@ test.describe("ADR-0034 custom LLM providers — the admin surface", () => {
     await shot(page, "phase5-09-tested-and-enabled");
 
     // now — and only now — it can be bound to an agent
+    await page.getByLabel("Filter navigation").fill("Agents");
     await page.getByRole("link", { name: "Agents", exact: true }).click();
     await page.getByTestId("agent-provider").selectOption("custom");
     const endpoints = page.getByTestId("agent-custom-endpoint");
@@ -427,6 +431,7 @@ test.describe("ADR-0034 custom LLM providers — the admin surface", () => {
 
   test("the org master switch, when off, says so plainly instead of looking broken", async () => {
     const setSwitch = async (value: "true" | "false") => {
+      await page.getByLabel("Filter navigation").fill("Organization");
       await page.getByRole("link", { name: "Organization", exact: true }).click();
       await expect(page.getByRole("heading", { name: "Organization", exact: true })).toBeVisible();
       await page.getByLabel("Custom LLM providers").selectOption(value);
@@ -465,6 +470,8 @@ test.describe("ADR-0034 custom LLM providers — the admin surface", () => {
     // the shell hides the sidebar behind the hamburger below the breakpoint —
     // reach the page the way a phone user actually would
     await page.getByRole("button", { name: "Toggle navigation" }).click();
+    // ADR-0094: the drawer is suite-scoped too — the filter works at 420px
+    await page.getByLabel("Filter navigation").fill("Custom LLM providers");
     await page.getByRole("link", { name: "Custom LLM providers", exact: true }).click();
     await expect(page.getByRole("heading", { name: "Custom LLM providers", exact: true })).toBeVisible();
     // no horizontal overflow of the page body — wide content scrolls inside

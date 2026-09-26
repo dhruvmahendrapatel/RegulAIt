@@ -301,3 +301,57 @@ that disagreed with the served text could not pass:**
   the stamping creates.
 - **`agent_config` resolution** at dispatch.
 - **Quantify the prompt-cache skew** during a ramp.
+
+## Amendment — 2026-08-09: deviation 1 is CLOSED (ADR-0073, migration 0084)
+
+Appended, not rewritten: everything above stands as the record of what ADR-0048 decided and what it
+shipped. This section records what has changed since, and exactly what has not.
+
+**[ADR-0073](0073-rules-engine-versioning.md) closes deviation 1.** The rules engine now resolves
+through `config_versions`:
+
+- `governedEvaluate` overlays the **ACTIVE** version of every loaded `approval_rule`, `rate_limit`
+  and `data_scope_rule` onto its row before calling the kernel, and `projects.ts:profilesForTags`
+  does the same for `compliance_profile` — the one funnel every §8.3 cascade consumer already goes
+  through. Activating and rolling back a rule version therefore **changes evaluation**, proved end
+  to end through the kernel rather than by reading a status column.
+- §2's **shadow canary for restriction rules now genuinely evaluates**. The candidate is run through
+  the kernel a second time, parameterised by the candidate bodies and nothing else, and each sampled
+  comparison is stored in `config_canary_observations` (migration 0084) with both sides' effect,
+  ruleId and full reason. `canary_pct` is honoured as the shadow **sampling rate** on the same
+  deterministic `canaryBucket` stable key.
+- Resolution is **one indexed query per evaluation** across all three rule types, not an N+1.
+- An artifact with version rows but **no active version** is UNRESOLVABLE and **fails closed** — a
+  `deny` with `ruleId: config-version-unresolvable` in the kernel path, a real 409 in the compliance
+  path. There is no branch on which "no version found" ends in an allow.
+- ADR-0048 §7's behaviour-preserving default is applied **lazily**: the first version created for a
+  rule mints `v1 (pre-versioning baseline)` from the live row and activates it. No migration
+  backfill, so an install with no rule versions behaves byte-identically to before.
+
+**`canaryIsLive` was NOT flipped for rules, deliberately.** It means "does the canary SERVE
+traffic", it is read by `resolveVersion`, and making it true for a restriction rule would enforce a
+candidate `deny` on a percentage of real work — the outage §2 exists to forbid. Instead the
+vocabulary is split: `canaryIsLive` (serves — still **false** for every rule type, pinned by a
+test), `canaryIsEvaluated` (something genuinely computes what the candidate would have decided —
+now **true** for all four rule types and for prompts), and `canaryModeOf` → `live | shadow | inert`,
+which is what the API and SPA report.
+
+**Deviation 2 is still open, and is now reported honestly rather than mislabelled.** `agent_config`
+was DECLARED a live-canary type by this ADR and never given a resolver, so `canaryIsLive`
+('agent_config') answered "yes" about something nothing reads. `LIVE_CANARY_ARTIFACT_TYPES` is now
+explicitly intent and `RESOLVED_ARTIFACT_TYPES` fact; `agent_config` is in the first and not the
+second, and every surface reports it as `inert` — "changes nothing and measures nothing".
+
+**Deviations 3, 4, 5 and 6 are unchanged.** In particular **retention/pruning (deviation 5) is still
+not built**, and now covers one more table: `config_canary_observations` also grows monotonically
+while a canary runs.
+
+**One consequence of this ADR's own design is named by ADR-0073 rather than fixed**: the ordinary
+rule-CRUD routes (`POST /v1/rules/approvals` and siblings) do **not** mint a version, unlike
+`POST /v1/agents/:id/system-prompt` which does. A versioned rule edited through the old CRUD surface
+would have its row and its active version disagree, and **dispatch would keep serving the version**.
+See ADR-0073's disclosure 10.
+
+The test in `config-versions.test.ts` that asserted this endpoint said "shadow evaluation for rule
+types is NOT yet wired" was **rewritten, not deleted**, carrying a comment naming what changed and
+why; it now pins the opposite claim plus the one thing that must not have changed with it.

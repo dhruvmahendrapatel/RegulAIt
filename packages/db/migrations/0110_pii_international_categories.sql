@@ -1,0 +1,51 @@
+-- ADR-0117 — WHICH JURISDICTIONS THIS DEPLOYMENT DETECTS, AND THE ANSWER ON
+-- UPGRADE IS "EXACTLY THE ONES IT DETECTED BEFORE".
+--
+-- WHAT THIS IS. One jsonb column on the `org_settings` singleton holding the
+-- list of international national-identifier categories `detectPII` runs, on
+-- top of its four always-on base detectors (email, US SSN, Luhn card, US
+-- phone). Empty means "none of them", and empty is the default.
+--
+-- ============================================================================
+-- WHY THE DEFAULT IS EMPTY RATHER THAN "THE ONES WITH A CHECK DIGIT".
+-- ============================================================================
+-- The obvious default — switch on every scheme whose check digit we verify —
+-- was written, and then MEASURED, and the measurement refused it. A single
+-- decimal check digit divides the candidate space by ten and no further, so
+-- against uniformly random digit runs of the right length these detectors
+-- accept:
+--
+--     Netherlands BSN    9.03%        Brazil CPF          1.02%
+--     Australia TFN      9.00%        Germany IdNr        0.23%
+--     Canada SIN         8.09%        France NIR          0.06%
+--     India Aadhaar      8.03%
+--
+-- Roughly one bare nine-digit order number in eleven reads as a BSN. In
+-- `block` mode that is a REFUSED REQUEST with no way for the user to route
+-- around it. Whether that trade is worth making is a per-deployment,
+-- per-jurisdiction question — a German customer gains nothing from Brazilian
+-- CPF detection and pays its false positives — so the product does not answer
+-- it on the administrator's behalf.
+--
+-- ============================================================================
+-- THE UPGRADE POSTURE, STATED RATHER THAN IMPLIED.
+-- ============================================================================
+-- This is ADR-0021's invariant applied again: a fresh or migrated
+-- `org_settings` row changes NOTHING. Concretely, for an existing deployment
+-- running this migration:
+--
+--   * a prompt that dispatched yesterday dispatches today;
+--   * a prompt that was refused yesterday is refused today, for the same
+--     reason string;
+--   * `detectPII` does not enter the international module at all until the
+--     column is non-empty, so there is no new work on the hot path and no new
+--     category can appear in an audit reason;
+--   * nothing here can switch a BASE detector OFF. The four live-verified
+--     categories are not configurable and this column cannot reach them.
+--
+-- ADDS ONE NULLABLE-FREE COLUMN WITH A DEFAULT. Writes no data, drops
+-- nothing, and is safe to run against a populated table: every existing row
+-- takes the empty default.
+
+ALTER TABLE "org_settings"
+  ADD COLUMN IF NOT EXISTS "pii_international_categories" jsonb NOT NULL DEFAULT '[]'::jsonb;

@@ -12,6 +12,7 @@
 import {
   and,
   approvalDelegations,
+  desc,
   eq,
   gt,
   lte,
@@ -55,6 +56,13 @@ export async function activeDelegationFrom(
   const org = await loadOrgSettings(db);
   if (!org.approvalDelegationEnabled) return null;
   const now = new Date();
+  // ADR-0107 (F01): nothing stops two delegations from the same person to the
+  // same person having OVERLAPPING windows — there is no unique constraint on
+  // (from_user_id, to_user_id) and none would be correct, because a window is
+  // allowed to be re-issued. With no order the row that authorized the decision
+  // (and whose `reason` landed on the audit trail) was whichever one Postgres
+  // reached first. The LATEST-STARTING window wins: re-issuing a delegation is
+  // the act of restating it, so the most recent instruction is the one in force.
   const [row] = await db
     .select({
       id: approvalDelegations.id,
@@ -71,6 +79,7 @@ export async function activeDelegationFrom(
         gt(approvalDelegations.endsAt, now),
       ),
     )
+    .orderBy(desc(approvalDelegations.startsAt), desc(approvalDelegations.id))
     .limit(1);
   return row ?? null;
 }

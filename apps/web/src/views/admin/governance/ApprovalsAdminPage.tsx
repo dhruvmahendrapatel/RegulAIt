@@ -57,7 +57,7 @@ export default function ApprovalsAdminPage() {
     if (row.selfReview && !reason) {
       setRowErrors((e) => ({
         ...e,
-        [row.id]: "This is a self-review (the approver is the requesting user) — a reason is required.",
+        [row.id]: "This is a self-review (the decider would be approving their own request) — a reason is required.",
       }));
       return;
     }

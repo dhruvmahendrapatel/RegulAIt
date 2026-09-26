@@ -50,6 +50,10 @@
  *     compliant with the EU AI Act and is not a certification of anything.
  */
 import { z } from "zod";
+// batch B1 — a pack's cascade PRESET is validated with the SAME check every
+// compliance-profile version body passes: only enforcing profile columns,
+// correctly typed, selection (`tag`) refused. One validator, not two.
+import { validateRuleVersionBody } from "./config-versions.js";
 
 // ---------------------------------------------------------------------------
 // Vocabularies
@@ -68,6 +72,7 @@ export const COMPLIANCE_PACK_FRAMEWORKS = [
   "hipaa",
   "pci-dss",
   "finra",
+  "soc-2",
   "custom",
 ] as const;
 export type CompliancePackFramework = (typeof COMPLIANCE_PACK_FRAMEWORKS)[number];
@@ -256,6 +261,14 @@ export const createCompliancePackSchema = z
      * itself: tagging with this drives the EXISTING cascade. Null = the pack is
      * evidence-only. */
     cascadeTag: z.string().min(1).max(120).nullish(),
+    /** batch B1 (ADR-0058 §2's preset half) — the compliance-profile STARTING
+     * POINT the pack's cascade tag seeds on activation: a partial map of
+     * enforcing `compliance_profiles` columns. Activation FIND-OR-CREATES the
+     * profile from this and never overwrites an existing one. Null/omitted =
+     * the pack ships no starting profile and the admin authors it, exactly as
+     * before this batch. Refused without a cascadeTag: a profile preset with
+     * no tag to hang it on is a claim about nothing. */
+    cascadePreset: z.record(z.unknown()).nullish(),
     controls: z.array(packControlSchema).min(1).max(500),
   })
   .strict()
@@ -269,6 +282,25 @@ export const createCompliancePackSchema = z
         });
       }
       seen.add(c.controlRef);
+    }
+    if (p.cascadePreset != null) {
+      if (p.cascadeTag == null) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["cascadePreset"],
+          message:
+            "a cascadePreset requires a cascadeTag — the preset is the profile the tag seeds, and " +
+            "without a tag there is nothing for the §8.3 cascade to key on",
+        });
+      }
+      const rejection = validateRuleVersionBody("compliance_profile", p.cascadePreset);
+      if (rejection) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["cascadePreset"],
+          message: `${rejection.error}: ${rejection.reason}`,
+        });
+      }
     }
   });
 export type CreateCompliancePackInput = z.infer<typeof createCompliancePackSchema>;
@@ -507,6 +539,19 @@ export const DEFAULT_COMPLIANCE_PACKS: CreateCompliancePackInput[] = [
       note: "Authored from the public text. NOT reviewed by counsel — treat as a starting point.",
     },
     cascadeTag: "eu-ai-act-high-risk",
+    // batch B1 — the §8.3 starting point this tag seeds on activation. Each
+    // value cites the obligation that makes it defensible; like every mapping
+    // in this pack it is a STARTING POINT an admin tightens, not legal advice.
+    cascadePreset: {
+      // Art. 19: automatically generated logs kept at least six months
+      auditRetentionDays: 183,
+      // Art. 14 human oversight: connector writes default to read-only so a
+      // human approval sits in front of state-changing acts
+      mcpDefaultMode: "read_only",
+      // Art. 15 robustness/cybersecurity names resilience against attempts to
+      // alter the system's behaviour — prompt injection is that attack here
+      guardrailModes: { prompt_injection: "block" },
+    },
     controls: [
       {
         controlRef: "eu-ai-act:art-12-record-keeping",
@@ -724,6 +769,17 @@ export const DEFAULT_COMPLIANCE_PACKS: CreateCompliancePackInput[] = [
       note: "Administrative and physical safeguards are out of scope for a control plane.",
     },
     cascadeTag: "hipaa",
+    // batch B1 — mirrors the onboarding wizard's HIPAA cascade seed (shared
+    // onboarding.ts COMPLIANCE_PACKS): PHI must not leave the boundary in a
+    // prompt, and 45 CFR 164.316(b)(2) holds documentation six years.
+    cascadePreset: {
+      mcpDefaultMode: "read_only",
+      auditRetentionDays: 2192,
+      piiMode: "block",
+      backupRetentionDays: 2192,
+      patchCadenceDays: 30,
+      guardrailModes: { prompt_injection: "block", semantic_dlp: "block" },
+    },
     controls: [
       {
         controlRef: "hipaa:164.312(b)-audit-controls",
@@ -795,6 +851,16 @@ export const DEFAULT_COMPLIANCE_PACKS: CreateCompliancePackInput[] = [
       note: "A QSA determines CDE scope; this pack does not.",
     },
     cascadeTag: "pci-dss",
+    // batch B1 — cardholder data never reaches a model: PII blocked, one year
+    // of audit retention (v4 req. 10.5.1), 30-day patch cadence (req. 6.3.3).
+    cascadePreset: {
+      mcpDefaultMode: "read_only",
+      auditRetentionDays: 365,
+      piiMode: "block",
+      backupRetentionDays: 365,
+      patchCadenceDays: 30,
+      guardrailModes: { prompt_injection: "block", semantic_dlp: "block" },
+    },
     controls: [
       {
         controlRef: "pci-dss:7.2.1-least-privilege",
@@ -853,6 +919,18 @@ export const DEFAULT_COMPLIANCE_PACKS: CreateCompliancePackInput[] = [
       note: "Broker-dealer scope determination is the firm's own.",
     },
     cascadeTag: "finra",
+    // batch B1 — deliberately MINIMAL: SEA 17a-4(b) makes a six-year record
+    // floor defensible; FINRA is a books-and-records regime, not a PII one, so
+    // no piiMode is claimed. Note the loop this closes: this pack's own
+    // 17a-4-record-retention control is evidenced by
+    // `compliance_profile_cascade` with the retention aspect — activation now
+    // seeds the very profile that control looks for, instead of reporting a
+    // gap the pack itself could have configured away.
+    cascadePreset: {
+      mcpDefaultMode: "read_only",
+      auditRetentionDays: 2192,
+      backupRetentionDays: 2192,
+    },
     controls: [
       {
         controlRef: "finra:3110-supervisory-review",
@@ -888,6 +966,151 @@ export const DEFAULT_COMPLIANCE_PACKS: CreateCompliancePackInput[] = [
         minEvidenceCount: 1,
         attestationRequired: true,
         ownerNote: "Organisational document.",
+      },
+    ],
+  },
+  {
+    framework: "soc-2",
+    version: 1,
+    title: "SOC 2 — Security (Common Criteria) control mapping",
+    description:
+      "Maps a Security-category (CC-series) subset of the 2017 Trust Services Criteria onto " +
+      "RegulAIt ledgers and configuration. SECURITY CATEGORY ONLY — Availability, Processing " +
+      "Integrity, Confidentiality and Privacy are out of this pack's scope and are not silently " +
+      "implied. A SOC 2 REPORT is an auditor's opinion on YOUR organisation; this pack collects " +
+      "the control-plane evidence an auditor would sample, it does not constitute the report.",
+    provenance: {
+      source: "AICPA Trust Services Criteria (2017, incl. 2022 points of focus) — Security/CC series",
+      catalogueRevision: "TSC 2017 (rev. 2022)",
+      reviewedBy: null,
+      reviewedOn: null,
+      note: "Authored from the public criteria. NOT reviewed by a CPA firm — treat as a starting point.",
+    },
+    cascadeTag: null,
+    controls: [
+      {
+        controlRef: "soc-2:CC6.1-logical-access",
+        title: "Logical access security is implemented over protected assets",
+        description:
+          "Default-deny operates on every governed call: evidenced by DENY decisions the gateway " +
+          "actually issued in the period — access control that refused nothing is asserted, not shown.",
+        coverage: "enforced",
+        collector: "audit_decisions",
+        collectorParams: { effect: "deny" },
+        minEvidenceCount: 1,
+        attestationRequired: false,
+        ownerNote: null,
+      },
+      {
+        controlRef: "soc-2:CC6.2-user-registration",
+        title: "Users are registered and authorized before access is provisioned",
+        description:
+          "User lifecycle actions (creation, initial credentials, deactivation — incl. SCIM " +
+          "deprovisioning per ADR-0037) land audit rows with objectType 'user'.",
+        coverage: "evidenced",
+        collector: "audit_decisions",
+        collectorParams: { objectType: "user" },
+        minEvidenceCount: 1,
+        attestationRequired: false,
+        ownerNote: null,
+      },
+      {
+        controlRef: "soc-2:CC6.3-access-modification",
+        title: "Access is modified or removed on role change and termination",
+        description:
+          "The mechanism is evidenced (user-lifecycle audit rows; deactivation is disabled_at, never " +
+          "a delete). The CADENCE — access reviews, termination SLAs — is organisational.",
+        coverage: "partial",
+        collector: "audit_decisions",
+        collectorParams: { objectType: "user" },
+        minEvidenceCount: 1,
+        attestationRequired: false,
+        ownerNote:
+          "Attach your access-review cadence and termination SLA; the control plane cannot observe HR events it is not told about.",
+      },
+      {
+        controlRef: "soc-2:CC6.6-boundary-protection",
+        title: "Threats from outside system boundaries are mitigated (egress control)",
+        description:
+          "ADR-0043/0034's default-deny egress guard: admin-typed outbound destinations are " +
+          "allow-listed and every list change is audited (ruleId 'egress-*').",
+        coverage: "enforced",
+        collector: "audit_decisions",
+        collectorParams: { ruleIdPrefix: "egress" },
+        minEvidenceCount: 1,
+        attestationRequired: false,
+        ownerNote: null,
+      },
+      {
+        controlRef: "soc-2:CC6.7-data-movement",
+        title: "Movement of information is restricted to authorized users and processes",
+        description:
+          "The semantic-DLP detector (ADR-0042) at warn-or-stronger inspects governed output paths; " +
+          "the §8.4 PII controls ride the same plane.",
+        coverage: "evidenced",
+        collector: "guardrail_configs",
+        collectorParams: { detector: "semantic_dlp", minMode: "warn" },
+        minEvidenceCount: 1,
+        attestationRequired: false,
+        ownerNote: null,
+      },
+      {
+        controlRef: "soc-2:CC7.2-monitoring",
+        title: "System components are monitored for anomalies indicative of malicious acts",
+        description:
+          "Every governed decision is recorded continuously in the hash-chained audit log " +
+          "(ADR-0060); the prompt-injection detector at block is the runtime tripwire.",
+        coverage: "evidenced",
+        collector: "guardrail_configs",
+        collectorParams: { detector: "prompt_injection", minMode: "block" },
+        minEvidenceCount: 1,
+        attestationRequired: false,
+        ownerNote: null,
+      },
+      {
+        controlRef: "soc-2:CC7.4-incident-response",
+        title: "Security incidents are responded to per a defined incident-response program",
+        coverage: "unaddressed",
+        collector: "none",
+        collectorParams: {},
+        minEvidenceCount: 1,
+        attestationRequired: true,
+        ownerNote:
+          "An incident-response PROGRAM (roles, runbooks, exercises) is organisational; attest with a reference to it. Audit rows can support a post-incident timeline but do not constitute the program.",
+      },
+      {
+        controlRef: "soc-2:CC8.1-change-management",
+        title: "Changes to infrastructure, data and software are authorized before deployment",
+        description:
+          "Pillar-2 workflow sign-offs: human approvals recorded against workflow instances " +
+          "(plan gate per ADR-0079, merge/deploy gates per §2), decided in the period.",
+        coverage: "enforced",
+        collector: "approvals",
+        collectorParams: { status: "approved", approvalObjectType: "workflow" },
+        minEvidenceCount: 1,
+        attestationRequired: false,
+        ownerNote: null,
+      },
+      {
+        controlRef: "soc-2:CC9.2-vendor-risk",
+        title: "Vendor and business-partner risks are assessed and managed",
+        coverage: "unaddressed",
+        collector: "none",
+        collectorParams: {},
+        minEvidenceCount: 1,
+        attestationRequired: true,
+        ownerNote:
+          "RegulAIt has no vendor-risk module (a known gap, L5 in the Credo analysis — deliberately deferred). Attest from your procurement/GRC process.",
+      },
+      {
+        controlRef: "soc-2:CC1.4-competence",
+        title: "The entity attracts, develops and retains competent individuals (control environment)",
+        coverage: "unaddressed",
+        collector: "none",
+        collectorParams: {},
+        minEvidenceCount: 1,
+        attestationRequired: true,
+        ownerNote: "Control-environment criteria live in HR and governance documents, not in a control plane.",
       },
     ],
   },

@@ -2,9 +2,10 @@
 # the gateway finds packages/db/migrations relative to its dist output).
 #
 # Build stage note (ADR-0026): `pnpm -r build` includes @regulait/web, so the
-# image carries apps/web/dist and the gateway serves the React SPA at /ui
-# (alongside the legacy /app and /admin shells). Without that dist the /ui
-# routes answer an explicit 503 "web_bundle_not_built" — never a blank page.
+# image carries apps/web/dist and the gateway serves the React SPA at /ui, which
+# is the whole product surface (ADR-0033 deleted the /app and /admin shells).
+# Without that dist the /ui routes answer an explicit 503 "web_bundle_not_built"
+# — never a blank page.
 FROM node:22-slim
 LABEL org.regulait.build-stage="workspace-build+runtime"
 

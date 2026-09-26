@@ -329,3 +329,44 @@ Three things about that are worth stating here rather than only in ADR-0064:
 3. **Timeliness is bounded by the box being up.** [ADR-0032](0032-scheduled-power-off-dev-infra.md)
    powers this deployment's infrastructure off nightly; a sweep due inside the off-window does not
    run, is not queued, and is picked up once — late — on the first tick after power-on.
+
+---
+
+## Amendment (2026-08-07) — `llm_as_judge` with no judge now REFUSES the run (ADR-0072)
+
+**This ADR's original text is unchanged and remains the record of what was decided in 2026-08-01.
+This amendment records what [ADR-0072](0072-scoring-semantics-correction.md) changed on 2026-08-07
+and why, with the owner's explicit approval.**
+
+**What this ADR originally specified.** An `llm_as_judge` case with no judge configured scored
+**0**, with `error: 'no_judge_configured'` on the `eval_results` row. The intent was to fail
+*loudly* rather than let an unmeasured case count as evidence, and that intent was right.
+
+**What was wrong with it.** The mechanism was wrong in kind. A **missing instrument** was recorded
+as a **bad measurement**, and nothing downstream could tell those apart: the zero was averaged into
+`mean_score`, compared against a drift baseline to produce a `score_delta`, read by
+`evaluateEvalGate` as "the agent answered badly", and made citable as measured evidence by an
+[ADR-0045](0045-model-risk-management.md) model card.
+
+**What ADR-0072 changed.** `llm_as_judge` joined `JUDGE_REFUSING_SCORER_KINDS`. A run whose cases
+use it with no dispatchable judge is now refused with a real **422** (`judge_required` /
+`judge_not_dispatchable`) from `judgeAvailabilityFor`, placed **before** the `eval_runs` INSERT —
+so a refusal leaves **no run row, no result row and not one dispatched token**. This is the posture
+[ADR-0067](0067-groundedness-evaluation.md) already established for its two judge-backed kinds; all
+three now behave identically. The score-0 path is deleted; the branch that held it is an
+unreachable throw, deliberately not a fallback.
+
+**What this invalidates.** Every `eval_runs` row written before this change was scored under the
+old semantics and is not comparable to a new one. Migration **0083** stamps those rows
+`scoring_semantics = 1` and everything after as `2`; baseline resolution and the gate refuse to
+compare across versions. **Pinned baselines predating this change must be re-pinned** —
+`GET /v1/evals/scoring-semantics` lists exactly which ones. Nothing was deleted or rewritten.
+
+**What this ADR's §4 gate promise now means.** Unchanged in substance: the deterministic scorers
+are still what a blocking gate should rest on, and the judge is still corroboration. The difference
+is that an unavailable judge now stops the run instead of contributing a zero to it.
+
+**The test that asserted the old behaviour was REWRITTEN, not removed.** See
+`apps/gateway/src/eval-harness.test.ts` — it now asserts the three absences (no run row, no result
+row, no dispatched token) and carries a comment naming what changed and why, plus a companion test
+asserting no `no_judge_configured` result row can exist.

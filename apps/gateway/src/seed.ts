@@ -21,12 +21,39 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createDb, runMigrations, backupRuns, eq } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { dataKeyFormatError } from "./secrets.js";
 
 const connectionString =
   process.env.DATABASE_URL ?? "postgres://regulait:regulait@localhost:5432/regulait";
 const BOOT = process.env.REGULAIT_BOOTSTRAP_TOKEN ?? "seed-bootstrap";
 const AUTH = { authorization: `Bearer ${BOOT}` };
 const DATA_KEY = process.env.REGULAIT_DATA_KEY;
+
+// The seeder builds an app directly rather than going through `startGateway`,
+// so ADR-0063's boot gate never runs here — deliberately, because constructing
+// an app is not putting a deployment into service (see boot.ts). The cost of
+// that, found by making the mistake: a malformed REGULAIT_DATA_KEY sailed
+// through migrations and most of the seed and then surfaced as
+// `POST /v1/git/connections -> 500 {"error":"internal"}`, an opaque failure
+// several minutes after the actual error. The seeder is usually the FIRST
+// thing an operator runs on a new deployment, which makes it the first place
+// the key can be wrong and the best place to say so.
+//
+// This checks the value's SHAPE only. It is not the custody gate and must not
+// become one: continuity is a question about a database in service, and the
+// seeder's whole job is to populate one that is not yet.
+if (DATA_KEY !== undefined && DATA_KEY.trim() !== "") {
+  const problem = dataKeyFormatError(DATA_KEY);
+  if (problem !== null) {
+    console.error(
+      `\nREGULAIT_DATA_KEY is set, but ${problem}\n\n` +
+        `  Nothing has been seeded. Mint one with \`openssl rand -hex 32\` and use the SAME value ` +
+        `in every terminal — the gateway, the seeder and demo:setup all encrypt under it, and a ` +
+        `different key in one of them writes ciphertext the others cannot read.\n`,
+    );
+    process.exit(1);
+  }
+}
 
 const db = createDb(connectionString);
 // An idle pooled connection killed out from under us (e.g. a scratch database
@@ -115,13 +142,21 @@ const passwords: Record<string, string> = {};
 }
 
 // --- agent catalog -------------------------------------------------------
+// Model-id freshness (B1.5, LIVE_VERIFICATION_2026-08): pinned provider model
+// ids AGE OUT — Google retired `gemini-2.5-pro` for new accounts and the
+// out-of-box "google goes live via env fallback" demo 502'd until the id was
+// refreshed to `gemini-3.6-flash` (proven working in the live run). Re-seed
+// semantics are unchanged and deliberate: an EXISTING agent row is matched by
+// name and never mutated (below), so refreshing an already-seeded database is
+// an admin act — `PATCH /v1/agents/:agentId` (the versioned agent_config edit
+// path), never a silent seed-side rewrite of rows an operator may have tuned.
 const AGENTS = [
   { name: "fast-mock", provider: "mock", tier: 0, costPerMTokIn: 1, costPerMTokOut: 5, model: "mock-fast" },
   { name: "balanced-mock", provider: "mock", tier: 1, costPerMTokIn: 3, costPerMTokOut: 15, model: "mock-balanced" },
   { name: "premium-mock", provider: "mock", tier: 2, costPerMTokIn: 15, costPerMTokOut: 75, model: "mock-premium" },
   { name: "claude-opus", provider: "anthropic", tier: 2, costPerMTokIn: 5, costPerMTokOut: 25, model: "claude-opus-5" },
   { name: "gpt-5", provider: "openai", tier: 2, costPerMTokIn: 2, costPerMTokOut: 8, model: "gpt-5" },
-  { name: "gemini-pro", provider: "google", tier: 1, costPerMTokIn: 1.25, costPerMTokOut: 10, model: "gemini-2.5-pro" },
+  { name: "gemini-pro", provider: "google", tier: 1, costPerMTokIn: 1.25, costPerMTokOut: 10, model: "gemini-3.6-flash" },
   { name: "grok", provider: "xai", tier: 1, costPerMTokIn: 3, costPerMTokOut: 15, model: "grok-4" },
 ];
 const catalog = (await call("GET", "/v1/agents")).agents ?? [];
@@ -892,6 +927,22 @@ if (!averyRuns.some((r: Json) => r.name === "phi-access-review")) {
 }
 
 // --- workflow instances (one per persona) --------------------------------
+// ADR-0079: a `planning` stage now RESTS (plan-only: mutating agent work
+// attributed to the instance is refused there). Every seeded instance that must
+// reach a later stage therefore leaves plan-only by the same explicit advance a
+// user makes — nothing here bypasses the gate. No-op for a template without a
+// planning stage, so the deploy-tail seeds below need no special-casing.
+async function leavePlanOnly(
+  instanceId: string,
+  auth: { authorization: string },
+): Promise<void> {
+  const view = await call("GET", `/v1/workflows/instances/${instanceId}`, undefined, auth);
+  if (view.instance?.status !== "blocked_on_plan") return;
+  const stage = view.instance.definition?.stages?.[view.instance.state?.currentStageIndex ?? -1];
+  if (!stage) return;
+  await call("POST", `/v1/workflows/instances/${instanceId}/advance`, { stageId: stage.id }, auth);
+}
+
 const DANA_CHANGE = "Add saved-payment-methods to checkout";
 const danaInstances = (await call("GET", "/v1/workflows/instances", undefined, danaAuth)).instances ?? [];
 if (!danaInstances.some((i: Json) => i.change?.description === DANA_CHANGE)) {
@@ -909,6 +960,7 @@ if (!danaInstances.some((i: Json) => i.change?.description === DANA_CHANGE)) {
     },
     danaAuth,
   );
+  await leavePlanOnly(inst.id, danaAuth);
   // submit the requirements artifact so Avery's inbox has a real sign-off waiting
   await call(
     "POST",
@@ -945,6 +997,7 @@ if (!danaInstances2.some((i: Json) => i.change?.description === PIPELINE_CHANGE)
     },
     danaAuth,
   );
+  await leavePlanOnly(inst.id, danaAuth);
   await call(
     "POST",
     `/v1/workflows/instances/${inst.id}/artifacts`,
@@ -966,7 +1019,7 @@ if (!averyInstances.some((i: Json) => i.change?.description === AVERY_CHANGE)) {
   // top of the rule-matched one, so this instance carries an extra compliance
   // sign-off nobody configured by hand. Left at the artifact stage: Avery's
   // Workflows page opens on something he can fill in.
-  await call(
+  const inst = await call(
     "POST",
     "/v1/workflows/instances",
     {
@@ -980,6 +1033,58 @@ if (!averyInstances.some((i: Json) => i.change?.description === AVERY_CHANGE)) {
     },
     averyAuth,
   );
+  await leavePlanOnly(inst.id, averyAuth);
+}
+
+// --- THE CASCADE HEADLINE (§8.3, MARKET_ANALYSIS 2026-08 §3 → item 4) ------
+// One compliance tag on hipaa-project does all the forcing; nobody configured
+// any of it per-change. Dana proposes an ordinary 'feature' change on the
+// HIPAA project: the assignment rule routes standard-change, and the project's
+// classification cascades sensitive-data in ON TOP. The requirements artifact
+// is submitted and the standard sign-off approved, so the instance comes to
+// rest EXACTLY at 'compliance-signoff' — the stage that exists only because of
+// the tag — pending in Avery's inbox on first open. The same tag already
+// blocks an SSN prompt in Dana's chat (piiMode) and floors audit retention at
+// 2555d. Idempotent by description, like every instance seed here.
+const CASCADE_CHANGE = "Redact and export the oncology cohort (PHI)";
+{
+  const danaInstances3 =
+    (await call("GET", "/v1/workflows/instances", undefined, danaAuth)).instances ?? [];
+  if (!danaInstances3.some((i: Json) => i.change?.description === CASCADE_CHANGE)) {
+    const inst = await call(
+      "POST",
+      "/v1/workflows/instances",
+      {
+        projectId: hipaaProjectId,
+        change: {
+          description: CASCADE_CHANGE,
+          paths: ["src/phi/cohort-export.ts"],
+          changeType: "feature",
+          environment: "staging",
+        },
+      },
+      danaAuth,
+    );
+    await leavePlanOnly(inst.id, danaAuth);
+    await call(
+      "POST",
+      `/v1/workflows/instances/${inst.id}/artifacts`,
+      {
+        stageId: "requirements",
+        content:
+          "# Requirements: oncology cohort export\n\n1. Export carries identifiers, timestamps and " +
+          "purpose-of-use codes — never clinical content.\n2. Every export is itself an audited event " +
+          "with a named requester.\n3. Redaction runs before anything leaves the clinical boundary.",
+      },
+      danaAuth,
+    );
+    // Avery approves the STANDARD sign-off so the instance advances to the
+    // cascade-forced compliance gate and parks there — that pending row is the
+    // cascade story sitting in his inbox.
+    const view = await call("GET", `/v1/workflows/instances/${inst.id}`, undefined, averyAuth);
+    const gate = (view.pendingApprovals ?? []).find((a: Json) => a.stageId === "signoff");
+    if (gate) await call("POST", `/v1/approvals/${gate.id}/decide`, { decision: "approved" }, averyAuth);
+  }
 }
 
 // --- deploy-verify-rollback pipeline (pillar 2 tail, ADR-0015) -------------
@@ -1036,6 +1141,7 @@ if (!averyInstances.some((i: Json) => i.change?.description === AVERY_CHANGE)) {
       { change: { description, paths: ["src/checkout/deploy.ts"], changeType: "deploy-demo", environment } },
       danaAuth,
     );
+    await leavePlanOnly(inst.id, danaAuth);
     await prep(inst.id);
     await approveInstanceGate(inst.id);
   }
@@ -1175,6 +1281,23 @@ RegulAIt demo data ready.
     dana   ${keys.dana}
     avery  ${keys.avery}
 ${pmWebhookSecret ? `\n    demo-pm webhook secret (shown ONCE)  ${pmWebhookSecret}\n` : ""}
+  THE HEADLINE — the §8.3 compliance cascade, live out of the box. ONE tag
+  ('hipaa' on hipaa-project) forces everything below; nobody configured any of
+  it per-change:
+    · avery  Inbox: '${CASCADE_CHANGE}' is parked at
+             'compliance-signoff' — a stage no assignment rule routed; the tag
+             cascaded the sensitive-data template into an ordinary feature
+             change (watch: approving it completes the governed flow).
+    · dana   Chat billed to hipaa-project: paste a prompt containing an SSN
+             (e.g. 123-45-6789) — DENIED before the model runs, red 'PII
+             blocked' badge, zero cost (the tag's piiMode 'block'; the seed
+             already left one such deny in /admin → Audit).
+    · admin  /admin → Workflows: the template GALLERY annotates, per stage,
+             which compliance profiles demand it — derived live from the same
+             cascade rules, so editing the profile moves the gallery. Audit
+             retention is floored at the tag's 2555 days; the hipaa backup
+             target's 2555d retention floor overrides its own 30d policy.
+
   Governance: 2 MCP servers with 8 tools (read + write), a 'repo-analyst' role
   granting read-only-all, per-user tool grants layered on top, 2 revocations,
   scoped policy rules (user + a FLEET write-approval + a ROLE-scoped rate limit,
@@ -1250,7 +1373,8 @@ ${pmWebhookSecret ? `\n    demo-pm webhook secret (shown ONCE)  ${pmWebhookSecre
   git connections.
 
   Still to do in the demo — nothing is seeded finished:
-    · avery  Inbox: TWO workflow sign-offs (standard + the pipeline);
+    · avery  Inbox: THREE workflow sign-offs (standard + the pipeline + the
+             cascade-forced compliance gate above);
              Workflows: an instance awaiting its requirements artifact;
              Runs: a planned run to start.
     · dana   Inbox: a shared-context conflict to arbitrate; Runs: a node

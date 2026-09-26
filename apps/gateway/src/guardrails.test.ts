@@ -27,6 +27,24 @@ import {
 } from "@regulait/shared";
 
 /**
+ * The most recent row by `at`.
+ *
+ * NEVER index a bare SELECT's result by position. Postgres does not promise
+ * insertion order without an ORDER BY, and two CI failures in this repo came
+ * from exactly that: a test read `rows[rows.length - 1]` as "the row just
+ * written", passed locally for months, and failed the first time the physical
+ * row order came back the other way round. Sorting by the column that actually
+ * carries the ordering makes the assertion mean what it says.
+ */
+function latestRow<T extends { at: Date }>(rows: readonly T[]): T {
+  const sorted = [...rows].sort((a, b) => a.at.getTime() - b.at.getTime());
+  const last = sorted[sorted.length - 1];
+  if (!last) throw new Error("latestRow: no rows");
+  return last;
+}
+
+
+/**
  * ADR-0042 — THE GUARDRAIL ENGINE, proved by attack.
  *
  * What this file is trying to make impossible to fake:
@@ -634,7 +652,7 @@ describe("ADR-0042 enforcement on the model dispatch path", () => {
 
     const denies = await guardrailAudits("guardrail-blocked");
     expect(denies.length).toBeGreaterThan(0);
-    const latest = denies[denies.length - 1]!;
+    const latest = latestRow(denies);
     expect(latest.effect).toBe("deny");
     const detail = latest.detail as {
       guardrail: { phase: string; outcome: string; findings: Array<{ detector: string; category: string; mode: string; count: number }> };
@@ -675,7 +693,7 @@ describe("ADR-0042 enforcement on the model dispatch path", () => {
     expect((await guardrailAudits("guardrail-logged")).length).toBeGreaterThan(before);
     // counts land in the usage detail, exactly as the PII counts do
     const rows = await db.select().from(usageEvents).where(eq(usageEvents.projectId, plainProj));
-    const detail = rows[rows.length - 1]!.detail as { guardrails?: { action: string } };
+    const detail = latestRow(rows).detail as { guardrails?: { action: string } };
     expect(detail.guardrails?.action).toBe("log");
   });
 

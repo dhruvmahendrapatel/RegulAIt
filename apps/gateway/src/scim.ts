@@ -56,6 +56,7 @@ import { randomBytes } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import {
   and,
+  asc,
   auditLog,
   authSessions,
   eq,
@@ -72,6 +73,7 @@ import {
 } from "@regulait/db";
 import { z } from "zod";
 import { hashToken } from "./auth.js";
+import { refuseIfFeatureNotLicensed } from "./licensing.js";
 import { reconcileGroupRoles, scimAssertedGroupsFor } from "./group-roles.js";
 
 // ---------------------------------------------------------------------------
@@ -385,10 +387,16 @@ export function registerScimRoutes(app: FastifyInstance, db: Db) {
     return row ?? null;
   };
   const loadUserByEmail = async (email: string): Promise<UserRow | null> => {
+    // ADR-0107 (F01) / ADR-0109: see `loadUserByEmail` in auth.ts. `lower(email)`
+    // IS now unique-backed (`users_email_lower_uq`, migration 0108), so this
+    // matches at most one row; the order is kept for a pre-0108 database and
+    // for the reason given there.
     const [row] = await db
       .select()
       .from(users)
-      .where(sql`lower(${users.email}) = ${email.toLowerCase()}`);
+      .where(sql`lower(${users.email}) = ${email.toLowerCase()}`)
+      .orderBy(asc(users.createdAt), asc(users.id))
+      .limit(1);
     return row ?? null;
   };
 
@@ -1263,6 +1271,17 @@ export function registerScimAdminRoutes(app: FastifyInstance, db: Db) {
   }));
 
   app.post("/v1/scim/tokens", async (req, reply) => {
+    // ADR-0052 §4: SCIM provisioning is a TIER FEATURE, enforced where it is
+    // ENABLED. Minting a token is the enabling act; an already-issued token
+    // keeps working (committed footprint, §5), and rotate/revoke stay open —
+    // rotating a credential narrows exposure and revoking one is offboarding,
+    // neither of which a commercial state may block.
+    const flagRefusal = await refuseIfFeatureNotLicensed(db, {
+      actorUserId: req.authCtx.userId,
+      feature: "scim_provisioning",
+      what: "issuing a SCIM provisioning token",
+    });
+    if (flagRefusal) return reply.status(flagRefusal.status).send(flagRefusal.body);
     const body = createScimTokenSchema.parse(req.body);
     const { token, tokenHash } = generateScimToken();
     const [row] = await db.insert(scimTokens).values({ name: body.name, tokenHash }).returning();

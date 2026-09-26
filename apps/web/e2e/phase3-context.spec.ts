@@ -329,6 +329,25 @@ test("promote: a signed-off artifact lands in the shared store, reported by its 
       },
     })
   ).json()) as { id: string };
+  // ADR-0079: a `planning` stage now RESTS instead of auto-completing, so a
+  // freshly started standard-change instance parks at `blocked_on_plan` and
+  // the requirements artifact below would 409. Leave plan-only the same way
+  // the seeder and the UI do — an explicit advance of the current stage.
+  const parked = (await (
+    await page.request.get(`/v1/workflows/instances/${inst.id}`)
+  ).json()) as {
+    instance?: { status?: string; state?: { currentStageIndex?: number }; definition?: { stages?: Array<{ id: string }> } };
+  };
+  if (parked.instance?.status === "blocked_on_plan") {
+    const stage = parked.instance.definition?.stages?.[parked.instance.state?.currentStageIndex ?? -1];
+    expect(stage, "a blocked_on_plan instance must have a current stage").toBeTruthy();
+    const advanced = await page.request.post(`/v1/workflows/instances/${inst.id}/advance`, {
+      headers: CSRF,
+      data: { stageId: stage!.id },
+    });
+    expect(advanced.status()).toBeLessThan(300);
+  }
+
   const artifactRes = await page.request.post(`/v1/workflows/instances/${inst.id}/artifacts`, {
     headers: CSRF,
     data: {

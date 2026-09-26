@@ -60,7 +60,26 @@ import {
 import { COMPLIANCE_PACK_DISCLAIMER, DEFAULT_COMPLIANCE_PACKS } from "@regulait/shared";
 import { COMPLIANCE_PACK_RULE_IDS } from "./compliance-packs.js";
 
+/**
+ * The most recent row by `at`.
+ *
+ * NEVER index a bare SELECT's result by position. Postgres does not promise
+ * insertion order without an ORDER BY, and two CI failures in this repo came
+ * from exactly that: a test read `rows[rows.length - 1]` as "the row just
+ * written", passed locally for months, and failed the first time the physical
+ * row order came back the other way round. Sorting by the column that actually
+ * carries the ordering makes the assertion mean what it says.
+ */
+function latestRow<T extends { at: Date }>(rows: readonly T[]): T {
+  const sorted = [...rows].sort((a, b) => a.at.getTime() - b.at.getTime());
+  const last = sorted[sorted.length - 1];
+  if (!last) throw new Error("latestRow: no rows");
+  return last;
+}
+
+
 const { buildApp } = await import("./app.js");
+import { installLicenseFixture, removeLicenseFixture } from "./testing/license-fixture.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -182,6 +201,10 @@ beforeAll(async () => {
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT });
   await app.ready();
+  // ADR-0052 §4: this suite exercises a route now tier-gated on
+  // `compliance_packs` — run under a real signed license granting it
+  // (removed in afterAll; the deployment ends UNLICENSED as it started).
+  await installLicenseFixture(app, { features: ["compliance_packs"], auth: ADMIN });
 
   // two teams, two projects, one lead on team A only
   const [tA] = await db.insert(teams).values({ name: `${PREFIX}-team-a` }).returning();
@@ -247,6 +270,7 @@ afterAll(async () => {
   await db.delete(teamMembers).where(inArray(teamMembers.teamId, [teamA, teamB]));
   await db.delete(teams).where(inArray(teams.id, [teamA, teamB]));
   await db.delete(users).where(sql`${users.email} LIKE ${"%@" + PREFIX + ".example"}`);
+  await removeLicenseFixture(db);
   await app.close();
 });
 
@@ -516,7 +540,7 @@ describe("ADR-0058 — the artifact never claims compliance", () => {
       .from(auditLog)
       .where(eq(auditLog.ruleId, COMPLIANCE_PACK_RULE_IDS.evaluated));
     expect(rows.length).toBeGreaterThan(0);
-    const latest = rows[rows.length - 1]!;
+    const latest = latestRow(rows);
     expect(latest.reason).toMatch(/CONTROL-MAPPING/);
     expect(latest.detail).toHaveProperty("effectiveProjectIds");
   });

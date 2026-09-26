@@ -426,6 +426,17 @@ const DLP_RULES: readonly Rule[] = [
     category: "credential_material",
     re: /\b(?:sk-[A-Za-z0-9]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{10,})\b/g,
   },
+  // The credential shapes THIS PRODUCT mints. Every one is `rgl` + an optional
+  // kind letter/word + `_` + a long hex run: `rgl_` (ADR-0025 user API key),
+  // `rglv_` (ADR-0066 virtual key), `rgls_` (session cookie token) and
+  // `rglscim_` (SCIM bearer). They live HERE rather than in the audit scrubber
+  // that consumes them, because a codebase with two lists of "what one of our
+  // own credentials looks like" will eventually have two DIFFERENT lists.
+  {
+    id: "dlp.secret.regulait_token",
+    category: "credential_material",
+    re: /\brgl(?:v|s|scim)?_[A-Fa-f0-9]{24,}\b/g,
+  },
   {
     id: "dlp.financial.material_nonpublic",
     category: "material_nonpublic",
@@ -451,6 +462,22 @@ export const semanticDlpDetector: GuardrailDetector = {
   },
 };
 
+/**
+ * The credential-material rules ALONE, exported so a consumer that must do
+ * something other than COUNT them (the ADR-0099 audit-log scrubber, which has
+ * to locate and replace the matched run) reuses these exact RegExp objects
+ * rather than keeping a copy that drifts.
+ *
+ * It is a FILTER of `DLP_RULES`, not a second list: adding a credential shape
+ * above automatically extends both the detector and the scrubber, and there is
+ * no way to add one to only one of them.
+ *
+ * Consumers MUST treat the RegExp objects as shared mutable state — every one
+ * carries `/g`, so reset `lastIndex` before use, exactly as `runRules` does.
+ */
+export const CREDENTIAL_MATERIAL_RULES: readonly { readonly id: string; readonly re: RegExp }[] =
+  DLP_RULES.filter((r) => r.category === "credential_material");
+
 // ---------------------------------------------------------------------------
 // 5. PII — classifier #1 in the registry (ADR-0042 §Decision)
 // ---------------------------------------------------------------------------
@@ -469,9 +496,11 @@ export const piiDetector: GuardrailDetector = {
   summary:
     "Formatted personal identifiers: email, bounded US SSN, Luhn-validated card runs, separator-bearing US phone (§8.4's detectPII, unchanged).",
   limits:
-    "Pattern-matched US-centric identifiers only. No names, no addresses, no non-US formats, no free-text personal data.",
+    "Pattern-matched US-centric identifiers only. No names, no addresses, no free-text personal data. ADR-0117's international national-identifier detectors are NOT reachable from this registration: `GuardrailDetector.detect` takes no deployment configuration, and the jurisdiction set is deployment configuration. The DISPATCH path (which calls `enforcePII` directly, as the note below says) DOES apply them. So this registration — the admin registry view and the tuning sandbox — is narrower than what actually enforces, and says so rather than implying parity.",
   ruleIds: ["pii.email", "pii.ssn", "pii.credit_card", "pii.phone"],
   detect(text) {
+    // Deliberately NOT passing a jurisdiction set: there is none to pass here.
+    // See `limits` — this is the narrower of the two PII surfaces, on purpose.
     return detectPII(text).map((h: PiiHit) => ({
       detector: "pii" as const,
       category: h.category,

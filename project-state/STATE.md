@@ -1,10 +1,10 @@
 ---
-phase: eight-pillars-shipped-productizing
-last_updated: 2026-08-03
+phase: codex-review-hardening-f02-closed-f05-next
+last_updated: 2026-09-07
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
-last_session: sessions/2026-08-02-session-06.md
+last_session: sessions/2026-08-13-session-15.md
 roadmap: ../docs/product/ROADMAP.md
 ---
 
@@ -20,6 +20,2154 @@ roadmap: ../docs/product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**2026-09-26 (latest) — D01 and G1 fixed. ADR-0125, migration 0115. Both write-ups were wrong first.**
+
+**D01, and I had described it wrongly.** I wrote that a malformed `REGULAIT_DATA_KEY` "boots clean".
+It does not — `keyBytes` throws and nothing starts. I had read the code instead of running it; the
+PENDING entry now carries that correction in its own heading. What was *actually* wrong was two
+narrower things. (i) The refusal was right and the **message** was not: `keyBytes` threw a plain
+`Error` and `main.ts` only converts `DataKeyBootError` into the operator sentence, so the one place
+written to be read mid-restore printed a stack trace. There is now a `malformed_key` code decided
+**first** — with a recorded fingerprint present the old ordering would have reported `key_missing`
+and sent an operator hunting a lost key rather than fixing a typo. (ii) **The seeder had no gate at
+all**, which is where the bare 500 came from: `seed.ts` builds an app directly rather than through
+`startGateway`, and it is usually the FIRST thing run on a new deployment. It now checks shape up
+front.
+
+**And fixing it exposed a worse bug than the one I was fixing.** The `switch` in
+`verifyDataKeyOnBoot` is what stops a boot — `decision.ok === false` stops nothing, the `throw`
+does — and it had no exhaustiveness check. Adding a code without a case would have made the gateway
+**come up on a key it had just refused**. There is a `never` default now. Root cause of my own
+error: `secrets.ts` said hex, `audit-scrub.ts` said base64, and only `Buffer.from` settled it. One
+exported authority (`dataKeyFormatError`) which `keyBytes` itself uses, so the validator can never
+be more lenient than the parser.
+
+**G1, and that item was too broad too.** Auditing before building found almost every enforcement
+counter was ALREADY shared because it was already SQL — `count()` over `audit_log` for the kernel's
+rate limits, `sum(usage_events)` for project budgets, an atomic increment for virtual keys, a column
+for lockout. **Exactly two were not**, failing in opposite directions:
+
+- **The HTTP edge limiter** on the plugin's per-process `Map`: N replicas enforced N × the ceiling
+  while the posture page reported the ceiling. Now Postgres-backed — but **local-first**, because
+  the naive one-write-per-request version lets an attacker turn a request flood into a Postgres
+  flood and makes the limiter the amplifier it exists to prevent. The local short-circuit is what
+  bounds writes to `max` per process per window. It is `>` not `>=`, and that is load-bearing: at
+  `hits === max` the request is still allowed, so `>=` would leave the last request of every window
+  unrecorded. Written as `>=` first; a test caught it. It fails **open** to the local count, stated
+  rather than discovered — no governed request can be answered without Postgres anyway.
+- **`orchestration_runs.budget`** was Postgres-backed but read-modify-write, and pillar 7 runs nodes
+  in parallel, so two workers each wrote an absolute and the second **erased the first's charges** —
+  a run could pass its cap with the ledger showing it under. Now a delta added under a blocking
+  `FOR UPDATE` (not `SKIP LOCKED`: the second writer must wait and then add).
+
+**Both new test files were run against the OLD implementations to confirm they go red**, because a
+single-process test cannot see either defect. The write-bounding test also asserts the counter
+reaches `max` *before* it stops advancing — a store that never wrote at all would satisfy "stops
+advancing" trivially, and did, during exactly that check.
+
+**This is NOT HA**, and the roadmap now says so where it used to say only "one replica": no
+timeouts, no breaker, no `/metrics`, a fixed host port, and per-process state outside the limiter
+unaudited. G2 and G8 come first.
+
+**Verification**: **191 files / 2867 passed / 9 skipped, exit 0 on a fresh database** (+18 tests,
++2 files), all packages built, web typecheck clean, instrument counters at zero.
+
+**2026-09-26 (later) — the demo runbook walked on a docker-less box. Two blockers, and M-041.**
+
+The container this session runs in has no docker daemon, so the runbook's very first command
+(`docker compose up -d db minio minio-init`) does not work here at all — a live failure waiting for
+Monday if the demo runs from a machine like this. DEMO_RUNBOOK §1.1 is the native-Postgres path.
+
+**I got its first command wrong, and that is M-041.** I wrote `openssl rand -base64 32`;
+`keyBytes` (`secrets.ts:32-35`) does `Buffer.from(key, "hex")` and requires 32 bytes, so it must be
+64 hex characters. I had looked it up — `audit-scrub.ts` asserted in a comment that the key "is
+base64 of 32 random bytes", `app.ts:206` says "hex AES-256 key" eleven hundred lines away, and I
+read the wrong one. **Two comments disagreed; only the parser settles it.** The wrong comment is
+fixed, because a wrong comment in a security file is a defect.
+
+**What it exposed is worth more than the typo, and is PENDING D01.** Nothing rejected the bad key.
+ADR-0063's boot gate checks key CONTINUITY, not FORMAT, and `dataKeyFingerprint` HMACs a buffer that
+comes back short rather than throwing. So the gateway boots clean, prints its posture block, seeds
+most of the way, and fails at the first credential write as a bare `500 {"error":"internal"}` — six
+`seed.test.ts` tests red, none naming the cause. The gate exists to hand an operator a real message
+mid-restore; it does not fire for the simplest possible misconfiguration. **Not fixed here** — it
+changes start-up behaviour and `boot.test.ts` drives that path, so it is the owner's call.
+
+**Then I walked it, and it found two more, neither native-specific.** (1) `demo:setup` printed a red
+*"do not present"* over a state it creates itself: §3b deliberately leaves the use case `proposed`,
+and `useCaseGateMode=enforcing` correctly blocks every dispatch attributed to its project, so the
+script's own happy-path probe returns 409. An operator would hunt a fault that does not exist. It
+now names that one case, says the gate is working, and gives the single action — every other
+non-200 keeps the abort. (2) *"With BOTH of those set"* was hardcoded for two unmet controls and
+printed when only one was.
+
+**Verified live, not reasoned about** (runbook §6): posture **6 of 7** with `auditAnchorTamperResistant`
+unmet and `settable: false`, exactly as §1.1 predicted; `GET /v1/execution` answering without admin;
+`tools/list` as Dana over the real MCP protocol returning `list_branches/read_file/write_file` with
+**`search_code` absent**, so her per-user revocation is enforced in DISCOVERY and not only at call
+time; a per-tool halt refusing `write_file` with a message that distinguishes an emergency stop from
+a missing grant while `read_file` on the same server kept working; the lift; both MCP loopback
+addresses reachable natively.
+
+**Suite: 189 files / 2849 passed / 9 skipped, exit 0 on a fresh database**, instrument counters at
+zero — the same number as before the kill-switch UI, so that work regressed nothing. The 9 failures
+reported mid-session were my own malformed key plus contamination from my own smoke run, not code.
+
+**2026-09-26 — gateway parity, measured against Kong. ROADMAP §8. No code; an honest answer.**
+
+Asked to confirm we work as a central gateway for every MCP call, and to say what
+`github.com/Kong/kong` has that we do not.
+
+**Confirmed, with three caveats.** We are in-line, not a policy library: six inbound surfaces open
+the upstream socket themselves after the decision (`mcp-proxy.ts:1203`, `compat-openai.ts:438`,
+`compat-anthropic.ts:454`, `compat-models.ts:153`, `agents-connectors.ts:3303` and `:4662`), and on
+the MCP path the connect happens at `mcp-proxy.ts:1278` *before the JSON-RPC body is interpreted*,
+so egress and admission refusals arrive as plain HTTP. The caveats: (1) it is a **method-aware
+re-implementation, not a transparent proxy** — exactly two handlers exist, `tools/list` and
+`tools/call`, and `resources/*`, `prompts/*`, `completion/*`, `logging/*`, sampling and
+notifications have no handler anywhere, so they are refused; (2) **streamable HTTP only** — zero
+hits for any stdio or SSE transport, so a local stdio MCP server, the commonest shape in the wild,
+cannot be fronted at all; (3) being in the path is an **operator posture, not an invariant** — no
+mTLS, no network capture, and the surfaces can be disabled into an indistinguishable 404.
+
+**Kong has moved onto our ground.** Its README now says "API · LLM · MCP Gateway" and `ai-mcp-proxy`
+(3.12+) fronts third-party MCP servers with per-tool ACLs — but as **AI Gateway Enterprise**, and
+its own docs say "AI Guardrails: not supported" for MCP traffic. So the comparison a prospect makes
+is against a paid tier, and we are well ahead on the governance half: per-user per-tool entitlement
+with argument-bound approvals versus Kong's consumer allow/deny lists, PII and injection handling on
+MCP payloads, hash-chained audit, default-deny egress, per-project cost, the kill switch.
+
+**Two of the twelve gaps are defects, not features, and are written as such.** **G1** — rate limits
+and budgets live in process memory (`app.ts:532`, no Redis anywhere), so a second replica silently
+doubles every limit while the dashboard says the limit is on. **G2** — no request timeout, no body
+limit, no upstream breaker (`Fastify({ logger: false, trustProxy })`, `app.ts:484`): a hung upstream
+has no bound, and it is also why the runbook has a row for an opaque `{"error":"internal"}`.
+
+**The cheapest strategic item is G9**: ship the existing decision-only PDP (`POST /v1/evaluate`,
+`app.ts:2018`) as an Envoy `ext_authz` / Kong callout. It makes "you already run Kong, keep it" a
+sale rather than an objection, and the endpoint already exists and already executes nothing. The
+honest posture against a platform team is **behind their gateway, not instead of it** — we should
+not grow a Lua plugin runtime or an ingress controller.
+
+**§8.4 says what not to claim**: not operational parity (no health checks, no breaker, no
+`/metrics`, one replica), and never that the rate limits hold under scale, because until G1 they
+hold for one process.
+
+**2026-09-25 (later) — ADR-0124: the kill switch and safe modes. Roadmap item I1, shipped.**
+(Migration 0114.)
+
+**One dial, four positions, checked first.** `org_settings.execution_mode` —
+`normal` / `read_only` / `require_approval` / `halted` — consulted ahead of every grant, rule, limit
+and scope at all three governed entry points (`evaluate`, `evaluateAgent`, `evaluateConnector`).
+Every effectful path in the product reaches one of those three, so a new caller inherits the gate
+without knowing it exists.
+
+**`execution` is a REQUIRED kernel input, and that is the whole design.** Optional-with-a-safe-
+default is the shape that rots: a future call site omits it, the deployment believes it is halted,
+and one path keeps running. Required means the COMPILER enumerates the call sites — 148 of them in
+this batch, and every one added later. Each needed a judgement (does this EXECUTE, or only
+EVALUATE?), and getting it wrong either way is a bug: an executing path marked evaluation-only is a
+bypass, a preview marked executing is a preview that reports "halted" during the one period an
+operator most needs to reason about policy.
+
+**Three scopes, because "stop everything" is usually the wrong tool.** Deployment, agent and tool,
+with a subject halt OUTRANKING the dial. The halt columns are deliberately separate from
+`agents.enabled`: "not in service" and "stopped in an incident" are different facts, and collapsing
+them would mean lifting a halt silently returns a deliberately-retired agent to service.
+
+**What it does NOT stop is the part to remember.** Reading the ledger, the queue and the posture
+page is never gated — a switch that locks the door behind you is a worse outage than the one it was
+thrown for, and `GET /v1/execution` is not even admin-only. Discovery ignores the dial, because an
+empty tool list mid-incident reads as revoked access. The platform's own governance sweeps keep
+running. Policy simulation and the red-team adjudicator use a named `EVALUATION_ONLY_EXECUTION` so
+that reaching for it is a checkable claim. Queued approvals are made unspendable, never destroyed.
+
+**`require_approval` is asymmetric and says so.** Only the MCP tool path can queue; `AgentDecision`
+and `ConnectorDecision` cannot even express the effect. It refuses on those two with a reason naming
+why, rather than silently denying where it claimed to queue.
+
+**Building it surfaced two real defects, both in that mode.** `approvals.rule_id` is a uuid and the
+dial's rule id is symbolic — **M-039 a third time**: a column's type is a claim about every producer.
+And `approver_user_id` is NOT NULL, so "nothing runs unattended" now has to name who is attending,
+enforced by route and DB CHECK.
+
+**Two structural guards earned their keep again**: ADR-0074's rule-write guard caught the halt write
+against `agents` (registered with why it is safe), and ADR-0102's prose inventory caught the three
+new reason columns (scrubbed — operator prose typed under incident pressure is exactly when someone
+pastes the credential they are rotating). And the ADR's claim that `PLAN_SAFE_MODES` "moved" to the
+kernel was false when written — it had been copied. Now one definition, re-exported.
+
+**Verification**: **189 files / 2849 passed / 9 MinIO skips, zero failures on a FRESH database**,
+instrument counters at zero; all packages green; web typecheck and build clean. The 129 pre-existing
+kernel tests pass unchanged with the dial at `normal`, which is the upgrade-safety proof.
+
+**The operator's screen shipped with it** (`/admin/execution`, the same day): current state first,
+all four positions with their blast radius in prose, per-agent and per-tool halts under the dial,
+one reason box that refuses a terse reason before the round trip, and an explicit statement of what
+survives a halt. Four Playwright tests drive it the way an incident happens, and one of them
+**reloads the page while the deployment is halted** — a control surface that dies with the thing it
+controls is not a control surface. The posture page links to it when the deployment is restricted.
+
+**Still open on I1**: no automatic or scheduled trip (nothing arms itself; every position is a
+deliberate act), one approver for the whole deployment, and no per-connector halt.
+
+**2026-09-25 — ADR-0123: criterion (d) tightened, and the ISACA assessment on the roadmap.**
+
+**The framework was a constant, and a refusal was not countable.** PoC criterion (d) was rated
+"yes, with a seam to narrate". Two causes. `euAiActScreeningFor` cited packs only on reaching an EU
+`high`/`prohibited` tier and filtered on the literal `"eu-ai-act"`, so every other pack we ship was
+unreachable from a use case — including the NIST AI RMF pack, which **has shipped since ADR-0058**
+and has no tier concept, so it could never have arrived through a screening gate anyway.
+
+**The half that mattered was worse than a missing feature.** A pack's `audit_decisions` collector
+reaches a decision only through `detail->>'projectId'`, and the governed DECISION rows on the MCP
+tool and connector paths did not carry it — while the PII-block rows on those same paths did. So
+`nist-ai-rmf:MANAGE-2.2`, whose own ownerNote reads "evidenced by refusals actually occurring",
+counted **zero** while the refusals sat in the ledger, correct, hash-chained and invisible. The
+product was telling an auditor that evidence did not exist when it did. `usage_events` already
+carried the project for the same call; the two records now agree.
+
+`GET /v1/use-cases/:id/frameworks` is a MAPPING, not a widened screening — inventing a tier for
+frameworks that do not have one would be the wrong shape. The remaining seam is named on every
+response rather than narrated around: evidence is collected per PROJECT and the payload says so, a
+use case with no project returns null statuses (not measured ≠ measured as none), entitlement is
+ADR-0047's own `evaluateReportAccess`, and the route persists nothing.
+
+**Criterion (d) now pairs with (b) on one screen**: the refusal demonstrated in (b) is what turns
+MANAGE-2.2 green, provided it carried the project header — and an unattributed refusal is still
+correctly not counted.
+
+**Three demo blockers found only by trying it.** Compliance packs are tier-gated and an unlicensed
+deployment runs default CLOSED, so (d) could not be shown at all; packs seed as draft and evaluate
+nothing until activated; and there was no use case to map. `demo:setup` now mints an EPHEMERAL
+licence (keypair in memory, public half only, outside the source tree — the committed dev key's
+private half was destroyed on purpose and this does not weaken that), activates the two packs, and
+creates the use case.
+
+**An unaudited governance write, closed.** `POST /v1/agents/:agentId/enabled` wrote nothing to the
+ledger and took no reason — three lines beneath a comment promising "audited acts — never silent
+PATCH writes" — despite being kernel-enforced platform-wide and the nearest thing we have to an
+emergency stop.
+
+**ISACA — *Cybersecurity Recommendations for Securing AI Agents* (2026), assessed and shelved as
+asked.** ROADMAP §7 holds an audit against its 15-item Secure-by-Default checklist done against
+ENFORCING CODE rather than ADRs: **4 full, 9 partial, 2 absent**, with both absences in the one
+category we have barely touched (Reliability, Resilience, Kill Switches). Ten ranked items, led by
+a kill switch and safe mode — we have every primitive and nothing that reads as an emergency
+control — and an ISACA compliance pack, which is the cheapest credibility on the list and would put
+our own gaps on our own dashboard. Two claims to stop making are recorded there and in the demo
+runbook: least privilege is enforced for the HUMANS holding agent grants, not for agents; and the
+injection detector runs at runtime but ships in `log` mode with no provenance model, so it is a
+detector rather than a defense.
+
+**2026-09-24 (later) — the seeded AND hardened demo environment, and the overstatement it found.**
+
+Two commands beyond the seed: `demo:mcp` stands up a real Streamable HTTP MCP server on loopback,
+and `demo:setup` creates what the gates need, verifies the happy path, and only then applies the
+ADR-0118 preset. The order is load-bearing — the five gates fire in sequence, so hardening first
+means every refusal demoed afterwards names the first unmet gate rather than the intended one.
+`demo:setup` measures a real user's dispatch either side of the preset and says plainly not to
+present if the hardened one fails.
+
+**The demo landmine is closed.** The seeded servers pointed at the discard port deliberately, and
+`POST /mcp/:serverId` connects upstream before reading any JSON-RPC message, so every request died
+at connect and the gateway looked broken rather than governed. With a real upstream the whole
+precedence chain now runs live over the real protocol: `read_file` allowed, `search_code` denied by
+a per-user revocation, `write_file` queued to a named approver — and `tools/list` is already
+filtered, so the deny is not a UI decoration.
+
+**Each demo server gets its OWN loopback address.** ADR-0122's registry diff keys on host, so two
+servers sharing one collapse onto whichever registry row came last. That limit is disclosed and
+real, but on a demo it reads as the product attributing traffic to the wrong server — the first
+rehearsal did exactly that.
+
+**The finding worth keeping: the ADR-0118 preset was overstating what it binds.** There are THREE
+independent attribution switches — `org_settings.dispatch_attribution_required` for the native
+dispatch, and `interception_settings.require_project_attribution` / `require_mcp_attribution` for
+the compat edge and the MCP proxy. Hardening sets one. The control's `refuses` text read "any
+dispatch that names no project", which an operator would reasonably read as all of them; a fully
+hardened deployment still serves an unattributed MCP tool call, which is now verified rather than
+assumed. The schema had always said it precisely — the preset's sentence just did not carry it. The
+text now names the scope and the other two switches, and a test asserts BOTH the behaviour and the
+disclosure, so widening the preset later fails until the sentence is rewritten. That column is the
+entire value of the posture page, and it is about to be read aloud to a customer.
+
+**Verification**: gateway **187 files / 2833 passed / 9 MinIO skips, exit 0 on a fresh database**,
+instrument counters at zero. The demo environment itself was rehearsed end to end on a hardened
+database: criteria (a) and (b) confirmed live, the happy path 200 on both sides of the preset.
+Docker is unavailable in this container, so the two environment-backed controls are handed to the
+demo box as exact commands rather than claimed — `docs/product/DEMO_RUNBOOK.md`.
+
+**2026-09-24 — ADR-0121 (Outlook, send-only), ADR-0122 (MCP discovery + the registry diff), the
+enforcement-posture page, and a correction to ADR-0120 that only a FRESH database could find.**
+(Migrations 0112, 0113.)
+
+**ADR-0121 — Outlook approvals is a courier that can only carry.** ADR-0061 and ADR-0113 both rested
+on a property neither had to state, because both providers happened to satisfy it: *the platform
+authenticates the inbound callback*. Email does not, and every way to invent one is worse than not
+having the channel — reply-to-approve trusts an assertion anyone who can put mail in a mailbox can
+make, SPF/DKIM/DMARC relocate the trust onto a relay's header parsing, and a secret link is a bearer
+token in a medium built to be forwarded and archived. So inbound is refused under its own code,
+`inbound_unsupported_by_design`, and the mail carries the content plus a portal link and **no decide
+actions** — with `allowFencedDecide` unable to opt out, because it loosens ADR-0061's fence rather
+than this channel's own limits.
+
+**The duller half of 0121 is the instructive one, and it is the session's theme.** The adapter had
+shipped an `outlook` case **no caller could reach**, and the full suite passed throughout. Two
+hand-maintained mirrors had drifted from it: shared's `connectorProviderKindSchema` had never learned
+the kind, so the connector could not be created; and drizzle's `text({enum})` widened while migration
+0069's CHECK still read `IN ('slack','teams')`, so the type said yes, the storage said no, and the
+route surfaced the violation as a 500. Both fixed, and the *class* is guarded by a test asserting the
+two kind lists are equal — living in the gateway because that is the only package that can see both,
+which is exactly why the drift was invisible.
+
+**ADR-0122 — detection is half a capability; the registry diff is the other half.** ADR-0055's
+catalogue was structurally MCP-blind (its signatures ask "is this a known vendor's hostname", and the
+interesting MCP servers are self-hosted on hostnames nobody can enumerate), and its corpus is
+hash-pinned on purpose, so this is a separate module rather than new entries. Confidence is graded and
+never averaged. The load-bearing part is the diff: from one piece of supplied evidence, a registered
+host comes back governed and named and an unknown one comes back `UNREGISTERED`, in the same response.
+
+**The enforcement-posture page is now a screen**, at `/admin/enforcement-posture` — deliberately NOT
+`/admin/posture`, which is ADR-0082's read-only executive one-pager. A control that starts refusing
+live traffic does not belong on a page people print for a meeting.
+
+**ADR-0120 was wrong in a way its own tests could not reach, and a fresh database found it.** The
+rule path reused `policy_simulation_flips.policy_id` — a uuid — for the kernel's `Decision.ruleId`,
+which is a uuid only when a stored rule row matched and a **symbolic** id (`default-deny`) when the
+kernel decided without one. 22P02 on the flip insert, 500 on the whole simulation — **on precisely
+the traffic a restrictive-rule preview exists to be run against**. The fixture's every caller was
+entitled, so the other half of the value space was never constructed. Migration 0113 adds
+`decision_rule_id text` and keeps both facts. Recorded as **M-039**.
+
+**Two shared-state defects were diagnosed rather than re-run as flakes.** This feature replays *every*
+`mcp_tool` audit row in the window rather than its own fixtures, so a shared development database
+cannot verify it. And `chatops.test.ts` was dropping a CHECK constraint and restoring a **hardcoded,
+now-stale** definition — a test mutating shared DDL and restoring what it remembered rather than what
+it found, which silently narrowed the constraint for every file that ran after it. It now reads
+`pg_get_constraintdef` before the drop and asserts the restore was faithful.
+
+**Verification**: gateway **187 files / 2832 passed / 9 MinIO skips, exit 0 on a FRESH database**,
+with `ECONNREFUSED`, `destroySoon`, unhandled and uncaught all at zero; all eleven packages green
+(1721 tests); web typecheck and build clean.
+
+**2026-09-20 (evening) — ADR-0120: policy simulation reaches approval rules and rate limits, and
+REFUSES data-scope rules for a stated reason.** (Migration 0111.) The deck listed "policy simulation
+and blast-radius preview"; the surface accepted exactly one thing, an ABAC policy version, and
+`policy_simulations.policy_version_id` was NOT NULL with an FK to `abac_policy_versions` — so the
+**storage** could not describe another candidate even if the code had wanted to.
+
+**The finding that shaped the work: the evaluation was never the missing part.** ADR-0073's shadow
+pass already evaluates candidate approval rules, rate limits and data-scope rules on the live path,
+and already recomputes a candidate limit's count when its window moves. What it could not do was be
+**asked** — it evaluates whatever version is marked `canary`, on real traffic, as it happens. So this
+batch adds almost no evaluation logic; it adds a way to ask. `governedEvaluate` gains a dry-run mode
+that forces a named version as the candidate and **returns** its decision, computed by the same
+`evaluateWith` the served decision came from.
+
+**I made the M-030 mistake again and caught it in time.** I checked `governed-evaluate.ts` for writes
+by grepping its own file, found none, and concluded it was side-effect free. It is not: it writes
+through `recordCanaryObservations`. A replay calling it once per recorded decision would have written
+**one canary observation per transcript row**, corrupting the very measurements an operator relies
+on, from a module whose header says it "executes NOTHING". The guard is one clause and its absence
+would not have surfaced until someone wondered why their canary percentages had moved.
+
+**`data_scope_rule` is refused, not approximated** — 422 with a self-explaining body, storing nothing.
+Judging one needs the call's **arguments**, and the MCP decision transcript records counts only by
+design (§8.4). That is ADR-0119's shape again: the product's own privacy discipline is what makes the
+feature impossible, and saying so beats a fabricated number on a surface whose whole value is that
+its numbers can be trusted.
+
+**Verified by me on a freshly created database**: **185 files / 2819 passed / 9 MinIO skips, exit 0**
+— +1 file, +6 tests. Build and `tsc --noEmit` clean; instruments asserted. Probe predicted before
+running: neutralise the candidate evaluation, 2 of 6 redden, 4 stay green. Exactly 2 and 4.
+
+**And a second process error, now M-038.** A fixture used `createdByUserId` where the column is
+`authorUserId`. It passed the **full 2,819-test suite, twice** — vitest transforms through esbuild
+and never typechecks, and drizzle silently dropped the unknown key — and I had begun writing the
+ADR's verification section around those numbers. It was caught only because build and tsc run after
+the suite, and only because I read their exit codes rather than the green summary above them. **A
+test file is code and gets the same gate as code.**
+
+**Honest limits**: two rule kinds of three; the replay covers MCP tool decisions only; project
+attribution is not reconstructed for rule candidates; the preview substitutes ONE version into
+today's rules, so two changes previewed separately do not tell you what they do together.
+
+**2026-09-20 (later still) — ADR-0119: the semantic cache reaches the IDE path, and the honest
+ceiling for that surface is THREE of seven techniques, not seven.** (No migration.) The deck sold
+"seven techniques applied automatically on every call" beside a slide selling the compat endpoints as
+where "the work developers already do arrives inside the same controls". That surface ran **one**.
+
+**The scoping was the substance.** Each remaining technique was checked against the **wire format**
+rather than against convenience, and three cannot follow because a vendor-shaped request has nowhere
+to carry what they need: **edit-vs-rewrite** diffs against `body.baseline` and there is no baseline
+field; **file pre-processing** shrinks `body.attachments` and the surface carries none; **context
+compaction** summarises a **stored conversation** and the surface is stateless. Compacting the
+supplied array in-flight would be a *different* technique costing a model call and latency on a
+synchronous IDE request — deliberately not smuggled in under this batch's name. Lazy tool loading and
+request batching belong to other surfaces. So this takes the surface from **one to two**, and says so,
+because the alternative was to make the slide true by redefining "applied" to mean "considered".
+
+**What was about to be duplicated was not a lookup but a governance boundary** — servable only to the
+same user, for the same agent, inside the TTL, and only after the stored normalized input is
+re-compared as a collision guard. Two copies would drift and **the copy that drifted would serve one
+user's answer to another**. It now lives in `semantic-cache-shared.ts` and **both paths call it**;
+the invoke path's existing tests passed unchanged, which is what makes that a refactor rather than a
+rewrite — and makes "both paths call it" verified rather than asserted. PII re-gating stays with the
+caller (a JSON API and a wire-compatible shim must refuse differently) while the **gate itself is
+shared**, so a cached answer still cannot be served onto a `block`-mode project.
+
+**Two behaviours differ from the invoke path and both are consequences, not choices.** `opt_in`
+cannot engage here — it means "the caller sets `semanticCache: true`", and inventing that field would
+break the wire compatibility that is the surface's whole purpose. And a **tool-bearing turn is never
+cached**, because its answer is not a pure function of the prompt: serving a previous one would be
+*wrong*, not merely stale.
+
+**Evidence is "no provider call", never "the answer matched"** — two identical requests return the
+same text whether or not a cache exists, so equality proves nothing. Every hit assertion pairs with a
+`usage_events` delta of **zero** and every miss with **one**. The cross-user test first **proves A
+hits**, so B's miss is about scope rather than an empty cache.
+
+**Verified by me on a freshly created database**: **184 files / 2813 passed / 9 MinIO skips, exit 0**
+— +1 file, +6 tests. Build and `tsc --noEmit` clean; instrument asserted (`ECONNREFUSED: 0`,
+`destroySoon: 0`). Probe predicted first: force a permanent miss and 4 of 6 redden, 2 stay green.
+Exactly 4 and 2.
+
+**Honest limits**: **exact-match only** — "semantic" is the technique's name, not its matching, so a
+re-worded question misses; a hit reports the model that produced the **cached** answer, not what
+routing would pick today; poisoning is bounded by scope rather than prevented; and the TTL **slides
+on reuse**, so a popular question can stay cached well beyond one TTL from its first ask.
+
+**2026-09-20 (later) — ADR-0118 landed: the hardened posture preset, built by me rather than
+dispatched.** (No migration.) Six agent deaths on session limits made delegation the slower path, so
+this one was built in-session. Eight controls the deck sells as active ship **off**; every default is
+a deliberate, upgrade-safe choice and **not one of them was changed**. What is new is a governed
+operation that turns the enforcing set on together, and a read that answers "what is enforcing right
+now?" in one call.
+
+**The read is the primary deliverable.** `GET /v1/org/posture` gives each control its value, whether
+it is satisfied and settable, and **what turning it on would refuse** — specific enough to act on
+(that `useCaseGateMode` binds only dispatches naming a project; that `mrmEnforced` bites on the
+**clock**; that `defaultPiiMode: block` must be read beside ADR-0117's false-positive rates). It is
+useful to an operator who never applies the preset.
+
+**Two controls are reported and never claimed.** The anchor is env-backed and so is the scheduler —
+an API call cannot set an environment variable. They carry `settable: false` and their **observed**
+state, `harden` neither touches nor counts them, and the overall verdict stays **false** even when
+every settable control is satisfied. So `hardened: true` is **unreachable on a default install**,
+which is honest rather than convenient. ADR-0060's precedent, applied.
+
+**Three design calls worth keeping**: enforcement and optimisation are separate groups and `harden`
+defaults to enforcement only, because bundling a cache policy into a switch called "hardened"
+conflates a cost decision with a security one; `mrmEnforced` emits **its own** audit row as well, or
+an operator alerting on `mrm-enforcement-enabled` would silently miss a preset-driven enablement; and
+the preset persists **no** "am I hardened" flag, so the answer is derived from the controls and
+cannot drift from them.
+
+**Proof is behavioural — allowed before, refused after — and writing it surfaced that the gates are
+ORDERED.** With everything hardened, an unattributed dispatch is refused `mrm_approval_required`,
+not `attribution_required`: MRM answers first. An assertion naming attribution therefore **fails
+while the attribution gate is perfectly healthy**, and my first draft made exactly that mistake. Each
+gate is now proved twice — through the preset, and **in isolation** by moving one dial.
+
+**It also exposed a vacuous test in ADR-0116.** The full suite failed *"one altered exported audit
+row"*, reporting that a tampered bundle verified clean. A **test** defect, not a product one: the
+mutation was `allow -> deny` on the first row of the exported segment, and in the shared database
+that row is whatever another file wrote — when it was already a `deny` the replace was a **no-op**
+and the bundle reached the verifier pristine. This batch's own MRM `deny` row shifted the segment and
+exposed it. **M-033 in a new place: the vacuity was in the SETUP, not the assertion** — the tamper
+test was tampering with nothing, and every sibling tamper case passing is what made it look fine.
+
+**Verified by me on a freshly created database**: **183 files / 2807 passed / 9 MinIO skips, exit 0**
+— +1 file, +13 tests. Repo-wide build and `tsc --noEmit` clean; instrument asserted
+(`ECONNREFUSED: 0`, `destroySoon: 0`, unhandled-error block empty). Non-vacuity predicted before
+running: neutralise only the write and 6 of 13 redden, 7 stay green including the isolation cases.
+Exactly 6 and 7.
+
+**Honest limits, stated in the ADR rather than discovered later**: "one switch" is true of **six** of
+eight; there is **no dry-run**, so applying it to a live install with unregistered use cases starts
+refusing real traffic immediately; there is no un-harden operation, deliberately; and a control that
+later gains its own toggle semantics would need the same dual-audit treatment `mrmEnforced` got, with
+nothing in the type system enforcing it.
+
+**2026-09-20 — ADR-0116 and ADR-0117 landed together: two of the deck's four false claims are now
+true, and both batches were finished by me after rate limits killed their agents mid-flight.**
+
+**ADR-0116 — signed, offline-verifiable exports** (no migration). The deck claimed *"a signed,
+self-verifying bundle your auditor can check independently."* Exports were **plain unsigned CSV or
+JSON**, and audit verification was a **live API call against the running system** — the opposite of
+the promise. Now: an Ed25519-signed bundle and a standalone verifier needing no database, no
+gateway, no network.
+
+**The design turns on a trap I had found in the sibling LLM product hours earlier**, and the ADR
+title states the answer: *the trust root is a fingerprint obtained OUT OF BAND, and the bundled
+public key is never the authority.* A bundle carrying its own key is self-*consistent*, not
+self-*verifying* — anyone can re-sign a doctored bundle with a fresh key. The verifier takes
+`--fingerprint` or a pinned `--keyring`; the bundled copy is a convenience and is never treated as
+authority. **No signing key produces a refusal, never a quietly unsigned bundle.** Rotation does not
+invalidate past bundles.
+
+**Six export producers were enumerated and only two are covered** — the compliance report artifact
+and `GET /v1/audit.csv`. Cost CSVs, billing statements and the onboarding snapshot are **not** signed,
+and the ADR says so in a table rather than letting "exports, plural" imply otherwise. **The deck
+sentence is written to describe what is covered**; used beside a screenshot of a cost CSV it becomes
+an overstatement again.
+
+**ADR-0117 — international identifier PII** (migration 0110). Ten jurisdictions, and the finding is
+that the batch's own premise was wrong. It first defaulted to "the checksum-backed jurisdictions";
+**three of its checksums were defective** — Verhoeff used the *generation* permutation offset inside
+the *validation* loop (rejecting the published example while still accepting ~10% of random input: a
+checksum-shaped function that was not the checksum), the German IdNr structural rule was **inverted**
+in a way the single published example could not expose, and the French NIR key range was off by one
+in both directions.
+
+**Then the reasoning itself fell.** Measured: **one decimal check digit divides the candidate space
+by ten and no more** — BSN **9.03%**, TFN 9.00%, NINO 8.47%, SIN 8.09%, Aadhaar 8.03% false positives
+on random digit runs, against Steuer-ID 0.23% and NIR 0.06%. In `block` mode that **refuses
+legitimate work the user cannot route around**. So the shipped default is **empty**, selection is
+per jurisdiction, and each measured rate is published next to its switch. "Checksum-backed" is no
+longer used as a safety rating anywhere.
+
+`enforcePII` now takes the enabled set as a **required** argument, so a path added later cannot
+silently enforce less than the org configured — the compiler asks, and the type error enumerated the
+**ten** call sites.
+
+**The compat/IDE path was passing for the wrong reason, and that is recorded as M-037.** `POST
+/v1/messages` resolved its agent by the `mock-balanced` **model string**; in the shared suite
+database ADR-0020's deterministic tie-break correctly picks another file's agent, refusing with
+`agent_denied`. An assertion asking only for "not 200" was satisfied by a refusal that had nothing
+to do with PII, so the enforcement claim on the IDE path had **never been tested in a full run**.
+The product was right; the test trusted a coincidence.
+
+**Verified by me on a freshly created database**: **182 files / 2794 passed / 9 MinIO skips, exit 0**
+— +2 files and +41 tests over S22's 180/2753. Repo-wide build and `tsc --noEmit` clean; instrument
+asserted (`ECONNREFUSED: 0`, `destroySoon: 0`, unhandled-error block empty). My own probe, predicted
+before running: removing the agent pin should redden exactly the two compat cases and leave the other
+37 green — it did, exactly.
+
+**What I had to finish, and it is a pattern now**: four agents died on one session limit, two more on
+the next. ADR-0117 **was never written by its agent at all** — its implementation, tests and vectors
+were committed without a decision record, which `CLAUDE.md` forbids. I reconstructed it from the
+committed code and the commit messages, re-read the measured rates from the registry rather than
+copying them from prose, and checked every cross-referenced ADR filename resolved — **two of my own
+first-draft links did not**, and I verified the ADR-0020 tie-break claim against ADR-0020's text
+rather than trusting the code comment that cited it (M-036).
+
+**2026-09-19 (evening) — S22 closed: the eval surface held the credential, and the fix is deliberately
+NOT one rule for all four columns.**
+([ADR-0115](../docs/decisions/0115-eval-result-credential-surface.md), no migration.) ADR-0111 named
+`eval_results.output_text` as a sixth surface and never probed it; ADR-0112 left it out of scope. A
+synthetic AWS example key was driven through a **real** governed eval run and a **real** red-team run,
+and every stored column read back by raw SQL — measured, not argued from the code.
+
+**Four columns, four answers, each argued.** `output_text` held the key **character for character**
+and is **left faithful at rest**, redacted at the presentation boundary; `detail` (jsonb) held it in
+the judge's per-claim verdicts and takes the same hook; **`error` is scrubbed at WRITE time** in
+ADR-0102's registry; `judge_rationale` already carried the marker and is unchanged.
+
+**The reason `error` splits from `output_text` is the whole point of the batch.** A red-team probe's
+purpose can be to prove the agent disclosed a secret — a product that records "a probe got through"
+while deleting what got through has not been made safer, it has destroyed its own evidence. But an
+upstream exception message is **never** evidence of anything: a defeat is proved by what the model
+*said*, not by what the transport threw. So the defeat evidence stays intact and a test pins it.
+
+**The copies were the other half of the finding.** `redteam_findings.output_snippet` and
+`redteam_probe_trials.output_snippet` are slices of `output_text`, and `cardView` re-derives the
+judge's claims onto a model card — so **six read routes** handed the key out, across three files.
+All six are now inside an encapsulated Fastify scope, the ADR-0112 pattern reused rather than
+re-invented.
+
+**Completed by me after the agent was killed mid-verification.** A session rate limit took it out
+while it was running the suite that would have caught the one defect it left: `eval_results.error`
+was added to the scrub registry but not to the **inventory that pins the registry's contents**. My
+run found exactly that. It is ADR-0102's structural guard working as designed — a registry addition
+cannot slip in unannounced — and the inventory entry now carries the write-time-vs-presentation
+reasoning above.
+
+**Verified by me on a freshly created database**: **180 files / 2753 passed / 9 MinIO skips, exit 0**
+— **+1 file, +13 tests** over S13's 179/2740, nothing else moved. Repo-wide build and `tsc --noEmit`
+clean; instrument asserted (`ECONNREFUSED: 0`, `destroySoon: 0`, unhandled-error block empty).
+
+**Worth keeping from its non-vacuity table: five probes, and it reports the one prediction it got
+wrong** (N5, over-eager scrub — it predicted 2 failures and got 3). Recording the miss rather than
+quietly restating the prediction is the discipline M-023 exists for.
+
+**2026-09-19 (later still) — S13 closed: a re-scan that still sees the SAME signature now RE-OPENS
+a finding whose status claims the problem is fixed, and the rule it replaces was never ADR-0017's.**
+([ADR-0114](../docs/decisions/0114-rescan-reopens-a-contradicted-finding.md), **no migration** —
+`open` was already in the enum.) ADR-0110 made the backup **ledger** row re-open; the **finding**
+did not follow. So a restore that reported success over a gap that is still live left
+`infra_findings.status` at `remediated` — the product showing an operator a **closed finding over a
+live gap**, on `/v1/infra/findings` and `/v1/infra/posture`, the surfaces they read *first*, while
+the ledger that now tells the truth is the one they reach for second.
+
+**The premise was wrong, and correcting it is the substance of the batch (now M-036).** S13 was
+filed — by me, in ADR-0110's Honest limits, and repeated into STATE.md and PENDING.md — as
+"pre-existing **ADR-0017** behaviour", quoting *"a re-scan never resets a finding's status"*.
+**ADR-0017 does not contain that sentence.** I checked it myself: its only idempotency claim is that
+a re-scan never duplicates a **ledger row** — rows, not status. The rule lived in exactly one place,
+an inline comment at `infra.ts:883`. I had put quotation marks around a code comment and an ADR
+number beside it. That is why it matters: a rule attributed to an ADR reads as *decided*, so the
+respectful move is to leave it alone; the same rule in a comment reads as *how it happens to work*,
+which invites the question. The citation is what kept it unexamined.
+
+**With the premise corrected it stops being a trade-off and becomes an inconsistency.**
+`infra.ts:670` already re-opens a finding when a cert rotation **fails** — *"re-proposable: the
+finding goes back to open, never silently closed."* A remediation that **reported success** while
+the same signature is still observable is not a scanner overruling a human; it is evidence the
+decision did not take effect. Re-opening the loud failure and staying silent on the quiet one is
+backwards — the quiet one is the one an operator cannot otherwise discover.
+
+**Per-status, each argued rather than decided by omission**: `remediated` and `auto_remediated`
+re-open (the second more strongly — same claim, but **nobody looked**). **`accepted_risk` does
+not** — a human chose to live with a known problem, the scan still seeing it is *expected*, and
+re-opening would nag an operator for doing exactly what the product asked, turning `accepted_risk`
+into a delay rather than a decision. **`remediation_proposed` does not** — it claims the problem is
+*being worked*, not resolved, so there is no contradiction to report; this is where ADR-0114
+**deliberately parts from ADR-0110 §2**, because on the ledger `restore_proposed` was the state that
+stopped the row saying the gap was live, while on the finding it would destroy an in-flight proposal
+and buy nothing. `open` is a no-op **with no audit row** — no closed claim to contradict, and that
+is also the flapping bound. `approved` is refused defensively and shown unreachable.
+
+**Flapping is bounded, not eliminated, and the bounds are existing mechanisms rather than an
+invented debounce**: it fires **at most once per false close** (`open` does not re-open, so no
+oscillation and no audit-row storm — asserted, not argued), and `scanResource` has exactly **one
+caller repo-wide** with no findings-scan scheduler anywhere. The second bound is disclosed as a
+property of *today's* deployment: whoever schedules fleet scans narrows the window in proportion.
+
+**Verified by me on a freshly created database**: **179 files / 2740 passed / 9 MinIO skips, exit
+0** — exactly **+1 file, +6 tests** over S21's 178/2734, nothing else moved. Repo-wide build and
+`tsc --noEmit` clean; instrument asserted (`ECONNREFUSED: 0`, `destroySoon: 0`, unhandled-error
+block empty). I re-derived the two load-bearing premises from source rather than from the report:
+ADR-0017 carries no status claim (`grep` returns nothing), and all **ten** writers of
+`infra_findings.status` are where the ADR says, with **no path anywhere setting `approved`**.
+
+**My own non-vacuity probe, additive to the agent's three and with the prediction written first**:
+the status flip and the audit row are two separable claims, so removing **only** the `auditLog`
+insert — keeping both the status change and the counter — had to redden something, or the
+"contradiction is audited, never silent" guarantee rests on nothing. Three tests went red, including
+the one pinning `priorStatus: "auto_remediated"`. Probe reverted and the revert verified clean.
+
+**The honest limits, which the ADR gives its own section**: flapping is bounded rather than removed
+and a future scan scheduler weakens the second bound; `priorDetectedAt` is the last observation
+before the close, **not** a remediation timestamp (there is no `remediated_at` column and no
+migration was added to invent one — the remediation's own moment is already in the audit log under
+the same `objectId`); "the same signature" is only as good as the provider's signature, and an
+unstable one would create new findings rather than re-open; and the provider under test is
+`MockInfraProvider` — the right fixture for a false success, and a narrow one.
+
+**2026-09-19 (later still) — S21 closed: the conversation list can now be asked for ONE project,
+and `none` for the unattributed ones.** (No ADR, no migration — a query parameter on an existing
+route, resolved inside an existing owner-scoped predicate.) `conversations.projectId` has always
+been the pillar-5 default attribution for every turn dispatched in a thread, and the list route
+already *returned* `projectName`; it could not be *asked* for one. An operator with a dozen threads
+had no way to answer "what have I been running against project X".
+
+**The `none` vocabulary is borrowed, not invented.** ADR-0024 O11 already exposes the null-project
+bucket as `GET /v1/costs/unattributed`, on the reasoning that spend belonging to no project must
+stay visible rather than be silently folded into one. The same argument applies here: without
+`none`, a user whose threads are mostly unattributed can filter to every project *except* the one
+they actually live in. One condition, one name, two surfaces.
+
+**The property that mattered is "narrows, never widens", and it is asserted rather than assumed.**
+The ownership predicate is applied *regardless* of the filter — `and(eq(userId), projectFilter)` —
+so passing another user's project id returns an **empty list**, not their threads. Five tests pin
+it: the two narrowing cases, and the never-widen case checked from **both** users' sides, because
+M-035's lesson is that a guarantee watching one producer is not a guarantee.
+
+**Non-vacuity, with the prediction written before the run** (M-023): removing the filter should
+redden the two narrowing tests and leave the three never-widen tests **green**, since ownership is
+enforced independently of the filter and a vacuous "never widens" would be indistinguishable from a
+sound one under a probe that also broke ownership. Result: exactly 2 red, 3 green. The probe was
+reverted and the revert verified (`0` matches).
+
+**Verified by me on a fresh database**: gateway **178 files / 2734 passed + 9 MinIO skips, exit 0**
+— exactly **+5** over S19's 2729, which are my five tests and nothing else. Instrument asserted
+(`ECONNREFUSED: 0`, `destroySoon: 0`).
+
+**2026-09-19 (later) — S19 closed: Teams ChatOps parity is complete, and the deferred verification
+for BOTH batches is done.** ([ADR-0113](../docs/decisions/0113-teams-outbound-courier.md), no
+migration.) ADR-0061 shipped Teams **inbound** — signature-verified callbacks that can decide
+approvals — and refused outbound with `outbound_provider_unsupported` because
+`connector-provider` had no Teams adapter. That courier now exists: `"teams"` in
+`CONNECTOR_PROVIDER_KINDS`, a **Bot Framework Connector REST** adapter, and `chatops.ts` routing
+through it.
+
+**Verified by me in one run, covering S14 and S19 together**: gateway **178 files / 2729 passed +
+9 MinIO skips, exit 0**; `connector-provider` **70 passed, exit 0**; repo-wide build and
+`tsc --noEmit` clean; instrument asserted (`ECONNREFUSED: 0`, `destroySoon: 0`). The numbers
+reconcile against S14's 2723 — S19 added six tests to the existing `chatops.test.ts`, so the file
+count is unchanged and its adapter tests live in the separate package.
+
+**Two things the agent did beyond the brief.** (a) **A message-redirection defence**: every call
+derives its `/v3/conversations/{id}/` prefix from the governed `object`, and the Activity's own
+`conversation.id` is **overwritten** from it — so a crafted payload cannot redirect a post to
+another Teams conversation. (b) **It found Teams is structurally different from Slack on egress**:
+one post touches **two hosts** (Entra login + Bot Connector), both routed through the guarded fetch
+that re-adjudicates every request URL. Neither is exempt, and an air-gapped install has neither
+allow-list entry, so the courier is simply absent rather than failing open.
+
+**Its non-vacuity table is the strongest of this session.** One neutralisation stayed **GREEN** —
+removing the entry-point adjudication — and rather than bury that it explains why it is not
+vacuity (the guarded fetch alone still refuses), then proves it in the next row by removing **both**
+egress layers and watching three tests redden, including ADR-0061's **pre-existing Slack** egress
+test. That is M-033 and M-035's lesson applied unprompted.
+
+**Honest about what is weaker**: card fidelity is **not** identical to Slack and the ADR does not
+claim it is — code spans have no Adaptive Cards equivalent and render as literal backticks; the
+portal link is an `Action.OpenUrl` only when `portalUrl` is absolute. The *content* and the
+*sensitivity fence* are identical; the markup is poorer.
+
+**A process note worth keeping.** The building agent was cut off by a rate limit one step before
+writing its ADR, having already committed the implementation and tests. I finished the batch: the
+ADR was **orphaned**, not in-flight, so committing it was the right call where leaving a *running*
+agent's files alone had been right three times before. I also briefly misread the commit range —
+the implementation landed *before* my own S14 status commit, so a `759e5b3..HEAD` diff showed only
+the test commit and I thought the adapter was missing. It was not; checking the code rather than
+trusting the range settled it.
+
+**2026-09-19 — S14 closed: the owner chose option (c), and conversations are now scrubbed at the
+PRESENTATION boundary.** ([ADR-0112](../docs/decisions/0112-conversation-presentation-scrub.md), no
+migration.) Stored rows keep byte-for-byte what was said; only what the four conversation routes
+**hand out** is redacted. Thirteen surfaces were enumerated — three carried content and are covered,
+six were checked and found to carry only ids, and a conversation export route **does not exist**
+(the `onSend` backstop means adding one later cannot silently reopen the surface).
+
+**The chokepoint, verified myself.** The scrub installs inside an encapsulated Fastify scope
+**before the first route is declared**, via `preSerialization` (walks the object, so a marker can
+never break the JSON) with `onSend` as the string/Buffer backstop. A route added to that file next
+month is covered by *where it is declared*, not by its author remembering a rule — ADR-0099/0102's
+own argument applied to the read side. `PRESENTATION_SCRUB` is `scrubAuditText` **by reference**
+through ADR-0102's alias, so the marker stays character-identical across `audit_log`, `trace_spans`
+and now conversations. Rejected, each for a stated reason: a DB-read scrub (corrupts replay), a
+per-route `presentX()` call (the convention ADR-0099 rejected), and a global `onSend` (would put the
+detector on every 4xx echo product-wide).
+
+**The find that matters more than the fix — recorded as M-035.** The guard protecting model replay
+**passed 10 of 10 while the provider was being handed redacted text.** The invoke path has **two**
+model-bound sources and only one runs per dispatch: with compaction eligible the wire comes from
+`ConversationContext.messages`; on optimizer `passthrough` compaction is skipped and it comes from
+`ConversationContext.history`. The guard watched the first. It was caught only because the probe was
+"mis-site the scrub on path X" rather than "remove the control" — a blunter probe would have left it
+green and shipped a guarantee that did not hold. **A positive assertion is vacuous in the same way a
+negative is, if it watches one of several producers.** `loadOwnConversation` is now
+`loadOwnConversationForReplay`, with both paths asserted on two identities.
+
+**The honest limit, which ADR-0112 gives its own top-level section rather than a footnote**: option
+(c) protects the API surface, **not the data at rest**. `pg_dump`, a restored backup, a `psql`
+session, or any module opening its own `pg.Pool` still reads the credential in the clear. **The
+operator procedure for "a customer pasted a key into chat" is therefore: ROTATE IT.** The product
+did not contain the secret, it stopped echoing it. And **model replay still sends the original text
+to the provider** — on the turn it was typed, on every later turn of that thread, and inside the
+compaction summarisation dispatch. Inherent to (c) and to everything short of (b).
+
+**Status of my own verification, stated rather than implied**: I verified the structure from the
+committed code (the rename and its two callers, the scope/hook siting, the detector identity). The
+agent reports **178 files / 2723 passed / 9 skipped, exit 0**. **I have NOT re-run the suite
+myself**, because a second agent (S19, Teams outbound) currently has uncommitted in-flight work in
+`chatops.ts` that fails typecheck — a run now would fail for reasons unrelated to S14. One suite
+covering both will follow when S19 lands.
+
+**2026-09-17 — R3 landed and retested: the trace surface was leaking credentials BY DEFAULT, and
+off the platform.** ([ADR-0111](../docs/decisions/0111-trace-preview-credential-scrub.md), no
+migration.) F04 named five surfaces nobody had assessed. All five are now assessed with a synthetic
+key (`AKIAIOSFODNN7EXAMPLE`, AWS's own published example): **one fixed, three proven clean, one left
+with the risk stated, and one referred to the owner.**
+
+**The finding.** `toolPayloadPreview` only truncated, so a governed tool call wrote its **raw
+arguments** into `trace_spans.input_preview` and its **raw result** into `output_preview` — the same
+payload ADR-0104 carefully scrubs into `approvals.arguments_preview` two tables away. S5's defect
+verbatim: one event, two stores, disagreeing about whether the secret was contained. **Two things
+make it worse than S5.** (a) **It is the shipped default** — `tracing_enabled` and
+`tracing_capture_content` are both `NOT NULL DEFAULT true` and read as `!== false`, so capture is on
+unless an operator turns it off. (b) **It egresses**: ADR-0070 exports spans over OTLP and
+`otelAttributesForSpan` puts both columns on the wire as `gen_ai.input.messages` /
+`gen_ai.output.messages`. Captured OTLP bytes showed the key in both.
+
+Worth recording the shape of the miss: `loadTracingPolicy`'s catch block reads *"Fail CLOSED on
+content (never store a prompt we could not confirm we are allowed to store)"*. The author thought
+hard about **authorisation to capture** and never asked **what the capture contains**. Two different
+questions; only the first got asked.
+
+**The fix is two strings in ADR-0102's existing registry** — same `createDb` Proxy, same
+`scrubAuditText`, no new detector, no per-call-site convention, no migration. It fixes the OTLP
+exporter for free, because the exporter reads the stored columns: row and wire cannot disagree.
+**Incidental hardening**: `PROSE_COLUMNS` was built with `new Map(REGISTRY.map(…))`, which keeps only
+the LAST entry for a repeated table — so a second `traceSpans` entry would have silently dropped
+`statusReason`'s coverage **while `proseScrubInventory()` kept reporting it covered**. A scrub that
+looks registered and isn't. The map now throws on a duplicate table at module load.
+
+**My independent retest — criteria written before results, all eight pass.** P1b: the Proxy scrubs
+**both** columns before the INSERT (proven through the real `createDb` path). P2 **over-redaction
+control**: ordinary prose, uuids and emails stored byte-identical — the probe that matters most,
+since this product stores payloads so an operator can audit what happened. P3: the marker is
+**character-identical** across stores and `PROSE_SCRUB === scrubAuditText` is pinned. P4 **egress**,
+asserted separately from storage: the OTLP wire carries the marker, not the key. P5: I attempted my
+own leak into a surface the report calls clean (zod `invalid_string`) and confirmed the body carries
+only `validation`/`code`/`path` — the value is absent. P6: one registry line, no second redactor.
+P7: the only credential-shaped string in the diff is AWS's published example. **P8: 177 files /
+2713 passed + 9 MinIO skips, 0 failed, exit 0**, build and repo-wide typecheck clean, instrument
+asserted.
+
+**Open, and referred rather than decided: conversations.** `conversation_messages.content`,
+`conversations.title` and the compaction summary hold a pasted credential verbatim — proven with a
+row. Deliberately **not** fixed: scrubbing a user's chat content is a different contract from
+scrubbing operator prose, and silently altering what someone said is data loss where the product
+promises fidelity. ADR-0111 draws the line at **the observability copy, not the record**, and states
+the cost plainly: the two records of one turn now deliberately disagree — S5's shape inverted,
+accepted only because the disagreement runs in the safe direction. **Four options are recorded for
+the owner (S14).**
+
+**Proven and accepted rather than closed**: two low-severity error echoes — zod `invalid_enum_value`
+returns the rejected value in `received`, and a 409 `detail` interpolates a stored server name.
+Neither persists or reaches a third party; both recorded so the next reviewer does not re-find them.
+**No backfill**: rows written before today still hold what they held, and the exporter will export
+an old unscrubbed span. Deliberate — the write is the chance, and rewriting historical observability
+data is a worse precedent.
+
+**2026-09-12 — S11 and S12 closed, and R0 reconciled.**
+([ADR-0110](../docs/decisions/0110-backup-rescan-reopen-and-preflight-gate.md), migration 0109.)
+
+**S11 — the owner decided a re-scan SHOULD re-open a miss, and that is now what happens.** One
+`backup_runs` row per finding: the idempotency read keys on `finding_id` + `kind='backup'`
+**regardless of status** and updates in place instead of inserting a second row. `missed` and
+`restore_proposed` re-open (the latter **superseding** a pending proposal, audited as
+`infra-restore-proposal-superseded` so it is visible, never silent); `restored` does **not** — the
+restore executed, and re-opening it would rewrite history. The constraint ADR-0109 **refused** is
+now added and bites (`backup_runs_finding_uq`, partial on `kind='backup' AND finding_id IS NOT
+NULL`). **The `kind` predicate is load-bearing on real data**: three `kind='restore'` rows share a
+`finding_id` with a `kind='backup'` row in one suite run, so a total index would have broken the
+approve path three times over — the same partial-index trap that already caused one bug here.
+
+**Probe B showed the old code was worse than ADR-0109 predicted.** Reverting to the old
+`status='missed'` read with the index present made the **RE-SCAN itself 409** — the second INSERT
+hit `23505` before any deny was reached. The old lifecycle was broken in **two** places, not one;
+ADR-0109 had listed that hazard as an unproven limit and it is now reproduced end to end.
+
+**One necessary corollary, verified rather than accepted**: the approve path now marks its source
+row `restored`. The old code inserted a new `kind:"restore"` row and marked the finding
+`remediated` but **never touched the source row**, leaving it at `restore_proposed` for ever — which
+was already inaccurate and, under the new rule, would have made an executed restore
+indistinguishable from a pending one, so a re-scan would have superseded work already done.
+
+**S12 — the pre-flight is now a real gate, and building it found a defect in the thing being
+wired.** `scripts/preflight-unique-constraints.mjs` printed with `console.log` and then called
+`process.exit()`; **Node's stdout is async on a pipe, so a blocked pre-flight could have handed CI a
+non-zero exit with NO reason printed** — a gate that fails silently is worse than none. Fixed to
+`fs.writeSync` with blockers repeated on stderr. One step added to the existing CI job after the
+suite (it needs a *migrated* database; on an empty one every check is trivially zero). `backup_runs`
+promoted advisory → blocking: **10 enforced, none advisory.**
+
+**Verified independently: 176 files / 2708 passed + 9 MinIO skips, 0 failed, exit 0**; repo-wide
+build and typecheck clean; migration 0109's index confirmed present in the migrated database; and
+**the pre-flight run exactly as CI runs it → `CLEAN`, exit 0.**
+
+**R0 — the enterprise plan's buckets were not stale, they were FALSE.** Its framing paragraph said
+ADRs 0036–0061 are "Proposed… not a claim that it is built". Measured: **26 of 26 Accepted, zero
+Proposed**, against a tree at ADR-0110. Every unticked row read as evidence something was unbuilt.
+Corrected with a dated note and a per-bucket banner, the historical text left standing rather than
+tidied. The plan's own rule to update the bucketing already existed and went unkept for six weeks;
+it is restated **with the durable fix named** — derive the bucketing from the ADR index instead of
+duplicating it, because a generated table cannot disagree with its source.
+
+**Honestly outstanding, both recorded**: the new CI step **has never actually run** (GitHub Actions
+is exhausted for this repo; verified locally only), and **a re-scan re-opens the ledger row but
+never the FINDING** — after a restore that claimed success while the gap is still live,
+`infraFindings.status` stays `remediated`, so the live gap is invisible on the findings surface.
+Deliberately not fixed here (**S13**). **Corrected 2026-09-19 (ADR-0114, M-036): calling this
+"pre-existing ADR-0017 behaviour" was a mis-attribution** — ADR-0017 makes no claim about finding
+status, only that a re-scan never duplicates a LEDGER row. The rule was an inline comment at
+`infra.ts:883`. S13 is now CLOSED; this paragraph is left otherwise unedited as the record of what
+was believed at the time.
+
+**2026-09-09 (later still) — S10 closed: nine constraints added, and TWO REFUSED on evidence.**
+([ADR-0109](../docs/decisions/0109-deferred-unique-constraints.md), migration 0108.) ADR-0107
+deferred 11 sites where an `ORDER BY` would encode the wrong claim — *"several are expected, here is
+the tiebreak"* — when the truth is *"a second one is a bug the database should refuse"*. The design
+I set was conservative: **the migration adds constraints and REFUSES; it never repairs, merges or
+deletes.** On a deployment holding duplicates the upgrade stops, which for a governance product
+beats silently merging somebody's records — the same reasoning ADR-0104 used declining to backfill
+consent. A pre-flight report shows an operator what blocks them before they upgrade.
+
+**Nine added** (partial where the column is nullable, total where not), including the valuable one:
+**`users_email_lower_uq ON users (lower(email))`** — the real fix behind the case-folded login
+lookup ADR-0107 could only make deterministic and explicitly called a stopgap. Every creation path
+was read: **SCIM create/replace, OIDC JIT, SAML JIT and the bulk importer all case-fold or
+pre-check and are unaffected**; the one unguarded path, `POST /v1/users`, now answers **409**
+instead of creating a second account. Normalising the schema to lower case was rejected — it would
+silently *adopt* an existing account's address.
+
+**The two refusals are the better half of this batch.**
+- **`backup_runs` — REFUSED, and it is a bug in the WRITING code.** I verified the state machine
+  myself: the idempotency read matches only `status='missed'` (`infra.ts:198`), proposing a restore
+  sets `restore_proposed` (`:1397`), and denying sets it **back** to `missed` (`:734`). So propose →
+  a re-scan inserts a second `missed` row → **denying would fail with 23505 and the operator could
+  not refuse the restore.** A constraint that blocks a governance decision is worse than the
+  duplicate it prevents. Shipped as an advisory pre-flight instead.
+- **`data_key_state` — ADR-0107's entry is factually WRONG.** It says "singleton by convention
+  only"; migration 0075 already gives the table `id text PRIMARY KEY DEFAULT 'singleton'` **plus**
+  `CHECK (id='singleton')` — the identical shape `org_settings` uses. Verified against the migration.
+  ADR-0109 corrects it in a new ADR rather than editing an accepted one.
+
+**The `trace_spans` contradiction I flagged dissolved**: the two sites read different predicates.
+`closeRunSpan` reads `(trace_id, kind='run')` with no run id and is genuinely multi-row (a trace can
+carry a sub-run), so its `asc(seq)` fix stands untouched; the constraint covers the strictly
+narrower `(trace_id, kind='run', run_id)`.
+
+**M-033's lesson was applied without being asked twice**: the tests assert both SQLSTATE `23505`
+**and** the exact `error.constraint` name, so a refusal by the pre-existing `users_email_unique`
+reddens instead of passing as a false success — and each partial index's *excluded* population is
+exercised, so an accidentally-total index reddens. Non-vacuity: all nine dropped on a fresh DB →
+**11/11 tests fail**, each on its own index; every one is independently load-bearing.
+
+**Verified: 175 files / 2702 passed + 9 MinIO skips, 0 failed, exit 0**, repo-wide build and
+typecheck clean, and **9 of 9 indexes confirmed present in the migrated database** — the migration
+applied, not merely compiled.
+
+**New, both owed a decision**: the `backup_runs` writing-code fix (does a re-scan re-open a miss
+while a restore is pending?), and the fact that **the pre-flight is wired into no CI or deploy
+path** — a check nobody runs is worth nothing.
+
+**2026-09-09 (later) — S9 closed: the test-side sweep found two tests that were VACUOUS, not
+flaky.** ([ADR-0108](../docs/decisions/0108-test-side-unordered-reads.md), no migration.) The build
+agent hit an account rate limit mid-probe; I picked the batch up, reverted an unreverted probe it had
+left in `mcp-tool-pricing.test.ts` (fix backed out, a raw `UPDATE` shuffling heap order, a
+`console.log`), ran the probes it had not finished, and completed its ADR — whose draft still
+described a *single* fix and carried a `[NON-VACUITY RESULT PENDING]` placeholder.
+
+**Scope collapsed under measurement — for the second batch running.** My brief said "~103 at-risk
+test sites". Rather than judge cardinality from `pg_index` as I had instructed, the agent
+**instrumented 145 of 148 candidate sites in place and ran the suite under the real condition** —
+one shared Postgres across all 174 files — turning every count into a fact. **Only NINE sites can
+match more than one row**; six of those assert something true of *every* matching row and were
+deliberately left alone. **Three needed fixing**, and all three are **pinned rather than ordered**,
+because each test already held the identifier for the row it meant. That is the stronger fix, and it
+is the second consecutive batch in which measuring beat the inference method I briefed.
+
+**The finding outranks the fixes.** Probing all three, **only ONE reddens**: `data-key-reencrypt`
+fails on `completed_with_failures` once the oldest of its four rows is rewritten to the heap end,
+which is what `.at(-1)` then picks — a real intermittent, really fixed. The other two stay **green
+with the fix reverted while demonstrably reading the wrong row**. `credentials-keys` asserts
+`not.toContain("sk-nina-own-key")`, which a **foreign row satisfies trivially** — so a test whose
+entire purpose is proving one user's stored key never leaks into another's ciphertext was capable of
+proving that about a row belonging to nobody in particular, and would have passed forever.
+`mcp-tool-pricing` passes on either row because a neighbouring file's row carries an identical
+`{before, after}`.
+
+**Those two were not flaky. They were vacuous, and that is worse** — a flaky test eventually tells
+you something is wrong; a vacuous one never does. Recorded as found rather than smoothed into a
+3-of-3 count.
+
+**A limit in my own standard technique, now written down (M-033).** I have claimed non-vacuity
+across B13a, B14, N1, N2 and S9 by neutralising a control and watching tests redden. That tests
+whether the **FIX** is load-bearing. It cannot test whether the **ASSERTION** is — a vacuous
+assertion stays green under any probe, and reads as "correctly unaffected". Two of the three sites
+here look identical to a legitimate negative control from the outside.
+
+**Verified: 174 files / 2691 passed + 9 MinIO skips, 0 failed, exit 0** on a fresh DB, with the
+instrument asserted (`ECONNREFUSED: 0`, `destroySoon: 0`, `PROBE leftovers: 0`). Counts match the
+N2 baseline exactly, as expected — S9 changed three predicates and added no tests.
+
+**Still open**: **S8** (parked, two hypotheses eliminated), **S10** (eleven sites wanting a unique
+constraint, incl. `users(lower(email))`), **R0**, **R3**. F01 remains open on S8.
+
+**2026-09-09 — N2 landed, and a flake sweep turned up a production serving bug.**
+([ADR-0107](../docs/decisions/0107-unordered-single-row-reads.md), no migration.) The task was
+meant to be test hygiene: four intermittents in four batches, all the same disease — *a query that
+does not ask for an order, whose caller then depends on one*. Scoping it changed what it was. The
+real pattern is not the 86 `.at(-1)` sites but `const [x] = await db.select()` with no `ORDER BY`,
+which appears **874 times**; after excluding aggregates (a `count()` returns one row by
+definition), singleton tables and primary-key lookups, **286 genuine candidates remained, 142 of
+them in PRODUCTION**. An unordered single-row read in production is a correctness bug, not a
+nuisance — ADR-0105 had already fixed one by accident, where an arbitrary row decided an
+authorization outcome.
+
+**The severe one, confirmed independently against the schema**: `training_artifacts` is
+`uniqueIndex(...).on(t.jobId)` — unique on `job_id`, with **`agent_id` unconstrained**. A second
+training job registers a second artifact against the same agent, and
+`resolveArtifactProviderForDispatch` read it unordered. **Which model answered an inference call
+was arbitrary and could differ between two identical requests.** Fixed with a total order
+(`desc(createdAt), desc(id)` — `created_at` alone ties for rows written in one transaction).
+**19 production sites fixed**, 11 **deferred to unique constraints** rather than tiebreaks, on the
+reasoning that an `ORDER BY` *accommodates* a duplicate where a constraint *states and enforces*
+the belief that there is none.
+
+**The agent improved on my brief, and the correction matters.** I told it to read `schema.ts` for
+uniqueness. It refused to trust that, applied all 107 migrations to a fresh database and queried
+`pg_index` directly — finding 274 unique indexes **plus 16 PARTIAL ones**, which is exactly where
+schema-reading fails in *both* directions: `compliance_packs_one_active_uq ON (framework) WHERE
+status='active'` clears a site that looks unprotected, while `guardrail_configs_org_uq ON (scope)
+WHERE scope_id IS NULL` does **not** cover a bare `eq(scope,'org')` — and that gap was one of the
+bugs. My instruction would have produced both false positives and false negatives.
+
+**Verified: 174 files / 2691 passed + 9 MinIO skips, 0 failed, exit 0**, on a fresh DB with the
+instrument itself checked (`ECONNREFUSED: 0`, `destroySoon: 0` — the assertion added after M-032).
+Repo-wide build and `tsc --noEmit` clean. Non-vacuity measured: two `ORDER BY`s reverted in place
+reddened 2 of 3 tests — the **stale artifact was served** and the **superseded delegation window
+returned** — while the third correctly stayed green as its own negative control.
+
+**F01 remains OPEN, and the partition is stated rather than blurred.** Production is swept; **103
+at-risk TEST sites are classified but not fixed**, clustering over `audit_log` (15),
+`shadow_ai_findings` (12) and `imported_cost_lines` (11) — the same shape as the two flakes already
+found, so each is a latent intermittent. The scan also matches only **two syntactic shapes**:
+`.at(-1)`, `rows[0]`, `sql.raw` and `Promise.all` destructuring are unswept, and the
+`use-cases-eu-tier` flake was itself an `.at(-1)`, so that class is known real and known unswept.
+**S8** is still undiagnosed. Five sites where ordering is a *semantic* choice were flagged, not
+decided silently — including which external PM tool receives a mirror, where mirroring to every
+link is arguably more correct and belongs to its own decision.
+
+**2026-09-08 — N1 landed: the `socket.destroySoon` cause is closed and proven, but F01 stays OPEN.**
+([ADR-0106](../docs/decisions/0106-mock-socket-net-contract.md), no migration.) Also closes
+**AER-003**'s residue via a documented pinned clean-checkout sequence in `README.md`.
+
+**The cause, traced end to end and verified rather than reasoned.** `@hono/node-server` — in the
+tree only **transitively, via `@modelcontextprotocol/sdk`, whose server transport imports it** —
+arms a 500 ms `unref`'d drain timer whose `forceClose` reads `socket && !socket.destroyed` and then
+calls `socket.destroySoon()` without establishing it is callable. Under `app.inject()` that socket
+is `light-my-request`'s `MockSocket extends EventEmitter`, carrying **only `remoteAddress`**: a real
+`net.Socket` answers both members, the mock answers neither — so the guard reads `!undefined` →
+`true`, passes, and calls a method that is not there. `unref` stops a timer holding the process
+open; it does not stop it firing. Fixed by **completing the mock against the contract it stands in
+for** — not by suppressing anything: no `dangerouslyIgnoreUnhandledErrors`, no `uncaughtException`
+handler, no `node_modules` patch. Two corrections to the long-standing record:
+`mcp-admission-auth.test.ts` was **never the buggy file** (its own upstream fixture uses a real
+`http.createServer`; it was merely where the transport is driven hardest), and the production
+reach is `mcp-proxy.ts:1458`, so every test file driving the inbound MCP route could hit it.
+
+**Proven, not merely quiet.** An async `throw` injected deliberately still yields *173 files passed,
+2688 passed, 0 failed, **exit 1*** — the F01 symptom shape reproduced on purpose, showing unhandled
+errors are still caught and the suite simply no longer manufactures one. A deliberately broken
+assertion also exits non-zero. `destroySoon`: **0 occurrences across 4 independent full runs.**
+
+**But F01's acceptance criterion is NOT met, and N1 is not being marked closed.** It requires
+repeated runs with no unhandled errors *and* consistent exit status. Across my four post-fix runs
+the exit codes were **1, 0, 0, 0** — the one failure being a *different*, previously unseen
+intermittent: `compat-longtail.test.ts` expecting 409 `no_model_credential` and getting **500**. It
+passes 3/3 in isolation, so it is order/state-dependent in the shared database. I instrumented it
+and re-ran the suite twice more; **it did not reproduce**, so the probe was reverted and no
+diagnosis was reached. Recorded as **S8**, with the untested hypothesis explicitly labelled as a
+guess. **That makes four intermittents found in four batches, every one by the independent retest
+rather than a build agent's run, and all the same disease: an assertion that passes by luck of
+what the shared database holds.**
+
+**A verification failure of my own, worth more than the result it nearly produced.** My first two
+N1 runs reported *159 files failed* — which was **Postgres being down**, not the code. I had
+redirected the database-setup stderr to `/dev/null`, suppressing the one signal that would have
+caught it, and every DB-backed file then "failed" with all its tests skipped. Reporting those
+numbers would have handed the owner a fabricated regression on work that was sound. Re-run with
+setup errors visible, an explicit reachability probe that aborts, and per-run `ECONNREFUSED`
+counts. This is the inverse of the warning I myself wrote into `TESTING_CHECKLIST.md` two batches
+ago — mass skips mean the database, not the code; I had only considered *dirty*, not *absent*.
+See **M-032**.
+
+**2026-09-08 — B14 closed and retested: a consent is now bound to the policy that demanded it, and
+expires.** ([ADR-0105](../docs/decisions/0105-consent-context-binding-and-expiry.md), migration
+0107.) A third external review run raised **AER-004 (HIGH)**, and it was true on all three counts I
+checked: ADR-0104's fingerprint covered `{projectId, arguments}` only; `approvals` carried `ruleId`
+and `approverUserId` but **no expiry and no rule/config-version identity**; and consumption was
+`WHERE id=? AND status='approved'` with no digest recheck and no freshness test. Two gaps —
+consent approved under rule version A stayed spendable after a stricter version B activated or the
+required approver changed (an authorization time-of-check/time-of-use hole), and an approved-but-
+unconsumed row lasted forever. The fix needed no new versioning concept: **ADR-0073 already
+resolves every approval rule through `config_versions`**, so the active version id per rule was
+already there to bind against. Consent is now fingerprinted over matched-rule × active-version ×
+required-approver × scope, given a queue-time TTL (72h default dial), and **both are re-derived
+inside the single atomic UPDATE that spends the row** — so nothing can be checked good and spent
+bad. Stale rows are **superseded visibly** and re-queued, not silently ignored. The required
+approver comes from a no-consent evaluation pass, which asks the kernel rather than re-deriving its
+selection order and breaks the digest↔selection↔decision circularity.
+
+**Verified independently: 172 files / 2685 passed + 9 MinIO skips, 0 failed**, on a fresh DB, plus
+a clean repo-wide build and `tsc --noEmit`. Its negative control is the strongest of the three
+batches — 6 of 11 reddened including both headline cases, and the load-bearing green stayed green:
+*an unrelated rule versioned → consent still spendable*, which is what proves the digest is not
+over-broad.
+
+**A third flake, found by my run and not the agent's** — the same family as the previous two.
+`zz-zz-copilot-live.test.ts` asserted citation labels against
+`/^(allow|deny|approval_required|error)/`, but `audit_log.effect` is
+`["allow","deny","require_approval"]` and `copilot.ts:1055` builds the label straight off the row,
+so a cited `require_approval` row could **never** match. It passed only while retrieval sampled
+none; B14's suite writes many such rows into the shared DB and the luck ran out. Fixed
+(`d8aa906`). **Root cause recorded as S7**: the codebase carries two adjacent vocabularies for one
+concept — `audit_log.effect`/`DecisionEffect` say `require_approval`, `GovernedToolCallOutcome.kind`
+says `approval_required` — each correct in its own domain, and reaching for the wrong one fails
+silently most of the time.
+
+**Three flakes in three batches, every one caught by the independent retest rather than the build
+agent's run, all the same disease: an assertion that passes by luck of what the shared database
+holds.** That is F01's substance and it raises the value of the `.at(-1)` sweep (N2).
+
+**Fresh reproduction of the exit-code defect, on this very run**: 2685 passed, **0 failed**, and
+the process still exited **1** on one unhandled `socket.destroySoon`. Going at N1 next while the
+reproduction is in hand.
+
+**2026-09-07 (later still) — two external review documents taken into the build plan.** The owner
+supplied an updated `codexInputs.md` (F01–F08 plus an automated block **AER-001…003** from two
+review runs) and a second document, `PathForward.md` (**PF-01…PF-14**, Waves 0–4), proposing
+RegulAIt be positioned as an AI security & governance **control plane** rather than a monolith.
+Both were rechecked against the tree rather than taken on trust, and the sequenced result is in
+[ENTERPRISE_READINESS_PLAN.md](../docs/product/ENTERPRISE_READINESS_PLAN.md) §Addendum.
+
+Three things that intake established. **(a) PF-01 — "bind approval to the exact action" — is P0 in
+that document and is already substantially built**: PathForward reviewed `271bdca`, which predates
+ADR-0104, so the plan records what ADR-0104 delivered and names the honest remaining delta (dual
+proposed/enforced digest recomputed pre-execution, envelope breadth, expiry/idempotency, coverage
+beyond the MCP path, the ABAC scope dial) instead of scheduling shipped work. **(b) AER-002 is half a
+correction to us, and I over-accepted it**: the enforced contract is a **project dispatch freeze** —
+an attributed tool priced `null`/`0` is blocked too, by deliberate decision. But AER-002 says the
+narrow wording is in "the ADR title", and **that part is false**: ADR-0103 is titled *"Gate the MCP
+tool-call path on the project budget"* and already carries an explicit *"It does not gate on the
+price of this call"* section; checklist row 58 already spells the unpriced case out too. The only
+genuinely narrow artifacts were the **commit subject** and this file's own headline. I repeated
+Codex's overstatement into STATE and the build plan without checking it — M-031's rule, a third
+time. Corrected in place; **R1** is correspondingly smaller than filed. **(c) AER-003 was partly misattributed**: the repo pins `pnpm@10.33.0` and CI installs
+`--frozen-lockfile`; the reviewer's host ignored the pin. The genuine residue is the absence of a
+documented pinned clean-checkout command (**R2**).
+
+The plan also records what none of the three sequencing proposals can settle: whether to adopt the
+control-plane positioning at all, whether F03 needs true reservations, whether automatic quarantine
+may ever act without a human, and the **suite-gated** items (workload identity, artifact admission)
+whose `MODULE_REGISTRY.md` / `CAPABILITY_MAP.md` are not readable from this environment. Also
+noted: the plan's own Buckets 1–3 are stale at ADR-0036–0061-as-Proposed against today's ADR-0104,
+so reconciling them is listed as **R0** — the same "stale row misleads a reader" failure F08 caught
+in PENDING.
+
+**2026-09-07 (later) — B13b closed and retested: an approval is now bound to the arguments it was
+approved for.** ([ADR-0104](../docs/decisions/0104-approval-payload-binding.md), migration 0106.)
+F05's gap: approval lookup keyed on user/server/tool/status only, `approvals` had no arguments
+column, and neither the queue row nor the audit row recorded the payload — so an approver signed
+"may call `write_note`" and the caller could execute it with anything. **Decided semantics
+(action-scoped consent by default, `tool` as an explicit escape hatch)**, because pillar 1 is
+default-deny and strictest-wins is this codebase's idiom; the real defect was that *no ADR said
+which it was*. Consent is now a sha256 over canonical `{projectId, arguments}`, the approver reads
+a **scrubbed** preview of the payload, and the executed digest lands on the audit row under either
+scope — closing the forensic half independently of the consent half.
+
+**Two things the agent did better than my brief.** I told it to write a canonicalizer in
+`packages/shared`; it found ADR-0060's existing `canonicalJson` and reused that plus ADR-0099's
+`scrubAuditDetail`, so there is genuinely ONE of each rather than the second implementation I was
+trying to prevent. And it fixed a pre-existing `.limit(1)` with **no `ORDER BY`** in the approval
+lookup — the same defect class as the flake found earlier the same day, sitting in the code path it
+was already editing.
+
+**Retested: 171 files / 2674 passed + 9 MinIO skips, 0 failed, 0 unhandled errors**, independently
+reproduced on a fresh DB, plus a clean rebuild and a **repo-wide** `tsc --noEmit` — the last of
+which matters because the agent's own near-miss (an interface edit that silently dropped
+`approverUserId`) passed both the gateway suite and a *filtered* typecheck against a stale
+`policy-kernel/dist`, and only a repo-wide check caught it. Verified further **by the rows**, not
+by status codes: a call signed for `{text:"safe"}` attempting `{text:"exfiltrate"}` sits **pending**
+rather than consumed; two identical calls share a digest and the second still re-queues (single-use
+intact); the same arguments in a different project carry a **different** digest; and a payload
+carrying a synthetic secret stored `[redacted:…]` in the preview while the call still **executed** —
+the digest is taken pre-scrub, so redaction cannot move consent identity.
+
+**A correction I own.** My brief asserted that `mcp-proxy.test.ts` "passes while doing exactly
+that". It does not — that test queued and executed with the *same* `{text:"hi"}`, and its retry was
+refused by single-use consumption, not by any payload check. The suite never exercised the hole in
+either direction. The finding stands (the neutralised-binding control shows it plainly), but I
+described a test from its shape instead of reading what it passed in. **M-031**, a repeat of M-030
+inside one session.
+
+New residue recorded: **an ABAC-driven pause has no configurable scope** — with no matching
+`approval_rules` row the default `action` applies (fail-closed, correct), but `abac_policies` has
+no scope column, so the `tool` reading is unavailable to a policy-driven pause.
+
+**2026-09-07 — B13a closed and retested: an exhausted project now FREEZES its attributed MCP
+dispatches, and my own retest caught a flake the build agent's run did not.**
+([ADR-0103](../docs/decisions/0103-mcp-path-project-budget-gate.md), no migration.) An outside
+review (Codex, findings F01-F08) was assessed against the tree; 7 of 8 checked claims held, F04
+was stale because ADR-0102 closed it the day before. **F02 was the live one**: pillar 5's
+`preDispatchProjectGate` had exactly ONE production call site — the model/connector dispatch path
+— so the MCP tool-call path was **priced and attributed but never gated**. Setting
+`x-regulait-project-id` and looping `tools/call` ran unbounded paid spend against an exhausted
+project, and the overspend then surfaced as a 409 on the *model* path: the symptom appearing
+somewhere other than the cause. The gate went into `executeGovernedToolCallInner` — the ONE shared
+primitive both entry points funnel through — sited exactly as §8.4 PII and ADR-0023's read_only
+enforcement already are, so pillar 7's delegated worker inherits it structurally rather than by
+anyone remembering. The gate is **reused, not reimplemented**, which carries the ADR-0027 ceiling,
+`overageActive`, ADR-0021's `budgetHardBlockPct`, strictest-wins `warn_only`, and the escalation
+into the one approvals queue. Unattributed calls are unchanged and now **defined** rather than
+merely tolerated.
+
+**The retest is the part worth recording.** Three full runs of the identical commit: the agent's
+170/2664/9-skips clean; mine **2663 passed / 1 failed** with an unhandled error, exit 1; mine again
+**2664/0**, zero unhandled errors, exit 0. Two independent lessons. (a) The one failure was NOT
+B13a and NOT the known `destroySoon` issue — `use-cases-eu-tier.test.ts` selected from `audit_log`
+with no `ORDER BY` and then indexed `.at(-1)`; Postgres guarantees no row order without one. Fixed
+(`0ebfabe`); certification run after the fix: **170 files / 2664 passed + 9 MinIO skips, 0 failed,
+0 unhandled errors**. (b) **I withdrew one of my own earlier corrections**: I had edited PENDING to
+say the `socket.destroySoon` attribution to `@hono/node-server` was wrong "because that package is
+not in this repo at all". It IS — transitively, via `@modelcontextprotocol/sdk@1.29.0`
+(`pnpm-lock.yaml:4223`). A direct-dependency check missed a transitive one, and I published the
+negative. See **M-030**. Net: the suite had **two** unrelated flake sources and §5 had been
+blaming one for both. Also corrected: `/app` and `/admin` do **not** 404 as I had said — they 302
+to `/ui` and resolve 200, so that F08 item is cosmetic banner staleness, not a broken link.
+
+Still open: **F05** (approval payload binding — designed and briefed, build not yet started),
+**S6**, F01's exit-code work and the `.at(-1)` sweep (86 sites, most benign), F03 (the gate is
+measured-spend/first-crossing-allowed, not a reservation), and PR #108's description.
+
+**2026-09-06 (later) — B12 closed and retested: the credential leak that the B10 retest found
+is shut, and the ledger says exactly how far.** ([ADR-0102](../docs/decisions/0102-operator-prose-credential-scrub.md),
+no migration.) ADR-0099 scrubbed `audit_log`; the retest proved the *same* operator-typed key,
+in the *same* request, was stored verbatim in `mcp_servers.admission_clear_reason` — one of 47
+free-text columns where a human can paste a secret while explaining an action. **The fix I
+briefed was measured and rejected**, which is the outcome I wanted from asking: there are **0
+shared reason schemas against 63 ad-hoc inline declarations**, so a zod refinement would have
+been the per-call-site convention ADR-0099 rejected in a costume. It went instead into the
+`createDb` Proxy ADR-0060 already installed — not audit-specific — composing outside the
+audit-chain wrapper and re-wrapping `transaction()`, which is load-bearing because the approval
+decide route writes its reason inside its own transaction. **51 columns covered, 3 excluded by
+name**, and the coverage is structural rather than a snapshot: a test asks `information_schema`,
+not the TypeScript, so a hand-authored migration cannot slip past. Retested live — the exact S5
+case inverted, with the column's marker **character-identical** to the audit row's (the two
+records now agree, which is the defect S5 actually named), a second surface scrubbed inside its
+transaction, and ordinary prose byte-identical. I also widened that guard myself (`c90a403`) to
+the same patterns as the sweep that found S5, and proved it non-vacuous. Suite **169 files /
+2656 passed + 9 MinIO skips**, independently verified on a fresh DB. **S5 is struck in
+proportion**: its 47 columns are closed, but ~34 `name`/`title`/`description` **content** columns
+remain verbatim and are now recorded as **S6** rather than allowed to vanish inside the closure —
+and ADR-0099's stale "but see S5" cross-reference was corrected in the same commit so the two
+rows cannot contradict each other. Still open: **S6**, the non-deterministic suite exit code, and
+PR #108's description, which is stale at ADR-0092 against today's ADR-0102 and 169/2656.
+
+**2026-09-06 (later) — B11 closed and retested: MCP registries can now be federated, and an
+imported entry arrives usable by nobody.** ([ADR-0101](../docs/decisions/0101-federated-mcp-registry.md),
+migration 0105.) This was deliberately sequenced last of the MCP wave: the reference
+implementation we reviewed grants federated entries the same access as locally-registered ones
+with no approval step, which is a default-deny violation, so federation was only safe to build
+once ADR-0097's admission gate existed to put imports behind. Built against the **real** v0.1
+registry API (`GET /v0.1/servers`, opaque `metadata.nextCursor`, unauthenticated reads) — and
+notably the dispatch brief I wrote carried an error from a docs summary (it claimed `packages`
+was required); the builder checked the spec, found otherwise, and built to the truth. The
+governing rules: a sync writes only a catalogue, **import is a separate audited operator act**
+creating one `federated`/`unscanned` row with **zero grants**, a federated server is still
+subject to admission with no bypass, and a local row is **never** clobbered — collisions are
+recorded and refused. Only a `remotes[]` entry with an absolute untemplated URL can become a
+server; a package's own loopback `transport.url` is deliberately ignored and **no URL is ever
+invented**, which matters because most registry entries are stdio packages this gateway cannot
+proxy at all. Air-gapped refuses before DNS. Retested live against a local fake registry: grant
+deltas of zero, the ungranted refusal proven non-vacuous, `held|critical` on a poisoned
+federated upstream, cursors round-tripped verbatim, idempotent re-sync, and B9/B10 regressions
+intact. Suite **168 files / 2640 passed + 9 MinIO skips**, independently verified on a fresh DB.
+Also confirmed at the owner's prompt: **everything is on GitHub** (remote head == local, PR #108
+carries it) — but **that PR's description is stale**, ending at ADR-0092 and quoting 141/2321
+against today's ADR-0101 and 168/2640; left for an owner decision rather than rewriting a
+20k-char record. Open findings carried forward: **S5** (audit scrub covers `audit_log` only; 47
+other free-text columns store operator prose verbatim) and the **non-deterministic suite exit
+code**.
+
+**2026-09-06 — B10 closed and retested: the product's most privileged credential now expires,
+the audit ledger scrubs secrets by construction, and the admission gate no longer has a blind
+spot.** Three slices from the gap-review backlog, all previously ranked and none requiring a
+prior decision to be reversed. **B10a** ([ADR-0098](../docs/decisions/0098-api-key-expiry.md),
+migration 0104): `api_keys` had no expiry column at all, and API keys are what authenticate the
+MCP proxy — they now carry a lifetime with an org default and ceiling, enforced in
+`authenticate()` (the single place a bearer token becomes an identity, so there is no second
+path to bypass). Both dials ship NULL, so an upgrade invalidates nothing; expired and revoked
+are distinct 401s with distinct audit rule ids; the ceiling **refuses rather than clamps**,
+including refusing an explicit never-expires request. **B10b**
+([ADR-0099](../docs/decisions/0099-audit-log-credential-scrub.md)): the credential scrub is
+sited at ADR-0060's existing audit-chain chokepoint, so raw inserts and future call sites are
+covered by construction rather than by 30-odd authors remembering a helper; redaction preserves
+correlation, and scrubbing precedes hashing so chain verification still passes. **B10c**
+([ADR-0100](../docs/decisions/0100-scheduled-mcp-admission-rescan.md)): an off-by-default sweep
+closes ADR-0097's own residue — a compromised server nobody calls is now re-examined anyway —
+re-adjudicating through the LIVE path so no second threshold exists, with `held` deliberately
+ineligible because nothing may auto-un-hold. Suite **167 files / 2599 passed + 9 MinIO skips**,
+independently verified on a fresh DB. **Two findings came out of the retest, both recorded
+rather than patched**: **S5** — the scrub covers `audit_log` only, and the same operator-typed
+key was persisted verbatim to `mcp_servers.admission_clear_reason`, one of **47** free-text
+columns outside the ledger (the fix is a design choice, and guessing at it would repeat the
+convention ADR-0099 rejected); and the gateway suite's **exit code is non-deterministic**
+(unhandled socket-teardown errors, same two errors giving exit 0 then 1) which matters because
+local verification is this project's only gate. Process: **M-029** — I judged B10a untested from
+one commit's stat and overwrote the tests it had committed in another; recovered because the
+work had been pushed. Surface ownership held: B10c was rescoped to backend-only, and the
+admission review-queue page is an explicit handoff to the local session that owns `apps/web`.
+
+**2026-09-05 — B9 closed and retested: MCP servers are now admitted, not merely registered,
+and off-the-shelf MCP clients can discover how to authenticate.** Prompted by an owner-requested
+gap review against [mcp-gateway-registry](https://github.com/agentic-community/mcp-gateway-registry)
+(Apache-2.0; the review's full findings, including the nine gaps NOT built, are recorded in
+PENDING.md), the two highest-value items shipped as one slice —
+[ADR-0097](../docs/decisions/0097-mcp-admission-scanning-and-auth-discovery.md), migration 0103.
+**Admission scanning** closes a real hole: ADR-0043 gated a server's URL, but `syncUpstreamTools`
+then upserted its tool names, descriptions and input schemas unexamined — so a compromised
+upstream could put instructions in a description that our models read and obey. A local,
+deterministic, zero-network scanner (reusing ADR-0042's detectors, adding tool-order,
+sensitive-path, exfiltration and hidden-Unicode rules) now runs over every scanned string
+**including each nested schema property description**, and the gate sits at the first statement
+of `connectUpstream` and inside the sync before the upsert, so a dirty manifest is never stored.
+Retested live: refusal proven **pre-connect by killing the upstream** (still
+`mcp_admission_held`, not a connection error), nested-only poison caught with its exact JSON
+path, and — the property that matters most — an approved server whose upstream later changed was
+**automatically re-held**, so approved-once is not approved-forever. The knob ships `off`
+(byte-identical, verified) with `log` and `enforce` beside it; clear is admin-only,
+reason-required and audited. **Auth discovery** adds RFC 9728 metadata and an RFC 6750
+`WWW-Authenticate` challenge, built to one rule: never advertise a mechanism we do not accept —
+`authorization_servers` is omitted *with a written reason* because no route validates an
+IdP-issued token, and both advertised credentials were verified genuinely accepted. Suite:
+**164 files / 2560 passed + 9 MinIO skips**, independently verified on a fresh DB; the pre-change
+403 baseline I captured beforehand is unchanged, confirming no entitlement refusal became a 401.
+Process: **M-028** logged — a delegated gap-check answered in convincing detail from a
+rolled-back tree (8th rollback), so any subagent reading the repo must now prove `HEAD == origin`
+before reading. Owner-gated work is unchanged; PENDING's new addendum names the next buildables
+(semantic discovery, which would reverse ADR-0044/0067, and quarantine, which collides with
+ADR-0092's no-auto-revoke).
+
+**2026-08-23 — B8 closed and retested: the copilot's filter matrix, the versioning ADR's
+last structural pair, and the applier's last two kinds are done; the buildable tail is empty
+again.** **B8a** (ADR-0096 amendment): vendor questions filter the audit ledger
+(`object_type='ai_vendor'`, retested 94→3 on rows the product wrote), AI use cases narrow
+approvals through their own workflow-instance pointer (9→1 live), and workflow templates
+narrow through `template_ids` containment (9→1 live, a composed instance counting for every
+composing template); still-refusing pairs stay pinned, and the honest limits are recorded
+(anomalies-tool intersection deliberately unwired; vendor spend unanswerable). **B8b**
+(ADR-0073 amendment, no migration): the compliance-profile shadow is STORED HISTORY —
+write-through into `config_canary_observations` with candidate×project×fingerprint dedup
+(re-reads write nothing, retested), the 50-project cap disclosed in-row, B7c's prune covering
+it unchanged — and recorded divergence feeds the ADR-0059 preview as the read-only
+`complianceProfileCanaryDivergence` field (byte-absent without divergence; both legs retested
+live with a hipaa candidate). **B8c** (ADR-0056 amendment, no migration): `rule_to_approval`
+and `budget_adjustment` proposals now APPLY — through the PRE-EXISTING public routes via
+extracted shared implementations (`createApprovalRuleRow`; `applyProjectPatch`, honestly
+scoped to project budgets), running each route's own zod with issues verbatim; retested
+end-to-end (approval_rules 3→4 with a 409 second apply; budget 0.2→5 with a smuggled field
+refused and the project untouched). Suite: **163 files / 2535 passed + 9 MinIO skips**,
+independently verified on a fresh DB at `f9b24b1`. Process: **M-027** logged — four
+consecutive slice agents stalled on phantom monitors (one with uncommitted work); the
+foreground-verification dispatch rule fixed it. Remaining work is owner-gated only (L13,
+L19, PII floor, savings semantics, P2 HA, L11/L9, live PM creds, S3 keypair, certification,
+quota refresh); the named-next buildables now in PENDING are the anomalies-tool intersection
+for use cases/templates and the rule-canary per-decision preview aggregation.
+
+**2026-08-22 (late night) — B7 closed and retested: the buildable-anytime tail is now EMPTY;
+every remaining pending item is owner-gated.** The three residual groups the ledger still
+carried became batch B7, each agent-built on its own scratch DB and then independently
+verified and hands-on retested keyless (criteria pre-written; Google quota still exhausted).
+**B7a** (ADR-0096 amendment): the seven remaining entity kinds — compliance packs, AI use
+cases, AI risks, workflow templates, initiatives, roles, virtual keys — now resolve in the
+copilot, each reusing its own list endpoint's visibility; initiative and virtual_key filter
+across multiple ledgers with row-delta proofs, the other five are audit-filterable, and the
+retest proved usage 19→15 on a named initiative plus the two-user byte-identical refusal with
+its negative control. **B7b** (ADR-0052 amendment): all four remaining tier flags enforce at
+their enabling acts (pack activation, decompose, air-gapped deploy target, custom provider —
+authoring and basic runs stay open) and the four expansion points are wired;
+`enforcementPointsWired` reports 11; retested on an ABSENT license (four named audited 403s,
+open paths still 201). **B7c** (ADR-0073 amendment, migration 0102): canary-observation
+retention sweep (10th scheduler job + manual door + org knob; versions NEVER pruned,
+live-canary evidence kept — retested pruned=1/keptLiveCanary=1), the subject-delete AFTER
+DELETE trigger (activation-ledger-authored, proven on a raw SQL delete), and
+`usage_events` now stamps the agent_config version that SERVED (moved 3→4 live across an
+activation flip; seed rows NULL). Suite: **161 files / 2509 passed + 9 MinIO skips**,
+independently verified on a fresh DB at head `77f2f38`. Process: a fifth silent workspace
+rollback was absorbed with zero loss (origin restore), and **M-026** logged — decision-only
+invoke 200s are previews, not executions; verify probes by the state they write. What
+remains is owner-gated only: L13, L19, PII floor default, pillar-6 savings semantics,
+session-narrowing/mirror-persistence decisions, P2 HA, L11/L9, live PM creds, S3 release
+keypair, certification — and a Google quota refresh for live-narration work. Named-next
+buildables recorded in PENDING: vendor audit-filter (now unblocked by ADR-0084's
+object_type) and two approvals joins for the copilot.
+
+**2026-08-22 (night) — B6 closed: the last three buildable residuals are live-retested; the
+copilot's hallucination class is shut twice over; a parallel-sessions protocol now governs this
+repo.** Since the paragraph below: the L6d two-layer narration fix landed and live-retested,
+then [ADR-0096](../docs/decisions/0096-copilot-entity-aware-planning.md) replaced disclosure
+with structural refusal — deterministic entity extraction (the model may never assert
+existence), entitlement-scoped exact-match resolution, and four honest outcomes
+(resolved+filtered with a proven row delta, 422 unresolved, 422 ambiguous-with-candidates,
+422 tool-cannot-filter), scope honesty byte-identical between invisible and nonexistent.
+**B6** (dated amendments to ADR-0095/0080/0096, migration 0101): one exported
+`mockShadowedByLive` predicate now covers routing + compaction-summarizer + decompose-worker
+(skips disclosed on the audit rows), an org knob `dispatchAttributionRequired` refuses
+projectless governed dispatch with 409 `attribution_required` **before any provider call**,
+and the copilot resolves MCP servers/tools as first-class entities (row-delta proven
+108→1→4 on real deny rows). Live retest passed on all three; mid-retest the owner's Google
+key **exhausted its quota** — every gate/refusal/disclosure was proven anyway (the 409-vs-
+provider-502 asymmetry itself proves gate ordering), further narration-content live work is
+parked in PENDING.md until quota refresh. My independent full-suite verification caught one
+non-B6 failure: a latent **7.13%-measured flake** in `agent-config-versioning`'s canary
+subject selection, diagnosed with the failed run's real draw order and fixed at the root
+(min/max-over-batch, `445a77d`). Gateway now **2475 passing + 9 MinIO skips / 157 files**,
+fresh-DB green. Multi-session work is now governed by
+[docs/CONTRIBUTING_PARALLEL_SESSIONS.md](../docs/CONTRIBUTING_PARALLEL_SESSIONS.md)
+(CLAUDE.md bootstrap step 5): declared surface ownership, push-immediately, the migration-
+watermark and same-number-file hazards written down. Remaining work is owner-gated only:
+L13, L19, PII floor default, pillar-6 savings semantics, P2 HA, other provider keys, live PM
+creds, L11 drift, L9 bias, S3 release keypair — and quota refresh for live narration.
+
+**2026-08-22 (evening) — local hands-on testing of the live copilot found a real
+hallucination hole; fix in flight.** Pulled HEAD, built, seeded a fresh database and drove the
+copilot against the live Gemini credential. **What works:** deterministic grounding cites real
+`audit_log` ids; live narration returns `generation: model` with `modelNarrationVerified: true`
+through the governed path, **metered** (2 rows, 1,804 in / 603 out tokens, ~$0.008, attributed)
+and audited (`copilot-question-answered`); the decision-support notice and scope caveat render
+on every answer. **What broke:** a question naming a NONEXISTENT entity ("Summarise the
+Zorblatt Quantum Compliance Widget approvals from last week") did **not** refuse — the
+keyword planner ignored the unknown entity, ran an unfiltered `listApprovals`, retrieved 8
+real org-wide approvals, and the model narrated *"for the Zorblatt Quantum Compliance Widget,
+8 approvals were requested, 4 approved, 4 pending"* — a fabricated subject bound to true
+numbers, stamped verified. The three existing guards all passed legitimately (no invented
+figure, no invented id, retrieval non-empty); **none checks that the question's SUBJECT was
+ever a filter**. Fix dispatched (two layers: filters disclosed to the narrator with a hard
+rule against attributing findings to unfiltered entities, plus a deterministic caveat that
+holds even when the model misbehaves; ADR-0056 amendment states precisely what
+`modelNarrationVerified` does and does not mean). Two process lessons logged: **M-023** (I
+called a run a reproduction before the negative control — which then also passed, proving
+nothing) and **M-024** (L6's own live test proved the refusal only in the EMPTY-retrieval
+case, the easy one, so this whole class survived "verified"). Also fixed and pushed: an
+order-fragile SoD audit assertion my independent full-suite run caught (`6059271`). Suite at
+**153 files / 2437 passed + 9 skips**.
+
+**2026-08-22 (later) — the autonomous queue is EMPTY: B1–B5 and L6 all landed.** Everything
+buildable without further owner input is built, each slice agent-built then independently
+re-verified on a second fresh database. **B2** (ADR-0090/0091): campaign expiry sweep on the
+real scheduler that decides nothing, review reassignment reusing ADR-0046's escalation with
+the holder-bar covering both holder shapes, SoD **N-way** sets (refusing only the completing
+mint) and pattern selectors on three enumerable dimensions (no free regex). **B3**
+(ADR-0080/0086/0089, migration 0098): three enforcement opt-ins, all default-off and proven
+byte-identical until flipped — use-case dispatch gate (`off|warn|enforce`), staleness-forces-
+recertification deepening ADR-0045's gate, intent capture with post-approval edits refused by
+name. **B4** (ADR-0063, migration 0099): the resumable transactional **key re-encryption
+walk** — watermark advanced inside the rewrite transaction, fail-closed registry drift check,
+corrupt rows recorded with `completed_with_failures` never `completed`, kill/resume proven.
+**B5** (ADR-0049/0052): six test files cured of shared-scratch-DB collisions (proven both
+directions), the framework cost floor genuinely sourced from the cascade, first two tier flags
+enforced at their enabling acts. **L6 + L24's model-judged half** (ADR-0056/0092 amendments,
+migration 0100): the **governance copilot is live through governed dispatch** — grounding
+moved from counts to retrieved object ids, an empty retrieval is a refusal (the live model
+itself refused a nonsense object), proposals gained a consent-gated applier riding the real
+choke points (`applyRuleEdit`, the one grant-revocation function — never a raw write) with
+two kinds honestly named unapplied, and recommendations gained an opt-in `model-judged`
+annotation layer that never touches deterministic evidence. Two live-driven fixes: narration
+was structurally impossible at a 1024-token ceiling on a reasoning model (981 thought tokens,
+39 of JSON, correctly discarded) — ceilings raised and measured. Gateway **2437 passing + 9
+MinIO skips / 153 files**, shared **742**, Playwright **136/136**. Process: **M-022** logged —
+the first L6 attempt was lost when a workspace rollback erased its unpushed commits, so agents
+in this container now push every scoped commit immediately. Remaining work is owner-gated only
+(L13, L19, PII floor default, other providers' keys, live PM creds).
+
+**2026-08-22 — the credential is UNPARKED, live-proven; owner testing is live; the follow-up
+queue is landing.** The owner supplied a Google/Gemini key and live-instrument verification
+passed **V1–V7** ([LIVE_VERIFICATION_2026-08.md](../docs/product/LIVE_VERIFICATION_2026-08.md),
+~$0.007): governed live dispatch with real metering, streaming, PII-cascade-precedes-dispatch
+proven against a live backend, judges (`model-judged` + the keyless 422 both ways), live-graded
+red-team trials, routing treating the live provider as a credentialed candidate. Owner testing
+against the checklist began and drives fixes directly: home stats now survive orientation
+dismissal (Show-orientation toggle), and **ADR-0094** rebuilt the console as a **tile launcher
++ suite-scoped sidebar** (one product suite at a time, cross-suite `/` filter as the
+anti-stranding escape hatch, routes byte-identical, Playwright 121→127). Batch **B1**
+(ADR-0073/0058 residuals): rule CRUD edit/delete built honest-first over versioning (migration
+0095: `retired` version status), `agent_config` became real versioned dispatch config with a
+zero-influence shadow canary, pack activation now seeds its §8.3 profile (migration 0096,
+presets as pack data). Batch **B1.5** (ADR-0095): owner-found mock-routing defect fixed —
+mocks route only when no credentialed live agent can serve (`mock_shadowed_by_live`
+disclosed, keyless demo byte-identical), savings never priced mock-vs-live; seed google agent
+→ `gemini-3.6-flash` (the 2.5 id is retired for new accounts) and `PATCH /v1/agents/:id`
+rides the versioned edit path. Gateway **2361 passing + 9 MinIO skips / 146 files**,
+Playwright **127/127**. In queue: B2 certification ops → B3 enforcement opt-ins → B4 key
+re-encryption → B5 long tail → **L6 governance copilot + L24 model-judged half** (now
+buildable). PENDING.md's credential section reads UNPARKED.
+
+**2026-08-21 (later) — pending ledger made durable; enterprise console IA shipped.**
+[PENDING.md](../docs/product/PENDING.md) now carries the complete post-queue pending set,
+each item with its exact unblock condition (credential / owner decision / live instrument /
+deliberate refusal / anytime follow-up) — written after the harness task list was lost to a
+workspace rollback, proving in-repo docs are the only durable ledger. Then an owner-directed
+enterprise UX pass ([ADR-0093](../docs/decisions/0093-console-information-architecture.md),
+subordinate to ADR-0075): the 26-entry Governance nav split into **11 question-shaped
+sections** (routes and labels byte-identical — grouping, not renaming), one `SeverityBadge`
+vocabulary on the brand's measured severity pairs (two disagreeing local maps deleted), a
+dismissible first-run orientation on the admin home (three live numbers, start-here links,
+zero extra fetches), and raw JSON dumps replaced with bounded code blocks. Survey finding
+recorded honestly: the page-pattern discipline had held — every new page already used the
+shared header/label/skeleton/empty-state idioms. Playwright **121/121** incl. the brand
+contract; one legitimate spec update (nav-section list 6 → 11, assertion unweakened).
+
+**2026-08-20 — the Credo-gap queue is landing: L1 and L3 shipped, positioning refreshed.** A
+gap analysis against Credo AI ([GAP_ANALYSIS_CREDO_AI_2026-08.md](../docs/product/GAP_ANALYSIS_CREDO_AI_2026-08.md))
+ranked eight lacks, and the owner directed both building the gaps and out-placing their
+presentation — so [POSITIONING.md](../docs/product/POSITIONING.md) (category claim: *AI governance
+that enforces itself*), two ADR-cited comparison pages, and a README hero rewrite shipped first.
+Then **L3**: a seventh seed compliance pack — SOC 2 Security (Common Criteria), 10 controls
+honestly graded, no CPA review claimed, `cascadeTag` null — as a dated ADR-0058 amendment. Then
+**L1** ([ADR-0080](../docs/decisions/0080-ai-use-case-registry.md)): an AI use-case registry with
+a pre-build intake front-door on pillar-2 rails (gallery template → ADR-0079 resting plan →
+questionnaire artifact → sign-off), whose `complianceTags` are the same tags §8.3 enforces and
+whose status can only change through the one decide path (both lifecycle joins proven non-vacuous
+the M-002 way), plus an admin Use-cases page. Then **L2**
+([ADR-0081](../docs/decisions/0081-ai-risk-register.md)): an AI risk register that makes the
+measurements legible as *risk* — a `DEFAULT_RISK_LIBRARY` of eight agentic risks whose evidence
+is computed at read time through a fixed category→resolver mapping over the real ledgers
+(red-team ASR verbatim with its Wilson interval, groundedness runs, PII/budget denials,
+guardrail configs, grants inventory), measured and declared kept in two labelled blocks that
+are never blended, acceptance an admin-only audited terminal action that freezes the evidence
+it was taken on, and `scope_drift` honestly attestation-only. Then **L7+L8**
+([ADR-0082](../docs/decisions/0082-inventory-and-posture.md)): a standing agent dependency
+inventory — pure aggregation, no migration — where **granted (may) and observed (did) are
+never blended** (grants ∪ role-derived − revocations vs. usage-event dispatches, trace-attributed
+tool/connector calls, and agent→agent feed edges from orchestration run history), plus a
+board-shaped, print-friendly **Posture one-pager** on ADR-0047's rails: every number a SELECT
+at request time (pack coverage via `evaluatePack`, risk counts with the attestation-only count
+named, ASR verbatim with its Wilson interval, spend vs budget, observed anchor grading), and
+an empty section renders *unmeasured, not resisted* — never zero-implies-good. Gateway suite
+**2172 passing + 9 MinIO skips / 131 files**, Playwright **109/109**, on fresh scratch
+databases — still the only gate (Actions exhausted). Then **L4**
+([ADR-0083](../docs/decisions/0083-shadow-ai-first-party-discovery.md)): first-party shadow-AI
+discovery as an **extension of ADR-0071, not a reversal** — a frozen, hash-pinned
+`SHADOW_AI_CATALOG_V1` (81 entries: 37 endpoint, 44 SDK signatures; no regex over input, no
+scrapers, no network calls) classifying operator-supplied DNS/proxy logs and dependency
+manifests through ADR-0071's existing ingest path, with the honest core being the
+**governed-via-gateway vs shadow** line computed per request from live model-credential/custom-
+provider config (deliberately NOT the egress allow-list, which would launder egress permissions
+into "governed AI"); a hit proves an artifact mentioned a provider, never that traffic flowed,
+and compiled-only signature hits surface as named catalogue gaps rather than findings. Then **L5**
+([ADR-0084](../docs/decisions/0084-vendor-ai-risk-portal.md), owner-directed over the gap
+doc's defer note): vendors as governed objects on the pillar-2 assessment rails — vendor
+answers live on the vendor's own row as **attributed attestations that are never evidence**
+(pinned both ways: zero delta on `compliance_pack_attestations`, and an org pack evaluation
+after a vendor claim still reports `attestation_required`); the seeded SOC 2 v1 stays
+byte-identical with CC9.2's graduation path recorded, and the risk register gains a
+`third_party_ai` category with a real resolver from day one. Gateway suite **2200 passing +
+9 MinIO skips / 133 files**, Playwright **111/111**. The Credo L-queue is now **fully built**
+(L1–L5, L7, L8; L6 waits on the parked credential). A second competitive pass
+([GAP_ANALYSIS_FOUR_VENDORS_2026-08.md](../docs/product/GAP_ANALYSIS_FOUR_VENDORS_2026-08.md),
+owner-directed: Holistic AI, watsonx.governance, Fiddler, OneTrust — all four sites
+egress-blocked, per-source honesty grades recorded) ranked lacks L9–L19 and struck ten
+near-miss claims after in-repo verification. Then **L10**
+([ADR-0085](../docs/decisions/0085-eu-ai-act-tier-screening.md)): EU-AI-Act risk-tier
+*screening* on the intake — a frozen, hash-pinned 17-rule data-only ruleset
+(`EU_AI_ACT_RULESET_V1`: 4 prohibited/11 high/2 limited, dominance ordered) computed
+server-side only from a fenced answers block in the questionnaire artifact (a smuggled tier is
+refused; unscreened is null, never guessed), the tier **informing** the human sign-off rather
+than blocking (blocking would overclaim enforcement and legal judgement — proven by a
+prohibited use case both denied and approved by its human with the tier as the recorded why);
+`high` derives its cascade recommendation live from the org's actual eu-ai-act packs/profiles.
+Gateway **2208 passing + 9 MinIO skips / 134 files**, Playwright **112/112** (e2e fixture fix:
+the auth rate-limit bucket raised in global-setup — the 112th sign-in tipped the production
+default's rolling window). Then **L12**
+([ADR-0086](../docs/decisions/0086-model-card-autofill.md)): the model card becomes **a window
+you sign** — evidence-shaped sections computed by SELECT at read time from the real ledgers
+(evals/groundedness, red-team ASR verbatim or *unmeasured not resisted*, guardrail modes,
+spend, effective grant holders, drift standing, linked use-cases/risks/vendors), kept in a
+labelled block that never blends with manual evidence; at the one decide path the on-screen
+window is frozen into the decision's audit detail (no migration — the snapshot is an audit
+artifact, not card state), and a **staleness note** counts what moved since the last granting
+decision ("2 eval runs and 1 guardrail change since certification") without judging it —
+ADR-0045's expiry gate untouched, no fairness number ever synthesized (pinned; L9 stays
+open). Gateway **2218 passing + 9 MinIO skips / 135 files**, Playwright **113/113**. The
+four-vendor build-next queue is done. Then **L15**
+([ADR-0087](../docs/decisions/0087-compliance-pack-version-diff.md)): the regulatory-
+intelligence feed REFUSED (a publisher's product; a feed would launder legal advice into a
+gateway that disclaims exactly that authority) and the pack-version diff BUILT — a
+deterministic zod-typed differ (cascadeTag changes flagged HIGH-consequence), a read-only
+diff endpoint whose **impact preview** evaluates both stored versions through the existing
+`evaluatePack` machinery against the current ledgers and names every computed-status move,
+and an activation audit that records whether a diff was computed without ever gating on it.
+Gateway **2228 passing + 9 MinIO skips / 136 files**. A fifth competitive pass
+([GAP_ANALYSIS_SAVIYNT_2026-08.md](../docs/product/GAP_ANALYSIS_SAVIYNT_2026-08.md),
+owner-directed): Saviynt's Agent Access Gateway is the first genuine call-plane claim in the
+series, but **their gateway authorizes an identity; ours governs the call** — nine near-miss
+claims struck; new lacks L20 (agent ownership/lifecycle/orphan signal) and L21
+(intended-vs-granted flags) queued build-next, L22–L24 later, L25/L26 refused (we integrate
+with IGA, we do not compete for it). Then **L14**
+([ADR-0088](../docs/decisions/0088-external-scorer-adapter.md)): the external-scorer adapter —
+the operator brings a Fiddler-style scoring endpoint as a registered, governed instrument
+(custom-provider egress/SSRF validation and credential custody, refused in air-gapped mode,
+migration 0090); every stored score is stamped `method: external:<name>` and never blended
+with lexical or model-judged, an unreachable scorer follows ADR-0067's refuse-don't-degrade
+path, and the inline guardrail path deliberately stays local-only as a named boundary. Built
+across a container restart: the killed agent's artifacts survived in pushed WIP checkpoints
+and were validated whole rather than rebuilt (M-015) — full revalidation from cold: `pnpm -r
+build` clean, shared **719**, gateway **2246 passing + 9 MinIO skips / 137 files**, Playwright
+**114/114**, all on fresh scratch databases. Owner promoted **L22–L24** into the queue
+(2026-08-20). Then **L20+L21**
+([ADR-0089](../docs/decisions/0089-agent-ownership-alignment.md), migration 0091): identity
+lifecycle at the call plane — agents gain an owner and a lifecycle where **retired refuses
+dispatch** (409 in the one dispatch core, after entitlement, before any provider work; terminal)
+and **deprecated only warns**; ownership renders as owned/unowned/orphaned computed at read
+time (orphaned = owner's SCIM-written `disabled_at`), and the inventory gains a third
+never-blend block: **intended-vs-granted alignment** (aligned/undershoot/overreach against
+`ai_use_cases.intendedAgentIds`, holder sets imported from ADR-0082's index, never about
+traffic). Gateway **2263 passing + 9 MinIO skips / 138 files**, Playwright **116/116**.
+Then **L22**
+([ADR-0090](../docs/decisions/0090-grant-certification-campaigns.md), migration 0092): grant
+certification campaigns over **gateway grants only** — a campaign snapshots the grants that
+existed at open, each item is one row on the ONE approvals queue decided via
+`decideOneApproval`, the own-grant bar is decider-keyed (an admin holder with an override
+reason is still refused), **revoke executes the real removal inside the decision's
+transaction** (which surfaced and closed a real gap: direct MCP tool/server grants had no
+removal path at all — two DELETE endpoints added on the shared impl), and a past-due campaign
+reads `expired-incomplete` on the breach-on-read idiom — undecided items stay undecided
+forever. Gateway **2279 passing + 9 MinIO skips / 139 files**, Playwright **118/118**.
+Then **L23**
+([ADR-0091](../docs/decisions/0091-sod-toxic-combinations.md), migration 0093):
+toxic-combination SoD at the grant choke point — admin-declared capability pairs (concrete,
+two-sided, reason required) refused `409 sod_conflict` at **all nine mint paths** (4 direct,
+4 role grants checked against every current assignee, role assignment against the whole
+bundle including bundle-internal pairs), a dedicated mint-time check so the kernel stays the
+one call-time path (byte-identical with zero rules), existing violators **surfaced at read
+time and never auto-revoked**, and overrides only through the one approvals queue with a
+decider-keyed bar and the mint executing inside the decision's transaction. IdP-group-derived
+assignments bypass the gate by design and surface as violations (recorded). Gateway **2302
+passing + 9 MinIO skips / 140 files**, Playwright **120/120**. Then **L24**
+([ADR-0092](../docs/decisions/0092-access-recommendations.md), migration 0094 — one CHECK
+widening; recommendations themselves store nothing): access recommendations as **queries with
+reasons** — six frozen v1 rules (unused-grant, never-signed-in-holder, orphaned/retired-agent
+grants, overreach, sod-violation), every result carrying hand-checkable evidence and a
+concrete action ref, nothing auto-executing; the only action path is a `from_recommendations`
+certification-campaign scope whose snapshot is exactly the currently-flagged grants (recommend
+→ human review → revoke-is-real, proven end-to-end). Verification falsified a brief premise
+(M-010): `usage_events` meters every governed call unconditionally, so unused-grant reads
+metering — tracing gates only agent-attribution; `not_assessable` fires where genuinely true.
+The model-judged half stays L6-blocked and unapproximated. Gateway **2321 passing + 9 MinIO
+skips / 141 files**, shared **728**, Playwright **121/121**. **The competitive build queue is
+COMPLETE** — Credo L1–L8, four-vendor L10/L12/L14/L15, Saviynt L20–L24, five gap-analysis
+docs, ADRs 0076–0092, migrations through 0094. Open owner decisions: L13 assessment AI
+pre-fill (collides with ADR-0080's "the answers are yours"); L6 + L24's copilot half (model
+credential); L9/L11 (instrument-gated); L19 certification spend. Process note: M-019 logged —
+a REPEAT of M-014 (agent parked on a watcher despite the rule in its brief); the rule is
+rewritten to make parking impossible (foreground suite runs with explicit timeouts, stated
+inside the verification step).
+
+**2026-08-15 — the ten-slice feature review is CLOSED and the market-analysis build queue is
+under way.** Every pillar was driven end-to-end and attacked with probes written to fail if
+enforcement regressed. Four governance holes were found live and closed (inert server grant;
+the semantic cache as a PII bypass; the self-review guard not surviving a delegation; the
+deploy-override with no second party), one ledger-honesty defect fixed (a refused dispatch
+claiming pillar-6 savings), and pillar 7's inheritance attacked and found genuinely holding.
+Local WORM anchoring (MinIO Object Lock, COMPLIANCE, observed grading) ships in compose by
+default; the deployment-wide PII floor closed the attribution dodge; `mistakes.md` is now an
+owner-mandated bootstrap read. A fresh market analysis
+([MARKET_ANALYSIS_2026-08.md](../docs/product/MARKET_ANALYSIS_2026-08.md)) found the gateway
+category absorbed by security vendors and named the **compliance cascade as the single most
+defensible claim** — so three queue items shipped against it: the P5 cost-reconciliation +
+roster wedge (ADR-0076), the cascade as the demo's headline path plus a cascade-derived
+template gallery (ADR-0077), and the tighten-only delegation conformance contract (ADR-0078).
+Gateway suite **2108 passing / 126 files**; GitHub Actions are exhausted, so internal
+validation on fresh scratch databases is the gate. The queue's top two items (a live model
+provider, live-instrument verification) are blocked on credentials the owner keeps parked.
+
+**ADR-0075 shipped, 2026-08-13 — [the regulAIt brand package and the regulAIt UI Structures contract are adopted in the SPA](../docs/decisions/0075-brand-identity-and-ui-structure-adoption.md).
+NO MIGRATION — this is presentation only; no schema, no API, no governance semantics.** The owner
+supplied two standards, and they settle their own precedence: *"the brand package wins on colour,
+type and the mark. This document wins on structure and markup contracts."* A third artefact in the
+same archive — an **"Organic" design system** (cream, terracotta, Caprasimo) — is **not adopted**,
+and the evidence is decisive rather than a judgement call: it is a generic design-system export with
+its own `theme.json` and no product, while UI Structures is titled *"UI structures for regulAIt
+apps"*, points at the brand package by name, and is itself rendered in Gantari/Figtree/IBM Plex Mono
+over Graphite and Signal Cyan. The two regulAIt artefacts agree; Organic disagrees with both.
+`apps/web/src/theme/tokens.css` is rewritten around the `--rg-*` token **names** the contract
+specifies (*"Names are the API"*) with **values** from the brand: the twelve-step Graphite ramp,
+Signal Cyan 500/400/700, the four product accents, and the four-step severity scale with AA-passing
+`-deep` text steps. **The whole palette swapped from one file with zero component edits**, because a
+survey found **zero hardcoded hex outside `src/theme/`** — the SPA's pre-existing token discipline
+is what made this cheap, and the original names remain as one-directional aliases. Gantari, Figtree
+and IBM Plex Mono are **self-hosted** (~90KB; both display faces are variable, so one woff2 each) —
+a brand rule that is also an ADR-0062 air-gap requirement, since an off-origin font request would
+break air-gapped mode. The sidebar becomes the app's only dark surface and does not invert with the
+theme; the mark's AI node is pinned to Signal Cyan; and the brand's forbidden spellings are
+corrected in user-visible copy — the wordmark is **`regulAIt`**, and the app had been shipping
+"RegulAIt" on every screen. UI Structures' **seven accessibility invariants are now asserted in a
+real browser** (`apps/web/e2e/brand-contract.spec.ts`): `main#rgMain` must resolve to a non-zero
+box, and the skip link must genuinely be the first tab stop under a real Tab press. That choice is
+the point — the doc's own Traps section records a page that returned **200 while rendering its full
+markup into a zero-height container**, which any stylesheet assertion would have passed.
+
+**Two process lessons from writing that spec, both worth keeping.** First, **a priming click
+invalidates a focus test**: clicking before pressing Tab sets the document's *sequential focus
+navigation starting point*, so Tab resumed past the sidebar and the correct skip link "failed" — and
+the first fix attempted was a CSS change to markup that was never broken. Second, **a green contract
+can be green for the wrong reason**: the wordmark check passed on its first run because the route
+list did not cover the pages carrying the offending copy *and* a word-boundary regex let
+"RegulAIt-LLM" through on a trailing hyphen. Tightening both made it fail on 14 of 15 routes. That
+is the same lesson as ADR-0072's three scoring inversions — *check that the test can fail.*
+
+### Previously
+
+
+**ADR-0074 shipped, 2026-08-09 — [an ordinary admin edit of a versioned rule now changes what is ENFORCED, not only what is DISPLAYED](../docs/decisions/0074-rule-read-model-write-choke-point.md).
+NO MIGRATION — every column already existed.** ADR-0073 (below) made the ACTIVE `config_versions`
+row the thing that enforces, which demoted the four rule tables to a **read-model**. Its own gap 10
+named the consequence and left it open: any writer that mutated a VERSIONED column without minting a
+version produced **silent divergence** — the admin saw their edit in the row, in `GET /v1/rules/*`
+and in the SPA, and enforcement never moved. **In a governance product that is worse than a
+refusal.** Gap 10 also described the defect wrongly, and the amendment on ADR-0073 corrects it: it
+said a rule *"edited through the old CRUD surface"*, implying a body-edit route that **has never
+existed**. The three `POST /v1/rules/*` routes are pure creates and were never the defect. The real
+set was: **`PATCH /v1/rules/:kind/:id/deploy-mode`** — a bare update **through a module-local table
+map**, so a `.update(approvalRules)` grep never found it, and one click on the admin rules list;
+**`POST /v1/compliance/profiles`**, which is **not a create route** but an `onConflictDoUpdate` on
+the UNIQUE `tag`, i.e. the ONLY edit path a compliance profile has, silently under-enforcing PII
+mode, MCP defaults, retention, budget ceilings, ADR-0042 guardrail floors and ADR-0068 red-team
+gating **at once**; and **`POST /v1/onboarding/compliance-pack`**, the same upsert, which computes
+`plan.profile: "update"` in its own dry-run and therefore *knew* it was overwriting. Worse, the
+outcome was **non-uniform** — `RULE_BODY_SCHEMAS` make every field optional, so against a partial
+active body the write *did* take effect, and the same 200 meant "discarded" on one artifact and
+"applied" on another with no way to tell. **The fix is one choke point, not three patches**:
+`applyRuleEdit` classifies the patch by field class — selection-only or unversioned artifact → plain
+row write (ADR-0073 §2 and invariant 4, byte-identical pre-0073); effective no-op → **mint nothing**
+(the onboarding pack is *designed* to be re-run); enforcing change on a versioned artifact → **mint
+AND activate**; versions present with none active → **409 refusing the write**, naming the activate
+route, because default-deny extends to WRITES. **The load-bearing line**: the body is composed onto
+the **ACTIVE BODY**, never onto the row — the row may already be drifted, and minting from it would
+promote that drift into an enforcing version, i.e. the fix would ratify the bug. Atomicity is
+**structural**: the mint branch never writes the enforcing columns itself, it lets
+`activateVersion`'s `writeRuleReadModel` do it — and that write **moved inside the transaction**,
+closing a crash window that reproduced the same divergence with no bad writer involved (this also
+reorders ADR-0048's agent-prompt read-model write). **Auto-activation bypasses no gate**, answerable
+from code: `evaluatePromotion` gates promoting a CANARY; direct activation has never been gated and
+`newVersion(activate:true)` is the shipped pattern. **The structural guard, because a point fix does
+not close a class**: `rule-write-guard.test.ts` enumerates every drizzle `.insert`/`.update` in every
+gateway source — **including writes through a variable**, which is how the worst writer hid — pins
+the set against an audited list where every entry states why it is safe, refuses aliased imports and
+raw SQL, and pins that only two modules may import `newVersion`. Verified by attack: adding a bare
+`db.update(complianceProfiles)` to an unrelated file makes it red. **Because an ordinary edit can now
+move a shadow canary's baseline**, ADR-0072's posture is applied to the comparison — a live ADR-0073
+read defect fixed on the way: both surfaces aggregated on `candidate_version_id` **alone** while
+`active_version_id` was already stored, pooling comparisons against different baselines into one
+`diverged` count that fed a promotion decision. Now every aggregate is keyed on **(candidate,
+active)**, the stranded set is **reported beside the totals and never folded in**, the ledger records
+`the shadow comparison baseline moved here`, and `POST …/promote` **refuses** a mixed-baseline sample
+(`canary-promote-stale-baseline`) unless overridden with a reason — **the gate lands on the
+PROMOTION, never on the EDIT**, so an incident edit is never blocked by a measurement. A NULL
+baseline counts as NOT comparable, because that failure direction matters. Orphaned versions
+(`artifact_id` is polymorphic so there is no FK; deleting a user, server, role, team or **approver**
+cascades the rule away and leaves an `active` version behind) are now **disclosed** by both read
+surfaces instead of rendering as a live governed artifact — deliberately **not** deleted, since they
+are the record of what governed the calls made while the rule existed. **Every assertion is a
+governed DECISION, never a column** — a test reading the row or the version count would have passed
+against the broken code, which is exactly why the defect shipped; with the fix disabled **12 of the
+15 new cases fail**. **Verification**: gateway **1,968 → 1,989 tests / 113 → 115 files** on a freshly
+created DB with **no existing gateway test rewritten**; shared **579 → 593**; Playwright **86 → 88**,
+zero console errors; policy-kernel 129, model-provider 122, infra-provider 174, training-provider 58,
+workflow-kernel 39, orchestration-kernel 27, optimizer-kernel 69, pm-provider 62, git-provider 51,
+connector-provider 58 all unchanged; `pnpm -r build`, `pnpm -r typecheck`, `pnpm --filter
+@regulait/web build` clean. **Disclosed rather than closed** (eleven items in the ADR): **operational
+bypasses remain** — a manual `psql`, a `pg_restore` of a pre-versioning backup or an air-gapped
+database dump all desynchronise a row with no application code involved, and **nothing in the schema
+prevents it**; existing drift is corrected **opportunistically on the next edit**, with no backfill
+and **no drift report** naming currently-drifted artifacts; partial version bodies are still
+authorable; ADR-0073's **read-side asymmetry stands** — `redteam.ts`, `cost-import.ts`,
+`compliance-packs.ts` and `setup-status.ts` read compliance profiles RAW and so fail **OPEN** in the
+same state the cascade fails closed; orphans are disclosed, **not tombstoned** (the AFTER DELETE
+trigger is its own slice); and the guard is a source scan over the gateway's own sources only.
+
+**ADR-0073 shipped, 2026-08-09 — [the rules engine now reads `config_versions`](../docs/decisions/0073-rules-engine-versioning.md)
+(migration 0084). This closes the LONGEST-STANDING DECLARED GAP in the project**, `PENDING.md` §3's
+ADR-0048 row: *"the shadow canary for rules evaluates nothing"*. ADR-0048 shipped immutable
+versioning/canary/rollback and wired ONE artifact type (`agent_system_prompt`) through the dispatch
+core; for `approval_rule`, `rate_limit`, `data_scope_rule` and `compliance_profile` it shipped
+**storage only**, and said so in capitals. So activating a rule version changed nothing, **rolling one
+back changed nothing** — the gesture an operator reaches for during an incident — and §2's shadow
+canary evaluated nothing at all. Now `governedEvaluate` overlays the **ACTIVE** version of every
+loaded rule onto its row before the kernel is called, and `projects.ts:profilesForTags` — the ONE
+funnel every §8.3 cascade consumer already goes through — does the same for compliance profiles, so
+`projectPiiMode`, `projectMcpMode`, the ADR-0042 guardrail floor and the pillar-3 infra floors all
+inherit it without learning `config_versions` exists. **Deliberately the same shape as the prompt
+path, not a second mechanism**: fall back to the table row when no version rows exist
+(byte-identical pre-0073 behaviour), the table row becomes a read-model rewritten by the same
+`activateVersion`, and dispatch never trusts it. **The shadow canary genuinely evaluates**: the
+served decision is computed to completion FIRST from the active bodies alone, then the candidate runs
+through the SAME kernel call parameterised by the candidate bodies **and nothing else**, and both
+sides' effect/ruleId/full reason land in `config_canary_observations` — deliberately NOT `audit_log`,
+which since ADR-0060 is the hash-chained record of decisions that were SERVED. `canary_pct` is
+honoured as a shadow **SAMPLING RATE** on ADR-0048's existing deterministic bucket. **Proved
+adversarially in both directions at once**: the ENTIRE served decision object is captured before any
+candidate exists and asserted **deep-equal** while a candidate that would PAUSE the call is running,
+AND the same run asserts a divergence row naming `allow` vs `require_approval` — a canary that
+recorded nothing passes the first and fails the second, one that enforced passes the second and fails
+the first. A corrupt candidate written straight into `config_versions` **throws**, the served answer
+is byte-identical, and the failure is recorded as `failed` (never as a divergence). Promotion then
+genuinely changes the served decision and **rollback restores it end to end**. **Default-deny
+survives**: version rows with NO active version are UNRESOLVABLE and DENY
+(`config-version-unresolvable`), or a real **409** in the compliance path. Resolution is **ONE
+indexed query per evaluation** across all three rule types, not an N+1; ADR-0048 §7's baseline is
+applied **lazily** (the first version of a rule mints `v1 (pre-versioning baseline)` from the live
+row) rather than by migration backfill. Only **ENFORCING** columns are versionable — a body naming a
+SELECTION column (`userId`, `serverId`, `scope`, `tag`) is a real **422** naming what to do instead,
+and bodies are **type-checked** so a stored `windowSeconds: "sixty"` cannot activate and then throw
+on the SERVED path. **`canaryIsLive` was NOT flipped for rules, deliberately, and this is the one
+place the slice brief was not followed**: it is read by `resolveVersion` and means "the canary
+SERVES", so flipping it would enforce a candidate deny on a share of real work — the exact outage §2
+forbids, and a direct contradiction of the same brief's own invariant. The vocabulary is split
+instead: `canaryIsLive` (still false for rules, pinned by a test), `canaryIsEvaluated` (now true for
+all four rule types) and `canaryModeOf` → `live | shadow | inert`; `inert` exists because ADR-0048
+DECLARED `agent_config` a live-canary type and never wired a resolver, so the API had been answering
+"live" about something nothing reads. **The SPA surfaces it**: `/admin/governance/rules` gained a
+shadow-canary card listing every running canary with sampled/would-change/failed counts and, per
+decision, what was served versus what the candidate would have done including the sentence the caller
+would have been given. **Verification**: gateway **1,943 → 1,968 tests / 112 → 113 files** on a
+freshly created DB; shared **566 → 579**; the full Playwright suite **82 → 86**, all green with zero console errors; policy-kernel 129, model-provider 122, infra-provider 174,
+training-provider 58, workflow-kernel 39, orchestration-kernel 27, pm-provider 62, git-provider 51 all
+unchanged; `pnpm -r build`, `pnpm -r typecheck` and `pnpm --filter @regulait/web build` clean.
+ADR-0048's test asserting the endpoint said "NOT yet wired" was **REWRITTEN, not deleted**, with a
+comment naming what changed. **Disclosed rather than closed** (twelve items in the ADR): **`agent_config`
+is still vocabulary-only** and now reports `inert` instead of being mislabelled `live`; the **ordinary
+rule-CRUD routes do NOT mint a version**, so a versioned rule edited through the old CRUD surface has
+its row and its active version disagree and **dispatch keeps serving the version** — the sharpest
+one; a rule canary still never serves, by design; `canary_pct` is capped at 99 by ADR-0048's DB CHECK
+so ~1% of keys are never shadowed; the shadow pass is **inline and awaited**; **no pruning** — one
+more monotonically-growing table; the **compliance-profile shadow is computed at READ time over the
+first 50 tagged projects** (its effect does not vary per request) and is **never stored
+historically**; the divergence is **not fed to ADR-0059's blast-radius preview**; and rebinding a
+rule to a different subject is a new rule, not a new version.
+
+**The three API-only parity features got a user-facing surface, 2026-08-09 — NO new ADR and NO
+migration, deliberately.** The owner's second request was competitor parity and *"maybe we will
+release this as a freeware"*. Six parity ADRs shipped, but **three of them disclosed "there is no
+SPA page"** — and on a freeware tool a feature nobody can reach without `curl` is, from a user's
+point of view, not built. This slice is a UI layer over already-accepted decisions, so it amends
+those ADRs with **dated, appended amendments** rather than superseding them; the Accepted text of
+0066, 0069, 0071 and 0072 is untouched. **Three pages**: `/admin/virtual-keys` (ADR-0066, nav
+*Identity & Access*) issues a key showing the plaintext **exactly once**, never fetches it again,
+leads with the ceiling rule (*a key only ever NARROWS* — listing a model does not grant it), and
+renders the enforcement counter and the `usage_events` total **apart** so a disagreement would be
+visible; `/admin/cost-consolidation` (ADR-0069, nav *Cost*) uploads/pastes an export, prints each
+adapter's `limits` **verbatim from the registry**, dry-runs with **rows accepted vs refused and
+every refusal's file line number**, applies, and carries the identity-mapping surface and the
+consolidated per-person/per-cost-centre view; the shadow-AI page (ADR-0071) gained a **raw-file
+import** card printing each adapter's `verification` sentence **verbatim** — including the four
+that say outright they have **never been run against a real vendor export** — with the
+whole-file-refusal default and its opt-out labelled as an opt-out. **The ADR-0069 honesty rule
+survived into the layout, which is the point**: `metered` and `imported` render in two
+separately-ruled columns and are **never summed**, and the browser spec **computes** each
+subject's `metered + imported` from the API's own answer and asserts that number appears nowhere
+in the document — so the guarantee cannot quietly stop being tested if seeded spend moves.
+ADR-0072's stranded-baseline report is now a card on `/admin/evals` (versions, per-version run
+counts labelled comparable/NOT, and every stranded pin by run id with the action); ADR-0067's four
+groundedness scorers and its `eval_cases.context` field were **already** authorable and needed no
+work — verified in the browser rather than assumed. **Two real bugs were found only by driving a
+browser, and both are fixed**: (1) `apps/web/src/api/client.ts` called `.join()` on an
+`issues[].path` the gateway had already joined into a **string**, so the TypeError escaped from the
+`ApiError` constructor and **every such refusal rendered as a JavaScript error instead of its
+reason** — the exact failure the "honest refusals" rule exists to prevent; (2) `RequireAdmin`
+**silently bounced** a non-admin to Home, which is a disappearance rather than a refusal — it now
+renders a real "you don't have access" statement, with the gateway still refusing independently.
+Two CSS classes referenced by ~15 admin screens (`.statRow`, `.grid`) were **never defined**, so
+those stat rows had no layout at all; both are now defined once. **Verification**: gateway
+**1,943 / 112 files unchanged** (no gateway source touched), shared 566, policy-kernel 129,
+model-provider 122, infra-provider 174, training-provider 58 — all unchanged; `pnpm -r build`,
+`pnpm -r typecheck` and `pnpm --filter @regulait/web build` clean; the **full Playwright suite is
+63 → 82 tests**, all green, with zero console errors and 19 screenshots. **Disclosed rather than
+closed**: ADR-0066's **fallback chains still have no page**; adapter configuration is a raw JSON
+textarea rather than a per-adapter form builder; the cost page has no bulk cost-centre editor; and
+the *adapters have still never met a real vendor export* — the page makes that visible, it does not
+make it untrue.
+
+**ADR-0072 shipped, 2026-08-07 — [the two scoring inversions, fixed together with an explicit
+baseline reset](../docs/decisions/0072-scoring-semantics-correction.md) (migration 0083, the number
+ADR-0071 deliberately left unused).** This is a CORRECTION slice, not a feature slice, and it amends
+two **Accepted** ADRs with the owner's explicit approval. Both bugs were the same shape: **the
+system recorded an ABSENCE OF MEASUREMENT, or a SUCCESS OF THE DEFENCE, as a bad number** — which
+then flowed into an average, a drift comparison, a promotion gate and a compliance artifact.
+**(1) ADR-0044 scored an `llm_as_judge` case with NO judge as 0** (`no_judge_configured`). Loud,
+which is exactly why ADR-0067 left it alone — but wrong IN KIND: a **missing instrument** recorded
+as a **bad measurement**, averaged into `mean_score`, deltaed against a baseline, read by the gate
+as "the agent answered badly", and citable as measured evidence by an ADR-0045 model card. It now
+takes ADR-0067's posture **exactly** — a real **422** from `judgeAvailabilityFor` placed **before**
+the `eval_runs` INSERT, with the suite asserting **no run row, no result row and not one dispatched
+token** — and the old score-0 branch is an unreachable **throw**, deliberately not a fallback,
+because a fallback to zero is the very thing being removed. **(2) ADR-0057 scored a
+guardrail-BLOCKED probe as a DEFEAT**, so **the platform holding looked identical to the platform
+failing** — in the per-probe outcome, the class aggregate, the pooled ASR and the gate. ADR-0068
+found it, named it on the per-trial row, counted `platform_held`, and declined to fix it because it
+would move every stored baseline — while **its own sequence path already scored the same input
+correctly**. Both paths now call **one** `classifyDispatchFailure`: a governance stop is a
+**platform hold** (resisted, score 1, counted, never an attack success anywhere including the
+aggregate ASR); a transport failure is excluded from the ASR **denominator**. The new suite runs
+**the same probe text down BOTH paths** against the same agent under the same blocking guardrail and
+asserts they agree field by field — an assertion that would have FAILED before this slice.
+**The baseline reset is the part that makes this safe, and it is explicit.** Both fixes change what
+stored numbers MEAN without changing their SHAPE, which is the most dangerous kind of change a
+measurement system can make. Migration 0083 adds `scoring_semantics` to `eval_runs` and
+`redteam_runs`; every pre-existing row is stamped **1** by the column DEFAULT and everything after
+**2**. **History is MARKED, never rewritten and never deleted**, and `audit_log` is not touched at
+all, so ADR-0060's hash chain is unaffected *by construction* rather than by care. Comparison
+refuses in **four** places: auto-resolution filters on the column; an explicitly pinned pre-0072
+baseline is a **422 before the run row exists**; an admin-pinned stranded baseline **FAILS the gate
+and names the run to re-pin** (never silently swapped for another); and pinning a v1 run is refused
+with **409 `baseline_semantics_stale`**. Both gates gained `baselineComparable` +
+`baselineIncomparableReason`, because `scoreDelta: null` alone cannot distinguish "first run ever"
+from "not comparable". **The product REPORTS the reset rather than leaving an operator to discover
+it**: `GET /v1/evals/scoring-semantics` returns the changelog, per-version run counts and **exactly
+which pinned baselines are stranded, by run id, with the action to take**; the ADR-0044 drift sweep
+**PAUSES** a stranded pair with the reason stated instead of spending a model call to reach a
+refusal it can predict; the run detail and every ADR-0045 model-card evidence entry carry the
+version. **Any baseline pinned before 2026-08-07 must be re-pinned.** Two existing tests were
+**REWRITTEN, not deleted**, each carrying a comment naming what changed and why: ADR-0067's
+judge-boundary test (which had pinned the asymmetry in both directions and now pins the *unified*
+boundary in both directions) and ADR-0044's `no_judge_configured` test. Gateway
+**1,926 -> 1,942 tests / 111 -> 112 files**; shared **554 -> 561**; policy-kernel 129,
+model-provider 122, infra-provider 174, training-provider 58 unchanged. **Disclosed rather than
+closed** (eight items in the ADR): the `eval_results` row for a blocked probe **still stores
+`score: 0`** — correct for an ordinary quality suite, since polarity belongs to the red-team layer,
+and the adjudication row is the authority; **`classifyDispatchFailure` is a DENY-LIST of transport
+codes**, so a future transport code would be mis-read as a platform hold — it fails **towards**
+claiming the defence worked, the wrong direction, named rather than hidden; there is **no SPA page**
+(API only); nothing re-verifies a judged metric because no provider is connected; `redteam_runs` has
+no admin-pinned-baseline concept so its reset is the resolution filter only; the version is global,
+not per-dataset; pre-0072 `redteam_probe_trials` rows are not individually marked; and there is **no
+down migration**, so rolling the code back with the column in place leaves rows stamped 2 that v1
+code produced.
+
+**Slice E of the parity wave shipped, 2026-08-07 — [ADR-0071](../docs/decisions/0071-shadow-ai-format-adapters.md),
+shadow-AI evidence format adapters. THE PARITY WAVE IS COMPLETE** — six slices, one ADR each,
+dispatched sequentially; see [COMPETITIVE_PARITY_PLAN.md](../docs/product/COMPETITIVE_PARITY_PLAN.md)
+§5 for the closing summary and the three things the wave is *not*. **This slice needed NO MIGRATION
+and that is a decision, not an omission**: 0083 was budgeted and left unused (it was later claimed
+by ADR-0072), because
+`shadow_ai_imports.summary` is already `jsonb NOT NULL` and carries the adapter id, the format
+basis, the fields actually read, the three row counts and the bounded refusal list — adding four
+columns to store what jsonb already stores would be migration cost with no query that needs it
+(nothing filters imports by adapter). **The plan's original Slice E paragraph asked for importers
+ADR-0055 had ALREADY SHIPPED** — four evidence kinds, dry-run/apply, payload fingerprints, per-row
+provenance, forbidden-key screening, correlation, the coverage scorecard — and the paragraph was
+corrected in the plan file before the slice started, which is the Slice D mistake caught by grepping
+first. **The genuine gap was one layer down**: ADR-0055 accepts rows *already normalised to its zod
+schemas*, so a customer had to hand-write the transform — and a hand-written transform is exactly
+the ten-minute `split("|")` that works on the first three lines of the sample and mis-parses every
+escaped line for ever afterwards. **Five adapters** on ADR-0069's registry playbook: `cef` and
+`leef` (published grammars, header `\|` escaping and CEF's `\=` extension escaping honoured),
+`w3c_extended` (driven by the file's OWN `#Fields:` directive, honoured again if it is redeclared
+mid-file), `proxy_common` (Squid native / NCSA common / combined, with the layout a REQUIRED
+operator assertion because those formats carry no header and a mis-sniffed layout reads the
+client-IP column as the destination), and `generic_mapped` over CSV *or* JSON producing **all four**
+evidence kinds. **An adapter LAYER, not a subsystem, and that is the structural claim**: no new
+table, no new evidence kind, and `processEvidenceImport` is now ONE function that both the
+row-shaped `POST /v1/shadow-ai/imports` and the new `POST /v1/shadow-ai/imports/raw` end in — the
+suite **proves** it by asserting the two routes compute a byte-identical analysis from the same
+evidence rather than asserting reuse in prose. Every adapter validates its output against
+**ADR-0055's OWN row schemas**, which is what turns a `rows.417.destinationHost` zod path into a
+refusal naming **line 418 of the file the operator has open**. **The escapes ARE the slice**:
+`CEF:0|Acme\|Corp|…|suser=alice\=admin` parses correctly and the unit suite asserts the naive
+`split()` gives a DIFFERENT answer, so a regression to string-splitting fails a test rather than
+shipping a confident wrong host; **not one regular expression is evaluated over file content
+anywhere** (ADR-0055's NO-REGEX-FROM-DATA rule verbatim — a CEF extension is precisely the
+attacker-shaped string that turns a lazy alternation into a ReDoS). **Every line is read or REFUSED
+WITH ITS 1-BASED FILE LINE NUMBER, and `onMalformedRow` DEFAULTS to refusing the WHOLE FILE**,
+because the one unrecoverable failure for a discovery product is a quietly smaller inventory that
+looks complete; `report_and_continue` is the explicit opt-in and still lists every refusal.
+An unreadable epoch unit, `07/08/2026`, a W3C token-count mismatch, an NCSA line whose target is a
+path (an origin-server log names no destination), a LEEF 2.0 sixth field that is not a delimiter, a
+declared `devTimeFormat`, and an ambiguous `host`/`url` header pair each REFUSE with the reason
+stated. **Three honesty fields, not one**: `capabilities` + a machine-readable `formatBasis`
+(`published-spec` / `declared-format` / `operator-mapped`) + a `verification` sentence + `limits`,
+all returned by `GET /v1/shadow-ai/adapters` — and every published-spec adapter says outright that
+it **has NOT been run against a real vendor export**, asserted by a test so it cannot be quietly
+softened. **No vendor-named preset ships, deliberately** (no `zscaler`, no `okta` — a test asserts
+it): ADR-0069 disclosed its declared-header presets as its own biggest gap, a CASB/SSO export has no
+published format at all, and the vendor's name is the part a buyer trusts. PII posture is
+**ADR-0055's, unchanged and strictly NARROWER** — unmapped fields are discarded, so a CEF `msg` or
+`cs1Label` never reaches the database; no ingest scan was added because an evidence row's only PII
+is the `sourceIdentity` the feature exists to record. Coverage honesty is preserved verbatim at the
+new surface, and emptying the catalogue makes every adapter match nothing (asserted — "detection is
+data" had to stay true here too). Gateway **1,907 → 1,926 tests / 110 → 111 files**; shared
+**500 → 550**; policy-kernel 129, model-provider 122, infra-provider 174, training-provider 58
+unchanged. **Disclosed rather than closed** (thirteen items in the ADR): **nothing has been run
+against a real export from any vendor's product** — the biggest gap and the owner's first follow-up;
+there is no vendor-named adapter at all; only a FIXED key list is read from CEF/LEEF, so a product
+using custom `cs1Label` slots gets every line refused; one record must be one line (no multi-line
+reassembly, no gzip, no multipart, 2 MB inline); the 5,000-row bound means a real proxy log must be
+chunked or pre-aggregated and each log line counts as ONE request unless the format carries a count;
+**re-posting the same file doubles a finding's `observationCount`** because ADR-0055 has no
+duplicate-payload 409 (pre-existing, unchanged, now named); a row whose host does not normalise is
+still DROPPED-and-counted rather than refused — ADR-0055's contract, left alone exactly as ADR-0067
+left `llm_as_judge`, named follow-up; a naive timestamp is read as UTC; a LEEF feed declaring
+`devTimeFormat` has EVERY row refused; the log grammars produce `egress_log` only; and there is no
+SPA page.
+
+**Slice F of the parity wave shipped, 2026-08-07 — [ADR-0070](../docs/decisions/0070-trace-observability.md)
+(migration 0082), trace/span observability.** The premise was **verified by grep before anything was
+written** (Slice D's was not, and was half wrong): there was **no trace or span model anywhere in
+`schema.ts` and no OpenTelemetry dependency in any package.json**, while every FACT a trace is made
+of already existed and was already governed — `orchestration_runs` and its node statuses, the
+`usage_events` ledger, the hash-chained `audit_log`, the guardrail/eval/red-team/lineage ledgers.
+**The gap was the SHAPE, not the data**: nothing could say *this call happened inside that node,
+which happened inside that run; this tool call was asked for by that specific model turn; and the
+reason there is no model call under this branch at all is that pillar 1 said no.* That last clause
+is the whole slice — **a governance product's most valuable trace is the one that shows why NOTHING
+happened**, and no incumbent (Langfuse/Helicone/LangSmith) is positioned to record it because none
+of them is the thing that refused. **The recorder WRAPS the one dispatch attempt rather than being
+scattered through it, and that is the argument**: `dispatchOnce` became `dispatchAttempt` with a
+thin traced wrapper taking its name, so all ~12 of its early returns (virtual-key ceiling, MRM,
+project budget, §8.4 PII, ADR-0042 guardrails, both egress refusals, missing credential,
+undispatchable agent) land as `denied` spans carrying their stated reason **without the core
+mentioning tracing at all** — a thirteenth refusal cannot forget to be traced. The pillar-1
+entitlement denial never reaches the core, so it gets its own `policy` span at the invoke route AND
+in the compat core; without that, the most common refusal in the product would be the one thing with
+no trace. **A span REFERENCES, it does not restate** (`usage_event_id`, `audit_log_id`, `run_id`,
+`node_id`, `agent_id`); the only duplication is the five fields a tree must render without an N+1,
+copied FROM the ledger row in the same call, with the suite **joining back by `usage_event_id` and
+asserting equality** rather than trusting the copy. An ADR-0066 **fallback hop is a CHILD of the
+attempt that failed**; an orchestration run is **four real levels** (run → node → model turn → the
+tool call that turn made), asserted by parent id and depth against a real run with a real MCP
+upstream — a flat list relabelled fails every line. `seq` (not the timestamp) orders siblings,
+because millisecond timestamps collide in-process. **Content rides the EXISTING ADR-0042/0044/0065
+posture** (already-adjudicated text + truncation + the withheld marker; a refusal ABOUT the input
+stores the marker, not the prompt), and **retention rides the §8.3 cascade's audit floor with no new
+knob** — one would let an operator keep prompts for a year under a framework that says ninety days.
+**Reading a trace is default-deny with a self exception** on ADR-0069's precedent: a non-admin
+naming somebody else gets a **403, not a narrowed result set**. Export is the published `gen_ai.*`
+OTel conventions over a **hand-rolled OTLP/HTTP JSON encoder** (the SDK rejected — we serialise
+stored rows, we do not instrument a live process, and its background exporter assumes opening a
+socket is fine), with **no default endpoint anywhere**, a real 409 when none is configured, and the
+ADR-0034/0043 egress guard applied at write time AND on every export. **The SPA ships a trace-tree
+page at `/admin/traces`** that leads with the traces where governance refused something and prints
+each deny reason inline. **Measured**: a 2,000-span tree reads in **42 ms in ONE query**, assembles
+in 7 ms, encodes to OTLP in 23 ms; the recorder costs two statements per span (≈400 spans/s).
+Gateway **1,889 → 1,907 tests / 109 → 110 files**; shared **480 → 500**; policy-kernel 129,
+model-provider 122, infra-provider 174, training-provider 58 unchanged.
+**Disclosed rather than closed** (twelve items in the ADR): a lost span is a **hole the API reports**
+(`partial: true`) rather than prevents — the recorder never fails the call it traces; **connector
+calls, workflow stages and eval-run grouping are DECLARED span kinds with nothing writing them**;
+there is **no prompt-playground diffing** (named in the slice's own paragraph, not built); no
+sampling and **no per-project tracing policy** (org-wide on/off only); no time-to-first-token
+(streaming is traced at completion); the exporter is a **pull with no spooling, no retry and no
+already-exported marker**, so an overlapping re-run re-sends; the OTLP **span id is the first 8
+bytes** of our uuid (the trace id is exact); a DENY exports as OTel status **ERROR** because OTel's
+enum has no member meaning "deliberately refused", so in somebody else's Grafana a refusal looks
+like a failure; and **nothing has been verified against a live OTLP collector** (`dryRun: true`
+exists so an operator can read the exact body first).
+
+**Slice C of the parity wave shipped, 2026-08-07 — [ADR-0069](../docs/decisions/0069-cross-vendor-cost-consolidation.md)
+(migration 0081), cross-vendor cost consolidation. This is THE WEDGE** — the one gap session 07's
+research found genuinely unserved by any incumbent, because per-seat SaaS spend is **invoice-side,
+not call-side**: every gateway attributes the traffic through it, and nobody consolidates one
+human's Claude Code seat + Copilot seat + raw OpenAI key + Bedrock account into a per-person figure
+FP&A can charge back. A pre-slice grep confirmed **no importer, no vendor-account→user identity
+resolution, and — the load-bearing gap — no `metered` vs `imported` distinction anywhere in the cost
+model**; every figure was implicitly metered with nothing to say so. **The blended total does not
+exist as a matter of TYPE**: `consolidate()`'s return shape has no field for metered+imported, no
+route computes one, and both suites walk the entire response body — every number at every depth,
+numbers spelled inside sentences included — asserting the blend appears nowhere (fixtures chosen so
+61.11 + 146.30 = 207.41 can arise no other way; a future convenience `total` fails four tests).
+**The distinction is a CHECK constraint, not a convention**: imported money lives in its own table
+with `basis` pinned to `'imported'` in the database — a column on `usage_events` would have been
+less code and was rejected because every existing statement/forecast/budget query reads that table
+and one missed `WHERE` puts an unverifiable restated figure inside a customer's invoice.
+**Five adapters** on the model-provider/infra-provider playbook (registry + declared capabilities +
+an honest `limits` string the API returns): `generic_mapped` (CSV *or* JSON, deliberately the good
+one — the long tail is longer than any preset list; header inference **refuses on ambiguity**),
+`openai_console`, `anthropic_console`, `aws_cur` and `seat_roster` (the wedge case — and its price
+is an **operator assertion**, stamped `derivedFrom` on every line). **Never trust the file**:
+character-scanned parsers (no regex over imported text, ADR-0055's rule verbatim), an ambiguous
+`07/08/2026` **refused** rather than guessed, an empty amount refused because it is not zero,
+`rows_parsed = rows_accepted + rows_refused` as a DB CHECK, and every refusal naming its **file line
+number** — the suite parses the same file clean and then corrupted and asserts the corrupt parse
+does not simply return less money. **Identity resolution is admin-authored and honest**: alias →
+exact email → domain rule → unresolved, in that precedence so a human's correction beats a
+mechanical match; ambiguity resolves to NOBODY; an unmatched account stays visible as its own
+unattributed subject and is **never spread pro-rata**; every line records HOW it matched and every
+correction re-resolves stored lines and audits its blast radius; deleting a user un-attributes their
+spend rather than deleting it. **Default-deny both ways** — importing and fleet-wide reads are
+admin-only, the single non-admin route refuses unless the caller IS that user. Re-applying identical
+bytes is a real **409** (partial unique index); the correction path is revoke-then-reimport, and the
+revoked batch row survives. **PII**: the same ADR-0042/0065 ingest path, with the **account column
+exempt by construction** — the email IS the join key — disclosed in the code, in every response, on
+the registry and in the ADR. Gateway **1859 → 1889 tests / 108 → 109 files**; shared **427 → 477**;
+policy-kernel 129, model-provider 122, infra-provider 174, training-provider 58 unchanged.
+**Disclosed rather than closed**: the three vendor presets are built against **DECLARED header sets
+never verified against a live console** (they refuse naming the missing column rather than
+mis-parsing, and `generic_mapped` is the escape hatch — this is the biggest honest gap and the
+owner's first follow-up); `aws_cur` reads unblended cost only so a Savings-Plan-heavy account will
+not reconcile; **imported figures never enter billing statements, budgets, forecasts, the optimizer
+or any enforcement path** (reporting-only, deliberately — we will not block work on a number we
+cannot verify); no FX conversion; no invoice-total reconciliation; no cross-chunk dedup for an
+operator-split CUR; `users.cost_center` has no history; **no scheduled re-import** (nothing to poll
+— the view reports its own staleness instead); and **no SPA page** (API + CSV only, same posture as
+ADR-0066).
+
+**Slice B shipped the same day — [ADR-0068](../docs/decisions/0068-redteam-depth.md) (migration
+0080), red-team probe-corpus depth**: N-trial runs with a Wilson-interval ASR and per-trial outcomes
+stored, an offline versioned corpus v2 across ten attack classes, multi-turn crescendo/many-shot
+sequences, and agentic probes whose induced tool/connector call is adjudicated by the **real**
+entitlement kernel and never executed. Read its "what this explicitly does NOT give you" before
+citing any rate: `trials` defaults to 1 and a one-trial run is labelled `single-trial`, probe
+grading is unverified because no provider is connected, and against the deterministic provider N
+trials buy a denominator rather than variance. See
+[docs/decisions/README.md](../docs/decisions/README.md) for the full row.
+
+**Slice A of the parity wave shipped, 2026-08-07 — [ADR-0067](../docs/decisions/0067-groundedness-evaluation.md)
+(migration 0079), groundedness/faithfulness/hallucination measurement.** A pre-slice grep found **no
+groundedness, faithfulness, hallucination or claim-attribution metric anywhere in the codebase** —
+the one measurement a regulated buyer asks for by name, and one that could not have been added by
+configuration because `eval_cases` had nowhere to put the CONTEXT an answer is supposed to rest on.
+Migration 0079 adds `eval_cases.context` (an **array**, one entry per retrieved chunk — chunk
+boundaries are the metric: a claim stitched out of fragments of three unrelated documents is exactly
+the fabrication this catches, and a single blob scores it as supported; there is a test asserting the
+stitched claim is refused) plus `context_in_prompt`, which records whether the model SAW the context
+or whether it was held back for scoring only. Context is **not a bypass** — when it rides the prompt
+it IS the dispatch input and takes the same §8.4 PII and ADR-0042 guardrail path; extracted claims are
+slices of `outputText` AFTER the withheld-marker substitution. A case with no context dispatches
+byte-identically, so **no existing baseline moved**. **Four metrics that genuinely work offline with
+no key** — `claim_support` (IDF-weighted coverage of the single best chunk, failing claims stored
+VERBATIM, fabricated FIGURES named and capped below threshold outright), `context_precision`
+(retrieval utilisation), `context_recall` (measures the RETRIEVER — high support with low recall is
+the signature of a model faithful to context that never held the answer), `answer_relevance` (with an
+abstention detector scoring 0 and saying why). **Proved adversarially**: every score assertion is
+paired with its opposite over the SAME context and the GAP asserted — end to end through the real
+harness a grounded answer scores **1.00** and a same-length same-topic fabricated one **0.00**;
+precision 1.00 tight vs 0.20 padded; relevance 0.73 vs 0.00. **The honesty line is the point**:
+`groundedness_judge` / `answer_relevance_judge` return a real **422** (`judge_required` /
+`judge_not_dispatchable`) from a pure, exhaustively-tested `judgeAvailabilityFor` placed BEFORE the
+`eval_runs` insert, and the suite asserts **no run row, no result row, not one dispatched token** —
+they never degrade to the lexical proxy under the judged name. The tokenizer was **hoisted** (not
+copied) out of `training-provider` into `@regulait/shared`, which now owns the one tokenizer.
+Gateway **1,815 → 1,835 tests / 106 → 107 files**; shared **360 → 402**; policy-kernel 129,
+model-provider 122, infra-provider 174, training-provider 58 all unchanged. **Disclosed rather than
+closed, and several limits are THEMSELVES tests so they cannot silently become untrue**: the lexical
+metrics cannot see negation flips (flagged, not scored) or swapped attribution, and score a
+synonym-only paraphrase as unsupported (a false positive — the direction that hurts);
+`context_precision` is utilisation, not Ragas's rank-aware precision; `answer_relevance` scores a
+fluent falsehood HIGH; the judges' JUDGMENT is unverified because no provider is connected (plumbing
+proven, instrument not); **ADR-0044's `llm_as_judge` deliberately still scores an unjudgeable case
+zero rather than refusing** — unifying it would change an accepted ADR's contract from inside a slice
+about a different metric, so it is named follow-up for the owner; and there is no retrieval
+integration, no embedding similarity, and no groundedness *reporting* screen (the eval page gained a
+context field so the new kinds are authorable, and the model card renders the summary).
+
+**Competitive-parity wave started, 2026-08-07 — ADR-0066 (migration 0078) is Slice D of
+[docs/product/COMPETITIVE_PARITY_PLAN.md](../docs/product/COMPETITIVE_PARITY_PLAN.md).** That plan
+exists because session 07's research **falsified all three assumed differentiators** (per-user
+gateway governance, in-gateway cost attribution, governed SDLC workflow are each already served by
+LiteLLM/Portkey/Cloudflare/Helicone/Langfuse); read its §0 before repeating the claim. With RegulAIt
+likely to ship as **freeware**, parity gaps are adoption blockers rather than competitive risks,
+which is the basis on which the wave is worth doing. **Slice D shipped four things, each designed so
+it may only ever NARROW** — the same ceiling shape ADR-0062 used for egress: (1) **`GET /v1/models`**,
+the discovery endpoint every off-the-shelf OpenAI client calls at setup and without which a tool
+fails *before* the first completion — one route, two envelopes (OpenAI by default, Anthropic when
+the SDK's `anthropic-version` header is present), both rendered from one entitlement filter that
+runs the **same `evaluateAgent` the dispatch path runs**, so an ungranted model is ABSENT rather
+than listed-then-403'd (proved with two users on disjoint grants, neither seeing the other's);
+(2) **virtual keys** (`rglv_`, reusing the api_keys sha256 hashing verbatim) carrying an owning
+user, optional model allow-list, optional USD budget + spend counter, optional expiry, revocation
+and an optional pinned platform credential the holder never sees — `isAdmin` hard-coded **false**
+whatever the owner is, and a **default-deny five-route allow-list** that makes minting keys,
+editing grants and reading credentials structurally unreachable (plus a by-kind refusal at
+`/auth/login-with-key`, since exchanging a virtual key for a session would hand back the identity
+it exists to narrow); (3) **per-key model allow-lists enforced at BOTH the compat surfaces and the
+native dispatch path**, inside the one `dispatchOnce` core against the SERVED agent *and* at the
+entry points against the REQUESTED agent (because `dispatch:false` never reaches the core); and
+(4) **provider fallback chains** whose subtle rule is that **a governance DENY is not a failure** —
+only a transport/upstream error triggers a hop, entitlement is re-evaluated per hop from scratch
+in the same mode, egress posture is re-evaluated per hop because each hop runs the whole core, and
+every hop is audited and disclosed. Gateway suite **1,764 → 1,815 tests across 106 files**.
+Disclosed rather than closed: no load balancing, no retry/backoff, no per-key budget *period*
+(lifetime cap; rotate the key), no per-key rate limits, pinning is platform-credential-only,
+fallback is one level deep by construction, `GET /v1/models` is gated on the interception surfaces,
+each failed hop bills its own usage row, and there is **no SPA page** for either feature (API-only).
+
+**Note on the two preceding slices, which shipped after this file was last caught up**:
+[ADR-0064](../docs/decisions/0064-in-process-scheduler.md) (migration 0076) added the in-process
+scheduler that six ADRs' sweeps had been missing, and
+[ADR-0065](../docs/decisions/0065-regulait-llm.md) (migration 0077) added RegulAIt-LLM. The
+paragraph below still describes the world as of ADR-0063 and has NOT been rewritten; treat
+[docs/decisions/README.md](../docs/decisions/README.md) as the authority for anything after 0063.
+
 **RegulAIt is a working, deployed product, not a scaffold.** All eight P0 pillars have shipped
 functionality; the gateway suite is at **1,689 tests** across 103 files (policy-kernel 129,
 workflow-kernel 39, `packages/shared` 360, model-provider 122); the schema is at **migration
@@ -1591,6 +3739,36 @@ region-allowlist SCP; OQ-002 (budget cap) resolved to $5/month; OQ-003 (GitHub a
 to personal `dhruvmahendrapatel`.
 
 ## Known follow-ups (not urgent, not blocking)
+- ~~`planning` is a vocabulary item, not a control~~ **CLOSED 2026-08-15 by
+  [ADR-0079](../docs/decisions/0079-plan-only-stage-enforcement.md).** The kernel now RESTS at a
+  planning stage (`blocked_on_plan`, left by an explicit `/advance`), an invoke may name an
+  `instanceId` (validated on the initiator-or-admin bar), and a mutating mode against an instance
+  parked there is refused `409 plan_only_stage` before dispatch, cache or billing. The
+  mutating-mode rule is an ALLOW-LIST (`plan/review/chat/ask/read`) so a mode invented later fails
+  closed. Honest limits kept in the ADR: attribution is OPT-IN (an invoke naming no instance is as
+  unconstrained as before — mandatory attribution would need its own floor decision, like
+  ADR-0021's), the rule binds declared intent rather than prompt semantics, and the MCP/compat
+  paths carry no instanceId.
+- **A deploy-override still has no second party.** ADR-0022's 2026-08-13 amendment made the
+  initiator's self-attestation loud (recorded reason + `workflow:deploy-override-attested`), but
+  routing the override to a genuine approver is the stronger control and needs a routing policy
+  to say *who*.
+- **Slice-9/10 findings (2026-08-15), reported not fixed:** (a) `sessionLifetimeHours`
+  narrowing is issuance-scoped — an already-issued session keeps its stamped expiry, so a 2h-old
+  session survives a 1h narrowing (ADR-0039's revocation levers are the pinned mitigation);
+  (b) a failed PM approval-mirror is surfaced in the decide response (`pmMirror.ok=false`) but
+  not persisted as a retryable marker — reconciliation currently rides drift detection.
+- **Two pillar-6 savings-semantics questions (slice-5 probe, 2026-08-15), deliberately not decided in code:**
+  (a) a semantic-cache HIT on a budget-blocked project is served (the cache sits before the
+  budget gate) — $0 spend, but the `semantic_caching` savings row claims an avoided dispatch
+  that would itself have been refused; (b) decision-only invokes write a `model_routing`
+  estimate row with savings although nothing dispatches (pinned behaviour). Both are honest
+  as estimates, misleading if the dashboard is ever read as "realized savings" — an owner
+  call on reporting semantics, not a code defect.
+- ~~Deployment-wide PII floor for unattributed dispatches~~ **RESOLVED 2026-08-13** — owner said
+  build it. ADR-0021 amendment: `defaultPiiMode` now governs wherever no compliance framework
+  does, including unattributed model/connector/MCP/cache/streaming/training-ingest calls.
+  Default stays `none` (behaviour-preserving); one `PUT /v1/org/settings` turns the floor on.
 - Security Hub's default standards enabled **both** AWS Foundational Security Best Practices and
   CIS AWS Foundations Benchmark v1.2.0 (the latter wasn't explicitly requested — AWS enables it
   by default alongside FSBP). Harmless; disable the CIS subscription later if its findings become

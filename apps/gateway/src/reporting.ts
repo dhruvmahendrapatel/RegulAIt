@@ -95,6 +95,8 @@ import {
   type SpendLine,
 } from "@regulait/shared";
 import { securityHeaders } from "./security-headers.js";
+import { buildExportBundle } from "./export-bundle.js";
+import { resolveLicense } from "./licensing.js";
 import { packControlsSection } from "./compliance-packs.js";
 import { resolveSchedulerConfig } from "./scheduler.js";
 
@@ -883,7 +885,14 @@ export function registerReportingRoutes(app: FastifyInstance, db: Db): void {
    * `section,key,metric,value`); JSON is the payload verbatim. */
   app.get("/v1/reports/runs/:id/export", async (req, reply) => {
     const { id } = idParam.parse(req.params);
-    const q = z.object({ format: z.enum(["csv", "json"]).default("csv") }).parse(req.query ?? {});
+    const q = z
+      .object({
+        format: z.enum(["csv", "json"]).default("csv"),
+        /** ADR-0116 — wrap the SAME bytes in a signed, offline-verifiable bundle. */
+        signed: z.enum(["0", "1", "true", "false"]).optional(),
+      })
+      .parse(req.query ?? {});
+    const wantsBundle = q.signed === "1" || q.signed === "true";
     const [run] = await db.select().from(reportRuns).where(eq(reportRuns.id, id));
     if (!run) return reply.status(404).send({ error: "unknown_report_run" });
     if (!(await canReadRun(db, run, req.authCtx))) {
@@ -906,6 +915,70 @@ export function registerReportingRoutes(app: FastifyInstance, db: Db): void {
         `platform here, so the act is recorded`,
       { format: q.format, entitlementScope: run.entitlementScope, rowCount: run.rowCount },
     );
+    // ADR-0116. The bundle is built AFTER the `report-exported` audit row above
+    // is written, deliberately: that row is then the chain head the manifest
+    // commits to, so the bundle carries the record of its own creation rather
+    // than a head from a moment before it existed.
+    if (wantsBundle) {
+      const license = await resolveLicense(db);
+      const bundle = await buildExportBundle({
+        db,
+        subject: {
+          kind: "report-run",
+          id: run.id,
+          descriptor: {
+            definitionId: run.definitionId,
+            format: q.format,
+            rowCount: run.rowCount,
+            periodStart: run.periodStart,
+            periodEnd: run.periodEnd,
+            entitlementScope: run.entitlementScope,
+            effectiveProjectIds: run.effectiveProjectIds,
+            generatedAt: run.generatedAt instanceof Date ? run.generatedAt.toISOString() : run.generatedAt,
+            basis: "estimate-list-price",
+          },
+        },
+        content: [
+          q.format === "json"
+            ? {
+                name: `report-${run.id}.json`,
+                contentType: "application/json",
+                body: Buffer.from(
+                  `${JSON.stringify({ run: { ...run, payload: undefined }, report: payload }, null, 2)}\n`,
+                  "utf8",
+                ),
+              }
+            : {
+                name: `report-${run.id}.csv`,
+                contentType: "text/csv",
+                body: Buffer.from(renderReportCsv(payload), "utf8"),
+              },
+        ],
+        actor: { userId: req.authCtx.userId ?? null, via: req.authCtx.via },
+        licenseId: license.document?.licenseId ?? null,
+      });
+      if (!bundle.ok) {
+        await audit(
+          req.authCtx.userId ?? null,
+          id,
+          "report-export-unsigned-refused",
+          "a signed export was requested and REFUSED because no export signing key is configured — " +
+            "an unsigned bundle is not emitted in its place",
+          { ruleId: bundle.ruleId, format: q.format },
+          "deny",
+        );
+        return reply.status(409).send({ error: bundle.ruleId, detail: bundle.reason });
+      }
+      const built = bundle;
+      for (const [k, v] of Object.entries(securityHeaders("application/gzip"))) reply.header(k, v);
+      reply.header("content-type", "application/gzip");
+      reply.header("content-disposition", `attachment; filename="${built.filename}"`);
+      reply.header("x-regulait-export-signing-key-id", built.keyId);
+      reply.header("x-regulait-export-signing-key-fingerprint", built.fingerprint);
+      reply.header("x-regulait-report-basis", "estimate-list-price");
+      return reply.send(built.archive);
+    }
+
     if (q.format === "json") return reply.send({ run: { ...run, payload: undefined }, report: payload });
     const csv = renderReportCsv(payload);
     for (const [k, v] of Object.entries(securityHeaders("text/csv"))) reply.header(k, v);

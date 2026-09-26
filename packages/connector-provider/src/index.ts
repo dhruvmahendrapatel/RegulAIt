@@ -31,6 +31,10 @@
  * every upstream call through that object so the upstream reach never exceeds
  * the authorized object:
  *   - slack     → a channel ID (e.g. "C0123456789")
+ *   - teams     → a Bot Framework CONVERSATION ID (e.g. "19:…@thread.tacv2")
+ *   - outlook   → ONE recipient mailbox address (e.g. "ana@acme.com"). A
+ *                 mailbox, never a distribution list the adapter resolves:
+ *                 the authorized object has to be the thing that receives.
  *   - github    → an "owner/repo" slug (e.g. "acme/billing")
  *   - jira      → a project key (e.g. "PLAT")
  *   - snowflake → a "DATABASE.SCHEMA" pair (e.g. "ANALYTICS.PUBLIC")
@@ -48,6 +52,8 @@ export const CONNECTOR_PROVIDER_KINDS = [
   "http",
   "webhook",
   "slack",
+  "teams",
+  "outlook",
   "github",
   "jira",
   "snowflake",
@@ -470,6 +476,311 @@ export class SlackConnectorProvider implements ConnectorProvider {
 }
 
 // ---------------------------------------------------------------------------
+// Microsoft Teams adapter — the BOT FRAMEWORK CONNECTOR REST API.
+//
+// WHY THIS API AND NOT MICROSOFT GRAPH. Graph has
+// `POST /teams/{team}/channels/{channel}/messages`, and it looks like the
+// obvious counterpart to Slack's `chat.postMessage`. It is the wrong one for a
+// daemon. Graph documents that endpoint's APPLICATION permission as
+// `Teamwork.Migrate.All` and states plainly that "application permissions are
+// only supported for migration" — an app-only credential, which is the only
+// kind this connector model holds, cannot send an ordinary channel message
+// through Graph at all. Everything else on that path needs a SIGNED-IN USER's
+// delegated `ChannelMessage.Send`, which `connector_credentials` does not model
+// and ChatOps has no user to obtain. So Graph is not a near-miss here; it is a
+// credential shape we do not have.
+//
+// The Bot Connector API is the documented, supported, app-only path, and it is
+// also the EXACT counterpart of the inbound half we already ship:
+// `packages/shared/src/chatops.ts` parses a Bot Framework **Activity**
+// (`from.aadObjectId`, `conversation.id`, `replyToId`, `value.*`). Outbound is
+// the same Activity travelling the other way.
+//
+// Verified against Microsoft Learn (fetched 2026-09-19):
+//   - "API reference for the Bot Framework Connector service" — Base URI, and
+//     the conversation operations table:
+//       POST /v3/conversations/{conversationId}/activities              (Send to conversation)
+//       POST /v3/conversations/{conversationId}/activities/{activityId} (Reply to activity)
+//       GET  /v3/conversations/{conversationId}/members                 (Get conversation members)
+//     both POSTs take an Activity and return a **ResourceResponse** `{id}`.
+//     The same table says "only Direct Line and Web Chat support the *get
+//     conversations* endpoint", which is why `GET /v3/conversations` is NOT the
+//     connection-root read here — see the refusal in `invoke`.
+//   - "Authentication with the Bot Connector API" — the app-only token:
+//       POST {login}/{tenant}/oauth2/v2.0/token
+//       grant_type=client_credentials&client_id=…&client_secret=…
+//       &scope=https%3A%2F%2Fapi.botframework.com%2F.default
+//     with `{tenant}` = `botframework.com` for a multi-tenant bot and the
+//     directory (tenant) id for a single-tenant one. The response is
+//     `{token_type, expires_in, access_token}`.
+//
+// CREDENTIAL SHAPE — ADR-0023's structured-JSON convention, as snowflake uses.
+// A Bot Connector bearer token lives about an hour, so storing one in
+// `connector_credentials.token` would work in a test and silently rot in
+// production. The stored credential is therefore the app registration itself,
+// `{appId, appPassword, tenantId?, loginBaseUrl?}`, and this adapter mints a
+// token per invoke — the same "nothing cached, nothing to revoke" posture the
+// snowflake adapter takes with its short-lived key-pair JWT.
+//
+// TWO HOSTS, BOTH GUARDED. This is the one place Teams is structurally
+// different from Slack: a post touches the login host AND the service host.
+// Both go through the SAME injected `fetchImpl`, and on the ChatOps path that
+// is the guarded fetch, which re-adjudicates EVERY request URL against the
+// egress allow-list. Neither host is exempt; an air-gapped install has neither
+// entry and the courier is simply absent. An operator enabling Teams ChatOps
+// must allow-list BOTH (`login.microsoftonline.com` and the service host).
+//
+// Object semantics: `object` is a **conversation ID** — the Teams analogue of
+// Slack's channel id and the governed unit an admin scopes via
+// `allowedObjects`. Every call derives its `/v3/conversations/{id}/` prefix
+// from `object`, and the Activity's own `conversation.id` is overwritten from
+// it, so a payload cannot redirect the message to another conversation.
+//
+// Operation surface:
+//   read,  object=null                → REFUSED (see above: no Teams-supported
+//                                       connection-root listing exists)
+//   read,  object=<conversationId>    → GET  /v3/conversations/{id}/members
+//   write, object=<conversationId>
+//          (required)                 → POST /v3/conversations/{id}/activities
+//   write, + payload.replyToId        → POST /v3/conversations/{id}/activities/{replyToId}
+//
+// Error taxonomy: unlike Slack, the Bot Connector answers with REAL HTTP status
+// codes and an `ErrorResponse` body `{error:{code,message}}`, so there is no
+// ok:false envelope to unwrap — the status is load-bearing and is kept. 429
+// (and the login service's own 429) becomes ConnectorRateLimitError; every
+// other non-2xx becomes a ConnectorProviderError carrying the upstream status
+// and the `error.code` when the body had one.
+// ---------------------------------------------------------------------------
+
+/** the global Teams service URL, documented as the one to use when no
+ * `serviceUrl` has been observed yet. Sovereign/regional clouds (GCC High, DoD,
+ * 21Vianet) and regional endpoints differ — those set an explicit baseUrl. */
+export const TEAMS_DEFAULT_BASE_URL = "https://smba.trafficmanager.net/teams";
+/** the Microsoft Entra ID login host. `login.microsoftonline.us` etc. override
+ * it through the credential's `loginBaseUrl`. */
+export const TEAMS_DEFAULT_LOGIN_BASE_URL = "https://login.microsoftonline.com";
+/** the multi-tenant bot's tenant segment, per the Bot Connector auth doc */
+export const TEAMS_MULTITENANT_SEGMENT = "botframework.com";
+/** the app-only scope the Bot Connector accepts */
+export const TEAMS_BOT_SCOPE = "https://api.botframework.com/.default";
+
+export const teamsCredentialSchema = z
+  .object({
+    appId: z.string().min(1),
+    appPassword: z.string().min(1),
+    /** omitted ⇒ multi-tenant bot (`botframework.com`) */
+    tenantId: z.string().min(1).optional(),
+    /** sovereign-cloud override for the Entra login host */
+    loginBaseUrl: z.string().url().optional(),
+  })
+  .strict();
+export type TeamsCredential = z.infer<typeof teamsCredentialSchema>;
+
+/** Same contract as `parseSnowflakeCredential`: a malformed credential fails
+ * EXPLICITLY with an actionable message rather than opaquely at first post. */
+export function parseTeamsCredential(token: string): TeamsCredential {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(token);
+  } catch {
+    throw new ConnectorProviderError(
+      "teams credential must be a JSON document {appId, appPassword, tenantId?, loginBaseUrl?} " +
+        "(the bot's Microsoft app registration, serialized then stored as the connection's single token) — " +
+        "got a non-JSON token. A raw Bot Connector bearer token is NOT accepted: it expires in about an hour, " +
+        "so storing one would work once and then fail silently.",
+      400,
+    );
+  }
+  const parsed = teamsCredentialSchema.safeParse(raw);
+  if (!parsed.success) {
+    const issues = parsed.error.issues
+      .map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
+      .join("; ");
+    throw new ConnectorProviderError(
+      `teams credential JSON is invalid — expected {appId, appPassword, tenantId?, loginBaseUrl?}: ${issues}`,
+      400,
+    );
+  }
+  return parsed.data;
+}
+
+export interface TeamsAdapterOptions {
+  /** the bot's app registration — NOT a bearer token (see parseTeamsCredential) */
+  credential: TeamsCredential;
+  /** the Bot Connector service URL; defaults to the global Teams endpoint */
+  baseUrl?: string | null;
+  fetchImpl?: FetchLike;
+}
+
+export class TeamsConnectorProvider implements ConnectorProvider {
+  readonly kind = "teams" as const;
+  private readonly base: string;
+  private readonly login: string;
+  private readonly cred: TeamsCredential;
+  private readonly fetchImpl: FetchLike;
+
+  constructor(opts: TeamsAdapterOptions) {
+    this.base = (opts.baseUrl ?? TEAMS_DEFAULT_BASE_URL).replace(/\/$/, "");
+    this.cred = opts.credential;
+    this.login = (opts.credential.loginBaseUrl ?? TEAMS_DEFAULT_LOGIN_BASE_URL).replace(/\/$/, "");
+    this.fetchImpl = opts.fetchImpl ?? (fetch as unknown as FetchLike);
+  }
+
+  /**
+   * Step 1 of the documented flow. One token per invoke, deliberately: a cached
+   * one would have to be invalidated on credential rotation, and this adapter
+   * has no lifecycle hook to do that. It goes through the SAME `fetchImpl` as
+   * the post, so on the ChatOps path the login host is egress-adjudicated too.
+   */
+  private async accessToken(): Promise<string> {
+    const tenant = this.cred.tenantId ?? TEAMS_MULTITENANT_SEGMENT;
+    const url = `${this.login}/${encodeURIComponent(tenant)}/oauth2/v2.0/token`;
+    const form = new URLSearchParams({
+      grant_type: "client_credentials",
+      client_id: this.cred.appId,
+      client_secret: this.cred.appPassword,
+      scope: TEAMS_BOT_SCOPE,
+    }).toString();
+    const res = await this.fetchImpl(url, {
+      method: "POST",
+      headers: { accept: "application/json", "content-type": "application/x-www-form-urlencoded" },
+      body: form,
+    });
+    if (res.status === 429) {
+      throw new ConnectorRateLimitError(
+        "teams token request rate-limited by the Microsoft Entra login service (HTTP 429)",
+        retryAfterSeconds(res.headers),
+        429,
+      );
+    }
+    const text = await res.text();
+    if (res.status < 200 || res.status >= 300) {
+      // the app password itself is never echoed; the login service's own
+      // `error`/`error_description` is what an operator needs
+      throw new ConnectorProviderError(
+        `teams token request failed: ${text}`,
+        res.status === 400 || res.status === 401 ? 401 : res.status,
+      );
+    }
+    const decoded = decodeBody(res.status, text).body as { access_token?: unknown } | null;
+    const token = decoded && typeof decoded === "object" ? decoded.access_token : null;
+    if (typeof token !== "string" || !token) {
+      throw new ConnectorProviderError(
+        "teams token response carried no access_token — refusing to post with no credential",
+        502,
+      );
+    }
+    return token;
+  }
+
+  async invoke(invocation: ConnectorInvocation): Promise<ConnectorInvokeResult> {
+    const payload = invocation.payload ?? {};
+    const op = typeof payload.op === "string" ? payload.op : null;
+    const conversationId = invocation.object ?? null;
+
+    let method: string;
+    let apiPath: string;
+    let body: string | undefined;
+    let label: string;
+
+    if (invocation.operation === "write") {
+      if (op !== null && op !== "conversations.sendToConversation" && op !== "conversations.replyToActivity") {
+        throw new ConnectorProviderError(
+          `teams write supports 'conversations.sendToConversation' and 'conversations.replyToActivity' (got op '${op}')`,
+          400,
+        );
+      }
+      if (!conversationId) {
+        throw new ConnectorProviderError(
+          "teams write requires an object (the target conversation ID) — an Activity with no conversation is meaningless",
+          400,
+        );
+      }
+      const { op: _op, replyToId: rawReplyTo, conversation: _conv, ...rest } = payload;
+      const replyToId = typeof rawReplyTo === "string" && rawReplyTo ? rawReplyTo : null;
+      if (op === "conversations.replyToActivity" && !replyToId) {
+        throw new ConnectorProviderError(
+          "teams 'conversations.replyToActivity' requires payload.replyToId (the activity being replied to)",
+          400,
+        );
+      }
+      method = "POST";
+      apiPath = replyToId
+        ? `/v3/conversations/${encodeURIComponent(conversationId)}/activities/${encodeURIComponent(replyToId)}`
+        : `/v3/conversations/${encodeURIComponent(conversationId)}/activities`;
+      label = replyToId ? "replyToActivity" : "sendToConversation";
+      // `conversation` comes from the GOVERNED OBJECT, never the payload — the
+      // destructure above drops any caller-supplied one before this spread.
+      body = JSON.stringify({ type: "message", ...rest, conversation: { id: conversationId } });
+    } else {
+      if (op !== null && op !== "conversations.members") {
+        throw new ConnectorProviderError(
+          `teams read supports 'conversations.members' (got op '${op}')`,
+          400,
+        );
+      }
+      if (!conversationId) {
+        // NOT a silent promise, and not a guess: Microsoft's own conversation
+        // operations table says `GET /v3/conversations` is supported only by
+        // Direct Line and Web Chat, so there is no Teams-channel listing to
+        // make the bare read mean anything. Refusing beats inventing.
+        throw new ConnectorProviderError(
+          "teams read requires an object (the conversation ID): the Bot Connector's 'get conversations' " +
+            "endpoint is supported only on the Direct Line and Web Chat channels, so the Teams channel has no " +
+            "connection-root listing to enumerate",
+          400,
+        );
+      }
+      method = "GET";
+      apiPath = `/v3/conversations/${encodeURIComponent(conversationId)}/members`;
+      label = "conversations.members";
+    }
+
+    // Step 1 (token) happens BEFORE the service call, so a credential failure
+    // never opens a socket to the service host.
+    const accessToken = await this.accessToken();
+
+    const headers: Record<string, string> = {
+      accept: "application/json",
+      authorization: `Bearer ${accessToken}`,
+    };
+    if (body !== undefined) headers["content-type"] = "application/json; charset=utf-8";
+
+    const res = await this.fetchImpl(`${this.base}${apiPath}`, {
+      method,
+      headers,
+      ...(body !== undefined ? { body } : {}),
+    });
+
+    if (res.status === 429) {
+      throw new ConnectorRateLimitError(
+        `teams ${label} rate-limited (HTTP 429)`,
+        retryAfterSeconds(res.headers),
+        429,
+      );
+    }
+    const text = await res.text();
+    if (res.status < 200 || res.status >= 300) {
+      // the Bot Connector's ErrorResponse: {"error":{"code":"…","message":"…"}}
+      let code: string | null = null;
+      try {
+        const parsed = JSON.parse(text) as { error?: { code?: unknown } };
+        if (parsed && typeof parsed === "object" && parsed.error && typeof parsed.error.code === "string") {
+          code = parsed.error.code;
+        }
+      } catch {
+        /* a non-JSON body is reported verbatim below */
+      }
+      throw new ConnectorProviderError(
+        `teams ${label} failed: ${code ?? text}`,
+        res.status,
+      );
+    }
+    return decodeBody(res.status, text);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // GitHub adapter — the CONNECTOR data plane over the GitHub REST API (distinct
 // from packages/git-provider, which is pillar 2's git_operation plane).
 // Bearer token (fine-grained PAT / classic PAT / app installation token).
@@ -501,6 +812,200 @@ export class SlackConnectorProvider implements ConnectorProvider {
 // retry-after wins when present; otherwise x-ratelimit-reset (epoch seconds)
 // minus now.
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// ADR-0121 — OUTLOOK: the approval COURIER, and deliberately nothing more.
+//
+// Microsoft Graph `sendMail`, app-only. Two things about the shape are worth
+// stating because they are decisions rather than defaults.
+//
+// THE TENANT IS REQUIRED, unlike Teams. The Bot Connector accepts a
+// multi-tenant bot against `botframework.com`; Graph app-only has no such
+// thing — a client-credentials token is minted for ONE tenant, and a
+// credential without it could only ever be guessed at.
+//
+// READ IS REFUSED OUTRIGHT. `operation: "read"` on a mailbox means `GET
+// /messages`, which is the whole mailbox. Nothing in an approval flow needs to
+// read mail, and a connector that CAN read every message an approver has ever
+// received is a vastly larger capability than one that can send one. A
+// read-only grant on this provider therefore authorizes nothing, and the
+// adapter says so rather than quietly offering a listing.
+// ---------------------------------------------------------------------------
+
+export const OUTLOOK_DEFAULT_GRAPH_BASE_URL = "https://graph.microsoft.com";
+/** the Entra login host; sovereign clouds override it on the credential */
+export const OUTLOOK_DEFAULT_LOGIN_BASE_URL = "https://login.microsoftonline.com";
+/** the app-only scope Graph accepts for client credentials */
+export const OUTLOOK_GRAPH_SCOPE = "https://graph.microsoft.com/.default";
+
+export const outlookCredentialSchema = z
+  .object({
+    appId: z.string().min(1),
+    appPassword: z.string().min(1),
+    /** REQUIRED — see the header: Graph app-only is single-tenant by nature */
+    tenantId: z.string().min(1),
+    /** the mailbox the approval is SENT FROM (`/users/{senderUpn}/sendMail`) */
+    senderUpn: z.string().min(1),
+    loginBaseUrl: z.string().url().optional(),
+  })
+  .strict();
+export type OutlookCredential = z.infer<typeof outlookCredentialSchema>;
+
+export function parseOutlookCredential(token: string): OutlookCredential {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(token);
+  } catch {
+    throw new ConnectorProviderError(
+      "outlook credential must be a JSON document {appId, appPassword, tenantId, senderUpn, loginBaseUrl?} " +
+        "(the app registration plus the mailbox approvals are sent FROM, serialized then stored as the " +
+        "connection's single token) — got a non-JSON token. A raw Graph bearer token is NOT accepted: it " +
+        "expires in about an hour, so storing one would work once and then fail silently.",
+      400,
+    );
+  }
+  const parsed = outlookCredentialSchema.safeParse(raw);
+  if (!parsed.success) {
+    const issues = parsed.error.issues
+      .map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
+      .join("; ");
+    throw new ConnectorProviderError(
+      `outlook credential JSON is invalid — expected {appId, appPassword, tenantId, senderUpn, loginBaseUrl?}: ${issues}`,
+      400,
+    );
+  }
+  return parsed.data;
+}
+
+export interface OutlookAdapterOptions {
+  credential: OutlookCredential;
+  /** the Graph base; defaults to the global endpoint */
+  baseUrl?: string | null;
+  fetchImpl?: FetchLike;
+}
+
+export class OutlookConnectorProvider implements ConnectorProvider {
+  readonly kind = "outlook" as const;
+  private readonly base: string;
+  private readonly login: string;
+  private readonly cred: OutlookCredential;
+  private readonly fetchImpl: FetchLike;
+
+  constructor(opts: OutlookAdapterOptions) {
+    this.base = (opts.baseUrl ?? OUTLOOK_DEFAULT_GRAPH_BASE_URL).replace(/\/$/, "");
+    this.cred = opts.credential;
+    this.login = (opts.credential.loginBaseUrl ?? OUTLOOK_DEFAULT_LOGIN_BASE_URL).replace(/\/$/, "");
+    this.fetchImpl = opts.fetchImpl ?? (fetch as unknown as FetchLike);
+  }
+
+  /** One token per invoke, for the same reason the Teams adapter does it: a
+   * cached token outliving a revoked credential is worse than a second
+   * round-trip, and this interface has no lifecycle hook to evict one. It goes
+   * through the SAME `fetchImpl`, so the login host is egress-adjudicated too. */
+  private async accessToken(): Promise<string> {
+    const url = `${this.login}/${encodeURIComponent(this.cred.tenantId)}/oauth2/v2.0/token`;
+    const form = new URLSearchParams({
+      grant_type: "client_credentials",
+      client_id: this.cred.appId,
+      client_secret: this.cred.appPassword,
+      scope: OUTLOOK_GRAPH_SCOPE,
+    });
+    const res = await this.fetchImpl(url, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
+      body: form.toString(),
+    });
+    const text = await res.text();
+    if (res.status === 429) {
+      throw new ConnectorProviderError(
+        "outlook token request rate-limited by the Microsoft Entra login service (HTTP 429)",
+        429,
+      );
+    }
+    if (res.status >= 400) {
+      throw new ConnectorProviderError(`outlook token request failed: ${text}`, res.status);
+    }
+    const decoded = decodeBody(res.status, text).body as { access_token?: unknown } | null;
+    const token = decoded && typeof decoded === "object" ? decoded.access_token : null;
+    if (typeof token !== "string" || !token) {
+      throw new ConnectorProviderError(
+        "outlook token response carried no access_token — refusing to send with no credential",
+        502,
+      );
+    }
+    return token;
+  }
+
+  async invoke(invocation: ConnectorInvocation): Promise<ConnectorInvokeResult> {
+    const payload = invocation.payload ?? {};
+    const op = typeof payload.op === "string" ? payload.op : null;
+    const recipient = invocation.object ?? null;
+
+    if (invocation.operation !== "write") {
+      throw new ConnectorProviderError(
+        "outlook is send-only: `operation: 'read'` on a mailbox means reading the mailbox, which is a far " +
+          "larger capability than delivering one approval and is not needed to deliver one. A read-only " +
+          "grant on this connector authorizes nothing.",
+        400,
+      );
+    }
+    if (op !== null && op !== "sendMail") {
+      throw new ConnectorProviderError(
+        `outlook write supports 'sendMail' (got op '${op}')`,
+        400,
+      );
+    }
+    if (!recipient) {
+      throw new ConnectorProviderError(
+        "outlook write requires an object (the recipient mailbox address) — a message with no recipient is meaningless",
+        400,
+      );
+    }
+
+    // THE RECIPIENT COMES FROM THE GOVERNED OBJECT, NEVER THE PAYLOAD. The
+    // destructure drops any caller-supplied recipients before the spread, so a
+    // crafted payload cannot redirect an approval to another mailbox — the same
+    // defence the Teams adapter applies to `conversation.id`.
+    const { op: _op, toRecipients: _to, ccRecipients: _cc, bccRecipients: _bcc, ...message } = payload;
+    const body = JSON.stringify({
+      message: {
+        ...message,
+        toRecipients: [{ emailAddress: { address: recipient } }],
+      },
+      // An approval that was sent is a fact the operator's own mailbox should
+      // carry too, so it is not silently absent from Sent Items.
+      saveToSentItems: true,
+    });
+
+    // Token first, so a credential failure never opens a socket to Graph.
+    const accessToken = await this.accessToken();
+    const url = `${this.base}/v1.0/users/${encodeURIComponent(this.cred.senderUpn)}/sendMail`;
+    const res = await this.fetchImpl(url, {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        authorization: `Bearer ${accessToken}`,
+        "content-type": "application/json",
+      },
+      body,
+    });
+    const text = await res.text();
+    const decoded = decodeBody(res.status, text);
+    if (res.status === 429) {
+      throw new ConnectorProviderError("outlook sendMail rate-limited by Microsoft Graph (HTTP 429)", 429);
+    }
+    if (res.status >= 400) {
+      throw new ConnectorProviderError(`outlook sendMail failed: ${text}`, res.status);
+    }
+    // Graph answers 202 with an EMPTY body on success. Reporting that honestly
+    // matters: "accepted for delivery" is not "delivered", and the adapter does
+    // not have, and must not imply, delivery confirmation.
+    return {
+      status: res.status,
+      body: decoded.body ?? { accepted: true, op: "sendMail", recipient },
+    };
+  }
+}
 
 export const GITHUB_DEFAULT_BASE_URL = "https://api.github.com";
 
@@ -1244,6 +1749,18 @@ export function resolveConnectorProvider(
   switch (config.kind) {
     case "mock":
       return sharedMock;
+    case "outlook": {
+      if (!config.token) {
+        throw new ConnectorProviderError(
+          "outlook connector requires a credential (the app registration JSON — see parseOutlookCredential)",
+        );
+      }
+      return new OutlookConnectorProvider({
+        credential: parseOutlookCredential(config.token),
+        baseUrl: config.baseUrl ?? null,
+        ...(fetchImpl ? { fetchImpl } : {}),
+      });
+    }
     case "generic":
     case "http": {
       if (!config.baseUrl) {
@@ -1278,6 +1795,22 @@ export function resolveConnectorProvider(
       }
       return new SlackConnectorProvider({
         token: config.token,
+        baseUrl: config.baseUrl ?? null,
+        ...(fetchImpl ? { fetchImpl } : {}),
+      });
+    case "teams":
+      // token = the structured-JSON credential {appId, appPassword, tenantId?,
+      // loginBaseUrl?} — the bot's Microsoft app registration, NOT a bearer
+      // token (a Bot Connector token lives ~1h; see parseTeamsCredential).
+      // baseUrl optional (defaults to the global Teams service URL; a regional
+      // or sovereign-cloud deployment sets its own serviceUrl).
+      if (!config.token) {
+        throw new ConnectorProviderError(
+          "teams connector requires a token (the JSON credential {appId, appPassword, tenantId?, loginBaseUrl?})",
+        );
+      }
+      return new TeamsConnectorProvider({
+        credential: parseTeamsCredential(config.token),
         baseUrl: config.baseUrl ?? null,
         ...(fetchImpl ? { fetchImpl } : {}),
       });
@@ -1350,6 +1883,15 @@ export function connectorDefaultBaseUrl(kind: string): string | null | undefined
   switch (kind) {
     case "slack":
       return SLACK_DEFAULT_BASE_URL;
+    case "teams":
+      // the documented global Teams service URL. It is a real compiled
+      // destination, so ADR-0062's posture gate adjudicates it exactly as it
+      // does slack.com — Teams gets no exemption. NOTE: a Teams post ALSO
+      // reaches the Entra login host, which this registry cannot name here
+      // because it is credential-derived (`loginBaseUrl`); that host is
+      // adjudicated at call time by the guarded fetch, which re-checks every
+      // request URL.
+      return TEAMS_DEFAULT_BASE_URL;
     case "github":
       return GITHUB_DEFAULT_BASE_URL;
     // these cannot be constructed without an explicit baseUrl (the adapter

@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import {
   and,
   approvals,
+  asc,
   auditLog,
   decisions,
   desc,
@@ -35,6 +36,7 @@ import {
   createPmConnectionSchema,
   pmSyncSchema,
 } from "@regulait/shared";
+import { refuseIfExpansionBlocked } from "./licensing.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import {
   ConnectionEgressBlockedError,
@@ -174,6 +176,15 @@ export async function mirrorNodeStatus(
 ): Promise<{ ok: boolean; state?: string; error?: string } | null> {
   // Orphaned links (item deleted in the tool, or unrepairable at sync time)
   // are dead: mirrors skip them rather than writing into the void.
+  // ADR-0107 (F01): `pm_links_conn_obj_node_uq` is UNIQUE on
+  // (connection_id, object_type, object_id, node_id) — CONNECTION FIRST. This
+  // predicate does not name a connection, and pillar 8 is explicitly
+  // multi-provider, so one run node linked in both Azure DevOps and Jira has
+  // TWO rows here. Unordered, which external system received the mirrored
+  // state was arbitrary. Oldest link wins: the first tool this object was
+  // linked into is the one that has been tracking it, and `id` totalises the
+  // order. (Mirroring into every link is a behaviour change, not a
+  // determinism fix — see the ADR.)
   const [link] = await db
     .select()
     .from(pmLinks)
@@ -184,7 +195,9 @@ export async function mirrorNodeStatus(
         eq(pmLinks.nodeId, nodeId),
         isNull(pmLinks.orphanedAt),
       ),
-    );
+    )
+    .orderBy(asc(pmLinks.createdAt), asc(pmLinks.id))
+    .limit(1);
   if (!link || !dataKey) return null;
   const [conn] = await db.select().from(pmConnections).where(eq(pmConnections.id, link.connectionId));
   if (!conn) return null;
@@ -267,7 +280,14 @@ export async function mirrorApprovalDecision(
   } else {
     return null;
   }
-  const [link] = await db.select().from(pmLinks).where(linkWhere);
+  // ADR-0107 (F01): same connection-blind predicate as `mirrorNodeStatus`; see
+  // the note there. Oldest link wins, deterministically.
+  const [link] = await db
+    .select()
+    .from(pmLinks)
+    .where(linkWhere)
+    .orderBy(asc(pmLinks.createdAt), asc(pmLinks.id))
+    .limit(1);
   if (!link) return null;
   const [conn] = await db.select().from(pmConnections).where(eq(pmConnections.id, link.connectionId));
   if (!conn) return null;
@@ -348,6 +368,18 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
 
   app.post("/v1/pm/connections", async (req, reply) => {
     const body = createPmConnectionSchema.parse(req.body);
+    // ADR-0052 — THE EXPANSION GATE (inventory: `pm_connection.create`, "a new
+    // integrated system is a wider footprint"). Refused once the license has
+    // lapsed past its grace window; permitted in every other state including
+    // absent (no tier flag in the §4 matrix covers PM connections — recorded
+    // in the ADR amendment rather than invented). Syncing through a
+    // connection that already exists is committed footprint and stays open.
+    const licenseRefusal = await refuseIfExpansionBlocked(db, {
+      actorUserId: req.authCtx.userId ?? null,
+      objectType: "pm_connection",
+      what: `creating PM connection '${body.name}'`,
+    });
+    if (licenseRefusal) return reply.status(licenseRefusal.status).send(licenseRefusal.body);
     if (!opts.dataKey) {
       return reply.status(503).send({ error: "pm_connections_require_data_key" });
     }
@@ -642,6 +674,7 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
     // Same honest-sync contract as the run endpoint: an existing link is
     // VERIFIED, not assumed — alive → verified, missing → repaired in place
     // (upsert), unrepairable → orphaned and skipped by future mirrors.
+    // ADR-0107 (F01): connection-blind; see `mirrorNodeStatus`. Oldest wins.
     const [existing] = await db
       .select()
       .from(pmLinks)
@@ -651,7 +684,9 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
           eq(pmLinks.objectId, instanceId),
           isNull(pmLinks.nodeId),
         ),
-      );
+      )
+      .orderBy(asc(pmLinks.createdAt), asc(pmLinks.id))
+      .limit(1);
     if (existing) {
       const base = { created: false, externalId: existing.externalId, externalUrl: existing.externalUrl };
       if (existing.orphanedAt) {
@@ -736,10 +771,17 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
     conn: typeof pmConnections.$inferSelect,
     body: NormalizedInboundEvent,
   ): Promise<{ matched: false } | { matched: true; drift: boolean }> => {
+    // ADR-0107 (F01): (connection_id, external_id) is NOT the unique index —
+    // that one is (connection_id, object_type, object_id, node_id) — so two
+    // RegulAIt objects linked to the SAME external work item both match, and
+    // which one an inbound webhook was attributed to was arbitrary. Oldest
+    // wins: the first object bound to that work item owns the inbound event.
     const [link] = await db
       .select()
       .from(pmLinks)
-      .where(and(eq(pmLinks.connectionId, conn.id), eq(pmLinks.externalId, body.externalId)));
+      .where(and(eq(pmLinks.connectionId, conn.id), eq(pmLinks.externalId, body.externalId)))
+      .orderBy(asc(pmLinks.createdAt), asc(pmLinks.id))
+      .limit(1);
     await db.insert(pmSyncEvents).values({
       connectionId: conn.id,
       linkId: link?.id ?? null,
@@ -1047,6 +1089,7 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
 
     // §4 mirror — best-effort, surfaced, never blocking the local record.
     let pmMirror: { ok: boolean; action?: string; externalId?: string; error?: string } | null = null;
+    // ADR-0107 (F01): connection-blind; see `mirrorNodeStatus`. Oldest wins.
     const [parentLink] = await db
       .select()
       .from(pmLinks)
@@ -1057,7 +1100,9 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
           isNull(pmLinks.nodeId),
           isNull(pmLinks.orphanedAt),
         ),
-      );
+      )
+      .orderBy(asc(pmLinks.createdAt), asc(pmLinks.id))
+      .limit(1);
     if (parentLink && opts.dataKey) {
       const [conn] = await db
         .select()

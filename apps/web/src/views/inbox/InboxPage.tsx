@@ -102,7 +102,7 @@ export default function InboxPage() {
     if (a.selfReview && !reason) {
       setRowErrors((e) => ({
         ...e,
-        [a.id]: "This is a self-review (the approver is the requesting user) — a reason is required.",
+        [a.id]: "This is a self-review (you would be deciding your own request) — a reason is required.",
       }));
       return;
     }
@@ -181,7 +181,7 @@ export default function InboxPage() {
                       )}
                     </span>
                     {a.selfReview && (
-                      <Badge tone="warn" title="The approver is the user who triggered the governed action — deciding requires a recorded reason">
+                      <Badge tone="warn" title="Deciding this would approve your own request — whether you are the named approver or received it through a delegation, a recorded reason is required">
                         self-review
                       </Badge>
                     )}

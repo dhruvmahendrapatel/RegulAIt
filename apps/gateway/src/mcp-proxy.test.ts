@@ -9,6 +9,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { z } from "zod";
 import { and, connectors, createDb, eq, mcpTools, modelCredentials, projects, runMigrations, usageEvents, type Db } from "@regulait/db";
+// ADR-0104 — the consent fingerprint the approvals queue row is bound to.
+import { approvalArgumentsDigest } from "@regulait/shared";
 import { resolveModelProvider, type MockModelProvider } from "@regulait/model-provider";
 import { buildApp } from "./app.js";
 import { currentPeriodKey } from "./projects.js";
@@ -335,11 +337,24 @@ describe("approvals through the proxy (§3 + §6 queue)", () => {
     expect(wrongDecider.statusCode).toBe(403);
   });
 
-  it("an approved call goes through once, consumes the approval, and audits the full journey", async () => {
+  it("an approved call goes through once, ONLY for the arguments it was approved for, and audits the full journey", async () => {
+    // ADR-0104 TIGHTENED THIS TEST. It used to prove only "an approval is
+    // single-use", which said nothing about WHICH call may spend it — and that
+    // silence was the finding: the approved-approval lookup keyed on
+    // user/server/tool/status, so a signature for one payload was spendable on
+    // any other. Every original assertion below is intact; a step was ADDED
+    // before the successful call, and the effects sequence grew by the
+    // require_approval that step now (correctly) produces.
     const queue = await app.inject({ method: "GET", headers: AUTH, url: "/v1/approvals?status=pending" });
-    const approvalId = queue
-      .json()
-      .approvals.find((a: { userId: string }) => a.userId === daveId).id;
+    const queued = queue.json().approvals.find((a: { userId: string }) => a.userId === daveId);
+    const approvalId = queued.id;
+
+    // The approver is no longer deciding blind: the row carries the SCRUBBED
+    // payload they are signing, and the fingerprint of the raw one.
+    expect(queued.argumentsPreview).toEqual({ text: "hi" });
+    expect(queued.argumentsDigest).toBe(
+      approvalArgumentsDigest({ projectId: null, arguments: { text: "hi" } }),
+    );
 
     const decide = await app.inject({
       method: "POST",
@@ -350,6 +365,21 @@ describe("approvals through the proxy (§3 + §6 queue)", () => {
     expect(decide.json().status).toBe("approved");
 
     const client = await mcpClientFor(daveId);
+
+    // THE ADDED STEP. Carol signed `{text:"hi"}`. A call with different
+    // arguments is a different call, and this approval is not consent for it.
+    // Before ADR-0104 this line SUCCEEDED — that was the hole.
+    await expect(
+      client.callTool({ name: "write_note", arguments: { text: "tampered" } }),
+    ).rejects.toThrow(/Approval required/);
+    // ...and it did not burn Carol's signature on the way past
+    const stillApproved = await app.inject({
+      method: "GET", headers: AUTH, url: "/v1/approvals?status=approved",
+    });
+    expect(
+      stillApproved.json().approvals.some((a: { id: string }) => a.id === approvalId),
+    ).toBe(true);
+
     const result = await client.callTool({ name: "write_note", arguments: { text: "hi" } });
     expect(result.content).toEqual([{ type: "text", text: "wrote: hi" }]);
 
@@ -369,7 +399,15 @@ describe("approvals through the proxy (§3 + §6 queue)", () => {
       .json()
       .entries.map((e: { effect: string }) => e.effect)
       .reverse();
-    expect(effects).toEqual(["require_approval", "require_approval", "allow", "require_approval"]);
+    // one MORE require_approval than before: the tampered attempt. The shape is
+    // otherwise unchanged — pause, pause, [pause], allow, pause.
+    expect(effects).toEqual([
+      "require_approval",
+      "require_approval",
+      "require_approval",
+      "allow",
+      "require_approval",
+    ]);
   });
 
   it("a denied approval does not let the call through", async () => {
@@ -1370,7 +1408,16 @@ describe("workflow engine (EPIC-03 slice)", () => {
     });
     expect(started.statusCode).toBe(201);
     const instanceId = started.json().id;
-    expect(started.json().status).toBe("blocked_on_artifact");
+    // ADR-0079: standardDef opens with a planning stage, which now RESTS
+    // (plan-only) instead of auto-completing — leaving it is an explicit act.
+    expect(started.json().status).toBe("blocked_on_plan");
+    const left = await app.inject({
+      method: "POST",
+      headers: leoAuth,
+      url: `/v1/workflows/instances/${instanceId}/advance`,
+      payload: { stageId: "plan" },
+    });
+    expect(left.json().status).toBe("blocked_on_artifact");
 
     const v1 = await app.inject({
       method: "POST",
@@ -1481,6 +1528,13 @@ describe("workflow engine (EPIC-03 slice)", () => {
     expect(stageIds).toContain("requirements_signoff");
     expect(stageIds).toContain("compliance_signoff");
 
+    // ADR-0079: leave the merged template's plan-only stage first
+    await app.inject({
+      method: "POST",
+      headers: leoAuth,
+      url: `/v1/workflows/instances/${instanceId}/advance`,
+      payload: { stageId: "plan" },
+    });
     // walk to the compliance gate: artifact → own sign-off → build/checks
     await app.inject({
       method: "POST",

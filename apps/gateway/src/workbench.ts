@@ -229,6 +229,28 @@ export async function ensureAssignment(
   return assignment;
 }
 
+/**
+ * ADR-0046's ONE approver-moving write: point a PENDING approval's single
+ * NOT NULL named approver at somebody else. It NEVER decides — the approval
+ * stays pending, it is simply now somebody else's to decide — and it refuses
+ * (returns false) on anything no longer pending, so a decided row can never
+ * be quietly re-pointed. Both the SLA `reassign` escalation below and the
+ * ADR-0090 campaign-item reassignment (grant-certification.ts) call THIS,
+ * not a copy: one mechanism, one place for a future guard to live.
+ */
+export async function reassignApprovalApprover(
+  db: Db,
+  approvalId: string,
+  newApproverUserId: string,
+): Promise<boolean> {
+  const [moved] = await db
+    .update(approvals)
+    .set({ approverUserId: newApproverUserId })
+    .where(and(eq(approvals.id, approvalId), eq(approvals.status, "pending")))
+    .returning();
+  return moved !== undefined;
+}
+
 // ---------------------------------------------------------------------------
 // SLA evaluation + escalation
 // ---------------------------------------------------------------------------
@@ -285,12 +307,9 @@ export async function evaluateAssignmentSla(
     policy.escalateToKind === "user" &&
     policy.escalateToId
   ) {
-    const [moved] = await db
-      .update(approvals)
-      .set({ approverUserId: policy.escalateToId })
-      .where(and(eq(approvals.id, row.id), eq(approvals.status, "pending")))
-      .returning();
-    if (moved) reassignedTo = policy.escalateToId;
+    if (await reassignApprovalApprover(db, row.id, policy.escalateToId)) {
+      reassignedTo = policy.escalateToId;
+    }
   }
 
   if (verdict.breachedNow) {
@@ -862,6 +881,14 @@ export function registerWorkbenchRoutes(app: FastifyInstance, db: Db, opts: Work
       // §4's sensitivity fence — evaluated PER ITEM, before the decision. A
       // batch containing one high-sensitivity item does not lose the fence
       // because the other items are ordinary.
+      //
+      // DELIBERATELY project-scoped, unlike the dispatch surfaces: the
+      // ADR-0021 floor governs what may be SENT OUT of the gateway, and an
+      // approval decision sends nothing anywhere. Routing unattributed rows
+      // through the floor here would turn a PII posture into an approvals-
+      // ergonomics policy — an org that sets a block floor would silently
+      // lose bulk decide on every unattributed approval in the queue. The
+      // ternary below is therefore intentional, not a missed call site.
       const piiMode = row.projectId ? await projectPiiMode(db, row.projectId) : null;
       if (bulkSensitivityFenced({ enabled: org.approvalBulkSensitiveBlocked, projectPiiMode: piiMode })) {
         const detail =

@@ -53,7 +53,7 @@ interface Lineage {
   active: VersionRow | null;
   canary: VersionRow | null;
   history: ActivationEvent[];
-  canaryMode: "live" | "shadow";
+  canaryMode: "live" | "shadow" | "inert";
   note: string;
 }
 interface TrafficRow {

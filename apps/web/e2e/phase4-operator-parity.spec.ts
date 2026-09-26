@@ -144,6 +144,8 @@ test.describe("admin console parity", () => {
   });
 
   test("gap 1: a rule is deploy-mode scoped inline, and cleared again (ADR-0027 A4)", async () => {
+    // ADR-0094: reach a suite's page from anywhere via the cross-suite filter
+    await page.getByLabel("Filter navigation").fill("Rules engine");
     await page.getByRole("link", { name: "Rules engine", exact: true }).click();
     await expect(page.getByRole("heading", { name: "Rules engine", exact: true })).toBeVisible();
     // the disclosure that mode scoping can only ever NARROW, never mint an allow
@@ -189,6 +191,7 @@ test.describe("admin console parity", () => {
   });
 
   test("gap 2: an existing revocation is narrowed to read_only and restored (ADR-0027 O9)", async () => {
+    await page.getByLabel("Filter navigation").fill("Users");
     await page.getByRole("link", { name: "Users", exact: true }).click();
     await expect(page.getByRole("heading", { name: "Users", exact: true })).toBeVisible();
     await page.locator("tbody tr[role='link']").first().click();

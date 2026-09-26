@@ -14,24 +14,38 @@ body,
 
 body {
   margin: 0;
-  background: var(--surface-0);
-  color: var(--text);
-  font-family: var(--font-sans);
+  background: var(--rg-canvas);
+  color: var(--rg-ink-body);
+  font-family: var(--rg-font);
   font-size: var(--text-md);
   line-height: 1.55;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
 
+/* Gantari carries headings, numbers and buttons at weights 600–800 — and is
+   never used for body copy. Figtree carries body and UI copy. */
 h1,
 h2,
 h3,
+h4,
+h5,
+h6 {
+  margin: 0;
+  font-family: var(--rg-font-display);
+  font-weight: var(--rg-heading-weight);
+  letter-spacing: var(--rg-heading-track);
+  line-height: var(--rg-heading-line);
+  color: var(--rg-ink);
+  text-wrap: balance;
+}
+
 p {
   margin: 0;
 }
 
 a {
-  color: var(--primary);
+  color: var(--rg-signal-700);
   text-decoration: none;
 }
 a:hover {
@@ -46,21 +60,95 @@ textarea {
   color: inherit;
 }
 
+/* Control IDs, hashes and timestamps set in mono, with tabular figures so they
+   align down a column. */
 code,
-pre {
-  font-family: var(--font-mono);
+pre,
+.rg-mono {
+  font-family: var(--rg-font-mono);
+  font-variant-numeric: tabular-nums;
 }
 
-/* Visible focus everywhere — keyboard users are first-class. */
+/* Ellipsis with the full value in `title` — see the tables contract. */
+.rg-truncate {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Uppercase mono kickers track +14%. */
+.rg-kicker {
+  font-family: var(--rg-font-mono);
+  font-size: var(--text-xs);
+  font-weight: 400;
+  letter-spacing: var(--rg-kicker-track);
+  text-transform: uppercase;
+  color: var(--rg-ink-muted);
+}
+
+/* A caption names a *section*. A label names a *control*. Marking a section
+   heading up as a <label> announces a field that never arrives — the single
+   most common defect the UI Structures doc records (252 of 303 labels in the
+   source app). If nothing follows it, it is a caption. */
+.rg-caption {
+  display: block;
+  font-family: var(--rg-font-display);
+  font-weight: 700;
+  font-size: var(--text-md);
+  letter-spacing: -0.01em;
+  color: var(--rg-ink);
+}
+
+/* Skip link — the first focusable element on the page, so a keyboard user
+   reaches content in one tab.
+
+   Hidden with the clip-rect technique rather than by translating it off the top
+   of the page: clipping leaves the link inside the viewport at a real 1px box,
+   so it does not depend on the page being scrollable to where it sits. Both
+   approaches work in Chromium today; this is the more conservative one.
+
+   `e2e/brand-contract.spec.ts` proves the link is genuinely the first tab stop
+   by driving Tab, rather than asserting the element is present — presence is
+   not the property that matters here. */
+.rg-skip-link {
+  position: absolute;
+  left: var(--s1);
+  top: var(--s1);
+  z-index: 100;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  background: var(--rg-surface);
+  color: var(--rg-ink);
+  border-radius: var(--rg-r-sm);
+  font-weight: 600;
+}
+.rg-skip-link:focus-visible {
+  width: auto;
+  height: auto;
+  padding: var(--s1) var(--s2);
+  border: 1px solid var(--rg-line-strong);
+  overflow: visible;
+  clip-path: none;
+  box-shadow: var(--rg-shadow-lg), var(--focus-ring);
+}
+
+/* Visible focus everywhere — keyboard users are first-class. Never the default
+   browser ring; always Signal. */
 :focus-visible {
   outline: none;
   box-shadow: var(--focus-ring);
-  border-radius: var(--radius-sm);
+  border-radius: var(--rg-r-sm);
 }
 
 ::selection {
-  background: var(--primary-soft);
-  color: var(--primary-soft-text);
+  background: rgba(0, 185, 212, 0.25);
+  color: var(--rg-ink);
 }
 
 @media (prefers-reduced-motion: reduce) {

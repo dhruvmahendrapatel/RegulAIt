@@ -383,6 +383,13 @@ describe("compliance defaults", () => {
     // MODE, it does not blanket-deny the project
     const clean = await invoke(umaAuth, cheapAgentId, { input: "no personal data here", projectId });
     expect(clean.statusCode).toBe(200);
+
+    // RESET — org_settings is a process-wide singleton and the files after
+    // this one share the database. Before the ADR-0021 floor amendment a
+    // leaked 'block' was invisible (unattributed calls ignored the default);
+    // now it would 403 every later PII-looking unattributed dispatch, which is
+    // exactly the order-dependency disease task #119 cured once already.
+    await putOrg({ defaultPiiMode: "none" });
   });
 
   it("env-key fallback off => provider honestly unconfigured and dispatch 409s (no env-var hint)", async () => {
@@ -534,6 +541,13 @@ describe("approvals — org quorum", () => {
     });
     expect(started.statusCode).toBe(201);
     const instanceId = started.json().id as string;
+    // ADR-0079: the planning stage rests — leave plan-only before the artifact
+    await app.inject({
+      method: "POST",
+      headers: umaAuth,
+      url: `/v1/workflows/instances/${instanceId}/advance`,
+      payload: { stageId: "plan" },
+    });
     await app.inject({
       method: "POST",
       headers: umaAuth,

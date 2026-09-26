@@ -120,7 +120,22 @@ describe("the PATCH endpoint", () => {
     });
     expect(set.statusCode).toBe(200);
     expect(set.json().pricePerCallUsd).toBe(0.05);
-    const [audit] = await db.select().from(auditLog).where(eq(auditLog.ruleId, "mcp-tool-price-set"));
+    // ADR-0108: measured at TWO rows under the full suite — mcp-project-budget
+    // .test.ts drives the same PATCH against its own server, and runs first.
+    // Its row happens to carry the identical {before: null, after: 0.05}, so
+    // this assertion passes on either row TODAY, by coincidence rather than by
+    // construction. Pin the row this test wrote: the writer stamps server_id
+    // and tool_name (mcp-proxy.ts), so naming both is exact.
+    const [audit] = await db
+      .select()
+      .from(auditLog)
+      .where(
+        and(
+          eq(auditLog.ruleId, "mcp-tool-price-set"),
+          eq(auditLog.serverId, serverId),
+          eq(auditLog.toolName, "o10_pricey"),
+        ),
+      );
     expect(audit).toBeTruthy();
     expect(audit!.detail).toMatchObject({ before: null, after: 0.05 });
   });

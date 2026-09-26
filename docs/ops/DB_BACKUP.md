@@ -244,12 +244,50 @@ docker exec -i "$CID" sh -c 'PGPASSWORD="$POSTGRES_PASSWORD" dropdb -U "$POSTGRE
    consumed and the acceptance is in the audit log with both fingerprints.
    Every connector token, model API key and TOTP enrolment must then be
    re-entered by hand. Nothing re-encrypts the old ciphertext; it is dead.
+   (If you still HOLD the old key and simply want to move to a new one, do
+   not use this path at all — run the re-encryption walk in section III-b,
+   which rewrites every row and loses nothing.)
 8. **Attest the new key** so this deployment does not repeat the exercise:
    ```bash
    curl -sS "$API/v1/security/data-key/attestations" \
      -H "Authorization: Bearer <admin key>" -H 'Content-Type: application/json' \
      -d '{"method":"password_manager","locationHint":"1Password vault: Platform Ops","confirmRecordedOutOfBand":true}'
    ```
+
+---
+
+## III-b. Rotate the data key WITH re-encryption (you hold both keys)
+
+This is the deliberate-rotation path (ADR-0063 §4's follow-up, batch B4): every ciphertext row
+is genuinely rewritten under the new key. Use it when the old key is compromised, leaving with
+an operator, or aging out — NOT for the lost-key case (that is §III step 7, and it costs you
+the ciphertext).
+
+1. **Generate the new key and record it out of band FIRST** (same custody rules as install —
+   the walk must never be the only place the new key exists).
+2. **Run the walk** on the box, as a CLI — deliberately not over HTTP, where a proxy timeout
+   mid-walk and a retry racing the first attempt are both live risks:
+   ```bash
+   REGULAIT_DATA_KEY=<the NEW key> REGULAIT_DATA_KEY_OLD=<the OLD key — full 64 hex, not the fingerprint> \
+     pnpm --filter @regulait/gateway reencrypt
+   ```
+   It refuses without both keys, refuses if any `*_ciphertext` column exists that its work
+   list does not name (fail closed), and exits 0 saying "nothing to do" if a previous walk
+   already finished. Batches are transactional with a per-table watermark, so a crash or
+   ctrl-C is safe: **re-run the same command and it resumes exactly where it stopped** — no
+   row processed twice, none missed. Watch progress from another terminal via
+   `GET /v1/security/data-key/reencryption` (admin).
+3. **Read the exit honestly.** Exit 0 = every row is under the new key. Exit 2 =
+   `completed_with_failures`: some rows decrypted under NEITHER key — they are listed in the
+   output and in the run's failure record (table + id), everything else was rotated. Those
+   rows were already unreadable; re-enter those specific credentials by hand.
+4. **Switch the gateway to the new key**: set `REGULAIT_DATA_KEY` to the new key, remove
+   `REGULAIT_DATA_KEY_OLD`, restart. No `REGULAIT_DATA_KEY_ROTATED_FROM` declaration is
+   needed — the walk already re-recorded the fingerprint, so the boot is an ordinary
+   `verified`.
+5. **Only after the walk reports completed: destroy the old key** everywhere it was recorded
+   (password manager entry, escrow copy). Destroying it earlier turns every not-yet-walked
+   row into a failure. Then **attest the new key** (step 8 above).
 
 ---
 

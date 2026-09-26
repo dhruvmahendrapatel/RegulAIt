@@ -496,3 +496,212 @@ the cited source holds the detail. This is an index, not a commitment to build a
 | 15 | ~~`key_custody` + `network` enforcement rungs — declared, not enforced~~ **key_custody SHIPPED 2026-07-31 (ADR-0024)** — `key_custody_enforced` makes BYO user credentials 409 + inert at dispatch (reversible), posture UI labels enforced-vs-declared honestly; `network` documented as an egress-allowlist recipe in IDE_INTEGRATION.md (infra-level by nature — product-side portion done; the actual egress control remains a Batch C/BYOC infra concern) | ADR-0020 / Batch H ladder → ADR-0024 | **done** (product side) |
 | 16 | Deeper a11y — beyond the shipped contrast/focus/aria-live pass (full keyboard-nav audit, screen-reader flows) | UX/a11y pass (STATE.md addendum 33) | **D** |
 | 17 | ~~Login by **user ID / username** instead of email~~ **SHIPPED 2026-08-01 (ADR-0030)** — nullable+unique `users.username` (migration 0047) whose CHECK forbids `@`, making the username and email namespaces provably disjoint so one login field resolves both ('@' ⇒ email, else username) with no impersonation path; case-insensitive by construction (lowercase-only storage, normalize-on-write); `{email, password}` still accepted so every shipped client keeps working; ADR-0025's uniform 401 (status, body AND scrypt cost) holds across the new namespace; admin-managed by default with an `org_settings.username_self_service` opt-in; OIDC deliberately still maps on verified email | owner request 2026-07-31 (ADR-0028 session) → ADR-0030 | **done** |
+
+---
+
+## 7. ISACA — *Cybersecurity Recommendations for Securing AI Agents* (2026)
+
+*Added 2026-09-25 at the owner's request: read the paper, say what we can take from it, and put it
+on the roadmap rather than building it now. Nothing below is committed.*
+
+**Why this document is worth taking seriously.** It is not a framework we would have to contort the
+product to fit. Its 11 practice categories are close to a description of what this product already
+is — a deterministic policy enforcement point between agent outputs and action-capable systems,
+with human approval for high-risk actions and a tamper-resistant ledger. Two of its controls read
+almost as our own design notes: *"do not let retrieved content directly trigger actions without a
+separate policy decision"* and *"implement a deterministic PEP … validating action type, target
+system, actor identity, authorization, business rules, risk thresholds, and required approvals."*
+
+That cuts both ways. Where we do **not** match it, the gap is conspicuous precisely because the rest
+lines up — and a security-led buyer (which Reynolds is) will read this paper.
+
+### 7.1 Honest self-assessment against the 15-item Secure-by-Default checklist
+
+Audited against **enforcing code**, not ADRs. Anything that could not be traced to code that runs is
+marked accordingly.
+
+| # | Checklist item | Us | Note |
+|---|---|---|---|
+| 1 | Inventory agents, tools, models, memory, providers | **Partial** | `GET /v1/inventory/*` covers agents, connectors, MCP servers, grants, providers, vendors, use cases, risks, and splits *granted* from *observed*. **Memory stores are not inventoried at all.** |
+| 2 | Trust boundaries and owners | **Partial** | Owners exist on agents, risks, vendors, use cases. Boundaries are implicit (deploy mode, project cascade, egress allow-list); no first-class object, and MCP servers/connectors have no owner. |
+| 3 | Per-agent identity, least privilege | **No, as specified** | Least privilege is real but **per-human**. `tool_grants` is `(userId, serverId, toolName)`; the ABAC schema has only a `User` principal. An agent's effective permission is the union of its grant-holders'. |
+| 4 | Short-lived credentials, federated identity | **Partial** | Real STS for customer cloud infra; expiry primitives on API keys, virtual keys, sessions, approvals. **No federated workload identity for agents**; model-provider credentials are long-lived stored keys. |
+| 5 | Sandbox execution, network segmentation | **No (sandbox)** | We proxy to remote MCP servers; nothing executes tools locally, so there is no sandbox to speak of — and also no local execution risk. Network side is one flat compose network and a wide-open Terraform egress rule. |
+| 6 | Deny outbound by default | **Yes** (application layer) | The egress guard: default-deny allow-list, no wildcards, resolved-address range blocks, IMDS carve-out, redirect refusal, DNS-rebind closed. Enforced at write time *and* every dispatch. Process-level egress is still open. |
+| 7 | Treat retrieved content and tool output as untrusted | **Partial** | A prompt-injection detector runs at **runtime** on MCP tool arguments *and output*, and on agent input/output. But it ships in `log` mode, does not see conversation history, system prompts or shared context, and there is **no provenance/trust-level tagging and no instruction-hierarchy enforcement**. |
+| 8 | Memory isolation and retention | **Partial** | Isolation is good (cache scoped per user+agent, conversations own-scoped, project context membership-gated). **Retention is not enforced** — the cache TTL is a read-time filter with no purge job, and conversations have no sweeper. |
+| 9 | All tool actions behind a PEP | **Yes** | One choke point: `governedEvaluate` → the policy kernel. Entitlements, ABAC, approvals, rate limits, data scopes, budgets, PII, guardrails, admission, plan-only. |
+| 10 | Human approval for high-risk actions | **Partial** | Strong core: payload-bound consent, policy-bound consent with TTL, atomic single-winner consume, SoD. **Missing: dual control** (tool-call rules name one approver) **and step-up re-auth** (MFA is a login-time session attribute). |
+| 11 | Log prompts, tool calls, decisions, approvals with redaction | **Yes** | Hash-chained ledger, WORM anchoring graded by asking the bucket, credential scrub at the DB chokepoint over 53 declared prose columns. *(The one hole found — an unaudited agent enable/disable — was closed in ADR-0123.)* |
+| 12 | Pin models and dependencies; SBOM; signing | **Partial — our weakest** | Ed25519-signed update bundles with verify-before-apply is real. **No SBOM or AI-BOM, no image signing, no digest-pinned base image, and no model version/endpoint pinning** (`agents.model` is a free-form string). |
+| 13 | Secure SDLC and change control | **Split** | *In-product* change control is strong (immutable versions, canary, rollback, policy dry-run, workflow gates). *Our own* CI runs build/typecheck/test only — no SAST, dependency, secret or container scanning. |
+| 14 | Kill switches, rollback, safe mode | **Partial — no kill switch** | Rollback is real. **There is no kill switch**: no global stop, no per-tool emergency disable. The nearest thing is a per-agent `enabled` flag (enforced in the kernel, now audited). **No read-only or recommendation-only mode** at agent or deployment scope. |
+| 15 | Continuous red teaming | **Yes — our strongest** | Versioned attack libraries including indirect prompt injection, multi-turn sequences, an adjudicator that asks the kernel what it *would* decide and executes nothing, a scheduled daily sweep, regression gating, evidence onto model cards. |
+
+**Score when this was written: 4 full, 9 partial, 2 absent.** *(Item 14 — kill switches, rollback,
+safe mode — moved to substantially covered on 2026-09-25 with ADR-0124; the table above is left as
+written so the assessment is not quietly rewritten after the fact.)* For a product this young that is a good
+result, and the two absent ones are both in category 11 (*Reliability, Resilience, Kill Switches*) —
+the one category we have barely touched.
+
+### 7.2 What to build, ranked
+
+Ordered by *buyer-visible gap × cost to close*, not by how interesting it is.
+
+| # | Item | Why | Rough size |
+|---|---|---|---|
+| ~~**I1**~~ | ~~**Kill switch + safe mode.**~~ **SHIPPED 2026-09-25 (ADR-0124, migration 0114)** — one org dial (`normal`/`read_only`/`require_approval`/`halted`) checked ahead of every rule at all three kernel entry points, plus per-agent and per-tool halts that outrank it. Required kernel input, so the compiler enumerates the call sites. Reason required by DB CHECK to throw AND to lift; both directions audited under distinct rule ids. Reading, discovery, the platform's own governance sweeps and evaluation-that-executes-nothing are all deliberately ungated. The operator's screen (`/admin/execution`) shipped the same day, with four Playwright tests including a reload **while halted**. Remaining: no automatic/scheduled trip, one approver for the whole deployment, and no per-connector halt. A global stop, a per-agent and per-tool emergency disable, and a deployment-wide read-only/recommendation-only mode. Audited, reversible, reason-required, surfaced on the posture page. | The single most conspicuous absence for a governance product, and the one a CISO asks about first. ISACA lists it twice (checklist 14, category 11). We already have every primitive — `enabled`, `plan-only`, connector `read` mode — but nothing that reads as an emergency control. | **M** |
+| **I2** | **An ISACA compliance pack.** The 15-item checklist is almost exactly the shape of a pack: one control per item, `collector` where we can evidence it, `attestationRequired` where it is organisational. | Cheapest credibility in the list — the machinery exists (ADR-0058), and §7.1 shows most controls would evidence themselves. It also makes our own gaps visible on our own dashboard, which is the right pressure. | **S** |
+| **I3** | **Memory retention that actually runs.** A TTL/purge sweep for `semantic_cache` and a conversation retention policy, driven by the existing scheduler. | We *declare* retention and do not enforce it. `semantic_cache` holds prompts and outputs and is never deleted — a privacy finding waiting to be written up, and ISACA calls it out explicitly. | **S/M** |
+| **I4** | **Content provenance and trust levels.** Tag retrieved content and tool output with a source trust level, and refuse to let low-trust content carry high action authority. Plus an instruction-hierarchy boundary so external content cannot override system instructions. | ISACA's category 5 in one line, and the thing our injection detector cannot do: it pattern-matches text rather than tracking where the text came from. This is a real differentiator, not just a gap-filler. | **L** |
+| **I5** | **SBOM / AI-BOM, image signing, model pinning.** CycloneDX in CI, cosign on the image, digest-pinned base, and a pinned model-version concept beside the free-form `agents.model`. | Supply chain is our weakest row and the easiest to be embarrassed on: a buyer asks for an SBOM and we have none. Model pinning also closes a real governance hole — a provider can change what `gpt-5` means underneath an approved model card. | **M** |
+| **I6** | **Dual control and step-up auth.** Quorum on tool-call approval rules (workflow stages already have it), and a re-authentication challenge at the sensitive action rather than a login-time MFA attribute. | ISACA asks for both explicitly for destructive/financial/irreversible actions. We have the approval machinery; this is an extension of it rather than a new subsystem. | **M** |
+| **I7** | **Per-agent identity.** An Agent principal in the ABAC schema, with its own entitlements rather than the union of its grant-holders'. | The most architecturally significant item here and the one we should be slowest about — it touches the kernel. But "least privilege for agents" is not a claim we can make today, and ISACA's category 3 is entirely about it. | **XL** |
+| **I8** | **Our own security CI.** SAST, dependency, secret and container scanning on the repository. | Not customer-facing, but it is checklist item 13 and we would fail our own pack. | **S** |
+| **I9** | **Memory-store inventory and connector/server ownership.** Extend the inventory to memory stores; add owners to MCP servers and connectors. | Closes checklist items 1 and 2 to *full*, cheaply. | **S** |
+| **I10** | **Data classification handling matrix** (ISACA Appendix A). Its Store/Send/Access/Keep/Dispose verbs per classification tier map onto our compliance-profile cascade, which already drives retention and PII mode. | Would let a compliance profile express handling rules in a vocabulary an auditor already knows. | **M** |
+
+### 7.3 Two things to change in how we *talk*, not what we build
+
+- **Do not claim "least privilege for agents."** We enforce least privilege for the *humans* who
+  hold agent grants. Until I7, the accurate sentence is "every agent call is bound to an entitled
+  human identity" — which is a strong claim, and a different one.
+- **The injection detector should be described as a detector, not a defense.** It runs at runtime on
+  tool arguments and output, which is more than registration-time scanning — and it ships in `log`
+  mode with no provenance model, which is less than a defense. Both halves, or neither.
+
+---
+
+## 8. Gateway parity — "a central point for every MCP call", measured against Kong
+
+*Added 2026-09-26 at the owner's request: confirm we already work as a gateway, and say what
+`github.com/Kong/kong` has that we do not. Nothing below is committed. Kong's own positioning has
+moved — its README now calls it an "**API · LLM · MCP** Gateway", and MCP is a first-class product
+line (`ai-mcp-proxy`, Gateway 3.12+, **AI Gateway Enterprise only**). So this is a direct overlap,
+not an analogy, and it is worth being exact about.*
+
+### 8.1 Confirmed: the gateway exists, and it is in-line
+
+Yes — this is already a gateway, not a policy library. Every governed call is made **by us**, over
+a socket **we** open, after the decision:
+
+| Surface | Route | Note |
+|---|---|---|
+| MCP | `POST /mcp/:serverId` — `apps/gateway/src/mcp-proxy.ts:1203` | the upstream connection is opened at `mcp-proxy.ts:1278`, **before the JSON-RPC body is interpreted**, so egress and admission refusals come back as plain HTTP rather than protocol errors |
+| OpenAI-compatible | `POST /v1/chat/completions` — `compat-openai.ts:438` | |
+| Anthropic-compatible | `POST /v1/messages` — `compat-anthropic.ts:454` | |
+| Model discovery | `GET /v1/models` — `compat-models.ts:153` | |
+| Native dispatch | `POST /v1/agents/:agentId/invoke` — `agents-connectors.ts:3303` | |
+| Connectors | `POST /v1/connectors/:connectorId/invoke` — `agents-connectors.ts:4662` | |
+
+`tools/list` is governance-filtered through `visibleTools` (`mcp-proxy.ts:1327`) and `tools/call`
+runs `executeGovernedToolCall` (`mcp-proxy.ts:285`), which maps ten distinct governance outcomes
+onto typed MCP errors (`mcp-proxy.ts:1396-1474`). There is also an out-of-band PDP —
+`POST /v1/evaluate` (`app.ts:2018`), decision-only, consumes no approvals.
+
+**Three caveats that belong in the same breath as the confirmation.**
+
+1. **It is not a transparent proxy — it is a method-aware re-implementation.** Exactly two MCP
+   methods are handled: `ListToolsRequestSchema` (`mcp-proxy.ts:1306`) and `CallToolRequestSchema`
+   (`mcp-proxy.ts:1373`). `resources/*`, `prompts/*`, `completion/*`, `logging/*`, sampling and
+   notifications have **no handler anywhere** in the repo, so the SDK answers `MethodNotFound`.
+   Nothing is byte-forwarded. For governance that is a feature — an unknown method cannot slip
+   through ungoverned. For "central point for **all** MCP traffic" it is a conformance gap: a
+   server whose value is its resources or prompts cannot be fronted by us at all.
+2. **One transport, inbound and out.** Streamable HTTP only, stateless, one transport per request,
+   no session id (`mcp-proxy.ts:1479`, comment: *"Stateless mode … no session tracking yet"*).
+   Zero hits repo-wide for `StdioClientTransport` or any SSE transport. **stdio — a local
+   subprocess, and the single most common MCP deployment shape — cannot be fronted by us.** The
+   discovery work (ADR-0122) already concedes this in the payload; the gateway inherits it.
+3. **Being in the path is an operator posture, not an invariant.** Enforcement depends entirely on
+   the client choosing our base URL. No network capture, no mTLS client certs, no proof-of-transit.
+   A developer who points their SDK at the real upstream is invisible to us — which is precisely
+   what `shadow-ai.ts:861` exists to *detect afterwards*, not to prevent. The compat and MCP
+   surfaces can also be disabled per scope and then answer an indistinguishable 404
+   (`app.ts:696-745`).
+
+### 8.2 What Kong has that we do not
+
+Split three ways, because "Kong has it" is not by itself an argument for building it.
+
+**(i) Table stakes we are actually missing — these are the real list.**
+
+| Kong | Us | Evidence |
+|---|---|---|
+| Distributed rate limiting (`rate-limiting-advanced`, shared counters) | ~~**In-memory, per-process**~~ **CLOSED — ADR-0125, migration 0115** | the counters are a Postgres table now, with a local pre-filter in front so a flood cannot be turned into a write storm. Still no Redis, and none needed |
+| Request/connection timeouts, body limits | **Neither** | `Fastify({ logger: false, trustProxy })` — `app.ts:484`. A hung upstream MCP server holds the socket indefinitely |
+| Active/passive upstream health checks, retries, circuit breaking | **Health: none. Retries: only `maxRetries: 2` inside the model SDKs** (`packages/model-provider/src/index.ts:266`). **Breaker: none** | one bad MCP server degrades every caller until a human notices |
+| Load balancing across upstream instances | **One logical server = one URL** (`mcpServers.url`) | the nearest analogue is `agent_fallbacks`, an ordered *failover* chain on dispatch failure (`agents-connectors.ts:553`) — not balancing |
+| Prometheus `/metrics` | **None** | zero hits for `/metrics` or `prom-client`; Fastify's own logger is explicitly off (`app.ts:484`). We have a rich DB-backed audit + usage ledger and OTel-GenAI span export (`packages/shared/src/tracing.ts:258`) — but nothing an SRE can scrape |
+| Declarative config (decK, DB-less mode, GitOps) | **Everything is DB rows** | no route/service/upstream manifest, no yaml dependency anywhere. `config-versions.ts` versions governance artifacts, which is adjacent but not the same thing |
+| Hybrid control-plane / data-plane, clustering, config propagation | **Single process, config read from Postgres per request** | scheduler health is in-process on purpose (`app.ts:3055`) |
+| Plugin SDK (Lua/Go/JS), 300+ plugin hub | **No extension point** | behaviour is added by editing `register*Routes` in `app.ts:122-324` |
+| CORS | **None** | no `@fastify/cors`, no `Access-Control-*` emitted. Browser-hosted MCP clients cannot reach us |
+| mTLS / client certificates | **None** | TLS is terminated by a Caddy sidecar (`docs/ops/TLS.md:21`); the gateway speaks plain HTTP |
+| Multi-tenancy | **One deployment = one org** | `org_settings` is an enforced singleton (`org-settings.ts:63-76`). Fine for BYOC and air-gapped (pillar 3); a hard blocker for hosted fast-start |
+| Canary / traffic splitting | **None** | the interception ladder (`compat-core.ts:181`) is a feature-flag precedence chain, not traffic splitting |
+| Runtime service discovery | **Static rows** | the federated registry sync (`mcp-registry.ts:1148`) is catalogue → *explicit human import* → fixed URL, deliberately (ADR-0101) |
+| WebSocket / gRPC / L4 | **None** | *(Kong's own MCP plugin does not support these upstreams either — see (iii))* |
+
+**(ii) Things Kong has that we should deliberately not build.** A Kubernetes ingress controller, L4
+proxying, a Lua plugin runtime, and a 300-plugin hub are a different product. Chasing them turns a
+governance layer into a second-rate API gateway. The right posture for a customer who already runs
+Kong is **behind or beside it, not instead of it** — and we are unusually well placed for that,
+because `POST /v1/evaluate` (`app.ts:2018`) is already a decision-only PDP, which is the exact shape
+of an Envoy `ext_authz` / Kong pre-function callout. That is item **G9** below and it is cheap.
+
+**(iii) Where we are ahead, and it is not close.** Worth stating because the gap list above is long
+and it would be easy to read it as "Kong wins".
+
+- Kong's MCP access control is **allow/deny lists of Consumers and Consumer Groups**, evaluated
+  per tool. Ours is a per-user, per-tool entitlement with **approvals bound to the exact arguments
+  that were approved** (ADR-0104), separation of duties, consent expiry, and per-user revocation
+  that beats a role grant.
+- Kong's own docs list **"AI Guardrails: not supported"** for MCP traffic. We run prompt-injection
+  detection and PII handling on MCP tool arguments *and* output.
+- Hash-chained audit with WORM anchoring graded by asking the bucket (ADR-0060), signed offline-
+  verifiable export, compliance packs with computed evidence (ADR-0058) — Kong has logging plugins.
+- Default-deny egress with resolved-address range blocking, DNS pinning and redirect refusal
+  (`egress-guard.ts`, `mcp-egress.ts:186`), re-run on every dispatch.
+- Per-project cost attribution at the point of every gateway call (pillar 5), and the kill switch
+  at three scopes (ADR-0124).
+- And the commercial point: Kong's `ai-mcp-proxy` is **AI Gateway Enterprise**. The comparison a
+  prospect will actually make is against a paid tier, not against OSS Kong.
+
+### 8.3 What to build, ranked
+
+Ordered by *risk if we ship without it × cost to close*. **G1 and G2 are not feature work — they
+are defects**, and they should not wait behind anything on this list.
+
+| # | Item | Why | Rough size |
+|---|---|---|---|
+| ~~**G1**~~ | ~~**Shared rate-limit and budget counters.**~~ **SHIPPED 2026-09-26 (ADR-0125, migration 0115).** **And the item as originally written was too broad — worth recording, because the correction is the interesting part.** Auditing before building found that almost every enforcement counter here was ALREADY shared, because it was already SQL: the kernel's `rate_limits` is a `count()` over `audit_log` (`governed-evaluate.ts:406`), project budgets a `sum(usage_events)` (`projects.ts:252`), a virtual key's spend an atomic `spent_usd = spent_usd + x` (`virtual-keys.ts:248`), login lockout a column. **Exactly two were not**, and they failed in opposite directions: the HTTP edge limiter on `@fastify/rate-limit`'s per-process `Map` (N replicas enforced N × the ceiling while the posture page reported the ceiling), and `orchestration_runs.budget`, which was Postgres-backed but read-modify-write — so two nodes of one fanned-out run each wrote an absolute and the second erased the first's charges. Both fixed; both tests proven able to fail against the old code. | Today, scaling out silently multiplied one limit and lost parallel charges on another. We would be enforcing a number we cannot name. Worse than having no limit, because the dashboard says the limit is on. | **M** |
+| **G2** | **Timeouts, body limits, upstream retry and a breaker.** Fastify `requestTimeout`/`bodyLimit`, a connect+read deadline on MCP and model upstreams, and a circuit breaker per upstream. | A hung or hostile upstream currently has no bound. This is also the fix for the runbook's own "every MCP call returns a bare `{"error":"internal"}`" row — an upstream failure should be a *named refusal*, like `egress_blocked` and `mcp_admission_held` already are. | **S/M** |
+| **G3** | **MCP protocol conformance: `resources/*`, `prompts/*`, `completion/*`, `logging/*` and notifications** — each with its own governed decision, not a pass-through. | Without it, "central point for all MCP calls" is not a claim we can make. A resource read is a *data-access* decision and deserves the kernel, not a hole. Design note: keep refusing unknown methods; the value is that the governed set is enumerated. | **M/L** |
+| **G4** | **stdio and SSE upstream transports.** | stdio is the most common MCP deployment shape in the wild and we cannot front it at all. This is the single biggest hole in the coverage claim, and it is also the answer ADR-0122's discovery payload currently has to apologise for. | **M** |
+| **G5** | **`/metrics` (Prometheus) and first-class operational telemetry.** | We have excellent *governance* observability and effectively no *operational* observability. An SRE asked to run this has nothing to scrape and no request log — `logger: false`. Cheapest item here with a real buyer-facing answer. | **S** |
+| **G6** | **Session-aware MCP proxying.** Honour MCP sessions and resumable streams rather than one stateless transport per request. | Stateless-per-request is fine for tool calls and wrong for anything long-running. Also a prerequisite for G3's notifications. | **M** |
+| **G7** | **Declarative governed-estate config (our decK).** Export/import servers, tools, grants, rules, egress allow-list and org settings as a reviewable manifest, with plan/apply. | This is not Kong-envy — it is the answer to *"how do I review a policy change in a pull request?"*, which is a question pillar 2 should already have an opinion about. ADR-0120's policy simulation is the dry-run half; this is the artifact half. | **L** |
+| **G8** | **Upstream breadth: multiple URLs per logical MCP server, with active health checks and balancing.** | Follows G2 naturally and removes a single point of failure we currently hand every customer. | **M** |
+| **G9** | **Ship the PDP as a sidecar/callout** — an Envoy `ext_authz` and Kong pre-function adapter over `POST /v1/evaluate`, plus a documented deployment topology. | The highest-leverage item on this list per unit of work: it makes "you already have Kong, keep it" a *sale* rather than an objection, and the endpoint already exists and already executes nothing. | **S/M** |
+| **G10** | **Real multi-tenancy.** Retire the `org_settings` singleton (`org-settings.ts:63`) for a tenant-scoped model. | Pillar 3 promises a hosted fast-start mode. Today the product cannot serve two customers from one deployment. Large and invasive — worth doing once, deliberately, not incrementally. | **XL** |
+| **G11** | **Bypass prevention, so being in the path is an invariant.** mTLS client certs, and a documented network posture (egress allow-listing at the perimeter) so the gateway is the only route out. | Turns §8.1's third caveat from a caveat into a control. Partly a deployment-guide problem, not only code — which is why it is cheap to *document* and expensive to *enforce*. | **L** |
+| **G12** | **REST→MCP generation from an OpenAPI schema** (Kong's `conversion-*` modes). | Not table stakes, and genuinely useful: it would let a customer bring a governed internal API into the agent estate without writing an MCP server. Worth a decision, not an assumption. | **M** |
+
+### 8.4 How to talk about it
+
+- **Say "governed MCP gateway", not "MCP gateway".** The honest sentence is: *every MCP tool call
+  and every model call that goes through us is authorised, attributed, scrubbed and recorded before
+  it leaves the building.* That is a stronger claim than Kong's and a narrower one.
+- **Concede the transport gap before it is found.** "We front remote HTTP MCP servers. A local
+  stdio server is something we *discover*, not something we *proxy* — yet." Volunteering it is what
+  makes the rest credible; it is the same move that works for discovery in the runbook.
+- **Do not claim operational parity with an API gateway.** No health checks, no breaker, no
+  timeouts, no `/metrics`, one replica. Against a platform team that runs Kong, claiming otherwise
+  fails on the first question. "We sit behind yours" is a better answer and, after **G9**, a true one.
+- **Never imply the rate limits hold under scale — and after G1, be precise about what changed.**
+  The edge limiter's counters are shared now (ADR-0125), so a second replica no longer doubles the
+  ceiling. That is one reason removed, not a claim of HA: there is still no timeout, no breaker, no
+  `/metrics`, a fixed host port and one replica in the compose file, and per-process state outside
+  the limiter has not been audited. The accurate sentence is *"the limits are correct across
+  processes; the deployment is still single-replica until G2 and G8."*

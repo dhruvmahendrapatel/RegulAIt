@@ -76,38 +76,94 @@ test.afterAll(async () => {
   await page.close();
 });
 
+/**
+ * Navigate via the sidebar's "/" filter. Under ADR-0094 the sidebar shows one
+ * suite at a time, so a bare click-by-label only works inside the current
+ * suite; the filter is the designed cross-suite path (it searches EVERY
+ * destination), so every journey below exercises it. Selecting an entry
+ * clears the filter again.
+ */
 async function nav(label: string, heading: string) {
+  await page.getByLabel("Filter navigation").fill(label);
   await page.getByRole("link", { name: label, exact: true }).click();
   await expect(page.getByRole("heading", { name: heading, exact: true })).toBeVisible();
 }
 
 test("admin login: one-time password → forced change → dashboard shows admin nav", async () => {
+  // MINT A FRESH one-time password rather than spending the seeded one.
+  // The seeded password is single-use and this suite shares ONE database, so
+  // whichever spec signs in first consumes it — this test used to depend on
+  // being that spec, which alphabetical file order stopped guaranteeing. The
+  // CONTRACT under test (a one-time password forces a change on first use) is
+  // unchanged; only its fixture is now owned by the test instead of borrowed.
+  const boot = { authorization: "Bearer e2e-bootstrap-token", "content-type": "application/json" };
+  const users = (await (await fetch(`${state.baseUrl}/v1/users`, { headers: boot })).json()) as {
+    users: Array<{ id: string; email: string }>;
+  };
+  const adminId = users.users.find((u) => u.email === "admin@regulait.local")!.id;
+  const minted = (await (
+    await fetch(`${state.baseUrl}/v1/users/${adminId}/set-initial-password`, {
+      method: "POST",
+      headers: boot,
+      body: JSON.stringify({ force: true }),
+    })
+  ).json()) as { password: string; mustChangePassword: boolean };
+  expect(minted.mustChangePassword).toBe(true);
+
   await page.goto("/ui");
   await page.getByLabel("Email").fill("admin@regulait.local");
-  await page.getByLabel("Password", { exact: true }).fill(state.passwords.admin);
+  await page.getByLabel("Password", { exact: true }).fill(minted.password);
   await page.getByRole("button", { name: "Sign in" }).click();
 
   await expect(page.getByText("Your password is one-time")).toBeVisible();
-  await page.getByLabel("Current (one-time) password").fill(state.passwords.admin);
+  await page.getByLabel("Current (one-time) password").fill(minted.password);
   await page.getByLabel("New password", { exact: true }).fill(ADMIN_PASSWORD);
   await page.getByLabel("Confirm new password").fill(ADMIN_PASSWORD);
   await page.getByRole("button", { name: "Set password & continue" }).click();
 
   await expect(page.getByRole("heading", { name: /Welcome back/ })).toBeVisible();
-  // the six admin groups render as real nav sections, no "classic ↗" bridges
-  for (const group of [
-    "Identity & Access",
-    "Governance",
-    "Integrations",
-    "Cost & Optimization",
-    "Compliance & Infra",
-    "Settings",
-  ]) {
-    await expect(page.getByText(group, { exact: true })).toBeVisible();
+  // ADR-0094 replaced the always-visible 11-section rail with a home launcher
+  // plus a suite-scoped sidebar. The old assertion (every ADR-0093 section
+  // heading visible at once) is restated at equivalent strength for the new
+  // IA: every suite must be offered by BOTH the launcher's tile grid and the
+  // sidebar's switcher — the two affordances that replaced "everything is
+  // always on screen" — so nothing is stranded. No "classic ↗" bridges.
+  const suites = [
+    ["workspace", "Workspace"],
+    ["ai-governance", "AI Governance"],
+    ["access-reviews", "Access Reviews"],
+    ["approvals-audit", "Approvals & Audit"],
+    ["policies-gates", "Policies & Gates"],
+    ["quality-security", "Quality & Security"],
+    ["compliance-infra", "Compliance & Infra"],
+    ["cost-optimization", "Cost & Optimization"],
+    ["identity-access", "Identity & Access"],
+    ["integrations", "Integrations"],
+    ["settings", "Settings"],
+  ] as const;
+  const switcher = page.getByLabel("Switch suite");
+  await expect(switcher).toBeVisible();
+  for (const [id, name] of suites) {
+    await expect(page.getByTestId(`suite-tile-${id}`)).toBeVisible();
+    await expect(switcher.locator("option", { hasText: name })).toHaveCount(1);
   }
+  // and there are no surprise extra suites in either affordance
+  await expect(page.locator('[data-testid^="suite-tile-"]')).toHaveCount(suites.length);
+  await expect(switcher.locator("option")).toHaveCount(suites.length);
   await expect(page.locator("text=classic ↗")).toHaveCount(0);
   await shot(page, "phase2-01-admin-dashboard");
-  track.assertClean("admin login + dashboard");
+
+  // the sidebar scopes to ONE suite: launching AI Governance shows its own
+  // entries (including the coalesced Overview section) and no other suite's
+  await page.getByTestId("suite-tile-ai-governance").click();
+  await expect(page.getByRole("heading", { name: "Posture", exact: true })).toBeVisible();
+  const aside = page.locator("aside");
+  await expect(aside.getByRole("link", { name: "Use cases", exact: true })).toBeVisible();
+  await expect(aside.getByRole("link", { name: "Reports", exact: true })).toBeVisible();
+  await expect(aside.getByRole("link", { name: "Users", exact: true })).toHaveCount(0);
+  await expect(aside.getByRole("link", { name: "Chat", exact: true })).toHaveCount(0);
+  await shot(page, "phase2-01b-ai-governance-suite");
+  track.assertClean("admin login + launcher + scoped sidebar");
 });
 
 test("users: create a user, issue a one-time password and an API key (one-time reveals)", async () => {
@@ -338,7 +394,10 @@ test("audit log: A4 deploy-mode filter, including the honest unknown / pre-0044 
 
 test("workflow templates: author a template from a starter", async () => {
   await nav("Workflow templates", "Workflow templates");
-  await page.getByLabel("Name").fill(`e2e-template-${Date.now()}`);
+  // exact: ADR-0077's gallery put a "Template name for <shape>" input on every
+  // gallery card, so a loose "Name" match now resolves to six controls. The
+  // authoring form's field is the one labelled exactly "Name".
+  await page.getByLabel("Name", { exact: true }).fill(`e2e-template-${Date.now()}`);
   await page.getByRole("button", { name: "Create template" }).click();
   await expect(page.getByText("Template created").first()).toBeVisible();
   await shot(page, "phase2-15-workflow-templates");

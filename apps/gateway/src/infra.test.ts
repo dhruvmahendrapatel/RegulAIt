@@ -150,12 +150,28 @@ describe("scan — detection, auto-remediation, and the always-gated critical", 
     expect(audit.some((e: any) => e.ruleId === "infra-scan" && e.effect === "allow")).toBe(true);
   });
 
-  it("is idempotent — a second scan duplicates nothing", async () => {
+  it("is idempotent — a second scan duplicates nothing, and RE-OPENS the auto-remediated finding it can still see (ADR-0114)", async () => {
     const before = (await getJson("/v1/infra/findings")).findings.length;
     const scan = await post("/v1/infra/scan", {});
     expect(scan.json().created).toBe(0);
     const after = (await getJson("/v1/infra/findings")).findings.length;
     expect(after).toBe(before);
+
+    // ADR-0114: the runtime drift was AUTO-remediated on the first scan, and
+    // the mock provider's remediation does not change what a scan observes —
+    // so the second scan sees the SAME signature over a status claiming the
+    // problem is resolved. That contradiction re-opens the finding IN PLACE
+    // (no new row — asserted by the count above) and is audited.
+    expect(scan.json().reopened).toBeGreaterThanOrEqual(1);
+    const rt = findingsFor((await getJson("/v1/infra/findings")).findings, runtimeId);
+    expect(rt).toHaveLength(1);
+    expect(rt[0].status).toBe("open");
+    const audit = (await getJson(`/v1/audit?userId=${adminId}`)).entries;
+    const reopen = audit.find(
+      (e: any) => e.ruleId === "infra-finding-reopened" && e.objectId === rt[0].id,
+    );
+    expect(reopen).toBeTruthy();
+    expect(reopen.detail.priorStatus).toBe("auto_remediated");
   });
 });
 
@@ -214,10 +230,16 @@ describe("governed remediation — approve and deny both audited", () => {
   });
 
   it("refuses to propose a non-open finding", async () => {
+    // This used to reach for the runtime finding, which ADR-0114 now RE-OPENS
+    // on the second scan (see the idempotency case above) — so the fixture is
+    // the `accepted_risk` finding the deny case just produced, which ADR-0114
+    // deliberately does NOT re-open. The claim under test is unchanged.
     const all = (await getJson("/v1/infra/findings")).findings;
-    const auto = findingsFor(all, runtimeId)[0]; // auto_remediated
-    const res = await post(`/v1/infra/findings/${auto.id}/remediate`, { approverUserId: approverId });
+    const closed = findingsFor(all, cpId).find((f: any) => f.kind === "cve");
+    expect(closed.status).toBe("accepted_risk"); // positive: a real non-open fixture
+    const res = await post(`/v1/infra/findings/${closed.id}/remediate`, { approverUserId: approverId });
     expect(res.statusCode).toBe(409);
+    expect(res.json().error).toBe("not_open");
   });
 });
 

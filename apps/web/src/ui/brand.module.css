@@ -1,0 +1,80 @@
+/* The mark and wordmark. See Brand.tsx for the rules these styles enforce. */
+
+.mark {
+  display: block;
+  flex: none;
+}
+
+.lockup {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  min-width: 0;
+}
+
+.lockupText {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* Gantari Bold, all lowercase except AI. */
+.word {
+  font-family: var(--rg-font-display);
+  font-weight: 700;
+  font-size: 19px;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  color: var(--rg-ink);
+  white-space: nowrap;
+}
+
+.wordOnDark {
+  color: var(--rg-dark-ink);
+}
+
+/* The AI pair. Below 24px it takes Signal 700 for contrast on light grounds;
+   on dark grounds it brightens to Signal 400. `--rg-signal-700` already resolves
+   to the bright step under the dark theme, so the light rule is the only one
+   that needs stating — except on the always-dark rail, which never inverts and
+   therefore pins Signal 400 explicitly. */
+.ai {
+  font-style: normal;
+  color: var(--rg-signal-700);
+}
+
+.wordOnDark .ai {
+  color: var(--rg-signal-400);
+}
+
+/* Product descriptor — identity only, never an action. */
+.descriptor {
+  font-family: var(--rg-font);
+  font-weight: 400;
+  font-size: 10.5px;
+  line-height: 1.2;
+  letter-spacing: var(--rg-kicker-track);
+  text-transform: uppercase;
+  color: var(--rg-product-deep);
+  margin-top: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* On the always-dark rail the light-theme `-deep` step is too dark to read, so
+   the descriptor takes the 300 step there. */
+:global(.rgRail) .descriptor {
+  color: var(--rg-product-300);
+}
+
+/* IBM Plex Mono caps, at no more than 40% of the wordmark's cap height. */
+.endorsement {
+  font-family: var(--rg-font-mono);
+  font-size: 9px;
+  font-weight: 400;
+  letter-spacing: var(--rg-kicker-track);
+  text-transform: uppercase;
+  color: var(--rg-ink-muted);
+  white-space: nowrap;
+}

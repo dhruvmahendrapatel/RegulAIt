@@ -6,184 +6,25 @@
  * product surface — there are no outbound bridges left.
  */
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { NavLink, useNavigate } from "react-router-dom";
+import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api/client";
 import type { Approval } from "../api/types";
 import { useSession } from "../session/SessionContext";
 import { useTheme } from "../ui/useTheme";
+import { Lockup, WORDMARK } from "../ui/Brand";
+import { ADMIN_GROUPS, SUITES, WORKSPACE, suiteHome, suiteOfPath, type NavEntry } from "./suites";
 import s from "./shell.module.css";
 
-interface NavEntry {
-  label: string;
-  to: string;
-}
-const WORKSPACE: NavEntry[] = [
-  { label: "Home", to: "/" },
-  { label: "Chat", to: "/chat" },
-  { label: "Runs", to: "/runs" },
-  { label: "Workflows", to: "/workflows" },
-  { label: "Inbox", to: "/inbox" },
-  { label: "Projects", to: "/projects" },
-  { label: "Shared context", to: "/context" },
-  // pillars 5 + 6 for the person who generates the spend — self-scoped, and
-  // the only place a non-admin can see their own cost and savings ledgers
-  { label: "Spend & savings", to: "/spend" },
-];
 
-/** the native admin surface (phase 2): grouped real routes inside this shell */
-const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
-  {
-    group: "Identity & Access",
-    items: [
-      { label: "Users", to: "/admin/users" },
-      { label: "Roles", to: "/admin/roles" },
-      { label: "Teams", to: "/admin/teams" },
-      { label: "Client access", to: "/admin/client-access" },
-      { label: "SSO & sessions", to: "/admin/sso" },
-      { label: "Provisioning (SCIM)", to: "/admin/provisioning" },
-      // ADR-0038: where an IdP group becomes a role — and where the ones that
-      // grant nothing are visible rather than silently inert.
-      { label: "Group → role mapping", to: "/admin/group-mappings" },
-    ],
-  },
-  {
-    group: "Governance",
-    items: [
-      { label: "Rules engine", to: "/admin/rules" },
-      // ADR-0040 — sits beside the rules engine because it is the same
-      // question ("what may this call do?") asked with attributes instead of
-      // static grants. It can only ever subtract from what Rules allows.
-      { label: "ABAC policies", to: "/admin/abac-policies" },
-      // ADR-0042 — the CONTENT gate, beside the destination and attribute
-      // gates. Independent controls that happen to share one interception
-      // point: what is in the payload vs. where the call may go vs. who may
-      // make it under which attributes.
-      { label: "Guardrails", to: "/admin/guardrails" },
-      // ADR-0044 — the QUALITY gate, beside the content/destination/attribute
-      // gates. Same question shape ("may this proceed?") asked of the agent's
-      // OUTPUT against a fixed dataset, and it blocks promotion the same way.
-      { label: "Evaluations", to: "/admin/evals" },
-      // ADR-0045 — the RISK-ACCEPTANCE gate, beside the quality gate. Evals ask
-      // "is this agent good on our cases?"; this asks "has a human accepted the
-      // risk of using it for this purpose, and is that acceptance still valid?"
-      // A high score is an input to that decision, never a substitute for it.
-      { label: "Model risk", to: "/admin/model-risk" },
-      // ADR-0057 — the SECURITY gate, beside the quality and risk gates. Evals
-      // ask "is this agent good on our cases?"; this asks "does it hold when
-      // someone attacks it?", measured through the live guardrails and blocking
-      // promotion through the same automated-check stage.
-      { label: "Red-teaming", to: "/admin/redteam" },
-      // ADR-0048 — the CHANGE-CONTROL layer under all of the above. The gates
-      // decide whether a call may proceed; this decides which VERSION of the
-      // governing artifact it proceeds under, and gives that change a canary
-      // and a one-click undo.
-      { label: "Prompt versions", to: "/admin/prompt-versions" },
-      { label: "Simulation", to: "/admin/simulation" },
-      { label: "Approvals queue", to: "/admin/approvals" },
-      // ADR-0046 — the SAME approvals, scaled: routing, SLA timers, escalation,
-      // workload and bulk triage. A layer on the one queue, never a second one.
-      { label: "Review workbench", to: "/admin/review-workbench" },
-      { label: "Audit log", to: "/admin/audit" },
-      // ADR-0050 — the audit log answers "who did what"; this answers "what
-      // flowed into what". Adjacent on purpose: an e-discovery or DPIA question
-      // starts in one and finishes in the other, and keeping them apart is what
-      // makes both readable.
-      { label: "Data lineage", to: "/admin/lineage" },
-      // ADR-0047 — the BOARD-facing read of the same two ledgers the Cost
-      // dashboard and the Audit log render operationally. Nothing new is
-      // stored: a report is a read-only projection, scoped to the caller's own
-      // entitlement, and it says on its face that spend is a list-price
-      // estimate and that no scheduler drives its schedules.
-      { label: "Reports", to: "/admin/reports" },
-      // ADR-0055 — the land-and-expand wedge: what AI are we NOT governing?
-      // It sits in Governance rather than Integrations because a discovered row
-      // is a governance gap, not a connection to configure.
-      { label: "Shadow-AI discovery", to: "/admin/shadow-ai" },
-      // ADR-0056 — the natural-language front door onto the very ledgers this
-      // group renders. It sits here, not under Settings, because it IS a
-      // governance surface: a governed tenant reading the governance record
-      // with the caller's own entitlements and unable to change anything.
-      { label: "Governance copilot", to: "/admin/copilot" },
-      // ADR-0061 — the Approvals Queue's chat courier. It sits beside the queue
-      // it mirrors, because the identity link is a governance trust artifact and
-      // not an integration setting.
-      { label: "ChatOps approvals", to: "/admin/chatops" },
-      { label: "Workflow templates", to: "/admin/workflow-templates" },
-    ],
-  },
-  {
-    group: "Integrations",
-    items: [
-      { label: "Agents", to: "/admin/agents" },
-      { label: "Model credentials", to: "/admin/model-credentials" },
-      // ADR-0034 — sits next to Model credentials because it is the same
-      // question ("what can our models talk to?") asked about an endpoint we
-      // do not own, rather than a vendor we do.
-      { label: "Custom LLM providers", to: "/admin/custom-providers" },
-      { label: "Connectors", to: "/admin/connectors" },
-      { label: "MCP servers", to: "/admin/mcp-servers" },
-      { label: "Git connections", to: "/admin/git-connections" },
-      { label: "PM connections", to: "/admin/pm-connections" },
-      { label: "Deploy targets", to: "/admin/deploy-targets" },
-    ],
-  },
-  {
-    group: "Cost & Optimization",
-    items: [
-      { label: "Cost dashboard", to: "/admin/cost" },
-      // ADR-0049 — budget-vs-FORECAST and spend-anomaly signals over the same
-      // measured ledger the Cost dashboard renders as actuals. Next to it
-      // because it is the same question asked forward in time rather than
-      // backward, and because a forecast that lived somewhere else would
-      // inevitably drift from the actuals it extrapolates.
-      { label: "Spend forecast & anomalies", to: "/admin/spend-monitor" },
-      // ADR-0051 — the same measured ledger again, turned into money. It sits
-      // here rather than under Settings because the honest framing is that
-      // billing is a READ of the cost data next to it: rate cards and invoices
-      // never touch the meter, and a statement that disagreed with the Cost
-      // dashboard would be the bug this placement makes obvious.
-      { label: "Metering & billing", to: "/admin/billing" },
-      { label: "Optimization", to: "/admin/optimization" },
-    ],
-  },
-  {
-    group: "Compliance & Infra",
-    items: [
-      { label: "Compliance profiles", to: "/admin/compliance" },
-      // ADR-0058 — framework control mappings evidenced from the same ledgers
-      // everything else here reads. It sits directly under Compliance profiles
-      // because a pack DRIVES that cascade rather than forking it: one tag, one
-      // cascade, one audit trail.
-      { label: "Compliance packs", to: "/admin/compliance-packs" },
-      { label: "Infrastructure", to: "/admin/infrastructure" },
-    ],
-  },
-  {
-    group: "Settings",
-    items: [
-      { label: "Organization", to: "/admin/organization" },
-      // ADR-0052 — the COMMERCIAL ceiling, deliberately beside the org-wide
-      // functional ceiling rather than under Cost: a license caps how many
-      // entitled users and which tier features exist, which is the same kind of
-      // org-level setting as the ones next to it. It is never a cost report.
-      { label: "Licensing & seats", to: "/admin/licensing" },
-      // ADR-0063 — the deployment's own envelope key: which one this box runs,
-      // whether it agrees with the ciphertext in the database, and whether any
-      // human has ever said they hold a copy. It sits in Settings rather than
-      // under Compliance because it is a property of THIS installation, and it
-      // is the one page whose absence of a record is itself the finding.
-      { label: "Data key custody", to: "/admin/data-key" },
-      // ADR-0064 — the six governance sweeps and whether anything is actually
-      // driving them. In Settings for the same reason the data key is: it is a
-      // property of THIS installation, and the page whose row of null
-      // timestamps is itself the finding.
-      { label: "Scheduled jobs", to: "/admin/scheduler" },
-      { label: "First-run setup", to: "/admin/first-run" },
-      { label: "Getting started", to: "/admin/setup" },
-    ],
-  },
-];
+/**
+ * route path → the nav section it lives under, so a page header can state where
+ * it is without every view repeating what the nav already declares. Workspace
+ * routes are deliberately absent: they are top-level, so they have no trail.
+ */
+const GROUP_OF_PATH = new Map<string, string>(
+  ADMIN_GROUPS.flatMap((g) => g.items.map((n) => [n.to, g.group] as const)),
+);
 
 export default function AppShell(props: { children: ReactNode }) {
   const { auth, signOut } = useSession();
@@ -229,20 +70,62 @@ export default function AppShell(props: { children: ReactNode }) {
     return () => document.removeEventListener("mousedown", onDown);
   }, [menuOpen]);
 
+  const { pathname } = useLocation();
   const q = filter.trim().toLowerCase();
-  const workspaceItems = useMemo(
-    () => WORKSPACE.filter((n) => !q || n.label.toLowerCase().includes(q)),
-    [q],
+
+  /**
+   * ADR-0094 — suite-scoped navigation. The suites a user can see (non-admins
+   * see only Workspace), the suite the current route belongs to, and the two
+   * render modes:
+   *  - filter EMPTY: only the active suite's sections render, under a compact
+   *    suite identity header with the switcher. Someone working in one suite
+   *    is not confronted with every other product's nav.
+   *  - filter NON-EMPTY: the "/" filter searches ACROSS ALL destinations in
+   *    every visible suite — it is the escape hatch, and scoping it to the
+   *    current suite would strand users (the ADR states this as an invariant).
+   */
+  const suites = useMemo(
+    () => SUITES.filter((su) => !su.admin || auth?.isAdmin),
+    [auth?.isAdmin],
   );
-  const adminGroups = useMemo(() => {
-    if (!auth?.isAdmin) return [];
-    return ADMIN_GROUPS.map((g) => ({
-      group: g.group,
-      items: g.items.filter(
-        (n) => !q || n.label.toLowerCase().includes(q) || g.group.toLowerCase().includes(q),
-      ),
-    })).filter((g) => g.items.length > 0);
-  }, [auth?.isAdmin, q]);
+  const activeSuite = useMemo(() => suiteOfPath(pathname), [pathname]);
+  const filterResults = useMemo(() => {
+    if (!q) return [];
+    return suites
+      .flatMap((su) => su.sections)
+      .map((g) =>
+        // Home is a constant affordance, not a suite entry — but the filter
+        // must still be able to find it
+        g.group === "Workspace" ? { group: g.group, items: [{ label: "Home", to: "/" }, ...g.items] } : g,
+      )
+      .map((g) => ({
+        group: g.group,
+        items: g.items.filter(
+          (n) => n.label.toLowerCase().includes(q) || g.group.toLowerCase().includes(q),
+        ),
+      }))
+      .filter((g) => g.items.length > 0);
+  }, [suites, q]);
+
+  const navEntry = (n: NavEntry) => (
+    <NavLink
+      key={n.to}
+      to={n.to}
+      end={n.to === "/"}
+      className={({ isActive }) => (isActive ? s.navItemActive! : s.navItem!)}
+      onClick={() => {
+        setSideOpen(false);
+        setFilter("");
+      }}
+    >
+      {n.label}
+      {n.to === "/inbox" && pendingCount > 0 && (
+        <span className={s.navCount} aria-label={`${pendingCount} pending approvals`}>
+          {pendingCount}
+        </span>
+      )}
+    </NavLink>
+  );
 
   const displayName = auth?.user?.displayName ?? "Operator";
   const initials = displayName
@@ -254,12 +137,18 @@ export default function AppShell(props: { children: ReactNode }) {
 
   return (
     <div className={s.shell}>
-      <aside className={[s.side, sideOpen ? s.sideOpen : ""].join(" ")} aria-label="Primary navigation">
+      {/* The first focusable element on the page — before the sidebar — so a
+          keyboard user reaches content in one tab rather than tabbing through
+          every nav item first. */}
+      <a href="#rgMain" className="rg-skip-link">
+        Skip to main content
+      </a>
+      <aside
+        className={[s.side, "rgRail", sideOpen ? s.sideOpen : ""].join(" ")}
+        aria-label="Primary navigation"
+      >
         <div className={s.brand}>
-          <span className={s.brandWord}>
-            regul<em>ai</em>t
-          </span>
-          <span className={s.brandTag}>governed</span>
+          <Lockup descriptor="governed" tone="onDark" />
         </div>
         <input
           ref={filterRef}
@@ -275,41 +164,65 @@ export default function AppShell(props: { children: ReactNode }) {
             }
           }}
         />
-        <div className={s.section}>Workspace</div>
-        {workspaceItems.map((n) => (
-          <NavLink
-            key={n.to}
-            to={n.to}
-            end={n.to === "/"}
-            className={({ isActive }) => (isActive ? s.navItemActive! : s.navItem!)}
-            onClick={() => setSideOpen(false)}
-          >
-            {n.label}
-            {n.to === "/inbox" && pendingCount > 0 && (
-              <span className={s.navCount} aria-label={`${pendingCount} pending approvals`}>
-                {pendingCount}
-              </span>
+        {q ? (
+          /* the escape hatch: matches from EVERY suite, grouped by section */
+          filterResults.length > 0 ? (
+            filterResults.map((g) => (
+              <div key={g.group}>
+                <div className={s.section}>{g.group}</div>
+                {g.items.map(navEntry)}
+              </div>
+            ))
+          ) : (
+            <div className={s.filterEmpty}>No destination matches</div>
+          )
+        ) : (
+          <>
+            {/* the two constant affordances: back to the launcher, and the
+                suite switcher (a native select — keyboard accessible for
+                free, and compact at every width) */}
+            {navEntry({ label: "Home", to: "/" })}
+            {suites.length > 1 && (
+              <div className={s.suiteHead}>
+                <div className={s.suiteName}>{activeSuite.name}</div>
+                <select
+                  className={s.suiteSwitch}
+                  aria-label="Switch suite"
+                  value={activeSuite.id}
+                  onChange={(e) => {
+                    const target = suites.find((su) => su.id === e.target.value);
+                    if (target && target.id !== activeSuite.id) {
+                      setSideOpen(false);
+                      navigate(target.id === "workspace" ? "/" : suiteHome(target));
+                    }
+                  }}
+                >
+                  {suites.map((su) => (
+                    <option key={su.id} value={su.id}>
+                      {su.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
             )}
-          </NavLink>
-        ))}
-        {adminGroups.map((g) => (
-          <div key={g.group}>
-            <div className={s.section}>{g.group}</div>
-            {g.items.map((n) => (
-              <NavLink
-                key={n.to}
-                to={n.to}
-                className={({ isActive }) => (isActive ? s.navItemActive! : s.navItem!)}
-                onClick={() => setSideOpen(false)}
-              >
-                {n.label}
-              </NavLink>
+            {activeSuite.sections.map((g) => (
+              <div key={g.group}>
+                {/* a section heading only where it adds information: inside a
+                    suite that presents more than one ADR-0093 section, or the
+                    plain Workspace list a non-admin sees */}
+                {(activeSuite.sections.length > 1 || suites.length === 1) && (
+                  <div className={s.section}>{g.group}</div>
+                )}
+                {g.items.map(navEntry)}
+              </div>
             ))}
-          </div>
-        ))}
+          </>
+        )}
         {/* The two "legacy ↗" bridges are gone: ADR-0033 deleted the
             single-file shells they pointed at, so a link here would be a dead
             end — the exact failure phase 1 refused to ship. */}
+        {/* No endorsement line here: the brand puts it in footers, sign-in
+            screens and legal surfaces — never in the app chrome. */}
         <div className={s.sideFoot}>Governed AI delivery platform</div>
       </aside>
 
@@ -324,7 +237,7 @@ export default function AppShell(props: { children: ReactNode }) {
             ☰
           </button>
           <span className={s.topbarSpacer} />
-          <span className={s.orgName}>RegulAIt workspace</span>
+          <span className={s.orgName}>{WORDMARK} workspace</span>
           <button
             className={s.iconBtn}
             aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
@@ -398,16 +311,61 @@ export default function AppShell(props: { children: ReactNode }) {
             )}
           </div>
         </header>
-        <main className={s.content}>{props.children}</main>
+        {/* tabindex="-1" makes this a valid skip-link target without adding it
+            to the tab order. It must keep a resolved height — see .content. */}
+        <main id="rgMain" tabIndex={-1} className={s.content}>
+          {props.children}
+        </main>
       </div>
     </div>
   );
 }
 
-/** consistent page header — every view uses it */
-export function PageHeader(props: { title: string; sub?: ReactNode; actions?: ReactNode }) {
+/**
+ * Consistent page header — every view uses it.
+ *
+ * Breadcrumb as kicker, then title, then the primary action right-aligned. The
+ * breadcrumb *states where you are* rather than offering navigation, which is
+ * why its items are plain text and only the last carries `aria-current="page"`.
+ */
+export function PageHeader(props: {
+  title: string;
+  crumbs?: string[];
+  sub?: ReactNode;
+  actions?: ReactNode;
+}) {
+  // Where a page sits is already known: it is the nav group the current route
+  // belongs to. Deriving the crumb from GROUP_OF_PATH means every admin screen
+  // gets a correct trail without 60-odd views each hand-passing one, and the
+  // trail cannot drift from the navigation it describes.
+  const { pathname } = useLocation();
+  const derived = GROUP_OF_PATH.get(pathname.replace(/\/+$/, "") || "/");
+  const crumbs = props.crumbs ?? (derived ? [derived] : undefined);
+  // No crumbs means there is no trail to state — rendering the title alone as a
+  // breadcrumb would just repeat the <h1> immediately below it, to the eye and
+  // to a screen reader both.
+  const trail = crumbs?.length ? [...crumbs, props.title] : [];
   return (
     <>
+      {trail.length > 0 && (
+        <nav aria-label="Breadcrumb">
+          <ol className={s.crumbs}>
+            {trail.map((c, i) => {
+              const last = i === trail.length - 1;
+              return (
+                <li key={`${c}-${i}`} className={last ? s.crumbCurrent : undefined}>
+                  {i > 0 && (
+                    <span className={s.crumbSep} aria-hidden>
+                      /{" "}
+                    </span>
+                  )}
+                  <span {...(last ? { "aria-current": "page" as const } : {})}>{c}</span>
+                </li>
+              );
+            })}
+          </ol>
+        </nav>
+      )}
       <div style={{ display: "flex", alignItems: "flex-start", gap: "var(--s2)" }}>
         <h1 className={s.pageTitle} tabIndex={-1} style={{ flex: 1 }}>
           {props.title}

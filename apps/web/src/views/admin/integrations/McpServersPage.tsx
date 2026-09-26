@@ -454,14 +454,16 @@ function ServerGrantForm(props: { users: ReturnType<typeof useUsers>; servers: M
   const act = useAction();
   const [userId, setUserId] = useState("");
   const [serverId, setServerId] = useState("");
-  const [readOnlyAll, setReadOnlyAll] = useState("true");
   return (
     <form
       className={a.formRow}
       onSubmit={(e) => {
         e.preventDefault();
         void act.run(
-          () => api.post("/v1/grants/servers", { userId, serverId, readOnlyAll: readOnlyAll === "true" }),
+          // readOnlyAll is always true: a server grant IS a read-all grant, and
+          // the gateway refuses `false` rather than store a grant that grants
+          // nothing. Scope below read-all is expressed with tool grants.
+          () => api.post("/v1/grants/servers", { userId, serverId, readOnlyAll: true }),
           "Server granted",
         );
       }}
@@ -476,12 +478,10 @@ function ServerGrantForm(props: { users: ReturnType<typeof useUsers>; servers: M
           {optionEls(serverOpts(props.servers), "— select —")}
         </Select>
       </Field>
-      <Field label="Read-only all">
-        <Select value={readOnlyAll} onChange={(e) => setReadOnlyAll(e.target.value)}>
-          <option value="true">true</option>
-          <option value="false">false</option>
-        </Select>
-      </Field>
+      <span className={v.hint}>
+        Grants every <strong>read</strong> tool on the server. Write tools still need an individual
+        tool grant.
+      </span>
       <Button type="submit" size="sm" disabled={act.busy}>
         Grant server
       </Button>

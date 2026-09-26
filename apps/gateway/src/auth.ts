@@ -1,5 +1,4 @@
 import {
-  createHash,
   createHmac,
   randomBytes,
   scryptSync,
@@ -9,6 +8,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import {
   and,
   apiKeys,
+  asc,
   auditLog,
   authMfaPending,
   authSessions,
@@ -51,6 +51,13 @@ import { deviceLabel } from "./device-label.js";
 import { checkEgress, createGuardedFetch, type EgressDenied } from "./egress-guard.js";
 import { loadEgressAllowList } from "./custom-providers.js";
 import { normalizeAssertedGroups, reconcileGroupRoles } from "./group-roles.js";
+import { hashToken } from "./token-hash.js";
+import { isVirtualKeyToken, resolveVirtualKey, touchVirtualKey } from "./virtual-keys.js";
+
+/** ADR-0066 kept this exported from `auth.ts` — the implementation moved to
+ * `token-hash.ts` so `virtual-keys.ts` can share it without an import cycle,
+ * and every existing `import { hashToken } from "./auth.js"` is unchanged. */
+export { hashToken };
 
 export interface AuthContext {
   /** null only for the bootstrap token (header or exchanged session), which
@@ -59,19 +66,62 @@ export interface AuthContext {
   isAdmin: boolean;
   /** "session" = ADR-0025 cookie session (password, MFA, SSO or key-exchange
    * login). The API-key and bootstrap header paths are byte-identical to
-   * pre-0042. */
-  via: "bootstrap" | "api-key" | "session";
+   * pre-0042. "virtual-key" is ADR-0066's scoped proxy credential: it resolves
+   * to a real user (`userId` is the OWNER, whose entitlements are its ceiling)
+   * but is NEVER admin, whatever the owner is, and reaches only the routes in
+   * `VIRTUAL_KEY_ALLOWED_ROUTES`. */
+  via: "bootstrap" | "api-key" | "session" | "virtual-key";
+  /** ADR-0066: set only when `via === "virtual-key"`. The dispatch core reads
+   * it to apply the key's allow-list and budget, and the ledger stamps it. */
+  virtualKeyId?: string;
 }
+
+/**
+ * ADR-0066 — a credential that really exists but may not be used, and the
+ * reason. Distinguished from `null` (nothing matched) so the holder — who by
+ * definition possesses the real token — learns why, exactly as ADR-0022's
+ * "disabled" marker does for a deactivated user's API key.
+ */
+/**
+ * ADR-0098 adds `api_key_expired` and `api_key_revoked`. Both are 401s that
+ * name what happened, for the same reason ADR-0066 named the virtual-key pair:
+ * only somebody holding the real token ever sees them, so nothing leaks, and
+ * an operator debugging "my key stopped working" MUST be able to tell a
+ * lifetime that ran out from a credential somebody deliberately killed. Those
+ * two facts call for opposite responses — reissue on the same terms, versus
+ * find out who revoked it and why — and `unauthenticated` distinguishes
+ * neither of them from a typo.
+ */
+export const AUTH_REFUSALS = [
+  "disabled",
+  "virtual_key_revoked",
+  "virtual_key_expired",
+  "api_key_expired",
+  "api_key_revoked",
+] as const;
+export type AuthRefusal = (typeof AUTH_REFUSALS)[number];
+
+export function isAuthRefusal(x: AuthContext | null | AuthRefusal): x is AuthRefusal {
+  return typeof x === "string";
+}
+
+/** ONE place the holder-facing wording lives, so the route hook and the
+ * key-exchange endpoint cannot drift into saying different things about the
+ * same credential. */
+export const AUTH_REFUSAL_DETAIL: Record<AuthRefusal, string> = {
+  disabled: "this account has been deactivated — an admin can reactivate it",
+  virtual_key_revoked: "this virtual key has been revoked and authenticates nothing",
+  virtual_key_expired: "this virtual key has expired — its issuer can mint a new one",
+  api_key_expired:
+    "this API key has expired and authenticates nothing — an admin must issue a new one (an expiry cannot be extended)",
+  api_key_revoked: "this API key has been revoked and authenticates nothing",
+};
 
 export const TOKEN_PREFIX = "rgl_";
 
 export function generateToken(): { token: string; tokenHash: string } {
   const token = TOKEN_PREFIX + randomBytes(24).toString("hex");
   return { token, tokenHash: hashToken(token) };
-}
-
-export function hashToken(token: string): string {
-  return createHash("sha256").update(token).digest("hex");
 }
 
 function safeEqual(a: string, b: string): boolean {
@@ -92,7 +142,7 @@ export async function authenticate(
   db: Db,
   bootstrapToken: string | undefined,
   authorizationHeader: string | undefined,
-): Promise<AuthContext | null | "disabled"> {
+): Promise<AuthContext | null | AuthRefusal> {
   if (!authorizationHeader?.startsWith("Bearer ")) return null;
   const token = authorizationHeader.slice("Bearer ".length).trim();
   if (token.length === 0) return null;
@@ -101,24 +151,114 @@ export async function authenticate(
     return { userId: null, isAdmin: true, via: "bootstrap" };
   }
 
+  // ADR-0066 — VIRTUAL KEYS. The `rglv_` prefix makes the two credential kinds
+  // disjoint, so this branch cannot change the api_keys path in any way: an
+  // ordinary `rgl_` token never reaches it, and an `rglv_` token never reaches
+  // the api_keys lookup below.
+  //
+  // THE LINE THAT MATTERS: `isAdmin` is hard-coded false. A virtual key issued
+  // by an admin is not an admin — a scoped, budgeted proxy credential that
+  // silently carried admin would be the exact opposite of what it is for. Its
+  // `userId` IS the owner, so every downstream entitlement check evaluates the
+  // owner's grants, which is what makes the key a CEILING rather than a bypass.
+  if (isVirtualKeyToken(token)) {
+    const resolved = await resolveVirtualKey(db, token);
+    if (!resolved.ok) {
+      if (resolved.reason === "revoked") return "virtual_key_revoked";
+      if (resolved.reason === "expired") return "virtual_key_expired";
+      return null;
+    }
+    // ADR-0022: a deactivated owner's virtual keys stop authenticating for the
+    // same reason their API keys do — the ceiling belongs to a person who is
+    // no longer allowed in.
+    if (resolved.ownerDisabled) return "disabled";
+    await touchVirtualKey(db, resolved.row.id);
+    return {
+      userId: resolved.row.userId,
+      isAdmin: false,
+      via: "virtual-key",
+      virtualKeyId: resolved.row.id,
+    };
+  }
+
+  // ADR-0098: the `revoked_at IS NULL` filter moved OUT of this WHERE clause.
+  // It used to make a revoked key indistinguishable from a token that never
+  // existed; the row is now fetched either way so the two dead states —
+  // revoked and expired — can be told apart, by the holder AND in the audit
+  // trail. The lookup is still one indexed equality on `token_hash`.
   const [row] = await db
     .select({
       keyId: apiKeys.id,
       userId: apiKeys.userId,
       isAdmin: users.isAdmin,
       disabledAt: users.disabledAt,
+      revokedAt: apiKeys.revokedAt,
+      expiresAt: apiKeys.expiresAt,
     })
     .from(apiKeys)
     .innerJoin(users, eq(apiKeys.userId, users.id))
-    .where(and(eq(apiKeys.tokenHash, hashToken(token)), isNull(apiKeys.revokedAt)));
+    .where(eq(apiKeys.tokenHash, hashToken(token)));
   if (!row) return null;
   // ADR-0022: a deactivated user's keys stop authenticating IMMEDIATELY — no
   // lastUsedAt touch, no context. Reactivation restores them unchanged
-  // (deactivate ≠ delete; the keys were never revoked).
+  // (deactivate ≠ delete; the keys were never revoked). Checked BEFORE the two
+  // key-state refusals so a disabled account keeps saying so, unchanged.
   if (row.disabledAt !== null) return "disabled";
+  // ADR-0098 — THE TWO DEAD STATES, in the one place a bearer token becomes an
+  // identity. Revoked is checked FIRST: a key somebody deliberately killed is
+  // revoked whatever its clock says, and telling its holder "expired" would
+  // invite them to ask for the same key again.
+  if (row.revokedAt !== null) {
+    await auditKeyRefusal(db, row.userId, row.keyId, "revoked", row.revokedAt);
+    return "api_key_revoked";
+  }
+  if (row.expiresAt !== null && row.expiresAt.getTime() <= Date.now()) {
+    await auditKeyRefusal(db, row.userId, row.keyId, "expired", row.expiresAt);
+    return "api_key_expired";
+  }
 
   await db.update(apiKeys).set({ lastUsedAt: new Date() }).where(eq(apiKeys.id, row.keyId));
   return { userId: row.userId, isAdmin: row.isAdmin, via: "api-key" };
+}
+
+/**
+ * ADR-0098 — the audit half of "expired ≠ revoked".
+ *
+ * Written HERE rather than at each 401 site, because `authenticate()` is the
+ * only place that knows WHICH key was presented — the refusal that leaves this
+ * function is a bare string. Every caller (the route auth hook, the
+ * interception identity probe, `POST /auth/login-with-key`) therefore audits
+ * identically, with no site left to forget.
+ *
+ * `ruleId` is the discriminator an operator greps: `api-key-refused-expired`
+ * versus `api-key-refused-revoked`. `lastUsedAt` is deliberately NOT touched —
+ * a refused presentation is not a use.
+ */
+async function auditKeyRefusal(
+  db: Db,
+  userId: string,
+  keyId: string,
+  kind: "expired" | "revoked",
+  at: Date,
+): Promise<void> {
+  await db.insert(auditLog).values({
+    userId,
+    objectType: "api_key",
+    objectId: keyId,
+    detail: {
+      phase: "authenticate",
+      keyId,
+      refusal: kind,
+      [kind === "expired" ? "expiresAt" : "revokedAt"]: at.toISOString(),
+    },
+    effect: "deny",
+    ruleId: `api-key-refused-${kind}`,
+    ruleChain: [],
+    reason:
+      kind === "expired"
+        ? `API key ${keyId} expired at ${at.toISOString()} and authenticates nobody; a new key must be issued`
+        : `API key ${keyId} was revoked at ${at.toISOString()} and authenticates nobody`,
+  });
 }
 
 // ===========================================================================
@@ -682,10 +822,26 @@ export async function refuseIpBlockedLogin(
  * to impersonate another account through it).
  */
 export async function loadUserByEmail(db: Db, email: string) {
+  // ADR-0107 (F01): `users_email_unique` is UNIQUE on `email` EXACTLY, not on
+  // `lower(email)`. This lookup case-folds, so 'Ada@x' and 'ada@x' — two
+  // separate, both-legal rows — BOTH match it, and unordered the row that got
+  // authenticated (or SCIM-updated) was arbitrary. Oldest account wins: the
+  // first registration of an address is the one that owns it.
+  //
+  // ADR-0109 (migration 0108) SHIPPED THE REAL FIX ADR-0107 deferred:
+  // `users_email_lower_uq`, a functional UNIQUE index ON users (lower(email)).
+  // On any database carrying that migration this predicate now matches AT MOST
+  // ONE ROW and the `orderBy` below is a no-op. It is KEPT rather than removed
+  // because it is the honest behaviour for a database that has not yet been
+  // migrated, and because removing it would say ordering never mattered here.
+  // The consequence of the index is stated at POST /v1/users, the one path
+  // that could create a case-variant: it now answers 409 instead.
   const [row] = await db
     .select()
     .from(users)
-    .where(sql`lower(${users.email}) = ${email.toLowerCase()}`);
+    .where(sql`lower(${users.email}) = ${email.toLowerCase()}`)
+    .orderBy(asc(users.createdAt), asc(users.id))
+    .limit(1);
   return row ?? null;
 }
 
@@ -896,7 +1052,27 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
         detail: "this account has been deactivated — an admin can reactivate it",
       });
     }
+    // ADR-0066: a revoked or expired virtual key is refused here for the same
+    // reason it is refused everywhere else, and says which. ADR-0098 extends
+    // the same courtesy to the API-key pair — this exchange runs through the
+    // very same `authenticate()`, so an expired key cannot buy a session here
+    // that it could not buy anywhere else.
+    if (isAuthRefusal(ctx)) {
+      return reply.status(401).send({ error: ctx, detail: AUTH_REFUSAL_DETAIL[ctx] });
+    }
     if (!ctx) return reply.status(401).send({ error: "invalid_key" });
+    // ADR-0066 — THE ESCALATION THIS ENDPOINT WOULD OTHERWISE BE. A virtual key
+    // is a NARROWED credential: not admin, budgeted, and confined to the
+    // dispatch surfaces. A browser session is the OWNER'S FULL IDENTITY. If
+    // this exchange accepted one, every restriction on the key would evaporate
+    // in a single POST — so it refuses, by kind, before anything else happens.
+    if (ctx.via === "virtual-key") {
+      return reply.status(403).send({
+        error: "virtual_key_not_exchangeable",
+        detail:
+          "a virtual key is a scoped, budgeted dispatch credential and cannot be exchanged for a browser session — that would hand back the full identity the key exists to narrow",
+      });
+    }
     const org = await loadOrgSettings(db);
     // ADR-0039: an exchanged API-key session is the AUTOMATION path — governed
     // by api_key_ip_policy, never by the human knob. The bootstrap exchange is

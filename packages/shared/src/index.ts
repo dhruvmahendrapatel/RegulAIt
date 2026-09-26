@@ -1,6 +1,29 @@
 import { z } from "zod";
+// ADR-0068 §5: the attack-class vocabulary is needed IN SCOPE here (not merely
+// re-exported below) so the compliance-profile schema validates a framework's
+// red-team gating classes against the one authoritative list.
+import { RED_TEAM_ATTACK_CLASSES } from "./redteam.js";
+// ADR-0097: the admission-mode enum is DEFINED in mcp-admission.ts and used by
+// updateOrgSettingsSchema below, so it is imported as well as re-exported.
+import { MCP_ADMISSION_MODES } from "./mcp-admission.js";
+// ADR-0104: the approval-scope vocabulary is needed IN SCOPE here (not merely
+// re-exported below) so `createApprovalRuleSchema` validates against the one
+// authoritative list rather than a second copy of the two strings.
+import { APPROVAL_SCOPES } from "./approval-binding.js";
+// ADR-0117: the international category tuple is consumed by
+// updateOrgSettingsSchema below, so it is imported as well as re-exported.
+import { INTERNATIONAL_PII_CATEGORIES } from "./pii-international.js";
 
-export { detectPII, type PiiHit, type PiiCategory } from "./pii.js";
+export { detectPII, type PiiHit, type PiiCategory, type BasePiiCategory } from "./pii.js";
+// ADR-0117 — the opt-in international national-identifier detectors.
+export {
+  INTERNATIONAL_DETECTORS,
+  INTERNATIONAL_PII_CATEGORIES,
+  ALL_INTERNATIONAL_CATEGORIES,
+  DEFAULT_INTERNATIONAL_CATEGORIES,
+  type InternationalDetector,
+  type InternationalPiiCategory,
+} from "./pii-international.js";
 
 // ADR-0044 — the evaluation harness's pure half: the scorer registry (six
 // deterministic kinds plus the model-backed judge's deterministic prompt/parse
@@ -9,6 +32,18 @@ export { detectPII, type PiiHit, type PiiCategory } from "./pii.js";
 export {
   EVAL_SCORER_KINDS,
   DETERMINISTIC_SCORER_KINDS,
+  JUDGE_BACKED_SCORER_KINDS,
+  JUDGE_REFUSING_SCORER_KINDS,
+  CONTEXT_REQUIRED_SCORER_KINDS,
+  SCORING_SEMANTICS_VERSION,
+  LEGACY_SCORING_SEMANTICS_VERSION,
+  SCORING_SEMANTICS_CHANGELOG,
+  scoringSemanticsSummary,
+  scoringSemanticsMismatchReason,
+  isJudgeBackedScorer,
+  refusesWithoutJudge,
+  requiresContext,
+  judgeAvailabilityFor,
   isDeterministicScorer,
   evalScorerRegistry,
   evalScorerConfigSchema,
@@ -36,7 +71,75 @@ export {
   type EvalAggregate,
   type EvalGateInput,
   type EvalGateDecision,
+  type JudgeBackedScorerKind,
+  type JudgeAvailability,
 } from "./evals.js";
+
+// ADR-0067 — GROUNDEDNESS. The locally-computable claim-support / context-
+// precision / context-recall / answer-relevance metrics, plus the deterministic
+// prompt-and-parse halves of the two JUDGE-BACKED metrics that refuse rather
+// than degrade when no provider is configured.
+export {
+  splitClaims,
+  hasNegation,
+  isNoncommittal,
+  scoreClaimSupport,
+  scoreContextPrecision,
+  scoreContextRecall,
+  scoreAnswerRelevance,
+  buildGroundednessJudgePrompt,
+  parseGroundednessVerdict,
+  DEFAULT_CLAIM_THRESHOLD,
+  MIN_CLAIM_TOKENS,
+  CLAIM_SNIPPET_MAX,
+  CLAIM_DETAIL_MAX,
+  type ClaimSupport,
+  type ClaimSupportReport,
+  type ClaimSupportOptions,
+  type ContextPrecisionReport,
+  type ContextRecallReport,
+  type AnswerRelevanceReport,
+  type GroundednessJudgeRequest,
+  type GroundednessJudgeVerdict,
+  type JudgedClaimVerdict,
+} from "./groundedness.js";
+
+// ADR-0088 — REGISTERED EXTERNAL SCORERS. The operator brings the instrument
+// (a Fiddler-class scoring endpoint), the gateway brings the governance, and
+// every score is stamped `method: "external:<name>"`. The pure contract
+// parser, the pre-flight refusal (the ADR-0067/0072 honesty line extended to
+// a third method family), and the admin write shapes.
+export {
+  externalScorerMethod,
+  parseExternalScorerResponse,
+  externalScorerAvailabilityFor,
+  externalScorerKindSchema,
+  createExternalScorerSchema,
+  updateExternalScorerSchema,
+  setExternalScorerEnabledSchema,
+  EXTERNAL_SCORER_DISCLOSURE,
+  EXTERNAL_SCORER_MAX_REASONS,
+  EXTERNAL_SCORER_MAX_REASON_CHARS,
+  type ExternalScorerRequest,
+  type ExternalScorerVerdict,
+  type ExternalScorerUse,
+  type ExternalScorerFacts,
+  type ExternalScorerAvailability,
+  type CreateExternalScorer,
+  type UpdateExternalScorer,
+} from "./external-scorer.js";
+
+// THE ONE TOKENIZER (hoisted here from training-provider by ADR-0067 so the
+// retrieval index, the classifier and the groundedness metrics cannot disagree
+// about what a word is).
+export {
+  tokenize,
+  isNumericToken,
+  buildIdf,
+  weightedVector,
+  cosine,
+  STOPWORDS,
+} from "./text.js";
 
 // ADR-0045 — the model risk management registry's pure half: the effective
 // status computation (which recomputes expiry from validUntil rather than
@@ -158,7 +261,30 @@ export {
   CONFIG_ARTIFACT_TYPES,
   CONFIG_VERSION_STATUSES,
   LIVE_CANARY_ARTIFACT_TYPES,
+  SHADOW_CANARY_ARTIFACT_TYPES,
+  RESOLVED_ARTIFACT_TYPES,
   canaryIsLive,
+  canaryIsShadowEvaluated,
+  canaryIsEvaluated,
+  canaryModeOf,
+  canaryModeNote,
+  VERSIONED_RULE_FIELDS,
+  RULE_SELECTION_FIELDS,
+  RULE_IDENTITY_FIELDS,
+  isRuleArtifact,
+  validateRuleVersionBody,
+  ruleBodyFrom,
+  applyRuleBody,
+  // ADR-0074 — the pure half of the read-model write choke point
+  definedRulePatch,
+  partitionRulePatch,
+  composeRuleBody,
+  effectiveRuleBody,
+  ruleBodiesEqual,
+  planRuleEdit,
+  assessCanaryBaseline,
+  evaluateBaselineFreshness,
+  resolveForShadow,
   createConfigVersionSchema,
   activateConfigVersionSchema,
   startCanarySchema,
@@ -177,6 +303,15 @@ export {
   type ResolvedVersion,
   type EvalEvidence,
   type PromotionDecision,
+  type CanaryMode,
+  type RuleBodyRejection,
+  type ShadowResolution,
+  type RulePatchPartition,
+  type RuleEditPlan,
+  type RuleEditPlanKind,
+  type BaselineBucket,
+  type BaselineAssessment,
+  type StaleBaselineDecision,
 } from "./config-versions.js";
 
 // ADR-0049 — cost forecasting and spend-anomaly detection's pure half: the two
@@ -381,6 +516,68 @@ export {
   type GuardrailEvaluation,
 } from "./guardrails.js";
 
+// ADR-0097 — MCP ADMISSION SCANNING: the tool-poisoning gate's pure half. A
+// deterministic, local, zero-network scan over one MCP tool manifest, reusing
+// ADR-0042's prompt-injection and DLP detectors and adding the four
+// manifest-specific classes they lack (tool-ordering directives, sensitive
+// local paths, exfiltration-shaped directives, hidden/bidi Unicode).
+export {
+  MCP_ADMISSION_SEVERITIES,
+  MCP_ADMISSION_MODES,
+  MCP_ADMISSION_STATES,
+  MCP_ADMISSION_HOLD_AT,
+  MCP_ADMISSION_SCANNER_VERSION,
+  scanMcpManifest,
+  scanUnitsForTool,
+  manifestDigest,
+  nextAdmissionState,
+  admissionFindingSummary,
+  mcpAdmissionRuleIds,
+  strictestSeverity,
+  type McpAdmissionSeverity,
+  type McpAdmissionMode,
+  type McpAdmissionState,
+  type McpAdmissionFinding,
+  type McpAdmissionScan,
+  type ScannableTool,
+} from "./mcp-admission.js";
+
+// ADR-0101 — FEDERATED MCP REGISTRY, the pure half: the v0.1 `ServerListResponse`
+// wire schema, the remote-vs-package classification that decides what can become
+// an `mcp_servers` row at all, and the verbatim name rule.
+export {
+  MCP_REGISTRY_API_VERSION,
+  MCP_REGISTRY_LIST_PATH,
+  MCP_REGISTRY_MAX_PAGE_SIZE,
+  MCP_REMOTE_TRANSPORT_TYPES,
+  MCP_REGISTRY_ENTRY_KINDS,
+  MCP_CATALOGUE_REASONS,
+  MCP_REGISTRY_UPSTREAM_STATUSES,
+  MCP_IMPORT_CONFLICT_REASONS,
+  mcpRegistryPageSchema,
+  normalizeRegistryPage,
+  classifyRegistryEntry,
+  usableRemoteUrl,
+  pickRemote,
+  localServerNameFor,
+  type McpRemoteTransportType,
+  type McpRegistryEntryKind,
+  type McpCatalogueReason,
+  type McpRegistryUpstreamStatus,
+  type McpImportConflictReason,
+  type McpRegistryPagePayload,
+  type NormalizedRegistryEntry,
+  type NormalizedRegistryPage,
+} from "./mcp-registry.js";
+
+/** ADR-0097 — the admin CLEAR action on a held MCP server. A reason is
+ * REQUIRED and there is no auto-clear: admitting a manifest a scanner flagged
+ * is a decision somebody signs, not a timeout that expires. */
+export const clearMcpAdmissionSchema = z
+  .object({ reason: z.string().min(1).max(2000) })
+  .strict();
+export type ClearMcpAdmission = z.infer<typeof clearMcpAdmissionSchema>;
+
 /** ADR-0042 admin write shapes. A mode is one of the four verbs; a partial map
  * lets an admin change one detector without restating the others.
  *
@@ -580,6 +777,12 @@ export const createApprovalRuleSchema = z
     ...ruleScopeFields,
     toolName: z.string().min(1).nullable().optional(),
     writeOnly: z.boolean().optional(),
+    /** ADR-0104 — what a consent granted under this rule is BOUND TO.
+     *  ABSENT is the default and the strict reading, 'action': the approval is
+     *  bound to the exact arguments the approver signed for. 'tool' is the
+     *  deliberate escape hatch, and an operator has to type it — it is the
+     *  looser semantics, so it is never what you get by saying nothing. */
+    approvalScope: z.enum(APPROVAL_SCOPES).optional(),
     approverUserId: z.string().uuid(),
   })
   .superRefine(refineRuleScope);
@@ -601,6 +804,17 @@ export const decideApprovalSchema = z.object({
 
 export const createApiKeySchema = z.object({
   name: z.string().min(1),
+  /** ADR-0098 — the caller-supplied expiry, ISO-8601. Three distinct inputs:
+   *  - ABSENT: the org's `apiKeyDefaultTtlDays` applies, falling back to
+   *    `apiKeyMaxTtlDays` when only a ceiling is configured, and to NO expiry
+   *    when neither is (the shipped defaults — byte-identical to pre-0098).
+   *  - a TIMESTAMP: honoured, unless it exceeds `apiKeyMaxTtlDays`, in which
+   *    case issuance is REFUSED BY NAME (422) rather than clamped.
+   *  - `null`: an explicit request for a key that never expires. Honoured
+   *    when no ceiling is configured; refused by the SAME 422 when one is,
+   *    because "no expiry" is the longest lifetime there is and a ceiling a
+   *    caller can step over by asking for infinity is not a ceiling. */
+  expiresAt: z.string().datetime().nullable().optional(),
 });
 
 export const createDataScopeRuleSchema = z
@@ -611,6 +825,49 @@ export const createDataScopeRuleSchema = z
     allowedValues: z.array(z.string()).min(1),
   })
   .superRefine(refineRuleScope);
+
+// ---------------------------------------------------------------------------
+// Batch B1 (ADR-0073 residual) — the ordinary CRUD EDIT surface for the three
+// restriction-rule kinds. Deliberately ENFORCING FIELDS ONLY, `.strict()`:
+// the selection columns (scope/serverScope/userId/roleId/teamId/serverId)
+// decide WHICH callers a rule is loaded for, and ADR-0073 §2 pins that
+// rebinding a rule to a different subject is a NEW rule, never an edit — the
+// route pre-checks those keys and refuses with the reason named, and strict
+// parsing catches everything else. Every field optional: a PATCH names only
+// what it means to move, and `applyRuleEdit` decides whether that is a policy
+// change to version (mint + activate), a plain row write (unversioned rule —
+// invariant 4), or a no-op. Value types mirror the version-body schemas in
+// config-versions.ts, which re-validate the COMPOSED body before anything is
+// stored.
+// ---------------------------------------------------------------------------
+const ruleDeployModeField = z.enum(["hosted", "byoc", "air_gapped"]).nullable().optional();
+
+export const updateApprovalRuleSchema = z
+  .object({
+    toolName: z.string().min(1).nullable().optional(),
+    writeOnly: z.boolean().optional(),
+    approverUserId: z.string().uuid().optional(),
+    deployMode: ruleDeployModeField,
+  })
+  .strict();
+
+export const updateRateLimitSchema = z
+  .object({
+    toolName: z.string().min(1).nullable().optional(),
+    maxCalls: z.number().int().min(0).optional(),
+    windowSeconds: z.number().int().positive().optional(),
+    deployMode: ruleDeployModeField,
+  })
+  .strict();
+
+export const updateDataScopeRuleSchema = z
+  .object({
+    toolName: z.string().min(1).nullable().optional(),
+    argPath: z.string().min(1).optional(),
+    allowedValues: z.array(z.string()).min(1).optional(),
+    deployMode: ruleDeployModeField,
+  })
+  .strict();
 
 export const createRoleSchema = z.object({
   name: z.string().min(1),
@@ -706,10 +963,48 @@ export const createAgentSchemaChecked = createAgentSchema.refine(agentCustomProv
 
 export const setAgentEnabledSchema = z.object({ enabled: z.boolean() });
 
+/** B1.5 — `PATCH /v1/agents/:agentId`: the ordinary admin edit surface for an
+ * agent's DISPATCH-EXECUTION config, deliberately the same three fields
+ * `VERSIONED_RULE_FIELDS.agent_config` names and nothing else (the ADR-0073
+ * scope line at the route edge). The gateway routes the edit through
+ * `applyRuleEdit`, so a versioned agent's edit mints + activates an
+ * agent_config version and an unversioned agent keeps the plain row write —
+ * never a raw column write that the dispatch-time resolver would ignore. */
+export const updateAgentConfigSchema = z.object({
+  model: z.string().min(1).nullish(),
+  costPerMTokIn: z.number().nonnegative().nullish(),
+  costPerMTokOut: z.number().nonnegative().nullish(),
+});
+
+/** ADR-0089 (gap L20): set/clear an agent's accountable human owner — a
+ * governance record, not authentication. null CLEARS (an explicit act, the
+ * agent-policy/system-prompt clear idiom); the gateway validates the user
+ * exists and is not deactivated. */
+export const setAgentOwnerSchema = z.object({ ownerUserId: z.string().uuid().nullable() });
+
+/** ADR-0089: an agent lifecycle transition. `reason` is required for any
+ * non-active target (enforced with a named 422 in the gateway so the refusal
+ * is self-explaining); retired is terminal — the gateway refuses transitions
+ * OUT of it by name. */
+export const setAgentLifecycleSchema = z.object({
+  status: z.enum(["active", "deprecated", "retired"]),
+  reason: z.string().min(1).max(2000).optional(),
+});
+
 /** ADR-0023: set/clear an existing agent's admin base system prompt (null
  * clears — an explicit choice, mirroring the agent-policy clear semantics) */
 export const setAgentSystemPromptSchema = z.object({
   systemPrompt: z.string().min(1).max(20_000).nullable(),
+});
+
+/** ADR-0066 §4: replace an agent's ORDERED provider fallback chain. PUT-the-
+ * whole-list on purpose — a partial chain is never a valid intermediate state,
+ * and an incremental API would need position renumbering, which is where this
+ * kind of feature grows its bugs. An empty array clears the chain, explicitly.
+ * The cap is deliberate: a chain longer than this is not a resilience strategy,
+ * it is a request that will take minutes to fail. */
+export const setAgentFallbacksSchema = z.object({
+  fallbackAgentIds: z.array(z.string().uuid()).max(8),
 });
 
 export const createAgentGrantSchema = z.object({
@@ -784,6 +1079,15 @@ export const invokeAgentSchema = z.object({
   stream: z.boolean().optional(),
   /** pillar 5: attribute this call's cost to a project */
   projectId: z.string().uuid().optional(),
+  /** PILLAR 2 §2 stage 2 (ADR-0079): attribute this call to a workflow
+   * INSTANCE — the join point that lets the instance's current stage constrain
+   * the call. Validated exactly like `projectId`: an unknown instance, or one
+   * the caller may not drive, REFUSES (never silently ignored). While the named
+   * instance rests at a `planning` stage, a mutating `mode` is refused
+   * (`plan_only_stage`) and a plan/read mode is allowed. Attribution is
+   * OPT-IN — an invoke that names no instance is unconstrained, exactly as
+   * before. */
+  instanceId: z.string().uuid().optional(),
   /** multi-turn: dispatch inside this conversation — the stored history rides
    * the request as the model's messages array, and the user+assistant turns
    * are persisted on completion. Only meaningful with dispatch=true; a
@@ -937,6 +1241,17 @@ export const connectorProviderKindSchema = z.enum([
   "http",
   "webhook",
   "slack",
+  // ADR-0113 — the Bot Framework Connector adapter. NOTE: its credential is
+  // ADR-0023's structured JSON ({appId, appPassword, tenantId?, loginBaseUrl?}),
+  // validated by the adapter at resolve time rather than at credential-write
+  // time; see ADR-0113's honest limits.
+  "teams",
+  // ADR-0121 — the Graph sendMail courier. SEND-ONLY: `operation: "read"` on a
+  // mailbox means reading the mailbox, which the adapter refuses outright.
+  // Its credential is ADR-0023 structured JSON and, unlike teams, `tenantId`
+  // and `senderUpn` are REQUIRED — Graph app-only is single-tenant by nature
+  // and a message needs a mailbox to be sent from.
+  "outlook",
   "github",
   "jira",
   "snowflake",
@@ -1042,6 +1357,16 @@ export const submitArtifactSchema = z.object({
 
 export const advanceStageSchema = z.object({
   stageId: z.string().min(1),
+});
+
+/** ADR-0077 — instantiate a workflow-template-gallery shape as a REAL template.
+ * The gallery entry id names the shape; `name` names the created template;
+ * `approverUserId` (optional) replaces every `requesting_user` approver
+ * placeholder in the shape with a concrete user, resolved and validated by the
+ * SAME template-creation path an admin-authored definition goes through. */
+export const createFromGallerySchema = z.object({
+  name: z.string().min(1).max(200),
+  approverUserId: z.string().uuid().optional(),
 });
 
 /** §2 report per-check outcomes into an automated_check stage. A real CI posts
@@ -1202,6 +1527,12 @@ export function deployTargetProviderConfig(
  * they deployed out-of-band (or accepts the condition) and the pipeline advances. */
 export const deployOverrideSchema = z.object({
   stageId: z.string().min(1),
+  /** Why the parked deploy is being cleared by hand ("deployed out-of-band",
+   * "condition accepted"). Optional for an arm's-length operator; REQUIRED
+   * when the person clearing the gate is the instance's own initiator, who is
+   * otherwise self-attesting that their own change shipped. Same shape and
+   * same reasoning as the self-review reason on an approval decision. */
+  reason: z.string().min(1).max(2000).optional(),
 });
 
 export const createGitConnectionSchema = z.object({
@@ -1410,6 +1741,13 @@ export const upsertComplianceProfileSchema = z.object({
    * carrying its tag. MAX-composed with every other setting, so it can only
    * raise a layer. */
   guardrailModes: guardrailModeMapSchema.nullable().optional(),
+  /** ADR-0068 §5: this framework's RED-TEAM opinion, on the same row as its PII
+   * mode and guardrail floor rather than in a parallel config. Composed by the
+   * cascade's existing rules (union / MAX / strictest-wins) and applied
+   * TIGHTEN-ONLY, so a framework can raise a red-team bar and never lower one. */
+  redteamGatingClasses: z.array(z.enum(RED_TEAM_ATTACK_CLASSES)).max(16).nullable().optional(),
+  redteamMinTrials: z.number().int().min(1).max(25).nullable().optional(),
+  redteamFailOnSeverity: z.enum(["low", "medium", "high", "critical"]).nullable().optional(),
 });
 
 // PILLAR 3 (§8.2): the governed infrastructure-operations layer.
@@ -1640,6 +1978,19 @@ export const updateOrgSettingsSchema = z
     summarizerAgentId: z.string().uuid().nullable().optional(),
     // governance / compliance defaults
     defaultPiiMode: orgPiiModeSchema.optional(),
+    /** ADR-0117: WHICH international national-identifier jurisdictions this
+     * deployment detects. Ships EMPTY and an upgrade never changes it, so an
+     * install that upgrades into ADR-0117 refuses exactly what it refused
+     * before. Each entry costs a measured false-positive rate against
+     * structureless input (see `INTERNATIONAL_DETECTORS[].falsePositivePct`,
+     * 0.06% for the French NIR up to 9.03% for the Dutch BSN), which is why
+     * the product will not pick a set on an administrator's behalf. These
+     * categories only ever ADD to the four base detectors; nothing here can
+     * switch email/ssn/credit_card/phone off. */
+    piiInternationalCategories: z
+      .array(z.enum(INTERNATIONAL_PII_CATEGORIES))
+      .max(INTERNATIONAL_PII_CATEGORIES.length)
+      .optional(),
     envKeyFallbackEnabled: z.boolean().optional(),
     envFallbackProviders: z
       .array(z.enum(["anthropic", "openai", "google", "xai"]))
@@ -1653,12 +2004,44 @@ export const updateOrgSettingsSchema = z
      * false = strict, requiring an explicit per-server flag or an allow entry.
      * IMDS/link-local stays unconditionally blocked either way. */
     mcpPrivateRangesDefault: z.boolean().optional(),
+    /** ADR-0097: the MCP ADMISSION posture. 'off' (default) = no manifest
+     * scan runs at all and behaviour is byte-identical to pre-0097. 'log' =
+     * every manifest sync is scanned and the verdict/findings are recorded on
+     * the server row, but nothing is ever refused. 'enforce' = a server whose
+     * scan verdict is `held` is refused BEFORE any upstream connect and
+     * contributes no tools to discovery, until an admin clears it with a
+     * reason. Recommended production setting: 'enforce'. */
+    mcpAdmissionMode: z.enum(MCP_ADMISSION_MODES).optional(),
     /** ADR-0062: the org's TIGHTENING dial over the deployment-wide egress
      * posture. 'inherit' (default) defers to the env-derived deploy mode;
      * 'strict' adjudicates compiled vendor endpoints against the egress
      * allow-list regardless of mode. There is deliberately NO value that
      * loosens an air_gapped deployment — the enum has no such member. */
     egressCompiledDefaultPolicy: egressCompiledDefaultPolicySchema.optional(),
+    /** ADR-0080 amendment (migration 0098, batch B3): does an approved AI use
+     * case gate dispatch? 'off' (default) = approval registers intent and
+     * gates nothing — the shipped honest limit, byte-identical. 'warn'
+     * records the refusal-shaped fact (audit row + response annotation)
+     * without blocking. 'enforce' refuses a governed dispatch attributed to a
+     * use-case-LINKED project (the `ai_use_cases.projectId` join — the only
+     * one the schema holds) unless at least one linked use case is approved.
+     * A project no use case links is untouched in every mode. */
+    useCaseGateMode: z.enum(["off", "warn", "enforce"]).optional(),
+    /** ADR-0080 amendment (migration 0101, batch B6b): must a governed
+     * dispatch NAME a project? false (default) = today, byte-identical — an
+     * unattributed dispatch runs and lands in the explicit "Unattributed" cost
+     * bucket. true = a governed dispatch with no `projectId` is refused 409
+     * `attribution_required`, audited, before any provider work. Independent
+     * of `useCaseGateMode` by construction: this acts only where projectId is
+     * null, that one only where it is not. */
+    dispatchAttributionRequired: z.boolean().optional(),
+    /** ADR-0092 amendment (migration 0100, L6c): may the deterministic
+     * access-recommendation findings carry a MODEL-JUDGED annotation? false
+     * (default) = the report is the six deterministic rules and nothing else.
+     * The agent id names the judge; null clears it. An enabled knob with no
+     * dispatchable judge reports `judged: unavailable` and changes nothing. */
+    recommendationJudgeEnabled: z.boolean().optional(),
+    recommendationJudgeAgentId: z.string().uuid().nullable().optional(),
     // budgets
     budgetEnforcement: budgetEnforcementSchema.optional(),
     budgetHardBlockPct: z.number().int().min(1).max(100).optional(),
@@ -1679,6 +2062,12 @@ export const updateOrgSettingsSchema = z
     modeAuditRetention: z
       .record(z.enum(["hosted", "byoc", "air_gapped"]), z.number().int().positive())
       .optional(),
+    /** Batch B7c (ADR-0073 amendment, migration 0102): retention window for
+     * `config_canary_observations` — shadow-canary evidence only, acted on by
+     * the ADR-0064 prune job (off with the scheduler) and the manual prune
+     * endpoint. `config_versions` themselves are NEVER pruned by anything;
+     * this knob cannot reach them. */
+    canaryObservationRetentionDays: z.number().int().min(1).max(3650).optional(),
     // O5 (migration 0045): scheduled backup verification — OFF by default
     backupVerifyEnabled: z.boolean().optional(),
     backupVerifyIntervalHours: z.number().int().min(1).max(24 * 30).optional(),
@@ -1696,6 +2085,25 @@ export const updateOrgSettingsSchema = z
     imageTokenEstimateTokens: z.number().int().min(1).max(100_000).optional(),
     sharedContextMaxChars: z.number().int().min(100).max(100_000).optional(),
     nodeOutputMaxChars: z.number().int().min(100).max(20_000).optional(),
+    // ADR-0065 (migration 0077) — RegulAIt-LLM. Two dials only: the master
+    // switch (ADR-0034's `customModelProvidersEnabled` precedent) and the
+    // estimated-cost threshold at which a training job stops being something a
+    // user starts and becomes something the ONE Approvals Queue decides.
+    llmTrainingEnabled: z.boolean().optional(),
+    llmTrainingApprovalThresholdUsd: z.number().min(0).max(1_000_000).optional(),
+    // ADR-0070 (migration 0082) — trace observability. Three dials and an
+    // exporter. `tracingEnabled` is the master switch (ADR-0034's
+    // `customModelProvidersEnabled` precedent); `tracingCaptureContent` may
+    // only ever NARROW (off keeps the tree, timings, costs and every deny
+    // reason, and stores no prompt or output at all); `tracingOtlpEndpoint` is
+    // null by default and is adjudicated by the egress guard at write time AND
+    // on every export — there is deliberately no default endpoint anywhere.
+    tracingEnabled: z.boolean().optional(),
+    tracingCaptureContent: z.boolean().optional(),
+    tracingPreviewMaxChars: z.number().int().min(0).max(20_000).optional(),
+    tracingOtlpEndpoint: z.string().trim().min(1).max(2048).nullable().optional(),
+    tracingOtlpHeaders: z.record(z.string(), z.string().max(4096)).nullable().optional(),
+    tracingOtlpServiceName: z.string().trim().min(1).max(200).optional(),
     // ADR-0025 sign-in policy dials
     passwordMinLength: z.number().int().min(8).max(128).optional(),
     passwordRequireClasses: z.number().int().min(1).max(4).optional(),
@@ -1717,6 +2125,27 @@ export const updateOrgSettingsSchema = z
     sessionIpAllowlist: z.array(z.string().trim().min(1).max(64)).max(256).nullable().optional(),
     sessionIpPolicy: ipPolicySchema.optional(),
     apiKeyIpPolicy: ipPolicySchema.optional(),
+    /** ADR-0098 (migration 0104): API-KEY LIFETIME. Two dials, both null by
+     * default so the shipped posture is exactly pre-0098 — a newly issued key
+     * never expires. `apiKeyDefaultTtlDays` is the lifetime (in days) applied
+     * to a key issued with no caller-supplied expiry; `apiKeyMaxTtlDays` is
+     * the CEILING on what any issuer may request, and a request over it —
+     * including an explicit request for no expiry at all — is refused by name
+     * (422 `api_key_expiry_exceeds_ceiling`), never silently clamped. Null
+     * clears either. A default above the ceiling is refused (422). Neither
+     * knob touches a key that already exists: expiry is set at issuance and
+     * this ADR deliberately offers no way to extend it. */
+    apiKeyDefaultTtlDays: z.number().int().min(1).max(3650).nullable().optional(),
+    apiKeyMaxTtlDays: z.number().int().min(1).max(3650).nullable().optional(),
+    /** ADR-0105 (migration 0107): HOW LONG AN APPROVED-BUT-UNSPENT MCP TOOL
+     * consent stays spendable, in HOURS from the moment it was queued. Ships
+     * at 72 — a deliberate upgrade-day change, because an approval is a human
+     * decision about one pending action and indefinite validity is the defect.
+     * NULL means "never expires": a legitimate operator choice, recorded as
+     * one, that knowingly reopens the gap ADR-0105 closes. Changing the dial
+     * never rewrites an approval that already exists — expiry is stamped at
+     * queue time, exactly as ADR-0098 stamps a key's at issuance. */
+    approvalTtlHours: z.number().int().min(1).max(8760).nullable().optional(),
     /** ADR-0039 self-lockout guard (mirrors the sso_only guard): saving
      * enforce_continuous with an allow-list that excludes the caller's own
      * current IP is refused (409) unless this explicit confirm rides along.
@@ -2089,6 +2518,7 @@ export {
   planUserImport,
   planGroupRoleImport,
   parseCsv,
+  parseCsvRecords,
   csvToUserRows,
   type OnboardingStepDef,
   type OnboardingStepStatus,
@@ -2132,6 +2562,49 @@ export {
   type ChainBreakKind,
   type ChainedAuditRow,
 } from "./audit-chain.js";
+
+// ADR-0099 — the audit-log CREDENTIAL SCRUB. Pure, and called from
+// `@regulait/db`'s single chained-insert path immediately BEFORE the row is
+// hashed, so every call site — helper, raw insert, and the next one written —
+// is covered without knowing it exists. Exported here so the scrub rule can be
+// tested, and so a reader of a redacted ledger can find the marker's grammar.
+export {
+  AUDIT_SCRUB_FINGERPRINT_HEX,
+  AUDIT_SCRUB_MARKER_PREFIX,
+  scrubAuditDetail,
+  scrubAuditRow,
+  scrubAuditText,
+  type ScrubbableAuditRow,
+} from "./audit-scrub.js";
+
+// ADR-0104 — APPROVAL PAYLOAD BINDING. The consent fingerprint an Approvals-
+// Queue row is bound to, and the approver-facing preview beside it. Pure: it
+// reuses ADR-0060's `canonicalJson` for the serialization and ADR-0099's
+// `scrubAuditDetail` for the preview rather than adding a second of either, so
+// the queue writer and the evaluation-time matcher hash the identical bytes.
+export {
+  APPROVAL_CONTEXT_DIGEST_VERSION,
+  APPROVAL_DIGEST_VERSION,
+  APPROVAL_SCOPES,
+  CONSENT_RETIREMENT_REASONS,
+  DEFAULT_APPROVAL_SCOPE,
+  DEFAULT_APPROVAL_TTL_HOURS,
+  approvalArgumentsDigest,
+  approvalArgumentsPreview,
+  approvalContextDigest,
+  effectiveApprovalScope,
+  normalizeApprovalArguments,
+  sortApprovalRuleVersions,
+  type ApprovalContextRef,
+  type ApprovalPayloadRef,
+  type ApprovalRuleVersionRef,
+  type ApprovalScope,
+  type ConsentRetirementReason,
+} from "./approval-binding.js";
+
+// ADR-0099 — the credential-material subset of ADR-0042's DLP rules, shared
+// with the scrubber so detection has exactly one definition.
+export { CREDENTIAL_MATERIAL_RULES } from "./guardrails.js";
 
 // ADR-0055 — SHADOW-AI DISCOVERY, the pure half: the untrusted-evidence
 // envelope (bounds + the pre-parse escalation screen), the catalogue shape and
@@ -2189,6 +2662,204 @@ export {
   type ShadowAiSubjectKind,
 } from "./shadow-ai.js";
 
+// ADR-0071 — SHADOW-AI EVIDENCE FORMAT ADAPTERS, the pure half: the layer BELOW
+// ADR-0055 that turns a raw CEF/LEEF/W3C/Squid/NCSA log or a mapped CSV/JSON
+// export into the evidence rows ADR-0055 already accepts. An adapter layer, not
+// a second pipeline: every adapter validates its output against ADR-0055's OWN
+// row schemas, so a row shape cannot drift from the pipeline that consumes it.
+// Not one regular expression is evaluated over file content anywhere in it, and
+// every unparseable line refuses with its FILE LINE NUMBER.
+export {
+  AttributeBag,
+  EVIDENCE_ADAPTERS,
+  EVIDENCE_ADAPTER_IDS,
+  EVIDENCE_ADAPTER_POSTURE,
+  EVIDENCE_FORMAT_BASES,
+  EVIDENCE_KIND_FIELDS,
+  EVIDENCE_SOURCE_FORMATS,
+  EvidenceFormatError,
+  PROXY_LAYOUTS,
+  RAW_EVIDENCE_MALFORMED_POLICIES,
+  cefAdapter,
+  describeEvidenceAdapters,
+  genericEvidenceConfigSchema,
+  genericMappedEvidenceAdapter,
+  getEvidenceAdapter,
+  inferEvidenceMapping,
+  leefAdapter,
+  leefConfigSchema,
+  numberedLines,
+  parseCefExtension,
+  parseCefLine,
+  parseClfTimestamp,
+  parseCountCell,
+  parseEvidenceTimestamp,
+  parseLeefLine,
+  proxyCommonAdapter,
+  proxyCommonConfigSchema,
+  rawEvidenceImportRequestSchema,
+  resolveLeefDelimiter,
+  splitUnescaped,
+  tokenizeClf,
+  tokenizeW3c,
+  unescapeLogValue,
+  w3cExtendedAdapter,
+  type CefRecord,
+  type EvidenceAdapter,
+  type EvidenceAdapterCapabilities,
+  type EvidenceAdapterInput,
+  type EvidenceFormatBasis,
+  type EvidenceParseResult,
+  type EvidenceRowRefusal,
+  type EvidenceSourceFormat,
+  type ProxyLayout,
+  type RawEvidenceImportRequest,
+  type RawEvidenceMalformedPolicy,
+} from "./evidence-adapters.js";
+
+// ADR-0083 — FIRST-PARTY SHADOW-AI DISCOVERY, the pure half: a versioned,
+// FROZEN, compiled-in signature catalogue (the ADR-0068 corpus pattern) and a
+// classifier that triages operator-supplied text — generic DNS/proxy log lines
+// and dependency manifests — into shadow / governed_via_gateway / unmatched.
+// No collector, no scraper, no network call, no regex over input; a compiled
+// hit triages and suggests, it can never mint a finding — findings still come
+// from ADR-0055's pipeline and the deployment's own admin catalogue.
+export {
+  DISCOVERY_MAX_BYTES,
+  DiscoveryParseError,
+  SHADOW_AI_CATALOG_V1,
+  SHADOW_AI_CATALOG_VERSION,
+  SHADOW_CATALOG_KINDS,
+  SHADOW_DISCOVERY_CLASSES,
+  SHADOW_DISCOVERY_POSTURE,
+  SHADOW_DISCOVERY_SOURCE_KINDS,
+  classifyDiscoveryContent,
+  endpointEntryMatches,
+  extractHostCandidatesFromLine,
+  matchCatalogEndpoint,
+  matchCatalogPackage,
+  normalizePackageName,
+  parseGoModManifest,
+  parsePackageJsonManifest,
+  parseRequirementsManifest,
+  sdkEntryMatches,
+  shadowCatalogEntrySchema,
+  type DiscoveryCandidate,
+  type DiscoveryClassification,
+  type ManifestEntry,
+  type ShadowCatalogEntry,
+  type ShadowCatalogKind,
+  type ShadowDiscoveryClass,
+  type ShadowDiscoverySourceKind,
+} from "./shadow-discovery.js";
+
+// ADR-0122 — MCP-server discovery from supplied evidence. Its own module, not
+// catalogue entries: an MCP server is identified by the SHAPE of a call rather
+// than by who operates it, so the matching rule differs from "is this hostname
+// a known vendor's" (see the module header).
+export {
+  findMcpEndpoints,
+  MCP_DISCOVERY_POSTURE,
+  MCP_SDK_PACKAGES,
+  type McpEndpointObservation,
+  type McpEvidenceConfidence,
+} from "./mcp-discovery.js";
+
+// ADR-0069 — CROSS-VENDOR COST CONSOLIDATION, the pure half: the adapter
+// registry (a new vendor is a new adapter, not a new code path), the
+// character-scanned amount/date parsers that refuse rather than guess, the
+// vendor-account -> RegulAIt-user resolution rules, and the consolidation math
+// whose output type has NO field for a metered+imported total.
+export {
+  ACCOUNT_RESOLUTION_METHODS,
+  ANY_VENDOR,
+  COST_BASES,
+  COST_BILLING_KINDS,
+  COST_IMPORT_ADAPTERS,
+  COST_IMPORT_ADAPTER_IDS,
+  COST_IMPORT_MAX_BYTES,
+  COST_IMPORT_MAX_COLUMNS,
+  COST_IMPORT_MAX_LINE_USD,
+  COST_IMPORT_MAX_ROWS,
+  COST_IMPORT_TEXT_MAX,
+  CostImportFormatError,
+  IMPORTED_BASIS_STATEMENT,
+  anthropicConsoleAdapter,
+  awsCurAdapter,
+  consolidate,
+  costColumnMappingSchema,
+  costImportDefaultsSchema,
+  costImportRequestSchema,
+  describeCostImportAdapters,
+  genericCsvConfigSchema,
+  genericMappedAdapter,
+  getCostImportAdapter,
+  inferMapping,
+  normalizeAccountKey,
+  openAiConsoleAdapter,
+  parseAmountCell,
+  parseDateCell,
+  readSourceTable,
+  renderConsolidatedCsv,
+  resolveVendorAccount,
+  seatRosterAdapter,
+  seatRosterConfigSchema,
+  vendorAliasRequestSchema,
+  vendorDomainRuleRequestSchema,
+  type AccountResolution,
+  type AccountResolutionMethod,
+  type ConsolidatedSubject,
+  type CostBasis,
+  type CostBillingKind,
+  type CostColumnMapping,
+  type CostImportAdapter,
+  type CostImportAdapterCapabilities,
+  type CostImportAdapterInput,
+  type CostImportDefaults,
+  type CostImportParseResult,
+  type CostRowRefusal,
+  type ImportedInput,
+  type ImportedSide,
+  type MeteredInput,
+  type MeteredSide,
+  type ParsedCostLine,
+  type VendorAliasRow,
+  type VendorDomainRuleRow,
+} from "./cost-import.js";
+
+// ADR-0076 — COST RECONCILIATION, the pure half: the planner that decides
+// which imported lines are cross-batch restatements of the same vendor fact
+// (marked, never deleted), refuses ambiguous multiplicities, and reports
+// overlapping-but-not-identical windows instead of guessing at them.
+export {
+  RECONCILIATION_MAX_WARNINGS,
+  planCostReconciliation,
+  type DuplicateGroupPlan,
+  type ReconciliationLineInput,
+  type ReconciliationPlan,
+  type ReconciliationWarning,
+  type SupersessionPlanItem,
+} from "./cost-reconciliation.js";
+
+// ADR-0076 — ROSTER INGEST, the pure half: parse a SCIM-style user export or
+// a CSV roster into normalised entries the gateway feeds through the EXISTING
+// alias/cost-centre write paths. Identity columns are join keys (PII-exempt by
+// the same construction ADR-0069 discloses); every unmapped column is
+// discarded at parse.
+export {
+  ROSTER_MAX_ROWS,
+  ROSTER_TEXT_MAX,
+  inferRosterMapping,
+  parseRosterExport,
+  rosterColumnMappingSchema,
+  rosterIngestRequestSchema,
+  type RosterColumnMapping,
+  type RosterEntry,
+  type RosterIngestRequest,
+  type RosterParseResult,
+  type RosterRowRefusal,
+} from "./roster-import.js";
+
 // ADR-0061 — CHATOPS APPROVALS, the pure half: signature verification and the
 // replay window (the FIRST wall — a forged callback must be cheap to reject,
 // before mapping, entitlement or any DB work), strict interaction parsing (the
@@ -2201,6 +2872,8 @@ export {
   CHATOPS_REPLAY_WINDOW_SECONDS,
   SLACK_SIGNATURE_HEADER,
   SLACK_TIMESTAMP_HEADER,
+  TEAMS_ADAPTIVE_CARD_CONTENT_TYPE,
+  TEAMS_ADAPTIVE_CARD_VERSION,
   TEAMS_AUTHORIZATION_HEADER,
   chatContentFenced,
   chatDecidable,
@@ -2211,9 +2884,11 @@ export {
   parseTeamsInteraction,
   slackSignature,
   slackSignatureBaseString,
+  teamsActivityForCard,
   teamsSignature,
   verifyChatSignature,
   type ApprovalCard,
+  type ApprovalCardAction,
   type ApprovalCardInput,
   type ChatInteraction,
   type ChatOpsAction,
@@ -2221,6 +2896,7 @@ export {
   type ChatSignatureFailure,
   type ChatSignatureInput,
   type ChatSignatureResult,
+  type TeamsActivityPayload,
 } from "./chatops.js";
 // ADR-0057 — continuous red-teaming's pure half: the attack-class registry
 // (each class next to what it CANNOT tell you), the versioned built-in probe
@@ -2229,35 +2905,82 @@ export {
 // itself a thin composition over ADR-0044's `evaluateEvalGate`, because a
 // red-team suite IS an eval suite with adversarial cases and inverted polarity.
 export {
+  RED_TEAM_AGENTIC_ATTACK_CLASSES,
+  RED_TEAM_AGENTIC_VECTORS,
   RED_TEAM_ATTACK_CLASSES,
   RED_TEAM_CANARY,
+  RED_TEAM_CORE_ATTACK_CLASSES,
+  RED_TEAM_CORPUS_VERSIONS,
   RED_TEAM_COVERAGE_DISCLOSURE,
+  RED_TEAM_LATEST_CORPUS_VERSION,
   RED_TEAM_ORIGIN_TAG,
   RED_TEAM_SEVERITIES,
   RED_TEAM_SEVERITY_WEIGHT,
   aggregateRedTeamByClass,
+  applyRedTeamPreset,
   attachRedTeamEvidenceSchema,
+  builtinRedTeamCorpus,
   builtinRedTeamLibrary,
+  builtinRedTeamLibraryV2,
+  composeRedTeamPreset,
   createRedTeamLibrarySchema,
   createRedTeamProbeSchema,
   evaluateRedTeamGate,
+  isSequenceProbe,
+  redTeamAgenticVectorSchema,
   redTeamAttackClassRegistry,
   redTeamAttackClassSchema,
   redTeamOverallAggregate,
+  redTeamProbeToolSchema,
   redTeamSeveritySchema,
+  seedRedTeamCorpusSchema,
   severityRank,
   startRedTeamRunSchema,
+  validateRedTeamAgentic,
   validateRedTeamProbe,
+  type RedTeamAgenticVector,
+  type RedTeamAgenticVectorKind,
   type RedTeamAttackClass,
   type RedTeamAttackClassInfo,
   type RedTeamClassAggregate,
   type RedTeamClassVerdict,
+  type RedTeamCompliancePreset,
+  type RedTeamEffectivePreset,
   type RedTeamGateDecision,
   type RedTeamGateInput,
   type RedTeamProbeOutcome,
   type RedTeamProbeSeed,
+  type RedTeamProbeTool,
+  type RedTeamRunSettings,
   type RedTeamSeverity,
 } from "./redteam.js";
+// ADR-0068 — attack-success-rate statistics. Pure: the Wilson score interval,
+// the per-probe trial roll-up whose denominator is never separable from its
+// rate, the pooled per-class ASR, and the `not_run` status that keeps an unrun
+// probe out of every aggregate rather than letting it read as resisted.
+export {
+  RED_TEAM_ASR_DISCLOSURE,
+  RED_TEAM_DEFAULT_TRIALS,
+  RED_TEAM_DEFAULT_Z,
+  RED_TEAM_MAX_TRIALS,
+  RED_TEAM_TRANSPORT_FAILURE_CODES,
+  RED_TEAM_GOVERNANCE_STOP_CODES,
+  RED_TEAM_PLATFORM_HELD_SCORE,
+  classifyDispatchFailure,
+  aggregateAsrByClass,
+  describeAsr,
+  measurementQuality,
+  summarizeProbeAsr,
+  trialCostNote,
+  wilsonInterval,
+  type RedTeamClassAsr,
+  type RedTeamMeasurementQuality,
+  type RedTeamProbeAsr,
+  type RedTeamProbeStatus,
+  type RedTeamTrialOutcome,
+  type DispatchFailureKind,
+  type WilsonInterval,
+} from "./redteam-stats.js";
 // ADR-0059 — policy simulation / blast-radius preview's pure half: the replay
 // classifier (total over recorded × candidate effect), the fidelity analysis
 // derived from the candidate's OWN source, the ADR-0047-shaped entitlement
@@ -2326,6 +3049,27 @@ export {
   type PackStatus,
 } from "./compliance-packs.js";
 
+// ADR-0087 — the compliance-pack VERSION DIFF, the pure half: a
+// deterministic, order-independent structured diff of two pack versions
+// (controls added/removed/changed with per-field before/after, pack-level
+// changes, the HIGH-consequence cascadeTag flag), so a framework revision is
+// reviewable before it activates. Claims-vs-claims only — the measured half
+// is the gateway's impact preview over the live ledgers.
+export {
+  PACK_CONTROL_DIFF_FIELDS,
+  PACK_LEVEL_DIFF_FIELDS,
+  compliancePackDiffSchema,
+  diffCompliancePacks,
+  type ChangedControl,
+  type CompliancePackDiff,
+  type ControlDiffSummary,
+  type ControlFieldChange,
+  type PackControlDiffField,
+  type PackLevelChange,
+  type PackLevelDiffField,
+  type PackVersionSnapshot,
+} from "./compliance-pack-diff.js";
+
 // ADR-0056 — THE AI GOVERNANCE COPILOT, the pure half: the read-only tool
 // vocabulary (four tools, no mutating one), the deterministic NL -> structured
 // query step (testable without a provider, and unsteerable by the data it
@@ -2333,25 +3077,57 @@ export {
 // hallucinate a figure), the narrator INTERFACE + prompt/parse/cross-check
 // following ADR-0044's judge pattern, and the proposal record builder.
 export {
+  COPILOT_APPLICABLE_PROPOSAL_KINDS,
+  COPILOT_BUDGET_ADJUSTMENT_FIELDS,
   COPILOT_DECISION_SUPPORT_NOTICE,
+  COPILOT_ENTITY_FILTER_MATRIX,
+  COPILOT_ENTITY_KINDS,
+  COPILOT_ENTITY_KIND_LABELS,
+  COPILOT_GRANT_KINDS,
+  COPILOT_GROUNDED_REFUSAL,
+  COPILOT_MAX_ENTITY_CANDIDATES,
+  COPILOT_OBJECT_KINDS,
   COPILOT_PROPOSAL_KINDS,
+  COPILOT_RULE_TO_APPROVAL_SOURCE_KINDS,
   COPILOT_SCOPE_CAVEAT,
   COPILOT_TIMEFRAMES,
   COPILOT_TOOLS,
   COPILOT_TOOL_SPECS,
+  COPILOT_UNAPPLICABLE_PROPOSAL_KINDS,
   buildNarrationPrompt,
   buildProposalRecord,
   copilotAskSchema,
+  copilotEntityAmbiguousRefusal,
+  copilotEntityNotFilterableRefusal,
+  copilotEntityUnresolvedRefusal,
+  copilotBudgetAdjustmentDiffSchema,
+  copilotGrantRevocationDiffSchema,
+  copilotPolicyTighteningDiffSchema,
+  copilotPlanFiltered,
+  copilotRuleToApprovalDiffSchema,
+  copilotProposalKindIsApplicable,
   copilotProposalSchema,
+  copilotToolSupportsEntityKind,
+  copilotToolsFilteringEntityKind,
+  copilotUnfilteredSubjectCaveat,
+  describeCopilotFilters,
+  extractEntityCandidates,
   narrationIsGrounded,
   parseNarration,
   planCopilotQuery,
   renderGroundedAnswer,
+  retrievalFoundNothing,
+  type CopilotApplicableProposalKind,
   type CopilotAskInput,
+  type CopilotCitableObject,
+  type CopilotEntityKind,
+  type CopilotEntityMatch,
+  type CopilotEntityRef,
   type CopilotEvidence,
   type CopilotNarration,
   type CopilotNarrationRequest,
   type CopilotNarrator,
+  type CopilotObjectKind,
   type CopilotProposalInput,
   type CopilotProposalKind,
   type CopilotQueryPlan,
@@ -2360,3 +3136,189 @@ export {
   type CopilotToolSpec,
   type GroundedAnswer,
 } from "./copilot.js";
+
+// ADR-0070 — TRACE / SPAN OBSERVABILITY, the pure half: the cycle-safe,
+// order-deterministic tree builder (the ONE place parentage is decided), the
+// preview truncation that adds a length limit and makes no second PII decision,
+// the OTel GenAI semantic-convention attribute mapping, and a hand-rolled
+// OTLP/HTTP JSON encoder (no OTel SDK — see the ADR).
+export {
+  OTEL_STATUS_ERROR,
+  OTEL_STATUS_OK,
+  OTEL_STATUS_UNSET,
+  OTLP_EXPORT_LIMITS,
+  TRACE_TRUNCATION_MARKER,
+  buildOtlpPayload,
+  buildSpanTree,
+  flattenSpanTree,
+  otelAttributesForSpan,
+  otelStatus,
+  otlpSpanId,
+  otlpTraceId,
+  summariseSpanTree,
+  toolPayloadPreview,
+  tracePreview,
+  type OtelAttrContext,
+  type OtlpBuildInput,
+  type SpanNode,
+  type SpanRecord,
+  type TraceRecord,
+  type TreeTotals,
+} from "./tracing.js";
+
+// ---------------------------------------------------------------------------
+// ADR-0080 — the AI use-case registry's request shapes. `status` is
+// conspicuously absent from every one of them: approved/rejected are reached
+// only through the linked intake instance's decision on the one approvals
+// queue, and retirement has its own audited endpoint.
+// ---------------------------------------------------------------------------
+
+export const AI_USE_CASE_DATA_SENSITIVITIES = [
+  "public",
+  "internal",
+  "confidential",
+  "regulated",
+] as const;
+
+export const createUseCaseSchema = z.object({
+  name: z.string().min(1).max(200),
+  description: z.string().min(1).max(4000),
+  businessContext: z.string().min(1).max(4000),
+  dataSensitivity: z.enum(AI_USE_CASE_DATA_SENSITIVITIES),
+  /** the SAME tags the §8.3 cascade enforces (compliance_profiles.tag) */
+  complianceTags: z.array(z.string().min(1).max(200)).max(20).default([]),
+  /** agent REFERENCES the proposer intends to use — validated server-side */
+  intendedAgentIds: z.array(z.string().uuid()).max(20).default([]),
+  projectId: z.string().uuid().optional(),
+});
+
+/** editable while the intake is in flight; `status` is NOT here on purpose —
+ * the gateway refuses a body naming it with a 422 that points at the decide
+ * path, rather than silently dropping the key */
+export const updateUseCaseSchema = z.object({
+  description: z.string().min(1).max(4000).optional(),
+  businessContext: z.string().min(1).max(4000).optional(),
+  intendedAgentIds: z.array(z.string().uuid()).max(20).optional(),
+  projectId: z.string().uuid().nullable().optional(),
+});
+
+export const retireUseCaseSchema = z.object({
+  reason: z.string().min(1).max(2000),
+});
+
+// ---------------------------------------------------------------------------
+// ADR-0081 — the AI risk register: the category/resolver vocabulary, the
+// fixed category → evidence mapping, the request shapes, the seed library,
+// and the disclaimer. Evidence itself lives in the gateway as real SELECTs.
+// ---------------------------------------------------------------------------
+export {
+  AI_RISK_CATEGORIES,
+  AI_RISK_LEVELS,
+  AI_RISK_REGISTER_DISCLAIMER,
+  AI_RISK_STATUSES,
+  DEFAULT_RISK_LIBRARY,
+  RISK_CATEGORY_EVIDENCE,
+  RISK_EVIDENCE_RESOLVERS,
+  acceptRiskSchema,
+  createRiskSchema,
+  riskLibraryEntrySchema,
+  transitionRiskSchema,
+  updateRiskSchema,
+  type AcceptRiskInput,
+  type AiRiskCategory,
+  type AiRiskLevel,
+  type AiRiskStatus,
+  type CreateRiskInput,
+  type RiskEvidenceResolverId,
+  type RiskLibraryEntry,
+  type TransitionRiskInput,
+  type UpdateRiskInput,
+} from "./risks.js";
+
+// ---------------------------------------------------------------------------
+// ADR-0084 — the AI vendor registry (third-party AI risk): the vocabulary,
+// the request shapes, and the attested-never-measured disclaimer. `status` is
+// conspicuously absent from every schema: approved/rejected are reached only
+// through the linked assessment instance's decision on the one approvals
+// queue, and retirement has its own audited endpoint.
+// ---------------------------------------------------------------------------
+export {
+  AI_VENDOR_ATTESTATION_DISCLAIMER,
+  AI_VENDOR_CATEGORIES,
+  AI_VENDOR_STATUSES,
+  createVendorSchema,
+  recordVendorAttestationSchema,
+  retireVendorSchema,
+  updateVendorSchema,
+  type AiVendorCategory,
+  type AiVendorStatus,
+  type CreateVendorInput,
+  type RecordVendorAttestationInput,
+  type UpdateVendorInput,
+} from "./vendors.js";
+
+// ---------------------------------------------------------------------------
+// ADR-0085 — EU AI Act risk-tier screening (gap L10): the questionnaire
+// vocabulary, the frozen v1 rule set, the deterministic classifier, the
+// answers-block parser, and the screening-not-legal-advice disclaimer. The
+// tier is computed SERVER-SIDE from the answers — never accepted from any
+// payload — and it informs the human sign-off; nothing is auto-blocked.
+// ---------------------------------------------------------------------------
+export {
+  classifyEuAiActTier,
+  euAiActAnswersSchema,
+  extractEuAiActAnswers,
+  renderEuAiActAnswersBlock,
+  EU_AI_ACT_ANNEX_III_DOMAINS,
+  EU_AI_ACT_ANSWERS_FENCE,
+  EU_AI_ACT_AFFECTED_PERSONS,
+  EU_AI_ACT_BIOMETRIC_USES,
+  EU_AI_ACT_DECISION_AUTONOMY,
+  EU_AI_ACT_PURPOSE_DOMAINS,
+  EU_AI_ACT_RULESET_V1,
+  EU_AI_ACT_RULESET_VERSION,
+  EU_AI_ACT_SCREENING_DISCLAIMER,
+  EU_AI_ACT_TIER_RANK,
+  EU_AI_ACT_TIERS,
+  type EuAiActAnswers,
+  type EuAiActClassification,
+  type EuAiActExtraction,
+  type EuAiActReason,
+  type EuAiActRule,
+  type EuAiActTier,
+} from "./eu-ai-act.js";
+
+// ---------------------------------------------------------------------------
+// ADR-0092 — access recommendations, the deterministic half (gap L24): the
+// frozen v1 rule set (queries with reasons — id, plain-language rationale
+// template, severity CLASS), the strict rationale renderer, and the
+// `from_recommendations` campaign-scope parser. No scores, no ranking, no
+// auto-execution; the model-judged half stays credential-blocked (L6).
+// ---------------------------------------------------------------------------
+export {
+  ACCESS_RECOMMENDATION_RULES_V1,
+  ACCESS_RECOMMENDATION_RULES_VERSION,
+  ACCESS_RECOMMENDATION_RULE_IDS,
+  ACCESS_RECOMMENDATION_SEVERITIES,
+  RECOMMENDATION_JUDGE_LIMITS,
+  RECOMMENDATION_JUDGE_METHOD,
+  RECOMMENDATION_JUDGE_OFF_NOTE,
+  RECOMMENDATION_JUDGE_UNAVAILABLE_NOTE,
+  RECOMMENDATION_JUDGE_VERDICTS,
+  UNUSED_GRANT_DEFAULT_WINDOW_DAYS,
+  accessRecommendationRuleById,
+  annotationsForFindings,
+  buildRecommendationJudgePrompt,
+  parseRecommendationJudgeReplies,
+  parseRecommendationRuleIds,
+  renderRecommendationRationale,
+  type AccessRecommendationRule,
+  type AccessRecommendationRuleId,
+  type AccessRecommendationSeverity,
+  type RecommendationJudge,
+  type RecommendationJudgeAnnotation,
+  type RecommendationJudgeReply,
+  type RecommendationJudgeRequest,
+  type RecommendationJudgeVerdict,
+  type RecommendationJudgedState,
+} from "./access-recommendations.js";

@@ -322,3 +322,92 @@ therefore into the backup — the exact failure this whole ADR exists to prevent
 
 **Still not production.** Nothing here changes the deployment's status, and the standing guardrail
 in `CLAUDE.md` is untouched.
+
+## Amendment (2026-08-22, batch B4) — §4's named follow-up built: the resumable, transactional re-encryption walk (migration 0099)
+
+§4 said full re-encryption "is a slice of its own" and named its shape exactly. This is that
+slice, built to that shape: **with both keys present, every ciphertext row is genuinely
+re-encrypted under the new key — in bounded batches, each batch one transaction, restartable
+after a crash, and refusing to lie about progress.**
+
+**Invocation — a CLI, deliberately not an HTTP mutation.**
+
+```
+REGULAIT_DATA_KEY=<new key> REGULAIT_DATA_KEY_OLD=<old key> \
+  pnpm --filter @regulait/gateway reencrypt
+```
+
+The walk visits every row of thirteen ciphertext columns while holding two live keys; inside an
+HTTP request that invites a proxy/client timeout mid-walk and an operator "retry" racing the
+first attempt. So HTTP gets a **status-only** endpoint (`GET /v1/security/data-key/reencryption`,
+admin, internal) and the walk runs only as a foreground CLI (the seed-script idiom). Note the env
+contract: `REGULAIT_DATA_KEY_ROTATED_FROM` holds the old key's **fingerprint** — a PRF output,
+which cannot decrypt anything — so the walk takes a new variable, **`REGULAIT_DATA_KEY_OLD`**,
+holding the old key's full 64 hex chars. It refuses to start without both keys, and exits 0 with
+"nothing to do" when the recorded fingerprint already names the new key and zero rows remain
+outside it.
+
+**Resumability: the watermark IS the transaction.** Progress lives in
+`data_key_reencryption_runs` / `_progress` / `_failures` (migration 0099): one watermark row per
+(run, table, column), committed **in the same transaction** as that batch's rewritten rows — so
+"these rows are under the new key" and "the walk is past them" are one atomic fact. A kill at any
+instant leaves the run `running`; the next invocation with the same two keys resumes from the
+exact watermark. Proven by aborting after N committed batches in-test, resuming, and asserting
+**byte-identical ciphertext** for already-settled rows (a second encryption would mint a fresh
+IV) plus a zero re-read count — no double-processing, no missed rows.
+
+**Which key is a row under?** The stored envelope did not say — `iv.tag.ciphertext` carried no
+key identity — so `encryptSecret` now appends the encrypting key's fingerprint as a **fourth
+segment** on every NEW write. It is a claim, not a proof (the GCM tag still decides; a test
+plants a lying marker and watches decryption refuse); its job is to let the walk skip
+already-settled rows idempotently without trial decryption. **Legacy three-segment rows** — every
+value written before this change — are resolved by try-old-then-new trial decryption and
+rewritten with the marker either way.
+
+**Fail closed on registry drift.** `CIPHERTEXT_COLUMNS` stays the single work list, and before
+touching anything the walk asks `information_schema` for every `*_ciphertext` column in the live
+database, refusing to start if the two disagree in either direction — a column silently left
+under the old key is exactly the two-keys-in-one-database state §3.2 calls the worst outcome.
+(The custody test pins the list against `schema.ts`; this check pins it against the actual
+database about to be modified.)
+
+**Honesty.** A row that decrypts under NEITHER key is recorded (table + id, in
+`data_key_reencryption_failures`) and the walk **continues** — one corrupt row must not brick a
+rotation — but the run's final status is **`completed_with_failures`, never `completed`**, the
+CLI exits nonzero (2), and the audited completion record names every failed row alongside
+per-table counts and duration. The fingerprint IS still re-recorded to the new key even then:
+the failed rows decrypt under neither key, so keeping the old fingerprint would not make them
+readable — it would only force the next boot to declare a rotation the walk has in fact
+performed. The failure record, not the fingerprint, is what says those rows are lost.
+
+**The boot gate knows about the walk.** After a completed walk, a boot under the new key alone
+is an ordinary `verified` — no rotation declaration needed. An INCOMPLETE walk adds itself to
+the boot line, the posture warnings, and (when the pending run's keys explain the mismatch) the
+refusal message itself, which now names the exact resume command instead of sending the operator
+down the abandon-the-old-ciphertext path.
+
+**Key custody consequence.** The OLD key must remain available until the walk reports
+`completed` — destroy it before that and every not-yet-walked row becomes a `failures` entry.
+After completion the old key should be destroyed per the custody runbook
+(`docs/ops/DB_BACKUP.md`), `REGULAIT_DATA_KEY_OLD` removed from the environment, and the new key
+attested.
+
+Non-vacuity the M-002 way, all three reverted by reversing the exact edit: no-op the write-back
+(decrypt/encrypt but skip the UPDATE) → 4 tests redden, led by the both-directions proof; break
+resume (restart from zero) → the no-double-processing assertion reddens (4 settled rows re-read);
+count a neither-key row as success → the `completed_with_failures` test reddens to `completed`.
+
+**Where it lives**: `packages/db/migrations/0099_data_key_reencryption.sql` (+ `schema.ts`);
+`apps/gateway/src/data-key-reencrypt.ts` (the walk, the status read, the route);
+`apps/gateway/src/reencrypt.ts` (the CLI); `apps/gateway/src/secrets.ts` (the fingerprint
+segment — the derivation moved here from `data-key.ts`, surface unchanged);
+`apps/gateway/src/data-key.ts` (boot-time pending-walk awareness);
+`apps/gateway/src/data-key-reencrypt.test.ts` (12 tests, own scratch database).
+
+**Honest residual**: the walk takes no table locks beyond each batch's `FOR UPDATE`, so a
+credential **written under the new key during the walk** is simply skipped by its marker — fine —
+but a concurrent write under the OLD key (impossible through the gateway, which only ever holds
+the new key; conceivable from a rogue `psql`) after the watermark has passed that row would be
+missed until a later walk. §4's "refusal of concurrent writes" clause was deliberately narrowed
+to this: the gateway process cannot produce old-key writes, and the walk is idempotently
+re-runnable, which is the honest remedy.

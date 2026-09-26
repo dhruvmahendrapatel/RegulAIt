@@ -109,6 +109,8 @@ export default function AuditLogPage() {
           </p>
         </Card>
 
+        <ChainIntegrityCard />
+
         <Card>
           <div className={a.formRow}>
             <Field label="Filter by user">
@@ -220,5 +222,111 @@ export default function AuditLogPage() {
         }}
       />
     </>
+  );
+}
+
+/** ADR-0060 verify report — only the fields this card renders. */
+interface VerifyReport {
+  status: "ok" | "broken" | "empty";
+  scanned: { rows: number; bounded: boolean };
+  legacy: { unchainedRowsBeforeGenesis: number; disclosure: string };
+  firstBreak: { seq: number; reason: string } | null;
+  anchor: {
+    checked: boolean;
+    source: "caller_supplied" | "worm_sink" | "database" | "none";
+    tamperResistant: boolean;
+    sinkMode: string | null;
+    matches: boolean | null;
+    unanchoredRows: number | null;
+    disclosure: string;
+  };
+}
+
+/**
+ * Chain integrity (ADR-0060), on demand rather than on load: verification
+ * RECOMPUTES the hash chain over the whole trail, which is deliberate work an
+ * admin asks for, not a page-render side effect. What comes back is rendered
+ * with the report's own honesty intact — the anchor's tamper resistance is
+ * what the MEDIUM answered at runtime (COMPLIANCE-mode Object Lock → true;
+ * GOVERNANCE / database / unobserved → false), never what configuration
+ * claims, and the residual window (rows newer than the last anchor) is shown
+ * every time because bounding it is the operator's job, not this card's.
+ */
+function ChainIntegrityCard() {
+  const [report, setReport] = useState<VerifyReport | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const run = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      setReport(await api.get<VerifyReport>("/v1/audit/verify"));
+    } catch (e) {
+      setError((e as { message?: string })?.message ?? "verification failed to run");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const anchorTone: Tone = report
+    ? report.anchor.tamperResistant
+      ? "ok"
+      : report.anchor.source === "none"
+        ? "danger"
+        : "warn"
+    : "neutral";
+
+  return (
+    <Card title="Chain integrity (ADR-0060) — tamper-evident hash chain + WORM anchor">
+      <div className={v.row}>
+        <span className={v.dim}>
+          Every chained row commits to the one before it; the head is anchored to write-once storage.
+          Verification recomputes the whole chain against the anchor.
+        </span>
+        <span className={v.grow} />
+        <Button onClick={() => void run()} disabled={busy}>
+          {busy ? "Verifying…" : report ? "Re-verify" : "Verify chain"}
+        </Button>
+      </div>
+      {error && (
+        <div className={v.errLine} role="alert">
+          {error}
+        </div>
+      )}
+      {report && (
+        <div className={v.stack} style={{ marginTop: "var(--s2)" }} data-testid="chain-report">
+          <div className={v.rowTight}>
+            <Badge tone={report.status === "ok" ? "ok" : report.status === "empty" ? "neutral" : "danger"}>
+              chain {report.status}
+            </Badge>
+            <span className={v.dim}>
+              {report.scanned.rows} row(s) recomputed{report.scanned.bounded ? " (bounded range)" : ""}
+            </span>
+            {report.firstBreak && (
+              <Badge tone="danger">first break at seq {report.firstBreak.seq}</Badge>
+            )}
+          </div>
+          {report.firstBreak && <p className={v.errLine}>{report.firstBreak.reason}</p>}
+          <div className={v.rowTight}>
+            <Badge tone={anchorTone}>
+              anchor: {report.anchor.source}
+              {report.anchor.sinkMode ? ` · ${report.anchor.sinkMode}` : ""}
+            </Badge>
+            <Badge tone={report.anchor.tamperResistant ? "ok" : "warn"}>
+              {report.anchor.tamperResistant ? "tamper-resistant (observed)" : "NOT tamper-resistant"}
+            </Badge>
+            {report.anchor.matches === false && <Badge tone="danger">anchor MISMATCH</Badge>}
+            {report.anchor.unanchoredRows != null && report.anchor.unanchoredRows > 0 && (
+              <span className={v.dim}>{report.anchor.unanchoredRows} row(s) newer than the last anchor</span>
+            )}
+          </div>
+          <p className={v.faint}>{report.anchor.disclosure}</p>
+          {report.legacy.unchainedRowsBeforeGenesis > 0 && (
+            <p className={v.faint}>{report.legacy.disclosure}</p>
+          )}
+        </div>
+      )}
+    </Card>
   );
 }

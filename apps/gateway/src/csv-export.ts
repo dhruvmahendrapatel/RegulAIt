@@ -147,31 +147,19 @@ async function write(raw: ServerResponse, chunk: string): Promise<void> {
   });
 }
 
-export async function streamCsv<R>(
-  reply: FastifyReply,
-  spec: CsvStreamSpec<R>,
-): Promise<CsvStreamResult> {
+/**
+ * Where the rendered CSV goes. ADR-0116 added the second implementation: a
+ * signed export bundle needs the SAME bytes this function streams, in memory,
+ * so they can be hashed and signed — and a second rendering loop written for
+ * that would be a second answer to "what does this export contain".
+ */
+interface CsvSink {
+  write(chunk: string): Promise<void>;
+}
+
+/** The rendering loop itself, with no opinion about where the bytes land. */
+async function emitCsv<R>(spec: CsvStreamSpec<R>, sink: CsvSink): Promise<CsvStreamResult> {
   const { window: win } = spec;
-  // Headers must go out before the first byte of body, so the truncation flag
-  // itself cannot live here — the window and ceiling that PRODUCE it can, and
-  // the trailing notice row reports what actually happened.
-  const headers: Record<string, string> = {
-    // reply.hijack() skips the onSend hook, so the streaming path sets the
-    // ADR-0031 security headers itself rather than losing them.
-    ...securityHeaders("text/csv"),
-    "content-type": "text/csv; charset=utf-8",
-    "content-disposition": `attachment; filename="${spec.filename}"`,
-    "cache-control": "no-store",
-    "x-regulait-export-row-limit": String(spec.maxRows),
-    "x-regulait-export-window-source": win.source,
-    ...(win.from ? { "x-regulait-export-window-from": win.from.toISOString() } : {}),
-    ...(win.to ? { "x-regulait-export-window-to": win.to.toISOString() } : {}),
-  };
-
-  reply.hijack();
-  const raw = reply.raw;
-  raw.writeHead(200, headers);
-
   let rows = 0;
   let batches = 0;
   let truncated = false;
@@ -179,7 +167,7 @@ export async function streamCsv<R>(
   let oldestExported: string | null = null;
 
   try {
-    await write(raw, spec.header.join(",") + spec.eol);
+    await sink.write(spec.header.join(",") + spec.eol);
 
     let after: KeysetCursor | null = null;
     for (;;) {
@@ -198,7 +186,7 @@ export async function streamCsv<R>(
 
       let chunk = "";
       for (const row of page) chunk += spec.renderRow(row) + spec.eol;
-      await write(raw, chunk);
+      await sink.write(chunk);
 
       rows += page.length;
       after = spec.cursorOf(page[page.length - 1]!);
@@ -228,7 +216,7 @@ export async function streamCsv<R>(
       parts.push(`rows=${rows}`);
       if (oldestExported) parts.push(`oldest row exported at ${oldestExported}`);
       parts.push("re-request with narrower from/to bounds to export the remainder");
-      await write(raw, noticeRow(`${NOTICE_PREFIX} ${parts.join("; ")}`) + spec.eol);
+      await sink.write(noticeRow(`${NOTICE_PREFIX} ${parts.join("; ")}`) + spec.eol);
     }
   } catch (err) {
     // The status line is already on the wire, so the only honest thing left is
@@ -236,14 +224,43 @@ export async function streamCsv<R>(
     disclosed = true;
     const msg = err instanceof Error ? err.message : String(err);
     try {
-      await write(
-        raw,
-        noticeRow(`${ERROR_PREFIX} export aborted after ${rows} row(s): ${msg}`) + spec.eol,
-      );
+      await sink.write(noticeRow(`${ERROR_PREFIX} export aborted after ${rows} row(s): ${msg}`) + spec.eol);
     } catch {
       /* the socket is gone; nothing further to say */
     }
   }
+
+  return { rows, truncated, disclosed, batches };
+}
+
+/** Stream the CSV straight to the wire. Byte-for-byte unchanged by ADR-0116's
+ * refactor: the same `emitCsv` loop, the same headers, the same terminator. */
+export async function streamCsv<R>(
+  reply: FastifyReply,
+  spec: CsvStreamSpec<R>,
+): Promise<CsvStreamResult> {
+  const { window: win } = spec;
+  // Headers must go out before the first byte of body, so the truncation flag
+  // itself cannot live here — the window and ceiling that PRODUCE it can, and
+  // the trailing notice row reports what actually happened.
+  const headers: Record<string, string> = {
+    // reply.hijack() skips the onSend hook, so the streaming path sets the
+    // ADR-0031 security headers itself rather than losing them.
+    ...securityHeaders("text/csv"),
+    "content-type": "text/csv; charset=utf-8",
+    "content-disposition": `attachment; filename="${spec.filename}"`,
+    "cache-control": "no-store",
+    "x-regulait-export-row-limit": String(spec.maxRows),
+    "x-regulait-export-window-source": win.source,
+    ...(win.from ? { "x-regulait-export-window-from": win.from.toISOString() } : {}),
+    ...(win.to ? { "x-regulait-export-window-to": win.to.toISOString() } : {}),
+  };
+
+  reply.hijack();
+  const raw = reply.raw;
+  raw.writeHead(200, headers);
+
+  const result = await emitCsv(spec, { write: (chunk) => write(raw, chunk) });
 
   // `end(cb)` is not honoured by light-my-request's mock response, so wait on
   // the stream events instead — that works identically on a real socket.
@@ -257,5 +274,26 @@ export async function streamCsv<R>(
     raw.once("close", done);
     raw.end();
   });
-  return { rows, truncated, disclosed, batches };
+  return result;
+}
+
+/**
+ * The SAME bytes, in memory, for ADR-0116's signed export bundle.
+ *
+ * It is the same `emitCsv` call, so the header row, the field escaping, the
+ * line terminator and — critically — the trailing truncation/window DISCLOSURE
+ * row are identical to what the streaming route emits. A bundle that quietly
+ * dropped the disclosure would be a signed document asserting completeness it
+ * does not have.
+ */
+export async function collectCsv<R>(
+  spec: CsvStreamSpec<R>,
+): Promise<CsvStreamResult & { csv: string }> {
+  let buf = "";
+  const result = await emitCsv(spec, {
+    write: async (chunk) => {
+      buf += chunk;
+    },
+  });
+  return { ...result, csv: buf };
 }

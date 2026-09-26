@@ -40,6 +40,13 @@ import { createHash, randomUUID } from "node:crypto";
 import { chmod, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { FastifyInstance } from "fastify";
+import {
+  GetObjectCommand,
+  GetObjectLockConfigurationCommand,
+  ListObjectVersionsCommand,
+  PutObjectCommand,
+  S3Client,
+} from "@aws-sdk/client-s3";
 import { z } from "zod";
 import {
   and,
@@ -101,6 +108,30 @@ export interface AnchorSink {
   readonly tamperResistant: boolean;
   write(record: AnchorRecord): Promise<string>;
   readLatest(): Promise<AnchorRecord | null>;
+  /**
+   * OPTIONAL, and only implemented by a sink whose immutability is a property
+   * of a REMOTE medium rather than of this process.
+   *
+   * `tamperResistant` above is a constant, which is right for a sink that knows
+   * its own answer at construction (`LocalWormSink` is false, always, and no
+   * amount of configuration changes that). It is exactly wrong for S3: whether
+   * the bucket enforces anything is a fact about the bucket, not about our
+   * config file, and the only honest way to know is to ASK the endpoint. A sink
+   * that implements this method is saying "do not take my constant on trust,
+   * await this and use what came back".
+   */
+  observe?(): Promise<AnchorSinkObservation>;
+}
+
+/** What a sink reports after asking its medium what it actually enforces. */
+export interface AnchorSinkObservation {
+  /** derived ONLY from what the medium answered — never from configuration */
+  tamperResistant: boolean;
+  /** the medium's answer in machine-readable form, so an operator can tell
+   * "nobody can delete this" from "we could not find out" */
+  mode: "compliance" | "governance" | "no_default_retention" | "object_lock_absent" | "unobserved";
+  /** one paragraph, same voice as the verify report's other disclosures */
+  disclosure: string;
 }
 
 /**
@@ -147,23 +178,431 @@ export class LocalWormSink implements AnchorSink {
   }
 }
 
+/** where the local anchor buffer lands when nothing overrides it */
+export const DEFAULT_ANCHOR_DIR = "./audit-anchors";
+
+// --- the S3 Object Lock sink -------------------------------------------------
+
+/**
+ * The slice of `S3Client` this sink uses.
+ *
+ * Structural rather than the concrete class so a unit test can substitute a
+ * transport that never leaves the process while still handing this code the
+ * REAL command objects. What is under test here is how an answer from the
+ * endpoint is GRADED, so a fake that also faked the commands would be marking
+ * its own homework.
+ */
+export interface S3SendClient {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  send(command: any): Promise<any>;
+}
+
+export interface S3AnchorConfig {
+  bucket: string;
+  /** key prefix every anchor lives under — mirrors the terraform module's
+   * `prefix`, whose writer grant is scoped to exactly this */
+  prefix: string;
+  region: string;
+  /** set for any S3-COMPATIBLE endpoint (MinIO in the compose stack, a
+   * customer's on-prem object store in an air-gapped install). Unset means
+   * real AWS S3 and the SDK's own endpoint resolution. */
+  endpoint?: string | undefined;
+  forcePathStyle: boolean;
+  retentionDays: number;
+  /** unset falls through to the SDK's default provider chain — an instance
+   * role in BYOC, which is the posture ADR-0060 actually wants, since it means
+   * no long-lived key exists to steal */
+  credentials?: { accessKeyId: string; secretAccessKey: string } | undefined;
+}
+
+/**
+ * Matches `retention_days` in `infra/modules/audit-anchor-worm-s3/variables.tf`.
+ *
+ * The two numbers must not drift: an anchor that expires before the rows it
+ * pins leaves those rows unprovable, and an install that gets one retention
+ * from terraform and a different one from the writer has no single answer to
+ * "how long is this evidence good for". 365 is a starting point, not a
+ * recommendation for a regulated workload — the compliance cascade is where
+ * this eventually belongs (ADR-0060 follow-up 5).
+ */
+export const DEFAULT_S3_ANCHOR_RETENTION_DAYS = 365;
+export const DEFAULT_S3_ANCHOR_PREFIX = "audit-anchors";
+
+/**
+ * How long an observation of the bucket's lock configuration is trusted before
+ * it is taken again.
+ *
+ * NOT an optimization. Caching the answer forever would mean a bucket whose
+ * default retention was quietly changed from COMPLIANCE to GOVERNANCE keeps
+ * being reported as tamper-resistant until someone restarts the gateway — a
+ * `true` that has silently become false is precisely the lie this class exists
+ * to prevent. Re-asking each minute bounds that window while keeping the cost
+ * off the per-anchor path.
+ */
+export const S3_LOCK_OBSERVATION_TTL_MS = 60_000;
+
+/**
+ * Anchors to an S3 bucket with Object Lock — the sink that ADR-0060 says is the
+ * one that actually earns `tamperResistant`.
+ *
+ * WHY THIS TALKS TO ANY S3-COMPATIBLE ENDPOINT, NOT TO AWS
+ * -------------------------------------------------------
+ * Endpoint, region, credentials and path-style are all configuration, so the
+ * same code serves the MinIO container in `docker-compose.yml`, a customer's
+ * on-prem object store in an air-gapped install (ADR-0041's primary motion),
+ * and real AWS S3. Object Lock is an S3 API contract, not an AWS feature, and
+ * anything implementing that contract is a valid destination. Hard-coding AWS
+ * would have made the one deployment mode this product leads with — the
+ * customer's own infrastructure — the one it could not serve.
+ *
+ * THE RULE THIS CLASS EXISTS TO ENFORCE: `tamperResistant` IS OBSERVED
+ * -------------------------------------------------------------------
+ * It is never read from configuration, an env var, or the fact that we ASKED
+ * for COMPLIANCE on our own `PutObject`. Our own request proves nothing: it is
+ * ours to lie about. The only evidence is what the bucket says when asked —
+ * `GetObjectLockConfiguration` — and the grading is deliberately harsh:
+ *
+ *   Object Lock enabled + default retention COMPLIANCE  → true
+ *   default retention GOVERNANCE                        → FALSE. A principal
+ *       holding `s3:BypassGovernanceRetention` deletes anchors at will, and
+ *       that is exactly the hostile administrator this control is for.
+ *   Object Lock enabled, no default retention rule      → FALSE. Nothing on
+ *       the bucket compels immutability; today's writer sets it per object,
+ *       tomorrow's misconfigured one does not, and neither leaves a trace.
+ *   Object Lock absent, or the call failed              → FALSE, fail closed.
+ *       An unobserved medium is graded as a mutable one. Guessing upward here
+ *       would ship the false assurance ADR-0060 exists to prevent.
+ *
+ * A boolean that lies here is worse than having no anchor at all: no anchor is
+ * a disclosed gap an auditor can price, while a false `true` is a gap nobody
+ * knows to look for.
+ *
+ * WHAT IT STILL DOES NOT BUY. Compliance-mode Object Lock stops an anchor being
+ * EDITED or FORGED. It does not stop the store being DESTROYED — whoever owns
+ * the host can drop the whole volume or close the account. Those are different
+ * attacks with different signatures: destruction is loud (verification reports
+ * the anchor missing and says so), forgery is silent. This closes the silent
+ * one.
+ */
+export class S3ObjectLockSink implements AnchorSink {
+  readonly destination = "s3_object_lock" as const;
+  private readonly client: S3SendClient;
+  private observed: { at: number; observation: AnchorSinkObservation } | null = null;
+  private inflight: Promise<AnchorSinkObservation> | null = null;
+
+  constructor(
+    private readonly config: S3AnchorConfig,
+    client?: S3SendClient,
+  ) {
+    this.client =
+      client ??
+      new S3Client({
+        region: config.region,
+        ...(config.endpoint ? { endpoint: config.endpoint } : {}),
+        forcePathStyle: config.forcePathStyle,
+        ...(config.credentials ? { credentials: config.credentials } : {}),
+      });
+  }
+
+  /**
+   * The last OBSERVED answer, and `false` until there is one.
+   *
+   * `AnchorSink.tamperResistant` is synchronous, so this getter cannot go and
+   * ask. It therefore reports the conservative value until `observe()` has run,
+   * and every path that publishes it — `write`, `readLatest`, the verify report
+   * — awaits `observe()` first. An un-awaited read can be too pessimistic; by
+   * construction it can never be too generous.
+   */
+  get tamperResistant(): boolean {
+    return this.observed?.observation.tamperResistant ?? false;
+  }
+
+  /** the observed mode, for callers that want more than a boolean */
+  get lockMode(): AnchorSinkObservation["mode"] {
+    return this.observed?.observation.mode ?? "unobserved";
+  }
+
+  async observe(): Promise<AnchorSinkObservation> {
+    const fresh = this.observed && Date.now() - this.observed.at < S3_LOCK_OBSERVATION_TTL_MS;
+    if (fresh && this.observed) return this.observed.observation;
+    // one probe in flight at a time: an anchor burst must not turn into a burst
+    // of identical GetObjectLockConfiguration calls
+    this.inflight ??= this.probe().finally(() => {
+      this.inflight = null;
+    });
+    return this.inflight;
+  }
+
+  /** the same answer whether the bucket said "no lock configuration" by
+   * returning nothing or by raising the not-found error for it */
+  private static absentObservation(where: string): AnchorSinkObservation {
+    return {
+      tamperResistant: false,
+      mode: "object_lock_absent",
+      disclosure: `The bucket ${where} does NOT have Object Lock enabled, so anything written to it can be overwritten or deleted by whoever holds this credential — the same posture as a local directory, just further away. Object Lock is a CREATE-TIME property of a bucket and cannot be turned on afterwards, so fixing this means a new bucket.`,
+    };
+  }
+
+  private async probe(): Promise<AnchorSinkObservation> {
+    const where = `${this.config.bucket}${this.config.endpoint ? ` at ${this.config.endpoint}` : ""}`;
+    try {
+      const res = await this.client.send(new GetObjectLockConfigurationCommand({ Bucket: this.config.bucket }));
+      const cfg = res?.ObjectLockConfiguration;
+      const enabled = cfg?.ObjectLockEnabled === "Enabled";
+      const mode = cfg?.Rule?.DefaultRetention?.Mode;
+
+      let observation: AnchorSinkObservation;
+      if (enabled && mode === "COMPLIANCE") {
+        observation = {
+          tamperResistant: true,
+          mode: "compliance",
+          disclosure: `Anchors are written to S3 Object Lock in COMPLIANCE mode on ${where}, as reported by the bucket itself (GetObjectLockConfiguration), not as configured here. For the retention period no principal — not this gateway's credential, not an administrator, not the account root — can delete or alter the anchor version that was written, so a full-recompute forgery diverges from a head nobody can rewrite. A later write to the same name adds a version rather than replacing it, and verification reads the original version, so a masking write cannot substitute a forged head either. It does NOT stop the anchor store being DESTROYED wholesale; that is a different attack, and a loud one, because verification then reports the anchor missing instead of matching.`,
+        };
+      } else if (enabled && mode === "GOVERNANCE") {
+        observation = {
+          tamperResistant: false,
+          mode: "governance",
+          disclosure: `The bucket ${where} has Object Lock in GOVERNANCE mode. A principal holding s3:BypassGovernanceRetention — which an administrator can grant themselves — can still delete or shorten a locked anchor, so this stops accidents and casual insiders but NOT the hostile administrator ADR-0060 is written against. Reported as NOT tamper-resistant for that reason. COMPLIANCE mode is what makes it evidence.`,
+        };
+      } else if (enabled) {
+        observation = {
+          tamperResistant: false,
+          mode: "no_default_retention",
+          disclosure: `The bucket ${where} has Object Lock enabled but NO default retention rule, so the bucket compels nothing: immutability depends entirely on every writer remembering to ask for it, and a writer that forgets leaves no trace. Reported as NOT tamper-resistant until a COMPLIANCE-mode default retention is set on the bucket.`,
+        };
+      } else {
+        observation = S3ObjectLockSink.absentObservation(where);
+      }
+      // cache only a real answer, and only for a bounded time — see the TTL
+      this.observed = { at: Date.now(), observation };
+      return observation;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      // A bucket with no Object Lock does not answer with an empty
+      // configuration — it ERRORS, with this code, on both AWS S3 and MinIO
+      // (measured). That is a definite answer, not a failure to get one, and
+      // the difference matters twice: an admin needs "there is no lock here"
+      // rather than "we could not tell", and `write` must drop the lock
+      // headers, because S3 rejects a locked PUT to an unlocked bucket and
+      // every anchor would fail instead of landing weak-but-disclosed.
+      const code = (err as { name?: string; Code?: string })?.name ?? (err as { Code?: string })?.Code ?? "";
+      if (/ObjectLockConfigurationNotFound|NoSuchObjectLockConfiguration/i.test(code)) {
+        const observation = S3ObjectLockSink.absentObservation(where);
+        this.observed = { at: Date.now(), observation };
+        return observation;
+      }
+      // NOT cached: a failed probe is usually "the endpoint is not up yet"
+      // (compose starts the gateway alongside MinIO), and freezing a `false`
+      // from a boot-time race would understate the medium forever.
+      return {
+        tamperResistant: false,
+        mode: "unobserved",
+        disclosure: `Could not read the Object Lock configuration of ${where} (${message}). Reported as NOT tamper-resistant: an unobserved medium is graded as a mutable one, because claiming an immutability nobody verified is the false assurance ADR-0060 exists to prevent.`,
+      };
+    }
+  }
+
+  /** same name shape as `LocalWormSink` — zero-padded so lexicographic key
+   * order IS chain order, which is what makes `readLatest` a list-and-take-last
+   * rather than a full scan and a sort */
+  private keyFor(seq: number): string {
+    return `${this.config.prefix}/anchor-${String(seq).padStart(20, "0")}.json`;
+  }
+
+  async write(record: AnchorRecord): Promise<string> {
+    const observation = await this.observe();
+    const key = this.keyFor(record.seq);
+    // Only omit the lock headers when the bucket POSITIVELY said it has no
+    // Object Lock: S3 rejects a locked PUT to an unlocked bucket, and failing
+    // every write there would trade a disclosed-weak anchor for no anchor. On
+    // an unobserved bucket we still ask for the lock — if the bucket does have
+    // it, the object is protected; if it does not, the write fails loudly and
+    // the anchor row records `failed` with the reason.
+    const lockHeaders =
+      observation.mode === "object_lock_absent"
+        ? {}
+        : {
+            ObjectLockMode: "COMPLIANCE" as const,
+            ObjectLockRetainUntilDate: new Date(Date.now() + this.config.retentionDays * 86_400_000),
+          };
+    await this.client.send(
+      new PutObjectCommand({
+        Bucket: this.config.bucket,
+        Key: key,
+        Body: JSON.stringify(record, null, 2),
+        ContentType: "application/json",
+        ...lockHeaders,
+      }),
+    );
+    return `s3://${this.config.bucket}/${key}`;
+  }
+
+  /**
+   * The newest anchor in the bucket, or `null`.
+   *
+   * IT READS VERSIONS, AND IT READS THE OLDEST ONE. This is not fussiness, it
+   * closes a hole that a plain `GetObject` leaves wide open, measured against a
+   * real COMPLIANCE-locked bucket:
+   *
+   *   * `DeleteObject` on the locked VERSION is refused — that is the guarantee.
+   *   * `PutObject` to the SAME KEY is ALLOWED. Object Lock protects a version,
+   *     not a name, so a new version becomes current and a plain `GetObject`
+   *     returns the ATTACKER'S bytes while the locked original sits underneath.
+   *   * `DeleteObject` without a version id is ALLOWED too: it writes a delete
+   *     marker, and a plain `ListObjectsV2` then cannot see the key at all, so
+   *     verification would silently fall back to an OLDER anchor.
+   *
+   * Both of those turn the sink built to stop silent forgery into a vehicle for
+   * it. Reading the FIRST version of each key removes them: our writer emits a
+   * given `seq` exactly once (seq is monotonic and gapless), so the earliest
+   * version of a key is by definition the one written under lock, and it is the
+   * one nobody — including us — can change.
+   *
+   * What an adversary CAN still do is add a NEW key with a fabricated higher
+   * `seq`. That anchor is locked too, so it cannot be withdrawn, and it will not
+   * match the table — verification reports a MISMATCH. They can raise a false
+   * alarm; they cannot manufacture a false pass. That asymmetry is the right way
+   * round for an integrity control.
+   *
+   * `null` on ANY failure, deliberately, and that is not an edge case: the
+   * terraform writer grant denies `s3:GetObject` on purpose, so an install
+   * following ADR-0060's least-privilege posture is WRITE-ONLY and lands here
+   * every time. Verification then falls back to the database anchor row and
+   * reports `source: "database", tamperResistant: false` — weaker, but HONEST.
+   * Throwing would turn "the writer cannot read back" into a 500 on the one
+   * endpoint that must always be able to say something.
+   */
+  async readLatest(): Promise<AnchorRecord | null> {
+    try {
+      await this.observe();
+      const prefix = `${this.config.prefix}/anchor-`;
+      let keyMarker: string | undefined;
+      let versionIdMarker: string | undefined;
+      // key → the oldest version seen for it. Versions come back newest-first
+      // per key, so the last one written down for a key is the earliest.
+      const firstVersionOf = new Map<string, string | undefined>();
+      for (;;) {
+        const page = await this.client.send(
+          new ListObjectVersionsCommand({
+            Bucket: this.config.bucket,
+            Prefix: prefix,
+            ...(keyMarker ? { KeyMarker: keyMarker } : {}),
+            ...(versionIdMarker ? { VersionIdMarker: versionIdMarker } : {}),
+          }),
+        );
+        // Delete markers are deliberately IGNORED: on a locked bucket a delete
+        // marker is a claim that an anchor is gone, not the fact of it.
+        const versions: Array<{ Key?: string; VersionId?: string }> = page?.Versions ?? [];
+        for (const v of versions) if (v.Key) firstVersionOf.set(v.Key, v.VersionId);
+        if (!page?.IsTruncated) break;
+        keyMarker = page.NextKeyMarker as string | undefined;
+        versionIdMarker = page.NextVersionIdMarker as string | undefined;
+        if (!keyMarker && !versionIdMarker) break;
+      }
+      if (firstVersionOf.size === 0) return null;
+      // seq is zero-padded in the key, so lexicographic max IS the highest seq.
+      const lastKey = [...firstVersionOf.keys()].sort().at(-1)!;
+      const versionId = firstVersionOf.get(lastKey);
+      const obj = await this.client.send(
+        new GetObjectCommand({
+          Bucket: this.config.bucket,
+          Key: lastKey,
+          // "null" is what a never-versioned bucket reports; asking for it by
+          // name is not universally accepted, so drop it and take the object.
+          ...(versionId && versionId !== "null" ? { VersionId: versionId } : {}),
+        }),
+      );
+      const body = obj?.Body;
+      const text: string = typeof body?.transformToString === "function" ? await body.transformToString() : String(body ?? "");
+      return JSON.parse(text) as AnchorRecord;
+    } catch {
+      return null;
+    }
+  }
+}
+
+/**
+ * Read the S3 destination out of the environment, or `null` for "not
+ * configured".
+ *
+ * The BUCKET is the switch. Everything else has a default, because an operator
+ * who has named a bucket has stated an intent, and refusing to anchor because
+ * they did not also set a region would leave the install with no external
+ * anchor over a detail we can pick. A wrong region or a wrong endpoint surfaces
+ * as a `failed` anchor row with the endpoint's own error on it, which is a far
+ * better failure than silence.
+ */
+export function resolveS3AnchorConfig(env: NodeJS.ProcessEnv): S3AnchorConfig | null {
+  const bucket = env.REGULAIT_AUDIT_ANCHOR_S3_BUCKET?.trim();
+  if (!bucket) return null;
+
+  const endpoint = env.REGULAIT_AUDIT_ANCHOR_S3_ENDPOINT?.trim() || undefined;
+  const accessKeyId = env.REGULAIT_AUDIT_ANCHOR_S3_ACCESS_KEY_ID?.trim();
+  const secretAccessKey = env.REGULAIT_AUDIT_ANCHOR_S3_SECRET_ACCESS_KEY?.trim();
+  const pathStyle = env.REGULAIT_AUDIT_ANCHOR_S3_FORCE_PATH_STYLE?.trim().toLowerCase();
+  const days = Number(env.REGULAIT_AUDIT_ANCHOR_S3_RETENTION_DAYS?.trim() || "");
+
+  return {
+    bucket,
+    prefix: env.REGULAIT_AUDIT_ANCHOR_S3_PREFIX?.trim() || DEFAULT_S3_ANCHOR_PREFIX,
+    // AWS_REGION is honoured second so a BYOC host that already declares its
+    // region does not have to declare it twice.
+    region: env.REGULAIT_AUDIT_ANCHOR_S3_REGION?.trim() || env.AWS_REGION?.trim() || "us-east-1",
+    endpoint,
+    // Virtual-host addressing needs DNS for `<bucket>.<host>`, which a
+    // container named `minio` on a compose network does not have. So a custom
+    // endpoint defaults to path style and AWS defaults to virtual-host, and
+    // either can be overridden for an S3-compatible store that insists.
+    forcePathStyle: pathStyle ? pathStyle === "1" || pathStyle === "true" || pathStyle === "yes" : endpoint !== undefined,
+    retentionDays: Number.isFinite(days) && days >= 1 ? Math.floor(days) : DEFAULT_S3_ANCHOR_RETENTION_DAYS,
+    credentials: accessKeyId && secretAccessKey ? { accessKeyId, secretAccessKey } : undefined,
+  };
+}
+
 /**
  * Resolve the configured sink, or `null` for "no sink".
  *
- * `null` is a legitimate, DISCLOSED state, not a misconfiguration to paper
- * over: an install with no WORM target still gets the chain (which catches
- * everything short of a full recompute), and every anchor is recorded with
- * `destination: 'none'` so nobody can mistake it for externalized.
+ * DEFAULT-ON, AND HONEST ABOUT WHAT THAT DOES NOT BUY. The local buffer is now
+ * the default rather than opt-in, because an install that anchors nothing keeps
+ * its only integrity evidence inside the very table an attacker edits. Writing
+ * the head to a second artifact raises the bar from "rewrite one table" to
+ * "rewrite one table AND the anchor rows AND the anchor files".
  *
- * `REGULAIT_AUDIT_ANCHOR_DIR` selects the local buffer. The S3 Object-Lock sink
- * is deliberately NOT wired here yet — see the ADR amendment: the bucket is
- * terraform (`infra/modules/audit-anchor-worm-s3/`), nothing has been applied to
- * any cloud account, and shipping a half-configured S3 writer that silently
- * no-ops would be exactly the false assurance this ADR exists to avoid.
+ * It does NOT make the trail tamper-RESISTANT, and this function must never be
+ * read as if it did. `LocalWormSink.tamperResistant` is `false` and says why: a
+ * directory on the same host stops a fat-fingered overwrite, and stops root from
+ * nothing. Against an adversary with total database and filesystem write, a full
+ * recompute still passes verification. The verify report says exactly that, and
+ * turning this default on does not change one word of it.
+ *
+ * The value that IS real: the buffer exists from the first boot, so pointing an
+ * install at a medium that genuinely is immutable becomes a configuration change
+ * rather than a code change and a backfill.
+ *
+ * `REGULAIT_AUDIT_ANCHOR_DIR` moves the buffer. `REGULAIT_AUDIT_ANCHOR=off`
+ * restores the previous `null` posture, which remains a legitimate, DISCLOSED
+ * state — every anchor written without a sink records `destination: 'none'` so
+ * nobody can mistake it for externalized.
+ *
+ * PRECEDENCE, and why the S3 sink does not need to be "enabled":
+ *
+ *   1. `REGULAIT_AUDIT_ANCHOR=off`  → no sink at all, disclosed as such.
+ *   2. an S3 bucket is configured   → `S3ObjectLockSink`. Naming a bucket IS
+ *      the opt-in; a second "and I mean it" flag would only create a state
+ *      where an operator believes they configured WORM and did not.
+ *   3. otherwise                    → the local buffer, as before.
+ *
+ * Choosing S3 does NOT by itself make the trail tamper-resistant. The sink
+ * grades the bucket by asking it, and reports `false` for a GOVERNANCE-mode,
+ * unlocked or unreachable bucket. Configuration cannot set that boolean; only
+ * the medium's own answer can.
  */
 export function resolveAnchorSink(env: NodeJS.ProcessEnv = process.env): AnchorSink | null {
+  if ((env.REGULAIT_AUDIT_ANCHOR ?? "").trim().toLowerCase() === "off") return null;
+  const s3 = resolveS3AnchorConfig(env);
+  if (s3) return new S3ObjectLockSink(s3);
   const dir = env.REGULAIT_AUDIT_ANCHOR_DIR?.trim();
-  return dir ? new LocalWormSink(dir) : null;
+  return new LocalWormSink(dir && dir.length > 0 ? dir : DEFAULT_ANCHOR_DIR);
 }
 
 // --- reading the chain head --------------------------------------------------
@@ -249,6 +688,9 @@ export async function captureAnchor(db: Db, sink: AnchorSink | null, actorUserId
   });
 
   const flushed = await flushAnchorRow(db, sink, { id, record: anchorRecordOf(head) });
+  // Observed, not declared — the caller of POST /v1/audit/anchor is being told
+  // whether what they just wrote is evidence, and only the medium can answer.
+  const observed = sink ? ((await sink.observe?.()) ?? null) : null;
   return {
     anchorId: id,
     seq: head.seq,
@@ -256,7 +698,7 @@ export async function captureAnchor(db: Db, sink: AnchorSink | null, actorUserId
     destination,
     status: flushed.status,
     externalRef: flushed.externalRef,
-    tamperResistant: sink?.tamperResistant ?? false,
+    tamperResistant: observed?.tamperResistant ?? sink?.tamperResistant ?? false,
     error: flushed.error,
   };
 }
@@ -344,6 +786,10 @@ export interface VerifyReport {
     checked: boolean;
     source: "caller_supplied" | "worm_sink" | "database" | "none";
     tamperResistant: boolean;
+    /** What the sink's medium answered when asked what it enforces, for a sink
+     * that can be asked (S3). `null` for every other source, because "we did
+     * not ask" and "it answered GOVERNANCE" must not look the same. */
+    sinkMode: AnchorSinkObservation["mode"] | null;
     seq: number | null;
     expectedRowHash: string | null;
     actualRowHash: string | null;
@@ -503,6 +949,12 @@ async function compareAgainstAnchor(
   let source: VerifyReport["anchor"]["source"] = "none";
   let tamperResistant = false;
   let expected: { seq: number; rowHash: string } | null = null;
+  // Set only by a sink that can be ASKED what its medium enforces. When it is
+  // set it OVERRIDES the generic text below, because "the bucket answered
+  // GOVERNANCE, so a privileged user can still delete this" is a materially
+  // different fact from "this is not tamper-resistant", and the reader needs
+  // the specific one.
+  let observation: AnchorSinkObservation | null = null;
 
   if (supplied) {
     source = "caller_supplied";
@@ -513,7 +965,10 @@ async function compareAgainstAnchor(
     const record = await sink.readLatest();
     if (record) {
       source = "worm_sink";
-      tamperResistant = sink.tamperResistant;
+      observation = (await sink.observe?.()) ?? null;
+      // the observed answer wins over the declared constant, always: the
+      // constant is what we configured, the observation is what is true
+      tamperResistant = observation?.tamperResistant ?? sink.tamperResistant;
       expected = { seq: record.seq, rowHash: record.rowHash };
     }
   }
@@ -545,6 +1000,7 @@ async function compareAgainstAnchor(
       checked: false,
       source: "none",
       tamperResistant: false,
+      sinkMode: null,
       seq: null,
       expectedRowHash: null,
       actualRowHash: null,
@@ -565,12 +1021,14 @@ async function compareAgainstAnchor(
     checked: true,
     source,
     tamperResistant,
+    sinkMode: observation?.mode ?? null,
     seq: expected.seq,
     expectedRowHash: expected.rowHash,
     actualRowHash: actual,
     matches: actual !== null && actual === expected.rowHash,
     unanchoredRows: ctx.lastSeq !== null ? Math.max(ctx.lastSeq - expected.seq, 0) : null,
-    disclosure: disclosureFor(source, tamperResistant),
+    // the medium's own account of what it enforces beats the generic text
+    disclosure: observation?.disclosure ?? disclosureFor(source, tamperResistant),
   };
 }
 
@@ -621,13 +1079,21 @@ export function registerAuditChainRoutes(
 
   app.get("/v1/audit/anchors", async () => {
     const rows = await db.select().from(auditAnchors).orderBy(desc(auditAnchors.seq)).limit(100);
+    // ASK the sink, do not read its constant. For S3 the honest answer lives on
+    // the bucket, and an admin reading this screen to decide whether the trail
+    // is evidence must not be shown what we configured in place of what is.
+    const observation = sink ? ((await sink.observe?.()) ?? null) : null;
+    const tamperResistant = observation?.tamperResistant ?? sink?.tamperResistant ?? false;
     return {
       anchors: rows,
-      sink: sink ? { destination: sink.destination, tamperResistant: sink.tamperResistant } : null,
+      sink: sink
+        ? { destination: sink.destination, tamperResistant, mode: observation?.mode ?? null }
+        : null,
       disclosure: sink
-        ? sink.tamperResistant
-          ? "Anchors are externalized to tamper-resistant storage."
-          : "Anchors are buffered to a medium this host can still rewrite. Until they reach WORM storage they are a consistency check, not evidence."
+        ? (observation?.disclosure ??
+          (tamperResistant
+            ? "Anchors are externalized to tamper-resistant storage."
+            : "Anchors are buffered to a medium this host can still rewrite. Until they reach WORM storage they are a consistency check, not evidence."))
         : "No anchor sink is configured: anchors exist only in this database and are NOT tamper-resistant.",
     };
   });

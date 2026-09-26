@@ -1,7 +1,9 @@
 import type { FastifyInstance } from "fastify";
 import {
+  agentFallbacks,
   agentGrants,
   agents,
+  asc,
   auditLog,
   connectorCredentials,
   connectorGrants,
@@ -20,10 +22,16 @@ import {
   usageEvents,
   userModelCredentials,
   userAgentPolicies,
+  users,
   type Db,
 } from "@regulait/db";
 import { createHash } from "node:crypto";
+import { deleteAgentGrantById, deleteConnectorGrantById } from "./grant-revocation.js";
+// ADR-0091 — toxic-combination SoD: the mint-time gate on the two direct
+// agent/connector grant endpoints (the other seven mint paths live in app.ts).
+import { refuseSodMint } from "./sod.js";
 import { evaluateAgent, evaluateConnector } from "@regulait/policy-kernel";
+import { agentHaltOf, loadExecutionMode, postureOf } from "./execution-posture.js";
 import {
   ConnectorProviderError,
   connectorDefaultBaseUrl,
@@ -66,11 +74,18 @@ import {
   invokeAgentSchema,
   invokeConnectorSchema,
   setAgentEnabledSchema,
+  setAgentFallbacksSchema,
+  setAgentLifecycleSchema,
+  setAgentOwnerSchema,
   setAgentPolicySchema,
   setAgentSystemPromptSchema,
+  updateAgentConfigSchema,
 } from "@regulait/shared";
 import type { PiiHit } from "@regulait/shared";
 import { guardrailWithheldMarker, guardrailCategoryList } from "@regulait/shared";
+// batch B1 — agent_config resolution at the ONE dispatch core: the active
+// version's model/list-price overlay, and the shadow canary's sampling
+import { applyRuleBody, resolveForShadow, stableKeyFor } from "@regulait/shared";
 import {
   guardrailOutcome,
   recordGuardrailDecision,
@@ -81,12 +96,31 @@ import {
   type GuardrailPolicy,
 } from "./guardrails.js";
 import { mrmDispatchGate } from "./mrm.js";
-import { newVersion, resolveAgentPromptVersion } from "./config-versions.js";
+// ADR-0080 amendment (batch B3): the use-case dispatch gate — org opt-in,
+// default off (byte-identical), the ADR-0045 gate shape beside the MRM rung.
+import {
+  attributionDispatchGate,
+  useCaseDispatchGate,
+  type DispatchUseCaseGate,
+} from "./use-case-gate.js";
+// ADR-0079: pillar 2 §2 stage 2 — the invoke→instance join point and the
+// plan-only refusal it makes possible.
+import { guardInstanceAttributedCall } from "./plan-only.js";
+import { loadVersions, newVersion, resolveAgentPromptVersion } from "./config-versions.js";
+// B1.5 — the agent model/pricing edit goes through ADR-0074's ONE choke point,
+// so a versioned agent's edit mints + activates an agent_config version.
+import { applyRuleEdit, isRuleEditRefusal } from "./rule-writes.js";
+import {
+  recordCanaryFailure,
+  recordCanaryObservations,
+  type CandidateNote,
+} from "./rule-versions.js";
 import { z } from "zod";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import {
   assertProjectAttribution,
   enforcePII,
+  piiInternationalCategories,
   piiCategoryList,
   piiWithheldMarker,
   postDispatchProjectAlert,
@@ -95,7 +129,7 @@ import {
   type PiiMode,
 } from "./projects.js";
 import {
-  loadOwnConversation,
+  loadOwnConversationForReplay,
   recordConversationTurns,
   type ConversationContext,
 } from "./conversations.js";
@@ -114,8 +148,16 @@ import {
   envFallbackAllowed,
   loadOrgSettings,
 } from "./org-settings.js";
+import {
+  lookupSemanticCache,
+  semanticCacheKey,
+  storeSemanticCache,
+  type SemanticCacheKey,
+} from "./semantic-cache-shared.js";
 import { loadInterceptionSettings } from "./compat-core.js";
 import { resolveCustomProviderForDispatch } from "./custom-providers.js";
+import { resolveArtifactProviderForDispatch } from "./regulait-llm.js";
+import type { ArtifactModelProvider } from "@regulait/training-provider";
 import { egressRefusal } from "./egress-guard.js";
 import { refuseIfExpansionBlocked } from "./licensing.js";
 import { checkCredentialBaseUrl, credentialGuardedFetch } from "./credential-egress.js";
@@ -132,6 +174,28 @@ import {
   decideCompiledDefault,
   loadCompiledEgressContext,
 } from "./compiled-egress.js";
+// ADR-0066 — the virtual-key ceiling (allow-list + budget) and the per-key
+// spend counter. Applied INSIDE the one dispatch core, so every caller of it
+// inherits both without a check of its own.
+import {
+  loadVirtualKeyContext,
+  recordVirtualKeySpend,
+  virtualKeyAllowListRefusal,
+  virtualKeyBudgetRefusal,
+  type VirtualKeyContext,
+} from "./virtual-keys.js";
+// ADR-0070 — the trace recorder. Wrapped AROUND the one dispatch attempt so
+// every governed caller (invoke, both compat shims, orchestration workers,
+// evals, the copilot, decompose) is traced without a line of its own, and so a
+// governance DENY becomes a PRESENT span carrying its reason.
+import {
+  beginTrace,
+  finishTrace,
+  loadTracingPolicy,
+  recordSpan,
+  traceForRoot,
+  type TraceContext,
+} from "./tracing.js";
 
 const userIdParam = z.object({ userId: z.string().uuid() });
 const agentIdParam = z.object({ agentId: z.string().uuid() });
@@ -145,11 +209,157 @@ export type AgentRow = typeof agents.$inferSelect;
 export interface SkippedCandidate {
   agentId: string;
   name: string;
-  reason: "no_model_credential" | "no_model_id" | "unknown_provider";
+  reason: "no_model_credential" | "no_model_id" | "unknown_provider" | "mock_shadowed_by_live";
+}
+
+/**
+ * ADR-0095 (B1.5 F1), widened by B6a — THE ONE MOCK-SHADOWING PREDICATE.
+ *
+ * A mock-provider agent exists for the KEYLESS demo: with no credential
+ * configured anywhere, the out-of-box roster must still route, summarize and
+ * decompose. The moment a live agent in the SAME governed roster can genuinely
+ * serve, a mock stops being an automatic pick — right-sizing real work onto a
+ * canned-prose responder is not an optimization, it is a non-answer.
+ *
+ * ADR-0095 shipped this for ROUTING selection only and named its own residual:
+ * the compaction-summarizer roster and the decompose-worker roster were not
+ * narrowed, so a mock could still be picked to SUMMARIZE a conversation (a
+ * canned summary silently degrades every later turn's retained context) or to
+ * PLAN a task graph (a canned plan is a nonsense DAG). B6a closes both by
+ * reusing this function rather than restating the rule — three copies of a
+ * predicate are three places for it to drift, and the drift would be silent.
+ *
+ * The contract, identical at all three call sites:
+ *   - `roster` is the caller's OWN entitled set (never widened here).
+ *   - `dispatchable` is that call site's own strict dispatchability test.
+ *   - Nothing is shadowed unless a non-mock member of the same roster is
+ *     dispatchable, so a keyless install shadows nothing and behaves exactly
+ *     as it did before.
+ *   - An EXPLICIT choice is not routing and is exempted by the CALLER (the
+ *     requested agent on invoke, the org's fixed summarizer, an explicitly
+ *     named lead) — this function only ever reports the shadowed set.
+ */
+export function mockShadowedByLive<T extends { id: string; provider: string }>(
+  roster: readonly T[],
+  dispatchable: (a: T) => boolean,
+): Set<string> {
+  const liveCanServe = roster.some((a) => a.provider !== "mock" && dispatchable(a));
+  if (!liveCanServe) return new Set<string>();
+  return new Set(roster.filter((a) => a.provider === "mock" && dispatchable(a)).map((a) => a.id));
 }
 
 /** §8.4 PII enforcement outcome threaded onto a dispatch. COUNTS ONLY —
  * inputHits/outputHits are per-category counts, never the matched text. */
+/**
+ * The project's PII input gate, hoisted so it can run BEFORE the two things
+ * that used to sit in front of it and let PII through:
+ *
+ *  1. the semantic-cache serve — a cache hit returned the cached output and the
+ *     request never reached `dispatchAttempt`, where the only PII gate lived. A
+ *     PII prompt cached under an ungated (no-project) call was then served
+ *     verbatim on a HIPAA-attributed replay. This is a compliance BYPASS, found
+ *     driving pillar 3 end-to-end.
+ *  2. the per-technique cost_events writes (`model_routing`, `context_compaction`,
+ *     …) — those were written in the handler BEFORE dispatch, so a call that
+ *     `dispatchAttempt` then blocked on PII still left phantom estimate rows
+ *     attributed to the project, skewing savings-by-technique reporting.
+ *
+ * Running the input gate here fixes both: a blocked call returns 403 before any
+ * cache serve and before any estimate row is written. `dispatchAttempt` keeps
+ * its own input+output gate — that path is also reached by orchestration and
+ * worker-node dispatch, which do not pass through this handler, so it is
+ * defense-in-depth, not redundancy. Both gates share one audit shape and one
+ * `pii-blocked` rule id, and a clean input simply passes both.
+ *
+ * Returns the block result (already audited) or null when the input is clean or
+ * the project has no PII mode.
+ */
+async function enforceProjectInputPii(
+  db: Db,
+  userId: string,
+  agentObjectId: string,
+  projectId: string | null,
+  input: string | undefined,
+): Promise<{ status: 403; error: "pii_blocked"; detail: string; pii: DispatchPii } | null> {
+  const piiMode = await projectPiiMode(db, projectId);
+  if (!piiMode) return null;
+  // ADR-0117: the jurisdiction set is the OTHER half of the §8.4 decision and
+  // is resolved on the SAME line of reasoning as the mode — org-wide, shipped
+  // empty, widened only by an explicit admin act.
+  const chk = enforcePII(piiMode, { input }, await piiInternationalCategories(db));
+  if (chk.action !== "block") return null;
+  const detail = `input contains PII: ${piiCategoryList(chk.hits)}`;
+  const pii: DispatchPii = {
+    mode: piiMode,
+    action: "block",
+    inputHits: chk.hits,
+    outputHits: [],
+    withheld: false,
+  };
+  await db.insert(auditLog).values({
+    userId,
+    objectType: "agent",
+    objectId: agentObjectId,
+    detail: {
+      phase: "pii",
+      pii: { mode: piiMode, action: "block", phase: "input", inputHits: chk.hits, outputHits: [] },
+      ...(projectId ? { projectId } : {}),
+    },
+    effect: "deny",
+    ruleId: "pii-blocked",
+    ruleChain: [],
+    reason: detail,
+  });
+  return { status: 403, error: "pii_blocked", detail, pii };
+}
+
+/**
+ * The OUTPUT counterpart for the cache-hit path. The input may be clean while
+ * the CACHED output carries PII (it was generated under a different, ungated
+ * attribution). Serving that cached output on a project whose mode is `block`
+ * would leak it, so the cached text is checked before it is served, with the
+ * same audit shape as the input gate above.
+ */
+export async function enforceProjectCachedOutputPii(
+  db: Db,
+  userId: string,
+  agentObjectId: string,
+  projectId: string | null,
+  outputText: string,
+): Promise<{ status: 403; error: "pii_blocked"; detail: string; pii: DispatchPii } | null> {
+  const piiMode = await projectPiiMode(db, projectId);
+  if (!piiMode) return null;
+  // ADR-0117: the jurisdiction set is the OTHER half of the §8.4 decision and
+  // is resolved on the SAME line of reasoning as the mode — org-wide, shipped
+  // empty, widened only by an explicit admin act.
+  const chk = enforcePII(piiMode, { output: outputText }, await piiInternationalCategories(db));
+  if (chk.action !== "block") return null;
+  const detail = `cached output withheld: contains PII (${piiCategoryList(chk.hits)})`;
+  const pii: DispatchPii = {
+    mode: piiMode,
+    action: "block",
+    inputHits: [],
+    outputHits: chk.hits,
+    withheld: true,
+  };
+  await db.insert(auditLog).values({
+    userId,
+    objectType: "agent",
+    objectId: agentObjectId,
+    detail: {
+      phase: "pii",
+      pii: { mode: piiMode, action: "block", phase: "output", inputHits: [], outputHits: chk.hits },
+      semanticCache: { hit: true },
+      ...(projectId ? { projectId } : {}),
+    },
+    effect: "deny",
+    ruleId: "pii-blocked",
+    ruleChain: [],
+    reason: detail,
+  });
+  return { status: 403, error: "pii_blocked", detail, pii };
+}
+
 export interface DispatchPii {
   mode: PiiMode;
   /** the effective action on this dispatch: 'block' (output withheld here, or
@@ -186,7 +396,18 @@ export type DispatchOutcome =
         pii?: DispatchPii;
         /** ADR-0042: present only when a guardrail detector produced hits */
         guardrails?: DispatchGuardrails;
+        /** ADR-0066 §4: present ONLY when the primary target failed at the
+         * transport layer and a configured fallback hop served instead. Its
+         * presence is the disclosure — a fallback is never silent. */
+        fallback?: DispatchFallback;
+        /** ADR-0080 amendment (batch B3): present ONLY under
+         * useCaseGateMode=warn when this dispatch would have been refused
+         * under enforce — the refusal-shaped fact, annotated, not enforced. */
+        useCaseGate?: DispatchUseCaseGate;
       };
+      /** ADR-0070: where this call landed in the trace tree. Present whenever
+       * tracing is enabled; absent when the org switched it off. */
+      trace?: DispatchTraceRef;
     }
   | {
       ok: false;
@@ -195,57 +416,769 @@ export type DispatchOutcome =
       detail?: string;
       pii?: DispatchPii;
       guardrails?: DispatchGuardrails;
+      /** ADR-0066 §4: present when a chain was attempted and exhausted, so the
+       * caller sees WHICH hops were tried and why each one did not serve. */
+      fallback?: DispatchFallback;
+      /** ADR-0070: a REFUSAL gets a trace reference too — that is the whole
+       * point. The span it names carries `status: 'denied'` and the reason. */
+      trace?: DispatchTraceRef;
     };
 
-/** The one governed-dispatch core, shared by the direct invoke path and the
- * orchestration worker-node path. The served agent is an INPUT — this
- * function never picks a model; governance and (where applicable) routing
- * have already happened upstream. Config problems (no model id, unknown
- * provider, missing credential) fail explicit, never fall back to a
- * different model. Every execution lands one MEASURED row in usage_events. */
+/** ADR-0070 — the trace coordinates of one dispatch attempt. */
+export interface DispatchTraceRef {
+  traceId: string;
+  spanId: string | null;
+}
+
+/** ADR-0066 §4 — what happened on the way to the answer. One entry per hop
+ * ATTEMPTED, in order, including the hops that were skipped for governance
+ * reasons: a chain that quietly dropped an unentitled hop would make a
+ * fallback look like a routing decision nobody made. */
+export interface DispatchFallback {
+  /** the agent the caller actually asked for (chain position -1) */
+  primaryAgentId: string;
+  /** the agent that ultimately served; null when the whole chain failed */
+  servedAgentId: string | null;
+  hops: Array<{
+    position: number;
+    agentId: string;
+    agentName: string;
+    outcome: "served" | "denied" | "failed" | "unavailable";
+    /** why this hop did not serve; absent on the hop that did */
+    reason?: string;
+  }>;
+}
+
+/** The arguments of the one governed-dispatch core. Extracted as a named type
+ * by ADR-0066 so the fallback driver and the single-attempt body share exactly
+ * one definition rather than two that agree today. */
+export interface GovernedDispatchArgs {
+  userId: string;
+  /** the agent to execute — caller has already governance-checked it */
+  served: AgentRow | undefined;
+  requestedAgentId: string;
+  /** routing counterfactual for measured savings; null = no routing happened */
+  baseline?: AgentRow | null;
+  input: string;
+  /** multi-turn: the FULL ordered history including the newest user turn;
+   * when present the provider ignores `input` (model-provider contract) */
+  messages?: ModelChatMessage[] | undefined;
+  /** system context (e.g. a nested run's signed-off workflow artifacts) */
+  system?: string | undefined;
+  /** pillar-6 prompt caching: mark `system` cacheable on the outgoing request
+   * (Anthropic ephemeral breakpoint). Purely a cost annotation — the served
+   * agent, model, entitlement, and output are unchanged. */
+  cacheSystem?: boolean | undefined;
+  /** pillar 7: tools the worker may call this turn. When absent the request
+   * is byte-identical to the tool-free dispatch. */
+  tools?: ModelToolDef[] | undefined;
+  /** ADR-0020 long tail: constrain which tools the model may/must call.
+   * Pure ModelDispatchRequest threading — validated upstream by the shims. */
+  toolChoice?: ModelToolChoice | undefined;
+  /** ADR-0020 long tail: structured-output constraint. The caller has
+   * already checked the served provider can honour it. */
+  responseFormat?: ModelResponseFormat | undefined;
+  /** ADR-0020 long tail: Anthropic extended thinking. The caller has
+   * already checked the served provider can honour it. */
+  thinking?: { budgetTokens: number } | undefined;
+  maxTokens?: number | undefined;
+  /** pillar 5 attribution: the project this call bills to */
+  projectId?: string | null | undefined;
+  /** streaming delta callback, forwarded to the provider */
+  onText?: ((delta: string) => void) | undefined;
+  /** streaming thinking-delta callback, forwarded to the provider */
+  onThinking?: ModelDispatchRequest["onThinking"] | undefined;
+  detail?: Record<string, unknown>;
+  /** ADR-0066 §2/§3 — the virtual key this call arrived on, when it did. Its
+   * allow-list and budget are applied INSIDE the core so no caller can forget
+   * them; absent/null on every ordinary path, where every check below is a
+   * no-op and the behaviour is byte-identical to pre-0066. */
+  virtualKey?: VirtualKeyContext | null | undefined;
+  /** ADR-0066 §4 — the mode a FALLBACK HOP is re-evaluated under. Only the
+   * chain driver reads it; a hop must be entitlement-checked in the same mode
+   * the primary was, or a `plan`-only grant could serve an `execute` call. */
+  mode?: string | undefined;
+  /** ADR-0070 — the trace this attempt's span hangs from.
+   *
+   *  - UNDEFINED (every ordinary caller): the core RESOLVES one from
+   *    `detail.runId` / `detail.conversationId`, or opens a standalone trace,
+   *    and closes it. Nothing to remember at any call site.
+   *  - a context: the caller owns the tree (the orchestration run path, the
+   *    fallback driver) and this attempt hangs under `parentSpanId`.
+   *  - EXPLICIT NULL: record nothing. Used by the fallback driver's own
+   *    bookkeeping and by anything that has already recorded the span itself.
+   */
+  trace?: TraceContext | null | undefined;
+  /** ADR-0070 — override the span's displayed name. Absent = derived from the
+   * served agent. Used by the fallback driver to label a hop. */
+  traceSpanName?: string | undefined;
+  /** ADR-0070 — the span kind this attempt records as. Defaults to `llm`; the
+   * fallback driver passes `fallback_hop`. */
+  traceSpanKind?: "llm" | "fallback_hop" | undefined;
+}
+
+/**
+ * ADR-0066 §4 — THE ONE GOVERNED-DISPATCH ENTRY POINT, now with fallback.
+ *
+ * Shared by the direct invoke path, both compat shims, the orchestration
+ * worker-node path, evals, the copilot and decompose. The served agent is an
+ * INPUT — this function never picks a model; governance and (where applicable)
+ * routing have already happened upstream.
+ *
+ * What it adds over `dispatchOnce` is the chain, and the chain has exactly four
+ * rules, each of which is a test in `gateway-parity.test.ts`:
+ *
+ *  1. **A GOVERNANCE DENY IS NOT A FAILURE.** Only a transport/upstream error
+ *     (`model_dispatch_failed`) triggers the chain. An entitlement denial, a
+ *     PII or guardrail block, an egress refusal, an MRM refusal, an exhausted
+ *     project or key budget, a missing credential, an undispatchable agent —
+ *     every one of those is a DECISION, and retrying a decision somewhere else
+ *     is how a governance product turns into a bypass. This is the subtle one
+ *     and it is asserted directly.
+ *  2. **ENTITLEMENT IS RE-EVALUATED PER HOP, FROM SCRATCH.** A hop never
+ *     inherits the primary's allow. It runs the caller's own `evaluateAgent`
+ *     again — same grants, same revocations, same tier ceiling, same mode — and
+ *     a hop the caller may not use is SKIPPED and audited, never served.
+ *  3. **EGRESS POSTURE IS RE-EVALUATED PER HOP**, because each hop runs the
+ *     whole of `dispatchOnce`, including ADR-0062's compiled-default admission
+ *     and ADR-0034's baseUrl guard. There is no shortcut path.
+ *  4. **EVERY HOP IS AUDITED.** A fallback is visible in the trail and in the
+ *     response (`result.fallback`), never silent. "Which model actually
+ *     answered, and why not the one I asked for" must be answerable afterwards.
+ *
+ * An agent with no `agent_fallbacks` rows — every agent, until an admin
+ * configures one — takes exactly one extra indexed SELECT on the failure path
+ * only, and is otherwise byte-identical to the pre-0066 core.
+ */
 export async function executeGovernedDispatch(
   db: Db,
   dataKey: string | undefined,
-  args: {
-    userId: string;
-    /** the agent to execute — caller has already governance-checked it */
-    served: AgentRow | undefined;
-    requestedAgentId: string;
-    /** routing counterfactual for measured savings; null = no routing happened */
-    baseline?: AgentRow | null;
-    input: string;
-    /** multi-turn: the FULL ordered history including the newest user turn;
-     * when present the provider ignores `input` (model-provider contract) */
-    messages?: ModelChatMessage[] | undefined;
-    /** system context (e.g. a nested run's signed-off workflow artifacts) */
-    system?: string | undefined;
-    /** pillar-6 prompt caching: mark `system` cacheable on the outgoing request
-     * (Anthropic ephemeral breakpoint). Purely a cost annotation — the served
-     * agent, model, entitlement, and output are unchanged. */
-    cacheSystem?: boolean | undefined;
-    /** pillar 7: tools the worker may call this turn. When absent the request
-     * is byte-identical to the tool-free dispatch. */
-    tools?: ModelToolDef[] | undefined;
-    /** ADR-0020 long tail: constrain which tools the model may/must call.
-     * Pure ModelDispatchRequest threading — validated upstream by the shims. */
-    toolChoice?: ModelToolChoice | undefined;
-    /** ADR-0020 long tail: structured-output constraint. The caller has
-     * already checked the served provider can honour it. */
-    responseFormat?: ModelResponseFormat | undefined;
-    /** ADR-0020 long tail: Anthropic extended thinking. The caller has
-     * already checked the served provider can honour it. */
-    thinking?: { budgetTokens: number } | undefined;
-    maxTokens?: number | undefined;
-    /** pillar 5 attribution: the project this call bills to */
-    projectId?: string | null | undefined;
-    /** streaming delta callback, forwarded to the provider */
-    onText?: ((delta: string) => void) | undefined;
-    /** streaming thinking-delta callback, forwarded to the provider */
-    onThinking?: ModelDispatchRequest["onThinking"] | undefined;
-    detail?: Record<string, unknown>;
-  },
+  args: GovernedDispatchArgs,
 ): Promise<DispatchOutcome> {
-  const { userId, served, requestedAgentId, baseline } = args;
+  const primary = await dispatchOnce(db, dataKey, args);
+  if (primary.ok) return primary;
+  // RULE 1. Everything except a transport/upstream failure is a decision.
+  if (primary.error !== "model_dispatch_failed") return primary;
+  if (!args.served) return primary;
+
+  // ADR-0070 — RULE 5 (added by this ADR, and the reason a trace exists at all
+  // for this feature): EVERY HOP IS A SPAN, NESTED UNDER THE ATTEMPT THAT
+  // FAILED. A silent fallback is precisely what a trace is for, and ADR-0066's
+  // audit rows — while complete — require knowing to go looking. The hop spans
+  // hang from the primary attempt's span so the tree reads "I asked for X, it
+  // failed at the transport layer, and here is what was tried instead". A hop
+  // SKIPPED for governance reasons is a span too, `status: 'denied'`, for the
+  // same reason ADR-0066 audits it: a chain that quietly dropped an unentitled
+  // hop would make a fallback look like a routing decision nobody made.
+  const hopTrace: TraceContext | null = primary.trace
+    ? {
+        traceId: primary.trace.traceId,
+        parentSpanId: primary.trace.spanId,
+        sessionId: null,
+        policy: await loadTracingPolicy(db),
+      }
+    : null;
+  const recordSkippedHop = async (
+    label: { position: number; agentId: string; agentName: string },
+    reason: string,
+    ruleId: string,
+  ) => {
+    if (!hopTrace) return;
+    const at = new Date();
+    await recordSpan(db, hopTrace, {
+      kind: "fallback_hop",
+      name: `fallback ${label.position}: ${label.agentName}`,
+      status: "denied",
+      statusReason: reason,
+      startedAt: at,
+      endedAt: at,
+      agentId: label.agentId,
+      attributes: { fallbackPosition: label.position, ruleId, primaryAgentId: args.served!.id },
+    });
+  };
+
+  const chain = await db
+    .select()
+    .from(agentFallbacks)
+    .where(eq(agentFallbacks.agentId, args.served.id))
+    .orderBy(asc(agentFallbacks.position));
+  if (chain.length === 0) return primary;
+
+  const primaryAgent = args.served;
+  const hops: DispatchFallback["hops"] = [];
+
+  // The caller's entitlement inputs, loaded ONCE for the whole chain — the same
+  // inputs, in the same shape, that `compat-core.ts` and the invoke path build.
+  // Loading them once is a query optimisation, not a policy shortcut: each hop
+  // still runs its own `evaluateAgent` against them.
+  const [grants, roleGrants, revocationRows, [policy]] = await Promise.all([
+    db.select().from(agentGrants).where(eq(agentGrants.userId, args.userId)),
+    loadRoleAgentGrants(db, args.userId),
+    loadAgentRevocations(db, args.userId),
+    db.select().from(userAgentPolicies).where(eq(userAgentPolicies.userId, args.userId)),
+  ]);
+  let ceilingTier: number | null = null;
+  if (policy?.ceilingAgentId) {
+    const [ceiling] = await db
+      .select({ tier: agents.tier })
+      .from(agents)
+      .where(eq(agents.id, policy.ceilingAgentId));
+    ceilingTier = ceiling?.tier ?? null;
+  }
+  const hopMode = args.mode ?? "execute";
+
+  const auditHop = async (
+    hop: { position: number; agentId: string; agentName: string },
+    effect: "allow" | "deny",
+    ruleId: string,
+    reason: string,
+    extra: Record<string, unknown> = {},
+  ) => {
+    await db.insert(auditLog).values({
+      userId: args.userId,
+      objectType: "agent",
+      objectId: hop.agentId,
+      detail: {
+        phase: "fallback",
+        primaryAgentId: primaryAgent.id,
+        primaryAgentName: primaryAgent.name,
+        position: hop.position,
+        mode: hopMode,
+        ...(args.projectId ? { projectId: args.projectId } : {}),
+        ...(args.virtualKey ? { virtualKeyId: args.virtualKey.id } : {}),
+        ...extra,
+      },
+      effect,
+      ruleId,
+      ruleChain: [],
+      reason,
+    });
+  };
+
+  for (const link of chain) {
+    const [hopAgent] = await db.select().from(agents).where(eq(agents.id, link.fallbackAgentId));
+    const label = { position: link.position, agentId: link.fallbackAgentId, agentName: hopAgent?.name ?? "(unknown)" };
+    if (!hopAgent || !hopAgent.enabled) {
+      const reason = hopAgent
+        ? `fallback hop '${hopAgent.name}' is disabled`
+        : `fallback hop ${link.fallbackAgentId} no longer exists`;
+      hops.push({ ...label, outcome: "unavailable", reason });
+      await auditHop(label, "deny", "fallback-hop-unavailable", reason);
+      await recordSkippedHop(label, reason, "fallback-hop-unavailable");
+      continue;
+    }
+    // RULE 2 — re-evaluate, never inherit.
+    const hopExecutionMode = await loadExecutionMode(db);
+    const decision = evaluateAgent({
+      userId: args.userId,
+      // ADR-0124 — a fallback hop is a real dispatch, so it is gated like one.
+      // The hop agent's OWN halt matters most here: halting an agent must also
+      // stop traffic being routed INTO it by somebody else's fallback chain.
+      execution: postureOf(hopExecutionMode, agentHaltOf(hopAgent)),
+      agent: {
+        id: hopAgent.id,
+        name: hopAgent.name,
+        tier: hopAgent.tier,
+        enabled: hopAgent.enabled,
+        modes: hopAgent.modes ?? null,
+      },
+      mode: hopMode,
+      agentGrants: grants,
+      roleAgentGrants: roleGrants,
+      agentRevocations: revocationRows,
+      ceilingTier,
+    });
+    if (decision.effect !== "allow") {
+      hops.push({ ...label, outcome: "denied", reason: decision.reason });
+      await auditHop(label, "deny", "fallback-hop-denied", decision.reason, {
+        kernelRuleId: decision.ruleId,
+      });
+      await recordSkippedHop(label, decision.reason, "fallback-hop-denied");
+      continue;
+    }
+    // The virtual key's own ceiling applies to hops too — a fallback must not
+    // be the way a key reaches a model its allow-list excludes.
+    if (args.virtualKey) {
+      const refusal = virtualKeyAllowListRefusal(args.virtualKey, hopAgent);
+      if (refusal) {
+        hops.push({ ...label, outcome: "denied", reason: refusal.detail });
+        await auditHop(label, "deny", refusal.ruleId, refusal.detail);
+        await recordSkippedHop(label, refusal.detail, refusal.ruleId);
+        continue;
+      }
+    }
+
+    const outcome = await dispatchOnce(db, dataKey, {
+      ...args,
+      served: hopAgent,
+      // ADR-0070: this hop's span is a CHILD of the primary attempt's span.
+      trace: hopTrace,
+      traceSpanKind: "fallback_hop",
+      traceSpanName: `fallback ${link.position}: ${hopAgent.name}`,
+      // The baseline is a ROUTING counterfactual; a fallback is not routing, so
+      // carrying the primary's baseline here would invent a savings figure for
+      // a decision the optimizer never made.
+      baseline: null,
+      detail: {
+        ...(args.detail ?? {}),
+        fallbackFromAgentId: primaryAgent.id,
+        fallbackPosition: link.position,
+      },
+    });
+    if (outcome.ok) {
+      hops.push({ ...label, outcome: "served" });
+      await auditHop(
+        label,
+        "allow",
+        "fallback-hop-served",
+        `primary agent '${primaryAgent.name}' failed at the transport layer; fallback hop ${link.position} ('${hopAgent.name}') served instead`,
+      );
+      return {
+        ok: true,
+        result: {
+          ...outcome.result,
+          fallback: { primaryAgentId: primaryAgent.id, servedAgentId: hopAgent.id, hops },
+        },
+        // the trace the CALLER is handed is the one containing the whole story:
+        // the failed primary attempt AND the hop that served under it.
+        ...(primary.trace ? { trace: primary.trace } : {}),
+      };
+    }
+    const reason = outcome.detail ?? outcome.error;
+    // A hop that is itself DENIED (its own PII/guardrail/budget/egress verdict)
+    // is recorded as denied, not failed — the distinction is the whole point of
+    // rule 1 and it must survive into the trail.
+    const isFailure = outcome.error === "model_dispatch_failed";
+    hops.push({ ...label, outcome: isFailure ? "failed" : "denied", reason });
+    await auditHop(
+      label,
+      "deny",
+      isFailure ? "fallback-hop-failed" : "fallback-hop-denied",
+      reason,
+      { hopError: outcome.error },
+    );
+  }
+
+  await auditHop(
+    { position: -1, agentId: primaryAgent.id, agentName: primaryAgent.name },
+    "deny",
+    "fallback-chain-exhausted",
+    `every configured fallback for '${primaryAgent.name}' was exhausted; returning the primary failure`,
+    { attempted: hops.length },
+  );
+  // The ORIGINAL failure is what the caller gets back — a chain that swapped in
+  // the last hop's error would hide which target they actually asked for.
+  return {
+    ...primary,
+    fallback: { primaryAgentId: primaryAgent.id, servedAgentId: null, hops },
+  };
+}
+
+/**
+ * ADR-0070 — what the traced attempt could not learn from the outcome alone.
+ * Populated by `dispatchAttempt` as it writes the rows the span REFERENCES.
+ * Deliberately a mutable sink rather than an addition to `DispatchOutcome`:
+ * the ids of the ledger and audit rows are plumbing, and no caller of the
+ * dispatch core should have to think about them.
+ */
+interface DispatchTraceSink {
+  usageEventId?: string | null;
+  auditLogId?: string | null;
+  /** the served provider/model, known even on refusals that never dispatched */
+  provider?: string | null;
+  model?: string | null;
+  /** the text the caller may see — post-PII/guardrail substitution */
+  outputText?: string | null;
+  contentWithheld?: boolean;
+  stopReason?: string | null;
+}
+
+/**
+ * ADR-0070 — resolve which trace this attempt belongs to when the caller did
+ * not name one. Three cases, in this order:
+ *
+ *   `detail.runId`     -> the RUN's tree (so every node dispatch of a run lands
+ *                         in one tree rather than N unrelated ones). This is a
+ *                         fallback: the orchestration path passes an explicit
+ *                         context so the dispatch nests under its node span.
+ *   `detail.conversationId` -> a per-turn trace grouped by the conversation as
+ *                         the SESSION id. That is the thread grouping: a
+ *                         multi-turn conversation reads as one thing.
+ *   otherwise          -> a standalone one-shot trace.
+ */
+async function resolveDispatchTrace(
+  db: Db,
+  args: GovernedDispatchArgs,
+): Promise<{ ctx: TraceContext | null; owned: boolean }> {
+  if (args.trace !== undefined) return { ctx: args.trace, owned: false };
+  const policy = await loadTracingPolicy(db);
+  if (!policy.enabled) return { ctx: null, owned: false };
+  const detail = args.detail ?? {};
+  const runId = typeof detail["runId"] === "string" ? (detail["runId"] as string) : null;
+  const conversationId =
+    typeof detail["conversationId"] === "string" ? (detail["conversationId"] as string) : null;
+  if (runId) {
+    const ctx = await traceForRoot(
+      db,
+      {
+        kind: "run",
+        name: `run ${runId}`,
+        userId: args.userId,
+        projectId: args.projectId ?? null,
+        sessionId: runId,
+        rootRefId: runId,
+      },
+      policy,
+    );
+    // NOT owned: a run's trace is closed when the run reaches a terminal state,
+    // not when one of its dispatches returns.
+    return { ctx, owned: false };
+  }
+  const ctx = await beginTrace(
+    db,
+    {
+      kind: conversationId ? "conversation" : "dispatch",
+      name: args.served ? `dispatch ${args.served.name}` : "dispatch",
+      userId: args.userId,
+      projectId: args.projectId ?? null,
+      sessionId: conversationId,
+      rootRefId: conversationId,
+    },
+    policy,
+  );
+  return { ctx, owned: !!ctx };
+}
+
+/**
+ * ADR-0070 — ONE governed dispatch attempt, TRACED.
+ *
+ * This is a thin wrapper and it is deliberately the ONLY place a dispatch span
+ * is written. Everything governance-bearing stays in `dispatchAttempt` below,
+ * untouched; this function times it, records exactly one span from whatever
+ * came back, and returns the outcome with the span's coordinates attached.
+ *
+ * THE RULE THIS SHAPE EXISTS TO ENFORCE: **a refusal produces a span too.**
+ * Every early return in `dispatchAttempt` — a virtual key's allow-list, the
+ * MRM gate, a project budget, a §8.4 PII block, an ADR-0042 guardrail block, an
+ * egress refusal, a missing credential, an undispatchable agent — flows through
+ * here and lands as `status: 'denied'` carrying its stated reason. A trace that
+ * showed only the calls that happened would answer "why did nothing happen"
+ * with silence, which is the single question this feature exists for.
+ *
+ * `model_dispatch_failed` is the one non-decision: it records as `error`, not
+ * `denied`, because it is a transport fault rather than a verdict — the same
+ * distinction ADR-0066's rule 1 draws when deciding whether to hop.
+ */
+async function dispatchOnce(
+  db: Db,
+  dataKey: string | undefined,
+  args: GovernedDispatchArgs,
+): Promise<DispatchOutcome> {
+  const { ctx, owned } = await resolveDispatchTrace(db, args);
+  const startedAt = new Date();
+  const sink: DispatchTraceSink = {};
+  let outcome: DispatchOutcome;
+  try {
+    outcome = await dispatchAttempt(db, dataKey, args, sink);
+  } catch (err) {
+    // An unexpected throw is still a thing that happened to a governed call.
+    if (ctx) {
+      await recordSpan(db, ctx, {
+        kind: args.traceSpanKind ?? "llm",
+        name: args.traceSpanName ?? (args.served ? args.served.name : "dispatch"),
+        status: "error",
+        statusReason: (err as Error)?.message ?? "dispatch threw",
+        startedAt,
+        agentId: args.served?.id ?? null,
+        provider: sink.provider ?? args.served?.provider ?? null,
+        model: sink.model ?? args.served?.model ?? null,
+        ...(args.projectId ? { attributes: { projectId: args.projectId } } : {}),
+      });
+      if (owned) await finishTrace(db, ctx, "error", startedAt);
+    }
+    throw err;
+  }
+
+  if (!ctx) return outcome;
+
+  const detail = args.detail ?? {};
+  const runId = typeof detail["runId"] === "string" ? (detail["runId"] as string) : null;
+  const nodeId = typeof detail["nodeId"] === "string" ? (detail["nodeId"] as string) : null;
+  const attributes: Record<string, unknown> = {
+    requestedAgentId: args.requestedAgentId,
+    ...(args.projectId ? { projectId: args.projectId } : {}),
+    ...(args.virtualKey ? { virtualKeyId: args.virtualKey.id } : {}),
+    ...(typeof detail["turn"] === "number" ? { turn: detail["turn"] } : {}),
+    ...(typeof args.traceSpanKind === "string" && args.traceSpanKind === "fallback_hop"
+      ? { fallbackPosition: detail["fallbackPosition"] ?? null }
+      : {}),
+  };
+
+  let spanId: string | null;
+  if (outcome.ok) {
+    const r = outcome.result;
+    attributes["stopReason"] = r.stopReason;
+    if (r.refusal) attributes["providerRefusal"] = true;
+    if (r.credentialSource) attributes["credentialSource"] = r.credentialSource;
+    if (r.pii) attributes["pii"] = { mode: r.pii.mode, action: r.pii.action, withheld: r.pii.withheld };
+    if (r.guardrails) {
+      attributes["guardrails"] = { action: r.guardrails.action, withheld: r.guardrails.withheld };
+    }
+    spanId = await recordSpan(db, ctx, {
+      kind: args.traceSpanKind ?? "llm",
+      name: args.traceSpanName ?? (args.served ? args.served.name : "dispatch"),
+      status: "ok",
+      startedAt,
+      agentId: r.servedAgentId,
+      runId,
+      nodeId,
+      // THE REFERENCE. The five denormalised figures below were copied FROM
+      // this row, in the same call that inserted it.
+      usageEventId: sink.usageEventId ?? null,
+      provider: sink.provider ?? args.served?.provider ?? null,
+      model: r.model,
+      inputTokens: r.usage.inputTokens,
+      outputTokens: r.usage.outputTokens,
+      costUsd: r.costUsd,
+      inputText: args.input,
+      // ALREADY-ADJUDICATED text: the withheld marker is already substituted.
+      outputText: r.outputText,
+      contentWithheld: !!(r.pii?.withheld || r.guardrails?.withheld),
+      attributes,
+    });
+    if (owned) await finishTrace(db, ctx, "ok", startedAt);
+    return { ...outcome, trace: { traceId: ctx.traceId, spanId } };
+  }
+
+  attributes["error"] = outcome.error;
+  const isTransport = outcome.error === "model_dispatch_failed";
+  spanId = await recordSpan(db, ctx, {
+    kind: args.traceSpanKind ?? "llm",
+    name: args.traceSpanName ?? (args.served ? args.served.name : "dispatch"),
+    status: isTransport ? "error" : "denied",
+    statusReason: outcome.detail ?? outcome.error,
+    startedAt,
+    agentId: args.served?.id ?? null,
+    runId,
+    nodeId,
+    auditLogId: sink.auditLogId ?? null,
+    provider: sink.provider ?? args.served?.provider ?? null,
+    model: sink.model ?? args.served?.model ?? null,
+    // A refusal that never dispatched has no input preview worth storing when
+    // the refusal WAS about the input (a PII/guardrail block): storing the very
+    // text a block refused would defeat the block. `pii_blocked` and
+    // `guardrail_blocked` therefore carry the marker, not the prompt.
+    inputText:
+      outcome.error === "pii_blocked" || outcome.error === "guardrail_blocked"
+        ? (outcome.detail ?? null)
+        : args.input,
+    contentWithheld: outcome.error === "pii_blocked" || outcome.error === "guardrail_blocked",
+    attributes,
+  });
+  if (owned) await finishTrace(db, ctx, isTransport ? "error" : "denied", startedAt);
+  return { ...outcome, trace: { traceId: ctx.traceId, spanId } };
+}
+
+/**
+ * ONE governed dispatch ATTEMPT. This is the pre-ADR-0066 body of
+ * `executeGovernedDispatch`, unchanged except for the two virtual-key checks
+ * and the per-key spend counter. It never recurses and knows nothing about
+ * fallback chains, which is what makes the driver above's rules provable.
+ *
+ * Config problems (no model id, unknown provider, missing credential) fail
+ * explicit, never fall back to a different model. Every execution lands one
+ * MEASURED row in usage_events.
+ *
+ * ADR-0070 renamed this from `dispatchOnce` and wrapped it (above). Nothing in
+ * this body decides anything about tracing beyond populating `sink` with the
+ * ids of rows it was already writing.
+ */
+/** batch B1 — the one-line description of an agent's dispatch-execution
+ * config, used as the shadow observation's effect string on BOTH sides so a
+ * divergence is a model or list-price difference and nothing else. Kept a
+ * human-readable sentence fragment rather than JSON because operators read it
+ * verbatim off the divergence endpoint. */
+function agentConfigEffect(a: {
+  model: string | null;
+  costPerMTokIn: number | null;
+  costPerMTokOut: number | null;
+}): string {
+  return (
+    `model=${a.model ?? "(none)"} ` +
+    `pricePerMTok=${a.costPerMTokIn ?? "unpriced"}/${a.costPerMTokOut ?? "unpriced"}`
+  );
+}
+
+async function dispatchAttempt(
+  db: Db,
+  dataKey: string | undefined,
+  args: GovernedDispatchArgs,
+  sink: DispatchTraceSink = {},
+): Promise<DispatchOutcome> {
+  const { userId, requestedAgentId, baseline } = args;
+
+  // -------------------------------------------------------------------------
+  // Batch B1 (ADR-0073 residual / ADR-0048 deviation 2) — `agent_config`
+  // RESOLVES AT DISPATCH, in the one shared core, the same shape as the
+  // prompt path two hundred lines below and the rule path in
+  // `governedEvaluate`:
+  //
+  //   - no version rows           -> the agents row governs (byte-identical
+  //                                  pre-B1 behaviour for every existing
+  //                                  install — this branch costs one indexed
+  //                                  query that returns zero rows);
+  //   - an ACTIVE version         -> its body (model + list price) is overlaid
+  //                                  onto the served row BEFORE the
+  //                                  dispatchability gate, the provider call,
+  //                                  and the pillar-5 cost attribution, so all
+  //                                  three see one consistent config. This is
+  //                                  the clause that makes activating and
+  //                                  ROLLING BACK an agent_config version
+  //                                  genuinely change dispatch.
+  //   - versions but NO active    -> REFUSED, 409, the ADR-0073 §4 discipline:
+  //                                  the state is unreachable through the API
+  //                                  (the lazy baseline + activateVersion keep
+  //                                  exactly one active) and reachable only by
+  //                                  corruption, and dispatching on a config
+  //                                  with no authoritative statement would
+  //                                  execute (and bill) a model nobody
+  //                                  authorized. Note the deliberate
+  //                                  asymmetry: `agent_system_prompt` keeps
+  //                                  its ADR-0048 fall-back-to-the-column
+  //                                  semantics unchanged — that path shipped
+  //                                  before the fail-closed rule and altering
+  //                                  it here would be a second, unrequested
+  //                                  behaviour change.
+  //   - a CANARY version          -> SHADOW-evaluated only. The candidate's
+  //                                  effective config is computed and one
+  //                                  observation row is recorded per sampled
+  //                                  dispatch; nothing about it can reach the
+  //                                  served config, which is fixed before the
+  //                                  comparison runs.
+  // -------------------------------------------------------------------------
+  let served = args.served;
+  let agentConfigShadow: { note: CandidateNote; candidateBody: Record<string, unknown> } | null = null;
+  /** Batch B7c (ADR-0073 amendment) — the ACTIVE agent_config version that
+   * SERVED this dispatch, captured here (the only place it is known) and
+   * stamped onto the usage row below alongside the prompt stamp. Stays null
+   * for an unversioned agent — pre-existing rows and behaviour byte-identical
+   * — and is NEVER the shadow/canary candidate: the column means "what
+   * served", and an agent_config candidate never serves. */
+  let servedAgentConfigVersion: { versionId: string; version: number } | null = null;
+  if (served) {
+    const cfgVersions = await loadVersions(db, "agent_config", served.id);
+    if (cfgVersions.length > 0) {
+      const detail = args.detail ?? {};
+      const res = resolveForShadow({
+        artifactType: "agent_config",
+        artifactId: served.id,
+        versions: cfgVersions.map((v) => ({
+          id: v.id,
+          version: v.version,
+          status: v.status,
+          canaryPct: v.canaryPct,
+          body: v.body,
+        })),
+        // the same stable key the prompt resolver uses below, so one dispatch
+        // buckets consistently across both artifact types
+        stableKey: stableKeyFor({
+          runId: typeof detail["runId"] === "string" ? (detail["runId"] as string) : null,
+          conversationId:
+            typeof detail["conversationId"] === "string" ? (detail["conversationId"] as string) : null,
+          userId,
+        }),
+      });
+      if (res.unresolvable) {
+        await db.insert(auditLog).values({
+          userId,
+          objectType: "agent",
+          objectId: served.id,
+          detail: { phase: "dispatch", artifactType: "agent_config", ...(args.projectId ? { projectId: args.projectId } : {}) },
+          effect: "deny",
+          ruleId: "config-version-unresolvable",
+          ruleChain: [],
+          reason: res.unresolvable,
+        });
+        return { ok: false, status: 409, error: "config_version_unresolvable", detail: res.unresolvable };
+      }
+      if (res.served) {
+        served = applyRuleBody(
+          "agent_config",
+          served as unknown as Record<string, unknown>,
+          res.served.body,
+        ) as typeof served;
+        servedAgentConfigVersion = { versionId: res.served.id, version: res.served.version };
+      }
+      if (res.candidate) {
+        agentConfigShadow = {
+          candidateBody: res.candidate.body,
+          note: {
+            artifactType: "agent_config",
+            artifactId: served.id,
+            candidateVersionId: res.candidate.id,
+            candidateVersion: res.candidate.version,
+            activeVersionId: res.served?.id ?? null,
+            activeVersion: res.served?.version ?? null,
+            canaryPct: res.candidate.canaryPct,
+            bucket: res.bucket,
+          },
+        };
+      }
+    }
+  }
+  // THE SHADOW OBSERVATION. Written before the dispatchability gate on
+  // purpose: the comparison is a statement about CONFIG, valid whether or not
+  // this particular attempt goes on to reach a provider — and writing it here
+  // keeps "one observation per sampled dispatch attempt" a rule with no
+  // exceptions to remember. Both sides carry the SAME ruleId string so
+  // `diverged` is judged purely on the effect (model/price) difference.
+  // Inline and awaited (ADR-0073 disclosure 4: a fire-and-forget measurement
+  // is one whose failures nobody sees) — but a measurement failure must never
+  // fail the dispatch, so every write is caught.
+  if (served && agentConfigShadow) {
+    const servedDesc = agentConfigEffect(served);
+    try {
+      const candidateAgent = applyRuleBody(
+        "agent_config",
+        args.served as unknown as Record<string, unknown>,
+        agentConfigShadow.candidateBody,
+      ) as NonNullable<typeof args.served>;
+      const candidateDesc = agentConfigEffect(candidateAgent);
+      await recordCanaryObservations(
+        db,
+        [agentConfigShadow.note],
+        {
+          servedEffect: servedDesc,
+          servedRuleId: "agent-config",
+          servedReason: `active agent_config — this dispatch executes ${servedDesc}`,
+          candidateEffect: candidateDesc,
+          candidateRuleId: "agent-config",
+          candidateReason:
+            candidateDesc === servedDesc
+              ? `the candidate agent_config resolves to the same dispatch config (${candidateDesc})`
+              : `the candidate agent_config would have executed ${candidateDesc} instead`,
+        },
+        {
+          userId,
+          projectId: args.projectId ?? null,
+          detail: { phase: "agent-config-shadow" },
+        },
+      );
+    } catch (err) {
+      try {
+        await recordCanaryFailure(
+          db,
+          [agentConfigShadow.note],
+          (err as Error)?.message ?? "agent_config shadow evaluation failed",
+          { userId, projectId: args.projectId ?? null, detail: { phase: "agent-config-shadow" } },
+          { effect: servedDesc, ruleId: "agent-config", reason: "active agent_config (served)" },
+        );
+      } catch {
+        // the served dispatch may never be failed by its own measurement
+      }
+    }
+  }
+
   if (!served || !served.model || !isModelProviderKind(served.provider)) {
     return {
       ok: false,
@@ -255,6 +1188,90 @@ export async function executeGovernedDispatch(
         ? `agent '${served.name}' needs a model id and a known provider (got provider '${served.provider}', model '${served.model ?? "none"}')`
         : "served agent not found in registry",
     };
+  }
+  // ADR-0070: the served provider/model, known here and therefore attachable to
+  // EVERY span below including the refusals that never reach the provider.
+  sink.provider = served.provider;
+  sink.model = served.model;
+
+  // ADR-0089 — THE AGENT LIFECYCLE GATE (gap L20). Retired is TERMINAL for
+  // governance purposes: a retired agent refuses dispatch with a named 409,
+  // the ADR-0045 gate idiom — refusal before ANY provider work, cost, or
+  // content processing, audited with the lifecycle reason. Placed in this ONE
+  // shared core so direct invokes, orchestration workers, fallback hops and
+  // both compat shims inherit it. The agent's grants still EVALUATE (nothing
+  // here deletes or bypasses entitlement rows — every caller already ran
+  // evaluateAgent); the refusal is a lifecycle decision layered after them,
+  // which keeps the entitlement history readable and the retirement
+  // reversible as a record, never as a dispatch. `deprecated` deliberately
+  // does NOT appear here: deprecation only WARNS in the ADR-0082 inventory.
+  if (served.lifecycleStatus === "retired") {
+    const [lcRow] = await db
+      .insert(auditLog)
+      .values({
+        userId,
+        objectType: "agent",
+        objectId: served.id,
+        detail: {
+          phase: "dispatch",
+          agentId: served.id,
+          agentName: served.name,
+          model: served.model,
+          lifecycleStatus: "retired",
+          lifecycleReason: served.lifecycleReason,
+          ...(args.projectId ? { projectId: args.projectId } : {}),
+        },
+        effect: "deny",
+        ruleId: "agent-retired-dispatch-refused",
+        ruleChain: [],
+        reason: `agent '${served.name}' is retired${served.lifecycleReason ? ` (${served.lifecycleReason})` : ""} — a retired agent refuses dispatch; its grants and history remain readable`,
+      })
+      .returning({ id: auditLog.id });
+    sink.auditLogId = lcRow?.id ?? null;
+    return {
+      ok: false,
+      status: 409,
+      error: "agent_retired",
+      detail: `agent '${served.name}' is retired${served.lifecycleReason ? `: ${served.lifecycleReason}` : ""} — retirement is terminal; re-registering is a new agent`,
+    };
+  }
+
+  // ADR-0066 §2/§3 — THE VIRTUAL-KEY CEILING. Placed FIRST, before the MRM
+  // gate and before any provider work, for the same reason every gate below is
+  // where it is: a refusal here must cost nothing — no tokens, no usage row, no
+  // network. Both checks are pure functions of the key row, so on every
+  // ordinary call (`virtualKey` absent) this block is two null checks.
+  //
+  // THE INVARIANT. This runs AFTER the caller's `evaluateAgent` — every caller
+  // of this function has already made that decision — and can therefore only
+  // ever SUBTRACT from it. There is no branch here that turns a deny into an
+  // allow, which is what makes "a key can only narrow" a property of the code
+  // rather than of the documentation.
+  const vk = args.virtualKey ?? null;
+  if (vk) {
+    const allowList = virtualKeyAllowListRefusal(vk, served);
+    const refusal = allowList ?? virtualKeyBudgetRefusal(vk);
+    if (refusal) {
+      const [vkRow] = await db.insert(auditLog).values({
+        userId,
+        objectType: "virtual_key",
+        objectId: vk.id,
+        detail: {
+          phase: "dispatch",
+          agentId: served.id,
+          agentName: served.name,
+          model: served.model,
+          ...(vk.budgetUsd !== null ? { budgetUsd: vk.budgetUsd, spentUsd: vk.spentUsd } : {}),
+          ...(args.projectId ? { projectId: args.projectId } : {}),
+        },
+        effect: "deny",
+        ruleId: refusal.ruleId,
+        ruleChain: [],
+        reason: refusal.detail,
+      }).returning({ id: auditLog.id });
+      sink.auditLogId = vkRow?.id ?? null;
+      return { ok: false, status: refusal.status, error: refusal.error, detail: refusal.detail };
+    }
   }
 
   // ADR-0045 — MODEL RISK MANAGEMENT GATE. Placed HERE: after the caller's
@@ -286,6 +1303,66 @@ export async function executeGovernedDispatch(
     };
   }
 
+  // ADR-0080 amendment (batch B6b) — THE ATTRIBUTION MANDATE, one rung above
+  // the use-case gate and with the same placement discipline. Default-OFF
+  // (`org_settings.dispatch_attribution_required`), so an ATTRIBUTED dispatch
+  // never even reads the settings row here and an unattributed one is
+  // byte-identical until an admin flips the knob. When ON, a dispatch naming
+  // no project is refused 409 `attribution_required`, audited, before any
+  // provider work — which is what closes B3a's own recorded hole: the
+  // use-case gate below can only bind dispatches that NAME a project, so
+  // without this knob a caller could walk past it by omitting `projectId`.
+  //
+  // The two knobs are INDEPENDENT by construction and there is no precedence
+  // rule to remember: this gate acts only where projectId IS NULL, the
+  // use-case gate only where it is NOT, so they never see the same dispatch.
+  const attributionRefusal = await attributionDispatchGate(db, {
+    userId,
+    agentId: served.id,
+    agentName: served.name,
+    projectId: args.projectId ?? null,
+  });
+  if (attributionRefusal) {
+    sink.auditLogId = attributionRefusal.auditLogId;
+    return {
+      ok: false,
+      status: attributionRefusal.status,
+      error: attributionRefusal.error,
+      detail: attributionRefusal.detail,
+    };
+  }
+
+  // ADR-0080 amendment (batch B3) — THE USE-CASE DISPATCH GATE, beside the
+  // MRM rung and with the same placement discipline: after the caller's
+  // entitlement decision, before ANY provider work, so a refusal costs
+  // nothing. Default-off (`org_settings.use_case_gate_mode = 'off'`) is
+  // byte-identical — an unattributed dispatch does not even read settings
+  // here. The join is honest and narrow: the gate fires only for a dispatch
+  // attributed to a project that at least one AI use case LINKS
+  // (`ai_use_cases.project_id`, the only join the schema holds); under
+  // 'enforce' such a dispatch refuses 409 `use_case_approval_required`
+  // unless a linked use case is approved, under 'warn' it proceeds with the
+  // refusal-shaped fact audited and annotated on the result.
+  let useCaseGateWarning: DispatchUseCaseGate | null = null;
+  const useCaseGate = await useCaseDispatchGate(db, {
+    userId,
+    agentId: served.id,
+    agentName: served.name,
+    projectId: args.projectId ?? null,
+  });
+  if (useCaseGate) {
+    if (useCaseGate.kind === "refuse") {
+      sink.auditLogId = useCaseGate.auditLogId;
+      return {
+        ok: false,
+        status: useCaseGate.status,
+        error: useCaseGate.error,
+        detail: useCaseGate.detail,
+      };
+    }
+    useCaseGateWarning = useCaseGate.annotation;
+  }
+
   // PILLAR 5 enforcement: an attributed dispatch is gated on the project's
   // measured budget BEFORE any provider work happens.
   const projectGate = await preDispatchProjectGate(db, args.projectId ?? null, userId);
@@ -302,11 +1379,15 @@ export async function executeGovernedDispatch(
   // resolved from its compliance cascade; an unclassified/unmatched project
   // yields null and every check below is a no-op (byte-identical behaviour).
   const piiMode = await projectPiiMode(db, args.projectId ?? null);
+  // ADR-0117: resolved ONCE for this dispatch and reused by the output check
+  // below, so the input and output gates can never disagree about which
+  // jurisdictions are in force for the same call.
+  const piiIntl = await piiInternationalCategories(db);
   let inputHits: PiiHit[] = [];
   if (piiMode) {
     // INPUT check runs BEFORE any provider work, so a block incurs no cost —
     // no usage row, no dispatch, no tokens.
-    const chk = enforcePII(piiMode, { input: args.input });
+    const chk = enforcePII(piiMode, { input: args.input }, piiIntl);
     inputHits = chk.hits;
     if (chk.action === "block") {
       const reason = `input contains PII: ${piiCategoryList(chk.hits)}`;
@@ -317,7 +1398,7 @@ export async function executeGovernedDispatch(
         outputHits: [],
         withheld: false,
       };
-      await db.insert(auditLog).values({
+      const [piiRow] = await db.insert(auditLog).values({
         userId,
         objectType: "agent",
         objectId: served.id,
@@ -330,7 +1411,8 @@ export async function executeGovernedDispatch(
         ruleId: "pii-blocked",
         ruleChain: [],
         reason,
-      });
+      }).returning({ id: auditLog.id });
+      sink.auditLogId = piiRow?.id ?? null;
       return { ok: false, status: 403, error: "pii_blocked", detail: reason, pii };
     }
   }
@@ -358,7 +1440,7 @@ export async function executeGovernedDispatch(
     guardrailInput = runGuardrails(guardrails, "input", args.input);
     const outcome = guardrailOutcome(guardrailInput);
     if (outcome) {
-      await recordGuardrailDecision(db, {
+      sink.auditLogId = await recordGuardrailDecision(db, {
         userId,
         objectType: "agent",
         objectId: served.id,
@@ -398,7 +1480,7 @@ export async function executeGovernedDispatch(
   if (served.provider === "custom") {
     customProvider = await resolveCustomProviderForDispatch(db, dataKey, served.customProviderId);
     if (!customProvider.ok) {
-      await db.insert(auditLog).values({
+      const [cpRow] = await db.insert(auditLog).values({
         userId,
         objectType: "custom_model_provider",
         objectId: served.customProviderId,
@@ -412,7 +1494,8 @@ export async function executeGovernedDispatch(
         ruleId: `custom-provider-${customProvider.error}`,
         ruleChain: [],
         reason: customProvider.detail,
-      });
+      }).returning({ id: auditLog.id });
+      sink.auditLogId = cpRow?.id ?? null;
       return {
         ok: false,
         status: customProvider.status,
@@ -423,13 +1506,49 @@ export async function executeGovernedDispatch(
     customDestination = customProvider.destination;
   }
 
+  // ADR-0065 — A MODEL THIS DEPLOYMENT TRAINED, served from its stored
+  // artifact. Placed HERE, in the same position as the custom-endpoint branch
+  // above, for the same reason: everything before it (entitlement, the MRM
+  // gate, the project budget, §8.4 PII) has already run, so a home-trained
+  // model is governed by exactly the machinery a bought one is, and this branch
+  // contributes only a provider instance. Notably it makes NO network call and
+  // needs NO credential, which is what lets a custom model work on an
+  // air-gapped install.
+  let artifactProvider: ArtifactModelProvider | null = null;
+  if (served.provider === "regulait_llm") {
+    const resolved = await resolveArtifactProviderForDispatch(db, served.id);
+    if (!resolved.ok) {
+      await db.insert(auditLog).values({
+        userId,
+        objectType: "training_artifact",
+        objectId: null,
+        detail: {
+          phase: "dispatch",
+          agentId: served.id,
+          agentName: served.name,
+          error: resolved.error,
+          ...(args.projectId ? { projectId: args.projectId } : {}),
+        },
+        effect: "deny",
+        ruleId: `llm-${resolved.error}`,
+        ruleChain: [],
+        reason: resolved.detail,
+      });
+      return { ok: false, status: resolved.status, error: resolved.error, detail: resolved.detail };
+    }
+    artifactProvider = resolved.provider;
+  }
+
   let apiKey: string | null = null;
   let baseUrl: string | null = null;
   let credentialSource: "user" | "platform" | "none" = "none";
   /** which row (if any) supplied the baseUrl override — for the egress audit */
   let credentialId: string | null = null;
   let credentialOrigin: "user_credential" | "platform_credential" | "environment" | null = null;
-  if (served.provider !== "mock" && served.provider !== "custom") {
+  // `regulait_llm` joins `mock` and `custom` in needing no vendor credential:
+  // the artifact is in our own database and is queried in-process, so there is
+  // no key to decrypt and no env fallback to consult.
+  if (served.provider !== "mock" && served.provider !== "custom" && served.provider !== "regulait_llm") {
     if (!dataKey) {
       return { ok: false, status: 503, error: "no_data_key", detail: "set REGULAIT_DATA_KEY" };
     }
@@ -440,7 +1559,52 @@ export async function executeGovernedDispatch(
     // flipping the toggle off restores them (reversible). Without custody:
     // BYO key — the BILLING user's own credential wins over the platform one;
     // their spend rides their key, and the ledger records which was used.
-    const custody = (await loadInterceptionSettings(db)).keyCustodyEnforced;
+    //
+    // ADR-0066 §2 — THE PINNED UPSTREAM CREDENTIAL, and why it is FIRST.
+    // A virtual key exists so a developer can call a vendor without ever
+    // holding the vendor's key. When the key names an upstream platform
+    // credential, THAT credential is what this dispatch uses — ahead of the
+    // owner's BYO key, ahead of the ordinary platform lookup, ahead of the env
+    // fallback — because "which vendor account does this key's traffic land on"
+    // is a decision the key's issuer made, not one the holder gets to change by
+    // pasting a credential of their own. A provider mismatch REFUSES rather
+    // than falling through to a different key: silently burning a credential
+    // the issuer did not name is precisely the accounting lie this feature
+    // exists to prevent. The key material is decrypted here and, as everywhere
+    // else in this codebase, is never returned to any caller.
+    if (vk?.upstreamCredentialId) {
+      const [pinned] = await db
+        .select()
+        .from(modelCredentials)
+        .where(eq(modelCredentials.id, vk.upstreamCredentialId));
+      if (!pinned) {
+        return {
+          ok: false,
+          status: 409,
+          error: "virtual_key_credential_missing",
+          detail: `virtual key '${vk.name}' pins an upstream credential that no longer exists`,
+        };
+      }
+      if (pinned.provider !== served.provider) {
+        return {
+          ok: false,
+          status: 409,
+          error: "virtual_key_credential_provider_mismatch",
+          detail:
+            `virtual key '${vk.name}' is pinned to the '${pinned.provider}' platform credential, but agent ` +
+            `'${served.name}' dispatches on provider '${served.provider}'. The call is refused rather than ` +
+            `billed to a credential this key was not issued against.`,
+        };
+      }
+      apiKey = decryptSecret(dataKey, pinned.keyCiphertext);
+      baseUrl = pinned.baseUrl;
+      credentialSource = "platform";
+      credentialId = pinned.id;
+      credentialOrigin = "platform_credential";
+    }
+    const custody = vk?.upstreamCredentialId
+      ? true
+      : (await loadInterceptionSettings(db)).keyCustodyEnforced;
     const [userCred] = custody
       ? [undefined]
       : await db
@@ -452,11 +1616,15 @@ export async function executeGovernedDispatch(
               eq(userModelCredentials.provider, served.provider),
             ),
           );
-    const [platformCred] = userCred
-      ? [undefined]
-      : await db.select().from(modelCredentials).where(eq(modelCredentials.provider, served.provider));
+    const [platformCred] =
+      userCred || vk?.upstreamCredentialId
+        ? [undefined]
+        : await db.select().from(modelCredentials).where(eq(modelCredentials.provider, served.provider));
     const cred = userCred ?? platformCred;
-    if (cred) {
+    if (apiKey !== null) {
+      // the virtual key's pinned credential already resolved above; the whole
+      // BYO/platform/env chain is deliberately skipped, not merely outranked
+    } else if (cred) {
       credentialSource = userCred ? "user" : "platform";
       credentialId = cred.id;
       credentialOrigin = userCred ? "user_credential" : "platform_credential";
@@ -536,7 +1704,7 @@ export async function executeGovernedDispatch(
       const reason =
         `model credential baseUrl override for provider '${served.provider}' ` +
         `(${credentialOrigin ?? "unknown source"}): ${decision.reason}`;
-      await db.insert(auditLog).values({
+      const [egRow] = await db.insert(auditLog).values({
         userId,
         objectType: "model_credential",
         objectId: credentialId,
@@ -554,7 +1722,8 @@ export async function executeGovernedDispatch(
         ruleId: "model-credential-egress-blocked",
         ruleChain: [],
         reason,
-      });
+      }).returning({ id: auditLog.id });
+      sink.auditLogId = egRow?.id ?? null;
       return { ok: false, status: 403, error: "egress_blocked", detail: reason };
     }
     // the same guarded fetch the custom-provider path uses: re-validates every
@@ -668,7 +1837,9 @@ export async function executeGovernedDispatch(
   try {
     // the custom path brings its own already-guarded provider instance; every
     // other provider resolves exactly as before
-    const provider = customProvider?.ok
+    const provider = artifactProvider
+      ? artifactProvider
+      : customProvider?.ok
       ? customProvider.provider
       : resolveModelProvider(
           { provider: served.provider, apiKey, baseUrl },
@@ -740,11 +1911,17 @@ export async function executeGovernedDispatch(
       : null;
   // The measured version of routing's savings claim: what the baseline agent
   // would have cost at the SAME measured token volumes, minus what we paid.
+  // B1.5 F1: never priced when a MOCK served against a NON-mock baseline — a
+  // canned mock answer "saving" a live model's list price is money nobody
+  // saved on work nobody did (the request was not actually served by a model).
+  // Mock-vs-mock stays measured: both sides are the same demo economy, so the
+  // counterfactual is honest there.
   const measuredCostSavedUsd =
     costUsd != null &&
     baseline &&
     baseline.costPerMTokIn != null &&
-    baseline.costPerMTokOut != null
+    baseline.costPerMTokOut != null &&
+    !(served.provider === "mock" && baseline.provider !== "mock")
       ? (result.usage.inputTokens / 1e6) * baseline.costPerMTokIn +
         (result.usage.outputTokens / 1e6) * baseline.costPerMTokOut -
         costUsd
@@ -757,7 +1934,7 @@ export async function executeGovernedDispatch(
   let outputText = result.outputText;
   let withheld = false;
   if (piiMode) {
-    const chk = enforcePII(piiMode, { output: result.outputText });
+    const chk = enforcePII(piiMode, { output: result.outputText }, piiIntl);
     outputHits = chk.hits;
     if (chk.action === "block") {
       withheld = true;
@@ -831,7 +2008,7 @@ export async function executeGovernedDispatch(
       }
     : {};
 
-  await db.insert(usageEvents).values({
+  const [usageRow] = await db.insert(usageEvents).values({
     userId,
     objectType: "agent",
     agentId: served.id,
@@ -855,6 +2032,17 @@ export async function executeGovernedDispatch(
     configVersionId: promptVersion?.versionId ?? null,
     configVersion: promptVersion?.version ?? null,
     configCanary: promptVersion?.canary ?? false,
+    // Batch B7c (ADR-0073 amendment) — THE SECOND STAMP. Which agent_config
+    // version actually served (model + list price resolved at the top of this
+    // function). NULL = the agent's config is unversioned, byte-identical to
+    // every pre-B7c row. Never the shadow candidate — a candidate never
+    // serves, so it has no business on the ledger of what did.
+    agentConfigVersionId: servedAgentConfigVersion?.versionId ?? null,
+    agentConfigVersion: servedAgentConfigVersion?.version ?? null,
+    // ADR-0066 §2 — WHICH VIRTUAL KEY PAID. Attribution rides the ONE existing
+    // ledger rather than a parallel per-key table, so per-key spend, per-project
+    // spend and the pillar-5 rollups are the same numbers by construction.
+    virtualKeyId: vk?.id ?? null,
     detail: {
       credentialSource,
       ...(promptVersion
@@ -872,7 +2060,11 @@ export async function executeGovernedDispatch(
       ...piiDetail,
       ...guardrailDetail,
     },
-  });
+  }).returning({ id: usageEvents.id });
+  // ADR-0070 — THE REFERENCE. The span's provider/model/token/cost fields are
+  // copied from THIS row, and `tracing.test.ts` joins on this id and asserts
+  // they still agree rather than trusting the copy.
+  sink.usageEventId = usageRow?.id ?? null;
   // ADR-0042: the OUTPUT-phase guardrail audit row — one row into the SINGLE
   // existing audit log, with detector, category counts, mode and outcome. A
   // block is `effect: 'deny'`; warn and log are allows.
@@ -953,6 +2145,13 @@ export async function executeGovernedDispatch(
       reason: `PII detected (${piiCategoryList([...inputHits, ...outputHits])}) — warned, dispatch proceeded`,
     });
   }
+  // ADR-0066 §2 — move the MEASURED cost onto the key's enforcement counter,
+  // in the same position and with the same discipline as the project budget
+  // just below: the crossing dispatch is billed honestly, and it is the NEXT
+  // call that the pre-gate refuses. An unpriced agent adds nothing rather than
+  // an invented figure.
+  if (vk) await recordVirtualKeySpend(db, vk.id, costUsd);
+
   // first budget crossing is allowed (measured cost arrives after the call)
   // but alerts immediately; the pre-gate blocks everything after it. Below the
   // cap, the softer configurable threshold raises a distinct non-blocking signal.
@@ -988,6 +2187,9 @@ export async function executeGovernedDispatch(
         : {}),
       ...(pii ? { pii } : {}),
       ...(dispatchGuardrails ? { guardrails: dispatchGuardrails } : {}),
+      // ADR-0080 amendment (batch B3): the warn-mode fact rides the result —
+      // absent everywhere else, so default-off responses are byte-identical
+      ...(useCaseGateWarning ? { useCaseGate: useCaseGateWarning } : {}),
     },
   };
 }
@@ -1016,6 +2218,8 @@ async function performDispatch(
     system?: string | undefined;
     cacheSystem?: boolean | undefined;
     onText?: ((delta: string) => void) | undefined;
+    /** ADR-0066: the virtual key this invoke arrived on, when it did */
+    virtualKey?: VirtualKeyContext | null | undefined;
   },
 ): Promise<DispatchOutcome> {
   const { userId, requestedAgentId, registry, routing, body } = args;
@@ -1031,6 +2235,11 @@ async function performDispatch(
     maxTokens: body.maxTokens,
     projectId: args.projectId,
     onText: args.onText,
+    virtualKey: args.virtualKey ?? null,
+    // ADR-0066 §4: a fallback hop is re-evaluated in the SAME mode the primary
+    // was entitled under — a `plan`-only grant must not serve an `execute` call
+    // just because it appears in a chain.
+    mode: body.mode,
     detail: { mode: body.mode, ...(body.conversationId ? { conversationId: body.conversationId } : {}) },
   });
 }
@@ -1109,7 +2318,14 @@ export async function configuredProviders(
   dataKey: string | undefined,
   userId: string,
 ): Promise<Set<string>> {
-  const set = new Set<string>(["mock"]);
+  // ADR-0065: `regulait_llm` joins `mock` as credential-free — a locally
+  // trained artifact is served from our own database with no vendor key and no
+  // outbound call, so it is always "configured". An agent of this kind whose
+  // artifact is missing still fails honestly at dispatch (409
+  // `artifact_not_registered`); what this set decides is only whether the
+  // router may consider it, and a router that skipped every home-trained model
+  // would make the whole feature unreachable from the invoke path.
+  const set = new Set<string>(["mock", "regulait_llm"]);
   // ADR-0034 — CUSTOM PROVIDERS ARE DISPATCHABLE PER ENDPOINT, NOT PER KIND.
   // Every other entry in this set is a provider KIND ("anthropic"), because a
   // stored key makes every agent of that kind servable. A custom endpoint is
@@ -1155,6 +2371,39 @@ export async function configuredProviders(
   for (const c of userCreds) set.add(c.provider);
   for (const c of platformCreds) set.add(c.provider);
   return set;
+}
+
+/**
+ * ADR-0070 amendment (2026-08-15) — what the governed connector body answers
+ * into instead of the Fastify reply, so that ONE wrapper can see EVERY exit and
+ * write the `connector` span from it.
+ *
+ * It is deliberately not a Fastify reply and is deliberately not named `reply`:
+ * it sends nothing, it decides nothing, it only captures the status and payload
+ * the attempt chose so the wrapper can classify them and then send them on
+ * unchanged. The shape mirrors `reply.status(n).send(body)` exactly so the body
+ * it wraps reads the same as every other route in this file.
+ */
+interface ConnectorAttemptResult {
+  status: number;
+  body: Record<string, unknown>;
+}
+interface ConnectorReplyRecorder {
+  status(code: number): ConnectorReplyRecorder;
+  send(body: Record<string, unknown>): ConnectorAttemptResult;
+}
+function connectorReplyRecorder(): ConnectorReplyRecorder {
+  let code = 200;
+  const api: ConnectorReplyRecorder = {
+    status(c) {
+      code = c;
+      return api;
+    },
+    send(body) {
+      return { status: code, body };
+    },
+  };
+  return api;
 }
 
 /** §2/§4: agent registry + entitlements, connector catalog + grants, and the
@@ -1275,6 +2524,55 @@ export function registerAgentConnectorRoutes(
       })
       .returning();
     return reply.status(201).send(row);
+  });
+
+  // B1.5 F2 (LIVE_VERIFICATION_2026-08) — edit an agent's DISPATCH-EXECUTION
+  // config: model id + the two list prices, the exact fields batch B1 made
+  // versionable as `agent_config`. Until now no API route edited an agent's
+  // model at all — the live run had to psql the column when Google retired the
+  // seeded model id. The edit rides `applyRuleEdit` (ADR-0074's one choke
+  // point): a VERSIONED agent's change mints + activates an agent_config
+  // version in one transaction (a raw column write would be silently ignored
+  // by the dispatch-time resolver — the exact divergence ADR-0074 exists to
+  // remove), an UNVERSIONED agent keeps the plain row write, byte-identical to
+  // pre-versioning semantics. Admin-only via the global gate.
+  app.patch("/v1/agents/:agentId", async (req, reply) => {
+    const { agentId } = agentIdParam.parse(req.params);
+    const [existing] = await db.select({ id: agents.id }).from(agents).where(eq(agents.id, agentId));
+    if (!existing) return reply.status(404).send({ error: "unknown_agent" });
+    // The ADR-0073 scope line at the route edge, refused with the remedy NAMED
+    // rather than as a generic strict-parse error: everything else on the
+    // agents row has its own audited route or is a new agent, not an edit.
+    const editable = new Set(Object.keys(updateAgentConfigSchema.shape));
+    const offending = Object.keys((req.body ?? {}) as Record<string, unknown>).filter(
+      (k) => !editable.has(k),
+    );
+    if (offending.length > 0) {
+      return reply.status(422).send({
+        error: "field_not_editable",
+        detail:
+          `'${offending.join("', '")}' is not part of an agent's dispatch-execution config. Editable here: ` +
+          `model, costPerMTokIn, costPerMTokOut. provider/customProviderId select the credential + egress ` +
+          `machinery (rebinding is a NEW agent — POST /v1/agents); tier feeds the entitlement ceiling; ` +
+          `enabled/lifecycle have their own audited routes; systemPrompt is its own versioned artifact ` +
+          `(POST /v1/agents/:agentId/system-prompt).`,
+      });
+    }
+    const patch = updateAgentConfigSchema.parse(req.body ?? {});
+    const res = await applyRuleEdit(db, {
+      artifactType: "agent_config",
+      artifactId: agentId,
+      patch,
+      actorUserId: req.authCtx.userId ?? null,
+      label: "edited via PATCH /v1/agents/:agentId",
+      auditObjectType: "agent",
+      auditRuleId: "agent-config-edited",
+      auditDetail: { phase: "agent-config-edit", patch },
+    });
+    if (isRuleEditRefusal(res)) {
+      return reply.status(res.status).send({ error: res.error, detail: res.detail });
+    }
+    return reply.send({ ...(res.row as Record<string, unknown>), versionMinted: res.mintedVersion, note: res.note });
   });
 
   // ADR-0023: set/clear an agent's admin-authored BASE system prompt — a
@@ -1559,42 +2857,303 @@ export function registerAgentConnectorRoutes(
 
   app.get("/v1/agents", async () => ({ agents: await db.select().from(agents) }));
 
+  // -------------------------------------------------------------------------
+  // ADR-0066 §4 — PROVIDER FALLBACK CHAINS (admin-only via the default gate).
+  //
+  // The chain is CONFIGURATION, not entitlement: putting an agent in a chain
+  // grants nobody anything. Every hop is re-evaluated against the CALLER's own
+  // grants at dispatch time, so an admin can configure a chain full of models
+  // that a particular user will never reach — and that user's calls will simply
+  // skip them, audibly. This is why the write path validates existence and
+  // shape but deliberately does NOT validate anybody's entitlement: a chain is
+  // not a promise about who may use it.
+  // -------------------------------------------------------------------------
+  app.get("/v1/agents/:agentId/fallbacks", async (req, reply) => {
+    const { agentId } = agentIdParam.parse(req.params);
+    const [agent] = await db.select().from(agents).where(eq(agents.id, agentId));
+    if (!agent) return reply.status(404).send({ error: "unknown_agent" });
+    const rows = await db
+      .select({
+        position: agentFallbacks.position,
+        agentId: agentFallbacks.fallbackAgentId,
+        name: agents.name,
+        provider: agents.provider,
+        model: agents.model,
+        enabled: agents.enabled,
+      })
+      .from(agentFallbacks)
+      .innerJoin(agents, eq(agentFallbacks.fallbackAgentId, agents.id))
+      .where(eq(agentFallbacks.agentId, agentId))
+      .orderBy(asc(agentFallbacks.position));
+    return reply.send({ agentId, fallbacks: rows });
+  });
+
+  app.put("/v1/agents/:agentId/fallbacks", async (req, reply) => {
+    const { agentId } = agentIdParam.parse(req.params);
+    const body = setAgentFallbacksSchema.parse(req.body);
+    const [agent] = await db.select().from(agents).where(eq(agents.id, agentId));
+    if (!agent) return reply.status(404).send({ error: "unknown_agent" });
+
+    if (body.fallbackAgentIds.includes(agentId)) {
+      return reply.status(422).send({
+        error: "self_fallback",
+        detail:
+          "an agent cannot be its own fallback — the primary already failed, and re-trying it is a loop expressed as configuration",
+      });
+    }
+    if (new Set(body.fallbackAgentIds).size !== body.fallbackAgentIds.length) {
+      return reply.status(422).send({
+        error: "duplicate_fallback",
+        detail: "a fallback chain must name each target at most once",
+      });
+    }
+    if (body.fallbackAgentIds.length > 0) {
+      const found = await db
+        .select({ id: agents.id, model: agents.model, provider: agents.provider })
+        .from(agents)
+        .where(inArray(agents.id, body.fallbackAgentIds));
+      const known = new Set(found.map((a) => a.id));
+      const missing = body.fallbackAgentIds.filter((id) => !known.has(id));
+      if (missing.length > 0) {
+        return reply.status(422).send({
+          error: "unknown_fallback_agent",
+          detail: `no agent with id(s): ${missing.join(", ")}`,
+        });
+      }
+      // A hop with no model id can never dispatch (ADR-0016: `model` NULL means
+      // decision-only). Accepting it would build a chain with a guaranteed dead
+      // rung, which fails at 3am rather than at configuration time.
+      const undispatchable = found.filter((a) => !a.model || !isModelProviderKind(a.provider));
+      if (undispatchable.length > 0) {
+        return reply.status(422).send({
+          error: "fallback_not_dispatchable",
+          detail:
+            `these agents cannot serve a dispatch and so cannot be fallbacks: ` +
+            undispatchable.map((a) => a.id).join(", "),
+        });
+      }
+    }
+
+    // Replace the whole ordered chain in one transaction — a partial chain is
+    // never a valid intermediate state, and PUT-the-list avoids every
+    // position-renumbering bug an incremental API would have.
+    await db.transaction(async (tx) => {
+      await tx.delete(agentFallbacks).where(eq(agentFallbacks.agentId, agentId));
+      if (body.fallbackAgentIds.length > 0) {
+        await tx.insert(agentFallbacks).values(
+          body.fallbackAgentIds.map((fallbackAgentId, position) => ({
+            agentId,
+            fallbackAgentId,
+            position,
+          })),
+        );
+      }
+    });
+    await db.insert(auditLog).values({
+      userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+      objectType: "agent",
+      objectId: agentId,
+      detail: { phase: "fallback-chain", chain: body.fallbackAgentIds },
+      effect: "allow",
+      ruleId: "fallback-chain-configured",
+      ruleChain: [],
+      reason:
+        body.fallbackAgentIds.length === 0
+          ? `fallback chain cleared for agent '${agent.name}'`
+          : `fallback chain for agent '${agent.name}' set to ${body.fallbackAgentIds.length} hop(s); each hop is re-entitled per caller at dispatch time`,
+    });
+    return reply.send({ agentId, fallbackAgentIds: body.fallbackAgentIds });
+  });
+
   // §4 new-agent-onboarding policy is opt-in by definition here: disabling is
   // platform-wide, but even an enabled agent reaches nobody without a grant.
   app.post("/v1/agents/:agentId/enabled", async (req, reply) => {
     const { agentId } = agentIdParam.parse(req.params);
     const body = setAgentEnabledSchema.parse(req.body);
+    const [before] = await db.select().from(agents).where(eq(agents.id, agentId));
+    if (!before) return reply.status(404).send({ error: "unknown_agent" });
+    if (before.enabled === body.enabled) return before;
+
     const [row] = await db
       .update(agents)
       .set({ enabled: body.enabled })
       .where(eq(agents.id, agentId))
       .returning();
-    if (!row) return reply.status(404).send({ error: "unknown_agent" });
+
+    /**
+     * THIS WRITE USED TO BE SILENT, three lines above a comment promising
+     * "audited acts — never silent PATCH writes".
+     *
+     * It is the most consequential switch on an agent: `enabled = false` is
+     * enforced in the policy kernel and refuses EVERY caller platform-wide,
+     * regardless of grants. It is also the closest thing this product has to
+     * an emergency stop. An operator reconstructing "when did this agent stop
+     * answering, and who stopped it?" had nothing in the ledger to find —
+     * which is exactly the question an audit trail exists for.
+     *
+     * Distinct rule ids per direction, because disabling and re-enabling are
+     * different facts and an operator alerting on one must not match the
+     * other. Effect follows the consequence: turning it OFF starts refusing,
+     * so it is recorded as a `deny`.
+     */
+    await db.insert(auditLog).values({
+      userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+      objectType: "agent",
+      objectId: agentId,
+      detail: { from: before.enabled, to: body.enabled, via: req.authCtx.via },
+      effect: body.enabled ? "allow" : "deny",
+      ruleId: body.enabled ? "agent-enabled" : "agent-disabled",
+      ruleChain: [],
+      reason: body.enabled
+        ? `agent '${before.name}' re-enabled — it can be dispatched again by anyone already granted it`
+        : `agent '${before.name}' DISABLED platform-wide — every dispatch to it is now refused in the ` +
+          "policy kernel regardless of grant",
+    });
     return row;
   });
 
+  // -------------------------------------------------------------------------
+  // ADR-0089 (gap L20) — agent ownership and lifecycle. Admin-only via the
+  // default gate, audited acts — never silent PATCH writes.
+  // -------------------------------------------------------------------------
+
+  // Set/clear the accountable human owner. A GOVERNANCE RECORD, not
+  // authentication: it changes what the ADR-0082 inventory and the posture
+  // page say about accountability, and nothing about who may invoke.
+  app.post("/v1/agents/:agentId/owner", async (req, reply) => {
+    const { agentId } = agentIdParam.parse(req.params);
+    const body = setAgentOwnerSchema.parse(req.body);
+    const [agent] = await db.select().from(agents).where(eq(agents.id, agentId));
+    if (!agent) return reply.status(404).send({ error: "unknown_agent" });
+    let ownerEmail: string | null = null;
+    if (body.ownerUserId) {
+      const [owner] = await db
+        .select({ id: users.id, email: users.email, disabledAt: users.disabledAt })
+        .from(users)
+        .where(eq(users.id, body.ownerUserId));
+      if (!owner) return reply.status(400).send({ error: "invalid_reference", field: "ownerUserId" });
+      // assigning ownership to a deactivated account would MINT an orphan —
+      // the exact state the inventory's orphan flag exists to surface
+      if (owner.disabledAt) {
+        return reply.status(409).send({
+          error: "owner_deactivated",
+          detail: "this account is deactivated — an agent owner must be an active user (reactivate them first)",
+        });
+      }
+      ownerEmail = owner.email;
+    }
+    const [row] = await db
+      .update(agents)
+      .set({ ownerUserId: body.ownerUserId })
+      .where(eq(agents.id, agentId))
+      .returning();
+    await db.insert(auditLog).values({
+      userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+      objectType: "agent",
+      objectId: agentId,
+      detail: {
+        phase: "ownership",
+        from: agent.ownerUserId,
+        to: body.ownerUserId,
+        ...(ownerEmail ? { ownerEmail } : {}),
+      },
+      effect: "allow",
+      ruleId: body.ownerUserId ? "agent-owner-set" : "agent-owner-cleared",
+      ruleChain: [],
+      reason: body.ownerUserId
+        ? `agent '${agent.name}' owner set to '${ownerEmail}' — an accountability record, not an entitlement`
+        : `agent '${agent.name}' owner cleared — the inventory now reads this agent as unowned`,
+    });
+    return row;
+  });
+
+  // Lifecycle transition, with reason, audited. Retired is TERMINAL for
+  // governance purposes: transitions out of it are refused by name — the
+  // record of why an agent was decommissioned must not be erasable by a
+  // status flip (re-registering is a new agent). The dispatch-side half of
+  // this decision (the 409 gate) lives in dispatchAttempt.
+  app.post("/v1/agents/:agentId/lifecycle", async (req, reply) => {
+    const { agentId } = agentIdParam.parse(req.params);
+    const body = setAgentLifecycleSchema.parse(req.body);
+    const [agent] = await db.select().from(agents).where(eq(agents.id, agentId));
+    if (!agent) return reply.status(404).send({ error: "unknown_agent" });
+    if (agent.lifecycleStatus === "retired") {
+      return reply.status(409).send({
+        error: "agent_retired_terminal",
+        detail:
+          "retirement is terminal for governance purposes — the decommissioning record cannot be " +
+          "flipped back; register a new agent instead",
+      });
+    }
+    if (agent.lifecycleStatus === body.status) {
+      return reply.status(409).send({ error: "lifecycle_unchanged", detail: `agent is already ${body.status}` });
+    }
+    if (body.status !== "active" && !body.reason) {
+      return reply.status(422).send({
+        error: "lifecycle_reason_required",
+        detail: `moving an agent to '${body.status}' requires a reason — it becomes part of the governance record`,
+      });
+    }
+    const [row] = await db
+      .update(agents)
+      .set({
+        lifecycleStatus: body.status,
+        lifecycleReason: body.status === "active" ? null : (body.reason ?? null),
+        lifecycleChangedAt: new Date(),
+      })
+      .where(eq(agents.id, agentId))
+      .returning();
+    await db.insert(auditLog).values({
+      userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+      objectType: "agent",
+      objectId: agentId,
+      detail: {
+        phase: "lifecycle",
+        from: agent.lifecycleStatus,
+        to: body.status,
+        ...(body.status !== "active" ? { reason: body.reason } : {}),
+      },
+      effect: "allow",
+      ruleId: `agent-lifecycle-${body.status}`,
+      ruleChain: [],
+      reason:
+        body.status === "retired"
+          ? `agent '${agent.name}' retired: ${body.reason} — dispatch now refuses with 409 agent_retired; grants and history remain readable`
+          : body.status === "deprecated"
+            ? `agent '${agent.name}' deprecated: ${body.reason} — a WARNING in the inventory; dispatch is not blocked`
+            : `agent '${agent.name}' returned to active (was ${agent.lifecycleStatus})`,
+    });
+    return row;
+  });
+
+  // ADR-0090: the removal itself lives in grant-revocation.ts — ONE
+  // implementation per grant kind, shared with a certification campaign's
+  // revoke decision so the campaign can never grow a parallel delete.
   app.delete("/v1/grants/agents/:grantId", async (req, reply) => {
     const { grantId } = z.object({ grantId: z.string().uuid() }).parse(req.params);
-    const deleted = await db
-      .delete(agentGrants)
-      .where(eq(agentGrants.id, grantId))
-      .returning({ id: agentGrants.id });
-    if (deleted.length === 0) return reply.status(404).send({ error: "unknown_grant" });
+    if (!(await deleteAgentGrantById(db, grantId))) {
+      return reply.status(404).send({ error: "unknown_grant" });
+    }
     return { removed: true };
   });
 
   app.delete("/v1/grants/connectors/:grantId", async (req, reply) => {
     const { grantId } = z.object({ grantId: z.string().uuid() }).parse(req.params);
-    const deleted = await db
-      .delete(connectorGrants)
-      .where(eq(connectorGrants.id, grantId))
-      .returning({ id: connectorGrants.id });
-    if (deleted.length === 0) return reply.status(404).send({ error: "unknown_grant" });
+    if (!(await deleteConnectorGrantById(db, grantId))) {
+      return reply.status(404).send({ error: "unknown_grant" });
+    }
     return { removed: true };
   });
 
   app.post("/v1/grants/agents", async (req, reply) => {
     const body = createAgentGrantSchema.parse(req.body);
+    // ADR-0091: the SoD mint gate — refused 409 by name, audited, no row
+    const sod = await refuseSodMint(
+      db,
+      { kind: "agent", userId: body.userId, agentId: body.agentId },
+      req.authCtx.userId,
+    );
+    if (sod) return reply.status(409).send(sod);
     const [row] = await db
       .insert(agentGrants)
       .values({
@@ -1750,6 +3309,42 @@ export function registerAgentConnectorRoutes(
     const [agent] = await db.select().from(agents).where(eq(agents.id, agentId));
     if (!agent) return reply.status(404).send({ error: "unknown_agent" });
 
+    // ADR-0066 §3 — THE PER-KEY ALLOW-LIST ON THE NATIVE DISPATCH PATH.
+    // The same check runs inside the dispatch core for the SERVED agent (so
+    // pillar-6 routing cannot route around it, and neither can a fallback hop).
+    // It ALSO runs here, on the REQUESTED agent, for two reasons a check in
+    // only one place would miss: `dispatch: false` never reaches the core at
+    // all, so a decision-only invoke would otherwise answer for a model the key
+    // may not touch; and refusing at the entry point names the agent the caller
+    // actually asked for instead of whatever routing settled on.
+    //
+    // The BUDGET is checked here as well, and not only in the core, for a
+    // reason the core cannot see: a semantic-cache HIT returns before the core
+    // is ever called. That hit costs $0, so leaving it unchecked would not
+    // overspend — but it would make an exhausted key work intermittently
+    // (fine on a prompt somebody asked before, 402 on a new one), which is both
+    // baffling to the holder and a free oracle for probing what is cached. An
+    // exhausted key refuses, consistently.
+    const invokeVirtualKey = await loadVirtualKeyContext(db, req);
+    if (invokeVirtualKey) {
+      const refusal =
+        virtualKeyAllowListRefusal(invokeVirtualKey, agent) ??
+        virtualKeyBudgetRefusal(invokeVirtualKey);
+      if (refusal) {
+        await db.insert(auditLog).values({
+          userId,
+          objectType: "virtual_key",
+          objectId: invokeVirtualKey.id,
+          detail: { phase: "invoke", agentId: agent.id, agentName: agent.name, model: agent.model },
+          effect: "deny",
+          ruleId: refusal.ruleId,
+          ruleChain: [],
+          reason: refusal.detail,
+        });
+        return reply.status(refusal.status).send({ error: refusal.error, detail: refusal.detail });
+      }
+    }
+
     // ADR-0021: the org-wide functional defaults, loaded ONCE per request
     // (the interception-settings pattern) and threaded to every consumption
     // point below. A fresh row is behaviour-preserving by construction.
@@ -1779,7 +3374,7 @@ export function registerAgentConnectorRoutes(
     // conversations are personal, see conversations.ts).
     let convo: Extract<ConversationContext, { ok: true }> | null = null;
     if (body.conversationId) {
-      const loaded = await loadOwnConversation(db, body.conversationId, userId);
+      const loaded = await loadOwnConversationForReplay(db, body.conversationId, userId);
       if (!loaded.ok) return reply.status(loaded.status).send({ error: loaded.error });
       convo = loaded;
     }
@@ -1792,6 +3387,24 @@ export function registerAgentConnectorRoutes(
     if (projectId) {
       const attribution = await assertProjectAttribution(db, projectId, userId, req.authCtx.isAdmin);
       if (!attribution.ok) return reply.status(attribution.status).send({ error: attribution.error });
+    }
+
+    // PILLAR 2 §2 stage 2 (ADR-0079) — WORKFLOW-INSTANCE ATTRIBUTION AND THE
+    // PLAN-ONLY GATE. Validated exactly like `projectId` above: an unknown or
+    // unauthorized instance REFUSES rather than being ignored. When the named
+    // instance rests at a `planning` stage, a mutating mode is refused here —
+    // before any dispatch, cache lookup or billing — and a plan/read mode is
+    // allowed through untouched. Naming no instance is unconstrained, exactly
+    // as before: this is opt-in attribution, and the ADR says so plainly.
+    if (body.instanceId) {
+      const gate = await guardInstanceAttributedCall(db, {
+        instanceId: body.instanceId,
+        userId,
+        isAdmin: req.authCtx.isAdmin,
+        mode: body.mode,
+        detail: { phase: "invoke", agentId: agent.id, agentName: agent.name },
+      });
+      if (!gate.ok) return reply.status(gate.status).send({ error: gate.error, detail: gate.detail });
     }
 
     // §8.4 STREAMING SUPPRESSION (ADR-0019, closing the recorded known limit).
@@ -1857,6 +3470,8 @@ export function registerAgentConnectorRoutes(
 
     const decision = evaluateAgent({
       userId,
+      // ADR-0124 — the kill switch on the native dispatch path.
+      execution: postureOf(await loadExecutionMode(db), agentHaltOf(agent)),
       // the display name rides along so denial prose says "premium-mock
       // (c8d62183…)" instead of a bare UUID (the id stays in the trace)
       agent: {
@@ -1881,6 +3496,21 @@ export function registerAgentConnectorRoutes(
     let dispatchOutcome: DispatchOutcome | null = null;
     let convoContext: PreparedConversationContext | null = null;
     if (decision.effect === "allow") {
+      // §8.4 PII INPUT GATE — hoisted ahead of BOTH the semantic-cache serve and
+      // the per-technique cost_events writes below, so a PII-bearing prompt can
+      // neither be answered from cache without adjudication nor leave phantom
+      // estimate rows before it is blocked. dispatchAttempt keeps its own gate
+      // for the orchestration/worker-node paths that never reach this handler.
+      // Runs only when dispatching (a decision-only invoke sends nothing to a
+      // model and produces no output to leak).
+      if (body.dispatch === true) {
+        const inputBlock = await enforceProjectInputPii(db, userId, agent.id, projectId, body.input);
+        if (inputBlock) {
+          return reply
+            .status(inputBlock.status)
+            .send({ decision, error: inputBlock.error, detail: inputBlock.detail, pii: inputBlock.pii, ...suppressionFlag });
+        }
+      }
       // PILLAR 6 §8/§10 SEMANTIC CACHING (REAL cache) — opt-in per-(user,agent)
       // EXACT-MATCH response cache. When enabled, an identical (whitespace/
       // case-normalized) single-turn input already answered for the SAME
@@ -1913,28 +3543,35 @@ export function registerAgentConnectorRoutes(
         !!body.input &&
         !convo &&
         routingModeForCache !== "passthrough";
-      let cacheNorm: string | null = null;
-      let cacheHash: string | null = null;
+      // ADR-0119: the key derivation, the scoped read and the collision guard
+      // moved to `semantic-cache-shared.ts` so the compat/IDE path runs THE
+      // SAME governance boundary rather than a second copy of it. The behaviour
+      // here is unchanged — the helper is the code that used to be inline.
+      let cacheKey: SemanticCacheKey | null = null;
       if (wantCache && body.input) {
-        cacheNorm = normalizeCacheInput(body.input);
-        cacheHash = createHash("sha256").update(cacheNorm).digest("hex");
-        const ttlCutoff = new Date(Date.now() - org.semanticCacheTtlSeconds * 1000);
-        // THE GOVERNANCE BOUNDARY: userId AND agentId (the invoked agent) AND a
-        // fresh row; the stored normalizedInput is re-checked as a hash-collision
-        // guard before anything is served.
-        const [hit] = await db
-          .select()
-          .from(semanticCache)
-          .where(
-            and(
-              eq(semanticCache.userId, userId),
-              eq(semanticCache.agentId, agent.id),
-              eq(semanticCache.promptHash, cacheHash),
-              gte(semanticCache.createdAt, ttlCutoff),
-            ),
-          )
-          .limit(1);
-        if (hit && hit.normalizedInput === cacheNorm) {
+        cacheKey = semanticCacheKey(body.input);
+        const hit = await lookupSemanticCache(db, {
+          userId,
+          agentId: agent.id,
+          key: cacheKey,
+          ttlSeconds: org.semanticCacheTtlSeconds,
+        });
+        if (hit) {
+          // The input was gated above; the CACHED OUTPUT may still carry PII it
+          // acquired under a different, ungated attribution. Withhold it rather
+          // than serve it on a project whose mode is `block`.
+          const outputBlock = await enforceProjectCachedOutputPii(
+            db,
+            userId,
+            agent.id,
+            projectId,
+            hit.outputText,
+          );
+          if (outputBlock) {
+            return reply
+              .status(outputBlock.status)
+              .send({ decision, error: outputBlock.error, detail: outputBlock.detail, pii: outputBlock.pii, ...suppressionFlag });
+          }
           // HIT: no provider call, no usage_events (no real spend). One
           // semantic_caching cost_events row estimates the WHOLE call saved —
           // full cached input+output tokens at the invoked agent's list price
@@ -2015,11 +3652,40 @@ export function registerAgentConnectorRoutes(
         }
       }
 
-      const registry = await db.select().from(agents).where(eq(agents.enabled, true));
+      // PILLAR-6 HONESTY: the per-technique cost_events rows below are only
+      // ESTIMATES for the dispatch this handler is about to attempt. They used
+      // to be inserted eagerly, BEFORE performDispatch — but the dispatch core
+      // still holds refusal gates of its own (virtual-key ceiling, MRM,
+      // project budget, §8.4 PII, ADR-0042 guardrail input, egress, missing
+      // credential), so a dispatch those gates refused had already left
+      // phantom savings rows attributed to the project. That is the same
+      // disease the enforceProjectInputPii hoist fixed for PII only (see its
+      // comment), proved by probe: a 409 project_budget_exceeded left a
+      // model_routing row claiming savings for a call that never ran. So the
+      // rows are STAGED here and flushed only once the outcome is known: a
+      // decision-only invoke flushes immediately (the routing DECISION is the
+      // deliverable, pinned behaviour), a dispatching invoke flushes only on a
+      // successful outcome — bill-and-withhold outcomes included, because that
+      // dispatch really ran and really billed.
+      const pendingCostEvents: Array<typeof costEvents.$inferInsert> = [];
+      const flushPendingCostEvents = async () => {
+        if (pendingCostEvents.length > 0) await db.insert(costEvents).values(pendingCostEvents);
+      };
+
+      // ADR-0124 — a HALTED agent is unroutable, excluded here rather than
+      // per-candidate: the optimiser must never select something an operator
+      // has stopped, and filtering at the query keeps that impossible rather
+      // than merely checked.
+      const registry = await db
+        .select()
+        .from(agents)
+        .where(and(eq(agents.enabled, true), isNull(agents.haltedAt)));
+      const routingExecutionMode = await loadExecutionMode(db);
       const entitled = registry.filter(
         (a) =>
           evaluateAgent({
             userId,
+            execution: postureOf(routingExecutionMode, agentHaltOf(a)),
             agent: { id: a.id, name: a.name, tier: a.tier, enabled: a.enabled, modes: a.modes ?? null },
             mode: body.mode,
             agentGrants: grants,
@@ -2047,13 +3713,33 @@ export function registerAgentConnectorRoutes(
       // compaction dispatch can never fail on config the invoke path already
       // knows about. Same filter decompose.ts applies to its worker roster.
       let compactionCandidates: AgentRow[] = [];
+      /** B6a: the summarizer candidates `mockShadowedByLive` removed, disclosed
+       * on the compaction audit row with the same reason string routing uses */
+      let compactionSkipped: SkippedCandidate[] = [];
       if (body.dispatch) {
         const configured = await configuredProviders(db, opts.dataKey, userId);
+        const strictlyDispatchable = (a: AgentRow) =>
+          Boolean(a.model) && isModelProviderKind(a.provider) && configured.has(agentProviderToken(a));
+        // B1.5 F1 (owner-experienced, LIVE_VERIFICATION_2026-08): mock agents
+        // exist for the KEYLESS demo — the out-of-box roster must route and
+        // answer with no credential configured anywhere. The moment a live
+        // agent in this caller's entitled roster can genuinely serve, a mock
+        // stops being a routing candidate: right-sizing a real request onto a
+        // canned-prose responder is not an optimization, it is a non-answer
+        // billed as savings. A mock the caller explicitly requested still
+        // serves (the requested-agent exemption below), because an explicit
+        // choice is not routing.
+        //
+        // B6a: the rule itself now lives in `mockShadowedByLive` so the
+        // summarizer and worker rosters can obey the SAME predicate instead of
+        // a second copy of it.
+        const shadowedMocks = mockShadowedByLive(entitled, strictlyDispatchable);
         const skipReason = (a: AgentRow): SkippedCandidate["reason"] | null => {
           if (a.id === agent.id) return null;
           if (!a.model) return "no_model_id";
           if (!isModelProviderKind(a.provider)) return "unknown_provider";
           if (!configured.has(agentProviderToken(a))) return "no_model_credential";
+          if (shadowedMocks.has(a.id)) return "mock_shadowed_by_live";
           return null;
         };
         skippedCandidates = entitled.flatMap((a) => {
@@ -2062,9 +3748,29 @@ export function registerAgentConnectorRoutes(
         });
         const skippedIds = new Set(skippedCandidates.map((s) => s.agentId));
         candidateRows = entitled.filter((a) => !skippedIds.has(a.id));
-        compactionCandidates = entitled.filter(
-          (a) => a.model && isModelProviderKind(a.provider) && configured.has(agentProviderToken(a)),
+        // B6a (ADR-0095's own recorded residual, now closed): the summarizer
+        // roster obeys the SAME `mockShadowedByLive` predicate the routing
+        // roster above obeys. A mock summary is canned prose written over the
+        // conversation's retained context, so every later turn in that thread
+        // silently degrades — quieter than the routing defect the owner hit,
+        // and the same disease.
+        //
+        // THE EXPLICIT-CHOICE EXEMPTION, mirroring routing's requested-agent
+        // exemption: ADR-0021's `summarizerSelection: 'fixed_agent'` is an
+        // admin naming ONE summarizer on purpose. Shadowing that pick would
+        // turn a deliberate configuration into `fixed_summarizer_unavailable`,
+        // so the fixed agent is exempt exactly as the requested agent is.
+        const fixedSummarizerId =
+          org.summarizerSelection === "fixed_agent" ? org.summarizerAgentId : null;
+        compactionSkipped = entitled.flatMap((a) =>
+          shadowedMocks.has(a.id) && a.id !== fixedSummarizerId
+            ? [{ agentId: a.id, name: a.name, reason: "mock_shadowed_by_live" as const }]
+            : [],
         );
+        const compactionSkippedIds = new Set(compactionSkipped.map((s) => s.agentId));
+        compactionCandidates = entitled
+          .filter(strictlyDispatchable)
+          .filter((a) => !compactionSkippedIds.has(a.id));
       }
 
       // PILLAR 6 §5 CONTEXT COMPACTION — strictly after governance (the
@@ -2085,6 +3791,7 @@ export function registerAgentConnectorRoutes(
           conversation: convo.conversation,
           messages: convo.messages,
           candidates: compactionCandidates,
+          skippedCandidates: compactionSkipped,
           projectId,
           execute: executeGovernedDispatch,
           org,
@@ -2170,7 +3877,7 @@ export function registerAgentConnectorRoutes(
       // passthrough, org toggle on, still records its passthrough decision,
       // exactly as today).
       if (org.routingEnabled) {
-        await db.insert(costEvents).values({
+        pendingCostEvents.push({
           userId,
           objectType: "agent",
           objectId: agent.id,
@@ -2207,7 +3914,7 @@ export function registerAgentConnectorRoutes(
           servedRow?.costPerMTokIn != null
             ? Number(((convoContext.savedTokensEst / 1e6) * servedRow.costPerMTokIn).toFixed(6))
             : null;
-        await db.insert(costEvents).values({
+        pendingCostEvents.push({
           userId,
           objectType: "agent",
           objectId: agent.id,
@@ -2277,7 +3984,7 @@ export function registerAgentConnectorRoutes(
                 ).toFixed(6),
               )
             : null;
-        await db.insert(costEvents).values({
+        pendingCostEvents.push({
           userId,
           objectType: "agent",
           objectId: agent.id,
@@ -2322,7 +4029,7 @@ export function registerAgentConnectorRoutes(
           servedRow?.costPerMTokOut != null
             ? Number(((editPlan.estimatedTokensSaved / 1e6) * servedRow.costPerMTokOut).toFixed(6))
             : null;
-        await db.insert(costEvents).values({
+        pendingCostEvents.push({
           userId,
           objectType: "agent",
           objectId: agent.id,
@@ -2359,7 +4066,7 @@ export function registerAgentConnectorRoutes(
           servedRow?.costPerMTokIn != null
             ? Number(((fpp.estimatedTokensSaved / 1e6) * servedRow.costPerMTokIn).toFixed(6))
             : null;
-        await db.insert(costEvents).values({
+        pendingCostEvents.push({
           userId,
           objectType: "agent",
           objectId: agent.id,
@@ -2488,33 +4195,20 @@ export function registerAgentConnectorRoutes(
       // otherwise a no-op (byte-identical to the pre-caching path). No
       // cost_events on a miss — nothing was saved yet.
       const storeSemanticCacheIf = async (outcome: DispatchOutcome) => {
-        if (!wantCache || !cacheHash || cacheNorm == null || !outcome.ok) return;
+        if (!wantCache || !cacheKey || !outcome.ok) return;
         const r = outcome.result;
         // never store a refusal, an empty output, or a PII-withheld marker
         if (r.refusal || !r.outputText || r.pii?.withheld) return;
-        await db
-          .insert(semanticCache)
-          .values({
-            userId,
-            agentId: agent.id,
-            promptHash: cacheHash,
-            normalizedInput: cacheNorm,
-            outputText: r.outputText,
-            model: r.model,
-            inputTokens: r.usage.inputTokens,
-            outputTokens: r.usage.outputTokens,
-          })
-          .onConflictDoUpdate({
-            target: [semanticCache.userId, semanticCache.agentId, semanticCache.promptHash],
-            set: {
-              normalizedInput: cacheNorm,
-              outputText: r.outputText,
-              model: r.model,
-              inputTokens: r.usage.inputTokens,
-              outputTokens: r.usage.outputTokens,
-              createdAt: new Date(),
-            },
-          });
+        // ADR-0119: shared with the compat/IDE path, so the two cannot drift.
+        await storeSemanticCache(db, {
+          userId,
+          agentId: agent.id,
+          key: cacheKey,
+          outputText: r.outputText,
+          model: r.model,
+          inputTokens: r.usage.inputTokens,
+          outputTokens: r.usage.outputTokens,
+        });
       };
 
       // MODEL DISPATCH: real execution, strictly after governance + routing —
@@ -2525,6 +4219,12 @@ export function registerAgentConnectorRoutes(
       // the payload the JSON path returns. Denials never reach this branch
       // (they respond as plain JSON before any stream opens), and the audit
       // row + usage ledger are written identically after completion.
+      //
+      // A DECISION-ONLY invoke first: nothing further can refuse it, so the
+      // staged estimate rows (only model_routing can be pending here) land now
+      // — the routing decision itself is the recorded event, exactly as before.
+      if (!body.dispatch) await flushPendingCostEvents();
+
       if (body.dispatch && useStream) {
         reply.hijack();
         reply.raw.writeHead(200, {
@@ -2546,7 +4246,11 @@ export function registerAgentConnectorRoutes(
           system: dispatchSystem,
           cacheSystem: promptCache.cacheSystem,
           onText: (delta) => send("delta", { text: delta }),
+          virtualKey: invokeVirtualKey,
         });
+        // savings are only claimed for work that happened (see the staging
+        // comment above) — a refused/failed stream leaves the ledger untouched
+        if (outcome.ok) await flushPendingCostEvents();
         await persistTurns(outcome);
         await storeSemanticCacheIf(outcome);
         await db.insert(auditLog).values({
@@ -2604,13 +4308,17 @@ export function registerAgentConnectorRoutes(
           input: dispatchInput,
           system: dispatchSystem,
           cacheSystem: promptCache.cacheSystem,
+          virtualKey: invokeVirtualKey,
         });
+        // savings are only claimed for work that happened (see the staging
+        // comment above) — a refused/failed dispatch leaves the ledger untouched
+        if (dispatchOutcome.ok) await flushPendingCostEvents();
         await persistTurns(dispatchOutcome);
         await storeSemanticCacheIf(dispatchOutcome);
       }
     }
 
-    await db.insert(auditLog).values({
+    const [decisionAuditRow] = await db.insert(auditLog).values({
       userId,
       objectType: "agent",
       objectId: agent.id,
@@ -2639,12 +4347,55 @@ export function registerAgentConnectorRoutes(
       ruleId: decision.ruleId,
       ruleChain: decision.ruleChain,
       reason: decision.reason,
-    });
+    }).returning({ id: auditLog.id });
 
+    // ADR-0070 — THE MOST VALUABLE SPAN IN THIS PRODUCT: the one that shows why
+    // NOTHING happened.
+    //
+    // Every refusal INSIDE the dispatch core (virtual-key ceiling, MRM gate,
+    // project budget, §8.4 PII, ADR-0042 guardrails, egress, missing
+    // credential) already becomes a `denied` span, because the core's traced
+    // wrapper records one from whatever the attempt returned. A pillar-1
+    // ENTITLEMENT denial never reaches the core at all — it is decided here, at
+    // the entry point, and returned — so without this block the single most
+    // common governance refusal in the product would be the ONE thing with no
+    // trace. It gets a one-span `dispatch` trace whose root is a `policy` span
+    // carrying the kernel's own reason and REFERENCING the audit row just
+    // written. No usage row exists (nothing was billed) and none is invented.
     if (decision.effect !== "allow") {
+      const denyTrace = await beginTrace(db, {
+        kind: "dispatch",
+        name: `denied: ${agent.name}`,
+        userId,
+        projectId,
+        ...(convo ? { sessionId: convo.conversation.id, rootRefId: convo.conversation.id } : {}),
+      });
+      if (denyTrace) {
+        const at = new Date();
+        await recordSpan(db, denyTrace, {
+          kind: "policy",
+          name: `entitlement: ${agent.name}`,
+          status: "denied",
+          statusReason: decision.reason,
+          startedAt: at,
+          endedAt: at,
+          agentId: agent.id,
+          auditLogId: decisionAuditRow?.id ?? null,
+          model: agent.model,
+          provider: agent.provider,
+          attributes: {
+            mode: body.mode,
+            ruleId: decision.ruleId,
+            ruleChain: decision.ruleChain,
+            effect: decision.effect,
+            ...(projectId ? { projectId } : {}),
+          },
+        });
+        await finishTrace(db, denyTrace, "denied", at);
+      }
       // A denied conversation turn is recorded honestly (detail.denied, no
       // assistant turn) but never replayed to a provider on later turns —
-      // loadOwnConversation filters it out of the model-bound history.
+      // loadOwnConversationForReplay filters it out of the model-bound history.
       if (convo && body.dispatch) {
         await recordConversationTurns(db, convo.conversation, {
           userContent: body.input ?? "",
@@ -2661,13 +4412,28 @@ export function registerAgentConnectorRoutes(
         ...(dispatchOutcome.detail ? { detail: dispatchOutcome.detail } : {}),
         ...(dispatchOutcome.pii ? { pii: dispatchOutcome.pii } : {}),
         ...(dispatchOutcome.guardrails ? { guardrails: dispatchOutcome.guardrails } : {}),
+        // ADR-0066 §4: an EXHAUSTED chain must be as visible as a successful
+        // one. Without this the caller sees only the primary's failure and has
+        // no way to know that three governed alternatives were tried.
+        ...(dispatchOutcome.fallback ? { fallback: dispatchOutcome.fallback } : {}),
+        ...(dispatchOutcome.trace ? { trace: dispatchOutcome.trace } : {}),
         ...suppressionFlag,
       });
     }
     return reply.send({
       decision,
       routing,
-      ...(dispatchOutcome ? { dispatch: dispatchOutcome.result } : {}),
+      // ADR-0070: the trace coordinates ride out with the dispatch, so a caller
+      // (and the SPA) can open the tree for the call it just made without
+      // guessing which of its traces was theirs.
+      ...(dispatchOutcome
+        ? {
+            dispatch: {
+              ...dispatchOutcome.result,
+              ...(dispatchOutcome.trace ? { trace: dispatchOutcome.trace } : {}),
+            },
+          }
+        : {}),
       ...(convoContext?.publicDetail ? { compaction: convoContext.publicDetail } : {}),
       ...suppressionFlag,
     });
@@ -2677,6 +4443,18 @@ export function registerAgentConnectorRoutes(
 
   app.post("/v1/connectors", async (req, reply) => {
     const body = createConnectorSchema.parse(req.body);
+    // ADR-0052 — THE EXPANSION GATE (inventory: `connector.create`, "a new
+    // connected system is a wider footprint"). Refused once the license has
+    // lapsed past its grace window; permitted in every other state including
+    // absent (no tier flag in the §4 matrix covers connectors — recorded in
+    // the ADR amendment rather than invented). Invoking a connector that
+    // already exists is governance-class and stays open.
+    const licenseRefusal = await refuseIfExpansionBlocked(db, {
+      actorUserId: req.authCtx.userId ?? null,
+      objectType: "connector",
+      what: `creating connector '${body.name}'`,
+    });
+    if (licenseRefusal) return reply.status(licenseRefusal.status).send(licenseRefusal.body);
     // ADR-0034 amendment #2 — the earliest honest failure for a connector
     // endpoint. NOT a substitute for the invoke-time check (see the note
     // there): this is so a typo, or a deliberate IMDS/collector URL, is a 400
@@ -2788,6 +4566,13 @@ export function registerAgentConnectorRoutes(
 
   app.post("/v1/grants/connectors", async (req, reply) => {
     const body = createConnectorGrantSchema.parse(req.body);
+    // ADR-0091: the SoD mint gate — refused 409 by name, audited, no row
+    const sod = await refuseSodMint(
+      db,
+      { kind: "connector", userId: body.userId, connectorId: body.connectorId, mode: body.mode },
+      req.authCtx.userId,
+    );
+    if (sod) return reply.status(409).send(sod);
     const [row] = await db
       .insert(connectorGrants)
       .values({
@@ -2883,445 +4668,575 @@ export function registerAgentConnectorRoutes(
     const [connector] = await db.select().from(connectors).where(eq(connectors.id, connectorId));
     if (!connector) return reply.status(404).send({ error: "unknown_connector" });
 
-    // pillar 5 + ADR-0011: attribution must point at a real project the caller
-    // may bill to — mirror the model invoke path. Checked up front, before any
-    // execution or metering can happen.
+    // ─────────────────────────────────────────────────────────────────────
+    // ADR-0070 amendment (2026-08-15) — THE CONNECTOR SPAN.
+    //
+    // `connector` was a DECLARED span kind with no writer, which made the
+    // vocabulary promise coverage the product did not have. It is emitted here,
+    // and it is emitted by a WRAPPER for exactly the reason the dispatch core's
+    // span is: this handler has FOURTEEN exits and eleven of them are refusals.
+    // A recorder sprinkled through the branches would trace the successes and
+    // miss the denials — "a trace of only the successes" is failure mode 2 in
+    // the ADR, and on a connector it is the worst one available, because a
+    // connector call is where customer data actually moves.
+    //
+    // So the whole governed body answers into a RECORDER instead of the Fastify
+    // reply, and the one span is written from whatever came back. Adding a
+    // fifteenth refusal below cannot forget to be traced, because nothing below
+    // mentions tracing.
+    //
+    // WHAT COUNTS AS A REFUSAL, and why the split is where it is: every 4xx this
+    // route produces is a DECISION (the entitlement kernel, §8.4 PII, an
+    // ADR-0042 guardrail, the ADR-0034/0062 egress guard, a missing credential,
+    // an unrecognised provider). Only a 5xx is a fault — a 502 from the upstream
+    // connector or a 503 for a missing data key. That is the same line
+    // `dispatchOnce` draws when it calls `model_dispatch_failed` the one
+    // non-decision, and it is the line ADR-0072 exists to protect: a defence
+    // working must never be scored as a defence failing.
+    // ─────────────────────────────────────────────────────────────────────
     const projectId = body.projectId ?? null;
-    if (projectId) {
-      const attribution = await assertProjectAttribution(db, projectId, userId, req.authCtx.isAdmin);
-      if (!attribution.ok) return reply.status(attribution.status).send({ error: attribution.error });
-    }
-
-    const [grants, roleConnectorGrantsForUser, connectorRevocationsForUser] = await Promise.all([
-      db.select().from(connectorGrants).where(eq(connectorGrants.userId, userId)),
-      // §5 role-bundled grants (ADR-0014): unioned in the kernel so a narrow
-      // direct grant cannot mask a broader role grant.
-      loadRoleConnectorGrants(db, userId),
-      // ADR-0019: the subtractive bound on that union.
-      loadConnectorRevocations(db, userId),
-    ]);
-
-    const decision = evaluateConnector({
-      userId,
-      connectorId,
-      connectorName: connector.name,
-      operation: body.operation,
-      object: body.object ?? null,
-      connectorGrants: grants,
-      roleConnectorGrants: roleConnectorGrantsForUser,
-      connectorRevocations: connectorRevocationsForUser,
-    });
-
-    // THE ONE AUDIT ROW — unchanged, written for every decision (allow or deny).
-    await db.insert(auditLog).values({
-      userId,
-      objectType: "connector",
-      objectId: connectorId,
-      detail: { operation: body.operation, ...(body.object ? { object: body.object } : {}) },
-      effect: decision.effect,
-      ruleId: decision.ruleId,
-      ruleChain: decision.ruleChain,
-      reason: decision.reason,
-    });
-
-    // A DENIED call bills nothing and executes nothing (mirror the model path).
-    if (decision.effect !== "allow") {
-      return reply.status(403).send({ decision });
-    }
-
-    // EXECUTION runs strictly INSIDE the allow branch, after the audit insert.
-    // A connector with no providerKind keeps TODAY'S behaviour exactly:
-    // governance-only, no execution, no cost, no usage row.
-    if (!connector.providerKind) {
-      return reply.send({ decision });
-    }
-    if (!isConnectorProviderKind(connector.providerKind)) {
-      return reply.status(409).send({
-        decision,
-        error: "unknown_connector_provider",
-        detail: `connector '${connector.name}' has an unrecognized provider_kind '${connector.providerKind}'`,
-      });
-    }
-
-    // Resolve the platform credential (connector_credentials → decrypt with the
-    // data key). Keyless kinds (mock, unauthenticated generic) skip it; a keyed
-    // kind with no stored credential fails explicit like the model path. A
-    // credential.baseUrl overrides the connector's, mirroring model_credentials.
-    const keylessKinds = new Set(["mock", "generic", "http", "webhook"]);
-    let token: string | null = null;
-    let baseUrl: string | null = connector.baseUrl ?? null;
-    const [cred] = await db
-      .select()
-      .from(connectorCredentials)
-      .where(eq(connectorCredentials.connectorId, connectorId));
-    if (cred) {
-      if (!opts.dataKey) {
-        return reply.status(503).send({ error: "no_data_key", detail: "set REGULAIT_DATA_KEY" });
+    /** filled at the ONE place the ledger row is written, so the span
+     * REFERENCES that row rather than recomputing its figures (rule 1). */
+    const sink: { usageEventId?: string | null; costUsd?: number | null } = {};
+    const attempt = async (out: ConnectorReplyRecorder): Promise<ConnectorAttemptResult> => {
+      // pillar 5 + ADR-0011: attribution must point at a real project the caller
+      // may bill to — mirror the model invoke path. Checked up front, before any
+      // execution or metering can happen.
+      if (projectId) {
+        const attribution = await assertProjectAttribution(db, projectId, userId, req.authCtx.isAdmin);
+        if (!attribution.ok) return out.status(attribution.status).send({ error: attribution.error });
       }
-      token = decryptSecret(opts.dataKey, cred.tokenCiphertext);
-      if (cred.baseUrl) baseUrl = cred.baseUrl;
-    } else if (!keylessKinds.has(connector.providerKind)) {
-      return reply.status(409).send({
-        decision,
-        error: "no_connector_credential",
-        detail: `connector '${connector.name}' (${connector.providerKind}) has no stored credential`,
-      });
-    }
 
-    // §8.4 PII ENFORCEMENT (pillar 3), connector path. The effective piiMode
-    // comes from the attributed project's cascade; an unattributed/unclassified
-    // call yields null and every check is a no-op. The INPUT check runs BEFORE
-    // provider.invoke, so a block executes nothing and bills nothing.
-    const piiMode: PiiMode | null = projectId ? await projectPiiMode(db, projectId) : null;
-    let inputHits: PiiHit[] = [];
-    if (piiMode) {
-      const chk = enforcePII(piiMode, {
-        input: JSON.stringify({ object: body.object ?? null, payload: body.payload ?? null }),
+      const [grants, roleConnectorGrantsForUser, connectorRevocationsForUser] = await Promise.all([
+        db.select().from(connectorGrants).where(eq(connectorGrants.userId, userId)),
+        // §5 role-bundled grants (ADR-0014): unioned in the kernel so a narrow
+        // direct grant cannot mask a broader role grant.
+        loadRoleConnectorGrants(db, userId),
+        // ADR-0019: the subtractive bound on that union.
+        loadConnectorRevocations(db, userId),
+      ]);
+
+      const decision = evaluateConnector({
+        userId,
+        // ADR-0124 — the kill switch on the connector path. A connector has no
+        // per-subject halt of its own; the dial governs it.
+        execution: postureOf(await loadExecutionMode(db), null),
+        connectorId,
+        connectorName: connector.name,
+        operation: body.operation,
+        object: body.object ?? null,
+        connectorGrants: grants,
+        roleConnectorGrants: roleConnectorGrantsForUser,
+        connectorRevocations: connectorRevocationsForUser,
       });
-      inputHits = chk.hits;
-      if (chk.action === "block") {
-        const reason = `input contains PII: ${piiCategoryList(chk.hits)}`;
+
+      // THE ONE AUDIT ROW — unchanged, written for every decision (allow or deny).
+      await db.insert(auditLog).values({
+        userId,
+        objectType: "connector",
+        objectId: connectorId,
+        // ADR-0058 SCOPE, same reason as the MCP tool path: a pack's
+        // `audit_decisions` collector reaches a decision only through
+        // `detail->>'projectId'`. The PII-block rows on this same path already
+        // carried it; the DECISION row did not, so a project-scoped count of
+        // connector refusals was structurally zero. Null when unattributed.
+        detail: {
+          operation: body.operation,
+          ...(body.object ? { object: body.object } : {}),
+          projectId: projectId ?? null,
+        },
+        effect: decision.effect,
+        ruleId: decision.ruleId,
+        ruleChain: decision.ruleChain,
+        reason: decision.reason,
+      });
+
+      // A DENIED call bills nothing and executes nothing (mirror the model path).
+      if (decision.effect !== "allow") {
+        return out.status(403).send({ decision });
+      }
+
+      // EXECUTION runs strictly INSIDE the allow branch, after the audit insert.
+      // A connector with no providerKind keeps TODAY'S behaviour exactly:
+      // governance-only, no execution, no cost, no usage row.
+      if (!connector.providerKind) {
+        return out.send({ decision });
+      }
+      if (!isConnectorProviderKind(connector.providerKind)) {
+        return out.status(409).send({
+          decision,
+          error: "unknown_connector_provider",
+          detail: `connector '${connector.name}' has an unrecognized provider_kind '${connector.providerKind}'`,
+        });
+      }
+
+      // Resolve the platform credential (connector_credentials → decrypt with the
+      // data key). Keyless kinds (mock, unauthenticated generic) skip it; a keyed
+      // kind with no stored credential fails explicit like the model path. A
+      // credential.baseUrl overrides the connector's, mirroring model_credentials.
+      const keylessKinds = new Set(["mock", "generic", "http", "webhook"]);
+      let token: string | null = null;
+      let baseUrl: string | null = connector.baseUrl ?? null;
+      const [cred] = await db
+        .select()
+        .from(connectorCredentials)
+        .where(eq(connectorCredentials.connectorId, connectorId));
+      if (cred) {
+        if (!opts.dataKey) {
+          return out.status(503).send({ error: "no_data_key", detail: "set REGULAIT_DATA_KEY" });
+        }
+        token = decryptSecret(opts.dataKey, cred.tokenCiphertext);
+        if (cred.baseUrl) baseUrl = cred.baseUrl;
+      } else if (!keylessKinds.has(connector.providerKind)) {
+        return out.status(409).send({
+          decision,
+          error: "no_connector_credential",
+          detail: `connector '${connector.name}' (${connector.providerKind}) has no stored credential`,
+        });
+      }
+
+      // §8.4 PII ENFORCEMENT (pillar 3), connector path. The effective piiMode
+      // comes from the attributed project's cascade; an unattributed or
+      // unclassified call falls to the ORG FLOOR (ADR-0021 defaultPiiMode, null
+      // when unset). The resolver is called unconditionally — the old
+      // `projectId ? … : null` ternary here was exactly the one-keystroke
+      // attribution dodge the floor exists to close. The INPUT check runs BEFORE
+      // provider.invoke, so a block executes nothing and bills nothing.
+      const piiMode: PiiMode | null = await projectPiiMode(db, projectId ?? null);
+      // ADR-0117: resolved once, shared by the input and output gates below.
+      const piiIntl = await piiInternationalCategories(db);
+      let inputHits: PiiHit[] = [];
+      if (piiMode) {
+        const chk = enforcePII(
+          piiMode,
+          { input: JSON.stringify({ object: body.object ?? null, payload: body.payload ?? null }) },
+          piiIntl,
+        );
+        inputHits = chk.hits;
+        if (chk.action === "block") {
+          const reason = `input contains PII: ${piiCategoryList(chk.hits)}`;
+          await db.insert(auditLog).values({
+            userId,
+            objectType: "connector",
+            objectId: connectorId,
+            detail: {
+              phase: "pii",
+              pii: { mode: piiMode, action: "block", phase: "input", inputHits: chk.hits, outputHits: [] },
+              operation: body.operation,
+              ...(projectId ? { projectId } : {}),
+            },
+            effect: "deny",
+            ruleId: "pii-blocked",
+            ruleChain: [],
+            reason,
+          });
+          return out.status(403).send({
+            decision,
+            error: "pii_blocked",
+            detail: reason,
+            pii: { mode: piiMode, action: "block", inputHits: chk.hits, outputHits: [], withheld: false },
+          });
+        }
+      }
+
+      // ADR-0042 GUARDRAIL ENGINE, connector path — the same two phases, the same
+      // exclusion of PII (enforced on its own path above), the same audit rules.
+      // Scoped to this connector's override (or the org default), MAX-composed
+      // with the attributed project's compliance floor.
+      const connectorGuardrails: GuardrailPolicy = await resolveGuardrailPolicy(db, {
+        projectId,
+        connectorId,
+      });
+      let cgInput: ReturnType<typeof runGuardrails> | null = null;
+      if (connectorGuardrails.active) {
+        cgInput = runGuardrails(
+          connectorGuardrails,
+          "input",
+          JSON.stringify({ object: body.object ?? null, payload: body.payload ?? null }),
+        );
+        const outcome = guardrailOutcome(cgInput);
+        if (outcome) {
+          await recordGuardrailDecision(db, {
+            userId,
+            objectType: "connector",
+            objectId: connectorId,
+            projectId,
+            evaluation: cgInput,
+            outcome,
+            detail: { operation: body.operation, connectorKind: connector.providerKind },
+          });
+        }
+        if (cgInput.action === "block") {
+          const reason = `input blocked by guardrail: ${guardrailCategoryList(cgInput.blocking)}`;
+          return out.status(403).send({
+            decision,
+            error: "guardrail_blocked",
+            detail: reason,
+            guardrails: {
+              action: "block",
+              phase: "input",
+              findings: flattenFindings(cgInput.findings),
+              withheld: false,
+            },
+          });
+        }
+      }
+
+      // ADR-0034 amendment #2 — THE CONNECTOR `baseUrl`, BEHIND THE EGRESS GUARD.
+      //
+      // This is the surface both earlier amendments named as the highest-priority
+      // one still open, and it is worse than the model paths in one specific way:
+      // the `webhook` kind does not READ the URL, it **POSTs `body.payload` to
+      // it**. A governed connector call is exactly where customer data lives, so
+      // an admin-typed `baseUrl` here is an exfiltration pipe, not merely an SSRF
+      // primitive. It is checked HERE, on every invoke — not only at write time —
+      // because a write-time verdict is not a fact about the future and because
+      // rows written before this guard existed are in the live database now.
+      //
+      // NO OVERRIDE MEANS NO CHECK: with `baseUrl` null the adapter uses its
+      // compiled vendor endpoint (slack/github/jira/... defaults), which nobody
+      // can type, so a non-overriding connector behaves byte-identically — the
+      // global fetch, no allow-list entry required.
+      //
+      // ── AMENDED BY ADR-0062 (2026-08-03) ────────────────────────────────────
+      // Still true as an SSRF argument, still not an egress policy. A connector
+      // is the surface that carries CUSTOMER DATA by construction, so a Slack or
+      // GitHub connector running on its compiled endpoint inside an air-gapped
+      // install is the exact thing that mode promises does not happen. Under a
+      // strict posture the compiled destination is adjudicated against the same
+      // `egress_allow_hosts` table; under `hosted` this is byte-identical.
+      let connectorFetch: typeof fetch | undefined;
+      if (baseUrl) {
+        let guarded;
+        try {
+          guarded = await guardConnectionCall(db, {
+            surface: "connector",
+            baseUrl,
+            userId,
+            objectId: connectorId,
+            label: `connector '${connector.name}' (${connector.providerKind})`,
+            detail: {
+              connectorKind: connector.providerKind,
+              operation: body.operation,
+              source: cred?.baseUrl ? "connector_credential" : "connector",
+              ...(projectId ? { projectId } : {}),
+            },
+          });
+        } catch (err) {
+          if (err instanceof ConnectionEgressBlockedError) {
+            return out.status(403).send({
+              decision,
+              error: "egress_blocked",
+              code: err.decision.code,
+              detail:
+                `connector '${connector.name}' (${connector.providerKind}): ${err.decision.reason}` +
+                ` (an admin adds permitted destinations under Egress Allow Hosts)`,
+            });
+          }
+          throw err;
+        }
+        connectorFetch = guarded.fetchImpl;
+      } else {
+        // ADR-0062 — the compiled connector endpoint. `snowflake` resolves to
+        // "not statically knowable" (its default is derived from the decrypted
+        // credential) and is therefore REFUSED under a strict posture rather
+        // than assumed safe; every kind that cannot exist without an explicit
+        // baseUrl resolves to "nothing to adjudicate".
+        const { posture, allowList } = await loadCompiledEgressContext(db);
+        const compiled = decideCompiledDefault({
+          posture,
+          surface: "connector",
+          kind: connector.providerKind,
+          defaultBaseUrl: connectorDefaultBaseUrl(connector.providerKind),
+          allowList,
+        });
+        if (!compiled.ok) {
+          await auditCompiledDefaultDenied(db, {
+            userId,
+            surface: "connector",
+            objectId: connectorId,
+            kind: connector.providerKind,
+            decision: compiled,
+            posture,
+            detail: {
+              connectorKind: connector.providerKind,
+              operation: body.operation,
+              ...(projectId ? { projectId } : {}),
+            },
+          });
+          return out.status(403).send({
+            decision,
+            error: "egress_blocked",
+            code: compiled.code,
+            detail: `connector '${connector.name}': ${compiled.reason}`,
+          });
+        }
+      }
+
+      // Execute. A FAILED call (ConnectorProviderError) bills NOTHING and
+      // surfaces as 502 — the same discipline as a failed model dispatch.
+      let result;
+      try {
+        const provider = resolveConnectorProvider(
+          { kind: connector.providerKind, baseUrl, token },
+          connectorFetch as unknown as Parameters<typeof resolveConnectorProvider>[1],
+        );
+        result = await provider.invoke({
+          operation: body.operation,
+          object: body.object ?? null,
+          payload: body.payload ?? null,
+        });
+      } catch (err) {
+        // ADR-0034 amendment #2 — a refusal raised by the GUARDED FETCH itself
+        // (the allow-list withdrawn between the pre-check and the request, or an
+        // approved endpoint answering 302 -> IMDS) is a GOVERNANCE decision, not
+        // an upstream failure. Without this it would surface as an opaque 500 or
+        // be laundered into a 502 "the connector broke", hiding the one fact an
+        // operator needs. `egressRefusal` digs it out of whatever the adapter
+        // wrapped it in, exactly as the model paths do.
+        const refusal = egressRefusal(err);
+        if (refusal) {
+          await db.insert(auditLog).values({
+            userId,
+            objectType: "connector",
+            objectId: connectorId,
+            detail: {
+              phase: "call",
+              baseUrl,
+              connectorKind: connector.providerKind,
+              operation: body.operation,
+              ...(projectId ? { projectId } : {}),
+            },
+            effect: "deny",
+            ruleId: "connector-egress-blocked",
+            ruleChain: [],
+            reason: `connector '${connector.name}': ${refusal}`,
+          });
+          return out.status(403).send({
+            decision,
+            error: "egress_blocked",
+            detail: `connector '${connector.name}': ${refusal}`,
+          });
+        }
+        if (err instanceof ConnectorProviderError) {
+          return out
+            .status(502)
+            .send({ decision, error: "connector_invoke_failed", detail: err.message });
+        }
+        throw err;
+      }
+
+      // §8.4 OUTPUT check: the call ran, so a block is BILL-AND-WITHHOLD — the
+      // usage row records honest spend, but result.body is replaced by the
+      // withheld marker and the response is denial-shaped.
+      let outputHits: PiiHit[] = [];
+      let respBody = result.body;
+      let withheld = false;
+      if (piiMode) {
+        const chk = enforcePII(piiMode, { output: JSON.stringify(result.body ?? null) }, piiIntl);
+        outputHits = chk.hits;
+        if (chk.action === "block") {
+          withheld = true;
+          respBody = piiWithheldMarker(chk.hits);
+        }
+      }
+      const anyHits = inputHits.length > 0 || outputHits.length > 0;
+      const piiAction: "block" | "warn" | "log" = withheld
+        ? "block"
+        : piiMode === "warn"
+          ? "warn"
+          : "log";
+      const pii =
+        piiMode && anyHits
+          ? { mode: piiMode, action: piiAction, inputHits, outputHits, withheld }
+          : null;
+
+      // ADR-0042 OUTPUT phase, connector path — bill-and-withhold, same as PII.
+      let cgOutput: ReturnType<typeof runGuardrails> | null = null;
+      let cgWithheld = false;
+      if (connectorGuardrails.active) {
+        cgOutput = runGuardrails(connectorGuardrails, "output", JSON.stringify(result.body ?? null));
+        if (cgOutput.action === "block") {
+          cgWithheld = true;
+          respBody = guardrailWithheldMarker(cgOutput.blocking);
+        }
+      }
+      const cgFindings = [...(cgInput?.findings ?? []), ...(cgOutput?.findings ?? [])];
+      const connectorGuardrailView: DispatchGuardrails | null = cgFindings.length
+        ? {
+            action: cgWithheld ? "block" : cgFindings.some((f) => f.action === "warn") ? "warn" : "log",
+            phase: cgWithheld ? "output" : cgInput?.findings.length ? "input" : "output",
+            findings: flattenFindings(cgFindings),
+            withheld: cgWithheld,
+          }
+        : null;
+
+      // pillar 5 actuals: an allowed, executed call bills the connector's flat
+      // list price. Unpriced → null, never an invented figure (agents' rule).
+      const costUsd = connector.pricePerCallUsd ?? null;
+      const [connectorUsageRow] = await db.insert(usageEvents).values({
+        userId,
+        objectType: "connector",
+        connectorId,
+        operation: body.operation,
+        costUsd,
+        projectId,
+        detail: {
+          status: result.status,
+          ...(body.object ? { object: body.object } : {}),
+          providerKind: connector.providerKind,
+          // §8.4 COUNTS ONLY — never the matched substrings
+          ...(pii ? { pii: { mode: pii.mode, action: pii.action, inputHits, outputHits } } : {}),
+          // ADR-0042 COUNTS ONLY, same contract
+          ...(connectorGuardrailView
+            ? {
+                guardrails: {
+                  action: connectorGuardrailView.action,
+                  findings: connectorGuardrailView.findings,
+                  withheld: cgWithheld,
+                },
+              }
+            : {}),
+        },
+      }).returning({ id: usageEvents.id });
+      // ADR-0070 — the span REFERENCES this row and copies its figure from it,
+      // in the same call that inserted it. Never a recomputed price.
+      sink.usageEventId = connectorUsageRow?.id ?? null;
+      sink.costUsd = costUsd;
+      if (cgOutput) {
+        const outcome = guardrailOutcome(cgOutput);
+        if (outcome) {
+          await recordGuardrailDecision(db, {
+            userId,
+            objectType: "connector",
+            objectId: connectorId,
+            projectId,
+            evaluation: cgOutput,
+            outcome,
+            detail: { operation: body.operation, connectorKind: connector.providerKind },
+          });
+        }
+      }
+      // §8.4 audit rows for a PII event (never for a clean payload): an OUTPUT
+      // block is a deny; a warn is an allow with 'pii-warned'; log is silent
+      // (counts already recorded in the usage detail above).
+      if (withheld) {
         await db.insert(auditLog).values({
           userId,
           objectType: "connector",
           objectId: connectorId,
           detail: {
             phase: "pii",
-            pii: { mode: piiMode, action: "block", phase: "input", inputHits: chk.hits, outputHits: [] },
+            pii: { mode: piiMode, action: "block", phase: "output", inputHits, outputHits },
             operation: body.operation,
             ...(projectId ? { projectId } : {}),
           },
           effect: "deny",
           ruleId: "pii-blocked",
           ruleChain: [],
-          reason,
+          reason: `output contains PII: ${piiCategoryList(outputHits)} — billed and withheld`,
         });
-        return reply.status(403).send({
-          decision,
-          error: "pii_blocked",
-          detail: reason,
-          pii: { mode: piiMode, action: "block", inputHits: chk.hits, outputHits: [], withheld: false },
-        });
-      }
-    }
-
-    // ADR-0042 GUARDRAIL ENGINE, connector path — the same two phases, the same
-    // exclusion of PII (enforced on its own path above), the same audit rules.
-    // Scoped to this connector's override (or the org default), MAX-composed
-    // with the attributed project's compliance floor.
-    const connectorGuardrails: GuardrailPolicy = await resolveGuardrailPolicy(db, {
-      projectId,
-      connectorId,
-    });
-    let cgInput: ReturnType<typeof runGuardrails> | null = null;
-    if (connectorGuardrails.active) {
-      cgInput = runGuardrails(
-        connectorGuardrails,
-        "input",
-        JSON.stringify({ object: body.object ?? null, payload: body.payload ?? null }),
-      );
-      const outcome = guardrailOutcome(cgInput);
-      if (outcome) {
-        await recordGuardrailDecision(db, {
-          userId,
-          objectType: "connector",
-          objectId: connectorId,
-          projectId,
-          evaluation: cgInput,
-          outcome,
-          detail: { operation: body.operation, connectorKind: connector.providerKind },
-        });
-      }
-      if (cgInput.action === "block") {
-        const reason = `input blocked by guardrail: ${guardrailCategoryList(cgInput.blocking)}`;
-        return reply.status(403).send({
-          decision,
-          error: "guardrail_blocked",
-          detail: reason,
-          guardrails: {
-            action: "block",
-            phase: "input",
-            findings: flattenFindings(cgInput.findings),
-            withheld: false,
-          },
-        });
-      }
-    }
-
-    // ADR-0034 amendment #2 — THE CONNECTOR `baseUrl`, BEHIND THE EGRESS GUARD.
-    //
-    // This is the surface both earlier amendments named as the highest-priority
-    // one still open, and it is worse than the model paths in one specific way:
-    // the `webhook` kind does not READ the URL, it **POSTs `body.payload` to
-    // it**. A governed connector call is exactly where customer data lives, so
-    // an admin-typed `baseUrl` here is an exfiltration pipe, not merely an SSRF
-    // primitive. It is checked HERE, on every invoke — not only at write time —
-    // because a write-time verdict is not a fact about the future and because
-    // rows written before this guard existed are in the live database now.
-    //
-    // NO OVERRIDE MEANS NO CHECK: with `baseUrl` null the adapter uses its
-    // compiled vendor endpoint (slack/github/jira/... defaults), which nobody
-    // can type, so a non-overriding connector behaves byte-identically — the
-    // global fetch, no allow-list entry required.
-    //
-    // ── AMENDED BY ADR-0062 (2026-08-03) ────────────────────────────────────
-    // Still true as an SSRF argument, still not an egress policy. A connector
-    // is the surface that carries CUSTOMER DATA by construction, so a Slack or
-    // GitHub connector running on its compiled endpoint inside an air-gapped
-    // install is the exact thing that mode promises does not happen. Under a
-    // strict posture the compiled destination is adjudicated against the same
-    // `egress_allow_hosts` table; under `hosted` this is byte-identical.
-    let connectorFetch: typeof fetch | undefined;
-    if (baseUrl) {
-      let guarded;
-      try {
-        guarded = await guardConnectionCall(db, {
-          surface: "connector",
-          baseUrl,
-          userId,
-          objectId: connectorId,
-          label: `connector '${connector.name}' (${connector.providerKind})`,
-          detail: {
-            connectorKind: connector.providerKind,
-            operation: body.operation,
-            source: cred?.baseUrl ? "connector_credential" : "connector",
-            ...(projectId ? { projectId } : {}),
-          },
-        });
-      } catch (err) {
-        if (err instanceof ConnectionEgressBlockedError) {
-          return reply.status(403).send({
-            decision,
-            error: "egress_blocked",
-            code: err.decision.code,
-            detail:
-              `connector '${connector.name}' (${connector.providerKind}): ${err.decision.reason}` +
-              ` (an admin adds permitted destinations under Egress Allow Hosts)`,
-          });
-        }
-        throw err;
-      }
-      connectorFetch = guarded.fetchImpl;
-    } else {
-      // ADR-0062 — the compiled connector endpoint. `snowflake` resolves to
-      // "not statically knowable" (its default is derived from the decrypted
-      // credential) and is therefore REFUSED under a strict posture rather
-      // than assumed safe; every kind that cannot exist without an explicit
-      // baseUrl resolves to "nothing to adjudicate".
-      const { posture, allowList } = await loadCompiledEgressContext(db);
-      const compiled = decideCompiledDefault({
-        posture,
-        surface: "connector",
-        kind: connector.providerKind,
-        defaultBaseUrl: connectorDefaultBaseUrl(connector.providerKind),
-        allowList,
-      });
-      if (!compiled.ok) {
-        await auditCompiledDefaultDenied(db, {
-          userId,
-          surface: "connector",
-          objectId: connectorId,
-          kind: connector.providerKind,
-          decision: compiled,
-          posture,
-          detail: {
-            connectorKind: connector.providerKind,
-            operation: body.operation,
-            ...(projectId ? { projectId } : {}),
-          },
-        });
-        return reply.status(403).send({
-          decision,
-          error: "egress_blocked",
-          code: compiled.code,
-          detail: `connector '${connector.name}': ${compiled.reason}`,
-        });
-      }
-    }
-
-    // Execute. A FAILED call (ConnectorProviderError) bills NOTHING and
-    // surfaces as 502 — the same discipline as a failed model dispatch.
-    let result;
-    try {
-      const provider = resolveConnectorProvider(
-        { kind: connector.providerKind, baseUrl, token },
-        connectorFetch as unknown as Parameters<typeof resolveConnectorProvider>[1],
-      );
-      result = await provider.invoke({
-        operation: body.operation,
-        object: body.object ?? null,
-        payload: body.payload ?? null,
-      });
-    } catch (err) {
-      // ADR-0034 amendment #2 — a refusal raised by the GUARDED FETCH itself
-      // (the allow-list withdrawn between the pre-check and the request, or an
-      // approved endpoint answering 302 -> IMDS) is a GOVERNANCE decision, not
-      // an upstream failure. Without this it would surface as an opaque 500 or
-      // be laundered into a 502 "the connector broke", hiding the one fact an
-      // operator needs. `egressRefusal` digs it out of whatever the adapter
-      // wrapped it in, exactly as the model paths do.
-      const refusal = egressRefusal(err);
-      if (refusal) {
+      } else if (piiMode === "warn" && anyHits) {
         await db.insert(auditLog).values({
           userId,
           objectType: "connector",
           objectId: connectorId,
           detail: {
-            phase: "call",
-            baseUrl,
-            connectorKind: connector.providerKind,
+            phase: "pii",
+            pii: { mode: piiMode, action: "warn", inputHits, outputHits },
             operation: body.operation,
             ...(projectId ? { projectId } : {}),
           },
-          effect: "deny",
-          ruleId: "connector-egress-blocked",
+          effect: "allow",
+          ruleId: "pii-warned",
           ruleChain: [],
-          reason: `connector '${connector.name}': ${refusal}`,
-        });
-        return reply.status(403).send({
-          decision,
-          error: "egress_blocked",
-          detail: `connector '${connector.name}': ${refusal}`,
+          reason: `PII detected (${piiCategoryList([...inputHits, ...outputHits])}) — warned, invoke proceeded`,
         });
       }
-      if (err instanceof ConnectorProviderError) {
-        return reply
-          .status(502)
-          .send({ decision, error: "connector_invoke_failed", detail: err.message });
-      }
+
+      return out.send({
+        decision,
+        result: { status: result.status, body: respBody },
+        costUsd,
+        ...(pii ? { pii } : {}),
+        ...(connectorGuardrailView ? { guardrails: connectorGuardrailView } : {}),
+      });
+    };
+
+    const traceCtx = await beginTrace(db, {
+      // a direct connector call is its own one-span trace, grouped by the
+      // CONNECTOR as the session — the same idiom the MCP proxy uses for
+      // `mcp:<serverId>`.
+      kind: "tool",
+      name: `connector ${connector.name}.${body.operation}`,
+      userId,
+      projectId,
+      sessionId: `connector:${connectorId}`,
+      rootRefId: connectorId,
+    });
+    const spanStartedAt = new Date();
+    let outcome: ConnectorAttemptResult;
+    try {
+      outcome = await attempt(connectorReplyRecorder());
+    } catch (err) {
+      // An unexpected throw is still a thing that happened to a governed call.
+      await recordSpan(db, traceCtx, {
+        kind: "connector",
+        name: `${connector.name}.${body.operation}`,
+        status: "error",
+        statusReason: (err as Error)?.message ?? "connector invoke threw",
+        startedAt: spanStartedAt,
+        connectorId,
+        attributes: { operation: body.operation, ...(projectId ? { projectId } : {}) },
+      });
+      await finishTrace(db, traceCtx, "error", spanStartedAt);
       throw err;
     }
 
-    // §8.4 OUTPUT check: the call ran, so a block is BILL-AND-WITHHOLD — the
-    // usage row records honest spend, but result.body is replaced by the
-    // withheld marker and the response is denial-shaped.
-    let outputHits: PiiHit[] = [];
-    let respBody = result.body;
-    let withheld = false;
-    if (piiMode) {
-      const chk = enforcePII(piiMode, { output: JSON.stringify(result.body ?? null) });
-      outputHits = chk.hits;
-      if (chk.action === "block") {
-        withheld = true;
-        respBody = piiWithheldMarker(chk.hits);
-      }
-    }
-    const anyHits = inputHits.length > 0 || outputHits.length > 0;
-    const piiAction: "block" | "warn" | "log" = withheld
-      ? "block"
-      : piiMode === "warn"
-        ? "warn"
-        : "log";
-    const pii =
-      piiMode && anyHits
-        ? { mode: piiMode, action: piiAction, inputHits, outputHits, withheld }
-        : null;
-
-    // ADR-0042 OUTPUT phase, connector path — bill-and-withhold, same as PII.
-    let cgOutput: ReturnType<typeof runGuardrails> | null = null;
-    let cgWithheld = false;
-    if (connectorGuardrails.active) {
-      cgOutput = runGuardrails(connectorGuardrails, "output", JSON.stringify(result.body ?? null));
-      if (cgOutput.action === "block") {
-        cgWithheld = true;
-        respBody = guardrailWithheldMarker(cgOutput.blocking);
-      }
-    }
-    const cgFindings = [...(cgInput?.findings ?? []), ...(cgOutput?.findings ?? [])];
-    const connectorGuardrailView: DispatchGuardrails | null = cgFindings.length
-      ? {
-          action: cgWithheld ? "block" : cgFindings.some((f) => f.action === "warn") ? "warn" : "log",
-          phase: cgWithheld ? "output" : cgInput?.findings.length ? "input" : "output",
-          findings: flattenFindings(cgFindings),
-          withheld: cgWithheld,
-        }
-      : null;
-
-    // pillar 5 actuals: an allowed, executed call bills the connector's flat
-    // list price. Unpriced → null, never an invented figure (agents' rule).
-    const costUsd = connector.pricePerCallUsd ?? null;
-    await db.insert(usageEvents).values({
-      userId,
-      objectType: "connector",
+    const errCode =
+      typeof outcome.body["error"] === "string" ? (outcome.body["error"] as string) : null;
+    const outDetail =
+      typeof outcome.body["detail"] === "string" ? (outcome.body["detail"] as string) : null;
+    const outDecision = outcome.body["decision"] as
+      | { reason?: string; ruleId?: string }
+      | undefined;
+    const spanStatus: "ok" | "denied" | "error" =
+      outcome.status < 400 ? "ok" : outcome.status >= 500 ? "error" : "denied";
+    // A refusal ABOUT the input does not store the input — storing the very
+    // payload a block refused would defeat the block (ADR-0070 rule 3).
+    const inputRefused = errCode === "pii_blocked" || errCode === "guardrail_blocked";
+    const resultBody = (outcome.body["result"] as { body?: unknown } | undefined)?.body;
+    const withheld =
+      inputRefused ||
+      !!(outcome.body["pii"] as { withheld?: boolean } | undefined)?.withheld ||
+      !!(outcome.body["guardrails"] as { withheld?: boolean } | undefined)?.withheld;
+    await recordSpan(db, traceCtx, {
+      kind: "connector",
+      name: `${connector.name}.${body.operation}`,
+      status: spanStatus,
+      statusReason: spanStatus === "ok" ? null : (outDetail ?? outDecision?.reason ?? errCode),
+      startedAt: spanStartedAt,
       connectorId,
-      operation: body.operation,
-      costUsd,
-      projectId,
-      detail: {
-        status: result.status,
+      // THE REFERENCE, and the figure copied from it in the same call.
+      usageEventId: sink.usageEventId ?? null,
+      costUsd: sink.costUsd ?? null,
+      inputText: inputRefused
+        ? outDetail
+        : JSON.stringify({ object: body.object ?? null, payload: body.payload ?? null }),
+      // ALREADY-ADJUDICATED text: the withheld marker is already substituted.
+      outputText: resultBody === undefined ? null : JSON.stringify(resultBody),
+      contentWithheld: withheld,
+      attributes: {
+        operation: body.operation,
+        httpStatus: outcome.status,
         ...(body.object ? { object: body.object } : {}),
-        providerKind: connector.providerKind,
-        // §8.4 COUNTS ONLY — never the matched substrings
-        ...(pii ? { pii: { mode: pii.mode, action: pii.action, inputHits, outputHits } } : {}),
-        // ADR-0042 COUNTS ONLY, same contract
-        ...(connectorGuardrailView
-          ? {
-              guardrails: {
-                action: connectorGuardrailView.action,
-                findings: connectorGuardrailView.findings,
-                withheld: cgWithheld,
-              },
-            }
-          : {}),
+        ...(connector.providerKind ? { providerKind: connector.providerKind } : {}),
+        ...(projectId ? { projectId } : {}),
+        ...(errCode ? { error: errCode } : {}),
+        ...(outDecision?.ruleId ? { ruleId: outDecision.ruleId } : {}),
       },
     });
-    if (cgOutput) {
-      const outcome = guardrailOutcome(cgOutput);
-      if (outcome) {
-        await recordGuardrailDecision(db, {
-          userId,
-          objectType: "connector",
-          objectId: connectorId,
-          projectId,
-          evaluation: cgOutput,
-          outcome,
-          detail: { operation: body.operation, connectorKind: connector.providerKind },
-        });
-      }
-    }
-    // §8.4 audit rows for a PII event (never for a clean payload): an OUTPUT
-    // block is a deny; a warn is an allow with 'pii-warned'; log is silent
-    // (counts already recorded in the usage detail above).
-    if (withheld) {
-      await db.insert(auditLog).values({
-        userId,
-        objectType: "connector",
-        objectId: connectorId,
-        detail: {
-          phase: "pii",
-          pii: { mode: piiMode, action: "block", phase: "output", inputHits, outputHits },
-          operation: body.operation,
-          ...(projectId ? { projectId } : {}),
-        },
-        effect: "deny",
-        ruleId: "pii-blocked",
-        ruleChain: [],
-        reason: `output contains PII: ${piiCategoryList(outputHits)} — billed and withheld`,
-      });
-    } else if (piiMode === "warn" && anyHits) {
-      await db.insert(auditLog).values({
-        userId,
-        objectType: "connector",
-        objectId: connectorId,
-        detail: {
-          phase: "pii",
-          pii: { mode: piiMode, action: "warn", inputHits, outputHits },
-          operation: body.operation,
-          ...(projectId ? { projectId } : {}),
-        },
-        effect: "allow",
-        ruleId: "pii-warned",
-        ruleChain: [],
-        reason: `PII detected (${piiCategoryList([...inputHits, ...outputHits])}) — warned, invoke proceeded`,
-      });
-    }
-
-    return reply.send({
-      decision,
-      result: { status: result.status, body: respBody },
-      costUsd,
-      ...(pii ? { pii } : {}),
-      ...(connectorGuardrailView ? { guardrails: connectorGuardrailView } : {}),
-    });
+    await finishTrace(db, traceCtx, spanStatus, spanStartedAt);
+    return reply.status(outcome.status).send(outcome.body);
   });
 }

@@ -67,6 +67,7 @@ import type { FastifyInstance } from "fastify";
 import {
   and,
   approvals,
+  asc,
   auditLog,
   chatIdentityLinks,
   chatopsConnections,
@@ -89,15 +90,33 @@ import {
   composeApprovalCard,
   composeDecidedCard,
   parseChatInteraction,
+  teamsActivityForCard,
+  type ApprovalCard,
   verifyChatSignature,
   type ChatOpsProvider,
 } from "@regulait/shared";
-import { resolveConnectorProvider, SLACK_DEFAULT_BASE_URL } from "@regulait/connector-provider";
+import {
+  resolveConnectorProvider,
+  SLACK_DEFAULT_BASE_URL,
+  TEAMS_DEFAULT_BASE_URL,
+} from "@regulait/connector-provider";
 import { ConnectionEgressBlockedError, guardConnectionCall } from "./connection-egress.js";
+import { EgressBlockedError } from "./egress-guard.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { projectPiiMode } from "./projects.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
+
+/**
+ * ADR-0113 — the chat providers this gateway can POST to. Deliberately a
+ * SEPARATE list from `CHATOPS_PROVIDERS` (which is what we accept INBOUND):
+ * inbound verification and outbound couriering are different capabilities and a
+ * provider can honestly have one without the other, which is exactly the state
+ * Teams was in between ADR-0061 and ADR-0113. Keeping the lists separate is
+ * what stops the next inbound-only provider from being silently assumed
+ * postable.
+ */
+export const CHATOPS_OUTBOUND_PROVIDERS: readonly ChatOpsProvider[] = ["slack", "teams"];
 
 /** stable rule ids — the strings an operator greps the audit log for */
 export const CHATOPS_RULE_IDS = {
@@ -132,7 +151,11 @@ const createConnectionSchema = z
     name: z.string().min(1).max(200),
     provider: z.enum(CHATOPS_PROVIDERS),
     connectorId: z.string().uuid(),
-    signingSecret: z.string().min(8).max(500),
+    /** ADR-0121 — OPTIONAL on the wire, and conditionally required below.
+     * Slack and teams must carry one (it verifies their inbound callbacks);
+     * outlook must NOT (it has no inbound path, so a secret here would be a
+     * field that looks like a security control and verifies nothing). */
+    signingSecret: z.string().min(8).max(500).optional(),
     defaultChannel: z.string().min(1).max(200),
     allowFencedDecide: z.boolean().default(false),
     enabled: z.boolean().default(true),
@@ -196,7 +219,10 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
         createdAt: r.createdAt,
         // the signing secret is NEVER returned: a reader who could see it could
         // forge callbacks, which is strictly worse than reading a bot token
-        signingSecretSet: true,
+        // ADR-0121 — read from the column, not hard-coded: a send-only
+        // outlook connection legitimately holds none, and reporting `true`
+        // for it would assert a control that does not exist.
+        signingSecretSet: r.signingSecretCiphertext !== null,
       })),
       posture:
         "The chat surface is a COURIER. Every decision goes through the same decide function the portal calls, " +
@@ -222,13 +248,39 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
         detail: `connector '${connector.name}' has providerKind '${connector.providerKind ?? "null"}', not '${body.provider}' — ChatOps posts through the existing connector adapter and its existing credential`,
       });
     }
+    // ADR-0121 — THE SIGNING SECRET IS PER-PROVIDER, AND BOTH DIRECTIONS ARE
+    // REFUSED RATHER THAN QUIETLY TOLERATED.
+    //
+    // Missing on slack/teams would register a workspace whose callbacks can
+    // never be verified — a courier that can post and can never be answered.
+    // Supplied on outlook is the more interesting error: it means the operator
+    // believes there is an inbound path to secure. There is not, by decision,
+    // so the refusal names the decision instead of storing the secret and
+    // letting them find out when no reply is ever acted on.
+    if (body.provider === "outlook" && body.signingSecret !== undefined) {
+      return reply.status(400).send({
+        error: "signing_secret_not_applicable",
+        detail:
+          "outlook is send-only: a signing secret verifies an INBOUND callback's HMAC and outlook has no " +
+          "inbound path — an email is an unauthenticated assertion, not a signed callback. Register it with " +
+          "no signing secret; approvals are decided from the portal link the message carries.",
+      });
+    }
+    if (body.provider !== "outlook" && body.signingSecret === undefined) {
+      return reply.status(400).send({
+        error: "signing_secret_required",
+        detail: `${body.provider} callbacks are HMAC-verified against this secret — registering without one would create a workspace that can post and can never be answered`,
+      });
+    }
+
     const [row] = await db
       .insert(chatopsConnections)
       .values({
         name: body.name,
         provider: body.provider,
         connectorId: body.connectorId,
-        signingSecretCiphertext: encryptSecret(opts.dataKey, body.signingSecret),
+        signingSecretCiphertext:
+          body.signingSecret === undefined ? null : encryptSecret(opts.dataKey, body.signingSecret),
         defaultChannel: body.defaultChannel,
         allowFencedDecide: body.allowFencedDecide,
         enabled: body.enabled,
@@ -353,25 +405,27 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
   async function postCard(
     conn: typeof chatopsConnections.$inferSelect,
     channel: string,
-    card: { text: string; blocks: Array<Record<string, unknown>> },
+    card: ApprovalCard,
     actorUserId: string | null,
     label: string,
   ): Promise<{ ok: true; messageRef: string | null } | { ok: false; status: number; body: Record<string, unknown> }> {
     const [connector] = await db.select().from(connectors).where(eq(connectors.id, conn.connectorId));
     if (!connector) return { ok: false, status: 400, body: { error: "invalid_reference", detail: "the ChatOps connector was deleted" } };
-    // ADR-0061 §5 — TEAMS PARITY IS INBOUND-ONLY TODAY. `connector-provider`
-    // has no Teams adapter, and inventing one HERE would be the second
-    // integration this design exists to avoid. The inbound half (signature
-    // verification, mapping, the one decide path) is channel-agnostic and works;
-    // the outbound courier refuses loudly rather than silently posting nothing.
-    if (conn.provider !== "slack") {
+    // ADR-0113 — TEAMS OUTBOUND EXISTS NOW. `connector-provider` grew a real
+    // Bot Framework Connector adapter, so the courier routes through the
+    // RESOLVED provider for the connection's own provider rather than assuming
+    // Slack. THE GUARD IS NOT WEAKENED: a provider ChatOps has no outbound
+    // adapter for still refuses loudly here rather than silently posting
+    // nothing — this is a widened allow-list, not a pass-through.
+    if (!CHATOPS_OUTBOUND_PROVIDERS.includes(conn.provider as ChatOpsProvider)) {
       return {
         ok: false,
         status: 501,
         body: {
           error: "outbound_provider_unsupported",
           detail:
-            "connector-provider has no Teams adapter yet, so Teams cards cannot be posted. Inbound Teams callbacks ARE verified and decided; only the outbound courier is missing.",
+            `connector-provider has no outbound adapter for '${conn.provider}', so its cards cannot be posted. ` +
+            `Inbound callbacks for a verified provider ARE verified and decided; only the outbound courier is missing.`,
         },
       };
     }
@@ -380,7 +434,10 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
     if (!cred || !token) {
       return { ok: false, status: 400, body: { error: "connector_credential_missing", detail: "the ChatOps connector has no decryptable bot token" } };
     }
-    const baseUrl = cred.baseUrl ?? connector.baseUrl ?? SLACK_DEFAULT_BASE_URL;
+    const baseUrl =
+      cred.baseUrl ??
+      connector.baseUrl ??
+      (conn.provider === "teams" ? TEAMS_DEFAULT_BASE_URL : SLACK_DEFAULT_BASE_URL);
 
     // EVERY post is guarded — no vendor-default exemption. Posting approval
     // content to a third party is exactly the shape ADR-0034 exists for, so
@@ -415,16 +472,54 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
     }
 
     const provider = resolveConnectorProvider(
-      { kind: "slack", baseUrl, token },
+      { kind: conn.provider as "slack" | "teams", baseUrl, token },
       guarded.fetchImpl as unknown as Parameters<typeof resolveConnectorProvider>[1],
     );
-    const result = await provider.invoke({
-      operation: "write",
-      object: channel,
-      payload: { op: "chat.postMessage", text: card.text, blocks: card.blocks },
-    });
+
+    // The SAME composed card, rendered for the provider that will show it. The
+    // fence decision is NOT re-taken here: `card.actions` is already empty when
+    // `chatDecidable` said no, and both renderers read that one field.
+    const payload =
+      conn.provider === "teams"
+        ? { op: "conversations.sendToConversation", ...teamsActivityForCard(card) }
+        : { op: "chat.postMessage", text: card.text, blocks: card.blocks };
+
+    let result;
+    try {
+      result = await provider.invoke({ operation: "write", object: channel, payload });
+    } catch (err) {
+      // ADR-0113: a Teams post touches TWO hosts — the Entra login host and the
+      // Bot Connector service host — and `guarded.fetchImpl` re-adjudicates
+      // every request URL, so the SECOND host can be refused after the first
+      // was permitted. That refusal arrives here as an EgressBlockedError from
+      // inside the adapter rather than from `guardConnectionCall` above, and it
+      // must become the same honest 403, not an opaque 500.
+      if (err instanceof EgressBlockedError) {
+        await audit(actorUserId, "chatops_connection", conn.id, CHATOPS_RULE_IDS.postRefusedEgress, "deny",
+          `ChatOps post to '${conn.name}' refused by the egress guard mid-call: ${err.decision.reason}`,
+          { code: err.decision.code, baseUrl, phase: "adapter" });
+        return {
+          ok: false,
+          status: 403,
+          body: {
+            error: "egress_blocked",
+            code: err.decision.code,
+            detail:
+              `chatops workspace '${conn.name}': ${err.decision.reason} (a Teams post reaches the Microsoft Entra ` +
+              `login host as well as the Bot Connector service host — BOTH need an Egress Allow Hosts entry)`,
+          },
+        };
+      }
+      throw err;
+    }
     const body = (result.body ?? {}) as Record<string, unknown>;
-    const messageRef = typeof body.ts === "string" ? body.ts : null;
+    // Slack returns `{ok, ts}`; the Bot Connector returns a ResourceResponse
+    // `{id}`. Both are "the handle this message is known by", which is what
+    // `chatops_messages.message_ref` stores — but the field is read PER
+    // PROVIDER rather than by a `ts ?? id` fallback, so a response that happens
+    // to carry both cannot silently make one provider read the other's handle.
+    const refField = conn.provider === "teams" ? "id" : "ts";
+    const messageRef = typeof body[refField] === "string" ? (body[refField] as string) : null;
     return { ok: true, messageRef };
   }
 
@@ -436,7 +531,19 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
 
     const [conn] = body.connectionName
       ? await db.select().from(chatopsConnections).where(eq(chatopsConnections.name, body.connectionName))
-      : await db.select().from(chatopsConnections).where(eq(chatopsConnections.enabled, true)).limit(1);
+      : // ADR-0107 (F01): `chatops_connections` is UNIQUE on `name`, not on
+        // `enabled` — a deployment may have Slack and Teams both switched on.
+        // Unordered, WHICH CHAT WORKSPACE an approval card was posted into was
+        // arbitrary, and an approver could find the card in a different place
+        // on two identical mirrors. Oldest-created wins: the first connection a
+        // deployment configured is its default destination, and an operator who
+        // wants another one names it explicitly (the branch above).
+        await db
+          .select()
+          .from(chatopsConnections)
+          .where(eq(chatopsConnections.enabled, true))
+          .orderBy(asc(chatopsConnections.createdAt), asc(chatopsConnections.id))
+          .limit(1);
     if (!conn) return reply.status(400).send({ error: "no_chatops_connection" });
     if (!conn.enabled) return reply.status(422).send({ error: "connection_disabled" });
 
@@ -495,6 +602,23 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
       const rawBody = typeof req.body === "string" ? req.body : "";
       const headers: Record<string, string | undefined> = {};
       for (const [k, v] of Object.entries(req.headers)) headers[k.toLowerCase()] = Array.isArray(v) ? v[0] : v;
+
+      // ---- WALL 0: a provider with no inbound path is refused HERE ---------
+      // ADR-0121. This is ordered before the decrypt for two reasons, and the
+      // second is the load-bearing one:
+      //
+      //  - a send-only connection holds NO signing secret (it is null by DB
+      //    check), so decrypting first would throw on a public, unauthenticated
+      //    route and turn a designed refusal into a 500;
+      //  - refusing before any cryptographic work is the same cheapness rule
+      //    WALL 1 keeps: an unsolicited packet aimed at this path must cost us
+      //    nothing.
+      //
+      // The 401 matches every other unverifiable inbound, so a prober still
+      // learns nothing about which workspaces exist or what kind they are.
+      if (conn.provider === "outlook" || conn.signingSecretCiphertext === null) {
+        return reply.status(401).send({ error: "unauthenticated", code: "inbound_unsupported_by_design" });
+      }
 
       // ---- WALL 1: signature + replay window, before ANY other work --------
       const signingSecret = decryptSecret(opts.dataKey, conn.signingSecretCiphertext);
