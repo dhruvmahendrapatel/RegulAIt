@@ -11,6 +11,9 @@ credential it mints is printed once and dies with the database.
 Four terminals, in this order. Steps 2–4 all need the same `DATABASE_URL`,
 `REGULAIT_BOOTSTRAP_TOKEN` and `REGULAIT_DATA_KEY`.
 
+**No docker on the demo box?** Skip to §1.1 and come back. Everything from §3 onwards is
+identical — the only thing you lose is the WORM anchor, and §2 says exactly what that costs.
+
 ```bash
 # (1) Postgres. On a laptop, docker compose also gives you the WORM audit anchor — see §2.
 docker compose up -d db minio minio-init
@@ -34,6 +37,58 @@ pnpm --filter @regulait/gateway start
 `demo:setup` ends by dispatching as a real user **before and after** applying the preset. If the
 second one is not `200` it says so in as many words. **Do not present until it is** — with the gates
 on, every refusal you then demo will name the first unmet gate rather than the one you meant to show.
+
+### 1.1 Without docker — a native Postgres path
+
+Docker is not available everywhere this gets demoed (a locked-down laptop, a cloud dev box, a
+customer-supplied machine). Nothing in §1 actually needs containers except Postgres and MinIO, and
+only one of those is load-bearing for the run of show.
+
+**Postgres 16, installed natively.** One-time, as root:
+
+```bash
+pg_ctlcluster 16 main start                                  # if it is not already running
+sudo -u postgres psql -c "CREATE ROLE regulait LOGIN PASSWORD 'regulait';"
+sudo -u postgres psql -c "CREATE DATABASE regulait OWNER regulait;"
+```
+
+**Mint the data key ONCE**, in one terminal, and read it off the screen:
+
+```bash
+openssl rand -base64 32        # 32 random bytes, base64 — copy this value
+```
+
+Then paste **that same literal** into **every** terminal, and run §1 steps 2–5 unchanged:
+
+```bash
+export DATABASE_URL="postgres://regulait:regulait@127.0.0.1:5432/regulait"
+export REGULAIT_BOOTSTRAP_TOKEN="dev-bootstrap"
+export REGULAIT_DATA_KEY="<the value you just minted>"
+export REGULAIT_SCHEDULER=on
+```
+
+Do **not** put `$(openssl rand -base64 32)` in each terminal's export — that mints a different key
+per shell, and the failure is delayed and confusing: seeding works, the gateway starts, and then a
+connector invoke answers `no_data_key` or fails to decrypt a credential the seed wrote minutes ago.
+
+Three things worth knowing rather than discovering:
+
+- **The gateway migrates on start-up**, so there is no separate migrate step and an empty database
+  is the right starting point. `pnpm --filter @regulait/gateway seed` will populate it.
+- **`REGULAIT_DATA_KEY` must be the same value in every terminal and across restarts.** It is the
+  AES-256-GCM key for stored credentials; a new key on restart does not rotate anything, it makes
+  every stored credential undecryptable. Generate it once, keep it in the shell, and **do not write
+  it into a file** — it dies with the session by design.
+- **`demo:setup` talks to Postgres directly**, not over HTTP, and already defaults to
+  `postgres://regulait:regulait@localhost:5432/regulait`. It does not care that there is no docker.
+
+**What you give up: MinIO, and therefore the WORM anchor.** There is no S3 Object Lock bucket, so
+`resolveAnchorSink` falls through to the local buffer (`audit-chain.ts:601-606`) — not to `off`.
+The posture page will show the anchor row with a local destination and **`tamperResistant: false`**,
+and §2's ceiling drops from 7 of 7 to **6 of 7**. See §2 for how to present that, because it is a
+better beat than it sounds.
+
+---
 
 ### Why step 3 exists
 
@@ -64,9 +119,24 @@ asking the bucket for its Object Lock configuration — a `GOVERNANCE`-mode buck
 **false**, because an administrator holding `s3:BypassGovernanceRetention` defeats it. No flag can
 fake it, which is the point and is worth saying out loud.
 
-**Confirm the page reads 7 of 7 before you present.** If docker is unavailable on the demo box, run
-at 5 of 7 and show the two unmet rows deliberately — an honest "here is what this install has not
-got" lands better than a number nobody can interrogate.
+**Confirm the page reads 7 of 7 before you present.** If you cannot, show the unmet rows
+deliberately — an honest "here is what this install has not got" lands better than a number nobody
+can interrogate.
+
+**On the §1.1 native path the ceiling is 6 of 7, and the missing row is the good one.** With
+`REGULAIT_SCHEDULER=on` exported, the scheduler row satisfies; the anchor row cannot, because
+without MinIO there is no Object Lock bucket to ask. It will read a **local buffer** with
+`tamperResistant: false`, and the control's own text says why: *"A local directory is a buffer,
+never WORM."*
+
+That is worth thirty seconds on screen rather than an apology. The point the row makes is the point
+the whole product makes: **the grade comes from asking the medium, not from reading the
+configuration.** No environment variable can flip that boolean, a GOVERNANCE-mode bucket grades
+`false` too, and a competitor's green tick here would mean nothing. Say: *"this install has no WORM
+medium, and rather than let me claim one, the product grades itself down."*
+
+If the buyer wants to see the `true` case, that needs docker (`minio` + `minio-init`) or a real S3
+Object Lock **COMPLIANCE** bucket. Do not stand one up against a live AWS account for a demo.
 
 ---
 
@@ -205,6 +275,9 @@ Two things to say out loud while it is on screen, because the payload says them:
 | activating a pack answers `license_feature_not_licensed` | the ephemeral demo licence is missing, or the gateway cannot see the keyring | re-run `demo:setup`, and start the gateway with `REGULAIT_LICENSE_KEYRING=<repo>/demo-license-keys` |
 | every MCP call returns a bare `{"error":"internal"}` | the demo MCP server is not running — an upstream connection failure currently surfaces as an opaque 500 rather than a named refusal | restart `demo:mcp`. (Worth knowing: unlike `egress_blocked` and `mcp_admission_held`, this one is not named yet.) |
 | `MANAGE-2.2` stays `unsatisfied` after a refusal | the refused call carried no `x-regulait-project-id` | repeat it with the header; an unattributed refusal is correctly not counted |
+| `docker compose up` fails / no docker daemon | the box has no container runtime | use the §1.1 native-Postgres path; you lose only the WORM anchor |
+| `no_data_key`, or stored credentials stop decrypting after a restart | `REGULAIT_DATA_KEY` was unset or regenerated between runs | export the SAME key in every terminal; on the native path a new key means re-seeding, not re-entering credentials |
+| posture reads 6 of 7 with the anchor row on a local destination | expected on the §1.1 path — no Object Lock bucket to grade | nothing to fix; present it as §2 describes |
 
 Re-running `demo:setup` is safe at any point. It reads the world back at each step rather than
 assuming the previous run landed, and it mints fresh keys for Dana and Avery each time.
