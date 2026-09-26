@@ -21,12 +21,39 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createDb, runMigrations, backupRuns, eq } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { dataKeyFormatError } from "./secrets.js";
 
 const connectionString =
   process.env.DATABASE_URL ?? "postgres://regulait:regulait@localhost:5432/regulait";
 const BOOT = process.env.REGULAIT_BOOTSTRAP_TOKEN ?? "seed-bootstrap";
 const AUTH = { authorization: `Bearer ${BOOT}` };
 const DATA_KEY = process.env.REGULAIT_DATA_KEY;
+
+// The seeder builds an app directly rather than going through `startGateway`,
+// so ADR-0063's boot gate never runs here — deliberately, because constructing
+// an app is not putting a deployment into service (see boot.ts). The cost of
+// that, found by making the mistake: a malformed REGULAIT_DATA_KEY sailed
+// through migrations and most of the seed and then surfaced as
+// `POST /v1/git/connections -> 500 {"error":"internal"}`, an opaque failure
+// several minutes after the actual error. The seeder is usually the FIRST
+// thing an operator runs on a new deployment, which makes it the first place
+// the key can be wrong and the best place to say so.
+//
+// This checks the value's SHAPE only. It is not the custody gate and must not
+// become one: continuity is a question about a database in service, and the
+// seeder's whole job is to populate one that is not yet.
+if (DATA_KEY !== undefined && DATA_KEY.trim() !== "") {
+  const problem = dataKeyFormatError(DATA_KEY);
+  if (problem !== null) {
+    console.error(
+      `\nREGULAIT_DATA_KEY is set, but ${problem}\n\n` +
+        `  Nothing has been seeded. Mint one with \`openssl rand -hex 32\` and use the SAME value ` +
+        `in every terminal — the gateway, the seeder and demo:setup all encrypt under it, and a ` +
+        `different key in one of them writes ciphertext the others cannot read.\n`,
+    );
+    process.exit(1);
+  }
+}
 
 const db = createDb(connectionString);
 // An idle pooled connection killed out from under us (e.g. a scratch database

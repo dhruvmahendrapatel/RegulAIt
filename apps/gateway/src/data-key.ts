@@ -162,6 +162,7 @@ import {
   FINGERPRINT_DOMAIN,
   FINGERPRINT_PREFIX,
   dataKeyFingerprint,
+  dataKeyFormatError,
   decryptSecret,
 } from "./secrets.js";
 
@@ -189,6 +190,7 @@ const NIL_USER = "00000000-0000-0000-0000-000000000000";
 export const DATA_KEY_RULE_IDS = {
   recorded: "data-key-fingerprint-recorded",
   verified: "data-key-fingerprint-verified",
+  malformed: "data-key-malformed",
   mismatch: "data-key-fingerprint-mismatch",
   undecryptable: "data-key-ciphertext-undecryptable",
   keyMissing: "data-key-missing",
@@ -307,6 +309,7 @@ export async function probeCiphertext(
 // ---------------------------------------------------------------------------
 
 export type DataKeyBootCode =
+  | "malformed_key"
   | "no_key_configured"
   | "recorded"
   | "verified"
@@ -324,6 +327,11 @@ export interface DataKeyBootDecision {
 }
 
 export interface DataKeyBootInput {
+  /** why the configured key is unusable as a key AT ALL (wrong encoding, wrong
+   * length), or null when it is well-formed or absent. Checked FIRST, because
+   * every other question in this matrix is about WHICH key this is, and a value
+   * that cannot be parsed is not a key to ask that about. */
+  malformed: string | null;
   /** fingerprint of the key this process is running with, or null for none */
   current: string | null;
   /** fingerprint this deployment's ciphertext was written under, or null */
@@ -340,7 +348,28 @@ export interface DataKeyBootInput {
  * only through an integration path that has to arrange a real restore.
  */
 export function decideDataKeyBoot(input: DataKeyBootInput): DataKeyBootDecision {
-  const { current, recorded, rotatedFrom, probe } = input;
+  const { malformed, current, recorded, rotatedFrom, probe } = input;
+
+  // FIRST, ahead of everything. A malformed key has no fingerprint, so it
+  // cannot be compared to the recorded one; before this branch existed the
+  // attempt threw out of `keyBytes` three frames down and `main.ts` re-raised
+  // it as a stack trace — bypassing the one place in this product written to
+  // say something useful to an operator mid-restore. The refusal was correct;
+  // the message was not.
+  if (malformed !== null) {
+    return {
+      code: "malformed_key",
+      ok: false,
+      message:
+        `REFUSING TO START: ${DATA_KEY_ENV} is set, but ${malformed}\n\n` +
+        `  This is a configuration error, not a key-custody problem: the value cannot be used ` +
+        `as an AES-256 key at all, so this deployment's real key — whatever it is — has not been ` +
+        `consulted and nothing has been recorded or changed.\n\n` +
+        `  Fix the value and start again. If you are minting a NEW key for a fresh deployment: ` +
+        `\`openssl rand -hex 32\`. If this deployment already has stored secrets, use the key ` +
+        `whose fingerprint this database records — see docs/ops/DB_BACKUP.md.`,
+    };
+  }
 
   if (current === null) {
     if (recorded === null) {
@@ -531,7 +560,16 @@ export async function verifyDataKeyOnBoot(
   dataKeyHex: string | undefined | null,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<DataKeyBootResult> {
-  const current = fingerprintOrNull(dataKeyHex);
+  // Format BEFORE fingerprint. `fingerprintOrNull` hashes `Buffer.from(x,
+  // "hex")` and `keyBytes` throws on anything that is not 32 bytes, so asking
+  // for a fingerprint first is what used to turn a one-character typo into an
+  // unhandled stack trace out of `main.ts`. Ask the authority instead, and let
+  // the matrix refuse in words.
+  const malformed =
+    dataKeyHex === undefined || dataKeyHex === null || dataKeyHex.trim() === ""
+      ? null // no key at all is a separate, legitimate state — see `no_key_configured`
+      : dataKeyFormatError(dataKeyHex);
+  const current = malformed === null ? fingerprintOrNull(dataKeyHex) : null;
   const state = await readState(db);
   const recorded = state?.fingerprint ?? null;
   const rotatedRaw = env[DATA_KEY_ROTATION_ENV];
@@ -554,7 +592,7 @@ export async function verifyDataKeyOnBoot(
   const probe =
     current !== null && recorded === null ? await probeCiphertext(db, (dataKeyHex as string).trim()) : null;
 
-  const decision = decideDataKeyBoot({ current, recorded, rotatedFrom, probe });
+  const decision = decideDataKeyBoot({ malformed, current, recorded, rotatedFrom, probe });
 
   if (
     decision.code === "mismatch" &&
@@ -651,8 +689,32 @@ export async function verifyDataKeyOnBoot(
       });
       throw new DataKeyBootError(decision, recorded, current);
 
+    // A configuration error, not a custody event: no fingerprint was derived,
+    // the recorded key was never compared against anything, and nothing was
+    // written. It is still filed, for the same reason the other three are —
+    // "why did this deployment not come up" belongs in the trail and not only
+    // in a console nobody was watching. The key itself is never in the detail.
+    case "malformed_key":
+      await audit(db, {
+        ruleId: DATA_KEY_RULE_IDS.malformed,
+        effect: "deny",
+        reason: decision.message,
+        detail: { problem: malformed, recorded },
+      });
+      throw new DataKeyBootError(decision, recorded, current);
+
     case "no_key_configured":
       break;
+
+    default: {
+      // Exhaustiveness. This switch decides whether a deployment starts, and a
+      // new DataKeyBootCode that nobody adds a case for would otherwise fall
+      // straight through and BOOT — `decision.ok` being false changes nothing
+      // here, because the throw is what stops it. That is exactly how adding
+      // `malformed_key` nearly turned a refusal into a silent acceptance.
+      const unreachable: never = decision.code;
+      throw new Error(`unhandled data-key boot code: ${String(unreachable)}`);
+    }
   }
 
   const attested = current === null ? false : await hasAttestation(db, current);

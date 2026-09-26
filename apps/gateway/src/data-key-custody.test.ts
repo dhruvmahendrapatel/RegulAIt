@@ -68,7 +68,7 @@ import {
   probeCiphertext,
   verifyDataKeyOnBoot,
 } from "./data-key.js";
-import { encryptSecret } from "./secrets.js";
+import { dataKeyFormatError, encryptSecret } from "./secrets.js";
 import { closeAll, dropScratchDatabase } from "./testing/scratch-db.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -250,9 +250,14 @@ describe("the fingerprint", () => {
     expect(FP_A).toBe(FINGERPRINT_PREFIX + expected);
   });
 
-  it("refuses a key the envelope itself would refuse", () => {
-    expect(() => dataKeyFingerprint("deadbeef")).toThrow(/32 bytes/);
-    expect(() => dataKeyFingerprint("")).toThrow(/32 bytes/);
+  it("refuses a key the envelope itself would refuse, and says which way it is wrong", () => {
+    // D01 sharpened these messages: both still refuse, and each now names its
+    // OWN problem rather than both reporting a length. Asserting the specific
+    // wording is the point — a fingerprint that cannot be derived is the last
+    // moment before an operator is handed something unactionable.
+    expect(() => dataKeyFingerprint("deadbeef")).toThrow(/8 hex characters.*exactly 64/);
+    expect(() => dataKeyFingerprint("")).toThrow(/it is empty/);
+    expect(() => dataKeyFingerprint("zzzz")).toThrow(/not hex digits/);
   });
 
   it("fingerprintsMatch is total — a null on either side is never a match", () => {
@@ -270,7 +275,14 @@ describe("the fingerprint", () => {
 
 describe("the boot decision", () => {
   const decide = (over: Partial<Parameters<typeof decideDataKeyBoot>[0]>) =>
-    decideDataKeyBoot({ current: null, recorded: null, rotatedFrom: null, probe: null, ...over });
+    decideDataKeyBoot({
+      malformed: null,
+      current: null,
+      recorded: null,
+      rotatedFrom: null,
+      probe: null,
+      ...over,
+    });
 
   it("no key + nothing recorded = nothing to check", () => {
     const d = decide({});
@@ -347,6 +359,76 @@ describe("the boot decision", () => {
 // ===========================================================================
 // 3. THE RESTORE, END TO END — the scenario ADR-0035 left open
 // ===========================================================================
+
+// ===========================================================================
+// 2b. A MALFORMED KEY — the shape check that runs BEFORE any of the above
+// ===========================================================================
+//
+// D01. Before this existed the refusal was correct and the MESSAGE was not:
+// `fingerprintOrNull` hashed `Buffer.from(x, "hex")`, `keyBytes` threw three
+// frames down, and `main.ts` — whose whole job is to print an operator
+// sentence rather than a stack trace — re-raised it as a stack trace, because
+// it only special-cases DataKeyBootError.
+//
+// The regression these tests really guard is subtler than the message. The
+// switch in `verifyDataKeyOnBoot` is what stops a boot; `decision.ok === false`
+// stops nothing. A new code with no case would fall through and the deployment
+// would COME UP on a key it had just refused.
+
+describe("a malformed data key", () => {
+  it("names what is wrong, and names base64 specifically because that is the mistake people make", () => {
+    // 32 random bytes in base64 — the exact thing `openssl rand -base64 32` prints
+    const asBase64 = Buffer.from("a".repeat(32), "utf8").toString("base64");
+    const problem = dataKeyFormatError(asBase64);
+    expect(problem).toMatch(/not hex digits/);
+    expect(problem).toMatch(/BASE64/);
+    expect(problem).toMatch(/openssl rand -hex 32/);
+  });
+
+  it("distinguishes 'not hex' from 'wrong length', because they need different fixes", () => {
+    expect(dataKeyFormatError("a".repeat(63))).toMatch(/63 hex characters/);
+    expect(dataKeyFormatError("a".repeat(65))).toMatch(/65 hex characters/);
+    // 64 characters, one of them not hex: the length is right and the message
+    // must NOT say the length is wrong
+    const typo = "a".repeat(63) + "z";
+    expect(dataKeyFormatError(typo)).toMatch(/not hex digits/);
+    expect(dataKeyFormatError(typo)).not.toMatch(/hex characters, and exactly/);
+  });
+
+  it("accepts the real thing, in either case, with whitespace around it", () => {
+    expect(dataKeyFormatError(KEY_A)).toBeNull();
+    expect(dataKeyFormatError(KEY_A.toUpperCase())).toBeNull();
+    expect(dataKeyFormatError(`  ${KEY_A}\n`)).toBeNull();
+    expect(dataKeyFormatError("")).toBe("it is empty");
+  });
+
+  it("is the SAME authority the cipher uses — anything it accepts, encryptSecret accepts", () => {
+    // the drift this prevents: a validator that is more lenient than the
+    // parser would let a key past the gate and fail at the first write, which
+    // is precisely the failure D01 is about.
+    expect(dataKeyFormatError(KEY_A)).toBeNull();
+    expect(() => encryptSecret(KEY_A, "x")).not.toThrow();
+    expect(dataKeyFormatError("zz")).not.toBeNull();
+    expect(() => encryptSecret("zz", "x")).toThrow(/unusable/);
+  });
+
+  it("is decided FIRST — ahead of every custody question, and never reports as a mismatch", () => {
+    const d = decideDataKeyBoot({
+      malformed: "it is 10 hex characters, and exactly 64 are required (32 bytes, AES-256).",
+      current: null,
+      // a recorded key is present: without the first-branch ordering this
+      // would come back `key_missing`, which would send an operator hunting a
+      // lost key rather than fixing a typo
+      recorded: FP_A,
+      rotatedFrom: null,
+      probe: null,
+    });
+    expect(d.code).toBe("malformed_key");
+    expect(d.ok).toBe(false);
+    expect(d.message).toMatch(/REFUSING TO START/);
+    expect(d.message).toMatch(/configuration error, not a key-custody problem/);
+  });
+});
 
 describe("restore onto a new box", () => {
   it("first boot with key A records the fingerprint and comes up normally", async () => {
@@ -568,6 +650,37 @@ describe("first boot after upgrade", () => {
     const res = await verifyDataKeyOnBoot(legacy, undefined, {});
     expect(res.code).toBe("no_key_configured");
     expect(res.ok).toBe(true);
+  });
+
+  it("D01: a base64 key REFUSES THE BOOT as a DataKeyBootError, not a raw throw", async () => {
+    await legacy.delete(dataKeyState);
+    await legacy.delete(auditLog);
+    const asBase64 = Buffer.from("a".repeat(32), "utf8").toString("base64");
+
+    // the type is the whole point: main.ts only prints the operator sentence
+    // for DataKeyBootError and re-raises anything else as a stack trace, which
+    // is exactly what a bare Error out of keyBytes used to produce.
+    const err = await verifyDataKeyOnBoot(legacy, asBase64, {}).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DataKeyBootError);
+    expect((err as DataKeyBootError).decision.code).toBe("malformed_key");
+    expect((err as DataKeyBootError).message).toMatch(/openssl rand -hex 32/);
+
+    // and it REFUSED — a code whose case is missing from the switch would
+    // return here instead of throwing, and the deployment would come up
+    expect((err as DataKeyBootError).decision.ok).toBe(false);
+
+    // nothing was recorded: no fingerprint was derived, so the recorded key
+    // was never compared against anything
+    expect(await legacy.select().from(dataKeyState)).toEqual([]);
+
+    // but the refusal IS in the trail, and the key is NOT
+    const [filed] = await legacy
+      .select()
+      .from(auditLog)
+      .where(eq(auditLog.ruleId, DATA_KEY_RULE_IDS.malformed))
+      .limit(1);
+    expect(filed?.effect).toBe("deny");
+    expect(JSON.stringify(filed?.detail ?? {})).not.toContain(asBase64);
   });
 });
 

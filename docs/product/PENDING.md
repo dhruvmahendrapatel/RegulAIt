@@ -788,38 +788,43 @@ digest binds the arguments, not the state they act on.
 
 # Addendum — found while walking the demo runbook on a docker-less box (2026-09-26)
 
-## D01 — a malformed `REGULAIT_DATA_KEY` boots clean and fails later as a bare `500`
+## ~~D01 — a malformed `REGULAIT_DATA_KEY` boots clean and fails later as a bare `500`~~ — **CLOSED 2026-09-26, and the original write-up was WRONG**
 
-**Found by making the mistake.** Writing the runbook's native-Postgres path I told the operator to
-mint the key with `openssl rand -base64 32`. Wrong: `keyBytes` (`apps/gateway/src/secrets.ts:32-35`)
-does `Buffer.from(key, "hex")` and requires exactly 32 bytes, so the key must be **64 hex
-characters**. What makes it worth recording is not the typo but **what the product did with it**.
+**Correcting myself first.** The heading above is what I wrote before testing it, from reading
+code rather than running it. **The gateway does not boot clean.** `keyBytes` throws, so
+`verifyDataKeyOnBoot` → `fingerprintOrNull` → `dataKeyFingerprint` → `keyBytes` raises before
+anything starts. Verified by booting with a base64 key: exit 1, nothing listening. I asserted the
+stronger, more alarming claim without probing it — the same error as F08's last bullet, and the
+second time in one day that I wrote down a conclusion I had not executed.
 
-ADR-0063's boot gate (`verifyDataKeyOnBoot`, `apps/gateway/src/data-key.ts:529`) exists precisely so
-that a key problem is caught at start-up, with a message written for an operator mid-restore rather
-than a stack trace. It checks key **continuity** — does this fingerprint match the one this
-deployment's ciphertext was written under — and never key **format**. `dataKeyFingerprint` HMACs
-`Buffer.from(hex, "hex")`, which silently yields a short buffer for a non-hex string instead of
-throwing. So:
+**What was actually wrong** turned out to be two narrower things, both now fixed:
 
-1. the gateway boots clean and prints its posture block;
-2. seeding runs and gets most of the way through;
-3. the **first credential write** — `POST /v1/git/connections`, `workflows.ts:1307` — throws inside
-   `encryptSecret` and surfaces as `500 {"error":"internal"}`.
+1. **The refusal was right and the message was not.** `keyBytes` threw a plain `Error`, and
+   `main.ts` only converts `DataKeyBootError` into the operator sentence — everything else it
+   re-raises. So the one place in this product written to be read at 3am mid-restore printed a
+   stack trace from three frames down instead. There is now a `malformed_key` code, decided
+   **first** in `decideDataKeyBoot` (ahead of every custody question — with a recorded fingerprint
+   present the old ordering would have reported `key_missing`, sending an operator hunting a lost
+   key rather than fixing a typo), filed to the ledger under `data-key-malformed`, and thrown as a
+   `DataKeyBootError`.
+2. **The seeder had no gate at all, and that is where the `500` came from.** `seed.ts` calls
+   `buildApp` directly rather than `startGateway`, deliberately — constructing an app is not
+   putting a deployment into service. But the seeder is usually the *first* thing run on a new
+   deployment, so it is the first place the key can be wrong; it sailed through migrations and
+   most of the seed and failed at `POST /v1/git/connections` as `500 {"error":"internal"}`. It now
+   checks the value's **shape** up front and exits 1 saying so. Shape only: continuity is a
+   question about a database in service, and the seeder's job is to populate one that is not.
 
-Six `seed.test.ts` tests fail with that 500 and none of them names the cause. It cost a full
-verification run to attribute.
+**A real bug was found while fixing it.** The `switch` in `verifyDataKeyOnBoot` is what stops a
+boot — `decision.ok === false` stops nothing, the `throw` does. It had no exhaustiveness check, so
+adding `malformed_key` without a case would have made the gateway **come up on a key it had just
+refused**. There is now a `never` default. That is the more dangerous defect of the two and it
+existed only for as long as it took to add a code.
 
-**The fix is small and belongs in the boot gate**: validate the format before fingerprinting, and
-raise a `DataKeyBootError` naming the expected shape. That turns the simplest possible
-misconfiguration into the 3am message the gate was built to give, instead of the one error shape
-this product tries hardest never to emit — an unnamed 500. Not done here: it changes start-up
-behaviour, `boot.test.ts` drives the real path, and this was a documentation task.
-
-**Also corrected in passing:** `packages/shared/src/audit-scrub.ts` carried a comment asserting the
-key "is base64 of 32 random bytes and looks like any other base64". It is hex, and that comment is
-what sent me the wrong way. Fixed in the same commit — a wrong comment in a security file is a
-defect, and this one demonstrably misled a reader.
+**Root cause of my own error, worth keeping:** `secrets.ts` said hex, `audit-scrub.ts` said base64,
+and the format was only truly knowable from `Buffer.from(x, "hex")`. There is now one exported
+authority, `dataKeyFormatError`, which `keyBytes` itself uses — so the validator cannot be more
+lenient than the parser — and a test asserts exactly that.
 
 ## D02 — the runbook's first command does not run without docker
 
