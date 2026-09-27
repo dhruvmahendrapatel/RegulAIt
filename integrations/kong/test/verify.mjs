@@ -26,7 +26,7 @@
  * .github/workflows/integrations.yml, which pins the Kong image.
  */
 import { execFileSync, execSync, spawn } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -164,6 +164,11 @@ async function main() {
   // could never express that, which is itself part of why the first adapter
   // reached for an environment variable.
   const dir = mkdtempSync(path.join(tmpdir(), "kong-e2e-"));
+  // `mkdtemp` creates the directory 0700 and owned by THIS user; Kong runs as
+  // the `kong` user inside the container and cannot traverse it. That is the
+  // whole of the first real container failure — "Permission denied" parsing the
+  // declarative config, nothing to do with its contents or the plugin.
+  chmodSync(dir, 0o755);
   const declarative = `_format_version: "3.0"
 services:
   - name: governed
@@ -196,6 +201,7 @@ plugins:
       timeout_ms: 2000
 `;
   writeFileSync(path.join(dir, "kong.yml"), declarative);
+  chmodSync(path.join(dir, "kong.yml"), 0o644);
 
   // Best-effort: on the FIRST run there is no such container and `docker rm -f`
   // exits non-zero, which would fail the harness before it started. Found by
