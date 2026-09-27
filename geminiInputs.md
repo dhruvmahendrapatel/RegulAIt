@@ -92,3 +92,28 @@ Beyond the gateway and shadow AI features, RegulAIt envisions an 8-pillar archit
 *   **VISION:** Bi-directional sync with Azure DevOps, Jira, Linear, and Asana where the PM tool acts as the *source of truth* for priority and acceptance criteria to avoid a split-brain system of record.
 *   **REALITY:** Currently lacks robust bi-directional sync adapters.
 *   **NEXT STEPS:** Agents need to build the integration layer so that decisions are recorded as first-class work items, and approvals made inside RegulAIt sync back as status transitions (or comments) on the linked ADO/Jira tickets.
+
+---
+
+## 5. Enterprise Cybersecurity Roadmap
+
+To elevate RegulAIt from an "AI proxy with compliance rules" to a true **enterprise-grade cybersecurity application** (AI SecOps platform), agents should prioritize building the following capabilities:
+
+### A. Active Threat Defense
+*   **Prompt Injection & Jailbreak Blocking:** Upgrade the current injection detection from "log mode" to an active firewall layer that blocks prompt injections, system prompt leaks, and malicious payloads *before* they reach the LLM.
+*   **Malware & Malicious URL Scanning:** Implement an inspection layer for MCP tools. If an agent fetches a file or webpage, the payload must be scanned for malware or phishing links before it enters the agent's context window.
+
+### B. Enterprise Data Loss Prevention (DLP)
+*   **Context-Aware Redaction:** Move beyond static pattern matching (e.g., regex for SSNs). Implement Exact Data Match (EDM) to protect specific customer databases and allow for in-flight redaction/masking rather than just outright dropping the request.
+*   **Source Code & IP Protection:** Build classifiers to detect and block the exfiltration of proprietary source code or internal API keys to public models.
+
+### C. SecOps & SIEM/SOAR Integration
+*   **Real-time SIEM Streaming:** While WORM storage is good for audits, SOCs need real-time data. Build native streaming integrations for Splunk, Datadog, Microsoft Sentinel, and CrowdStrike LogScale.
+*   **Automated Incident Response (SOAR):** Implement webhooks that trigger SOAR platforms when severe violations occur (e.g., repeated jailbreak attempts), allowing for automated remediation like isolating the user or revoking credentials.
+
+### D. Identity & Access Management (IAM) Parity
+*   **SCIM Provisioning & SAML SSO:** Build SCIM endpoints to automatically sync users, groups, and roles directly from enterprise directories like Azure AD (Entra ID) or Okta.
+*   **Attribute-Based Access Control (ABAC):** Expand the policy engine to evaluate dynamic attributes (e.g., device posture, network location) alongside static roles.
+
+### E. Certifications
+*   Code architecture and data handling must strictly align with the requirements for **SOC 2 Type II, ISO 27001, and HIPAA compliance** to satisfy enterprise CISOs.
