@@ -863,3 +863,68 @@ another file in this suite make this assertion false without touching my rows?"
 wider lever to make an assertion hold is the signal that the fixture is wrong:
 the right move is almost always a value so specific to this run that no sibling
 could collide with it.**
+
+---
+
+## M-043 (2026-09-27) — I shipped a fail-open and an auth bypass, both in code I had exempted from testing in writing
+
+ADR-0127 shipped two proxy adapters. An independent review found both unsafe,
+and neither defect was subtle.
+
+**The Envoy adapter failed open on `deny`.** Envoy's HTTP `ext_authz` decides
+from the **status code** — 2xx allow, anything else denied. `/v1/authz/check`
+answers `200` for all three outcomes and puts the decision in the body, because
+that is what the Kong adapter needed. So a correctly computed, correctly
+audited refusal would have reached Envoy as 200 and been **admitted**, by a
+deployment that believed it was governed, with a ledger row agreeing the call
+was denied. That is worse than shipping no adapter.
+
+**The Kong adapter let the caller choose who they were.** It read
+`x-regulait-subject` from the request and used the authenticated consumer only
+as a **fallback** — so any caller who could reach the route could be authorized
+as anyone. `serverId` and `toolName` came from client headers too, so a caller
+could also choose *which question was asked*: name a tool you hold, invoke a
+different one.
+
+**The rule.** *Two claims about a component I have never executed are worth
+less than one run of it. If I cannot run it, I do not get to say it is safe —
+I say it is unverified, and I do not ship it as an example someone will paste.*
+
+Three things make this worse than an ordinary bug, and they are the reasons to
+keep this entry long.
+
+1. **I wrote the disclosure and then reasoned past it.** ADR-0127's own limits
+   section says *"the adapters are not exercised by CI… the endpoint is tested,
+   the adapters are reviewed. That is a real gap and it is disclosed rather
+   than papered over."* Six paragraphs earlier the same ADR asserts *"both
+   adapters fail closed."* I wrote both sentences in one sitting. Disclosing a
+   gap does not license a confident claim across it — **it forbids one.** An
+   honest limits section is not a payment that buys the right to assert
+   anyway.
+
+2. **The comment stated the safe rule; the line below did the unsafe thing.**
+   Directly above the Kong subject line I wrote *"Kong must map its own
+   authenticated consumer to a RegulAIt user UUID before here; the raw consumer
+   id will not do."* The next line preferred the client's header over the
+   consumer. I read that file more than once and the comment kept answering the
+   question for me. **A comment asserting a property is evidence about
+   intent and none at all about behaviour** — when auditing, read the code with
+   the comments covered.
+
+3. **It is M-041 again, one layer out.** M-041 is *"a procedure is not
+   documentation until it has been executed."* I applied it to a runbook and
+   not to an integration, because config and Lua did not feel like a procedure.
+   They are: an example config is a procedure a customer executes, and this one
+   would have executed a fail-open. The rule was never about runbooks.
+
+**What it cost.** Both adapters went out in a repository that is now public,
+and the Envoy one has been withdrawn rather than patched — a correct version
+needs a contract change at the endpoint (status codes Envoy can act on), which
+Kong's adapter would have to move with. The fix is now a design decision
+instead of a config edit, which is what shipping unverified bought.
+
+**The standing consequence.** Nothing under `integrations/` is described as
+supported again until its **deny path** is exercised end to end against a
+pinned container, asserting **zero upstream invocations** for every refusal
+and every PDP failure. A deny path that has never been run is a deny path that
+does not work.

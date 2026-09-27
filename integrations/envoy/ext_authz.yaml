@@ -1,87 +1,60 @@
-# ADR-0127 / ROADMAP G9 — Envoy `ext_authz` pointed at RegulAIt's PDP.
+# ADR-0127 / ROADMAP G9 — WITHDRAWN. THERE IS NO ENVOY ADAPTER.
 #
-# Envoy stays the data plane. RegulAIt decides. Nothing here proxies traffic
-# THROUGH RegulAIt: the request never leaves Envoy's hands, and the only thing
-# that crosses is a question and an answer.
+# This file used to contain an `ext_authz` configuration. It was unsafe, it was
+# never run against a real Envoy, and it has been removed rather than patched.
+# What is left is the reason, so that nobody rebuilds it the same way and so the
+# ADR's claim that "both adapters fail closed" is corrected where it was made.
 #
-# READ docs/deployment/GATEWAY_TOPOLOGY.md FIRST. It states the three things
-# that make this safe or unsafe — the credential is a subject-impersonation
-# key, the decision costs real database work, and a PDP decides without
-# enforcing. None of them are visible from this file alone.
+# DO NOT COPY THE OLD VERSION OUT OF GIT HISTORY. Four things were wrong with
+# it, and the first is the one that matters:
 #
-# Envoy 1.28+. Written against the HTTP variant of ext_authz on purpose: the
-# gRPC one is faster and would need a proto service RegulAIt does not speak,
-# and this is the version a customer can stand up against the existing REST
-# endpoint in an afternoon.
-
-http_filters:
-  - name: envoy.filters.http.ext_authz
-    typed_config:
-      "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz
-      transport_api_version: V3
-
-      # FAIL CLOSED. The default is `false`, which is the dangerous default for
-      # a governance deployment: if RegulAIt is unreachable, Envoy would admit
-      # everything and the audit trail would show nothing was ever asked. An
-      # outage must not silently become an open door.
-      failure_mode_allow: false
-
-      # The PDP does real work — on the order of twenty database round trips
-      # per decision (GATEWAY_TOPOLOGY.md §4). This sits on the p99 of every
-      # request Envoy serves, so the timeout is a deliberate number and not a
-      # default: long enough for a healthy decision, short enough that a sick
-      # PDP is a fast failure rather than a hang.
-      http_service:
-        server_uri:
-          uri: http://regulait-gateway:3000
-          cluster: regulait_pdp
-          timeout: 2s
-        path_prefix: /v1/authz/check
-
-        authorization_request:
-          allowed_headers:
-            patterns:
-              - exact: content-type
-              # The SUBJECT. Envoy must map its own authenticated identity to a
-              # RegulAIt user UUID before this point — see §3 of the topology
-              # doc. RegulAIt trusts this header because the caller holds an
-              # admin key; that is precisely why the key is sensitive.
-              - exact: x-regulait-subject
-          headers_to_add:
-            - key: authorization
-              # A secret in a config file is a placeholder, not a pattern. Use
-              # your secret manager / SDS. See GATEWAY_TOPOLOGY.md §5.
-              value: "Bearer ${REGULAIT_PDP_KEY}"
-
-        authorization_response:
-          # `x-regulait-decision` distinguishes `approval_required` from a flat
-          # deny. Forward it so a caller can tell "a human can unblock this"
-          # from "never" — the distinction the approvals queue exists to make,
-          # and the one a bare 403 destroys.
-          allowed_client_headers:
-            patterns:
-              - exact: x-regulait-decision
-              - exact: x-regulait-reason
-
-      # Envoy's ext_authz speaks OK / denied and has no third outcome, so
-      # `approval_required` arrives as a denial carrying its own header. That
-      # is the correct mapping — the request must not proceed — but a caller
-      # that treats every 403 the same will lose a recoverable state.
-      status_on_error:
-        code: ServiceUnavailable
-
-clusters:
-  - name: regulait_pdp
-    type: STRICT_DNS
-    connect_timeout: 1s
-    load_assignment:
-      cluster_name: regulait_pdp
-      endpoints:
-        - lb_endpoints:
-            - endpoint:
-                address:
-                  socket_address: { address: regulait-gateway, port_value: 3000 }
-    # The gateway speaks plain HTTP behind its own TLS sidecar (docs/ops/TLS.md).
-    # If this hop leaves the host, terminate TLS in front of it or run it over a
-    # network you control: the question carries a subject identity and the
-    # answer carries a rule id.
+#  1. IT FAILED OPEN ON DENY — the exact outcome the whole feature exists to
+#     prevent.
+#
+#     Envoy's HTTP `ext_authz` decides from the STATUS CODE: 2xx means allow,
+#     anything else means denied. `POST /v1/authz/check` answers 200 for all
+#     three outcomes and carries the decision in the JSON body, because that is
+#     what the Kong adapter (which parses the body) needs. Envoy does not parse
+#     the body. So a correctly computed, correctly audited `deny` would have
+#     reached Envoy as 200 and been admitted — with a ledger row saying the
+#     request was refused. Worse than no adapter: a deployment that believes it
+#     is governed, and an audit trail that agrees with it.
+#
+#  2. It could not have produced a decision at all. Envoy's HTTP ext_authz
+#     sends no request body unless `with_request_body` is configured, and
+#     `/v1/authz/check` parses its body with a required zod schema — so every
+#     check would have been a 400. A 400 is non-2xx, so in practice it would
+#     have denied EVERYTHING rather than allowing everything. That is luck, not
+#     design: the fail-open in (1) is what the config actually specified, and
+#     it is what a customer would have hit the moment they fixed the body.
+#
+#  3. `path_prefix` PREPENDS to the original request path. It is not a route
+#     override. The PDP would have been asked for `/v1/authz/check/<whatever
+#     path the client requested>`, which the gateway does not route.
+#
+#  4. It forwarded `x-regulait-decision` and `x-regulait-reason` back to the
+#     client via `allowed_client_headers`. The endpoint has never set those
+#     headers — they are a Kong-side construct. The config described a contract
+#     the server does not implement.
+#
+# WHAT A REAL ADAPTER NEEDS, so the next attempt starts from the right place:
+#
+#  - A status-code contract Envoy can act on, not a body one: the PDP must
+#    answer non-2xx for `deny` and `approval_required`, distinguishing them by
+#    header. That is a change to the ENDPOINT, and it breaks Kong's current
+#    `res.status ~= 200 -> pdp_error` branch, so the two adapters and the route
+#    have to move together. It is a contract decision, not a config tweak.
+#  - Subject derivation from Envoy's own authenticated identity, never from a
+#    client-settable header — the same defect the Kong adapter carried and the
+#    header-stripping it now does.
+#  - Verification against a PINNED ENVOY CONTAINER with an upstream invocation
+#    counter, asserting ZERO upstream calls for every deny, every
+#    approval_required, and every PDP failure. A adapter whose deny path is not
+#    exercised end to end is an adapter whose deny path does not work; that is
+#    the lesson this file is.
+#
+# Contract reference:
+# https://www.envoyproxy.io/docs/envoy/latest/api-v3/extensions/filters/http/ext_authz/v3/ext_authz.proto
+#
+# Until that exists, RegulAIt supports Kong for this integration and does not
+# support Envoy. Saying so is cheaper than the alternative.

@@ -92,9 +92,19 @@ scanning, cost attribution or token optimisation, because **the payload never ar
 decides without enforcing: a caller that ignores the answer proceeds, and we will not know. The
 ledger records what was *asked*, not what the proxy then did.
 
-Both adapters therefore **fail closed**, including when the PDP is unreachable — an outage that
+The adapter therefore **fails closed**, including when the PDP is unreachable — an outage that
 silently becomes an open door is the worst shape this can take, because the trail would show that
 nothing was ever asked.
+
+> **CORRECTION, 2026-09-27.** As first written this section said *both* adapters fail closed. That
+> was false of the Envoy one and false in the most expensive direction. Envoy's `ext_authz` decides
+> from the HTTP status code and `/v1/authz/check` answers `200` for `deny` as well as `allow`, so a
+> refusal would have been admitted — by a deployment that believed it was governed, with a ledger
+> row agreeing that the call was denied. The Envoy adapter is **withdrawn**; see
+> `integrations/envoy/ext_authz.yaml` for the full post-mortem and what a correct one requires. The
+> claim was written from the config's intent rather than from Envoy's contract, and no Envoy ever
+> ran it — which is precisely the gap the "not exercised by CI" limit below described and which I
+> then reasoned past.
 
 ### 6. Honest performance, up front
 
@@ -123,6 +133,15 @@ which is a maintenance category this project did not previously have.
   half-tested ones.
 - **No identity mapping.** The customer maps their consumer/JWT subject to a RegulAIt user UUID. We
   do not, and cannot, do it for them.
-- **The adapters are not exercised by CI.** They are configuration and Lua for other people's
-  runtimes; the *endpoint* is tested, the adapters are reviewed. That is a real gap and it is
-  disclosed rather than papered over.
+- **The adapter is not exercised by CI.** It is Lua for someone else's runtime; the *endpoint* is
+  tested, the adapter is reviewed. That is a real gap and it is disclosed rather than papered over
+  — and disclosing it turned out not to be enough: an unexercised adapter shipped with a fail-open
+  deny path and a second one shipped taking its subject from a client-settable header. Review did
+  not catch either. Nothing in `integrations/` should be called supported again until its deny
+  path is exercised end to end against a pinned container, asserting zero upstream invocations for
+  every refusal.
+- **The subject was spoofable until 2026-09-27.** The Kong adapter preferred an inbound
+  `x-regulait-subject` header over the authenticated consumer, and took `serverId`/`toolName` from
+  client headers too — so a caller could choose both who they were and which question was asked.
+  Identity now comes only from the authenticated consumer, the question comes from route
+  configuration, and inbound `x-regulait-*` headers are stripped.

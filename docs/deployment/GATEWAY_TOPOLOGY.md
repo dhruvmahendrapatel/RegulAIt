@@ -3,8 +3,15 @@
 For a customer who already runs Kong, Envoy, or another L7 gateway and does not want a second one.
 Their proxy keeps the traffic; RegulAIt answers **"may this run?"** on each request.
 
-Adapters: [`integrations/envoy/ext_authz.yaml`](../../integrations/envoy/ext_authz.yaml),
-[`integrations/kong/regulait-authz.lua`](../../integrations/kong/regulait-authz.lua).
+Adapter: [`integrations/kong/regulait-authz.lua`](../../integrations/kong/regulait-authz.lua).
+
+> **Kong only, today. There is no Envoy adapter** — the one shipped with ADR-0127 was withdrawn
+> because it failed open on `deny`, and [`integrations/envoy/ext_authz.yaml`](../../integrations/envoy/ext_authz.yaml)
+> now records why and what a correct one needs. Envoy's `ext_authz` decides from the HTTP status
+> code, and `/v1/authz/check` answers `200` for all three outcomes with the decision in the body.
+> Giving Envoy a contract it can act on is a change to the ENDPOINT that Kong's adapter would have
+> to move with, so it is a contract decision rather than a config fix. Do not point an `ext_authz`
+> filter at this endpoint in the meantime.
 
 ---
 
@@ -90,11 +97,15 @@ timeout rather than a default. Before you put this in front of production traffi
 | `deny` | 403 | refused: no grant, revoked, rate limited, halted, out of scope |
 | `approval_required` | **403, with `x-regulait-decision: approval_required`** | a human can unblock this |
 
-The third is the one to get right. Envoy's `ext_authz` has two outcomes and no third, so a pending
-approval **must** map to a denial — failing closed, as everywhere else in this product. But it is not
-the same fact as a policy refusal, and a caller that treats every 403 alike loses the distinction
-the approvals queue exists to make: *"ask someone"* versus *"never"*. Both adapters carry it in a
-header for that reason. Surface it.
+The third is the one to get right. A proxy filter of this shape has two outcomes and no third, so a
+pending approval **must** map to a denial — failing closed, as everywhere else in this product. But
+it is not the same fact as a policy refusal, and a caller that treats every 403 alike loses the
+distinction the approvals queue exists to make: *"ask someone"* versus *"never"*. The Kong adapter
+carries it in a header for that reason. Surface it.
+
+Note that the table above describes what the ADAPTER returns to the client, not what the endpoint
+returns to the adapter. `/v1/authz/check` itself answers `200` for all three and puts the decision
+in the body — which is exactly why a status-code-driven filter cannot be pointed at it directly.
 
 ## 7. What is deliberately not here
 
