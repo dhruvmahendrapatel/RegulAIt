@@ -63,12 +63,29 @@ its **deny path** is exercised end to end against a **pinned Kong container**
 with an **upstream invocation counter**, asserting **zero upstream calls** for
 each refusal. That now runs on every change, and asserts exactly that for:
 
+- an unauthenticated request (`key-auth` refuses before this plugin runs);
 - a policy `deny`;
-- an `approval_required`;
-- a PDP that is unreachable;
-- a PDP that answers non-200 or unparseable;
+- an **`approval_required`** — refused with a `403` AND carrying
+  `x-regulait-decision: approval_required`, because a caller that treats every
+  403 alike loses the distinction the approvals queue exists to make;
+- a PDP that is **unreachable** (the gateway is killed);
+- a PDP that answers **non-200** (a stub returning 500 on a second governed
+  route — a different plugin branch from the unreachable case);
+- a PDP whose answer is **unparseable** (a stub returning 200 with a body
+  `cjson` cannot decode — the shape most likely to be mistaken for success);
 - a request with a forged `x-regulait-subject` (and its case variants), which
-  must be ignored entirely rather than merely overridden.
+  must be ignored entirely rather than merely overridden;
+- the **decision context** the plugin claims to send, read back from the PDP's
+  own `contextApplied` ledger rather than from the plugin's source — including
+  that `args` is NOT claimed.
+
+**Correction (2026-09-27, AER-034):** the three middle entries above —
+`approval_required`, non-200 and unparseable — were listed here before the
+harness asserted any of them. They are asserted now, on two extra routes whose
+plugin instances point at stub PDPs, which is what made the two answer-shaped
+failures expressible at all (a plugin's config is per route). A list of
+assertions in a README is a promise; this one had three entries it had not paid
+for.
 
 Checking the client's status code would NOT be enough: a 403 rendered after the
 upstream already ran is indistinguishable from a refusal, from the client's

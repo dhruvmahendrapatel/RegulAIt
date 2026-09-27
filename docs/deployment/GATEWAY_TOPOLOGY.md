@@ -14,9 +14,12 @@ Adapter: [`integrations/kong/`](../../integrations/kong/) (a Kong plugin).
 > **pinned `kong:3.6`** in DB-less mode behind `key-auth`. The assertion is not that the client
 > saw a 403 — a 403 rendered after the upstream already ran looks identical from the client side —
 > it is that **the upstream was never called**, measured by a counting upstream. Verified: an
-> entitled consumer reaches the upstream; a denied one does not; a forged `x-regulait-subject`
-> naming a more-entitled user is ignored in all three case spellings; and an unreachable PDP fails
-> closed. First green run 2026-09-27.
+> entitled consumer reaches the upstream; a denied one does not; an `approval_required` is refused
+> with `x-regulait-decision: approval_required` rather than as a flat deny; a forged
+> `x-regulait-subject` naming a more-entitled user is ignored in all three case spellings; a PDP
+> that is unreachable, that answers non-200, or whose answer cannot be parsed each fail closed; and
+> the decision context the adapter claims to send is read back from the PDP's own `contextApplied`
+> ledger, including that `args` is NOT claimed. First green run 2026-09-27.
 >
 > What that covers precisely: Kong 3.6, DB-less, `key-auth`, one governed route. Other Kong
 > versions, DB-backed mode and other auth plugins are not covered, and the priority ordering this

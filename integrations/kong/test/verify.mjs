@@ -189,6 +189,34 @@ async function main() {
   scratchBase = base;
   scratchBoot = boot;
 
+  // AER-034 — a THIRD subject, entitled to the tool AND caught by an approval
+  // rule, so the `approval_required` branch can be asserted end to end. It needs
+  // its own user because the entitled consumer's `allow` is the control for
+  // every other case: putting a rule on THEM would turn assertion (b) into a
+  // different test.
+  const pending = (
+    await api("POST", `${base}/v1/users`, { email: `kong-pending-${Date.now()}@kong.example`, displayName: "Kong pending" }, boot)
+  ).json;
+  if (!pending?.id) throw new Error(`could not create the approval-required subject: ${JSON.stringify(pending).slice(0, 200)}`);
+  await api("POST", `${base}/v1/grants/tools`, { userId: pending.id, serverId: server.id, toolName: tool.name }, boot);
+  const rule = await api(
+    "POST",
+    `${base}/v1/rules/approvals`,
+    {
+      scope: "user",
+      userId: pending.id,
+      serverScope: "server",
+      serverId: server.id,
+      toolName: tool.name,
+      approverUserId: admin.id,
+    },
+    boot,
+  );
+  if (rule.status !== 201) {
+    throw new Error(`could not create the approval rule: ${rule.status} ${JSON.stringify(rule.json).slice(0, 200)}`);
+  }
+
+
   // ---- 4. Kong, DB-less, with the plugin mounted -------------------------
   // The declarative config is GENERATED because `custom_id` must carry a real
   // RegulAIt user UUID that only exists after seeding. A checked-in kong.yml
@@ -209,6 +237,15 @@ services:
       - name: governed-route
         paths: ["/governed"]
         strip_path: true
+      # AER-034 — two more governed routes, differing ONLY in where their plugin
+      # instance points its PDP. A plugin's config is per route, which is what
+      # makes "the same upstream, a broken decision point" expressible at all.
+      - name: pdp-500-route
+        paths: ["/pdp-500"]
+        strip_path: true
+      - name: pdp-junk-route
+        paths: ["/pdp-junk"]
+        strip_path: true
 consumers:
   - username: entitled
     custom_id: "${entitled.id}"
@@ -218,6 +255,10 @@ consumers:
     custom_id: "${stranger.id}"
     keyauth_credentials:
       - key: stranger-key
+  - username: pending
+    custom_id: "${pending.id}"
+    keyauth_credentials:
+      - key: pending-key
 plugins:
   - name: key-auth
     route: governed-route
@@ -245,6 +286,37 @@ plugins:
       # claiming it does.
       project_id: "${project.id}"
       session_origin: "sso"
+      timeout_ms: 2000
+  # The two broken-PDP routes. key-auth on each, because the plugin refuses an
+  # unauthenticated request before it ever calls a PDP — without auth these would
+  # assert the wrong branch.
+  - name: key-auth
+    route: pdp-500-route
+    config:
+      key_names: ["apikey"]
+  - name: regulait-authz
+    route: pdp-500-route
+    config:
+      # the plugin appends /v1/authz/check, so this resolves to the upstream's
+      # non-counting stub path that answers 500
+      pdp_url: "http://host.docker.internal:${UPSTREAM_PORT}/__pdp500"
+      pdp_key: "{vault://env/regulait-pdp-key}"
+      server_id: "${server.id}"
+      tool_name: "${tool.name}"
+      timeout_ms: 2000
+  - name: key-auth
+    route: pdp-junk-route
+    config:
+      key_names: ["apikey"]
+  - name: regulait-authz
+    route: pdp-junk-route
+    config:
+      # 200 with a body cjson cannot decode — an unreadable answer must refuse,
+      # never be treated as an allow
+      pdp_url: "http://host.docker.internal:${UPSTREAM_PORT}/__pdpjunk"
+      pdp_key: "{vault://env/regulait-pdp-key}"
+      server_id: "${server.id}"
+      tool_name: "${tool.name}"
       timeout_ms: 2000
 `;
   writeFileSync(path.join(dir, "kong.yml"), declarative);
@@ -373,7 +445,41 @@ plugins:
       `status ${r.status}, upstream count ${await upstreamCount()}`);
   }
 
-  // (f) THE QUESTION THE ADAPTER ASKS (AER-028). The README claimed the callout
+  // (f) APPROVAL_REQUIRED — a DENY that is not a policy refusal (AER-034).
+  //     The README claimed this was asserted and it was not. It is the one
+  //     outcome a proxy filter cannot express (two outcomes, no third), so it
+  //     maps to a 403 — and it must ALSO carry the header that keeps it
+  //     distinguishable from "never", because that distinction is the entire
+  //     reason the approvals queue exists. Zero upstream calls, like every
+  //     other refusal.
+  await api("GET", `http://127.0.0.1:${UPSTREAM_PORT}/__reset`);
+  r = await fetch(proxy, { headers: { apikey: "pending-key" } });
+  check("an approval_required is refused, named in a header, and never proxied",
+    r.status === 403 &&
+      r.headers.get("x-regulait-decision") === "approval_required" &&
+      (await upstreamCount()) === 0,
+    `status ${r.status}, decision ${r.headers.get("x-regulait-decision")}, count ${await upstreamCount()}`);
+
+  // (g) A PDP THAT ANSWERS NON-200 (AER-034). A different branch from the
+  //     unreachable case below — `res.status ~= 200` rather than `not res` —
+  //     and the README claimed both. An answer the adapter will not act on must
+  //     fail CLOSED.
+  await api("GET", `http://127.0.0.1:${UPSTREAM_PORT}/__reset`);
+  r = await fetch(`http://127.0.0.1:${KONG_PROXY_PORT}/pdp-500`, { headers: { apikey: "entitled-key" } });
+  check("a PDP that answers non-200 fails CLOSED and proxies nothing",
+    r.status >= 400 && (await upstreamCount()) === 0,
+    `status ${r.status}, count ${await upstreamCount()}`);
+
+  // (h) A PDP THAT ANSWERS UNPARSEABLY. The nastiest of the three: a 200 with a
+  //     body the plugin cannot read is the shape most likely to be mistaken for
+  //     success by a `if status == 200 then proceed` adapter.
+  await api("GET", `http://127.0.0.1:${UPSTREAM_PORT}/__reset`);
+  r = await fetch(`http://127.0.0.1:${KONG_PROXY_PORT}/pdp-junk`, { headers: { apikey: "entitled-key" } });
+  check("a PDP whose answer cannot be parsed fails CLOSED and proxies nothing",
+    r.status >= 400 && (await upstreamCount()) === 0,
+    `status ${r.status}, count ${await upstreamCount()}`);
+
+  // (i) THE QUESTION THE ADAPTER ASKS (AER-028). The README claimed the callout
   //     carried context and the plugin sent three fields. The PDP records what
   //     each decision was actually computed on, so the ledger is the place to
   //     check it — asserting on the plugin's source would only restate the code.
@@ -391,8 +497,12 @@ plugins:
       `contextApplied=${JSON.stringify(applied)}`);
   }
 
-  // (e) PDP DOWN -> fail closed, and still nothing proxied. An outage that
+  // (j) PDP DOWN -> fail closed, and still nothing proxied. An outage that
   //     silently becomes an open door is the worst shape this can take.
+  //
+  //     LAST ON PURPOSE, and lettered out of sequence to say so: it KILLS the
+  //     gateway, so every assertion that needs a live PDP — including (i), which
+  //     reads the PDP's own ledger — has to have run already.
   await api("GET", `http://127.0.0.1:${UPSTREAM_PORT}/__reset`);
   gateway.kill("SIGKILL");
   await new Promise((r2) => setTimeout(r2, 1500));

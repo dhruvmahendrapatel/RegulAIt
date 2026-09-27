@@ -25,6 +25,29 @@ createServer((req, res) => {
     res.writeHead(200).end("{}");
     return;
   }
+  // ---- STUB PDP ENDPOINTS (AER-034) -------------------------------------
+  //
+  // The plugin's two failure branches are `if not res` (unreachable) and
+  // `res.status ~= 200` (an answer it will not act on). The unreachable branch
+  // was asserted by killing the gateway; these two paths let the OTHER branch be
+  // asserted, by pointing a second governed route's `pdp_url` at them.
+  //
+  // They must NOT increment the counter: they are the PDP standing in for a
+  // broken one, not the upstream being reached. Counting them would make the
+  // very assertion they exist for ("zero upstream calls") unfalsifiable.
+  if (req.url?.startsWith("/__pdp500")) {
+    res.writeHead(500, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: "pdp_exploded" }));
+    return;
+  }
+  if (req.url?.startsWith("/__pdpjunk")) {
+    // 200 with a body `cjson.decode` cannot parse — the plugin must refuse
+    // rather than treat an unreadable answer as an allow
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end("this is not json {{{");
+    return;
+  }
+
   // Anything else is a real proxied request and is what we are counting.
   count += 1;
   res.writeHead(200, { "content-type": "application/json" });
