@@ -111,7 +111,7 @@ kept in sync bi-directionally (§3), not a RegulAIt-internal record that merely 
 ```yaml
 pm_tool_field_mapping:
   adapter: azure_devops
-  organization: reynoldsbrands
+  organization: acme-brands
   project: RegulAIt-Pilot
   mappings:
     task:

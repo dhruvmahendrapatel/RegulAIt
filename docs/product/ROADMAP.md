@@ -581,7 +581,7 @@ separate policy decision"* and *"implement a deterministic PEP … validating ac
 system, actor identity, authorization, business rules, risk thresholds, and required approvals."*
 
 That cuts both ways. Where we do **not** match it, the gap is conspicuous precisely because the rest
-lines up — and a security-led buyer (which Reynolds is) will read this paper.
+lines up — and a security-led buyer, which our current prospect is, will read this paper.
 
 ### 7.1 Honest self-assessment against the 15-item Secure-by-Default checklist
 
