@@ -13,6 +13,7 @@ import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, Input, Select, Table, Textarea } from "../../../ui/kit";
 import {
   KV,
+  RemoveButton,
   agentOpts,
   optionEls,
   useAction,
@@ -738,9 +739,55 @@ function EntitlementCard(props: { uOpts: Array<{ v: string; l: string }>; agents
               { key: "provider", header: "Provider", render: (x) => x.provider },
               { key: "tier", header: "Tier", align: "right", render: (x) => x.tier },
               {
+                key: "source",
+                header: "Via",
+                render: (x) =>
+                  x.source === "role" ? (
+                    <Badge tone="info" title={(x.roles ?? []).join(", ")}>
+                      role{(x.roles ?? []).length ? `: ${(x.roles ?? []).join(", ")}` : ""}
+                    </Badge>
+                  ) : (
+                    <Badge tone="ok">direct</Badge>
+                  ),
+              },
+              {
                 key: "revoked",
                 header: "",
                 render: (x) => (x.revoked ? <Badge tone="danger">revoked</Badge> : null),
+              },
+              {
+                key: "actions",
+                header: "",
+                align: "right",
+                render: (x) => (
+                  <RemoveButton
+                    what={`${x.name} from this user`}
+                    // A role-granted agent has no direct grant to delete. Saying
+                    // that on the row is the point: an absent button would read
+                    // as a missing feature, and the admin would not learn that
+                    // the lever they want is the role — or a per-user
+                    // revocation, which subtracts without touching the role.
+                    disabledReason={
+                      x.source === "role"
+                        ? `granted by role ${(x.roles ?? []).join(", ")} — remove it there, or add a per-user revocation on the Users page`
+                        : undefined
+                    }
+                    consequence={
+                      <p>
+                        The direct grant is deleted, so the next call this user makes on{" "}
+                        <strong>{x.name}</strong> is refused by default-deny. Nothing already audited
+                        changes — the ledger keeps every call made while the grant existed, and the
+                        removal is itself audited.
+                      </p>
+                    }
+                    onRemove={() => api.del(`/v1/grants/agents/${x.grantId}`)}
+                    onDone={() => {
+                      void act.run(async () => {
+                        setView(await api.get<UserAgentPolicyView>(`/v1/users/${userId}/agents`));
+                      }, null);
+                    }}
+                  />
+                ),
               },
             ]}
             rows={view.agents}

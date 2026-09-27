@@ -23,7 +23,18 @@ import type {
 } from "../../api/adminTypes";
 import { fmtUsd } from "../../api/format";
 import { useSession } from "../../session/SessionContext";
-import { Badge, Button, Card, EmptyState, ErrorState, Input, Modal, SkeletonBlock, Table } from "../../ui/kit";
+import {
+  Badge,
+  Button,
+  Card,
+  ConfirmModal,
+  EmptyState,
+  ErrorState,
+  Input,
+  Modal,
+  SkeletonBlock,
+  Table,
+} from "../../ui/kit";
 import { useToast } from "../../ui/toast";
 import a from "./admin.module.css";
 import v from "../views.module.css";
@@ -165,6 +176,77 @@ export function useNameMaps() {
 // ---- one async action at a time -------------------------------------------
 
 /** Submit-handler helper: busy flag + inline error + success toast + refresh. */
+/**
+ * The destructive row action, once, for every table that has one.
+ *
+ * WHY THIS EXISTS AS A COMPONENT. An audit of the admin surface found twelve
+ * DELETE endpoints the gateway serves that no screen could reach — among them
+ * all four grant types, which is the product's central object: an admin could
+ * hand out access and not take it back without a database client. The reason
+ * was never a decision; it is that "grant" is one line and "remove" is a
+ * button, a confirmation, a busy state, an error surface and a refetch. Priced
+ * per table, it did not get built. Priced once, it is one line per site.
+ *
+ * TWO RULES IT ENFORCES, because they are what separates a complete surface
+ * from one that merely has the happy path.
+ *
+ * 1. AN ACTION THAT DOES NOT APPLY IS DISABLED AND EXPLAINED, NEVER HIDDEN.
+ *    A missing button is indistinguishable from a missing feature, and the
+ *    reader has no way to tell which. `disabledReason` turns "why can't I
+ *    remove this?" into an answer on the row — an agent granted BY A ROLE has
+ *    no direct grant to delete, and saying so is more useful than an absence.
+ *
+ * 2. THE CONFIRMATION STATES THE CONSEQUENCE, NOT THE ACTION. "Are you sure?"
+ *    tells the reader nothing they did not already know. `consequence` says
+ *    what will be true afterwards — that access stops at the next call, that
+ *    the audit trail is kept — which is the only thing that makes a
+ *    confirmation more than a speed bump.
+ */
+export function RemoveButton(props: {
+  /** the object, named as a person would say it: "Ada Admin's grant on gpt-4o" */
+  what: string;
+  onRemove: () => Promise<unknown>;
+  /** what becomes true once it is gone; shown in the confirmation */
+  consequence?: ReactNode;
+  /** present but refused, with the reason on the row */
+  disabledReason?: string;
+  label?: string;
+  /** runs after a successful removal — refetch the list it came from */
+  onDone?: () => void;
+}) {
+  const act = useAction();
+  const [open, setOpen] = useState(false);
+  const blocked = props.disabledReason != null;
+  return (
+    <>
+      <Button
+        size="sm"
+        variant="ghost"
+        disabled={blocked || act.busy}
+        title={props.disabledReason}
+        aria-label={`${props.label ?? "Remove"} ${props.what}`}
+        onClick={() => setOpen(true)}
+      >
+        {props.label ?? "Remove"}
+      </Button>
+      <ConfirmModal
+        open={open}
+        danger
+        title={`Remove ${props.what}?`}
+        confirmLabel={props.label ?? "Remove"}
+        body={props.consequence}
+        onCancel={() => setOpen(false)}
+        onConfirm={() => {
+          void act.run(props.onRemove, `Removed ${props.what}`).then((ok) => {
+            setOpen(false);
+            if (ok) props.onDone?.();
+          });
+        }}
+      />
+    </>
+  );
+}
+
 export function useAction() {
   const { toast } = useToast();
   const invalidate = useAdminInvalidate();
