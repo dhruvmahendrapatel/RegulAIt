@@ -105,6 +105,52 @@ function main() {
     return false;
   };
 
+  // ---- the ADD side ------------------------------------------------------
+  //
+  // "73 POST routes are unreached" is a true number and a useless one: most are
+  // ACTIONS (/prune, /sweep, /abort, /remediate), not add buttons, and a census
+  // that counts them reads as noise and gets ignored. The precise question is
+  // narrower and checkable: IS THERE A COLLECTION THE UI LISTS AND CANNOT ADD
+  // TO? That is what "the add button is missing" actually means, and it is
+  // three, not seventy-three.
+  const posted = new Set();
+  for (const f of walk(gatewaySrc)) {
+    const src = readFileSync(f, "utf8");
+    for (const m of src.matchAll(/app\.post\(\s*"([^"]+)"/g)) posted.add(norm(m[1]));
+  }
+  const gotten = new Set();
+  for (const f of walk(gatewaySrc)) {
+    const src = readFileSync(f, "utf8");
+    for (const m of src.matchAll(/app\.get\(\s*"([^"]+)"/g)) gotten.add(norm(m[1]));
+  }
+  const uiVerb = (verb) => {
+    const out = new Set();
+    for (const f of walk(webSrc)) {
+      const src = readFileSync(f, "utf8");
+      for (const m of src.matchAll(new RegExp(`api\\.${verb}(?:<[^>]*>)?\\(`, "g"))) {
+        for (const lit of src.slice(m.index, m.index + 400).matchAll(/[`"'](\/v1\/[^`"']*)[`"']/g)) {
+          out.add(norm(lit[1].split("?")[0]));
+        }
+      }
+    }
+    return out;
+  };
+  const uiPost = uiVerb("post");
+  const uiGet = uiVerb("get");
+  const anyMatch = (route, set) => {
+    if (set.has(route)) return true;
+    const want = route.split("/");
+    for (const u of set) {
+      const got = u.split("/");
+      if (got.length === want.length && got.every((seg, i) => seg === want[i] || seg === ":x" || want[i] === ":x")) {
+        return true;
+      }
+    }
+    return false;
+  };
+  const addGaps = [...posted]
+    .filter((p) => !anyMatch(p, uiPost) && gotten.has(p) && anyMatch(p, uiGet))
+    .sort();
   if (served.size === 0) {
     console.error("preflight-ui-affordances: found no DELETE routes — the scan is broken, not the app");
     return 2;
@@ -125,6 +171,17 @@ function main() {
   for (const r of orphans) {
     console.error(`  NO UI AFFORDANCE  ${r}`);
   }
+  if (addGaps.length > 0) {
+    console.log("");
+    console.log(`listed by the UI but not addable from it: ${addGaps.length}`);
+    for (const r of addGaps) console.error(`  NO ADD AFFORDANCE  ${r}`);
+    console.error(
+      "\nEach route above creates something the UI already SHOWS — the list is\n" +
+        "there and the way to add to it is not. Build the form, or say here why\n" +
+        "the collection is populated some other way.",
+    );
+  }
+
   if (orphans.length > 0) {
     console.error(
       "\nEach route above can delete a governed object that no screen can delete.\n" +
@@ -132,7 +189,7 @@ function main() {
         "DELIBERATELY_API_ONLY in this file with a reason somebody can check.",
     );
   }
-  return orphans.length > 0 || staleExemptions.length > 0 ? 1 : 0;
+  return orphans.length > 0 || staleExemptions.length > 0 || addGaps.length > 0 ? 1 : 0;
 }
 
 try {
