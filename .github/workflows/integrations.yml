@@ -1,6 +1,6 @@
 # Proxy-adapter verification — the pinned container M-043 demands.
 #
-# DELIBERATELY NOT PART OF `ci.yml`, and not on `pull_request`, YET.
+# DELIBERATELY NOT PART OF `ci.yml`, and deliberately not a gate — yet.
 #
 # Two adapters shipped from this repository without ever being run: one failed
 # OPEN on deny, the other could not load its first line. The rule written
