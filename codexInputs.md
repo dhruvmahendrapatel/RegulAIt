@@ -1941,6 +1941,161 @@ dependency-blocked rows.
   not deletion semantics, database integrity, proxy enforcement, accessibility conformance,
   production readiness, certification or enterprise readiness. The repository-reported full web
   suite remains unverified in this run.
+
+### Automated enterprise-readiness run — 2026-09-27 05:35:45 CDT (UTC-05:00)
+
+**Target branch, synchronization and reviewed range**
+
+- Exclusive target: `dhruv/active`.
+- The run began with local HEAD and `origin/dhruv/active` at
+  `3b4635de53d58c338696099eadf19d1ed5ab59ed`. The only pre-existing worktree item was the unrelated
+  untracked `RegulAIt/` directory; it was not read, moved, staged or changed.
+- `git fetch origin dhruv/active --prune` and `git pull --ff-only origin dhruv/active`
+  fast-forwarded the checkout to `a5c873409e5875fd0dbdffa0eafde4b78de20fd6`, matching upstream,
+  without merge, rebase, reset or stash.
+- Incremental review range: `3b4635d..a5c8734` (nine commits, 14 files), plus the still-open
+  authorization-callout findings. The range replaces the unusable Kong pre-function with a custom
+  plugin, adds and runs a real Kong container harness, makes that harness a PR gate, restores the
+  narrow Kong support claim, and changes the blocked-removal accessibility behavior.
+
+**Commands/tests and outcomes**
+
+- Mandatory suite and repository instruction reads — completed before synchronization and review.
+- Branch/status/remote/ref inspection, `git fetch origin dhruv/active --prune`, commit/delta
+  inspection and `git pull --ff-only origin dhruv/active` — **PASS**; local and upstream reached
+  `a5c8734...` and tracked files remained clean.
+- `git diff --check 3b4635d..HEAD` — **PASS**.
+- `node --check integrations/kong/test/verify.mjs` and
+  `node --check integrations/kong/test/upstream.mjs` — **PASS**.
+- `corepack pnpm --filter @regulait/web typecheck` — **PASS**.
+- `corepack pnpm --filter @regulait/web build` — **PASS**; Vite reported a 1,116.80 kB main
+  JavaScript chunk (310.10 kB gzip), above the configured 900 kB warning threshold.
+- `node scripts/preflight-ui-affordances.mjs` — **EXIT 1 by the script's stated contract**: 53
+  DELETE routes, 51 detected as reachable, zero exempt and two orphaned
+  (`/v1/approvals/views/:x`, `/v1/llm/backend-configs/:x`), plus two listed collections without an
+  add affordance (`/v1/copilot/proposals`, `/v1/redteam/libraries`). These are unchanged open UI
+  gaps; the result is source-pattern evidence, not runtime proof.
+- GitHub Actions run `36300665525`, job `108567580158`, was independently inspected with `gh`:
+  **PASS** on PR head `4d7bd55458961a542a90760be7037ce6fd7a7921`. Its build, Kong pull and
+  adapter-verification step succeeded. The job log confirms only unauthenticated, allow, policy
+  deny, three subject-header spellings and unreachable-PDP assertions. Evidence URL:
+  https://github.com/dhruvmahendrapatel/RegulAIt/actions/runs/36300665525
+- The local Kong harness was not rerun. No Kong image was installed locally, its script drops a
+  fixed database and uses fixed ports/container names, and no exclusive disposable database was
+  available. No database, browser, migration, cloud, provider or deployment test ran.
+
+#### AER-033 — HIGH — The Kong verification harness persists an unrestricted administrator key in a world-readable temporary file
+
+**Evidence type:** direct source observation. GitHub-hosted runners are ephemeral, but local and
+self-hosted-runner exposure was not reproduced with another operating-system account.
+
+The harness mints a key for `admin@regulait.local` and retains its one-time plaintext token
+(`integrations/kong/test/verify.mjs:154-159`). It then changes the generated temporary directory to
+mode `0755`, interpolates that token literally as `pdp_key` in `kong.yml`, and changes the file to
+mode `0644` (`:166-204`). Any local account able to traverse the normal system temporary directory
+can therefore read the full administrator bearer credential during the run. The `finally` block
+removes the Kong container and kills processes, but does not delete the host directory/file, revoke
+the key or drop the scratch database (`:333-353`). A source search found no `rmSync`, `unlink`, key
+revocation or final database drop. Redaction in the diagnostic `cat` output (`:250-260`) does not
+remove the on-disk secret.
+
+**Impact:** the newly required security gate leaves a durable, broadly readable control-plane
+credential on developer machines and persistent/self-hosted runners. Because AER-027 remains open,
+this is not a callout-scoped token: it is an unrestricted administrator identity. A second local
+user or later process can use the retained credential against a gateway/database that remains
+reachable, turning an integration check into full administrative compromise. The ephemeral nature
+of GitHub-hosted runners reduces persistence there; it does not make the documented local harness
+safe.
+
+**Recommended remediation:** do not serialize a plaintext administrator token into a
+world-readable bind mount. Give the adapter a purpose-built, action-scoped workload credential as
+required by AER-027; inject it through a Kong-supported secret/vault mechanism with the narrowest
+possible exposure. Keep any unavoidable host directory/file owner-only, and make the container
+access it without granting every host user read access. In an unconditional cleanup path, revoke
+the minted key, remove the complete temporary directory, and drop a uniquely named scratch
+database only after proving it belongs to this run. Apply the same cleanup when startup or an
+assertion fails.
+
+**Acceptance evidence required:**
+
+1. A synthetic canary token cannot be read by a non-runner OS account from the temp directory,
+   container configuration/inspection, process arguments or logs during the run.
+2. Normal success, Kong startup failure, assertion failure and interruption each leave no canary in
+   the host temp tree and no reusable key or owned scratch database.
+3. The callout credential is denied on unrelated administrative routes and is revocable without
+   rotating a human/admin identity.
+4. A concurrent run uses unique resources and cannot delete, reuse or expose another run's secret
+   or database.
+
+#### AER-034 — MEDIUM — The restored Kong verification claim exceeds the assertions and change coverage of its gate
+
+**Evidence type:** source-to-documentation comparison plus independently inspected repository-run
+log; missing cases are not inferred from a green summary.
+
+`integrations/kong/README.md:57-69` says the harness asserts zero upstream calls for policy `deny`,
+`approval_required`, PDP unreachable, PDP non-200 or unparseable, and a forged subject header. The
+executable assertions at `integrations/kong/test/verify.mjs:290-330` cover unauthenticated, allow,
+one policy deny, three spellings of only `x-regulait-subject`, and PDP unreachable. There is no
+approval-required, reachable-PDP non-200 or unparseable-response test. The independently inspected
+green Actions log lists exactly the smaller set; it does not support the broader README statement.
+
+The harness also creates only one governed route with one server/tool binding (`verify.mjs:172-201`).
+It therefore does not satisfy AER-030's two-route acceptance test proving that two plugin instances
+in one Kong process authorize distinct actions, nor does it exercise forged server/tool/decision
+headers, missing route mappings or disabled/deleted identities. Finally, the required workflow is
+triggered only by `integrations/**` and its own YAML (`.github/workflows/integrations.yml:24-29`).
+Changes to the gateway PDP route, shared decision schema, authorization semantics, seed or lockfile
+can break the contract without running this gate. `kong:3.6` and `postgres:16` are mutable tags,
+not immutable image pins, despite the workflow's “PINNED” label (`:36-55`).
+
+**Impact:** the one observed runtime is valuable evidence for a narrow Kong 3.6 DB-less/key-auth
+path, but the repository describes refusal modes it did not run and labels a mutable environment as
+pinned. Contract changes outside `integrations/` can merge without exercising the adapter. This can
+turn a truthful narrow verification into false confidence about action binding and fail-closed
+coverage.
+
+**Recommended remediation:** either narrow the README to the assertions that exist or, preferably,
+add deterministic PDP fixtures/fault injection for `approval_required`, non-200 and malformed
+responses, plus a second route/plugin instance with a different tool. Assert zero upstream calls
+for every refusal and prove the PDP ledger received the exact route-specific action. Add missing
+mapping/identity/header cases. Expand workflow path coverage to the gateway endpoint, shared
+contract/schema, relevant authorization/seed code and dependency lockfile. Pin exact Kong/Postgres
+patch versions and immutable digests while still testing an explicitly scheduled/current-version
+compatibility lane.
+
+**Acceptance evidence required:** the README case list is generated from or maps one-to-one to
+named passing assertions; two routes cannot borrow each other's grant; every documented refusal has
+zero upstream calls; deliberate malformed/non-200 fixtures fail closed; a gateway contract change
+causes the workflow to run; and logs record exact image digests and tested commit.
+
+**Prior-finding status and remaining uncertainty — 2026-09-27 05:35 CDT**
+
+- **AER-030 is partially resolved, not closed against its acceptance contract.** The custom plugin
+  fixes the pre-function phase/sandbox defects and moves server/tool into per-plugin configuration.
+  The inspected real-container run proves allow, one deny, subject spoof resistance and PDP-outage
+  failure for one Kong 3.6 DB-less/key-auth route. AER-034 records the missing second-route and
+  documented refusal cases; `handler.lua:42` also still reports version `0.1.0-unverified`.
+- **AER-031 is substantially corrected but retains a current contradiction.** The topology and
+  support matrix now withdraw Envoy and narrowly scope Kong. The deployment index nevertheless says
+  “Kong only ... no Envoy adapter” and then, in the same entry, advertises “the Envoy and Kong
+  adapters” (`docs/deployment/README.md:17`). Remove the second phrase or label historical content.
+- **AER-032 is resolved in source and repository-reported browser evidence.** `RemoveButton` now
+  uses a focusable `aria-disabled` control with an adjacent keyboard-operable reason control
+  (`apps/web/src/views/admin/adminKit.tsx:206-271`), and the new browser test covers focus, Tab,
+  Enter, visible note, Escape and focus return
+  (`apps/web/e2e/zz-zz-zz-zz-zz-zz-zz-zz-zz-zz-blocked-reason-a11y.spec.ts:55-85`). This run
+  independently passed typecheck/build but did not run the database-backed browser test.
+- **AER-026 now has narrow runtime evidence for Kong subject spoofing.** The run proves three header
+  spellings do not borrow another consumer's entitlement. Duplicate-header behavior and the other
+  reserved protocol fields remain untested. Envoy remains withdrawn.
+- **AER-027 and AER-028 remain open HIGH findings.** The new harness explicitly uses an admin API
+  key and its callout still omits arguments, project attribution and request principal. AER-033 makes
+  the key's operational handling a separate high-severity defect. No reviewed code closes AER-017,
+  AER-018, AER-019, AER-021 or AER-022; no evidence in this range closes AER-004, AER-007, AER-010,
+  AER-011 or AER-014.
+- A green PR job for one topology, local compilation and a source-pattern census do not prove all
+  supported Kong versions/modes, secret containment, approval semantics, database integrity,
+  accessibility conformance, production readiness, certification or enterprise readiness.
 <!-- codex-enterprise-feedback:end -->
 
 Date: 2026-09-06  
