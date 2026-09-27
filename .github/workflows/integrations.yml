@@ -1,6 +1,7 @@
 # Proxy-adapter verification — the pinned container M-043 demands.
 #
-# DELIBERATELY NOT PART OF `ci.yml`, and deliberately not a gate — yet.
+# A GATE, and deliberately still separate from `ci.yml`: it needs docker and a
+# pinned image, and it only runs when `integrations/` changes.
 #
 # Two adapters shipped from this repository without ever being run: one failed
 # OPEN on deny, the other could not load its first line. The rule written
