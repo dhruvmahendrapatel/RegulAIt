@@ -1,17 +1,30 @@
 # Behind your gateway — RegulAIt as a decision point
 
 For a customer who already runs Kong, Envoy, or another L7 gateway and does not want a second one.
+**Read the withdrawal notice below before planning around this.**
 Their proxy keeps the traffic; RegulAIt answers **"may this run?"** on each request.
 
-Adapter: [`integrations/kong/regulait-authz.lua`](../../integrations/kong/regulait-authz.lua).
+Adapter: [`integrations/kong/`](../../integrations/kong/) (a Kong plugin).
 
-> **Kong only, today. There is no Envoy adapter** — the one shipped with ADR-0127 was withdrawn
-> because it failed open on `deny`, and [`integrations/envoy/ext_authz.yaml`](../../integrations/envoy/ext_authz.yaml)
-> now records why and what a correct one needs. Envoy's `ext_authz` decides from the HTTP status
-> code, and `/v1/authz/check` answers `200` for all three outcomes with the decision in the body.
-> Giving Envoy a contract it can act on is a change to the ENDPOINT that Kong's adapter would have
-> to move with, so it is a contract decision rather than a config fix. Do not point an `ext_authz`
-> filter at this endpoint in the meantime.
+> ### NO PROXY ADAPTER IS SUPPORTED TODAY. Both were withdrawn.
+>
+> **Envoy** shipped with ADR-0127 and **failed open on `deny`**: its `ext_authz` filter decides from
+> the HTTP status code, and `/v1/authz/check` answers `200` for every outcome with the decision in
+> the body. A refusal would have been admitted, by a deployment that believed it was governed.
+> [`integrations/envoy/ext_authz.yaml`](../../integrations/envoy/ext_authz.yaml) now holds the
+> post-mortem. Do not point an `ext_authz` filter at this endpoint.
+>
+> **Kong** shipped as a `pre-function` snippet that could not run: Pre-Function executes at priority
+> `1000000`, ahead of every auth plugin, so reading the consumer refused all authenticated traffic;
+> `require "resty.http"` is blocked in Kong's serverless sandbox; and its per-route configuration was
+> actually `os.getenv`, which is node-wide. It has been replaced by a real plugin
+> ([`integrations/kong/`](../../integrations/kong/)) whose priority sits below every common auth
+> plugin and whose config is genuinely per route — **but no Kong has run it**, so it is published as
+> the correct shape and not as a supported integration.
+>
+> Neither becomes supported until its **deny path** runs end to end against a **pinned container**
+> with an upstream invocation counter showing **zero upstream calls** for every refusal and every PDP
+> failure (`mistakes.md` M-043). The endpoint itself is tested; the adapters are not.
 
 ---
 
@@ -34,7 +47,7 @@ run the in-line MCP proxy for their agent traffic and the callout for the rest.
 ## 2. It decides; it does not enforce
 
 `POST /v1/authz/check` returns an answer. A caller that ignores it proceeds, and RegulAIt will not
-know. Everything below assumes the gateway is configured to obey — **both adapters fail closed**, and
+know. Everything below assumes the gateway is configured to obey — **the adapter fails closed**, and
 if you change that, you have changed what the product guarantees.
 
 The ledger records what was **asked**. It cannot record what the proxy then did. If you need the
@@ -66,7 +79,7 @@ Roughly **twenty Postgres round trips**, across about eight sequential steps: en
 memberships, rule and approval loads, version resolution, a `count()` for each matching rate limit,
 ABAC attributes when policies exist, the execution posture, and the audit write.
 
-This sits on the **p99 of every request your gateway serves**. Both adapters ship a deliberate 2s
+This sits on the **p99 of every request your gateway serves**. The Kong plugin uses a deliberate 2s
 timeout rather than a default. Before you put this in front of production traffic:
 
 - measure it against your own latency budget, on your own data volume;

@@ -928,3 +928,30 @@ supported again until its **deny path** is exercised end to end against a
 pinned container, asserting **zero upstream invocations** for every refusal
 and every PDP failure. A deny path that has never been run is a deny path that
 does not work.
+
+### M-043 addendum (2026-09-27) — the rule was tested within the hour, and the other adapter failed it too
+
+M-043's standing consequence was *"nothing under `integrations/` is described as
+supported again until its deny path is exercised end to end against a pinned
+container."* I then described the Kong adapter as the one RegulAIt supports, in
+the same commit that set the rule. A review found it could not run at all:
+
+- Kong's `pre-function` executes at priority **1000000**, ahead of every
+  authentication plugin — so taking identity from `kong.client.get_consumer()`,
+  which my fix had just made the ONLY source, refused all authenticated traffic;
+- `require "resty.http"` is blocked in Kong's serverless sandbox by default, so
+  the first executable line could not load;
+- and its "per-route" configuration was `os.getenv`, which is node-wide, so one
+  data plane serving several governed routes would ask the same question for all
+  of them. I wrote a comment calling it per-route while writing the env read.
+
+**Two of the three were introduced by my own fix for the previous finding.**
+Removing the spoofable header made the consumer the sole identity source, which
+is correct and made the ordering bug fatal; replacing header-supplied config with
+env-supplied config swapped a security bug for a correctness one.
+
+**The sharper rule.** *A fix for a finding is new, unverified code and inherits
+the same burden as the code it replaces.* I treated "this removes the reported
+defect" as sufficient, and shipped a claim of support on the strength of it. The
+right output was the fix plus "still unverified" — which is what both adapters
+now say.

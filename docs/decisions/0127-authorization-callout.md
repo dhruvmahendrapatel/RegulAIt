@@ -72,7 +72,7 @@ Envoy's `ext_authz` has two outcomes and no third, and nothing in this repositor
 decide what a pending approval means at a proxy. It is a **deny** — the request must not proceed,
 failing closed as everywhere else. But it is not the same fact as a policy refusal, and collapsing
 them destroys the distinction the approvals queue exists to make: *"a human can unblock this"*
-versus *"never"*. So it carries its own code and both adapters map it to 403 **with a header naming
+versus *"never"*. So it carries its own code and the adapter maps it to 403 **with a header naming
 it**.
 
 ### 4. The credential is a subject-impersonation key, and the docs say so
@@ -96,6 +96,14 @@ The adapter therefore **fails closed**, including when the PDP is unreachable �
 silently becomes an open door is the worst shape this can take, because the trail would show that
 nothing was ever asked.
 
+> **CORRECTION, 2026-09-27 (second).** The Kong adapter has since been withdrawn too, so **this ADR
+> currently ships no supported adapter**. The `pre-function` snippet could not run: Pre-Function
+> executes at priority `1000000`, ahead of every auth plugin, so taking identity from the consumer
+> refused all authenticated traffic; `require "resty.http"` is blocked in Kong's serverless sandbox;
+> and its "per-route" server/tool configuration was `os.getenv`, which is node-wide. A real plugin
+> replaces it (`integrations/kong/`) with the priority and per-route config both correct — and no
+> Kong has run it, so it is the correct shape and not a supported integration.
+>
 > **CORRECTION, 2026-09-27.** As first written this section said *both* adapters fail closed. That
 > was false of the Envoy one and false in the most expensive direction. Envoy's `ext_authz` decides
 > from the HTTP status code and `/v1/authz/check` answers `200` for `deny` as well as `allow`, so a
@@ -109,7 +117,7 @@ nothing was ever asked.
 ### 6. Honest performance, up front
 
 A decision is roughly **twenty Postgres round trips** across about eight sequential steps, and it
-sits on the p99 of every request the customer's gateway serves. Both adapters ship a deliberate 2s
+sits on the p99 of every request the customer's gateway serves. The Kong plugin uses a deliberate 2s
 timeout rather than a default, and §4 of the topology doc says to measure it before production.
 
 **It is not cacheable**, and the reason is the interesting one: the answer depends on rate-limit

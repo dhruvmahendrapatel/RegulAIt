@@ -28,6 +28,7 @@ import {
   Button,
   Card,
   ConfirmModal,
+  InfoButton,
   EmptyState,
   ErrorState,
   Input,
@@ -217,13 +218,42 @@ export function RemoveButton(props: {
   const act = useAction();
   const [open, setOpen] = useState(false);
   const blocked = props.disabledReason != null;
+
+  // A DISABLED BUTTON IS NOT FOCUSABLE, so the `title` that used to carry the
+  // reason was reachable by hover and by nothing else — invisible to exactly
+  // the keyboard and screen-reader users who cannot discover it any other way,
+  // and invisible on touch to everyone. Rule (1) said the reason must be on the
+  // row; putting it in a tooltip on an unfocusable element meant it was not.
+  //
+  // So a blocked action is `aria-disabled` rather than `disabled`: still in the
+  // tab order, still announced, still refusing to act — with the reason beside
+  // it in an InfoButton, which is a real focusable control with a real panel.
+  if (blocked) {
+    return (
+      <span style={{ display: "inline-flex", alignItems: "center" }}>
+        <Button
+          size="sm"
+          variant="ghost"
+          aria-disabled
+          style={{ opacity: 0.5, cursor: "not-allowed" }}
+          aria-label={`${props.label ?? "Remove"} ${props.what} — unavailable`}
+          onClick={(e) => e.preventDefault()}
+        >
+          {props.label ?? "Remove"}
+        </Button>
+        <InfoButton label={`the reason ${props.what} cannot be removed here`}>
+          <p>{props.disabledReason}</p>
+        </InfoButton>
+      </span>
+    );
+  }
+
   return (
     <>
       <Button
         size="sm"
         variant="ghost"
-        disabled={blocked || act.busy}
-        title={props.disabledReason}
+        disabled={act.busy}
         aria-label={`${props.label ?? "Remove"} ${props.what}`}
         onClick={() => setOpen(true)}
       >
