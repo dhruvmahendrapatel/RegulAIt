@@ -23,7 +23,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, Select, Table, Textarea } from "../../../ui/kit";
-import { QueryGate, Stat, useAction } from "../adminKit";
+import { QueryGate, RemoveButton, Stat, useAction } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -340,6 +340,36 @@ export default function CompliancePacksPage() {
                         <Button variant="primary" disabled={act.busy} onClick={() => void evaluate(p)}>
                           Evaluate
                         </Button>
+                        <RemoveButton
+                          what={`${p.framework} v${p.version}`}
+                          // An ACTIVE pack is the one composing the cascade right
+                          // now. Deleting it is not the same act as deleting a
+                          // draft, so it is not offered: retire it first, which
+                          // is a reversible, audited state change, and then the
+                          // delete is an ordinary cleanup.
+                          disabledReason={
+                            p.status === "active"
+                              ? "this version is active — retire it (or activate another version) before deleting, so the cascade is never left without a pack mid-change"
+                              : undefined
+                          }
+                          consequence={
+                            <p>
+                              The pack definition and its controls are deleted.{" "}
+                              {p.cascadeTag ? (
+                                <>
+                                  It carries the cascade tag <code>{p.cascadeTag}</code>, so anything
+                                  tagged with it loses the stages, retention and data-scope defaults
+                                  this pack contributed — unless another active pack carries the same
+                                  tag.{" "}
+                                </>
+                              ) : null}
+                              Evidence already computed against it stays in the audit trail; what
+                              goes is the definition future evaluations would read.
+                            </p>
+                          }
+                          onRemove={() => api.del(`/v1/compliance/packs/${p.id}`)}
+                          onDone={refresh}
+                        />
                       </div>
                     );
                   },

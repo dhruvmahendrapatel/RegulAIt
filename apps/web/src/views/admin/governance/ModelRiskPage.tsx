@@ -849,6 +849,28 @@ export default function ModelRiskPage() {
                       { key: "ref", header: "Reference", render: (r) => r.evalRunId ?? r.externalRef },
                       { key: "l", header: "Label", render: (r) => r.label ?? "—" },
                       { key: "at", header: "Attached", render: (r) => ago(r.attachedAt) },
+                      {
+                        key: "actions",
+                        header: "",
+                        align: "right",
+                        render: (r) => (
+                          <RemoveButton
+                            what={`this ${r.kind} evidence`}
+                            label="Detach"
+                            consequence={
+                              <p>
+                                The citation is removed from this card. The evaluation run itself is
+                                untouched — this detaches the reference, it does not delete the
+                                evidence. If the card's completeness depended on it, the card
+                                becomes incomplete again, which is the honest result: a card is
+                                complete only while something actually backs it.
+                              </p>
+                            }
+                            onRemove={() => api.del(`/v1/mrm/cards/${detail.id}/evidence/${r.id}`)}
+                            onDone={() => void refreshAll()}
+                          />
+                        ),
+                      },
                     ]}
                   />
                 )}
