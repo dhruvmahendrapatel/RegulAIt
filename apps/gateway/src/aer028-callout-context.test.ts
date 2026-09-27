@@ -18,7 +18,11 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
+  and,
+  auditLog,
   createDb,
+  desc,
+  eq,
   runMigrations,
   users,
   mcpServers,
@@ -119,6 +123,56 @@ describe("AER-028 — a data-scope rule is evaluated against the real arguments"
     const res = await ask({ userId, serverId, toolName: TOOL, args: { schema: { nested: true } } });
     expect(res.statusCode, res.body).toBe(200);
     expect(JSON.parse(res.body).decision).toBe("deny");
+  });
+});
+
+describe("AER-028 — the LEDGER records what the decision was computed on", () => {
+  /**
+   * The Kong harness asserts the adapter's context against this row rather than
+   * against the plugin's source — reading the plugin would only restate the
+   * code. That makes `detail.contextApplied` a contract between two test
+   * suites, so it is pinned here, where it can be run without a container.
+   */
+  it("every callout row carries contextApplied, so a proxy's claim is checkable", async () => {
+    const res = await ask({
+      userId,
+      serverId,
+      toolName: TOOL,
+      args: { schema: "analytics" },
+      projectId: null,
+      principal: { sessionOrigin: "sso", mfaCompleted: true },
+    });
+    expect(res.statusCode, res.body).toBe(200);
+
+    const rows = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.toolName, TOOL), eq(auditLog.userId, userId)))
+      .orderBy(desc(auditLog.at))
+      .limit(1);
+    expect(rows.length).toBe(1);
+    const detail = rows[0]!.detail as { contextApplied?: string[]; credential?: string };
+    expect(detail.contextApplied, "the names, on the row").toEqual(
+      expect.arrayContaining(["args", "principal"]),
+    );
+    // a null projectId is ABSENT context, not supplied context — otherwise a
+    // proxy sending `projectId: null` would read as having narrowed by project
+    expect(detail.contextApplied).not.toContain("projectId");
+    // and the row still records WHICH credential asked (AER-027)
+    expect(detail.credential).toBeTruthy();
+  });
+
+  it("the values themselves never reach the ledger row's contextApplied", async () => {
+    const res = await ask({ userId, serverId, toolName: TOOL, args: { schema: "analytics" } });
+    expect(res.statusCode).toBe(200);
+    const rows = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.toolName, TOOL), eq(auditLog.userId, userId)))
+      .orderBy(desc(auditLog.at))
+      .limit(1);
+    const applied = (rows[0]!.detail as { contextApplied?: string[] }).contextApplied ?? [];
+    for (const name of applied) expect(["args", "projectId", "principal"]).toContain(name);
   });
 });
 
