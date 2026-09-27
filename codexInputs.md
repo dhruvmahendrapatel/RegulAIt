@@ -1754,6 +1754,193 @@ scan of every wizard stage and both themes with no serious/critical violations.
 - `PathForward.md` already carries the strategic workload-identity, constrained-delegation and
   policy-decision-contract direction; this run therefore did not duplicate operational defects into
   that roadmap. `codexInputs.md` remains the single implementation feedback ledger.
+
+### Automated enterprise-readiness run — 2026-09-27 00:35:41 CDT (UTC-05:00)
+
+**Target branch, synchronization and reviewed range**
+
+- Exclusive target: `dhruv/active`.
+- The run began with local HEAD and `origin/dhruv/active` at
+  `4692894a99fbad4eae1ecdb934255ae6408f8467`. The only pre-existing worktree item was the unrelated
+  untracked `RegulAIt/` directory; it was not read, moved, staged or changed.
+- `git fetch origin dhruv/active --prune` advanced the upstream ref to
+  `717a2034622273ec9fabfbbddc96bde1f361a83e`; `git pull --ff-only origin dhruv/active` then
+  fast-forwarded the checkout to the same commit without merge, rebase, reset or stash. The required
+  pre-publication fetch found one further non-conflicting script-only commit, so a second
+  fast-forward-only pull advanced both local and upstream to
+  `d370b9285eab768cbd5b7646b3d56c267f2dff1e` while preserving this feedback.
+- Incremental review range: `4692894..d370b92` (ten commits, 25 files), plus the still-open
+  authorization-callout findings. The range withdraws the Envoy adapter, changes the Kong adapter,
+  adds multiple UI deletion paths and an affordance census, fixes the guided-intake labels, adds an
+  approval status filter, and changes the shared `Field` labelling behavior.
+
+**Commands/tests and outcomes**
+
+- Mandatory suite and repository instruction reads — completed before synchronization and review.
+- Branch/status/remote/ref inspection, two `git fetch origin dhruv/active --prune` checks, delta
+  inspection and two `git pull --ff-only origin dhruv/active` operations — **PASS**; local/upstream
+  both became `d370b92...`, and the second upstream delta did not touch `codexInputs.md`.
+- Commit-by-commit `git show`, line-numbered inspection of the changed integration, deployment,
+  ADR, UI and test files, and targeted `rg` claim/usage searches — completed.
+- Kong's current primary documentation was checked for the serverless plugin execution phase,
+  priority and sandbox contract. This is documentation-backed source analysis; no Kong runtime was
+  exercised. References:
+  https://developer.konghq.com/plugins/pre-function/ and
+  https://developer.konghq.com/support/error-require-resty-http-not-allowed-within-sandbox/.
+- `corepack pnpm --filter @regulait/web typecheck` — **PASS**.
+- `corepack pnpm --filter @regulait/web build` — **PASS**; Vite repeated the existing warning that
+  the main JavaScript chunk is 1,116.42 kB (309.99 kB gzip), above the configured 900 kB warning
+  threshold.
+- `node scripts/preflight-ui-affordances.mjs` — **EXIT 1 by the script's stated contract**, both
+  before and after the final script-only commit. Final output: 53 DELETE routes, 51 detected as
+  reachable, zero exempt, and two still orphaned (`/v1/approvals/views/:x`,
+  `/v1/llm/backend-configs/:x`), plus two collections listed but not addable from the UI
+  (`/v1/copilot/proposals`, `/v1/redteam/libraries`). This is a source-pattern census, not
+  behavior proof; its own header says it is not yet a required gate.
+- Node `v22.19.0` and pnpm `10.33.0` matched the repository floor/pin. Docker is installed, but no
+  Kong image or Lua runtime was present locally. No image was downloaded and no service was started.
+- `DATABASE_URL` was absent. The Playwright global setup drops a fixed default database named
+  `regulait_wt_spa`, so the browser suite was not run without proof that no other session could be
+  using it. No database, migration, cloud, provider or deployment test ran.
+
+#### AER-030 — HIGH — The remaining Kong adapter is not runnable as the documented pre-function and cannot bind a distinct action per route
+
+**Evidence type:** direct source/configuration observation, cross-checked against Kong's official
+plugin and sandbox documentation; no Kong runtime was available locally.
+
+The artifact tells an operator to drop the file into a Kong `pre-function`
+(`integrations/kong/regulait-authz.lua:1-4`). In that mode, three independent contract mismatches
+remain:
+
+1. Kong documents the Pre-Function plugin as priority `1000000` and says it runs before other
+   plugins in the phase. The script obtains identity only from `kong.client.get_consumer()` and
+   refuses when it is absent (`integrations/kong/regulait-authz.lua:81-96`). With an ordinary Kong
+   authentication plugin on the same route, the pre-function runs first, before that plugin can set
+   the authenticated consumer. The shipped path therefore refuses normal authenticated traffic.
+2. The first executable line loads `resty.http` (`integrations/kong/regulait-authz.lua:40`). Kong's
+   default serverless-function sandbox is restricted, and Kong's own support documentation uses
+   `require "resty.http" not allowed within sandbox` as the exact failure example. The repository
+   provides no required `untrusted_lua` configuration, pinned Kong version or security analysis for
+   weakening that sandbox. `os.getenv` usage (`:43-50`) adds another unproved sandbox dependency.
+3. The comments say the server/tool question is configured per route, but both are process
+   environment variables (`:46-51`). Environment variables are node/process configuration, not a
+   value attached to an individual Kong Route or plugin instance. On one Kong data plane serving
+   multiple governed routes, every copy of this file reads the same pair. Once an operator gets the
+   script running, route B can therefore be checked as route A's server/tool — the same
+   question-versus-action mismatch the header fix intended to remove.
+
+**Impact:** the only remaining advertised adapter is fail-closed but unusable under Kong's normal,
+secure serverless-plugin configuration. Workarounds invite operators to disable/relax the Lua
+sandbox or reorder/replace authentication without a supported design. A single process-wide action
+pair can also turn a truthful `allow` for one tool into admission of a different route. This means
+the current “Kong only” / supported-deployment claim is not backed by a runnable integration at the
+primary authorization boundary.
+
+**Recommended remediation:** withdraw the Kong support claim until it passes a pinned-container
+test. Prefer a real versioned Kong plugin with a schema carrying `serverId`, `toolName`, PDP URL and
+vault reference per plugin/Route instance, and an explicit priority that runs after the supported
+authentication plugins but before proxying. If Pre-Function remains an example, embed non-secret
+route-specific constants in each route's plugin configuration, name the exact safe sandbox settings,
+derive identity from a fact guaranteed to exist at that phase, and do not require unrestricted
+`os`/module access. A process environment variable is acceptable for a node-wide PDP address, not
+for the action being authorized.
+
+**Acceptance evidence required:**
+
+1. Against pinned minimum and current Kong containers with default-secure settings, the adapter
+   loads without relaxing the sandbox beyond a documented minimum and observes a consumer created
+   by each supported authentication plugin.
+2. Two routes in one Kong instance carry different server/tool bindings. A subject entitled only to
+   route A gets one upstream call for A and zero for B; the PDP ledger proves the exact two actions
+   asked.
+3. Client-supplied, duplicated and case-varied subject/server/tool/decision headers cannot alter the
+   action or survive to upstream.
+4. Missing/disabled/unmapped consumer, missing route configuration, malformed PDP response, 4xx,
+   5xx, timeout and network failure each produce zero upstream calls.
+5. `allow`, `deny` and `approval_required` are exercised end to end with an upstream invocation
+   counter, and CI runs the same test rather than treating Lua review as execution evidence.
+
+#### AER-031 — MEDIUM — The Envoy withdrawal was not reconciled across current support claims
+
+**Evidence type:** direct documentation observation.
+
+The corrected topology banner says there is no Envoy adapter
+(`docs/deployment/GATEWAY_TOPOLOGY.md:6-14`), but the same current page still says “both adapters
+fail closed” and “both adapters ship” a timeout (`:36-38,63-70`), and later says the HTTP variant
+works against the endpoint (`:110-115`). The deployment index still advertises “the Envoy and Kong
+adapters” (`docs/deployment/README.md:17`). ADR-0127 still calls this a supported deployment with two
+worked adapters (`docs/decisions/0127-authorization-callout.md:122-133`), while its later limits say
+nothing under `integrations/` should be called supported before a pinned-container denial test
+(`:136-142`). `docs/decisions/README.md:135` and `docs/product/ROADMAP.md:754` retain the shipped,
+two-adapter account as well.
+
+**Impact:** an operator can land on current documentation that contradicts the withdrawal and can
+reasonably conclude Envoy remains supported. More broadly, the repository marks G9 shipped while
+the sole remaining Kong path has never been run and has the AER-030 blockers above. Historical ADR
+text may remain historical, but current indexes and roadmap status are product claims.
+
+**Recommended remediation:** perform a repository-wide claim reconciliation, preserving the ADR's
+history as an explicitly dated correction while changing current deployment/index/roadmap language
+to “endpoint implemented; adapters experimental/withdrawn” until executable evidence exists. Link
+every support claim to the pinned integration test and supported-version matrix.
+
+**Acceptance evidence required:** `rg` finds no current statement that two adapters ship, Envoy is
+supported, or the deployment is supported; historical text is visibly superseded. A support matrix
+names Kong/Envoy versions, status, last runtime-test commit and limits. G9 becomes shipped again only
+after the applicable real-proxy suite passes.
+
+#### AER-032 — MEDIUM — Disabled destructive controls hide the explanation from keyboard and assistive-technology users
+
+**Evidence type:** direct React/HTML source observation; browser accessibility behavior was not run.
+
+The shared `RemoveButton` promises that an inapplicable action is “disabled and explained,” but it
+puts `disabledReason` only in the native disabled button's `title`
+(`apps/web/src/views/admin/adminKit.tsx:205-227`). Disabled buttons are not keyboard-focusable, and a
+`title` tooltip is not a reliable accessible description. The visible button and its `aria-label`
+contain only the action/object, not the reason. This pattern now carries material guidance for
+role-derived agent, connector and MCP grants, active compliance packs, initiatives with projects,
+and frozen eval datasets (for example `AgentsPage.tsx:770-773`, `McpServersPage.tsx:203-206`,
+`CompliancePacksPage.tsx:350-353`, and `EvalsPage.tsx:611-614`). A mouse user may discover the
+tooltip; a keyboard or screen-reader user may encounter an unavailable action with no reason or
+remediation.
+
+**Impact:** administrators using keyboard or assistive technology cannot learn why a governance
+operation is unavailable or which safer action to take. This directly undercuts the new surface's
+stated “never hidden; explained” behavior.
+
+**Recommended remediation:** render the reason as visible row text or a focusable explanatory
+control and connect it with `aria-describedby`. If the button must remain in the tab order for
+discovery, use `aria-disabled` plus an event guard; otherwise keep native `disabled` and place the
+reason in adjacent persistent text that is reachable and programmatically associated. Do not rely
+on `title` as the sole channel.
+
+**Acceptance evidence required:** tab/shift-tab and a screen reader expose each disabled reason and
+its remediation; pointer, keyboard and touch users receive the same information; automated tests
+assert the accessible description for representative direct, role-derived, active/frozen and
+dependency-blocked rows.
+
+**Prior-finding status and remaining uncertainty — 2026-09-27 00:35 CDT**
+
+- **AER-025 is mitigated by withdrawal, not closed as delivered functionality.** The executable
+  Envoy configuration was removed and the main topology banner warns against using it. There is no
+  longer a shipped fail-open config on this branch. A supported Envoy claim remains unearned, and
+  AER-031 records the stale current references.
+- **AER-026's direct spoof paths are removed in source for Kong, and Envoy is withdrawn.** Kong now
+  derives `subject` from `consumer.custom_id`, binds server/tool away from request headers and
+  clears client protocol headers. Runtime closure is not yet justified: AER-030 shows the documented
+  phase cannot obtain a normal authenticated consumer and the action is not actually per-route.
+- **AER-029 is resolved in source.** The intake now wires real labels/ids and the changed Playwright
+  spec uses exact `getByLabel` queries for all three controls. The repository reports the browser
+  test passing; this run independently passed typecheck/build but did not run the browser suite
+  because its fixed scratch database could not be proved exclusive.
+- AER-027 and AER-028 remain open HIGH findings; this range explicitly acknowledges them but does
+  not add a callout-scoped credential or the missing action context. AER-017, AER-018, AER-019,
+  AER-021 and AER-022 also remain open HIGH; their enforcement/provider/MCP paths were not changed.
+  No reviewed evidence closes AER-004, AER-007, AER-010, AER-011 or AER-014.
+- The web build and source-level affordance census establish compilation and declared UI reachability,
+  not deletion semantics, database integrity, proxy enforcement, accessibility conformance,
+  production readiness, certification or enterprise readiness. The repository-reported full web
+  suite remains unverified in this run.
 <!-- codex-enterprise-feedback:end -->
 
 Date: 2026-09-06  
