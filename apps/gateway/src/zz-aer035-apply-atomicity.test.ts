@@ -106,7 +106,8 @@ async function approvedProposal(kind: string, diff: Record<string, unknown>): Pr
   // through the decide path would drag its separation-of-duties rules in here
   await db
     .update(approvals)
-    .set({ status: "approved", decidedByUserId: adminId, decidedAt: new Date() })
+    // `decidedBy`, not `decidedByUserId` — the column is `decided_by`
+    .set({ status: "approved", decidedBy: adminId, decidedAt: new Date() })
     .where(eq(approvals.id, p.json().approvalId as string));
   return proposalId;
 }
@@ -164,12 +165,15 @@ beforeAll(async () => {
   // ownership check passes
   const [q] = await db
     .insert(copilotQueries)
+    // `copilot_queries` has no `tool`/`timeframe` columns of its own — the
+    // planned tool and window live inside `plan`, which is where the real route
+    // puts them. (The first draft named them as columns; it ran fine, because
+    // drizzle drops unknown keys, and only the BUILD caught it — vitest
+    // transpiles without typechecking.)
     .values({
       userId: adminId,
       question: "aer035 fixture",
-      tool: "listAudit",
-      timeframe: "last_7d",
-      plan: {},
+      plan: { tool: "listAudit", timeframe: "last_7d" },
       evidence: {},
       answer: "fixture",
       generation: "grounded",
