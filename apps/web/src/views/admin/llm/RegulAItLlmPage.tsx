@@ -46,7 +46,20 @@ import {
   Textarea,
   type Tone,
 } from "../../../ui/kit";
-import { KV, QueryGate, Stat, agentOpts, optionEls, projectOpts, useAction, useAgents, useProjects } from "../adminKit";
+import {
+  KV,
+  OutcomePanel,
+  QueryGate,
+  RemoveButton,
+  Stat,
+  agentOpts,
+  optionEls,
+  projectOpts,
+  useAction,
+  useAgents,
+  useApiAction,
+  useProjects,
+} from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -68,6 +81,7 @@ interface BackendInfo {
   configEnabled: boolean;
   hasCredential: boolean;
   baseUrl: string | null;
+  lastTestedAt?: string | null;
   lastTestError: string | null;
 }
 interface ScanFindings {
@@ -297,6 +311,8 @@ export default function RegulAItLlmPage() {
   const [regUse, setRegUse] = useState("");
 
   const backend = (backends.data?.backends ?? []).find((b) => b.kind === jobBackend);
+  /** which backend's credential form is open, if any */
+  const [configuring, setConfiguring] = useState<string | null>(null);
   const dials = METHOD_DIALS[jobMethod] ?? [];
 
   /** JSONL → rows. Parsed HERE so a malformed line is named before anything is
@@ -394,8 +410,30 @@ export default function RegulAItLlmPage() {
                   header: "What it cannot do",
                   render: (r) => <span className={v.faint}>{r.limits}</span>,
                 },
+                {
+                  key: "configure",
+                  header: "",
+                  align: "right",
+                  render: (r) => (
+                    <BackendConfigActions
+                      backend={r}
+                      selected={configuring === r.kind}
+                      onSelect={() => setConfiguring(configuring === r.kind ? null : r.kind)}
+                      onDone={() => void backends.refetch()}
+                    />
+                  ),
+                },
               ]}
             />
+            {configuring !== null && (
+              <BackendConfigForm
+                backend={(backends.data?.backends ?? []).find((b) => b.kind === configuring)!}
+                onDone={() => {
+                  setConfiguring(null);
+                  void backends.refetch();
+                }}
+              />
+            )}
           </Card>
 
           {/* ---------------- upload ---------------- */}
@@ -1044,5 +1082,168 @@ export default function RegulAItLlmPage() {
         </QueryGate>
       </div>
     </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// BACKEND CREDENTIALS (batch B9c).
+//
+// The table above has always said, in a warning badge, that a backend with no
+// credential "will refuse every job" — and there was no way to give it one.
+// `PUT /v1/llm/backend-configs/:backend` and its DELETE have existed since
+// ADR-0065 and nothing in the portal called either; the affordance census caught
+// the DELETE side. A screen that names a blocking condition and offers no lever
+// for it is worse than one that says nothing: it reads as a product that cannot
+// do the thing.
+//
+// Three properties this pair is careful about, each a decision the gateway makes
+// that a UI can quietly contradict:
+//
+//  - **The in-process backends are REFUSED configuration, by name.** `local` and
+//    `mock` run here and hold no credential, and the route answers
+//    `backend_needs_no_config` (409). So no control is offered for them and the
+//    row says why — an enabled-looking control that 409s teaches an operator
+//    that the product is broken rather than that the backend is keyless.
+//  - **A secret is write-only.** The list endpoint reports `hasCredential`, never
+//    the key; the form therefore never pre-fills one and says so. A password box
+//    showing dots that are not the stored value is a lie a reader cannot detect.
+//  - **The endpoint's own egress guard is surfaced verbatim.** A base URL outside
+//    the allow-list is refused at write time with `egress_blocked` and its code.
+//    That refusal is the useful thing on screen, so it is shown as-is.
+// ---------------------------------------------------------------------------
+
+function BackendConfigActions(props: {
+  backend: BackendInfo;
+  selected: boolean;
+  onSelect: () => void;
+  onDone: () => void;
+}) {
+  const b = props.backend;
+  // `local`/`mock`: the route refuses configuration by name, so the row states
+  // the fact rather than offering a control that cannot work
+  if (!b.requiresCredential)
+    return <span className={v.faint}>runs here — nothing to configure</span>;
+
+  return (
+    <span className={v.rowTight} style={{ justifyContent: "flex-end" }}>
+      <Button size="sm" onClick={props.onSelect} aria-expanded={props.selected}>
+        {props.selected ? "Close" : b.configured ? "Edit credential" : "Add credential"}
+      </Button>
+      <RemoveButton
+        what={`the ${b.kind} backend configuration`}
+        label="Remove"
+        // Nothing to delete until something was stored. Saying so beats an
+        // enabled button that 404s.
+        disabledReason={b.configured ? undefined : "nothing is stored for this backend yet"}
+        consequence={
+          <p>
+            The stored endpoint and credential are deleted, so <strong>{b.kind}</strong> refuses every
+            training job again — the same state it shipped in. Jobs already run keep their records and
+            their artifacts; the removal is audited.
+          </p>
+        }
+        onRemove={() => api.del(`/v1/llm/backend-configs/${b.kind}`)}
+        onDone={props.onDone}
+      />
+    </span>
+  );
+}
+
+function BackendConfigForm(props: { backend: BackendInfo; onDone: () => void }) {
+  const b = props.backend;
+  const act = useApiAction();
+  const [apiKey, setApiKey] = useState("");
+  const [baseUrl, setBaseUrl] = useState(b.baseUrl ?? "");
+  // FIRST-TIME SETUP DEFAULTS TO ENABLED; editing preserves what is stored.
+  // Adding a credential to a backend that currently refuses every job IS the
+  // request to make it usable, and storing a credential alongside `enabled:
+  // false` is the odd case rather than the safe one — an operator who wanted
+  // that would be surprised twice (once by the refusals, once by finding the
+  // key was there all along). Nothing is silent about it: the checkbox is on
+  // screen, showing its state, before Save is pressed.
+  const [enabled, setEnabled] = useState(b.configured ? b.configEnabled : true);
+  const [allowPlaintextHttp, setAllowPlaintextHttp] = useState(false);
+
+  const save = () =>
+    void act
+      .run(() => {
+        const body: Record<string, unknown> = { enabled, allowPlaintextHttp };
+        // ABSENT vs NULL matters at this endpoint: undefined keeps the stored
+        // key, null CLEARS it. An empty box must therefore send neither — it
+        // means "leave the credential alone", which is the only reading that
+        // lets an operator change the endpoint without re-entering the secret.
+        if (apiKey !== "") body.apiKey = apiKey;
+        body.baseUrl = baseUrl === "" ? null : baseUrl;
+        return api.put(`/v1/llm/backend-configs/${b.kind}`, body);
+      }, `${b.kind} configuration saved`)
+      .then((res) => {
+        if (res) {
+          setApiKey("");
+          props.onDone();
+        }
+      });
+
+  return (
+    <div className={a.subCard} style={{ marginTop: "var(--s2)" }}>
+      <p className={v.dim}>
+        Configuring <code>{b.kind}</code>. Fine-tuning runs on the vendor&rsquo;s compute, so this
+        credential leaves your deployment when a job runs — that is what this backend is. It is stored
+        encrypted with <code>REGULAIT_DATA_KEY</code> and never returned by any endpoint.
+      </p>
+      <form
+        className={a.formRow}
+        onSubmit={(e) => {
+          e.preventDefault();
+          save();
+        }}
+      >
+        <Field label={b.hasCredential ? "Replace the API key (leave empty to keep it)" : "API key"} grow>
+          <Input
+            type="password"
+            autoComplete="off"
+            value={apiKey}
+            onChange={(e) => setApiKey(e.target.value)}
+            placeholder={b.hasCredential ? "a key is stored — leave empty to keep it" : "required before any job will run"}
+          />
+        </Field>
+        <Field label="Endpoint (empty uses the default)" grow>
+          <Input
+            value={baseUrl}
+            onChange={(e) => setBaseUrl(e.target.value)}
+            placeholder={b.defaultBaseUrl ?? "https://…"}
+          />
+        </Field>
+      </form>
+      <div className={v.row}>
+        <label style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+          <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
+          <span>enabled — jobs may use this backend</span>
+        </label>
+        <label style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+          <input
+            type="checkbox"
+            checked={allowPlaintextHttp}
+            onChange={(e) => setAllowPlaintextHttp(e.target.checked)}
+          />
+          <span>allow plaintext http to this endpoint</span>
+        </label>
+        <Button variant="primary" size="sm" disabled={act.busy} onClick={save}>
+          Save
+        </Button>
+      </div>
+      <p className={v.faint}>
+        The endpoint is checked against the egress allow-list <strong>when you save</strong>, not when a
+        job runs — so a host nothing may reach is refused here, with the reason, rather than in the
+        middle of a training run. Plaintext http is off by default and has to be asked for: a
+        credential on an unencrypted hop is readable by anything on the path.
+      </p>
+      {!b.hasCredential && apiKey === "" && (
+        <p className={v.dim}>
+          Saving with no key stores the endpoint and leaves <code>{b.kind}</code> refusing every job —
+          which is a legitimate thing to want, and the badge above will keep saying so.
+        </p>
+      )}
+      <OutcomePanel outcome={act.outcome} testId="backend-config-outcome" />
+    </div>
   );
 }

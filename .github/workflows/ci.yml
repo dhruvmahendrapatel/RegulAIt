@@ -159,6 +159,34 @@ jobs:
       - name: Pre-flight — duplicates that would block a unique constraint (ADR-0109/0110)
         run: node scripts/preflight-unique-constraints.mjs "$DATABASE_URL"
 
+      # B9c — THE AFFORDANCE CENSUS, AS A GATE.
+      #
+      # `scripts/preflight-ui-affordances.mjs` compares the gateway's DELETE
+      # routes against the controls the SPA actually renders, and the POST routes
+      # against the lists it shows. It was written during a UI-completeness sweep
+      # and deliberately NOT wired in, for the one honest reason: it exited 1. A
+      # check that fails on arrival is a check somebody disables.
+      #
+      # It exits 0 as of this commit — 53 of 53 DELETE routes reachable, no
+      # collection the UI lists without a way to add to it — so it becomes a
+      # gate now, which is the only way the property survives. The failure it
+      # prevents is specific and has happened repeatedly in this repo: an
+      # endpoint ships, the list that shows its objects ships, and the control
+      # that removes one does not. Access could be granted from the portal and
+      # only taken back with a database client; saved views existed for a year
+      # with no screen; a training backend announced "will refuse every job" and
+      # offered no way to configure one. Each was found by a human reading the
+      # product, which is not a mechanism.
+      #
+      # It is STATIC — it reads route registrations and TSX sources, needs no
+      # database and no build — so it sits in this job purely to avoid a second
+      # runner startup. Exit 1 means a gap, exit 2 means the script could not
+      # run; both fail the job. An intentional API-only route is declared in
+      # `DELIBERATELY_API_ONLY` inside the script, with a reason, rather than by
+      # loosening this step.
+      - name: Pre-flight — every governed object the UI lists can be added and removed from it (B9c)
+        run: node scripts/preflight-ui-affordances.mjs
+
   docker-build:
     # The quickstart path must never rot: prove the compose image still builds.
     #
