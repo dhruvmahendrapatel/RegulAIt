@@ -25,7 +25,7 @@
  * Requires: docker, a built gateway, and a Postgres. Run by
  * .github/workflows/integrations.yml, which pins the Kong image.
  */
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, execSync, spawn } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -54,6 +54,22 @@ const check = (name, ok, detail = "") => {
 
 const sh = (cmd, args, opts = {}) =>
   execFileSync(cmd, args, { encoding: "utf8", stdio: "pipe", ...opts });
+
+/**
+ * BOTH STREAMS, COMBINED. `execFileSync` with `stdio: "pipe"` returns stdout
+ * ONLY — and `docker logs` writes the container's stderr to stderr, which is
+ * where every Kong startup error goes. The first diagnostic pass reported
+ * "(no stdout)" for a container that had plenty to say, and the missing output
+ * was discarded by the helper meant to surface it. Merging the streams in the
+ * shell is the fix; reading `e.stderr` on throw only covers the failure path.
+ */
+const shBoth = (line) => {
+  try {
+    return execSync(`${line} 2>&1`, { encoding: "utf8" });
+  } catch (e) {
+    return String(e.stdout ?? "") + String(e.stderr ?? "") || `(command failed: ${line})`;
+  }
+};
 
 async function waitFor(fn, ms, what) {
   const deadline = Date.now() + ms;
@@ -227,21 +243,15 @@ plugins:
   };
   const dumpKong = (why) => {
     console.error(`--- kong container (${why}): ${state()} ---`);
-    try {
-      console.error(sh("docker", ["logs", "regulait-kong-e2e"], { stdio: "pipe" }).slice(-6000) || "(no stdout)");
-    } catch (e) {
-      console.error("(could not read logs)", e instanceof Error ? e.message : e);
-    }
+    console.error(shBoth("docker logs regulait-kong-e2e").slice(-8000) || "(container produced no output at all)");
     // Kong validates the declarative config at boot; if that is what rejected
     // it, this prints the actual complaint instead of leaving it to inference.
-    try {
-      console.error("--- kong config parse ---\n" + sh("docker", [
-        "run", "--rm", "-v", `${dir}:/kong/declarative`, KONG_IMAGE,
-        "kong", "config", "parse", "/kong/declarative/kong.yml",
-      ], { stdio: "pipe" }));
-    } catch (e) {
-      console.error("config parse rejected it:", e.stdout ?? e.stderr ?? String(e));
-    }
+    console.error("--- kong config parse ---");
+    console.error(
+      shBoth(`docker run --rm -v ${dir}:/kong/declarative ${KONG_IMAGE} kong config parse /kong/declarative/kong.yml`),
+    );
+    console.error("--- the generated declarative config ---");
+    console.error(shBoth(`cat ${path.join(dir, "kong.yml")}`).replace(/pdp_key: "[^"]*"/, 'pdp_key: "<redacted>"'));
   };
 
   // Its own loop rather than waitFor(): waitFor swallows exceptions and retries,
@@ -322,7 +332,7 @@ try {
 } finally {
   if (kongStarted) {
     try {
-      console.log("\n--- kong logs (tail) ---\n" + sh("docker", ["logs", "--tail", "40", "regulait-kong-e2e"]));
+      console.log("\n--- kong logs (tail) ---\n" + shBoth("docker logs --tail 40 regulait-kong-e2e"));
     } catch {
       /* best effort */
     }
