@@ -5,7 +5,10 @@
  * Toast lives in ./toast.tsx (it carries a provider).
  */
 import {
+  Children,
+  cloneElement,
   forwardRef,
+  isValidElement,
   useEffect,
   useId,
   useMemo,
@@ -44,7 +47,72 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
 
 // ---- fields ---------------------------------------------------------------
 
+/**
+ * A labelled form control.
+ *
+ * ASSOCIATION IS EXPLICIT (htmlFor/id), NOT BY WRAPPING, and the difference is
+ * not cosmetic. When a `<label>` CONTAINS its control, the control's accessible
+ * name is computed from the label element's text content — which, for a
+ * `<select>`, swallows the options. Every select on the admin surface was
+ * announcing itself as "Detect byhostnameweb appSDK packageAPI key prefix"
+ * instead of "Detect by": the whole option list read out as the field's name,
+ * on every select in the product.
+ *
+ * It surfaced as a test that could not find a control by its own label, which
+ * is the same tell as the two label defects before it — if `getByLabel` cannot
+ * name it, neither can a screen reader.
+ *
+ * The wrapping form is kept as a FALLBACK for the handful of fields whose
+ * children are not a single element (a row of two inputs, a control plus a
+ * hint). Those keep exactly the behaviour they had rather than silently losing
+ * their association.
+ */
 export function Field(props: { label: string; children: ReactNode; error?: string | null; grow?: boolean }) {
+  const auto = useId();
+  // A SPACER IS NOT A LABEL. `<Field label="&nbsp;">` is used to keep a submit
+  // button aligned with the inputs beside it — and rendering that as a real
+  // <label> wrapping the button gave the button the accessible name
+  // "\u00a0Add signature": a non-breaking space glued to the front of every
+  // such control in the product, which is enough to make it unfindable by its
+  // own name. A spacer renders as an aria-hidden span and never as a <label>.
+  const spacer = props.label.trim().replace(/\u00a0/g, "") === "";
+  if (spacer) {
+    return (
+      <div className={s.field} style={props.grow ? { flex: 1 } : undefined}>
+        <span className={s.fieldLabel} aria-hidden>
+          {props.label}
+        </span>
+        {props.children}
+        {props.error ? <span className={s.fieldError}>{props.error}</span> : null}
+      </div>
+    );
+  }
+
+  const only = Children.count(props.children) === 1 ? Children.only(props.children) : null;
+  // ONLY controls that actually take a label. A <label htmlFor> pointing at a
+  // <button> does not describe it — it REPLACES its accessible name, so
+  // `<Field label="&nbsp;"><Button>Add signature</Button></Field>` turned the
+  // submit button into one named " ". That regression was introduced by the
+  // first draft of this very fix and caught by a spec that could no longer
+  // find the button, which is the same signal as before: a control a test
+  // cannot name is a control a screen reader cannot name either.
+  const labelable = only !== null && isValidElement(only) &&
+    (only.type === Input || only.type === Select || only.type === Textarea);
+  const single = labelable && isValidElement<{ id?: string }>(only) ? only : null;
+
+  if (single) {
+    const id = single.props.id ?? auto;
+    return (
+      <div className={s.field} style={props.grow ? { flex: 1 } : undefined}>
+        <label className={s.fieldLabel} htmlFor={id}>
+          {props.label}
+        </label>
+        {single.props.id ? single : cloneElement(single, { id })}
+        {props.error ? <span className={s.fieldError}>{props.error}</span> : null}
+      </div>
+    );
+  }
+
   return (
     <label className={s.field} style={props.grow ? { flex: 1 } : undefined}>
       <span className={s.fieldLabel}>{props.label}</span>

@@ -931,6 +931,7 @@ export default function ShadowAiPage() {
               Install / refresh shipped seed
             </Button>
           </div>
+          <AddSignatureForm onAdded={refresh} />
           <Table<Signature>
             rows={catalogue.data?.signatures ?? []}
             rowKey={(r) => r.id}
@@ -981,3 +982,117 @@ export default function ShadowAiPage() {
     </>
   );
 }
+
+/**
+ * ADD A SIGNATURE the shipped seed does not carry.
+ *
+ * The catalogue could be seeded and its rows deleted, and a custom signature
+ * could not be added from anywhere — which is the wrong way round for this
+ * feature in particular. The shipped seed covers the well-known providers;
+ * the ones a specific customer actually needs to detect are, by definition,
+ * the ones nobody shipped. An internal LLM gateway on a private hostname is
+ * exactly the shadow AI a governance team wants found, and it was the one
+ * thing the catalogue could not be told about.
+ *
+ * MATCH TYPE IS DERIVED, NOT ASKED. The gateway refuses any pairing other than
+ * sdk_package↔package and api_key_prefix↔key_prefix, so offering both as free
+ * choices means offering combinations that can only be rejected. Kind is the
+ * real question; for a hostname the remaining choice (exact vs suffix) is a
+ * genuine one and is the only place a match type is asked for.
+ */
+function AddSignatureForm(props: { onAdded: () => void }) {
+  const act = useAction();
+  const [provider, setProvider] = useState("");
+  const [kind, setKind] = useState<"hostname" | "sdk_package" | "api_key_prefix" | "web_app">("hostname");
+  const [value, setValue] = useState("");
+  const [hostMatch, setHostMatch] = useState<"exact_host" | "host_suffix">("host_suffix");
+  const [minLength, setMinLength] = useState("20");
+
+  // the one pairing the gateway will accept for this kind
+  const matchType =
+    kind === "sdk_package" ? "package" : kind === "api_key_prefix" ? "key_prefix" : hostMatch;
+
+  return (
+    <form
+      className={a.formRow}
+      onSubmit={(e) => {
+        e.preventDefault();
+        void act
+          .run(
+            () =>
+              api.post("/v1/shadow-ai/catalogue", {
+                provider,
+                kind,
+                value,
+                matchType,
+                // An api_key_prefix with no length bound matches every string
+                // that happens to start with it, so the gateway requires one.
+                ...(kind === "api_key_prefix" ? { minLength: Number(minLength) } : {}),
+                provenance: "admin",
+              }),
+            "Signature added",
+          )
+          .then((ok) => {
+            if (ok) {
+              setProvider("");
+              setValue("");
+              props.onAdded();
+            }
+          });
+      }}
+    >
+      <Field label="Provider">
+        <Input required value={provider} onChange={(e) => setProvider(e.target.value)} placeholder="e.g. Acme LLM" />
+      </Field>
+      <Field label="Detect by">
+        <Select value={kind} onChange={(e) => setKind(e.target.value as typeof kind)}>
+          <option value="hostname">hostname</option>
+          <option value="web_app">web app</option>
+          <option value="sdk_package">SDK package</option>
+          <option value="api_key_prefix">API key prefix</option>
+        </Select>
+      </Field>
+      <Field label={kind === "sdk_package" ? "Package name" : kind === "api_key_prefix" ? "Key prefix" : "Hostname"}>
+        <Input
+          required
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          placeholder={
+            kind === "sdk_package" ? "acme-llm-sdk" : kind === "api_key_prefix" ? "acme-" : "llm.internal.acme.example"
+          }
+        />
+      </Field>
+      {kind === "hostname" || kind === "web_app" ? (
+        <Field label="Match">
+          <Select value={hostMatch} onChange={(e) => setHostMatch(e.target.value as typeof hostMatch)}>
+            <option value="host_suffix">suffix — this host and anything under it</option>
+            <option value="exact_host">exact — only this host</option>
+          </Select>
+        </Field>
+      ) : null}
+      {kind === "api_key_prefix" ? (
+        <Field label="Min key length">
+          <Input
+            required
+            type="number"
+            min={1}
+            max={512}
+            value={minLength}
+            onChange={(e) => setMinLength(e.target.value)}
+          />
+        </Field>
+      ) : null}
+      <Field label="&nbsp;">
+        <Button type="submit" variant="primary" disabled={act.busy || !provider || !value}>
+          Add signature
+        </Button>
+      </Field>
+      {act.error && (
+        <span className={v.errLine} role="alert">
+          {act.error}
+        </span>
+      )}
+    </form>
+  );
+}
+
