@@ -82,9 +82,13 @@ toggle beside its current value (absent is not the same as set to what it alread
 `rule_to_approval` inherits the source rule's scope rather than asking for it again, and the exact
 diff is rendered before it is sent — the recorded object is what a named human will be asked to
 approve. The e2e compares the previewed JSON byte-for-byte against what the server stored, because a
-preview that drifts from the payload is worse than no preview. `scripts/preflight-ui-affordances.mjs`
-now reports **0 add-affordance gaps** for the first time (2 delete orphans remain:
-`/v1/approvals/views/:x`, `/v1/llm/backend-configs/:x`).
+preview that drifts from the payload is worse than no preview. The affordance census
+(`scripts/preflight-ui-affordances.mjs`) drops its add-affordance list from two entries to one — `/v1/redteam/libraries`
+remains, and two delete orphans did too (`/v1/approvals/views/:x`,
+`/v1/llm/backend-configs/:x`). **I first wrote that it reported "0 add gaps", in three
+documents. That was wrong**: I read the census output as though closing the copilot entry
+emptied the list, when the remaining entry was printed directly beneath it. All three are
+corrected in place.
 
 Verification: gateway suite green after the one remaining failure was identified and fixed — it was
 `adr0127-advisory-decisions.test.ts`'s CLOSED-SET contract assertion, which `contextApplied`

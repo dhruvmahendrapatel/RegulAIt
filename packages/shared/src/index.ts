@@ -2585,6 +2585,9 @@ export {
 export {
   APPROVAL_CONTEXT_DIGEST_VERSION,
   APPROVAL_DIGEST_VERSION,
+  /** B9b — the ten kinds THE ONE QUEUE holds, and their labels */
+  APPROVAL_OBJECT_TYPES,
+  APPROVAL_OBJECT_TYPE_LABELS,
   APPROVAL_SCOPES,
   CONSENT_RETIREMENT_REASONS,
   DEFAULT_APPROVAL_SCOPE,
@@ -2596,6 +2599,7 @@ export {
   normalizeApprovalArguments,
   sortApprovalRuleVersions,
   type ApprovalContextRef,
+  type ApprovalObjectType,
   type ApprovalPayloadRef,
   type ApprovalRuleVersionRef,
   type ApprovalScope,

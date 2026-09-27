@@ -55,6 +55,51 @@ export const APPROVAL_SCOPES = ["action", "tool"] as const;
 export type ApprovalScope = (typeof APPROVAL_SCOPES)[number];
 
 /**
+ * Every kind of governed object that can sit in THE ONE QUEUE
+ * (`approvals.object_type`) — the list `schema.ts` carries as a TS-only
+ * widening, named once here so the queue's filter, the portal's select and the
+ * saved views all draw on the same ten strings.
+ *
+ * The column has no DB CHECK (migration 0001), so this constant is the only
+ * enumeration there is: a new kind that forgets to be added here is invisible
+ * to the queue filter rather than rejected by it, which is why this lives beside
+ * the other approval constants instead of being inlined at a call site.
+ *
+ * MCP tool calls, workflow sign-offs, run escalations, project budget overages,
+ * infrastructure operations, MRM model-card sign-offs, copilot proposals,
+ * RegulAIt-LLM training runs, certification-campaign items and SoD overrides —
+ * ten kinds, one inbox, one decide path. That is the claim, and a per-kind
+ * filter is how an approver works it without it becoming a second queue.
+ */
+export const APPROVAL_OBJECT_TYPES = [
+  "mcp_tool",
+  "workflow",
+  "run",
+  "project",
+  "infra_operation",
+  "model_card",
+  "copilot_proposal",
+  "training_job",
+  "grant_certification",
+  "sod_override",
+] as const;
+export type ApprovalObjectType = (typeof APPROVAL_OBJECT_TYPES)[number];
+
+/** what each queue kind IS, for a select an approver reads rather than decodes */
+export const APPROVAL_OBJECT_TYPE_LABELS: Record<ApprovalObjectType, string> = {
+  mcp_tool: "MCP tool call",
+  workflow: "workflow stage sign-off",
+  run: "agent run escalation",
+  project: "project budget overage",
+  infra_operation: "infrastructure operation",
+  model_card: "model-card sign-off (MRM)",
+  copilot_proposal: "governance-copilot proposal",
+  training_job: "RegulAIt-LLM training run",
+  grant_certification: "certification-campaign item",
+  sod_override: "separation-of-duties override",
+};
+
+/**
  * ADR-0104: consent is ACTION-scoped unless an operator says otherwise. Pillar
  * 1 is default-deny and this codebase's rule idiom is strictest-wins, so the
  * default is the narrow reading of what an approver signed. This constant is

@@ -110,6 +110,8 @@ import {
   updateUserSchema,
   advisoryDetail,
   authzCheckRequestSchema,
+  /** B9b — the ten kinds the one queue holds; the `objectType` filter's enum */
+  APPROVAL_OBJECT_TYPES,
   type AuthzDecision,
 } from "@regulait/shared";
 import { governedEvaluate } from "./governed-evaluate.js";
@@ -2481,8 +2483,27 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // while a delegation window to them is active (ADR-0022), the pending
   // approvals of their delegator(s), marked delegatedFrom.
   app.get("/v1/approvals", async (req) => {
-    const { status } = z
-      .object({ status: z.enum(["pending", "approved", "denied", "consumed", "superseded"]).optional() })
+    // B9b — THREE server-side filters, not one.
+    //
+    // The queue is fleet-wide and capped at 100 rows, which is what makes this
+    // a correctness matter rather than a convenience: with one dimension, the
+    // only way to find "the copilot proposals waiting on me" is to page through
+    // everything, and the cap means the rows you want may not be in the
+    // response at all. Every filter here narrows IN THE ENDPOINT, for the same
+    // reason `status` does — the queue's materialization and visibility rules
+    // (ADR-0022 delegation widening, ADR-0046 routing) run inside this handler,
+    // so a client-side filter would be filtering a list the server already
+    // decided you could see, one capped page at a time.
+    //
+    // `approverUserId` is a DISPLAY filter, never a widening: it is intersected
+    // with `scopeCondition` below, so a non-admin filtering by somebody else's
+    // id sees only the rows they could already see.
+    const { status, objectType, approverUserId } = z
+      .object({
+        status: z.enum(["pending", "approved", "denied", "consumed", "superseded"]).optional(),
+        objectType: z.enum(APPROVAL_OBJECT_TYPES).optional(),
+        approverUserId: z.string().uuid().optional(),
+      })
       .parse(req.query);
     // ADR-0022 delegation widening: a non-admin sees their own rows PLUS the
     // PENDING rows of anyone actively delegating to them (pending only — a
@@ -2526,9 +2547,13 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
             ...(assignedIds.length ? [inArray(approvals.id, assignedIds)] : []),
           ],
         );
-    const conditions = [status ? eq(approvals.status, status) : undefined, scopeCondition].filter(
-      (c) => c !== undefined,
-    );
+    const conditions = [
+      status ? eq(approvals.status, status) : undefined,
+      objectType ? eq(approvals.objectType, objectType) : undefined,
+      // ANDed with `scopeCondition`, never substituted for it
+      approverUserId ? eq(approvals.approverUserId, approverUserId) : undefined,
+      scopeCondition,
+    ].filter((c) => c !== undefined);
     const rows = await db
       .select()
       .from(approvals)

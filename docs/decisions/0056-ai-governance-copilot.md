@@ -843,9 +843,14 @@ answer at all.
   against a diff the applier would refuse. The reverse is still possible and
   still correct — an approved proposal whose target vanished refuses at apply
   with `proposal_target_gone` and stays unapplied.
-- `scripts/preflight-ui-affordances.mjs` reports **0 add-affordance gaps** for
-  the first time (2 delete orphans remain: `/v1/approvals/views/:x` and
-  `/v1/llm/backend-configs/:x`).
+- `scripts/preflight-ui-affordances.mjs`'s add-affordance list drops from two
+  entries to one: `/v1/copilot/proposals` is closed, `/v1/redteam/libraries`
+  remains. **Correction (same day):** the first version of this paragraph, of the
+  index row, and of `STATE.md`'s recap all said "0 add gaps". That was wrong — I
+  read the census output as though closing the copilot entry emptied the list,
+  and `/v1/redteam/libraries` was printed directly beneath it. Two delete orphans
+  also remained at that point (`/v1/approvals/views/:x`,
+  `/v1/llm/backend-configs/:x`); the first is closed by batch B9b.
 - Tests: the four apply-time refusal assertions in
   `zz-zz-copilot-live.test.ts` moved to propose time, each now also asserting
   that **no approval row was opened** — the half a status-code check misses. One

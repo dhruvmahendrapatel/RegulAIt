@@ -1,4 +1,5 @@
 import { sql } from "drizzle-orm";
+import { APPROVAL_OBJECT_TYPES } from "@regulait/shared";
 import {
   bigint,
   check,
@@ -1234,18 +1235,12 @@ export const approvals = pgTable(
       // does NOT get a second inbox — an arm's-length approver approving the
       // one queue row mints the refused grant inside the decision's own
       // transaction with the overridden rule recorded; denied mints nothing.
-      enum: [
-        "mcp_tool",
-        "workflow",
-        "run",
-        "project",
-        "infra_operation",
-        "model_card",
-        "copilot_proposal",
-        "training_job",
-        "grant_certification",
-        "sod_override",
-      ],
+      // B9b: the list itself now lives in `@regulait/shared`
+      // (`APPROVAL_OBJECT_TYPES`), because the queue's own `objectType` filter
+      // needs the same ten strings and two hand-maintained copies of "what can
+      // be in the one queue" would drift the moment a kind is added — the
+      // column has no DB CHECK, so nothing else would catch it.
+      enum: APPROVAL_OBJECT_TYPES,
     })
       .notNull()
       .default("mcp_tool"),
