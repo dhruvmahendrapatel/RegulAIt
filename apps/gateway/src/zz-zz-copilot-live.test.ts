@@ -145,8 +145,68 @@ async function proposeThrough(
     { queryId, kind, title, rationale: "l6 coverage", diff, approverUserId: approverId },
     adminAuth,
   );
-  expect(p.statusCode).toBe(201);
+  expect(p.statusCode, p.body).toBe(201);
   return { proposalId: p.json().proposal.id as string, approvalId: p.json().approvalId as string };
+}
+
+/**
+ * B9a — the same call, expecting the PROPOSE-TIME DIFF GATE to refuse.
+ *
+ * The four assertions that used to live at apply time moved here, and the move
+ * is the point: a diff that cannot be applied is now refused before any human
+ * is asked to consent to it, so there is never a real approval on the record
+ * against a change that could not happen. Each of these also asserts that NO
+ * APPROVAL ROW WAS OPENED, which is the half a status-code check would miss.
+ */
+async function proposeExpectingRefusal(
+  kind: string,
+  title: string,
+  diff: Record<string, unknown>,
+): Promise<{ statusCode: number; error: string; detail: string }> {
+  const ask = await post("/v1/copilot/ask", { question: "which denied decisions happened this week?" }, adminAuth);
+  expect(ask.statusCode).toBe(201);
+  const approvalsBefore = (await db.select({ id: approvals.id }).from(approvals)).length;
+  const p = await post(
+    "/v1/copilot/proposals",
+    { queryId: ask.json().query.id, kind, title, rationale: "l6 coverage", diff, approverUserId: approverId },
+    adminAuth,
+  );
+  const approvalsAfter = (await db.select({ id: approvals.id }).from(approvals)).length;
+  expect(approvalsAfter, "a refused proposal must not open an Approvals-Queue item").toBe(approvalsBefore);
+  const rows = await db.select({ id: copilotProposals.id }).from(copilotProposals).where(eq(copilotProposals.title, title));
+  expect(rows.length, "a refused proposal must not be recorded").toBe(0);
+  return { statusCode: p.statusCode, error: p.json().error as string, detail: (p.json().detail ?? "") as string };
+}
+
+/**
+ * B9a — A ROW THE PROPOSE GATE NEVER SAW, approved and ready to apply.
+ *
+ * The applier still validates the diff, and this is the only path that can now
+ * reach that check: a proposal recorded before the propose-time gate existed,
+ * or one whose nested payload schema tightened afterwards. Inserted directly
+ * for exactly that reason — going through the endpoint would be refused, which
+ * is the behaviour the tests above assert.
+ */
+async function legacyApprovedProposal(kind: string, title: string, diff: Record<string, unknown>): Promise<string> {
+  const ask = await post("/v1/copilot/ask", { question: "which denied decisions happened this week?" }, adminAuth);
+  const [approval] = await db
+    .insert(approvals)
+    .values({ userId: adminId, objectType: "copilot_proposal", approverUserId: approverId, status: "approved" })
+    .returning();
+  const [row] = await db
+    .insert(copilotProposals)
+    .values({
+      queryId: ask.json().query.id as string,
+      kind,
+      title,
+      rationale: "a row from before the propose-time diff gate existed",
+      diff,
+      evidence: {},
+      approvalId: approval!.id,
+      proposedByUserId: adminId,
+    })
+    .returning();
+  return row!.id;
 }
 
 const decide = async (approvalId: string, decision: "approved" | "denied") => {
@@ -582,12 +642,25 @@ describe("L6b — an approved proposal can be APPLIED, and an unapproved one can
     expect((chokeRow!.detail as Record<string, unknown>).copilotProposalId).toBe(proposalId);
   });
 
-  it("surfaces a malformed diff as a named refusal rather than half-applying it", async () => {
-    const { proposalId, approvalId } = await proposeThrough("policy_tightening", "l6 malformed", {
+  it("surfaces a malformed diff as a named refusal — at PROPOSE time, before consent is asked", async () => {
+    // B9a moved this refusal earlier. It used to be asserted at apply time,
+    // which meant the product had already opened a queue item and a named human
+    // had already approved a diff that could never be read.
+    const res = await proposeExpectingRefusal("policy_tightening", "l6 malformed", {
       ruleKind: "approvals",
       // no ruleId, no patch
     });
-    await decide(approvalId, "approved");
+    expect(res.statusCode).toBe(422);
+    expect(res.error).toBe("proposal_diff_invalid");
+    expect(res.detail).toMatch(/ruleKind, ruleId, patch/);
+  });
+
+  it("STILL refuses at apply time for a row the propose gate never saw — defence in depth", async () => {
+    // the only path that can now reach the applier's own diff check: a row
+    // recorded before that gate existed. It must not half-apply.
+    const proposalId = await legacyApprovedProposal("policy_tightening", "l6 legacy malformed", {
+      ruleKind: "approvals",
+    });
     const res = await applyProposal(proposalId);
     expect(res.statusCode).toBe(422);
     expect(res.json().error).toBe("proposal_diff_invalid");
@@ -740,7 +813,7 @@ describe("B8c — rule_to_approval applies through POST /v1/rules/approvals' own
 
   it("NEVER bypasses the route's own zod: a create the route would refuse is refused with its error", async () => {
     const sourceId = await makeSourceRateLimit("b8c_zod_src");
-    const { proposalId, approvalId } = await proposeThrough("rule_to_approval", "b8c zod bypass attempt", {
+    const res = await proposeExpectingRefusal("rule_to_approval", "b8c zod bypass attempt", {
       sourceRuleKind: "rate-limits",
       sourceRuleId: sourceId,
       // scope 'user' with NO userId — exactly what POST /v1/rules/approvals'
@@ -753,16 +826,12 @@ describe("B8c — rule_to_approval applies through POST /v1/rules/approvals' own
         approverUserId: approverId,
       },
     });
-    await decide(approvalId, "approved");
-    const res = await applyProposal(proposalId);
     expect(res.statusCode).toBe(422);
-    expect(res.json().error).toBe("proposal_diff_invalid");
+    expect(res.error).toBe("proposal_diff_invalid");
     // the ROUTE'S schema, by name, and ITS message verbatim
-    expect(res.json().detail).toMatch(/createApprovalRuleSchema/);
-    expect(res.json().detail).toMatch(/scope 'user' requires a userId/);
+    expect(res.detail).toMatch(/createApprovalRuleSchema/);
+    expect(res.detail).toMatch(/scope 'user' requires a userId/);
     expect(await approvalRuleCountFor("b8c_zod_tool")).toBe(0);
-    const [row] = await db.select().from(copilotProposals).where(eq(copilotProposals.id, proposalId));
-    expect(row!.appliedAt).toBeNull();
   });
 });
 
@@ -878,17 +947,15 @@ describe("B8c — budget_adjustment applies through PATCH /v1/projects/:projectI
 
   it("NEVER bypasses the route's own zod: a patch the route would refuse is refused with its error", async () => {
     const projectId = await makeProject("b8c-budget-zod", { budgetUsd: 100 });
-    const { proposalId, approvalId } = await proposeThrough("budget_adjustment", "b8c zod bypass attempt", {
+    const res = await proposeExpectingRefusal("budget_adjustment", "b8c zod bypass attempt", {
       projectId,
       // a NEGATIVE budget — updateProjectSchema requires positive; a raw
       // db.update would have written it without complaint
       patch: { budgetUsd: -50 },
     });
-    await decide(approvalId, "approved");
-    const res = await applyProposal(proposalId);
     expect(res.statusCode).toBe(422);
-    expect(res.json().error).toBe("proposal_diff_invalid");
-    expect(res.json().detail).toMatch(/updateProjectSchema/);
+    expect(res.error).toBe("proposal_diff_invalid");
+    expect(res.detail).toMatch(/updateProjectSchema/);
     expect((await readProject(projectId)).budgetUsd).toBe(100);
   });
 
@@ -911,15 +978,13 @@ describe("B8c — budget_adjustment applies through PATCH /v1/projects/:projectI
 
   it("refuses a patch that reaches past the budget — a budget_adjustment may not rename a project", async () => {
     const projectId = await makeProject("b8c-budget-scope", { budgetUsd: 100 });
-    const { proposalId, approvalId } = await proposeThrough("budget_adjustment", "b8c scope smuggle", {
+    const res = await proposeExpectingRefusal("budget_adjustment", "b8c scope smuggle", {
       projectId,
       patch: { budgetUsd: 120, name: "smuggled-rename" },
     });
-    await decide(approvalId, "approved");
-    const res = await applyProposal(proposalId);
     expect(res.statusCode).toBe(422);
-    expect(res.json().error).toBe("proposal_diff_invalid");
-    expect(res.json().detail).toMatch(/'name' is not a budget field/);
+    expect(res.error).toBe("proposal_diff_invalid");
+    expect(res.detail).toMatch(/'name' is not a budget field/);
     const after = await readProject(projectId);
     expect(after.name).toBe("b8c-budget-scope");
     expect(after.budgetUsd).toBe(100);

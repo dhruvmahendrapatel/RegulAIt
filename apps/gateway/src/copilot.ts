@@ -187,6 +187,160 @@ const APPLY_RULE_ARTIFACT_TYPES = {
   "data-scopes": "data_scope_rule",
 } as const;
 
+/**
+ * THE ONE AUTHORITY ON WHETHER A PROPOSAL'S DIFF IS WELL-FORMED.
+ *
+ * Batch B9a. This was previously inline in the APPLIER only, which meant a
+ * proposal whose diff could never be applied was still recorded, and still
+ * opened an Approvals-Queue item: a named human read a title and a rationale,
+ * consented, and only then did the product answer "this diff is malformed".
+ * That is consent spent on a change that could not happen — in a governance
+ * product the worst possible place to discover a validation error, because the
+ * audit trail now holds a real human approval of nothing.
+ *
+ * So the check moved here and is called from BOTH ends: `POST /v1/copilot/
+ * proposals` refuses a malformed diff at 422 before any approval exists, and
+ * the applier still calls it too. The second call is not redundant — rows
+ * proposed before this existed are still in the table, and defence in depth at
+ * a mutation door is not a duplication we trade away.
+ *
+ * WHAT IT CHECKS: shape only, plus the nested payload schemas of the two kinds
+ * whose diff carries one (`createApprovalRuleSchema`, `updateProjectSchema` —
+ * the EXACT zod the public routes parse with, never a copy), plus the budget
+ * kind's key restriction, which is structural.
+ *
+ * WHAT IT DELIBERATELY DOES NOT CHECK: that the target still exists. A grant,
+ * rule or project can be removed between proposing and applying, and that is a
+ * fact about the world at apply time, not a defect in the diff. Those checks
+ * stay where they can only be answered — in the applier, against the database,
+ * at the moment of the write.
+ */
+type ValidatedProposalDiff =
+  | { kind: "grant_revocation"; grantKind: z.infer<typeof copilotGrantRevocationDiffSchema>["grantKind"]; grantId: string }
+  | {
+      kind: "policy_tightening";
+      ruleKind: z.infer<typeof copilotPolicyTighteningDiffSchema>["ruleKind"];
+      ruleId: string;
+      patch: Record<string, unknown>;
+    }
+  | {
+      kind: "rule_to_approval";
+      sourceRuleKind: z.infer<typeof copilotRuleToApprovalDiffSchema>["sourceRuleKind"];
+      sourceRuleId: string;
+      create: z.infer<typeof createApprovalRuleSchema>;
+    }
+  | { kind: "budget_adjustment"; projectId: string; patch: z.infer<typeof updateProjectSchema> };
+
+type ProposalDiffRefusal = { ok: false; status: number; error: string; detail: string };
+
+const issueList = (err: z.ZodError): string =>
+  err.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ");
+
+const pathList = (err: z.ZodError): string =>
+  err.issues.map((i) => i.path.join(".") || "(root)").join(", ");
+
+export function validateCopilotProposalDiff(
+  kind: string,
+  diff: unknown,
+): ({ ok: true } & ValidatedProposalDiff) | ProposalDiffRefusal {
+  const bad = (detail: string): ProposalDiffRefusal => ({
+    ok: false,
+    status: 422,
+    error: "proposal_diff_invalid",
+    detail,
+  });
+
+  if (kind === "grant_revocation") {
+    const parsed = copilotGrantRevocationDiffSchema.safeParse(diff);
+    if (!parsed.success)
+      return bad(
+        `a grant_revocation diff must name {grantKind, grantId}; this one does not (${pathList(parsed.error)}).`,
+      );
+    return { ok: true, kind, ...parsed.data };
+  }
+
+  if (kind === "policy_tightening") {
+    const parsed = copilotPolicyTighteningDiffSchema.safeParse(diff);
+    if (!parsed.success)
+      return bad(
+        `a policy_tightening diff must name {ruleKind, ruleId, patch}; this one does not (${pathList(parsed.error)}).`,
+      );
+    // AN EMPTY PATCH IS NOT A TIGHTENING. `applyRuleEdit` treats it as a no-op,
+    // so without this an approver could consent to a "tightening" that moves
+    // nothing and the ledger would record it as applied.
+    if (Object.keys(parsed.data.patch).length === 0)
+      return bad(
+        "a policy_tightening patch must move at least one field; this one is empty, and an approval " +
+          "recorded against a change that does nothing is worse than no proposal at all.",
+      );
+    return { ok: true, kind, ...parsed.data };
+  }
+
+  if (kind === "rule_to_approval") {
+    const parsed = copilotRuleToApprovalDiffSchema.safeParse(diff);
+    if (!parsed.success)
+      return bad(
+        `a rule_to_approval diff must name {sourceRuleKind, sourceRuleId, create}; this one does not ` +
+          `(${pathList(parsed.error)}).`,
+      );
+    // THE ROUTE'S OWN VALIDATION, NEVER BYPASSED: the exact schema
+    // POST /v1/rules/approvals parses with, its issues surfaced verbatim.
+    const create = createApprovalRuleSchema.safeParse(parsed.data.create);
+    if (!create.success)
+      return bad(
+        `the 'create' payload was refused by POST /v1/rules/approvals' own schema ` +
+          `(createApprovalRuleSchema): ${issueList(create.error)}. Nothing was created.`,
+      );
+    return {
+      ok: true,
+      kind,
+      sourceRuleKind: parsed.data.sourceRuleKind,
+      sourceRuleId: parsed.data.sourceRuleId,
+      create: create.data,
+    };
+  }
+
+  if (kind === "budget_adjustment") {
+    const parsed = copilotBudgetAdjustmentDiffSchema.safeParse(diff);
+    if (!parsed.success)
+      return bad(
+        `a budget_adjustment diff must name {projectId, patch}; this one does not (${pathList(parsed.error)}).`,
+      );
+    const keys = Object.keys(parsed.data.patch);
+    const offBudget = keys.filter((k) => !(COPILOT_BUDGET_ADJUSTMENT_FIELDS as readonly string[]).includes(k));
+    if (keys.length === 0)
+      return bad(
+        `a budget_adjustment patch must move at least one budget field ` +
+          `(${COPILOT_BUDGET_ADJUSTMENT_FIELDS.join(", ")}); this one is empty.`,
+      );
+    if (offBudget.length > 0)
+      return bad(
+        `a budget_adjustment adjusts the project's budget fields ` +
+          `(${COPILOT_BUDGET_ADJUSTMENT_FIELDS.join(", ")}) and nothing else; ` +
+          `'${offBudget.join("', '")}' is not a budget field.`,
+      );
+    // THE ROUTE'S OWN VALIDATION, NEVER BYPASSED: the exact schema
+    // PATCH /v1/projects/:projectId parses with, its issues surfaced verbatim.
+    const patch = updateProjectSchema.safeParse(parsed.data.patch);
+    if (!patch.success)
+      return bad(
+        `the patch was refused by PATCH /v1/projects/:projectId's own schema ` +
+          `(updateProjectSchema): ${issueList(patch.error)}. Nothing was changed.`,
+      );
+    return { ok: true, kind, projectId: parsed.data.projectId, patch: patch.data };
+  }
+
+  // a kind outside the enum cannot reach here through either caller (the
+  // proposal schema refuses it, and the applier's kind gate runs first), so
+  // this is the unreachable branch stated rather than assumed
+  return {
+    ok: false,
+    status: 422,
+    error: "proposal_kind_not_applicable",
+    detail: `there is no diff shape defined for a '${kind}' proposal.`,
+  };
+}
+
 /** stable rule ids — the strings an operator greps the audit log for */
 export const COPILOT_RULE_IDS = {
   asked: "copilot-question-answered",
@@ -1778,6 +1932,28 @@ export function registerCopilotRoutes(app: FastifyInstance, db: Db, opts: Copilo
     const [approver] = await db.select().from(users).where(eq(users.id, body.approverUserId));
     if (!approver) return reply.status(404).send({ error: "unknown_approver" });
 
+    // ---- THE DIFF GATE, BEFORE ANY CONSENT IS ASKED FOR ---------------------
+    // B9a. Until this existed a malformed diff was recorded and opened a real
+    // Approvals-Queue item, so a named human consented and the refusal arrived
+    // only at apply time — an approval permanently on the record against a
+    // change that could never happen. The check is the SAME function the
+    // applier runs, so the two ends cannot disagree about what a valid diff is.
+    const diffCheck = validateCopilotProposalDiff(body.kind, body.diff);
+    if (!diffCheck.ok) {
+      await audit(
+        userId,
+        "copilot_proposal",
+        null,
+        COPILOT_RULE_IDS.proposalRefused,
+        `refused to record a '${body.kind}' copilot proposal: ${diffCheck.detail} No approval was ` +
+          `opened — asking a human to consent to a diff that cannot be applied would leave a real ` +
+          `approval on the record against nothing`,
+        { kind: body.kind, queryId: body.queryId, error: diffCheck.error },
+        "deny",
+      );
+      return reply.status(diffCheck.status).send({ error: diffCheck.error, detail: diffCheck.detail });
+    }
+
     const record = buildProposalRecord({
       kind: body.kind as CopilotProposalKind,
       title: body.title,
@@ -1933,22 +2109,19 @@ export function registerCopilotRoutes(app: FastifyInstance, db: Db, opts: Copilo
       );
     }
 
+    // ---- THE DIFF GATE ------------------------------------------------------
+    // The same authority `POST /v1/copilot/proposals` refuses a malformed diff
+    // with, run again here: a row proposed before that check existed, or one
+    // whose nested payload schema has since tightened, must not reach a write.
+    const diff = validateCopilotProposalDiff(proposal.kind, proposal.diff);
+    if (!diff.ok) return refuse(diff.status, diff.error, diff.detail);
+
     // ---- THE MUTATION, THROUGH THE PUBLIC DOOR ------------------------------
     let applied: Record<string, unknown>;
     let reason: string;
 
-    if (proposal.kind === "grant_revocation") {
-      const parsedDiff = copilotGrantRevocationDiffSchema.safeParse(proposal.diff);
-      if (!parsedDiff.success) {
-        return refuse(
-          422,
-          "proposal_diff_invalid",
-          `a grant_revocation diff must name {grantKind, grantId}; this one does not (${parsedDiff.error.issues
-            .map((i) => i.path.join(".") || "(root)")
-            .join(", ")}).`,
-        );
-      }
-      const { grantKind, grantId } = parsedDiff.data;
+    if (diff.kind === "grant_revocation") {
+      const { grantKind, grantId } = diff;
       // ADR-0090's ONE removal implementation per kind — the exact function the
       // DELETE endpoints and a campaign's revoke decision call. Not a copy.
       const removers = {
@@ -1978,18 +2151,8 @@ export function registerCopilotRoutes(app: FastifyInstance, db: Db, opts: Copilo
         `same one-per-kind removal the DELETE /v1/grants endpoints and an ADR-0090 campaign's revoke ` +
         `decision use. Consent came from approval ${approval.id}; this act is attributed to the ` +
         `applying admin, not to the copilot`;
-    } else if (proposal.kind === "policy_tightening") {
-      const parsedDiff = copilotPolicyTighteningDiffSchema.safeParse(proposal.diff);
-      if (!parsedDiff.success) {
-        return refuse(
-          422,
-          "proposal_diff_invalid",
-          `a policy_tightening diff must name {ruleKind, ruleId, patch}; this one does not (${parsedDiff.error.issues
-            .map((i) => i.path.join(".") || "(root)")
-            .join(", ")}).`,
-        );
-      }
-      const { ruleKind, ruleId, patch } = parsedDiff.data;
+    } else if (diff.kind === "policy_tightening") {
+      const { ruleKind, ruleId, patch } = diff;
       const artifactType = APPLY_RULE_ARTIFACT_TYPES[ruleKind];
       // ADR-0074's ONE DOOR. Never a `.update()` on the rule table: a versioned
       // rule must mint and activate, or the admin sees an edit that enforces
@@ -2030,37 +2193,14 @@ export function registerCopilotRoutes(app: FastifyInstance, db: Db, opts: Copilo
         (res.mintedVersion ? ` (config version minted and activated)` : ` (unversioned rule: plain row write)`) +
         `. Consent came from approval ${approval.id}; this act is attributed to the applying admin, ` +
         `not to the copilot`;
-    } else if (proposal.kind === "rule_to_approval") {
+    } else if (diff.kind === "rule_to_approval") {
       // B8c — the cross-artifact CREATE the first amendment named unapplied.
       // The create half IS a public endpoint's work — POST /v1/rules/approvals
       // — and the derivation half happened at PROPOSAL time (the evidence names
       // the noisy source rule). So the apply is: re-run the route's own zod,
       // check the SOURCE rule still exists, then create through the extracted
       // implementation the route itself calls (`createApprovalRuleRow`).
-      const parsedDiff = copilotRuleToApprovalDiffSchema.safeParse(proposal.diff);
-      if (!parsedDiff.success) {
-        return refuse(
-          422,
-          "proposal_diff_invalid",
-          `a rule_to_approval diff must name {sourceRuleKind, sourceRuleId, create}; this one does not ` +
-            `(${parsedDiff.error.issues.map((i) => i.path.join(".") || "(root)").join(", ")}).`,
-        );
-      }
-      const { sourceRuleKind, sourceRuleId, create } = parsedDiff.data;
-      // THE ROUTE'S OWN VALIDATION, NEVER BYPASSED: the exact schema
-      // POST /v1/rules/approvals parses with, its issues surfaced verbatim. A
-      // payload the route would refuse is refused here, not applied.
-      const parsedCreate = createApprovalRuleSchema.safeParse(create);
-      if (!parsedCreate.success) {
-        return refuse(
-          422,
-          "proposal_diff_invalid",
-          `the 'create' payload was refused by POST /v1/rules/approvals' own schema ` +
-            `(createApprovalRuleSchema): ${parsedCreate.error.issues
-              .map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
-              .join("; ")}. Nothing was created.`,
-        );
-      }
+      const { sourceRuleKind, sourceRuleId, create } = diff;
       // the CROSS-ARTIFACT half: an approval requirement "derived from" a rule
       // that no longer exists would be a requirement justified by nothing
       const source = await loadRuleRow(db, APPLY_RULE_ARTIFACT_TYPES[sourceRuleKind], sourceRuleId);
@@ -2074,7 +2214,7 @@ export function registerCopilotRoutes(app: FastifyInstance, db: Db, opts: Copilo
           { sourceRuleKind, sourceRuleId },
         );
       }
-      const row = await createApprovalRuleRow(db, parsedCreate.data);
+      const row = await createApprovalRuleRow(db, create);
       applied = {
         via: "POST /v1/rules/approvals (createApprovalRuleRow)",
         approvalRuleId: row.id,
@@ -2092,48 +2232,10 @@ export function registerCopilotRoutes(app: FastifyInstance, db: Db, opts: Copilo
       // public write is PATCH /v1/projects/:projectId — so the apply rides that
       // route's extracted core (`applyProjectPatch`), behind that route's own
       // zod and its own budget-requires-approver invariant.
-      const parsedDiff = copilotBudgetAdjustmentDiffSchema.safeParse(proposal.diff);
-      if (!parsedDiff.success) {
-        return refuse(
-          422,
-          "proposal_diff_invalid",
-          `a budget_adjustment diff must name {projectId, patch}; this one does not ` +
-            `(${parsedDiff.error.issues.map((i) => i.path.join(".") || "(root)").join(", ")}).`,
-        );
-      }
-      const { projectId, patch } = parsedDiff.data;
-      const keys = Object.keys(patch);
-      const offBudget = keys.filter(
-        (k) => !(COPILOT_BUDGET_ADJUSTMENT_FIELDS as readonly string[]).includes(k),
-      );
-      if (keys.length === 0 || offBudget.length > 0) {
-        return refuse(
-          422,
-          "proposal_diff_invalid",
-          keys.length === 0
-            ? `a budget_adjustment patch must move at least one budget field ` +
-                `(${COPILOT_BUDGET_ADJUSTMENT_FIELDS.join(", ")}); this one is empty.`
-            : `a budget_adjustment adjusts the project's budget fields ` +
-                `(${COPILOT_BUDGET_ADJUSTMENT_FIELDS.join(", ")}) and nothing else; ` +
-                `'${offBudget.join("', '")}' is not a budget field.`,
-        );
-      }
-      // THE ROUTE'S OWN VALIDATION, NEVER BYPASSED: the exact schema
-      // PATCH /v1/projects/:projectId parses with, its issues surfaced verbatim.
-      const parsedPatch = updateProjectSchema.safeParse(patch);
-      if (!parsedPatch.success) {
-        return refuse(
-          422,
-          "proposal_diff_invalid",
-          `the patch was refused by PATCH /v1/projects/:projectId's own schema ` +
-            `(updateProjectSchema): ${parsedPatch.error.issues
-              .map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
-              .join("; ")}. Nothing was changed.`,
-        );
-      }
+      const { projectId, patch } = diff;
       const res = await applyProjectPatch(db, {
         projectId,
-        patch: parsedPatch.data,
+        patch,
         actorUserId: userId,
         auditDetail: { via: "copilot-proposal-apply", copilotProposalId: proposal.id, approvalId: approval.id },
       });
