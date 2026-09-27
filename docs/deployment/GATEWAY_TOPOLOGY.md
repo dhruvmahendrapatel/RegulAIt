@@ -8,7 +8,8 @@ Adapter: [`integrations/kong/`](../../integrations/kong/) (a Kong plugin).
 
 > ### Kong: supported and VERIFIED. Envoy: withdrawn, do not use.
 >
-> **Kong** is exercised on every change to `integrations/` by
+> **Kong** is exercised — on any change to `integrations/`, to the gateway's source, or to the
+> shared packages, which are the three places that can alter either side of this contract — by
 > [`.github/workflows/integrations.yml`](../../.github/workflows/integrations.yml), against a
 > **pinned `kong:3.6`** in DB-less mode behind `key-auth`. The assertion is not that the client
 > saw a 403 — a 403 rendered after the upstream already ran looks identical from the client side —

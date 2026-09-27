@@ -195,7 +195,17 @@ plugins:
     route: governed-route
     config:
       pdp_url: "http://host.docker.internal:${GATEWAY_PORT}"
-      pdp_key: "${pdpKey}"
+      # A VAULT REFERENCE, NOT THE SECRET. The declarative file has to be
+      # readable by the \`kong\` user inside the container, and the first version
+      # achieved that by chmod 0644 — with a plaintext UNRESTRICTED ADMIN TOKEN
+      # inside it. On a CI runner that is ephemeral; on a developer's machine it
+      # is a durable control-plane credential sitting world-readable in /tmp.
+      # The key now arrives as an environment variable the container resolves at
+      # read time, which is also exactly the pattern this repo tells operators
+      # to use (\`referenceable = true\` on the field is what permits it), so the
+      # harness exercises the recommended secret handling instead of a shortcut
+      # no customer should copy.
+      pdp_key: "{vault://env/regulait-pdp-key}"
       server_id: "${server.id}"
       tool_name: "${tool.name}"
       timeout_ms: 2000
@@ -216,6 +226,10 @@ plugins:
     "--add-host", "host.docker.internal:host-gateway",
     "-v", `${dir}:/kong/declarative`,
     "-v", `${path.join(repoRoot, "integrations/kong/kong")}:/opt/regulait/kong`,
+    // The secret, out of band of the config file. Visible to `docker inspect`
+    // for whoever can already talk to the daemon — strictly better than a
+    // world-readable file, and it is what the vault reference above resolves.
+    "-e", `REGULAIT_PDP_KEY=${pdpKey}`,
     "-e", "KONG_DATABASE=off",
     // WITHOUT THESE, A FATAL STARTUP ERROR IS INVISIBLE. Kong writes its error
     // log to a file inside the container by default, so `docker logs` came back
@@ -257,6 +271,9 @@ plugins:
       shBoth(`docker run --rm -v ${dir}:/kong/declarative ${KONG_IMAGE} kong config parse /kong/declarative/kong.yml`),
     );
     console.error("--- the generated declarative config ---");
+    // The file no longer contains the secret (it holds a vault reference), but
+    // the redaction stays: a dump that depends on the file never regaining one
+    // is a dump that leaks the day it does.
     console.error(shBoth(`cat ${path.join(dir, "kong.yml")}`).replace(/pdp_key: "[^"]*"/, 'pdp_key: "<redacted>"'));
   };
 

@@ -1,7 +1,9 @@
 # Kong — RegulAIt as an authorization decision point (ADR-0127)
 
-> **VERIFIED against a pinned `kong:3.6`.** Every change to `integrations/` runs
-> the deny path end to end with a counting upstream — see
+> **VERIFIED against a pinned `kong:3.6`.** The deny path runs end to end with a
+> counting upstream on any change to `integrations/`, to the gateway's source,
+> or to the shared packages — the three places that can alter either side of
+> this contract. See
 > [`test/verify.mjs`](test/verify.mjs) and
 > [`.github/workflows/integrations.yml`](../../.github/workflows/integrations.yml).
 > First green run 2026-09-27.

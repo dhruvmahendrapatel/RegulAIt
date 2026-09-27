@@ -27,6 +27,14 @@ on:
     paths:
       - "integrations/**"
       - ".github/workflows/integrations.yml"
+      # THE ADAPTER'S CONTRACT LIVES ON THE OTHER SIDE TOO. A filter of only
+      # `integrations/**` would let a change to `/v1/authz/check`, to the
+      # decision kernel, or to the route's admin gating break the adapter with
+      # this gate never running — and the claim "verified on every change" would
+      # be false in exactly the direction that matters. The web app cannot
+      # affect it, so it stays out and doc-only changes still skip the job.
+      - "apps/gateway/src/**"
+      - "packages/**"
 
 jobs:
   kong-adapter:

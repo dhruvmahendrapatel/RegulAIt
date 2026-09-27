@@ -989,3 +989,37 @@ fails the same way the code it tests does.* Budget for it: the first green run
 of a new harness is mostly debugging the harness. That cost is paid ONCE, and
 the reviews it replaces were being paid per finding — two adapters, three
 review cycles, and both defects still reached a public repository.
+
+### M-044 (2026-09-27) — my fix for a permissions error published an admin credential
+
+The Kong harness could not start because `mkdtempSync` creates its directory
+`0700` and Kong runs as another user inside the container. I fixed it with
+`chmod 0755` on the directory and `0644` on the file — and **that file contained
+the plaintext PDP key, which is an unrestricted administrator token.** On a CI
+runner the box is ephemeral; on a developer's machine it is a durable
+control-plane credential sitting world-readable in `/tmp`, found by review as
+AER-033.
+
+**The rule.** *Before widening permissions on anything, read what is inside it.*
+"Make it readable" and "make it readable BY EVERYONE" are the same keystroke and
+different decisions, and the second one is only safe if you know the contents.
+I knew the contents — I had written them forty lines above — and still did not
+connect the two, because I was debugging a startup failure and the file was a
+config file in my head, not a secret.
+
+**Second-order, and the reason this is its own entry rather than a footnote on
+M-043:** this is the THIRD defect introduced by a fix in this ADR's history.
+Removing the spoofable header made the consumer the sole identity source, which
+made a priority-ordering bug fatal; replacing header config with `os.getenv`
+swapped a security bug for a correctness one; and now a permissions fix has
+leaked a credential. M-043's addendum already said a fix inherits the burden of
+the code it replaces. The sharper version: **a fix made under debugging pressure
+is the most dangerous code in the change**, because the goal has narrowed to
+"make the error stop" and the usual questions are not being asked.
+
+The remedy is the pattern this repo already recommends to its own customers and
+was not using itself: the secret never enters the file. Kong resolves
+`{vault://env/regulait-pdp-key}` at read time from an environment variable, so
+the config is readable and carries nothing worth reading. The harness now
+exercises the secret handling we tell operators to use, instead of a shortcut
+no customer should copy.
