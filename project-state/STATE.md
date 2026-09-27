@@ -57,6 +57,26 @@ README's disclosure is measured rather than promised, and it cleans up after its
 scratch PDP key, removes its temp directory, drops its scratch database), which was AER-033's
 residual hygiene.
 
+**Closed in the same pass — AER-034 and AER-031.** The Kong README's "What is actually asserted"
+listed `approval_required`, a non-200 PDP and an unparseable PDP answer, and the harness asserted
+none of the three. They are asserted now rather than removed: `approval_required` needed a third
+subject (entitled AND caught by an approval rule, because putting a rule on the entitled consumer
+would turn the `allow` control into a different test), and the two answer-shaped failures needed two
+more governed routes whose plugin instances point at stub PDPs — a plugin's config being per route is
+what makes "the same upstream, a broken decision point" expressible at all. **Green in a real
+container on the first run**, and the Kong access log corroborates each branch independently:
+`regulait pdp returned 500` → 503, `/pdp-junk` → 503, and a 403 whose body length differs from the
+policy-deny 403 because it carries `approval_required`. AER-031's last residue is gone too —
+`docs/deployment/README.md`'s index row said "Kong only, no Envoy adapter" and then described "the
+Envoy and Kong adapters" in the same cell.
+
+**One process failure worth the ledger (M-047).** The AER-035 concurrency test passed five tests
+locally and broke the CI build on two nonexistent column names. `vitest run` does not typecheck, and
+drizzle silently drops unknown keys — so the test was green, correct about the thing it asserted, and
+uncompilable, all at once. I had run the gateway typecheck after editing `copilot.ts` and then written
+the test file and run only vitest: the check I ran was not the check CI runs. Same family as M-041 and
+M-045. Mitigation in use from here: after touching a test file, run the owning package's `build`.
+
 **2026-09-27 — the PDP credential stopped being an administrator, the authorization
 callout started asking the same question a dispatch asks, and the copilot's propose half got both
 a gate and a UI. Migration 0117, ADR-0127 and ADR-0056 amended.**
