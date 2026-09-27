@@ -119,6 +119,18 @@ component that authenticated the user and knows what it is calling, so it is the
 the trusted path. Omitting `principal` can only ever narrow a decision — absent means the honest
 "unknown", which is the weakest reading.
 
+**What the Kong adapter sends, and what it deliberately does not.** `project_id` and
+`session_origin` are per-route plugin config, because a governed route fronts one project context
+and its operator knows which auth plugin fronts it — both are static per route and both are true.
+There is **no `mfa_completed` field**: Kong cannot observe whether a second factor was completed,
+and a configured `true` would be an unchecked assertion sitting in the trusted path. **`args` are
+not sent at all**, and that is the adapter's real limit: mapping an HTTP body onto a tool's named
+arguments is a per-route projection, and a *wrong* mapping evaluates a data-scope rule against the
+wrong values — which is worse than the fail-closed deny that omitting them produces. **A route
+governed by a data-scope rule is therefore refused by this adapter until that mapping exists**, by
+design. The harness asserts all of this against the PDP's own ledger (`contextApplied`) rather than
+against the plugin's source, including that the adapter does *not* claim to send `args`.
+
 The response carries `contextApplied`: the **names** of the dimensions the decision was computed on,
 never their values. A proxy that believes it is sending arguments and is not would otherwise see
 only a stream of denials with no way to tell a policy refusal from its own misconfiguration.

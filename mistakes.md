@@ -1051,3 +1051,41 @@ The work built on the false premise was still worth having — an ephemeral
 keypair whose private half is never persisted is the right shape for a test
 environment — but it was justified to the owner with a reason that was not true,
 and that is what would have cost them if they had planned around it.
+
+### M-046 (2026-09-27) — I filed a correctness bug under "honest limits" and then repeated it
+
+The copilot applier's B8c amendment (2026-08-22) listed, as honest limit 5, "the
+applier is still not transactional across its audit row". I wrote batch B9a
+against that same code five weeks later, read that sentence, and carried it
+forward unchanged into a new amendment's limits section. An external review then
+found (AER-035) that the applier was **not transactional at all and not
+concurrency-safe**: twenty simultaneous applies of one approved proposal created
+**ten governance rules from one human approval**, measured.
+
+**The rule.** *A limit you wrote down is a claim you have not re-checked. When
+you touch the code it describes, re-derive it — do not copy it forward.* A
+limits section is the most load-bearing prose in an ADR precisely because it is
+where a reader stops looking, and the copy-forward is what turns one session's
+understatement into the next session's assumption.
+
+**Why the original framing was wrong, and why it was comfortable.** "Not
+transactional across its audit row" sounds like a records-keeping nicety — the
+change happened, the note about it lands a moment later. The actual property was
+that the change could happen TWICE. The gap between those two readings is the
+whole finding, and I had written the words that closed it off. A limit phrased as
+a cosmetic shortfall does not invite anyone to test it.
+
+**The second-order failure, which is mine and not B8c's.** B9a *added tests to
+this exact route* — four refusal cases moved from apply time to propose time —
+and I did not once ask what two concurrent callers would do. I was reasoning
+about the ORDER of checks (does the refusal come before consent is spent?) while
+the defect was in their ATOMICITY, and those feel like the same question until
+you write `Promise.all`. The existing tests "proved" idempotency by applying
+twice in sequence, which is a different property, and their passing is what let
+me believe the ground was covered.
+
+**Extractable check, added to the concurrency family:** when a route reads a row,
+decides from it, and then writes based on that decision, the test that matters is
+`Promise.all` over N copies of the request — and the assertion is a count of the
+ARTIFACTS the world now holds, never a count of successful responses. A route can
+return exactly one 200 and have applied the change twice.

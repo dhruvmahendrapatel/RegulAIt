@@ -27,6 +27,22 @@ return {
           -- unnamed thing.
           { server_id = { type = "string", required = true } },
           { tool_name = { type = "string", required = true } },
+          -- AER-028's PROJECT half. Optional, and honest either way: a governed
+          -- route fronts a tool inside ONE project context, so this is static
+          -- per route and the operator is the only component that knows it.
+          -- Omitting it means a deploy-mode-scoped rule sees no project and
+          -- matches nothing — the fail-closed direction, and the reason this
+          -- field exists rather than a guess.
+          { project_id = { type = "string" } },
+          -- ADR-0040 session facts, for an ABAC policy that reads them.
+          -- DELIBERATELY per-route static, because that is the only thing Kong
+          -- can state truthfully: it knows which auth plugin fronts this route,
+          -- so an operator whose route sits behind OIDC can say `sso` once.
+          -- There is NO mfa field: Kong cannot observe whether a second factor
+          -- was completed, and a configured `true` would be an assertion nobody
+          -- checked, sitting in the trusted path. Absent is the honest value —
+          -- it reads as "unknown", which is the weakest input a policy can get.
+          { session_origin = { type = "string", one_of = { "password", "sso", "api_key" } } },
           -- The PDP does real database work per decision (GATEWAY_TOPOLOGY.md
           -- §4) and this runs on every request, so the deadline is deliberate.
           { timeout_ms = { type = "integer", default = 2000, between = { 100, 10000 } } },

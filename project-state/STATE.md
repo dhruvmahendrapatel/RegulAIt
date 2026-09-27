@@ -21,7 +21,43 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
-**2026-09-27 (latest) — the PDP credential stopped being an administrator, the authorization
+**2026-09-27 (latest, second entry) — AER-035: one human approval could be spent twice, and did
+create ten governance rules under test. ADR-0056 amended for the fifth time, M-046 logged.**
+
+An external review found the copilot's proposal applier **not transactional and not
+concurrency-safe**. It read the proposal, checked `applied_at`, ran the mutation, wrote the marker
+and appended the audit row as five independent statements with no lock. Two concurrent requests
+could both see `applied_at = NULL` and both spend one human's consent; `rule_to_approval` is the
+material case, because `createApprovalRuleRow` is an unconditional insert with a fresh id. **With
+the lock removed, twenty simultaneous applies produced ten successes and ten live approval rules
+from one approval.** With it: one and one.
+
+The fix is one transaction opened with `SELECT … FOR UPDATE` on the proposal row, with every choke
+point widened to accept a transaction handle through ADR-0074's existing `DbOrTx`/`DbOrTxDeep`
+types (plus a `DbOrTxWrite` for the ones that DELETE) rather than a new mechanism. Refusals are
+audited **after** the rollback on purpose: a deny row written inside the transaction would roll back
+with it and leave the one case an operator most needs to find unrecorded.
+
+**And the process failure is mine, not the reviewer's find.** B8c filed this under honest limits as
+"not transactional across its audit row" — which sounds like a records-keeping nicety when the real
+property was that the change could happen twice — and batch B9a, which *added tests to this exact
+route* five weeks later, copied that sentence forward without re-deriving it. M-046: *a limit you
+wrote down is a claim you have not re-checked; when you touch the code it describes, re-derive it.*
+The existing tests "proved" idempotency by applying twice in sequence, which is a different property,
+and their passing is what let me believe the ground was covered.
+
+**Also in this pass:** the Kong adapter now sends the decision context it can state truthfully —
+`project_id` and `session_origin` as per-route config — and deliberately still sends no `args`,
+because a *wrong* body-to-arguments mapping would evaluate a data-scope rule against the wrong
+values, which is worse than the fail-closed deny that omitting them produces. There is no
+`mfa_completed` field for the same reason: Kong cannot observe a second factor, and a configured
+`true` would be an unchecked assertion in the trusted path. The harness now asserts all of this
+against the PDP's own `contextApplied` ledger — including that `args` is NOT claimed — so the
+README's disclosure is measured rather than promised, and it cleans up after itself (revokes the
+scratch PDP key, removes its temp directory, drops its scratch database), which was AER-033's
+residual hygiene.
+
+**2026-09-27 — the PDP credential stopped being an administrator, the authorization
 callout started asking the same question a dispatch asks, and the copilot's propose half got both
 a gate and a UI. Migration 0117, ADR-0127 and ADR-0056 amended.**
 

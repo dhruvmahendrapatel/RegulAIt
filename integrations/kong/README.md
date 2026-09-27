@@ -81,11 +81,25 @@ the first green run the Kong access log independently corroborated the
 harness: one `200` in the entire run, five refusals, and the upstream counter
 at zero for every one of them.
 
-## Known limitation — this plugin sends no `args`
+## The context this plugin sends — and the one thing it does not
 
-The plugin sends `userId`, `serverId` and `toolName`, and **not the call's arguments**. Kong would
-have to buffer and parse the request body to supply them, which is a real cost on every request and
-a decision an operator should make deliberately rather than inherit.
+`project_id` and `session_origin` are **per-route plugin config**, and sent when set. Both are
+static per route and both are things Kong can state truthfully: a governed route fronts one project
+context, and its operator knows which auth plugin fronts it. Set `project_id` if any of your rules
+are deploy-mode scoped; set `session_origin` (`password` | `sso` | `api_key`) if an ABAC policy
+reads it.
+
+There is deliberately **no `mfa_completed`**. Kong cannot observe whether a second factor was
+completed, and a configured `true` would be an assertion nobody checked sitting in the trusted path.
+Absent reads as "unknown", which is the weakest input a policy can get — the safe direction.
+
+### Known limitation — this plugin sends no `args`
+
+The plugin sends `userId`, `serverId`, `toolName` and the two fields above, and **not the call's
+arguments**. Kong would have to buffer and parse the request body to supply them, and then map that
+body onto the tool's named arguments — a per-route projection whose *wrong* version would evaluate a
+data-scope rule against the wrong values. That is worse than the fail-closed deny you get by
+omitting them, which is why this is a gap rather than a guess.
 
 The consequence is specific and worth knowing before you deploy: **if a data-scope rule applies to
 the governed tool, this plugin will get `deny`** — the kernel fails closed on a rule whose argument
@@ -94,4 +108,6 @@ rule. Either govern a route whose tool carries no data-scope rule, or extend the
 `args` and accept the buffering cost.
 
 `contextApplied` in the response tells you which dimensions were actually used, so this shows up as
-`[]` rather than as a mystery.
+`["projectId","principal"]` — with `args` conspicuously absent — rather than as a mystery. The
+harness asserts exactly that against the PDP's own ledger, including that `args` is NOT claimed: a
+disclosure in a README is a promise, and this one is now measured.

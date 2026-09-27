@@ -1521,8 +1521,16 @@ export function registerCopilotRoutes(app: FastifyInstance, db: Db, opts: Copilo
     reason: string,
     detail: Record<string, unknown>,
     effect: "allow" | "deny" = "allow",
+    /**
+     * AER-035 — the WRITER, so an audit row can be appended INSIDE a caller's
+     * transaction. The copilot's proposal applier passes its transaction handle:
+     * the mutation, the applied marker and this row must commit together, or an
+     * applied change can exist with no audit row saying who applied it.
+     * Defaults to the top-level handle, so every other caller is unchanged.
+     */
+    writer: Pick<Db, "insert"> = db,
   ) {
-    await db.insert(auditLog).values({
+    await writer.insert(auditLog).values({
       userId: actor ?? ZERO_UUID,
       objectType,
       objectId,
@@ -2033,257 +2041,355 @@ export function registerCopilotRoutes(app: FastifyInstance, db: Db, opts: Copilo
   //    a named person consented; a named person applied.
   //  * ONCE. `applied_at` is the idempotency gate — a second apply is refused,
   //    never re-executed.
+  //  * ONCE EVEN UNDER CONCURRENCY, AND ALL-OR-NOTHING (AER-035, 2026-09-27).
+  //    The three properties above were each true of a single request and none of
+  //    them was true of two. The proposal was read, `applied_at` was checked,
+  //    the mutation ran, the marker was written and the audit row was appended
+  //    as five independent statements — so two concurrent requests could both
+  //    see `applied_at = NULL` and both spend one human's consent. The
+  //    `rule_to_approval` branch was the material case: `createApprovalRuleRow`
+  //    is an unconditional insert, so one approval could create TWO live
+  //    governance rules while the proposal recorded only the last writer's
+  //    result. A crash between the mutation and the marker left a real change
+  //    replayable; a crash between the marker and the audit left an applied
+  //    change with no audit row — in a product whose claim is that every
+  //    governed change is attributable, the second is the worse of the two.
+  //
+  //    Now: ONE transaction, opened with `SELECT … FOR UPDATE` on the proposal
+  //    row. Concurrent applies serialize on that lock, the second one sees the
+  //    `applied_at` its predecessor committed and takes the ordinary
+  //    already-applied refusal. The mutation, the marker, the result and the
+  //    audit row commit together or not at all, which is also why no
+  //    idempotency column was added: there is no half-applied state left behind
+  //    to recover from. Every choke point this calls was widened to accept a
+  //    transaction handle (`DbOrTx`/`DbOrTxDeep`/`DbOrTxWrite`) rather than
+  //    opening a second connection beside it.
+  //
+  //    REFUSALS ARE AUDITED OUTSIDE THE TRANSACTION, on purpose: a refusal
+  //    rolls the transaction back, and a deny row inside it would roll back
+  //    too — leaving the one case an operator most needs to find unrecorded.
   // -------------------------------------------------------------------------
   app.post("/v1/copilot/proposals/:proposalId/apply", async (req, reply) => {
     const { proposalId } = z.object({ proposalId: z.string().uuid() }).parse(req.params);
     const userId = req.authCtx.userId ?? null;
 
-    const [proposal] = await db.select().from(copilotProposals).where(eq(copilotProposals.id, proposalId));
-    if (!proposal) return reply.status(404).send({ error: "unknown_copilot_proposal" });
-
-    /** every refusal takes this path: audited as a deny, naming the proposal */
-    const refuse = async (status: number, error: string, detail: string, extra: Record<string, unknown> = {}) => {
-      await audit(
-        userId,
-        "copilot_proposal",
-        proposal.id,
-        COPILOT_RULE_IDS.proposalApplyRefused,
-        `refused to apply copilot proposal '${proposal.title}' (${proposal.kind}): ${detail}`,
-        { kind: proposal.kind, error, ...extra },
-        "deny",
-      );
-      return reply.status(status).send({ error, detail });
-    };
-
-    // ALREADY APPLIED. Checked before consent so a replay cannot re-execute a
-    // mutation just because the approval is still 'approved'.
-    if (proposal.appliedAt) {
-      return refuse(
-        409,
-        "proposal_already_applied",
-        `this proposal was already applied at ${proposal.appliedAt.toISOString()}. Applying is a ` +
-          `mutation, so it happens once; propose a new change rather than re-applying this one.`,
-        { appliedAt: proposal.appliedAt.toISOString() },
-      );
+    /**
+     * A refusal, thrown so it ROLLS THE TRANSACTION BACK. Carrying the proposal
+     * identity on the error is what lets the deny row be audited afterwards,
+     * outside the transaction that just disappeared.
+     */
+    class ApplyRefusal extends Error {
+      constructor(
+        readonly status: number,
+        readonly code: string,
+        readonly why: string,
+        readonly extra: Record<string, unknown> = {},
+        readonly subject: { id: string; title: string; kind: string } | null = null,
+      ) {
+        super(code);
+      }
     }
 
-    // ---- THE CONSENT GATE ---------------------------------------------------
-    if (!proposal.approvalId) {
-      return refuse(
-        409,
-        "proposal_has_no_approval",
-        "this proposal carries no Approvals-Queue item, so no human has consented to it. The " +
-          "copilot's only route to a change is a proposal a named human approves.",
-      );
-    }
-    const [approval] = await db.select().from(approvals).where(eq(approvals.id, proposal.approvalId));
-    if (!approval) {
-      return refuse(
-        409,
-        "proposal_approval_missing",
-        "the Approvals-Queue item this proposal was opened against no longer exists, so there is " +
-          "no recorded consent to apply.",
-        { approvalId: proposal.approvalId },
-      );
-    }
-    if (approval.status !== "approved") {
-      return refuse(
-        409,
-        "proposal_not_approved",
-        `the linked approval is '${approval.status}', not 'approved'. A copilot proposal is applied ` +
-          `only on a named human's recorded consent through the one approvals queue — the copilot ` +
-          `cannot consent on anyone's behalf and neither can this endpoint.`,
-        { approvalId: approval.id, approvalStatus: approval.status },
-      );
-    }
+    try {
+      const done = await db.transaction(async (tx) => {
+        // THE LOCK. Every other statement in this handler depends on this row
+        // not moving underneath it, and `FOR UPDATE` is what makes a second
+        // concurrent apply wait here rather than race ahead.
+        const [proposal] = await tx
+          .select()
+          .from(copilotProposals)
+          .where(eq(copilotProposals.id, proposalId))
+          .for("update");
+        if (!proposal) throw new ApplyRefusal(404, "unknown_copilot_proposal", "", {}, null);
 
-    // ---- THE KIND GATE ------------------------------------------------------
-    if (!copilotProposalKindIsApplicable(proposal.kind)) {
-      return refuse(
-        422,
-        "proposal_kind_not_applicable",
-        COPILOT_UNAPPLICABLE_PROPOSAL_KINDS[proposal.kind] ??
-          `there is no public endpoint that applies a '${proposal.kind}' proposal, and this endpoint ` +
-            `will not write the change directly.`,
-        { applicableKinds: COPILOT_APPLICABLE_PROPOSAL_KINDS },
-      );
-    }
+        /**
+         * Every refusal takes this path: audited as a deny, naming the proposal.
+         *
+         * The EXPLICIT `never` annotation on the binding (not merely on the
+         * arrow) is what TypeScript needs to treat a call to it as terminating
+         * control flow — without it, every guard below stops narrowing and the
+         * compiler reports the values they guard as possibly undefined.
+         */
+        const refuse: (status: number, error: string, detail: string, extra?: Record<string, unknown>) => never = (
+          status,
+          error,
+          detail,
+          extra = {},
+        ) => {
+          throw new ApplyRefusal(status, error, detail, extra, {
+            id: proposal.id,
+            title: proposal.title,
+            kind: proposal.kind,
+          });
+        };
 
-    // ---- THE DIFF GATE ------------------------------------------------------
-    // The same authority `POST /v1/copilot/proposals` refuses a malformed diff
-    // with, run again here: a row proposed before that check existed, or one
-    // whose nested payload schema has since tightened, must not reach a write.
-    const diff = validateCopilotProposalDiff(proposal.kind, proposal.diff);
-    if (!diff.ok) return refuse(diff.status, diff.error, diff.detail);
+        // ALREADY APPLIED. Checked before consent so a replay cannot re-execute a
+        // mutation just because the approval is still 'approved'.
+        if (proposal.appliedAt) {
+          refuse(
+            409,
+            "proposal_already_applied",
+            `this proposal was already applied at ${proposal.appliedAt.toISOString()}. Applying is a ` +
+              `mutation, so it happens once; propose a new change rather than re-applying this one.`,
+            { appliedAt: proposal.appliedAt.toISOString() },
+          );
+        }
 
-    // ---- THE MUTATION, THROUGH THE PUBLIC DOOR ------------------------------
-    let applied: Record<string, unknown>;
-    let reason: string;
+        // ---- THE CONSENT GATE ---------------------------------------------------
+        if (!proposal.approvalId) {
+          refuse(
+            409,
+            "proposal_has_no_approval",
+            "this proposal carries no Approvals-Queue item, so no human has consented to it. The " +
+              "copilot's only route to a change is a proposal a named human approves.",
+          );
+        }
+        const [approval] = await tx.select().from(approvals).where(eq(approvals.id, proposal.approvalId));
+        if (!approval) {
+          refuse(
+            409,
+            "proposal_approval_missing",
+            "the Approvals-Queue item this proposal was opened against no longer exists, so there is " +
+              "no recorded consent to apply.",
+            { approvalId: proposal.approvalId },
+          );
+        }
+        if (approval.status !== "approved") {
+          refuse(
+            409,
+            "proposal_not_approved",
+            `the linked approval is '${approval.status}', not 'approved'. A copilot proposal is applied ` +
+              `only on a named human's recorded consent through the one approvals queue — the copilot ` +
+              `cannot consent on anyone's behalf and neither can this endpoint.`,
+            { approvalId: approval.id, approvalStatus: approval.status },
+          );
+        }
 
-    if (diff.kind === "grant_revocation") {
-      const { grantKind, grantId } = diff;
-      // ADR-0090's ONE removal implementation per kind — the exact function the
-      // DELETE endpoints and a campaign's revoke decision call. Not a copy.
-      const removers = {
-        agent: deleteAgentGrantById,
-        connector: deleteConnectorGrantById,
-        tool: deleteToolGrantById,
-        server: deleteServerGrantById,
-        role_agent: deleteRoleAgentGrantById,
-        role_connector: deleteRoleConnectorGrantById,
-        role_tool: deleteRoleToolGrantById,
-        role_server: deleteRoleServerGrantById,
-      } as const;
-      const removed = await removers[grantKind](db, grantId);
-      if (!removed) {
-        return refuse(
-          404,
-          "proposal_target_gone",
-          `the ${grantKind} grant this proposal names (${grantId}) no longer exists — nothing was ` +
-            `removed, and the proposal stays unapplied so the record does not claim a change that ` +
-            `did not happen.`,
-          { grantKind, grantId },
+        // ---- THE KIND GATE ------------------------------------------------------
+        if (!copilotProposalKindIsApplicable(proposal.kind)) {
+          refuse(
+            422,
+            "proposal_kind_not_applicable",
+            COPILOT_UNAPPLICABLE_PROPOSAL_KINDS[proposal.kind] ??
+              `there is no public endpoint that applies a '${proposal.kind}' proposal, and this endpoint ` +
+                `will not write the change directly.`,
+            { applicableKinds: COPILOT_APPLICABLE_PROPOSAL_KINDS },
+          );
+        }
+
+        // ---- THE DIFF GATE ------------------------------------------------------
+        // The same authority `POST /v1/copilot/proposals` refuses a malformed diff
+        // with, run again here: a row proposed before that check existed, or one
+        // whose nested payload schema has since tightened, must not reach a write.
+        const diff = validateCopilotProposalDiff(proposal.kind, proposal.diff);
+        if (!diff.ok) refuse(diff.status, diff.error, diff.detail);
+
+        // ---- THE MUTATION, THROUGH THE PUBLIC DOOR ------------------------------
+        let applied: Record<string, unknown>;
+        let reason: string;
+
+        if (diff.kind === "grant_revocation") {
+          const { grantKind, grantId } = diff;
+          // ADR-0090's ONE removal implementation per kind — the exact function the
+          // DELETE endpoints and a campaign's revoke decision call. Not a copy.
+          const removers = {
+            agent: deleteAgentGrantById,
+            connector: deleteConnectorGrantById,
+            tool: deleteToolGrantById,
+            server: deleteServerGrantById,
+            role_agent: deleteRoleAgentGrantById,
+            role_connector: deleteRoleConnectorGrantById,
+            role_tool: deleteRoleToolGrantById,
+            role_server: deleteRoleServerGrantById,
+          } as const;
+          const removed = await removers[grantKind](tx, grantId);
+          if (!removed) {
+            refuse(
+              404,
+              "proposal_target_gone",
+              `the ${grantKind} grant this proposal names (${grantId}) no longer exists — nothing was ` +
+                `removed, and the proposal stays unapplied so the record does not claim a change that ` +
+                `did not happen.`,
+              { grantKind, grantId },
+            );
+          }
+          applied = { via: "grant-revocation", grantKind, grantId, removed: true };
+          reason =
+            `applied copilot proposal '${proposal.title}': removed ${grantKind} grant ${grantId} through the ` +
+            `same one-per-kind removal the DELETE /v1/grants endpoints and an ADR-0090 campaign's revoke ` +
+            `decision use. Consent came from approval ${approval.id}; this act is attributed to the ` +
+            `applying admin, not to the copilot`;
+        } else if (diff.kind === "policy_tightening") {
+          const { ruleKind, ruleId, patch } = diff;
+          const artifactType = APPLY_RULE_ARTIFACT_TYPES[ruleKind];
+          // ADR-0074's ONE DOOR. Never a `.update()` on the rule table: a versioned
+          // rule must mint and activate, or the admin sees an edit that enforces
+          // nothing — which in a governance product is worse than a refusal.
+          const res = await applyRuleEdit(tx, {
+            artifactType,
+            artifactId: ruleId,
+            patch,
+            actorUserId: userId,
+            label: `applied copilot proposal ${proposal.id}`,
+            reason:
+              `${ruleKind} rule tightened by applying copilot proposal '${proposal.title}' ` +
+              `(approval ${approval.id})`,
+            auditObjectType: "restriction_rule",
+            auditRuleId: "copilot-proposal-rule-edit",
+            auditDetail: {
+              phase: "copilot-proposal-apply",
+              ruleKind,
+              copilotProposalId: proposal.id,
+              approvalId: approval.id,
+            },
+          });
+          if (isRuleEditRefusal(res)) {
+            // THE CHOKE POINT'S OWN REFUSAL, SURFACED VERBATIM. The applier does not
+            // get a way around a refusal an admin editing by hand would hit.
+            refuse(res.status, res.error, res.detail, { ruleKind, ruleId });
+          }
+          applied = {
+            via: "applyRuleEdit",
+            ruleKind,
+            ruleId,
+            versionMinted: res.mintedVersion,
+            note: res.note,
+          };
+          reason =
+            `applied copilot proposal '${proposal.title}': edited ${ruleKind} rule ${ruleId} through ` +
+            `applyRuleEdit, ADR-0074's single door for every rule-table write` +
+            (res.mintedVersion ? ` (config version minted and activated)` : ` (unversioned rule: plain row write)`) +
+            `. Consent came from approval ${approval.id}; this act is attributed to the applying admin, ` +
+            `not to the copilot`;
+        } else if (diff.kind === "rule_to_approval") {
+          // B8c — the cross-artifact CREATE the first amendment named unapplied.
+          // The create half IS a public endpoint's work — POST /v1/rules/approvals
+          // — and the derivation half happened at PROPOSAL time (the evidence names
+          // the noisy source rule). So the apply is: re-run the route's own zod,
+          // check the SOURCE rule still exists, then create through the extracted
+          // implementation the route itself calls (`createApprovalRuleRow`).
+          const { sourceRuleKind, sourceRuleId, create } = diff;
+          // the CROSS-ARTIFACT half: an approval requirement "derived from" a rule
+          // that no longer exists would be a requirement justified by nothing
+          const source = await loadRuleRow(tx, APPLY_RULE_ARTIFACT_TYPES[sourceRuleKind], sourceRuleId);
+          if (!source) {
+            refuse(
+              404,
+              "proposal_target_gone",
+              `the ${sourceRuleKind} rule this proposal derives its approval requirement from ` +
+                `(${sourceRuleId}) no longer exists — nothing was created, and the proposal stays ` +
+                `unapplied so the record does not claim a conversion of a rule that is gone.`,
+              { sourceRuleKind, sourceRuleId },
+            );
+          }
+          const row = await createApprovalRuleRow(tx, create);
+          applied = {
+            via: "POST /v1/rules/approvals (createApprovalRuleRow)",
+            approvalRuleId: row.id,
+            derivedFromRuleKind: sourceRuleKind,
+            derivedFromRuleId: sourceRuleId,
+          };
+          reason =
+            `applied copilot proposal '${proposal.title}': created approval rule ${row.id} through the ` +
+            `same create POST /v1/rules/approvals performs, derived from ${sourceRuleKind} rule ` +
+            `${sourceRuleId}. Consent came from approval ${approval.id}; this act is attributed to the ` +
+            `applying admin, not to the copilot`;
+        } else {
+          // B8c — budget_adjustment. The kind is a PROJECT-budget adjustment (the
+          // object pillar 5 attributes spend to), and the project budget's one
+          // public write is PATCH /v1/projects/:projectId — so the apply rides that
+          // route's extracted core (`applyProjectPatch`), behind that route's own
+          // zod and its own budget-requires-approver invariant.
+          const { projectId, patch } = diff;
+          const res = await applyProjectPatch(tx, {
+            projectId,
+            patch,
+            actorUserId: userId,
+            auditDetail: { via: "copilot-proposal-apply", copilotProposalId: proposal.id, approvalId: approval.id },
+          });
+          if (!res.ok) {
+            // THE CHOKE POINT'S OWN REFUSAL, SURFACED VERBATIM — `unknown_project`
+            // (the target vanished) and `budget_requires_approver` (the route's
+            // merged-row invariant) are the same answers an admin's own PATCH gets.
+            refuse(res.status, res.error, res.detail, { projectId });
+          }
+          applied = {
+            via: "PATCH /v1/projects/:projectId (applyProjectPatch)",
+            projectId,
+            changed: res.changed,
+          };
+          reason =
+            `applied copilot proposal '${proposal.title}': adjusted project ${projectId}'s budget ` +
+            `(${Object.keys(res.changed).join(", ")}) through the same merged write ` +
+            `PATCH /v1/projects/:projectId performs, including its budget-requires-approver invariant. ` +
+            `Consent came from approval ${approval.id}; this act is attributed to the applying admin, ` +
+            `not to the copilot`;
+        }
+
+        const [updated] = await tx
+          .update(copilotProposals)
+          .set({ appliedAt: new Date(), appliedByUserId: userId, appliedResult: applied })
+          .where(eq(copilotProposals.id, proposal.id))
+          .returning();
+
+        await audit(
+          userId,
+          "copilot_proposal",
+          proposal.id,
+          COPILOT_RULE_IDS.proposalApplied,
+          reason,
+          {
+            kind: proposal.kind,
+            approvalId: approval.id,
+            // THE PROPOSAL AS CONTEXT: what was proposed, on what evidence, and
+            // what the choke point actually did — all on the one row an auditor
+            // reads.
+            copilotProposalId: proposal.id,
+            copilotQueryId: proposal.queryId,
+            proposedByUserId: proposal.proposedByUserId,
+            diff: proposal.diff,
+            applied,
+          },
+          "allow",
+          // INSIDE THE TRANSACTION. An applied change whose audit row was
+          // written afterwards can exist without one; written here it cannot.
+          tx,
         );
-      }
-      applied = { via: "grant-revocation", grantKind, grantId, removed: true };
-      reason =
-        `applied copilot proposal '${proposal.title}': removed ${grantKind} grant ${grantId} through the ` +
-        `same one-per-kind removal the DELETE /v1/grants endpoints and an ADR-0090 campaign's revoke ` +
-        `decision use. Consent came from approval ${approval.id}; this act is attributed to the ` +
-        `applying admin, not to the copilot`;
-    } else if (diff.kind === "policy_tightening") {
-      const { ruleKind, ruleId, patch } = diff;
-      const artifactType = APPLY_RULE_ARTIFACT_TYPES[ruleKind];
-      // ADR-0074's ONE DOOR. Never a `.update()` on the rule table: a versioned
-      // rule must mint and activate, or the admin sees an edit that enforces
-      // nothing — which in a governance product is worse than a refusal.
-      const res = await applyRuleEdit(db, {
-        artifactType,
-        artifactId: ruleId,
-        patch,
-        actorUserId: userId,
-        label: `applied copilot proposal ${proposal.id}`,
-        reason:
-          `${ruleKind} rule tightened by applying copilot proposal '${proposal.title}' ` +
-          `(approval ${approval.id})`,
-        auditObjectType: "restriction_rule",
-        auditRuleId: "copilot-proposal-rule-edit",
-        auditDetail: {
-          phase: "copilot-proposal-apply",
-          ruleKind,
-          copilotProposalId: proposal.id,
-          approvalId: approval.id,
-        },
+
+        // The transaction's product, returned rather than replied: the HTTP
+        // response is written after COMMIT, so a client is never told a change
+        // happened that a rollback then undid.
+        return { proposal: updated, applied };
       });
-      if (isRuleEditRefusal(res)) {
-        // THE CHOKE POINT'S OWN REFUSAL, SURFACED VERBATIM. The applier does not
-        // get a way around a refusal an admin editing by hand would hit.
-        return refuse(res.status, res.error, res.detail, { ruleKind, ruleId });
-      }
-      applied = {
-        via: "applyRuleEdit",
-        ruleKind,
-        ruleId,
-        versionMinted: res.mintedVersion,
-        note: res.note,
-      };
-      reason =
-        `applied copilot proposal '${proposal.title}': edited ${ruleKind} rule ${ruleId} through ` +
-        `applyRuleEdit, ADR-0074's single door for every rule-table write` +
-        (res.mintedVersion ? ` (config version minted and activated)` : ` (unversioned rule: plain row write)`) +
-        `. Consent came from approval ${approval.id}; this act is attributed to the applying admin, ` +
-        `not to the copilot`;
-    } else if (diff.kind === "rule_to_approval") {
-      // B8c — the cross-artifact CREATE the first amendment named unapplied.
-      // The create half IS a public endpoint's work — POST /v1/rules/approvals
-      // — and the derivation half happened at PROPOSAL time (the evidence names
-      // the noisy source rule). So the apply is: re-run the route's own zod,
-      // check the SOURCE rule still exists, then create through the extracted
-      // implementation the route itself calls (`createApprovalRuleRow`).
-      const { sourceRuleKind, sourceRuleId, create } = diff;
-      // the CROSS-ARTIFACT half: an approval requirement "derived from" a rule
-      // that no longer exists would be a requirement justified by nothing
-      const source = await loadRuleRow(db, APPLY_RULE_ARTIFACT_TYPES[sourceRuleKind], sourceRuleId);
-      if (!source) {
-        return refuse(
-          404,
-          "proposal_target_gone",
-          `the ${sourceRuleKind} rule this proposal derives its approval requirement from ` +
-            `(${sourceRuleId}) no longer exists — nothing was created, and the proposal stays ` +
-            `unapplied so the record does not claim a conversion of a rule that is gone.`,
-          { sourceRuleKind, sourceRuleId },
+
+      return reply.send({
+        proposal: done.proposal,
+        applied: done.applied,
+        note:
+          "APPLIED UNDER THE ADMIN'S OWN IDENTITY, through the same public endpoint an admin would " +
+          "use by hand. The copilot proposed the change and a named human approved it; neither the " +
+          "copilot nor this endpoint may apply anything that is not approved. The mutation, the " +
+          "applied marker and the audit row committed as ONE transaction over a locked proposal row.",
+      });
+    } catch (e) {
+      // THE REFUSAL, AUDITED AFTER THE ROLLBACK. Inside the transaction the deny
+      // row would have been rolled back with everything else, and an operator
+      // hunting a refused apply would find nothing.
+      if (e instanceof ApplyRefusal) {
+        if (e.subject === null) return reply.status(e.status).send({ error: e.code });
+        await audit(
+          userId,
+          "copilot_proposal",
+          e.subject.id,
+          COPILOT_RULE_IDS.proposalApplyRefused,
+          `refused to apply copilot proposal '${e.subject.title}' (${e.subject.kind}): ${e.why}`,
+          { kind: e.subject.kind, error: e.code, ...e.extra },
+          "deny",
         );
+        return reply.status(e.status).send({ error: e.code, detail: e.why });
       }
-      const row = await createApprovalRuleRow(db, create);
-      applied = {
-        via: "POST /v1/rules/approvals (createApprovalRuleRow)",
-        approvalRuleId: row.id,
-        derivedFromRuleKind: sourceRuleKind,
-        derivedFromRuleId: sourceRuleId,
-      };
-      reason =
-        `applied copilot proposal '${proposal.title}': created approval rule ${row.id} through the ` +
-        `same create POST /v1/rules/approvals performs, derived from ${sourceRuleKind} rule ` +
-        `${sourceRuleId}. Consent came from approval ${approval.id}; this act is attributed to the ` +
-        `applying admin, not to the copilot`;
-    } else {
-      // B8c — budget_adjustment. The kind is a PROJECT-budget adjustment (the
-      // object pillar 5 attributes spend to), and the project budget's one
-      // public write is PATCH /v1/projects/:projectId — so the apply rides that
-      // route's extracted core (`applyProjectPatch`), behind that route's own
-      // zod and its own budget-requires-approver invariant.
-      const { projectId, patch } = diff;
-      const res = await applyProjectPatch(db, {
-        projectId,
-        patch,
-        actorUserId: userId,
-        auditDetail: { via: "copilot-proposal-apply", copilotProposalId: proposal.id, approvalId: approval.id },
-      });
-      if (!res.ok) {
-        // THE CHOKE POINT'S OWN REFUSAL, SURFACED VERBATIM — `unknown_project`
-        // (the target vanished) and `budget_requires_approver` (the route's
-        // merged-row invariant) are the same answers an admin's own PATCH gets.
-        return refuse(res.status, res.error, res.detail, { projectId });
-      }
-      applied = {
-        via: "PATCH /v1/projects/:projectId (applyProjectPatch)",
-        projectId,
-        changed: res.changed,
-      };
-      reason =
-        `applied copilot proposal '${proposal.title}': adjusted project ${projectId}'s budget ` +
-        `(${Object.keys(res.changed).join(", ")}) through the same merged write ` +
-        `PATCH /v1/projects/:projectId performs, including its budget-requires-approver invariant. ` +
-        `Consent came from approval ${approval.id}; this act is attributed to the applying admin, ` +
-        `not to the copilot`;
+      throw e;
     }
-
-    const [updated] = await db
-      .update(copilotProposals)
-      .set({ appliedAt: new Date(), appliedByUserId: userId, appliedResult: applied })
-      .where(eq(copilotProposals.id, proposal.id))
-      .returning();
-
-    await audit(userId, "copilot_proposal", proposal.id, COPILOT_RULE_IDS.proposalApplied, reason, {
-      kind: proposal.kind,
-      approvalId: approval.id,
-      // THE PROPOSAL AS CONTEXT: what was proposed, on what evidence, and what
-      // the choke point actually did — all on the one row an auditor reads.
-      copilotProposalId: proposal.id,
-      copilotQueryId: proposal.queryId,
-      proposedByUserId: proposal.proposedByUserId,
-      diff: proposal.diff,
-      applied,
-    });
-
-    return reply.send({
-      proposal: updated,
-      applied,
-      note:
-        "APPLIED UNDER THE ADMIN'S OWN IDENTITY, through the same public endpoint an admin would " +
-        "use by hand. The copilot proposed the change and a named human approved it; neither the " +
-        "copilot nor this endpoint may apply anything that is not approved.",
-    });
   });
 
   app.get("/v1/copilot/proposals", async (req) => {

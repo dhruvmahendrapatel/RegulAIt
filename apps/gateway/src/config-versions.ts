@@ -140,6 +140,16 @@ export type DbOrTx = Pick<Db, "select" | "update" | "insert">;
  */
 export type DbOrTxDeep = Pick<Db, "select" | "update" | "insert" | "transaction">;
 
+/**
+ * AER-035 (2026-09-27) — the same structural trick for the helpers a caller
+ * must be able to run INSIDE its own transaction, including the ones that
+ * DELETE. The copilot's proposal applier now runs its consent check, its
+ * mutation, its applied marker and its audit row as one transaction over a
+ * locked proposal, and every choke point it calls has to be able to join that
+ * transaction rather than opening a second connection beside it.
+ */
+export type DbOrTxWrite = Pick<Db, "select" | "update" | "insert" | "delete">;
+
 const artifactParam = z.object({
   artifactType: z.enum(CONFIG_ARTIFACT_TYPES),
   artifactId: z.string().uuid(),

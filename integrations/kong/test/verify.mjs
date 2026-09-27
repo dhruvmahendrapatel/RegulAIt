@@ -26,7 +26,7 @@
  * .github/workflows/integrations.yml, which pins the Kong image.
  */
 import { execFileSync, execSync, spawn } from "node:child_process";
-import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -44,6 +44,18 @@ const DB = process.env.KONG_E2E_DB ?? "regulait_kong_e2e";
 const PG = process.env.E2E_PG ?? "postgres://regulait:regulait@localhost:5432";
 
 const failures = [];
+/**
+ * AER-033's residual hygiene. The harness left three things behind: its host
+ * temp directory, the scratch PDP key and the scratch database. None of them is
+ * a plaintext credential any more (the key arrives through a vault reference),
+ * but a run that leaves a live key and a fixed-name database behind cannot be
+ * run twice concurrently and leaves a credential nobody is watching. These are
+ * hoisted so `finally` can clean up whatever a failed run managed to create.
+ */
+let scratchDir = null;
+let scratchKeyId = null;
+let scratchBase = null;
+let scratchBoot = null;
 const check = (name, ok, detail = "") => {
   if (ok) console.log(`  PASS  ${name}`);
   else {
@@ -142,6 +154,11 @@ async function main() {
   const tools = (await api("GET", `${base}/v1/servers/${server.id}/tools`, undefined, boot)).json.tools ?? [];
   if (!tools.length) throw new Error("the seeded server has no tools — nothing to govern");
   const tool = tools[0];
+  // AER-028: a real seeded project, so the `project_id` the plugin sends is a
+  // uuid the PDP can resolve rather than a literal that would be refused.
+  const projects = (await api("GET", `${base}/v1/projects`, undefined, boot)).json.projects ?? [];
+  if (!projects.length) throw new Error("the seed created no project — the context assertion needs one");
+  const project = projects[0];
 
   const entitled = users.find((u) => u.email === "dana@regulait.local") ?? users[0];
   const stranger = users.find((u) => u.id !== entitled.id);
@@ -167,6 +184,10 @@ async function main() {
   ).json;
   const pdpKey = key.token ?? key.key;
   if (!pdpKey) throw new Error(`could not mint a PDP key: ${JSON.stringify(key).slice(0, 200)}`);
+  // remembered so `finally` can revoke it even when an assertion below throws
+  scratchKeyId = key.id ?? null;
+  scratchBase = base;
+  scratchBoot = boot;
 
   // ---- 4. Kong, DB-less, with the plugin mounted -------------------------
   // The declarative config is GENERATED because `custom_id` must carry a real
@@ -174,6 +195,7 @@ async function main() {
   // could never express that, which is itself part of why the first adapter
   // reached for an environment variable.
   const dir = mkdtempSync(path.join(tmpdir(), "kong-e2e-"));
+  scratchDir = dir;
   // `mkdtemp` creates the directory 0700 and owned by THIS user; Kong runs as
   // the `kong` user inside the container and cannot traverse it. That is the
   // whole of the first real container failure — "Permission denied" parsing the
@@ -218,6 +240,11 @@ plugins:
       pdp_key: "{vault://env/regulait-pdp-key}"
       server_id: "${server.id}"
       tool_name: "${tool.name}"
+      # AER-028's context, on the route that fronts the tool. Sent so assertion
+      # (f) below can prove the adapter really carries it rather than the README
+      # claiming it does.
+      project_id: "${project.id}"
+      session_origin: "sso"
       timeout_ms: 2000
 `;
   writeFileSync(path.join(dir, "kong.yml"), declarative);
@@ -346,6 +373,24 @@ plugins:
       `status ${r.status}, upstream count ${await upstreamCount()}`);
   }
 
+  // (f) THE QUESTION THE ADAPTER ASKS (AER-028). The README claimed the callout
+  //     carried context and the plugin sent three fields. The PDP records what
+  //     each decision was actually computed on, so the ledger is the place to
+  //     check it — asserting on the plugin's source would only restate the code.
+  {
+    const rows = (await api("GET", `${base}/v1/audit?limit=50`, undefined, boot)).json.entries ?? [];
+    const callouts = rows.filter((r) => (r.detail ?? {}).contextApplied !== undefined);
+    const applied = callouts.length ? (callouts[0].detail.contextApplied ?? []) : null;
+    check("the adapter sends the decision context it claims to",
+      applied !== null && applied.includes("projectId") && applied.includes("principal"),
+      `contextApplied=${JSON.stringify(applied)} over ${callouts.length} callout row(s)`);
+    // and it does NOT claim to send arguments, which it cannot map correctly —
+    // an adapter that reported `args` without one would be the worse failure
+    check("the adapter does not claim to send tool arguments it cannot map",
+      applied !== null && !applied.includes("args"),
+      `contextApplied=${JSON.stringify(applied)}`);
+  }
+
   // (e) PDP DOWN -> fail closed, and still nothing proxied. An outage that
   //     silently becomes an open door is the worst shape this can take.
   await api("GET", `http://127.0.0.1:${UPSTREAM_PORT}/__reset`);
@@ -375,8 +420,31 @@ try {
       /* best effort */
     }
   }
+  // AER-033 residual: revoke the scratch credential before anything else, so a
+  // failure in the steps after it still leaves no live key behind.
+  if (scratchKeyId && scratchBase && scratchBoot) {
+    try {
+      await api("DELETE", `${scratchBase}/v1/virtual-keys/${scratchKeyId}`, undefined, scratchBoot);
+    } catch {
+      /* best effort — the gateway may already be dead from assertion (e) */
+    }
+  }
   gateway?.kill("SIGKILL");
   upstream?.kill("SIGKILL");
+  if (scratchDir) {
+    try {
+      rmSync(scratchDir, { recursive: true, force: true });
+    } catch {
+      /* best effort */
+    }
+  }
+  try {
+    sh("psql", [`${PG}/postgres`, "-v", "ON_ERROR_STOP=1", "-c", `DROP DATABASE IF EXISTS ${DB} WITH (FORCE)`], {
+      stdio: "pipe",
+    });
+  } catch {
+    /* best effort — a leftover scratch database is recreated by the next run */
+  }
 }
 
 if (failures.length > 0) {

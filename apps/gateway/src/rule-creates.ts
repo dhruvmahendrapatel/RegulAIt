@@ -22,7 +22,8 @@
  * the kernel serves (the same ADR-0074 reasoning the create routes have
  * always carried; see `rule-write-guard.test.ts`).
  */
-import { approvalRules, type Db } from "@regulait/db";
+import { approvalRules } from "@regulait/db";
+import type { DbOrTx } from "./config-versions.js";
 import type { z } from "zod";
 import type { createApprovalRuleSchema } from "@regulait/shared";
 
@@ -50,7 +51,9 @@ export const scopedRuleColumns = (body: {
 });
 
 export async function createApprovalRuleRow(
-  db: Db,
+  // AER-035: a caller may run this inside its own transaction (the copilot's
+  // proposal applier does), so it must be able to join one.
+  db: DbOrTx,
   body: CreateApprovalRuleInput,
 ): Promise<typeof approvalRules.$inferSelect> {
   const [row] = await db

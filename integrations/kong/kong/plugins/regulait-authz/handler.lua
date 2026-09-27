@@ -60,6 +60,47 @@ local function strip_client_claims()
   end
 end
 
+--[[
+THE QUESTION THE CALLOUT ASKS (AER-028).
+
+`userId`, `serverId` and `toolName` alone were not the same question a real
+dispatch asks. The kernel FAILS CLOSED on a data-scope rule whose argument is
+absent, so a deployment with one got `deny` from the PDP for calls that would
+really have been allowed — wrong in the safe direction, which is the direction
+that gets a PDP switched off.
+
+This builder sends everything this adapter can state TRUTHFULLY and nothing it
+cannot:
+
+  * `projectId` — per-route config. A governed route fronts one project context.
+  * `principal.sessionOrigin` — per-route config, because Kong knows which auth
+    plugin fronts the route. There is no `mfaCompleted`: Kong cannot observe a
+    second factor, and absent reads as "unknown", which is the weakest input an
+    ABAC policy can get. A configured `true` would be an unchecked assertion
+    sitting in the trusted path.
+  * `args` — NOT SENT, and this is the honest limit. Mapping an HTTP body to a
+    tool's named arguments is a per-route projection, and a WRONG mapping
+    evaluates a data-scope rule against the wrong values — which is worse than
+    the fail-closed deny that omitting them produces. So a route governed by a
+    data-scope rule is refused by this adapter, by design, until that mapping
+    exists. The response's `contextApplied` names what the decision really ran
+    on, so an operator can tell this from a policy refusal.
+--]]
+local function build_question(conf, subject)
+  local body = {
+    userId = subject,
+    serverId = conf.server_id,
+    toolName = conf.tool_name,
+  }
+  if conf.project_id and conf.project_id ~= "" then
+    body.projectId = conf.project_id
+  end
+  if conf.session_origin and conf.session_origin ~= "" then
+    body.principal = { sessionOrigin = conf.session_origin }
+  end
+  return body
+end
+
 local function refuse(status, decision, reason)
   strip_client_claims()
   kong.response.set_header("x-regulait-decision", decision)
@@ -99,11 +140,7 @@ function RegulaitAuthz:access(conf)
       ["content-type"] = "application/json",
       ["authorization"] = "Bearer " .. conf.pdp_key,
     },
-    body = cjson.encode({
-      userId = subject,
-      serverId = conf.server_id,
-      toolName = conf.tool_name,
-    }),
+    body = cjson.encode(build_question(conf, subject)),
   })
 
   -- FAIL CLOSED, and say which failure it was. An outage that silently becomes

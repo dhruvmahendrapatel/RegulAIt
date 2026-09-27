@@ -40,11 +40,12 @@ import {
   toolGrants,
   type Db,
 } from "@regulait/db";
+import type { DbOrTxWrite } from "./config-versions.js";
 
 /** true when a row was actually removed; false when it was already gone */
 export type Removed = boolean;
 
-export async function deleteAgentGrantById(db: Db, grantId: string): Promise<Removed> {
+export async function deleteAgentGrantById(db: DbOrTxWrite, grantId: string): Promise<Removed> {
   const deleted = await db
     .delete(agentGrants)
     .where(eq(agentGrants.id, grantId))
@@ -52,7 +53,7 @@ export async function deleteAgentGrantById(db: Db, grantId: string): Promise<Rem
   return deleted.length > 0;
 }
 
-export async function deleteConnectorGrantById(db: Db, grantId: string): Promise<Removed> {
+export async function deleteConnectorGrantById(db: DbOrTxWrite, grantId: string): Promise<Removed> {
   const deleted = await db
     .delete(connectorGrants)
     .where(eq(connectorGrants.id, grantId))
@@ -60,7 +61,7 @@ export async function deleteConnectorGrantById(db: Db, grantId: string): Promise
   return deleted.length > 0;
 }
 
-export async function deleteToolGrantById(db: Db, grantId: string): Promise<Removed> {
+export async function deleteToolGrantById(db: DbOrTxWrite, grantId: string): Promise<Removed> {
   const deleted = await db
     .delete(toolGrants)
     .where(eq(toolGrants.id, grantId))
@@ -68,7 +69,7 @@ export async function deleteToolGrantById(db: Db, grantId: string): Promise<Remo
   return deleted.length > 0;
 }
 
-export async function deleteServerGrantById(db: Db, grantId: string): Promise<Removed> {
+export async function deleteServerGrantById(db: DbOrTxWrite, grantId: string): Promise<Removed> {
   const deleted = await db
     .delete(serverGrants)
     .where(eq(serverGrants.id, grantId))
@@ -79,7 +80,7 @@ export async function deleteServerGrantById(db: Db, grantId: string): Promise<Re
 /** roleId, when given, scopes the delete exactly as the nested admin route
  * does (`DELETE /v1/roles/:roleId/grants/agents/:grantId`) */
 export async function deleteRoleAgentGrantById(
-  db: Db,
+  db: DbOrTxWrite,
   grantId: string,
   roleId?: string,
 ): Promise<Removed> {
@@ -95,7 +96,7 @@ export async function deleteRoleAgentGrantById(
 }
 
 export async function deleteRoleConnectorGrantById(
-  db: Db,
+  db: DbOrTxWrite,
   grantId: string,
   roleId?: string,
 ): Promise<Removed> {
@@ -111,7 +112,7 @@ export async function deleteRoleConnectorGrantById(
 }
 
 export async function deleteRoleToolGrantById(
-  db: Db,
+  db: DbOrTxWrite,
   grantId: string,
   roleId?: string,
 ): Promise<Removed> {
@@ -127,7 +128,7 @@ export async function deleteRoleToolGrantById(
 }
 
 export async function deleteRoleServerGrantById(
-  db: Db,
+  db: DbOrTxWrite,
   grantId: string,
   roleId?: string,
 ): Promise<Removed> {

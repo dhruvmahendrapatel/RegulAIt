@@ -879,3 +879,109 @@ answer at all.
 4. All limits of the earlier amendments stand unchanged.
 
 No migration: every column this needed already exists.
+
+---
+
+## Amendment — 2026-09-27 (AER-035): applying a proposal is ONE transaction over a LOCKED row
+
+### The correction this amendment makes, before anything else
+
+The B8c amendment said the applier was "not transactional across its audit row"
+and filed that under honest limits. That framing was too small, and the B9a
+amendment repeated it without re-examining it. The applier was **not
+transactional at all, and not concurrency-safe**, which is a different and worse
+fact: it did not merely record a change slightly out of step, it could apply the
+same change twice.
+
+The route read the proposal, checked `applied_at`, ran the mutation, wrote the
+marker and appended the audit row as **five independent statements with no lock
+and no transaction**. Two consequences:
+
+**1. Two concurrent requests could both spend one human's consent.** Both see
+`applied_at = NULL`, both pass the consent gate, both mutate.
+`rule_to_approval` is the material case: `createApprovalRuleRow` is an
+unconditional insert with a fresh id and no proposal reference, so **one
+approval could create two live governance rules**, while the proposal row
+recorded only whichever `applied_result` committed last.
+
+**2. A crash could leave any two of the three facts disagreeing.** After the
+mutation but before the marker: a real change, still replayable. After the
+marker but before the audit: an applied change with **no audit row naming who
+applied it** — in a product whose entire claim is that every governed change is
+attributable, that is the worse of the two.
+
+The existing tests did not catch it because they proved only *sequential* replay
+refusal: one request completes before the second begins. That is a different
+property, and passing it says nothing about the first.
+
+**Measured, not argued.** With the lock removed, twenty simultaneous applies of
+one approved `rule_to_approval` proposal produced **ten successes and ten
+approval rules** from a single human approval. With it: one and one.
+
+### Decision
+
+**The whole apply is one transaction, opened with `SELECT … FOR UPDATE` on the
+proposal row.**
+
+- **The lock is the serialization point.** A second concurrent apply waits
+  there, then sees the `applied_at` its predecessor committed and takes the
+  ordinary `proposal_already_applied` refusal. No new error code, no new state
+  machine — the existing idempotency gate simply became correct.
+- **Every choke point joins the transaction.** `applyRuleEdit`,
+  `createApprovalRuleRow`, `applyProjectPatch` and the eight
+  `delete*GrantById` functions were widened from `Db` to the ADR-0074
+  `DbOrTx` / `DbOrTxDeep` types (plus a new `DbOrTxWrite` for the ones that
+  DELETE). This is the structural trick ADR-0074 already established for
+  exactly this reason, reused rather than reinvented: `tx.transaction()` opens a
+  SAVEPOINT, so `applyRuleEdit → newVersion → activateVersion` nested inside the
+  applier's transaction is still ONE database transaction.
+- **The success audit is written with the transaction handle.** The local
+  `audit()` helper gained an optional writer defaulting to the top-level handle,
+  so every other caller is byte-identical and this one commits its row with the
+  change it describes.
+- **Refusals are audited AFTER the rollback, deliberately.** A refusal throws,
+  which rolls the transaction back; a deny row written inside it would roll back
+  too, leaving the one case an operator most needs to find unrecorded. So the
+  refusal carries the proposal's identity on the error and the deny row is
+  appended outside. A test asserts both halves: no applied marker, and the deny
+  row present anyway.
+- **No idempotency column was added, and that is a decision rather than an
+  omission.** AER-035 suggested one for crash recovery. With the mutation, the
+  marker and the audit in one commit there is no half-applied state to recover
+  from — a crash rolls back all three — so a column would guard a window that
+  no longer exists.
+
+### Consequences
+
+- `POST /v1/copilot/proposals/:id/apply` serializes per proposal. The cost is a
+  row lock held for the duration of one apply, which is bounded by the choke
+  point it calls; the alternative was a governance boundary where a retry could
+  duplicate a change.
+- New test file `zz-aer035-apply-atomicity.test.ts`: twenty simultaneous applies
+  for each of the four kinds, asserting **what the world now holds** (one
+  approval rule, one recorded rule edit, the grant gone, the budget written
+  once) rather than a tally of HTTP 200s — a route can return one success and
+  still have applied twice. For `policy_tightening`, whose write is idempotent,
+  the countable artifact is the choke point's own audit row, because the *value*
+  cannot distinguish one application from two. The losers are asserted to answer
+  `proposal_already_applied` specifically: for `grant_revocation`, a
+  `proposal_target_gone` would have meant they ran the removal and found it
+  already done — a second execution wearing a different refusal's name.
+
+### Honest limits after this amendment
+
+1. The lock is per proposal. Two DIFFERENT proposals that both edit the same
+   rule still interleave; `applyRuleEdit`'s own artifact-row lock (ADR-0074) is
+   what orders those, and this amendment does not widen it.
+2. No fault-injection test exists for a crash *between* statements inside the
+   transaction; the argument that all three facts commit together is the
+   database's, not a test's. AER-035's acceptance item 3 is met by construction
+   rather than by injected failure, and that distinction is left visible here
+   rather than claimed as evidence.
+3. `applyRuleEdit`'s SAVEPOINT nesting is exercised by the existing suite
+   through the ordinary route, not by a test written for the nested case
+   specifically.
+4. All limits of the earlier amendments stand unchanged, except the "not
+   transactional across its audit row" limit of B8c, which this replaces.
+
+No migration.

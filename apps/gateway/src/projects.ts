@@ -27,6 +27,7 @@ import {
   type Db,
   type SQL,
 } from "@regulait/db";
+import type { DbOrTx } from "./config-versions.js";
 import {
   csvBatchRows,
   csvMaxRows,
@@ -1011,7 +1012,10 @@ export type ProjectPatchResult =
   | { ok: false; status: 404 | 422; error: string; detail: string };
 
 export async function applyProjectPatch(
-  db: Db,
+  // AER-035: joins the caller's transaction when there is one — the copilot's
+  // proposal applier commits this write, its applied marker and its audit row
+  // together or not at all.
+  db: DbOrTx,
   args: {
     projectId: string;
     patch: z.infer<typeof updateProjectSchema>;
