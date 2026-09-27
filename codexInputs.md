@@ -2096,6 +2096,141 @@ causes the workflow to run; and logs record exact image digests and tested commi
 - A green PR job for one topology, local compilation and a source-pattern census do not prove all
   supported Kong versions/modes, secret containment, approval semantics, database integrity,
   accessibility conformance, production readiness, certification or enterprise readiness.
+
+### Automated enterprise-readiness run — 2026-09-27 10:47:09 CDT (UTC-05:00)
+
+**Target branch, synchronization and reviewed range**
+
+- Exclusive target: `dhruv/active`.
+- The run began with local HEAD and `origin/dhruv/active` at
+  `9f7d3563cebf67c72107680d898e5392a687f8af`. The only pre-existing worktree item was the unrelated
+  untracked `RegulAIt/` directory; it was not read, moved, staged or changed.
+- `git fetch origin dhruv/active --prune` advanced the upstream ref to
+  `7c985468a7b25525141d051409deb7c7cab71938`; `git pull --ff-only origin dhruv/active` then
+  fast-forwarded the checkout to the same commit without reset, stash, rebase or a new local merge.
+- Incremental review range: `9f7d356..7c98546` (eight commits, 34 files), plus still-open
+  high-risk findings. The range scopes the PDP key, adds callout context, changes the Kong harness,
+  adds a copilot proposal form/diff validation, adds approval filters/saved-view UI, and changes
+  seeded/e2e licensing.
+
+**Commands/tests and outcomes**
+
+- Mandatory suite and repository instruction reads — completed before synchronization and review.
+- Branch/status/remote/tracking inspection, `git fetch origin dhruv/active --prune`, delta review and
+  `git pull --ff-only origin dhruv/active` — **PASS**; local/upstream reached `7c98546...` and tracked
+  files remained clean.
+- `git diff --check 9f7d356..HEAD` and `node --check integrations/kong/test/verify.mjs` — **PASS**.
+- Direct package typechecks immediately after the pull: web and shared — **PASS**; database and
+  gateway — **FAIL** because those packages resolve `@regulait/shared` from the prior local
+  `dist/` declarations. This was an ordering/artifact failure, not suppressed. The repository's
+  dependency-ordered `corepack pnpm -r build` rebuilt shared first and then **PASSED** all 15
+  workspace builds; explicit database and gateway typecheck reruns then **PASSED**.
+- The build's web bundle completed with a 1,141.24 kB main JavaScript chunk (317.24 kB gzip), above
+  the configured 900 kB warning threshold.
+- `corepack pnpm --filter @regulait/shared test` — **PASS**, 38 files / 912 tests.
+- `node scripts/preflight-ui-affordances.mjs` — **EXIT 1 by the script's stated contract**, improved
+  from the prior run: 53 DELETE routes, 52 detected as reachable, zero exempt and one orphaned
+  (`/v1/llm/backend-configs/:x`); one listed collection remains without an add affordance
+  (`/v1/redteam/libraries`). The saved-view delete and copilot-proposal add gaps are closed in the
+  source census; this is not behavioral browser proof.
+- GitHub PR 114 at exact head `7c98546...` reports **PASS** for CI run `36319393210` and Integrations
+  run `36319393190`. The CI log reports 196 gateway test files, 2,921 passed / 9 skipped, including
+  AER-027 (9), AER-028 (6) and queue-filter (9) tests. The Kong job's log still lists only
+  unauthenticated, allow, policy deny, three subject-header spellings and unreachable-PDP
+  assertions. These are repository-run results independently inspected with `gh`, not locally
+  reproduced database/proxy results.
+- `DATABASE_URL` was absent. No local database, migration, gateway integration, Playwright, cloud,
+  provider or deployment test ran; the fixed database/port/container harnesses were not invoked
+  without an explicitly exclusive disposable environment.
+
+#### AER-035 — HIGH — Copilot proposal application is neither concurrency-safe nor atomic with its mutation and audit
+
+**Evidence type:** direct source/control-flow observation. The race and injected-failure paths were
+not reproduced because no exclusive disposable database was available.
+
+The apply route reads a proposal and checks `appliedAt` in separate ordinary queries
+(`apps/gateway/src/copilot.ts:2037-2067`). It then performs the approved mutation
+(`:2123-2259`), unconditionally marks the proposal applied using only `WHERE id = ...`
+(`:2261-2265`), and writes the `copilot-proposal-applied` audit event afterwards (`:2267-2277`).
+There is no outer transaction, row lock, atomic claim or compare-and-set on `appliedAt` spanning
+those operations.
+
+Two concurrent requests can therefore both observe `appliedAt = NULL` and both execute the same
+consent. The `rule_to_approval` branch is the clearest material case: each caller reaches
+`createApprovalRuleRow` (`copilot.ts:2217`), whose implementation is an unconditional insert with a
+new random id and no proposal-id uniqueness (`apps/gateway/src/rule-creates.ts:52-69`). One human
+approval can create two live governance rules, while the proposal row's final `appliedResult`
+records only whichever update won last. A failure after the mutation but before the applied marker
+leaves a real change replayable; a failure after the marker but before the audit leaves an applied
+change without the audit row the route promises. The tests prove only sequential replay refusal:
+one request completes before the second begins
+(`apps/gateway/src/zz-zz-copilot-live.test.ts:599-617,771-786,908-931`). No concurrent
+`Promise.all` or failure-boundary test exists.
+
+**Impact:** a client retry, load-balancer retry or two administrators can spend one recorded consent
+more than once. Duplicate approval rules can create duplicate governance effects/queue work;
+policy edits can mint extra versions; and partial failures can leave the proposal record, actual
+policy state and audit ledger disagreeing. This breaks the route's explicit “mutation happens once”
+and “audited under the applying human” claims at a privileged governance boundary.
+
+**Recommended remediation:** make application one database transaction over a locked proposal and
+approval. Either acquire `SELECT ... FOR UPDATE` on the proposal before rechecking `appliedAt`, or
+atomically claim a durable applying state with `UPDATE ... WHERE applied_at IS NULL RETURNING` and
+define safe recovery of abandoned claims. Execute the target mutation, proposal result/marker and
+audit-chain append in the same transaction; refactor the shared mutation helpers to accept that
+transaction rather than starting an independent one. Add a proposal/application idempotency key or
+unique source-proposal reference to created artifacts so crash recovery cannot create a second row.
+
+**Acceptance evidence required:**
+
+1. Twenty simultaneous apply requests for one approved `rule_to_approval` proposal yield exactly
+   one success, one rule, one applied marker/result and one apply audit; all others get the same
+   explicit already-applied/in-progress result.
+2. Repeat the concurrency test for policy tightening, grant revocation and budget adjustment; no
+   duplicate version, audit, removal or overwrite occurs.
+3. Fault injection after the target mutation, after the proposal marker and before audit proves the
+   transaction either commits all three facts or rolls back all three.
+4. A process crash during an applying claim has a documented, bounded recovery path that cannot
+   silently replay a completed mutation.
+
+**Prior-finding status and remaining uncertainty — 2026-09-27 10:47 CDT**
+
+- **AER-033's HIGH credential exposure is resolved in source and in the repository-run Kong job.**
+  The harness now mints a `purpose: "pdp"` virtual key, stores only a Kong vault reference in the
+  world-readable declarative file, and injects the scoped secret into the short-lived container
+  (`integrations/kong/test/verify.mjs:151-170,205-248`). The green head run proves that path starts
+  and enforces the tested cases. Residual hygiene remains: the script still does not remove its
+  host temp directory, revoke the scratch key or drop its fixed scratch database in `finally`;
+  those no longer leave a plaintext administrator token, but should still be cleaned up and made
+  per-run before the harness is safe for concurrent/self-hosted use.
+- **AER-027 is resolved in source with repository-run database evidence.** Migration 0117 adds a
+  closed `dispatch|pdp` purpose; unknown purposes fail to an empty route set; a PDP key reaches only
+  `POST /v1/authz/check`; dispatch keys cannot ask; PDP keys cannot dispatch/admin; issuance is
+  admin-only and revocation is tested. The head CI log reports all nine focused tests passing. This
+  run did not reproduce them locally.
+- **AER-028 is partially resolved, not closed for the shipped adapter.** The endpoint now accepts
+  `args`, `projectId` and principal facts, passes them into the kernel and reports the names in
+  `contextApplied`; all six focused tests pass in head CI. The Kong plugin still sends only
+  `userId`, `serverId` and `toolName`
+  (`integrations/kong/kong/plugins/regulait-authz/handler.lua:91-107`). Its README explicitly
+  discloses missing `args`, but the adapter also omits project/principal context. Operators using
+  Kong therefore still do not get parity with a context-bearing dispatch; absent data-scope args
+  fail closed as documented.
+- **AER-034 remains open MEDIUM.** Workflow path coverage now includes gateway source and packages,
+  which closes one sub-finding. README still claims `approval_required`, PDP non-200 and
+  unparseable-response assertions that neither the harness source nor the exact head job log
+  contains; it still tests one route, and `kong:3.6` / `postgres:16` remain mutable tags described
+  as pinned. The head log confirms the same smaller assertion set, so a green job does not resolve
+  the claim/evidence mismatch.
+- **AER-031's deployment-index contradiction remains** at `docs/deployment/README.md:17`.
+  AER-030 retains AER-034's missing two-route/action-binding acceptance evidence. AER-026 has the
+  same narrow three-spelling subject-header evidence, not duplicate-header or all-reserved-header
+  coverage.
+- The green repository CI is strong evidence for the tested commit but does not include Playwright.
+  This run's source census shows two UI gaps remain. No reviewed evidence closes AER-017, AER-018,
+  AER-019, AER-021 or AER-022, and no evidence in this range closes AER-004, AER-007, AER-010,
+  AER-011 or AER-014. Nothing here establishes production readiness, certification or enterprise
+  readiness.
 <!-- codex-enterprise-feedback:end -->
 
 Date: 2026-09-06  
