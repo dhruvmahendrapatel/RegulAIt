@@ -1,0 +1,64 @@
+# Proxy-adapter verification — the pinned container M-043 demands.
+#
+# DELIBERATELY NOT PART OF `ci.yml`, and not on `pull_request`, YET.
+#
+# Two adapters shipped from this repository without ever being run: one failed
+# OPEN on deny, the other could not load its first line. The rule written
+# afterwards is that nothing in `integrations/` is called supported until its
+# DENY path is exercised end to end against a pinned container with an upstream
+# invocation counter. This workflow is that rule made executable.
+#
+# It starts on `workflow_dispatch` only because the harness itself has never
+# run either, and wiring an unproven job into the PR gate would redden every
+# pull request while it is debugged — the same "ship it and find out" that
+# produced the findings this exists to prevent. It moves to `pull_request` with
+# `paths: integrations/**` once it has passed on its own, and the Kong support
+# claim is restored in the same change and not before.
+name: Integrations
+
+on:
+  workflow_dispatch:
+
+jobs:
+  kong-adapter:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: regulait
+          POSTGRES_PASSWORD: regulait
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U regulait -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # PINNED. An adapter verified against "whatever Kong is latest today" is
+      # verified against nothing in particular — the ordering and sandbox
+      # behaviour this plugin depends on are version-specific.
+      KONG_IMAGE: kong:3.6
+      E2E_PG: postgres://regulait:regulait@localhost:5432
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm -r build
+
+      - name: Pull the pinned Kong image
+        run: docker pull "$KONG_IMAGE"
+
+      - name: Verify the Kong adapter's deny path
+        run: node integrations/kong/test/verify.mjs
