@@ -7,6 +7,7 @@
 import {
   forwardRef,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -72,6 +73,196 @@ export const Textarea = forwardRef<HTMLTextAreaElement, TextareaHTMLAttributes<H
 );
 
 // ---- Card -----------------------------------------------------------------
+
+/**
+ * An inline "why does this exist" affordance.
+ *
+ * ── WHY THIS COMPONENT EXISTS ──────────────────────────────────────────────
+ * This product has a great deal to explain — most fields encode a governance
+ * decision with a real consequence — and the explanations had been written as
+ * PROSE ON THE PAGE: sixty-word page subtitles, parenthetical asides inside
+ * field labels, paragraphs between form rows. There are ~185 strings over 110
+ * characters across the views.
+ *
+ * That prose is good and should not be deleted; it is in the wrong place. Read
+ * once it is essential and read every day after that it is noise, and noise is
+ * what teaches people to skim past the sentence that mattered. Moving it behind
+ * a deliberate affordance keeps the answer one keystroke away for whoever wants
+ * it and off the screen of whoever already knows.
+ *
+ * ── IT IS A DISCLOSURE, NOT A TOOLTIP, AND THE DIFFERENCE IS THE POINT ─────
+ * A hover tooltip is unreachable by touch, hostile to a screen reader, and
+ * vanishes the moment you move toward it — which makes it the wrong container
+ * for anything longer than a few words. This opens on CLICK, stays open, and is
+ * dismissed by Escape or a click outside. It can therefore hold a real
+ * paragraph, and a keyboard or touch user gets exactly what a mouse user gets.
+ *
+ * `aria-expanded` and `aria-controls` tie the trigger to the panel, and the
+ * panel is `role="note"` rather than `role="tooltip"` because it is standing
+ * explanatory content, not a transient label for the control.
+ */
+export function InfoButton(props: {
+  /** what this explains — announced to a screen reader, e.g. "compliance tags" */
+  label: string;
+  children: ReactNode;
+  /** nudges the panel left when the trigger sits near the right edge */
+  align?: "start" | "end";
+}) {
+  const [open, setOpen] = useState(false);
+  const wrap = useRef<HTMLSpanElement>(null);
+  const panelId = useId();
+
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setOpen(false);
+        // Return focus to the trigger: closing must not dump a keyboard user
+        // back at the top of the document.
+        wrap.current?.querySelector("button")?.focus();
+      }
+    };
+    const onDown = (e: MouseEvent) => {
+      if (!wrap.current?.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("keydown", onKey);
+    document.addEventListener("mousedown", onDown);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.removeEventListener("mousedown", onDown);
+    };
+  }, [open]);
+
+  return (
+    <span className={s.infoWrap} ref={wrap}>
+      <button
+        type="button"
+        className={s.infoBtn}
+        aria-label={open ? `Hide help for ${props.label}` : `What is ${props.label}?`}
+        aria-expanded={open}
+        aria-controls={panelId}
+        onClick={() => setOpen((v) => !v)}
+      >
+        {/* A drawn glyph, not the character "i": a text "i" inherits the
+            surrounding font and optical size and reads as a typo at 12px. */}
+        <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+          <circle cx="8" cy="8" r="7" fill="none" strokeWidth="1.5" />
+          <circle cx="8" cy="4.6" r="0.95" stroke="none" />
+          <path d="M8 7.1v4.6" strokeWidth="1.6" strokeLinecap="round" />
+        </svg>
+      </button>
+      {open && (
+        <span id={panelId} role="note" className={`${s.infoPanel} ${props.align === "end" ? s.infoPanelEnd : ""}`}>
+          {props.children}
+        </span>
+      )}
+    </span>
+  );
+}
+
+/**
+ * A closed-vocabulary tag picker.
+ *
+ * ── WHY THIS REPLACED A TEXT BOX ───────────────────────────────────────────
+ * Compliance tags were a comma-separated `<Input>`. That looks like a small UI
+ * choice and is not: these tags are what the pillar-3 cascade keys on, so a
+ * typo does not produce a validation error — it produces a use case that
+ * silently inherits NO compliance consequences. The failure is invisible at the
+ * moment it happens and expensive later.
+ *
+ * The vocabulary is a real object (`compliance_profiles.tag`) and the page
+ * already loads it, so asking a human to retype it from memory was never
+ * necessary. Choosing from the list makes the wrong answer unrepresentable.
+ *
+ * ── FREE ENTRY IS STILL ALLOWED, AND MARKED ────────────────────────────────
+ * A tag with no profile is legitimate — you can tag ahead of writing the
+ * profile — so this does not forbid one. It marks it: an unknown tag is shown
+ * as `unbound`, with the plain consequence spelled out, rather than looking
+ * identical to a tag that actually enforces something. Refusing it outright
+ * would be the wrong trade; letting it pass unremarked is what the text box
+ * already did.
+ */
+export function TagPicker(props: {
+  value: string[];
+  onChange: (next: string[]) => void;
+  /** the known vocabulary — tags that resolve to a compliance profile */
+  known: string[];
+  id?: string;
+}) {
+  const [draft, setDraft] = useState("");
+  const listId = useId();
+  const add = (raw: string) => {
+    const t = raw.trim().replace(/,+$/, "");
+    if (!t || props.value.includes(t)) return setDraft("");
+    props.onChange([...props.value, t]);
+    setDraft("");
+  };
+  const unbound = (t: string) => !props.known.includes(t);
+
+  return (
+    <div className={s.tagPicker}>
+      {props.value.length > 0 && (
+        <ul className={s.tagList}>
+          {props.value.map((t) => (
+            <li key={t} className={`${s.tagChip} ${unbound(t) ? s.tagChipUnbound : ""}`}>
+              <span>{t}</span>
+              {unbound(t) && <em className={s.tagUnboundMark}>unbound</em>}
+              <button
+                type="button"
+                aria-label={`Remove tag ${t}`}
+                onClick={() => props.onChange(props.value.filter((x) => x !== t))}
+              >
+                ×
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <div className={s.tagInputRow}>
+        <input
+          id={props.id}
+          className={s.input}
+          list={listId}
+          value={draft}
+          placeholder={props.known.length ? "start typing, or pick a known tag" : "no profiles defined yet"}
+          onChange={(e) => {
+            // A datalist click fires change with the full value and no key
+            // event, so committing on a trailing comma alone would never catch
+            // it. Committing when the value matches the vocabulary exactly is
+            // what makes picking from the list feel like picking, not typing.
+            const v = e.target.value;
+            if (v.endsWith(",")) return add(v);
+            if (props.known.includes(v)) return add(v);
+            setDraft(v);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              // Enter adds a tag; it must not submit the form around it.
+              e.preventDefault();
+              add(draft);
+            }
+            if (e.key === "Backspace" && draft === "" && props.value.length) {
+              props.onChange(props.value.slice(0, -1));
+            }
+          }}
+          onBlur={() => add(draft)}
+        />
+        <datalist id={listId}>
+          {props.known.filter((t) => !props.value.includes(t)).map((t) => (
+            <option key={t} value={t} />
+          ))}
+        </datalist>
+      </div>
+      {props.value.some(unbound) && (
+        <p className={s.tagWarn}>
+          No compliance profile carries {props.value.filter(unbound).map((t) => `“${t}”`).join(", ")} yet, so
+          it enforces nothing until one does. That is allowed — tagging ahead of the profile is normal — but it
+          is not the same as being governed.
+        </p>
+      )}
+    </div>
+  );
+}
 
 export function Card(props: {
   title?: ReactNode;

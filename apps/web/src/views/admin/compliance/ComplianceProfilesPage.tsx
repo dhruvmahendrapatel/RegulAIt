@@ -36,7 +36,8 @@ export default function ComplianceProfilesPage() {
     <>
       <PageHeader
         title="Compliance profiles"
-        sub="A single classification tag on a project cascades required workflow stages, MCP data-scope defaults, audit-log retention, PII handling and infra floors — policy-as-code, one tag."
+        sub="One classification tag, cascaded into policy everywhere it applies."
+        info={<p>A single classification tag on a project cascades required workflow stages, MCP data-scope defaults, audit-log retention, PII handling and infra floors — policy-as-code, one tag.</p>}
       />
       <div className={v.stack}>
         <Card flush title="Profiles">

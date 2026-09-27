@@ -90,7 +90,8 @@ export default function AbacPoliciesPage() {
     <>
       <PageHeader
         title="ABAC policies"
-        sub="Attribute-conditional policy, evaluated inside the same kernel and recorded in the same audit trail as every RBAC decision. A policy can only DENY or PAUSE a call the entitlement model already allows — it can never grant one, and with no active policy the kernel decides exactly as it did before."
+        sub="Attribute-conditional policy that can narrow a decision, never widen it."
+        info={<p>Attribute-conditional policy, evaluated inside the same kernel and recorded in the same audit trail as every RBAC decision. A policy can only DENY or PAUSE a call the entitlement model already allows — it can never grant one, and with no active policy the kernel decides exactly as it did before.</p>}
       />
       <div className={v.stack}>
         <Card title="Write a policy">

@@ -41,7 +41,8 @@ export default function PmConnectionsPage() {
     <>
       <PageHeader
         title="PM connections"
-        sub="Task graphs and workflow stages map onto the customer's own work items (pillar 8). Users link a run from its detail page; status, sign-offs and decisions mirror out; inbound webhooks record drift, never overwrite the state machine."
+        sub="Task graphs and stages mapped onto the customer's own work items."
+        info={<p>Task graphs and workflow stages map onto the customer's own work items (pillar 8). Users link a run from its detail page; status, sign-offs and decisions mirror out; inbound webhooks record drift, never overwrite the state machine.</p>}
       />
       <div className={v.stack}>
         {reveal && <RevealCard reveal={reveal} onDismiss={() => setReveal(null)} />}

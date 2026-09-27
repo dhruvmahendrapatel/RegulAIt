@@ -390,7 +390,12 @@
 }
 .emptyBody {
   font-size: var(--text-sm);
-  max-width: 380px;
+  /* Centred text is fine for a line and hostile for a paragraph: every line
+     starts in a different place, so the eye hunts for each one. The BLOCK stays
+     centred (it is a flex item that shrinks to its content, so a short body is
+     unchanged); only a body long enough to wrap gets a straight left edge. */
+  max-width: 48ch;
+  text-align: start;
 }
 
 /* ---- CodeBlock ---- */
@@ -499,4 +504,116 @@ a.barLabel {
   .barLabel {
     width: 96px;
   }
+}
+
+/* ---------------------------------------------------------------------------
+   InfoButton — the "why does this exist" disclosure.
+
+   Sized and coloured to RECEDE. It sits beside labels and headings all over the
+   product, so anything louder than this becomes its own kind of noise — which
+   would defeat the point of moving the prose off the page in the first place.
+   --------------------------------------------------------------------------- */
+.infoWrap {
+  position: relative;
+  display: inline-flex;
+  vertical-align: middle;
+  margin-inline-start: var(--s0);
+}
+
+.infoBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* The glyph is 14px; the BUTTON is 24px. The difference is the hit target —
+     a 14px control is below every touch-target floor there is. */
+  inline-size: 24px;
+  block-size: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--rg-r-pill);
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  transition: color var(--rg-dur-fast) var(--rg-ease), background var(--rg-dur-fast) var(--rg-ease);
+}
+.infoBtn svg {
+  inline-size: 14px;
+  block-size: 14px;
+  stroke: currentColor;
+  fill: currentColor;
+}
+.infoBtn:hover,
+.infoBtn[aria-expanded="true"] {
+  color: var(--rg-signal);
+  background: var(--rg-signal-tint);
+}
+.infoBtn:focus-visible {
+  outline: 2px solid var(--rg-signal);
+  outline-offset: 1px;
+}
+
+.infoPanel {
+  position: absolute;
+  z-index: 40;
+  inset-block-start: calc(100% + 6px);
+  inset-inline-start: 0;
+  inline-size: max-content;
+  /* Wide enough for a real paragraph, capped so it never becomes a wall. */
+  max-inline-size: min(34rem, calc(100vw - 2rem));
+  padding: var(--s1) var(--s2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  box-shadow: var(--rg-shadow-lg);
+  /* Normal sentence case and left-aligned: this is prose, and it must not
+     inherit the uppercase letter-spaced treatment of the labels it sits beside. */
+  font-size: var(--text-sm);
+  font-weight: 400;
+  line-height: 1.55;
+  letter-spacing: normal;
+  text-transform: none;
+  text-align: start;
+  color: var(--text);
+  white-space: normal;
+}
+/* Near the right edge, open leftward so the panel cannot push the page wider. */
+.infoPanelEnd {
+  inset-inline-start: auto;
+  inset-inline-end: 0;
+}
+.infoPanel code {
+  font-family: var(--rg-font-mono);
+  font-size: 0.92em;
+}
+.infoPanel p + p {
+  margin-block-start: var(--s1);
+}
+
+/* --- TagPicker ------------------------------------------------------------- */
+.tagPicker { display: flex; flex-direction: column; gap: var(--s0); min-width: 0; }
+.tagList { display: flex; flex-wrap: wrap; gap: var(--s0); list-style: none; margin: 0; padding: 0; }
+.tagChip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 6px 3px 10px;
+  border: 1px solid var(--rg-signal-ring);
+  border-radius: var(--rg-r-pill);
+  background: var(--rg-signal-tint);
+  color: var(--text);
+  font-size: var(--text-xs);
+}
+/* An unbound tag must not look like a governed one — same shape, different
+   colour and an explicit word, because colour alone is not a message. */
+.tagChipUnbound { border-color: var(--rg-medium); background: var(--rg-medium-tint); }
+.tagUnboundMark { font-style: normal; font-size: 0.85em; color: var(--rg-medium-deep); text-transform: uppercase; letter-spacing: 0.04em; }
+.tagChip button {
+  border: 0; background: transparent; cursor: pointer; padding: 0 2px;
+  font-size: 15px; line-height: 1; color: var(--text-dim); border-radius: var(--rg-r-sm);
+}
+.tagChip button:hover { color: var(--danger); }
+.tagChip button:focus-visible { outline: 2px solid var(--rg-signal); outline-offset: 1px; }
+.tagInputRow { display: flex; gap: var(--s0); }
+.tagInputRow .input { flex: 1; }
+.tagWarn {
+  margin: 0; font-size: var(--text-xs); line-height: 1.5;
+  color: var(--rg-medium-deep); text-transform: none; letter-spacing: normal; font-weight: 400;
 }

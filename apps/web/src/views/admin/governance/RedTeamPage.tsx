@@ -151,7 +151,8 @@ export default function RedTeamPage() {
     <>
       <PageHeader
         title="Red-teaming"
-        sub="Adversarial probes run through the SAME governed dispatch as real traffic — entitlements, guardrails, metering and audit all apply — so a run measures the guardrail-plus-model system as deployed. A published attack library is an ordinary evaluation dataset, so a regression blocks promotion through the existing automated-check gate rather than a second mechanism."
+        sub="Adversarial probes, through the same governed path as real traffic."
+        info={<p>Adversarial probes run through the SAME governed dispatch as real traffic — entitlements, guardrails, metering and audit all apply — so a run measures the guardrail-plus-model system as deployed. A published attack library is an ordinary evaluation dataset, so a regression blocks promotion through the existing automated-check gate rather than a second mechanism.</p>}
       />
       <div className={v.stack}>
         <QueryGate

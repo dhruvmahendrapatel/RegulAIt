@@ -13,6 +13,7 @@ import type { Approval } from "../api/types";
 import { useSession } from "../session/SessionContext";
 import { useTheme } from "../ui/useTheme";
 import { Lockup, WORDMARK } from "../ui/Brand";
+import { InfoButton } from "../ui/kit";
 import { ADMIN_GROUPS, SUITES, WORKSPACE, suiteHome, suiteOfPath, type NavEntry } from "./suites";
 import s from "./shell.module.css";
 
@@ -332,6 +333,17 @@ export function PageHeader(props: {
   title: string;
   crumbs?: string[];
   sub?: ReactNode;
+  /**
+   * The long-form "what is this screen for" explanation.
+   *
+   * Most of these pages used to carry three or four sentences of it as the
+   * subtitle. That prose is good and it was in the wrong place: read once it is
+   * essential, read every day after that it is furniture, and furniture is what
+   * teaches people to skim past the sentence that mattered. `sub` is now one
+   * line that orients; `info` is the paragraph, one click away for whoever
+   * wants it and off the screen of whoever does not.
+   */
+  info?: ReactNode;
   actions?: ReactNode;
 }) {
   // Where a page sits is already known: it is the nav group the current route
@@ -367,9 +379,24 @@ export function PageHeader(props: {
         </nav>
       )}
       <div style={{ display: "flex", alignItems: "flex-start", gap: "var(--s2)" }}>
-        <h1 className={s.pageTitle} tabIndex={-1} style={{ flex: 1 }}>
-          {props.title}
-        </h1>
+        {/*
+          The info trigger is a SIBLING of the <h1>, never a child of it. Inside
+          the heading its label joins the heading's accessible name, so every
+          swept page announced as "Scheduled jobs, what is the Scheduled jobs
+          page?" — the landmark a screen-reader user navigates by, made longer
+          and less distinct on 52 screens at once. Outside it, the heading is
+          its title again and the button is its own control.
+        */}
+        <div className={s.pageTitleRow}>
+          <h1 className={s.pageTitle} tabIndex={-1}>
+            {props.title}
+          </h1>
+          {props.info != null && (
+            <span className={s.pageTitleInfo}>
+              <InfoButton label={`the ${props.title} page`}>{props.info}</InfoButton>
+            </span>
+          )}
+        </div>
         {props.actions}
       </div>
       {props.sub != null ? <p className={s.pageSub}>{props.sub}</p> : <div style={{ height: "var(--s3)" }} />}

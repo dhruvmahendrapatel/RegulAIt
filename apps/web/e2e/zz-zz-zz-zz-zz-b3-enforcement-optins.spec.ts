@@ -59,6 +59,22 @@ async function signIn(page: Page, email: string, candidates: string[], settleOn:
   throw new Error("could not sign in as admin");
 }
 
+/**
+ * Drive the guided intake. It is four steps now ("What it is", "Data & risk",
+ * "Intended use", "Review") and the submit button only exists on the last one,
+ * so a spec that fills the first panel and looks for "Propose use case" waits
+ * for a control that is not rendered yet. Only the first panel is filled here:
+ * these specs are about what happens AFTER the proposal, and everything on
+ * steps 2-3 is optional by design.
+ */
+async function proposeUseCase(page: Page, f: { name: string; what: string; why: string }) {
+  await page.getByLabel("Name", { exact: true }).fill(f.name);
+  await page.getByLabel("What it does").fill(f.what);
+  await page.getByLabel("Why the business wants it").fill(f.why);
+  for (let i = 0; i < 3; i++) await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByRole("button", { name: "Propose use case" }).click();
+}
+
 test("the use-case gate knob ships OFF, saves through the audited PUT, and is restored", async ({ page }) => {
   await signIn(page, "admin@regulait.local", [ADMIN_PASSWORD, state.passwords.admin], ADMIN_PASSWORD);
 
@@ -107,12 +123,11 @@ test("intent capture: a proposed use case's intended agents are editable in flig
   await expect(page.getByRole("heading", { name: "Use cases", exact: true })).toBeVisible();
 
   // propose without any intent — the exact "no intent recorded" state
-  await page.getByLabel("Name", { exact: true }).fill("b3e2e-intent-capture");
-  await page.getByLabel("Description").fill("prove intent is captured in flight");
-  await page
-    .getByLabel("Business context — why the business wants this")
-    .fill("close the ADR-0089 capture half");
-  await page.getByRole("button", { name: "Propose use case" }).click();
+  await proposeUseCase(page, {
+    name: "b3e2e-intent-capture",
+    what: "prove intent is captured in flight",
+    why: "close the ADR-0089 capture half",
+  });
   await expect(
     page.getByText("Use case proposed — its intake workflow is resting at the plan stage"),
   ).toBeVisible();

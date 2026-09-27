@@ -235,7 +235,8 @@ export default function ExecutionControlPage() {
     <>
       <PageHeader
         title="Execution control"
-        sub="The emergency stop. One dial for the whole deployment, plus a halt on a single agent or a single tool — because an incident confined to one tool should not cost you the business. Every position is an operator's deliberate act: nothing here trips on its own."
+        sub="The emergency stop — deployment-wide, per agent, or per tool. Nothing here trips on its own."
+        info={<p>The emergency stop. One dial for the whole deployment, plus a halt on a single agent or a single tool — because an incident confined to one tool should not cost you the business. Every position is an operator's deliberate act: nothing here trips on its own.</p>}
       />
       <div className={v.stack}>
         <QueryGate loading={state.isLoading} error={state.error} onRetry={() => void refresh()}>

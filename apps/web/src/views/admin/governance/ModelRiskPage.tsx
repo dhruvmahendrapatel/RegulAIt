@@ -240,7 +240,8 @@ export default function ModelRiskPage() {
     <>
       <PageHeader
         title="Model risk"
-        sub="A model card is one risk position on one model for one stated purpose: intended use, provider-stated data claims, known limitations, a recorded bias/fairness assessment, linked evidence, a named human sign-off, and the date that sign-off lapses. regulAIt records and expires these; it does NOT measure bias or fairness — that requires running the model against a purpose-built dataset."
+        sub="One risk position, on one model, for one stated purpose."
+        info={<p>A model card is one risk position on one model for one stated purpose: intended use, provider-stated data claims, known limitations, a recorded bias/fairness assessment, linked evidence, a named human sign-off, and the date that sign-off lapses. regulAIt records and expires these; it does NOT measure bias or fairness — that requires running the model against a purpose-built dataset.</p>}
       />
       <div className={v.stack}>
         <QueryGate

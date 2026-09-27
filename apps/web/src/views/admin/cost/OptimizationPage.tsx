@@ -51,7 +51,8 @@ export default function OptimizationPage() {
     <>
       <PageHeader
         title="Optimization"
-        sub="The pillar-6 savings ledger: every technique the backend applied on a user's behalf writes an event with its estimated savings; the usage ledger carries the measured actuals."
+        sub="The pillar-6 savings ledger."
+        info={<p>The pillar-6 savings ledger: every technique the backend applied on a user's behalf writes an event with its estimated savings; the usage ledger carries the measured actuals.</p>}
       />
       <div className={v.stack}>
         <div className={a.formRow}>

@@ -135,7 +135,8 @@ export default function GettingStartedPage() {
     <>
       <PageHeader
         title="Getting started"
-        sub="A live checklist, recomputed from the real objects on every load — never a tutorial that can drift. Each pending step links to the exact view that completes it."
+        sub="A live checklist, recomputed from the real objects on every load."
+        info={<p>A live checklist, recomputed from the real objects on every load — never a tutorial that can drift. Each pending step links to the exact view that completes it.</p>}
         actions={
           <Button size="sm" onClick={() => void q.refetch()}>
             Re-check

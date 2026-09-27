@@ -329,6 +329,21 @@
   color: var(--rg-signal-700);
 }
 
+.pageTitleRow {
+  display: flex;
+  align-items: flex-start;
+  gap: 0;
+  flex: 1;
+  min-width: 0;
+}
+/* Centres the 24px info target on the heading's FIRST line box, so a title
+   that wraps keeps the mark beside its first line rather than floating to the
+   vertical middle of two. */
+.pageTitleInfo {
+  display: flex;
+  align-items: center;
+  block-size: calc(var(--text-2xl) * var(--rg-heading-line));
+}
 .pageTitle {
   font-family: var(--rg-font-display);
   font-size: var(--text-2xl);

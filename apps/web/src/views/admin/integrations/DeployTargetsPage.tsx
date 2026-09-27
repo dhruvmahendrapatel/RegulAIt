@@ -55,7 +55,8 @@ export default function DeployTargetsPage() {
     <>
       <PageHeader
         title="Deploy targets"
-        sub="Where a deployment/rollback stage acts. mock runs everywhere with no credential; aws/azure/gcp/kubernetes execute as deterministic dry-run shapes — a dry-run deploy is recorded and badged as such, and it can never satisfy a production deploy gate."
+        sub="Where a deployment or rollback stage acts. Every non-mock kind is a dry-run shape, and a dry run can never satisfy a production deploy gate."
+        info={<p>Where a deployment/rollback stage acts. mock runs everywhere with no credential; aws/azure/gcp/kubernetes execute as deterministic dry-run shapes — a dry-run deploy is recorded and badged as such, and it can never satisfy a production deploy gate.</p>}
       />
       <div className={v.stack}>
         <Card title="Add a target">

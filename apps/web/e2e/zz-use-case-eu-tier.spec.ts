@@ -60,6 +60,22 @@ async function signIn(page: Page, email: string, candidates: string[], settleOn:
   throw new Error("could not sign in as admin");
 }
 
+/**
+ * Drive the guided intake. It is four steps now ("What it is", "Data & risk",
+ * "Intended use", "Review") and the submit button only exists on the last one,
+ * so a spec that fills the first panel and looks for "Propose use case" waits
+ * for a control that is not rendered yet. Only the first panel is filled here:
+ * these specs are about what happens AFTER the proposal, and everything on
+ * steps 2-3 is optional by design.
+ */
+async function proposeUseCase(page: Page, f: { name: string; what: string; why: string }) {
+  await page.getByLabel("Name", { exact: true }).fill(f.name);
+  await page.getByLabel("What it does").fill(f.what);
+  await page.getByLabel("Why the business wants it").fill(f.why);
+  for (let i = 0; i < 3; i++) await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByRole("button", { name: "Propose use case" }).click();
+}
+
 test("a social-scoring use case screens PROHIBITED — banner, Art. 5 reason, disclaimer — and still awaits its human sign-off", async ({ page }) => {
   await signIn(page, "admin@regulait.local", [ADMIN_PASSWORD, state.passwords.admin], ADMIN_PASSWORD);
 
@@ -67,12 +83,11 @@ test("a social-scoring use case screens PROHIBITED — banner, Art. 5 reason, di
   await expect(page.getByRole("heading", { name: "Use cases", exact: true })).toBeVisible();
 
   // propose
-  await page.getByLabel("Name", { exact: true }).fill("uct-e2e-citizen-score");
-  await page.getByLabel("Description").fill("rank citizens by social behaviour for perks");
-  await page
-    .getByLabel("Business context — why the business wants this")
-    .fill("a partner asked for a loyalty score");
-  await page.getByRole("button", { name: "Propose use case" }).click();
+  await proposeUseCase(page, {
+    name: "uct-e2e-citizen-score",
+    what: "rank citizens by social behaviour for perks",
+    why: "a partner asked for a loyalty score",
+  });
   await expect(
     page.getByText("Use case proposed — its intake workflow is resting at the plan stage"),
   ).toBeVisible();

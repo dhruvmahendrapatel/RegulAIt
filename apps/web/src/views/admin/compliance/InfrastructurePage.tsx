@@ -98,7 +98,8 @@ export default function InfrastructurePage() {
     <>
       <PageHeader
         title="Infrastructure"
-        sub="Monitored resources, operational policies, detected findings and governed remediation. Findings are inert until governed — auto-remediation happens only under a permissive policy; every 'critical' is always approval-gated."
+        sub="Monitored resources, policies, findings and governed remediation."
+        info={<p>Monitored resources, operational policies, detected findings and governed remediation. Findings are inert until governed — auto-remediation happens only under a permissive policy; every 'critical' is always approval-gated.</p>}
       />
       <div className={v.stack}>
         <div className={v.grid4}>

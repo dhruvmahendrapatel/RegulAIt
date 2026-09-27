@@ -267,7 +267,8 @@ export default function RulesEnginePage() {
     <>
       <PageHeader
         title="Rules engine"
-        sub="A rule targets one user, an assigned role, a team, or the whole fleet — on one server or all of them. Every governed call evaluates them in the same fixed precedence the Simulation view visualizes."
+        sub="Rules targeting a user, a role, a team, or the whole fleet."
+        info={<p>A rule targets one user, an assigned role, a team, or the whole fleet — on one server or all of them. Every governed call evaluates them in the same fixed precedence the Simulation view visualizes.</p>}
       />
       <div className={v.stack}>
         <ShadowCanaryCard />

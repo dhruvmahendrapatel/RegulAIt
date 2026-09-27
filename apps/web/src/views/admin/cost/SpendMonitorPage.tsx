@@ -127,7 +127,8 @@ export default function SpendMonitorPage() {
     <>
       <PageHeader
         title="Spend forecast & anomalies"
-        sub="Budget-vs-FORECAST and statistical spend-anomaly detection over the measured usage ledger. The projector is a run-rate (or EWMA) extrapolation you can re-derive with a calculator, reported with a real confidence interval; the detector is a modified z-score against each project's own rolling baseline. A forecast is not a commitment and an anomaly is not proof — both say so on their face, and enforcement rides the existing Approvals Queue rather than a second inbox."
+        sub="Budget-vs-forecast, and anomaly detection over measured usage."
+        info={<p>Budget-vs-FORECAST and statistical spend-anomaly detection over the measured usage ledger. The projector is a run-rate (or EWMA) extrapolation you can re-derive with a calculator, reported with a real confidence interval; the detector is a modified z-score against each project's own rolling baseline. A forecast is not a commitment and an anomaly is not proof — both say so on their face, and enforcement rides the existing Approvals Queue rather than a second inbox.</p>}
       />
       <div className={v.stack}>
         {/* ---------------- forecast ---------------- */}

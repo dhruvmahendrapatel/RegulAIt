@@ -109,7 +109,8 @@ export default function LicensingPage() {
     <>
       <PageHeader
         title="Licensing & seats"
-        sub="A license is a COMMERCIAL ceiling on top of the governance ceiling — it caps how many entitled users exist and which tier features are available, and can never grant an entitlement the governance layer denies. It is a signed file verified locally against a pinned public key, with no phone-home of any kind, because the flagship deployment is air-gapped and there is no home to phone."
+        sub="The commercial ceiling that sits on top of the governance ceiling."
+        info={<p>A license is a COMMERCIAL ceiling on top of the governance ceiling — it caps how many entitled users exist and which tier features are available, and can never grant an entitlement the governance layer denies. It is a signed file verified locally against a pinned public key, with no phone-home of any kind, because the flagship deployment is air-gapped and there is no home to phone.</p>}
       />
       <div className={v.stack}>
         <QueryGate loading={status.isLoading} error={status.error} onRetry={() => void status.refetch()}>

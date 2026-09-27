@@ -49,7 +49,8 @@ export default function ModelCredentialsPage() {
     <>
       <PageHeader
         title="Model credentials"
-        sub="One platform credential per provider, encrypted at rest. Re-adding a provider rotates its key in place; nothing here ever reads a stored secret back."
+        sub="One platform credential per provider, encrypted at rest. Nothing here ever reads a stored secret back."
+        info={<p>One platform credential per provider, encrypted at rest. Re-adding a provider rotates its key in place; nothing here ever reads a stored secret back.</p>}
       />
       <div className={v.stack}>
         <Card title="Add or rotate a platform credential">

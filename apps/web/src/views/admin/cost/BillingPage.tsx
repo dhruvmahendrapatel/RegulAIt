@@ -159,7 +159,8 @@ export default function BillingPage() {
     <>
       <PageHeader
         title="Metering & billing"
-        sub="Nothing on this page meters. Every governed agent, connector and MCP call already writes a measured row to usage_events and an estimated (list-price) row to cost_events at the point of the call; billing is a read-side consumer of that one ledger, so no number here can drift from the cost dashboard. Rate cards are immutable versions and every statement freezes the snapshot it was rated against, so changing a price cannot restate an invoice you already issued."
+        sub="Invoices and rate cards, read from the one usage ledger."
+        info={<p>Nothing on this page meters. Every governed agent, connector and MCP call already writes a measured row to usage_events and an estimated (list-price) row to cost_events at the point of the call; billing is a read-side consumer of that one ledger, so no number here can drift from the cost dashboard. Rate cards are immutable versions and every statement freezes the snapshot it was rated against, so changing a price cannot restate an invoice you already issued.</p>}
       />
       <div className={v.stack}>
         <QueryGate loading={overview.isLoading} error={overview.error} onRetry={() => void overview.refetch()}>

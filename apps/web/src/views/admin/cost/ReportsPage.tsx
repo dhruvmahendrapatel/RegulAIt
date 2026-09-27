@@ -109,7 +109,8 @@ export default function ReportsPage() {
     <>
       <PageHeader
         title="Executive & compliance reports"
-        sub="A read-only projection over the ledgers this platform already holds — usage_events (spend), audit_log (governance decisions) and approvals (throughput). No second source of truth, no rollup table that could drift from the cost dashboard. Every generation is scoped to the requesting caller's own entitlement: a report can never show spend or audit data you could not see directly."
+        sub="A read-only projection over the ledgers the platform already holds."
+        info={<p>A read-only projection over the ledgers this platform already holds — usage_events (spend), audit_log (governance decisions) and approvals (throughput). No second source of truth, no rollup table that could drift from the cost dashboard. Every generation is scoped to the requesting caller's own entitlement: a report can never show spend or audit data you could not see directly.</p>}
       />
       <div className={v.stack}>
         <QueryGate loading={overview.isLoading} error={overview.error} onRetry={() => void overview.refetch()}>

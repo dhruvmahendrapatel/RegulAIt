@@ -121,7 +121,8 @@ export default function SchedulerPage() {
     <>
       <PageHeader
         title="Scheduled jobs"
-        sub="Six governance sweeps — model-card expiry, approval SLA, report generation, spend anomalies, eval drift and red-team runs — run on an in-process timer with a database lock, so a BYOC or air-gapped install needs no external cron. They buy TIMELINESS, never enforcement: model-card expiry is still recomputed at dispatch and an SLA breach is still caught when the queue is read, whether or not any of this has run."
+        sub="Six governance sweeps on an in-process timer. Timeliness, never enforcement."
+        info={<p>Six governance sweeps — model-card expiry, approval SLA, report generation, spend anomalies, eval drift and red-team runs — run on an in-process timer with a database lock, so a BYOC or air-gapped install needs no external cron. They buy TIMELINESS, never enforcement: model-card expiry is still recomputed at dispatch and an SLA breach is still caught when the queue is read, whether or not any of this has run.</p>}
       />
       <div className={v.stack}>
         <QueryGate loading={status.isLoading} error={status.error} onRetry={() => void status.refetch()}>

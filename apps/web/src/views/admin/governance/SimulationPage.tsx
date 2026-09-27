@@ -82,7 +82,8 @@ export default function SimulationPage() {
     <>
       <PageHeader
         title="Simulation / access preview"
-        sub="Would this call be allowed right now? Evaluates live policy without executing anything — the same kernel, the same precedence, zero side effects."
+        sub="Would this call be allowed right now? Evaluated live, executing nothing."
+        info={<p>Would this call be allowed right now? Evaluates live policy without executing anything — the same kernel, the same precedence, zero side effects.</p>}
       />
       <div className={v.stack}>
         <Card>

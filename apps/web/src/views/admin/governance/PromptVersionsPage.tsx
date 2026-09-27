@@ -101,7 +101,8 @@ export default function PromptVersionsPage() {
     <>
       <PageHeader
         title="Prompt versions, canary & rollback"
-        sub="An agent's base system prompt is a governance artifact, so changing it is versioned like the code that reads it: an edit INSERTS a new immutable version, activation is a pointer move, and rollback re-points at a body that was never overwritten. A canary routes a deterministic slice of traffic — sticky per run, so a multi-turn conversation cannot flip mid-conversation — and every dispatch records which version served it, so a regression is attributable to a version rather than to a time window."
+        sub="System prompts as versioned, roll-backable governance artifacts."
+        info={<p>An agent's base system prompt is a governance artifact, so changing it is versioned like the code that reads it: an edit INSERTS a new immutable version, activation is a pointer move, and rollback re-points at a body that was never overwritten. A canary routes a deterministic slice of traffic — sticky per run, so a multi-turn conversation cannot flip mid-conversation — and every dispatch records which version served it, so a regression is attributable to a version rather than to a time window.</p>}
       />
       <div className={v.stack}>
         <Card title="Agent">

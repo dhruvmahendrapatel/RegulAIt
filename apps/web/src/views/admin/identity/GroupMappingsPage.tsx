@@ -82,7 +82,8 @@ export default function GroupMappingsPage() {
     <>
       <PageHeader
         title="Group → role mapping"
-        sub="Turn an IdP group into a regulAIt role — explicitly, one mapping at a time. A group with no mapping grants nothing: membership in it is recorded and inert. Mapping is purely additive, it confers exactly the mapped role's grants and never more, a per-user revocation still beats it, and no group can ever confer the platform admin bit."
+        sub="Turn an IdP group into a regulAIt role. A group with no mapping grants nothing."
+        info={<p>Turn an IdP group into a regulAIt role — explicitly, one mapping at a time. A group with no mapping grants nothing: membership in it is recorded and inert. Mapping is purely additive, it confers exactly the mapped role's grants and never more, a per-user revocation still beats it, and no group can ever confer the platform admin bit.</p>}
       />
       <div className={v.stack}>
         <Card title="Map a group to a role">

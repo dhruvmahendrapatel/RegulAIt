@@ -63,7 +63,8 @@ export default function ScimPage() {
     <>
       <PageHeader
         title="Provisioning (SCIM 2.0)"
-        sub="Your IdP pushes accounts and group membership here, and — the part that matters — deprovisions them. Offboarding through SCIM deactivates: sessions die at once, API keys stop authenticating, and nothing is deleted, so the audit trail of everything the account ever did survives and reactivation restores it unchanged."
+        sub="IdP-driven provisioning — and, more importantly, deprovisioning."
+        info={<p>Your IdP pushes accounts and group membership here, and — the part that matters — deprovisions them. Offboarding through SCIM deactivates: sessions die at once, API keys stop authenticating, and nothing is deleted, so the audit trail of everything the account ever did survives and reactivation restores it unchanged.</p>}
       />
       <div className={v.stack}>
         {reveal && <RevealCard reveal={reveal} onDismiss={() => setReveal(null)} />}

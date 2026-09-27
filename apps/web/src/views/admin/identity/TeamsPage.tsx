@@ -83,7 +83,8 @@ export default function TeamsPage() {
     <>
       <PageHeader
         title="Teams"
-        sub="Flat membership — per-user roles (owner/contributor/viewer) live on Shared-Project membership. Default classifications are surfaced (never silently resolved) when a member joins a project whose tags don't cover them."
+        sub="Flat membership; per-user roles live on Shared-Project membership."
+        info={<p>Flat membership — per-user roles (owner/contributor/viewer) live on Shared-Project membership. Default classifications are surfaced (never silently resolved) when a member joins a project whose tags don't cover them.</p>}
       />
       <div className={v.stack}>
         <Card title="Create a team">

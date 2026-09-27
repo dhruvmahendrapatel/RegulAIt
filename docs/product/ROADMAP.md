@@ -8,6 +8,26 @@
 > all merged: counts, migration numbers and batch statuses below reflect that state, and §6
 > (orphaned deferrals) was added.
 >
+> ### ⚠ RECONCILED 2026-09-26 — read this before trusting any status below
+>
+> §1–§6 were written 2026-07-30 and their own front matter says the counts and batch statuses
+> "reflect that state": **ADR 0037, migration 0037**. The tree is now **ADR 0127, migration 0116**.
+> An audit against the actual code found several statuses simply wrong, in the direction that
+> matters — work described as *not started* **is shipped**:
+>
+> | | roadmap said | actually |
+> |---|---|---|
+> | **Batch A** git-provider breadth | not started | **SHIPPED** — gitlab/bitbucket/azure_devops all resolve, 51 package tests |
+> | **Batch B** connector-kind breadth | not started, four kinds 501 | **SHIPPED** — 10 kinds, **zero** 501s, plus teams + outlook |
+> | **Batch C** infra-ops / BYOC | mock only | **PARTIAL** — real lazy-SDK clients exist *and are wired*, flag-gated off |
+> | **Batch E** CI | disabled | **SHIPPED** — re-enabled 2026-08-01 |
+> | **Batch G** owner key | parked | credential **path** shipped; the key itself is still parked |
+> | **§2** "2 of 6 layers vendor-plural" | — | **4 of 6**; the sharp edge #1 it names is also fixed |
+> | **§6** SCIM team sync | open | **SHIPPED** (ADR-0037/0038) |
+>
+> Corrections are applied inline below. **§4's ordering and §5's decisions predate all of it**
+> and should be re-derived, not followed.
+>
 > **Audience:** the project owner, and any future Claude session picking this up cold.
 > Read `CLAUDE.md` → `project-state/STATE.md` → this file, in that order.
 >
@@ -29,9 +49,12 @@ also a narrower claim than it sounds. Precisely:
   survives every path; the optimizer can never widen entitlement; delegation only ever
   tightens (agent ceiling ADR-0016 + budget ceiling); one audit trail, one approvals queue;
   measured spend is distinct from estimated spend and neither invents a dollar.
-- ~36k lines across 11 packages + the gateway; suite = **432 gateway tests** as of the
-  Batch H + temperature-amendment merges (was ≈361 at STATE.md addendum 33) plus per-package
-  suites. All green locally at last verification.
+- **13 packages** + the gateway. Suite as of 2026-09-26: **193 gateway test files / ~2,862
+  gateway cases**, plus ~1,549 package cases (shared 815, policy-kernel 129, model-provider 122,
+  infra-provider 105, connector-provider 76, optimizer-kernel 69, pm-provider 62,
+  training-provider 52, git-provider 51, workflow-kernel 41, orchestration-kernel 27) —
+  **≈4,411 repo-wide across 251 test files**. Highest migration **0116**, highest ADR **0127**.
+  *(This line previously read "432 gateway tests … 11 packages" and was two months stale.)*
 
 **What it does NOT mean**
 - It does not mean the pillars are *complete*. Several pillars have a full spine and a thin
@@ -75,9 +98,20 @@ hard-locks to one vendor at any layer."* Here is the truth table, read off the r
 
 ### The honest statement
 
-> The provider-agnostic principle is today **a design commitment honored by interface shape
-> and honest failure, not by shipped adapters.** Two of six product layers (model, PM) are
-> genuinely vendor-plural. Four are not.
+> **CORRECTED 2026-09-26 — the statement below was true on 2026-07-30 and is now wrong.**
+> **Four of six** product layers are genuinely vendor-plural: **model**, **PM tool**, **git**
+> (gitlab/bitbucket/azure_devops all resolve — `git-provider/src/index.ts:292-320`) and
+> **connectors** (ten kinds, zero 501s — `connector-provider/src/index.ts:51-63,1750-1860`).
+> The remaining two — **cloud deploy** and **infra-ops** — have moved from "no adapter" to
+> "real lazy-SDK adapter present and wired, flag-gated off by default"
+> (`REGULAIT_DEPLOY_LIVE`, `REGULAIT_INFRA_LIVE`). That is a different and much smaller gap
+> than the one this section was written about.
+>
+> The original text, kept for the reasoning:
+>
+> > The provider-agnostic principle is today **a design commitment honored by interface shape
+> > and honest failure, not by shipped adapters.** Two of six product layers (model, PM) are
+> > genuinely vendor-plural. Four are not.
 
 That is not nothing — it is materially better than a hard-coded integration, because:
 - Every layer has a **neutral interface** the gateway codes against, so adding a vendor is a
@@ -87,14 +121,18 @@ That is not nothing — it is materially better than a hard-coded integration, b
   succeed, never silently fall back to a different vendor. That discipline is uniform.
 
 Two sharp edges worth naming:
-1. **`git_connections.provider` accepts kinds the registry rejects.** The DB enum is
+1. ~~**`git_connections.provider` accepts kinds the registry rejects.**~~ **FIXED** — creation now
+   rejects unimplemented kinds, naming the kind (`apps/gateway/src/workflows.ts:1279`), and all
+   four kinds resolve anyway. Original text: The DB enum is
    `["github","gitlab","bitbucket","azure_devops","mock"]`
    (`packages/db/src/schema.ts` ~L593) but only two resolve. An admin can create a GitLab
    connection through the portal and it only fails later, at `git_operation` stage execution.
    Recommend either narrowing the accepted set at creation time or surfacing a
    "not-implemented" badge in the admin Git Connections UI. *(Recommendation only — I am not
    editing schema or portal in this pass.)*
-2. **A dry-run deploy returns a success shape.** `azure` / `gcp` / `kubernetes` deploy stages
+2. **A dry-run deploy returns a success shape.** **STILL TRUE and now the sharpest edge in this
+   section**, because real clients exist behind a default-off flag: the dry-run is what ships.
+   `azure` / `gcp` / `kubernetes` deploy stages
    will advance a workflow past `deployment` having deployed nothing. The `[dry-run]` suffix
    in the detail string is the only tell. Acceptable while it is labeled and while nothing is
    production — but it must not survive contact with a real customer environment.
@@ -117,7 +155,14 @@ multi-session, or gated on an external decision.
 
 ---
 
-### Batch A — Git-provider breadth (GitLab, Bitbucket, Azure DevOps)
+### ~~Batch A — Git-provider breadth (GitLab, Bitbucket, Azure DevOps)~~ — **SHIPPED (verified 2026-09-26)**
+
+> All three adapters are real and registered: `packages/git-provider/src/{gitlab,bitbucket,azure-devops}.ts`, each
+> with a sibling test file (51 cases in the package). `resolveProvider()` (`index.ts:292`) resolves all four kinds,
+> `IMPLEMENTED_GIT_PROVIDERS` (`index.ts:36-42`) is the honest set, and the git stage reaches it
+> (`apps/gateway/src/workflows.ts:40,1031`). The optional item — narrowing `git_connections` creation to implemented
+> kinds — **is also done** (`workflows.ts:1279`), which closes §2's sharp edge #1. The row below is the original
+> 2026-07-30 text, kept so the reasoning is still readable.
 
 | | |
 |---|---|
@@ -131,7 +176,13 @@ multi-session, or gated on an external decision.
 
 ---
 
-### Batch B — Connector-kind breadth (Slack, GitHub, Jira, Snowflake)
+### ~~Batch B — Connector-kind breadth (Slack, GitHub, Jira, Snowflake)~~ — **SHIPPED (verified 2026-09-26)**
+
+> `packages/connector-provider/src/index.ts:51-63` declares **ten** kinds — http, webhook, slack, teams, outlook,
+> github, jira, snowflake, generic, mock — and the registry switch (`:1750-1860`) constructs a real adapter for every
+> one. **Zero `501`/not-implemented throws remain.** Slack (`:352`) handles `chat.postMessage` and 429 →
+> `ConnectorRateLimitError`; Jira (`:1830`) Basic `email:api_token`; Snowflake (`:1848`) key-pair JWT. 76 package
+> tests. Two kinds beyond the four this batch scoped (teams, outlook) shipped as well.
 
 | | |
 |---|---|
@@ -145,7 +196,15 @@ multi-session, or gated on an external decision.
 
 ---
 
-### Batch C — Infra-ops + BYOC real execution (pillar 3's outer layer)
+### Batch C — Infra-ops + BYOC real execution (pillar 3's outer layer) — **PARTIAL, not "mock only" (verified 2026-09-26)**
+
+> The description below is out of date in the direction that matters. Real lazy-SDK clients exist for all three
+> clouds plus Kubernetes (`infra-{aws,azure,gcp}-client.ts`, `deploy-{aws,azure,gcp,k8s}-client.ts`) and they are
+> **wired, not merely authored**: `infra.ts:63-65` imports the builders and `providerConfig()` injects them
+> (`:339,348,356`). What remains true is that the **default path is a dry-run**: `infra.ts:334` returns early unless
+> `REGULAIT_INFRA_LIVE`, and `deploy.ts:42` gates on `REGULAIT_DEPLOY_LIVE`, with `dryRun:true` the default
+> (`:222,359,489,624`). Flag on but unwired throws explicitly rather than pretending. **Unverified:** whether the
+> live path has ever run against a real cloud — the tests use fake SDK modules by design.
 
 | | |
 |---|---|
@@ -184,7 +243,12 @@ multi-session, or gated on an external decision.
 
 ---
 
-### Batch E — Housekeeping / project hygiene
+### Batch E — Housekeeping / project hygiene — **CI IS RE-ENABLED (verified 2026-09-26)**
+
+> `.github/workflows/ci.yml:44` has `pull_request`, a weekly `schedule`, and `workflow_dispatch`; `push` is omitted
+> deliberately to fit the 2,000-minute allowance. The "CI re-enable still open" item below is **done**. Terraform is
+> still **authored-only** — the row below is correct on that: 7 modules, no `*.tfstate` in-tree (remote state would
+> not show here, so "never applied" is unverified rather than proven).
 
 | | |
 |---|---|
@@ -221,7 +285,11 @@ multi-session, or gated on an external decision.
 
 ---
 
-### Batch G — The parked item: wire the owner's Anthropic API key
+### Batch G — The parked item: wire the owner's Anthropic API key — **the PATH is shipped; the key is still parked**
+
+> `model_credentials` exists (`packages/db/src/schema.ts:2300`) and dispatch precedence is documented at `:2385`
+> (user credential → platform `model_credentials` → explicit env). So this is no longer engineering work: it is the
+> owner loading a key. Whether one is loaded in any running stack is not knowable from the tree.
 
 | | |
 |---|---|
@@ -481,7 +549,7 @@ the cited source holds the detail. This is an index, not a commitment to build a
 |---|---|---|---|
 | 1 | Reapply-on-reclassification — re-running the compliance cascade over in-flight workflow instances when a project's tag changes (today: diff covers policy only, in-flight instances keep merged definitions) | compliance-cascade addendum (STATE.md) | **D** |
 | 2 | Per-framework cost policies — compliance frameworks driving cost/budget defaults, not just workflow/scope/retention/PII | compliance-cascade addendum (STATE.md) | **D** |
-| 3 | SCIM team sync (and SSO status surface — no backend at all today, grep finds zero references) | ADR-0012 §4; Shared-Projects addendum | **D** (admin-portal serial) |
+| 3 | ~~SCIM team sync (and SSO status surface)~~ **SHIPPED (verified 2026-09-26)** — `apps/gateway/src/scim.ts` is 1,385 lines of SCIM 2.0 Users **and Groups** with its own `scim_tokens` trust path and deactivate-not-delete (ADR-0037); group→role mapping in `group-roles.ts` (ADR-0038, migration 0053); SAML shipped too (`saml.test.ts`). The "no backend at all today, grep finds zero references" claim was true on 2026-07-30. | ADR-0012 §4 | — |
 | 4 | Rule *exemptions* object — cross-scope override for scoped policy rules, rejected in v1 because it widens | rule-scoping slice (migration 0026, STATE.md) | **D** |
 | 5 | Backup **scheduler** — `backup_runs` ledger exists, nothing actually schedules runs | ADR-0017 | **C** |
 | 6 | Cert-rotation **lifecycle** — rotation verbs exist; no expiry-driven auto-proposal loop | ADR-0017 | **C** |
@@ -490,7 +558,7 @@ the cited source holds the detail. This is an index, not a commitment to build a
 | 9 | Partial revocations — revocations are total; "read-only from now on" means editing the grant | ADR-0019 consequences | **D** |
 | 10 | Per-tool MCP pricing — price is flat per call on the *server*; an additive per-tool column when a customer needs it | ADR-0019 consequences | **D** |
 | 11 | ~~Docs honesty: unattributed MCP calls are unmetered/unenforced~~ **SHIPPED 2026-07-31 (ADR-0024)** — every MCP call is now metered (null-project rows land in an explicit Unattributed bucket), `require_mcp_attribution` closes the gap outright, and the docs state the now-true claim | ADR-0019 consequences → ADR-0024 | **done** |
-| 12 | OTel ingestion (the interception ladder's *observe* rung) | Batch H work item (6), unshipped | **H follow-on** |
+| 12 | OTel **ingestion** (the interception ladder's *observe* rung) — **still genuinely unshipped**, and the distinction matters: ADR-0070 delivered tracing **emission and OTLP export** (`apps/gateway/src/tracing.ts`, 847 lines; `GET /v1/traces`; egress-guarded exporter config in `org-settings.ts:514-527`), which is the OPPOSITE direction. There is no `POST /v1/traces` or any OTLP receive route. | Batch H work item (6) | **H follow-on** |
 | 13 | ~~Per-role/per-project interception-setting overrides~~ **SHIPPED 2026-07-31 (ADR-0024)** — `interception_scope_rules` (user > project > role > org, first non-NULL per field, most-recent wins in-kind; exposure ≠ entitlement; 404 stays indistinguishable), admin CRUD + live effective-value preview | ADR-0020 → ADR-0024 | **done** |
 | 14 | Compat long tail — `tool_choice`, thinking blocks, structured outputs (today: loud 400s; `temperature` alone is accept-and-disclose) | ADR-0020 §5 | **H follow-on** |
 | 15 | ~~`key_custody` + `network` enforcement rungs — declared, not enforced~~ **key_custody SHIPPED 2026-07-31 (ADR-0024)** — `key_custody_enforced` makes BYO user credentials 409 + inert at dispatch (reversible), posture UI labels enforced-vs-declared honestly; `network` documented as an egress-allowlist recipe in IDE_INTEGRATION.md (infra-level by nature — product-side portion done; the actual egress control remains a Batch C/BYOC infra concern) | ADR-0020 / Batch H ladder → ADR-0024 | **done** (product side) |

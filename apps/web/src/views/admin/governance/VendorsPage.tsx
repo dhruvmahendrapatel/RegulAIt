@@ -141,7 +141,8 @@ export default function VendorsPage() {
     <>
       <PageHeader
         title="Vendors"
-        sub="Third-party AI as a governed object: a proposed vendor starts a real assessment workflow — plan, questionnaire, human sign-off on the one Approvals queue. Everything a vendor supplies is an attestation: a recorded claim with attribution, never verified by this platform and never blended into computed evidence."
+        sub="Third-party AI as a governed object. Everything a vendor supplies is an attestation — a recorded claim, never verified by this platform."
+        info={<p>Third-party AI as a governed object: a proposed vendor starts a real assessment workflow — plan, questionnaire, human sign-off on the one Approvals queue. Everything a vendor supplies is an attestation: a recorded claim with attribution, never verified by this platform and never blended into computed evidence.</p>}
       />
       <div className={v.stack}>
         {/* ---------------- propose ---------------- */}

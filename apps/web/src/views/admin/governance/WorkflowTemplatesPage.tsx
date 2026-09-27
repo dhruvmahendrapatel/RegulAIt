@@ -69,7 +69,8 @@ export default function WorkflowTemplatesPage() {
     <>
       <PageHeader
         title="Workflow templates"
-        sub="Stage chains and how changes route to them. Retired templates start no new instances; in-flight ones keep their snapshotted definition."
+        sub="Stage chains, and how changes route to them."
+        info={<p>Stage chains and how changes route to them. Retired templates start no new instances; in-flight ones keep their snapshotted definition.</p>}
       />
       <div className={v.stack}>
         <Card title="Templates">

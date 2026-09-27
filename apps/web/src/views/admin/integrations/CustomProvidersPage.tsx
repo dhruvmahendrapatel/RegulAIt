@@ -444,7 +444,8 @@ export default function CustomProvidersPage() {
     <>
       <PageHeader
         title="Custom LLM providers"
-        sub="Any OpenAI-compatible or Anthropic-Messages-compatible endpoint — Ollama, vLLM, LM Studio, LocalAI, Azure OpenAI, a Bedrock proxy, an internal gateway. An admin-typed URL is an SSRF primitive, so every destination is default-deny: allow-list the host, register (disabled), pass a connection test, then enable. This page explains the rules; the gateway enforces them and its refusals are shown here word for word."
+        sub="Any OpenAI- or Anthropic-compatible endpoint, governed like the rest."
+        info={<p>Any OpenAI-compatible or Anthropic-Messages-compatible endpoint — Ollama, vLLM, LM Studio, LocalAI, Azure OpenAI, a Bedrock proxy, an internal gateway. An admin-typed URL is an SSRF primitive, so every destination is default-deny: allow-list the host, register (disabled), pass a connection test, then enable. This page explains the rules; the gateway enforces them and its refusals are shown here word for word.</p>}
       />
       <div className={v.stack}>
         {capabilityOff && (

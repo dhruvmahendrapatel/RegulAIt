@@ -26,7 +26,8 @@ export default function OrganizationPage() {
     <>
       <PageHeader
         title="Organization"
-        sub="Org-wide functional defaults. Everything here used to be a hardcoded constant; now it is your choice. Org settings are CEILINGS: they only ever narrow what happens below them. Every save is audited with exactly which keys changed."
+        sub="Org-wide functional defaults."
+        info={<p>Org-wide functional defaults. Everything here used to be a hardcoded constant; now it is your choice. Org settings are CEILINGS: they only ever narrow what happens below them. Every save is audited with exactly which keys changed.</p>}
       />
       <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
         {q.data && <Loaded settings={q.data.settings} />}
