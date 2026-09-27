@@ -1274,6 +1274,486 @@ to prove diagnostic usefulness and a negative control that uses the current `sli
 - The source probes and non-DB suites establish the reproduced pure behavior and compilation only.
   No migration, gateway DB path, browser journey, provider parity, backup/restore or production
   readiness was independently verified; no live Microsoft, S3, provider or cloud resource was used.
+
+### Automated enterprise-readiness run — 2026-09-26 14:34:01 CDT (UTC-05:00)
+
+**Review boundary and synchronization**
+
+- The last commit recorded as reviewed in this ledger was
+  `76958bb3a98bd12c2fb8b06fe156df6bf78a9bca`. The checkout began clean at
+  `5483a47429c3dfb1ad4f8fd886c2a251f3043199` on `claude/status-check-2gbrwf`, tracking the
+  same upstream SHA. The intervening merge/ADR-0125 code and the two feedback-file commits had
+  already been directly inspected during the preceding GitHub handoff; this run retained the
+  formal ledger boundary and concentrated new-code review on `5483a47..9bce6f6`.
+- `git pull --ff-only` succeeded and fast-forwarded the checkout to
+  `9bce6f6c1d22fe11b8fbec892571a7ac3e89043c`. Local and
+  `origin/claude/status-check-2gbrwf` matched that SHA immediately after synchronization.
+  `origin/main` advanced to `5d6cf94` (PR #110 / ADR-0126); the tracking branch also contains the
+  later branch-cleanup script commit.
+- Reviewed material change: ADR-0126, migration 0116, inbound and provider/MCP deadlines, MCP
+  circuit-breaker state and tests, related runbook/roadmap claims, and the dry-run-first remote
+  branch cleanup script. No commit, push, stash, reset, cloud/provider call, migration, deployment,
+  production action or product-code edit was made. This ledger update is the only local edit.
+
+**Commands and independently observed outcomes**
+
+- `git status --short --branch`; `git rev-parse HEAD`; `git rev-parse @{upstream}`; `git remote -v` —
+  PASS before pull: tracking branch configured correctly and no local modification existed.
+- `git pull --ff-only` — PASS: fast-forward `5483a47..9bce6f6`.
+- `git log`/`git diff`/`rg` and line-numbered source reads over the reviewed range — direct source
+  observation. In particular, `GoogleProvider` has no deadline signal, and the breaker call-site
+  inventory contains no breaker operation on the shared governed tool-call path.
+- `pnpm --filter @regulait/gateway typecheck` — PASS (TypeScript no-emit check). pnpm reused the
+  installed dependency graph; it also emitted the existing warning that `package.json`'s `pnpm`
+  overrides field is ignored by the installed pnpm version.
+- `pnpm --filter @regulait/model-provider typecheck` — PASS.
+- `pnpm --filter @regulait/model-provider test` — PASS: 1 file / 122 tests. No test in that suite
+  references the newly exported model timeout setter/default, so the green count is not timeout
+  parity evidence.
+- Isolated no-network `GoogleProvider` probe using the injected fetch seam and a 25 ms configured
+  model deadline — REPRODUCED: after 120 ms the dispatch promise was still pending and the captured
+  fetch `RequestInit` had no signal. The first attempt with Node's strip-only TypeScript loader failed
+  on an unsupported parameter property; rerunning the same probe with the repository's installed
+  `tsx` runner produced the result above.
+- Isolated no-network MCP SDK probe — the SDK request rejected with `RequestTimeout` and its
+  transport signal was aborted when connect cleanup ran. The first invocation from the workspace
+  root failed to resolve the package; rerunning from `apps/gateway` resolved it. No separate finding
+  is based on the failed setup attempt.
+- `bash -n scripts/delete-merged-branches.sh` and its default dry run could not execute on this
+  Windows host because the available WSL launcher has no `/bin/bash`. The script was source-reviewed;
+  its executable behavior remains unverified here, and no branch deletion was attempted.
+- `DATABASE_URL` was absent. Per the shared-database rule, the new database-backed
+  `g2-upstream-deadlines.test.ts`, migration 0116 and the full gateway/repository suites were not run.
+  ADR/STATE totals remain repository-reported evidence.
+
+#### AER-021 — HIGH — The shipped model deadline omits Google/Gemini completely
+
+**Evidence type:** reproduced isolated behavior plus direct provider source tracing. No provider or
+network endpoint was contacted.
+
+ADR-0126 says model dispatch was genuinely unbounded before this change and now concludes that no
+unbounded wait remains on any MCP or model path
+(`docs/decisions/0126-upstream-deadlines-and-circuit-breaker.md:25-32,120-122`). The roadmap marks G2
+shipped on the same basis (`docs/product/ROADMAP.md:679`). The implementation pushes the resolved
+number into a process-wide model-provider setting (`apps/gateway/src/timeouts.ts:107-147`) and passes
+that value to the Anthropic/OpenAI/xAI/custom SDK constructors
+(`packages/model-provider/src/index.ts:257-268,949-990,1034-1066`).
+
+`GoogleProvider` is the provider-agnostic exception. It uses raw `fetch` with no `AbortSignal` or
+other deadline at `packages/model-provider/src/index.ts:1265-1349`, then can wait indefinitely for
+either `res.json()` or a streaming `reader.read()` at lines 1394-1414. The isolated probe set the
+exported model deadline to 25 ms, supplied an injected fetch that never resolves, and observed the
+dispatch still pending after 120 ms with no signal in `RequestInit`. Existing provider tests have no
+timeout assertion, so their 122 passes do not cover this claim.
+
+**Impact:** a hung or hostile Gemini/custom-Google endpoint can still hold gateway work without a
+bound, consume sockets/concurrency and bypass the operator's `REGULAIT_MODEL_TIMEOUT_MS` setting. The
+behavior contradicts both the provider-agnostic principle and the explicit shipped/no-unbounded-wait
+claim. An enterprise operator cannot name the effective deadline because one supported vendor has
+none.
+
+**Recommended remediation:** give every dispatch a per-operation `AbortController`/`AbortSignal`
+with the resolved deadline and pass it to Google's fetch. Keep it active through streamed body
+consumption, cancel the reader/body on expiry, map timeout distinctly from other provider failure,
+and compose it with any future caller cancellation signal. Prefer a shared deadline helper used by
+both raw-fetch and SDK-backed adapters so newly added providers cannot omit it silently. Correct the
+ADR/roadmap shipped wording until parity is executable.
+
+**Acceptance evidence required:** inject a fetch that never returns headers and a response whose
+stream returns headers but never yields/finishes. For both streaming and non-streaming Google calls,
+prove rejection near the configured deadline and prove the signal/body reader was cancelled.
+Repeat a table-driven timeout conformance test for every real provider kind. Include a negative
+control without the signal that remains pending, and test that the environment-configured value is
+the one each adapter observes.
+
+#### AER-022 — HIGH — The MCP circuit breaker guards only the outer proxy handshake, not MCP operations or delegated workers
+
+**Evidence type:** direct source/call-site observation. Database-backed concurrency behavior was not
+run because no disposable `DATABASE_URL` was available.
+
+The only breaker admission check is in the HTTP proxy route before its initial upstream connection
+(`apps/gateway/src/mcp-proxy.ts:1310-1328`). The only failure recording is the catch around that
+connection at lines 1334-1392, and a successful initialize immediately resets the breaker at
+1395-1398. The actual shared governed tool primitive independently reads the server and opens its
+own upstream connection at lines 426-459 and 919-930. Its `listTools` call at 1096 and `callTool`
+call at 923-930 have deadlines but no `breakerAdmits`, `recordUpstreamFailure` or
+`recordUpstreamSuccess` call. Pillar-7 workers invoke that shared primitive directly, so they never
+pass through the proxy-route breaker. The new breaker tests use endpoints that fail or hang during
+initialize; none completes initialize and then hangs `listTools`/`callTool`, and none exercises a
+delegated worker.
+
+**Impact:** an upstream can initialize successfully and then hang or fail every real operation.
+Each request resets any accumulated handshake failures and can pay the full 15-second list or
+120-second tool deadline indefinitely; delegated workers bypass the breaker altogether. A hostile
+or degraded server can therefore recreate the queued-work/resource-exhaustion condition ADR-0126
+says the breaker bounds, while the database reports a healthy closed breaker. This is a material
+availability and claim-integrity gap.
+
+**Recommended remediation:** put breaker admission and outcome recording around the one shared MCP
+operation boundary used by proxy calls, manifest sync/admission rescans and delegated workers.
+Define explicitly whether initialize, `listTools` and `callTool` share one server breaker or separate
+operation buckets; whichever model is chosen, a successful handshake must not erase a failed tool
+operation. Count only attributable upstream/network/deadline failures, never governance, admission,
+egress, budget, PII or approval refusals.
+
+**Acceptance evidence required:** use a fake MCP server that initializes successfully but then
+hangs/fails `listTools` or `callTool`. After the configured threshold, prove both direct proxy and
+delegated-worker calls fast-fail without a new upstream invocation, then prove exactly one recovery
+probe after cooldown. Add mixed-success concurrency cases and assert database state, audit
+transitions and invocation counts—not only HTTP status. A negative control retaining route-only
+breaker placement must fail.
+
+#### AER-023 — MEDIUM — Breaker state changes and their audit transitions are non-atomic
+
+**Evidence type:** direct source observation; failure injection and threshold-crossing concurrency
+were not run without a disposable database.
+
+`recordUpstreamFailure` first increments and reads the server row, then separately writes
+`breaker_opened_at`, then separately inserts the opened audit fact
+(`apps/gateway/src/upstream-breaker.ts:219-253`). Once the row-level lock from the increment statement
+is released, two failures crossing the threshold can both observe `openedAt` null, both set it, and
+both file an opened transition. An audit-insert failure leaves a real open state without its claimed
+transition. Recovery similarly clears state and then separately files the closed event at lines
+260-275. The conditional half-open election is atomic, but the opening/closing transition plus its
+ledger fact is not. The sequential tests do not inject audit failure or race the threshold.
+
+**Impact:** the operational state and immutable audit history can disagree, and concurrent failures
+can manufacture duplicate or misleading transitions. Operators and incident reviews cannot rely on
+the ledger to answer when the breaker opened or recovered—the exact question ADR-0126 says these
+summary facts exist to answer.
+
+**Recommended remediation:** perform each state transition and its audit insert in one transaction.
+Use a conditional update that opens only when `breaker_opened_at` is null and the post-increment
+count crosses the threshold; only the row actually changed may emit `opened`. Close only from an
+observed open state and emit recovery from that committed transition. Make transition helpers accept
+the transaction handle and define idempotent retry behavior.
+
+**Acceptance evidence required:** barrier-race failures at threshold-1 and threshold, and inject an
+audit insert failure on open/probe/close. Assert one durable transition fact per real state change,
+rollback of state when audit fails, no duplicate opened/closed events, accurate counts/reasons, and
+the same result across multiple gateway instances.
+
+#### AER-024 — MEDIUM — An open breaker masks newer admission and egress policy refusals
+
+**Evidence type:** direct ordering observation; the combined state was not database-reproduced.
+
+The proxy calls `breakerAdmits` at `apps/gateway/src/mcp-proxy.ts:1310-1328` before
+`connectUpstream` at 1334-1337. But `connectUpstream` is where the current admission decision and
+egress URL policy are actually re-evaluated (`mcp-proxy.ts:136-149`; `mcp-egress.ts:235-256`).
+Despite the nearby comment saying the breaker sits after the egress guard, an already-open breaker
+returns 503 first. The new policy-refusal test begins from a closed breaker, so it proves policy
+denials do not increment the counter; it does not prove a newly tightened policy remains the visible
+governing reason while the breaker is open.
+
+**Impact:** after an operator quarantines a server or tightens egress policy, callers can continue to
+receive `mcp_upstream_circuit_open` rather than the authoritative
+`mcp_admission_held`/`egress_blocked` decision, and the policy refusal is not recorded on those
+requests. Nothing reaches the upstream, so this is not an execution bypass, but it makes a governance
+change present as an outage and weakens failure honesty during an incident.
+
+**Recommended remediation:** separate side-effect-free admission/egress preflight from socket
+creation and run current governance checks before breaker fast-fail. Only after those checks allow
+the request should the breaker decide whether to contact the upstream. Keep policy refusals excluded
+from the failure count.
+
+**Acceptance evidence required:** open a breaker, then apply an admission hold and separately remove
+egress permission. Subsequent calls must return and audit the current policy refusal with zero
+upstream attempts and unchanged breaker failure count. Lift policy while the breaker remains open and
+prove the next result returns to 503 until the normal cooldown/probe succeeds.
+
+**Prior-finding reconciliation and remaining uncertainty — 2026-09-26 14:34 CDT**
+
+- AER-017, AER-018 and AER-019 remain open HIGH findings. The G2 range does not change execution
+  mode semantics, add kill-switch coverage to workflow/infra/PM writes, or make emergency state and
+  audit atomic. AER-020 remains open MEDIUM; the discovery scrub implementation was not changed.
+- AER-014 remains HIGH: ADR-0125 made selected live counters shared but did not add a replay clock to
+  policy simulation. AER-010 and AER-011 remain HIGH residuals; G2 did not change the compat cache
+  gate ordering or cache identity. No direct evidence in this run justifies closing AER-004 or
+  AER-007.
+- ADR-0126's own disclosed gaps remain disclosures, not new findings here: connector HTTP invokes
+  still have no deadline, model/connector upstreams have no breaker, and `openBreakers()` has no
+  operator route/UI. They should remain visible work rather than being read as covered by G2.
+- Migration 0116 was source-checked only. The new G2 database suite and fresh migration were not run,
+  so schema behavior, multi-process breaker races and the repository-reported full-suite total remain
+  unverified. The inability to execute bash also leaves the branch-deletion script unverified on
+  this host.
+- Passing typechecks and 122 isolated provider tests establish compilation and existing adapter
+  behavior, not provider timeout parity, MCP breaker completeness, database correctness, production
+  readiness or certification. No external provider, cloud resource or live deployment was used.
+
+### Automated enterprise-readiness run — 2026-09-26 19:35:36 CDT (UTC-05:00)
+
+**Target branch and synchronization blocker**
+
+- Exclusive target: `dhruv/active`.
+- The checkout is still on `claude/status-check-2gbrwf` at
+  `9bce6f6c1d22fe11b8fbec892571a7ac3e89043c`, not the target branch.
+- The worktree was not clean before synchronization: tracked `codexInputs.md` contains the prior
+  automated feedback update (206 inserted lines), and an untracked `RegulAIt/` directory is present.
+  Both were preserved exactly; no stash, reset, discard, commit, move or deletion was attempted.
+- No local `dhruv/active` branch existed. `git fetch origin dhruv/active` succeeded read-only and
+  created the remote-tracking ref at `21209b15a5382079c272ac65aa1ca13efda99659`
+  (`feat(web): guided use-case intake, and two kit primitives it needed`).
+- Git object inspection showed that committed `codexInputs.md` is byte-identical on the current HEAD
+  and `origin/dhruv/active` (`8cd87edfd8438b7c54ec3f1f688d8caff59a7ba3`), and the target tree has no
+  tracked `RegulAIt` path. Even so, the branch-transition rule permits creating the missing local
+  tracking branch only from a clean worktree. Therefore this run did not switch branches, pull, or
+  review another branch as a substitute.
+
+**Commands and outcomes**
+
+- Mandatory suite/repository instruction reads — completed before repository action.
+- `git status --short --branch`, `git branch --show-current`, `git remote -v`, `git branch -vv`,
+  local/remote ref checks — current branch and local-work blocker confirmed.
+- `git fetch origin dhruv/active` — PASS; remote target resolved to `21209b15...` without changing
+  the checkout.
+- `git diff --name-status HEAD..origin/dhruv/active -- codexInputs.md`, committed blob comparisons,
+  local diff stat and target-tree collision check — committed feedback blobs match; local feedback
+  modification and untracked directory remain.
+- `DATABASE_URL` is absent. No tests, migration, source review or product verification ran because
+  the target branch could not be checked out safely under the standing branch rule.
+
+**Required user/agent action:** preserve the current `codexInputs.md` feedback and determine ownership
+of the untracked `RegulAIt/` directory, then leave the worktree clean on a local `dhruv/active` branch
+tracking `origin/dhruv/active`. Until that happens, this automation will continue to refuse review on
+the wrong branch. No finding status changed in this blocked run.
+
+### Automated enterprise-readiness run — 2026-09-26 20:47:13 CDT (UTC-05:00)
+
+**Target branch, synchronization and reviewed range**
+
+- Exclusive target: `dhruv/active`.
+- The user explicitly requested that the preserved feedback be moved to and maintained on that
+  branch. `git switch --track -c dhruv/active origin/dhruv/active` preserved both the modified
+  `codexInputs.md` and the unrelated untracked `RegulAIt/` directory; the latter was not read,
+  moved, deleted or otherwise changed.
+- `git fetch origin dhruv/active` then `git pull --ff-only origin dhruv/active` fast-forwarded the
+  branch from `21209b15a5382079c272ac65aa1ca13efda99659` to
+  `d03162003a19ed147cce13e2c37d0185a783e3dc`. Local HEAD and
+  `origin/dhruv/active` both resolved to `d03162003...` after synchronization.
+- The prior blocked-run condition is therefore **resolved**. The last reviewed G2 work is present
+  in this branch; because the prior feedback-only commit is not an ancestor, the code review used
+  merge-base `5d6cf94a6b94f3b8d90acb617ac547e155cf6dcc` and concentrated on the G9
+  authorization callout, guided intake, page-header sweep, and still-open high-risk anchors.
+
+**Commands/tests and outcomes**
+
+- Mandatory suite and repository instruction reads — completed before branch action.
+- Branch/remote/status/ref inspection, `git fetch origin dhruv/active`, safe tracking-branch switch,
+  and `git pull --ff-only origin dhruv/active` — **PASS**; no merge, rebase, reset, stash, commit,
+  push, force operation or product-code edit was performed.
+- `git diff --check 5d6cf94..HEAD` — **FAIL** only for a new blank line at EOF in
+  `docs/product/PENDING.md:868`; no source whitespace error was reported.
+- `corepack pnpm --filter @regulait/web typecheck` — **PASS**.
+- `corepack pnpm --filter @regulait/shared test` — **PASS**, 38 files / 912 tests.
+- `corepack pnpm --filter @regulait/policy-kernel test` — **PASS**, 2 files / 129 tests.
+- The first isolated `corepack pnpm --filter @regulait/gateway typecheck` — **FAIL**, because its
+  workspace dependency declarations were stale (new shared/model-provider/DB exports were absent
+  from generated package output). `corepack pnpm build` then completed **PASS** for all 15 workspace
+  projects, after which the same gateway typecheck completed **PASS**. This is a build-order/setup
+  dependency, not evidence of a source compile defect. The web build emitted its existing
+  >900 kB chunk-size warning.
+- `DATABASE_URL` was absent. No migration or database-backed gateway test was run; the new
+  `adr0127-advisory-decisions.test.ts` remains repository-reported evidence, not an independently
+  reproduced result. No Envoy or Lua runtime was installed, and ADR-0127 itself records that the
+  adapters are not exercised by CI.
+
+#### AER-025 — HIGH — The shipped Envoy adapter cannot implement the endpoint contract and would treat a reachable deny as allow
+
+**Evidence type:** direct source/configuration observation, cross-checked against Envoy's official
+HTTP `ext_authz` contract; no Envoy runtime was available locally.
+
+The endpoint requires a JSON POST body containing `userId`, `serverId` and `toolName`
+(`packages/shared/src/index.ts:3336-3341`). The shipped Envoy HTTP filter forwards only selected
+request headers, has no `with_request_body`, and uses `path_prefix: /v1/authz/check`
+(`integrations/envoy/ext_authz.yaml:18-66`). Envoy documents that its HTTP authorization request has
+no body by default and that `path_prefix` is prepended to the original request path; this is not a
+JSON-body transformation. Therefore an ordinary protected request cannot satisfy the Zod contract
+at `apps/gateway/src/app.ts:2093-2099`.
+
+There is a second, security-critical protocol mismatch. Envoy's raw HTTP authorization service
+treats **HTTP 200** as allow and non-200 as deny. RegulAIt's endpoint returns HTTP 200 for all three
+application decisions, including `deny`, unknown tool, and `approval_required`
+(`apps/gateway/src/app.ts:2100-2108,2122-2142`). Consequently a deployment that adds the missing
+request transformation but keeps this response contract converts a policy denial into an Envoy
+allow. The comments/docs claiming that `approval_required` “arrives as a denial” and that both
+adapters fail closed are not true of this configuration.
+
+Official protocol reference used for this check:
+https://www.envoyproxy.io/docs/envoy/latest/api-v3/extensions/filters/http/ext_authz/v3/ext_authz.proto
+
+**Impact:** as shipped, the Envoy example is fail-closed but unusable (malformed/wrong-path calls).
+If an operator performs the obvious request-shaping repair without also changing the status
+contract, policy denials can proceed upstream. This invalidates the documented supported-Envoy
+claim at a primary authorization boundary.
+
+**Recommended remediation:** do not present the raw endpoint as an Envoy HTTP `ext_authz` service.
+Either add a purpose-built Envoy-compatible endpoint that derives the action from trusted headers
+and returns 200 only for allow / 403 for deny and approval-required, or ship a tested transformation
+layer with the same status semantics. Keep the JSON decision code in the denial response/header for
+the recoverable approval distinction.
+
+**Acceptance evidence required:**
+
+1. Run a real pinned Envoy container with the shipped example (or the replacement) and an
+   instrumented upstream. An allowed decision reaches upstream exactly once.
+2. `deny`, unknown tool, malformed/missing identity, PDP 4xx/5xx, timeout and network failure each
+   produce zero upstream calls.
+3. `approval_required` produces zero upstream calls plus the documented
+   `x-regulait-decision: approval_required` response signal.
+4. The adapter constructs the exact subject/server/tool action without forwarding the original
+   protected payload as if it were the PDP request.
+5. The adapter is validated in CI against the minimum and current supported Envoy versions.
+
+#### AER-026 — HIGH — The sample adapters trust a caller-controlled subject header
+
+**Evidence type:** direct source/configuration observation; exploitability depends on an operator's
+unshown filters, which the shipped examples do not provide.
+
+The Kong sample chooses `x-regulait-subject` before the authenticated consumer's `custom_id`
+(`integrations/kong/regulait-authz.lua:27-35`). The Envoy sample permits the same downstream header
+and forwards it to the PDP (`integrations/envoy/ext_authz.yaml:44-50`). Neither artifact removes the
+client value and overwrites it from a verified JWT, mTLS principal, or Kong consumer mapping. The
+topology document says the gateway “must map” its authenticated identity and admits that a wrong
+mapping makes a decision about the wrong person (`docs/deployment/GATEWAY_TOPOLOGY.md:44-54`), but
+the worked examples do not implement or enforce that prerequisite.
+
+**Impact:** unless a deployment adds an undocumented sanitization/mapping stage, a caller can name
+another RegulAIt user UUID. If that user has broader grants, the PDP answers the wrong subject's
+question and the data plane may authorize an otherwise forbidden request.
+
+**Recommended remediation:** make identity derivation part of each adapter, not a comment. Reject
+the request if a trusted identity cannot be mapped. Never prefer a downstream-supplied subject
+header. If a header must cross filter stages, strip any inbound copy and set it from authenticated
+dynamic metadata/consumer data in a named, tested stage.
+
+**Acceptance evidence required:**
+
+1. A client-supplied `x-regulait-subject` for a privileged user is ignored or rejected for both
+   adapters; the upstream sees zero calls.
+2. The authenticated principal maps deterministically to one RegulAIt user; unmapped, ambiguous,
+   disabled and deleted identities fail closed.
+3. Tests prove the map cannot be bypassed by duplicate/case-varied headers or by omitting the
+   authenticated consumer while supplying the subject header.
+4. Audit evidence records both the authenticated workload/consumer identity and resolved subject
+   without putting either under client control.
+
+#### AER-027 — HIGH — The documented PDP secret is an unrestricted administrator credential
+
+**Evidence type:** direct authorization-model observation.
+
+`POST /v1/authz/check` is absent from `NON_ADMIN_ROUTES`, so the central route classifier's default
+is `admin` (`apps/gateway/src/route-classes.ts:421-446`). Ordinary API keys inherit the owning
+user's `isAdmin` bit (`apps/gateway/src/auth.ts:189-221`); the schema documentation explicitly says
+an ordinary API key carries admin-ness and reaches every route its user may
+(`packages/db/src/schema.ts:6895-6899`). There is no callout-only service credential or route scope.
+The topology asks operators to place this key in Envoy/Kong and calls it a subject-impersonation
+key, but a stolen key can also invoke the entire admin control plane.
+
+**Impact:** compromise of a data-plane secret can become full organization administration: policy,
+identity, connector, provider and deployment configuration are in the blast radius. “Its own key”
+does not create least privilege when all keys for an admin user have identical authority.
+
+**Recommended remediation:** introduce a separate workload/service credential type or explicit API
+key scopes. A PDP key should be accepted only on the callout (and narrowly necessary health/key
+rotation surfaces), have TTL/rotation/revocation, optional network/mTLS binding, and a distinct
+audit principal. Do not solve this with a convention that the key is “used only there.”
+
+**Acceptance evidence required:**
+
+1. A callout-scoped credential can call `/v1/authz/check` but receives 403 on representative user,
+   policy, secret, provider, connector and execution-control admin routes.
+2. A normal non-admin key and virtual key cannot impersonate arbitrary subjects through the
+   callout; bootstrap and human session credentials are either explicitly prohibited or justified.
+3. Revocation/expiry takes effect on the next check and is independently audited.
+4. The adapters can load/rotate the scoped credential without committing it or exposing it in
+   process listings, logs, error bodies or configuration exports.
+
+#### AER-028 — HIGH — The callout omits arguments, project attribution and request principal, so “same governance” is not true
+
+**Evidence type:** direct source observation plus passing pure policy-kernel tests; endpoint behavior
+was not database-reproduced.
+
+The wire schema names only user, server and tool (`packages/shared/src/index.ts:3336-3341`). The
+route calls `governedEvaluate` with `args = undefined`, `projectId = null`, and
+`principal = undefined` (`apps/gateway/src/app.ts:2111-2120`). Those are material policy inputs:
+
+- data-scope rules require an argument at their configured path and fail closed when it is missing
+  (`packages/policy-kernel/src/index.ts:833-850`), so a correctly scoped action is always refused;
+- deploy-mode-scoped approval, rate-limit and data-scope rules do not match an unattributed call
+  (`apps/gateway/src/governed-evaluate.ts:132-151` and
+  `packages/policy-kernel/src/index.ts:623-639`), so a real project's restrictions can disappear;
+- active ABAC policies evaluate with no authenticated-session facts and a null project
+  (`apps/gateway/src/governed-evaluate.ts:479-508`).
+
+The topology discloses missing payload-dependent PII/guardrail/output/cost features, but it does not
+disclose that authorization itself can diverge. ADR-0127 and the handler call it “same kernel, same
+governance,” while the topology table says the answer means “entitled, within limits, nothing
+pending” / “out of scope.” Those claims exceed the three-field decision contract.
+
+**Impact:** customers can receive false denials for data-scoped tools and false allows where a
+project/deploy-mode restriction would have bound the real action. Session-conditional ABAC can also
+answer a different question from the one the gateway is enforcing.
+
+**Recommended remediation:** define a canonical, versioned authorization action envelope containing
+the policy-relevant context, with provenance rules for each field. Arguments or extracted resource
+attributes must be size-limited and scrubbed; project and authentication facts must come from
+trusted gateway identity/context, not arbitrary client JSON. If the product intentionally supports
+only context-free authorization, reject context-dependent tools/policies explicitly and narrow the
+claims/UI/docs.
+
+**Acceptance evidence required:**
+
+1. A data-scope rule allows a matching resource argument and denies a non-matching/missing one
+   through the real adapter; the upstream call count proves enforcement.
+2. A project with an active deploy-mode restriction produces the same decision in the callout and
+   the in-line path; an unattributed request does not bypass it.
+3. Session/IP/authentication-strength ABAC decisions are either faithfully represented from trusted
+   metadata or the callout refuses them by name.
+4. Exact-action approvals bind to the same canonical context in both paths; changed arguments or
+   project cannot spend another action's consent.
+5. A parity matrix covers entitlement, revocation, execution posture, rate limits, data scope,
+   approvals, ABAC and project/deploy context, and explicitly lists payload-only controls as absent.
+
+#### AER-029 — MEDIUM — The guided intake's new controls have visible text but no accessible labels
+
+**Evidence type:** direct React source observation; web typecheck passed, browser/accessibility test
+was not run.
+
+The new wizard renders “Compliance tags,” “Intended agent (optional),” and “Project (optional)” as
+plain `<span>` elements (`apps/web/src/views/admin/governance/UseCasesPage.tsx:359-406`). They are
+not `<label>` elements and have no `htmlFor`/`aria-labelledby` relationship. `TagPicker` supports an
+`id` but this call does not pass one; its input receives `id={props.id}` only
+(`apps/web/src/ui/kit.tsx:185-223`). Both `<Select>` controls are therefore unnamed too. The new
+visual test locates the tag input with `input[list]`, which avoids detecting the missing label.
+
+**Impact:** screen-reader and voice-control users cannot reliably identify or target three material
+governance inputs. This also weakens automated regression coverage for the intake flow.
+
+**Recommended remediation:** expose label/id (or `aria-labelledby`) wiring through `TagPicker` and
+use the existing `Field` primitive or explicit labels for both selects. Keep the adjacent
+`InfoButton` separate from the control's accessible name.
+
+**Acceptance evidence required:** Playwright `getByLabel` must uniquely resolve all three controls;
+tab/shift-tab, Enter, Escape and screen-reader names must be verified; add an automated accessibility
+scan of every wizard stage and both themes with no serious/critical violations.
+
+**Prior-finding status and remaining uncertainty**
+
+- AER-017, AER-018, AER-019, AER-021 and AER-022 remain open HIGH findings. The current source still
+  omits a Google/Gemini abort signal (`packages/model-provider/src/index.ts:1265-1288`) and confines
+  MCP breaker accounting to the outer proxy connect/handshake
+  (`apps/gateway/src/mcp-proxy.ts:1310-1398`). G9 did not close the execution-mode, kill-switch or
+  emergency-state atomicity findings.
+- AER-004, AER-007, AER-010, AER-011 and AER-014 remain open HIGH/residual findings; the reviewed
+  range did not supply direct evidence for closure. AER-023 and AER-024 remain MEDIUM.
+- The G9 endpoint tests cover its JSON contract and advisory ledger behavior, not either adapter,
+  identity mapping, least-privilege credentialing, or project/argument/session parity. A successful
+  build, 1,041 passing pure/shared tests and typechecks do not prove the database path, proxy
+  integration, production readiness, certification or enterprise readiness.
+- `PathForward.md` already carries the strategic workload-identity, constrained-delegation and
+  policy-decision-contract direction; this run therefore did not duplicate operational defects into
+  that roadmap. `codexInputs.md` remains the single implementation feedback ledger.
 <!-- codex-enterprise-feedback:end -->
 
 Date: 2026-09-06  
