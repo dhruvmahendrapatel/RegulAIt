@@ -1,14 +1,13 @@
 -- ADR-0127 / ROADMAP G9 — RegulAIt as Kong's authorization decision point.
 --
 -- ┌─────────────────────────────────────────────────────────────────────────┐
--- │ UNVERIFIED. NOT SUPPORTED. No Kong has run this.                        │
+-- │ VERIFIED against a pinned kong:3.6 — deny path exercised end to end,    │
+-- │ with a counting upstream, on every change to integrations/.             │
+-- │ .github/workflows/integrations.yml · first green run 2026-09-27.        │
 -- │                                                                          │
--- │ It is published as the CORRECT SHAPE of the integration, not as a        │
--- │ working one, and RegulAIt does not claim Kong support until this         │
--- │ plugin's DENY path has been exercised end to end against a pinned Kong   │
--- │ container with an upstream invocation counter, asserting zero upstream   │
--- │ calls for every refusal and every PDP failure. That is M-043's standing  │
--- │ rule, written after the Envoy adapter shipped failing open.              │
+-- │ Covered precisely: Kong 3.6, DB-less, key-auth, one governed route.      │
+-- │ The PRIORITY ordering below is version-specific, so a different Kong is  │
+-- │ unverified until the harness runs against it.                            │
 -- └─────────────────────────────────────────────────────────────────────────┘
 --
 -- WHY A PLUGIN AND NOT THE `pre-function` THIS REPLACES. The snippet it

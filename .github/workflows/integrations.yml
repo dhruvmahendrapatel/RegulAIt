@@ -8,18 +8,16 @@
 # DENY path is exercised end to end against a pinned container with an upstream
 # invocation counter. This workflow is that rule made executable.
 #
-# IT IS ADVISORY (`continue-on-error`) UNTIL IT HAS PASSED ONCE.
+# IT IS A GATE NOW. It passed on 2026-09-27 (run 36300665525) against kong:3.6,
+# and `continue-on-error` came off in the same change that restored the Kong
+# support claim — which is what was promised when it went in advisory.
 #
-# The harness has never run against a container either, so gating pull requests
-# on it would be the same "ship it and find out" that produced the findings it
-# exists to prevent. But `workflow_dispatch` alone cannot start it: GitHub only
-# offers that for workflows already on the DEFAULT branch, and this one is not —
-# which would mean merging it to prove it and proving it by merging it.
-#
-# So it runs on pull requests that touch `integrations/`, and it cannot fail
-# them. That buys real signal at no cost to the gate. `continue-on-error` comes
-# OFF in the same change that restores the Kong support claim, and not before —
-# an advisory check nobody ever promotes is just a slower way of not testing.
+# Four rounds to get it green, and every one of them was a fault in the HARNESS
+# rather than the adapter: the log capture discarded stderr (so a talking
+# container read as silent), the wait could not tell a dead container from a
+# slow one, and `mkdtemp` handed Kong a config file it had no permission to
+# read. An instrument that has never been run is itself untested, and this is
+# what that costs — once.
 name: Integrations
 
 on:
@@ -33,8 +31,6 @@ jobs:
   kong-adapter:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # Advisory until it has passed once — see the header.
-    continue-on-error: true
 
     services:
       postgres:

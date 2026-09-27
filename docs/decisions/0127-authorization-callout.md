@@ -96,6 +96,14 @@ The adapter therefore **fails closed**, including when the PDP is unreachable â€
 silently becomes an open door is the worst shape this can take, because the trail would show that
 nothing was ever asked.
 
+> **RESOLVED, 2026-09-27 (third).** The Kong plugin is now **verified**: its deny path runs end to
+> end against a pinned `kong:3.6` on every change to `integrations/`, with a COUNTING UPSTREAM â€”
+> because a 403 rendered after the upstream already ran is indistinguishable from a refusal on the
+> client side, which is precisely how the Envoy defect stayed invisible. An entitled consumer
+> reaches the upstream, a denied one does not, a forged `x-regulait-subject` is ignored in all three
+> case spellings, and an unreachable PDP fails closed. Envoy stays withdrawn. What is covered is
+> Kong 3.6 / DB-less / key-auth / one route, and nothing wider.
+>
 > **CORRECTION, 2026-09-27 (second).** The Kong adapter has since been withdrawn too, so **this ADR
 > currently ships no supported adapter**. The `pre-function` snippet could not run: Pre-Function
 > executes at priority `1000000`, ahead of every auth plugin, so taking identity from the consumer

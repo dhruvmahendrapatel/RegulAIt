@@ -1,30 +1,33 @@
 # Behind your gateway — RegulAIt as a decision point
 
 For a customer who already runs Kong, Envoy, or another L7 gateway and does not want a second one.
-**Read the withdrawal notice below before planning around this.**
+**Kong is the supported adapter; there is no Envoy one — see below.**
 Their proxy keeps the traffic; RegulAIt answers **"may this run?"** on each request.
 
 Adapter: [`integrations/kong/`](../../integrations/kong/) (a Kong plugin).
 
-> ### NO PROXY ADAPTER IS SUPPORTED TODAY. Both were withdrawn.
+> ### Kong: supported and VERIFIED. Envoy: withdrawn, do not use.
 >
-> **Envoy** shipped with ADR-0127 and **failed open on `deny`**: its `ext_authz` filter decides from
-> the HTTP status code, and `/v1/authz/check` answers `200` for every outcome with the decision in
-> the body. A refusal would have been admitted, by a deployment that believed it was governed.
-> [`integrations/envoy/ext_authz.yaml`](../../integrations/envoy/ext_authz.yaml) now holds the
+> **Kong** is exercised on every change to `integrations/` by
+> [`.github/workflows/integrations.yml`](../../.github/workflows/integrations.yml), against a
+> **pinned `kong:3.6`** in DB-less mode behind `key-auth`. The assertion is not that the client
+> saw a 403 — a 403 rendered after the upstream already ran looks identical from the client side —
+> it is that **the upstream was never called**, measured by a counting upstream. Verified: an
+> entitled consumer reaches the upstream; a denied one does not; a forged `x-regulait-subject`
+> naming a more-entitled user is ignored in all three case spellings; and an unreachable PDP fails
+> closed. First green run 2026-09-27.
+>
+> What that covers precisely: Kong 3.6, DB-less, `key-auth`, one governed route. Other Kong
+> versions, DB-backed mode and other auth plugins are not covered, and the priority ordering this
+> plugin depends on is version-specific — so treat a different Kong as unverified until the harness
+> runs against it.
+>
+> **Envoy remains withdrawn.** The adapter shipped with ADR-0127 **failed open on `deny`**: its
+> `ext_authz` filter decides from the HTTP status code, and `/v1/authz/check` answers `200` for
+> every outcome with the decision in the body, so a refusal would have been admitted by a
+> deployment that believed it was governed.
+> [`integrations/envoy/ext_authz.yaml`](../../integrations/envoy/ext_authz.yaml) holds the
 > post-mortem. Do not point an `ext_authz` filter at this endpoint.
->
-> **Kong** shipped as a `pre-function` snippet that could not run: Pre-Function executes at priority
-> `1000000`, ahead of every auth plugin, so reading the consumer refused all authenticated traffic;
-> `require "resty.http"` is blocked in Kong's serverless sandbox; and its per-route configuration was
-> actually `os.getenv`, which is node-wide. It has been replaced by a real plugin
-> ([`integrations/kong/`](../../integrations/kong/)) whose priority sits below every common auth
-> plugin and whose config is genuinely per route — **but no Kong has run it**, so it is published as
-> the correct shape and not as a supported integration.
->
-> Neither becomes supported until its **deny path** runs end to end against a **pinned container**
-> with an upstream invocation counter showing **zero upstream calls** for every refusal and every PDP
-> failure (`mistakes.md` M-043). The endpoint itself is tested; the adapters are not.
 
 ---
 

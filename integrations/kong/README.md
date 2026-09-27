@@ -1,9 +1,15 @@
 # Kong — RegulAIt as an authorization decision point (ADR-0127)
 
-> **UNVERIFIED. RegulAIt does not currently claim Kong support.**
-> No Kong has run this plugin. It is published as the *correct shape* of the
-> integration so the next attempt does not start from the wrong one — not as a
-> working artifact. See "What has to happen before this is supported" below.
+> **VERIFIED against a pinned `kong:3.6`.** Every change to `integrations/` runs
+> the deny path end to end with a counting upstream — see
+> [`test/verify.mjs`](test/verify.mjs) and
+> [`.github/workflows/integrations.yml`](../../.github/workflows/integrations.yml).
+> First green run 2026-09-27.
+>
+> **Covered precisely:** Kong 3.6, DB-less, `key-auth`, one governed route. Other
+> Kong versions, DB-backed mode and other auth plugins are NOT covered — and the
+> priority ordering this plugin depends on is version-specific, so a different
+> Kong is unverified until the harness runs against it.
 
 `kong/plugins/regulait-authz/` is a custom Kong plugin: `handler.lua` and
 `schema.lua`.
@@ -48,11 +54,12 @@ The route also needs an authentication plugin, and each Kong consumer needs its
 refused rather than guessed at: a wrong mapping is an authorization decision
 about the wrong person.
 
-## What has to happen before this is supported
+## What is actually asserted
 
 Per `mistakes.md` M-043, nothing in `integrations/` is called supported until
 its **deny path** is exercised end to end against a **pinned Kong container**
-with an **upstream invocation counter**, asserting **zero upstream calls** for:
+with an **upstream invocation counter**, asserting **zero upstream calls** for
+each refusal. That now runs on every change, and asserts exactly that for:
 
 - a policy `deny`;
 - an `approval_required`;
@@ -61,5 +68,13 @@ with an **upstream invocation counter**, asserting **zero upstream calls** for:
 - a request with a forged `x-regulait-subject` (and its case variants), which
   must be ignored entirely rather than merely overridden.
 
+Checking the client's status code would NOT be enough: a 403 rendered after the
+upstream already ran is indistinguishable from a refusal, from the client's
+side. That is exactly the shape of the Envoy bug, which is why the counter
+exists and why "the client got 403" is not the assertion.
+
 That rule exists because the Envoy adapter shipped **failing open** on deny and
-was reviewed, not run. Review did not catch it. Running it would have.
+was reviewed, not run. Review did not catch it. Running it would have — and on
+the first green run the Kong access log independently corroborated the
+harness: one `200` in the entire run, five refusals, and the upstream counter
+at zero for every one of them.

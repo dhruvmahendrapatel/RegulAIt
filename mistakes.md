@@ -955,3 +955,37 @@ the same burden as the code it replaces.* I treated "this removes the reported
 defect" as sufficient, and shipped a claim of support on the strength of it. The
 right output was the fix plus "still unverified" — which is what both adapters
 now say.
+
+### M-043 resolution (2026-09-27) — the rule is met for Kong, and the instrument cost four rounds
+
+The standing consequence — *nothing under `integrations/` is called supported
+until its deny path is exercised end to end against a pinned container,
+asserting zero upstream invocations for every refusal* — is now **met for Kong**
+(3.6, DB-less, `key-auth`, one route) and unmet for everything else. Envoy stays
+withdrawn.
+
+**What the harness proves that a status-code test would not.** A 403 the client
+receives is indistinguishable from a refusal even when the upstream already ran,
+which is exactly how the Envoy defect stayed invisible through review. So the
+assertion is a COUNTING UPSTREAM: one `200` in the whole run, five refusals, and
+the counter at zero for each. The Kong access log corroborated it independently.
+
+**Four rounds to get it green, and all four were faults in the INSTRUMENT, not
+the adapter:**
+
+1. the log capture used `execFileSync(… stdio:"pipe")`, which returns stdout
+   only — and `docker logs` writes the container's stderr to stderr, so a
+   container with plenty to say read as silent;
+2. the wait could not distinguish a dead container from a slow one, so a
+   failure that was knowable in 3 seconds cost 60;
+3. an early-exit written as a `throw` inside a predicate that catches and
+   retries — silently retried until the timeout it was added to avoid;
+4. `mkdtempSync` creates its directory `0700` owned by the invoking user, and
+   Kong runs as `kong` inside the container, so it was handed a config file it
+   had no permission to open.
+
+**The rule this adds.** *A test harness is code that has never been run, and it
+fails the same way the code it tests does.* Budget for it: the first green run
+of a new harness is mostly debugging the harness. That cost is paid ONCE, and
+the reviews it replaces were being paid per finding — two adapters, three
+review cycles, and both defects still reached a public repository.
