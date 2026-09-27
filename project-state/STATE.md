@@ -1,6 +1,6 @@
 ---
 phase: codex-review-hardening-f02-closed-f05-next
-last_updated: 2026-09-07
+last_updated: 2026-09-27
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
@@ -21,7 +21,79 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
-**2026-09-26 (latest) — D01 and G1 fixed. ADR-0125, migration 0115. Both write-ups were wrong first.**
+**2026-09-27 (latest) — the PDP credential stopped being an administrator, the authorization
+callout started asking the same question a dispatch asks, and the copilot's propose half got both
+a gate and a UI. Migration 0117, ADR-0127 and ADR-0056 amended.**
+
+**AER-027 — the most exposed component held the keys to the control plane.**
+`POST /v1/authz/check` is admin-gated, so the only credential a data-plane proxy (Kong, an
+`ext_authz` sidecar) could hold to ask it was an **admin API key** — one that reaches every other
+admin route in the product, to do a job that is one question wide. Virtual keys gained a `purpose`
+(migration 0117, `dispatch` | `pdp`, defaulting to `dispatch` so every existing key keeps exactly
+the routes it had). A `pdp` key reaches that one route and nothing else: it cannot dispatch a model,
+read a ledger, or mint another key, and it is never an administrator whatever its owner is. Minting
+one is itself an admin act, because such a key can ask about **anybody**. The separation is asserted
+in both directions — a `pdp` key is refused `GET /v1/me` (which is on the dispatch allow-list, so
+the refusal is about purpose rather than about a route that happens to be closed), and a `dispatch`
+key cannot ask an authorization question about anyone.
+
+**AER-028 — "fails closed" is not a defence when the closure is indiscriminate.** The callout
+passed `args = undefined, projectId = null, principal = undefined` into the kernel. The consequence
+was not that rules were skipped: the kernel **fails closed on a data-scope rule whose argument is
+absent**, so any deployment with one got `deny` from the PDP for calls that would really have been
+allowed. That is wrong in the safe direction, which is the direction that gets a PDP switched off —
+an operator whose proxy denies everything removes the proxy, and then nothing is governed at all.
+The request now accepts optional `args`, `projectId` and `principal`, all believed exactly as
+`userId` already was (in this topology the proxy is the only component that *can* supply them, which
+is why the credential above is purpose-scoped), and the response carries `contextApplied`: the
+**names** of the dimensions the decision was computed on, never their values, so a proxy that
+believes it is sending arguments and is not can tell its own misconfiguration from a policy refusal.
+The fail-closed behaviour with no args is asserted **unchanged** — the fix is context, not a
+relaxation, and the tests are written to tell those two apart.
+
+**A real product defect fell out of it.** The parity suite caught the fallback-chain virtual-key
+allow-list refusal writing its audit row through `auditHop`, which stamps `objectType: "agent"` —
+so a credential-scope denial was filed against the wrong object type. It now writes
+`objectType: "virtual_key"` against the key's own id.
+
+**And one claim I made repeatedly in this session was false.** I said no license could be installed
+in any environment. `demo:setup` had been minting one all along. The ephemeral-license path added for
+the e2e suite (`REGULAIT_EPHEMERAL_LICENSE=1`, keypair generated at seed time, private half never
+persisted) is still worth having, but it did not close the gap I claimed.
+
+**Batch B9a — consent was being asked for diffs that could not be applied.** The copilot's diff
+validation lived in the **applier only**, and `copilotProposalSchema` types `diff` as
+`z.record(z.unknown())`. So a malformed diff was recorded, an ordinary Approvals-Queue item was
+opened, a named human read a title and a rationale and consented, and only then did the product
+answer `proposal_diff_invalid` — leaving a real human approval permanently on the audit record
+against a change that could never happen. The existing test proposed `diff: { revoke: […] }`, a
+shape no applier branch can read, and asserted **201**; having to change that test is the clearest
+statement of what was wrong. There is now one authority, `validateCopilotProposalDiff`, called from
+both ends, and the applier lost four inline copies of the same parsing. Its call is kept anyway:
+pre-gate rows are still in the table, and defence in depth at a mutation door is not a duplication
+worth trading away — two *different* implementations of one check would have been.
+
+**The propose half also had no UI at all.** The copilot page could list proposals and apply approved
+ones, so the product's single most governed write was the one an admin could not reach without curl.
+The new form covers all four kinds, and its shape follows from the gate: every target is **chosen
+from the real object** rather than typed (a retyped uuid is the likeliest cause of a refused
+proposal, and there is now no box to retype one into), each patch field carries its own inclusion
+toggle beside its current value (absent is not the same as set to what it already is), a
+`rule_to_approval` inherits the source rule's scope rather than asking for it again, and the exact
+diff is rendered before it is sent — the recorded object is what a named human will be asked to
+approve. The e2e compares the previewed JSON byte-for-byte against what the server stored, because a
+preview that drifts from the payload is worse than no preview. `scripts/preflight-ui-affordances.mjs`
+now reports **0 add-affordance gaps** for the first time (2 delete orphans remain:
+`/v1/approvals/views/:x`, `/v1/llm/backend-configs/:x`).
+
+Verification: gateway suite green after the one remaining failure was identified and fixed — it was
+`adr0127-advisory-decisions.test.ts`'s CLOSED-SET contract assertion, which `contextApplied`
+legitimately widened; it was widened by exactly one field rather than exempted, and now also asserts
+that `contextApplied` holds only names from a fixed vocabulary (an implementation that put argument
+values there would have satisfied the old key check and leaked the very thing it exists to prevent).
+Playwright **148/148**.
+
+**2026-09-26 — D01 and G1 fixed. ADR-0125, migration 0115. Both write-ups were wrong first.**
 
 **D01, and I had described it wrongly.** I wrote that a malformed `REGULAIT_DATA_KEY` "boots clean".
 It does not — `keyBytes` throws and nothing starts. I had read the code instead of running it; the
@@ -1441,7 +1513,9 @@ migration 0100): the **governance copilot is live through governed dispatch** �
 moved from counts to retrieved object ids, an empty retrieval is a refusal (the live model
 itself refused a nonsense object), proposals gained a consent-gated applier riding the real
 choke points (`applyRuleEdit`, the one grant-revocation function — never a raw write) with
-two kinds honestly named unapplied, and recommendations gained an opt-in `model-judged`
+two kinds honestly named unapplied *(all four kinds apply as of batch B8c, 2026-08-22; and as
+of batch B9a, 2026-09-27, a malformed diff is refused BEFORE an approval is opened — see the
+ADR-0056 amendments)*, and recommendations gained an opt-in `model-judged`
 annotation layer that never touches deterministic evidence. Two live-driven fixes: narration
 was structurally impossible at a 1024-token ceiling on a reasoning model (981 thought tokens,
 39 of JSON, correctly discarded) — ceilings raised and measured. Gateway **2437 passing + 9

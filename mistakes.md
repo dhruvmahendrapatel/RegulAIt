@@ -1023,3 +1023,31 @@ was not using itself: the secret never enters the file. Kong resolves
 the config is readable and carries nothing worth reading. The harness now
 exercises the secret handling we tell operators to use, instead of a shortcut
 no customer should copy.
+
+### M-045 (2026-09-27) — I reported a capability as absent without running the command that provides it
+
+Several times in one session I told the owner that **no license can be installed
+in any environment**, and built an argument on top of it: the e2e suite runs with
+every tier feature closed, therefore a demo keypair is needed, therefore here is
+an ephemeral-licensing path. The premise was false. `demo:setup` had been minting
+a signed license all along. I had read the licensing module and the e2e setup, put
+them together, and reported the conclusion as an observation.
+
+**The rule.** *A claim that something cannot be done is a claim about what you
+ran, not about what you read.* Before reporting an absence, run the one command
+that would produce the thing — especially when the absence is the premise of work
+you are about to propose, because then it is load-bearing and nobody else will
+check it.
+
+This is the same shape as M-041 (a runbook command I had never run) and as the
+D01 write-up in `STATE.md` ("I had read the code instead of running it"), and the
+repetition is the point of logging it a third time: the failure is not
+carelessness about commands, it is that **a negative claim feels cheaper to make
+than a positive one.** Asserting "X works" invites me to demonstrate it. Asserting
+"X does not exist" invites nothing, and so it goes out unverified. Both need the
+same evidence.
+
+The work built on the false premise was still worth having — an ephemeral
+keypair whose private half is never persisted is the right shape for a test
+environment — but it was justified to the owner with a reason that was not true,
+and that is what would have cost them if they had planned around it.

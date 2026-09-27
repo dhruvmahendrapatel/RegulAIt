@@ -736,3 +736,141 @@ unchanged.
 No migration: `copilot_proposals` (0100) and both target tables already carry
 every column this needed. Migration 0103 was reserved for this batch and is
 deliberately NOT used.
+
+---
+
+## Amendment — 2026-09-27 (batch B9a): consent is never asked for a diff that cannot be applied, and the propose half gets a UI
+
+### The correction this amendment makes, before anything else
+
+The B8c amendment above closed "an approved proposal is not applied by
+anything" and reported the loop complete. It was not. Two things were missing,
+and the first is a governance defect rather than a gap:
+
+**Diff validation lived in the APPLIER only.** `POST /v1/copilot/proposals`
+parsed `copilotProposalSchema` — which types `diff` as `z.record(z.unknown())`
+and therefore accepts any object at all — and then wrote the proposal row AND
+an ordinary `approvals` row. The per-kind diff schemas ran at apply time. So a
+malformed diff was recorded, a real Approvals-Queue item was opened, a named
+human read a title and a rationale and consented, and only then did the product
+answer `proposal_diff_invalid`.
+
+That leaves a **real human approval permanently on the audit record against a
+change that could never happen**. In a product whose entire claim is that
+consent is traceable, that is the worst possible place to discover a validation
+error: the ledger now holds a person's recorded approval of nothing, and it
+cannot be distinguished later from an approval of something real that was never
+applied.
+
+The evidence that this was not theoretical: the existing test in
+`apps/gateway/src/copilot.test.ts` proposed `diff: { revoke: [{ userId,
+toolName }] }` — a shape no applier branch can read — and asserted **201**. The
+test had to be changed by this batch, which is the clearest possible statement
+of what was wrong.
+
+### Decision
+
+**1. One authority on diff validity, called from both ends.**
+`validateCopilotProposalDiff(kind, diff)` (`apps/gateway/src/copilot.ts`) is
+now the only place that decides whether a diff is well-formed. The propose
+route calls it and refuses `422 proposal_diff_invalid` with an audited deny
+**before any approval row exists**; the applier calls the same function and the
+four inline copies of that parsing are gone from it.
+
+The applier's call is **not redundant**. Rows proposed before this existed are
+still in the table, and a nested payload schema can tighten after a proposal is
+recorded. Defence in depth at a mutation door is not a duplication worth
+trading away — but two *different* implementations of the same check would
+have been, which is why this is one function rather than two.
+
+**What it checks:** shape (the four `.strict()` per-kind diff schemas), the
+nested payload schemas of the two kinds that carry one
+(`createApprovalRuleSchema`, `updateProjectSchema` — the exact zod the public
+routes parse with, never a copy), and `budget_adjustment`'s key restriction to
+`COPILOT_BUDGET_ADJUSTMENT_FIELDS`, which is structural.
+
+**What it deliberately does not check:** that the target still exists. A grant,
+rule or project can be removed between proposing and applying; that is a fact
+about the world at apply time, not a defect in the diff. Enforcing it at
+propose time would also make a proposal expire silently. Those checks stay
+where they can only be answered — in the applier, against the database, at the
+moment of the write. A test pins this: a `grant_revocation` naming a grant id
+that does not exist is **recorded** (201), and refused at apply with
+`proposal_target_gone`.
+
+**One new refusal:** a `policy_tightening` whose `patch` is `{}`.
+`applyRuleEdit` treats an empty patch as a no-op, so without this an approver
+could consent to a "tightening" that moves nothing and the proposal would then
+record itself as applied.
+
+**2. The propose half gets a UI.** Before this batch the copilot page could
+LIST proposals and APPLY approved ones, but there was no form — so the
+product's single most governed write was the one an admin could not reach
+without curl, and the four accepted diff shapes were documented nowhere a user
+could see them. `apps/web/src/views/admin/governance/CopilotProposalForm.tsx`
+covers all four kinds, and its shape follows from point 1:
+
+- **The target is chosen from the real object, never typed.** A grant comes out
+  of that user's or that role's own entitlement list carrying its real grant
+  id; a rule out of that kind's rule table; a project out of the project list.
+  A retyped uuid is the most likely cause of a refused proposal, and there is
+  no text box here for one to be retyped into. Role-conferred entitlements are
+  excluded from the per-user grant kinds, with the reason stated on screen,
+  because they carry no grant row to remove.
+- **A patch names only what moves.** Both `applyRuleEdit` and `PATCH
+  /v1/projects/:projectId` take a partial patch, so each editable field has its
+  own inclusion toggle and shows the current value either way: absent is not
+  the same as set to what it already is, and an admin who cannot see the
+  current value cannot tell a tightening from a loosening.
+- **A derived rule inherits its scope.** A `rule_to_approval`'s `create` takes
+  subject, server and deploy binding from the source rule rather than asking
+  for them again — a requirement "derived from" a rule that binds different
+  subjects is not derived from it, and those six fields are exactly where
+  `createApprovalRuleSchema`'s `superRefine` would otherwise fire.
+- **The diff is rendered before it is sent**, and a refusal is shown verbatim
+  (the gateway's sentences name the enforcing schema). The recorded object is
+  what a named human will be asked to approve; a proposer who has not read it
+  is asking someone else to consent to something they did not read either.
+
+`AskResponse` in `CopilotPage.tsx` gained the `query` field the ask endpoint has
+always returned (`copilot.ts` strips only `evidence`). The interface simply
+never declared it, which is why the page could not offer to propose from an
+answer at all.
+
+### Consequences
+
+- A proposal and its approval now stand or fall together: no approval is opened
+  against a diff the applier would refuse. The reverse is still possible and
+  still correct — an approved proposal whose target vanished refuses at apply
+  with `proposal_target_gone` and stays unapplied.
+- `scripts/preflight-ui-affordances.mjs` reports **0 add-affordance gaps** for
+  the first time (2 delete orphans remain: `/v1/approvals/views/:x` and
+  `/v1/llm/backend-configs/:x`).
+- Tests: the four apply-time refusal assertions in
+  `zz-zz-copilot-live.test.ts` moved to propose time, each now also asserting
+  that **no approval row was opened** — the half a status-code check misses. One
+  new test inserts a pre-gate row directly and asserts the applier still
+  refuses it, which is the only path that can now reach that code. New e2e
+  `apps/web/e2e/zz-zz-zz-zz-zz-zz-zz-zz-zz-zz-zz-copilot-propose.spec.ts`
+  compares the previewed JSON byte-for-byte against the diff the server
+  recorded, because a preview that drifts from the payload is worse than no
+  preview.
+
+### Honest limits after this amendment
+
+1. The form covers the four kinds that exist. A fifth proposal kind needs a
+   builder here as well as an applier branch, and nothing enforces that pairing
+   — the affordance census would catch a missing form only if the kind also
+   introduced a new route.
+2. Diff validity is not target validity, by design (see above). A proposal can
+   still be approved and then refused at apply because the world moved. The
+   proposals table shows `appliedAt` but does not yet surface "approved, and
+   would now fail" — an admin learns it by clicking Apply.
+3. The propose-time check cannot validate what only the database knows: a
+   `policy_tightening` patch is checked against the rule kind's field list at
+   apply (`validateRuleVersionBody` inside `applyRuleEdit`), not here, because
+   that authority lives behind the choke point and duplicating it would be the
+   second source of truth this amendment exists to avoid.
+4. All limits of the earlier amendments stand unchanged.
+
+No migration: every column this needed already exists.
