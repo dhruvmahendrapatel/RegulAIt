@@ -324,7 +324,7 @@ if (licenseStatus.body?.state === "valid") {
   const doc = {
     schema: LICENSE_SCHEMA_ID as "regulait.license/1",
     licenseId: `demo-${Date.now()}`,
-    tenant: "RegulAIt capability demo — NOT A PRODUCTION DEPLOYMENT",
+    tenant: "regulAIt capability demo — NOT A PRODUCTION DEPLOYMENT",
     tier: "enterprise",
     seatCap: 25,
     features: [...LICENSE_FEATURES] as string[],

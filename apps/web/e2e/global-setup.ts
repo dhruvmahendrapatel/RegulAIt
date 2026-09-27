@@ -43,8 +43,22 @@ export default async function globalSetup() {
   execFileSync("psql", [`${PG}/postgres`, "-v", "ON_ERROR_STOP=1", "-c",
     `CREATE DATABASE ${DB_NAME}`]);
 
+  // The suite licenses itself, with an EPHEMERAL key the seeder mints and
+  // throws away (see seed.ts). Without it, tier-gated features default CLOSED
+  // and two specs fail on a licensing posture that reads exactly like a product
+  // defect — phase1's goal decomposition (`advanced_orchestration`) and
+  // phase5's custom provider registration (`custom_model_providers`).
+  //
+  // The keyring is a scratch directory OUTSIDE the source tree, and the SAME
+  // one must be visible to both the seeder (which installs) and the gateway
+  // (which verifies) — a license signed against a keyring the gateway cannot
+  // read is refused, correctly, and would look like the install silently
+  // failing.
+  const licenseKeyring = path.join(here, ".e2e-license-keys");
   const env = {
     ...process.env,
+    REGULAIT_EPHEMERAL_LICENSE: "1",
+    REGULAIT_LICENSE_KEYRING: licenseKeyring,
     DATABASE_URL,
     REGULAIT_BOOTSTRAP_TOKEN: BOOT,
     REGULAIT_DATA_KEY: DATA_KEY,

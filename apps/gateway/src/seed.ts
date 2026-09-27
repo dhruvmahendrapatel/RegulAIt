@@ -17,10 +17,13 @@
  * context conflict to arbitrate, and both have a run they can drive further.
  */
 
+import { generateKeyPairSync, sign } from "node:crypto";
+import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createDb, runMigrations, backupRuns, eq } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { LICENSE_FEATURES, LICENSE_SCHEMA_ID, canonicalLicenseBytes } from "@regulait/shared";
 import { dataKeyFormatError } from "./secrets.js";
 
 const connectionString =
@@ -1253,6 +1256,82 @@ if (DATA_KEY) {
     );
   }
   pmSummaryLine = `${syncLine}; ${decisionLine}`;
+}
+
+// ---------------------------------------------------------------------------
+// OPT-IN EPHEMERAL LICENSE (REGULAIT_EPHEMERAL_LICENSE=1)
+// ---------------------------------------------------------------------------
+//
+// Tier-gated features default CLOSED with no license installed, which is the
+// correct posture and is fatal to anything that wants to exercise them. Two
+// headline capabilities sit behind that gate — `advanced_orchestration`
+// (pillar-7 goal decomposition) and `custom_model_providers` — so a seeded
+// environment could not demonstrate or TEST either, and two e2e specs failed
+// for a reason that looked like a product defect and was a licensing posture.
+//
+// THE KEY IS MINTED HERE AND THROWN AWAY, and that is the whole design. The
+// committed dev key's private half was destroyed on generation on purpose, so
+// nothing in this repository can mint a license the DEFAULT keyring accepts —
+// the correct fail-closed direction, and retaining a private half to make this
+// convenient would quietly undo it. Instead this generates a fresh keypair,
+// writes only the PUBLIC half into a scratch keyring outside the source tree,
+// signs one short-dated license, and never writes the private half anywhere.
+//
+// OPT-IN, because a seeder that silently licenses itself would make the
+// default-closed posture untestable — the thing being protected here is the
+// ability to observe the refusal. `infra/license-keys/` and
+// `infra/release-keys/` are untouched, and the license says on its face that
+// it is not production.
+if (process.env.REGULAIT_EPHEMERAL_LICENSE === "1") {
+  const keyringDir = process.env.REGULAIT_LICENSE_KEYRING;
+  if (!keyringDir) {
+    throw new Error(
+      "REGULAIT_EPHEMERAL_LICENSE=1 needs REGULAIT_LICENSE_KEYRING pointing at a scratch directory. " +
+        "The gateway process must read the SAME directory, or it will refuse the license this seeder installs.",
+    );
+  }
+  mkdirSync(keyringDir, { recursive: true });
+  const keyId = "regulait-seed-ephemeral";
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  writeFileSync(
+    path.join(keyringDir, `${keyId}.pub`),
+    publicKey.export({ type: "spki", format: "pem" }).toString(),
+    "utf8",
+  );
+  const nowIso = new Date().toISOString();
+  const doc = {
+    schema: LICENSE_SCHEMA_ID as "regulait.license/1",
+    licenseId: `seed-${Date.now()}`,
+    tenant: "regulAIt seeded environment — NOT A PRODUCTION DEPLOYMENT",
+    tier: "enterprise",
+    seatCap: 25,
+    features: [...LICENSE_FEATURES] as string[],
+    deploymentMode: "hosted" as const,
+    issuedAt: nowIso,
+    notBefore: nowIso,
+    expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+    graceDays: 0,
+    hardStopOnExpiry: false,
+  };
+  // sign the EXACT BYTES delivered — the verifier checks the signature over
+  // what arrives, never over a re-parse
+  const bytes = Buffer.from(canonicalLicenseBytes(doc), "utf8");
+  const installed = await app.inject({
+    method: "POST",
+    url: "/v1/licenses",
+    headers: AUTH,
+    payload: {
+      documentBase64: bytes.toString("base64"),
+      signature: sign(null, bytes, privateKey).toString("base64"),
+      signingKeyId: keyId,
+    },
+  });
+  if (installed.statusCode !== 200 && installed.statusCode !== 201) {
+    throw new Error(
+      `ephemeral license install failed (${installed.statusCode}): ${installed.body.slice(0, 300)}`,
+    );
+  }
+  console.log(`  license  ephemeral (30d, all features), keyring ${keyringDir} — NOT production`);
 }
 
 await app.close();
