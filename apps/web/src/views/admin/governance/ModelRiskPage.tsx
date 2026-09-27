@@ -25,7 +25,16 @@ import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, Input, Select, Table, Textarea } from "../../../ui/kit";
-import { QueryGate, optionEls, useAction, useAgents, useUsers, userOpts, agentOpts } from "../adminKit";
+import {
+  QueryGate,
+  RemoveButton,
+  optionEls,
+  useAction,
+  useAgents,
+  useUsers,
+  userOpts,
+  agentOpts,
+} from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -526,6 +535,36 @@ export default function ModelRiskPage() {
                       <Button variant="ghost" onClick={() => setOpenCard(r.id === openCard ? null : r.id)}>
                         {r.id === openCard ? "Close" : "Open"}
                       </Button>
+                    ),
+                  },
+                  {
+                    key: "actions",
+                    header: "",
+                    align: "right",
+                    render: (r) => (
+                      <RemoveButton
+                        what={`the model card for ${r.subjectName ?? r.agentId ?? "this model"}`}
+                        // A card in force is the thing MRM enforcement stands on:
+                        // deleting it is not tidying, it is withdrawing a control.
+                        // Say which one, rather than letting it read like removing
+                        // a row from a list.
+                        consequence={
+                          <p>
+                            The card and its evidence are deleted. If MRM enforcement is on, this
+                            model then has <strong>no risk position at all</strong> — which is not
+                            the same as a lapsed one: a lapsed card refuses dispatch, and a missing
+                            card is judged by whatever the enforcement toggle says about models
+                            without cards. The sign-off history goes with it. Retiring a model is
+                            usually what is wanted instead; delete when the card was created in
+                            error.
+                          </p>
+                        }
+                        onRemove={() => api.del(`/v1/mrm/cards/${r.id}`)}
+                        onDone={() => {
+                          if (openCard === r.id) setOpenCard(null);
+                          void cards.refetch();
+                        }}
+                      />
                     ),
                   },
                 ]}
