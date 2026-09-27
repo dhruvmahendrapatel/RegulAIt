@@ -106,7 +106,8 @@ export default function DataKeyPage() {
     <>
       <PageHeader
         title="Data key custody"
-        sub="REGULAIT_DATA_KEY is the AES-256-GCM envelope over every stored secret — OIDC client secrets, TOTP secrets, model API keys, connector/git/PM tokens, SAML SP keys. It is deliberately NOT in the backup: a key stored beside the ciphertext it protects is not an envelope. This page is how you prove, before you need it, that the key you hold is this deployment's key."
+        sub="Custody of the key every stored secret is encrypted under. It is deliberately NOT in the backup."
+        info={<p>REGULAIT_DATA_KEY is the AES-256-GCM envelope over every stored secret — OIDC client secrets, TOTP secrets, model API keys, connector/git/PM tokens, SAML SP keys. It is deliberately NOT in the backup: a key stored beside the ciphertext it protects is not an envelope. This page is how you prove, before you need it, that the key you hold is this deployment's key.</p>}
       />
       <div className={v.stack}>
         <QueryGate loading={status.isLoading} error={status.error} onRetry={() => void status.refetch()}>

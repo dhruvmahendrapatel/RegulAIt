@@ -72,7 +72,8 @@ export default function ApprovalsAdminPage() {
     <>
       <PageHeader
         title="Approvals queue"
-        sub="The one inbox, fleet-wide. The named approver decides; an active delegation lets the delegate decide on-behalf-of (both audited); an admin may decide in anyone's place only with a recorded reason (audit-marked as an override)."
+        sub="The one inbox, fleet-wide."
+        info={<p>The one inbox, fleet-wide. The named approver decides; an active delegation lets the delegate decide on-behalf-of (both audited); an admin may decide in anyone's place only with a recorded reason (audit-marked as an override).</p>}
       />
       <div className={v.stack}>
         <Card flush>

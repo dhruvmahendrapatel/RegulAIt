@@ -318,7 +318,12 @@ export default function UseCasesPage() {
                 setProjectId("");
                 setStep(0);
                 await refreshAll();
-              });
+                // The form empties itself and jumps back to step 1 on success,
+                // which from the outside is indistinguishable from the form
+                // having thrown everything away. Say what happened, and say
+                // where the use case now IS — resting at the plan stage,
+                // waiting for a human, not silently approved.
+              }, "Use case proposed — its intake workflow is resting at the plan stage");
             }}
           >
             {step === 0 && (

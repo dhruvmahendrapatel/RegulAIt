@@ -153,7 +153,8 @@ export default function ReviewWorkbenchPage() {
     <>
       <PageHeader
         title="Review workbench"
-        sub="Routing, SLA timers, escalation and bulk triage over the SAME approvals the queue shows — one approval object, one decision path, one audit trail. Nothing here decides anything on a timer: escalation moves work toward someone who can decide it, and a queue that cleared itself by timeout would be a bypass, not a feature."
+        sub="Routing, SLA timers and bulk triage over the one approvals queue."
+        info={<p>Routing, SLA timers, escalation and bulk triage over the SAME approvals the queue shows — one approval object, one decision path, one audit trail. Nothing here decides anything on a timer: escalation moves work toward someone who can decide it, and a queue that cleared itself by timeout would be a bypass, not a feature.</p>}
       />
       <div className={v.stack}>
         <QueryGate

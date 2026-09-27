@@ -292,7 +292,8 @@ export default function SodRulesPage() {
     <>
       <PageHeader
         title="SoD rules"
-        sub="Toxic capability combinations — sets of 2..8 gateway capabilities (agents, connectors, MCP tools/servers — concrete objects or enumerable patterns by agent lifecycle status, provider kind, or connector mode) no single identity may hold together in full. Enforced where grants are minted: a grant, role grant or role assignment that would complete the whole set is refused by name; any subset short of it is allowed. Creating a rule never revokes anybody — existing violators are listed here and resolved through certification campaigns or revocation. A refused mint can be escalated to the one approvals queue for an arm's-length override."
+        sub="Toxic capability combinations, and who may hold them anyway."
+        info={<p>Toxic capability combinations — sets of 2..8 gateway capabilities (agents, connectors, MCP tools/servers — concrete objects or enumerable patterns by agent lifecycle status, provider kind, or connector mode) no single identity may hold together in full. Enforced where grants are minted: a grant, role grant or role assignment that would complete the whole set is refused by name; any subset short of it is allowed. Creating a rule never revokes anybody — existing violators are listed here and resolved through certification campaigns or revocation. A refused mint can be escalated to the one approvals queue for an arm's-length override.</p>}
       />
       <div className={v.stack}>
         {/* ---------------- create ---------------- */}

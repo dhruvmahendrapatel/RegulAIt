@@ -74,7 +74,8 @@ export default function RolesPage() {
     <>
       <PageHeader
         title="Roles"
-        sub="A role is a provisioning bundle: assigning it hands the holder every grant listed on it. Deleting a role that is still held is refused with the holders named."
+        sub="A role is a provisioning bundle, not a permission."
+        info={<p>A role is a provisioning bundle: assigning it hands the holder every grant listed on it. Deleting a role that is still held is refused with the holders named.</p>}
       />
       <div className={v.stack}>
         <Card title="Create & assign">

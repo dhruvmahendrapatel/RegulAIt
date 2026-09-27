@@ -65,7 +65,8 @@ export default function ExternalScorersPage() {
     <>
       <PageHeader
         title="External scorers"
-        sub="Bring your own scoring instrument — a Fiddler-class endpoint you run or buy — as a governed, disclosed eval scorer. RegulAIt governs the call and records provenance; it does not validate the instrument."
+        sub="Bring your own scoring instrument. RegulAIt governs the call and records provenance; it does not validate the instrument."
+        info={<p>Bring your own scoring instrument — a Fiddler-class endpoint you run or buy — as a governed, disclosed eval scorer. RegulAIt governs the call and records provenance; it does not validate the instrument.</p>}
       />
       <div className={v.stack}>
         <Card title="What an external score is, and is not">

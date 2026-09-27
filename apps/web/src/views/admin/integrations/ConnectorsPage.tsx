@@ -25,7 +25,8 @@ export default function ConnectorsPage() {
     <>
       <PageHeader
         title="Connectors"
-        sub="The catalog is decoupled from entitlement. kind is the display category; providerKind is the execution adapter (absent = governance-only). Per-call price feeds pillar 5."
+        sub="The connector catalog, decoupled from entitlement — registering one grants nobody anything."
+        info={<p>The catalog is decoupled from entitlement. kind is the display category; providerKind is the execution adapter (absent = governance-only). Per-call price feeds pillar 5.</p>}
       />
       <div className={v.stack}>
         <Card flush title="Catalog">

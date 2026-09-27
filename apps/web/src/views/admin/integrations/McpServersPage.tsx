@@ -39,7 +39,8 @@ export default function McpServersPage() {
     <>
       <PageHeader
         title="MCP servers"
-        sub="Register the servers the governed MCP proxy fronts, build their tool inventory (with per-tool call pricing), and hand out tool-level allow-list grants — default-deny has nothing to govern until a server exists."
+        sub="The servers the governed MCP proxy fronts, and their tool inventory."
+        info={<p>Register the servers the governed MCP proxy fronts, build their tool inventory (with per-tool call pricing), and hand out tool-level allow-list grants — default-deny has nothing to govern until a server exists.</p>}
       />
       <div className={v.stack}>
         <Card title="Server registry">

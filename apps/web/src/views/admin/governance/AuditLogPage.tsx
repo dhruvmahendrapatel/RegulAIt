@@ -77,7 +77,8 @@ export default function AuditLogPage() {
     <>
       <PageHeader
         title="Audit log"
-        sub="Every governed decision, lifecycle action and settings change lands here — one trail, all eight pillars. Filter by user and by deploy mode; the table shows the latest 100 rows, and the CSV export carries the full filtered trail."
+        sub="Every governed decision, lifecycle action and settings change."
+        info={<p>Every governed decision, lifecycle action and settings change lands here — one trail, all eight pillars. Filter by user and by deploy mode; the table shows the latest 100 rows, and the CSV export carries the full filtered trail.</p>}
       />
       <div className={v.stack}>
         <Card title="Retention (§8.4) — a single global floor">

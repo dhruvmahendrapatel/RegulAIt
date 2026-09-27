@@ -46,7 +46,8 @@ export default function CostDashboardPage() {
     <>
       <PageHeader
         title="Cost dashboard"
-        sub="Real-time per-project AI spend attribution applied at the point of every gateway call — budget-vs-actual, forecast, showback, chargeback. Built into the gateway, not bolted on."
+        sub="Per-project AI spend, attributed at the point of every gateway call."
+        info={<p>Real-time per-project AI spend attribution applied at the point of every gateway call — budget-vs-actual, forecast, showback, chargeback. Built into the gateway, not bolted on.</p>}
       />
       <div className={v.stack}>
         <Card flush title="Projects — fleet spend">

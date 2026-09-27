@@ -40,7 +40,8 @@ export default function GitConnectionsPage() {
     <>
       <PageHeader
         title="Git connections"
-        sub="What git_operation stages execute against. Templates reference a connection by name. Every listed kind has a real adapter — a kind without one is refused at creation, never discovered mid-workflow."
+        sub="What git_operation stages execute against."
+        info={<p>What git_operation stages execute against. Templates reference a connection by name. Every listed kind has a real adapter — a kind without one is refused at creation, never discovered mid-workflow.</p>}
       />
       <div className={v.stack}>
         <Card title="Add a connection">

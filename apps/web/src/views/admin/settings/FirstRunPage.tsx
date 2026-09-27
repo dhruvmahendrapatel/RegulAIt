@@ -110,7 +110,8 @@ export default function FirstRunPage() {
     <>
       <PageHeader
         title="First-run setup"
-        sub="The ordered path from installed to governing. Resumable — leave and come back; every step is idempotent, so re-running one reconciles rather than duplicates. This is the in-product setup; bringing the deployment itself up is the installer's job."
+        sub="The ordered path from installed to governing. Resumable."
+        info={<p>The ordered path from installed to governing. Resumable — leave and come back; every step is idempotent, so re-running one reconciles rather than duplicates. This is the in-product setup; bringing the deployment itself up is the installer's job.</p>}
         actions={
           <Button size="sm" onClick={() => void q.refetch()}>
             Re-check

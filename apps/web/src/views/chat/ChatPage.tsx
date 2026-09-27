@@ -523,7 +523,8 @@ export default function ChatPage() {
     <>
       <PageHeader
         title="Chat"
-        sub="Every message goes through governance, routing and metered dispatch — the trace shows what actually happened. Conversations remember: each turn carries the whole thread."
+        sub="Every message goes through governance, routing and metered dispatch."
+        info={<p>Every message goes through governance, routing and metered dispatch — the trace shows what actually happened. Conversations remember: each turn carries the whole thread.</p>}
       />
       <div className={s.split}>
         <Card className={s.rail} title="Conversations">

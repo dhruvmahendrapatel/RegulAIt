@@ -196,7 +196,8 @@ export default function PosturePage() {
     <>
       <PageHeader
         title="Posture"
-        sub="The one-page executive read of everything the operator pages hold: pack coverage, open risks, red-team posture, spend vs budget, governance activity, audit anchoring and the use-case pipeline. Every number is computed from the real ledgers at the moment this page loads — nothing is a stored rollup — and where a ledger is empty the page says unmeasured, never zero-implies-good. Print this page for the meeting: the browser's print view drops the app chrome."
+        sub="The one-page executive read of what the operator pages hold."
+        info={<p>The one-page executive read of everything the operator pages hold: pack coverage, open risks, red-team posture, spend vs budget, governance activity, audit anchoring and the use-case pipeline. Every number is computed from the real ledgers at the moment this page loads — nothing is a stored rollup — and where a ledger is empty the page says unmeasured, never zero-implies-good. Print this page for the meeting: the browser's print view drops the app chrome.</p>}
         actions={
           <span className={p.noPrint}>
             <Button variant="ghost" onClick={() => window.print()}>

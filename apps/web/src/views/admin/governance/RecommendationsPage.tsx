@@ -118,7 +118,8 @@ export default function RecommendationsPage() {
     <>
       <PageHeader
         title="Access recommendations"
-        sub="The deterministic half of access intelligence: every recommendation is a stated, versioned rule over this deployment's own ledgers, computed at read time with its evidence attached. No scores, no ranking — severity is a class. Nothing executes automatically: the action path is a certification campaign over exactly the flagged grants, or an ordinary revocation. The model-judged half is credential-blocked, not approximated."
+        sub="The deterministic half of access intelligence."
+        info={<p>The deterministic half of access intelligence: every recommendation is a stated, versioned rule over this deployment's own ledgers, computed at read time with its evidence attached. No scores, no ranking — severity is a class. Nothing executes automatically: the action path is a certification campaign over exactly the flagged grants, or an ordinary revocation. The model-judged half is credential-blocked, not approximated.</p>}
       />
       <QueryGate loading={report.isLoading} error={report.error} onRetry={() => void report.refetch()}>
         {d && (

@@ -390,7 +390,12 @@
 }
 .emptyBody {
   font-size: var(--text-sm);
-  max-width: 380px;
+  /* Centred text is fine for a line and hostile for a paragraph: every line
+     starts in a different place, so the eye hunts for each one. The BLOCK stays
+     centred (it is a flex item that shrinks to its content, so a short body is
+     unchanged); only a body long enough to wrap gets a straight left edge. */
+  max-width: 48ch;
+  text-align: start;
 }
 
 /* ---- CodeBlock ---- */

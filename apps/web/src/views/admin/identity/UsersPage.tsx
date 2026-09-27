@@ -103,7 +103,8 @@ export default function UsersPage() {
     <>
       <PageHeader
         title="Users"
-        sub="Deactivate is not delete: audit history, grants and keys survive; authentication stops until an admin reactivates. The last active admin can be neither deactivated nor demoted."
+        sub="Accounts, activation state, and the last-admin protection."
+        info={<p>Deactivate is not delete: audit history, grants and keys survive; authentication stops until an admin reactivates. The last active admin can be neither deactivated nor demoted.</p>}
       />
       <div className={v.stack}>
         {reveal && <RevealCard reveal={reveal} onDismiss={() => setReveal(null)} />}

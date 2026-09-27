@@ -85,7 +85,8 @@ export default function LineagePage() {
     <>
       <PageHeader
         title="Data lineage"
-        sub="Which inputs the gateway SUPPLIED to a dispatch, and what that dispatch produced — chained across runs through the shared context store's versioned items. This is supplied-inputs provenance, NOT intra-model attribution: it does not claim which of those inputs influenced the output, because that is not observable from outside a model. Completeness is bounded by gateway visibility, node granularity, and the metadata-by-default posture."
+        sub="What the gateway supplied to a dispatch, and what came back — supplied-inputs provenance, NOT intra-model attribution."
+        info={<p>Which inputs the gateway SUPPLIED to a dispatch, and what that dispatch produced — chained across runs through the shared context store's versioned items. This is supplied-inputs provenance, NOT intra-model attribution: it does not claim which of those inputs influenced the output, because that is not observable from outside a model. Completeness is bounded by gateway visibility, node granularity, and the metadata-by-default posture.</p>}
       />
       <div className={v.stack}>
         <Card title="Trace">

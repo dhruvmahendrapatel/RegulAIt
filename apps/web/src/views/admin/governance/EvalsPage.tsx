@@ -231,7 +231,8 @@ export default function EvalsPage() {
     <>
       <PageHeader
         title="Evaluations"
-        sub="Golden datasets, scored runs, and the baseline comparison the workflow check gate blocks on. Every eval dispatch goes through the same governed core as any other call — entitlements, budget, PII and guardrails all apply, and the spend lands in the one usage ledger. An eval is not a bypass."
+        sub="Golden datasets and scored runs — what the workflow check gate blocks on."
+        info={<p>Golden datasets, scored runs, and the baseline comparison the workflow check gate blocks on. Every eval dispatch goes through the same governed core as any other call — entitlements, budget, PII and guardrails all apply, and the spend lands in the one usage ledger. An eval is not a bypass.</p>}
       />
       <div className={v.stack}>
         {/* ------- ADR-0072: what the numbers MEAN, and what is stranded ---- */}

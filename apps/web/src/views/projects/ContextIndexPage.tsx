@@ -33,7 +33,8 @@ export default function ContextIndexPage() {
     <>
       <PageHeader
         title="Shared context"
-        sub="Cross-team context retention: what every member of a Shared Project reads before doing anything, with provenance on every revision and conflicts resolved by a named arbiter instead of by whoever saved last."
+        sub="Cross-team context retention, with provenance."
+        info={<p>Cross-team context retention: what every member of a Shared Project reads before doing anything, with provenance on every revision and conflicts resolved by a named arbiter instead of by whoever saved last.</p>}
       />
       {projectsQ.isLoading ? (
         <Card>

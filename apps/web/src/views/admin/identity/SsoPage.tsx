@@ -35,7 +35,8 @@ export default function SsoPage() {
     <>
       <PageHeader
         title="SSO & sessions"
-        sub="OIDC and SAML 2.0 single sign-on providers (secrets write-only, signatures verified against pinned certificates) and the browser sign-in / session policy. API keys and the bootstrap token are machine credentials — none of this touches them."
+        sub="OIDC and SAML sign-on, and the browser session policy."
+        info={<p>OIDC and SAML 2.0 single sign-on providers (secrets write-only, signatures verified against pinned certificates) and the browser sign-in / session policy. API keys and the bootstrap token are machine credentials — none of this touches them.</p>}
       />
       <div className={v.stack}>
         <OidcCard />

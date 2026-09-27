@@ -158,7 +158,8 @@ export default function RisksPage() {
     <>
       <PageHeader
         title="Risks"
-        sub="The register that makes the measurements legible as risk: a named scenario, an owner, the mitigating control we actually enforce, and a residual-risk acceptance record. Evidence is computed live from the real ledgers at read time — never hand-ticked — and likelihood/impact stay declared human judgments beside it, never blended into a score."
+        sub="The register that makes the measurements legible as risk."
+        info={<p>The register that makes the measurements legible as risk: a named scenario, an owner, the mitigating control we actually enforce, and a residual-risk acceptance record. Evidence is computed live from the real ledgers at read time — never hand-ticked — and likelihood/impact stay declared human judgments beside it, never blended into a score.</p>}
       />
       <div className={v.stack}>
         {/* ---------------- register ---------------- */}

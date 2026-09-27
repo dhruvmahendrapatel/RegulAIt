@@ -150,7 +150,8 @@ export default function EnforcementPosturePage() {
     <>
       <PageHeader
         title="Enforcement posture"
-        sub="What is enforcing in this deployment right now — and, per control, what turning it on would start refusing. Every control below ships OFF so that an existing install behaves identically across an upgrade; that makes a fresh deployment's posture a decision somebody has to take deliberately rather than one it arrives with."
+        sub="What is enforcing in this deployment right now. Every control below ships OFF."
+        info={<p>What is enforcing in this deployment right now — and, per control, what turning it on would start refusing. Every control below ships OFF so that an existing install behaves identically across an upgrade; that makes a fresh deployment's posture a decision somebody has to take deliberately rather than one it arrives with.</p>}
       />
       <div className={v.stack}>
         <QueryGate
