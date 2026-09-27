@@ -36,9 +36,23 @@ export default function ApprovalsAdminPage() {
   const { auth } = useSession();
   const me = auth?.userId ?? null;
   const act = useAction();
+  // The queue shipped unfiltered, and `GET /v1/approvals` has supported a
+  // `status` filter all along — the UI simply never sent one. On a fleet-wide
+  // inbox that is the difference between "the one inbox" and a list nobody can
+  // work: a decided approval never leaves, so the pending items an approver is
+  // actually accountable for sink under months of settled ones.
+  //
+  // The filter is SERVER-SIDE (a query parameter, not a client-side array
+  // filter) on purpose: the queue's materialization and visibility rules run
+  // inside that endpoint, so filtering after the fact would be filtering a list
+  // the server already decided you could see, one page at a time.
+  const [status, setStatus] = useState<string>("pending");
   const q = useQuery({
-    queryKey: ["approvals"],
-    queryFn: () => api.get<{ approvals: Approval[] }>("/v1/approvals"),
+    queryKey: ["approvals", status],
+    queryFn: () =>
+      api.get<{ approvals: Approval[] }>(
+        status ? `/v1/approvals?status=${encodeURIComponent(status)}` : "/v1/approvals",
+      ),
   });
   const [reasons, setReasons] = useState<Record<string, string>>({});
   const [rowErrors, setRowErrors] = useState<Record<string, string>>({});
@@ -77,6 +91,21 @@ export default function ApprovalsAdminPage() {
       />
       <div className={v.stack}>
         <Card flush>
+          <div className={a.formRow} style={{ padding: "var(--s2) var(--s2) 0" }}>
+            <Field label="Status">
+              <Select value={status} onChange={(e) => setStatus(e.target.value)}>
+                <option value="pending">pending — awaiting a decision</option>
+                <option value="approved">approved</option>
+                <option value="denied">denied</option>
+                <option value="consumed">consumed — the approved call has since run</option>
+                <option value="superseded">superseded</option>
+                <option value="">— every status —</option>
+              </Select>
+            </Field>
+            <span className={v.faint} style={{ alignSelf: "center" }}>
+              {q.data ? `${q.data.approvals.length} shown` : ""}
+            </span>
+          </div>
           <Table<Approval>
             columns={[
               { key: "type", header: "Type", sort: (r) => r.objectType, render: (r) => r.objectType },

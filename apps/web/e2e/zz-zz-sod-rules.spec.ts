@@ -165,6 +165,11 @@ test("declare a rule, get refused at the real grant form, escalate, arm's-length
   // re-load the page to read the decided row rather than a stale cache
   await expect(page.getByText("Decision recorded")).toBeVisible();
   await page.reload();
+  // The queue now opens on PENDING — a fleet-wide inbox that shows every status
+  // it has ever held is unworkable. A decided row is still there, one filter
+  // change away, which is exactly the move a real approver makes to confirm
+  // their own decision landed.
+  await page.getByLabel("Status").selectOption("approved");
   await expect(queueRow.getByText("approved", { exact: true })).toBeVisible();
 
   // --- the grant EXISTS now, minted with the override recorded -------------
