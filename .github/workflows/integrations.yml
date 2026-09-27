@@ -8,21 +8,33 @@
 # DENY path is exercised end to end against a pinned container with an upstream
 # invocation counter. This workflow is that rule made executable.
 #
-# It starts on `workflow_dispatch` only because the harness itself has never
-# run either, and wiring an unproven job into the PR gate would redden every
-# pull request while it is debugged — the same "ship it and find out" that
-# produced the findings this exists to prevent. It moves to `pull_request` with
-# `paths: integrations/**` once it has passed on its own, and the Kong support
-# claim is restored in the same change and not before.
+# IT IS ADVISORY (`continue-on-error`) UNTIL IT HAS PASSED ONCE.
+#
+# The harness has never run against a container either, so gating pull requests
+# on it would be the same "ship it and find out" that produced the findings it
+# exists to prevent. But `workflow_dispatch` alone cannot start it: GitHub only
+# offers that for workflows already on the DEFAULT branch, and this one is not —
+# which would mean merging it to prove it and proving it by merging it.
+#
+# So it runs on pull requests that touch `integrations/`, and it cannot fail
+# them. That buys real signal at no cost to the gate. `continue-on-error` comes
+# OFF in the same change that restores the Kong support claim, and not before —
+# an advisory check nobody ever promotes is just a slower way of not testing.
 name: Integrations
 
 on:
   workflow_dispatch:
+  pull_request:
+    paths:
+      - "integrations/**"
+      - ".github/workflows/integrations.yml"
 
 jobs:
   kong-adapter:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # Advisory until it has passed once — see the header.
+    continue-on-error: true
 
     services:
       postgres:
