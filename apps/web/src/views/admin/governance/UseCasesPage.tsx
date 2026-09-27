@@ -356,9 +356,25 @@ export default function UseCasesPage() {
                     <option value="regulated">regulated</option>
                   </Select>
                 </Field>
+                {/*
+                  A real <label htmlFor>, NOT a bare <span>. The InfoButton has
+                  to sit OUTSIDE the label — inside it, the label's click target
+                  covers the button and every click on the explanation toggles
+                  the control it explains. So the association is explicit by id
+                  rather than implicit by wrapping, which is what <Field> does
+                  everywhere there is no button to place.
+
+                  The first cut used a span and lost the association entirely:
+                  the control announced as an unlabelled combo box, the visible
+                  text did not focus it, and getByLabel could not find it. Same
+                  root cause as the info trigger inside the <h1> — putting the
+                  button beside a labelling element broke the labelling element.
+                */}
                 <div className={a.labelRow}>
-                  <span className={a.inlineLabel}>Compliance tags</span>
-                  <InfoButton label="compliance tags">
+                  <label className={a.inlineLabel} htmlFor="uc-compliance-tags">
+                    Compliance tags
+                  </label>
+                  <InfoButton label="the compliance-tags field">
                     <p>
                       These are the <em>same</em> tags the pillar-3 cascade keys on. A tag that matches a compliance
                       profile pulls in its consequences — required workflow stages, PII handling mode, audit retention,
@@ -371,6 +387,7 @@ export default function UseCasesPage() {
                   </InfoButton>
                 </div>
                 <TagPicker
+                  id="uc-compliance-tags"
                   value={tags}
                   onChange={setTags}
                   known={(profiles.data?.profiles ?? []).map((p) => p.tag)}
@@ -381,8 +398,10 @@ export default function UseCasesPage() {
             {step === 2 && (
               <>
                 <div className={a.labelRow}>
-                  <span className={a.inlineLabel}>Intended agent (optional)</span>
-                  <InfoButton label="intended agents">
+                  <label className={a.inlineLabel} htmlFor="uc-intended-agent">
+                    Intended agent (optional)
+                  </label>
+                  <InfoButton label="the intended-agent field">
                     <p>
                       Naming the agents you <em>mean</em> to use is what the alignment flags stand on: the registry
                       later compares intent against what was actually granted and reports overshoot or undershoot.
@@ -390,12 +409,14 @@ export default function UseCasesPage() {
                     <p>Leaving it empty is honest — it just means there is nothing to compare against.</p>
                   </InfoButton>
                 </div>
-                <Select value={agentId} onChange={(e) => setAgentId(e.target.value)}>
+                <Select id="uc-intended-agent" value={agentId} onChange={(e) => setAgentId(e.target.value)}>
                   {optionEls(agentOpts(agents.data?.agents), "none yet")}
                 </Select>
                 <div className={a.labelRow}>
-                  <span className={a.inlineLabel}>Project (optional)</span>
-                  <InfoButton label="the project attribution">
+                  <label className={a.inlineLabel} htmlFor="uc-project">
+                    Project (optional)
+                  </label>
+                  <InfoButton label="the project field">
                     <p>
                       Evidence is collected <em>per project</em>. A use case attributed to no project returns nulls
                       rather than zeros on its framework mapping — "not measured" and "measured as none" are
@@ -403,7 +424,7 @@ export default function UseCasesPage() {
                     </p>
                   </InfoButton>
                 </div>
-                <Select value={projectId} onChange={(e) => setProjectId(e.target.value)}>
+                <Select id="uc-project" value={projectId} onChange={(e) => setProjectId(e.target.value)}>
                   {optionEls((projects.data?.projects ?? []).map((p) => ({ v: p.id, l: p.name })), "none yet")}
                 </Select>
               </>

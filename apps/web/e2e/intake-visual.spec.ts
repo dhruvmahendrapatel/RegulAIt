@@ -63,9 +63,18 @@ test("the guided intake, stage by stage", async ({ page }) => {
   await page.getByLabel("Why the business wants it").fill("Cuts first-response time on the support desk.");
   await page.getByRole("button", { name: "Continue" }).click();
 
-  // stage 2 — the tag picker, including an unbound tag
-  await expect(page.getByText("Compliance tags")).toBeVisible();
-  const tagBox = page.locator("input[list]");
+  // stage 2 — the tag picker, including an unbound tag.
+  //
+  // Reached by getByLabel, deliberately. The first cut of this spec used
+  // `locator("input[list]")` — a structural selector — and that was the tell:
+  // the control had no associated label to find it by, because the label was a
+  // bare <span> next to an InfoButton. A test that reaches a form control by
+  // its DOM shape passes happily over a control no screen reader can name.
+  // `exact` matters: getByLabel substring-matches, and the info trigger beside
+  // each field carries its own aria-label. Exact keeps the assertion pointed at
+  // the CONTROL rather than quietly passing on the button next to it.
+  const tagBox = page.getByLabel("Compliance tags", { exact: true });
+  await expect(tagBox).toBeVisible();
   await tagBox.fill("not-a-real-profile");
   await tagBox.press("Enter");
   await expect(page.getByText("unbound")).toBeVisible();
@@ -73,6 +82,9 @@ test("the guided intake, stage by stage", async ({ page }) => {
   await page.getByRole("button", { name: /Remove tag not-a-real-profile/ }).click();
   await page.getByRole("button", { name: "Continue" }).click();
 
+  // stage 3 — both optional controls must be reachable BY THEIR LABEL too.
+  await expect(page.getByLabel("Intended agent (optional)", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Project (optional)", { exact: true })).toBeVisible();
   await shot("3-intended-use");
   await page.getByRole("button", { name: "Continue" }).click();
 
