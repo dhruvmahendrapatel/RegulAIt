@@ -981,7 +981,16 @@ proposal row.**
 3. `applyRuleEdit`'s SAVEPOINT nesting is exercised by the existing suite
    through the ordinary route, not by a test written for the nested case
    specifically.
-4. All limits of the earlier amendments stand unchanged, except the "not
+4. **The APPROVAL row is read inside the transaction but not locked.** A
+   `decide` that denies the approval can commit between our read of `approved`
+   and the mutation, so a proposal can be applied against consent that was
+   withdrawn moments earlier. The window is narrow and was wider before this
+   amendment, and it is left open deliberately: locking the approval too would
+   make this route and the decide path take two locks, and a lock-ordering
+   mistake at a governance boundary is worse than a narrow read-committed window.
+   Closing it properly means deciding the order and testing for deadlock, which
+   is its own change.
+5. All limits of the earlier amendments stand unchanged, except the "not
    transactional across its audit row" limit of B8c, which this replaces.
 
 No migration.
