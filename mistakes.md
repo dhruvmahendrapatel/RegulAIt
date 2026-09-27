@@ -1089,3 +1089,31 @@ decides from it, and then writes based on that decision, the test that matters i
 `Promise.all` over N copies of the request — and the assertion is a count of the
 ARTIFACTS the world now holds, never a count of successful responses. A route can
 return exactly one 200 and have applied the change twice.
+
+### M-047 (2026-09-27) — I typechecked the code and then wrote the test, and vitest never told me
+
+The AER-035 concurrency test named two columns that do not exist:
+`decidedByUserId` (the column is `decided_by`) and `tool`/`timeframe` as columns
+on `copilot_queries`, which has neither. All five tests passed locally and the
+CI **build** failed with two `tsc` errors.
+
+**The rule.** *`vitest run` does not typecheck. A test file is only compiled by
+`tsc -p tsconfig.json`, so a green test run says nothing about whether the file
+builds — run the package's `build`, not just its tests, before pushing a new test
+file.*
+
+**Why it passed for the wrong reason, which is the part worth remembering.**
+Drizzle silently drops keys that are not columns. So `.set({ status: "approved",
+decidedByUserId: … })` really did set the status, which was all those assertions
+needed; the unknown key went nowhere and nothing complained. A test can be
+green, correct about the thing it asserts, and uncompilable at the same time.
+
+**The sequence that produced it.** I ran the gateway typecheck after editing
+`copilot.ts`, confirmed it clean, then wrote the test file and ran only vitest.
+The check I ran was not the check CI runs, and the gap was exactly the file I had
+just added. This is the same family as M-041 (a runbook command I never ran) and
+M-045 (an absence I never verified): **the verification covered the step before
+the one that mattered.**
+
+Cheap mitigation used from here: after adding or editing any `*.test.ts`, run the
+owning package's `build` script — not its `test` script — before commit.
