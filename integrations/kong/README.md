@@ -80,3 +80,18 @@ was reviewed, not run. Review did not catch it. Running it would have — and on
 the first green run the Kong access log independently corroborated the
 harness: one `200` in the entire run, five refusals, and the upstream counter
 at zero for every one of them.
+
+## Known limitation — this plugin sends no `args`
+
+The plugin sends `userId`, `serverId` and `toolName`, and **not the call's arguments**. Kong would
+have to buffer and parse the request body to supply them, which is a real cost on every request and
+a decision an operator should make deliberately rather than inherit.
+
+The consequence is specific and worth knowing before you deploy: **if a data-scope rule applies to
+the governed tool, this plugin will get `deny`** — the kernel fails closed on a rule whose argument
+is absent (AER-028). That is correct, and it is not a bug you should work around by removing the
+rule. Either govern a route whose tool carries no data-scope rule, or extend the plugin to send
+`args` and accept the buffering cost.
+
+`contextApplied` in the response tells you which dimensions were actually used, so this shows up as
+`[]` rather than as a mystery.

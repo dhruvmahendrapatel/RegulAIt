@@ -96,6 +96,28 @@ The adapter therefore **fails closed**, including when the PDP is unreachable �
 silently becomes an open door is the worst shape this can take, because the trail would show that
 nothing was ever asked.
 
+> **AMENDED, 2026-09-27 (fourth) — AER-027 and AER-028, the two this ADR left open.**
+>
+> **The PDP credential is no longer an administrator.** `/v1/authz/check` is admin-gated, so the
+> only credential that could reach it was an admin API key — putting a control-plane administrator
+> inside the most exposed component in a deployment, to do a job one question wide. Migration 0117
+> adds `purpose` to ADR-0066 virtual keys: a `pdp` key reaches that one route and nothing else,
+> is never admin whatever its owner is, and carries the expiry and revocation virtual keys already
+> have. THE SEPARATION RUNS BOTH WAYS — a dispatch key cannot ask an authorization question about
+> another person, and a pdp key cannot spend anybody's budget. An unrecognised purpose resolves to
+> the EMPTY route set, so a credential a future build does not understand reaches nothing. Issuing
+> one is admin-only, because a pdp key can ask about anybody.
+>
+> **The callout now asks the same question the dispatch would.** It passed `args = undefined,
+> projectId = null, principal = undefined`, and the consequence was not that rules were skipped: the
+> kernel FAILS CLOSED on a data-scope rule whose argument is absent, so any deployment with one got
+> `deny` for calls that would really have been allowed. Safe direction, wrong answer — and wrong in
+> the way that gets a PDP removed, after which nothing is governed at all. All three are now
+> accepted, all three are optional, and all three are believed exactly as `userId` already is. The
+> response carries `contextApplied`, the NAMES of the dimensions used and never their values,
+> because the single likeliest misdeployment is a proxy that believes it is sending arguments and
+> is not.
+>
 > **RESOLVED, 2026-09-27 (third).** The Kong plugin is now **verified**: its deny path runs end to
 > end against a pinned `kong:3.6` on every change to `integrations/`, with a COUNTING UPSTREAM —
 > because a 403 rendered after the upstream already ran is indistinguishable from a refusal on the

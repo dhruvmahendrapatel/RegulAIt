@@ -702,7 +702,34 @@ export async function executeGovernedDispatch(
       const refusal = virtualKeyAllowListRefusal(args.virtualKey, hopAgent);
       if (refusal) {
         hops.push({ ...label, outcome: "denied", reason: refusal.detail });
-        await auditHop(label, "deny", refusal.ruleId, refusal.detail);
+        // AUDITED AGAINST THE KEY, NOT THE AGENT — the same rule the three
+        // other call sites follow, and the one this path quietly broke by
+        // reaching for `auditHop`, whose objectType is 'agent' because a hop
+        // is normally an event about an agent. A key's allow-list refusal is
+        // an event about the KEY: burying it under the agent means a reviewer
+        // auditing what a credential was refused cannot find it, and the
+        // gateway-parity suite asserts exactly that ("audited against the KEY,
+        // not buried under the agent"). It escaped because this is the one
+        // refusal site that does not write its own row.
+        await db.insert(auditLog).values({
+          userId: args.userId,
+          objectType: "virtual_key",
+          objectId: args.virtualKey.id,
+          detail: {
+            phase: "fallback",
+            primaryAgentId: primaryAgent.id,
+            primaryAgentName: primaryAgent.name,
+            position: label.position,
+            agentId: hopAgent.id,
+            agentName: hopAgent.name,
+            mode: hopMode,
+            ...(args.projectId ? { projectId: args.projectId } : {}),
+          },
+          effect: "deny",
+          ruleId: refusal.ruleId,
+          ruleChain: [],
+          reason: refusal.detail,
+        });
         await recordSkippedHop(label, refusal.detail, refusal.ruleId);
         continue;
       }

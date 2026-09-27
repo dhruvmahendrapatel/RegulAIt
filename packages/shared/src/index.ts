@@ -3338,5 +3338,40 @@ export const authzCheckRequestSchema = z.object({
   userId: z.string().uuid(),
   serverId: z.string().uuid(),
   toolName: z.string().min(1),
+
+  // ---- AER-028: THE CONTEXT THAT MAKES THIS THE SAME QUESTION -------------
+  //
+  // Without these the callout asked a DIFFERENT question than the dispatch it
+  // is standing in for, and got a different answer. The kernel fails closed on
+  // a data-scope rule whose argument is absent — correct, and it meant that any
+  // deployment with a data-scope rule got `deny` from the PDP for calls that
+  // would really have been allowed. A PDP that is wrong in the safe direction
+  // is still wrong, and it is wrong in a way that gets it switched off.
+  //
+  // All three are OPTIONAL and all three are BELIEVED, exactly as `userId`
+  // already is. That is not a new trust boundary: in this topology the proxy is
+  // the component that authenticated the user and knows what it is calling, so
+  // it is the only thing that CAN supply them. It is, however, why the
+  // credential holding this is purpose-scoped (AER-027) and why the proxy must
+  // be treated as part of the trusted path.
+
+  /** The real call arguments, so data-scope rules evaluate the actual values.
+   *  Absent means absent — a data-scope rule still fails closed rather than
+   *  being skipped, which is the behaviour that must not change. */
+  args: z.record(z.unknown()).optional(),
+
+  /** Pillar-5 attribution, from which the deploy-mode context is derived, so a
+   *  mode-scoped rule matches the same way it would on the real dispatch. */
+  projectId: z.string().uuid().nullish(),
+
+  /** ADR-0040 session facts for the ABAC principal bag. Absent leaves the
+   *  honest "unknown" defaults, which are the WEAKEST reading — so omitting
+   *  this can only narrow a decision, never widen one. */
+  principal: z
+    .object({
+      sessionOrigin: z.string().min(1).max(64).nullish(),
+      mfaCompleted: z.boolean().nullish(),
+    })
+    .optional(),
 });
 export type AuthzCheckRequest = z.infer<typeof authzCheckRequestSchema>;

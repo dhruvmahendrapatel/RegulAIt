@@ -6919,6 +6919,14 @@ export const virtualKeys = pgTable(
      * matches by provider-native model id OR by agent id — the two things a
      * client can actually name, so a key issued against `GET /v1/models`
      * output and a key issued against an agent id both work. */
+    /** ADR-0127/AER-027 (migration 0117) — WHICH ROUTES THIS KEY MAY REACH.
+     * 'dispatch' is ADR-0066's model surfaces and is the default, so every
+     * pre-0117 row is unchanged. 'pdp' reaches `POST /v1/authz/check` and
+     * NOTHING ELSE: the credential a data-plane proxy holds to ask
+     * authorization questions, which before this could only be an admin API
+     * key — making proxy compromise equivalent to control-plane admin. The
+     * separation runs BOTH ways: a pdp key cannot dispatch either. */
+    purpose: text("purpose").notNull().default("dispatch").$type<"dispatch" | "pdp">(),
     allowedModels: jsonb("allowed_models").$type<string[]>(),
     /** NULL = no per-key budget. When set, spend is enforced BEFORE dispatch
      * against `spent_usd`; the first crossing is allowed (measured cost is only

@@ -241,10 +241,24 @@ describe("POST /v1/authz/check", () => {
     // adapters pointing at /v1/evaluate. `Decision.reason` and `ruleChain`
     // carry rule ids, grant ids, role names and approver DISPLAY NAMES AND
     // EMAILS. A data-plane proxy may log, forward or render whatever it gets.
-    expect(Object.keys(body).sort()).toEqual(["decision", "reason"]);
+    //
+    // AER-028 widened this set by exactly one field: `contextApplied`, the
+    // NAMES of the dimensions the decision was computed on. It is listed here
+    // rather than exempted, because the value of this assertion is that the set
+    // is closed — a new field must be added deliberately, by someone who has
+    // read the paragraph above and decided it carries nothing.
+    expect(Object.keys(body).sort()).toEqual(["contextApplied", "decision", "reason"]);
     expect(body).not.toHaveProperty("ruleChain");
     expect(body).not.toHaveProperty("approverName");
     expect(body).not.toHaveProperty("effect");
+
+    // and `contextApplied` is itself a closed vocabulary of DIMENSION NAMES.
+    // An implementation that put the argument values in here would satisfy the
+    // key check above and leak the very thing that check exists to prevent.
+    expect(Array.isArray(body.contextApplied)).toBe(true);
+    for (const name of body.contextApplied as string[]) {
+      expect(["args", "projectId", "principal"]).toContain(name);
+    }
   });
 
   it("an unknown tool is a DENY, not a 404", async () => {

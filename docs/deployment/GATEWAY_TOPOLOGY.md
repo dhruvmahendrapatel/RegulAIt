@@ -69,13 +69,59 @@ The callout names the user it is asking about:
 an admin API key and asserts who it is asking about — there is no check that the key "belongs to"
 the subject. That is what makes the callout usable by a proxy at all, and it means:
 
-> **The PDP key is a subject-impersonation credential.** Anything holding it can ask a question
-> about any user. Treat it like a signing key: its own key, minimum blast radius, rotated, never in
-> a config file in git.
+> **The PDP key is a subject-impersonation credential — but it is no longer an administrator.**
+> Anything holding it can ask a question about any user, which is inherent: the subject comes from
+> the request body and is believed, and that is what makes the callout usable by a proxy at all.
+> What it can no longer do is anything else.
+
+**Mint it as a `pdp` virtual key, never as an admin API key** (AER-027, migration 0117):
+
+```sh
+curl -X POST https://<gateway>/v1/virtual-keys \
+  -H "authorization: Bearer <an admin key>" \
+  -d '{"name":"kong-pdp","userId":"<owner uuid>","purpose":"pdp","expiresAt":"2027-01-01T00:00:00Z"}'
+```
+
+That credential reaches `POST /v1/authz/check` and **nothing else**: it cannot dispatch a model,
+read a ledger, or mint another key, and it is never an administrator whatever its owner is. Until
+this existed the only credential that could reach an admin-gated `/v1/authz/check` was an admin API
+key — so putting a PDP in your data plane meant putting a control-plane administrator there, which
+is the wrong blast radius for a component whose whole job is one question.
+
+Issuing one is itself an admin act, because a pdp key can ask about **anyone**. It carries the
+expiry and revocation every virtual key has; rotate it by minting the replacement and revoking the
+old one. Still: its own credential, minimum blast radius, never in a config file in git — the Kong
+plugin reads it through a vault reference for exactly that reason.
 
 Your gateway must map **its** authenticated identity (a JWT `sub`, a Kong consumer, an mTLS CN) to a
 RegulAIt user UUID before it calls. Nothing here does that mapping for you, and a wrong mapping is
 an authorization decision about the wrong person.
+
+## 3b. The context a decision needs (AER-028)
+
+`POST /v1/authz/check` accepts three optional fields beyond the subject, and supplying them is what
+makes the callout ask **the same question** a real dispatch would:
+
+| field | what it decides |
+| --- | --- |
+| `args` | data-scope rules, which constrain an argument to allowed values |
+| `projectId` | the deploy-mode context a mode-scoped rule matches on |
+| `principal` | ADR-0040 session facts (`sessionOrigin`, `mfaCompleted`) for ABAC |
+
+**Omitting them is not neutral.** The kernel fails closed on a data-scope rule whose argument is
+absent, so a deployment with one gets `deny` for calls that would really be allowed. That is the
+safe direction and still the wrong answer — an operator whose proxy denies everything removes the
+proxy, and then nothing is governed at all.
+
+All three are **believed**, exactly as `userId` already is: in this topology your proxy is the
+component that authenticated the user and knows what it is calling, so it is the only thing that
+*can* supply them. That is why the credential is purpose-scoped (§3) and why the proxy is part of
+the trusted path. Omitting `principal` can only ever narrow a decision — absent means the honest
+"unknown", which is the weakest reading.
+
+The response carries `contextApplied`: the **names** of the dimensions the decision was computed on,
+never their values. A proxy that believes it is sending arguments and is not would otherwise see
+only a stream of denials with no way to tell a policy refusal from its own misconfiguration.
 
 ## 4. What a decision costs
 

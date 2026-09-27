@@ -269,7 +269,7 @@ import {
 import { registerAnthropicCompat } from "./compat-anthropic.js";
 import { registerOpenAiCompat } from "./compat-openai.js";
 import { registerModelsDiscovery } from "./compat-models.js";
-import { registerVirtualKeyRoutes, VIRTUAL_KEY_ALLOWED_ROUTES } from "./virtual-keys.js";
+import { registerVirtualKeyRoutes, routesForPurpose } from "./virtual-keys.js";
 // ADR-0097 — the tool-poisoning admission gate (part A) and the RFC 9728
 // protected-resource metadata + WWW-Authenticate challenge (part B).
 import {
@@ -995,11 +995,18 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   app.addHook("preHandler", async (req, reply) => {
     if (req.authCtx.via !== "virtual-key") return;
     const route = `${req.method} ${req.routeOptions.url ?? ""}`;
-    if (!VIRTUAL_KEY_ALLOWED_ROUTES.has(route)) {
+    // AER-027: the allow-list is chosen by the key's PURPOSE, and the
+    // separation runs both ways — a dispatch key cannot ask an authorization
+    // question about another person, and a pdp key cannot spend anybody's
+    // budget. An unrecognised purpose resolves to the empty set rather than a
+    // default, so a credential this build does not understand reaches nothing.
+    const allowed = routesForPurpose(req.authCtx.virtualKeyPurpose);
+    if (!allowed.has(route)) {
+      const purpose = req.authCtx.virtualKeyPurpose ?? "dispatch";
       return reply.status(403).send({
         error: "virtual_key_scope",
         detail:
-          `a virtual key may only reach this deployment's model-dispatch surfaces (${[...VIRTUAL_KEY_ALLOWED_ROUTES].join(", ")}); ` +
+          `a '${purpose}' virtual key may only reach ${[...allowed].join(", ") || "<nothing: unrecognised purpose>"}; ` +
           `'${route}' is not one of them. Use the owner's own API key or session for anything else.`,
       });
     }
@@ -1010,7 +1017,19 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // visible tools, and calling tools through the proxy.
   app.addHook("preHandler", async (req, reply) => {
     const route = `${req.method} ${req.routeOptions.url ?? ""}`;
-    if (!NON_ADMIN_ROUTES.has(route) && !req.authCtx.isAdmin) {
+    // AER-027: a purpose-scoped virtual key satisfies this gate for the routes
+    // on ITS OWN allow-list, and nothing else. The hook above has already
+    // refused it everywhere outside that set, so this is not a second chance —
+    // it is the same one decision read once more.
+    //
+    // This changes exactly ONE route's behaviour: `POST /v1/authz/check` with a
+    // 'pdp' key. Every dispatch route a virtual key can reach is already in
+    // NON_ADMIN_ROUTES, so a dispatch key gains nothing here. Making the
+    // endpoint plainly non-admin instead would have let ANY authenticated user
+    // ask authorization questions about anyone, which is worse than the problem.
+    const scopedKeyMayReach =
+      req.authCtx.via === "virtual-key" && routesForPurpose(req.authCtx.virtualKeyPurpose).has(route);
+    if (!NON_ADMIN_ROUTES.has(route) && !req.authCtx.isAdmin && !scopedKeyMayReach) {
       return reply.status(403).send({ error: "admin_only" });
     }
   });
@@ -2108,16 +2127,41 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       });
     }
 
+    // AER-028 — THE SAME QUESTION THE DISPATCH WOULD ASK.
+    //
+    // These four were `undefined, null, null, undefined`, and the consequence
+    // was not that rules were skipped: the kernel FAILS CLOSED on a data-scope
+    // rule whose argument is missing, so any deployment with one got `deny`
+    // from the PDP for calls that would really have been allowed. Safe
+    // direction, wrong answer, and wrong in the way that gets a PDP switched
+    // off. `ceilingTools` stays null because a Team-Lead ceiling is a property
+    // of a RUN, and a proxy request is not inside one.
     const { decision } = await governedEvaluate(
       db,
       body.userId,
       body.serverId,
       { serverId: tool.serverId, name: tool.name, kind: tool.kind },
-      undefined,
+      body.args,
       null,
-      null,
-      undefined,
+      body.projectId ?? null,
+      body.principal
+        ? {
+            sessionOrigin: body.principal.sessionOrigin ?? null,
+            mfaCompleted: body.principal.mfaCompleted ?? null,
+          }
+        : undefined,
     );
+
+    // What the decision was actually computed ON. A proxy that believes it is
+    // sending arguments and is not would otherwise see only a stream of denies
+    // with no way to tell a policy refusal from its own misconfiguration —
+    // which is the single most likely way this integration gets misdeployed.
+    // Names only, never values: this response crosses into a data plane.
+    const contextApplied = [
+      body.args !== undefined ? "args" : null,
+      body.projectId ? "projectId" : null,
+      body.principal ? "principal" : null,
+    ].filter((x): x is string => x !== null);
 
     const mapped: AuthzDecision =
       decision.effect === "allow"
@@ -2134,12 +2178,21 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       ruleId: decision.ruleId,
       ruleChain: decision.ruleChain,
       reason: decision.reason,
-      detail: advisoryDetail({ askedByUserId: req.authCtx.userId ?? null, via: "authz_check" }),
+      detail: advisoryDetail({
+        askedByUserId: req.authCtx.userId ?? null,
+        via: "authz_check",
+        // AER-027: which credential asked. A pdp virtual key is a distinct
+        // audit principal from an administrator doing the same thing by hand,
+        // and the ledger should not blur them.
+        credential: req.authCtx.via,
+        ...(req.authCtx.virtualKeyId ? { virtualKeyId: req.authCtx.virtualKeyId } : {}),
+        contextApplied,
+      }),
     });
 
     // `reason` here is the RULE ID, not the prose. It is stable, it is enough
     // for a proxy to correlate with the ledger, and it names no person.
-    return reply.status(200).send({ decision: mapped, reason: decision.ruleId });
+    return reply.status(200).send({ decision: mapped, reason: decision.ruleId, contextApplied });
   });
 
   app.post("/v1/evaluate", async (req, reply) => {

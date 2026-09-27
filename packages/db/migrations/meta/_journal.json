@@ -813,6 +813,13 @@
       "when": 1785051000000,
       "tag": "0116_upstream_circuit_breaker",
       "breakpoints": true
+    },
+    {
+      "idx": 117,
+      "version": "7",
+      "when": 1785052000000,
+      "tag": "0117_virtual_key_purpose",
+      "breakpoints": true
     }
   ]
 }

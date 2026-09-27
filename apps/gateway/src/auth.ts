@@ -71,6 +71,10 @@ export interface AuthContext {
    * but is NEVER admin, whatever the owner is, and reaches only the routes in
    * `VIRTUAL_KEY_ALLOWED_ROUTES`. */
   via: "bootstrap" | "api-key" | "session" | "virtual-key";
+  /** AER-027: which allow-list this virtual key is bound to. 'dispatch' is
+   *  ADR-0066's model surfaces; 'pdp' is `POST /v1/authz/check` and nothing
+   *  else. Set only when `via === "virtual-key"`. */
+  virtualKeyPurpose?: "dispatch" | "pdp";
   /** ADR-0066: set only when `via === "virtual-key"`. The dispatch core reads
    * it to apply the key's allow-list and budget, and the ledger stamps it. */
   virtualKeyId?: string;
@@ -178,6 +182,7 @@ export async function authenticate(
       isAdmin: false,
       via: "virtual-key",
       virtualKeyId: resolved.row.id,
+      virtualKeyPurpose: resolved.row.purpose ?? "dispatch",
     };
   }
 

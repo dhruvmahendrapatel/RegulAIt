@@ -151,11 +151,21 @@ async function main() {
   await api("POST", `${base}/v1/grants/tools`,
     { userId: entitled.id, serverId: server.id, toolName: tool.name }, boot);
 
-  // a PDP key: an admin API key, which is what the topology doc says this is
+  // A PURPOSE-SCOPED PDP CREDENTIAL (AER-027), not an administrator key.
+  //
+  // This used to mint an admin API key, because `/v1/authz/check` was
+  // admin-gated and nothing else could reach it — so the harness modelled, and
+  // the docs recommended, putting a control-plane administrator token inside a
+  // data-plane proxy. A 'pdp' virtual key reaches that one route and nothing
+  // else: it cannot dispatch, cannot read a ledger and cannot mint another key.
+  //
+  // The harness uses it because a verification that exercises a MORE privileged
+  // credential than the product recommends is verifying the wrong deployment.
   const admin = users.find((u) => u.email === "admin@regulait.local");
-  const key = (await api("POST", `${base}/v1/users/${admin.id}/keys`, { name: "kong-e2e" }, boot)).json;
-  // the plaintext is returned exactly once, as `token`
-  const pdpKey = key.token;
+  const key = (
+    await api("POST", `${base}/v1/virtual-keys`, { name: "kong-e2e-pdp", userId: admin.id, purpose: "pdp" }, boot)
+  ).json;
+  const pdpKey = key.token ?? key.key;
   if (!pdpKey) throw new Error(`could not mint a PDP key: ${JSON.stringify(key).slice(0, 200)}`);
 
   // ---- 4. Kong, DB-less, with the plugin mounted -------------------------
