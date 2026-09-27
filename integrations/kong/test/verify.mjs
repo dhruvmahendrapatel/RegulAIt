@@ -195,6 +195,14 @@ plugins:
     "-v", `${dir}:/kong/declarative`,
     "-v", `${path.join(repoRoot, "integrations/kong/kong")}:/opt/regulait/kong`,
     "-e", "KONG_DATABASE=off",
+    // WITHOUT THESE, A FATAL STARTUP ERROR IS INVISIBLE. Kong writes its error
+    // log to a file inside the container by default, so `docker logs` came back
+    // EMPTY on the first run and the only signal was a 60s timeout — a harness
+    // that cannot say why it failed is barely better than no harness.
+    "-e", "KONG_PROXY_ERROR_LOG=/dev/stderr",
+    "-e", "KONG_ADMIN_ERROR_LOG=/dev/stderr",
+    "-e", "KONG_PROXY_ACCESS_LOG=/dev/stdout",
+    "-e", "KONG_LOG_LEVEL=info",
     "-e", "KONG_DECLARATIVE_CONFIG=/kong/declarative/kong.yml",
     "-e", "KONG_PLUGINS=bundled,regulait-authz",
     "-e", "KONG_LUA_PACKAGE_PATH=/opt/regulait/?.lua;;",
@@ -205,11 +213,62 @@ plugins:
   kongStarted = true;
 
   const proxy = `http://127.0.0.1:${KONG_PROXY_PORT}/governed/anything`;
-  try {
-    await waitFor(async () => (await fetch(proxy).catch(() => null)) !== null, 60_000, "Kong");
-  } catch (e) {
-    console.error("--- kong logs ---\n" + sh("docker", ["logs", "regulait-kong-e2e"]).slice(-4000));
-    throw e;
+
+  // A CONTAINER THAT DIED IS NOT A CONTAINER THAT IS SLOW. Distinguishing the
+  // two is the difference between a 3-second answer and a 60-second timeout
+  // that says nothing: poll the container's STATE, and fail the moment it has
+  // exited rather than waiting out the clock on something already dead.
+  const state = () => {
+    try {
+      return sh("docker", ["inspect", "-f", "{{.State.Status}} {{.State.ExitCode}}", "regulait-kong-e2e"]).trim();
+    } catch {
+      return "gone 1";
+    }
+  };
+  const dumpKong = (why) => {
+    console.error(`--- kong container (${why}): ${state()} ---`);
+    try {
+      console.error(sh("docker", ["logs", "regulait-kong-e2e"], { stdio: "pipe" }).slice(-6000) || "(no stdout)");
+    } catch (e) {
+      console.error("(could not read logs)", e instanceof Error ? e.message : e);
+    }
+    // Kong validates the declarative config at boot; if that is what rejected
+    // it, this prints the actual complaint instead of leaving it to inference.
+    try {
+      console.error("--- kong config parse ---\n" + sh("docker", [
+        "run", "--rm", "-v", `${dir}:/kong/declarative`, KONG_IMAGE,
+        "kong", "config", "parse", "/kong/declarative/kong.yml",
+      ], { stdio: "pipe" }));
+    } catch (e) {
+      console.error("config parse rejected it:", e.stdout ?? e.stderr ?? String(e));
+    }
+  };
+
+  // Its own loop rather than waitFor(): waitFor swallows exceptions and retries,
+  // which is right for "not up yet" and exactly wrong for "already dead" — the
+  // early exit has to be a return, not a throw, or it is silently retried until
+  // the timeout it was added to avoid.
+  {
+    const deadline = Date.now() + 90_000;
+    let reason = "timeout";
+    let up = false;
+    for (;;) {
+      const st = state();
+      if (!st.startsWith("running")) {
+        reason = `container is '${st}'`;
+        break;
+      }
+      if ((await fetch(proxy).catch(() => null)) !== null) {
+        up = true;
+        break;
+      }
+      if (Date.now() > deadline) break;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    if (!up) {
+      dumpKong(reason);
+      throw new Error(`Kong did not come up: ${reason}`);
+    }
   }
 
   console.log("\nassertions:");
