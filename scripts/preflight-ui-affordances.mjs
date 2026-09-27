@@ -68,17 +68,27 @@ function main() {
     for (const m of src.matchAll(/app\.delete\(\s*"([^"]+)"/g)) served.add(norm(m[1]));
   }
 
-  // Every shape the client is actually called with, including `api.del<T>(…)`
-  // — the type parameter is why the first version of this census reported two
-  // endpoints as unreachable that had buttons all along. A census that
-  // overcounts gets ignored as fast as one that undercounts.
+  // EVERY SHAPE THE CALL IS ACTUALLY WRITTEN IN, which took three tries.
+  //
+  //   api.del(`/v1/x/${id}`)                 the easy one
+  //   api.del<Thing>(`/v1/x/${id}`)          type parameter before the paren
+  //   api.del(cond ? `/v1/a/..` : `/v1/b/..`) path chosen inside the call
+  //
+  // The first two misses each made this census OVERSTATE the gap, which is the
+  // more dangerous direction: a report that cries wolf is switched off, and
+  // then it is not a report. So rather than expecting a literal to sit
+  // immediately after the paren, take a window after each call site and
+  // harvest every /v1 path literal inside it.
   const reached = new Map();
   for (const f of walk(webSrc)) {
     const src = readFileSync(f, "utf8");
-    for (const m of src.matchAll(/api\.(?:del|delete)(?:<[^>]*>)?\(\s*[`"']([^`"']*)/g)) {
-      const key = norm(m[1]);
-      if (!reached.has(key)) reached.set(key, []);
-      reached.get(key).push(path.relative(root, f));
+    for (const m of src.matchAll(/api\.(?:del|delete)(?:<[^>]*>)?\(/g)) {
+      const window = src.slice(m.index, m.index + 400);
+      for (const lit of window.matchAll(/[`"'](\/v1\/[^`"']*)[`"']/g)) {
+        const key = norm(lit[1]);
+        if (!reached.has(key)) reached.set(key, []);
+        reached.get(key).push(path.relative(root, f));
+      }
     }
   }
 
