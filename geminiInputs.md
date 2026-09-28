@@ -1,6 +1,6 @@
 # RegulAIt - Gemini Findings & Next Steps for Agents
 
-This document contains findings from the initial repository sweep regarding RegulAIt's gateway capabilities, its current limitations compared to its claims, and architectural requirements for expanding it into a full-fledged gateway and Shadow AI discovery engine. 
+This document contains findings from the initial repository sweep regarding RegulAIt's gateway capabilities, its current limitations compared to its claims, and architectural requirements for expanding it into a full-fledged gateway and Shadow AI discovery engine.
 
 This file is intended for consumption by Claude and Codex agents operating on this repository.
 
@@ -9,7 +9,7 @@ This file is intended for consumption by Claude and Codex agents operating on th
 Currently, RegulAIt is a "method-aware proxy" built specifically for HTTP LLM/MCP governance. To reach parity with enterprise API gateways, the following architectural gaps must be closed:
 
 ### A. Network Resilience & Traffic Management
-*   **Circuit Breakers:** Prevent cascading failures when upstream providers (OpenAI, Anthropic) or MCP servers go down. 
+*   **Circuit Breakers:** Prevent cascading failures when upstream providers (OpenAI, Anthropic) or MCP servers go down.
 *   **Request Timeouts & Retries:** Configurable upstream timeouts and intelligent retry logic (with exponential backoff).
 *   **Payload Size Limits:** Hard limits on request/response body sizes to prevent memory exhaustion attacks.
 *   **Health Checks:** Active and passive health checks for registered downstream MCP servers.
@@ -33,7 +33,7 @@ Agents should reference the architectures of the following open-source projects 
 
 Other agents building on this codebase must be aware of these current limitations to avoid compounding technical debt:
 
-*   **CLAIM:** *Full MCP Proxy Gateway.* 
+*   **CLAIM:** *Full MCP Proxy Gateway.*
     *   **REALITY:** It is not a full proxy. It only handles tool execution. Other MCP capabilities (resources, prompts) are actively dropped. It cannot proxy `stdio` MCP servers.
 *   **CLAIM:** *Enterprise Rate Limiting.*
     *   **REALITY:** Limits are enforced locally per Node.js process. It is not HA-ready for rate limiting.
@@ -52,12 +52,12 @@ To fulfill the vision of an end-to-end Shadow AI discovery tool, the platform ne
 We need a scan engine to automatically identify undeclared AI workloads and create intake use cases for them.
 *   **Cloud Estate (AWS, GCP, Azure):** Use read-only IAM roles to scan for managed AI service usage (e.g., AWS Bedrock, SageMaker endpoints, Azure OpenAI deployments, GCP Vertex AI).
     *   *Reference:* Look at **CloudQuery** or **Steampipe** for multi-cloud data extraction architectures.
-*   **Git Repositories:** Scan enterprise source code for imported AI libraries (e.g., `openai`, `langchain`, `anthropic`) or hardcoded API keys. 
+*   **Git Repositories:** Scan enterprise source code for imported AI libraries (e.g., `openai`, `langchain`, `anthropic`) or hardcoded API keys.
     *   *Reference:* Look at **TruffleHog** or **Gitleaks** for scanning patterns.
 
 ### Phase 2: Endpoint Agent (Local MCP Detection)
 *   **Lightweight Daemon:** Build a small, low-footprint agent (preferably in Rust or Go) intended to run on end-user workstations.
-*   **Capabilities:** 
+*   **Capabilities:**
     *   Monitor running processes for known MCP server execution commands (e.g., `npx -y @modelcontextprotocol/server-...`, Python MCP runners).
     *   Monitor local port bindings associated with AI dev tools.
 *   *Reference:* Look at **OSquery** or **Wazuh** for cross-platform endpoint telemetry gathering.
