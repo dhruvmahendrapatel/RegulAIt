@@ -28,11 +28,12 @@ import {
   mcpTools,
   rateLimits,
   runMigrations,
+  SESSION_ORIGINS,
   toolGrants,
   users,
   type Db,
 } from "@regulait/db";
-import { advisoryDetail, isAdvisoryDetail } from "@regulait/shared";
+import { AUTHZ_SESSION_ORIGINS, advisoryDetail, isAdvisoryDetail } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
@@ -257,7 +258,12 @@ describe("POST /v1/authz/check", () => {
     // key check above and leak the very thing that check exists to prevent.
     expect(Array.isArray(body.contextApplied)).toBe(true);
     for (const name of body.contextApplied as string[]) {
-      expect(["args", "projectId", "principal"]).toContain(name);
+      // AER-036 widened this by exactly one: `principal.asserted`, which says the
+      // origin was the CALLER'S CLAIM rather than something this gateway
+      // observed. Added here deliberately rather than by loosening the check,
+      // for the same reason `contextApplied` itself was: the value of this
+      // assertion is that the set is closed.
+      expect(["args", "projectId", "principal", "principal.asserted"]).toContain(name);
     }
   });
 
@@ -338,5 +344,126 @@ describe("POST /v1/authz/check", () => {
       .limit(1);
     expect(row!.ruleChain).toBeDefined();
     expect((row!.detail as { via?: string }).via).toBe("authz_check");
+  });
+});
+
+// ===========================================================================
+// AER-036 — the callout could label API-key traffic as SSO, and the PDP believed
+// a word the product does not use.
+// ===========================================================================
+//
+// THE FINDING, in one sentence: `principal.sessionOrigin` was
+// `z.string().min(1).max(64)`, the Kong adapter sent `sso`, and nothing on
+// either side objected. The damage is not that `sso` matched nothing — it is
+// that it matched the WRONG THINGS IN BOTH DIRECTIONS:
+//
+//   * a policy written `sessionOrigin == "oidc"` could never fire for that
+//     traffic, because the resolved-session path never produces `sso`;
+//   * a policy written `sessionOrigin != "api_key"` was SATISFIED by it, so
+//     key-auth traffic labelled `sso` passed an authentication-strength rule
+//     that exists to refuse exactly that traffic.
+//
+// So an ABAC rule decided differently at the callout than at this product's own
+// dispatch boundary. The fix at THIS boundary is a closed vocabulary plus honest
+// provenance; the Kong half (derive from the credential, refuse a contradiction)
+// is asserted in `integrations/kong/test/verify.mjs` against a real container.
+
+describe("AER-036 — the callout's session origin is a closed vocabulary", () => {
+  let subjectId: string;
+
+  beforeAll(async () => {
+    const [u] = await db
+      .insert(users)
+      .values({ email: `aer036-${randomUUID()}@advisory.example`, displayName: "AER036" })
+      .returning({ id: users.id });
+    subjectId = u!.id;
+    await db.insert(toolGrants).values({ userId: subjectId, serverId, toolName: TOOL });
+  });
+
+  const check = (payload: Record<string, unknown>) =>
+    app.inject({ method: "POST", headers: AUTH, url: "/v1/authz/check", payload });
+
+  it("REFUSES `sso` — the exact value the adapter used to send", async () => {
+    const res = await check({
+      userId: subjectId,
+      serverId,
+      toolName: TOOL,
+      principal: { sessionOrigin: "sso" },
+    });
+    // 400, not a silent accept and not a deny: a caller sending an origin no
+    // policy can ever match has a misconfiguration, and a narrow contract exists
+    // to say so. A deny would have looked like a policy refusal and sent the
+    // operator to the wrong screen.
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("accepts every origin the gateway's OWN derivation can produce", async () => {
+    // The property that makes a policy mean the same thing on both paths. If one
+    // of these were rejected, a proxy faithfully reporting what it saw would be
+    // refused by the PDP.
+    for (const origin of ["password", "api_key", "oidc", "saml", "bootstrap", "unknown"]) {
+      const res = await check({
+        userId: subjectId,
+        serverId,
+        toolName: TOOL,
+        principal: { sessionOrigin: origin },
+      });
+      expect(res.statusCode, `origin ${origin} must be accepted`).toBe(200);
+    }
+  });
+
+  it("the vocabulary is the SAME LIST the session column enforces", async () => {
+    // A MIRROR, and mirrors drift. `@regulait/shared` cannot import
+    // `@regulait/db` (shared depends on zod and nothing else; db depends on
+    // shared), so the two lists are kept in step here — the gateway is the only
+    // package that can see both.
+    //
+    // This is the guard ADR-0121 had to add AFTER the same class of drift
+    // shipped: `connectorProviderKindSchema` had never learned `outlook` while
+    // the drizzle enum had, so the type said yes and the storage said no. An
+    // origin added to one list and not the other would reproduce exactly the
+    // failure AER-036 describes.
+    expect([...AUTHZ_SESSION_ORIGINS].sort()).toEqual([...SESSION_ORIGINS].sort());
+  });
+
+  it("does not claim principal context for an EMPTY principal", async () => {
+    // `contextApplied` used to contain `principal` whenever the KEY existed, so
+    // a proxy sending `principal: {}` was told its principal context had been
+    // applied when the kernel had received nothing but defaults — a green light
+    // for a misconfiguration, on the one field a proxy is most likely to get
+    // wrong.
+    const res = await check({ userId: subjectId, serverId, toolName: TOOL, principal: {} });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().contextApplied).not.toContain("principal");
+    expect(res.json().contextApplied).not.toContain("principal.asserted");
+  });
+
+  it("marks a real origin as an ASSERTION, and records its exact value", async () => {
+    const res = await check({
+      userId: subjectId,
+      serverId,
+      toolName: TOOL,
+      principal: { sessionOrigin: "api_key" },
+    });
+    expect(res.statusCode).toBe(200);
+    const applied = res.json().contextApplied as string[];
+    expect(applied).toContain("principal");
+    // On THIS route the origin is always the caller's claim. The subject is
+    // believed here too (ADR-0127 §3) — the difference is that the subject's
+    // status was documented and this one was not.
+    expect(applied).toContain("principal.asserted");
+
+    // and the VALUE reaches the ledger, because "which origin was this decided
+    // under" is unanswerable afterwards otherwise — which is the question asked
+    // when a callout and a dispatch disagree. The response stays names-only; the
+    // ledger is internal.
+    const [row] = await db
+      .select({ detail: auditLog.detail })
+      .from(auditLog)
+      .where(eq(auditLog.userId, subjectId))
+      .orderBy(desc(auditLog.at))
+      .limit(1);
+    const detail = row!.detail as { assertedPrincipal?: { sessionOrigin?: string } };
+    expect(detail.assertedPrincipal?.sessionOrigin).toBe("api_key");
   });
 });

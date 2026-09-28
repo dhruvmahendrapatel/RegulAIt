@@ -100,11 +100,44 @@ at zero for every one of them.
 
 ## The context this plugin sends — and the one thing it does not
 
-`project_id` and `session_origin` are **per-route plugin config**, and sent when set. Both are
-static per route and both are things Kong can state truthfully: a governed route fronts one project
-context, and its operator knows which auth plugin fronts it. Set `project_id` if any of your rules
-are deploy-mode scoped; set `session_origin` (`password` | `sso` | `api_key`) if an ABAC policy
-reads it.
+`project_id` is **per-route plugin config**, and sent when set. It is static per route and it is
+something Kong can state truthfully: a governed route fronts one project context. Set it if any of
+your rules are deploy-mode scoped.
+
+### The session origin — DERIVED where it can be, asserted only where it cannot (AER-036)
+
+**This was wrong until 2026-09-28 and the correction is a breaking config change.** The field was
+`session_origin`, an operator-set string (`password` | `sso` | `api_key`) copied straight into
+`principal.sessionOrigin` and believed by the PDP. The justification given here was that "its
+operator knows which auth plugin fronts it" — but nothing checked that, and **this repository's own
+harness put `key-auth` on the governed route and configured `sso` on it**, so the shipped example
+was the counter-example. An authentication-strength ABAC policy could be satisfied by a configuration
+file. Worse, `sso` is not in the product's own vocabulary
+(`password` | `api_key` | `oidc` | `saml` | `bootstrap` | `unknown`), so a policy written
+`sessionOrigin == "oidc"` could never fire for that traffic while one written
+`sessionOrigin != "api_key"` **was** satisfied by it — wrong in both directions.
+
+What it does now:
+
+- **Derived from the credential where Kong can see one.** `kong.client.get_credential()` returns
+  what the route's auth plugin authenticated with, and its shape names the mechanism: a key-auth
+  credential carries `key` (→ `api_key`), a basic-auth credential carries `username` and `password`
+  (→ `password`). For those, the adapter sends what it observed, not what it was told.
+- **`asserted_session_origin`** replaces `session_origin`, accepts only `password` | `oidc` | `saml`
+  — the values Kong cannot derive — and its name says what it is. `api_key` is deliberately not
+  accepted: it is observable, so it is never an assertion.
+- **A contradiction is a refusal.** If the credential says `api_key` and the config declares `oidc`,
+  the request is refused with `x-regulait-reason: session_origin_contradicts_credential` and the
+  upstream is never reached. Sending either value would be wrong — the declared one is false, and
+  silently substituting the derived one overrides a policy intent nobody revisited.
+- **The PDP refuses an out-of-vocabulary origin outright** (400), so a value no policy can match can
+  no longer be accepted in silence, and the ledger records the exact value under
+  `assertedPrincipal.sessionOrigin` with `principal.asserted` in `contextApplied`.
+
+**The honest residue.** For OIDC and SAML the configured value is still an assertion this adapter
+cannot verify, because nothing in Kong's community plugin set gives an equally reliable per-request
+signal. Scope such a route to one auth mechanism and treat the field as the trusted assertion it is
+named after. Omitting it entirely is always safe: absent reads as `unknown`, the weakest input.
 
 There is deliberately **no `mfa_completed`**. Kong cannot observe whether a second factor was
 completed, and a configured `true` would be an assertion nobody checked sitting in the trusted path.

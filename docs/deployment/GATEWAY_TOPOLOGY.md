@@ -122,9 +122,14 @@ component that authenticated the user and knows what it is calling, so it is the
 the trusted path. Omitting `principal` can only ever narrow a decision — absent means the honest
 "unknown", which is the weakest reading.
 
-**What the Kong adapter sends, and what it deliberately does not.** `project_id` and
-`session_origin` are per-route plugin config, because a governed route fronts one project context
-and its operator knows which auth plugin fronts it — both are static per route and both are true.
+**What the Kong adapter sends, and what it deliberately does not.** `project_id` is per-route plugin
+config, because a governed route fronts one project context — static per route and true. The session
+origin is **derived from the credential Kong authenticated with** where it can be (key-auth →
+`api_key`, basic-auth → `password`), and taken from `asserted_session_origin` only for the values
+Kong cannot observe (`oidc`, `saml`). A declared origin that contradicts the credential is a
+**refusal**, not a substitution. Until 2026-09-28 this was an unchecked operator-set string in a
+vocabulary the product does not use (`sso`), and this repository's own harness declared it on a
+key-auth route — see AER-036 and `integrations/kong/README.md`.
 There is **no `mfa_completed` field**: Kong cannot observe whether a second factor was completed,
 and a configured `true` would be an unchecked assertion sitting in the trusted path. **`args` are
 not sent at all**, and that is the adapter's real limit: mapping an HTTP body onto a tool's named

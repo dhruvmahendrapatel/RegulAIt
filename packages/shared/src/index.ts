@@ -3337,6 +3337,24 @@ export {
   type AuthzDecision,
 } from "./audit-advisory.js";
 
+/**
+ * The session origins a callout may assert — a MIRROR of `SESSION_ORIGINS` in
+ * `@regulait/db`, kept in step by `apps/gateway/src/zz-aer036-*.test.ts`.
+ *
+ * Every value here is one the gateway's own `abacPrincipalFromRequest` can
+ * produce, which is the property that makes a policy written against this
+ * vocabulary mean the same thing on both paths.
+ */
+export const AUTHZ_SESSION_ORIGINS = [
+  "password",
+  "api_key",
+  "oidc",
+  "saml",
+  "bootstrap",
+  "unknown",
+] as const;
+export type AuthzSessionOrigin = (typeof AUTHZ_SESSION_ORIGINS)[number];
+
 export const authzCheckRequestSchema = z.object({
   /** the SUBJECT the proxy is asking about — not the caller. See ADR-0127 §3. */
   userId: z.string().uuid(),
@@ -3373,7 +3391,32 @@ export const authzCheckRequestSchema = z.object({
    *  this can only narrow a decision, never widen one. */
   principal: z
     .object({
-      sessionOrigin: z.string().min(1).max(64).nullish(),
+      /**
+       * AER-036 — a CLOSED vocabulary, and it must be the product's own.
+       *
+       * This was `z.string().min(1).max(64)`, which accepted anything, and the
+       * Kong adapter duly sent `sso` — a value the resolved-session path never
+       * produces. The consequence was worse than a value nobody matched: a
+       * policy written `sessionOrigin == "oidc"` could never fire for that
+       * traffic, while one written `sessionOrigin != "api_key"` was SATISFIED by
+       * it. An authentication-strength rule therefore decided differently at the
+       * callout than at this product's own dispatch boundary, in both directions.
+       *
+       * So an origin outside the vocabulary is now a 400 rather than a silent
+       * accept: a caller sending a value no policy can ever match has a
+       * misconfiguration, and telling it is the whole point of a narrow contract.
+       * `unknown` is IN the list, because it is the honest thing to send when a
+       * caller genuinely cannot tell — the weakest reading, and it is what the
+       * gateway's own derivation returns for exactly that case.
+       *
+       * MIRROR of `SESSION_ORIGINS` in `@regulait/db`. This package cannot
+       * import that one (shared depends on zod and nothing else, and db depends
+       * on shared), so the lists are kept in step by a test in the gateway —
+       * the only package that can see both. Same shape, and same reason, as the
+       * `connectorProviderKindSchema` mirror ADR-0121 had to add after that
+       * drift shipped.
+       */
+      sessionOrigin: z.enum(AUTHZ_SESSION_ORIGINS).nullish(),
       mfaCompleted: z.boolean().nullish(),
     })
     .optional(),

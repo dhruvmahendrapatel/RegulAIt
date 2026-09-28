@@ -2172,10 +2172,27 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // with no way to tell a policy refusal from its own misconfiguration —
     // which is the single most likely way this integration gets misdeployed.
     // Names only, never values: this response crosses into a data plane.
+    // AER-036: `principal` used to appear here whenever the KEY existed, so a
+    // caller that sent `principal: {}` — or `{ sessionOrigin: null }` — was told
+    // its principal context had been applied when the kernel had received
+    // nothing but defaults. On the one field a proxy is most likely to get wrong,
+    // that is a green light for a misconfiguration.
+    //
+    // It now appears only when a value actually arrived AND was accepted by the
+    // closed vocabulary, and it is joined by `principal.asserted`: on THIS route
+    // the origin is always the caller's claim rather than something this gateway
+    // observed, and a response that does not distinguish the two invites a reader
+    // to treat a proxy's configuration as evidence. The subject is believed here
+    // for the same reason (ADR-0127 §3) — the difference is that the subject's
+    // status is documented and this one was not.
+    const principalApplied =
+      body.principal !== undefined &&
+      (body.principal.sessionOrigin != null || body.principal.mfaCompleted != null);
     const contextApplied = [
       body.args !== undefined ? "args" : null,
       body.projectId ? "projectId" : null,
-      body.principal ? "principal" : null,
+      principalApplied ? "principal" : null,
+      principalApplied ? "principal.asserted" : null,
     ].filter((x): x is string => x !== null);
 
     const mapped: AuthzDecision =
@@ -2202,6 +2219,19 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         credential: req.authCtx.via,
         ...(req.authCtx.virtualKeyId ? { virtualKeyId: req.authCtx.virtualKeyId } : {}),
         contextApplied,
+        // AER-036: the VALUE the decision ran on, not just that a field was
+        // present. `contextApplied` is what crosses into a data plane and stays
+        // names-only; the ledger is internal, and "which origin was this decided
+        // under" is unanswerable afterwards without it — which is exactly the
+        // question asked when a callout and a dispatch disagree.
+        ...(principalApplied
+          ? {
+              assertedPrincipal: {
+                sessionOrigin: body.principal?.sessionOrigin ?? null,
+                mfaCompleted: body.principal?.mfaCompleted ?? null,
+              },
+            }
+          : {}),
       }),
     });
 

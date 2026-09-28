@@ -140,7 +140,12 @@ describe("AER-028 — the LEDGER records what the decision was computed on", () 
       toolName: TOOL,
       args: { schema: "analytics" },
       projectId: null,
-      principal: { sessionOrigin: "sso", mfaCompleted: true },
+      // AER-036: `sso` was this fixture's origin and it is no longer a value the
+      // schema accepts — it is not in `SESSION_ORIGINS`, so a policy written
+      // against the product's own vocabulary could never match it while a
+      // "not an API key" policy was satisfied by it. `oidc` is what the adapter
+      // should have been saying.
+      principal: { sessionOrigin: "oidc", mfaCompleted: true },
     });
     expect(res.statusCode, res.body).toBe(200);
 
@@ -172,7 +177,11 @@ describe("AER-028 — the LEDGER records what the decision was computed on", () 
       .orderBy(desc(auditLog.at))
       .limit(1);
     const applied = (rows[0]!.detail as { contextApplied?: string[] }).contextApplied ?? [];
-    for (const name of applied) expect(["args", "projectId", "principal"]).toContain(name);
+    // AER-036 added `principal.asserted` — deliberately listed rather than
+    // loosened, because the value of this assertion is that the set is closed.
+    for (const name of applied) {
+      expect(["args", "projectId", "principal", "principal.asserted"]).toContain(name);
+    }
   });
 });
 
@@ -183,7 +192,12 @@ describe("AER-028 — the response says what the decision was computed on", () =
       serverId,
       toolName: TOOL,
       args: { schema: "analytics" },
-      principal: { sessionOrigin: "sso", mfaCompleted: true },
+      // AER-036: `sso` was this fixture's origin and it is no longer a value the
+      // schema accepts — it is not in `SESSION_ORIGINS`, so a policy written
+      // against the product's own vocabulary could never match it while a
+      // "not an API key" policy was satisfied by it. `oidc` is what the adapter
+      // should have been saying.
+      principal: { sessionOrigin: "oidc", mfaCompleted: true },
     });
     expect(res.statusCode, res.body).toBe(200);
     const body = JSON.parse(res.body);
@@ -191,7 +205,7 @@ describe("AER-028 — the response says what the decision was computed on", () =
     // The whole response crosses into a data plane, so it must carry no values
     // — not the argument, not the origin. A proxy may log this verbatim.
     expect(res.body).not.toContain("analytics");
-    expect(res.body).not.toContain("sso");
+    expect(res.body).not.toContain("oidc");
   });
 
   it("the contract still carries only decision, reason and contextApplied", async () => {

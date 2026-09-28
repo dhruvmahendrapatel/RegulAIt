@@ -246,6 +246,14 @@ services:
       - name: pdp-junk-route
         paths: ["/pdp-junk"]
         strip_path: true
+      # AER-036 — a route whose DECLARED session origin contradicts the
+      # credential its auth plugin actually presents. key-auth means the origin
+      # is observably 'api_key'; the config below declares 'oidc'. That is the
+      # exact shape this harness used to SHIP (key-auth plus session_origin:
+      # "sso"), so it is now a route whose only job is to be refused.
+      - name: origin-lie-route
+        paths: ["/origin-lie"]
+        strip_path: true
 consumers:
   - username: entitled
     custom_id: "${entitled.id}"
@@ -285,7 +293,12 @@ plugins:
       # (f) below can prove the adapter really carries it rather than the README
       # claiming it does.
       project_id: "${project.id}"
-      session_origin: "sso"
+      # AER-036 — NO declared origin here, on purpose. This route runs key-auth,
+      # so the origin is DERIVED from the credential Kong actually authenticated
+      # with ('api_key'), and assertion (i) checks the exact value that reached
+      # the ledger. The previous version of this file declared 'sso' on this very
+      # route, which is what made the finding demonstrable from the shipped
+      # example rather than only in theory.
       timeout_ms: 2000
   # The two broken-PDP routes. key-auth on each, because the plugin refuses an
   # unauthenticated request before it ever calls a PDP — without auth these would
@@ -317,6 +330,26 @@ plugins:
       pdp_key: "{vault://env/regulait-pdp-key}"
       server_id: "${server.id}"
       tool_name: "${tool.name}"
+      timeout_ms: 2000
+  - name: key-auth
+    route: origin-lie-route
+    config:
+      key_names: ["apikey"]
+  - name: regulait-authz
+    route: origin-lie-route
+    config:
+      # A WORKING PDP. The refusal under test must come from the contradiction
+      # and not from a broken decision point, so this points at the real gateway
+      # exactly as the governed route does.
+      pdp_url: "http://host.docker.internal:${GATEWAY_PORT}"
+      pdp_key: "{vault://env/regulait-pdp-key}"
+      server_id: "${server.id}"
+      tool_name: "${tool.name}"
+      # key-auth is on this route, so the credential says 'api_key'. Declaring
+      # 'oidc' is the lie, and the plugin must refuse rather than send either
+      # value: the declared one is false, and silently substituting the derived
+      # one would override a policy intent nobody revisited.
+      asserted_session_origin: "oidc"
       timeout_ms: 2000
 `;
   writeFileSync(path.join(dir, "kong.yml"), declarative);
@@ -486,7 +519,8 @@ plugins:
   {
     const rows = (await api("GET", `${base}/v1/audit?limit=50`, undefined, boot)).json.entries ?? [];
     const callouts = rows.filter((r) => (r.detail ?? {}).contextApplied !== undefined);
-    const applied = callouts.length ? (callouts[0].detail.contextApplied ?? []) : null;
+    const detail = callouts.length ? (callouts[0].detail ?? {}) : null;
+    const applied = detail ? (detail.contextApplied ?? []) : null;
     check("the adapter sends the decision context it claims to",
       applied !== null && applied.includes("projectId") && applied.includes("principal"),
       `contextApplied=${JSON.stringify(applied)} over ${callouts.length} callout row(s)`);
@@ -495,7 +529,48 @@ plugins:
     check("the adapter does not claim to send tool arguments it cannot map",
       applied !== null && !applied.includes("args"),
       `contextApplied=${JSON.stringify(applied)}`);
+
+    // AER-036 — THE EXACT VALUE AND ITS PROVENANCE, not the word "principal".
+    //
+    // The previous version of this assertion checked only that `contextApplied`
+    // contained `principal`, which was satisfied by a route declaring `sso` on
+    // key-auth traffic. The governed route now declares NO origin, so the only
+    // way `api_key` reaches the ledger is if the plugin derived it from the
+    // credential Kong authenticated with.
+    check("the recorded session origin is the one DERIVED from the credential",
+      (detail?.assertedPrincipal ?? {}).sessionOrigin === "api_key",
+      `assertedPrincipal=${JSON.stringify(detail?.assertedPrincipal ?? null)}`);
+    // and the PDP marks it as a CLAIM rather than as something it observed —
+    // this route believes its caller about the subject too, and the difference
+    // between the two is that this one is now stated
+    check("the PDP records the origin as an ASSERTION, not as evidence",
+      applied !== null && applied.includes("principal.asserted"),
+      `contextApplied=${JSON.stringify(applied)}`);
   }
+
+  // (i2) AER-036 — A DECLARED ORIGIN THAT CONTRADICTS THE CREDENTIAL IS REFUSED.
+  //      This is the finding's own demonstration turned into a test: key-auth on
+  //      the route, `oidc` in the config. Sending either value would be wrong, so
+  //      the request must be refused — and, as with every other refusal here, the
+  //      upstream must not be reached, because a 403 rendered after the upstream
+  //      already ran is indistinguishable from a refusal on the client side.
+  await api("GET", `http://127.0.0.1:${UPSTREAM_PORT}/__reset`);
+  r = await fetch(`http://127.0.0.1:${KONG_PROXY_PORT}/origin-lie`, { headers: { apikey: "entitled-key" } });
+  check("a declared session origin that contradicts the credential is REFUSED",
+    r.status === 403 && (await upstreamCount()) === 0,
+    `status ${r.status}, count ${await upstreamCount()}`);
+  // and it says WHICH refusal, so an operator is sent to the plugin config
+  // rather than to a policy screen or a network
+  check("and it names the contradiction rather than reading as a policy denial",
+    r.headers.get("x-regulait-reason") === "session_origin_contradicts_credential",
+    `reason=${r.headers.get("x-regulait-reason")}`);
+  // NON-VACUITY: the entitled subject really is allowed on an equivalent route,
+  // so this refusal is the contradiction and not a failed entitlement
+  await api("GET", `http://127.0.0.1:${UPSTREAM_PORT}/__reset`);
+  r = await fetch(`http://127.0.0.1:${KONG_PROXY_PORT}/governed`, { headers: { apikey: "entitled-key" } });
+  check("control: the same subject and credential ARE allowed where nothing is contradicted",
+    r.status === 200 && (await upstreamCount()) === 1,
+    `status ${r.status}, count ${await upstreamCount()}`);
 
   // (j) PDP DOWN -> fail closed, and still nothing proxied. An outage that
   //     silently becomes an open door is the worst shape this can take.

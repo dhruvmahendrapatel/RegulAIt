@@ -73,11 +73,13 @@ This builder sends everything this adapter can state TRUTHFULLY and nothing it
 cannot:
 
   * `projectId` — per-route config. A governed route fronts one project context.
-  * `principal.sessionOrigin` — per-route config, because Kong knows which auth
-    plugin fronts the route. There is no `mfaCompleted`: Kong cannot observe a
-    second factor, and absent reads as "unknown", which is the weakest input an
-    ABAC policy can get. A configured `true` would be an unchecked assertion
-    sitting in the trusted path.
+  * `principal.sessionOrigin` — DERIVED from the authenticated credential where
+    Kong can see one, and only otherwise taken from the operator's declared
+    assertion (AER-036: it used to be the declared value unconditionally, and the
+    declaration was never checked against anything). There is no `mfaCompleted`:
+    Kong cannot observe a second factor, and absent reads as "unknown", which is
+    the weakest input an ABAC policy can get. A configured `true` would be an
+    unchecked assertion sitting in the trusted path.
   * `args` — NOT SENT, and this is the honest limit. Mapping an HTTP body to a
     tool's named arguments is a per-route projection, and a WRONG mapping
     evaluates a data-scope rule against the wrong values — which is worse than
@@ -86,7 +88,35 @@ cannot:
     exists. The response's `contextApplied` names what the decision really ran
     on, so an operator can tell this from a policy refusal.
 --]]
-local function build_question(conf, subject)
+--[[
+AER-036 — THE SESSION ORIGIN IS DERIVED WHERE IT CAN BE, AND ASSERTED ONLY WHERE
+IT CANNOT.
+
+`kong.client.get_credential()` returns the credential the auth plugin on this
+route authenticated with, and its SHAPE names the mechanism: a key-auth
+credential carries `key`, a basic-auth credential carries `username` and
+`password`. Those two are therefore observable per request, and for them this
+adapter sends what it saw rather than what it was told.
+
+Nothing in Kong's community plugin set gives an equally reliable per-request
+signal for OIDC or SAML, so for those the configured value remains an ASSERTION —
+which is why the field is now named `asserted_session_origin` and why a
+contradiction is a refusal rather than a silent substitution. The vocabulary is
+the product's own (`SESSION_ORIGINS`): `sso` is gone, because it matched no
+policy the gateway can express and satisfied every "not an API key" policy.
+
+Returns the origin plus whether it was derived, or nil when Kong knows nothing —
+in which case NO principal is sent and the kernel reads `unknown`, the weakest
+input. Absent is always a safe answer here; a wrong one is not.
+--]]
+local function derive_session_origin(credential)
+  if not credential then return nil end
+  if credential.key ~= nil and credential.key ~= "" then return "api_key" end
+  if credential.username ~= nil and credential.password ~= nil then return "password" end
+  return nil
+end
+
+local function build_question(conf, subject, session_origin)
   local body = {
     userId = subject,
     serverId = conf.server_id,
@@ -95,8 +125,8 @@ local function build_question(conf, subject)
   if conf.project_id and conf.project_id ~= "" then
     body.projectId = conf.project_id
   end
-  if conf.session_origin and conf.session_origin ~= "" then
-    body.principal = { sessionOrigin = conf.session_origin }
+  if session_origin then
+    body.principal = { sessionOrigin = session_origin }
   end
   return body
 end
@@ -131,6 +161,27 @@ function RegulaitAuthz:access(conf)
     return refuse(403, "deny", "consumer_not_mapped")
   end
 
+  -- AER-036 — DERIVE, THEN REFUSE A CONTRADICTION.
+  --
+  -- A route whose credential Kong can read has an observable origin, so the
+  -- observation wins over the declaration. If the operator declared a DIFFERENT
+  -- one, this deployment's ABAC expectations are not the ones being evaluated:
+  -- sending either value would be wrong (the declared one is false, the derived
+  -- one silently overrides a policy intent nobody revisited), so the request is
+  -- refused with its own reason, before the upstream is reached.
+  --
+  -- Fail-closed on a misconfiguration is the posture everywhere else in this
+  -- integration — an unmapped consumer and an unreachable PDP are both refusals
+  -- — and it is what makes "configuring SSO on a key-auth route is impossible"
+  -- true in the deployment rather than only in the documentation.
+  local derived = derive_session_origin(kong.client.get_credential())
+  local asserted = conf.asserted_session_origin
+  if asserted == "" then asserted = nil end
+  if derived and asserted and derived ~= asserted then
+    return refuse(403, "deny", "session_origin_contradicts_credential")
+  end
+  local session_origin = derived or asserted
+
   local client = http.new()
   client:set_timeout(conf.timeout_ms)
 
@@ -140,7 +191,7 @@ function RegulaitAuthz:access(conf)
       ["content-type"] = "application/json",
       ["authorization"] = "Bearer " .. conf.pdp_key,
     },
-    body = cjson.encode(build_question(conf, subject)),
+    body = cjson.encode(build_question(conf, subject, session_origin)),
   })
 
   -- FAIL CLOSED, and say which failure it was. An outage that silently becomes
