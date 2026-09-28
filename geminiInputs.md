@@ -158,14 +158,20 @@ not re-checked.* So every line below was checked against code, not against docs.
 
 ## NOT verified in this pass — treat as unknown, not as true
 
-**Pillar 7 (orchestration DAG) and Pillar 8 (PM bi-directional sync).** The verification
-agent for these two hit a session rate limit before reporting. `packages/orchestration-kernel`
+**Pillar 7 (orchestration DAG) and Pillar 8 (PM bi-directional sync).** *(CLOSED
+2026-09-28 — see VERIFICATION APPENDIX II at the end of this file. Both claims are
+largely FALSE; the residual gaps are narrower and different from what the lines
+say.)* The verification agent for these two hit a session rate limit before
+reporting. `packages/orchestration-kernel`
 and `packages/pm-provider` both exist with substantial test suites (27 and 62 tests), and
 `pm-provider` has an `inbound.ts`, which is evidence against "lacks bi-directional sync" —
 but that is an inference, not a verification. **Do not act on those two "REALITY" lines
 either way until someone checks them.**
 
 ## Section 5 (Enterprise Cybersecurity Roadmap) — NOT VERIFIED, with three flags
+*(CLOSED 2026-09-28 — verified item by item in VERIFICATION APPENDIX II at the end
+of this file. Three of the ten items already ship, three are partial, one is
+genuinely missing, and four were not found.)*
 
 That section landed while this verification was being written, so none of it was
 checked. It is listed here so nobody mistakes silence for confirmation. Three items
@@ -189,3 +195,147 @@ enough to say "check before building", not enough to call the line wrong:
 Everything else in section 5 (malware/URL scanning, EDM, source-code exfiltration
 classifiers, SIEM streaming, SOAR webhooks, SCIM, certification alignment) is
 unassessed here.
+
+---
+
+# VERIFICATION APPENDIX II — 2026-09-28, pillars 7 and 8 and section 5
+
+The first appendix left three things explicitly unverified. This closes them.
+Same rule as before: checked against **code**, not against ADRs or READMEs. An
+ADR saying something exists is not evidence; a function with a call site and a
+test is. Where I could not confirm something I say "not found", not "absent".
+
+## Pillar 7 — "no task graph (DAG), no parallel subtasks, no PM/Team-Lead model"
+
+**Mostly FALSE. Do not rebuild the DAG or the delegation model. One real gap.**
+
+| Part of the claim | Verdict | Evidence |
+| --- | --- | --- |
+| no task graph / DAG | **FALSE** | `packages/orchestration-kernel/src/index.ts:33` `taskNodeSchema.dependsOn`; `:92` graph schema validates duplicate ids, self-dependency and unknown deps, then runs **three-colour iterative-DFS cycle detection** (`:120`). `readyNodes()` at `:316` computes the ready set. |
+| no PM / Team-Lead delegation | **FALSE** | `leadNodeId`, `allowedAgentIds`, `allowedToolRefs` on every node (`:66-80`). `computeNodeCeiling` (`:243`) walks the lead chain and **intersects**, so a ceiling can only ever NARROW; `computeNodeBudgetCeiling` (`:267`) takes the **MIN** of the node's own cap and every lead ancestor's. Both cycle-guarded. |
+| workers could exceed the initiating user's entitlements | **FALSE** | Enforced, not advisory: `orchestration.ts:704` (`computeNodeCeiling` per node), `:1068` passes `ceilingTools` into the governed tool call, `:1845`/`:1924`/`:2148` apply the agent ceiling at dispatch and reassign. A denial carries its own rule id (`lead-ceiling` / `agent-lead-ceiling`) so it is distinguishable in the trail from an ordinary entitlement denial. |
+| no parallel execution of independent subtasks | **HALF-TRUE — and this is the real gap** | Auto-advance drives the **whole ready set as a wave**: every wave node is started and dispatched before any is submitted, so independent branches are concurrent *in the run's recorded state* (`orchestration.ts:2288-2299`). But the file says plainly of the same loop: *"we do NOT batch in this synchronous interactive path — nodes still dispatch one at a time below"* (`:2383`). So the DAG, the ready set and the wave semantics are real; **wall-clock concurrency is not**. |
+
+27 tests in `packages/orchestration-kernel/src/index.test.ts`.
+
+**What to build, if anything**: not a task graph — an executor that actually runs
+a wave concurrently. That is a scheduling change (and a decision about
+per-provider concurrency limits and partial-failure semantics), not a modelling
+one, and the model is already in place to support it.
+
+## Pillar 8 — "lacks bi-directional sync; a shadow copy; decisions not first-class"
+
+**FALSE on two of the three parts. The third is half-true and the boundary is
+sharper than the claim.**
+
+- **Inbound exists and is provider-native.** Six parsers —
+  `parseJiraInboundWebhook`, `parseLinear…`, `parseAsana…`, `parseMonday…`,
+  `parseAzureDevOps…`, `parseGeneric…` (`packages/pm-provider/src/inbound.ts:164-625`).
+  Route `POST /v1/pm/webhooks/:connectionName` (`apps/gateway/src/pm.ts:952`),
+  authenticated by the **per-connection secret** with HMAC and a constant-time
+  compare (`inbound.ts:67`), not by a bearer token; the global auth hook exempts
+  exactly this route. HMAC needs exact raw bytes, so the JSON parser is swapped
+  for raw capture **in a scoped plugin covering only this route**. A connection
+  with no secret rejects all webhook traffic (401).
+- **Every inbound signal is retained**, matched or not: `pm_sync_events` is an
+  append-only log (`packages/db/src/schema.ts:2288`).
+- **Decisions ARE first-class linked records.** The `decisions` table
+  (`schema.ts:2270`) is deliberately FK-free "like audit_log — a decision is a
+  governance record that must survive the deletion of the run/instance/user it
+  describes", and `pm_links.object_type` includes `"decision"` alongside
+  `run_node`/`run`/`workflow_instance` (`:2241`).
+- **"Shadow copy" is HALF-TRUE, and the precise line is worth knowing.** Drift is
+  detected and there are three resolution policies —
+  `manual | prefer_pm | prefer_regulait` (`schema.ts:2223`). Under `prefer_pm`
+  the PM state **is** adopted as authoritative for that item (`adoptedState`,
+  `pm.ts:912`) and audited — but the audit reason says it exactly:
+  *"the PM state is adopted as authoritative for this item; **the run state
+  machine stays untouched**"* (`pm.ts:917`). So the PM tool can be the source of
+  truth for an item's reported state, and is never the source of truth for
+  execution.
+
+**What to build, if anything**: not inbound sync — a decision about whether a
+PM-reported state should be allowed to drive the run state machine, which is a
+governance question (it lets an external system move a governed run) and not a
+plumbing one.
+
+## Section 5 — Enterprise Cybersecurity Roadmap, item by item
+
+### DO NOT BUILD — these already ship
+
+- **A1 "upgrade injection/jailbreak detection from log mode to active blocking"** —
+  `prompt_injection` and `jailbreak` are two of the five detector ids, and the
+  mode vocabulary is `off|log|warn|block` (`packages/db/src/schema.ts:26,36`).
+  `block` is a real refusal: `guardrail_blocked` is an outcome on the model
+  dispatch path (`agents-connectors.ts:1485`, `:4900`) and on the MCP tool path
+  (`mcp-proxy.ts`, `GovernedToolCallOutcome`). Notably, an output-phase detector
+  at `block` makes responses **buffer**: *"no delta reaches a client before the
+  completed text has been scanned"* (`guardrails.ts:451`) — which is the part a
+  naive implementation gets wrong. **Caveat**: every detector shipped today is
+  the `heuristic` tier (local, deterministic, zero-cost); the interface declares
+  `model` and `external` tiers but none is registered (`shared/src/guardrails.ts:99-102`).
+  So "blocking" exists and "model-backed classification" does not.
+- **D8 SAML SSO and SCIM provisioning** — `apps/gateway/src/saml.ts`; SCIM v2 at
+  `/scim/v2/Users`, `/Users/:id`, `/Groups`, `/Groups/:id` (`scim.ts:109-114`),
+  with `PATCH active:false` and `DELETE /Users/:id` both disabling the account
+  **and revoking live sessions** through one path so they cannot drift apart
+  (`scim.ts:405`). Group→role mapping is its own surface
+  (`registerGroupRoleMappingRoutes`).
+- **E10, two of the three frameworks** — `COMPLIANCE_PACK_FRAMEWORKS` ships
+  `soc-2` and `hipaa` (`packages/shared/src/compliance-packs.ts:68-77`).
+
+### PARTIAL — exists, but not the thing the line asks for
+
+- **B3 "Exact Data Match (EDM) against specific customer databases"** — there is a
+  `semantic_dlp` detector, and admin-supplied per-detector term lists are
+  described as "the intended way to make `semantic_dlp` useful for a specific
+  business" (`shared/src/guardrails.ts:92`). That is a customer **dictionary**,
+  not EDM: no corpus ingestion, no hashed-record index, no per-record match.
+- **D9 "ABAC with dynamic attributes"** — ABAC exists and already evaluates two
+  dynamic session facts the line does not mention: `sessionOrigin` and
+  `mfaCompleted`, beside `roles`/`roleIds`/`teams`/`isAdmin`
+  (`packages/policy-kernel/src/abac.ts:85-105`), plus resource attributes and a
+  context bag carrying `deployModes` (`:138`). **The two attributes the line
+  names specifically — device posture and network location — are not there**, and
+  neither is time-of-day.
+- **E10 "ISO 27001"** — **not shipped**. The ISO pack is `iso-42001` (the AI
+  management-system standard), which is a different thing from ISO 27001
+  (information security). `soc-2` and `hipaa` do ship.
+
+### GENUINELY MISSING (positively confirmed absent)
+
+- **B4 in-flight redaction/masking.** The PII verbs are `block | warn | log`
+  (plus `off`/`none`) everywhere — `schema.ts:2533`, `:3107`, `:6714`. There is
+  no redact or mask action; a block is bill-and-withhold (the result is replaced
+  by a withheld marker), never a masked passthrough. This is the cleanest real
+  gap in section 5.
+
+### NOT FOUND (searched, nothing surfaced — treat as likely missing, not proven)
+
+- **A2 malware / malicious-URL scanning of MCP tool RESULTS.** Guardrails do scan
+  tool results for injection and PII, but nothing scans for malware or does URL
+  reputation.
+- **B5 source-code / API-key exfiltration classifiers on outbound content.**
+  Secret-shaped patterns appear in red-team and eval fixtures, not as an outbound
+  detector.
+- **C6 real-time SIEM streaming** (Splunk / Datadog / Sentinel / LogScale). What
+  exists is `GET /v1/audit.csv`, a **pull** export that streams a batched DB walk
+  — not a push integration.
+- **C7 SOAR webhooks on severe violations.** No outbound webhook subscription
+  surface was found, and nothing was found that counts repeated violations by a
+  subject and reacts (auto-revoke / isolate).
+
+### NOT CHECKED — my own coverage gaps, stated so nobody mistakes silence for a verdict
+
+- I did not audit the **web UI** for any of section 5; everything above is
+  gateway, kernel and schema.
+- I did not check whether the heuristic `prompt_injection` / `jailbreak`
+  detectors are actually GOOD — only that block mode exists and is enforced.
+  Detection quality is a separate question from enforcement wiring.
+- I did not verify SCIM against a real Entra ID or Okta tenant, only that the
+  four routes and the deactivation path exist.
+- I did not read the pm-provider **outbound** adapters in detail; the claim under
+  test was about inbound.
+- Pillar 7's wave loop: I read the dispatch path, not the review/acceptance path,
+  so "sequential dispatch" is established for auto-advance and not for every
+  route that can start a node.
