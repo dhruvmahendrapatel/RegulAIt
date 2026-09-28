@@ -488,6 +488,17 @@ export const mcpServers = pgTable("mcp_servers", {
   breakerOpenedAt: timestamp("breaker_opened_at", { withTimezone: true }),
   breakerLastFailureAt: timestamp("breaker_last_failure_at", { withTimezone: true }),
   breakerLastError: text("breaker_last_error"),
+  /**
+   * AER-037 (migration 0118) — the health sweep's ROTATION CURSOR: when a pass
+   * last CONSIDERED this row, not when the row last answered.
+   *
+   * A bounded pass without one picks the same head of a constant order forever,
+   * so past the cap the tail of the estate was never actively probed at all.
+   * Ordering by this ascending, nulls first, turns the cap into a fair
+   * round-robin. Written at SELECTION time, which is also what makes two
+   * concurrent passes pick disjoint sets instead of racing over the same head.
+   */
+  lastHealthProbeAt: timestamp("last_health_probe_at", { withTimezone: true }),
   /** ADR-0101 (migration 0105) — FEDERATION PROVENANCE, on the server row
    * itself, because "where did this come from" is asked while looking at the
    * server. `local` is the migration DEFAULT and the only value a pre-0105 row

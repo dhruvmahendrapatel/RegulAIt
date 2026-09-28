@@ -436,12 +436,13 @@ export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): Schedu
       // where nothing is wrong.
       name: SCHEDULER_JOB_NAMES.mcpHealthProbe,
       description:
-        "Probe every registered MCP upstream, circuit-broken ones first, and feed the result to " +
-        "ADR-0126's breaker — so a dead upstream is refused before a user finds it and a recovered one " +
-        "resumes without waiting for someone to try. Makes outbound calls through the same guarded " +
-        "connect the proxy uses. Enforcement does not depend on it: the breaker still learns from " +
-        "traffic with this off. Admission holds and egress blocks are OUR refusals and never open a " +
-        "breaker.",
+        "Probe up to 50 MCP upstreams per pass — circuit-broken ones first, then the least recently " +
+        "probed — and feed the result to ADR-0126's breaker, so a dead upstream is refused before a " +
+        "user finds it and a recovered one resumes without waiting for someone to try. Coverage of a " +
+        "larger estate comes from the rotation across passes, not from one pass; the result reports " +
+        "the backlog. Makes outbound calls through the same guarded connect the proxy uses. " +
+        "Enforcement does not depend on it: the breaker still learns from traffic with this off. " +
+        "Admission holds and egress blocks are OUR refusals and never open a breaker.",
       adr: "ADR-0126",
       defaultIntervalSeconds: 5 * 60,
       run: async (ctx) => {
@@ -458,6 +459,14 @@ export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): Schedu
             opened: out.opened,
             recovered: out.recovered,
             capped: out.capped,
+            // AER-037: `capped` alone says a pass truncated and nothing about
+            // whether the estate is being covered. These three are what an
+            // operator reads to tell a healthy steady backlog from a starved
+            // tail: `neverProbed` must fall to zero and `oldestProbeAt` must
+            // keep moving.
+            backlog: out.backlog,
+            neverProbed: out.neverProbed,
+            oldestProbeAt: out.oldestProbeAt?.toISOString() ?? null,
           },
         };
       },

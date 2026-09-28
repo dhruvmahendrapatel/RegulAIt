@@ -820,6 +820,13 @@
       "when": 1785052000000,
       "tag": "0117_virtual_key_purpose",
       "breakpoints": true
+    },
+    {
+      "idx": 118,
+      "version": "7",
+      "when": 1785053000000,
+      "tag": "0118_health_probe_rotation",
+      "breakpoints": true
     }
   ]
 }

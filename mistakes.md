@@ -1117,3 +1117,41 @@ the one that mattered.**
 
 Cheap mitigation used from here: after adding or editing any `*.test.ts`, run the
 owning package's `build` script — not its `test` script — before commit.
+
+### M-048 (2026-09-28) — a cap I wrote a paragraph defending, over an order that never moved
+
+The active health probe (ADR-0126, commit `b145b1c`) bounded a pass at 50 and
+ordered the rest by `name asc`. An external review (AER-037) pointed out that the
+order is **constant**, so with more than 50 registered servers every five-minute
+pass probes the same lexicographically first cohort and the tail is never actively
+probed at all — retaining exactly the behaviour the feature exists to remove, on a
+deployment whose scheduler page reads green.
+
+The file's own header had a section titled "THE CAP, AND WHY IT DEGRADES TO TODAY"
+arguing the cap was safe: *"servers past the cap are simply discovered passively
+by the first user to call them, which is exactly today's behaviour."* That
+sentence is **true of any one server and false of the estate** — the failure is
+not that some server waits, it is that the SAME servers wait every time. I wrote
+a defence of the cap and never asked which rows it excludes on the second pass.
+
+**The rule.** *A cap over an ordered set is a starvation bug unless the order
+moves. Before defending a `LIMIT`, name the rows it excludes on pass two — if they
+are the same rows as pass one, there is no rotation and the tail is starved, not
+merely late.*
+
+**The second instance in the same file, found while fixing the first.** Rows whose
+breaker was open and still inside its cooldown were selected and then skipped, so
+a bounded pass could spend its entire budget on rows nobody is permitted to probe.
+Same shape: the budget going somewhere it cannot do work. Selection is now
+filtered in SQL to rows a probe is actually possible against.
+
+**And a third, older one the fix's full-suite run exposed.** The same file's two
+egress-refusal tests used loopback with `allowPrivateRanges: false` and passed
+alone while failing in the full run: `mcp-proxy.test.ts` inserts an
+`egress_allow_hosts` row for `127.0.0.1`, so by the time this file ran the
+"blocked" host was allow-listed and the refusal never happened. **This is M-040
+and M-042 for the third time**, in a file written the day after reading the
+paragraph in `g2-upstream-deadlines.test.ts` that documents exactly it. The fix is
+the one that paragraph already prescribes: a literal TEST-NET-3 address (RFC
+5737), randomised per run, which is public and therefore independent of the
+private-range posture and of every other suite's allow-list.
