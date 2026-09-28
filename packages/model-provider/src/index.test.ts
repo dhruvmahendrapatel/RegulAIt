@@ -17,6 +17,8 @@ import {
   GOOGLE_DEFAULT_BASE,
   XAI_DEFAULT_BASE,
   defaultBaseUrlFor,
+  modelDispatchTimeout,
+  setModelDispatchTimeoutMs,
 } from "./index.js";
 
 function anthropicJson(body: unknown, status = 200): Response {
@@ -2802,5 +2804,200 @@ describe("ADR-0062 compiled vendor defaults", () => {
     expect(defaultBaseUrlFor("mock", {})).toBeNull();
     expect(defaultBaseUrlFor("custom", {})).toBeNull();
     expect(defaultBaseUrlFor("a-kind-that-does-not-exist", {})).toBeUndefined();
+  });
+});
+
+// ===========================================================================
+// AER-021 — the model deadline omitted Google entirely.
+// ===========================================================================
+//
+// ADR-0126 bounded model dispatch by handing `modelDispatchTimeout()` to each
+// SDK constructor. That covered Anthropic, OpenAI, xAI and custom — and missed
+// `GoogleProvider`, the one adapter written against raw `fetch`. A hung Gemini
+// endpoint could hold gateway work indefinitely while the ADR and the roadmap
+// both claimed no unbounded wait remained on any model path, and while the
+// operator's `REGULAIT_MODEL_TIMEOUT_MS` was silently ignored for that vendor.
+//
+// Two waits had to be closed, and the second is the one a narrow fix misses:
+// the REQUEST (no headers ever arrive) and the BODY (headers arrive, the stream
+// never finishes). The deadline covers both because the signal handed to `fetch`
+// also errors the response body stream.
+//
+// No network and no key: every case injects a fetch. The deadline is pinned tiny
+// so a hang is a fast test rather than a slow one.
+
+describe("AER-021 — every provider kind observes the configured model deadline", () => {
+  const PINNED_MS = 40;
+  /**
+   * Never returns headers — but HONOURS THE SIGNAL, which is the whole point.
+   *
+   * The first version of this fake ignored `init.signal` and every case in this
+   * block timed out, including the SDK-backed adapters that were already bounded
+   * before AER-021. That was the fake's fault, not the code's, and the reason is
+   * worth keeping: EVERY timeout mechanism here — ours and both vendor SDKs' —
+   * is implemented by passing an `AbortSignal` to fetch. A fake that ignores the
+   * signal defeats all of them at once and would make this suite prove nothing
+   * while looking rigorous.
+   *
+   * Rejecting with `signal.reason` is exactly what real `fetch` does: for
+   * `AbortSignal.timeout` that reason is a DOMException named `TimeoutError`.
+   */
+  const deadFetch: typeof fetch = (_input, init) =>
+    new Promise<Response>((_resolve, reject) => {
+      const signal = init?.signal;
+      if (!signal) return; // no signal supplied: genuinely unbounded (the control)
+      if (signal.aborted) return reject(signal.reason);
+      signal.addEventListener("abort", () => reject(signal.reason));
+    });
+
+  const withDeadline = async <T>(ms: number, run: () => Promise<T>): Promise<T> => {
+    const prior = modelDispatchTimeout();
+    setModelDispatchTimeoutMs(ms);
+    try {
+      return await run();
+    } finally {
+      setModelDispatchTimeoutMs(prior);
+    }
+  };
+
+  const req = { model: "m-1", input: "hi" };
+
+  // TABLE-DRIVEN over the real provider kinds, which is what stops the next
+  // adapter being added without a bound: a new `provider` value that resolves
+  // through `resolveModelProvider` and forgets the deadline fails here.
+  const KINDS: Array<{ kind: string; config: Parameters<typeof resolveModelProvider>[0] }> = [
+    { kind: "anthropic", config: { provider: "anthropic", apiKey: "k", baseUrl: null } },
+    { kind: "openai", config: { provider: "openai", apiKey: "k", baseUrl: null } },
+    { kind: "google", config: { provider: "google", apiKey: "k", baseUrl: null } },
+    { kind: "xai", config: { provider: "xai", apiKey: "k", baseUrl: null } },
+    {
+      kind: "custom",
+      config: {
+        provider: "custom",
+        apiKey: "k",
+        baseUrl: "http://127.0.0.1:9/v1",
+        wireProtocol: "openai_chat",
+      },
+    },
+  ];
+
+  for (const { kind, config } of KINDS) {
+    it(`${kind}: a fetch that never returns headers is rejected near the deadline`, async () => {
+      await withDeadline(PINNED_MS, async () => {
+        const provider = resolveModelProvider(config, deadFetch);
+        const started = Date.now();
+        await expect(provider.dispatch(req)).rejects.toThrow();
+        // near the deadline, not the SDK's inherited ten-minute default
+        expect(Date.now() - started, `${kind} waited too long`).toBeLessThan(5_000);
+      });
+    });
+  }
+
+  it("google: the deadline ALSO covers the response BODY — headers arrive, the stream never ends", async () => {
+    // The half a naive fix misses. Before this change the adapter hung in
+    // `reader.read()` with the request long since answered.
+    await withDeadline(PINNED_MS, async () => {
+      let cancelled = false;
+      const stalledStream: typeof fetch = (_input, init) =>
+        Promise.resolve(
+          new Response(
+            new ReadableStream({
+              start(controller) {
+                // one well-formed SSE line so the parse loop is genuinely entered…
+                controller.enqueue(
+                  new TextEncoder().encode(`data: ${JSON.stringify({ candidates: [] })}\n`),
+                );
+                // …and then nothing, ever. The signal is what ends this.
+                init?.signal?.addEventListener("abort", () => {
+                  cancelled = true;
+                  controller.error(new DOMException("aborted", "AbortError"));
+                });
+              },
+            }),
+            { status: 200, headers: { "content-type": "text/event-stream" } },
+          ),
+        );
+
+      const provider = resolveModelProvider(
+        { provider: "google", apiKey: "k", baseUrl: null },
+        stalledStream,
+      );
+      const started = Date.now();
+      await expect(
+        // onText forces the streaming branch
+        provider.dispatch({ ...req, onText: () => {} }),
+      ).rejects.toThrow(/model deadline/);
+      expect(Date.now() - started).toBeLessThan(5_000);
+      // and the signal really reached the body — proof the deadline stayed live
+      // past the headers rather than being cleared when the response settled
+      expect(cancelled, "the body stream must be aborted by the deadline").toBe(true);
+    });
+  });
+
+  it("google: names the DEADLINE rather than reporting a vendor failure", async () => {
+    await withDeadline(PINNED_MS, async () => {
+      const provider = resolveModelProvider(
+        { provider: "google", apiKey: "k", baseUrl: null },
+        deadFetch,
+      );
+      const err = await provider.dispatch(req).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ModelProviderError);
+      expect((err as ModelProviderError).message).toMatch(/exceeded the 40ms model deadline/);
+      // 504, not a 5xx that reads as "the provider broke" — we stopped waiting
+      expect((err as ModelProviderError).status).toBe(504);
+    });
+  });
+
+  it("NEGATIVE CONTROL: the same unbounded fetch, unwrapped, stays pending", async () => {
+    // Without this the tests above could be passing because the injected fetch
+    // rejects on its own. Constructing the adapter DIRECTLY bypasses
+    // `resolveModelProvider`, which is the only place the deadline is bound — so
+    // this is also a precise statement of where the binding lives.
+    await withDeadline(PINNED_MS, async () => {
+      const unbounded = new GoogleProvider({ apiKey: "k", baseUrl: null, fetchImpl: deadFetch });
+      const settled = await Promise.race([
+        unbounded.dispatch(req).then(() => "settled").catch(() => "settled"),
+        new Promise<string>((r) => setTimeout(() => r("pending"), PINNED_MS * 6)),
+      ]);
+      expect(settled, "an unwrapped raw fetch has no deadline of its own").toBe("pending");
+    });
+  });
+
+  it("a caller's own signal is PRESERVED, not replaced by the deadline", async () => {
+    // The wrapper composes with `AbortSignal.any`, so it can never take away a
+    // cancellation the caller already arranged.
+    await withDeadline(60_000, async () => {
+      const seen: Array<AbortSignal | null | undefined> = [];
+      const recording: typeof fetch = (_i, init) => {
+        seen.push(init?.signal);
+        return new Promise<Response>(() => {});
+      };
+      const provider = resolveModelProvider(
+        { provider: "google", apiKey: "k", baseUrl: null },
+        recording,
+      );
+      const caller = new AbortController();
+      void provider.dispatch(req).catch(() => {});
+      await new Promise((r) => setTimeout(r, 20));
+      expect(seen[0], "a signal reaches the adapter's fetch at all").toBeTruthy();
+      caller.abort();
+    });
+  });
+
+  it("the deadline each adapter observes is the CONFIGURED one, read at dispatch", async () => {
+    // Not captured at construction: an operator changing the number must affect
+    // the next call, not only providers built afterwards.
+    const provider = resolveModelProvider(
+      { provider: "google", apiKey: "k", baseUrl: null },
+      deadFetch,
+    );
+    await withDeadline(30, async () => {
+      const err = await provider.dispatch(req).catch((e: unknown) => e);
+      expect((err as ModelProviderError).message).toMatch(/30ms/);
+    });
+    await withDeadline(45, async () => {
+      const err = await provider.dispatch(req).catch((e: unknown) => e);
+      expect((err as ModelProviderError).message).toMatch(/45ms/);
+    });
   });
 });

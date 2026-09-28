@@ -117,9 +117,10 @@ summary rather than the stream.
 
 ## Consequences
 
-**What this buys.** No unbounded wait remains on any MCP or model path. A dead upstream is a named,
-audited, fast refusal instead of an opaque 500 and a held socket — and after five failures it stops
-costing anything at all.
+**What this buys.** ~~No unbounded wait remains on any MCP or model path.~~ **That sentence was false
+for one vendor for two days — see the AER-021 amendment at the end of this file.** It is true as of
+2026-09-28. A dead upstream is a named, audited, fast refusal instead of an opaque 500 and a held
+socket — and after five failures it stops costing anything at all.
 
 **What it costs.** One SQL update per upstream failure, and nothing per success on a healthy
 upstream. The breaker read is free.
@@ -207,3 +208,72 @@ the remedy the paragraph in `g2-upstream-deadlines.test.ts` already prescribes f
 about 4 minutes for 50 servers and about an hour for 500. That is a real bound rather than a starved
 tail, but it is not "every upstream every 5 minutes", and an estate large enough to care should raise
 the limit or shorten the interval. The result's `oldestProbeAt` is what says whether it needs to.
+
+
+## Amendment 2026-09-28 — AER-021: the model deadline omitted Google entirely, and the claim above was false
+
+This ADR bounded model dispatch by handing `modelDispatchTimeout()` to each SDK constructor, and then
+concluded that **"no unbounded wait remains on any MCP or model path."** An automated review found
+that claim false for one supported vendor.
+
+`GoogleProvider` is the only adapter written against raw `fetch` — the other four (Anthropic, OpenAI,
+xAI, custom) are SDK-backed and really were bounded. Google's `dispatch` called `fetchImpl` with no
+`AbortSignal` and then awaited `res.json()` or looped on `reader.read()`, so a hung or hostile Gemini
+endpoint could hold gateway work indefinitely, consume sockets and concurrency, and **silently ignore
+the operator's `REGULAIT_MODEL_TIMEOUT_MS`**. An enterprise operator could not name their effective
+deadline, because one vendor had none.
+
+**The scope claim was measured, not accepted.** Removing the fix reddens exactly the four Google cases
+and leaves anthropic, openai, xai and custom green — so the SDK adapters were already bounded and
+Google was the whole gap, as the finding said.
+
+### The fix is placed where the NEXT adapter cannot omit it
+
+Adding a signal inside `GoogleProvider.dispatch` would have closed this instance and left the next
+raw-fetch adapter free to omit it just as quietly. Instead `deadlineBoundFetch` wraps the fetch in
+`resolveModelProvider` — the single funnel every production dispatch is built through — so an adapter
+added later inherits the bound without its author doing anything. The omission becomes structurally
+impossible rather than something to remember. It is idempotent (a `Symbol.for` marker), so
+double-wrapping is a no-op, and it **composes** a caller's own signal with `AbortSignal.any` rather
+than replacing it.
+
+**Two waits had to close, and the second is the one a narrow fix misses.** Headers arriving is not the
+end of the wait: the old code could hang forever *after* a successful response, in `reader.read()` or
+`res.json()`. `AbortSignal.timeout` is the right primitive precisely because the signal handed to
+`fetch` **also errors the response body stream** — so one deadline covers request and body, there is
+nothing to clear on (a wrapper cannot know when the caller finished reading), and an abort landing
+after a fully-consumed body is a no-op. The stream reader is cancelled in a `finally` regardless, because
+a half-read body is a held socket.
+
+A deadline is now reported as **504 with "exceeded the Nms model deadline"**, distinct from a provider
+failure: "we stopped waiting" and "the vendor refused" send an operator to different places.
+
+### Verification
+
+Nine tests, **table-driven across all five real provider kinds**, injected fetch throughout — no
+network and no key. Each kind is proved to reject near the configured deadline; Google additionally
+proves the body case (headers arrive, the stream never ends) and that **the abort actually reached the
+body stream**, which is what shows the deadline stayed live past the response. A negative control
+constructs `GoogleProvider` directly, bypassing the funnel, and asserts it stays pending — which also
+states precisely where the binding lives. One test flips the configured number between two dispatches
+on the *same* provider instance and asserts the error names each value, so the deadline is read at
+dispatch rather than captured at construction.
+
+**An error in the test itself, worth recording.** The first version of the injected fetch ignored
+`init.signal`, and every case timed out — including the SDK adapters that were already bounded. The
+fake was at fault, not the code: **every timeout mechanism here, ours and both vendor SDKs', is
+implemented by passing an `AbortSignal` to fetch**, so a fake that ignores the signal defeats all of
+them at once and would have made a rigorous-looking suite prove nothing. It now rejects with
+`signal.reason`, which is what real `fetch` does.
+
+### Honest limits
+
+- **`deadlineBoundFetch` only helps if the underlying fetch honours the signal.** Real `undici` fetch
+  does; an injected one must. That is a property of the injection point, not something this wrapper can
+  enforce, and it is exactly what the test error above illustrates.
+- **Direct construction bypasses the binding.** `new GoogleProvider({...})` is unbounded by design — it
+  is what the negative control asserts. Production always goes through `resolveModelProvider`.
+- **The SDK adapters remain bounded by their own `timeout` option** as well as by the wrapper. Two
+  mechanisms, the same number; whichever expires first wins.
+- **No per-call override.** The deadline is process-wide, inherited from `timeouts.ts`, and carries the
+  ADR-0021 configurability debt already recorded there.
