@@ -170,3 +170,101 @@ provider, and the read endpoint does not pretend otherwise.
   are what ADR-0104's rule machinery already does per rule; the dial does not reach that yet.
 - **Per-connector halt** does not exist — the dial governs connectors, but there is no way to stop
   one connector the way you can stop one tool.
+
+## Amendment 2026-09-28 — AER-017: `require_approval` is a RESTRICTION, not a gate, and the ordering was wrong
+
+An automated review found the manual-approval dial to be **a permanent queue loop that also
+manufactured entitlement**. Both halves were reproduced before anything was changed.
+
+### What this ADR got right, and the one case it does not cover
+
+The original decision put the execution gate **first**, "ahead of every grant, rule, limit and
+scope", and argued: *"a stop that ran after entitlement resolution would still be a stop, but it
+would also be one more thing to get right in the wrong order later."* That argument is correct — for
+`halted`, a subject halt and `read_only`. Each can **only deny**, so running it first costs nothing
+and forecloses a whole class of ordering mistakes.
+
+**`require_approval` is not a stop.** It is a *conditional allow* — the one effect the gate can
+return that leads to execution. Returned before entitlement is resolved it produced two defects:
+
+1. **Approval manufactured entitlement.** An ungranted caller was invited into the approvals queue,
+   so an operator could sign off a call the caller was never entitled to make. That contradicts the
+   rule stated in `evaluate`'s own docstring, three lines below the gate: *"an ungranted call is
+   default-denied and nothing can rescue it."*
+2. **The approval could never be consumed.** The early return sits in front of the consume logic, so
+   a retry carrying an approved id got `require_approval` again — indefinitely. Operators approved
+   work that could not run.
+
+Reproducing it found a **third** consequence the finding did not name: a call denied by a **rate
+limit** or an **ABAC forbid** was also queued rather than denied. The dial was overriding every other
+rule, not just the grant check.
+
+### Why the exhaustive test did not catch it
+
+This ADR shipped a unit test asserting **exhaustively** that no input to `executionGate` returns an
+`allow`. That test passed throughout, and still does. `require_approval` is not an `allow` — so a
+conditional allow sat inside a set of stops, satisfying a guard written to prove the set contained
+only restrictions. The guard was true and the property it was believed to establish was not.
+
+### The fix
+
+- `executionGate` gains `stopsOnly`. When the caller resolves entitlement itself, the queueable
+  `require_approval` branch returns nothing; **every stop is still returned either way**. Default
+  `false`, so the two paths that cannot queue — model dispatch and connector calls, where
+  `require_approval` mode is a refusal and therefore a stop — are untouched.
+- A new `executionApprovalHold(execution)` expresses the hold as its own thing. Separate function,
+  not a mode of the gate: the gate answers *"must this stop before we even look?"*, the hold answers
+  *"does an otherwise-allowed call still need a human?"*. Collapsing those two is what produced
+  AER-017. It **fails closed** on a missing approver, exactly as ADR-0040's ABAC hold does — a hold
+  with nobody to route the queue entry to is unusable.
+- `evaluate` consults the hold **after every denial** (grants, data scope, rate limits, ABAC forbid)
+  and **before every other hold**. After the denials, so the dial can only restrict a call the rest
+  of the policy would have allowed. Before the other holds, so that during an incident the reason an
+  operator reads is the dial they just turned.
+- **One human sign-off per call satisfies whichever hold is checked first.** That is the pre-existing
+  contract for the ABAC hold and the approval rules and is unchanged: *"nothing runs unattended while
+  this mode is set"* is satisfied by one attendant, not by one per matching rule.
+
+### Verification — the finding's own acceptance list, all six
+
+Kernel-level (`packages/policy-kernel/src/index.test.ts`) and end-to-end through the real MCP path
+against a fake upstream (`apps/gateway/src/adr0124-kill-switch.test.ts`):
+
+1. ungranted call → `default-deny`, and **zero approval rows** — asserted on the queue, not just the
+   answer;
+2. granted call → exactly one pending row naming `execution-require-approval`;
+3. decide it → one retry **executes the tool exactly once**;
+4. the next call queues again with a different approval id — one sign-off buys one call;
+5. eight **concurrent** retries on one approval yield one allow and **one execution**;
+6. a per-tool halt still outranks the hold, and a rate limit, data-scope refusal and ABAC forbid
+   cannot be overridden.
+
+The rule chain is asserted in full, because the *ordering* is the fix: the grant resolves, the denial
+checks are traversed, and only then is the hold recorded.
+
+**The negative control the finding asked for was run**: restoring the early return reddens exactly 4
+kernel tests and 3 gateway tests, and nothing else.
+
+### An instrument error worth recording
+
+The concurrency assertions first used the harness's existing `upstreamHits`, and failed at 3 and 4
+where they expected 1. The counter was not lying — it counts **HTTP requests**, incremented before
+any protocol work, because ADR-0124's own claim is *"the socket was never reached"*. But one governed
+tool call reaches that socket several times (handshake, manifest sync, `tools/call`), so it cannot
+answer "did the tool run once". A `toolRuns` counter inside the tool handler was added for the claim
+being made. **Reaching for the counter that exists rather than the one that measures the claim is the
+same error as M-049** — there, a grep for a name the code does not use; here, a counter for a
+different fact.
+
+### Honest limits
+
+- **One approval satisfies whichever hold matched first.** The finding asked that an approval issued
+  by the execution-mode rule "must not satisfy a different approval rule". That binding is not
+  implemented here: the kernel receives a single `approvedApprovalId` and the first matching hold
+  consumes it. The effect is bounded — one human signed off this exact call — but a deployment that
+  wants per-rule consent does not get it yet, and this is the shape to revisit if that matters.
+- **Self-review is permitted** and recorded as such; the acceptance test decides as the named
+  approver, which on this fixture is the requesting user. That is a separate control (and a separate
+  argument) from this finding.
+- The dial remains excluded from ADR-0118's hardening preset, unchanged: if it were included,
+  "harden" would mean "halt".
