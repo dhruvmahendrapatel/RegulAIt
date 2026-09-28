@@ -44,6 +44,7 @@ import { runCampaignExpirySweep } from "./grant-certification.js";
 import { runCanaryObservationPrune } from "./config-versions.js";
 import { runMcpAdmissionRescan } from "./mcp-admission-rescan.js";
 import { runMcpRegistrySync } from "./mcp-registry.js";
+import { runMcpHealthProbeSweep } from "./mcp-health-probe.js";
 import { toRegistry, type SchedulerJobDefinition, type SchedulerJobRegistry } from "./scheduler.js";
 
 const HOUR = 3600;
@@ -70,6 +71,7 @@ export const SCHEDULER_JOB_NAMES = {
   canaryObservationPrune: "canary-observation-prune-sweep",
   mcpAdmissionRescan: "mcp-admission-rescan-sweep",
   mcpRegistrySync: "mcp-registry-sync-sweep",
+  mcpHealthProbe: "mcp-health-probe-sweep",
 } as const;
 
 export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): SchedulerJobDefinition[] {
@@ -412,6 +414,50 @@ export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): Schedu
             serversCreated: out.serversCreated,
             grantsCreated: out.grantsCreated,
             reason: out.reason,
+          },
+        };
+      },
+    },
+    {
+      // ADR-0126's ACTIVE half. The breaker learns from traffic, which means the
+      // FIRST user after an outage always pays the full connect deadline — on a
+      // quiet deployment that user can be the person being demoed to. This makes
+      // the platform the first caller instead.
+      //
+      // NOT a control, like every other sweep here: the breaker consulted on the
+      // request path is the enforcement, and with the scheduler off (the shipped
+      // default) behaviour is identical to before this job existed, because the
+      // breaker still learns passively. This only changes WHEN it learns.
+      //
+      // Our own refusals — an admission hold, an egress block — are counted
+      // separately and never charged to the breaker. An air-gapped install
+      // refuses every outbound host by design, and a probe that called that a
+      // failure would report every upstream as circuit-broken on a deployment
+      // where nothing is wrong.
+      name: SCHEDULER_JOB_NAMES.mcpHealthProbe,
+      description:
+        "Probe every registered MCP upstream, circuit-broken ones first, and feed the result to " +
+        "ADR-0126's breaker — so a dead upstream is refused before a user finds it and a recovered one " +
+        "resumes without waiting for someone to try. Makes outbound calls through the same guarded " +
+        "connect the proxy uses. Enforcement does not depend on it: the breaker still learns from " +
+        "traffic with this off. Admission holds and egress blocks are OUR refusals and never open a " +
+        "breaker.",
+      adr: "ADR-0126",
+      defaultIntervalSeconds: 5 * 60,
+      run: async (ctx) => {
+        const out = await runMcpHealthProbeSweep(ctx.db);
+        return {
+          itemsProcessed: out.probed,
+          detail: {
+            eligible: out.eligible,
+            probed: out.probed,
+            healthy: out.healthy,
+            failed: out.failed,
+            skippedCircuitOpen: out.skippedCircuitOpen,
+            skippedOurRefusal: out.skippedOurRefusal,
+            opened: out.opened,
+            recovered: out.recovered,
+            capped: out.capped,
           },
         };
       },

@@ -681,6 +681,14 @@ describe("every sweep is registered", () => {
         // is no second adjudication. Driven end-to-end in
         // mcp-admission-rescan.test.ts; this list pins its registration.
         SCHEDULER_JOB_NAMES.mcpAdmissionRescan,
+        // ADR-0126's ACTIVE half: probes every registered upstream — broken ones
+        // first — and feeds the result to the breaker, so a dead server is
+        // refused before a user finds it and a recovered one resumes without
+        // waiting for someone to try. Charges OUR refusals (admission holds,
+        // egress blocks) to nothing, because an air-gapped install would
+        // otherwise report every upstream as broken. Driven end-to-end in
+        // zz-mcp-health-probe.test.ts; this list pins its registration.
+        SCHEDULER_JOB_NAMES.mcpHealthProbe,
         // ADR-0101: pulls each ENABLED upstream MCP registry and refreshes the
         // federated CATALOGUE — and nothing else. It creates no server row and
         // no grant, because turning a directory entry into a governed object is
