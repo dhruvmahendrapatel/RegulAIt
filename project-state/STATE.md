@@ -1,5 +1,5 @@
 ---
-phase: gateway-hardening-probe-and-retry-done-pillars-7-8-verify-next
+phase: verification-closed-abac-v2-done-pii-redaction-next
 last_updated: 2026-09-28
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
@@ -20,6 +20,37 @@ roadmap: ../docs/product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**2026-09-28 (latest) — the three unverified claims closed, two external findings fixed, and
+ABAC schema v2 adds network location. M-048 and M-049 logged.**
+
+The session's build work: ADR-0128's retry policy (a retry is an idempotence claim, so a write
+tool gets exactly one attempt and the budget for a sequence IS the operation's deadline), the
+active health probe, then two findings from an external review — AER-037 (the probe's cap over a
+constant order starved the tail of the estate; migration 0118 adds a rotation cursor) and AER-036
+(the Kong adapter could label API-key traffic as SSO and the PDP believed it; the origin is now
+derived from the credential and a contradiction is refused). Then AER-035 item 3: a fault injected
+in Postgres at the applier's last write, proving the abort undoes the mutation AND the marker.
+
+**Verification before building, twice over.** `geminiInputs.md` appendix II closed pillars 7/8 and
+section 5: the orchestration DAG, Team-Lead ceilings, PM inbound sync and first-class decisions all
+already exist — the real gaps are narrower (wall-clock concurrency; whether PM state may drive the
+run state machine). Guardrail block mode, SAML+SCIM and the SOC-2/HIPAA packs ship. **Then I got one
+wrong in that very appendix** and corrected it: ABAC does evaluate time-of-day. M-049's rule — *a
+grep that returns nothing proves the absence of a string, never the absence of a capability* — is
+the most reusable thing this session produced.
+
+**ABAC schema v2** closes the one gap that survived: `context.clientIp`, Cedar's own `ipaddr` type,
+`required: false` so strict validation forces `context has clientIp` and "we don't know" is decided
+at write time. The version boundary is what makes it safe — emitting it to a stored v1 policy group
+would fail-closed every governed call, so `contextFor` takes the schema version. No device-posture
+attribute, because nothing here can observe posture and an unpopulatable attribute is an assertion
+nobody checked.
+
+Next, in order: in-flight PII redaction (the one confirmed section-5 gap — the verbs are
+block/warn/log with no mask), an ISO 27001 pack, and the five older OPEN HIGH findings
+(AER-017/018/019/021/022). SIEM streaming, SOAR webhooks, tool-result malware scanning and outbound
+secret classifiers were NOT FOUND and need a build decision, not just work.
 
 **2026-09-28 — the two genuine gaps in gateway hardening, closed: ACTIVE upstream health probing
 and a retry policy we own. ADR-0128 added.**

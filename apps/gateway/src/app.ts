@@ -2159,6 +2159,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       body.args,
       null,
       body.projectId ?? null,
+      // AER-036 / schema v2: NOTE WHAT IS DELIBERATELY ABSENT. There is no
+      // `clientIp` here and `authzCheckRequestSchema` does not accept one,
+      // because on this route `req.ip` is the PROXY's address and the proxy is
+      // asking about a subject somewhere else entirely. Forwarding either value
+      // would be the AER-036 mistake in a new field: an attribute that reads as
+      // the subject's network location and is actually somebody else's. Absent
+      // is correct, and a v2 policy's `context has clientIp` guard is what
+      // decides what to do about it.
       body.principal
         ? {
             sessionOrigin: body.principal.sessionOrigin ?? null,

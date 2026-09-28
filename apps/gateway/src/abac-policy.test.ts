@@ -554,22 +554,39 @@ describe("ADR-0040 (5) — the context is SERVER-DERIVED and cannot be spoofed",
   });
 
   it("session origin + MFA come from the resolved session, never from a header", () => {
+    // CLOSED SET, widened by exactly one field for schema v2's `clientIp`. Listed
+    // rather than loosened to `objectContaining`, for the same reason the rest of
+    // this file pins shapes: a new principal attribute must be added by someone
+    // who has read what this test is protecting.
     expect(abacPrincipalFromRequest({ authCtx: { via: "api-key" } })).toEqual({
-      sessionOrigin: "api_key", mfaCompleted: false,
+      sessionOrigin: "api_key", mfaCompleted: false, clientIp: null,
     });
     expect(abacPrincipalFromRequest({ authCtx: { via: "bootstrap" } })).toEqual({
-      sessionOrigin: "bootstrap", mfaCompleted: false,
+      sessionOrigin: "bootstrap", mfaCompleted: false, clientIp: null,
     });
     expect(
       abacPrincipalFromRequest({
         authCtx: { via: "session" },
         sessionAuth: { origin: "saml", totpEnabled: true },
       }),
-    ).toEqual({ sessionOrigin: "saml", mfaCompleted: true });
+    ).toEqual({ sessionOrigin: "saml", mfaCompleted: true, clientIp: null });
     // an unknown/absent session fails toward the WEAK claim, never the strong one
     expect(
       abacPrincipalFromRequest({ authCtx: { via: "session" }, sessionAuth: undefined }),
-    ).toEqual({ sessionOrigin: "unknown", mfaCompleted: false });
+    ).toEqual({ sessionOrigin: "unknown", mfaCompleted: false, clientIp: null });
+  });
+
+  it("the client address comes from the RESOLVED peer, and absence is null not a guess", () => {
+    // Schema v2. `ip` is what Fastify resolved under ADR-0031's trusted-proxy
+    // policy — this module never reads a forwarding header itself, which is the
+    // whole reason the field is sourced here rather than parsed anywhere else.
+    expect(
+      abacPrincipalFromRequest({ authCtx: { via: "api-key" }, ip: "203.0.113.7" }).clientIp,
+    ).toBe("203.0.113.7");
+    // and an unresolvable peer is NULL — never a sentinel address, which a
+    // policy could not tell apart from a real one
+    expect(abacPrincipalFromRequest({ authCtx: { via: "api-key" }, ip: null }).clientIp).toBeNull();
+    expect(abacPrincipalFromRequest({ authCtx: { via: "api-key" } }).clientIp).toBeNull();
   });
 });
 

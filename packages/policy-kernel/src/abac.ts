@@ -58,10 +58,18 @@ export const ABAC_DEFAULT_TIMEZONE = "UTC";
 // The versioned attribute schema
 // ---------------------------------------------------------------------------
 
-/** the schema version stored on every policy version row */
-export type AbacSchemaVersion = "v1";
-export const ABAC_SCHEMA_VERSIONS: readonly AbacSchemaVersion[] = ["v1"];
-export const ABAC_CURRENT_SCHEMA_VERSION: AbacSchemaVersion = "v1";
+/**
+ * The schema version stored on every policy version row.
+ *
+ * v1 and v2 are BOTH evaluated, each against its own schema — `evaluate` groups
+ * the stored policies by `schemaVersion` and runs one authorization per group.
+ * A v1 policy is therefore not broken, not migrated and not re-validated by the
+ * arrival of v2; it simply keeps meaning what it meant. That is the entire
+ * reason this field is versioned rather than global.
+ */
+export type AbacSchemaVersion = "v1" | "v2";
+export const ABAC_SCHEMA_VERSIONS: readonly AbacSchemaVersion[] = ["v1", "v2"];
+export const ABAC_CURRENT_SCHEMA_VERSION: AbacSchemaVersion = "v2";
 
 /**
  * v1 of the Cedar schema. It is code, not data, on purpose: the attributes a
@@ -155,7 +163,55 @@ const SCHEMA_V1 = {
   },
 };
 
-const SCHEMAS: Record<AbacSchemaVersion, unknown> = { v1: SCHEMA_V1 };
+/**
+ * v2 = v1 plus ONE context attribute: `clientIp`, the network location the
+ * request came from.
+ *
+ * ── WHY CEDAR'S OWN `ipaddr` AND NOT A STRING ──────────────────────────────
+ * Cedar ships an `ipaddr` extension type with `isInRange`, `isIpv4`, `isIpv6`
+ * and `isLoopback`, so a policy author writes
+ * `context.clientIp.isInRange(ip("10.0.0.0/8"))` and gets real CIDR semantics
+ * from the engine. Exposing a String instead would have meant either shipping a
+ * second CIDR matcher of our own (there is already one in the gateway's
+ * `net-policy.ts`, for session IP allow-listing) or leaving authors to do prefix
+ * comparisons on text — which is how `10.1.0.0/16` ends up matching `10.10.…`.
+ *
+ * ── WHY NOT REUSE `org_settings.session_ip_allowlist` ──────────────────────
+ * That list governs SESSION CREATION. Deriving an `inCorporateNetwork` boolean
+ * from it would mean an admin who tightened where people may log in had
+ * silently changed what every ABAC policy sees — two different facts wearing one
+ * control, which is the same mistake ADR-0126 refused when it kept the breaker,
+ * ADR-0124's halt and `agents.enabled` in three separate columns. The raw
+ * address goes to the policy and the policy decides; no new org column, and
+ * nothing to keep in step.
+ *
+ * ── WHY `required: false`, WHICH IS THE LOAD-BEARING PART ──────────────────
+ * The client IP is genuinely UNDETERMINABLE here. ADR-0031 trusts no proxy by
+ * default, so behind an untrusted hop `req.ip` is the hop's address or nothing
+ * at all. Declaring the attribute optional makes Cedar's strict validation
+ * REFUSE a policy that says `context.clientIp.isInRange(…)` without first
+ * guarding `context has clientIp` — so "we do not know where this came from"
+ * becomes a case the author must decide at WRITE time, instead of a silent
+ * no-match at runtime. A required attribute with a sentinel (`0.0.0.0`) would
+ * have let an unknown origin quietly test as a real address.
+ *
+ * There is deliberately NO device-posture attribute. Nothing in this product
+ * can observe device posture, and an attribute we cannot populate honestly is
+ * the AER-036 mistake in a new place: a field that looks like evidence and is
+ * an assertion nobody checked.
+ */
+const SCHEMA_V2 = (() => {
+  const base = structuredClone(SCHEMA_V1) as typeof SCHEMA_V1;
+  const ctx = base[ABAC_NAMESPACE].actions[ABAC_ACTION].appliesTo.context;
+  (ctx.attributes as Record<string, unknown>).clientIp = {
+    type: "Extension" as const,
+    name: "ipaddr" as const,
+    required: false,
+  };
+  return base;
+})();
+
+const SCHEMAS: Record<AbacSchemaVersion, unknown> = { v1: SCHEMA_V1, v2: SCHEMA_V2 };
 
 export function abacSchema(version: string): unknown | null {
   return SCHEMAS[version as AbacSchemaVersion] ?? null;
@@ -221,6 +277,14 @@ export interface AbacContextAttrs {
   deployModes: readonly string[];
   environments: readonly string[];
   rateLimitUsagePct: number;
+  /**
+   * The network location the request came from, as a plain address string
+   * ("203.0.113.7", "2001:db8::1"). Absent or null = undeterminable, which is
+   * an ordinary outcome here and not an error: ADR-0031 trusts no proxy by
+   * default. Only reaches a policy evaluated under schema v2 or later, and only
+   * when it parses — see `contextFor`.
+   */
+  clientIp?: string | null | undefined;
 }
 
 export interface AbacRequest {
@@ -358,9 +422,58 @@ function entitiesFor(req: AbacRequest): cedar.Entities {
   ];
 }
 
-function contextFor(req: AbacRequest, timezone: string): cedar.Context {
+/**
+ * Is this a literal IP address Cedar's `ip()` constructor will accept?
+ *
+ * PARSED, NOT PATTERN-MATCHED where it matters: `ip("garbage")` is a Cedar
+ * EVALUATION ERROR, and this engine fails closed on an evaluation failure — so
+ * one malformed `X-Forwarded-For` reaching the context would turn every
+ * IP-aware policy into a blanket deny. Anything that does not parse is treated
+ * as "undeterminable" and the attribute is omitted, which is the case the
+ * policy already has to guard with `context has clientIp`.
+ *
+ * Deliberately strict: no ports, no zone ids, no CIDR suffix, no brackets. A
+ * value carrying any of those is not this request's address.
+ */
+function isLiteralIpAddress(value: string): boolean {
+  if (value.length === 0 || value.length > 45) return false;
+  if (value.includes("/") || value.includes("%") || value.includes("[")) return false;
+  // IPv4: four decimal octets, no leading zeros beyond a bare "0"
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(value);
+  if (v4) {
+    return v4.slice(1).every((part) => {
+      if (part.length > 1 && part.startsWith("0")) return false;
+      const n = Number(part);
+      return n >= 0 && n <= 255;
+    });
+  }
+  // IPv6: hex groups with at most one "::" elision, optional IPv4 tail
+  if (!value.includes(":")) return false;
+  if ((value.match(/::/g) ?? []).length > 1) return false;
+  const tail = value.slice(value.lastIndexOf(":") + 1);
+  const head = tail.includes(".") ? value.slice(0, value.lastIndexOf(":") + 1) : value;
+  if (tail.includes(".") && !isLiteralIpAddress(tail)) return false;
+  const groups = head.split(":").filter((g) => g.length > 0);
+  if (groups.some((g) => !/^[0-9a-fA-F]{1,4}$/.test(g))) return false;
+  const max = tail.includes(".") ? 6 : 8;
+  return value.includes("::") ? groups.length <= max : groups.length === max;
+}
+
+/**
+ * THE CONTEXT BAG, and note that it takes the SCHEMA VERSION.
+ *
+ * That parameter is load-bearing rather than tidy. `isAuthorized` is called
+ * with `validateRequest: true`, so a context attribute the group's schema does
+ * not declare is a REQUEST VALIDATION FAILURE — and this engine turns a failure
+ * into `forbid` (correctly: an ABAC layer that stops enforcing when it errors is
+ * worse than no ABAC layer). Emitting `clientIp` unconditionally would therefore
+ * have fail-closed every call governed by a stored v1 policy, which is as close
+ * to a self-inflicted outage as this file can get. v1 groups get exactly the v1
+ * bag; only v2 and later see `clientIp`.
+ */
+function contextFor(req: AbacRequest, timezone: string, schemaVersion: string): cedar.Context {
   const t = timeInZone(req.at ?? new Date(), timezone);
-  return {
+  const ctx: cedar.Context = {
     deployModes: [...req.context.deployModes],
     environments: [...req.context.environments],
     hour: t.hour,
@@ -369,6 +482,11 @@ function contextFor(req: AbacRequest, timezone: string): cedar.Context {
     timezone,
     rateLimitUsagePct: Math.max(0, Math.min(100, Math.trunc(req.context.rateLimitUsagePct))),
   };
+  const ip = req.context.clientIp;
+  if (schemaVersion !== "v1" && typeof ip === "string" && isLiteralIpAddress(ip)) {
+    ctx.clientIp = { __extn: { fn: "ip", arg: ip } };
+  }
+  return ctx;
 }
 
 class CedarAbacEngine implements AbacEngine {
@@ -501,7 +619,7 @@ class CedarAbacEngine implements AbacEngine {
           principal: entityUid("User", request.principal.id),
           action: { type: `${ABAC_NAMESPACE}::Action`, id: ABAC_ACTION },
           resource: entityUid("Tool", request.resource.id),
-          context: contextFor(request, tz),
+          context: contextFor(request, tz, schemaVersion),
           schema: schema as cedar.Schema,
           validateRequest: true,
           policies: { staticPolicies },

@@ -3709,6 +3709,9 @@ export interface AbacPolicyTestCase {
     deployModes?: string[];
     environments?: string[];
     rateLimitUsagePct?: number;
+    /** schema v2 — a literal client address to evaluate this case at. Stored
+     *  data, not enforcement input: the simulation surface executes nothing. */
+    clientIp?: string | null;
   };
   /** 'match' = this policy is expected to fire; 'no_match' = it must not */
   expect: "match" | "no_match";

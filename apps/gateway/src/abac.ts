@@ -151,6 +151,8 @@ export interface AbacToolContext {
   /** highest per-window rate-limit consumption at this call site, 0–100 */
   rateLimitUsagePct?: number;
   principal?: AbacPrincipalContext;
+  /** schema v2 — carried inside `principal` by the route that knows the request;
+   *  see the note in `abac-principal.ts` on why it lands in Cedar's CONTEXT bag */
   /** the instant to evaluate at; defaults to now. Tests and the simulation
    * surface pin it — the ENFORCEMENT path never accepts one from a client. */
   at?: Date;
@@ -272,6 +274,10 @@ export async function assembleAbacRequest(db: Db, ctx: AbacToolContext): Promise
       deployModes: derived.deployModes,
       environments: derived.environments,
       rateLimitUsagePct: ctx.rateLimitUsagePct ?? 0,
+      // Schema v2. The engine drops it for a v1 policy group and for anything
+      // that does not parse as a literal address, so passing it unconditionally
+      // here is safe and keeps ONE place that decides.
+      clientIp: ctx.principal?.clientIp ?? null,
     },
     ...(ctx.at ? { at: ctx.at } : {}),
   };
@@ -348,6 +354,12 @@ export function runAbacPolicyTests(
         deployModes: c.context?.deployModes ?? [],
         environments: c.context?.environments ?? [],
         rateLimitUsagePct: c.context?.rateLimitUsagePct ?? 0,
+        // Schema v2. A TEST CASE may name an address, because previewing "what
+        // does this network rule do to a call from 203.0.113.7" is the whole
+        // point of the surface — and this path EXECUTES NOTHING (ADR-0120). It
+        // is the one place a caller-supplied address is legitimate, for exactly
+        // the reason the enforcement path's is not.
+        clientIp: c.context?.clientIp ?? null,
       },
       ...(c.at ? { at: new Date(c.at) } : {}),
     };
@@ -400,6 +412,10 @@ const testCaseSchema: z.ZodType<AbacPolicyTestCase> = z.object({
       deployModes: z.array(z.string()).optional(),
       environments: z.array(z.string()).optional(),
       rateLimitUsagePct: z.number().int().min(0).max(100).optional(),
+      /** schema v2 — a literal address to evaluate the case at. Unparseable
+       *  values are dropped by the engine rather than rejected here, so a test
+       *  case can deliberately exercise the "undeterminable" branch. */
+      clientIp: z.string().max(45).nullish(),
     })
     .optional(),
   expect: z.enum(["match", "no_match"]),
