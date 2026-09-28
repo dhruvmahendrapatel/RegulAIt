@@ -1,6 +1,6 @@
 ---
-phase: codex-review-hardening-f02-closed-f05-next
-last_updated: 2026-09-27
+phase: gateway-hardening-probe-and-retry-done-pillars-7-8-verify-next
+last_updated: 2026-09-28
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
@@ -20,6 +20,37 @@ roadmap: ../docs/product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**2026-09-28 — the two genuine gaps in gateway hardening, closed: ACTIVE upstream health probing
+and a retry policy we own. ADR-0128 added.**
+
+Verification before building paid for itself: of four planned "gateway-hardening" items, three
+already existed, so the work narrowed to two. (1) **Active health probing** —
+`mcp-health-probe-sweep`, registered as a scheduler job under ADR-0126, makes the platform the
+first caller after an outage instead of a user. It reuses `breakerAdmits` so it enters the
+breaker's own one-winner election rather than re-implementing it, probes broken upstreams FIRST
+because recovery is the time-critical half, and counts OUR refusals (egress-blocked,
+admission-held) separately without ever charging them to the breaker — an air-gapped install
+would otherwise report every upstream as circuit-broken on a deployment where nothing is wrong.
+Not a control: with the scheduler off (the shipped default) behaviour is byte-identical, because
+the breaker still learns passively.
+
+(2) **A retry policy we own** (ADR-0128). The honest gap was narrower than "no retries": the model
+SDKs retry twice already, so on the MCP path the gap was total and on the model path it was
+*ownership* — vendor backoff, vendor classifier, invisible to our breaker. The design turns on one
+sentence: **a retry is an assertion that running an operation twice is indistinguishable from
+running it once**, which is true of `connect` and `tools/list` and false of `tools/call`. So
+`attemptsForToolKind` reads §3's stored `mcp_tools.kind` and gives a write — and an unknown kind —
+exactly one attempt. The budget for a whole sequence *is* the operation's configured deadline, so
+retries never extend a bound an operator approved and a timeout is never retried; our own refusals
+exit on the first attempt; one exhausted sequence is ONE failure to the breaker, not three. The
+recovery test carries a permanent twin with the policy set to one attempt, so removing the wiring
+reddens the pair rather than needing a remembered experiment. The file also caught a false green in
+itself: two apps in one process cannot hold different retry policies, because the config is a
+module singleton and the second `buildApp` silently set it for both.
+
+Open on this thread: the model path still retries with the vendor's policy, and pillars 7/8 plus
+the owner's new `geminiInputs.md` section 5 are still unverified.
 
 **2026-09-27 (latest, second entry) — AER-035: one human approval could be spent twice, and did
 create ten governance rules under test. ADR-0056 amended for the fifth time, M-046 logged.**

@@ -67,6 +67,7 @@ import { schedulerHealth } from "./scheduler-health.js";
 import { SharedRateLimitStore } from "./rate-limit-store.js";
 import { resolveTimeoutConfig, setTimeoutConfig, type TimeoutConfig } from "./timeouts.js";
 import { resolveBreakerConfig, setBreakerConfig, type BreakerConfig } from "./upstream-breaker.js";
+import { resolveRetryConfig, setRetryConfig, type RetryConfig } from "./upstream-retry.js";
 import {
   rateLimitKey,
   rateLimitMax,
@@ -215,6 +216,17 @@ export interface BuildAppOptions {
   timeouts?: Partial<TimeoutConfig>;
   /** ADR-0126 circuit-breaker thresholds; same reason */
   breaker?: Partial<BreakerConfig>;
+  /**
+   * ADR-0128 retry/backoff policy; a test pins `maxAttempts: 1` to assert that
+   * the whole mechanism is switchable off.
+   *
+   * PROCESS-WIDE, exactly like `timeouts` and `breaker` above: it sets a module
+   * singleton, because a gateway process has one policy. So in a test file that
+   * builds SEVERAL apps, the last `buildApp` wins for all of them — switch the
+   * policy with `setRetryConfig` at the point it matters instead of expecting
+   * two apps to disagree.
+   */
+  retry?: Partial<RetryConfig>;
   /** hex AES-256 key for encrypting stored git tokens (REGULAIT_DATA_KEY) */
   dataKey?: string;
   /** ADR-0031: which peers may speak for the client via X-Forwarded-*.
@@ -506,6 +518,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   const timeoutCfg = resolveTimeoutConfig(process.env, opts.timeouts ?? {});
   setTimeoutConfig(timeoutCfg);
   setBreakerConfig(resolveBreakerConfig(process.env, opts.breaker ?? {}));
+  setRetryConfig(resolveRetryConfig(process.env, opts.retry ?? {}));
   const app = Fastify({
     logger: false,
     trustProxy,

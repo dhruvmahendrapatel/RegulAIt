@@ -59,6 +59,14 @@ const NIL_USER = "00000000-0000-0000-0000-000000000000";
 export interface McpEgressDeps {
   resolve?: EgressResolver;
   fetchImpl?: typeof fetch;
+  /**
+   * ADR-0128: the deadline THIS attempt may use, which on a retry is what is
+   * left of the sequence's budget rather than the full configured bound.
+   * Absent = `timeouts().mcpConnectMs`, i.e. exactly the pre-retry behaviour.
+   * It lives in this bag because the bag is already how a caller overrides what
+   * this function would otherwise read from module state.
+   */
+  connectDeadlineMs?: number;
 }
 
 /** Everything one decision needs: the allow-list snapshot and the EFFECTIVE
@@ -167,6 +175,19 @@ export async function auditMcpUpstreamUnreachable(
     reason: string;
     timedOut: boolean;
     deadlineMs: number;
+    /**
+     * ADR-0128 — how many attempts the sequence actually made, and the backoffs
+     * between them. They ride the ONE failure row rather than getting a row
+     * each: a row per attempt would turn one outage into thousands of
+     * near-identical entries, which is verbatim why the breaker files
+     * transitions and not refusals. Absent on callers that do not retry.
+     */
+    attempts?: number;
+    retryDelaysMs?: number[];
+    /** the classifier's verdict on the LAST error, so the ledger says whether
+     *  we declined to retry and why — a spent deadline and an unrecognised
+     *  error are different operator problems. */
+    retryVerdict?: string | null;
   },
 ): Promise<void> {
   await db.insert(auditLog).values({
@@ -179,6 +200,9 @@ export async function auditMcpUpstreamUnreachable(
       url: args.url,
       outcome: args.timedOut ? "deadline_exceeded" : "connect_failed",
       deadlineMs: args.deadlineMs,
+      ...(args.attempts !== undefined ? { attempts: args.attempts } : {}),
+      ...(args.retryDelaysMs !== undefined ? { retryDelaysMs: args.retryDelaysMs } : {}),
+      ...(args.retryVerdict ? { retryVerdict: args.retryVerdict } : {}),
     },
     effect: "deny",
     ruleId: "mcp-upstream-unreachable",
@@ -274,7 +298,7 @@ export async function guardedMcpConnect(
   // own timer never sees. The signal goes through `requestInit` because the
   // guarded fetch already forwards a caller-supplied signal
   // (`pinned-fetch.ts`) and simply had nobody supplying one.
-  const deadlineMs = timeouts().mcpConnectMs;
+  const deadlineMs = deps.connectDeadlineMs ?? timeouts().mcpConnectMs;
   await client.connect(
     new StreamableHTTPClientTransport(new URL(serverRow.url), {
       fetch: guardedFetch,

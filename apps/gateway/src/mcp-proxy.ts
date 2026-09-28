@@ -62,6 +62,13 @@ import {
 } from "./mcp-egress.js";
 import { timeouts } from "./timeouts.js";
 import {
+  attemptsForToolKind,
+  isDeadlineError,
+  newRetryReport,
+  withUpstreamRetry,
+  type RetryReport,
+} from "./upstream-retry.js";
+import {
   breakerAdmits,
   recordUpstreamFailure,
   recordUpstreamSuccess,
@@ -136,17 +143,36 @@ function toolKind(tool: Tool): "read" | "write" {
 export async function connectUpstream(
   db: Db,
   serverRow: { id: string; url: string; allowPrivateRanges: boolean | null },
+  opts: { retry?: RetryReport; retryAttempts?: number } = {},
 ): Promise<Client> {
-  // ADR-0097 — THE ADMISSION GATE, and note the ORDER. It runs BEFORE
-  // `guardedMcpConnect`, which is the only function in this codebase that
-  // opens an outbound MCP socket, so a held server is refused with provably
-  // zero outbound attempt — the same standard ADR-0043 holds itself to, proven
-  // the same way (a recording resolver that must see no lookup at all).
-  // Re-read per connect, never cached: the verdict recorded at the last sync is
-  // not a fact about this request, and a row written straight into Postgres
-  // must be adjudicated too.
-  await assertAdmitted(db, serverRow.id);
-  return guardedMcpConnect(db, serverRow);
+  // ADR-0128 — THE RETRY SEQUENCE WRAPS BOTH GATES, and that is the point of
+  // putting it here rather than inside `guardedMcpConnect`. A handshake is
+  // idempotent so it may be repeated; an egress block or an admission hold is
+  // OUR adjudication, is classified non-retryable, and therefore exits on the
+  // first attempt with the gates having run exactly once. Wrapping the gates
+  // also means a retry cannot become a bypass: every attempt re-adjudicates.
+  //
+  // The budget for the WHOLE sequence is the one configured connect deadline,
+  // so retrying never extends the bound an operator set — see upstream-retry.ts.
+  return withUpstreamRetry(
+    async ({ deadlineMs }) => {
+      // ADR-0097 — THE ADMISSION GATE, and note the ORDER. It runs BEFORE
+      // `guardedMcpConnect`, which is the only function in this codebase that
+      // opens an outbound MCP socket, so a held server is refused with provably
+      // zero outbound attempt — the same standard ADR-0043 holds itself to,
+      // proven the same way (a recording resolver that must see no lookup at
+      // all). Re-read per connect, never cached: the verdict recorded at the
+      // last sync is not a fact about this request, and a row written straight
+      // into Postgres must be adjudicated too.
+      await assertAdmitted(db, serverRow.id);
+      return guardedMcpConnect(db, serverRow, { connectDeadlineMs: deadlineMs });
+    },
+    {
+      budgetMs: timeouts().mcpConnectMs,
+      ...(opts.retryAttempts !== undefined ? { maxAttempts: opts.retryAttempts } : {}),
+      ...(opts.retry ? { report: opts.retry } : {}),
+    },
+  );
 }
 
 /** The one governed tool-call primitive, shared by the MCP proxy route (a
@@ -292,25 +318,6 @@ export interface McpPii {
   withheld: boolean;
 }
 
-/**
- * Is this failure a DEADLINE rather than a refusal?
- *
- * Three shapes reach here and they come from different layers, which is why
- * this is a predicate and not an `instanceof`: `AbortSignal.timeout` rejects
- * with a DOMException named `TimeoutError`, the MCP SDK raises `McpError` with
- * `ErrorCode.RequestTimeout` (-32001) when ITS timer fires first, and undici
- * surfaces some connect deadlines as an `Error` whose `cause.code` is one of
- * the ETIMEDOUT family. Missing one would silently downgrade a timeout to
- * "unreachable", which points an operator at the wrong thing.
- */
-function isDeadlineError(err: unknown): boolean {
-  if (err instanceof McpError && err.code === ErrorCode.RequestTimeout) return true;
-  const e = err as { name?: string; code?: unknown; cause?: { code?: unknown } } | null;
-  if (!e) return false;
-  if (e.name === "TimeoutError" || e.name === "AbortError") return true;
-  const code = e.code ?? e.cause?.code;
-  return code === "ETIMEDOUT" || code === "UND_ERR_CONNECT_TIMEOUT" || code === "UND_ERR_HEADERS_TIMEOUT";
-}
 
 export async function executeGovernedToolCall(
   db: Db,
@@ -920,13 +927,25 @@ async function executeGovernedToolCallInner(
     // An upstream FAILURE throws out of here before any metering — a failed
     // call bills nothing, exactly like a failed model dispatch or connector
     // invoke.
-    const content = await upstream.callTool(
-      { name: toolName, arguments: args.arguments },
-      undefined,
-      // G2: by far the most generous of the three deadlines, because this is
-      // the upstream doing real work — a build, a query, a scan. A bound that
-      // severs legitimate work is worse than the hang it replaced.
-      { timeout: timeouts().mcpCallToolMs },
+    // ADR-0128 — THE ONE PLACE A RETRY WOULD HAVE BEEN A BUG. A `tools/call` is
+    // an arbitrary side-effecting operation on somebody else's system: a blind
+    // retry can open two pull requests or charge two cards, and it does so
+    // precisely when the network is unreliable. `attemptsForToolKind` reads
+    // §3's stored read/write classification and returns 1 for a write — and
+    // for a tool whose kind is unknown, since `toolKind` already treats an
+    // un-annotated tool as a write. A read tool is safe to ask twice.
+    const content = await withUpstreamRetry(
+      ({ deadlineMs }) =>
+        upstream!.callTool({ name: toolName, arguments: args.arguments }, undefined, {
+          timeout: deadlineMs,
+        }),
+      {
+        // G2: by far the most generous of the three deadlines, because this is
+        // the upstream doing real work — a build, a query, a scan. A bound that
+        // severs legitimate work is worse than the hang it replaced.
+        budgetMs: timeouts().mcpCallToolMs,
+        maxAttempts: attemptsForToolKind(kind),
+      },
     );
 
     // §8.4 OUTPUT check: the tool already ran, so a block here is BILL-AND-
@@ -1093,7 +1112,13 @@ export async function syncUpstreamTools(
   trigger: McpAdmissionTrigger = "sync",
 ): Promise<Tool[]> {
   // G2: a manifest is small, so a slow one is a sick upstream, not a busy one.
-  const { tools } = await client.listTools(undefined, { timeout: timeouts().mcpListToolsMs });
+  // ADR-0128: and reading a manifest is idempotent by definition, so it is one
+  // of the two MCP operations that may simply be asked again — within the same
+  // one deadline, which is the whole sequence's budget.
+  const { tools } = await withUpstreamRetry(
+    ({ deadlineMs }) => client.listTools(undefined, { timeout: deadlineMs }),
+    { budgetMs: timeouts().mcpListToolsMs },
+  );
   // ADR-0097 — SCAN BEFORE UPSERT. This is the one moment the gateway sees a
   // manifest, and scanning here rather than after the upsert is what keeps a
   // poisoned description out of `mcp_tools` ENTIRELY: under `enforce` a dirty
@@ -1332,8 +1357,12 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
     // pre-hijack refusal shape — a plain 403 naming the real reason. The
     // refusal is already audited inside the guard and nothing left the box.
     let upstream: Client;
+    // ADR-0128: the sequence reports into this, so the ONE failure row below can
+    // say how hard we tried. A row per attempt was deliberately not written —
+    // see upstream-retry.ts for why, which is verbatim the breaker's reasoning.
+    const connectRetry = newRetryReport();
     try {
-      upstream = await connectUpstream(db, serverRow);
+      upstream = await connectUpstream(db, serverRow, { retry: connectRetry });
     } catch (err) {
       if (err instanceof McpEgressBlockedError) {
         return reply.status(403).send({
@@ -1379,11 +1408,18 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
         reason: detail,
         timedOut,
         deadlineMs: timeouts().mcpConnectMs,
+        attempts: connectRetry.attempts,
+        retryDelaysMs: connectRetry.delaysMs,
+        retryVerdict: connectRetry.lastWhy,
       });
       // count it towards the breaker. This is the ONLY place a connect failure
       // is counted: an egress refusal and an admission hold return above, and
       // neither is the upstream's fault — tripping a breaker on our own policy
       // decision would mean a governance change looked like an outage.
+      // ONE failure for the whole sequence, not one per attempt. The breaker's
+      // threshold was chosen against the unit "one user-visible failed
+      // operation"; counting attempts would silently make it three times more
+      // trigger-happy without anybody changing its configuration.
       await recordUpstreamFailure(db, serverRow, detail);
       return reply.status(timedOut ? 504 : 502).send({
         error: timedOut ? "mcp_upstream_timeout" : "mcp_upstream_unreachable",
