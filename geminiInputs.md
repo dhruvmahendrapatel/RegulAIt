@@ -171,7 +171,8 @@ either way until someone checks them.**
 ## Section 5 (Enterprise Cybersecurity Roadmap) — NOT VERIFIED, with three flags
 *(CLOSED 2026-09-28 — verified item by item in VERIFICATION APPENDIX II at the end
 of this file. Three of the ten items already ship, three are partial, one is
-genuinely missing, and four were not found.)*
+genuinely missing, and four were not found. One line in it was corrected the same
+day — see the CORRECTION under D9.)*
 
 That section landed while this verification was being written, so none of it was
 checked. It is listed here so nobody mistakes silence for confirmation. Three items
@@ -291,13 +292,27 @@ plumbing one.
   described as "the intended way to make `semantic_dlp` useful for a specific
   business" (`shared/src/guardrails.ts:92`). That is a customer **dictionary**,
   not EDM: no corpus ingestion, no hashed-record index, no per-record match.
-- **D9 "ABAC with dynamic attributes"** — ABAC exists and already evaluates two
-  dynamic session facts the line does not mention: `sessionOrigin` and
-  `mfaCompleted`, beside `roles`/`roleIds`/`teams`/`isAdmin`
-  (`packages/policy-kernel/src/abac.ts:85-105`), plus resource attributes and a
-  context bag carrying `deployModes` (`:138`). **The two attributes the line
-  names specifically — device posture and network location — are not there**, and
-  neither is time-of-day.
+- **D9 "ABAC with dynamic attributes"** — ABAC is real Cedar
+  (`@cedar-policy/cedar-wasm` 4.12.0, in-process wasm, no sidecar and no network
+  hop — chosen so an air-gapped deployment gains no network dependency in its
+  enforcement path). It already evaluates two dynamic session facts the line does
+  not mention — `sessionOrigin` and `mfaCompleted`, beside
+  `roles`/`roleIds`/`teams`/`isAdmin` (`packages/policy-kernel/src/abac.ts:85-105`)
+  — plus a **context bag in which every field is server-derived**, so nothing a
+  client can assert reaches it (`:130-150`): `deployModes`, `environments`,
+  `hour`, `minute`, `dayOfWeek`, `timezone` and `rateLimitUsagePct`.
+
+  **CORRECTION, 2026-09-28 (see M-049).** The first version of this line said
+  "neither is time-of-day". **That was wrong.** Time-of-day is evaluated, and
+  carefully: `hour`/`minute`/`dayOfWeek` are computed in the POLICY'S declared
+  IANA timezone, never the server's incidental locale and never a client clock
+  (`abac.ts:29-32`, `timeInZone` at `:287`). I searched for a name the code does
+  not use, found nothing, and wrote down an absence — in the very appendix whose
+  purpose is to stop exactly that.
+
+  **What is genuinely not there**: network location (no client IP or CIDR
+  attribute in the context bag) and device posture. Those two are the attributes
+  the line names, and on those two the line is right.
 - **E10 "ISO 27001"** — **not shipped**. The ISO pack is `iso-42001` (the AI
   management-system standard), which is a different thing from ISO 27001
   (information security). `soc-2` and `hipaa` do ship.

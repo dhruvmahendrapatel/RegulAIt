@@ -1155,3 +1155,40 @@ paragraph in `g2-upstream-deadlines.test.ts` that documents exactly it. The fix 
 the one that paragraph already prescribes: a literal TEST-NET-3 address (RFC
 5737), randomised per run, which is public and therefore independent of the
 private-range posture and of every other suite's allow-list.
+
+### M-049 (2026-09-28) — I searched for a NAME, found nothing, and wrote down an absence
+
+Verification appendix II — the document whose entire purpose is to stop agents
+acting on unchecked claims of absence — asserted that the ABAC engine does not
+evaluate time-of-day. It does. `hour`, `minute`, `dayOfWeek` and `timezone` are
+in the Cedar context bag (`packages/policy-kernel/src/abac.ts:141-147`), and they
+are computed in the **policy's declared IANA timezone**, never the server's
+locale and never a client clock (`timeInZone`, `:287`) — a more careful
+implementation than the line I wrote claimed was missing entirely.
+
+**How it happened, precisely.** I grepped that file for
+`Context:|ipAddress|networkLocation|devicePosture|timeOfDay|deployMode|Environment`.
+The grep returned three hits, all `deployModes`. I read the `User` shape, saw the
+principal attributes, and concluded the context bag held `deployModes` and
+nothing else. **I never read the context Record itself** — it was twenty lines
+below the last line I looked at. `timeOfDay` is not a token this codebase uses;
+the code says `hour`, `minute`, `dayOfWeek`. So the grep could only ever have
+missed it.
+
+**The rule.** *A grep that returns nothing proves the ABSENCE OF A STRING, never
+the absence of a capability. Before writing "X is not implemented", open the
+structure that would contain X and read it — a type, a schema, a table
+definition, a switch. If you cannot name the file and lines you read, you have
+not checked, and the honest verdict is "not found", not "missing".*
+
+This is the sharper form of M-046 (*a limit you wrote down is a claim you have
+not re-checked*) and the same family as M-045 (*an absence I never verified*).
+The aggravating detail is the venue: I made it while writing the correction
+appendix, in the paragraph immediately after quoting M-046 at the reader. The
+appendix's own "NOT CHECKED" discipline is what should have caught it — the
+honest entry would have been "I checked the principal attributes; I did not read
+the context bag."
+
+Mitigation used from here: when a verification verdict is "missing", the evidence
+cell must cite the file and line range of the structure I READ and found it
+absent from — not the grep that failed to find it.
