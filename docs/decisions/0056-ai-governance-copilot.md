@@ -1012,6 +1012,26 @@ proposal row.**
    crash testing makes them safe. That is what the trigger observes. A harness
    that killed the process would be testing Postgres's durability and would pass
    whether or not our boundary was drawn correctly.
+
+   **The usual non-vacuity probe could not be run, and the reason is better than
+   the probe would have been.** The obvious way to check that this test would
+   catch a broken boundary is to move one of the three writes onto the plain `db`
+   handle instead of `tx` and watch the test redden. Both attempts —
+   `createApprovalRuleRow(db, …)` and the success `audit(…, db)` — **deadlocked
+   instead of diverging**, and neither test run ever finished. That is not a
+   flaw in the experiment: the transaction holds `FOR UPDATE` on the proposal row
+   and, once it has written anything to the ledger,
+   `pg_advisory_xact_lock(AUDIT_CHAIN_LOCK_KEY)` (`audit-chain.ts:154`). A second
+   connection needing either one waits for a transaction that is itself waiting
+   for that connection.
+
+   So the boundary is not merely documented, it is **structurally enforced**: a
+   future refactor that took one of these writes out of the transaction would
+   hang in this suite rather than silently producing two facts out of three.
+   What the test relies on instead is its own paired positive case (M-033): the
+   same proposal, the trigger dropped, asserted to return 200 with exactly one
+   rule and a non-null `applied_at` — so the three absences are read against a
+   demonstrated presence rather than against nothing.
 3. `applyRuleEdit`'s SAVEPOINT nesting is exercised by the existing suite
    through the ordinary route, not by a test written for the nested case
    specifically.
