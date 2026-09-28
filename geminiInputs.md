@@ -117,3 +117,75 @@ To elevate RegulAIt from an "AI proxy with compliance rules" to a true **enterpr
 
 ### E. Certifications
 *   Code architecture and data handling must strictly align with the requirements for **SOC 2 Type II, ISO 27001, and HIPAA compliance** to satisfy enterprise CISOs.
+
+---
+
+# VERIFICATION APPENDIX — added 2026-09-28 by the Claude session on `dhruv/active`
+
+**Scope: sections 1–4 only.** Section 5 (Enterprise Cybersecurity Roadmap) was
+committed after this pass ran and is NOT covered — see "Section 5" at the end.
+
+Sections 1–4 were verified against the code before any of them was built on.
+**Four of the "REALITY" lines are wrong or stale, and two of them would have caused
+an agent to rebuild features that already ship.** The original text above is left
+untouched; this appendix is the correction.
+
+Why this appendix exists at all: this repository has a logged mistake (`mistakes.md`
+M-046) from exactly this failure mode — a written-down limitation was carried forward
+for five weeks without being re-derived, and the real defect turned out to be far
+worse than the sentence describing it. *A limit you wrote down is a claim you have
+not re-checked.* So every line below was checked against code, not against docs.
+
+## Corrections — do not build these, they exist
+
+| Claim above | Verdict | Evidence |
+| --- | --- | --- |
+| "Circuit Breakers" needed | **ALREADY EXISTS** | ADR-0126 + migration `0116_upstream_circuit_breaker.sql`. Per-upstream breaker columns on `mcp_servers`; `breakerAdmits()` consulted on the hot path before the connect (`mcp-proxy.ts:1318`), answering `503 mcp_upstream_circuit_open` with `Retry-After`. Columns deliberately on the server row so reading costs no extra query. |
+| "Request Timeouts & Retries" needed | **ALREADY EXISTS** (retries: see caveat) | ADR-0126 + `apps/gateway/src/timeouts.ts`. `requestTimeout` was Fastify's `0` (disabled) and is now set (`app.ts:512`); MCP `connect`/`listTools`/`callTool` each carry a deadline (`mcp-egress.ts:277`, `mcp-proxy.ts:929`, `:1096`); model dispatch is bounded. `connectionTimeout` is deliberately NOT set — it is socket inactivity, and this product streams on purpose (MCP hijack, both compat SSE edges, orchestration SSE, `/v1/audit.csv`). |
+| "Payload Size Limits" needed | **ALREADY EXISTED BEFORE ADR-0126** | Fastify defaults `bodyLimit` to 1 MiB and nothing overrode it. ADR-0126 restated it explicitly in `timeouts.ts` and pinned the number with a test, so changing it has to be argued for. This was never a missing bound. |
+| "Centralized Rate Limiting & Budgets… limits live in single-process memory… we need Redis or Valkey" | **FALSE, and the remedy is already chosen** | ADR-0125 + migration `0115_rate_limit_counters.sql` audited this exact sentence and found it **too broad**: almost every enforcement counter was already shared because it was already SQL — kernel `rate_limits` (`count()` over `audit_log`), project budgets (`sum(usage_events.cost_usd)`), virtual-key budgets (atomic increment), login lockout, replay guards. Only TWO were per-process, and both were fixed: the HTTP edge limiter now counts in Postgres via `SharedRateLimitStore` (`rate-limit-store.ts`, wired at `app.ts:67`), and the measured run/node budget was made atomic. **Postgres was chosen over a new dependency deliberately**, and the ADR gives the security reason for rejecting the naive one-write-per-request version: a limiter that writes on every unauthenticated request turns a request flood into a Postgres flood, making the limiter the amplifier it exists to prevent. |
+| "Pillar 2: does NOT implement a declarative multi-stage pipeline… agents must build the core engine" | **FALSE** | `packages/workflow-kernel/src/index.ts` is a zod-validated declarative engine (stage types `trigger`/`planning`/`artifact_generation`/`human_approval`/`automated_build`/`automated_check`/`git_operation`/`deployment`/`rollback`) with a real state machine, assignment-rule routing and multi-template merge. Persisted in `workflowTemplates`/`workflowInstances`/`workflowEvents`/`workflowArtifacts`. Routes in `apps/gateway/src/workflows.ts`. PR generation calls a real git provider (`createBranch`/`openPullRequest`/`mergePullRequest`), not a stub. **Plan-only is enforced, not advisory**: `plan-only.ts` refuses `409 plan_only_stage` at the actual dispatch entry points (`agents-connectors.ts:3426`, `orchestration.ts:1778`). A test proves out-of-order transitions are refused (`workflow-kernel/src/index.test.ts:466`). |
+| "Seven Token Optimization Techniques… only two are actually applied" | **PARTLY TRUE — true only of ONE surface** | "2 of 7 on the compat/IDE paths" is correct and is ADR-0119's own number. But **all seven are implemented and wired on some route**: model routing + semantic caching on compat AND native invoke; edit-vs-rewrite, file pre-processing and context compaction on `POST /v1/agents/:agentId/invoke`; lazy tool-loading on the MCP proxy's manifest endpoint; request batching in orchestration's auto-dispatch. Read as "only two exist", the claim would cause five working techniques to be rebuilt. Also note the reason differs per technique: three are blocked from the compat surface (missing `baseline`/`attachments` fields; statelessness), two were never applicable there — they belong to other surfaces. |
+| "Self-Verifying Exports… marketing phrasing is slightly overstated" | **TECHNICALLY TRUE, BUT ALREADY FIXED** | The mechanics described are right: the bundle carries `manifest.json` + detached signature + digests + chain segment, plus `signing-key.pub` explicitly labelled "a CONVENIENCE ONLY" (`export-bundle.ts:32`), and `scripts/verify-export-bundle.sh` **refuses to run at all** without an out-of-band trust root, printing why (a bundle checked against its own bundled key proves only internal consistency). ADR-0116 already identified the overstated deck wording, called it false, and prescribed the replacement sentence. Nothing in `docs/` still claims "self-verifying". No action. |
+
+## Genuinely open — these are real
+
+1. **ACTIVE health checking.** The breaker is *passive*: it learns from failures on real traffic. There is no prober that checks a registered MCP server on a schedule when no traffic is flowing, so a dead upstream is discovered by the first user to hit it. (`/health` and `/v1/health/schedulers` are the gateway's own liveness, not upstream probes.) This is the one item of section 1A that is not already built.
+2. **Retry backoff is the SDK's, not ours.** `maxRetries: 2` is set per provider client (`packages/model-provider/src/index.ts:266` and three more) and the deadline now bounds the total, but there is no RegulAIt-owned exponential-backoff policy, no jitter, and no per-upstream retry budget. The claim said "intelligent retry logic (with exponential backoff)" — that part is fair.
+3. **Transparent MCP proxying and non-HTTP transports.** Consistent with the claim: the proxy exposes one route (`POST /mcp/:serverId`) and the only MCP client calls are `listTools`/`callTool`, so `resources/*` and `prompts/*` have no path, and there is no `stdio` or SSE transport. (Checked directly; not exhaustively audited for a pass-through branch.)
+4. **YAML authoring.** The workflow engine is declarative and JSON-native; there is no YAML parser in the repo. "YAML/JSON" is half true — a thin serialization gap, not an engine gap.
+5. **Arbitrary conditional branching** between stages (route to a sub-workflow on outcome) is not in the executable stage types; only a single `condition` gate on `deployment` exists.
+
+## NOT verified in this pass — treat as unknown, not as true
+
+**Pillar 7 (orchestration DAG) and Pillar 8 (PM bi-directional sync).** The verification
+agent for these two hit a session rate limit before reporting. `packages/orchestration-kernel`
+and `packages/pm-provider` both exist with substantial test suites (27 and 62 tests), and
+`pm-provider` has an `inbound.ts`, which is evidence against "lacks bi-directional sync" —
+but that is an inference, not a verification. **Do not act on those two "REALITY" lines
+either way until someone checks them.**
+
+## Section 5 (Enterprise Cybersecurity Roadmap) — NOT VERIFIED, with three flags
+
+That section landed while this verification was being written, so none of it was
+checked. It is listed here so nobody mistakes silence for confirmation. Three items
+in it, however, describe things this session has direct evidence already exist —
+enough to say "check before building", not enough to call the line wrong:
+
+- **"SAML SSO"** — ADR-0125's audit table names "replay guards (SAML, TOTP, OIDC)"
+  among the enforcement mechanisms that are already shared state, which means a SAML
+  path exists. SCIM provisioning is a separate question and was not checked.
+- **"Attribute-Based Access Control (ABAC) — expand the policy engine to evaluate
+  dynamic attributes"** — `packages/policy-kernel/src/abac.ts` already evaluates
+  principal attributes including `sessionOrigin` and `mfaCompleted` (`abac.ts:97-99`,
+  `:202-203`), and the authorization callout was extended on 2026-09-27 specifically
+  to carry them (AER-028). The engine exists; whether it covers *device posture and
+  network location* specifically is the open part.
+- **"Upgrade the current injection detection from 'log mode' to an active firewall
+  layer that blocks"** — a `block` mode already exists and is exercised: the copilot
+  test suite runs a guardrail at `block` and asserts samples are withheld. So the
+  gap, if any, is which surfaces default to which mode — not the absence of blocking.
+
+Everything else in section 5 (malware/URL scanning, EDM, source-code exfiltration
+classifiers, SIEM streaming, SOAR webhooks, SCIM, certification alignment) is
+unassessed here.
