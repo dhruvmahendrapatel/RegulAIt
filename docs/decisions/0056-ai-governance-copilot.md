@@ -973,11 +973,45 @@ proposal row.**
 1. The lock is per proposal. Two DIFFERENT proposals that both edit the same
    rule still interleave; `applyRuleEdit`'s own artifact-row lock (ADR-0074) is
    what orders those, and this amendment does not widen it.
-2. No fault-injection test exists for a crash *between* statements inside the
+2. ~~No fault-injection test exists for a crash *between* statements inside the
    transaction; the argument that all three facts commit together is the
    database's, not a test's. AER-035's acceptance item 3 is met by construction
    rather than by injected failure, and that distinction is left visible here
-   rather than claimed as evidence.
+   rather than claimed as evidence.~~ **CLOSED 2026-09-28 — item 3 now has an
+   injected failure at the last write.** The review was right that the existing
+   coverage did not reach it: the refusal test fires *before* any target
+   mutation, so it proved the transaction can abort, not that the abort undoes
+   the mutation and the applied marker. Those are written seconds apart inside
+   the same transaction, and "they are in one transaction" was a claim about the
+   source rather than an observed property.
+
+   The fault is injected **in Postgres, not in the application**: a
+   `before insert` trigger on `audit_log`, scoped by rule id *and* object id to
+   one proposal, raises exactly when the applier writes its success audit row —
+   the last write of the transaction, therefore strictly after the target
+   mutation and after `applied_at`. Nothing in the shipped code changes, there is
+   no failpoint left behind, and the timing is deterministic rather than raced.
+   `rule_to_approval` is the kind chosen because its insert has a fresh id, so a
+   surviving rule is unmistakable — it is the same mutation whose unlocked
+   version produced ten rules from one approval.
+
+   Three things are then asserted: **no approval rule** (the mutation rolled back
+   with the audit row), **no applied marker** (a surviving `applied_at` would mean
+   consent spent on a change that never happened, and the proposal could never be
+   applied again), and **no success audit row**. The test then **applies the same
+   proposal again with the trigger gone and gets a 200 with exactly one rule** —
+   which is both the recovery assertion and this test's own non-vacuity proof: it
+   shows the earlier failure was the injected one rather than the proposal having
+   been inapplicable all along.
+
+   **On acceptance item 4 (process crash / recovery), stated rather than faked:**
+   an uncommitted transaction discarded when a backend dies is a Postgres
+   guarantee, not a path in this repository's code. What this repository has to
+   prove is that all three writes are inside one transaction — because if they
+   are, a crash cannot leave two of them behind, and if they are not, no amount of
+   crash testing makes them safe. That is what the trigger observes. A harness
+   that killed the process would be testing Postgres's durability and would pass
+   whether or not our boundary was drawn correctly.
 3. `applyRuleEdit`'s SAVEPOINT nesting is exercised by the existing suite
    through the ordinary route, not by a test written for the nested case
    specifically.

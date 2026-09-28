@@ -263,11 +263,16 @@ governed route now declares **no** origin, and the harness checks that `api_key`
 the only way that value can arrive is derivation from the credential. A new `origin-lie-route` runs
 key-auth and declares `oidc`, and is asserted to be refused with the named reason and **zero upstream
 invocations**, paired with a control proving the same subject and credential are allowed where nothing
-is contradicted. **Not run locally**: this container harness needs Docker, which this session did not
-have, so the Kong half rests on the repository's Integrations job rather than on a local run. Both Lua
-files were syntax-checked with `luac -p`. M-043's standard — no adapter deny path is supported until it
-runs against a pinned container showing zero upstream calls — is met by that job and by nothing this
-session did itself.
+is contradicted.
+
+**Not run locally, but it has now run.** This container harness needs Docker, which this session did
+not have, so both Lua files were only syntax-checked locally with `luac -p`. The Integrations job then
+ran it against the pinned `kong:3.6` and **passed** (run `36370388322`, job `kong-adapter`): its Kong
+access log shows `GET /origin-lie … 403` and `GET /governed … 200`, and the harness reported
+`control: the same subject and credential ARE allowed where nothing is contradicted` followed by
+`all assertions passed`. M-043's standard — no adapter deny path is supported until it runs against a
+pinned container showing zero upstream calls — is therefore met for this change by that run, and not
+by anything done locally.
 
 ### The honest residue
 

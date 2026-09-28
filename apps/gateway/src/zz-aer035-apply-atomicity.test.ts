@@ -49,6 +49,7 @@ import {
   projects,
   rateLimits,
   runMigrations,
+  sql,
   toolGrants,
   users,
   type Db,
@@ -356,5 +357,134 @@ describe("AER-035 — a refusal after the lock rolls everything back, and is sti
     });
     expect(again.statusCode).toBe(404);
     expect(again.json().error).toBe("proposal_target_gone");
+  }, 60_000);
+});
+
+// ===========================================================================
+// AER-035 acceptance item 3 — a fault AFTER the mutation and the marker.
+// ===========================================================================
+//
+// WHAT WAS STILL UNPROVEN, and why the existing coverage did not cover it. The
+// refusal test above fires BEFORE any target mutation, so it proves the
+// transaction can abort — not that the abort undoes the mutation and the applied
+// marker. Those are written seconds apart inside the same transaction, and
+// "they are in one transaction" was, until this test, a claim about the source
+// rather than an observed property.
+//
+// THE FAULT IS INJECTED IN POSTGRES, not in the application. A `before insert`
+// trigger on `audit_log`, scoped by rule id AND object id to this one proposal,
+// raises exactly when the applier writes its SUCCESS audit row — which is the
+// last write of the transaction and therefore strictly after the target mutation
+// and after `applied_at`. Nothing in the shipped code changes, there is no
+// failpoint to leave behind, and the timing is deterministic rather than raced.
+//
+// ABOUT ACCEPTANCE ITEM 4 (process crash / recovery), stated rather than faked:
+// an uncommitted transaction discarded when a backend dies is a Postgres
+// guarantee, not a path in this repository's code. What this repository has to
+// prove is that all three writes are INSIDE one transaction — because if they
+// are, a crash cannot leave two of them behind, and if they are not, no amount of
+// crash testing makes them safe. That is exactly what this test observes. A
+// harness that killed the process would be testing Postgres's durability, and
+// would pass whether or not our boundary was drawn correctly.
+
+describe("AER-035 — a fault at the LAST write undoes the mutation and the marker", () => {
+  it("an injected failure on the success audit leaves no rule, no marker, and no audit row", async () => {
+    const toolName = `aer035_fault_${randomUUID().slice(0, 8)}`;
+    await db.insert(mcpTools).values({ serverId, name: toolName, kind: "read" });
+    const sourceId = await sourceRateLimit(toolName);
+    const proposalId = await approvedProposal("rule_to_approval", {
+      sourceRuleKind: "rate-limits",
+      sourceRuleId: sourceId,
+      create: { scope: "fleet", serverScope: "server", serverId, toolName, approverUserId: adminId },
+    });
+
+    // THE FAILPOINT. Scoped to this proposal, so no other test in this file or
+    // any other can be affected by it, and dropped in `finally` whatever happens.
+    const fnName = `zz_aer035_fault_${proposalId.replace(/-/g, "")}`;
+    // The body is a dollar-quoted STRING to Postgres, so bind parameters cannot
+    // reach inside it — `$1` there is the function's own positional argument, not
+    // the query's. Both values are inlined instead: one is a compile-time
+    // constant and the other is a uuid this test just generated, so there is
+    // nothing user-supplied in the statement.
+    expect(proposalId).toMatch(/^[0-9a-f-]{36}$/);
+    await db.execute(
+      sql.raw(`
+      create or replace function ${fnName}() returns trigger as $$
+      begin
+        if new.rule_id = '${COPILOT_RULE_IDS.proposalApplied}' and new.object_id = '${proposalId}'::uuid then
+          raise exception 'aer035 injected failure on the success audit';
+        end if;
+        return new;
+      end $$ language plpgsql;
+    `),
+    );
+    await db.execute(
+      sql`create trigger ${sql.raw(fnName)} before insert on audit_log for each row execute function ${sql.raw(fnName)}()`,
+    );
+
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: `/v1/copilot/proposals/${proposalId}/apply`,
+        headers: AUTH,
+        payload: {},
+      });
+      // It fails. WHICH status matters less than what the world holds — an
+      // injected database fault is not a governance outcome and has no named
+      // shape; what must not happen is a 200.
+      expect(res.statusCode, res.body).not.toBe(200);
+
+      // (1) THE TARGET MUTATION IS GONE. `rule_to_approval` inserts an approval
+      // rule with a fresh id, so a surviving one is unmistakable — this is the
+      // same mutation whose unlocked version produced ten rules from one
+      // approval, which is why it is the kind chosen here.
+      const rules = await db
+        .select()
+        .from(approvalRules)
+        .where(and(eq(approvalRules.serverId, serverId), eq(approvalRules.toolName, toolName)));
+      expect(rules, "the mutation rolled back with the audit row").toHaveLength(0);
+
+      // (2) THE MARKER IS GONE — written BEFORE the audit, so a surviving
+      // `applied_at` would mean consent had been spent on a change that never
+      // happened, and the proposal could never be applied again.
+      const [row] = await db.select().from(copilotProposals).where(eq(copilotProposals.id, proposalId));
+      expect(row!.appliedAt, "no applied marker without the change").toBeNull();
+      expect(row!.appliedResult).toBeNull();
+
+      // (3) AND NO SUCCESS ROW, which is the trivial half but worth pinning: a
+      // ledger claiming an apply that did not happen is the failure mode this
+      // whole ADR exists to prevent.
+      const applied = await db
+        .select()
+        .from(auditLog)
+        .where(and(eq(auditLog.ruleId, COPILOT_RULE_IDS.proposalApplied), eq(auditLog.objectId, proposalId)));
+      expect(applied).toHaveLength(0);
+    } finally {
+      await db.execute(sql`drop trigger if exists ${sql.raw(fnName)} on audit_log`);
+      await db.execute(sql`drop function if exists ${sql.raw(fnName)}()`);
+    }
+
+    // RECOVERY, which is acceptance item 4's real question: after the fault, the
+    // proposal is still applicable exactly once. If the marker had survived the
+    // rollback this would return `proposal_already_applied` and a human's consent
+    // would have been consumed by a failure.
+    const again = await app.inject({
+      method: "POST",
+      url: `/v1/copilot/proposals/${proposalId}/apply`,
+      headers: AUTH,
+      payload: {},
+    });
+    expect(again.statusCode, again.body).toBe(200);
+    const rulesNow = await db
+      .select()
+      .from(approvalRules)
+      .where(and(eq(approvalRules.serverId, serverId), eq(approvalRules.toolName, toolName)));
+    expect(rulesNow, "and it creates exactly one rule, not zero and not two").toHaveLength(1);
+
+    // NON-VACUITY FOR THE WHOLE TEST: the failure above really was the injected
+    // one rather than the proposal being inapplicable all along. The line above
+    // is what proves it — same proposal, trigger gone, 200.
+    const [after] = await db.select().from(copilotProposals).where(eq(copilotProposals.id, proposalId));
+    expect(after!.appliedAt).not.toBeNull();
   }, 60_000);
 });
