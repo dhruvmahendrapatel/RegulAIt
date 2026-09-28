@@ -2231,6 +2231,203 @@ unique source-proposal reference to created artifacts so crash recovery cannot c
   AER-019, AER-021 or AER-022, and no evidence in this range closes AER-004, AER-007, AER-010,
   AER-011 or AER-014. Nothing here establishes production readiness, certification or enterprise
   readiness.
+
+### Automated enterprise-readiness run — 2026-09-27 20:30:08 CDT (UTC-05:00)
+
+**Target branch, synchronization and reviewed range**
+
+- Exclusive target: `dhruv/active`.
+- The run began with local HEAD and `origin/dhruv/active` at
+  `b085a60d700af96d2dc5e4169b9b61b1a4052590`. Tracked files were clean.
+- `git fetch origin dhruv/active --prune` advanced the upstream ref to
+  `476aab1297eb662069dc5a6ddbe9fa6d67e1942b`; `git pull --ff-only origin dhruv/active` then
+  fast-forwarded the checkout to that commit without reset, stash, merge or rebase.
+- The required pre-publication fetch then found one additional upstream commit that did not touch
+  `codexInputs.md`; a second fast-forward-only pull advanced both refs to
+  `b145b1cd476160fe99f10863e517aed39e20beec`. That commit was reviewed before publication.
+- Incremental review range: `e0e407683ca5e8deaa2474784db942c9dcf05b75..b145b1cd476160fe99f10863e517aed39e20beec`
+  (13 commits, 30 files), because `e0e4076...` is the last commit whose automated review is recorded
+  below. The range adds the AER-035 transaction/lock and tests, expands the Kong harness and callout
+  context, closes two UI affordance gaps, repairs the deployment index, adds harness cleanup and
+  adds/then qualifies `geminiInputs.md`. The final commit adds an active MCP upstream health-probe
+  scheduler job and its database-backed tests.
+
+**Commands/tests and outcomes**
+
+- Mandatory suite and repository instruction reads — completed before synchronization and review.
+- Branch/status/remote/tracking inspection, `git fetch origin dhruv/active --prune`, delta review and
+  `git pull --ff-only origin dhruv/active` — **PASS**; local/upstream reached `476aab1...`.
+- `git diff --check e0e4076..HEAD` — **FAIL**: five trailing-whitespace lines in the newly added
+  `geminiInputs.md` (`:3,12,36,55,60`). This is a repository-hygiene verification failure in an
+  agent-input document, not evidence that product behavior failed. It was not edited because this
+  feedback run is authorized to publish only `codexInputs.md`.
+- First `corepack pnpm -r build` — **ENVIRONMENT FAILURE** because this checkout had no
+  `node_modules` (for example `vite/client`, `vitest`, `zod` and Node types could not be resolved).
+  `corepack pnpm install --frozen-lockfile` restored the exact lockfile dependencies without a
+  tracked-file change; the subsequent dependency-ordered `corepack pnpm -r build` — **PASS** for all
+  15 built workspaces. The web build reported a 1,146.62 kB main JavaScript chunk (318.80 kB gzip),
+  above the configured 900 kB warning threshold.
+- `corepack pnpm --filter @regulait/gateway typecheck` after the final upstream health-probe commit —
+  **PASS**.
+- `node --check integrations/kong/test/verify.mjs` and
+  `node --check integrations/kong/test/upstream.mjs` — **PASS**.
+- `node scripts/preflight-ui-affordances.mjs` — **PASS**: 53 DELETE routes, 53 detected as reachable,
+  zero exempt and zero orphaned. This is static source-pattern evidence, not browser behavior.
+- GitHub PR 114 at intermediate head `476aab1...` reports **PASS** for CI run `36366023080` and Integrations
+  run `36366023084`. The inspected CI log reports 197 gateway files, 2,928 passed / 9 skipped and
+  specifically shows `zz-aer035-apply-atomicity.test.ts` passing five tests; its UI-affordance gate
+  also reports 53/53. The inspected Kong log shows named PASS results for `approval_required`,
+  reachable PDP non-200, unparseable PDP response, context reporting, absent `args` and unreachable
+  PDP, all with the intended upstream checks. These are repository-run results, not locally
+  reproduced database/container results.
+- At final reviewed head `b145b1c...`, Integrations run `36367114978` passed and local gateway
+  typecheck passed. CI run `36367114976` had completed install/build and was still running the
+  database suite after ten minutes when observation stopped; the new health-probe tests therefore
+  had **no completed exact-head CI verdict at publication time**. In-progress is uncertainty, not a
+  failure or pass.
+- `DATABASE_URL` was absent. No local database, migration, gateway integration, Playwright, Kong
+  container, cloud, provider or deployment test ran. The full database suite was not run without an
+  explicitly exclusive disposable database.
+
+#### AER-036 — HIGH — The Kong adapter can label API-key traffic as SSO and that unverified value enters ABAC
+
+**Lifecycle: OPEN. Evidence type:** direct source/configuration observation plus reproduced behavior
+in the repository-run Kong harness. Exploitation against a custom session-origin policy was not run
+locally because no exclusive database was available.
+
+The new Kong schema accepts an operator-set `session_origin` value of `password`, `sso` or `api_key`
+(`integrations/kong/kong/plugins/regulait-authz/schema.lua:45`). The handler copies that string into
+`principal.sessionOrigin` without deriving it from the request's authenticated consumer or auth
+plugin (`handler.lua:89-100`). The PDP then accepts that caller-supplied principal and passes it into
+the policy kernel (`apps/gateway/src/app.ts:2141-2155`), where `sessionOrigin` is a policy-visible
+principal attribute. The normal in-process boundary deliberately derives an API-key request as
+`api_key` and a real session from the resolved session record (`apps/gateway/src/abac-principal.ts:34-57`).
+
+This is not only a hypothetical configuration error: the shipped harness puts `key-auth` on the
+governed route (`integrations/kong/test/verify.mjs:263-270`) and configures
+`session_origin: "sso"` on that same route (`:281-289`). Its green assertion checks only that the
+ledger says a `principal` dimension was present; it never checks the value or proves it came from
+authentication. The docs nevertheless say this static setting is something Kong can state
+truthfully and that both configured fields are true (`integrations/kong/README.md:103-106`;
+`docs/deployment/GATEWAY_TOPOLOGY.md:125-128`). The accepted vocabulary also diverges from the
+application's actual origin vocabulary: the UI contract names `oidc`, while the resolved session
+path records concrete origins such as `saml`; the adapter invents the generic value `sso`.
+
+**Impact:** an authentication-strength ABAC policy can be evaluated on a fabricated or stale session
+origin. A key-auth request can be represented as SSO; on a mixed-auth route every request receives
+the same label. A policy such as “forbid unless the origin is the enterprise SSO path” can therefore
+make a different decision at the Kong callout than at RegulAIt's own dispatch boundary. The
+purpose-scoped PDP key limits which endpoint is reachable, but does not make the attributes in its
+request authentic. This breaks the claim that the adapter carries truthful principal context and
+can turn a security control into allow-by-configuration.
+
+**Recommended remediation:** do not expose an arbitrary static session-strength assertion as if it
+were request evidence. Derive the canonical origin per request from a specific supported Kong auth
+plugin/credential type and bind that derivation to the authenticated consumer, or omit
+`principal.sessionOrigin` so the kernel receives `unknown`. If a deployment-level constant remains,
+name it as an explicit trusted assertion, constrain it to a route proven to have one auth mechanism,
+use the same canonical enum as the gateway, and refuse startup/configuration when the declared value
+contradicts the configured auth plugin. `contextApplied` must not report `principal` merely because a
+field existed; the verification should establish provenance and exact normalized value.
+
+**Acceptance evidence required:**
+
+1. With `key-auth`, a request reaches the PDP as `sessionOrigin: "api_key"` or `unknown`; configuring
+   it as SSO is impossible or fails closed before traffic is accepted.
+2. With supported OIDC and SAML plugins, per-request tests prove the canonical origin is derived from
+   the authentication result, including mixed-auth and missing/ambiguous metadata cases.
+3. An ABAC policy that forbids non-SSO traffic cannot be bypassed by plugin configuration, client
+   headers or a different credential on the same route; zero upstream calls proves the refusal.
+4. The Kong harness asserts the exact recorded origin value and provenance, not only that
+   `contextApplied` contains the word `principal`; docs and schema use the same origin vocabulary as
+   the gateway.
+
+#### AER-037 — MEDIUM — The capped health sweep selects the same first 50 closed servers forever
+
+**Lifecycle: OPEN. Evidence type:** direct source/control-flow observation. The greater-than-50
+case was not run locally because it requires the database suite.
+
+The new active MCP health sweep has a hard default cap of 50
+(`apps/gateway/src/mcp-health-probe.ts:73-74`). It sorts open breakers first and every remaining
+closed server by the same stable name order, then applies `LIMIT 50` (`:118-134`). It stores no
+cursor, last-probed time or rotation state. Therefore, when more than 50 servers are healthy/closed,
+each five-minute pass selects the same lexicographically first 50 and the tail is never actively
+probed. `capped: true` reports that truncation but does not make progress. The exported function and
+scheduler description both say they probe every registered upstream (`:98-100` and
+`apps/gateway/src/scheduler-jobs.ts`), while the implementation only ever probes one fixed prefix.
+The new tests cover dead, cooldown, egress-refused and zero-limit cases, but not 51+ healthy rows or
+eventual coverage (`apps/gateway/src/zz-mcp-health-probe.test.ts:90-209`).
+
+**Impact:** an enterprise deployment with more than 50 registered MCP servers can leave some
+upstreams permanently passive. Those tail servers retain the exact “first user discovers the
+outage” behavior this feature claims to remove, while scheduler health can remain green and merely
+show `capped`. Naming determines protection, so an operator cannot predict eventual coverage from
+the feature description.
+
+**Recommended remediation:** keep broken-first priority, but rotate the closed cohort with persisted
+`last_health_probe_at`/cursor state (and a deterministic tie-breaker), or process bounded pages until
+every eligible row has a fair opportunity across runs. Expose oldest-unprobed age and remaining
+backlog; make wording explicitly “up to N per pass” unless one cycle guarantees complete coverage.
+
+**Acceptance evidence required:** create at least 51 closed servers with a small pass limit; across
+bounded consecutive runs every id is attempted without starving open-breaker recovery, no server is
+double-selected within a page, concurrent scheduler instances preserve the lease/cursor contract,
+and the operator output reports backlog plus oldest-unprobed age.
+
+**Prior-finding lifecycle and remaining uncertainty — 2026-09-27 20:30 CDT**
+
+- **AER-035 — PARTIALLY RESOLVED, not RESOLVED/DONE.** Fixing commits `946ba2c` and `f203e7c`
+  put proposal lock/read, the public-door mutation, applied marker/result and success audit in one
+  database transaction (`apps/gateway/src/copilot.ts:2093-2363`). The proposal row is locked
+  `FOR UPDATE`; all four mutation helpers now accept the transaction. The exact-head CI run passes
+  five focused tests: 20-way races for `rule_to_approval`, policy tightening, grant revocation and
+  budget adjustment, plus a post-lock vanished-target refusal that leaves no marker and retains its
+  outside-transaction deny audit (`apps/gateway/src/zz-aer035-apply-atomicity.test.ts:190-359`). This
+  directly satisfies acceptance items 1 and 2 and proves one rollback/refusal path. It does **not**
+  satisfy item 3's requested fault injection after the target mutation, after the proposal marker
+  and before the success audit; the added refusal happens before any target mutation. Nor is the
+  process-crash/recovery case in item 4 exercised. Add deterministic failpoints in test builds and
+  reconnect/restart assertions before marking AER-035 DONE. The ADR's stated possibility that the
+  ordinary decide route changes `approved` to `denied` is not supported by the inspected writer:
+  that update is conditional on `status = 'pending'` (`apps/gateway/src/app.ts:3015-3025`), so it is
+  not recorded here as a separate race without another applicable writer.
+- **AER-034 — PARTIALLY RESOLVED.** Commit `b8e9720` adds executable, green Kong cases for the three
+  README promises that were previously unsupported: `approval_required`, PDP non-200 and
+  unparseable PDP output (`integrations/kong/test/verify.mjs:445-489`). The harness now has three
+  route/plugin instances, but the two added routes are fault fixtures bound to the same server/tool;
+  AER-030's acceptance test for two distinct route/action bindings still has not been shown.
+  Forged reserved fields beyond the three subject-header spellings and disabled/deleted identities
+  also remain untested. `kong:3.6` and `postgres:16` remain mutable tags described as pinned.
+- **AER-033 — PARTIALLY RESOLVED.** The high plaintext-administrator-key exposure remains fixed by
+  the purpose-scoped PDP key/vault injection. Commit `b8e9720` now revokes the scratch key, removes
+  the host temporary directory and drops the database in `finally`
+  (`integrations/kong/test/verify.mjs:530-564`), and the exact-head Kong job passes. Do not mark the
+  full acceptance contract DONE yet: cleanup is best-effort, a hard process interruption cannot run
+  `finally`, and fixed database/port/container resources still prevent safe concurrent runs.
+- **AER-031 — RESOLVED/DONE.** Fixing commit `b8e9720` removes the contradictory deployment-index
+  wording. `docs/deployment/README.md:17` now says Kong only and explicitly says the Envoy adapter is
+  withdrawn; the topology document and index agree. Residual limitation: this is documentation
+  consistency, not evidence for a supported Envoy integration.
+- **AER-028 — PARTIALLY RESOLVED.** The Kong adapter now carries static `projectId` and a principal
+  origin and the exact-head container run proves their dimension names reach the ledger; it still
+  intentionally omits `args`, so data-scope rules fail closed. AER-036 shows why presence is not
+  enough to close principal parity: the new origin is not authenticated request context. The static
+  project value also remains valid only for the documented one-project-per-route deployment shape.
+- **Previously observed UI affordance gaps — RESOLVED in source/static gate, not browser-verified in
+  this run.** Commit `7205bd2` adds red-team library creation, LLM backend configuration/removal and
+  corrects the Red-team scheduling response type. Local build, local census and the exact-head CI
+  census pass 53/53. A new Playwright spec exists, but the inspected CI run did not execute
+  Playwright and no browser test was run locally, so runtime accessibility and failure UX remain
+  uncertain.
+- `geminiInputs.md` now carries a verification appendix that corrects several stale “missing”
+  assertions before agents act on them. Its Section 5 is explicitly marked unverified. The five
+  whitespace errors above remain, and roadmap language remains proposal material rather than proof
+  of missing or working product behavior.
+- AER-017, AER-018, AER-019, AER-021 and AER-022 remain OPEN HIGH; this range did not change their
+  enforcement/provider/MCP paths. No reviewed evidence closes AER-004, AER-007, AER-010, AER-011 or
+  AER-014. Green builds and focused repository jobs do not establish production readiness,
+  certification, complete provider/deployment parity or enterprise readiness.
+
 <!-- codex-enterprise-feedback:end -->
 
 Date: 2026-09-06  
