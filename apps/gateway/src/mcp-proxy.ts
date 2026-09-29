@@ -63,6 +63,7 @@ import {
 import { timeouts } from "./timeouts.js";
 import {
   attemptsForToolKind,
+  classifyUpstreamError,
   isDeadlineError,
   newRetryReport,
   withUpstreamRetry,
@@ -70,6 +71,8 @@ import {
 } from "./upstream-retry.js";
 import {
   breakerAdmits,
+  breakerConfig,
+  breakerStateOf,
   recordUpstreamFailure,
   recordUpstreamSuccess,
 } from "./upstream-breaker.js";
@@ -199,6 +202,13 @@ export type GovernedToolCallOutcome =
       costUsd?: number | null;
     }
   | { kind: "unknown_tool" }
+  /**
+   * AER-022: this upstream is circuit-broken (ADR-0126) and nothing was
+   * attempted. Distinct from every governance outcome around it because it says
+   * nothing about the CALLER's entitlement — the call was fine and the server is
+   * not — and distinct from a plain failure because we can say when to come back.
+   */
+  | { kind: "upstream_circuit_open"; reason: string; retryAfterMs: number }
   | { kind: "denied"; decision: Decision }
   | { kind: "pii_blocked"; reason: string; pii: McpPii }
   /** ADR-0042: a content-safety detector refused the tool ARGUMENTS. Distinct
@@ -460,10 +470,100 @@ async function executeGovernedToolCallInner(
       await u.close();
     }
   };
+  // AER-022 — THE BREAKER, AT THE ONE SHARED OPERATION BOUNDARY.
+  //
+  // ADR-0126 put admission and recording in the HTTP proxy ROUTE only. That left
+  // two holes an upstream could drive through: this primitive opens its own
+  // connection and runs its own `listTools`/`callTool`, and pillar-7's delegated
+  // workers call it DIRECTLY (`orchestration.ts`), never passing the route at
+  // all. So an upstream that completed `initialize` and then hung every real
+  // operation was never circuit-broken, and each proxy request RESET the
+  // accumulated failures on its successful handshake.
+  //
+  // The election lives here rather than in the route because there must be
+  // exactly ONE per operation: `breakerAdmits` moves `breaker_opened_at` in a
+  // conditional UPDATE to elect a single half-open prober, so two callers would
+  // mean the route wins and this primitive then fast-fails — breaking the very
+  // recovery path the election exists to protect. The route keeps a READ-ONLY
+  // state check so it can still refuse pre-hijack with a 503 and a Retry-After.
+  //
+  // MEMOISED, AND CONSULTED AT THE POINT OF CONTACT — not at the top of this
+  // function. There are two places below that reach an upstream (the manifest
+  // sync, and the call itself), and the breaker must guard both without holding
+  // two elections. Checking once at the top would have done that, but it would
+  // also have put the breaker AHEAD OF THE KERNEL: a call this deployment
+  // forbids would come back "upstream unavailable" and file no deny row, which
+  // inverts this product's first rule — governance decides, and an outage never
+  // silently stands in for a decision. So the election happens on first contact
+  // and its verdict is reused, leaving the governance decision where it was.
+  let breakerVerdict: { refusedUntilMs: number; reason: string } | null = null;
+  let breakerElected = false;
+  const breakerRefusesUpstream = async (): Promise<GovernedToolCallOutcome | null> => {
+    if (!breakerElected) {
+      breakerElected = true;
+      breakerVerdict = await breakerAdmits(db, serverRow);
+    }
+    return breakerVerdict === null
+      ? null
+      : {
+          kind: "upstream_circuit_open",
+          reason: breakerVerdict.reason,
+          retryAfterMs: breakerVerdict.refusedUntilMs,
+        };
+  };
+
+  /**
+   * AER-022 — a SUCCESSFUL OPERATION is the only thing that closes the breaker.
+   *
+   * The bug this replaces recorded success after `initialize`. A handshake proves
+   * the socket answered; it does not prove the server works, so treating it as
+   * health erased exactly the failures that mattered. Called after `listTools`
+   * and after `callTool` — the operations a caller actually wanted.
+   */
+  //
+  // Once per operation, not once per call: this primitive may run BOTH a
+  // `listTools` (the manifest-sync path above) and a `callTool`, and
+  // `recordUpstreamSuccess` reads the failure count off the row SNAPSHOT taken
+  // before either ran. Without the latch the second success would re-clear an
+  // already-cleared breaker and file a SECOND "recovered" transition for one
+  // recovery — the audit ledger's whole job here is that a transition means a
+  // transition.
+  let breakerCleared = false;
+  const operationSucceeded = async () => {
+    if (breakerCleared) return;
+    breakerCleared = true;
+    await recordUpstreamSuccess(db, serverRow);
+  };
+
+  /**
+   * One attributable upstream failure. OUR OWN refusals are never charged here —
+   * an admission hold (ADR-0097) or an egress block (ADR-0043) is a decision this
+   * gateway made, and an air-gapped install refuses every host by design, so
+   * counting them would report every upstream as broken where nothing is wrong.
+   * Governance outcomes never reach this function at all: they are returned as
+   * values rather than thrown.
+   */
+  const operationFailed = async (err: unknown) => {
+    if (classifyUpstreamError(err).why === "our_own_refusal") return;
+    await recordUpstreamFailure(db, serverRow, err instanceof Error ? err.message : String(err));
+  };
+
   try {
     if (!kind) {
-      upstream = await connectUpstream(db, serverRow);
-      const upstreamTools = await syncUpstreamTools(db, serverId, upstream);
+      // AER-022: connect + `tools/list` is a real upstream OPERATION, so its
+      // outcome belongs to the breaker — this is one of the two paths that used
+      // to contact an upstream with no breaker involvement whatsoever.
+      const refused = await breakerRefusesUpstream();
+      if (refused) return refused;
+      let upstreamTools;
+      try {
+        upstream = await connectUpstream(db, serverRow);
+        upstreamTools = await syncUpstreamTools(db, serverId, upstream);
+      } catch (err) {
+        await operationFailed(err);
+        throw err;
+      }
+      await operationSucceeded();
       const found = upstreamTools.find((t) => t.name === toolName);
       if (!found) return { kind: "unknown_tool" };
       kind = toolKind(found);
@@ -923,7 +1023,20 @@ async function executeGovernedToolCallInner(
       }
     }
 
-    if (!upstream) upstream = await connectUpstream(db, serverRow);
+    if (!upstream) {
+      // AER-022: the second of the two contact points. On the common path (a tool
+      // already in the manifest) this is the FIRST, so it is here that a governed,
+      // approved, budgeted call meets a broken upstream — after the kernel has
+      // ruled, and before a socket is opened.
+      const refused = await breakerRefusesUpstream();
+      if (refused) return refused;
+      try {
+        upstream = await connectUpstream(db, serverRow);
+      } catch (err) {
+        await operationFailed(err);
+        throw err;
+      }
+    }
     // An upstream FAILURE throws out of here before any metering — a failed
     // call bills nothing, exactly like a failed model dispatch or connector
     // invoke.
@@ -934,19 +1047,35 @@ async function executeGovernedToolCallInner(
     // §3's stored read/write classification and returns 1 for a write — and
     // for a tool whose kind is unknown, since `toolKind` already treats an
     // un-annotated tool as a write. A read tool is safe to ask twice.
-    const content = await withUpstreamRetry(
-      ({ deadlineMs }) =>
-        upstream!.callTool({ name: toolName, arguments: args.arguments }, undefined, {
-          timeout: deadlineMs,
-        }),
-      {
-        // G2: by far the most generous of the three deadlines, because this is
-        // the upstream doing real work — a build, a query, a scan. A bound that
-        // severs legitimate work is worse than the hang it replaced.
-        budgetMs: timeouts().mcpCallToolMs,
-        maxAttempts: attemptsForToolKind(kind),
-      },
-    );
+    let content: Awaited<ReturnType<typeof upstream.callTool>>;
+    try {
+      content = await withUpstreamRetry(
+        ({ deadlineMs }) =>
+          upstream!.callTool({ name: toolName, arguments: args.arguments }, undefined, {
+            timeout: deadlineMs,
+          }),
+        {
+          // G2: by far the most generous of the three deadlines, because this is
+          // the upstream doing real work — a build, a query, a scan. A bound that
+          // severs legitimate work is worse than the hang it replaced.
+          budgetMs: timeouts().mcpCallToolMs,
+          maxAttempts: attemptsForToolKind(kind),
+        },
+      );
+    } catch (err) {
+      // AER-022: a hung or failing `tools/call` now counts, so an upstream that
+      // initializes cleanly and then fails every real operation is broken after
+      // the threshold instead of never.
+      //
+      // A `try`/`catch` rather than `.catch()`: an async `.catch` handler that
+      // rethrows still widens the inferred type to include `undefined`, which
+      // no longer satisfies the SDK's `tools/call` handler signature.
+      await operationFailed(err);
+      throw err;
+    }
+    // AER-022: THE operation succeeded. This — not the handshake — is what closes
+    // a breaker, and it is what the old placement got wrong.
+    await operationSucceeded();
 
     // §8.4 OUTPUT check: the tool already ran, so a block here is BILL-AND-
     // WITHHOLD — the usage row below records the honest spend, but the result
@@ -1340,15 +1469,32 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
     // the entire point. 503 with Retry-After, because unlike 502/504 this is a
     // refusal the gateway is making on its own initiative and it can say when
     // to come back.
-    const breaker = await breakerAdmits(db, serverRow);
-    if (breaker) {
+    //
+    // AER-022: READ-ONLY here, deliberately. `breakerAdmits` runs the half-open
+    // ELECTION, and the election must happen exactly once per operation — it is
+    // now run inside `executeGovernedToolCall`, the one boundary every caller
+    // shares (this route AND pillar-7's delegated workers). Electing here too
+    // would mean the route wins the probe and the primitive, arriving second,
+    // sees a moved timestamp and fast-fails: the recovery path would never
+    // complete and a recovered upstream would stay broken forever. So the route
+    // reads the state, refuses a definitively OPEN circuit pre-hijack with the
+    // 503 an HTTP caller can act on, and lets a half-open one through to the
+    // primitive that owns the election.
+    if (breakerStateOf(serverRow) === "open") {
+      const retryAfterMs = Math.max(
+        0,
+        breakerConfig().cooldownMs - (Date.now() - serverRow.breakerOpenedAt!.getTime()),
+      );
       return reply
         .status(503)
-        .header("retry-after", String(Math.ceil(breaker.refusedUntilMs / 1000)))
+        .header("retry-after", String(Math.ceil(retryAfterMs / 1000)))
         .send({
           error: "mcp_upstream_circuit_open",
-          detail: breaker.reason,
-          retryAfterMs: breaker.refusedUntilMs,
+          detail:
+            `upstream MCP server '${serverRow.name}' is circuit-broken after ` +
+            `${serverRow.breakerConsecutiveFailures} consecutive failures: ` +
+            `${serverRow.breakerLastError ?? "unknown"}`,
+          retryAfterMs,
         });
     }
 
@@ -1428,10 +1574,18 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
       });
     }
 
-    // The connect succeeded, so whatever the breaker thought, this upstream is
-    // answering. Resets the count and — only if the circuit was actually open —
-    // files the recovery transition. A healthy call writes nothing.
-    await recordUpstreamSuccess(db, serverRow);
+    // AER-022 — NOTHING IS RECORDED AS SUCCESS HERE, AND THAT IS THE FIX.
+    //
+    // This line used to read `recordUpstreamSuccess(db, serverRow)`, on the
+    // reasoning that a completed handshake proves the upstream answers. It does
+    // not. `initialize` is a protocol formality an upstream can satisfy while
+    // hanging or erroring every `tools/list` and `tools/call` that follows — and
+    // because this ran on EVERY proxy request, each new request wiped the
+    // accumulated failures that the real operations were building up, so such a
+    // server could never be circuit-broken at all. Success is now recorded by
+    // `executeGovernedToolCall`, after an OPERATION, which is the only evidence
+    // that means anything. A connect FAILURE is still counted above: that one
+    // really is the upstream failing.
 
     const proxy = new Server(
       { name: "regulait-gateway", version: "0.1.0" },
@@ -1605,6 +1759,17 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
                 ? ` Approval '${outcome.requeuedApprovalId}' has been raised under the current policy ` +
                   `and is pending sign-off. Retry after approval.`
                 : ` Retry to raise a fresh approval.`),
+          );
+        // AER-022: the breaker refusing post-hijack. The pre-hijack 503 above
+        // catches a definitively open circuit; this is the half-open case where
+        // another request won the election, or a circuit that opened between the
+        // route's read and the operation. Post-hijack there is no HTTP status
+        // left to set, so the retry window is named in the MCP error itself.
+        case "upstream_circuit_open":
+          throw new McpError(
+            ErrorCode.InternalError,
+            `Upstream unavailable: ${outcome.reason}. Retry after ` +
+              `${Math.ceil(outcome.retryAfterMs / 1000)}s.`,
           );
         case "allowed":
           return outcome.content as Record<string, unknown>;

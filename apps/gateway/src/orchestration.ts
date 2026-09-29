@@ -1102,6 +1102,34 @@ async function dispatchRunNodeInner(
             };
             traceStatus = "denied";
             break;
+          /**
+           * AER-022 — the upstream is circuit-broken, and this case existing at
+           * all is the finding's point: a delegated worker used to call the
+           * governed primitive with NO breaker involvement, so it could pay the
+           * full tool deadline against a known-dead server indefinitely while
+           * the proxy route refused the same server instantly.
+           *
+           * Worded as NOT the worker's fault and NOT governance. The worker is
+           * told to stop asking, with the cooldown, so a tool-using loop does not
+           * burn its remaining turns re-trying a server nobody can reach.
+           */
+          case "upstream_circuit_open":
+            block = {
+              type: "tool_result",
+              toolUseId: tc.id,
+              content:
+                `the MCP server for '${tc.name}' is unavailable and calls to it are being refused: ` +
+                `${toolOut.reason} Do not retry this tool for at least ` +
+                `${Math.ceil(toolOut.retryAfterMs / 1000)}s; use another approach or report that the ` +
+                `server is down.`,
+              isError: true,
+            };
+            // Its own status, not "denied": every other value in this switch is
+            // either a governance decision or an allow, and folding an OUTAGE in
+            // with the denials would make an operator reading run traces see a
+            // policy problem where there is a network one.
+            traceStatus = "upstream_circuit_open";
+            break;
           // ADR-0019 §8.4: the run's project is block-mode and the tool
           // ARGUMENTS carried PII — denied pre-call, nothing billed. Reported
           // back to the worker by CATEGORY, never by content.

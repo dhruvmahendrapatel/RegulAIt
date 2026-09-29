@@ -85,6 +85,7 @@ import { asc, inArray, mcpServers, sql, type Db } from "@regulait/db";
 import { McpAdmissionHeldError } from "./mcp-admission.js";
 import { McpEgressBlockedError } from "./mcp-egress.js";
 import { connectUpstream } from "./mcp-proxy.js";
+import { timeouts } from "./timeouts.js";
 import {
   breakerAdmits,
   breakerConfig,
@@ -116,7 +117,9 @@ export interface McpHealthProbeResult {
   inCooldown: number;
   /** how many this pass actually attempted a connect against */
   probed: number;
-  /** answered the handshake */
+  /** answered the handshake AND a real `tools/list` — AER-022: a handshake alone
+   *  is not health, and accepting one as health let this sweep close a breaker
+   *  that tool failures had opened */
   healthy: number;
   /** a genuine upstream failure; the breaker was told */
   failed: number;
@@ -287,6 +290,23 @@ export async function runMcpHealthProbeSweep(
       // opens a socket by itself.
       const client = await connectUpstream(db, row);
       try {
+        // AER-022 — AND THEN A REAL OPERATION. The first version of this file
+        // stopped at the connect and called that health, which is the same
+        // mistake the proxy route made: `initialize` is a protocol formality an
+        // upstream can satisfy while hanging every `tools/list` that follows. A
+        // probe that accepted a handshake as recovery could CLOSE a breaker that
+        // real tool failures had opened, handing the next user the outage the
+        // breaker was holding back — worse than not probing at all, because the
+        // sweep would report `recovered` while the upstream stayed broken.
+        //
+        // `tools/list` is the cheapest operation the protocol defines that
+        // actually exercises the server's own handler, it is read-only on every
+        // upstream by definition, and it is the same call the proxy makes to sync
+        // a manifest — so "the probe passed" now means what a user needs it to.
+        // Bounded by G2's list deadline: an upstream that answers `initialize`
+        // and then hangs is precisely the case, so an unbounded await here would
+        // hang the whole sweep on its first sick server.
+        await client.listTools(undefined, { timeout: timeouts().mcpListToolsMs });
         out.healthy += 1;
       } finally {
         await client.close().catch(() => {});
