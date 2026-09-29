@@ -2428,6 +2428,189 @@ and the operator output reports backlog plus oldest-unprobed age.
   AER-014. Green builds and focused repository jobs do not establish production readiness,
   certification, complete provider/deployment parity or enterprise readiness.
 
+### Automated enterprise-readiness run — 2026-09-28 23:14:40 CDT (UTC-05:00)
+
+**Target branch, synchronization and reviewed range**
+
+- Exclusive target: dhruv/active.
+- The run began clean on dhruv/active at feedback commit
+  9d4595afc3e0cb69de3c34c5e564dbf6ef823f2c. A read-only fetch found
+  origin/dhruv/active at c37c9b93ba83023fffc349750dd68a01e05ab5be, 13 commits ahead with no
+  local divergence. git pull --ff-only origin dhruv/active succeeded; no reset, stash, merge,
+  rebase or unrelated write was used.
+- Reviewed product range:
+  b145b1cd476160fe99f10863e517aed39e20beec..c37c9b93ba83023fffc349750dd68a01e05ab5be.
+  The intervening 9d4595a commit is this feedback file's prior publication, not product evidence.
+- A second fetch before editing found local HEAD and origin/dhruv/active still equal at c37c9b9.
+
+**Commands/tests and outcomes**
+
+- Mandatory suite and repository instruction reads — **PASS**, completed before synchronization and
+  review.
+- Branch/status/remote/tracking inspection, git fetch origin dhruv/active --prune and
+  git pull --ff-only origin dhruv/active — **PASS**.
+- git diff --check b145b1c..HEAD — **PASS**. Commit dd0c9b8 removes the five whitespace failures
+  reported in the prior run.
+- corepack pnpm --filter @regulait/policy-kernel test — **PASS**: 145/145 tests.
+- corepack pnpm --filter @regulait/model-provider test — **PASS**: 132/132 tests, including every
+  AER-021 provider deadline case and the Google response-body hang.
+- The first bare pnpm --filter @regulait/gateway typecheck invocation — **ENVIRONMENT FAILURE**
+  before TypeScript ran: the bundled wrapper tried to purge/install modules without a TTY.
+- The first corepack gateway typecheck saw stale built declarations in changed workspace packages.
+  After corepack pnpm --filter @regulait/shared build, --filter @regulait/db build and
+  --filter @regulait/policy-kernel build all passed, the repeated
+  corepack pnpm --filter @regulait/gateway typecheck — **PASS**. No tracked file changed.
+- node --check integrations/kong/test/verify.mjs — **PASS**.
+- Exact-head GitHub Integrations run 36502000239 at c37c9b9 — **PASS**, including the Kong adapter
+  harness. This is repository-run container evidence, not locally reproduced Kong behavior.
+- Exact-head GitHub CI run 36502000235 at c37c9b9 — **FAIL**. Build passed. Policy kernel passed
+  145 tests and model-provider passed 132. Gateway reported 198 passed files, one failed file,
+  2,972 passed tests, nine skipped and two failed. Both failures are in
+  apps/gateway/src/g2-upstream-deadlines.test.ts:
+  the recovered post-cooldown request returned 200 but left breakerOpenedAt non-null
+  (test beginning line 377), and a 12-request half-open backlog made 12 upstream attempts instead of
+  electing exactly one prober (test beginning line 437). Both preflight gates were consequently
+  skipped. This is a fresh exact-head verification failure, not an inference.
+- DATABASE_URL, TEST_DATABASE_URL and VITEST_DATABASE_URL were unset. No local database, migration,
+  gateway integration, browser, cloud, provider or deployment test ran.
+
+#### AER-038 — HIGH — Retrying a tools/call from an upstream readOnly hint can duplicate execution
+
+**Lifecycle: OPEN. Evidence type:** direct source and test-boundary observation; duplicate execution
+after an ambiguous response failure is a reasoned consequence and has not been reproduced against a
+live external MCP service.
+
+The new retry policy correctly defaults an unannotated tool to write, but it classifies a tool as
+read solely from the upstream-supplied MCP annotation readOnlyHint
+(apps/gateway/src/mcp-proxy.ts:134-138). attemptsForToolKind then permits the configured number of
+attempts for that read classification (apps/gateway/src/upstream-retry.ts:303-311), and the proxy
+reissues upstream.callTool with the same arguments (apps/gateway/src/mcp-proxy.ts:1042-1063).
+
+Read-only and idempotent are not equivalent. A read operation can consume a queue item, advance a
+cursor, create an export, trigger metered work, mutate access logs or be implemented incorrectly.
+More importantly, after ECONNRESET, EPIPE, timeout, 500, 502, 503 or 504, the proxy cannot know
+whether the remote handler performed the operation before the response was lost. No stable
+idempotency key is sent and no upstream deduplication contract is required. The classification is
+also asserted by the server whose execution is being repeated, not approved independently by the
+operator.
+
+The shipped test does not cover that ambiguity. Its fake returns 503 before the MCP server or tool
+handler runs, then proves the read tool received two POSTs while the write received one
+(apps/gateway/src/zz-adr0128-upstream-retry.test.ts:656-773). ADR-0128 itself first states that
+tools/call cannot make an idempotence claim and can duplicate pull requests, messages or charges
+(docs/decisions/0128-upstream-retry-policy.md:34-49), but then treats readOnlyHint as sufficient and
+acknowledges only that a lying upstream gains a new consequence (:169-171). The risk exists even
+when the hint is honest because an observational read is not necessarily safe to execute twice.
+
+**Impact:** one authorized user call can cause two or three upstream executions while RegulAIt
+records one logical call. That can duplicate external side effects or cost, make the local
+audit/usage trail disagree with the provider, and violate approval or budget expectations during
+exactly the network failures where operators most need failure honesty.
+
+**Recommended remediation:** default every tools/call to one attempt. Permit retry only under a
+separate operator-approved idempotency capability, not readOnlyHint, and send one stable
+idempotency key/call identity across attempts to an upstream that contractually deduplicates it.
+Retry transport failures only when the client can prove the request was not sent; treat all
+post-send/unknown failures as ambiguous and surface them without replay.
+
+**Acceptance evidence required:**
+
+1. A fake handler increments a durable side-effect counter and then drops or 503s the response;
+   without an idempotency contract RegulAIt makes one upstream execution, even when readOnlyHint is
+   true.
+2. With an explicitly trusted idempotency contract, every attempt carries the same key and the
+   upstream records one effect; a different logical call receives a different key.
+3. A server cannot opt itself into replay merely by changing its tool annotation; operator policy
+   controls eligibility.
+4. Audit and usage evidence distinguishes attempts from logical calls and remains reconcilable with
+   the one external effect.
+
+#### AER-022 — HIGH — Shared breaker change regresses the route-level half-open election
+
+**Lifecycle: PARTIALLY RESOLVED, not RESOLVED/DONE. Evidence type:** direct source/control-flow
+observation plus reproduced exact-head GitHub CI failures.
+
+Commit c37c9b9 moves breaker admission and operation-failure accounting into the shared operation
+boundary, which is meaningful progress for tools/call and delegated workers
+(apps/gateway/src/mcp-proxy.ts:484-566). It does not preserve the existing proxy-route election.
+The outer /mcp/:serverId path performs only a read-only breaker-state check
+(apps/gateway/src/mcp-proxy.ts:1473 onward) and calls connectUpstream at :1511 before
+executeGovernedToolCall can call breakerAdmits. After cooldown, every concurrent request therefore
+connects upstream before the shared primitive elects one prober. tools/list is served by the outer
+MCP proxy and never reaches the shared call primitive, so its successful recovery path also does
+not call the primitive's operationSucceeded hook.
+
+The exact-head CI result proves both effects: 12/12 half-open callers reached the black-hole
+upstream rather than one, and a successful recovery response failed to close the breaker. This is
+the finding's own pre-existing test suite rejecting the proposed fix, not a speculative edge case.
+
+**Recommended remediation:** make one shared operation own admission before any connect/handshake
+and completion after every relevant MCP operation. Alternatively elect at the route before
+connectUpstream and pass an already-admitted probe token/context into the shared primitive so it
+does not elect twice. tools/list, tools/call and delegated execution must share the same semantics.
+
+**Remaining acceptance evidence:** restore both g2-upstream-deadlines tests; add an upstream that
+initializes and then hangs/fails list and call operations; prove one probe across simultaneous
+proxy and delegated-worker calls, closure only after an actual successful probe, fast-fail for
+losers, and consistent database/audit/invocation counts.
+
+**Prior-finding lifecycle and remaining uncertainty — 2026-09-28 23:14 CDT**
+
+- **AER-017 — RESOLVED/DONE.** Fixing commit dee2e0e separates unconditional execution-mode stops
+  from the conditional approval hold and evaluates the latter only after entitlement, scope,
+  rate-limit and ABAC denials (packages/policy-kernel/src/index.ts:669-705, :863-974). The source
+  and focused regression tests cover ungranted calls, approved-consent consumption, competing
+  consumers, rate/ABAC denial and missing approver
+  (packages/policy-kernel/src/index.test.ts:1767-1923;
+  apps/gateway/src/adr0124-kill-switch.test.ts:495-630). Local 145/145 kernel tests passed, and the
+  exact-head CI log reports the gateway ADR-0124 file passing. No acceptance item remains open.
+- **AER-021 — RESOLVED/DONE.** Fixing commit 4aea3dd binds AbortSignal.timeout at the provider
+  resolver, composes any caller signal and supplies the wrapper to every adapter
+  (packages/model-provider/src/index.ts:2433-2506). Google keeps body consumption inside the same
+  deadline and cancels the reader (:1407-1436). Local 132/132 provider tests passed, including
+  Anthropic, OpenAI, xAI, custom, Google header/body hangs, exact configured timing, caller-signal
+  preservation and the unwrapped negative control. Residual limitation: this proves local timeout
+  behavior, not vendor service availability.
+- **AER-035 — PARTIALLY RESOLVED.** Commit f587c5f directly addresses acceptance item 3. A scoped
+  database trigger fails the final success-audit insert after the target mutation and applied
+  marker; the test proves all three roll back, removes the trigger and successfully retries the same
+  proposal exactly once (apps/gateway/src/zz-aer035-apply-atomicity.test.ts:364-489). Exact-head CI
+  reports all six focused AER-035 tests passing. Acceptance item 4 remains: there is still no
+  process-kill/reconnect or restart-recovery test, which the prior run explicitly required before
+  DONE. The transaction shape strongly suggests PostgreSQL will roll back an interrupted session,
+  but that is not direct repository evidence, so the lifecycle is not silently closed.
+- **AER-036 — PARTIALLY RESOLVED.** Fixing commit 4f12c84 closes the demonstrated key-auth defect:
+  the schema replaces session_origin with a constrained asserted_session_origin
+  (integrations/kong/kong/plugins/regulait-authz/schema.lua:41-67); the handler derives api_key or
+  password from the request credential and refuses a contradictory assertion
+  (handler.lua:112-181); the passing exact-head harness verifies the exact ledger origin and a
+  zero-upstream contradiction refusal (integrations/kong/test/verify.mjs:537-565). OIDC and SAML
+  remain operator assertions the adapter cannot verify, as the docs now state honestly
+  (integrations/kong/README.md:123-138). Original acceptance item 2 required per-request derivation
+  for supported OIDC/SAML, mixed-auth and ambiguous metadata; that remains unmet. Keep the field
+  visibly asserted and do not present principal context as authenticated parity until those paths
+  exist.
+- **AER-037 — PARTIALLY RESOLVED.** Fixing commit 7b3e9b0 adds persisted lastHealthProbeAt ordering,
+  broken-first priority, cooldown filtering, backlog/oldest-probe reporting and a seven-server,
+  limit-three sequential rotation test (apps/gateway/src/mcp-health-probe.ts:193-250;
+  apps/gateway/src/zz-mcp-health-probe.test.ts:269-358). This closes the deterministic tail
+  starvation proved in the original finding. It does not satisfy the original concurrent-instance
+  acceptance item: selection and timestamp update are separate statements without a transaction,
+  row lock, SKIP LOCKED or atomic claim. Two direct overlapping sweeps can select the same rows
+  despite comments claiming disjoint sets (:81 and :243). The scheduler lease reduces normal
+  overlap but is not proof for an expired/slow lease. Add a two-sweep concurrency test and atomic
+  claim, or explicitly narrow the contract to the renewable scheduler lease and remove the
+  unsupported concurrency claim.
+- **ABAC schema v2 network location — reviewed with no new finding in this run.** Commit 5a9cad2
+  takes enforcement input from Fastify req.ip rather than a PDP client field, uses Cedar's ipaddr
+  extension, leaves the attribute optional/guarded and preserves v1 evaluation. Local kernel tests
+  and final gateway typecheck passed. Database-backed gateway integration was not run locally.
+- **AER-038 is the only new stable finding.** AER-022 has materially changed but remains open as
+  partial because exact-head regression evidence blocks closure. No new evidence in this range
+  changes AER-004, AER-007, AER-010, AER-011, AER-014, AER-018 or AER-019. A red exact-head CI
+  result and focused green tests cannot establish production readiness, certification, complete
+  provider/deployment parity or enterprise readiness.
+
 <!-- codex-enterprise-feedback:end -->
 
 Date: 2026-09-06  
