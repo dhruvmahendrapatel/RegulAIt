@@ -272,9 +272,9 @@ describe("ADR-0043 — MCP servers behind the egress guard", () => {
     await setOrgDefault(false);
     const res = await app.inject({
       method: "POST",
-      headers: userAuth,
+      headers: { ...userAuth, accept: "application/json, text/event-stream" },
       url: `/mcp/${privateServerId}`,
-      payload: {},
+      payload: { jsonrpc: "2.0", id: 1, method: "tools/list" },
     });
     expect(res.statusCode).toBe(403);
     expect(res.json().error).toBe("egress_blocked");
@@ -346,21 +346,24 @@ describe("ADR-0043 — MCP servers behind the egress guard", () => {
       allowPlaintextHttp: true,
     });
 
-    const res = await app.inject({
-      method: "POST",
-      headers: userAuth,
-      url: `/mcp/${row!.id}`,
-      payload: {},
-    });
-    expect(res.statusCode).toBe(403);
-    expect(res.json().error).toBe("egress_blocked");
-    expect(res.json().code).toBe("blocked_address_range");
-    const audit = await latestAudit("mcp-server-egress-blocked");
-    expect((audit!.detail as Record<string, unknown>).phase).toBe("connect");
-    // the row is refused, never rewritten
-    const [after] = await db.select().from(mcpServers).where(eq(mcpServers.id, row!.id));
-    expect(after!.url).toBe("http://169.254.169.254/mcp");
-    await dropAllowHost(hostId);
+    try {
+      const res = await app.inject({
+        method: "POST",
+        headers: { ...userAuth, accept: "application/json, text/event-stream" },
+        url: `/mcp/${row!.id}`,
+        payload: { jsonrpc: "2.0", id: 1, method: "tools/list" },
+      });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().error).toBe("egress_blocked");
+      expect(res.json().code).toBe("blocked_address_range");
+      const audit = await latestAudit("mcp-server-egress-blocked");
+      expect((audit!.detail as Record<string, unknown>).phase).toBe("connect");
+      // the row is refused, never rewritten
+      const [after] = await db.select().from(mcpServers).where(eq(mcpServers.id, row!.id));
+      expect(after!.url).toBe("http://169.254.169.254/mcp");
+    } finally {
+      await dropAllowHost(hostId);
+    }
   });
 
   it("a public-internet MCP URL is refused without an allow entry and accepted with one", async () => {

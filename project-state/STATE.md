@@ -4,7 +4,7 @@ last_updated: 2026-09-29
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
-last_session: sessions/2026-09-29-session-01.md
+last_session: sessions/2026-09-29-session-02.md
 roadmap: ../docs/product/ROADMAP.md
 ---
 
@@ -40,6 +40,14 @@ the inherited-credential failure and PII measurement timeouts. GitHub checks on 
 commit are the full Linux gate; do not infer a full-suite pass from the focused results.
 P1 approval/export/cache/emergency-control work follows the P0 CI gate. No production
 designation or deployment was performed.
+
+P0 CI follow-up: run 36652212904 passed the breaker/retry suites but exposed two
+egress fixtures sending empty MCP bodies. They now send valid tools/list requests
+and retain every denial assertion; IMDS allow-list cleanup now runs in finally,
+preventing the two downstream OIDC failures that the skipped cleanup caused.
+The combined egress/breaker/retry run passed all 65 tests on a fresh task database.
+See session-02 for the first CI failure and follow-up evidence; the published
+follow-up commit's checks remain the full-suite gate.
 
 **2026-09-28 (latest) — the three unverified claims closed, two external findings fixed, and
 ABAC schema v2 adds network location. M-048 and M-049 logged.**

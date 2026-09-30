@@ -1208,3 +1208,16 @@ remove ambient provider credentials from the child process. A fixture claiming
 "unconfigured" must not depend on the invoking shell. Use `pnpm --filter ... exec
 vitest run <files>` for focused runs: passing `--` through this repo's test script
 caused the initial supposedly focused command to run the entire gateway suite.
+
+### M-051 (2026-09-29) - Admission-boundary changes missed adjacent egress fixtures
+
+The P0 focused set covered breaker and retry behavior but omitted the egress
+suite. Two refusal fixtures posted empty MCP bodies and depended on the old
+preliminary connection to reach the guard. With operation-boundary admission,
+they stopped at protocol validation. One failed assertion also skipped IMDS
+allow-list cleanup, causing two misleading downstream OIDC failures in CI.
+
+Rule: when moving a connection/admission boundary, include adjacent authorization
+and egress suites. Refusal fixtures must submit valid operations that reach the
+boundary under test. Security-posture fixture cleanup belongs in finally so a
+failed assertion cannot silently change later tests' permissions.
