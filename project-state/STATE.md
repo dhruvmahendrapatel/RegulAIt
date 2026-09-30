@@ -21,6 +21,10 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-09-30 - MCP redaction integration in progress (ADR-0143).** This
+chapter owns MCP/evaluator integration and migration 0120. Public redaction
+settings remain disabled until all dispatch paths meet the safety contract.
+
 **2026-09-30 - Structured consent and complete model-output gates
 (ADR-0141/0142).** Added a bounded decoded-JSON redactor and frozen action
 preparation that binds original/effective payloads, category policy and both
