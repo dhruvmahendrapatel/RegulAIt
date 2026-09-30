@@ -3628,6 +3628,12 @@ export type OrgSettingsRow = typeof orgSettings.$inferSelect;
 /** what a matching ABAC policy does to a call the RBAC layer already allowed */
 export const ABAC_POLICY_MODES = ["forbid", "require_approval"] as const;
 
+/** Shared-lockable policy generation for exact-action approval consumption. */
+export const governancePolicyEpoch = pgTable("governance_policy_epoch", {
+  id: boolean("id").primaryKey().default(true),
+  epoch: bigint("epoch", { mode: "number" }).notNull().default(0),
+});
+
 export const abacPolicies = pgTable(
   "abac_policies",
   {

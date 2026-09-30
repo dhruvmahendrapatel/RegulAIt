@@ -2722,6 +2722,22 @@ fixes in this P0 batch.
   production readiness, certification, complete provider/deployment parity, backup/restore
   reliability or live-service behavior.
 
+### Implementer update - 2026-09-30 07:37 CDT (P1 approval binding)
+
+- AER-004: ADR-0130 and migration 0119 address the four recorded residuals.
+  Legacy null contexts cannot satisfy or consume an approval; active ABAC
+  policy identity/source enters the v2 context digest; a database policy epoch
+  is read before evaluation and checked under a shared row lock in the approval
+  consume transaction. Approval-rule, config-version and ABAC writes advance
+  that epoch through database triggers. Settings GET/PUT and the settings audit
+  now name a null approval TTL `nonexpiring_high_risk`.
+- Fresh disposable PostgreSQL database: consent-context-expiry.test.ts 14/14
+  passed, including legacy re-queue, ABAC-only activation, and a controlled
+  evaluation/activation/consume race with zero upstream calls. Gateway build
+  passed. The complete GitHub CI result for this P1 commit is pending at this
+  entry; closure is contingent on that gate. This batch does not cover every
+  grant, budget or emergency-setting race.
+
 <!-- codex-enterprise-feedback:end -->
 
 Date: 2026-09-06  

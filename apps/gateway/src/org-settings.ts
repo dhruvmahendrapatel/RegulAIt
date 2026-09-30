@@ -412,10 +412,14 @@ export function redactSettings(row: OrgSettingsRow): OrgSettingsRow {
   };
 }
 
+function approvalTtlPosture(row: OrgSettingsRow): "bounded" | "nonexpiring_high_risk" {
+  return row.approvalTtlHours == null ? "nonexpiring_high_risk" : "bounded";
+}
+
 export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db) {
   app.get("/v1/org/settings", async () => {
     const settings = await loadOrgSettings(db);
-    return { settings: redactSettings(settings), envKeys: envKeyPresence() };
+    return { settings: redactSettings(settings), approvalTtlPosture: approvalTtlPosture(settings), envKeys: envKeyPresence() };
   });
 
   app.put("/v1/org/settings", async (req, reply) => {
@@ -551,7 +555,7 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db) {
       userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
       objectType: "org_settings",
       objectId: null,
-      detail: { via: req.authCtx.via, changed, after },
+      detail: { via: req.authCtx.via, changed, after, approvalTtlPosture: approvalTtlPosture(after) },
       effect: "allow",
       ruleId: "org-settings-updated",
       ruleChain: [],
@@ -560,7 +564,7 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db) {
           ? `org settings updated: ${Object.keys(changed).join(", ")}`
           : "org settings written with no effective change",
     });
-    return reply.send({ settings: redactSettings(after) });
+    return reply.send({ settings: redactSettings(after), approvalTtlPosture: approvalTtlPosture(after) });
   });
 
   // -------------------------------------------------------------------------

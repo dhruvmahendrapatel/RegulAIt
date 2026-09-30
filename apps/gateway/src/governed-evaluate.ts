@@ -10,6 +10,7 @@ import {
   deployTargets,
   eq,
   gte,
+  governancePolicyEpoch,
   inArray,
   mcpServers,
   or,
@@ -105,6 +106,8 @@ export interface GovernedEvaluation {
    * that governed the call, and the audit row is owed it either way.
    */
   contextDigest: string;
+  /** DB policy generation read before the evaluation's policy snapshot. */
+  policyEpoch: number;
   /**
    * ADR-0105: approved rows that WOULD have satisfied this call on ADR-0104's
    * payload test but were refused on the new ones — an expired consent, or one
@@ -209,6 +212,9 @@ export async function governedEvaluate(
    */
   simulate?: { versionId: string },
 ): Promise<GovernedEvaluation> {
+  const [policyGeneration] = await db.select({ epoch: governancePolicyEpoch.epoch }).from(governancePolicyEpoch);
+  if (!policyGeneration) throw new Error("governance policy epoch is unavailable");
+  const policyEpoch = policyGeneration.epoch;
   // PILLAR 1 rule scoping: resolve the user's role/team memberships first, then
   // widen every rule load from the exact (userId, serverId) match to every
   // scope this user matches. The kernel receives a pre-filtered set and stays
@@ -373,6 +379,7 @@ export async function governedEvaluate(
         requiredApproverUserId: null,
         approvalScope: "action",
       }),
+      policyEpoch,
       retiredApprovals: [],
     };
   }
@@ -592,6 +599,11 @@ export async function governedEvaluate(
       ruleId: r.id,
       activeVersionId: aResolved.activeVersionByArtifact.get(r.id) ?? null,
     })),
+    abacPolicies: abacPolicies.map((p) => ({
+      policyId: p.id,
+      version: p.version ?? null,
+      source: p.source,
+    })),
     requiredApproverUserId: pendingDecision.approverUserId ?? null,
     approvalScope,
   });
@@ -615,9 +627,7 @@ export async function governedEvaluate(
   //   * a stored `context_digest` that differs from the one just computed means
   //     the governing policy moved after the signature — the consent does not
   //     satisfy;
-  //   * a NULL stored `context_digest` is a legacy row and IS accepted: it
-  //     predates the feature and is still payload-bound under ADR-0104. See
-  //     ADR-0105 for why that call was made rather than fail-closed;
+  //   * a NULL stored context is a legacy row and cannot authorize execution;
   //   * a stored `expires_at` in the past does not satisfy. NULL never expires
   //     — a legacy row, or an org that set the dial to NULL on purpose.
   //
@@ -631,7 +641,7 @@ export async function governedEvaluate(
   const expired = (r: (typeof approvedRows)[number]) =>
     r.expiresAt != null && r.expiresAt.getTime() <= now;
   const contextStale = (r: (typeof approvedRows)[number]) =>
-    r.contextDigest != null && r.contextDigest !== contextDigest;
+    r.contextDigest !== contextDigest;
   const fresh = (r: (typeof approvedRows)[number]) => !expired(r) && !contextStale(r);
 
   const usable = approvedRows.filter((r) => satisfiesPayload(r) && fresh(r));
@@ -777,6 +787,7 @@ export async function governedEvaluate(
     argumentsDigest,
     approvalScope,
     contextDigest,
+    policyEpoch,
     retiredApprovals,
     ...(candidateDecision ? { candidateDecision } : {}),
   };

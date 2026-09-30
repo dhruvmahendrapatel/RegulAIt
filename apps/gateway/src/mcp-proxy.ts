@@ -17,6 +17,7 @@ import {
   costEvents,
   eq,
   gt,
+  governancePolicyEpoch,
   interceptionSettings,
   INTERCEPTION_SETTINGS_ID,
   isNull,
@@ -251,6 +252,42 @@ export type GovernedToolCallOutcome =
    * PROJECT ledger, and it carries the same status/error the model path
    * returns so the two surfaces name the same condition identically. */
   | { kind: "budget_blocked"; status: number; error: string; detail?: string };
+
+/** Consume only if the policy snapshot used to evaluate this call is still current. */
+export async function consumeBoundApproval(
+  db: Db,
+  input: {
+    approvalId: string;
+    policyEpoch: number;
+    approvalScope: "action" | "tool";
+    argumentsDigest: string;
+    contextDigest: string;
+  },
+): Promise<boolean> {
+  return db.transaction(async (tx) => {
+    const [generation] = await tx
+      .select({ epoch: governancePolicyEpoch.epoch })
+      .from(governancePolicyEpoch)
+      .for("share");
+    if (!generation || generation.epoch !== input.policyEpoch) return false;
+    const consumed = await tx
+      .update(approvals)
+      .set({ status: "consumed" })
+      .where(
+        and(
+          eq(approvals.id, input.approvalId),
+          eq(approvals.status, "approved"),
+          ...(input.approvalScope === "action"
+            ? [eq(approvals.argumentsDigest, input.argumentsDigest)]
+            : []),
+          eq(approvals.contextDigest, input.contextDigest),
+          or(isNull(approvals.expiresAt), gt(approvals.expiresAt, sql`now()`))!,
+        ),
+      )
+      .returning({ id: approvals.id });
+    return consumed.length === 1;
+  });
+}
 
 /**
  * ADR-0105 — RETIRE A CONSENT THAT NO LONGER SATISFIES THE CALL, VISIBLY.
@@ -575,6 +612,7 @@ async function executeGovernedToolCallInner(
       argumentsDigest,
       approvalScope,
       contextDigest,
+      policyEpoch,
       retiredApprovals,
     } = await governedEvaluate(
       db,
@@ -944,46 +982,27 @@ async function executeGovernedToolCallInner(
       // Atomically consume the approval; losing the race means another call
       // already spent it, so this call must go back through the queue.
       //
-      // ADR-0105 — THE WHOLE TEST IS IN THE PREDICATE, NOT AROUND IT.
-      //
-      // The matcher in `governedEvaluate` already refused a stale or expired
-      // row. This is the same test again, expressed as part of the SINGLE
-      // atomic statement that changes the row's state — so between the moment
-      // the decision was taken and the moment the consent is actually spent
-      // there is no window in which a row can be checked as good and then
-      // spent as bad. Two calls racing for one consent still resolve to exactly
-      // one winner (the `status = 'approved'` conjunct, unchanged), and a
-      // caller whose evaluation is already behind a policy activation cannot
-      // spend on the strength of it.
+      // A shared lock on the policy epoch orders this consume against policy
+      // writes. Their database triggers update the same row. If any write
+      // committed after evaluation began, this call must evaluate again.
       //
       //   * `arguments_digest` is asserted ONLY under action scope. Under the
       //     ADR-0104 `tool` escape hatch a different payload's digest — or a
       //     legacy NULL — is exactly what the row is allowed to carry, so
       //     asserting it there would quietly delete the escape hatch.
-      //   * `context_digest` must equal this call's, OR be NULL. A NULL is a
-      //     row queued before migration 0107; it is accepted because it is
-      //     still payload-bound under ADR-0104, and ADR-0105 argues that call
-      //     rather than leaving it implicit.
+      //   * `context_digest` must equal this call's. Legacy NULL rows re-queue.
       //   * `expires_at` must be absent or in the future, evaluated by the
       //     DATABASE's clock (`now()`), not this process's — the row is being
       //     changed there and the freshness question has to be answered there
       //     too.
-      const consumed = await db
-        .update(approvals)
-        .set({ status: "consumed" })
-        .where(
-          and(
-            eq(approvals.id, approvedApprovalId),
-            eq(approvals.status, "approved"),
-            ...(approvalScope === "action"
-              ? [eq(approvals.argumentsDigest, argumentsDigest)]
-              : []),
-            or(isNull(approvals.contextDigest), eq(approvals.contextDigest, contextDigest))!,
-            or(isNull(approvals.expiresAt), gt(approvals.expiresAt, sql`now()`))!,
-          ),
-        )
-        .returning({ id: approvals.id });
-      if (consumed.length === 0) {
+      const consumed = await consumeBoundApproval(db, {
+        approvalId: approvedApprovalId,
+        policyEpoch,
+        approvalScope,
+        argumentsDigest,
+        contextDigest,
+      });
+      if (!consumed) {
         // ADR-0105 — CLASSIFY, do not return one opaque failure. Re-read the
         // row and say which of the three actually happened: somebody else spent
         // it, it lapsed, or the policy moved underneath it. The first is a

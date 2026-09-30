@@ -208,6 +208,18 @@ describe("ADR-0105 — the consent-context fingerprint", () => {
       .not.toBe(approvalContextDigest(base));
   });
 
+  it("binds active ABAC policy identity and source independently of approval rules", () => {
+    const policy = { policyId: RULE_B, version: 1, source: "forbid when A" };
+    const first = approvalContextDigest({ ...base, abacPolicies: [policy] });
+    expect(first).not.toBe(approvalContextDigest(base));
+    expect(first).not.toBe(approvalContextDigest({
+      ...base, abacPolicies: [{ ...policy, version: 2 }],
+    }));
+    expect(first).not.toBe(approvalContextDigest({
+      ...base, abacPolicies: [{ ...policy, source: "forbid when B" }],
+    }));
+  });
+
   it("an UNVERSIONED rule hashes to a STABLE value, not to 'unknown'", () => {
     // pre-ADR-0073 rules have no version rows at all. That has to be a fixed
     // input or every unversioned rule would look like a policy change on every

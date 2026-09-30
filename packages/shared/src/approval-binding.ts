@@ -238,7 +238,7 @@ export function effectiveApprovalScope(
  * contract: bumping it makes every pre-existing context digest stop matching,
  * which is a re-queue (fail-closed), never an accidental match.
  */
-export const APPROVAL_CONTEXT_DIGEST_VERSION = "regulait.approval-context.v1";
+export const APPROVAL_CONTEXT_DIGEST_VERSION = "regulait.approval-context.v2";
 
 /** One governing approval rule and the `config_versions` row currently ACTIVE
  * for it. `activeVersionId` is null when the rule has no version rows — the
@@ -252,6 +252,8 @@ export interface ApprovalRuleVersionRef {
 export interface ApprovalContextRef {
   /** the rules that MATCHED this call, with their resolved active versions */
   ruleVersions: ReadonlyArray<ApprovalRuleVersionRef>;
+  /** every active ABAC policy that could govern this call */
+  abacPolicies?: ReadonlyArray<{ policyId: string; version: number | null; source: string }>;
   /** who policy currently requires to sign — `decision.approverUserId` */
   requiredApproverUserId?: string | null;
   /** the strictest scope across the matched rules */
@@ -295,6 +297,9 @@ export function approvalContextDigest(ref: ApprovalContextRef): string {
         ruleId: p.ruleId,
         activeVersionId: p.activeVersionId ?? null,
       })),
+      abacPolicies: [...(ref.abacPolicies ?? [])]
+        .sort((a, b) => a.policyId.localeCompare(b.policyId))
+        .map((p) => ({ policyId: p.policyId, version: p.version, source: p.source })),
       requiredApproverUserId: ref.requiredApproverUserId ?? null,
       approvalScope: ref.approvalScope,
     })}`,

@@ -1,6 +1,6 @@
 ---
-phase: p0-mcp-fixes-implemented-p1-security-next
-last_updated: 2026-09-29
+phase: p1-security-in-progress
+last_updated: 2026-09-30
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
@@ -20,6 +20,17 @@ roadmap: ../docs/product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**2026-09-30 - P1 approval binding is being hardened (ADR-0130).** The P0
+follow-up commit f666733 passed full GitHub CI (run 36653593771) and Kong
+integration (run 36653593778). AER-004 source revalidation found the legacy
+null-context and ABAC identity gaps and the policy activation race. Migration
+0119 adds a database policy epoch; consumption holds a shared epoch lock while
+it compares the evaluated generation and spends a matching approval. The
+context digest is v2 and binds active ABAC policies; null contexts re-queue.
+The approval suite passed 14/14 on a fresh disposable database before the
+settings posture response was added. P1 export, cache and emergency controls,
+P2 and P3 remain in the approved sequence.
 
 **2026-09-29 - Owner-approved delivery order; P0 fixes implemented in dd50ab2.**
 
@@ -1294,9 +1305,10 @@ required approver changed (an authorization time-of-check/time-of-use hole), and
 unconsumed row lasted forever. The fix needed no new versioning concept: **ADR-0073 already
 resolves every approval rule through `config_versions`**, so the active version id per rule was
 already there to bind against. Consent is now fingerprinted over matched-rule × active-version ×
-required-approver × scope, given a queue-time TTL (72h default dial), and **both are re-derived
-inside the single atomic UPDATE that spends the row** — so nothing can be checked good and spent
-bad. Stale rows are **superseded visibly** and re-queued, not silently ignored. The required
+required-approver × scope, given a queue-time TTL (72h default dial). The 2026-09-08
+implementation compared that earlier policy snapshot with the stored digest during consumption;
+it did not re-derive policy inside the UPDATE, leaving the race later tracked as AER-004 and
+addressed by ADR-0130. Stale rows are **superseded visibly** and re-queued. The required
 approver comes from a no-consent evaluation pass, which asks the kernel rather than re-deriving its
 selection order and breaks the digest↔selection↔decision circularity.
 
