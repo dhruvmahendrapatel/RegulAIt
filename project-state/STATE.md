@@ -1,10 +1,10 @@
 ---
-phase: verification-closed-abac-v2-done-pii-redaction-next
-last_updated: 2026-09-28
+phase: p0-mcp-fixes-implemented-p1-security-next
+last_updated: 2026-09-29
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
-last_session: sessions/2026-08-13-session-15.md
+last_session: sessions/2026-09-29-session-01.md
 roadmap: ../docs/product/ROADMAP.md
 ---
 
@@ -20,6 +20,26 @@ roadmap: ../docs/product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**2026-09-29 - Owner-approved delivery order; P0 fixes implemented in dd50ab2.**
+
+The owner approved: P0 breaker/retry fixes, P1 security findings and crash/concurrency
+verification, P2 in-flight PII redaction then an ISO 27001 evidence pack, P3 SIEM and
+outbound-secret detection scoping, and design-first treatment of the larger extensions.
+This supersedes the older next-work ordering below. AER-017 and AER-021 are already
+resolved in the latest audit and are not new implementation work.
+
+ADR-0129 records the P0 change: manifest requests elect before connecting; proxy and
+delegated tool calls use one shared admission path; successful initialization never
+clears a breaker; every tool call receives one attempt regardless of readOnlyHint.
+The final focused run passed 45 tests, including both previously failing CI regressions
+and mixed proxy/worker/discovery contention. Workspace build, final gateway build and both
+CI preflights passed. Local tests used a task-owned temporary PostgreSQL cluster, separate
+from the installed service. The full local run was not completed: see the session log for
+the inherited-credential failure and PII measurement timeouts. GitHub checks on the published
+commit are the full Linux gate; do not infer a full-suite pass from the focused results.
+P1 approval/export/cache/emergency-control work follows the P0 CI gate. No production
+designation or deployment was performed.
 
 **2026-09-28 (latest) — the three unverified claims closed, two external findings fixed, and
 ABAC schema v2 adds network location. M-048 and M-049 logged.**

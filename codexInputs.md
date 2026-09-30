@@ -2611,6 +2611,48 @@ losers, and consistent database/audit/invocation counts.
   result and focused green tests cannot establish production readiness, certification, complete
   provider/deployment parity or enterprise readiness.
 
+### Implementation verification - 2026-09-29 19:49 CDT (UTC-05:00)
+
+Owner-approved P0 implementation on `dhruv/active`, fixing commit
+`dd50ab20f9831a8b71a5e11a6161e2ec7ba78859` (ADR-0129). Source fixes and
+focused tests are locally verified; full Linux CI must be read from GitHub's
+checks for the published commit. This entry does not claim a full local suite pass.
+
+- **AER-022 - RESOLVED/DONE for the reported operation-boundary regression.**
+  `mcp-proxy.ts` elects manifest requests before any connection and routes tool
+  calls directly through the shared governed primitive. Successful initialize
+  cannot erase list/call failures. Delegated manifest discovery now uses the
+  same breaker. Both original `g2-upstream-deadlines.test.ts` failures pass.
+  `zz-aer022-operation-breaker.test.ts` adds six cases: list/call failure after
+  successful initialize, and a proxy, worker, list or delegated-discovery winner
+  competing with mixed proxy/worker callers. Losers make no contact; one successful
+  probe produces one closed transition. The separate AER-023 state/audit atomicity
+  finding is not closed by this work.
+- **AER-038 - RESOLVED/DONE for automatic tool replay.**
+  `attemptsForToolKind` returns one for every classification and retry configuration.
+  The HTTP regression in `zz-adr0128-upstream-retry.test.ts` appends a durable effect
+  record before returning 503 and proves one request/effect for both read-hinted
+  and write tools. An upstream annotation cannot opt into replay. No operator
+  idempotency opt-in was added, so opt-in/deduplication acceptance scenarios are
+  deferred requirements for a future feature, not claims about this implementation.
+  This does not promise exactly-once execution across a caller's own retries.
+
+Final focused command:
+`corepack pnpm --filter @regulait/gateway exec vitest run src/g2-upstream-deadlines.test.ts src/zz-adr0128-upstream-retry.test.ts src/zz-aer022-operation-breaker.test.ts`
+passed **45/45 tests in three files** on a task-exclusive disposable PostgreSQL 16
+cluster. Workspace build and final gateway build passed. Both CI preflights passed.
+Provider variables were removed from the final test process without changing the
+user's saved environment. The root full test command hit two existing PII measurement
+timeouts; the unchanged measurement assertions passed under an explicit local 20s
+limit. A broader gateway run was stopped before completion. Exact commands, false
+starts, results and remaining priorities are preserved in
+`project-state/sessions/2026-09-29-session-01.md`.
+
+No closure is claimed for AER-004/007/010/011/014/018/019/023 or the remaining
+partial findings. In particular, direct source rechecks still find the export
+scope and compat-cache governance defects; those are the next P1 work, not collateral
+fixes in this P0 batch.
+
 <!-- codex-enterprise-feedback:end -->
 
 Date: 2026-09-06  

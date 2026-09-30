@@ -1192,3 +1192,19 @@ the context bag."
 Mitigation used from here: when a verification verdict is "missing", the evidence
 cell must cite the file and line range of the structure I READ and found it
 absent from — not the grep that failed to find it.
+
+### M-050 (2026-09-29) - Integration tests inherited a real provider credential
+
+The Codex P0 verification used a fresh disposable PostgreSQL cluster but initially
+inherited GEMINI_API_KEY from the parent shell. A test that explicitly expected
+an unconfigured Google provider chose that provider and failed its budget
+assertion (0.30 instead of 0.60), before dispatch. Database isolation alone did
+not reproduce CI's environment. The run was stopped; provider variables were
+removed only from the new test child process before restarting on a new database.
+No credential value was read or printed, and the user's saved environment was unchanged.
+
+Rule: before offline integration tests, inspect environment variable names and
+remove ambient provider credentials from the child process. A fixture claiming
+"unconfigured" must not depend on the invoking shell. Use `pnpm --filter ... exec
+vitest run <files>` for focused runs: passing `--` through this repo's test script
+caused the initial supposedly focused command to run the entire gateway suite.
