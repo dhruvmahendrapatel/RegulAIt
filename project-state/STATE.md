@@ -21,6 +21,10 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-09-30 - Approver action review in progress (ADR-0144).** This chapter
+owns approval presentation and migration 0121. It closes the missing UI
+preview without enabling the still-incomplete public redaction policy.
+
 **2026-09-30 - MCP redacted-action integration (ADR-0143).** Migration 0120
 stores admitted input schemas and extends policy-generation invalidation.
 The real MCP queue/consume/send path now binds original/effective payloads,
