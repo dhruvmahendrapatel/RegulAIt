@@ -622,6 +622,8 @@ export const mcpTools = pgTable(
     haltedReason: text("halted_reason"),
     haltedByUserId: uuid("halted_by_user_id").references(() => users.id, { onDelete: "set null" }),
     description: text("description"),
+    /** ADR-0143: null until a manifest sync; redacted calls fail closed without it. */
+    inputSchema: jsonb("input_schema").$type<Record<string, unknown>>(),
     /** O10 (migration 0045): optional PER-TOOL price override. Resolution is
      * tool-first, server-flat-price fallback (ADR-0019 recorded the flat
      * price as "an additive column when a customer needs it" — this is it).

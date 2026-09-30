@@ -13,6 +13,7 @@ if (!databaseUrl) throw new Error("DATABASE_URL must name a disposable test data
 const admin = { authorization: "Bearer aer022-operation-bootstrap" };
 let db: Db;
 let app: ReturnType<typeof buildApp>;
+let gatewayUrl: string;
 let userId: string;
 let auth: { authorization: string };
 
@@ -25,6 +26,7 @@ beforeAll(async () => {
     retry: { maxAttempts: 1 },
     timeouts: { mcpConnectMs: 2000, mcpListToolsMs: 2000, mcpCallToolMs: 2000 },
   });
+  gatewayUrl = await app.listen({ host: "127.0.0.1", port: 0 });
   const user = await app.inject({ method: "POST", url: "/v1/users", headers: admin,
     payload: { email: `aer022-${Date.now()}@example.test`, displayName: "Breaker test" } });
   expect(user.statusCode).toBe(201);
@@ -34,7 +36,7 @@ beforeAll(async () => {
   auth = { authorization: `Bearer ${key.json().token}` };
 }, 120_000);
 
-afterAll(async () => { await app.close(); });
+afterAll(async () => { app.server.closeAllConnections(); await app.close(); });
 
 async function fixture() {
   let fail: "tools/list" | "tools/call" | null = null;
@@ -77,12 +79,17 @@ async function fixture() {
   const grant = await app.inject({ method: "POST", url: "/v1/grants/tools", headers: admin,
     payload: { userId, serverId: id, toolName: "ping" } });
   expect(grant.statusCode, grant.body).toBe(201);
-  const proxy = (method: "tools/list" | "tools/call") => app.inject({
-    method: "POST", url: `/mcp/${id}`,
-    headers: { ...auth, accept: "application/json, text/event-stream" },
-    payload: { jsonrpc: "2.0", id: 1, method,
-      ...(method === "tools/call" ? { params: { name: "ping", arguments: {} } } : {}) },
-  });
+  // The MCP HTTP adapter drains a real IncomingMessage/socket on close.
+  // Fastify injection's fake socket does not implement that contract.
+  const proxy = async (method: "tools/list" | "tools/call") => {
+    const response = await fetch(`${gatewayUrl}/mcp/${id}`, {
+      method: "POST", signal: AbortSignal.timeout(10_000),
+      headers: { ...auth, "content-type": "application/json", accept: "application/json, text/event-stream" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method,
+        ...(method === "tools/call" ? { params: { name: "ping", arguments: {} } } : {}) }),
+    });
+    return { statusCode: response.status, body: await response.text() };
+  };
   const direct = () => executeGovernedToolCall(db, undefined, { userId, serverId: id, toolName: "ping", arguments: {} });
   return {
     id, counts, proxy, direct,

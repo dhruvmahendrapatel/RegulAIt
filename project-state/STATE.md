@@ -4,7 +4,7 @@ last_updated: 2026-09-30
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
-last_session: sessions/2026-09-30-session-03.md
+last_session: sessions/2026-09-30-session-04.md
 roadmap: ../docs/product/ROADMAP.md
 ---
 
@@ -21,9 +21,24 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
-**2026-09-30 - MCP redaction integration in progress (ADR-0143).** This
-chapter owns MCP/evaluator integration and migration 0120. Public redaction
-settings remain disabled until all dispatch paths meet the safety contract.
+**2026-09-30 - MCP redacted-action integration (ADR-0143).** Migration 0120
+stores admitted input schemas and extends policy-generation invalidation.
+The real MCP queue/consume/send path now binds original/effective payloads,
+transformation policy and schema identity, forces exact-action consent, checks
+both data scopes and rechecks the generation after connection. Strict schema
+validation rejects incompatible placeholders; traces capture only effective
+input, and unsupported output is withheld while completed calls are metered.
+297 tests passed across 12 gateway files, including 39 new tests; gateway
+typecheck, DB build and pinned frozen/offline lockfile validation passed.
+Retry/breaker fixtures now use real HTTP after fake-socket close errors made
+an earlier assertion-only pass insufficient. A temporary control-removal
+mutation was blocked by the safety reviewer and was not applied. Previous
+commit `57aadb7` is confirmed CI and integration green; this batch's CI awaits
+the push. Public redaction settings remain disabled. The SPA does not yet
+render the stored `argumentsPreview`; this is the next operator-facing gate.
+Model/connector wiring,
+mid-call policy transitions, provider/schema resource bounds, the residual P1
+verification, P3 integrations and full Credo workflow parity remain open.
 
 **2026-09-30 - Structured consent and complete model-output gates
 (ADR-0141/0142).** Added a bounded decoded-JSON redactor and frozen action
@@ -4051,7 +4066,7 @@ first).
 ## Decisions
 See [docs/decisions/README.md](../docs/decisions/README.md) for the full ADR index — that index is
 the authority on how many exist and their status; do not restate a count here (this line claimed
-"all nine ADRs" long after there were eighteen). All ADRs to date are Accepted; superseding a
+"all nine ADRs" long after there were eighteen). Statuses vary; superseding a
 decision means a new ADR plus a status flip on the old one, never an edit in place.
 ADR-0009 (2026-07-24) chose the product stack: TypeScript
 end-to-end — Fastify gateway + official MCP SDK, hand-rolled pure policy kernel (typed

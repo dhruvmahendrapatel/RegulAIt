@@ -61,9 +61,13 @@ the immediate implementation sequence.
   or a complete Statement of Applicability. Content/domain review remains.
 - P2: validated text/decoded-JSON transformations and frozen original/effective
   consent preparation pass 1,085 shared tests (ADR-0140/0141). Gateway redaction
-  is not enabled. Next: wire prepared consent through actual queue/consume/send,
-  final-policy checks, destination-schema validation and bounded/cancellable
-  provider handling.
+  is not publicly enabled. ADR-0143 now wires the MCP queue/consume/send path,
+  strict destination-schema validation, original/effective data-scope checks,
+  final admission generation checks, safe trace capture and result redaction.
+  297 gateway tests passed (39 new). The SPA still needs to render the stored
+  effective-action preview before approvers can review it. Model/connector integration, transitions
+  into redaction mid-call, complete final-output policy checks and bounded
+  provider/schema handling remain release gates; the full feature is not done.
 - Model-output blocking now covers thinking/tool-call content and callbacks,
   with 204 gateway regressions and a four-case negative control (ADR-0142).
   This closes enumerated leaks in existing block mode, not all redaction gates.

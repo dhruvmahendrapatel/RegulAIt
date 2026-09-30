@@ -31,6 +31,7 @@ import {
   effectiveApprovalScope,
   type ApprovalScope,
   type ConsentRetirementReason,
+  type PreparedPiiApproval,
 } from "@regulait/shared";
 import { loadEntitlements, loadScopeMemberships } from "./entitlements.js";
 import { evaluateAbacForToolCall, loadActiveAbacPolicies, type AbacPrincipalContext } from "./abac.js";
@@ -211,7 +212,11 @@ export async function governedEvaluate(
    * must execute nothing.
    */
   simulate?: { versionId: string },
+  preparedPii?: PreparedPiiApproval,
 ): Promise<GovernedEvaluation> {
+  if (preparedPii && preparedPii.originalArgumentsDigest !== approvalArgumentsDigest({ projectId, arguments: args })) {
+    throw new Error("Prepared PII action does not match the original arguments");
+  }
   const [policyGeneration] = await db.select({ epoch: governancePolicyEpoch.epoch }).from(governancePolicyEpoch);
   if (!policyGeneration) throw new Error("governance policy epoch is unavailable");
   const policyEpoch = policyGeneration.epoch;
@@ -447,7 +452,7 @@ export async function governedEvaluate(
   // RAW arguments (pre-scrub) and the pillar-5 attribution. Everything
   // downstream — the queue row, the audit row, this match — uses this exact
   // string, so the writer and the matcher cannot hash different bytes.
-  const argumentsDigest = approvalArgumentsDigest({
+  const argumentsDigest = preparedPii?.argumentsDigest ?? approvalArgumentsDigest({
     projectId: projectId ?? null,
     arguments: args,
   });
@@ -481,7 +486,7 @@ export async function governedEvaluate(
     tool,
     deployContext,
   });
-  const approvalScope = effectiveApprovalScope(matchedARules);
+  const approvalScope = preparedPii ? "action" : effectiveApprovalScope(matchedARules);
 
   // ADR-0040 ABAC. The policy-set load is ONE indexed query, and an install
   // with no active policies stops there: `abacDecision` stays null, the kernel
@@ -534,8 +539,8 @@ export async function governedEvaluate(
      * learn who policy CURRENTLY requires as approver, and once holding the
      * row that satisfied. Defaulted so the shadow pass below is unchanged. */
     heldApprovalId: string | null = null,
-  ) =>
-    evaluate({
+  ) => {
+    const evaluateArguments = (evaluatedArgs: Record<string, unknown> | undefined) => evaluate({
       userId,
       serverId,
       /**
@@ -559,12 +564,21 @@ export async function governedEvaluate(
       })),
       rateLimits: limitRows,
       dataScopeRules: scopes,
-      args,
+      args: evaluatedArgs,
       approvedApprovalId: heldApprovalId,
       ceilingTools: ceilingTools ?? null,
       deployContext,
       abacDecision,
     });
+    const original = evaluateArguments(args);
+    if (!preparedPii) return original;
+    const effective = evaluateArguments(preparedPii.effectiveArguments);
+    const decision = original.effect === "deny" ? original : effective.effect === "deny" ? effective : original;
+    // The kernel's data-scope explanation quotes the rejected raw value.
+    return decision.ruleChain.some((entry) => entry.rule === "data-scope" && entry.outcome === "deny")
+      ? { ...decision, reason: "Original or effective arguments are outside the allowed data scope" }
+      : decision;
+  };
 
   // ---------------------------------------------------------------------
   // ADR-0105 — WHO POLICY CURRENTLY REQUIRES, and the consent-context digest.

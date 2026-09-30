@@ -476,6 +476,7 @@ async function userKeyFor(target: ReturnType<typeof buildApp>, label: string) {
   return { authorization: `Bearer ${key.json().token}` };
 }
 
+let gatewayUrl: string;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
@@ -491,6 +492,7 @@ beforeAll(async () => {
     retry: RETRY_ON,
   });
   auth = await userKeyFor(app, "on");
+  gatewayUrl = await app.listen({ host: "127.0.0.1", port: 0 });
 
   blackHole = net.createServer((sock) => {
     blackHoleSockets.add(sock);
@@ -518,13 +520,19 @@ async function register(url: string): Promise<string> {
   return reg.json().id as string;
 }
 
-const listTools = (id: string) =>
-  app.inject({
+// MCP's adapter requires real socket drain/close semantics, not inject's mock.
+async function postMcp(id: string, payload: unknown, headers = auth) {
+  const response = await fetch(`${gatewayUrl}/mcp/${id}`, {
     method: "POST",
-    url: `/mcp/${id}`,
-    headers: { ...auth, "content-type": "application/json", accept: "application/json, text/event-stream" },
-    payload: { jsonrpc: "2.0", id: 1, method: "tools/list" },
+    signal: AbortSignal.timeout(10_000),
+    headers: { ...headers, "content-type": "application/json", accept: "application/json, text/event-stream" },
+    body: JSON.stringify(payload),
   });
+  const body = await response.text();
+  return { statusCode: response.status, body, json: () => JSON.parse(body) };
+}
+
+const listTools = (id: string) => postMcp(id, { jsonrpc: "2.0", id: 1, method: "tools/list" });
 
 describe("an upstream that is briefly not ready", () => {
   it("is RECOVERED by the retry — the request succeeds where it used to 502", async () => {
@@ -738,21 +746,12 @@ describe("a tools/call that fails once", () => {
       }
 
       const call = (toolName: string) =>
-        app.inject({
-          method: "POST",
-          url: `/mcp/${id}`,
-          headers: {
-            ...tcAuth,
-            "content-type": "application/json",
-            accept: "application/json, text/event-stream",
-          },
-          payload: {
+        postMcp(id, {
             jsonrpc: "2.0",
             id: 7,
             method: "tools/call",
             params: { name: toolName, arguments: {} },
-          },
-        });
+        }, tcAuth);
 
       // The response is ambiguous even when the upstream advertises read-only.
       const read = await call("r128_read");

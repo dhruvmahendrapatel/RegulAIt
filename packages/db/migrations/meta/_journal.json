@@ -834,6 +834,13 @@
       "when": 1785054000000,
       "tag": "0119_approval_policy_epoch",
       "breakpoints": true
+    },
+    {
+      "idx": 120,
+      "version": "7",
+      "when": 1785055000000,
+      "tag": "0120_mcp_redaction_policy",
+      "breakpoints": true
     }
   ]
 }

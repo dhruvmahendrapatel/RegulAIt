@@ -40,6 +40,7 @@ import {
   toolPayloadPreview,
   admissionFindingSummary,
   type PiiHit,
+  type PreparedPiiApproval,
   type ScannableTool,
 } from "@regulait/shared";
 // ADR-0070 — the tool span. A governed tool call is the other half of what a
@@ -55,6 +56,7 @@ import {
   type DispatchGuardrails,
 } from "./guardrails.js";
 import { governedEvaluate, type RetiredApproval } from "./governed-evaluate.js";
+import { prepareMcpPiiAction, redactMcpResult } from "./mcp-pii.js";
 import { abacPrincipalFromRequest, type AbacPrincipalContext } from "./abac-principal.js";
 import {
   auditMcpUpstreamUnreachable,
@@ -357,7 +359,7 @@ async function supersedeStaleConsent(
  * model and connector paths hold). */
 export interface McpPii {
   mode: PiiMode;
-  action: "block" | "warn" | "log";
+  action: "block" | "warn" | "log" | "redact";
   inputHits: PiiHit[];
   outputHits: PiiHit[];
   withheld: boolean;
@@ -404,7 +406,8 @@ export async function executeGovernedToolCall(
   // whatever it returned. A refusal (entitlement, PII, guardrail, pending
   // approval) is a `denied` span carrying its reason, not an absent one.
   const traceStartedAt = new Date();
-  const outcome = await executeGovernedToolCallInner(db, _dataKey, args);
+  const traceInput: { value?: Record<string, unknown> } = {};
+  const outcome = await executeGovernedToolCallInner(db, _dataKey, args, traceInput);
   if (args.trace) {
     const denied =
       outcome.kind === "denied" ||
@@ -458,7 +461,7 @@ export async function executeGovernedToolCall(
       // TOOL I/O. Arguments are what the model asked for; content is what the
       // governed path already decided the caller may see — on a PII/guardrail
       // withhold, that is the marker, not the payload.
-      inputText: capture ? toolPayloadPreview(args.arguments, max) : null,
+      inputText: capture && traceInput.value ? toolPayloadPreview(traceInput.value, max) : null,
       outputText:
         capture && outcome.kind === "allowed" ? toolPayloadPreview(outcome.content, max) : null,
       contentWithheld:
@@ -479,9 +482,13 @@ async function executeGovernedToolCallInner(
   db: Db,
   _dataKey: string | undefined,
   args: Parameters<typeof executeGovernedToolCall>[2],
+  traceInput: { value?: Record<string, unknown> },
 ): Promise<GovernedToolCallOutcome> {
   const { userId, serverId, toolName } = args;
   const projectId = args.projectId ?? null;
+  const [preparationGeneration] = await db.select({ epoch: governancePolicyEpoch.epoch }).from(governancePolicyEpoch);
+  const piiMode: PiiMode | null = await projectPiiMode(db, projectId);
+  const piiIntl = await piiInternationalCategories(db);
   const [serverRow] = await db.select().from(mcpServers).where(eq(mcpServers.id, serverId));
   if (!serverRow) return { kind: "unknown_tool" };
 
@@ -498,6 +505,7 @@ async function executeGovernedToolCallInner(
   // Unknown tool: sync the manifest once in case it's newly added upstream.
   let kind = toolRow?.kind;
   let upstream: Client | null = null;
+  const redactActive = piiMode === "redact";
   const closeUpstream = async () => {
     if (upstream) {
       const u = upstream;
@@ -580,7 +588,9 @@ async function executeGovernedToolCallInner(
    */
   const operationFailed = async (err: unknown) => {
     if (classifyUpstreamError(err).why === "our_own_refusal") return;
-    await recordUpstreamFailure(db, serverRow, err instanceof Error ? err.message : String(err));
+    await recordUpstreamFailure(db, serverRow, redactActive
+      ? "MCP upstream failed during PII-redacted dispatch"
+      : err instanceof Error ? err.message : String(err));
   };
 
   try {
@@ -596,6 +606,7 @@ async function executeGovernedToolCallInner(
         upstreamTools = await syncUpstreamTools(db, serverId, upstream);
       } catch (err) {
         await operationFailed(err);
+        if (redactActive) throw new Error("MCP upstream discovery failed under PII redaction");
         throw err;
       }
       const found = upstreamTools.find((t) => t.name === toolName);
@@ -604,6 +615,29 @@ async function executeGovernedToolCallInner(
         return { kind: "unknown_tool" };
       }
       kind = toolKind(found);
+    }
+
+    // The generation was read before the server/tool snapshot above. A first
+    // manifest sync changes it; redacted callers retry using that stored schema.
+    let preparedPii: PreparedPiiApproval | undefined;
+    const refuseTransformation = async (reason: string): Promise<GovernedToolCallOutcome> => {
+      const decision: Decision = { effect: "deny", ruleId: "pii-transformation-refused", ruleChain: [], reason };
+      await db.insert(auditLog).values({ userId, serverId, toolName, ...decision, detail: { projectId, phase: "pii" } });
+      return { kind: "denied", decision };
+    };
+    if (piiMode === "redact") {
+      const [currentTool] = await db.select().from(mcpTools).where(and(eq(mcpTools.serverId, serverId), eq(mcpTools.name, toolName)));
+      try {
+        preparedPii = prepareMcpPiiAction(projectId, args.arguments, piiIntl, currentTool?.inputSchema);
+        // The preparation validated ordinary JSON. Snapshot the original too,
+        // so caller mutation cannot move either data-scope checks or identity.
+        args = { ...args, arguments: structuredClone(args.arguments ?? {}) };
+        traceInput.value = preparedPii.effectiveArguments;
+      } catch {
+        return refuseTransformation("MCP PII transformation or input schema validation failed");
+      }
+    } else {
+      traceInput.value = args.arguments ?? {};
     }
 
     const {
@@ -627,7 +661,13 @@ async function executeGovernedToolCallInner(
       // ADR-0040: the ABAC principal bag's session facts, when a request is
       // behind this call.
       args.principal,
+      undefined,
+      preparedPii,
     );
+
+    if (preparedPii && preparationGeneration?.epoch !== policyEpoch) {
+      return refuseTransformation("PII policy changed during action preparation; retry for fresh evaluation");
+    }
 
     // ADR-0104 — THE FORENSIC HALF, and it is unconditional.
     //
@@ -816,6 +856,7 @@ async function executeGovernedToolCallInner(
             eq(approvals.serverId, serverId),
             eq(approvals.toolName, toolName),
             eq(approvals.status, "pending"),
+            eq(approvals.contextDigest, contextDigest),
             ...(approvalScope === "action"
               ? [eq(approvals.argumentsDigest, argumentsDigest)]
               : []),
@@ -848,13 +889,10 @@ async function executeGovernedToolCallInner(
               approverUserId: decision.approverUserId!,
               // ADR-0104: the fingerprint the consent will be BOUND to, and
               // beside it the SCRUBBED payload the approver actually reads.
-              // Both are stored under either scope — a tool-scoped approval
-              // still deserves to show a human what raised it. The digest is
-              // taken from the RAW arguments upstream in `governedEvaluate`;
-              // the preview is derived from the same raw value here, so
-              // redaction cannot move the consent identity.
+              // Redaction forces action scope and supplies a preview of the
+              // effective snapshot; consent also binds the original digest.
               argumentsDigest,
-              argumentsPreview: approvalArgumentsPreview(args.arguments),
+              argumentsPreview: preparedPii?.argumentsPreview ?? approvalArgumentsPreview(args.arguments),
               // ADR-0105: the POLICY identity this consent is being asked for,
               // and the clock it dies on. Both stamped HERE, at queue time —
               // the digest so the signature is bound to the policy the
@@ -902,12 +940,10 @@ async function executeGovernedToolCallInner(
     // check runs on the tool ARGUMENTS, before the approval is consumed and
     // before the upstream is contacted, so a block executes nothing, consumes
     // no approval and bills nothing.
-    const piiMode: PiiMode | null = await projectPiiMode(db, projectId ?? null);
     // ADR-0117: the jurisdiction set, resolved once for this tool call and
     // shared by the argument gate and the tool-result gate below.
-    const piiIntl = await piiInternationalCategories(db);
-    let inputHits: PiiHit[] = [];
-    if (piiMode) {
+    let inputHits: PiiHit[] = preparedPii ? [...preparedPii.hits] : [];
+    if (piiMode && !preparedPii) {
       const chk = enforcePII(piiMode, { input: JSON.stringify(args.arguments ?? null) }, piiIntl);
       inputHits = chk.hits;
       if (chk.action === "block") {
@@ -978,6 +1014,24 @@ async function executeGovernedToolCallInner(
       }
     }
 
+    if (!upstream) {
+      const refused = await breakerRefusesUpstream();
+      if (refused) return refused;
+      try {
+        upstream = await connectUpstream(db, serverRow);
+      } catch (err) {
+        await operationFailed(err);
+        if (redactActive) throw new Error("MCP upstream connection failed under PII redaction");
+        throw err;
+      }
+    }
+    if (preparedPii) {
+      const [liveGeneration] = await db.select({ epoch: governancePolicyEpoch.epoch }).from(governancePolicyEpoch);
+      if (liveGeneration?.epoch !== policyEpoch) {
+        return refuseTransformation("PII or governance policy changed before execution; retry for fresh evaluation");
+      }
+    }
+
     if (approvedApprovalId) {
       // Atomically consume the approval; losing the race means another call
       // already spent it, so this call must go back through the queue.
@@ -1042,20 +1096,6 @@ async function executeGovernedToolCallInner(
       }
     }
 
-    if (!upstream) {
-      // AER-022: the second of the two contact points. On the common path (a tool
-      // already in the manifest) this is the FIRST, so it is here that a governed,
-      // approved, budgeted call meets a broken upstream — after the kernel has
-      // ruled, and before a socket is opened.
-      const refused = await breakerRefusesUpstream();
-      if (refused) return refused;
-      try {
-        upstream = await connectUpstream(db, serverRow);
-      } catch (err) {
-        await operationFailed(err);
-        throw err;
-      }
-    }
     // An upstream FAILURE throws out of here before any metering — a failed
     // call bills nothing, exactly like a failed model dispatch or connector
     // invoke.
@@ -1068,7 +1108,7 @@ async function executeGovernedToolCallInner(
     try {
       content = await withUpstreamRetry(
         ({ deadlineMs }) =>
-          upstream!.callTool({ name: toolName, arguments: args.arguments }, undefined, {
+          upstream!.callTool({ name: toolName, arguments: preparedPii?.effectiveArguments ?? args.arguments }, undefined, {
             timeout: deadlineMs,
           }),
         {
@@ -1088,6 +1128,7 @@ async function executeGovernedToolCallInner(
       // rethrows still widens the inferred type to include `undefined`, which
       // no longer satisfies the SDK's `tools/call` handler signature.
       await operationFailed(err);
+      if (redactActive) throw new Error("MCP upstream call failed under PII redaction");
       throw err;
     }
     // AER-022: THE operation succeeded. This — not the handshake — is what closes
@@ -1100,7 +1141,21 @@ async function executeGovernedToolCallInner(
     let outputHits: PiiHit[] = [];
     let resultContent: unknown = content;
     let withheld = false;
-    if (piiMode) {
+    if (preparedPii) {
+      try {
+        // Re-read output policy too. A tightened policy while the tool ran may
+        // withhold the result, but cannot undo the already executed operation.
+        const outputMode = await projectPiiMode(db, projectId);
+        const outputIntl = [...new Set([...piiIntl, ...await piiInternationalCategories(db)])];
+        const transformed = redactMcpResult(content, outputIntl);
+        outputHits = transformed.hits;
+        resultContent = transformed.value;
+        if (outputMode === "block" && outputHits.length) throw new Error("PII output blocked");
+      } catch {
+        withheld = true;
+        resultContent = { content: [{ type: "text", text: "[output withheld: PII transformation could not be safely completed]" }], isError: true };
+      }
+    } else if (piiMode) {
       const chk = enforcePII(piiMode, { output: JSON.stringify(content ?? null) }, piiIntl);
       outputHits = chk.hits;
       if (chk.action === "block") {
@@ -1112,9 +1167,9 @@ async function executeGovernedToolCallInner(
       }
     }
     const anyHits = inputHits.length > 0 || outputHits.length > 0;
-    const piiAction: McpPii["action"] = withheld ? "block" : piiMode === "warn" ? "warn" : "log";
+    const piiAction: McpPii["action"] = withheld ? "block" : preparedPii ? "redact" : piiMode === "warn" ? "warn" : "log";
     const pii: McpPii | null =
-      piiMode && anyHits
+      piiMode && (anyHits || preparedPii || withheld)
         ? { mode: piiMode, action: piiAction, inputHits, outputHits, withheld }
         : null;
 
@@ -1211,7 +1266,9 @@ async function executeGovernedToolCallInner(
         effect: "deny",
         ruleId: "pii-blocked",
         ruleChain: [],
-        reason: `output contains PII: ${piiCategoryList(outputHits)} — billed and withheld`,
+        reason: preparedPii
+          ? "Output could not be released under the PII policy; billed and withheld"
+          : `output contains PII: ${piiCategoryList(outputHits)} — billed and withheld`,
       });
     } else if (piiMode === "warn" && anyHits) {
       await db.insert(auditLog).values({
@@ -1290,10 +1347,11 @@ export async function syncUpstreamTools(
         name: tool.name,
         kind: toolKind(tool),
         description: tool.description ?? null,
+        inputSchema: tool.inputSchema,
       })
       .onConflictDoUpdate({
         target: [mcpTools.serverId, mcpTools.name],
-        set: { kind: toolKind(tool), description: tool.description ?? null },
+        set: { kind: toolKind(tool), description: tool.description ?? null, inputSchema: tool.inputSchema },
       });
   }
   return tools;

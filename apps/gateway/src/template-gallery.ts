@@ -67,7 +67,7 @@ export interface GalleryEntry {
 
 export interface GalleryProfileSummary {
   tag: string;
-  piiMode: "block" | "warn" | "log";
+  piiMode: import("./projects.js").PiiMode;
   auditRetentionDays: number | null;
   mcpDefaultMode: "read_only" | "read_write";
   requiredTemplates: Array<{ id: string; name: string; retired: boolean; stageIds: string[] }>;

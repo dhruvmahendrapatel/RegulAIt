@@ -333,7 +333,7 @@ export async function assertProjectAttribution(
 
 type ComplianceProfileRow = typeof complianceProfiles.$inferSelect;
 
-const PII_STRICTNESS: Record<string, number> = { log: 0, warn: 1, block: 2 };
+const PII_STRICTNESS: Record<string, number> = { log: 0, warn: 1, redact: 2, block: 3 };
 
 /** §8.3: the effective policy of a SET of framework profiles. The spec gives
  * no strictness ordering among frameworks, so profiles compose additively:
@@ -355,7 +355,7 @@ export function effectiveCompliancePolicy(profiles: ComplianceProfileRow[]) {
         p.auditRetentionDays == null ? m : Math.max(m ?? 0, p.auditRetentionDays),
       null,
     ),
-    piiMode: profiles.reduce<"block" | "warn" | "log">(
+    piiMode: profiles.reduce<PiiMode>(
       (m, p) => (PII_STRICTNESS[p.piiMode]! > PII_STRICTNESS[m]! ? (p.piiMode as never) : m),
       "log",
     ),
@@ -439,7 +439,8 @@ async function profilesForTags(db: Db, tags: string[]): Promise<ComplianceProfil
 // The compliance cascade's piiMode dimension, turned from a declared policy
 // into a real enforcement point applied at every project-attributed dispatch.
 
-export type PiiMode = "block" | "warn" | "log";
+// Redact is internal until every dispatch path supports it. Public schemas stay closed.
+export type PiiMode = "block" | "warn" | "log" | "redact";
 
 /** The effective piiMode for a dispatch, resolved through ONE rule: an
  * explicit compliance framework governs where one matches; EVERYWHERE ELSE
@@ -550,6 +551,7 @@ export function enforcePII(
   io: { input?: string | undefined; output?: string | undefined },
   international: readonly InternationalPiiCategory[],
 ): PiiEnforcement {
+  if (mode === "redact") throw new Error("PII redaction requires a prepared dispatch path");
   const phase: "input" | "output" = io.output !== undefined ? "output" : "input";
   const text = phase === "output" ? (io.output ?? "") : (io.input ?? "");
   const hits = detectPII(text, international);
