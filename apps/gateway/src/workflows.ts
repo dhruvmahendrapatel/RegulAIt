@@ -43,6 +43,7 @@ import {
   IMPLEMENTED_GIT_PROVIDERS,
 } from "@regulait/git-provider";
 import { resolveDeployProvider, liveDeployClients, DeployProviderError } from "./deploy.js";
+import { ExternalEffectBlockedError, runExternalWrite } from "./external-effects.js";
 import { validateGraph } from "@regulait/orchestration-kernel";
 import { inTransaction, planRun, type ApprovalPostCommit, type DbOrTx } from "./orchestration.js";
 import {
@@ -794,6 +795,7 @@ async function runGitExecutions(
         continue;
       }
       let deployErr: string | null = null;
+      let executionControlRefused = false;
       try {
         if (context[`deploy:${stage.id}`] === undefined) {
           const provider = resolveDeployProvider({
@@ -817,7 +819,8 @@ async function runGitExecutions(
           // transaction above and is released below after the provider call —
           // awaiting here holds no DB transaction or row lock open, and a
           // rejected promise lands in the same catch → deploy_blocked path.
-          const res = await provider.deploy(target!.name, target!.environment, instance.id);
+          const res = await runExternalWrite(db, "deploy.deploy", () =>
+            provider.deploy(target!.name, target!.environment, instance.id));
           // §3 the control-plane / agent-execution-plane data boundary: in
           // AIR_GAPPED mode NOTHING that could carry execution-plane detail
           // (the deploy URL, the provider detail string) is retained in the
@@ -833,12 +836,16 @@ async function runGitExecutions(
           if (target!.mode !== "air_gapped") context.deployUrl = res.url;
         }
       } catch (err) {
+        executionControlRefused = err instanceof ExternalEffectBlockedError;
         deployErr = err instanceof Error ? err.message : String(err);
       }
       delete context.executing;
       if (deployErr === null) delete context.lastError;
       else context.lastError = `${stage.id}: ${deployErr}`;
       await db.update(workflowInstances).set({ context }).where(eq(workflowInstances.id, instance.id));
+      // A deployment-wide stop is not a manual deploy handoff: leave the
+      // claimed stage awaiting_execution so lifting the stop permits a retry.
+      if (executionControlRefused) break;
       // a provider that isn't integrated yet → manual handoff (not a hard fail)
       if (deployErr !== null) {
         const r = await applyEvent(
@@ -926,7 +933,8 @@ async function runGitExecutions(
           // ASYNC-DEPLOY: awaited outside any transaction (same claim/release
           // semantics as the deploy executor); a rejection lands in this catch
           // and keeps the stage awaiting_execution (retryable), never terminal.
-          const res = await provider.rollback(target.name, priorDeploy?.deployId ?? "unknown");
+          const res = await runExternalWrite(db, "deploy.rollback", () =>
+            provider.rollback(target.name, priorDeploy?.deployId ?? "unknown"));
           // §3 air-gapped boundary: keep only which deploy was reversed, not the
           // provider detail string (which could carry execution-plane info).
           context[`rollback:${stage.id}`] =
@@ -1043,7 +1051,8 @@ async function runGitExecutions(
         // Idempotent replay (§2 re-open): if we already created this branch,
         // re-execution succeeds without a provider call instead of 422ing forever.
         if (context.branch !== branch) {
-          await provider.createBranch(stage.repo!, branch, stage.base ?? "main");
+          await runExternalWrite(db, "git.create_branch", () =>
+            provider.createBranch(stage.repo!, branch, stage.base ?? "main"));
           context.branch = branch;
         }
       } else if (stage.action === "open_pr" && context.prId !== undefined) {
@@ -1056,7 +1065,7 @@ async function runGitExecutions(
           .where(eq(workflowArtifacts.instanceId, instance.id))
           .orderBy(desc(workflowArtifacts.version))
           .limit(1);
-        const pr = await provider.openPullRequest(stage.repo!, {
+        const pr = await runExternalWrite(db, "git.open_pull_request", () => provider.openPullRequest(stage.repo!, {
           head: String(context.branch ?? ""),
           base: stage.base ?? "main",
           title: change.description,
@@ -1069,15 +1078,15 @@ async function runGitExecutions(
 
 ${latestArtifact.content}`
               : "(no artifact)"),
-        });
+        }));
         context.prId = pr.id;
         context.prUrl = pr.url;
       } else if (stage.action === "merge" && context.mergeSha === undefined) {
-        const result = await provider.mergePullRequest(
+        const result = await runExternalWrite(db, "git.merge_pull_request", () => provider.mergePullRequest(
           stage.repo!,
           String(context.prId ?? ""),
           stage.strategy ?? "merge",
-        );
+        ));
         context.mergeSha = result.sha;
       }
     } catch (err) {

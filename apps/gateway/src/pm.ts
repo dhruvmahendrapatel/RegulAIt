@@ -27,8 +27,10 @@ import {
   resolvePmProvider,
   resolveStatus,
   resolveTaskFields,
+  type PmProvider,
   type NormalizedInboundEvent,
 } from "@regulait/pm-provider";
+import { runExternalWrite } from "./external-effects.js";
 import type { RunState, TaskGraph } from "@regulait/orchestration-kernel";
 import type { WorkflowDefinition } from "@regulait/workflow-kernel";
 import {
@@ -150,7 +152,7 @@ async function providerFor(
       throw new CompiledDefaultEgressBlockedError("pm_connection", compiled);
     }
   }
-  return resolvePmProvider(
+  const provider = resolvePmProvider(
     {
       provider: conn.provider,
       token: decryptSecret(dataKey, conn.tokenCiphertext),
@@ -159,6 +161,15 @@ async function providerFor(
     },
     pmFetch as unknown as Parameters<typeof resolvePmProvider>[1],
   );
+  // A new PM method fails typecheck until this final-call wrapper classifies it.
+  return {
+    kind: provider.kind,
+    getWorkItem: (...args) => provider.getWorkItem(...args),
+    createWorkItem: (...args) => runExternalWrite(db, "pm.create_work_item", () => provider.createWorkItem(...args)),
+    updateFields: (...args) => runExternalWrite(db, "pm.update_fields", () => provider.updateFields(...args)),
+    transitionState: (...args) => runExternalWrite(db, "pm.transition_state", () => provider.transitionState(...args)),
+    addComment: (...args) => runExternalWrite(db, "pm.add_comment", () => provider.addComment(...args)),
+  } satisfies PmProvider;
 }
 
 /** §3/§5 outbound mirror: RegulAIt owns node status (it owns the state

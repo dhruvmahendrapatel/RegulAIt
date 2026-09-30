@@ -4,7 +4,7 @@ last_updated: 2026-09-30
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
-last_session: sessions/2026-09-29-session-02.md
+last_session: sessions/2026-09-30-session-01.md
 roadmap: ../docs/product/ROADMAP.md
 ---
 
@@ -21,14 +21,27 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-09-30 - External-write emergency gate (ADR-0139).** Deployment,
+rollback, Git branch/PR/merge, infra remediation and PM mutations now check
+the live execution mode at the final provider call. Halted/read-only/
+require-approval modes refuse writes; halted workflow stages and infra
+approvals remain retryable. A halted auto-remediation is marked deferred and
+retried on the next scan if the policy still permits it. Six focused files
+passed 31 tests and six adjacent files passed 43 tests on disposable databases;
+gateway typecheck passed. AER-018 is locally mitigated on the enumerated paths,
+but paused-call counting-fake coverage for every adapter, exact-head CI, and
+already-in-flight cancellation remain unverified. Do not claim a complete
+deployment-wide halt from these tests alone.
+
 **2026-09-30 - Cache-hit governance (ADR-0138).** Native and compat cache
 hits now re-enter the shared dispatch core before serving. Live virtual-key,
 MRM, attribution, use-case, project-budget, input PII/guardrail and output
 PII/guardrail denials withhold cached text and record neither a saving nor
 provider usage. Four adjacent cache/interception suites passed 93/93 on a
 disposable database; gateway typecheck passed. AER-010's documented bypass is
-repaired locally, pending an explicit negative-control mutation and exact-head
-CI. Native cache identity/version invalidation remains a separate AER-011
+repaired, and commit `b33de7c` passed exact-head CI. An explicit
+negative-control mutation remains unrun. Native cache identity/version
+invalidation remains a separate AER-011
 review. AER-018's non-AI provider paths and PII redaction remain open.
 
 **2026-09-30 - P1/P2/P3 continuation.** AER-035's six focused copilot

@@ -260,6 +260,7 @@ export interface BuildAppOptions {
 }
 import { z } from "zod";
 import { registerMcpProxy } from "./mcp-proxy.js";
+import { ExternalEffectBlockedError } from "./external-effects.js";
 import { registerAgentConnectorRoutes } from "./agents-connectors.js";
 import { registerCustomProviderRoutes } from "./custom-providers.js";
 import { registerExternalScorerRoutes } from "./external-scorers.js";
@@ -642,6 +643,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // rule/profile silently absent.
     if (err instanceof ConfigVersionUnresolvableError) {
       return reply.status(409).send({ error: "config_version_unresolvable", detail: err.message });
+    }
+    if (err instanceof ExternalEffectBlockedError) {
+      return reply.status(err.statusCode).send({ error: err.code, detail: err.message });
     }
     const pgCode = (err as { cause?: { code?: string } }).cause?.code;
     if (pgCode === "23505") return reply.status(409).send({ error: "conflict" });

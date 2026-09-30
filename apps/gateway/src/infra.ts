@@ -66,6 +66,7 @@ import { buildGcpInfraLiveClient } from "./infra-gcp-client.js";
 import { complianceProfilesForTags, effectiveCompliancePolicy } from "./projects.js";
 import { loadOrgSettings, type SchedulerTickState } from "./org-settings.js";
 import { recordSchedulerFailure, recordSchedulerSuccess } from "./scheduler-health.js";
+import { ExternalEffectBlockedError, runExternalWrite } from "./external-effects.js";
 
 type InfraResourceRow = typeof infraResources.$inferSelect;
 type InfraPolicyRow = typeof infraPolicies.$inferSelect;
@@ -457,13 +458,13 @@ export async function applyInfraApprovalDecision(
   if (decision === "approved") {
     if (resource) {
       const provider = resolveInfraProvider(providerConfig(resource));
-      await provider.remediate({
+      await runExternalWrite(tx, "infra.remediate", () => provider.remediate({
         id: finding.id,
         resourceId: finding.resourceId,
         kind: finding.kind,
         signature,
         detail: finding.detail,
-      });
+      }));
     }
     await tx.update(infraFindings).set({ status: "remediated" }).where(eq(infraFindings.id, finding.id));
     await tx.insert(auditLog).values({
@@ -623,13 +624,13 @@ async function applyInfraActionDecision(
         // O6: conceptually the cert enters "rotating" here — the provider call
         // runs inside this txn (no async boundary to persist it across), and
         // the durable checkpoint is the terminal state below.
-        const res = await provider.remediate({
+        const res = await runExternalWrite(tx, "infra.remediate", () => provider.remediate({
           id: finding?.id ?? ledgerId,
           resourceId: resource.id,
           kind: ACTION_TO_KIND[action],
           signature,
           detail: finding?.detail ?? null,
-        });
+        }));
         providerDetail = res.detail;
       } catch (err) {
         // O6: a cert rotation the provider fails lands in the FAILED terminal
@@ -872,6 +873,49 @@ async function scanResource(
   let refreshed = 0;
   let reopened = 0;
   for (const report of reports) {
+    const autoEligible =
+      ceiling != null &&
+      report.severity !== "critical" &&
+      severityRank(report.severity) <= severityRank(ceiling as InfraSeverity);
+    const autoRemediate = async (findingId: string) => {
+      try {
+        await runExternalWrite(db, "infra.remediate", () => provider.remediate({
+          id: findingId,
+          resourceId: resource.id,
+          kind: report.kind,
+          signature: report.signature,
+          detail: report.detail,
+        }));
+      } catch (err) {
+        if (err instanceof ExternalEffectBlockedError) {
+          await db.update(infraFindings)
+            .set({ detail: { ...report.detail, autoRemediationDeferred: true } })
+            .where(eq(infraFindings.id, findingId));
+        }
+        throw err;
+      }
+      await db.update(infraFindings)
+        .set({ status: "auto_remediated", detail: report.detail })
+        .where(eq(infraFindings.id, findingId));
+      await db.insert(auditLog).values({
+        userId: actorId,
+        objectType: "infra_operation",
+        objectId: findingId,
+        detail: {
+          phase: "auto-remediate",
+          resource: resource.name,
+          kind: report.kind,
+          severity: report.severity,
+          signature: report.signature,
+          ceiling,
+        },
+        effect: "allow",
+        ruleId: "infra-auto-remediate",
+        ruleChain: [],
+        reason: `finding ${report.kind}/${report.severity} on ${resource.name} auto-remediated: severity <= policy ceiling '${ceiling}' and not critical (governed automation, audited)`,
+      });
+      autoRemediated++;
+    };
     const [existing] = await db
       .select()
       .from(infraFindings)
@@ -883,9 +927,10 @@ async function scanResource(
         ),
       );
     if (existing) {
-      // Idempotent re-scan: refresh detected_at + the report payload, and never
-      // trigger a second remediation (auto-remediation fires on NEW findings
-      // only — see below). What a re-scan does to `status` is ADR-0114's
+      // Idempotent re-scan: refresh detected_at + the report payload. A
+      // previously halted auto-attempt is the sole retry exception; ordinary
+      // existing or newly re-opened findings do not auto-run again. What a
+      // re-scan does to `status` is ADR-0114's
       // decision, and it replaces the rule that used to live in this comment:
       //
       //   "status is NEVER reset (a remediated/approved finding stays that
@@ -946,13 +991,15 @@ async function scanResource(
       //                          rather than assumed away, the posture
       //                          ADR-0110 took with 'success'/'failed'.
       const reopens = existing.status === "remediated" || existing.status === "auto_remediated";
+      const retryDeferred =
+        existing.status === "open" && existing.detail.autoRemediationDeferred === true && autoEligible;
       const priorStatus = existing.status;
       const priorDetectedAt = existing.detectedAt;
       await db
         .update(infraFindings)
         .set({
           detectedAt: new Date(),
-          detail: report.detail,
+          detail: retryDeferred ? { ...report.detail, autoRemediationDeferred: true } : report.detail,
           severity: report.severity,
           ...(reopens ? { status: "open" as const } : {}),
         })
@@ -996,6 +1043,7 @@ async function scanResource(
       await syncFindingLedger(db, actorId, resource, existing.id, report);
       await auditDetection(db, actorId, resource, report, existing.id);
       refreshed++;
+      if (retryDeferred) await autoRemediate(existing.id);
       continue;
     }
     const [inserted] = await db
@@ -1013,43 +1061,8 @@ async function scanResource(
     await syncFindingLedger(db, actorId, resource, inserted!.id, report);
     await auditDetection(db, actorId, resource, report, inserted!.id);
 
-    // THE AUTO-VS-GATE DECISION on a NEW finding. critical is never auto (the
-    // ceiling enum can't hold it, and this double-guards anyway).
-    const auto =
-      ceiling != null &&
-      report.severity !== "critical" &&
-      severityRank(report.severity) <= severityRank(ceiling as InfraSeverity);
-    if (auto) {
-      await provider.remediate({
-        id: inserted!.id,
-        resourceId: resource.id,
-        kind: report.kind,
-        signature: report.signature,
-        detail: report.detail,
-      });
-      await db
-        .update(infraFindings)
-        .set({ status: "auto_remediated" })
-        .where(eq(infraFindings.id, inserted!.id));
-      await db.insert(auditLog).values({
-        userId: actorId,
-        objectType: "infra_operation",
-        objectId: inserted!.id,
-        detail: {
-          phase: "auto-remediate",
-          resource: resource.name,
-          kind: report.kind,
-          severity: report.severity,
-          signature: report.signature,
-          ceiling,
-        },
-        effect: "allow",
-        ruleId: "infra-auto-remediate",
-        ruleChain: [],
-        reason: `finding ${report.kind}/${report.severity} on ${resource.name} auto-remediated: severity <= policy ceiling '${ceiling}' and not critical (governed automation, audited)`,
-      });
-      autoRemediated++;
-    }
+    // Critical findings remain approval-only, regardless of the ceiling.
+    if (autoEligible) await autoRemediate(inserted!.id);
   }
   return { created, autoRemediated, refreshed, reopened };
 }

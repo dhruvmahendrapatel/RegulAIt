@@ -3021,9 +3021,25 @@ Focused prime-then-tighten tests cover virtual-key budget, MRM, attribution,
 linked use case, project budget, input/output PII and input/output guardrails;
 the native invoke test covers cached-output PII. On a disposable PostgreSQL
 database, four serial cache/interception files passed 93/93; gateway typecheck
-passed. This is local implementation evidence, not exact-head CI or a complete
-security audit. The explicit mutation negative control remains unrun. AER-011
+passed. Commit `b33de7c` subsequently passed exact-head build-and-test,
+Docker build and Kong integration checks. This is not a complete security
+audit. The explicit mutation negative control remains unrun. AER-011
 native cache identity and AER-018 external provider effects remain separate.
+
+### 2026-09-30 implementation addendum: AER-018 external writes
+
+The current checkout adds a shared final-call execution-mode check for deploy,
+rollback, Git branch/PR/merge, infrastructure remediation and PM provider
+mutations. Halted, read-only and require-approval modes refuse these writes.
+Halted workflow stages and infra approvals remain retryable; a stopped
+auto-remediation retains a deferred marker so a later scan can retry it under
+the then-current policy. The direct provider-call structural assertion and
+mock-backed route tests passed in 31 focused tests; 43 adjacent tests passed;
+gateway typecheck passed. This mitigates the enumerated AER-018 source paths
+locally, but there has been no paused counting-fake matrix for every adapter,
+no cancellation of calls already in flight, and no exact-head CI for this
+second change yet. Do not infer a globally complete halt or live-provider
+verification from these tests.
 
 <!-- codex-enterprise-feedback:end -->
 

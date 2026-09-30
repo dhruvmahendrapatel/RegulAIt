@@ -32,6 +32,6 @@ Permitted hit tests retain zero usage delta and one saving. The four adjacent
 cache/interception files passed 93 tests on a disposable PostgreSQL database
 with file parallelism disabled; gateway TypeScript and diff checks passed.
 
-An explicit mutation run moving lookup above the gates and full CI are still
-outstanding verification. Neither this ADR nor the local suite establishes
-production readiness.
+Commit `b33de7c` passed exact-head build-and-test, Docker build and Kong
+integration checks. An explicit mutation run moving lookup above the gates is
+still outstanding. Neither this ADR nor CI establishes production readiness.

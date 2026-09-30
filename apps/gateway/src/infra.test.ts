@@ -254,3 +254,54 @@ describe("§8.3 cascade consumption", () => {
     expect(backup.effectivePolicy.patchCadenceDaysCeiling).toBe(30);
   });
 });
+
+describe("external remediation execution stop", () => {
+  const setMode = (mode: "normal" | "halted") =>
+    app.inject({
+      method: "PUT", url: "/v1/execution/mode", headers: AUTH,
+      payload: { mode, reason: `infra final-call ${mode}` },
+    });
+
+  it("keeps an approved remediation pending while halted, then permits retry", async () => {
+    const all = (await getJson("/v1/infra/findings")).findings;
+    const drift = findingsFor(all, runtimeId).find((f: any) => f.kind === "drift" && f.status === "open");
+    expect(drift).toBeDefined();
+    const proposed = await post(`/v1/infra/findings/${drift.id}/remediate`, { approverUserId: approverId });
+    expect(proposed.statusCode).toBe(202);
+    const approvalId = proposed.json().approvalId as string;
+    expect((await setMode("halted")).statusCode).toBe(200);
+    try {
+      const denied = await post(`/v1/approvals/${approvalId}/decide`, { decision: "approved" }, approverAuth);
+      expect(denied.statusCode).toBe(409);
+      const finding = (await getJson("/v1/infra/findings")).findings.find((f: any) => f.id === drift.id);
+      expect(finding.status).toBe("remediation_proposed");
+      const queue = (await getJson("/v1/approvals", approverAuth)).approvals;
+      expect(queue.find((a: any) => a.id === approvalId).status).toBe("pending");
+    } finally {
+      expect((await setMode("normal")).statusCode).toBe(200);
+    }
+    const retry = await post(`/v1/approvals/${approvalId}/decide`, { decision: "approved" }, approverAuth);
+    expect(retry.statusCode).toBe(200);
+    const finding = (await getJson("/v1/infra/findings")).findings.find((f: any) => f.id === drift.id);
+    expect(finding.status).toBe("remediated");
+  });
+
+  it("leaves an auto-remediation finding open while halted", async () => {
+    const resource = await post("/v1/infra/resources", { name: "inf-halt-auto", kind: "agent_runtime" });
+    expect(resource.statusCode).toBe(201);
+    const resourceId = resource.json().id as string;
+    expect((await post("/v1/infra/policies", { resourceId, autoRemediateMaxSeverity: "low" })).statusCode).toBe(201);
+    expect((await setMode("halted")).statusCode).toBe(200);
+    try {
+      const scan = await post("/v1/infra/scan", { resourceId });
+      expect(scan.statusCode).toBe(409);
+      const finding = findingsFor((await getJson("/v1/infra/findings")).findings, resourceId)[0];
+      expect(finding.status).toBe("open");
+    } finally {
+      expect((await setMode("normal")).statusCode).toBe(200);
+    }
+    const resumed = await post("/v1/infra/scan", { resourceId });
+    expect(resumed.statusCode).toBe(200);
+    expect(resumed.json().autoRemediated).toBe(1);
+  });
+});
