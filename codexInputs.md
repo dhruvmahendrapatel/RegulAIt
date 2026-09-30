@@ -3035,10 +3035,10 @@ Halted workflow stages and infra approvals remain retryable; a stopped
 auto-remediation retains a deferred marker so a later scan can retry it under
 the then-current policy. The direct provider-call structural assertion and
 mock-backed route tests passed in 31 focused tests; 43 adjacent tests passed;
-gateway typecheck passed. This mitigates the enumerated AER-018 source paths
-locally, but there has been no paused counting-fake matrix for every adapter,
-no cancellation of calls already in flight, and no exact-head CI for this
-second change yet. Do not infer a globally complete halt or live-provider
+gateway typecheck passed. Commit `8507fa3` passed exact-head build-and-test,
+Docker build and Kong integration checks. This mitigates the enumerated
+AER-018 source paths, but there has been no paused counting-fake matrix for
+every adapter and no cancellation of calls already in flight. Do not infer a globally complete halt or live-provider
 verification from these tests.
 
 <!-- codex-enterprise-feedback:end -->

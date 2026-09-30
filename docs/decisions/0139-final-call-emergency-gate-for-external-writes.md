@@ -37,7 +37,9 @@ provider methods remain inside the guard. Route tests cover halted deploy,
 Git merge, approved and automatic infra remediation, and PM sync, including
 retry after lifting the stop. Six focused files passed 31 tests and six
 adjacent files passed 43 tests on disposable PostgreSQL databases. Gateway
-typecheck passed. These tests use mock providers; a paused-call matrix with
-counting live fakes for every adapter and full CI are still outstanding. The
+typecheck passed. Commit `8507fa3` then passed exact-head build-and-test,
+Docker build and Kong integration checks. These tests use mock providers; a
+paused-call matrix with counting live fakes for every adapter is still
+outstanding. The
 classification inventory is limited to the paths examined here, not a proof
 that every future external effect is automatically covered.

@@ -28,9 +28,9 @@ require-approval modes refuse writes; halted workflow stages and infra
 approvals remain retryable. A halted auto-remediation is marked deferred and
 retried on the next scan if the policy still permits it. Six focused files
 passed 31 tests and six adjacent files passed 43 tests on disposable databases;
-gateway typecheck passed. AER-018 is locally mitigated on the enumerated paths,
-but paused-call counting-fake coverage for every adapter, exact-head CI, and
-already-in-flight cancellation remain unverified. Do not claim a complete
+gateway typecheck passed, and `8507fa3` passed exact-head CI. AER-018 is
+mitigated on the enumerated paths, but paused-call counting-fake coverage for
+every adapter and already-in-flight cancellation remain unverified. Do not claim a complete
 deployment-wide halt from these tests alone.
 
 **2026-09-30 - Cache-hit governance (ADR-0138).** Native and compat cache
