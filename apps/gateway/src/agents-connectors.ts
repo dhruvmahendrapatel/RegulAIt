@@ -341,6 +341,8 @@ export type DispatchOutcome =
          * surface can render them; withheld along with the output on a PII
          * output block. Their tokens are already inside usage.outputTokens. */
         thinking?: ModelThinkingBlock[];
+        /** Complete scanned output was released instead of live provider events. */
+        streamBuffered?: boolean;
         usage: { inputTokens: number; outputTokens: number };
         costUsd: number | null;
         measuredCostSavedUsd: number | null;
@@ -1918,8 +1920,8 @@ async function dispatchAttempt(
   // streaming caller — the SSE invoke route, both compat shims, and the
   // orchestration worker path — rather than only the one route that knows to
   // ask. When any output-phase detector is at `block`, `onText` is not handed
-  // to the provider at all: deltas are accumulated locally, the completed text
-  // is scanned, and only then is the buffer flushed to the caller — or dropped
+  // to the provider at all: the provider returns its completed result,
+  // all content channels are scanned, and only then is that result flushed — or dropped
   // entirely if the scan blocked. A client can therefore never receive a token
   // of content the buffered path would have withheld.
   //
@@ -1929,13 +1931,12 @@ async function dispatchAttempt(
   // response so this is disclosed rather than silent. With every output
   // detector at `off`/`log`/`warn` (the shipped posture) nothing is buffered and
   // streaming is byte-identical to before.
-  const bufferStream = !!args.onText && guardrails.blocksOutput;
-  const bufferedDeltas: string[] = [];
-  const providerOnText = bufferStream
-    ? (delta: string) => {
-        bufferedDeltas.push(delta);
-      }
-    : args.onText;
+  const bufferStream = !!(args.onText || args.onThinking) && (guardrails.blocksOutput || piiMode === "block");
+  // Release only the complete result that was scanned, never a separate delta
+  // transcript that a faulty provider could make disagree with its result.
+  // Omitting both callbacks also avoids an unbounded duplicate delta buffer.
+  const providerOnText = bufferStream ? undefined : args.onText;
+  const providerOnThinking = bufferStream ? undefined : args.onThinking;
 
   let result;
   try {
@@ -1963,7 +1964,7 @@ async function dispatchAttempt(
       ...(args.thinking ? { thinking: args.thinking } : {}),
       ...(args.maxTokens ? { maxTokens: args.maxTokens } : {}),
       ...(providerOnText ? { onText: providerOnText } : {}),
-      ...(args.onThinking ? { onThinking: args.onThinking } : {}),
+      ...(providerOnThinking ? { onThinking: providerOnThinking } : {}),
     });
   } catch (err) {
     // ADR-0034: an egress refusal raised INSIDE the adapter (the guarded fetch
@@ -2037,8 +2038,15 @@ async function dispatchAttempt(
   let outputHits: PiiHit[] = [];
   let outputText = result.outputText;
   let withheld = false;
+  // Thinking and tool arguments are outputs too, including when the visible
+  // answer is empty. Scan their decoded provider objects before forwarding.
+  const outputForPolicy = [
+    result.outputText,
+    ...(result.thinking ?? []).map((block) => JSON.stringify(block)),
+    ...(result.toolCalls ?? []).map((call) => JSON.stringify(call)),
+  ].join("\n");
   if (piiMode) {
-    const chk = enforcePII(piiMode, { output: result.outputText }, piiIntl);
+    const chk = enforcePII(piiMode, { output: outputForPolicy }, piiIntl);
     outputHits = chk.hits;
     if (chk.action === "block") {
       withheld = true;
@@ -2068,7 +2076,7 @@ async function dispatchAttempt(
   let guardrailOutput: ReturnType<typeof runGuardrails> | null = null;
   let guardrailWithheld = false;
   if (guardrails.active) {
-    guardrailOutput = runGuardrails(guardrails, "output", result.outputText);
+    guardrailOutput = runGuardrails(guardrails, "output", outputForPolicy);
     if (guardrailOutput.action === "block") {
       guardrailWithheld = true;
       // the guardrail marker wins over the PII one when both fired: both are
@@ -2078,8 +2086,14 @@ async function dispatchAttempt(
   }
   // Flush (or drop) the buffered stream. This is the line that makes the
   // streaming guarantee real: on a block the deltas are simply never written.
-  if (bufferStream && args.onText && !guardrailWithheld && !withheld) {
-    for (const delta of bufferedDeltas) args.onText(delta);
+  if (bufferStream && !guardrailWithheld && !withheld) {
+    for (const block of result.thinking ?? []) {
+      if (block.type === "thinking") {
+        args.onThinking?.({ thinking: block.thinking });
+        args.onThinking?.({ signature: block.signature });
+      }
+    }
+    if (outputText) args.onText?.(outputText);
   }
   const guardrailFindings = [
     ...(guardrailInput?.findings ?? []),
@@ -2269,11 +2283,12 @@ async function dispatchAttempt(
       outputText,
       stopReason: result.stopReason,
       refusal: result.refusal,
-      ...(result.toolCalls ? { toolCalls: result.toolCalls } : {}),
+      ...(result.toolCalls && !withheld && !guardrailWithheld ? { toolCalls: result.toolCalls } : {}),
       // thinking blocks ride out with the output — and are withheld WITH the
       // output when a PII or guardrail block replaced it (reasoning can leak
       // the same content the completion was withheld for)
       ...(result.thinking && !withheld && !guardrailWithheld ? { thinking: result.thinking } : {}),
+      ...(bufferStream ? { streamBuffered: true } : {}),
       usage: result.usage,
       costUsd,
       measuredCostSavedUsd,

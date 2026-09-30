@@ -6,6 +6,8 @@ superseding a decision means a new ADR plus a status flip on the old one.
 
 | ID | Title | Status | Date |
 |---|---|---|---|
+| [0142](0142-complete-model-output-gates.md) | Scan and withhold thinking/tool output; release only inspected final model content under blocking policies. | Accepted | 2026-09-30 |
+| [0141](0141-structured-pii-and-prepared-consent.md) | Transform decoded JSON safely and bind original/effective payloads into prepared action consent. | Accepted | 2026-09-30 |
 | [0140](0140-validated-pii-redaction-foundation.md) | Add validated shared text redaction without enabling an incomplete gateway policy. | Accepted | 2026-09-30 |
 | [0139](0139-final-call-emergency-gate-for-external-writes.md) | Recheck execution mode at deployment, Git, infra and PM provider writes (AER-018). | Accepted | 2026-09-30 |
 | [0138](0138-governed-semantic-cache-hits.md) | Run native and compat cache hits through live dispatch gates before serving (AER-010). | Accepted | 2026-09-30 |

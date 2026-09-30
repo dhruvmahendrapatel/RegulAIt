@@ -48,7 +48,10 @@
  * about which dimension failed to match.
  */
 import { canonicalJson, sha256Hex } from "./audit-chain.js";
-import { scrubAuditDetail } from "./audit-scrub.js";
+import { AUDIT_SCRUB_MAX_DEPTH, scrubAuditDetail } from "./audit-scrub.js";
+import { INTERNATIONAL_PII_CATEGORIES, type InternationalPiiCategory } from "./pii-international.js";
+import { PII_REDACTION_VERSION } from "./pii.js";
+import { PII_PAYLOAD_LIMITS, PII_PAYLOAD_VERSION, redactPiiPayload, type PiiJsonValue } from "./pii-payload.js";
 
 /** The scope of an approval rule's consent (`approval_rules.approval_scope`). */
 export const APPROVAL_SCOPES = ["action", "tool"] as const;
@@ -172,6 +175,74 @@ export function approvalArgumentsPreview(
 ): unknown {
   return scrubAuditDetail(normalizeApprovalArguments(args));
 }
+
+/** Separate namespace: legacy raw-only approvals cannot authorize a transform. */
+export const PII_APPROVAL_DIGEST_VERSION = "regulait.pii-approval-binding.v1";
+
+/**
+ * Prepare one immutable redacted action for approval and eventual execution.
+ * The original digest remains bound even when different originals redact to
+ * identical effective arguments. The provider must receive effectiveArguments,
+ * never the credential-scrubbed preview. Callers must force action scope and
+ * recheck live policy/epoch before consuming consent and sending this snapshot.
+ * This helper does not perform authorization or enable the redaction mode.
+ */
+export function preparePiiApproval(
+  ref: ApprovalPayloadRef,
+  international: readonly InternationalPiiCategory[],
+) {
+  const raw = normalizeApprovalArguments(ref.arguments);
+  // Do not create a persisted preview deeper than the credential scrubber
+  // actually visits. At this bound any deepest object can only be empty.
+  const transformed = redactPiiPayload(raw, international, { ...PII_PAYLOAD_LIMITS, maxDepth: AUDIT_SCRUB_MAX_DEPTH });
+  // The input API requires an arguments bag, not a scalar or array. Check at
+  // runtime too, before a loosely typed caller can bind the wrong wire shape.
+  if (transformed.value === null || typeof transformed.value !== "object" || Array.isArray(transformed.value)) {
+    throw new Error("PII approval arguments must be a JSON object");
+  }
+  const effectiveArguments = transformed.value as { readonly [key: string]: PiiJsonValue };
+  const projectId = ref.projectId ?? null;
+  const originalArgumentsDigest = approvalArgumentsDigest({ projectId, arguments: raw });
+  const effectiveArgumentsDigest = approvalArgumentsDigest({ projectId, arguments: effectiveArguments });
+  const enabled = new Set(international);
+  const transformation = Object.freeze({
+    mode: "redact" as const,
+    textVersion: PII_REDACTION_VERSION,
+    payloadVersion: PII_PAYLOAD_VERSION,
+    internationalCategories: Object.freeze(INTERNATIONAL_PII_CATEGORIES.filter((category) => enabled.has(category))),
+  });
+  const argumentsDigest = sha256Hex(`${PII_APPROVAL_DIGEST_VERSION}\n${canonicalJson({
+    projectId, originalArgumentsDigest, effectiveArgumentsDigest, transformation,
+  })}`);
+  // Never put the original payload in the preview. The remaining credentials
+  // in the effective payload still use the existing audit scrubber.
+  const freezePreview = (value: unknown): unknown => {
+    if (value !== null && typeof value === "object") {
+      for (const child of Object.values(value)) freezePreview(child);
+      Object.freeze(value);
+    }
+    return value;
+  };
+  const argumentsPreview = freezePreview({
+    transformation,
+    originalArgumentsDigest,
+    effectiveArgumentsDigest,
+    effectiveArguments: approvalArgumentsPreview(effectiveArguments),
+  });
+  return Object.freeze({
+    projectId,
+    approvalScope: "action" as const,
+    argumentsDigest,
+    originalArgumentsDigest,
+    effectiveArgumentsDigest,
+    transformation,
+    effectiveArguments,
+    argumentsPreview,
+    hits: Object.freeze(transformed.hits.map((hit) => Object.freeze(hit))),
+  });
+}
+
+export type PreparedPiiApproval = ReturnType<typeof preparePiiApproval>;
 
 /**
  * STRICTEST-WINS across every approval rule that matched this call: if ANY of

@@ -59,9 +59,14 @@ the immediate implementation sequence.
   explicit negative controls and OS crash/recovery still require work.
 - P2: ISO 27001 partial evidence mapping landed (ADR-0134), not certification
   or a complete Statement of Applicability. Content/domain review remains.
-- P2: validated text redaction foundation passes 1,019 shared tests
-  (ADR-0140). Gateway redaction is not enabled. Next: structured transformations,
-  policy/algorithm-bound consent and bounded complete-output handling.
+- P2: validated text/decoded-JSON transformations and frozen original/effective
+  consent preparation pass 1,085 shared tests (ADR-0140/0141). Gateway redaction
+  is not enabled. Next: wire prepared consent through actual queue/consume/send,
+  final-policy checks, destination-schema validation and bounded/cancellable
+  provider handling.
+- Model-output blocking now covers thinking/tool-call content and callbacks,
+  with 204 gateway regressions and a four-case negative control (ADR-0142).
+  This closes enumerated leaks in existing block mode, not all redaction gates.
 - P3: delivery/detection contract and synthetic baseline exist (ADR-0135).
   No live SIEM adapter or outbound secret-blocking deployment is claimed.
 

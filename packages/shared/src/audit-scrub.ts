@@ -258,12 +258,12 @@ function normalizeKey(key: string): string {
  * limit the subtree is passed through unscrubbed rather than dropped — losing
  * evidence would be the worse failure — and ADR-0099 records it as a residue.
  */
-const MAX_DEPTH = 24;
+export const AUDIT_SCRUB_MAX_DEPTH = 24;
 
 export function scrubAuditDetail(value: unknown, depth = 0): unknown {
   if (typeof value === "string") return scrubAuditText(value);
   if (value === null || typeof value !== "object") return value;
-  if (depth >= MAX_DEPTH) return value;
+  if (depth >= AUDIT_SCRUB_MAX_DEPTH) return value;
 
   if (Array.isArray(value)) {
     let changed = false;
@@ -292,7 +292,7 @@ export function scrubAuditDetail(value: unknown, depth = 0): unknown {
       s = scrubAuditDetail(v, depth + 1);
     }
     if (s !== v) changed = true;
-    next[k] = s;
+    Object.defineProperty(next, k, { value: s, enumerable: true, writable: true, configurable: true });
   }
   return changed ? next : value;
 }

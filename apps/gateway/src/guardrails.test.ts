@@ -80,6 +80,8 @@ function latestRow<T extends { at: Date }>(rows: readonly T[]): T {
 declare global {
   // eslint-disable-next-line no-var
   var __grProviderCalls: Array<{ model: string; input: string }>;
+  // eslint-disable-next-line no-var
+  var __grProviderCompleted: boolean;
 }
 globalThis.__grProviderCalls = [];
 
@@ -105,6 +107,31 @@ vi.mock("@regulait/model-provider", async (importOriginal) => {
       const wrapped = Object.create(inner as object) as typeof inner;
       wrapped.dispatch = async (req: Parameters<typeof inner.dispatch>[0]) => {
         globalThis.__grProviderCalls.push({ model: req.model, input: req.input ?? "" });
+        const channel = /<<gr-channel:(pii|dlp|clean|mismatch|error):(thinking|tool|text)>>/.exec(req.input);
+        if (channel) {
+          globalThis.__grProviderCompleted = false;
+          const payload = channel[1] === "pii" ? "123-45-6789"
+            : channel[1] === "clean" ? "Ordinary planning detail."
+            : "CONFIDENTIAL - INTERNAL USE ONLY. Unreleased plans.";
+          const text = channel[2] === "text" ? payload : "A clean visible answer.";
+          req.onThinking?.({ thinking: payload.slice(0, 4) });
+          req.onThinking?.({ thinking: payload.slice(4) });
+          req.onThinking?.({ signature: "test-signature" });
+          req.onText?.(channel[1] === "mismatch" ? payload : text);
+          if (channel[1] === "error") throw new actual.ModelProviderError("synthetic provider failure");
+          globalThis.__grProviderCompleted = true;
+          return {
+            outputText: channel[1] === "mismatch" ? "A clean final answer." : text,
+            stopReason: channel[2] === "tool" ? "tool_use" : "end_turn",
+            refusal: false,
+            ...(channel[2] === "thinking" && channel[1] !== "mismatch"
+              ? { thinking: [{ type: "thinking" as const, thinking: payload, signature: "test-signature" }] } : {}),
+            ...(channel[2] === "tool"
+              ? { toolCalls: [{ id: "test-call", name: "save_note", arguments: { note: payload } }] } : {}),
+            usage: { inputTokens: 12, outputTokens: 24 },
+            providerMessageId: "gr-channel-test",
+          };
+        }
         const hit = CANNED.find(([sentinel]) => (req.input ?? "").includes(sentinel));
         if (!hit) return inner.dispatch(req);
         const text = hit[1];
@@ -153,6 +180,7 @@ let quietAgentId: string;
 let connectorId: string;
 let plainProj: string;
 let floorProj: string;
+let piiBlockProj: string;
 
 function providerCallCount(): number {
   return globalThis.__grProviderCalls.length;
@@ -339,6 +367,18 @@ beforeAll(async () => {
     payload: { name: "gr-floor-proj", classifications: ["gr-floor"] },
   });
   floorProj = p2.json().id;
+
+  const piiProfile = await app.inject({
+    method: "POST", url: "/v1/compliance/profiles", headers: AUTH,
+    payload: { tag: "gr-pii-output-block", piiMode: "block" },
+  });
+  expect(piiProfile.statusCode).toBe(201);
+  const piiProject = await app.inject({
+    method: "POST", url: "/v1/projects", headers: AUTH,
+    payload: { name: "gr-pii-output-block", classifications: ["gr-pii-output-block"] },
+  });
+  expect(piiProject.statusCode).toBe(201);
+  piiBlockProj = piiProject.json().id;
 
   mcpUpstream = await startUpstream();
   const s = await app.inject({
@@ -747,6 +787,100 @@ describe("ADR-0042 enforcement on the model dispatch path", () => {
 // ===========================================================================
 
 describe("ADR-0042 streaming", () => {
+  async function channelDispatch(input: string, projectId: string, thinkingOnly = false) {
+    const dbmod = await import("@regulait/db");
+    const [served] = await db.select().from(dbmod.agents).where(eq(dbmod.agents.id, agentId));
+    const events: Array<{ channel: string; value: unknown; completed: boolean }> = [];
+    const outcome = await executeGovernedDispatch(db, DATA_KEY, {
+      userId: ginaId, served, requestedAgentId: agentId, input, projectId,
+      ...(!thinkingOnly ? { onText: (value: string) => events.push({ channel: "text", value, completed: globalThis.__grProviderCompleted }) } : {}),
+      onThinking: (value) => events.push({ channel: "thinking", value, completed: globalThis.__grProviderCompleted }),
+    });
+    return { outcome, events };
+  }
+
+  for (const policy of ["pii", "dlp"] as const) {
+    for (const channel of ["text", "thinking", "tool"] as const) {
+      it(`${policy} output block scans ${channel} and withholds EVERY content channel`, async () => {
+        await setOrgModes({ prompt_injection: "log", jailbreak: "log", toxicity: "log", semantic_dlp: policy === "dlp" ? "block" : "log" });
+        resetProviderCalls();
+        const projectId = policy === "pii" ? piiBlockProj : plainProj;
+        const before = (await db.select().from(usageEvents).where(eq(usageEvents.projectId, projectId))).length;
+        const { outcome, events } = await channelDispatch(`<<gr-channel:${policy}:${channel}>>`, projectId);
+        expect(providerCallCount()).toBe(1);
+        expect(events).toEqual([]);
+        expect(outcome.ok).toBe(true);
+        if (!outcome.ok) throw new Error("unreachable");
+        expect(outcome.result.outputText).toContain("output withheld");
+        expect(outcome.result.thinking).toBeUndefined();
+        expect(outcome.result.toolCalls).toBeUndefined();
+        expect(outcome.result.streamBuffered).toBe(true);
+        expect(policy === "pii" ? outcome.result.pii?.withheld : outcome.result.guardrails?.withheld).toBe(true);
+        const rows = await db.select().from(usageEvents).where(eq(usageEvents.projectId, projectId));
+        expect(rows).toHaveLength(before + 1);
+        expect(JSON.stringify(latestRow(rows).detail)).not.toContain(policy === "pii" ? "123-45-6789" : "Unreleased plans");
+      });
+    }
+  }
+
+  it("a thinking-only subscriber is also withheld under a PII block", async () => {
+    await setOrgModes({ prompt_injection: "log", jailbreak: "log", toxicity: "log", semantic_dlp: "log" });
+    const { outcome, events } = await channelDispatch("<<gr-channel:pii:thinking>>", piiBlockProj, true);
+    expect(events).toEqual([]);
+    expect(outcome.ok && outcome.result.pii?.withheld).toBe(true);
+  });
+
+  it("clean thinking/signature and text are released only after completion under the same PII policy", async () => {
+    await setOrgModes({ prompt_injection: "log", jailbreak: "log", toxicity: "log", semantic_dlp: "log" });
+    const { outcome, events } = await channelDispatch("<<gr-channel:clean:thinking>>", piiBlockProj);
+    expect(outcome.ok).toBe(true);
+    expect(events).toEqual([
+      { channel: "thinking", value: { thinking: "Ordinary planning detail." }, completed: true },
+      { channel: "thinking", value: { signature: "test-signature" }, completed: true },
+      { channel: "text", value: "A clean visible answer.", completed: true },
+    ]);
+    expect(outcome.ok && outcome.result.thinking?.[0]).toEqual({ type: "thinking", thinking: "Ordinary planning detail.", signature: "test-signature" });
+  });
+
+  it("clean tool calls remain usable under the same output guardrail policy", async () => {
+    await setOrgModes({ prompt_injection: "log", jailbreak: "log", toxicity: "log", semantic_dlp: "block" });
+    const { outcome, events } = await channelDispatch("<<gr-channel:clean:tool>>", plainProj);
+    expect(outcome.ok && outcome.result.toolCalls).toEqual([{ id: "test-call", name: "save_note", arguments: { note: "Ordinary planning detail." } }]);
+    expect(events).toEqual([{ channel: "text", value: "A clean visible answer.", completed: true }]);
+  });
+
+  it("never flushes an unscanned delta transcript that differs from the completed result", async () => {
+    await setOrgModes({ prompt_injection: "log", jailbreak: "log", toxicity: "log", semantic_dlp: "block" });
+    const { outcome, events } = await channelDispatch("<<gr-channel:mismatch:text>>", plainProj);
+    expect(outcome.ok && outcome.result.outputText).toBe("A clean final answer.");
+    expect(events).toEqual([{ channel: "text", value: "A clean final answer.", completed: true }]);
+  });
+
+  it("a provider error cannot release already-emitted text or thinking callbacks under block", async () => {
+    await setOrgModes({ prompt_injection: "log", jailbreak: "log", toxicity: "log", semantic_dlp: "block" });
+    const { outcome, events } = await channelDispatch("<<gr-channel:error:thinking>>", plainProj);
+    expect(outcome).toMatchObject({ ok: false, error: "model_dispatch_failed" });
+    expect(events).toEqual([]);
+  });
+
+  it("warn mode retains live thinking and text events", async () => {
+    await setOrgModes({ prompt_injection: "log", jailbreak: "log", toxicity: "log", semantic_dlp: "warn" });
+    const { outcome, events } = await channelDispatch("<<gr-channel:dlp:thinking>>", plainProj);
+    expect(outcome.ok && outcome.result.guardrails?.action).toBe("warn");
+    expect(events.some((event) => !event.completed)).toBe(true);
+    expect(events.filter((event) => event.channel === "thinking").map((event) => (event.value as { thinking?: string }).thinking ?? "").join(""))
+      .toContain("CONFIDENTIAL");
+  });
+
+  it("non-streaming calls also withhold blocked tool arguments", async () => {
+    await setOrgModes({ prompt_injection: "log", jailbreak: "log", toxicity: "log", semantic_dlp: "log" });
+    const result = await invoke("<<gr-channel:pii:tool>>", piiBlockProj);
+    expect(result.statusCode).toBe(200);
+    expect(result.json().dispatch.pii.withheld).toBe(true);
+    expect(result.json().dispatch.toolCalls).toBeUndefined();
+    expect(result.body).not.toContain("123-45-6789");
+  });
+
   it("core: with an output detector at 'block', a blocked completion yields ZERO deltas to the caller", async () => {
     await setOrgModes({ prompt_injection: "log", jailbreak: "log", toxicity: "log", semantic_dlp: "block" });
     const [served] = await db
@@ -788,7 +922,7 @@ describe("ADR-0042 streaming", () => {
     });
     expect(outcome.ok).toBe(true);
     if (!outcome.ok) throw new Error("unreachable");
-    expect(received.length).toBeGreaterThan(1); // the buffer was flushed, chunk by chunk
+    expect(received).toHaveLength(1); // release the exact completed text that was scanned
     expect(received.join("")).toBe(outcome.result.outputText);
   });
 

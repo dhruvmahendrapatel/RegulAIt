@@ -15,6 +15,10 @@ import { APPROVAL_SCOPES } from "./approval-binding.js";
 import { INTERNATIONAL_PII_CATEGORIES } from "./pii-international.js";
 
 export { detectPII, redactPII, PII_REDACTION_VERSION, type PiiHit, type PiiCategory, type BasePiiCategory } from "./pii.js";
+export {
+  redactPiiPayload, PiiPayloadError, PII_PAYLOAD_VERSION, PII_PAYLOAD_LIMITS,
+  type PiiJsonValue, type PiiPayloadLimits, type PiiPayloadErrorCode,
+} from "./pii-payload.js";
 // ADR-0117 — the opt-in international national-identifier detectors.
 export {
   INTERNATIONAL_DETECTORS,
@@ -2585,6 +2589,7 @@ export {
 export {
   APPROVAL_CONTEXT_DIGEST_VERSION,
   APPROVAL_DIGEST_VERSION,
+  PII_APPROVAL_DIGEST_VERSION,
   /** B9b — the ten kinds THE ONE QUEUE holds, and their labels */
   APPROVAL_OBJECT_TYPES,
   APPROVAL_OBJECT_TYPE_LABELS,
@@ -2594,6 +2599,7 @@ export {
   DEFAULT_APPROVAL_TTL_HOURS,
   approvalArgumentsDigest,
   approvalArgumentsPreview,
+  preparePiiApproval,
   approvalContextDigest,
   effectiveApprovalScope,
   normalizeApprovalArguments,
@@ -2601,6 +2607,7 @@ export {
   type ApprovalContextRef,
   type ApprovalObjectType,
   type ApprovalPayloadRef,
+  type PreparedPiiApproval,
   type ApprovalRuleVersionRef,
   type ApprovalScope,
   type ConsentRetirementReason,

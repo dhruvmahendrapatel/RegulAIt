@@ -4,7 +4,7 @@ last_updated: 2026-09-30
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
-last_session: sessions/2026-09-30-session-02.md
+last_session: sessions/2026-09-30-session-03.md
 roadmap: ../docs/product/ROADMAP.md
 ---
 
@@ -20,6 +20,21 @@ roadmap: ../docs/product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**2026-09-30 - Structured consent and complete model-output gates
+(ADR-0141/0142).** Added a bounded decoded-JSON redactor and frozen action
+preparation that binds original/effective payloads, category policy and both
+transform versions. Previews contain the effective action, with credentials
+scrubbed; deep/prototype-shaped inputs have explicit safety tests. These are
+primitives, not enabled in-flight redaction. Actual model block-mode gaps were
+also fixed: PII-only and guardrail policies suppress text AND thinking events,
+scan thinking/tool calls, withhold every content channel on a block, and flush
+only inspected final content on success. 1,085 shared tests and 204 gateway
+tests passed; shared build and gateway typecheck passed. A temporary negative
+control failed all four targeted output cases, and was restored before final
+verification. The previous `40eb442` commit is confirmed CI-green. New batch
+CI is pending. Provider collection limits/cancellation, final-policy binding
+and actual redaction integration remain open; the full parity goal is active.
 
 **2026-09-30 - PII redaction foundation (ADR-0140).** Shared validators now
 support in-process offsets; `redactPII` performs deterministic full-region
