@@ -176,7 +176,7 @@ describe("the pack schema refuses the shapes that would manufacture assurance", 
   });
 });
 
-describe("the seven launch packs are honest data", () => {
+describe("the launch packs are honest data", () => {
   it("every one parses under the schema the API accepts", () => {
     for (const pack of DEFAULT_COMPLIANCE_PACKS) {
       const res = createCompliancePackSchema.safeParse(pack);
@@ -199,9 +199,17 @@ describe("the seven launch packs are honest data", () => {
     }
   });
 
-  it("covers the six frameworks ADR-0058 names plus the SOC 2 amendment", () => {
+  it("covers the launch frameworks and the ISO 27001 partial mapping", () => {
     const frameworks = DEFAULT_COMPLIANCE_PACKS.map((p) => p.framework).sort();
-    expect(frameworks).toEqual(["eu-ai-act", "finra", "hipaa", "iso-42001", "nist-ai-rmf", "pci-dss", "soc-2"]);
+    expect(frameworks).toEqual(["eu-ai-act", "finra", "hipaa", "iso-27001", "iso-42001", "nist-ai-rmf", "pci-dss", "soc-2"]);
+  });
+
+  it("never presents the ISO 27001 seed as a Statement of Applicability or certification", () => {
+    const pack = DEFAULT_COMPLIANCE_PACKS.find((p) => p.framework === "iso-27001")!;
+    expect(pack.description).toMatch(/not a Statement of Applicability/);
+    expect(pack.description).toMatch(/not .*certification/);
+    expect(pack.controls.every((c) => c.coverage !== "enforced")).toBe(true);
+    expect(pack.controls.some((c) => c.attestationRequired && c.controlRef === "iso-27001:6.1.3")).toBe(true);
   });
 
   // batch B1 — ADR-0058 §2's preset half: a pack with a cascade tag now

@@ -731,7 +731,7 @@ export function registerCompliancePackRoutes(app: FastifyInstance, db: Db): void
     });
   });
 
-  /** install the six launch packs as ORDINARY ROWS. Idempotent per
+  /** install the seed catalogue as ORDINARY ROWS. Idempotent per
    * (framework, version) — a re-seed skips what already exists rather than
    * duplicating or overwriting an admin's edits. */
   app.post("/v1/compliance/packs/seed", async (req, reply) => {

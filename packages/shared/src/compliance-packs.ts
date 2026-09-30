@@ -69,6 +69,7 @@ export const COMPLIANCE_PACK_FRAMEWORKS = [
   "eu-ai-act",
   "nist-ai-rmf",
   "iso-42001",
+  "iso-27001",
   "hipaa",
   "pci-dss",
   "finra",
@@ -511,7 +512,7 @@ export function buildPackScorecard(input: {
 // ---------------------------------------------------------------------------
 
 /**
- * The six launch packs of ADR-0058, expressed in exactly the shape
+ * The launch packs of ADR-0058, expressed in exactly the shape
  * `POST /v1/compliance/packs` accepts. Nothing in the evaluator reads this
  * constant: `POST /v1/compliance/packs/seed` inserts these as ordinary rows and
  * the evaluator only ever reads rows. Emptying the tables makes the evaluator
@@ -695,6 +696,78 @@ export const DEFAULT_COMPLIANCE_PACKS: CreateCompliancePackInput[] = [
         minEvidenceCount: 1,
         attestationRequired: true,
         ownerNote: "Organisational. Attest with a reference to the policy set and training records.",
+      },
+    ],
+  },
+  {
+    framework: "iso-27001",
+    version: 1,
+    title: "ISO/IEC 27001:2022 — information security controls (partial mapping)",
+    description:
+      "A scoped mapping of selected Annex A control references to platform evidence. " +
+      "This is not a Statement of Applicability, an ISMS assessment, or certification.",
+    provenance: {
+      source: "ISO/IEC 27001:2022 Annex A reference controls and ISO/IEC 27001 Auditing Practices Group guidance",
+      catalogueRevision: "2022 (including awareness of Amendment 1:2024)",
+      reviewedBy: null,
+      reviewedOn: null,
+      note: "Paraphrased control references only; copyrighted control text is not reproduced. " +
+        "Applicability and risk treatment require the customer's own assessment and Statement of Applicability.",
+    },
+    cascadeTag: null,
+    controls: [
+      {
+        controlRef: "iso-27001:A.5.15",
+        title: "Access control",
+        description: "Active ABAC policies show a platform access-control configuration, not coverage of all organizational access.",
+        coverage: "partial",
+        collector: "abac_policies_active",
+        collectorParams: {},
+        minEvidenceCount: 1,
+        attestationRequired: false,
+        ownerNote: "Review identity lifecycle, access reviews, and non-platform systems separately.",
+      },
+      {
+        controlRef: "iso-27001:A.8.15",
+        title: "Logging",
+        description: "Decision audit rows evidence activity mediated by RegulAIt during the selected period.",
+        coverage: "partial",
+        collector: "audit_decisions",
+        collectorParams: {},
+        minEvidenceCount: 1,
+        attestationRequired: false,
+        ownerNote: "This count does not establish log completeness, retention, review, or coverage outside RegulAIt.",
+      },
+      {
+        controlRef: "iso-27001:A.8.12",
+        title: "Data leakage prevention",
+        description: "Configured guardrails provide platform-specific DLP posture evidence.",
+        coverage: "partial",
+        collector: "guardrail_configs",
+        collectorParams: { detector: "semantic_dlp", minMode: "block" },
+        minEvidenceCount: 1,
+        attestationRequired: false,
+        ownerNote: "Configuration is not proof of detection effectiveness or organization-wide DLP.",
+      },
+      {
+        controlRef: "iso-27001:6.1.3",
+        title: "Information security risk treatment and applicability",
+        coverage: "unaddressed",
+        collector: "none",
+        collectorParams: {},
+        minEvidenceCount: 1,
+        attestationRequired: true,
+        ownerNote: "Customer must provide its risk treatment decisions and Statement of Applicability.",
+      },
+      {
+        controlRef: "iso-27001:9.2",
+        title: "Internal audit",
+        coverage: "unaddressed",
+        collector: "none",
+        collectorParams: {},
+        minEvidenceCount: 1,
+        attestationRequired: true,
+        ownerNote: "Customer must evidence its independent internal audit program and results.",
       },
     ],
   },

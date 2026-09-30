@@ -3020,7 +3020,7 @@ export {
 // ADR-0058 — REGULATORY COMPLIANCE PACKS, the pure half: the pack/control and
 // collector vocabularies, the satisfaction rule (an attestation-required
 // control returns BEFORE any count is consulted, so it can never reach
-// 'satisfied'), the verdict-free scorecard, and the six launch packs as SEED
+// 'satisfied'), the verdict-free scorecard, and the pack catalogue as SEED
 // DATA the gateway inserts as ordinary rows.
 export {
   COMPLIANCE_PACK_DISCLAIMER,

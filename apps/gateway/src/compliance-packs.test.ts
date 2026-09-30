@@ -446,7 +446,7 @@ describe("ADR-0058 — a pack added as DATA is evaluated with no code change", (
       .where(eq(compliancePacks.id, packId));
   });
 
-  it("seeds the six launch packs as ROWS, idempotently", async () => {
+  it("seeds the catalogue as ROWS, idempotently", async () => {
     const first = await post("/v1/compliance/packs/seed", {});
     expect(first.statusCode).toBe(201);
     expect(first.json().created.length).toBe(DEFAULT_COMPLIANCE_PACKS.length);
