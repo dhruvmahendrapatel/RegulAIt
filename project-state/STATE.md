@@ -4,7 +4,7 @@ last_updated: 2026-09-30
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
-last_session: sessions/2026-09-30-session-01.md
+last_session: sessions/2026-09-30-session-02.md
 roadmap: ../docs/product/ROADMAP.md
 ---
 
@@ -20,6 +20,19 @@ roadmap: ../docs/product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**2026-09-30 - PII redaction foundation (ADR-0140).** Shared validators now
+support in-process offsets; `redactPII` performs deterministic full-region
+replacement across all 14 supported categories. Existing detection counts,
+opt-in defaults and conformance scores are unchanged. All 1,019 shared tests
+passed, including 103 new tests; shared build and gateway typecheck passed.
+No gateway redaction mode is enabled: structured payloads, exact effective
+approval binding, final policy checks and bounded complete-output handling
+remain required by ADR-0137. The active full-Credo-parity goal is tracked in
+[the current checklist](../docs/product/CREDO_PARITY_CHECKLIST_2026-09-30.md),
+using primary vendor pages and the owner's Discover -> Assess -> Govern
+workflow reference. Historical completion labels do not establish current
+feature or workflow parity. No production deployment occurred.
 
 **2026-09-30 - External-write emergency gate (ADR-0139).** Deployment,
 rollback, Git branch/PR/merge, infra remediation and PM mutations now check

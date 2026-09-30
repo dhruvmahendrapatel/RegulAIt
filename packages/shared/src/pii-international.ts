@@ -18,8 +18,8 @@
  * digit are marked `checksum: false`, are held to the tightest structural
  * constraints their issuing authority publishes, and are OFF by default.
  *
- * CONTRACT. Same as `detectPII`: pure, total, no I/O, no LLM, and COUNTS ONLY
- * — a matched substring is never returned, never logged and never stored.
+ * CONTRACT. Pure, total, no I/O, no LLM. Counts are safe to persist. Optional
+ * match visitors receive offsets for in-process redaction only, never values.
  */
 
 /** A national-identifier category. One per jurisdiction+scheme, because a
@@ -39,6 +39,9 @@ export const INTERNATIONAL_PII_CATEGORIES = [
 ] as const;
 
 export type InternationalPiiCategory = (typeof INTERNATIONAL_PII_CATEGORIES)[number];
+
+/** UTF-16 offsets, end exclusive. In-process only; never persist these. */
+export type PiiMatchVisitor = (start: number, end: number) => void;
 
 export interface InternationalDetector {
   readonly category: InternationalPiiCategory;
@@ -66,7 +69,7 @@ export interface InternationalDetector {
   /** What this detector cannot do. Quoted into the guardrail registry so the
    * product's own limits page stays honest. */
   readonly limits: string;
-  readonly count: (text: string) => number;
+  readonly count: (text: string, onMatch?: PiiMatchVisitor) => number;
 }
 
 // ---------------------------------------------------------------------------
@@ -338,6 +341,7 @@ function countDigitScheme(
   len: number,
   sepClass: string,
   validate: (digits: string) => boolean,
+  onMatch?: PiiMatchVisitor,
 ): number {
   const sep = sepClass ? `[${sepClass}]?` : "";
   const re = new RegExp(`(?<![0-9])(?:[0-9]${sep}){${len - 1}}[0-9](?![0-9])`, "g");
@@ -358,73 +362,81 @@ function countDigitScheme(
     if (sepSet.has(text[start - 1] ?? "") && isDigit(text[start - 2])) continue;
     if (sepSet.has(text[end] ?? "") && isDigit(text[end + 1])) continue;
     const digits = m[0].replace(/[^0-9]/g, "");
-    if (digits.length === len && validate(digits)) n++;
+    if (digits.length === len && validate(digits)) {
+      n++;
+      onMatch?.(start, end);
+    }
   }
   return n;
 }
 
-function countAadhaar(text: string): number {
-  return countDigitScheme(text, 12, " -", aadhaarValid);
+function countAadhaar(text: string, onMatch?: PiiMatchVisitor): number {
+  return countDigitScheme(text, 12, " -", aadhaarValid, onMatch);
 }
-function countCpf(text: string): number {
-  return countDigitScheme(text, 11, ".-", cpfValid);
+function countCpf(text: string, onMatch?: PiiMatchVisitor): number {
+  return countDigitScheme(text, 11, ".-", cpfValid, onMatch);
 }
-function countBsn(text: string): number {
-  return countDigitScheme(text, 9, ".", bsnValid);
+function countBsn(text: string, onMatch?: PiiMatchVisitor): number {
+  return countDigitScheme(text, 9, ".", bsnValid, onMatch);
 }
-function countSin(text: string): number {
-  return countDigitScheme(text, 9, " -", sinValid);
+function countSin(text: string, onMatch?: PiiMatchVisitor): number {
+  return countDigitScheme(text, 9, " -", sinValid, onMatch);
 }
-function countTfn(text: string): number {
-  return countDigitScheme(text, 9, " ", tfnValid);
+function countTfn(text: string, onMatch?: PiiMatchVisitor): number {
+  return countDigitScheme(text, 9, " ", tfnValid, onMatch);
 }
-function countSteuerId(text: string): number {
-  return countDigitScheme(text, 11, " ", steuerIdValid);
+function countSteuerId(text: string, onMatch?: PiiMatchVisitor): number {
+  return countDigitScheme(text, 11, " ", steuerIdValid, onMatch);
 }
-function countNir(text: string): number {
-  return countDigitScheme(text, 15, " ", nirValid);
+function countNir(text: string, onMatch?: PiiMatchVisitor): number {
+  return countDigitScheme(text, 15, " ", nirValid, onMatch);
 }
 
 const DNI_RE = /(?<![A-Za-z0-9])([XYZ]?)(\d{7,8})[ -]?([A-Za-z])(?![A-Za-z0-9])/g;
-function countDniNie(text: string): number {
+function countDniNie(text: string, onMatch?: PiiMatchVisitor): number {
   let n = 0;
-  DNI_RE.lastIndex = 0;
+  const re = new RegExp(DNI_RE.source, DNI_RE.flags);
   let m: RegExpExecArray | null;
-  while ((m = DNI_RE.exec(text)) !== null) {
+  while ((m = re.exec(text)) !== null) {
     const prefix = (m[1] ?? "").toUpperCase();
     const digits = m[2] ?? "";
     const letter = (m[3] ?? "").toUpperCase();
     if (prefix === "") {
       // DNI: exactly 8 digits.
       if (digits.length !== 8) continue;
-      if (dniLetterFor(Number(digits)) === letter) n++;
+      if (dniLetterFor(Number(digits)) !== letter) continue;
     } else {
       // NIE: X/Y/Z + exactly 7 digits, prefix folded to 0/1/2.
       if (digits.length !== 7) continue;
       const fold = prefix === "X" ? "0" : prefix === "Y" ? "1" : "2";
-      if (dniLetterFor(Number(fold + digits)) === letter) n++;
+      if (dniLetterFor(Number(fold + digits)) !== letter) continue;
     }
+    n++;
+    onMatch?.(m.index, m.index + m[0].length);
   }
   return n;
 }
 
 const CF_RE = /(?<![A-Za-z0-9])[A-Za-z]{6}\d{2}[A-Za-z]\d{2}[A-Za-z]\d{3}[A-Za-z](?![A-Za-z0-9])/g;
-function countCodiceFiscale(text: string): number {
+function countCodiceFiscale(text: string, onMatch?: PiiMatchVisitor): number {
   let n = 0;
-  CF_RE.lastIndex = 0;
+  const re = new RegExp(CF_RE.source, CF_RE.flags);
   let m: RegExpExecArray | null;
-  while ((m = CF_RE.exec(text)) !== null) {
-    if (codiceFiscaleValid(m[0].toUpperCase())) n++;
+  while ((m = re.exec(text)) !== null) {
+    if (codiceFiscaleValid(m[0].toUpperCase())) {
+      n++;
+      onMatch?.(m.index, m.index + m[0].length);
+    }
   }
   return n;
 }
 
 const NINO_RE = /(?<![A-Za-z0-9])([A-Za-z]{2})[ ]?(\d{2})[ ]?(\d{2})[ ]?(\d{2})[ ]?([A-Da-d])(?![A-Za-z0-9])/g;
-function countNino(text: string): number {
+function countNino(text: string, onMatch?: PiiMatchVisitor): number {
   let n = 0;
-  NINO_RE.lastIndex = 0;
+  const re = new RegExp(NINO_RE.source, NINO_RE.flags);
   let m: RegExpExecArray | null;
-  while ((m = NINO_RE.exec(text)) !== null) {
+  while ((m = re.exec(text)) !== null) {
     const prefix = (m[1] ?? "").toUpperCase();
     const a = prefix.charAt(0);
     const b = prefix.charAt(1);
@@ -432,6 +444,7 @@ function countNino(text: string): number {
     if ("DFIQUVO".includes(b)) continue;
     if (NINO_INVALID_PREFIXES.has(prefix)) continue;
     n++;
+    onMatch?.(m.index, m.index + m[0].length);
   }
   return n;
 }

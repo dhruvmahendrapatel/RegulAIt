@@ -14,7 +14,7 @@ import { APPROVAL_SCOPES } from "./approval-binding.js";
 // updateOrgSettingsSchema below, so it is imported as well as re-exported.
 import { INTERNATIONAL_PII_CATEGORIES } from "./pii-international.js";
 
-export { detectPII, type PiiHit, type PiiCategory, type BasePiiCategory } from "./pii.js";
+export { detectPII, redactPII, PII_REDACTION_VERSION, type PiiHit, type PiiCategory, type BasePiiCategory } from "./pii.js";
 // ADR-0117 — the opt-in international national-identifier detectors.
 export {
   INTERNATIONAL_DETECTORS,

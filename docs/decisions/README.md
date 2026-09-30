@@ -6,6 +6,7 @@ superseding a decision means a new ADR plus a status flip on the old one.
 
 | ID | Title | Status | Date |
 |---|---|---|---|
+| [0140](0140-validated-pii-redaction-foundation.md) | Add validated shared text redaction without enabling an incomplete gateway policy. | Accepted | 2026-09-30 |
 | [0139](0139-final-call-emergency-gate-for-external-writes.md) | Recheck execution mode at deployment, Git, infra and PM provider writes (AER-018). | Accepted | 2026-09-30 |
 | [0138](0138-governed-semantic-cache-hits.md) | Run native and compat cache hits through live dispatch gates before serving (AER-010). | Accepted | 2026-09-30 |
 | [0137](0137-in-flight-pii-redaction-boundary.md) | Define the final-byte, streaming, and exact-action constraints before enabling PII redaction. | Proposed | 2026-09-30 |

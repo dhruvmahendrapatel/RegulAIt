@@ -13,6 +13,7 @@
 import {
   INTERNATIONAL_DETECTORS,
   type InternationalPiiCategory,
+  type PiiMatchVisitor,
 } from "./pii-international.js";
 
 /** The four original, live-verified categories. Named separately so the
@@ -63,24 +64,43 @@ function luhnValid(digits: string): boolean {
   return sum % 10 === 0;
 }
 
-function countMatches(text: string, re: RegExp): number {
-  let n = 0;
-  // each RegExp is a module constant with the /g flag; reset lastIndex so the
-  // function stays total and re-entrant regardless of prior use
-  re.lastIndex = 0;
-  while (re.exec(text) !== null) n++;
-  return n;
+function visitMatches(text: string, pattern: RegExp, onMatch: PiiMatchVisitor): void {
+  const re = new RegExp(pattern.source, pattern.flags);
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    onMatch(m.index, m.index + m[0].length);
+  }
 }
 
-function countCreditCards(text: string): number {
-  let n = 0;
-  CC_CANDIDATE_RE.lastIndex = 0;
-  let m: RegExpExecArray | null;
-  while ((m = CC_CANDIDATE_RE.exec(text)) !== null) {
-    const digits = m[0].replace(/[ -]/g, "");
-    if (digits.length >= 13 && digits.length <= 19 && luhnValid(digits)) n++;
+function visitPII(
+  text: string,
+  international: readonly InternationalPiiCategory[],
+  onMatch: (category: PiiCategory, start: number, end: number) => void,
+): void {
+  visitMatches(text, EMAIL_RE, (start, end) => onMatch("email", start, end));
+  visitMatches(text, SSN_RE, (start, end) => onMatch("ssn", start, end));
+  visitMatches(text, CC_CANDIDATE_RE, (start, end) => {
+    const digits = text.slice(start, end).replace(/[ -]/g, "");
+    if (digits.length >= 13 && digits.length <= 19 && luhnValid(digits)) {
+      onMatch("credit_card", start, end);
+    }
+  });
+  visitMatches(text, PHONE_RE, (start, end) => onMatch("phone", start, end));
+  const enabled = new Set(international);
+  for (const detector of INTERNATIONAL_DETECTORS) {
+    if (enabled.has(detector.category)) {
+      detector.count(text, (start, end) => onMatch(detector.category, start, end));
+    }
   }
-  return n;
+}
+
+const CATEGORY_ORDER: readonly PiiCategory[] = [
+  "email", "ssn", "credit_card", "phone", ...INTERNATIONAL_DETECTORS.map((d) => d.category),
+];
+
+function countHits(counts: Partial<Record<PiiCategory, number>>): PiiHit[] {
+  return CATEGORY_ORDER.filter((category) => (counts[category] ?? 0) > 0)
+    .map((category) => ({ category, count: counts[category] ?? 0 }));
 }
 
 /**
@@ -90,11 +110,9 @@ function countCreditCards(text: string): number {
  * text — so it is safe to persist in an audit/usage detail.
  *
  * `international` names the national-identifier jurisdictions this deployment
- * has SWITCHED ON. It is a required argument rather than an optional one on
- * purpose: `detectPII` is the single point every governed dispatch path
- * reaches PII through, and a new call site that forgets the list would
- * silently enforce less than the deployment asked for — the one failure mode
- * this work exists to close. An empty array is the shipped value and is
+ * has SWITCHED ON. Governed callers must pass their effective policy's list;
+ * omission selects the shipped default of no international categories.
+ * An empty array is the shipped value and is
  * byte-identical to the pre-ADR-0117 behaviour: the four base detectors run,
  * nothing else does, and `pii-international.ts` is never entered.
  *
@@ -107,27 +125,73 @@ export function detectPII(
   international: readonly InternationalPiiCategory[] = [],
 ): PiiHit[] {
   if (!text) return [];
-  const counts: Partial<Record<PiiCategory, number>> = {
-    email: countMatches(text, EMAIL_RE),
-    ssn: countMatches(text, SSN_RE),
-    credit_card: countCreditCards(text),
-    phone: countMatches(text, PHONE_RE),
-  };
-  const order: PiiCategory[] = ["email", "ssn", "credit_card", "phone"];
-  if (international.length > 0) {
-    const on = new Set<string>(international);
-    // Registry order, not caller order, so the audit reason string for a given
-    // text is the same whatever order an admin happened to list jurisdictions.
-    for (const detector of INTERNATIONAL_DETECTORS) {
-      if (!on.has(detector.category)) continue;
-      const n = detector.count(text);
-      if (n > 0) {
-        counts[detector.category] = n;
-        order.push(detector.category);
+  const counts: Partial<Record<PiiCategory, number>> = {};
+  visitPII(text, international, (category) => {
+    counts[category] = (counts[category] ?? 0) + 1;
+  });
+  return countHits(counts);
+}
+
+/** Bind this version, effective categories and transformed bytes into consent. */
+export const PII_REDACTION_VERSION = "validated-spans-v1";
+
+const PLACEHOLDERS: Readonly<Record<PiiCategory, string>> = {
+  email: "[EMAIL]", ssn: "[SSN]", credit_card: "[CARD]", phone: "[PHONE]",
+  aadhaar: "[AADHAAR]", cpf: "[CPF]", bsn: "[BSN]", sin: "[SIN]", tfn: "[TFN]",
+  steuer_id: "[STEUER_ID]", nir: "[NIR]", dni_nie: "[DNI_NIE]",
+  codice_fiscale: "[CODICE_FISCALE]", nino: "[NINO]",
+};
+
+// More specific identifiers win over generic numeric shapes. National-ID ties
+// follow registry order; selection is independent of caller category order.
+const REDACTION_PRIORITY: readonly PiiCategory[] = [
+  "email", "ssn", ...INTERNATIONAL_DETECTORS.map((d) => d.category), "credit_card", "phone",
+];
+
+interface PiiSpan {
+  category: PiiCategory;
+  start: number;
+  end: number;
+}
+
+/**
+ * Redact a complete, decoded text value using the same validators as detectPII.
+ * This is NOT a stream filter or a serialized JSON transformer: callers must
+ * buffer full text and traverse parsed payloads before final approval binding.
+ * Only hits are safe audit metadata; text may still contain undetected PII.
+ * Offsets and original values never leave this function.
+ */
+export function redactPII(
+  text: string,
+  international: readonly InternationalPiiCategory[] = [],
+): { text: string; hits: PiiHit[] } {
+  const spans: PiiSpan[] = [];
+  const counts: Partial<Record<PiiCategory, number>> = {};
+  visitPII(text, international, (category, start, end) => {
+    spans.push({ category, start, end });
+    counts[category] = (counts[category] ?? 0) + 1;
+  });
+  spans.sort((a, b) => a.start - b.start || b.end - a.end);
+  const regions: PiiSpan[] = [];
+  for (const span of spans) {
+    const previous = regions[regions.length - 1];
+    if (previous && span.start < previous.end) {
+      // Cover the UNION, including transitive overlaps, not just the winning
+      // category's span. Otherwise a losing match can leak its remaining tail.
+      previous.end = Math.max(previous.end, span.end);
+      if (REDACTION_PRIORITY.indexOf(span.category) < REDACTION_PRIORITY.indexOf(previous.category)) {
+        previous.category = span.category;
       }
+    } else {
+      regions.push({ ...span });
     }
   }
-  return order
-    .filter((c) => (counts[c] ?? 0) > 0)
-    .map((c) => ({ category: c, count: counts[c] ?? 0 }));
+  const parts: string[] = [];
+  let cursor = 0;
+  for (const region of regions) {
+    parts.push(text.slice(cursor, region.start), PLACEHOLDERS[region.category]);
+    cursor = region.end;
+  }
+  parts.push(text.slice(cursor));
+  return { text: parts.join(""), hits: countHits(counts) };
 }
