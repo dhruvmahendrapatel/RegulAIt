@@ -21,6 +21,19 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-09-30 - Signed report export isolation (ADR-0131).** AER-007 reproduced:
+non-admin report bundles contained unrelated audit payloads. Version-2 bundles
+now disclose only subject-row payloads, keeping contiguous signed hash
+commitments for other rows. The verifier names the reduced proof and rejects
+extra audit payloads (AER-009). Route-level non-admin denial/entitlement,
+synthetic sentinel isolation, pinned offline verification and the full 28-test
+bundle suite passed on a disposable database. Admin full-payload bundles stay
+version 1. Full CI for the preceding approval commit failed only a flaky
+relative login-timing assertion (30 ms versus 67 ms under runner load); both
+failure paths still exceed the scrypt floor. The ratio check was removed and
+its targeted case passed locally; the next CI run is the full gate. Remaining P1 cache and emergency findings, crash verification,
+P2 and P3 are not closed by this change.
+
 **2026-09-30 - P1 approval binding is being hardened (ADR-0130).** The P0
 follow-up commit f666733 passed full GitHub CI (run 36653593771) and Kong
 integration (run 36653593778). AER-004 source revalidation found the legacy

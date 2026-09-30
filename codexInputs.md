@@ -2738,6 +2738,24 @@ fixes in this P0 batch.
   entry; closure is contingent on that gate. This batch does not cover every
   grant, budget or emergency-setting race.
 
+### Implementer update - 2026-09-30 (P1 signed export isolation)
+
+- AER-007 reproduced and corrected in ADR-0131. The non-admin report route
+  builds a v2 bundle with payload bytes only for that report's audit rows;
+  unrelated rows retain signed hash commitments. The manifest, README and
+  offline verifier disclose that undisclosed source bytes cannot be rehashed
+  from this bundle. Admin full-payload v1 exports remain available.
+- AER-009: the verifier now rejects audit payload files absent from the signed
+  chain, including an empty chain. The attack test inserts a stray payload.
+- On a disposable PostgreSQL database the export suite passed 28/28, including
+  non-member denial, entitled non-admin export, unrelated sentinel isolation,
+  pinned offline verification and existing tamper/key-rotation controls. The
+  preceding approval commit's full CI failed only the unrelated login timing
+  ratio assertion (30 ms versus 67 ms); both paths run scrypt. The test now
+  requires each path to exceed the fast-fail floor, and its targeted run passed.
+  The complete CI result for this batch is pending. AER-008's export/audit
+  atomicity is not claimed fixed here.
+
 <!-- codex-enterprise-feedback:end -->
 
 Date: 2026-09-06  

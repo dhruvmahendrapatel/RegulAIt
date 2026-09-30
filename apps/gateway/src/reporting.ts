@@ -956,6 +956,7 @@ export function registerReportingRoutes(app: FastifyInstance, db: Db): void {
         ],
         actor: { userId: req.authCtx.userId ?? null, via: req.authCtx.via },
         licenseId: license.document?.licenseId ?? null,
+        auditPayloadScope: req.authCtx.isAdmin ? "full" : "subject",
       });
       if (!bundle.ok) {
         await audit(

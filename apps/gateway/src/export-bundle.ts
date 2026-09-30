@@ -83,6 +83,7 @@ import {
 
 /** The manifest schema id. Bumped with the shape, never silently. */
 export const EXPORT_BUNDLE_SCHEMA = "regulait.export-bundle/1" as const;
+export const SCOPED_EXPORT_BUNDLE_SCHEMA = "regulait.export-bundle/2" as const;
 
 /** How many chain rows a single bundle will carry, at most. A bundle is
  * evidence an auditor reads, not a database dump. Truncation is DISCLOSED in
@@ -279,6 +280,7 @@ export interface ChainSegmentRow {
   rowHash: string;
   /** the EXACT bytes ADR-0060 hashes to get contentHash */
   payload: string;
+  subject: boolean;
 }
 
 export interface ChainSegment {
@@ -364,6 +366,7 @@ export async function readChainSegment(db: Db, subjectId: string | null): Promis
     prevHash: r.prevHash as string,
     rowHash: r.rowHash as string,
     payload: canonicalAuditPayload(r),
+    subject: subjectId !== null && r.objectId === subjectId,
   }));
 
   return {
@@ -499,6 +502,7 @@ const README = (m: {
   fingerprint: string;
   subjectKind: string;
   segmentNote: string;
+  payloadScope: "full" | "subject";
 }) => `RegulAIt signed export bundle
 =============================
 
@@ -524,9 +528,9 @@ WHAT A PASSING VERIFICATION PROVES
   * The content in content/ is byte-for-byte what was signed.
   * It was signed by the private key whose fingerprint you supplied — key id
     '${m.keyId}'.
-  * The audit rows in audit/rows/ hash to the content hashes in
-    audit/chain.tsv, those link into an unbroken hash chain, and that chain
-    ends at the head recorded in the signed manifest.
+  * Disclosed audit payloads hash to their content hashes in audit/chain.tsv.
+    Every row's signed hash commitment links into a contiguous chain ending
+    at the head recorded in the signed manifest.
   * The export happened at the time the signed manifest records, by the
     database's own clock, and was performed by the recorded actor.
 
@@ -539,6 +543,7 @@ WHAT IT DOES NOT PROVE
     (RegulAIt writes chain heads to WORM storage; see POST /v1/audit/anchor).
     If you retained such an anchor, compare it to the head in the manifest.
   * ${m.segmentNote}
+  * ${m.payloadScope === "subject" ? "Only the report's own audit payloads are disclosed. Other rows carry signed hash commitments, so their underlying content cannot be independently rehashed from this bundle." : "All audit payloads in the chain segment are disclosed."}
   * It does not prove the export is COMPLETE with respect to any query you did
     not specify. The manifest's subject descriptor records exactly what was
     asked for, including any row ceiling or date window that shaped it.
@@ -551,8 +556,8 @@ WHAT IS IN HERE
   manifest.json             the signed object; canonical JSON, sorted keys
   manifest.json.sig         base64 Ed25519 signature over manifest.json's bytes
   content/                  the export itself (subject kind: ${m.subjectKind})
-  audit/chain.tsv           seq, content_hash, prev_hash, row_hash
-  audit/rows/<seq>.payload  the exact bytes hashed to produce content_hash
+  audit/chain.tsv           seq, content_hash, prev_hash, row_hash${m.payloadScope === "subject" ? ", payload|commitment" : ""}
+  audit/rows/<seq>.payload  exact bytes for ${m.payloadScope === "subject" ? "subject rows only" : "every chain row"}
   signing-key.pub           the public key — a convenience, NOT the trust root
 `;
 
@@ -566,6 +571,7 @@ export async function buildExportBundle(args: {
   content: ExportContentFile[];
   actor: { userId: string | null; via: string };
   licenseId: string | null;
+  auditPayloadScope?: "full" | "subject";
 }): Promise<BuiltBundle | ExportSigningRefusal> {
   const key = resolveExportSigningKey();
   if (!key.ok) return key;
@@ -579,6 +585,7 @@ export async function buildExportBundle(args: {
   ).toISOString();
 
   const segment = await readChainSegment(args.db, args.subject.id);
+  const payloadScope = args.auditPayloadScope ?? "full";
 
   // The actor's NAME as the deployment knows it, resolved here rather than
   // taken from the request: an auditor reading a bundle six months later needs
@@ -605,14 +612,14 @@ export async function buildExportBundle(args: {
   for (const c of args.content) addListed(`content/${c.name}`, c.body);
 
   const chainTsv = segment.rows
-    .map((r) => `${r.seq}\t${r.contentHash}\t${r.prevHash}\t${r.rowHash}`)
+    .map((r) => `${r.seq}\t${r.contentHash}\t${r.prevHash}\t${r.rowHash}${payloadScope === "subject" ? `\t${r.subject ? "payload" : "commitment"}` : ""}`)
     .join("\n");
   addListed("audit/chain.tsv", Buffer.from(chainTsv.length > 0 ? `${chainTsv}\n` : "", "utf8"));
 
   // The payload files are NOT in `files[]`: their digests ARE the content
   // hashes in chain.tsv, and chain.tsv is itself listed and signed. Listing
   // them twice would let the two lists disagree.
-  const payloadFiles = segment.rows.map((r) => ({
+  const payloadFiles = segment.rows.filter((r) => payloadScope === "full" || r.subject).map((r) => ({
     path: `audit/rows/${r.seq}.payload`,
     body: Buffer.from(r.payload, "utf8"),
   }));
@@ -626,13 +633,14 @@ export async function buildExportBundle(args: {
         fingerprint: key.fingerprint,
         subjectKind: args.subject.kind,
         segmentNote: segment.note,
+        payloadScope,
       }),
       "utf8",
     ),
   );
 
   const manifest: Record<string, unknown> = {
-    schema: EXPORT_BUNDLE_SCHEMA,
+    schema: payloadScope === "subject" ? SCOPED_EXPORT_BUNDLE_SCHEMA : EXPORT_BUNDLE_SCHEMA,
     product: "regulait",
     installId: install.installId,
     installIdSource: install.source,
@@ -650,6 +658,7 @@ export async function buildExportBundle(args: {
     audit: {
       algorithm: AUDIT_CHAIN_ALGORITHM,
       payloadVersion: AUDIT_PAYLOAD_VERSION,
+      payloadScope,
       genesisPrevHash: AUDIT_GENESIS_PREV_HASH,
       genesisRowHash: AUDIT_GENESIS_ROW_HASH,
       head: segment.head,
