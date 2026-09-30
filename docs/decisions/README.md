@@ -6,6 +6,7 @@ superseding a decision means a new ADR plus a status flip on the old one.
 
 | ID | Title | Status | Date |
 |---|---|---|---|
+| [0138](0138-governed-semantic-cache-hits.md) | Run native and compat cache hits through live dispatch gates before serving (AER-010). | Accepted | 2026-09-30 |
 | [0137](0137-in-flight-pii-redaction-boundary.md) | Define the final-byte, streaming, and exact-action constraints before enabling PII redaction. | Proposed | 2026-09-30 |
 | [0136](0136-exact-compat-cache-identity.md) | Bind compat cache entries to exact canonical request identity (AER-011). | Accepted | 2026-09-30 |
 | [0135](0135-siem-and-outbound-secret-evaluation.md) | Scope SIEM delivery and outbound secret detection with explicit quality and integration gates. | Proposed | 2026-09-30 |

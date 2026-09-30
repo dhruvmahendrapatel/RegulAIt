@@ -153,6 +153,7 @@ import {
   semanticCacheKey,
   storeSemanticCache,
   type SemanticCacheKey,
+  type SemanticCacheHit,
 } from "./semantic-cache-shared.js";
 import { loadInterceptionSettings } from "./compat-core.js";
 import { resolveCustomProviderForDispatch } from "./custom-providers.js";
@@ -313,53 +314,6 @@ async function enforceProjectInputPii(
   return { status: 403, error: "pii_blocked", detail, pii };
 }
 
-/**
- * The OUTPUT counterpart for the cache-hit path. The input may be clean while
- * the CACHED output carries PII (it was generated under a different, ungated
- * attribution). Serving that cached output on a project whose mode is `block`
- * would leak it, so the cached text is checked before it is served, with the
- * same audit shape as the input gate above.
- */
-export async function enforceProjectCachedOutputPii(
-  db: Db,
-  userId: string,
-  agentObjectId: string,
-  projectId: string | null,
-  outputText: string,
-): Promise<{ status: 403; error: "pii_blocked"; detail: string; pii: DispatchPii } | null> {
-  const piiMode = await projectPiiMode(db, projectId);
-  if (!piiMode) return null;
-  // ADR-0117: the jurisdiction set is the OTHER half of the §8.4 decision and
-  // is resolved on the SAME line of reasoning as the mode — org-wide, shipped
-  // empty, widened only by an explicit admin act.
-  const chk = enforcePII(piiMode, { output: outputText }, await piiInternationalCategories(db));
-  if (chk.action !== "block") return null;
-  const detail = `cached output withheld: contains PII (${piiCategoryList(chk.hits)})`;
-  const pii: DispatchPii = {
-    mode: piiMode,
-    action: "block",
-    inputHits: [],
-    outputHits: chk.hits,
-    withheld: true,
-  };
-  await db.insert(auditLog).values({
-    userId,
-    objectType: "agent",
-    objectId: agentObjectId,
-    detail: {
-      phase: "pii",
-      pii: { mode: piiMode, action: "block", phase: "output", inputHits: [], outputHits: chk.hits },
-      semanticCache: { hit: true },
-      ...(projectId ? { projectId } : {}),
-    },
-    effect: "deny",
-    ruleId: "pii-blocked",
-    ruleChain: [],
-    reason: detail,
-  });
-  return { status: 403, error: "pii_blocked", detail, pii };
-}
-
 export interface DispatchPii {
   mode: PiiMode;
   /** the effective action on this dispatch: 'block' (output withheld here, or
@@ -482,6 +436,10 @@ export interface GovernedDispatchArgs {
    * already checked the served provider can honour it. */
   thinking?: { budgetTokens: number } | undefined;
   maxTokens?: number | undefined;
+  /** A candidate answer, never authorization to serve it. The shared core
+   * re-runs every provider-independent input gate and current output controls
+   * before returning it, without contacting a provider or writing usage. */
+  cachedResponse?: SemanticCacheHit | undefined;
   /** pillar 5 attribution: the project this call bills to */
   projectId?: string | null | undefined;
   /** streaming delta callback, forwarded to the provider */
@@ -935,6 +893,7 @@ async function dispatchOnce(
     requestedAgentId: args.requestedAgentId,
     ...(args.projectId ? { projectId: args.projectId } : {}),
     ...(args.virtualKey ? { virtualKeyId: args.virtualKey.id } : {}),
+    ...(args.cachedResponse ? { semanticCache: "hit" } : {}),
     ...(typeof detail["turn"] === "number" ? { turn: detail["turn"] } : {}),
     ...(typeof args.traceSpanKind === "string" && args.traceSpanKind === "fallback_hop"
       ? { fallbackPosition: detail["fallbackPosition"] ?? null }
@@ -964,8 +923,8 @@ async function dispatchOnce(
       usageEventId: sink.usageEventId ?? null,
       provider: sink.provider ?? args.served?.provider ?? null,
       model: r.model,
-      inputTokens: r.usage.inputTokens,
-      outputTokens: r.usage.outputTokens,
+      inputTokens: args.cachedResponse ? 0 : r.usage.inputTokens,
+      outputTokens: args.cachedResponse ? 0 : r.usage.outputTokens,
       costUsd: r.costUsd,
       inputText: args.input,
       // ALREADY-ADJUDICATED text: the withheld marker is already substituted.
@@ -1492,6 +1451,124 @@ async function dispatchAttempt(
         },
       };
     }
+  }
+
+  if (args.cachedResponse) {
+    const cached = args.cachedResponse;
+    let outputHits: PiiHit[] = [];
+    if (piiMode) {
+      const check = enforcePII(piiMode, { output: cached.outputText }, piiIntl);
+      outputHits = check.hits;
+      if (check.action === "block") {
+        const detail = `cached output withheld: contains PII (${piiCategoryList(outputHits)})`;
+        const [row] = await db.insert(auditLog).values({
+          userId,
+          objectType: "agent",
+          objectId: served.id,
+          detail: {
+            phase: "pii",
+            pii: { mode: piiMode, action: "block", phase: "output", inputHits, outputHits },
+            semanticCache: { hit: true },
+            ...(args.projectId ? { projectId: args.projectId } : {}),
+          },
+          effect: "deny",
+          ruleId: "pii-blocked",
+          ruleChain: [],
+          reason: detail,
+        }).returning({ id: auditLog.id });
+        sink.auditLogId = row?.id ?? null;
+        return {
+          ok: false,
+          status: 403,
+          error: "pii_blocked",
+          detail,
+          pii: { mode: piiMode, action: "block", inputHits, outputHits, withheld: true },
+        };
+      }
+    }
+
+    const guardrailOutput = guardrails.active
+      ? runGuardrails(guardrails, "output", cached.outputText)
+      : null;
+    if (guardrailOutput) {
+      const outcome = guardrailOutcome(guardrailOutput);
+      if (outcome) {
+        sink.auditLogId = await recordGuardrailDecision(db, {
+          userId,
+          objectType: "agent",
+          objectId: served.id,
+          projectId: args.projectId ?? null,
+          evaluation: guardrailOutput,
+          outcome,
+          detail: { agentId: served.id, model: served.model, semanticCache: { hit: true } },
+        });
+      }
+      if (guardrailOutput.action === "block") {
+        return {
+          ok: false,
+          status: 403,
+          error: "guardrail_blocked",
+          detail: `cached output blocked by guardrail: ${guardrailCategoryList(guardrailOutput.blocking)}`,
+          guardrails: {
+            action: "block",
+            phase: "output",
+            findings: flattenFindings(guardrailOutput.findings),
+            withheld: true,
+          },
+        };
+      }
+    }
+
+    const anyPii = inputHits.length > 0 || outputHits.length > 0;
+    const pii: DispatchPii | null = piiMode && anyPii
+      ? { mode: piiMode, action: piiMode === "warn" ? "warn" : "log", inputHits, outputHits, withheld: false }
+      : null;
+    if (piiMode === "warn" && anyPii) {
+      await db.insert(auditLog).values({
+        userId,
+        objectType: "agent",
+        objectId: served.id,
+        detail: {
+          phase: "pii",
+          pii: { mode: piiMode, action: "warn", inputHits, outputHits },
+          semanticCache: { hit: true },
+          ...(args.projectId ? { projectId: args.projectId } : {}),
+        },
+        effect: "allow",
+        ruleId: "pii-warned",
+        ruleChain: [],
+        reason: `PII detected (${piiCategoryList([...inputHits, ...outputHits])}) — warned, cached answer served`,
+      });
+    }
+    const findings = [...(guardrailInput?.findings ?? []), ...(guardrailOutput?.findings ?? [])];
+    const guardrailAction: DispatchGuardrails["action"] | null = findings.length === 0
+      ? null
+      : findings.some((f) => f.action === "warn") ? "warn" : "log";
+    return {
+      ok: true,
+      result: {
+        servedAgentId: served.id,
+        model: cached.model ?? served.model,
+        outputText: cached.outputText,
+        stopReason: "cached",
+        refusal: false,
+        usage: { inputTokens: cached.inputTokens, outputTokens: cached.outputTokens },
+        costUsd: 0,
+        measuredCostSavedUsd: null,
+        credentialSource: "none",
+        projectBudgetAlerted: false,
+        ...(pii ? { pii } : {}),
+        ...(guardrailAction ? {
+          guardrails: {
+            action: guardrailAction,
+            phase: guardrailInput?.findings.length ? "input" : "output",
+            findings: flattenFindings(findings),
+            withheld: false,
+          },
+        } : {}),
+        ...(useCaseGateWarning ? { useCaseGate: useCaseGateWarning } : {}),
+      },
+    };
   }
 
   // ADR-0034 — CUSTOM PROVIDER RESOLUTION. Deliberately placed HERE, inside
@@ -3584,20 +3661,28 @@ export function registerAgentConnectorRoutes(
           ttlSeconds: org.semanticCacheTtlSeconds,
         });
         if (hit) {
-          // The input was gated above; the CACHED OUTPUT may still carry PII it
-          // acquired under a different, ungated attribution. Withhold it rather
-          // than serve it on a project whose mode is `block`.
-          const outputBlock = await enforceProjectCachedOutputPii(
-            db,
+          const governed = await executeGovernedDispatch(db, opts.dataKey, {
             userId,
-            agent.id,
+            served: agent,
+            requestedAgentId: agent.id,
+            input: body.input,
             projectId,
-            hit.outputText,
-          );
-          if (outputBlock) {
+            virtualKey: invokeVirtualKey,
+            mode: body.mode,
+            cachedResponse: hit,
+            detail: { surface: "invoke_cache", mode: body.mode },
+          });
+          if (!governed.ok) {
             return reply
-              .status(outputBlock.status)
-              .send({ decision, error: outputBlock.error, detail: outputBlock.detail, pii: outputBlock.pii, ...suppressionFlag });
+              .status(governed.status)
+              .send({
+                decision,
+                error: governed.error,
+                ...(governed.detail ? { detail: governed.detail } : {}),
+                ...(governed.pii ? { pii: governed.pii } : {}),
+                ...(governed.guardrails ? { guardrails: governed.guardrails } : {}),
+                ...suppressionFlag,
+              });
           }
           // HIT: no provider call, no usage_events (no real spend). One
           // semantic_caching cost_events row estimates the WHOLE call saved —
@@ -3632,19 +3717,7 @@ export function registerAgentConnectorRoutes(
             projectId,
             detail: { model: hit.model, cachedAt: hit.createdAt, mode: body.mode },
           });
-          const cachedDispatch = {
-            servedAgentId: agent.id,
-            model: hit.model,
-            outputText: hit.outputText,
-            stopReason: "cached",
-            refusal: false,
-            usage: { inputTokens: hit.inputTokens, outputTokens: hit.outputTokens },
-            costUsd: 0,
-            measuredCostSavedUsd: null,
-            credentialSource: "none" as const,
-            projectBudgetAlerted: false,
-            cached: true as const,
-          };
+          const cachedDispatch = { ...governed.result, cached: true as const };
           await db.insert(auditLog).values({
             userId,
             objectType: "agent",
@@ -3670,7 +3743,7 @@ export function registerAgentConnectorRoutes(
               reply.raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
             // A hit need not simulate token-by-token streaming: emit the cached
             // text as one delta, then the final result event.
-            send("delta", { text: hit.outputText });
+            send("delta", { text: governed.result.outputText });
             send("result", { decision, cached: true, dispatch: cachedDispatch });
             reply.raw.end();
             return reply;

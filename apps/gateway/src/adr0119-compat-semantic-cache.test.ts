@@ -6,12 +6,14 @@ import {
   costEvents,
   createDb,
   eq,
+  guardrailConfigs,
   runMigrations,
+  semanticCache,
   usageEvents,
   type Db,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
-import { AGENT_HEADER } from "./compat-core.js";
+import { AGENT_HEADER, PROJECT_HEADER } from "./compat-core.js";
 import { lookupSemanticCache, semanticCacheRequestKey, storeSemanticCache } from "./semantic-cache-shared.js";
 
 /**
@@ -70,12 +72,60 @@ async function setPolicy(policy: "off" | "opt_in" | "always") {
   expect(r.statusCode).toBe(200);
 }
 
+async function putOrg(patch: Record<string, unknown>) {
+  const res = await app.inject({ method: "PUT", url: "/v1/org/settings", headers: AUTH, payload: patch });
+  expect(res.statusCode).toBe(200);
+}
+
+async function setMrm(enforced: boolean) {
+  const res = await app.inject({ method: "POST", url: "/v1/mrm/enforcement", headers: AUTH, payload: { enforced } });
+  expect(res.statusCode).toBe(200);
+}
+
+async function setDlp(mode: "log" | "block") {
+  const res = await app.inject({
+    method: "PUT", url: "/v1/guardrails/config", headers: AUTH,
+    payload: { modes: { semantic_dlp: mode } },
+  });
+  expect(res.statusCode).toBe(200);
+}
+
+async function primeCompat(prompt: string, projectId?: string) {
+  await setPolicy("always");
+  const first = await ask(authA, prompt, {}, projectId);
+  expect(first.statusCode).toBe(200);
+  const usage = await usageCount(userA);
+  const savings = await cacheSavingsCount(userA);
+  const hit = await ask(authA, prompt, {}, projectId);
+  expect(hit.statusCode).toBe(200);
+  expect(await usageCount(userA)).toBe(usage);
+  expect(await cacheSavingsCount(userA)).toBe(savings + 1);
+  return hit.json().content[0].text as string;
+}
+
+async function expectCompatCacheDenied(
+  prompt: string,
+  error: string,
+  priorText: string,
+  projectId?: string,
+  auth = authA,
+) {
+  const usage = await usageCount(userA);
+  const savings = await cacheSavingsCount(userA);
+  const res = await ask(auth, prompt, {}, projectId);
+  expect(res.statusCode).toBeGreaterThanOrEqual(400);
+  expect(res.json().error.regulait_code).toBe(error);
+  expect(res.body).not.toContain(priorText);
+  expect(await usageCount(userA)).toBe(usage);
+  expect(await cacheSavingsCount(userA)).toBe(savings);
+}
+
 /** One Anthropic-shaped call, naming the agent so resolution is unambiguous. */
-function ask(auth: { authorization: string }, text: string, extra: Record<string, unknown> = {}) {
+function ask(auth: { authorization: string }, text: string, extra: Record<string, unknown> = {}, projectId?: string) {
   return app.inject({
     method: "POST",
     url: "/v1/messages",
-    headers: { ...auth, [AGENT_HEADER]: agentId },
+    headers: { ...auth, [AGENT_HEADER]: agentId, ...(projectId ? { [PROJECT_HEADER]: projectId } : {}) },
     payload: {
       model: `adr0119-model-${RUN}`,
       max_tokens: 64,
@@ -213,6 +263,162 @@ describe("the technique the IDE path was missing", () => {
 });
 
 describe("the governance boundary the shared module exists to protect", () => {
+  it("rechecks a virtual key's live budget before serving its cached answer", async () => {
+    await setPolicy("always");
+    const issued = await app.inject({
+      method: "POST", url: "/v1/virtual-keys", headers: authA,
+      payload: { name: `aer010-key-${RUN}`, budgetUsd: 1 },
+    });
+    expect(issued.statusCode).toBe(201);
+    const keyAuth = { authorization: `Bearer ${issued.json().token as string}` };
+    const prompt = `aer010 virtual key ${RUN}`;
+    const first = await ask(keyAuth, prompt);
+    expect(first.statusCode).toBe(200);
+    const hit = await ask(keyAuth, prompt);
+    expect(hit.statusCode).toBe(200);
+    const changed = await app.inject({
+      method: "PATCH", url: `/v1/virtual-keys/${issued.json().id as string}`,
+      headers: authA, payload: { budgetUsd: 0 },
+    });
+    expect(changed.statusCode).toBe(200);
+    await expectCompatCacheDenied(prompt, "virtual_key_budget_exhausted", hit.json().content[0].text, undefined, keyAuth);
+  });
+
+  it("rechecks a project-linked use case and a project's live budget before a hit", async () => {
+    const prior = (await app.inject({ method: "GET", url: "/v1/org/settings", headers: AUTH })).json().settings.useCaseGateMode as string;
+    const project = await app.inject({
+      method: "POST", url: "/v1/projects", headers: AUTH,
+      payload: { name: `aer010-project-${RUN}`, budgetUsd: 0.01, budgetApproverUserId: userB },
+    });
+    expect(project.statusCode).toBe(201);
+    const projectId = project.json().id as string;
+    const member = await app.inject({
+      method: "POST", url: `/v1/projects/${projectId}/members`, headers: AUTH,
+      payload: { userId: userA, role: "contributor" },
+    });
+    expect(member.statusCode).toBe(201);
+    const prompt = `aer010 project ${RUN}`;
+    try {
+      const text = await primeCompat(prompt, projectId);
+      const useCase = await app.inject({
+        method: "POST", url: "/v1/use-cases", headers: authA,
+        payload: {
+          name: `aer010-use-case-${RUN}`, description: "cache governance verification",
+          businessContext: "verify approval changes on cache hits", dataSensitivity: "internal", projectId,
+        },
+      });
+      expect(useCase.statusCode).toBe(201);
+      await putOrg({ useCaseGateMode: "enforce" });
+      await expectCompatCacheDenied(prompt, "use_case_approval_required", text, projectId);
+      await putOrg({ useCaseGateMode: "off" });
+      await db.insert(usageEvents).values({ userId: userA, objectType: "agent", projectId, costUsd: 0.02 });
+      await expectCompatCacheDenied(prompt, "project_budget_exceeded", text, projectId);
+    } finally {
+      await putOrg({ useCaseGateMode: prior });
+    }
+  });
+
+  it("rechecks MRM and mandatory attribution before a primed compat hit", async () => {
+    const mrmPrompt = `aer010 mrm ${RUN}`;
+    const mrmText = await primeCompat(mrmPrompt);
+    const priorMrm = (await app.inject({ method: "GET", url: "/v1/mrm/status", headers: AUTH })).json().enforced as boolean;
+    try {
+      await setMrm(true);
+      await expectCompatCacheDenied(mrmPrompt, "mrm_approval_required", mrmText);
+    } finally {
+      await setMrm(priorMrm);
+    }
+
+    const attributionPrompt = `aer010 attribution ${RUN}`;
+    const attributionText = await primeCompat(attributionPrompt);
+    const prior = (await app.inject({ method: "GET", url: "/v1/org/settings", headers: AUTH })).json().settings.dispatchAttributionRequired as boolean;
+    try {
+      await putOrg({ dispatchAttributionRequired: true });
+      await expectCompatCacheDenied(attributionPrompt, "attribution_required", attributionText);
+    } finally {
+      await putOrg({ dispatchAttributionRequired: prior });
+    }
+  });
+
+  it("rechecks input PII and the current input guardrail before a primed compat hit", async () => {
+    const prior = (await app.inject({ method: "GET", url: "/v1/org/settings", headers: AUTH })).json().settings.defaultPiiMode as string;
+    const piiPrompt = `aer010-${RUN}@example.com`;
+    try {
+      await putOrg({ defaultPiiMode: "none" });
+      const piiText = await primeCompat(piiPrompt);
+      await putOrg({ defaultPiiMode: "block" });
+      await expectCompatCacheDenied(piiPrompt, "pii_blocked", piiText);
+    } finally {
+      await putOrg({ defaultPiiMode: prior });
+    }
+
+    const beforeConfig = (await db.select().from(guardrailConfigs).where(eq(guardrailConfigs.scope, "org")))[0] ?? null;
+    const guardrailPrompt = `COMPANY CONFIDENTIAL aer010 ${RUN}`;
+    try {
+      await setDlp("log");
+      const text = await primeCompat(guardrailPrompt);
+      await setDlp("block");
+      await expectCompatCacheDenied(guardrailPrompt, "guardrail_blocked", text);
+    } finally {
+      if (beforeConfig) {
+        await db.update(guardrailConfigs).set({
+          promptInjectionMode: beforeConfig.promptInjectionMode,
+          jailbreakMode: beforeConfig.jailbreakMode,
+          toxicityMode: beforeConfig.toxicityMode,
+          semanticDlpMode: beforeConfig.semanticDlpMode,
+          customTerms: beforeConfig.customTerms,
+        }).where(eq(guardrailConfigs.id, beforeConfig.id));
+      } else {
+        await db.delete(guardrailConfigs).where(eq(guardrailConfigs.scope, "org"));
+      }
+    }
+  });
+
+  it("rechecks a cached completion against newly blocked output guardrails", async () => {
+    const beforeConfig = (await db.select().from(guardrailConfigs).where(eq(guardrailConfigs.scope, "org")))[0] ?? null;
+    try {
+      await setDlp("log");
+      const rowsBefore = new Set((await db.select({ hash: semanticCache.promptHash }).from(semanticCache).where(eq(semanticCache.userId, userA))).map((r) => r.hash));
+      const freshPrompt = `aer010 output fresh ${RUN}`;
+      await primeCompat(freshPrompt);
+      const row = (await db.select().from(semanticCache).where(eq(semanticCache.userId, userA))).find((r) => !rowsBefore.has(r.promptHash));
+      expect(row).toBeDefined();
+      await db.update(semanticCache).set({ outputText: "COMPANY CONFIDENTIAL synthetic cached answer" }).where(eq(semanticCache.id, row!.id));
+      await setDlp("block");
+      await expectCompatCacheDenied(freshPrompt, "guardrail_blocked", "COMPANY CONFIDENTIAL synthetic cached answer");
+    } finally {
+      if (beforeConfig) {
+        await db.update(guardrailConfigs).set({
+          promptInjectionMode: beforeConfig.promptInjectionMode,
+          jailbreakMode: beforeConfig.jailbreakMode,
+          toxicityMode: beforeConfig.toxicityMode,
+          semanticDlpMode: beforeConfig.semanticDlpMode,
+          customTerms: beforeConfig.customTerms,
+        }).where(eq(guardrailConfigs.id, beforeConfig.id));
+      } else {
+        await db.delete(guardrailConfigs).where(eq(guardrailConfigs.scope, "org"));
+      }
+    }
+  });
+
+  it("withholds a cached completion when output PII becomes blocked", async () => {
+    const prior = (await app.inject({ method: "GET", url: "/v1/org/settings", headers: AUTH })).json().settings.defaultPiiMode as string;
+    try {
+      await putOrg({ defaultPiiMode: "none" });
+      const rowsBefore = new Set((await db.select({ hash: semanticCache.promptHash }).from(semanticCache).where(eq(semanticCache.userId, userA))).map((r) => r.hash));
+      const prompt = `aer010 output pii ${RUN}`;
+      await primeCompat(prompt);
+      const row = (await db.select().from(semanticCache).where(eq(semanticCache.userId, userA))).find((r) => !rowsBefore.has(r.promptHash));
+      expect(row).toBeDefined();
+      const cachedText = `sensitive-${RUN}@example.com`;
+      await db.update(semanticCache).set({ outputText: cachedText }).where(eq(semanticCache.id, row!.id));
+      await putOrg({ defaultPiiMode: "block" });
+      await expectCompatCacheDenied(prompt, "pii_blocked", cachedText);
+    } finally {
+      await putOrg({ defaultPiiMode: prior });
+    }
+  });
+
   it("stores no plaintext request and rejects a matching index hash with different request identity", async () => {
     const key = semanticCacheRequestKey({ messages: [{ role: "user", content: "private value" }] });
     expect(key.norm).not.toContain("private value");

@@ -3009,6 +3009,22 @@ above; they do not establish enterprise readiness, production readiness,
 certification, complete provider/deployment parity, upgrade/restore behavior or
 live-service reliability.
 
+### 2026-09-30 implementation addendum: AER-010 cache-hit gates
+
+The current checkout changes both native and compat cache hits to call the
+shared governed-dispatch core with a cached response candidate. The core
+rechecks the live provider-independent gates listed in AER-010 and scans the
+cached output under current PII and general guardrail policy before either
+caller emits it or records savings. Denials return the current native or
+vendor-compatible error, no cached text and no new saving/usage row.
+Focused prime-then-tighten tests cover virtual-key budget, MRM, attribution,
+linked use case, project budget, input/output PII and input/output guardrails;
+the native invoke test covers cached-output PII. On a disposable PostgreSQL
+database, four serial cache/interception files passed 93/93; gateway typecheck
+passed. This is local implementation evidence, not exact-head CI or a complete
+security audit. The explicit mutation negative control remains unrun. AER-011
+native cache identity and AER-018 external provider effects remain separate.
+
 <!-- codex-enterprise-feedback:end -->
 
 Date: 2026-09-06  

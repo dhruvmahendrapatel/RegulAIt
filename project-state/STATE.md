@@ -21,6 +21,16 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-09-30 - Cache-hit governance (ADR-0138).** Native and compat cache
+hits now re-enter the shared dispatch core before serving. Live virtual-key,
+MRM, attribution, use-case, project-budget, input PII/guardrail and output
+PII/guardrail denials withhold cached text and record neither a saving nor
+provider usage. Four adjacent cache/interception suites passed 93/93 on a
+disposable database; gateway typecheck passed. AER-010's documented bypass is
+repaired locally, pending an explicit negative-control mutation and exact-head
+CI. Native cache identity/version invalidation remains a separate AER-011
+review. AER-018's non-AI provider paths and PII redaction remain open.
+
 **2026-09-30 - P1/P2/P3 continuation.** AER-035's six focused copilot
 fault/concurrency tests passed after an app rebuild before retry; OS process
 kill/recovery remains unverified. AER-011 compat cache identity now includes

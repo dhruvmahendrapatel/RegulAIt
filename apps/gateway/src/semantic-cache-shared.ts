@@ -11,10 +11,9 @@
  *
  * So the key derivation, the scoped lookup, the collision guard and the store
  * live here and BOTH paths call them. Nothing policy-bearing beyond the cache's
- * own scoping is decided here: PII re-gating of a cached output stays with the
- * caller, because what a withheld output should DO differs between a JSON API
- * that returns a decision object and a wire-compatible shim that must answer in
- * the vendor's own shape.
+ * own scoping is decided here: the shared governed-dispatch core rechecks live
+ * policy before either caller can serve a hit. Each caller then renders a
+ * denial in its own JSON or vendor-compatible wire shape.
  */
 
 import { createHash } from "node:crypto";

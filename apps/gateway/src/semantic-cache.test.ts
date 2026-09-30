@@ -121,6 +121,43 @@ afterAll(async () => {
 });
 
 describe("semantic caching — real per-(user,agent) exact-match cache", () => {
+  it("rechecks current output PII policy on the native invoke hit before serving or recording savings", async () => {
+    const suffix = Math.random().toString(36).slice(2, 8);
+    const u = await makeUser(`sc-policy-${suffix}@example.com`);
+    await grant(u.id, agentId);
+    const prompt = `native cache output pii ${suffix}`;
+    const settings = await app.inject({ method: "GET", url: "/v1/org/settings", headers: AUTH });
+    const prior = settings.json().settings.defaultPiiMode as string;
+    try {
+      const first = await invoke(u.auth, agentId, { input: prompt, semanticCache: true });
+      expect(first.cached).toBeFalsy();
+      const row = (await cacheRows(u.id))[0];
+      expect(row).toBeDefined();
+      const cachedText = `native-sensitive-${suffix}@example.com`;
+      await db.update(semanticCache).set({ outputText: cachedText }).where(eq(semanticCache.id, row!.id));
+      const policy = await app.inject({
+        method: "PUT", url: "/v1/org/settings", headers: AUTH, payload: { defaultPiiMode: "block" },
+      });
+      expect(policy.statusCode).toBe(200);
+      const beforeUsage = await usageCount(u.id);
+      const beforeSavings = (await cacheHitRows(u.id)).length;
+      const denied = await app.inject({
+        method: "POST", url: `/v1/agents/${agentId}/invoke`, headers: u.auth,
+        payload: { mode: "chat", dispatch: true, input: prompt, semanticCache: true },
+      });
+      expect(denied.statusCode).toBe(403);
+      expect(denied.json().error).toBe("pii_blocked");
+      expect(denied.body).not.toContain(cachedText);
+      expect(await usageCount(u.id)).toBe(beforeUsage);
+      expect((await cacheHitRows(u.id)).length).toBe(beforeSavings);
+    } finally {
+      const restored = await app.inject({
+        method: "PUT", url: "/v1/org/settings", headers: AUTH, payload: { defaultPiiMode: prior },
+      });
+      expect(restored.statusCode).toBe(200);
+    }
+  });
+
   it("(a) MISS then a normalized-equal re-ask is a HIT: served from cache, no new usage row, one cost row", async () => {
     const u = await makeUser("sc-hit@example.com");
     await grant(u.id, agentId);

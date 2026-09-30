@@ -59,10 +59,10 @@ import { z } from "zod";
 import {
   agentProviderToken,
   configuredProviders,
-  enforceProjectCachedOutputPii,
   executeGovernedDispatch,
   type AgentRow,
   type DispatchOutcome,
+  type GovernedDispatchArgs,
 } from "./agents-connectors.js";
 import { loadAgentRevocations, loadRoleAgentGrants } from "./entitlements.js";
 import { loadVersions } from "./config-versions.js";
@@ -956,6 +956,33 @@ export async function executeCompatCall(
       })
     : null;
 
+  const dispatchArgs: GovernedDispatchArgs = {
+    userId: prepared.userId,
+    served: prepared.served,
+    requestedAgentId: prepared.requested.id,
+    baseline: prepared.resolution.routerOverrode ? prepared.requested : null,
+    input: flatText,
+    messages: args.messages,
+    ...(args.system ? { system: args.system } : {}),
+    ...(args.cacheSystem ? { cacheSystem: true } : {}),
+    ...(args.tools ? { tools: args.tools } : {}),
+    ...(args.toolChoice ? { toolChoice: args.toolChoice } : {}),
+    ...(args.responseFormat ? { responseFormat: args.responseFormat } : {}),
+    ...(args.thinking ? { thinking: args.thinking } : {}),
+    ...(args.maxTokens ? { maxTokens: args.maxTokens } : {}),
+    projectId: prepared.projectId,
+    ...(args.onText ? { onText: args.onText } : {}),
+    ...(args.onThinking ? { onThinking: args.onThinking } : {}),
+    virtualKey: prepared.virtualKey,
+    mode: COMPAT_MODE,
+    detail: {
+      surface: `compat_${args.surface}`,
+      mode: COMPAT_MODE,
+      requestedModel: prepared.resolution.requestedModel,
+      resolutionMode: prepared.resolution.mode,
+    },
+  };
+
   if (cacheKey) {
     const hit = await lookupSemanticCache(db, {
       userId: prepared.userId,
@@ -967,29 +994,17 @@ export async function executeCompatCall(
       ttlSeconds: org.semanticCacheTtlSeconds,
     });
     if (hit) {
-      // The input was gated upstream, but the CACHED OUTPUT may carry PII it
-      // acquired under a different, ungated attribution. Re-gate it rather
-      // than serve it onto a block-mode project.
-      const outputBlock = await enforceProjectCachedOutputPii(
-        db,
-        prepared.userId,
-        prepared.requested.id,
-        prepared.projectId,
-        hit.outputText,
-      );
-      if (outputBlock) {
-        return {
-          ok: false,
-          status: outputBlock.status,
-          error: outputBlock.error,
-          ...(outputBlock.detail ? { detail: outputBlock.detail } : {}),
-          ...(outputBlock.pii ? { pii: outputBlock.pii } : {}),
-        };
-      }
+      const governed = await executeGovernedDispatch(db, dataKey, {
+        ...dispatchArgs,
+        onText: undefined,
+        onThinking: undefined,
+        cachedResponse: hit,
+      });
+      if (!governed.ok) return governed;
       // A streaming caller still gets a stream: the cached answer is emitted
       // as one delta, so the wire contract is unchanged and an IDE cannot tell
       // a hit from a very fast model.
-      args.onText?.(hit.outputText);
+      args.onText?.(governed.result.outputText);
       const savings = semanticCacheSavings(prepared.requested, hit);
       await db.insert(costEvents).values({
         userId: prepared.userId,
@@ -1032,13 +1047,13 @@ export async function executeCompatCall(
       return {
         ok: true,
         result: {
-          servedAgentId: prepared.requested.id,
+          servedAgentId: governed.result.servedAgentId,
           // the model that PRODUCED the cached answer, which is the honest
           // thing to report; falling back to the requested model string only
           // when the row predates model recording, so the wire response always
           // carries a valid identifier.
-          model: hit.model ?? prepared.resolution.requestedModel,
-          outputText: hit.outputText,
+          model: governed.result.model,
+          outputText: governed.result.outputText,
           stopReason: "end_turn",
           refusal: false,
           usage: { inputTokens: hit.inputTokens, outputTokens: hit.outputTokens },
@@ -1046,37 +1061,16 @@ export async function executeCompatCall(
           measuredCostSavedUsd: savings.estimatedCostSavedUsd,
           credentialSource: "none",
           projectBudgetAlerted: false,
+          ...(governed.result.pii ? { pii: governed.result.pii } : {}),
+          ...(governed.result.guardrails ? { guardrails: governed.result.guardrails } : {}),
+          ...(governed.result.useCaseGate ? { useCaseGate: governed.result.useCaseGate } : {}),
         },
+        ...(governed.trace ? { trace: governed.trace } : {}),
       };
     }
   }
 
-  const outcome = await executeGovernedDispatch(db, dataKey, {
-    userId: prepared.userId,
-    served: prepared.served,
-    requestedAgentId: prepared.requested.id,
-    baseline: prepared.resolution.routerOverrode ? prepared.requested : null,
-    input: flatText,
-    messages: args.messages,
-    ...(args.system ? { system: args.system } : {}),
-    ...(args.cacheSystem ? { cacheSystem: true } : {}),
-    ...(args.tools ? { tools: args.tools } : {}),
-    ...(args.toolChoice ? { toolChoice: args.toolChoice } : {}),
-    ...(args.responseFormat ? { responseFormat: args.responseFormat } : {}),
-    ...(args.thinking ? { thinking: args.thinking } : {}),
-    ...(args.maxTokens ? { maxTokens: args.maxTokens } : {}),
-    projectId: prepared.projectId,
-    ...(args.onText ? { onText: args.onText } : {}),
-    ...(args.onThinking ? { onThinking: args.onThinking } : {}),
-    virtualKey: prepared.virtualKey,
-    mode: COMPAT_MODE,
-    detail: {
-      surface: `compat_${args.surface}`,
-      mode: COMPAT_MODE,
-      requestedModel: prepared.resolution.requestedModel,
-      resolutionMode: prepared.resolution.mode,
-    },
-  });
+  const outcome = await executeGovernedDispatch(db, dataKey, dispatchArgs);
 
   await db.insert(auditLog).values({
     userId: prepared.userId,

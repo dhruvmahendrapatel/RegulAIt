@@ -1221,3 +1221,15 @@ Rule: when moving a connection/admission boundary, include adjacent authorizatio
 and egress suites. Refusal fixtures must submit valid operations that reach the
 boundary under test. Security-posture fixture cleanup belongs in finally so a
 failed assertion cannot silently change later tests' permissions.
+
+### M-052 (2026-09-30) - Parallel suites raced fresh database migrations
+
+Multiple gateway files called `runMigrations` against the same new database
+while Vitest file parallelism was enabled. `CREATE SCHEMA IF NOT EXISTS` is not
+race-free across those workers; setup failed before the feature tests ran.
+The four-file run passed 93/93 after recreating the disposable database and
+using `--no-file-parallelism`.
+
+Rule: gateway integration files sharing one freshly created database must run
+serially, or each worker must receive its own database. A migration collision
+is a harness failure, not a product regression.
