@@ -6,6 +6,10 @@ superseding a decision means a new ADR plus a status flip on the old one.
 
 | ID | Title | Status | Date |
 |---|---|---|---|
+| [0137](0137-in-flight-pii-redaction-boundary.md) | Define the final-byte, streaming, and exact-action constraints before enabling PII redaction. | Proposed | 2026-09-30 |
+| [0136](0136-exact-compat-cache-identity.md) | Bind compat cache entries to exact canonical request identity (AER-011). | Accepted | 2026-09-30 |
+| [0135](0135-siem-and-outbound-secret-evaluation.md) | Scope SIEM delivery and outbound secret detection with explicit quality and integration gates. | Proposed | 2026-09-30 |
+| [0134](0134-iso-27001-partial-evidence-pack.md) | Add a partial ISO/IEC 27001 evidence mapping, not an SoA or certification. | Accepted | 2026-09-30 |
 | [0133](0133-atomic-breaker-transition-facts.md) | Commit MCP breaker state transitions with their audit facts (AER-023). | Accepted | 2026-09-30 |
 | [0132](0132-atomic-emergency-state-and-audit.md) | Lock emergency state and commit each transition with its audit fact (AER-019). | Accepted | 2026-09-30 |
 | [0131](0131-scoped-signed-report-audit-proof.md) | Entitled non-admin report exports disclose subject audit payloads only; other chain rows carry signed commitments (AER-007/AER-009). | Accepted | 2026-09-30 |

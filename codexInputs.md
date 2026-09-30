@@ -2779,6 +2779,33 @@ fixes in this P0 batch.
   in that health run. No new change to the already-landed rotation was needed.
   Full CI for this batch is pending.
 
+### 2026-09-30 continuation: P1 verification, P2 boundary, P3 evaluation
+
+- AER-035's six focused copilot tests pass after rebuilding the app before
+  retry, including 20-way races and injected last-write rollback. This is an
+  application-restart test, not proof of OS process kill recovery. Keep the
+  latter acceptance item open.
+- AER-011: compat cache identity is now versioned canonical request data,
+  including roles and message boundaries, system/response options, project,
+  served agent and its prompt/config version set. The 8-test compat suite and
+  gateway typecheck pass. Native cache identity and version-race coverage
+  remain to review before calling the entire finding closed.
+- AER-010 remains HIGH: compat and native cache hits return ahead of all
+  current dispatch gates. The identity fix does not repair that early return.
+  AER-018 also remains HIGH for live workflow, infra, and PM writes; ADR-0132
+  only fixed the atomicity of the emergency control rows.
+- The ISO/IEC 27001:2022 seed is partial mapping only, with attestation for
+  applicability and internal audit. Eighteen shared and fifteen gateway pack
+  tests pass. It is not
+  a Statement of Applicability, an audit, or certification.
+- PII redaction is not enabled. ADR-0137 records why count-only detectors,
+  streaming, exact-action MCP consent, cache replay and final-byte provider
+  gates must be resolved together before an in-flight mode is safe.
+- P3 has a proposed SIEM delivery/secret-detection contract and a 10-case
+  synthetic credential-rule baseline (TP=5, FP=0, FN=0, TN=5). This tiny
+  corpus cannot establish real-world detector quality. No live sender or
+  outbound block was implemented or integration-tested.
+
 <!-- codex-enterprise-feedback:end -->
 
 Date: 2026-09-06  

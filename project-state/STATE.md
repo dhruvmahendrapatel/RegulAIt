@@ -21,6 +21,21 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-09-30 - P1/P2/P3 continuation.** AER-035's six focused copilot
+fault/concurrency tests passed after an app rebuild before retry; OS process
+kill/recovery remains unverified. AER-011 compat cache identity now includes
+the complete canonical request rather than lower-cased flattened text;
+the eight-test compat suite and gateway typecheck passed. AER-010 remains
+HIGH because cache hits still return ahead of shared dispatch gates. The
+ISO/IEC 27001:2022 partial evidence seed (ADR-0134) passes 18 shared and
+15 gateway pack tests;
+it is not an SoA or certification and requires customer attestation. P3 now
+has a proposed delivery/detection contract and a 10-case synthetic detector
+baseline (ADR-0135); no SIEM adapter or outbound secret block is live. PII
+redaction is a proposed boundary only (ADR-0137), not enabled: count-only
+detectors cannot yet perform validated in-flight replacement, and current
+cache governance/streaming gaps must be closed before that mode ships.
+
 **2026-09-30 - Breaker transition audit atomicity (ADR-0133).** AER-023
 reproduced in source and fixed: opened/probing/closed state and audit facts
 commit together; recovery reads the locked current row. New fault/concurrency
