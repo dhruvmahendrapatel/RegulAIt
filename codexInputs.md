@@ -2653,6 +2653,75 @@ partial findings. In particular, direct source rechecks still find the export
 scope and compat-cache governance defects; those are the next P1 work, not collateral
 fixes in this P0 batch.
 
+### Automated enterprise-readiness run — 2026-09-30 00:08:35 CDT (UTC-05:00)
+
+**Target branch, synchronization and reviewed range**
+
+- Exclusive target: dhruv/active.
+- The checkout was clean and already synchronized at
+  f666733c6931894f18f212819fed9b794f15c575; a fresh
+  git fetch origin dhruv/active --prune left local HEAD and
+  origin/dhruv/active equal with zero ahead/behind.
+- Incremental review range:
+  43f42add658d5ab32133f7b34930df7a9e5ac7db..f666733c6931894f18f212819fed9b794f15c575.
+  Product fix commit dd50ab20f9831a8b71a5e11a6161e2ec7ba78859 implements ADR-0129;
+  f666733 repairs the adjacent egress fixtures and preserves their denial assertions.
+
+**Commands/tests and independently observed outcomes**
+
+- Required suite and repository instruction files were read before review. The suite rules,
+  registry, capability map, CLAUDE.md and parallel-session instructions were unchanged; the
+  updated STATE.md, mistakes.md and ADR index/ADR-0129 were read and reconciled.
+- Branch/status/remote/tracking inspection plus the fresh fetch — **PASS**; no pull was needed and
+  no reset, stash, merge, rebase or unrelated write occurred.
+- git diff --check 43f42ad..f666733 — **PASS**.
+- node --check integrations/kong/test/verify.mjs — **PASS**.
+- corepack pnpm --filter @regulait/gateway typecheck — **PASS** locally.
+- Exact-head GitHub CI run 36653593771 at f666733 — **PASS**: workspace build, full
+  repository test command and both preflights passed. Its log reports 200/200 gateway test files
+  and specifically shows zz-adr0128-upstream-retry.test.ts 26/26,
+  mcp-oidc-egress.test.ts 20/20, g2-upstream-deadlines.test.ts 13/13 and
+  zz-aer022-operation-breaker.test.ts 6/6.
+- Exact-head GitHub Integrations run 36653593778 — **PASS**, including the Kong container
+  harness. These two runs are repository-run evidence observed from GitHub, not locally reproduced
+  database/container behavior.
+- DATABASE_URL, TEST_DATABASE_URL and VITEST_DATABASE_URL were unset. No local database,
+  migration, full gateway integration, browser, provider, cloud or deployment test ran.
+
+**Finding lifecycle reconciliation**
+
+- **AER-022 — RESOLVED/DONE.** Independent source review confirms the route no longer makes a
+  preliminary upstream connection for tools/call; it maps that request onto the shared governed
+  primitive (apps/gateway/src/mcp-proxy.ts:1656-1668). Manifest requests elect before connecting
+  (:1481-1495), record list failure/success at the operation boundary (:1577-1586), and
+  delegated manifest discovery now performs the same election and operation accounting
+  (:1318-1329). The shared primitive elects once before first contact and records call
+  failure/success (:502-546, :1040-1076). The new six-case operation suite proves failures
+  after successful initialization and a single half-open winner across proxy, worker, list and
+  delegated-discovery contention
+  (apps/gateway/src/zz-aer022-operation-breaker.test.ts:103-153). Exact-head CI also restores both
+  original g2-upstream-deadlines regressions. This satisfies AER-022's source, invocation-count,
+  database-state and recovery-transition acceptance evidence. The separate AER-023 state/audit
+  transaction defect and AER-024 policy-vs-breaker ordering defect remain open; neither is silently
+  included in this closure.
+- **AER-038 — RESOLVED/DONE.** attemptsForToolKind now returns one for every classification and
+  retry configuration (apps/gateway/src/upstream-retry.ts:296-300), so an upstream-controlled
+  readOnlyHint cannot enable replay. The HTTP regression writes an external effect before the
+  first 503 and proves exactly one request/effect for both the read-hinted and unannotated tool
+  (apps/gateway/src/zz-adr0128-upstream-retry.test.ts:651-770); exact-head CI passes that file.
+  No operator idempotency/replay feature was added, so the conditional acceptance work for such a
+  future feature is not falsely claimed. The remaining limitation is explicit: one gateway request
+  gets one upstream attempt, but the product does not promise exactly-once execution if a caller
+  submits a new request.
+- **AER-023 and AER-024 — OPEN/MEDIUM, unchanged.** ADR-0129 explicitly excludes breaker
+  state/audit atomicity, and the current open/probe/close writers remain separate state and audit
+  statements. Breaker admission also still precedes connect-time egress/admission evaluation on
+  manifest requests. Their historical impact, remediation and acceptance tests remain current.
+- No new stable finding was opened in this range. Exact-head green CI and focused source evidence
+  support the two scoped lifecycle closures above; they do not establish enterprise readiness,
+  production readiness, certification, complete provider/deployment parity, backup/restore
+  reliability or live-service behavior.
+
 <!-- codex-enterprise-feedback:end -->
 
 Date: 2026-09-06  
