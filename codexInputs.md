@@ -2806,6 +2806,209 @@ fixes in this P0 batch.
   corpus cannot establish real-world detector quality. No live sender or
   outbound block was implemented or integration-tested.
 
+### Automated enterprise-readiness run — 2026-09-30 10:19:55 CDT (UTC-05:00)
+
+**Target branch, synchronization and reviewed range**
+
+- Exclusive target: `dhruv/active`. The checkout was clean, already tracked
+  `origin/dhruv/active`, and had zero divergence. `git pull --ff-only origin
+  dhruv/active` returned `Already up to date`.
+- Reviewed local/upstream SHA: `2d9682f10d20b16665cb62df5e282075d02971b0`.
+  Incremental range:
+  `7046dfc48c9265704ca45946c97a5ece0a3eb47b..2d9682f10d20b16665cb62df5e282075d02971b0`
+  (7 commits, 40 files, +1,580/-324), plus the still-open high-risk findings
+  touched by this range.
+- The suite rules, module registry, capability map, repository `CLAUDE.md`,
+  current STATE, mistakes ledger, ADR index and parallel-session instructions
+  were read before review. No product, ADR, STATE, PathForward or sibling-repo
+  file was edited by this run.
+
+**Exact commands/tests and outcomes**
+
+- `git diff --check 7046dfc48c9265704ca45946c97a5ece0a3eb47b..HEAD`
+  — passed. Migration `0119_approval_policy_epoch` is registered at
+  `packages/db/migrations/meta/_journal.json:835`.
+- Exact-head GitHub Actions were inspected, not inferred from STATE: CI run
+  `36723371117` and Integrations run `36723371380` both completed successfully
+  at `2d9682f...`. CI ran the recursive build and tests; the gateway result was
+  202 files / 2,997 passed / 9 skipped, and shared was 39 files / 916 passed.
+  The changed focused files passed: consent context 14/14, export bundle 28/28,
+  emergency atomicity 6/6, breaker atomicity 4/4, compat cache 8/8, copilot
+  atomicity 6/6, gateway compliance packs 15/15, shared compliance packs 18/18
+  and outbound-secret baseline 2/2. The Kong adapter job passed. The CI
+  `docker-build` job passed its path check but skipped the actual image build;
+  it is not counted as image evidence.
+- `pnpm --filter @regulait/gateway typecheck` did not reach TypeScript because
+  the local pnpm wrapper attempted a non-interactive modules-directory purge
+  and aborted. Running the already-installed compiler directly with
+  `node_modules\.bin\tsc.cmd -p apps\gateway\tsconfig.json --noEmit`
+  passed. This false start changed no tracked file.
+- `DATABASE_URL`, `REGULAIT_TEST_DATABASE_URL` and `TEST_DATABASE_URL` were
+  unset. No local database, migration, browser, cloud, provider or deployment
+  test was run; database-backed behavior below is supported by direct source
+  review plus the exact-head CI service database, not relabelled as locally
+  reproduced behavior.
+
+#### AER-004 — RESOLVED/DONE — Current policy is bound atomically to consent consumption
+
+**Fixing commit:** `7b44da6a59dbbaaca4f1350ce353ac12beefe0c8`.
+**Evidence type:** direct source observation plus exact-head database CI.
+
+Migration 0119 advances a singleton policy epoch from statement triggers on
+approval rules, config versions, ABAC policies and ABAC versions
+(`packages/db/migrations/0119_approval_policy_epoch.sql:1-32`). Evaluation reads
+that generation before policy (`apps/gateway/src/governed-evaluate.ts:215-217`),
+and consumption takes a shared lock and compares the epoch inside the same
+transaction as the conditional approval update
+(`apps/gateway/src/mcp-proxy.ts:257-288`). The conditional update now requires
+an exact non-null v2 context digest. That digest includes active ABAC policy id,
+version and source (`packages/shared/src/approval-binding.ts:238-305`;
+`apps/gateway/src/governed-evaluate.ts:496-515,597-607`). API and audit evidence
+name a null TTL `nonexpiring_high_risk`
+(`apps/gateway/src/org-settings.ts:414-425,558-573`).
+
+The exact-head 14-test database suite proves legacy-null re-queue with zero
+upstream contact, ABAC-only invalidation, an activation after evaluation leaving
+the old row unspent, concurrent consume/activation behavior and visible null-TTL
+posture (`apps/gateway/src/consent-context-expiry.test.ts:470-593`). This meets
+all five original acceptance items. Residual documentation cleanup: the schema
+comment at `packages/db/src/schema.ts:1295-1304` still says a null context is
+accepted, while the current predicate rejects it. Correct that comment, but do
+not reopen the now-enforced control unless contradictory runtime evidence
+appears. The epoch deliberately does not claim atomicity for every entitlement,
+budget or emergency-setting change.
+
+#### AER-007 — RESOLVED/DONE — Entitled report bundles disclose only subject audit payloads
+
+**Fixing commit:** `b9df6d0455f172a634b3382af7004ae77f87c1d0`.
+**Evidence type:** direct source observation plus exact-head database/offline-verifier CI.
+
+Non-admin report export now selects schema v2 subject scope
+(`apps/gateway/src/reporting.ts:922-960`). The contiguous chain remains signed,
+but only rows whose `objectId` is the report-run id receive payload files;
+unrelated rows carry hash commitments
+(`apps/gateway/src/export-bundle.ts:324-378,614-625,642-669`). The README and
+verifier explicitly state that commitment-only rows cannot be independently
+rehashed from this bundle (`apps/gateway/src/export-bundle.ts:526-560`;
+`scripts/verify-export-bundle.sh:448-450`). Admin full-payload schema v1 remains
+separate and explicit.
+
+The 28/28 exact-head export suite proves non-member refusal, entitled non-admin
+offline verification, and that an unrelated unique sentinel is absent from all
+disclosed payloads while subject rows remain present
+(`apps/gateway/src/export-bundle.test.ts:413-463`). That directly satisfies the
+original confidentiality and offline-proof acceptance criteria. The disclosed
+limitation is correct: v2 proves signed commitments and linkage for unrelated
+rows, not their undisclosed source bytes.
+
+#### AER-009 — PARTIALLY RESOLVED / LOW RESIDUAL — Unlisted audit payloads are refused; two negative spellings remain untested
+
+**Fixing commit:** `b9df6d0455f172a634b3382af7004ae77f87c1d0`.
+**Evidence type:** direct verifier observation plus exact-head attack test.
+
+The verifier derives the expected payload paths from signed `chain.tsv`, lists
+the actual `audit/rows` tree and rejects any extra path even when the chain is
+empty (`scripts/verify-export-bundle.sh:328-361,453-458`). The exact-head suite
+first verifies a pristine archive, then adds `audit/rows/999999999.payload` and
+gets the distinct `unlisted audit payloads` refusal
+(`apps/gateway/src/export-bundle.test.ts:635-644`). The demonstrated smuggling
+path is closed. Keep this ID partial until the original acceptance matrix also
+executes a nonnumeric/alternate filename and confirms the existing missing-row
+refusal; the generic source comparison should reject both, but that is not a
+substitute for the requested negative tests. No high-severity exploit remains
+on the reviewed evidence.
+
+#### AER-019 — RESOLVED/DONE — Emergency state and its audit fact commit as one transition
+
+**Fixing commit:** `1bac371d0f179a264f12964144587fae3df06198`.
+**Evidence type:** direct source observation plus exact-head fault/concurrency CI.
+
+Mode, agent and tool set/lift paths now lock the governing row and write state
+plus audit through one transaction handle
+(`apps/gateway/src/execution-control.ts:219-255,273-327,339-391`). The exact-head
+6/6 suite injects audit failure into all six directions, proves rollback, closes
+and rebuilds the application before rereading durable state, races 20 same-state
+requests at every scope, and verifies conflicting mode history is ordered from
+the state actually committed
+(`apps/gateway/src/zz-aer019-emergency-atomicity.test.ts:49-78,107-208`). This
+satisfies the original failure, idempotency, concurrency and restart criteria.
+AER-018 remains separate and OPEN/HIGH: this atomicity change does not make live
+workflow, infrastructure or PM-provider writes halt-aware.
+
+#### AER-023 — RESOLVED/DONE — Breaker open/probe/close state is atomic with transition audit
+
+**Fixing commit:** `324b23165d4873e634b7e74669c4fec536dcfc8d`.
+**Evidence type:** direct source observation plus exact-head fault/concurrency CI.
+
+Half-open election, threshold opening and recovery now commit their state and
+transition fact in transactions, and close rereads/locks current state rather
+than trusting a stale caller row (`apps/gateway/src/upstream-breaker.ts:184-202,
+228-254,264-281`). The 4/4 exact-head suite injects independent open/probe/close
+audit failures and proves state rollback, then races 20 failures and 20
+recoveries to one open fact and one close fact with an exact failure count
+(`apps/gateway/src/zz-aer023-breaker-atomicity.test.ts:64-125`). This satisfies
+the original state/ledger and duplicate-transition acceptance criteria. AER-024
+remains OPEN/MEDIUM because breaker-vs-current-policy ordering was not changed.
+
+#### AER-011 — PARTIALLY RESOLVED / MEDIUM RESIDUAL — Compat identity is canonical; the full mutation matrix is not yet executable
+
+**Fixing commit:** `aa1e1b9093b9909cb6f642876ab7089c8d4dc528`.
+**Evidence type:** direct source observation plus partial exact-head regression matrix.
+
+The compat key is now a versioned canonical SHA-512 request commitment with a
+separate indexed SHA-256 and collision comparison
+(`apps/gateway/src/semantic-cache-shared.ts:39-46,61-99`). It includes surface,
+requested/served identity, served provider/model/prompt, project, ordered role
+messages and boundaries, system/cache annotation, response format, thinking,
+max tokens, tool choice and prompt/config version rows
+(`apps/gateway/src/compat-core.ts:925-956`). Exact-head tests prove identical
+hits and case, whitespace, system, role, boundary and max-token misses, plus a
+forced matching-index/different-identity refusal
+(`apps/gateway/src/adr0119-compat-semantic-cache.test.ts:156-234`).
+
+The high-risk demonstrated flat-text collision is source-closed, so residual
+severity is reduced. Keep the ID partial until paired database tests cover
+response schema, thinking, project and active prompt/config-version changes and
+negative mutations that omit each field, as the original acceptance criteria
+required. Review native invoke-cache identity/version invalidation separately;
+do not silently broaden this compat closure to that path. AER-010 remains
+OPEN/HIGH: the compat hit at `compat-core.ts:960` can still return before
+`executeGovernedDispatch` at line 1054 and therefore bypass current dispatch
+gates.
+
+**Other prior-finding lifecycle and claim review**
+
+- **AER-035 remains PARTIALLY RESOLVED/HIGH residual.** Exact-head CI passes all
+  six focused transaction/race/fault tests, and the latest test rebuilds the
+  application before retry. It still does not kill the OS process or reconnect
+  after an interrupted transaction, the acceptance item explicitly retained at
+  the prior review. Do not mark DONE from an in-process app rebuild.
+- **AER-037 remains PARTIALLY RESOLVED/MEDIUM residual.** The full exact-head
+  suite includes the existing greater-than-cap rotation/cooldown coverage, but
+  this range adds no lease/transaction or concurrent scheduler-instance proof.
+  The prior concurrent-selection acceptance item remains unmet.
+- **AER-010, AER-014 and AER-018 remain OPEN/HIGH. AER-008 and AER-024 remain
+  OPEN/MEDIUM.** This range did not close their cache-gate ordering, historical
+  simulation clock, uncovered effectful paths, export completion-audit ordering
+  or breaker/policy-ordering defects. Their historical impacts and acceptance
+  tests remain current.
+- The ISO/IEC 27001 seed is honestly limited to partial platform evidence and
+  named human attestations; ADR-0134 expressly disclaims a Statement of
+  Applicability, audit or certification. ADR-0135 (SIEM/outbound secrets) and
+  ADR-0137 (PII redaction) are `Proposed` and explicitly say there is no live
+  sender, block or redaction mode. The 10-case synthetic detector corpus is a
+  regression baseline only. No new stable finding was opened from these
+  scoped additions.
+
+**Remaining uncertainty**
+
+No local disposable database was available, no browser journey or live
+provider/cloud path ran, and the actual Docker image build was skipped by CI.
+Exact-head green CI plus the scoped source/tests support the lifecycle changes
+above; they do not establish enterprise readiness, production readiness,
+certification, complete provider/deployment parity, upgrade/restore behavior or
+live-service reliability.
+
 <!-- codex-enterprise-feedback:end -->
 
 Date: 2026-09-06  
