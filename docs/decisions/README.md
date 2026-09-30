@@ -6,6 +6,7 @@ superseding a decision means a new ADR plus a status flip on the old one.
 
 | ID | Title | Status | Date |
 |---|---|---|---|
+| [0129](0129-mcp-operation-admission-and-single-attempt-tools.md) | MCP admission before contact, operation-based recovery, and one attempt for every tool call (AER-022/AER-038); supersedes the read-hint retry exception in ADR-0128. | Accepted | 2026-09-29 |
 | [0001](0001-record-architecture-decisions.md) | Record architecture decisions | Accepted | 2026-07-21 |
 | [0002](0002-two-account-aws-foundation.md) | Two-account AWS Organization for the foundation phase | Accepted | 2026-07-21 |
 | [0003](0003-terraform-over-cloudformation.md) | Terraform as the authoritative IaC tool | Accepted | 2026-07-21 |

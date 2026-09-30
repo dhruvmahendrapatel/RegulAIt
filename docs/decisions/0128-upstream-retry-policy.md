@@ -1,6 +1,6 @@
 # ADR-0128 — A retry policy we own: a retry is an idempotence claim, and `tools/call` cannot make it
 
-- **Status**: Accepted
+- **Status**: Partially superseded by [ADR-0129](0129-mcp-operation-admission-and-single-attempt-tools.md): every tool call is now single-attempt, including read-hinted tools. Connect/list retry policy remains accepted.
 - **Date**: 2026-09-28
 - **Relates to**: [ADR-0126](0126-upstream-deadlines-and-circuit-breaker.md) (the deadlines this
   spends and the breaker this reports to), [ADR-0043](0043-mcp-egress-guard.md) and

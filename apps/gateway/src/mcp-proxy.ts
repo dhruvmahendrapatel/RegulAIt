@@ -71,8 +71,6 @@ import {
 } from "./upstream-retry.js";
 import {
   breakerAdmits,
-  breakerConfig,
-  breakerStateOf,
   recordUpstreamFailure,
   recordUpstreamSuccess,
 } from "./upstream-breaker.js";
@@ -484,8 +482,8 @@ async function executeGovernedToolCallInner(
   // exactly ONE per operation: `breakerAdmits` moves `breaker_opened_at` in a
   // conditional UPDATE to elect a single half-open prober, so two callers would
   // mean the route wins and this primitive then fast-fails — breaking the very
-  // recovery path the election exists to protect. The route keeps a READ-ONLY
-  // state check so it can still refuse pre-hijack with a 503 and a Retry-After.
+  // recovery path the election exists to protect. The route delegates tool
+  // calls without connecting; it separately elects for manifest requests.
   //
   // MEMOISED, AND CONSULTED AT THE POINT OF CONTACT — not at the top of this
   // function. There are two places below that reach an upstream (the manifest
@@ -563,9 +561,11 @@ async function executeGovernedToolCallInner(
         await operationFailed(err);
         throw err;
       }
-      await operationSucceeded();
       const found = upstreamTools.find((t) => t.name === toolName);
-      if (!found) return { kind: "unknown_tool" };
+      if (!found) {
+        await operationSucceeded();
+        return { kind: "unknown_tool" };
+      }
       kind = toolKind(found);
     }
 
@@ -1043,10 +1043,8 @@ async function executeGovernedToolCallInner(
     // ADR-0128 — THE ONE PLACE A RETRY WOULD HAVE BEEN A BUG. A `tools/call` is
     // an arbitrary side-effecting operation on somebody else's system: a blind
     // retry can open two pull requests or charge two cards, and it does so
-    // precisely when the network is unreliable. `attemptsForToolKind` reads
-    // §3's stored read/write classification and returns 1 for a write — and
-    // for a tool whose kind is unknown, since `toolKind` already treats an
-    // un-annotated tool as a write. A read tool is safe to ask twice.
+    // precisely when the network is unreliable. AER-038: readOnlyHint is not
+    // an idempotency contract either, so every tool receives one attempt.
     let content: Awaited<ReturnType<typeof upstream.callTool>>;
     try {
       content = await withUpstreamRetry(
@@ -1317,8 +1315,18 @@ export async function resolveNodeToolContext(
     if (!serverRow) continue;
     let upstream: Client | null = null;
     try {
-      upstream = await connectUpstream(db, serverRow);
-      const upstreamTools = await syncUpstreamTools(db, serverId, upstream);
+      if (await breakerAdmits(db, serverRow)) continue;
+      let upstreamTools;
+      try {
+        upstream = await connectUpstream(db, serverRow);
+        upstreamTools = await syncUpstreamTools(db, serverId, upstream);
+      } catch (err) {
+        if (classifyUpstreamError(err).why !== "our_own_refusal") {
+          await recordUpstreamFailure(db, serverRow, err instanceof Error ? err.message : String(err));
+        }
+        throw err;
+      }
+      await recordUpstreamSuccess(db, serverRow);
       const entitlements = await loadEntitlements(db, userId, serverId);
       const refs: ToolRef[] = upstreamTools.map((t) => ({
         serverId,
@@ -1461,54 +1469,31 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
       }
     }
 
-    // ADR-0126 / G2 — the breaker, consulted before anything is attempted.
-    // Reading it cost nothing: it rides the `serverRow` already fetched above.
-    //
-    // It sits AFTER the egress guard's own refusal path and BEFORE the connect,
-    // because a circuit-broken upstream must not be contacted at all — that is
-    // the entire point. 503 with Retry-After, because unlike 502/504 this is a
-    // refusal the gateway is making on its own initiative and it can say when
-    // to come back.
-    //
-    // AER-022: READ-ONLY here, deliberately. `breakerAdmits` runs the half-open
-    // ELECTION, and the election must happen exactly once per operation — it is
-    // now run inside `executeGovernedToolCall`, the one boundary every caller
-    // shares (this route AND pillar-7's delegated workers). Electing here too
-    // would mean the route wins the probe and the primitive, arriving second,
-    // sees a moved timestamp and fast-fails: the recovery path would never
-    // complete and a recovered upstream would stay broken forever. So the route
-    // reads the state, refuses a definitively OPEN circuit pre-hijack with the
-    // 503 an HTTP caller can act on, and lets a half-open one through to the
-    // primitive that owns the election.
-    if (breakerStateOf(serverRow) === "open") {
-      const retryAfterMs = Math.max(
-        0,
-        breakerConfig().cooldownMs - (Date.now() - serverRow.breakerOpenedAt!.getTime()),
-      );
-      return reply
-        .status(503)
-        .header("retry-after", String(Math.ceil(retryAfterMs / 1000)))
-        .send({
-          error: "mcp_upstream_circuit_open",
-          detail:
-            `upstream MCP server '${serverRow.name}' is circuit-broken after ` +
-            `${serverRow.breakerConsecutiveFailures} consecutive failures: ` +
-            `${serverRow.breakerLastError ?? "unknown"}`,
-          retryAfterMs,
-        });
-    }
-
     // ADR-0043: the connect-time egress verdict surfaces HERE, before the
     // reply is hijacked into an MCP transport, as the route's ordinary
     // pre-hijack refusal shape — a plain 403 naming the real reason. The
     // refusal is already audited inside the guard and nothing left the box.
-    let upstream: Client;
+    let upstream: Client | null = null;
     // ADR-0128: the sequence reports into this, so the ONE failure row below can
     // say how hard we tried. A row per attempt was deliberately not written —
     // see upstream-retry.ts for why, which is verbatim the breaker's reasoning.
     const connectRetry = newRetryReport();
+    const needsManifest = ListToolsRequestSchema.safeParse(req.body).success;
+    if (needsManifest) {
+      const refusal = await breakerAdmits(db, serverRow);
+      if (refusal) {
+        return reply.status(503)
+          .header("retry-after", String(Math.ceil(refusal.refusedUntilMs / 1000)))
+          .send({ error: "mcp_upstream_circuit_open", detail: refusal.reason,
+            retryAfterMs: refusal.refusedUntilMs });
+      }
+    }
     try {
-      upstream = await connectUpstream(db, serverRow, { retry: connectRetry });
+      // Tool calls own admission in the shared primitive. Protocol setup is
+      // local; only a manifest request needs a connection at this boundary.
+      if (needsManifest) {
+        upstream = await connectUpstream(db, serverRow, { retry: connectRetry });
+      }
     } catch (err) {
       if (err instanceof McpEgressBlockedError) {
         return reply.status(403).send({
@@ -1574,18 +1559,8 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
       });
     }
 
-    // AER-022 — NOTHING IS RECORDED AS SUCCESS HERE, AND THAT IS THE FIX.
-    //
-    // This line used to read `recordUpstreamSuccess(db, serverRow)`, on the
-    // reasoning that a completed handshake proves the upstream answers. It does
-    // not. `initialize` is a protocol formality an upstream can satisfy while
-    // hanging or erroring every `tools/list` and `tools/call` that follows — and
-    // because this ran on EVERY proxy request, each new request wiped the
-    // accumulated failures that the real operations were building up, so such a
-    // server could never be circuit-broken at all. Success is now recorded by
-    // `executeGovernedToolCall`, after an OPERATION, which is the only evidence
-    // that means anything. A connect FAILURE is still counted above: that one
-    // really is the upstream failing.
+    // A handshake cannot establish recovery. Each handler records success
+    // only after its list or call operation actually finishes.
 
     const proxy = new Server(
       { name: "regulait-gateway", version: "0.1.0" },
@@ -1598,12 +1573,17 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
       // into something dirty is refused HERE — as a real MCP error naming the
       // reason, never a fabricated empty tool list. The dirty manifest was not
       // stored either (syncUpstreamTools scans before it upserts).
-      const upstreamTools = await syncUpstreamTools(db, serverId, upstream).catch((err: unknown) => {
+      if (!upstream) throw new McpError(ErrorCode.InternalError, "Missing manifest connection");
+      const upstreamTools = await syncUpstreamTools(db, serverId, upstream).catch(async (err: unknown) => {
         if (err instanceof McpAdmissionHeldError) {
           throw new McpError(ErrorCode.InvalidRequest, `Denied by policy: ${err.detail}`);
         }
+        if (classifyUpstreamError(err).why !== "our_own_refusal") {
+          await recordUpstreamFailure(db, serverRow, err instanceof Error ? err.message : String(err));
+        }
         throw err;
       });
+      await recordUpstreamSuccess(db, serverRow);
       const entitlements = await loadEntitlements(db, userId, serverId);
       const refs: ToolRef[] = upstreamTools.map((t) => ({
         serverId,
@@ -1760,11 +1740,9 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
                   `and is pending sign-off. Retry after approval.`
                 : ` Retry to raise a fresh approval.`),
           );
-        // AER-022: the breaker refusing post-hijack. The pre-hijack 503 above
-        // catches a definitively open circuit; this is the half-open case where
-        // another request won the election, or a circuit that opened between the
-        // route's read and the operation. Post-hijack there is no HTTP status
-        // left to set, so the retry window is named in the MCP error itself.
+        // Tool admission happens after governance, inside the MCP handler.
+        // The response is already hijacked, so expose the retry window in the
+        // MCP error; manifest admission can still return a pre-hijack HTTP 503.
         case "upstream_circuit_open":
           throw new McpError(
             ErrorCode.InternalError,
@@ -1781,7 +1759,7 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
     reply.hijack();
     reply.raw.on("close", () => {
       void transport.close();
-      void upstream.close();
+      void upstream?.close();
     });
     await proxy.connect(transport);
     await transport.handleRequest(req.raw, reply.raw, req.body);

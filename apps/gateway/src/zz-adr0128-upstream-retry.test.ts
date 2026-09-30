@@ -44,6 +44,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import http from "node:http";
 import net from "node:net";
 import path from "node:path";
+import { appendFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { createDb, eq, mcpServers, runMigrations, and, auditLog, desc, type Db } from "@regulait/db";
 import { StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -161,12 +163,12 @@ describe("a tools/call is an idempotence claim", () => {
     expect(attemptsForToolKind(undefined)).toBe(1);
   });
 
-  it("gives a READ tool the configured attempts", () => {
+  it("never lets a READ hint authorize replay, even with retries enabled", () => {
     // EXPLICIT config, not the ambient one. The policy is a process-wide
     // singleton (see the note on `setRetryConfig` below), so a unit test that
     // read it would be asserting whichever app Part 2 built last — which is
     // exactly the false green this file caught on its first run.
-    expect(attemptsForToolKind("read", { maxAttempts: 7, baseDelayMs: 1, maxDelayMs: 2 })).toBe(7);
+    expect(attemptsForToolKind("read", { maxAttempts: 7, baseDelayMs: 1, maxDelayMs: 2 })).toBe(1);
   });
 
   it("and the SHIPPED default really does allow more than one, or none of this is on", () => {
@@ -645,17 +647,12 @@ describe("an upstream that hangs", () => {
 // PART 3 — the claim that matters most: a WRITE tool is never asked twice.
 // ===========================================================================
 //
-// Part 1 proves `attemptsForToolKind` returns 1 for a write. That is the policy.
-// This proves the WIRING: that the number actually reaches the `tools/call` at
-// the one call site, against a real upstream that really fails once. The two
-// halves are one test on purpose — a read and a write tool on the SAME upstream,
-// failing in the SAME way, in the same pass — because the only interesting
-// question is whether they are treated differently, and a pair of separate
-// tests could both pass while the distinction was absent.
+// AER-038: verify the one-attempt policy at the actual HTTP boundary for both
+// tool classifications, including a committed effect followed by a lost reply.
 
 /** Serves MCP, but 503s the FIRST `tools/call` for each tool name and counts
  *  every `tools/call` it is sent, per tool. */
-function toolCallFlakyUpstream(): {
+function toolCallFlakyUpstream(effectFile: string): {
   server: http.Server;
   callsFor: (tool: string) => number;
 } {
@@ -674,6 +671,8 @@ function toolCallFlakyUpstream(): {
       const tool = msg?.method === "tools/call" ? msg.params?.name : undefined;
       if (tool) {
         seen.set(tool, (seen.get(tool) ?? 0) + 1);
+        // Simulate a committed external effect BEFORE losing its response.
+        appendFileSync(effectFile, `${tool}\n`);
         if (!failed.has(tool)) {
           failed.add(tool);
           res.writeHead(503, { "content-type": "text/plain" }).end("flaky");
@@ -704,8 +703,10 @@ function toolCallFlakyUpstream(): {
 }
 
 describe("a tools/call that fails once", () => {
-  it("is RETRIED for a read tool and NOT for a write tool, on the same upstream", async () => {
-    const { server, callsFor } = toolCallFlakyUpstream();
+  it("never replays a committed effect after a 503, including readOnlyHint tools", async () => {
+    const scratch = mkdtempSync(path.join(tmpdir(), "regulait-aer038-"));
+    const effectFile = path.join(scratch, "effects.txt");
+    const { server, callsFor } = toolCallFlakyUpstream(effectFile);
     const url = await listenOnEphemeral(server);
     try {
       const id = await register(url);
@@ -753,11 +754,12 @@ describe("a tools/call that fails once", () => {
           },
         });
 
-      // THE READ TOOL: the 503 is absorbed and the caller gets its answer
+      // The response is ambiguous even when the upstream advertises read-only.
       const read = await call("r128_read");
       expect(read.statusCode, read.body).toBe(200);
-      expect(read.body).toContain("read-ok");
-      expect(callsFor("r128_read")).toBe(2);
+      expect(read.body).not.toContain("read-ok");
+      expect(read.body).toContain('"error"');
+      expect(callsFor("r128_read")).toBe(1);
 
       // THE WRITE TOOL: the SAME failure, and it is NOT asked again. A second
       // attempt here is how a retry policy opens two pull requests or charges
@@ -766,9 +768,12 @@ describe("a tools/call that fails once", () => {
       const write = await call("r128_write");
       expect(write.body).not.toContain("write-ok");
       expect(callsFor("r128_write")).toBe(1);
+      expect(readFileSync(effectFile, "utf8").trim().split("\n"))
+        .toEqual(["r128_read", "r128_write"]);
     } finally {
       server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));
+      rmSync(scratch, { recursive: true, force: true });
     }
   }, 30_000);
 });

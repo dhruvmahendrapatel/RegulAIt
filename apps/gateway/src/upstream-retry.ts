@@ -23,13 +23,10 @@
  * so exactly when the network is unreliable, which is exactly when nobody is
  * watching closely.
  *
- * This product already knows which is which: §3's read/write distinction is
- * stored per tool in `mcp_tools.kind`, and `toolKind()` defaults an
- * un-annotated tool to **write**. So `attemptsForToolKind` reads that column
- * and gives a write tool exactly one attempt — the same conservative default,
- * reused rather than re-derived. An upstream that wants its writes retried can
- * say so by declaring them `readOnlyHint`, and if it lies about that, it has
- * lied about something this product already acts on everywhere else.
+ * Every tools/call gets one attempt, including tools marked readOnlyHint.
+ * That upstream annotation is not an idempotency contract: a handler may have
+ * completed before its response was lost. Replay needs operator authorization
+ * and upstream deduplication, neither of which this protocol path provides.
  *
  * ── RETRIES NEVER EXTEND THE BOUND AN OPERATOR SET ─────────────────────────
  * The naive wrapper multiplies the deadline by the attempt count: a 10s connect
@@ -293,20 +290,14 @@ export function newRetryReport(): RetryReport {
 }
 
 /**
- * attempts permitted for a `tools/call`, from the tool's own read/write kind.
- *
- * A named function rather than a ternary at the call site, because the call
- * site should read as the decision it is making — "how many times may this be
- * attempted, given what it does" — and because this is the one place the
- * never-retry-a-write rule lives.
+ * Tool classification never authorizes replay after an ambiguous failure.
+ * Keep the arguments for callers, but fail closed for every classification.
  */
 export function attemptsForToolKind(
-  kind: "read" | "write" | null | undefined,
-  cfg: RetryConfig = active,
+  _kind: "read" | "write" | null | undefined,
+  _cfg: RetryConfig = active,
 ): number {
-  // null/undefined is not "unknown, therefore fine": an unclassified tool is
-  // treated as a write, identically to `toolKind`'s un-annotated default.
-  return kind === "read" ? cfg.maxAttempts : 1;
+  return 1;
 }
 
 const sleepReal = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
