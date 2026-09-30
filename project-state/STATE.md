@@ -21,6 +21,13 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-09-30 - Emergency transition atomicity (ADR-0132).** AER-019's six
+set/lift paths now lock the control row and commit state plus audit together.
+The existing emergency suite passed 15/15; six new tests passed fault injection
+for all directions, app restart/readback, 20-way contention on mode/agent/tool,
+and conflicting mode-history ordering. AER-018's external provider paths are
+still outside this fix; no deployment-wide halt completeness claim follows.
+
 **2026-09-30 - Signed report export isolation (ADR-0131).** AER-007 reproduced:
 non-admin report bundles contained unrelated audit payloads. Version-2 bundles
 now disclose only subject-row payloads, keeping contiguous signed hash

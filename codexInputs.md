@@ -2756,6 +2756,18 @@ fixes in this P0 batch.
   The complete CI result for this batch is pending. AER-008's export/audit
   atomicity is not claimed fixed here.
 
+### Implementer update - 2026-09-30 (P1 emergency atomicity)
+
+- AER-019: ADR-0132 makes all six mode/agent/tool set-and-lift paths row-locked
+  and transactional with the audit insert. The idempotency check runs under
+  the lock. Fault-injected audit failure rolls back every direction; rebuilding
+  the app still reads the prior state. Twenty-way same-state races on all
+  three scopes record one transition, and a conflicting mode race has a
+  coherent ordered audit history. New suite: 6/6; existing ADR-0124 suite:
+  15/15; gateway build passed. Full CI is pending.
+- AER-018 is separate and remains open: live workflow, infra and PM provider
+  mutations are not made halt-aware by this transaction change.
+
 <!-- codex-enterprise-feedback:end -->
 
 Date: 2026-09-06  
