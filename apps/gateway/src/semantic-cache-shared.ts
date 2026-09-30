@@ -19,6 +19,7 @@
 
 import { createHash } from "node:crypto";
 import { and, eq, gte, semanticCache, type Db } from "@regulait/db";
+import { canonicalJson } from "@regulait/shared";
 
 export interface SemanticCacheKey {
   /** the normalized text actually stored, and re-compared on a candidate hit */
@@ -32,6 +33,16 @@ export interface SemanticCacheKey {
  * in an IDE would miss a cache entry the same prompt stored from the API. */
 export function semanticCacheKey(input: string): SemanticCacheKey {
   const norm = input.trim().toLowerCase().replace(/\s+/g, " ");
+  return { norm, hash: createHash("sha256").update(norm).digest("hex") };
+}
+
+/** Compat responses depend on the complete request, not a normalized search
+ * phrase. Keep only a SHA-512 commitment in the cache row: the full canonical
+ * request may contain private system instructions and message content. The
+ * separate SHA-256 index and SHA-512 comparison preserve the collision guard
+ * without persisting that additional plaintext. */
+export function semanticCacheRequestKey(request: unknown): SemanticCacheKey {
+  const norm = `compat-v2:${createHash("sha512").update(canonicalJson(request)).digest("hex")}`;
   return { norm, hash: createHash("sha256").update(norm).digest("hex") };
 }
 

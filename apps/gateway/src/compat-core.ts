@@ -65,6 +65,7 @@ import {
   type DispatchOutcome,
 } from "./agents-connectors.js";
 import { loadAgentRevocations, loadRoleAgentGrants } from "./entitlements.js";
+import { loadVersions } from "./config-versions.js";
 import { assertProjectAttribution, projectPiiMode } from "./projects.js";
 import { PROJECT_HEADER } from "./mcp-proxy.js";
 // ADR-0070 — the compat surfaces' entitlement refusal gets a `policy` deny span
@@ -73,7 +74,7 @@ import { beginTrace, finishTrace, recordSpan } from "./tracing.js";
 import { effectiveTechniqueMode, loadOrgSettings } from "./org-settings.js";
 import {
   lookupSemanticCache,
-  semanticCacheKey,
+  semanticCacheRequestKey,
   semanticCacheSavings,
   storeSemanticCache,
 } from "./semantic-cache-shared.js";
@@ -924,7 +925,36 @@ export async function executeCompatCall(
     prepared.routingMode !== "passthrough" &&
     !args.tools &&
     flatText.length > 0;
-  const cacheKey = wantCache ? semanticCacheKey(flatText) : null;
+  const cacheVersions = wantCache
+    ? await Promise.all([
+        loadVersions(db, "agent_system_prompt", prepared.served.id),
+        loadVersions(db, "agent_config", prepared.served.id),
+      ])
+    : null;
+  const versionIdentity = (rows: Awaited<ReturnType<typeof loadVersions>>) =>
+    rows.map((v) => ({ id: v.id, status: v.status, canaryPct: v.canaryPct, body: v.body }));
+  const cacheKey = wantCache
+    ? semanticCacheRequestKey({
+        surface: args.surface,
+        requestedModel: prepared.resolution.requestedModel,
+        requestedAgentId: prepared.requested.id,
+        servedAgentId: prepared.served.id,
+        servedModel: prepared.served.model,
+        servedProvider: prepared.served.provider,
+        servedCustomProviderId: prepared.served.customProviderId,
+        servedSystemPrompt: prepared.served.systemPrompt,
+        promptVersions: versionIdentity(cacheVersions![0]),
+        agentConfigVersions: versionIdentity(cacheVersions![1]),
+        projectId: prepared.projectId,
+        messages: args.messages,
+        system: args.system ?? null,
+        cacheSystem: args.cacheSystem ?? false,
+        responseFormat: args.responseFormat ?? null,
+        thinking: args.thinking ?? null,
+        maxTokens: args.maxTokens ?? null,
+        toolChoice: args.toolChoice ?? null,
+      })
+    : null;
 
   if (cacheKey) {
     const hit = await lookupSemanticCache(db, {

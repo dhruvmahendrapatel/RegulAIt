@@ -383,9 +383,11 @@ describe("AER-035 — a refusal after the lock rolls everything back, and is sti
 // guarantee, not a path in this repository's code. What this repository has to
 // prove is that all three writes are INSIDE one transaction — because if they
 // are, a crash cannot leave two of them behind, and if they are not, no amount of
-// crash testing makes them safe. That is exactly what this test observes. A
-// harness that killed the process would be testing Postgres's durability, and
-// would pass whether or not our boundary was drawn correctly.
+// crash testing makes them safe. That is exactly what this test observes. The
+// retry below uses a newly built application instance after the failed write;
+// it is not an OS process-kill simulation. A harness that killed the process
+// would mainly test Postgres's durability, and would pass whether or not our
+// application transaction boundary was drawn correctly.
 
 describe("AER-035 — a fault at the LAST write undoes the mutation and the marker", () => {
   it("an injected failure on the success audit leaves no rule, no marker, and no audit row", async () => {
@@ -464,8 +466,12 @@ describe("AER-035 — a fault at the LAST write undoes the mutation and the mark
       await db.execute(sql`drop function if exists ${sql.raw(fnName)}()`);
     }
 
+    await app.close();
+    app = buildApp(db, { bootstrapToken: BOOT });
+
     // RECOVERY, which is acceptance item 4's real question: after the fault, the
-    // proposal is still applicable exactly once. If the marker had survived the
+    // proposal is still applicable exactly once through a fresh application
+    // instance. If the marker had survived the
     // rollback this would return `proposal_already_applied` and a human's consent
     // would have been consumed by a failure.
     const again = await app.inject({

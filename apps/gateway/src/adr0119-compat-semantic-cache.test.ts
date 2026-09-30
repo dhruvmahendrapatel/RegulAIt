@@ -12,6 +12,7 @@ import {
 } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { AGENT_HEADER } from "./compat-core.js";
+import { lookupSemanticCache, semanticCacheRequestKey, storeSemanticCache } from "./semantic-cache-shared.js";
 
 /**
  * ADR-0119 — THE SEMANTIC CACHE ON THE COMPAT / IDE PATH.
@@ -181,7 +182,7 @@ describe("the technique the IDE path was missing", () => {
     expect(body.content[0].text).toBe(first.json().content[0].text);
   });
 
-  it("normalisation means casing and whitespace still hit", async () => {
+  it("case and whitespace changes miss because they can change model behavior", async () => {
     await setPolicy("always");
     const prompt = `normalised question ${RUN}`;
     await ask(authA, prompt);
@@ -189,11 +190,50 @@ describe("the technique the IDE path was missing", () => {
     const beforeUsage = await usageCount(userA);
     const res = await ask(authA, `   ${prompt.toUpperCase()}   `);
     expect(res.statusCode).toBe(200);
-    expect(await usageCount(userA)).toBe(beforeUsage);
+    expect(await usageCount(userA)).toBe(beforeUsage + 1);
+  });
+
+  it("does not reuse an answer when system, role, boundary, or output contract changes", async () => {
+    await setPolicy("always");
+    const prompt = `identity question ${RUN}`;
+    await ask(authA, prompt);
+    const variants = [
+      { system: "Answer in French" },
+      { max_tokens: 65 },
+      { messages: [{ role: "assistant", content: prompt }] },
+      { messages: [{ role: "user", content: "identity" }, { role: "user", content: `question ${RUN}` }] },
+    ];
+    for (const extra of variants) {
+      const before = await usageCount(userA);
+      const res = await ask(authA, prompt, extra);
+      expect(res.statusCode).toBe(200);
+      expect(await usageCount(userA)).toBe(before + 1);
+    }
   });
 });
 
 describe("the governance boundary the shared module exists to protect", () => {
+  it("stores no plaintext request and rejects a matching index hash with different request identity", async () => {
+    const key = semanticCacheRequestKey({ messages: [{ role: "user", content: "private value" }] });
+    expect(key.norm).not.toContain("private value");
+    await storeSemanticCache(db, {
+      userId: userA,
+      agentId,
+      key,
+      outputText: "synthetic cached answer",
+      model: "mock",
+      inputTokens: 1,
+      outputTokens: 1,
+    });
+    const forged = await lookupSemanticCache(db, {
+      userId: userA,
+      agentId,
+      key: { hash: key.hash, norm: `${key.norm}changed` },
+      ttlSeconds: 3600,
+    });
+    expect(forged).toBeNull();
+  });
+
   it("one user's cached answer is NEVER served to another", async () => {
     await setPolicy("always");
     const prompt = `cross user secret ${RUN}`;
