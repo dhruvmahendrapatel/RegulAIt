@@ -6,6 +6,7 @@ superseding a decision means a new ADR plus a status flip on the old one.
 
 | ID | Title | Status | Date |
 |---|---|---|---|
+| [0133](0133-atomic-breaker-transition-facts.md) | Commit MCP breaker state transitions with their audit facts (AER-023). | Accepted | 2026-09-30 |
 | [0132](0132-atomic-emergency-state-and-audit.md) | Lock emergency state and commit each transition with its audit fact (AER-019). | Accepted | 2026-09-30 |
 | [0131](0131-scoped-signed-report-audit-proof.md) | Entitled non-admin report exports disclose subject audit payloads only; other chain rows carry signed commitments (AER-007/AER-009). | Accepted | 2026-09-30 |
 | [0130](0130-approval-policy-epoch-and-abac-binding.md) | Bind ABAC policy identity to MCP consent, reject legacy null context, and serialize approval consumption with policy writes (AER-004). | Accepted | 2026-09-30 |

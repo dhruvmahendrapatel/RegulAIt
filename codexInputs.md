@@ -2768,6 +2768,17 @@ fixes in this P0 batch.
 - AER-018 is separate and remains open: live workflow, infra and PM provider
   mutations are not made halt-aware by this transaction change.
 
+### Implementer update - 2026-09-30 (P1 breaker audit and sweep verification)
+
+- AER-023: ADR-0133 commits opened/probing/closed breaker transitions with
+  their audit rows. Independent injected audit failures roll back each state;
+  twenty concurrent failures create one open fact and twenty concurrent
+  successes create one close fact. New suite: 4/4. Existing breaker, retry and
+  health suites: 40/40 on a fresh disposable database.
+- AER-037: the existing greater-than-cap rotation and cooldown tests passed
+  in that health run. No new change to the already-landed rotation was needed.
+  Full CI for this batch is pending.
+
 <!-- codex-enterprise-feedback:end -->
 
 Date: 2026-09-06  

@@ -21,6 +21,13 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-09-30 - Breaker transition audit atomicity (ADR-0133).** AER-023
+reproduced in source and fixed: opened/probing/closed state and audit facts
+commit together; recovery reads the locked current row. New fault/concurrency
+tests passed 4/4, and the existing breaker/retry/health suites passed 40/40
+on a fresh database. The health suite also revalidated AER-037 rotation over
+the cap. Full CI for this new batch is pending.
+
 **2026-09-30 - Emergency transition atomicity (ADR-0132).** AER-019's six
 set/lift paths now lock the control row and commit state plus audit together.
 The existing emergency suite passed 15/15; six new tests passed fault injection
