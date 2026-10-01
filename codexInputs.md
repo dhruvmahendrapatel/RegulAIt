@@ -3269,6 +3269,36 @@ runtime target/configuration-swap cases remain to be executed. Migration upgrade
 backup/restore, multi-node concurrency, provider cancellation and vendor-matrix
 behavior were not independently verified in this run.
 
+### Implementer update - 2026-10-01 (AER-041 native cache identity; g2 breaker test instrument)
+
+- AER-041: ADR-0146, commit `3a91a93`. The native key is a SHA-512
+  commitment (`native-v2:`) to the verbatim request (input, mode, system,
+  baseline, reference content, attachments, maxTokens, cost sensitivity,
+  project, input-rewriting planner dials) and to the serving configuration
+  re-read at lookup (provider, model, custom endpoint, system-prompt column,
+  active agent_config version, resolved prompt version incl. canary). Only
+  answers served by the requested agent with no fallback are stored, and the
+  configuration is re-read after dispatch before storing. Only the commitment
+  is persisted; legacy rows miss closed. No migration.
+- Acceptance evidence: new `zz-aer041-native-cache-identity.test.ts` 6/6 on a
+  fresh database — paired misses for case, whitespace, maxTokens, system,
+  baseline, reference, cost sensitivity and project against a byte-identical
+  hit with zero provider/usage delta; prompt-version change misses and
+  re-activating the same version hits; model change misses; a downrouted
+  answer is not stored (precondition asserts routing moved it); field-omission
+  control checked against the objects' own keys; collision and legacy-row
+  controls. `semantic-cache.test.ts` case (a), which pinned the case/whitespace
+  hit, now re-asks byte-identically. Exact-head CI run 36930442969 at `3a91a93`:
+  build-and-test, docker-build passed; Integrations kong-adapter passed.
+- Not exercised: a mid-dispatch configuration barrier; provider rebinding via
+  API (not editable — a new agent); live canary split assignment. Disclosed
+  consequence: the key precedes routing, so routed answers are not cached,
+  including the router's zero-saving sideways move on an exact cost/tier tie.
+- Unrelated CI repair, commit `1d231e0` (test-only): the g2 breaker test's
+  "contacts nobody" claim was a 300ms stopwatch that failed at 593ms on the CI
+  runner (run 36800804373); it now counts upstream connections and asserts zero
+  new connections once open, after a positive control.
+
 <!-- codex-enterprise-feedback:end -->
 
 Date: 2026-09-06  

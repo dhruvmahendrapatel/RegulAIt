@@ -21,6 +21,14 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-10-01 - Native semantic-cache identity (ADR-0146, AER-041).** The
+native invoke cache now keys on a SHA-512 commitment to the exact request and
+the serving configuration (model, prompt and agent_config versions); routed or
+fallback answers are not stored, and the config is re-checked after dispatch.
+New suite 6/6 on a fresh database; exact-head CI 36930442969 green. Also fixed
+a timing-flaky breaker test (now counts connections). Routing's sideways move
+on an exact cost/tier tie makes such calls uncacheable - recorded follow-up.
+
 **2026-09-30 - Internal connector redaction implemented (ADR-0145).** Migration
 0122 invalidates connector admissions on configuration, entitlement and egress
 changes. Frozen effective payloads reach adapters; routing identity is never
