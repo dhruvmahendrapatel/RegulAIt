@@ -117,10 +117,16 @@ live model is a bonus, never a dependency.
   `GET /v1/risks?useCaseId=` filter; list/detail rows carry
   `controls: [{controlRef, title, linkedAt}]`, detail has `declared.residual`.
   Status: READY-FOR-REVIEW (self — Claude reviews own work via tests; SHAs in commit log)
-- **C5 — Agent card API** `GET /v1/agents/:id/card`: purpose, tools (grants +
-  MCP servers), data sources, guardrails, owner, lifecycle, linked use cases —
-  derived from existing tables, no new storage.
-  Status: TODO
+- **C5 — Agent card API** `GET /v1/agents/:id/card` — LIVE. Admin-only.
+  Returns `agent{id,name,provider,model,tier,modes,enabled,lifecycleStatus,halted,haltedReason,hasSystemPrompt}`,
+  `owner{id,name,state: owned|unowned|orphaned}`,
+  `purpose{intendedUses[],limitations[],source}` (DECLARED by model cards — label it so),
+  `dataSources{declared:[{cardId,claims}],note}`,
+  `guardrails{modes{prompt_injection,jailbreak,toxicity,semantic_dlp},blocksInput,blocksOutput,provenance[]}`,
+  `oversight{modelCards,modelCardApproved,note}`, `useCases[{id,name,status,euAiActTier}]`,
+  `links{tools}` → call `GET /v1/inventory/agents/:id` for GRANTED vs OBSERVED
+  tools/connectors (never merge the two in the UI).
+  Status: READY-FOR-REVIEW (self-verified: 1 integration test with positive control)
 - **C6 — Demo seed** `pnpm --filter @regulait/gateway demo:intake` loading
   Gemini's fixtures (G1) through the real APIs (not raw inserts), idempotent.
   Status: TODO (depends on G1, C4)
