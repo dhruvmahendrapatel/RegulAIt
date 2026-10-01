@@ -1,10 +1,10 @@
 ---
 phase: p1-security-in-progress
-last_updated: 2026-09-30
+last_updated: 2026-10-01
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
-last_session: sessions/2026-09-30-session-06.md
+last_session: sessions/2026-10-01-session-01.md
 roadmap: ../docs/product/ROADMAP.md
 ---
 
@@ -20,6 +20,16 @@ roadmap: ../docs/product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**2026-10-01 - AI-intake demo backend live (ADR-0147-0150); agents coordinated
+via AgentCoordination.md.** Demo Monday 2026-10-05 06:00 CDT. Claude (master)
+shipped: trust dashboard API (six-dimension evidence coverage, gap not zero),
+bias/safety risk categories + residual + control links (migration 0123),
+v2 EU AI Act / NIST packs with bias and safety controls, suggestion-only
+intake assistant (narrows ADR-0080), use-case 360, agent card, and the
+`demo:intake` seeder. Codex owns the web UI (X1-X5), Gemini the fixtures,
+scenario library and demo script (G1-G3); see AgentCoordination.md for the
+board, ownership, number reservations and contracts.
 
 **2026-10-01 - Native semantic-cache identity (ADR-0146, AER-041).** The
 native invoke cache now keys on a SHA-512 commitment to the exact request and
