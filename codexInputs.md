@@ -3041,6 +3041,234 @@ AER-018 source paths, but there has been no paused counting-fake matrix for
 every adapter and no cancellation of calls already in flight. Do not infer a globally complete halt or live-provider
 verification from these tests.
 
+### Automated enterprise-readiness run — 2026-09-30 20:06:38 CDT (UTC-05:00)
+
+**Target branch, synchronization and reviewed range**
+
+- Exclusive target: `dhruv/active`. The checkout was clean, already tracked
+  `origin/dhruv/active`, and had zero divergence. `git fetch origin dhruv/active`
+  and `git pull --ff-only origin dhruv/active` succeeded; the pull returned
+  `Already up to date`.
+- Reviewed local/upstream SHA: `cd503b340d94df8b66708ab2024680580d869ca6`.
+  Incremental range:
+  `ad808c888a005cf9817b69a1a54441fbfcf80786..cd503b340d94df8b66708ab2024680580d869ca6`
+  (11 commits, 79 files, +4,692/-609), plus the still-open findings touched by
+  the cache and emergency-write changes.
+- The suite rules, module registry, capability map, repository `CLAUDE.md`,
+  current STATE, mistakes ledger, ADR index and parallel-session instructions
+  were read before review. No product, ADR, STATE, PathForward or sibling-repo
+  file was edited by this run.
+
+**Exact commands/tests and outcomes**
+
+- `git diff --check` — passed. `git status --short --branch`, `git rev-parse
+  HEAD` and `git rev-parse origin/dhruv/active` confirmed a clean aligned
+  checkout before review.
+- Exact-head GitHub Actions were inspected directly. CI run `36796690597` and
+  Integrations run `36796690550` both completed successfully at `cd503b3...`.
+  CI ran the recursive build/tests and an actual Docker image build. Gateway:
+  206 files / 3,088 passed / 9 skipped; shared: 42 files / 1,085 passed. The
+  relevant files include compat cache 14/14, native cache 6/6, external-effects
+  2/2, workflow deploy 7/7, workflow pipeline 4/4, infrastructure 9/9, PM
+  budget mirror 3/3, MCP redaction 23/23, MCP PII 18/18, connector redaction
+  23/23, shared PII payload 54/54, PII approval 12/12, PII redaction 103/103
+  and PII conformance 97/97. The Kong adapter job also passed.
+- `pnpm --filter @regulait/gateway typecheck` did not reach TypeScript: the
+  local wrapper attempted a non-interactive modules-directory purge and
+  aborted with `ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY`. Running the
+  already-installed compiler directly as
+  `node_modules\.bin\tsc.cmd -p apps\gateway\tsconfig.json --noEmit` passed.
+  The failed wrapper invocation changed no tracked file.
+- The standard web `test` script only prints that coverage lives elsewhere and
+  exits zero (`apps/web/package.json:6-11`), so the new approval-review unit
+  file was not counted as exact-head CI evidence. Independent direct execution
+  with `node_modules\.bin\vitest.cmd run
+  apps/web/src/views/approvals/approvalReview.test.ts` passed 1 file / 25 tests.
+- `DATABASE_URL` was unset. No local migration/database suite, Playwright
+  journey, live provider, cloud or deployment test was run. Database-backed
+  behavior below is source-observed plus exact-head CI evidence, not relabelled
+  as locally reproduced behavior.
+
+#### AER-010 — PARTIALLY RESOLVED / LOW RESIDUAL — Cache hits now traverse current gates; the required mutation negative remains unrun
+
+**Fixing commit:** `b33de7c0adc960e354f8a3065f3ec6aef33a5521`.
+**Evidence type:** direct source observation plus exact-head database CI.
+
+Both native and compat hits now pass a cached-response candidate into the same
+governed-dispatch core used by misses before any cached bytes or savings fact is
+emitted (`apps/gateway/src/agents-connectors.ts:444-447,1461-1576,3673-3769`;
+`apps/gateway/src/compat-core.ts:994-1045`). That core re-runs virtual-key,
+MRM, attribution, use-case, project-budget, input PII and input guardrail gates,
+then current output PII and guardrails. A refusal returns before provider,
+usage or savings writes. The exact-head 14-test compat suite exercises the
+prime-then-tighten matrix and the 6-test native suite includes current cached
+output PII. This closes the demonstrated early-return bypass and reduces the
+residual severity.
+
+Keep this ID **PARTIALLY RESOLVED**, not DONE, because acceptance item 4
+explicitly required a mutation that moves lookup above the shared gates and
+proves the denial matrix fails. ADR-0138 and the implementer addendum both say
+that mutation was not run. Execute and retain an equivalent control-removal
+negative before marking DONE. AER-011 and AER-041 are separate cache-identity
+findings; passing current-policy gates does not prove the cached answer belongs
+to the current request/configuration.
+
+#### AER-018 — PARTIALLY RESOLVED / MEDIUM RESIDUAL — Enumerated external writes use the final-call dial, but the required per-path pause matrix is incomplete
+
+**Fixing commit:** `8507fa3798ce30b3a5d5516cb0b0276bb1af5aed`.
+**Evidence type:** direct source observation plus exact-head database CI.
+
+The shared wrapper now refuses every enumerated deployment, rollback, Git,
+infrastructure-remediation and PM mutation unless the freshly loaded execution
+mode is `normal` (`apps/gateway/src/external-effects.ts:4-40`). Direct calls in
+workflows and infrastructure are wrapped, and the PM provider is wrapped at its
+construction boundary (`apps/gateway/src/workflows.ts:822,936,1054,1068,1085`;
+`apps/gateway/src/infra.ts:461,627,882`; `apps/gateway/src/pm.ts:168-171`). The
+2-test exact-head suite proves zero callback invocations for every enumerated
+operation under halted/read-only/require-approval and structurally checks the
+current direct workflow/Git/infra calls. Route tests prove stopped workflow,
+infra and PM work remains retryable.
+
+Keep this ID **PARTIALLY RESOLVED**, with lower residual severity. The original
+acceptance contract requires each real provider path to pause immediately
+before its external call, change mode, resume, and prove the adapter invocation
+count stays zero under all three restrictive modes. Current tests exercise the
+wrapper generically and selected routes, but do not provide that barrier/count
+matrix for every actual adapter; the structural assertion also covers direct
+workflow/Git/infra method names rather than every future provider mutation.
+Add those per-path counting fakes and make registration without a classification
+fail before marking DONE. Cancellation of a call already inside its external
+request remains an explicitly disclosed limitation, not a closure claim.
+
+#### AER-039 — OPEN / HIGH — MCP approvals are not bound to the mutable server destination or its admitted manifest
+
+**Evidence type:** direct source observation and claim-to-code comparison;
+target-swap behavior was not run locally because no disposable database was
+available.
+
+An admin can update an MCP server's `url` and `allowPrivateRanges` in place
+without changing its id or resetting its admitted tool inventory
+(`apps/gateway/src/app.ts:1433-1467`). Migration 0120 advances the consent
+policy epoch for PII, approval/ABAC, grants and selected tool fields, but has no
+trigger for target-bearing `mcp_servers` fields
+(`packages/db/migrations/0120_mcp_redaction_policy.sql:3-42`). The approval
+context digest contains rule versions, ABAC versions, required approver and
+scope—not server URL, private-range posture or manifest identity
+(`packages/shared/src/approval-binding.ts:322-377`). Pending/approved matching
+uses the stable `serverId`, tool, payload and that context digest
+(`apps/gateway/src/mcp-proxy.ts:850-913`). A later request loads the current
+server row, connects to it, consumes the old approval, and invokes the tool
+(`apps/gateway/src/mcp-proxy.ts:489-504,1022-1063,1112-1126`).
+
+**Impact:** a signature granted for an exact payload on one upstream can be
+spent against a different egress-allowed upstream under the same database id,
+using the old stored tool/schema/admission facts. That can redirect an approved
+write or disclose its effective arguments. The redacted action's original and
+effective argument digests remain exact, but the external target those bytes
+reach is not part of the consent. Egress validation limits destinations; it
+does not make a different allowed destination the one the approver reviewed.
+This affects the already-live ordinary MCP approval flow as well as the
+publicly gated redaction mode.
+
+**Recommended remediation:** define a versioned MCP target/admission identity
+covering the execution-relevant server destination/posture and admitted
+manifest/schema identity. Include it in the approval review/context and exact
+consume predicate, or advance the policy epoch selectively when those fields
+change and force fresh manifest admission plus re-approval. Do not attach an
+unfiltered trigger to every `mcp_servers` update: breaker counters and health
+cursors are operational churn, not a new action target.
+
+**Acceptance evidence required:** queue and approve against upstream A, then
+change the URL/private-range posture through both the API and direct SQL before
+execution. The old row must be marked stale or left unspent, a fresh review must
+name/bind upstream B, and both fake upstream tool-call counts must remain zero
+until that new approval is granted. Repeat for manifest/schema/admission drift.
+Prove breaker/health-only updates do not invalidate consent. Add a barrier case
+around connect/final execution so a target-policy change cannot make the new
+destination receive bytes under the old signature.
+
+#### AER-040 — OPEN / MEDIUM — The critical approver-review tests are outside the standard and CI test gates
+
+**Evidence type:** exact-head CI log plus locally reproduced pure-test behavior.
+
+ADR-0144 reports 25 parser/binding tests and five Chromium journeys as evidence
+for a security-sensitive approval UI
+(`docs/decisions/0144-approver-action-review.md:31-51`). The committed unit file exists and passes when invoked directly
+(25/25 in this run), but `apps/web/package.json:10` defines `test` as an echo and
+exit zero. The exact-head recursive CI therefore did not execute that file, and
+the CI workflow has no Playwright step. A green standard `pnpm test`/CI run can
+regress malformed-preview refusal, binding-key invalidation or the bulk-review
+workflow without failing.
+
+**Recommended remediation and acceptance test:** give the web package a real
+unit-test command, make the root/CI test gate run it, and add a gated Playwright
+job for the five ADR journeys against an isolated database. Demonstrate that a
+deliberately failing unit assertion and a broken review journey both fail CI.
+Keep public redaction disabled until these checks are durable rather than
+one-time repository-reported evidence.
+
+#### AER-041 — OPEN / HIGH — Native semantic-cache identity still collapses distinct requests and stale agent configurations
+
+**Evidence type:** direct source observation; the existing exact-head tests pin
+the unsafe normalization rather than testing configuration invalidation.
+
+The native invoke path keys only on `body.input`, then scopes lookup by user and
+agent (`apps/gateway/src/agents-connectors.ts:3636-3680`). `semanticCacheKey`
+trims, lowercases and collapses whitespace, and the stored collision guard
+compares that same normalized string (`apps/gateway/src/semantic-cache-shared.ts:23-35,60-99`). The key contains no project, `maxTokens`, current provider/model,
+admin system prompt, or active prompt/config version. The native cache test
+explicitly expects case/whitespace-different prompts to hit and tests only
+user/agent isolation (`apps/gateway/src/semantic-cache.test.ts:161-242`). On a
+hit, current governance gates run, but no provider runs; those gates validate
+the current agent while the returned bytes and recorded model can belong to an
+older model/prompt/configuration (`apps/gateway/src/agents-connectors.ts:3681-3769`).
+
+**Impact:** case-sensitive code/identifiers can receive an answer for a
+different prompt, a smaller `maxTokens` request can receive a prior longer
+answer, and changing an agent's provider/model/system prompt or active version
+does not invalidate old output. Current MRM and policy gates can pass for the
+new configuration while the system serves output generated under the old one.
+This is the native counterpart to AER-011's now-hardened compat identity and is
+an integrity/governance-context failure, not a cross-user cache leak.
+
+**Recommended remediation:** use a separate versioned canonical native-request
+commitment that includes exact input bytes, project and generation-affecting
+request options plus served provider/model/system-prompt and active
+prompt/config version identities. Persist only commitments if plaintext system
+material is inappropriate. Make old-format rows miss closed.
+
+**Acceptance evidence required:** paired database cases must prove misses for
+case, meaningful whitespace, project, max tokens, model/provider, system prompt
+and active prompt/config-version changes, while a byte-identical request under
+the identical immutable configuration still hits with zero provider/usage
+delta. Add collision and field-omission negative controls equivalent to the
+compat suite.
+
+**Other lifecycle and claim review**
+
+- **AER-011 remains PARTIALLY RESOLVED / MEDIUM residual.** No new compat
+  identity fields or its remaining response-schema/thinking/project/version
+  mutation matrix landed. AER-041 tracks the deliberately separate native path.
+- **AER-014 and AER-035 remain OPEN/PARTIALLY RESOLVED with HIGH residual;
+  AER-037 remains PARTIALLY RESOLVED/MEDIUM; AER-008 and AER-024 remain
+  OPEN/MEDIUM.** This range supplied no direct evidence satisfying their
+  remaining acceptance items.
+- ADRs 0140-0145 are unusually explicit that public `redact` remains gated and
+  that decoded-text transformation is not binary inspection, bounded provider
+  collection, in-flight cancellation or certification. The source and exact-head
+  tests support substantial internal foundations, but those limitations remain
+  release gates. No enterprise-readiness, production-readiness, certification
+  or complete provider parity conclusion is justified.
+
+**Remaining uncertainty**
+
+No disposable local database, browser journey or live vendor/provider path was
+available. Exact-head CI is green and the pure approval-review unit suite passed
+locally, but AER-039 and AER-041 are source-established identity gaps whose
+runtime target/configuration-swap cases remain to be executed. Migration upgrade,
+backup/restore, multi-node concurrency, provider cancellation and vendor-matrix
+behavior were not independently verified in this run.
+
 <!-- codex-enterprise-feedback:end -->
 
 Date: 2026-09-06  
