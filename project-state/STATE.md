@@ -21,6 +21,11 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-09-30 - Connector redaction boundaries in progress (ADR-0145).** This
+chapter owns connector invocation, final-send hooks and migration 0122.
+Public redaction remains gated. The prior approval review chapter is pushed
+as `03aaea7`; CI 36794552034 and Integrations 36794551926 are in progress.
+
 **2026-09-30 - Approver action review implemented (ADR-0144).** Migration
 0121 records preview provenance and consent scope without inventing legacy
 facts. MCP approvals retain project attribution for bulk sensitivity checks.

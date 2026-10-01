@@ -6,6 +6,7 @@ superseding a decision means a new ADR plus a status flip on the old one.
 
 | ID | Title | Status | Date |
 |---|---|---|---|
+| [0145](0145-connector-redaction-boundaries.md) | Freeze connector redaction, recheck final sends and withhold changed-policy output. | Accepted; implementing | 2026-09-30 |
 | [0144](0144-approver-action-review.md) | Record approval preview provenance and scope; review MCP payloads in inbox, queue and bulk triage. 85 focused tests and five real browser journeys pass; public redaction remains gated. | Accepted; implemented | 2026-09-30 |
 | [0143](0143-mcp-redacted-action-enforcement.md) | Bind MCP redacted actions to schemas and exact consent; recheck before send and withhold unsafe output. Public mode remains gated. | Accepted | 2026-09-30 |
 | [0142](0142-complete-model-output-gates.md) | Scan and withhold thinking/tool output; release only inspected final model content under blocking policies. | Accepted | 2026-09-30 |
