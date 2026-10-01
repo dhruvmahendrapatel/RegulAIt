@@ -3278,6 +3278,19 @@ export {
   type RiskSuggestion,
   type SuggestionSource,
 } from "./intake-assist.js";
+// demo task G1/C6 — the fixture contract between Gemini's data and the seeder
+export {
+  DEMO_DATA_SENSITIVITIES,
+  type DemoIntakeFixtures,
+  type DemoModelCard,
+  type DemoRisk,
+  type DemoShadowFinding,
+  type DemoUseCase,
+  type DemoUseCaseTarget,
+  type DemoVendor,
+  type DemoVendorTarget,
+  type DemoRiskTarget,
+} from "./demo-intake-types.js";
 
 // ---------------------------------------------------------------------------
 // ADR-0084 — the AI vendor registry (third-party AI risk): the vocabulary,

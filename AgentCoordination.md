@@ -30,7 +30,8 @@ this line and every milestone moves with it.)
    - Migrations: Claude `0123`–`0124` (journal `when` 1785058000000, 1785059000000);
      Codex `0125`–`0126` (1785060000000, 1785061000000); Gemini none.
      **Never run `drizzle-kit generate`.**
-   - ADRs: Claude `0147`–`0150`; Codex `0151`–`0153`; Gemini `0154`–`0155`.
+   - ADRs: Claude `0147`–`0150` (all used) and `0156`–`0160`; Codex `0151`–`0153`;
+     Gemini `0154`–`0155`.
      ADR index rows in `docs/decisions/README.md` are added by Claude on review.
 4. **Honesty rules carried from the repo** (CLAUDE.md, mistakes.md):
    no fabricated metrics; "unmeasured" is shown as unmeasured, never as 0% or
@@ -86,9 +87,8 @@ live model is a bonus, never a dependency.
 
 ### Claude — gateway, data model, contracts, review
 
-- **C0 — Coordination + roadmap.** This file; ROADMAP section for the four
-  Credo-parity modules and three agentic phases.
-  Status: IN-PROGRESS (Claude, 2026-10-01 22:10)
+- **C0 — Coordination + roadmap.** Done (ROADMAP §9; this file).
+  Status: VERIFIED
 - **C1 — Trust dashboard API** `GET /v1/reports/trust[?projectId=]` — LIVE
   (ADR-0148). Admin-only. Exact shape in §4.1 (updated to the built
   payload). Note for X3: bias is unmeasured unless a v2 pack is active (C1b) —
@@ -170,20 +170,36 @@ and an explicit "unmeasured" state.
 ### Gemini — demo content, fixtures, script
 
 - **G1 — Demo fixtures** `packages/shared/src/demo-intake/fixtures.ts` +
-  `fixtures.test.ts`: a fictional company ("Acme Bank"), 10 use cases across
-  lifecycle states (proposed / under review / approved / rejected / retired)
-  and EU AI Act tiers (at least 2 high, 1 prohibited-rejected, 3 limited,
-  4 minimal); 5 vendors (fictional names, or real public AI vendors described
-  factually); model cards; 25–35 risks using ONLY the categories in
-  `packages/shared/src/risks.ts` plus `bias_fairness`/`unsafe_output` (C4),
-  each with declared likelihood/impact and, for mitigated ones, residual
-  values and control refs taken from `controlRef` in
-  `DEFAULT_COMPLIANCE_PACKS` (`packages/shared/src/compliance-packs.ts`, e.g.
-  `eu-ai-act:art-14-human-oversight`); the test must assert every referenced
-  ref exists; 6 shadow-AI
-  findings; intake questionnaire answers for the hero use case
-  ("Credit-limit-increase assistant"). Pure data, no I/O. Run:
-  `pnpm --filter @regulait/shared test`.
+  `fixtures.test.ts`. **Export exactly**
+  `export const DEMO_INTAKE_FIXTURES: DemoIntakeFixtures` — the type is
+  `packages/shared/src/demo-intake-types.ts` (Claude-owned contract; read its
+  comments, they are the rules). Do NOT edit `packages/shared/src/index.ts`;
+  Claude wires the export on review. Content:
+  - `company`: fictional "Acme Bank" (no real organisation's branding).
+  - `hero`: the "Credit-limit-increase assistant" (live-demo use case; its
+    `intake` must screen as EU AI Act **high** — essential-services +
+    profilesNaturalPersons is the proven combination).
+  - `useCases`: 10 — targetStatus spread: 2 proposed, 2 under_review,
+    4 approved, 1 rejected (a prohibited-tier one, e.g. social scoring),
+    1 retired. Tiers (COMPUTED from `intake`): ≥2 high, 1 prohibited, ≥3 limited,
+    rest minimal. `intendedAgentNames` must be agents the existing seed creates
+    (read `apps/gateway/src/seed.ts`; Claude will confirm names on review).
+  - `vendors`: 5, mixed targetStatus; real public AI vendors may be named
+    factually, or use fictional names.
+  - `risks`: 25–35 across ALL 11 categories (incl. `bias_fairness`,
+    `unsafe_output`), every `useCaseKey` valid; ~60% mitigated
+    (`residual` + ≥1 `controls`), 2 `accepted` (with `acceptanceNote`),
+    4 `closed` (with `closeReason`), rest open.
+  - `modelCards`: one per seeded agent used above; at least 2 with an
+    `assessed` biasFairness entry (makes the bias axis evidenced) and 1
+    `in_progress`.
+  - `shadowAi`: 6 SaaS AI apps (synthetic `grantedBy` like `user-17@acme.example`).
+  - `fixtures.test.ts` must assert: every `controlRef` exists in
+    `DEFAULT_COMPLIANCE_PACKS`; every cross-key resolves; every `intake`
+    parses with `intakeAssistRequestSchema`; the hero and each use case's
+    tier (via `classifyEuAiActTier`) matches the spread above; required
+    notes/reasons are present for accepted/closed/rejected/retired.
+  Run: `pnpm --filter @regulait/shared build && pnpm --filter @regulait/shared exec vitest run src/demo-intake`.
   Status: TODO
 - **G2 — Agentic risk-scenario library** `packages/shared/src/demo-intake/scenario-library.ts`
   (+ test): 30–40 scenarios, each `{key, title, description, category,
