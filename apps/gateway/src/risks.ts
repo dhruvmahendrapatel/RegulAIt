@@ -46,8 +46,10 @@ import type { FastifyInstance } from "fastify";
 import {
   agentGrants,
   agents,
+  aiRiskControls,
   aiRisks,
   aiUseCases,
+  compliancePackControls,
   aiVendors,
   and,
   auditLog,
@@ -60,6 +62,7 @@ import {
   gte,
   inArray,
   lt,
+  modelCards,
   projects,
   redteamRuns,
   shadowAiFindings,
@@ -69,11 +72,14 @@ import {
   type Db,
 } from "@regulait/db";
 import {
+  AI_RISK_CATEGORIES,
   AI_RISK_REGISTER_DISCLAIMER,
   DEFAULT_RISK_LIBRARY,
   RISK_CATEGORY_EVIDENCE,
   acceptRiskSchema,
   createRiskSchema,
+  linkRiskControlSchema,
+  setResidualRiskSchema,
   transitionRiskSchema,
   updateRiskSchema,
   type AiRiskCategory,
@@ -94,7 +100,40 @@ export const RISK_RULE_IDS = {
   updated: "risk-updated",
   transitioned: (to: string) => `risk-${to}`,
   accepted: "risk-accepted",
+  /** ADR-0147 */
+  residualSet: "risk-residual-set",
+  controlLinked: "risk-control-linked",
+  controlUnlinked: "risk-control-unlinked",
 } as const;
+
+/** ADR-0147 — the mitigating controls linked to each risk, with the pack
+ * control's title when a pack defines the ref. One query for a page of risks. */
+export async function loadRiskControls(
+  db: Db,
+  riskIds: readonly string[],
+): Promise<Map<string, Array<{ controlRef: string; title: string | null; linkedAt: Date }>>> {
+  const out = new Map<string, Array<{ controlRef: string; title: string | null; linkedAt: Date }>>();
+  if (riskIds.length === 0) return out;
+  const links = await db
+    .select()
+    .from(aiRiskControls)
+    .where(inArray(aiRiskControls.riskId, [...riskIds]))
+    .orderBy(aiRiskControls.linkedAt);
+  const refs = [...new Set(links.map((l) => l.controlRef))];
+  const titled = refs.length
+    ? await db
+        .select({ controlRef: compliancePackControls.controlRef, title: compliancePackControls.title })
+        .from(compliancePackControls)
+        .where(inArray(compliancePackControls.controlRef, refs))
+    : [];
+  const titleOf = new Map(titled.map((t) => [t.controlRef, t.title]));
+  for (const l of links) {
+    const list = out.get(l.riskId) ?? [];
+    list.push({ controlRef: l.controlRef, title: titleOf.get(l.controlRef) ?? null, linkedAt: l.linkedAt });
+    out.set(l.riskId, list);
+  }
+  return out;
+}
 
 /** kept in lockstep with @regulait/shared's ADR-0067 scorer kinds — the
  * subset of EVAL_SCORER_KINDS that measures groundedness. Exported for the
@@ -524,6 +563,77 @@ export async function resolveRiskEvidence(
         break;
       }
 
+      case "model_card_fairness": {
+        // ADR-0147: DOCUMENTATION evidence. A model card's bias/fairness entry
+        // says an assessment was done (or not) and where its result lives; the
+        // platform never fetches or grades it (ADR-0063). So this counts the
+        // documented entries by status and says plainly that it is an
+        // attestation, not a fairness measurement.
+        const cards = await db
+          .select({ id: modelCards.id, biasFairness: modelCards.biasFairness })
+          .from(modelCards)
+          .where(risk.agentId ? eq(modelCards.agentId, risk.agentId) : undefined);
+        const byStatus: Record<string, number> = { not_assessed: 0, in_progress: 0, assessed: 0, waived: 0 };
+        let cardsWithEntries = 0;
+        for (const c of cards) {
+          const entries = (c.biasFairness ?? []) as Array<{ status?: string }>;
+          if (entries.length > 0) cardsWithEntries += 1;
+          for (const e of entries) {
+            if (e.status && e.status in byStatus) byStatus[e.status] = (byStatus[e.status] ?? 0) + 1;
+          }
+        }
+        entries.push({
+          resolver,
+          kind: "configuration",
+          source: "model_cards",
+          queried:
+            "model cards" +
+            (risk.agentId ? " for this risk's agent" : ", org-wide") +
+            " and their documented bias/fairness entries by status (ADR-0063) — an attestation " +
+            "by the card's author; this platform does not compute disparity metrics",
+          measured: { cards: cards.length, cardsWithEntries, entriesByStatus: byStatus },
+          note:
+            cardsWithEntries === 0
+              ? "no documented bias/fairness assessment — unassessed, not fair"
+              : undefined,
+        });
+        break;
+      }
+
+      case "output_safety_config": {
+        const [toxicityAtBlock, jailbreakAtBlock] = await Promise.all([
+          runCollector(db, "guardrail_configs", ctx({ detector: "toxicity", minMode: "block" })),
+          runCollector(db, "guardrail_configs", ctx({ detector: "jailbreak", minMode: "block" })),
+        ]);
+        entries.push({
+          resolver,
+          kind: "configuration",
+          source: "guardrail_configs",
+          queried:
+            "guardrail configs with toxicity and jailbreak detection at 'block' (ADR-0042) — " +
+            "configuration evidence: a quiet period is not proof a runtime control exists",
+          measured: { toxicityAtBlock, jailbreakAtBlock },
+        });
+        break;
+      }
+
+      case "guardrail_blocks": {
+        const blocks = await runCollector(db, "audit_decisions", ctx({
+          effect: "deny",
+          ruleIdPrefix: "guardrail-blocked",
+        }));
+        entries.push({
+          resolver,
+          kind: "measured",
+          source: "audit_log",
+          queried:
+            "audit_log rows in the window with effect='deny' and rule_id 'guardrail-blocked' — " +
+            "every guardrail block the gateway actually performed",
+          measured: { blocks },
+        });
+        break;
+      }
+
       default: {
         // an unknown resolver is NOT silently skipped — same posture as
         // runCollector's unknown-collector branch
@@ -678,24 +788,15 @@ export function registerRiskRoutes(app: FastifyInstance, db: Db): void {
     const q = z
       .object({
         status: z.enum(["open", "mitigating", "accepted", "closed"]).optional(),
-        category: z
-          .enum([
-            "tool_misuse",
-            "scope_drift",
-            "prompt_injection",
-            "data_leakage_pii",
-            "over_permissioning",
-            "budget_overrun",
-            "hallucination",
-            "shadow_ai",
-            "third_party_ai",
-          ])
-          .optional(),
+        category: z.enum(AI_RISK_CATEGORIES).optional(),
+        /** ADR-0147: the risks registered against one use case */
+        useCaseId: z.string().uuid().optional(),
       })
       .parse(req.query);
     const conditions = [];
     if (q.status) conditions.push(eq(aiRisks.status, q.status));
     if (q.category) conditions.push(eq(aiRisks.category, q.category));
+    if (q.useCaseId) conditions.push(eq(aiRisks.useCaseId, q.useCaseId));
     if (!req.authCtx.isAdmin) {
       if (!req.authCtx.userId) return reply.status(403).send({ error: "bootstrap_has_no_risks" });
       conditions.push(eq(aiRisks.ownerUserId, req.authCtx.userId));
@@ -714,8 +815,13 @@ export function registerRiskRoutes(app: FastifyInstance, db: Db): void {
           .where(inArray(users.id, ownerIds))
       : [];
     const ownerName = new Map(ownerRows.map((u) => [u.id, u.displayName || u.email]));
+    const controls = await loadRiskControls(db, rows.map((r) => r.id));
     return {
-      risks: rows.map((r) => ({ ...r, ownerName: ownerName.get(r.ownerUserId) ?? null })),
+      risks: rows.map((r) => ({
+        ...r,
+        ownerName: ownerName.get(r.ownerUserId) ?? null,
+        controls: controls.get(r.id) ?? [],
+      })),
       disclaimer: AI_RISK_REGISTER_DISCLAIMER,
     };
   });
@@ -733,11 +839,17 @@ export function registerRiskRoutes(app: FastifyInstance, db: Db): void {
         detail: "a risk is visible to its owner and to admins",
       });
     }
+    const controls = (await loadRiskControls(db, [row.id])).get(row.id) ?? [];
     return {
-      risk: row,
+      risk: { ...row, controls },
       declared: {
         likelihood: row.likelihood,
         impact: row.impact,
+        /** ADR-0147: the declared position once the linked controls operate */
+        residual:
+          row.residualLikelihood && row.residualImpact
+            ? { likelihood: row.residualLikelihood, impact: row.residualImpact }
+            : null,
         status: row.status,
         mitigation: row.mitigation,
         acceptance:
@@ -934,5 +1046,133 @@ export function registerRiskRoutes(app: FastifyInstance, db: Db): void {
         "acceptance is a record, not a control — nothing about enforcement changed. The " +
         "evidence at the moment of acceptance is frozen into the audit trail.",
     };
+  });
+
+  // ---------------------------------------------------------------------------
+  // ADR-0147 — residual position and mitigating-control links
+  // ---------------------------------------------------------------------------
+
+  /** owner-or-admin, and only while the risk is live — the same rule as PATCH */
+  async function loadEditableRisk(
+    riskId: string,
+    req: { authCtx: { isAdmin: boolean; userId: string | null } },
+  ): Promise<{ row: AiRiskRow } | { status: number; body: Record<string, unknown> }> {
+    const [row] = await db.select().from(aiRisks).where(eq(aiRisks.id, riskId));
+    if (!row) return { status: 404, body: { error: "not_found" } };
+    if (!req.authCtx.isAdmin && req.authCtx.userId !== row.ownerUserId) {
+      return { status: 403, body: { error: "forbidden", detail: "a risk is editable by its owner and by admins" } };
+    }
+    if (row.status === "accepted" || row.status === "closed") {
+      return {
+        status: 409,
+        body: {
+          error: "risk_not_editable",
+          detail: `a ${row.status} risk is a decided record — editing it would change what was ${row.status}`,
+        },
+      };
+    }
+    return { row };
+  }
+
+  // The residual position — DECLARED, like the inherent one. Both or neither.
+  app.put("/v1/risks/:riskId/residual", async (req, reply) => {
+    const { riskId } = riskIdParam.parse(req.params);
+    const body = setResidualRiskSchema.parse(req.body);
+    const loaded = await loadEditableRisk(riskId, req);
+    if ("status" in loaded) return reply.status(loaded.status).send(loaded.body);
+    const { row } = loaded;
+    const [updated] = await db
+      .update(aiRisks)
+      .set({ residualLikelihood: body.likelihood, residualImpact: body.impact, updatedAt: new Date() })
+      .where(eq(aiRisks.id, riskId))
+      .returning();
+    await db.insert(auditLog).values({
+      userId: req.authCtx.userId ?? NO_IDENTITY,
+      objectType: "ai_risk",
+      objectId: riskId,
+      detail: {
+        phase: "residual",
+        inherent: { likelihood: row.likelihood, impact: row.impact },
+        from: { likelihood: row.residualLikelihood, impact: row.residualImpact },
+        to: { likelihood: body.likelihood, impact: body.impact },
+      },
+      effect: "allow",
+      ruleId: RISK_RULE_IDS.residualSet,
+      ruleChain: [],
+      reason:
+        body.likelihood === null
+          ? `residual position cleared on AI risk '${row.title}'`
+          : `residual position on AI risk '${row.title}' declared ${body.likelihood} likelihood / ` +
+            `${body.impact} impact (inherent ${row.likelihood} / ${row.impact})`,
+    });
+    return updated;
+  });
+
+  // Link a mitigating control by its pack control ref. A ref no pack defines
+  // is refused — a link to a control that does not exist would be a
+  // mitigation claim with nothing behind it.
+  app.post("/v1/risks/:riskId/controls", async (req, reply) => {
+    const { riskId } = riskIdParam.parse(req.params);
+    const body = linkRiskControlSchema.parse(req.body);
+    const loaded = await loadEditableRisk(riskId, req);
+    if ("status" in loaded) return reply.status(loaded.status).send(loaded.body);
+    const { row } = loaded;
+    const [known] = await db
+      .select({ controlRef: compliancePackControls.controlRef, title: compliancePackControls.title })
+      .from(compliancePackControls)
+      .where(eq(compliancePackControls.controlRef, body.controlRef))
+      .limit(1);
+    if (!known) {
+      return reply.status(422).send({
+        error: "unknown_control_ref",
+        detail:
+          `no compliance pack defines control '${body.controlRef}' — seed or author the pack ` +
+          "first (GET /v1/compliance/packs lists what exists)",
+      });
+    }
+    const inserted = await db
+      .insert(aiRiskControls)
+      .values({ riskId, controlRef: body.controlRef, linkedByUserId: req.authCtx.userId ?? null })
+      .onConflictDoNothing()
+      .returning();
+    if (inserted.length === 0) {
+      return reply.status(409).send({ error: "already_linked" });
+    }
+    await db.insert(auditLog).values({
+      userId: req.authCtx.userId ?? NO_IDENTITY,
+      objectType: "ai_risk",
+      objectId: riskId,
+      detail: { phase: "control-linked", controlRef: body.controlRef },
+      effect: "allow",
+      ruleId: RISK_RULE_IDS.controlLinked,
+      ruleChain: [],
+      reason: `control '${body.controlRef}' linked as mitigating AI risk '${row.title}'`,
+    });
+    return reply.status(201).send({ riskId, controlRef: body.controlRef, title: known.title });
+  });
+
+  app.delete("/v1/risks/:riskId/controls/:controlRef", async (req, reply) => {
+    const params = z
+      .object({ riskId: z.string().uuid(), controlRef: z.string().min(3).max(200) })
+      .parse(req.params);
+    const loaded = await loadEditableRisk(params.riskId, req);
+    if ("status" in loaded) return reply.status(loaded.status).send(loaded.body);
+    const { row } = loaded;
+    const removed = await db
+      .delete(aiRiskControls)
+      .where(and(eq(aiRiskControls.riskId, params.riskId), eq(aiRiskControls.controlRef, params.controlRef)))
+      .returning();
+    if (removed.length === 0) return reply.status(404).send({ error: "not_linked" });
+    await db.insert(auditLog).values({
+      userId: req.authCtx.userId ?? NO_IDENTITY,
+      objectType: "ai_risk",
+      objectId: params.riskId,
+      detail: { phase: "control-unlinked", controlRef: params.controlRef },
+      effect: "allow",
+      ruleId: RISK_RULE_IDS.controlUnlinked,
+      ruleChain: [],
+      reason: `control '${params.controlRef}' unlinked from AI risk '${row.title}'`,
+    });
+    return reply.status(204).send();
   });
 }

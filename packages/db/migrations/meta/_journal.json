@@ -855,6 +855,13 @@
       "when": 1785057000000,
       "tag": "0122_connector_policy_epoch",
       "breakpoints": true
+    },
+    {
+      "idx": 123,
+      "version": "7",
+      "when": 1785058000000,
+      "tag": "0123_risk_dimensions_residual_controls",
+      "breakpoints": true
     }
   ]
 }

@@ -98,18 +98,23 @@ live model is a bonus, never a dependency.
   (contract §4.2). Deterministic tier/framework/risk/control suggestions from
   structured answers (works keyless); optional governed-dispatch draft of the
   questionnaire narrative, labelled `source: "model"|"mock"|"rules"`.
-  Suggestion-only: nothing is written until a human submits. ADR-0147
+  Suggestion-only: nothing is written until a human submits. ADR-0148
   narrows ADR-0080 §3 ("no AI pre-fill").
   Status: TODO
 - **C3 — Use-case 360 API** `GET /v1/use-cases/:id/overview` (§4.3): use case,
   questionnaire status, tier, frameworks, linked model cards/vendors/agents,
   risks (inherent/residual), approvals, recent audit.
   Status: TODO
-- **C4 — Risk model upgrade** (migration 0123): add `bias_fairness` and
-  `unsafe_output` categories (with evidence resolvers), residual
-  likelihood/impact, risk↔control link table. Keep the 3-level declared
-  scale (ADR: no fake arithmetic). Endpoints: link/unlink control, set residual.
-  Status: TODO
+- **C4 — Risk model upgrade** (migration 0123, ADR-0147): `bias_fairness`,
+  `unsafe_output` categories with evidence resolvers; `TRUST_DIMENSIONS` +
+  `RISK_CATEGORY_DIMENSION` exported from `@regulait/shared`; residual
+  likelihood/impact; risk↔control links. Endpoints (live now):
+  `PUT /v1/risks/:id/residual {likelihood, impact}` (both or both null),
+  `POST /v1/risks/:id/controls {controlRef}` (201 / 409 dup / 422 unknown),
+  `DELETE /v1/risks/:id/controls/:controlRef` (URL-encode the ref; 204),
+  `GET /v1/risks?useCaseId=` filter; list/detail rows carry
+  `controls: [{controlRef, title, linkedAt}]`, detail has `declared.residual`.
+  Status: READY-FOR-REVIEW (self — Claude reviews own work via tests; SHAs in commit log)
 - **C5 — Agent card API** `GET /v1/agents/:id/card`: purpose, tools (grants +
   MCP servers), data sources, guardrails, owner, lifecycle, linked use cases —
   derived from existing tables, no new storage.

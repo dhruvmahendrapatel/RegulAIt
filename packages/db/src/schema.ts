@@ -11,6 +11,7 @@ import {
   jsonb,
   numeric,
   pgTable,
+  primaryKey,
   text,
   timestamp,
   unique,
@@ -7731,6 +7732,9 @@ export const AI_RISK_CATEGORIES = [
    * STATES (platform records); the assessment CONTENT is vendor-attested and
    * the evidence payload says so. */
   "third_party_ai",
+  /** ADR-0147 (migration 0123): the bias and safety trust dimensions */
+  "bias_fairness",
+  "unsafe_output",
 ] as const;
 export type AiRiskCategory = (typeof AI_RISK_CATEGORIES)[number];
 
@@ -7770,6 +7774,10 @@ export const aiRisks = pgTable(
     }),
     acceptedAt: timestamp("accepted_at", { withTimezone: true }),
     acceptanceNote: text("acceptance_note"),
+    /** ADR-0147 (migration 0123): the DECLARED residual position once the
+     * linked controls operate — same three-level scale, both or neither */
+    residualLikelihood: text("residual_likelihood", { enum: AI_RISK_LEVELS }),
+    residualImpact: text("residual_impact", { enum: AI_RISK_LEVELS }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -7788,6 +7796,27 @@ export const aiRisks = pgTable(
 );
 
 export type AiRiskRow = typeof aiRisks.$inferSelect;
+
+/**
+ * ADR-0147 (migration 0123) — a mitigating control linked to a risk, by the
+ * pack control's stable `controlRef`. The gateway validates the ref against
+ * the seeded compliance packs; the link records who claimed the mitigation.
+ */
+export const aiRiskControls = pgTable(
+  "ai_risk_controls",
+  {
+    riskId: uuid("risk_id")
+      .notNull()
+      .references(() => aiRisks.id, { onDelete: "cascade" }),
+    controlRef: text("control_ref").notNull(),
+    linkedByUserId: uuid("linked_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    linkedAt: timestamp("linked_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ name: "ai_risk_controls_pk", columns: [t.riskId, t.controlRef] }),
+    index("ai_risk_controls_ref_idx").on(t.controlRef),
+  ],
+);
 
 // ---------------------------------------------------------------------------
 // ADR-0090 (migration 0092) — grant certification campaigns (gap L22).

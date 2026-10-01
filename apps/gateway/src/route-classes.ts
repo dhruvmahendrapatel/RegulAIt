@@ -168,6 +168,10 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /v1/risks/:riskId",
   "PATCH /v1/risks/:riskId",
   "POST /v1/risks/:riskId/transition",
+  // ADR-0147: owner-or-admin, enforced in the handler like PATCH
+  "PUT /v1/risks/:riskId/residual",
+  "POST /v1/risks/:riskId/controls",
+  "DELETE /v1/risks/:riskId/controls/:controlRef",
   // ADR-0084 — the AI vendor registry, the same shape again: proposing a
   // vendor is a front-door act, and list/detail/edit are owner-or-admin
   // INSIDE the handler. Recording a vendor ATTESTATION is owner-or-admin too

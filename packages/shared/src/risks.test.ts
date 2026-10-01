@@ -19,9 +19,12 @@ import {
   AI_RISK_CATEGORIES,
   AI_RISK_REGISTER_DISCLAIMER,
   DEFAULT_RISK_LIBRARY,
+  RISK_CATEGORY_DIMENSION,
   RISK_CATEGORY_EVIDENCE,
   RISK_EVIDENCE_RESOLVERS,
+  TRUST_DIMENSIONS,
   riskLibraryEntrySchema,
+  setResidualRiskSchema,
   transitionRiskSchema,
 } from "./risks.js";
 
@@ -105,5 +108,36 @@ describe("the disclaimer", () => {
     expect(AI_RISK_REGISTER_DISCLAIMER).toMatch(/not real-world exposure/);
     expect(AI_RISK_REGISTER_DISCLAIMER).toMatch(/DECLARED human judgments/);
     expect(AI_RISK_REGISTER_DISCLAIMER).toMatch(/none — attestation only/);
+  });
+});
+
+describe("ADR-0147 — the six trust dimensions", () => {
+  it("every category maps to exactly one dimension, and every dimension has a category", () => {
+    // total: a category without a dimension would be silently dropped from the
+    // dashboard; an empty dimension would be an axis no risk can ever move
+    expect(Object.keys(RISK_CATEGORY_DIMENSION).sort()).toEqual([...AI_RISK_CATEGORIES].sort());
+    for (const d of TRUST_DIMENSIONS) {
+      expect(Object.values(RISK_CATEGORY_DIMENSION), d).toContain(d);
+    }
+  });
+
+  it("keeps the radar axis order fixed", () => {
+    expect(TRUST_DIMENSIONS).toEqual(["bias", "security", "privacy", "reliability", "safety", "compliance"]);
+  });
+
+  it("the two new categories have library entries and real resolvers", () => {
+    for (const c of ["bias_fairness", "unsafe_output"] as const) {
+      expect(DEFAULT_RISK_LIBRARY.some((e) => e.category === c), c).toBe(true);
+      expect(RISK_CATEGORY_EVIDENCE[c]).not.toContain("none");
+    }
+  });
+});
+
+describe("ADR-0147 — residual position", () => {
+  it("is set together or cleared together, never half-stated", () => {
+    expect(setResidualRiskSchema.safeParse({ likelihood: "low", impact: "medium" }).success).toBe(true);
+    expect(setResidualRiskSchema.safeParse({ likelihood: null, impact: null }).success).toBe(true);
+    expect(setResidualRiskSchema.safeParse({ likelihood: "low", impact: null }).success).toBe(false);
+    expect(setResidualRiskSchema.safeParse({ likelihood: "extreme", impact: "low" }).success).toBe(false);
   });
 });

@@ -792,7 +792,7 @@ Demo-critical items for 2026-10-05 are tracked in `AgentCoordination.md`
 | Platform & MCP server governance | exists | `mcp-proxy.ts`, `mcp-registry.ts`, admission/egress ADRs |
 | Dependency graph (agents, sub-agents, models, tools, data) | partial | `lineage.ts`; no graph UI, no risk propagation |
 | Shadow-AI discovery and classification | partial | classifies imported evidence (`shadow-ai.ts`); no network scanning; MCP discovery has no UI [X4] |
-| AI-assisted intake & registration | missing | ADR-0080 forbade pre-fill; governed, suggestion-only assistant [C2, X1, ADR-0147] |
+| AI-assisted intake & registration | missing | ADR-0080 forbade pre-fill; governed, suggestion-only assistant [C2, X1, ADR-0148] |
 
 ### Phase 2 — Assess & Deploy  (modules: Risk Intelligence; Compliance & Policy Engine)
 
