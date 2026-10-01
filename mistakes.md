@@ -1233,3 +1233,15 @@ using `--no-file-parallelism`.
 Rule: gateway integration files sharing one freshly created database must run
 serially, or each worker must receive its own database. A migration collision
 is a harness failure, not a product regression.
+
+### M-053 (2026-10-01) - Shipped a DELETE route without running the affordance census
+
+ADR-0147 added `DELETE /v1/risks/:riskId/controls/:controlRef`. Every vitest
+suite passed locally and in CI, but the job failed afterwards on
+`scripts/preflight-ui-affordances.mjs`: no screen calls the route. The tests
+were green, so the failure only surfaced after an 11-minute CI run.
+
+Rule: any change that adds an `app.delete(...)` route runs
+`node scripts/preflight-ui-affordances.mjs` before push. If the button belongs
+to another agent's surface, add a TEMPORARY `DELIBERATELY_API_ONLY` entry that
+names the owning task, and make deleting it part of that task's acceptance.

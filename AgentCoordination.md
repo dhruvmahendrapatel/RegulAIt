@@ -158,7 +158,11 @@ and an explicit "unmeasured" state.
   (status, tier, owner), tabs Overview / Frameworks (existing
   `GET /v1/use-cases/:id/frameworks`) / Risks (inherent→residual, link
   controls — C4) / Stack (model cards, vendors, agent cards — C5) / Approvals /
-  Audit. Consumes C3.
+  Audit. Consumes C3. **Acceptance includes**: an unlink-control
+  `<RemoveButton/>` on each linked control (calls
+  `DELETE /v1/risks/:id/controls/:controlRef`), and deleting the temporary
+  `/v1/risks/:x/controls/:x` entry from `DELIBERATELY_API_ONLY` in
+  `scripts/preflight-ui-affordances.mjs` (CI's affordance census).
   Status: TODO
 - **X3 — Trust dashboard** `/ui/admin/governance/trust` and a compact card on
   Home: six-axis radar (SVG), KPI tiles (risks found, mitigated, evidence
