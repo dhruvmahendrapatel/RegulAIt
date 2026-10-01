@@ -103,10 +103,10 @@ live model is a bonus, never a dependency.
   (ADR-0149). Suggestion-only; writes nothing but an audit row. Exact shape
   in §4.2 (updated to the built payload).
   Status: READY-FOR-REVIEW (self-verified: shared 8/8, gateway 4/4)
-- **C3 — Use-case 360 API** `GET /v1/use-cases/:id/overview` (§4.3): use case,
-  questionnaire status, tier, frameworks, linked model cards/vendors/agents,
-  risks (inherent/residual), approvals, recent audit.
-  Status: TODO
+- **C3 — Use-case 360 API** `GET /v1/use-cases/:id/overview` — LIVE.
+  Owner-or-admin. Shape in §4.3. Frameworks stay on the existing
+  `GET /v1/use-cases/:id/frameworks` (call both).
+  Status: READY-FOR-REVIEW (self-verified: 1 integration test, all assertions on owned ids)
 - **C4 — Risk model upgrade** (migration 0123, ADR-0147): `bias_fairness`,
   `unsafe_output` categories with evidence resolvers; `TRUST_DIMENSIONS` +
   `RISK_CATEGORY_DIMENSION` exported from `@regulait/shared`; residual
@@ -275,12 +275,31 @@ Response:
 - `blocking` non-null ⇒ show a prominent "prohibited" banner; allow
   "save as rejected record" rather than submit.
 
-### 4.3 `GET /v1/use-cases/:id/overview`
-Use case row + `tier`, `questionnaire { submitted, artifactId, submittedAt }`,
-`frameworks` (same as the existing frameworks endpoint), `stack { modelCards[],
-vendors[], agents[] }`, `risks[]` (with residual + linked control keys),
-`approvals[]` (pending/decided), `audit[]` (last 20 rows for this use case).
-Exact JSON published at M1.
+### 4.3 `GET /v1/use-cases/:id/overview` — LIVE
+```json
+{ "useCase": { "...every ai_use_cases column...": "", "ownerName": "Avery" },
+  "screening": { "tier": "high", "reasons": [], "rulesetVersion": 1, "screened": true },
+  "questionnaire": { "submitted": true, "artifactId": "uuid", "version": 2, "submittedAt": "..." },
+  "stack": {
+    "agents": [ { "id": "uuid", "name": "...", "provider": "mock", "model": "mock-balanced",
+                  "lifecycleStatus": "active", "halted": false,
+                  "modelCards": [ { "id": "uuid", "intendedUse": "...", "signOff": "approved|pending|none|..." } ],
+                  "modelCardApproved": true } ],
+    "vendors": [ { "id": "uuid", "name": "...", "category": "model_provider", "status": "approved",
+                   "linkedVia": ["agent provider", "named by a risk"] } ] },
+  "risks": [ { "id": "uuid", "title": "...", "category": "hallucination", "dimension": "reliability",
+               "status": "open", "inherent": { "likelihood": "high", "impact": "medium" },
+               "residual": { "likelihood": "low", "impact": "medium" } ,
+               "controls": [ { "controlRef": "eu-ai-act:art-15-accuracy-robustness", "title": "...", "linkedAt": "..." } ] } ],
+  "summary": { "risks": 2, "liveRisks": 2, "liveWithoutControls": 1,
+               "agentsWithoutApprovedModelCard": 1, "pendingApprovals": 0 },
+  "approvals": [ { "id": "uuid", "status": "pending", "stageId": "...", "approverUserId": "uuid",
+                   "requestedAt": "...", "decidedAt": null, "decisionReason": null } ],
+  "audit": [ { "id": 1, "at": "...", "userId": "uuid", "ruleId": "...", "effect": "allow", "reason": "..." } ],
+  "links": { "frameworks": "/v1/use-cases/<id>/frameworks" } }
+```
+`residual` is null when none is declared. `summary.*` are for header badges
+("1 live risk has no control", "1 agent lacks an approved model card").
 
 ---
 
