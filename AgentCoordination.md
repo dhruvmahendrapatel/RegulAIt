@@ -128,9 +128,16 @@ live model is a bonus, never a dependency.
   `links{tools}` → call `GET /v1/inventory/agents/:id` for GRANTED vs OBSERVED
   tools/connectors (never merge the two in the UI).
   Status: READY-FOR-REVIEW (self-verified: 1 integration test with positive control)
-- **C6 — Demo seed** `pnpm --filter @regulait/gateway demo:intake` loading
-  Gemini's fixtures (G1) through the real APIs (not raw inserts), idempotent.
-  Status: TODO (depends on G1, C4)
+- **C6 — Demo seed** `pnpm --filter @regulait/gateway demo:intake` — BUILT.
+  `seedDemoIntake()` (`apps/gateway/src/demo-intake-seed-lib.ts`) loads
+  `DEMO_INTAKE_FIXTURES` through the real APIs: vendors and use cases driven
+  through their intake workflows to the target state (tier COMPUTED from the
+  submitted questionnaire), risks with controls/residual/transitions, model
+  cards, a synthetic shadow-AI import. Idempotent; per-item failures reported.
+  Run order for a demo DB: `seed` → `demo:setup` → `demo:intake`.
+  Verified with an inline fixture set (`zz-c6-demo-intake-seed.test.ts`);
+  waits on G1 for the real dataset (CLI exits 1 with a clear message until then).
+  Status: READY-FOR-REVIEW (self-verified) — final run pending G1
 
 ### Codex — web UI (apps/web), browser verification
 

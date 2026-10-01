@@ -210,7 +210,8 @@ export async function seedDemoIntake(
     const reason = u.decisionReason ? `${u.decisionReason} — ${SEED_REASON}` : SEED_REASON;
     if (!(await decide(instanceId, decision, reason, dana.auth, `use case ${u.name}`))) return;
     if (u.targetStatus === "retired") {
-      const ret = await call("POST", `/v1/use-cases/${id}/retire`, { reason: u.decisionReason ?? "retired (seeded)" }, dana.auth);
+      // retirement is an admin act (the default gate), not the proposer's
+      const ret = await call("POST", `/v1/use-cases/${id}/retire`, { reason: u.decisionReason ?? "retired (seeded)" }, ada.auth);
       if (!ok(ret.status)) fail(`use case ${u.name} retire`, ret);
     }
   }
