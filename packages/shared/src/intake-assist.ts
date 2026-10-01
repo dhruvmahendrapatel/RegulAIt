@@ -363,3 +363,23 @@ export function parseIntakeNarrative(output: string): Record<string, string> | n
     return null;
   }
 }
+
+/**
+ * The questionnaire document a proposer submits as the intake artifact:
+ * the eight narrative sections plus §9 with the ADR-0085 answers block. One
+ * renderer for the wizard (X1) and the demo seeder (C6), so both submit the
+ * shape the server's tier extractor reads.
+ */
+export function renderQuestionnaireMarkdown(
+  sections: ReadonlyArray<Pick<QuestionnaireSectionDraft, "heading" | "text">>,
+  euAiActBlock: string,
+): string {
+  return [
+    "# AI use-case intake questionnaire",
+    "",
+    ...sections.flatMap((s) => [`## ${s.heading}`, s.text.trim(), ""]),
+    "## 9. EU AI Act risk screening (structured, ADR-0085)",
+    euAiActBlock.trim(),
+    "",
+  ].join("\n");
+}

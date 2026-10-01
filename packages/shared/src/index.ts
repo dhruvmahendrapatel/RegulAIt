@@ -3270,6 +3270,7 @@ export {
   composeQuestionnaireDraft,
   intakeAssistRequestSchema,
   parseIntakeNarrative,
+  renderQuestionnaireMarkdown,
   suggestIntake,
   type FrameworkSuggestion,
   type IntakeAssistRequest,

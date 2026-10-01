@@ -5,6 +5,7 @@ import {
   CATEGORY_SUGGESTED_CONTROLS,
   intakeAssistRequestSchema,
   parseIntakeNarrative,
+  renderQuestionnaireMarkdown,
   suggestIntake,
   type IntakeAssistRequest,
 } from "./intake-assist.js";
@@ -143,5 +144,16 @@ describe("ADR-0149 — the intake assistant's rules", () => {
   it("parses a model narrative and drops unknown sections", () => {
     expect(parseIntakeNarrative('noise {"sections":[{"id":"purpose","text":"A"},{"id":"evil","text":"B"}]} tail')).toEqual({ purpose: "A" });
     expect(parseIntakeNarrative("canned mock prose with no json")).toBeNull();
+  });
+
+  it("renders a submittable questionnaire whose tier the server extractor reads back", () => {
+    const req = credit();
+    const s = suggestIntake(req);
+    const md = renderQuestionnaireMarkdown(s.questionnaire, s.euAiActBlock);
+    expect(md).toContain("## 1. Purpose and business context");
+    expect(md).toContain("## 9. EU AI Act risk screening");
+    const extracted = extractEuAiActAnswers(md);
+    expect(extracted.status).toBe("ok");
+    if (extracted.status === "ok") expect(classifyEuAiActTier(extracted.answers).tier).toBe("high");
   });
 });
