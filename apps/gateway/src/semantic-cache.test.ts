@@ -15,8 +15,10 @@ import { buildApp } from "./app.js";
 /**
  * PILLAR 6 §8/§10 — semantic caching, end to end: a REAL per-(user,agent)
  * exact-match response cache. An opt-in (semanticCache:true) dispatch whose
- * normalized input (whitespace/case-insensitive) already has a fresh stored
- * answer for the SAME user+agent is served straight from the cache — the
+ * byte-identical request (ADR-0146 — no case/whitespace normalisation; the
+ * full request/configuration matrix lives in zz-aer041-native-cache-identity)
+ * already has a fresh stored answer for the SAME user+agent is served straight
+ * from the cache — the
  * provider is skipped (no usage_events, no spend), the response is flagged
  * cached:true, and ONE semantic_caching cost_events row records the whole-call
  * saving. The governance boundary is absolute (§12): the lookup is scoped by
@@ -158,7 +160,7 @@ describe("semantic caching — real per-(user,agent) exact-match cache", () => {
     }
   });
 
-  it("(a) MISS then a normalized-equal re-ask is a HIT: served from cache, no new usage row, one cost row", async () => {
+  it("(a) MISS then a byte-identical re-ask is a HIT: served from cache, no new usage row, one cost row", async () => {
     const u = await makeUser("sc-hit@example.com");
     await grant(u.id, agentId);
 
@@ -177,9 +179,12 @@ describe("semantic caching — real per-(user,agent) exact-match cache", () => {
     // one cache row was stored for this (user, agent)
     expect(await cacheRows(u.id)).toHaveLength(1);
 
-    // SECOND: same user+agent, normalized-equal input (extra whitespace + case)
+    // SECOND: same user+agent, byte-identical input. This used to send a
+    // case/whitespace VARIANT and expect a hit — that pinned AER-041's defect
+    // (case-sensitive identifiers collided). A variant now misses; see
+    // zz-aer041-native-cache-identity.test.ts.
     const second = await invoke(u.auth, agentId, {
-      input: "  explain   THE   cap    theorem\tclearly  ",
+      input: "Explain the CAP theorem clearly",
       semanticCache: true,
     });
     expect(second.cached).toBe(true);

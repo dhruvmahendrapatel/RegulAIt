@@ -152,9 +152,11 @@ import {
   loadOrgSettings,
 } from "./org-settings.js";
 import {
+  loadNativeCacheConfig,
   lookupSemanticCache,
-  semanticCacheKey,
+  semanticCacheNativeKey,
   storeSemanticCache,
+  type NativeCacheRequest,
   type SemanticCacheKey,
   type SemanticCacheHit,
 } from "./semantic-cache-shared.js";
@@ -3634,9 +3636,11 @@ export function registerAgentConnectorRoutes(
         }
       }
       // PILLAR 6 §8/§10 SEMANTIC CACHING (REAL cache) — opt-in per-(user,agent)
-      // EXACT-MATCH response cache. When enabled, an identical (whitespace/
-      // case-normalized) single-turn input already answered for the SAME
-      // user+agent within the TTL is served straight from the cache, skipping
+      // EXACT-MATCH response cache. When enabled, a byte-identical single-turn
+      // request (ADR-0146: input, generation options and project — nothing is
+      // case- or whitespace-normalised) already answered for the SAME
+      // user+agent under the SAME serving configuration within the TTL is
+      // served straight from the cache, skipping
       // the provider call entirely (no usage_events, no spend). "passthrough"
       // is §12's off switch; conversation dispatches are excluded (a single
       // input key can't stand in for multi-turn history). When off, this is
@@ -3669,9 +3673,45 @@ export function registerAgentConnectorRoutes(
       // moved to `semantic-cache-shared.ts` so the compat/IDE path runs THE
       // SAME governance boundary rather than a second copy of it. The behaviour
       // here is unchanged — the helper is the code that used to be inline.
+      //
+      // AER-041 / ADR-0146: the key is a commitment to the exact request AND
+      // the configuration that would serve it, re-read here — see
+      // `semanticCacheNativeKey`. `cacheRequest` is kept so the store side can
+      // re-derive the key against the configuration that is current AFTER the
+      // dispatch and refuse to store if the two disagree.
       let cacheKey: SemanticCacheKey | null = null;
-      if (wantCache && body.input) {
-        cacheKey = semanticCacheKey(body.input);
+      let cacheRequest: NativeCacheRequest | null = null;
+      const cacheConfig =
+        wantCache && body.input ? await loadNativeCacheConfig(db, { agentId: agent.id, userId }) : null;
+      if (wantCache && body.input && cacheConfig) {
+        cacheRequest = {
+          input: body.input,
+          mode: body.mode,
+          system: body.system ?? null,
+          baseline: body.baseline ?? null,
+          referenceContent: body.referenceContent ?? null,
+          attachments: (body.attachments ?? []).map((a) => ({
+            kind: a.kind,
+            name: a.name,
+            mediaType: a.mediaType,
+            dataBase64: a.dataBase64,
+          })),
+          maxTokens: body.maxTokens ?? null,
+          costSensitivity: body.costSensitivity ?? null,
+          projectId: projectId ?? null,
+          // The two pillar-6 techniques below that REWRITE what the model is
+          // sent are functions of these dials, so they are part of the request
+          // the answer was produced for. Prompt caching and routing are not
+          // here: the first changes billing only, and the store side refuses
+          // any answer routing served from a different agent.
+          planner: {
+            filePreprocessing: modeFor(org.filePreprocessingEnabled),
+            minPreprocessTokens: org.minPreprocessTokens,
+            editVsRewrite: modeFor(org.editVsRewriteEnabled),
+            minEditableBaselineTokens: org.minEditableBaselineTokens,
+          },
+        };
+        cacheKey = semanticCacheNativeKey(cacheRequest, cacheConfig);
         const hit = await lookupSemanticCache(db, {
           userId,
           agentId: agent.id,
@@ -4313,10 +4353,25 @@ export function registerAgentConnectorRoutes(
       // otherwise a no-op (byte-identical to the pre-caching path). No
       // cost_events on a miss — nothing was saved yet.
       const storeSemanticCacheIf = async (outcome: DispatchOutcome) => {
-        if (!wantCache || !cacheKey || !outcome.ok) return;
+        if (!wantCache || !cacheKey || !cacheRequest || !outcome.ok) return;
         const r = outcome.result;
         // never store a refusal, an empty output, or a PII-withheld marker
         if (r.refusal || !r.outputText || r.pii?.withheld) return;
+        // AER-041 / ADR-0146 — store only an answer the key can honestly
+        // describe. The key commits to the REQUESTED agent's configuration;
+        // an answer routing served from a cheaper agent, or a fallback hop
+        // produced, came from a different one, and a later hit would present
+        // it under the wrong identity (and run the hit's governance against
+        // the wrong agent). Those dispatches simply do not populate the cache.
+        if (r.servedAgentId !== agent.id || r.fallback) return;
+        // And the configuration must not have changed WHILE this dispatch ran:
+        // re-derive the key against what serves now. A model, prompt or
+        // version change mid-flight would otherwise file an old-config answer
+        // under the new configuration's key.
+        const configNow = await loadNativeCacheConfig(db, { agentId: agent.id, userId });
+        if (!configNow || semanticCacheNativeKey(cacheRequest, configNow).norm !== cacheKey.norm) {
+          return;
+        }
         // ADR-0119: shared with the compat/IDE path, so the two cannot drift.
         await storeSemanticCache(db, {
           userId,
