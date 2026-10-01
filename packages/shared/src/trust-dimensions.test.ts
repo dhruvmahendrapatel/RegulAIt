@@ -30,13 +30,29 @@ describe("ADR-0148 — control → trust dimension", () => {
     expect(dimensionForControl({ controlRef: "x", collector: "some_future_collector" })).toBe("compliance");
   });
 
-  it("every default control lands on a known dimension, and the default packs reach five of six", () => {
-    const seen = new Set(allControls.map((c) => dimensionForControl(c)));
-    for (const d of seen) expect(TRUST_DIMENSIONS).toContain(d);
-    // RECORDED, not aspirational: no default control evidences BIAS until a
-    // pack ships a fairness control (ADR-0148 §Consequences). When one does,
-    // this assertion must be updated deliberately — it is the line that keeps
-    // the radar from claiming a measured bias axis it does not have.
-    expect([...seen].sort()).toEqual(["compliance", "privacy", "reliability", "safety", "security"]);
+  it("v1 packs reach five of six dimensions; the v2 packs (ADR-0150) add bias", () => {
+    // RECORDED, not aspirational: no v1 control evidences BIAS (ADR-0148
+    // §Consequences). ADR-0150's v2 packs add fairness controls; this is the
+    // line that keeps the radar from claiming a bias axis the active packs
+    // do not have.
+    const v1 = DEFAULT_COMPLIANCE_PACKS.filter((p) => p.version === 1).flatMap((p) => p.controls);
+    const seenV1 = new Set(v1.map((c) => dimensionForControl(c)));
+    expect([...seenV1].sort()).toEqual(["compliance", "privacy", "reliability", "safety", "security"]);
+    const seenAll = new Set(allControls.map((c) => dimensionForControl(c)));
+    for (const d of seenAll) expect(TRUST_DIMENSIONS).toContain(d);
+    expect([...seenAll].sort()).toEqual([...TRUST_DIMENSIONS].sort());
+  });
+
+  it("the v2 packs are v1 plus additions — no v1 control is dropped or changed", () => {
+    for (const fw of ["eu-ai-act", "nist-ai-rmf"]) {
+      const v1 = DEFAULT_COMPLIANCE_PACKS.find((p) => p.framework === fw && p.version === 1)!;
+      const v2 = DEFAULT_COMPLIANCE_PACKS.find((p) => p.framework === fw && p.version === 2)!;
+      expect(v2, fw).toBeDefined();
+      expect(v2.controls.slice(0, v1.controls.length)).toEqual(v1.controls);
+      expect(v2.controls.length).toBeGreaterThan(v1.controls.length);
+      expect(new Set(v2.controls.map((c) => c.controlRef)).size).toBe(v2.controls.length);
+    }
+    const bias = allControls.filter((c) => dimensionForControl(c) === "bias").map((c) => c.controlRef);
+    expect(bias.sort()).toEqual(["eu-ai-act:art-10-bias-examination", "nist-ai-rmf:MEASURE-2.11"]);
   });
 });

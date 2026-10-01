@@ -200,8 +200,12 @@ describe("the launch packs are honest data", () => {
   });
 
   it("covers the launch frameworks and the ISO 27001 partial mapping", () => {
-    const frameworks = DEFAULT_COMPLIANCE_PACKS.map((p) => p.framework).sort();
+    const frameworks = [...new Set(DEFAULT_COMPLIANCE_PACKS.map((p) => p.framework))].sort();
     expect(frameworks).toEqual(["eu-ai-act", "finra", "hipaa", "iso-27001", "iso-42001", "nist-ai-rmf", "pci-dss", "soc-2"]);
+    // ADR-0150: exactly two frameworks ship a second version (bias/safety controls)
+    const versions = DEFAULT_COMPLIANCE_PACKS.map((p) => `${p.framework}@${p.version}`).sort();
+    expect(versions.filter((v) => v.endsWith("@2"))).toEqual(["eu-ai-act@2", "nist-ai-rmf@2"]);
+    expect(new Set(versions).size).toBe(versions.length);
   });
 
   it("never presents the ISO 27001 seed as a Statement of Applicability or certification", () => {

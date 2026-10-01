@@ -70,6 +70,7 @@ import {
   lineageEdges,
   lt,
   modelCardApprovals,
+  modelCards,
   projectMembers,
   sql,
   usageEvents,
@@ -226,6 +227,18 @@ export async function runCollector(
             sql`(${modelCardApprovals.validUntil} IS NULL OR ${modelCardApprovals.validUntil} > ${periodEnd})`,
           ),
         );
+      return row?.n ?? 0;
+    }
+
+    case "model_card_fairness": {
+      // ADR-0150: DOCUMENTATION evidence. A card counts when it records at
+      // least one completed (`assessed`) bias/fairness assessment. The
+      // platform does not compute or grade fairness; it counts that the
+      // examination was documented and where its result lives.
+      const [row] = await db
+        .select({ n: count() })
+        .from(modelCards)
+        .where(sql`jsonb_path_exists(${modelCards.biasFairness}, '$[*] ? (@.status == "assessed")')`);
       return row?.n ?? 0;
     }
 

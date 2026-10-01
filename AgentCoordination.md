@@ -91,14 +91,15 @@ live model is a bonus, never a dependency.
   Status: IN-PROGRESS (Claude, 2026-10-01 22:10)
 - **C1 — Trust dashboard API** `GET /v1/reports/trust[?projectId=]` — LIVE
   (ADR-0148). Admin-only. Exact shape in §4.1 (updated to the built
-  payload). Note for X3: on a default install **bias is unmeasured** (no
-  default control evidences it) — draw the gap; C1b adds real controls.
+  payload). Note for X3: bias is unmeasured unless a v2 pack is active (C1b) —
+  always support drawing the gap.
   Status: READY-FOR-REVIEW (self-verified: 4/4 + shared 4/4)
-- **C1b — Bias & safety controls**: new pack versions adding EU AI Act
-  Art. 10 bias examination + NIST MEASURE 2.11 (fairness, evidenced by
-  documented model-card fairness assessments) and NIST MEASURE 2.6 (safety,
-  toxicity/jailbreak guardrails at block). Makes the bias axis measurable.
-  Status: TODO
+- **C1b — Bias & safety controls** (ADR-0150): `eu-ai-act@2`, `nist-ai-rmf@2`
+  with fairness (documented model-card assessments) and safety (toxicity at
+  block) controls; demo setup activates the latest versions. With v2 active the
+  bias axis is MEASURED; it reaches 100% only once a model card documents a
+  completed (`assessed`) fairness assessment — C6 seeds one.
+  Status: READY-FOR-REVIEW (self-verified: shared 1102/1102; 12 pack suites 130/130)
 - **C2 — Intake assistant API** `POST /v1/use-cases/intake/assist` — LIVE
   (ADR-0149). Suggestion-only; writes nothing but an audit row. Exact shape
   in §4.2 (updated to the built payload).

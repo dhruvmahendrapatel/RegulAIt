@@ -19,7 +19,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { compliancePacks, createDb, eq, runMigrations, type Db } from "@regulait/db";
+import { and, compliancePacks, createDb, eq, modelCards, runMigrations, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -95,7 +95,11 @@ describe("shape and the gap rule", () => {
 
   it("activating a pack makes its dimensions measured — and bias stays a gap (no default control evidences it)", async () => {
     const before = await dashboard();
-    const [pack] = await db.select().from(compliancePacks).where(eq(compliancePacks.framework, "eu-ai-act"));
+    // v1 explicitly: v2 (ADR-0150) adds a bias control, tested below
+    const [pack] = await db
+      .select()
+      .from(compliancePacks)
+      .where(and(eq(compliancePacks.framework, "eu-ai-act"), eq(compliancePacks.version, 1)));
     expect(pack).toBeDefined();
     // Activation through the route is licence-gated (ADR-0052) and that gate
     // is not this file's subject, so the row is set active directly — the
@@ -111,6 +115,44 @@ describe("shape and the gap rule", () => {
     const bias = after.dimensions.find((x) => x.key === "bias")!;
     expect(bias.measured).toBe(false);
     expect(bias.evidenceCoveragePct).toBeNull();
+  });
+
+  it("ADR-0150: the v2 pack makes bias measured — and only a DOCUMENTED assessment evidences it", async () => {
+    const [v1] = await db.select().from(compliancePacks).where(and(eq(compliancePacks.framework, "eu-ai-act"), eq(compliancePacks.version, 1)));
+    const [v2] = await db.select().from(compliancePacks).where(and(eq(compliancePacks.framework, "eu-ai-act"), eq(compliancePacks.version, 2)));
+    expect(v2).toBeDefined();
+    // one active version per framework — mirror what activation does
+    await db.update(compliancePacks).set({ status: "retired" }).where(eq(compliancePacks.id, v1!.id));
+    await db.update(compliancePacks).set({ status: "active" }).where(eq(compliancePacks.id, v2!.id));
+    try {
+      const measured = (await dashboard()).dimensions.find((x) => x.key === "bias")!;
+      expect(measured.measured).toBe(true);
+      expect(measured.controlsApplicable).toBeGreaterThanOrEqual(1);
+      const evidencedBefore = measured.controlsEvidenced;
+
+      // a card with an assessment still IN PROGRESS is not evidence…
+      const a = await call("POST", "/v1/agents", AUTH, { name: `adr0148-fair-${RUN}`, provider: "mock", tier: 1, modes: ["chat"], model: "m" });
+      const agentId = a.json().id as string;
+      await db.insert(modelCards).values({
+        agentId, intendedUse: `fairness probe ${RUN}`,
+        biasFairness: [{ dimension: "sex", method: "demographic parity", status: "in_progress" }],
+      });
+      const pending = (await dashboard()).dimensions.find((x) => x.key === "bias")!;
+      // (org-wide collector: another suite may already have documented one, so
+      // the claim is "this card did not move it", not an absolute zero)
+      expect(pending.controlsEvidenced).toBe(evidencedBefore);
+
+      // …a completed, documented one is
+      await db.update(modelCards).set({
+        biasFairness: [{ dimension: "sex", method: "demographic parity", status: "assessed", resultRef: "eval-run-1" }],
+      }).where(eq(modelCards.agentId, agentId));
+      const done = (await dashboard()).dimensions.find((x) => x.key === "bias")!;
+      expect(done.controlsEvidenced).toBe(done.controlsApplicable);
+      expect(done.evidenceCoveragePct).toBe(100);
+    } finally {
+      await db.update(compliancePacks).set({ status: "retired" }).where(eq(compliancePacks.id, v2!.id));
+      await db.update(compliancePacks).set({ status: "active" }).where(eq(compliancePacks.id, v1!.id));
+    }
   });
 
   it("is admin-only and refuses an unknown project", async () => {

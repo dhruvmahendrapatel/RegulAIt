@@ -115,6 +115,11 @@ export const EVIDENCE_COLLECTORS = [
    * retention floor, guardrail floor) — evidence that the §8.3 cascade is
    * configured, not merely available */
   "compliance_profile_cascade",
+  /** ADR-0150: model cards that DOCUMENT a completed bias/fairness assessment
+   * (at least one `assessed` entry). Documentation evidence — the platform
+   * records that an assessment was done and where its result lives; it does
+   * not compute or grade fairness itself. */
+  "model_card_fairness",
   /** NOT AUTO-EVIDENCED. Pairs with attestationRequired. */
   "none",
 ] as const;
@@ -1188,3 +1193,76 @@ export const DEFAULT_COMPLIANCE_PACKS: CreateCompliancePackInput[] = [
     ],
   },
 ];
+
+/**
+ * ADR-0150 — SECOND VERSIONS of the EU AI Act and NIST AI RMF packs, adding
+ * the bias and safety controls the trust dashboard's bias and safety axes need
+ * (ADR-0148). New VERSIONS rather than edits: an activated v1 keeps producing
+ * the reports it produced, and activating v2 retires v1 through the normal
+ * activation path with its diff on record (ADR-0087).
+ */
+function nextVersion(
+  framework: string,
+  extra: { titleSuffix: string; note: string; controls: CreateCompliancePackInput["controls"] },
+): CreateCompliancePackInput {
+  const base = DEFAULT_COMPLIANCE_PACKS.find((p) => p.framework === framework && p.version === 1);
+  if (!base) throw new Error(`no v1 '${framework}' pack to extend`);
+  return {
+    ...base,
+    version: 2,
+    title: `${base.title} — ${extra.titleSuffix}`,
+    provenance: { ...base.provenance, note: `${base.provenance.note} v2: ${extra.note}` },
+    controls: [...base.controls, ...extra.controls],
+  };
+}
+
+DEFAULT_COMPLIANCE_PACKS.push(
+  nextVersion("eu-ai-act", {
+    titleSuffix: "v2 adds data-governance bias examination",
+    note: "adds Art. 10(2)(f) examination for possible biases, evidenced by documented model-card fairness assessments.",
+    controls: [
+      {
+        controlRef: "eu-ai-act:art-10-bias-examination",
+        title: "Training, validation and testing data are examined for possible biases",
+        description:
+          "Evidenced by model cards that document a completed bias/fairness assessment (ADR-0063). " +
+          "The platform records that the examination was done and where its result lives; it does " +
+          "not compute disparity metrics itself.",
+        coverage: "evidenced",
+        collector: "model_card_fairness",
+        collectorParams: {},
+        minEvidenceCount: 1,
+        attestationRequired: false,
+        ownerNote: null,
+      },
+    ],
+  }),
+  nextVersion("nist-ai-rmf", {
+    titleSuffix: "v2 adds fairness and safety measurement",
+    note: "adds MEASURE 2.11 (fairness and bias, documented model-card assessments) and MEASURE 2.6 (safety, output-safety guardrails at block).",
+    controls: [
+      {
+        controlRef: "nist-ai-rmf:MEASURE-2.11",
+        title: "Fairness and bias are evaluated and results are documented",
+        coverage: "evidenced",
+        collector: "model_card_fairness",
+        collectorParams: {},
+        minEvidenceCount: 1,
+        attestationRequired: false,
+        ownerNote:
+          "Documentation evidence: counts model cards with a completed fairness assessment, not the " +
+          "assessment's result.",
+      },
+      {
+        controlRef: "nist-ai-rmf:MEASURE-2.6",
+        title: "The AI system is evaluated for safety risks — unsafe output is blocked",
+        coverage: "enforced",
+        collector: "guardrail_configs",
+        collectorParams: { detector: "toxicity", minMode: "block" },
+        minEvidenceCount: 1,
+        attestationRequired: false,
+        ownerNote: "Configuration evidence: a toxicity detector at block somewhere in the guardrail set.",
+      },
+    ],
+  }),
+);
