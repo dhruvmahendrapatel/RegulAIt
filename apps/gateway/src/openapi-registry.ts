@@ -432,6 +432,7 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/reports/overview": "internal",
   // ADR-0082 — the boardroom posture one-pager; internal like the overview.
   "GET /v1/reports/posture": "internal",
+  "GET /v1/reports/trust": "internal",
   "GET /v1/reports/runs": "public-beta",
   "GET /v1/reports/runs/:id": "public-beta",
   "GET /v1/reports/runs/:id/export": "internal",
@@ -1076,6 +1077,7 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/reports/definitions/:id/schedules": "reports",
   "GET /v1/reports/overview": "reports",
   "GET /v1/reports/posture": "reports",
+  "GET /v1/reports/trust": "reports",
   "GET /v1/reports/runs": "reports",
   "GET /v1/reports/runs/:id": "reports",
   "GET /v1/reports/runs/:id/export": "reports",

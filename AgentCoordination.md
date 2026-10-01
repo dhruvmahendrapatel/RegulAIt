@@ -89,10 +89,15 @@ live model is a bonus, never a dependency.
 - **C0 — Coordination + roadmap.** This file; ROADMAP section for the four
   Credo-parity modules and three agentic phases.
   Status: IN-PROGRESS (Claude, 2026-10-01 22:10)
-- **C1 — Trust dashboard API** `GET /v1/reports/trust` (contract §4.1).
-  Six dimensions: bias, security, privacy, reliability, safety, compliance.
-  Per dimension: evidence coverage over active-pack controls mapped to it,
-  open/mitigated risk counts, `measured: false` when nothing maps.
+- **C1 — Trust dashboard API** `GET /v1/reports/trust[?projectId=]` — LIVE
+  (ADR-0148). Admin-only. Exact shape in §4.1 (updated to the built
+  payload). Note for X3: on a default install **bias is unmeasured** (no
+  default control evidences it) — draw the gap; C1b adds real controls.
+  Status: READY-FOR-REVIEW (self-verified: 4/4 + shared 4/4)
+- **C1b — Bias & safety controls**: new pack versions adding EU AI Act
+  Art. 10 bias examination + NIST MEASURE 2.11 (fairness, evidenced by
+  documented model-card fairness assessments) and NIST MEASURE 2.6 (safety,
+  toxicity/jailbreak guardrails at block). Makes the bias axis measurable.
   Status: TODO
 - **C2 — Intake assistant API** `POST /v1/use-cases/intake/assist`
   (contract §4.2). Deterministic tier/framework/risk/control suggestions from
@@ -198,26 +203,35 @@ All under the existing auth (session cookie or Bearer key). Errors use the
 repo's `{ error, detail }` shape. Numbers are never invented: a missing
 measurement is `null` with `measured: false`.
 
-### 4.1 `GET /v1/reports/trust?projectId=<uuid?>`
+### 4.1 `GET /v1/reports/trust?projectId=<uuid?>` — LIVE
 ```json
 {
-  "generatedAt": "2026-10-02T12:00:00Z",
+  "generatedAt": "2026-10-02T12:00:00.000Z",
+  "window": { "start": "...", "end": "...", "days": 30 },
   "scope": { "projectId": null, "label": "Organization" },
+  "packsEvaluated": [ { "framework": "eu-ai-act", "version": 1, "controls": 6 } ],
   "dimensions": [
-    { "key": "security", "label": "Security", "measured": true,
-      "evidenceCoveragePct": 77, "controlsEvidenced": 10, "controlsApplicable": 13,
-      "risks": { "open": 3, "mitigating": 1, "accepted": 0, "closed": 4 } },
-    { "key": "bias", "label": "Bias", "measured": false,
-      "evidenceCoveragePct": null, "controlsEvidenced": 0, "controlsApplicable": 0,
-      "risks": { "open": 1, "mitigating": 0, "accepted": 0, "closed": 0 } }
+    { "key": "bias", "label": "Bias", "measured": false, "evidenceCoveragePct": null,
+      "controlsEvidenced": 0, "controlsApplicable": 0,
+      "risks": { "open": 1, "mitigating": 0, "accepted": 0, "closed": 0 } },
+    { "key": "security", "label": "Security", "measured": true, "evidenceCoveragePct": 77,
+      "controlsEvidenced": 10, "controlsApplicable": 13,
+      "risks": { "open": 3, "mitigating": 1, "accepted": 0, "closed": 4 } }
   ],
-  "totals": { "risksFound": 31, "risksMitigated": 22,
-              "evidenceCoveragePct": 71, "useCases": { "proposed": 2, "under_review": 3, "approved": 4, "rejected": 1, "retired": 0 } },
-  "heatmap": [ { "likelihood": "high", "impact": "high", "count": 2 } ],
-  "definitions": { "evidenceCoveragePct": "controls with current evidence / controls applicable, across active packs, for controls mapped to this dimension" }
+  "totals": { "risksFound": 31, "risksMitigated": 22, "risksAccepted": 2, "risksOpen": 7,
+              "evidenceCoveragePct": 71, "controlsEvidenced": 30, "controlsApplicable": 42,
+              "useCases": { "proposed": 2, "under_review": 3, "approved": 4, "rejected": 1, "retired": 0 } },
+  "heatmap":         [ { "likelihood": "low", "impact": "low", "count": 0 } ],
+  "residualHeatmap": [ { "likelihood": "low", "impact": "low", "count": 0 } ],
+  "definitions": { "evidenceCoveragePct": "...", "risksMitigated": "...", "heatmap": "...", "measured": "..." }
 }
 ```
-Dimension order is fixed: bias, security, privacy, reliability, safety, compliance.
+- `dimensions` always has 6 entries in this order: bias, security, privacy,
+  reliability, safety, compliance.
+- `heatmap`/`residualHeatmap` always have 9 cells (likelihood × impact over
+  low/medium/high), likelihood-major order. Closed risks are excluded.
+- Label the radar value "Evidence coverage", and show the `definitions` text
+  in a tooltip/info popover. Never label it "trust score" or "compliance %".
 
 ### 4.2 `POST /v1/use-cases/intake/assist`
 Request:

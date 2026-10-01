@@ -144,6 +144,7 @@ import { applyModelCardApprovalDecision, registerMrmRoutes } from "./mrm.js";
 import { registerRedTeamRoutes } from "./redteam.js";
 import { registerReportingRoutes } from "./reporting.js";
 import { registerPostureRoutes } from "./posture.js";
+import { registerTrustDashboardRoutes } from "./trust-dashboard.js";
 import { registerPosturePresetRoutes } from "./posture-preset.js";
 import { registerExecutionControlRoutes } from "./execution-control.js";
 import { registerInventoryRoutes } from "./inventory.js";
@@ -3445,6 +3446,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // through the default gate, the ADR-0047 position for an org-scoped report.
   // The anchor sink rides in so tamper resistance is OBSERVED, never config.
   registerPostureRoutes(app, db, ...(opts.auditAnchorSink !== undefined ? [{ sink: opts.auditAnchorSink }] : []));
+  // ADR-0148 — the six-dimension trust dashboard (demo task C1)
+  registerTrustDashboardRoutes(app, db);
   // ADR-0082 — the standing agent dependency inventory: per registered agent,
   // GRANTED (what the entitlement rows allow) vs OBSERVED (what run/usage/
   // trace history recorded), never blended — an aggregation over existing

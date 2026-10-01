@@ -3253,6 +3253,12 @@ export {
   type TransitionRiskInput,
   type UpdateRiskInput,
 } from "./risks.js";
+// ADR-0148 — trust-dimension classification for compliance controls
+export {
+  CONTROL_DIMENSION_OVERRIDES,
+  dimensionForControl,
+  type ControlForDimension,
+} from "./trust-dimensions.js";
 
 // ---------------------------------------------------------------------------
 // ADR-0084 — the AI vendor registry (third-party AI risk): the vocabulary,

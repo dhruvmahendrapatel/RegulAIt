@@ -6,6 +6,7 @@ superseding a decision means a new ADR plus a status flip on the old one.
 
 | ID | Title | Status | Date |
 |---|---|---|---|
+| [0148](0148-trust-dashboard-coverage-by-dimension.md) | Trust dashboard: per-dimension evidence coverage over active packs (gap, not zero, when unmeasured), honest mitigation count, inherent/residual heatmaps. | Accepted | 2026-10-01 |
 | [0147](0147-trust-dimensions-residual-risk-controls.md) | Six trust dimensions over a total category map; bias/safety risk categories with honestly-labelled evidence; declared residual position; risk→pack-control links (migration 0123). | Accepted | 2026-10-01 |
 | [0146](0146-native-semantic-cache-identity.md) | Native semantic-cache key commits to exact request bytes, project, generation options and the serving configuration; routed/fallback answers are not stored (AER-041). | Accepted | 2026-10-01 |
 | [0145](0145-connector-redaction-boundaries.md) | Freeze connector redaction, recheck final sends and withhold changed-policy output. 287 focused tests pass; public mode remains gated. | Accepted; internally implemented | 2026-09-30 |
