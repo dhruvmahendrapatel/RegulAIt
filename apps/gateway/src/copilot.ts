@@ -1466,7 +1466,7 @@ export class ModelBackedNarrator implements CopilotNarrator {
 
 /** the entitlement inputs, the SAME `evaluateAgent` path an ordinary invoke
  * takes — the copilot's narrator is not exempt from anything */
-async function agentDecision(db: Db, userId: string, agent: AgentRow): Promise<AgentDecision> {
+export async function agentDecision(db: Db, userId: string, agent: AgentRow): Promise<AgentDecision> {
   const [grants, roleGrants, revocations, [policy]] = await Promise.all([
     db.select().from(agentGrants).where(eq(agentGrants.userId, userId)),
     loadRoleAgentGrants(db, userId),

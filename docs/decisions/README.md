@@ -6,6 +6,7 @@ superseding a decision means a new ADR plus a status flip on the old one.
 
 | ID | Title | Status | Date |
 |---|---|---|---|
+| [0149](0149-governed-intake-assistant.md) | Suggestion-only intake assistant: deterministic tier/frameworks/risks/controls/draft from the proposer's answers; optional governed model draft, source-labelled. Narrows ADR-0080 §3. | Accepted | 2026-10-01 |
 | [0148](0148-trust-dashboard-coverage-by-dimension.md) | Trust dashboard: per-dimension evidence coverage over active packs (gap, not zero, when unmeasured), honest mitigation count, inherent/residual heatmaps. | Accepted | 2026-10-01 |
 | [0147](0147-trust-dimensions-residual-risk-controls.md) | Six trust dimensions over a total category map; bias/safety risk categories with honestly-labelled evidence; declared residual position; risk→pack-control links (migration 0123). | Accepted | 2026-10-01 |
 | [0146](0146-native-semantic-cache-identity.md) | Native semantic-cache key commits to exact request bytes, project, generation options and the serving configuration; routed/fallback answers are not stored (AER-041). | Accepted | 2026-10-01 |

@@ -84,6 +84,10 @@ import {
   EU_AI_ACT_ANSWERS_FENCE,
   EU_AI_ACT_RULESET_VERSION,
   EU_AI_ACT_SCREENING_DISCLAIMER,
+  buildIntakeNarrativePrompt,
+  intakeAssistRequestSchema,
+  parseIntakeNarrative,
+  suggestIntake,
   type EuAiActReason,
   COMPLIANCE_PACK_DISCLAIMER,
   REPORT_PERIODS,
@@ -95,6 +99,8 @@ import { complianceProfilesForTags, effectiveCompliancePolicy } from "./projects
 // ADR-0058's evaluator, reused rather than reimplemented: a second copy of the
 // collector logic would drift from the one that produces real pack reports.
 import { evaluatePack } from "./compliance-packs.js";
+import { executeGovernedDispatch } from "./agents-connectors.js";
+import { agentDecision } from "./copilot.js";
 import { callerProjectIds, callerTeamIds, resolveScopeProjectIds } from "./reporting.js";
 // ADR-0089 (gap L21): the ONE granted computation and its never-blend note —
 // imported from the inventory, never reimplemented.
@@ -631,6 +637,108 @@ export function registerUseCaseRoutes(
   db: Db,
   opts: UseCaseRouteOptions = {},
 ): void {
+  // -------------------------------------------------------------------------
+  // ADR-0149 — THE INTAKE ASSISTANT. Suggestion-only: this route writes no use
+  // case, no artifact and no risk. The tier, frameworks, risks, controls and a
+  // first draft of every narrative section come from deterministic rules over
+  // the proposer's own answers (`suggestIntake`), so they work with no model
+  // at all. A model draft is OPTIONAL: an ordinary governed dispatch of a
+  // registry agent the caller is entitled to (the copilot's `agentDecision` +
+  // `executeGovernedDispatch` path — PII, guardrails, budget and audit all
+  // apply), and every section says whether its text came from `rules`, a
+  // `mock` provider or a live `model`.
+  // -------------------------------------------------------------------------
+  app.post("/v1/use-cases/intake/assist", async (req, reply) => {
+    const userId = req.authCtx.userId;
+    if (!userId) {
+      return reply.status(403).send({
+        error: "intake_assist_requires_identity",
+        detail: "the assistant drafts on behalf of a person; a token with no user identity cannot propose",
+      });
+    }
+    const body = intakeAssistRequestSchema.parse(req.body ?? {});
+    const suggestions = suggestIntake(body);
+
+    type Narrative =
+      | { status: "not_requested" }
+      | { status: "skipped" | "refused" | "failed" | "unparseable"; reason: string }
+      | { status: "drafted"; source: "model" | "mock"; agentId: string; sections: string[] };
+    let narrative: Narrative = { status: "not_requested" };
+    let questionnaire = suggestions.questionnaire;
+    if (body.draftNarrative) {
+      const [agent] = body.agentId ? await db.select().from(agents).where(eq(agents.id, body.agentId)) : [];
+      if (!agent) {
+        narrative = { status: "skipped", reason: body.agentId ? "unknown agent" : "no agentId supplied" };
+      } else {
+        const decision = await agentDecision(db, userId, agent);
+        if (decision.effect !== "allow") {
+          narrative = { status: "refused", reason: decision.reason };
+        } else {
+          const outcome = await executeGovernedDispatch(db, opts.dataKey, {
+            userId,
+            served: agent,
+            requestedAgentId: agent.id,
+            baseline: null,
+            input: buildIntakeNarrativePrompt(body, suggestions.questionnaire),
+            maxTokens: 4096,
+            projectId: null,
+            detail: { purpose: "intake-assist" },
+          });
+          if (!outcome.ok) {
+            narrative = { status: "failed", reason: `${outcome.error}${outcome.detail ? ` — ${outcome.detail}` : ""}` };
+          } else {
+            const parsed = parseIntakeNarrative(outcome.result.outputText);
+            if (!parsed) {
+              // the rules draft stands; a reply we cannot parse is never shown
+              // as if it were a draft
+              narrative = {
+                status: "unparseable",
+                reason: "the model reply was not the requested JSON; the rule-based draft is shown instead",
+              };
+            } else {
+              const source = agent.provider === "mock" ? ("mock" as const) : ("model" as const);
+              questionnaire = questionnaire.map((s) =>
+                parsed[s.id] ? { ...s, text: parsed[s.id]!, source } : s,
+              );
+              narrative = { status: "drafted", source, agentId: agent.id, sections: Object.keys(parsed) };
+            }
+          }
+        }
+      }
+    }
+
+    // One audit row per assist: counts and outcomes, never the description
+    // text — the proposer has not submitted anything yet.
+    await db.insert(auditLog).values({
+      userId,
+      objectType: "ai_use_case",
+      objectId: null,
+      detail: {
+        phase: "intake-assist",
+        tier: suggestions.tier.value,
+        frameworks: suggestions.frameworks.map((f) => f.framework),
+        riskCategories: suggestions.risks.map((r) => r.category),
+        narrative: narrative.status,
+      },
+      effect: "allow",
+      ruleId: "use-case-intake-assisted",
+      ruleChain: [],
+      reason:
+        `intake assistant suggested tier '${suggestions.tier.value}', ` +
+        `${suggestions.frameworks.length} framework(s) and ${suggestions.risks.length} risk(s); nothing was saved`,
+    });
+
+    return {
+      ...suggestions,
+      questionnaire,
+      narrative,
+      disclaimer:
+        "Suggestions only. Nothing is saved until you submit the questionnaire, and the tier is " +
+        "recomputed server-side from the answers you submit. Rule-based suggestions trace to your " +
+        "answers; model-drafted text is labelled with its source and may be wrong.",
+    };
+  });
+
   // Propose: creates the registry row AND starts its governing intake
   // instance through the one instance-creation path. Non-admin on purpose —
   // proposing a use case is the FRONT door, and the person walking through it

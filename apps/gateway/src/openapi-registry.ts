@@ -624,6 +624,7 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   // ADR-0080 — the AI use-case registry: new surface, internal until the shape settles
   "GET /v1/use-cases": "internal",
   "POST /v1/use-cases": "internal",
+  "POST /v1/use-cases/intake/assist": "internal",
   "GET /v1/use-cases/:useCaseId": "internal",
   // ADR-0123 — the framework mapping. Internal like its siblings until the
   // use-cases surface as a whole is published.
@@ -1237,6 +1238,7 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/usage-events": "usage-events",
   "GET /v1/use-cases": "use-cases",
   "POST /v1/use-cases": "use-cases",
+  "POST /v1/use-cases/intake/assist": "use-cases",
   "GET /v1/use-cases/:useCaseId": "use-cases",
   "GET /v1/use-cases/:useCaseId/frameworks": "use-cases",
   "GET /v1/execution": "org-settings",

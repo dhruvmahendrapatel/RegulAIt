@@ -99,13 +99,10 @@ live model is a bonus, never a dependency.
   documented model-card fairness assessments) and NIST MEASURE 2.6 (safety,
   toxicity/jailbreak guardrails at block). Makes the bias axis measurable.
   Status: TODO
-- **C2 — Intake assistant API** `POST /v1/use-cases/intake/assist`
-  (contract §4.2). Deterministic tier/framework/risk/control suggestions from
-  structured answers (works keyless); optional governed-dispatch draft of the
-  questionnaire narrative, labelled `source: "model"|"mock"|"rules"`.
-  Suggestion-only: nothing is written until a human submits. ADR-0148
-  narrows ADR-0080 §3 ("no AI pre-fill").
-  Status: TODO
+- **C2 — Intake assistant API** `POST /v1/use-cases/intake/assist` — LIVE
+  (ADR-0149). Suggestion-only; writes nothing but an audit row. Exact shape
+  in §4.2 (updated to the built payload).
+  Status: READY-FOR-REVIEW (self-verified: shared 8/8, gateway 4/4)
 - **C3 — Use-case 360 API** `GET /v1/use-cases/:id/overview` (§4.3): use case,
   questionnaire status, tier, frameworks, linked model cards/vendors/agents,
   risks (inherent/residual), approvals, recent audit.
@@ -233,27 +230,50 @@ measurement is `null` with `measured: false`.
 - Label the radar value "Evidence coverage", and show the `definitions` text
   in a tooltip/info popover. Never label it "trust score" or "compliance %".
 
-### 4.2 `POST /v1/use-cases/intake/assist`
-Request:
+### 4.2 `POST /v1/use-cases/intake/assist` — LIVE
+Any signed-in user (not the bootstrap token). Request (strict — unknown keys → 400):
 ```json
-{ "description": "free text from the requester",
-  "answers": { "domain": "credit", "affectsIndividuals": true, "autonomy": "human_in_loop",
-               "dataSensitivity": "confidential", "usesPersonalData": true,
-               "deployment": "internal|customer_facing", "toolsUsed": ["crm.read"] },
-  "draftNarrative": true, "agentId": "<uuid, optional — used only for the model draft>" }
+{ "title": "Credit-limit-increase assistant",
+  "description": "free text",
+  "euAiAct": { "purposeDomain": "essential-services", "affectedPersons": ["customers"],
+               "decisionAutonomy": "human-reviews", "biometricUse": "none",
+               "emotionRecognition": false, "socialScoring": false, "manipulativeTechniques": false,
+               "profilesNaturalPersons": true, "safetyComponent": false,
+               "interactsWithHumans": true, "generatesSyntheticContent": true },
+  "context": { "sectors": ["financial-services"], "dataCategories": ["personal", "financial"],
+               "deployment": "customer-facing", "euNexus": true, "usesExternalVendor": true,
+               "generative": true, "autonomousActions": true, "toolsUsed": ["crm.read"] },
+  "draftNarrative": false, "agentId": "<uuid, optional>" }
 ```
+Enums (import from `@regulait/shared`): `EU_AI_ACT_PURPOSE_DOMAINS`,
+`EU_AI_ACT_AFFECTED_PERSONS`, `EU_AI_ACT_DECISION_AUTONOMY`,
+`EU_AI_ACT_BIOMETRIC_USES`, `INTAKE_SECTORS`, `INTAKE_DATA_CATEGORIES`,
+`INTAKE_DEPLOYMENTS`. Schema: `intakeAssistRequestSchema`.
+
 Response:
 ```json
-{ "tier": { "value": "high", "reasons": ["Annex III 5(b) creditworthiness"], "source": "rules" },
-  "frameworks": [ { "framework": "eu-ai-act", "why": "...", "source": "rules" } ],
-  "risks": [ { "scenarioKey": "credit-disparate-impact", "title": "...", "category": "bias_fairness",
+{ "tier": { "value": "high", "reasons": [ { "ruleId": "...", "tier": "high", "ref": "Annex III ...", "reason": "..." } ],
+            "rulesetVersion": 1, "source": "rules", "disclaimer": "..." },
+  "frameworks": [ { "framework": "eu-ai-act", "title": "...", "why": "...", "source": "rules" } ],
+  "risks": [ { "scenarioKey": "...", "title": "...", "description": "...", "category": "bias_fairness",
                "dimension": "bias", "likelihood": "medium", "impact": "high",
-               "suggestedControls": ["eu-ai-act:art-14-human-oversight"], "source": "rules" } ],
-  "questionnaire": { "sections": [ { "id": "purpose", "text": "...", "source": "mock" } ] },
-  "disclaimer": "Suggestions only. Nothing is saved until you submit." }
+               "suggestedControls": ["eu-ai-act:art-9-risk-management-system"], "why": "...", "source": "rules" } ],
+  "euAiActBlock": "```eu-ai-act-answers\n{...}\n```",
+  "questionnaire": [ { "id": "purpose", "heading": "1. Purpose and business context", "text": "...", "source": "rules" } ],
+  "blocking": null,
+  "narrative": { "status": "not_requested" },
+  "disclaimer": "Suggestions only. ..." }
 ```
-`questionnaire` is present only when `draftNarrative` is true and the caller is
-entitled to the agent; otherwise `questionnaire: null` with `reason`.
+- `narrative.status` ∈ `not_requested | skipped | refused | failed | unparseable | drafted`
+  (`drafted` adds `source: "model"|"mock"`). Show a source badge on every
+  suggestion and section.
+- **Submitting (X1):** create the use case with the EXISTING
+  `POST /v1/use-cases`, then submit the questionnaire markdown (the 8 sections
+  + `euAiActBlock` under "## 9. EU AI Act risk screening") through the existing
+  workflow artifact route; then create accepted risks with `POST /v1/risks`
+  (`useCaseId`) and link controls with `POST /v1/risks/:id/controls`.
+- `blocking` non-null ⇒ show a prominent "prohibited" banner; allow
+  "save as rejected record" rather than submit.
 
 ### 4.3 `GET /v1/use-cases/:id/overview`
 Use case row + `tier`, `questionnaire { submitted, artifactId, submittedAt }`,

@@ -143,6 +143,8 @@ export const NON_ADMIN_ROUTES = new Set([
   // and there is no status-writing route at all, because approved/rejected
   // exist only as decisions of the linked intake instance on the one queue.
   "POST /v1/use-cases",
+  // ADR-0149: any proposer may ask for suggestions; nothing is written
+  "POST /v1/use-cases/intake/assist",
   "GET /v1/use-cases",
   "GET /v1/use-cases/:useCaseId",
   // ADR-0058 mapping view. Non-admin for the same reason the detail route is:

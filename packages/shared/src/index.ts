@@ -3259,6 +3259,25 @@ export {
   dimensionForControl,
   type ControlForDimension,
 } from "./trust-dimensions.js";
+// ADR-0149 — the intake assistant's deterministic half
+export {
+  CATEGORY_SUGGESTED_CONTROLS,
+  INTAKE_DATA_CATEGORIES,
+  INTAKE_DEPLOYMENTS,
+  INTAKE_SECTIONS,
+  INTAKE_SECTORS,
+  buildIntakeNarrativePrompt,
+  composeQuestionnaireDraft,
+  intakeAssistRequestSchema,
+  parseIntakeNarrative,
+  suggestIntake,
+  type FrameworkSuggestion,
+  type IntakeAssistRequest,
+  type IntakeSuggestions,
+  type QuestionnaireSectionDraft,
+  type RiskSuggestion,
+  type SuggestionSource,
+} from "./intake-assist.js";
 
 // ---------------------------------------------------------------------------
 // ADR-0084 — the AI vendor registry (third-party AI risk): the vocabulary,
