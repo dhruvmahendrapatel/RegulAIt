@@ -773,3 +773,51 @@ are defects**, and they should not wait behind anything on this list.
   `/metrics`, a fixed host port and one replica in the compose file, and per-process state outside
   the limiter has not been audited. The accurate sentence is *"the limits are correct across
   processes; the deployment is still single-replica until G2 and G8."*
+
+## 9. AI governance modules — Credo-parity scope, by agentic phase (added 2026-10-01)
+
+Owner-directed scope (2026-10-01): the four platform modules and the three
+agentic-governance phases below are roadmap commitments. Status is from a code
+inventory on 2026-10-01, not from ADR claims; "partial" names what is missing.
+Demo-critical items for 2026-10-05 are tracked in `AgentCoordination.md`
+(task IDs in brackets). Detailed acceptance work stays in
+`CREDO_PARITY_CHECKLIST_2026-09-30.md`.
+
+### Phase 1 — Discover & Register  (module: AI Registry & Discovery)
+
+| Capability | Status | Where / gap |
+|---|---|---|
+| Central inventory: use cases, models, vendors, agents | exists | `use-cases.ts`, `mrm.ts`, `vendors.ts`, `agents-connectors.ts`, `inventory.ts`; no single 360 view [C3, X2] |
+| Agent cards (purpose, tools, data sources, guardrails) | partial | data exists across tables; no card [C5] |
+| Platform & MCP server governance | exists | `mcp-proxy.ts`, `mcp-registry.ts`, admission/egress ADRs |
+| Dependency graph (agents, sub-agents, models, tools, data) | partial | `lineage.ts`; no graph UI, no risk propagation |
+| Shadow-AI discovery and classification | partial | classifies imported evidence (`shadow-ai.ts`); no network scanning; MCP discovery has no UI [X4] |
+| AI-assisted intake & registration | missing | ADR-0080 forbade pre-fill; governed, suggestion-only assistant [C2, X1, ADR-0147] |
+
+### Phase 2 — Assess & Deploy  (modules: Risk Intelligence; Compliance & Policy Engine)
+
+| Capability | Status | Where / gap |
+|---|---|---|
+| Agentic risk assessment library with mapped controls | partial | 9 categories, no scenario library, no bias/safety category [C4, G2] |
+| Inherent → residual risk with control linkage | missing | declared likelihood/impact only [C4] |
+| Policy inheritance and aggregate risk scoring | missing | packs are org-level; no inheritance across connected entities; aggregate view only as six-dimension coverage [C1] |
+| Automated red-teaming and drift detection | partial | `redteam.ts`, `evals.ts`; drift baselines not continuous |
+| Pre-built policy packs: EU AI Act, NIST AI RMF, ISO 42001, SOC 2 (+ ISO 27001 partial, HIPAA, PCI-DSS, FINRA) | exists | `compliance-packs.ts`; per-use-case framework mapping has no UI [X2] |
+| Governance workflows with approval gates | exists | workflows + approvals with separation of duties |
+| Automated evidence generation and audit trails | exists | collectors, hash-chained audit, signed exports (no UI for signed export) [X4] |
+| Custom guardrails and compliance mapping | exists | ADR-0042 guardrails; custom packs |
+| Enforcement integration with CI/CD, CASBs, API gateways | partial | Kong adapter exists; CI/CD and CASB not built |
+
+### Phase 3 — Monitor & Respond  (module: Governance in production)
+
+| Capability | Status | Where / gap |
+|---|---|---|
+| Trace ingestion and continuous evaluation | partial | `tracing.ts`, `evals.ts`; continuous scheduled evaluation of traces not yet |
+| Human-in-the-loop escalation for high-risk actions | exists | approvals, execution modes (ADR-0124), inbox |
+| Remediation agents (GAIA-equivalent) for automated controls | missing | copilot proposes via approvals only (ADR-0056); no remediation agents |
+| Real-time compliance monitoring and alerts | partial | posture report, spend alerts; trust dashboard [C1, X3]; no alert rules on posture change |
+
+Post-demo order (proposal, needs owner confirmation): residual-risk and
+control linkage hardening → dependency graph + risk propagation → continuous
+trace evaluation with alerting → remediation agents behind approvals →
+CI/CD/CASB enforcement adapters → vendor-facing questionnaire portal.
