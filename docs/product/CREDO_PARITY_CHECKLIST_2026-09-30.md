@@ -64,8 +64,12 @@ the immediate implementation sequence.
   is not publicly enabled. ADR-0143 now wires the MCP queue/consume/send path,
   strict destination-schema validation, original/effective data-scope checks,
   final admission generation checks, safe trace capture and result redaction.
-  297 gateway tests passed (39 new). The SPA still needs to render the stored
-  effective-action preview before approvers can review it. Model/connector integration, transitions
+  297 gateway tests passed (39 new). ADR-0144 now presents the effective action
+  in Inbox, Queue and Workbench, records preview provenance/scope, preserves
+  project attribution and invalidates local bulk review on binding changes.
+  85 focused tests and five real browser journeys passed, including approval
+  to actual MCP delivery and mobile layout/keyboard checks. This is not a
+  server guarantee of human attention. Model/connector integration, transitions
   into redaction mid-call, complete final-output policy checks and bounded
   provider/schema handling remain release gates; the full feature is not done.
 - Model-output blocking now covers thinking/tool-call content and callbacks,

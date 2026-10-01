@@ -27,10 +27,12 @@ import {
   Table,
 } from "../../../ui/kit";
 import { OutcomePanel, RemoveButton, optionEls, useAction, useApiAction, useUsers, userOpts } from "../adminKit";
+import { McpActionReview } from "../../approvals/McpActionReview";
+import { inspectApprovalAction } from "../../approvals/approvalReview";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
-const labelOf = (r: Approval) => approvalStageLabel(r) ?? r.stageId ?? r.objectType;
+const labelOf = (r: Approval) => r.objectType === "mcp_tool" ? r.toolName ?? "MCP action" : approvalStageLabel(r) ?? r.stageId ?? r.objectType;
 
 /**
  * Mirrors `APPROVAL_OBJECT_TYPES` in @regulait/shared — the ten kinds THE ONE
@@ -98,6 +100,10 @@ export default function ApprovalsAdminPage() {
   const [rowErrors, setRowErrors] = useState<Record<string, string>>({});
 
   const decide = async (row: Approval, decision: "approved" | "denied") => {
+    if (decision === "approved" && row.objectType === "mcp_tool") {
+      const blocked = inspectApprovalAction(row).blockedReason;
+      if (blocked) { setRowErrors((errors) => ({ ...errors, [row.id]: blocked })); return; }
+    }
     const reason = (reasons[row.id] ?? "").trim();
     const override = me !== row.approverUserId && !row.delegatedFrom;
     setRowErrors((e) => ({ ...e, [row.id]: "" }));
@@ -191,6 +197,7 @@ export default function ApprovalsAdminPage() {
                 align: "right",
                 render: (r) => {
                   if (r.status !== "pending") {
+                    if (r.objectType === "mcp_tool") return <McpActionReview approval={r} />;
                     return r.decisionReason ? (
                       <span className={v.faint} title={r.decisionReason}>
                         “{r.decisionReason.slice(0, 40)}”
@@ -198,8 +205,8 @@ export default function ApprovalsAdminPage() {
                     ) : null;
                   }
                   const override = me !== r.approverUserId && !r.delegatedFrom;
-                  return (
-                    <span className={v.rowTight} style={{ justifyContent: "flex-end" }}>
+                  const controls = (blockedReason: string | null) => (
+                    <span className={v.rowTight} style={{ justifyContent: "flex-end", flexWrap: "wrap" }}>
                       {override && <Badge tone="warn">override</Badge>}
                       {r.selfReview && <Badge tone="warn">self-review</Badge>}
                       <Input
@@ -209,7 +216,7 @@ export default function ApprovalsAdminPage() {
                         value={reasons[r.id] ?? ""}
                         onChange={(e) => setReasons((s) => ({ ...s, [r.id]: e.target.value }))}
                       />
-                      <Button size="sm" variant="primary" disabled={act.busy} onClick={() => void decide(r, "approved")}>
+                      <Button size="sm" variant="primary" disabled={act.busy || !!blockedReason} onClick={() => void decide(r, "approved")}>
                         approve
                       </Button>
                       <Button size="sm" variant="danger" disabled={act.busy} onClick={() => void decide(r, "denied")}>
@@ -220,8 +227,12 @@ export default function ApprovalsAdminPage() {
                           {rowErrors[r.id]}
                         </span>
                       )}
+                      {r.objectType === "mcp_tool" && act.error && <span role="alert">{act.error}</span>}
                     </span>
                   );
+                  return r.objectType === "mcp_tool"
+                    ? <McpActionReview approval={r} controls={controls} />
+                    : controls(null);
                 },
               },
             ]}

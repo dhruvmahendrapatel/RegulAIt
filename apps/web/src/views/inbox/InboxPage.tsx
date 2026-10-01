@@ -25,9 +25,12 @@ import {
   StatusBadge,
 } from "../../ui/kit";
 import { useToast } from "../../ui/toast";
+import { McpActionReview } from "../approvals/McpActionReview";
+import { inspectApprovalAction } from "../approvals/approvalReview";
 import v from "../views.module.css";
 
 const approvalLabel = (a: Approval): string => {
+  if (a.objectType === "mcp_tool") return `MCP action: ${a.toolName ?? "unknown tool"}`;
   const sentinel = approvalStageLabel(a);
   if (sentinel) return sentinel;
   if (a.objectType === "infra_operation")
@@ -88,6 +91,10 @@ export default function InboxPage() {
   });
 
   const decide = async (a: Approval, decision: "approved" | "denied") => {
+    if (decision === "approved" && a.objectType === "mcp_tool") {
+      const blocked = inspectApprovalAction(a).blockedReason;
+      if (blocked) { setRowErrors((errors) => ({ ...errors, [a.id]: blocked })); return; }
+    }
     const reason = (reasons[a.id] ?? "").trim();
     const named = me === a.approverUserId;
     const delegated = Boolean(a.delegatedFrom);
@@ -162,6 +169,15 @@ export default function InboxPage() {
               const canDecide = named || delegated || Boolean(auth?.isAdmin);
               const target = approvalTarget(a);
               const inst = a.instanceId ? instances[a.instanceId] : undefined;
+              const controls = (blockedReason: string | null) => <div className={v.row} style={{ flexWrap: "wrap" }}>
+                <Input style={{ maxWidth: 260 }}
+                  placeholder={named || delegated ? "reason (optional)" : "reason (required - admin override)"}
+                  aria-label="Decision reason" value={reasons[a.id] ?? ""}
+                  onChange={(e) => setReasons((r) => ({ ...r, [a.id]: e.target.value }))} />
+                <Button size="sm" variant="primary" disabled={deciding === a.id || !!blockedReason} onClick={() => void decide(a, "approved")}>Approve</Button>
+                <Button size="sm" variant="danger" disabled={deciding === a.id} onClick={() => void decide(a, "denied")}>Deny</Button>
+                {rowErrors[a.id] && <div className={v.errLine} role="alert">{rowErrors[a.id]}</div>}
+              </div>;
               return (
                 <div key={a.id} className={v.listRow} style={{ flexDirection: "column", alignItems: "stretch", gap: "var(--s1)" }}>
                   <div className={v.row}>
@@ -202,40 +218,12 @@ export default function InboxPage() {
                   {inst && <MergeGateEvidence inst={inst} />}
                   {a.contextConflict && <ConflictPreview conflict={a.contextConflict} />}
                   {canDecide ? (
-                    <div className={v.row}>
-                      <Input
-                        style={{ maxWidth: 260 }}
-                        placeholder={
-                          named || delegated ? "reason (optional)" : "reason (required — admin override)"
-                        }
-                        aria-label="Decision reason"
-                        value={reasons[a.id] ?? ""}
-                        onChange={(e) => setReasons((r) => ({ ...r, [a.id]: e.target.value }))}
-                      />
-                      <Button
-                        size="sm"
-                        variant="primary"
-                        disabled={deciding === a.id}
-                        onClick={() => void decide(a, "approved")}
-                      >
-                        Approve
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="danger"
-                        disabled={deciding === a.id}
-                        onClick={() => void decide(a, "denied")}
-                      >
-                        Deny
-                      </Button>
-                    </div>
+                    a.objectType === "mcp_tool" ? <McpActionReview approval={a} controls={controls} /> : controls(null)
                   ) : (
-                    <span className={v.faint}>awaiting {a.approverName ?? "the named approver"}</span>
-                  )}
-                  {rowErrors[a.id] && (
-                    <div className={v.errLine} role="alert">
-                      {rowErrors[a.id]}
-                    </div>
+                    <>
+                      {a.objectType === "mcp_tool" && <McpActionReview approval={a} />}
+                      <span className={v.faint}>awaiting {a.approverName ?? "the named approver"}</span>
+                    </>
                   )}
                 </div>
               );
@@ -259,6 +247,7 @@ export default function InboxPage() {
                   </div>
                 </div>
                 <StatusBadge status={a.status} />
+                {a.objectType === "mcp_tool" && <McpActionReview approval={a} />}
               </div>
             ))}
           </Card>

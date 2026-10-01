@@ -857,6 +857,8 @@ async function executeGovernedToolCallInner(
             eq(approvals.toolName, toolName),
             eq(approvals.status, "pending"),
             eq(approvals.contextDigest, contextDigest),
+            eq(approvals.argumentsPreviewKind, preparedPii ? "mcp_redacted_v1" : "arguments_v1"),
+            eq(approvals.approvalScope, approvalScope),
             ...(approvalScope === "action"
               ? [eq(approvals.argumentsDigest, argumentsDigest)]
               : []),
@@ -893,6 +895,9 @@ async function executeGovernedToolCallInner(
               // effective snapshot; consent also binds the original digest.
               argumentsDigest,
               argumentsPreview: preparedPii?.argumentsPreview ?? approvalArgumentsPreview(args.arguments),
+              argumentsPreviewKind: preparedPii ? "mcp_redacted_v1" : "arguments_v1",
+              approvalScope,
+              projectId,
               // ADR-0105: the POLICY identity this consent is being asked for,
               // and the clock it dies on. Both stamped HERE, at queue time —
               // the digest so the signature is bound to the policy the

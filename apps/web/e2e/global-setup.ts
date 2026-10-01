@@ -38,10 +38,12 @@ async function waitFor(url: string, ms: number): Promise<void> {
 
 export default async function globalSetup() {
   // 1. fresh scratch database
-  execFileSync("psql", [`${PG}/postgres`, "-v", "ON_ERROR_STOP=1", "-c",
-    `DROP DATABASE IF EXISTS ${DB_NAME} WITH (FORCE)`]);
-  execFileSync("psql", [`${PG}/postgres`, "-v", "ON_ERROR_STOP=1", "-c",
-    `CREATE DATABASE ${DB_NAME}`]);
+  if (!/^[a-z][a-z0-9_]*$/.test(DB_NAME)) throw new Error("Invalid scratch database identifier");
+  // Windows psql stops parsing options at the first positional argument.
+  execFileSync("psql", ["-v", "ON_ERROR_STOP=1", "-c",
+    `DROP DATABASE IF EXISTS ${DB_NAME} WITH (FORCE)`, `${PG}/postgres`]);
+  execFileSync("psql", ["-v", "ON_ERROR_STOP=1", "-c",
+    `CREATE DATABASE ${DB_NAME}`, `${PG}/postgres`]);
 
   // The suite licenses itself, with an EPHEMERAL key the seeder mints and
   // throws away (see seed.ts). Without it, tier-gated features default CLOSED
@@ -113,6 +115,7 @@ export default async function globalSetup() {
     env,
     stdio: ["ignore", "pipe", "pipe"],
     detached: true,
+    windowsHide: true,
   });
   child.stdout.pipe(log);
   child.stderr.pipe(log);

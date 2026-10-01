@@ -2676,7 +2676,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     const instanceIds = ids(rows.map((r) => r.instanceId));
     const runIds = ids(rows.map((r) => r.runId));
     const projectIds = ids(rows.map((r) => r.projectId));
-    const [userRows, instanceRows, runRows, projectRows] = await Promise.all([
+    const approvalServerIds = ids(rows.map((r) => r.serverId));
+    const [userRows, instanceRows, runRows, projectRows, approvalServerRows] = await Promise.all([
       userIds.length
         ? db
             .select({ id: users.id, displayName: users.displayName, email: users.email })
@@ -2701,6 +2702,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
             .from(projects)
             .where(inArray(projects.id, projectIds))
         : [],
+      approvalServerIds.length
+        ? db.select({ id: mcpServers.id, name: mcpServers.name }).from(mcpServers).where(inArray(mcpServers.id, approvalServerIds))
+        : [],
     ]);
     const nameOf = new Map(userRows.map((u) => [u.id, u.displayName || u.email]));
     const instanceLabel = new Map(
@@ -2708,6 +2712,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     );
     const runLabel = new Map(runRows.map((r) => [r.id, r.name]));
     const projectLabel = new Map(projectRows.map((p) => [p.id, p.name]));
+    const approvalServerLabel = new Map(approvalServerRows.map((s) => [s.id, s.name]));
     // ADR-0022 UX: infra_operation rows finally say WHAT they govern. Their
     // stageId sentinel carries the finding/ledger id — resolve it to the
     // resource plus a one-line finding/action summary, same enrichment
@@ -2881,6 +2886,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     return {
       approvals: rows.map((r) => ({
         ...r,
+        serverName: r.serverId ? approvalServerLabel.get(r.serverId) ?? null : null,
+        projectName: r.projectId ? projectLabel.get(r.projectId) ?? null : null,
         // Finding-6 separation-of-duties surface: the person who would sign
         // IS the user who triggered the governed action — the UI badges it,
         // deciding it requires a recorded reason. Three ways that happens,

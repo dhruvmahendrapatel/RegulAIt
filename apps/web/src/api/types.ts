@@ -381,6 +381,15 @@ export interface Approval {
   runId?: string | null;
   projectId?: string | null;
   toolName?: string | null;
+  serverId?: string | null;
+  serverName?: string | null;
+  projectName?: string | null;
+  argumentsDigest?: string | null;
+  argumentsPreview?: unknown;
+  argumentsPreviewKind?: "arguments_v1" | "mcp_redacted_v1" | null;
+  approvalScope?: "action" | "tool" | null;
+  contextDigest?: string | null;
+  expiresAt?: string | null;
   selfReview?: boolean;
   requestedByName?: string | null;
   approverName?: string | null;

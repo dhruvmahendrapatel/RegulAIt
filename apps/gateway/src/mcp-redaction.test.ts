@@ -116,6 +116,11 @@ describe("MCP redacted execution, real upstream and database", () => {
     expect(queued.kind).toBe("approval_required");
     if (queued.kind !== "approval_required") throw new Error("not queued");
     const [row] = await db.select().from(approvals).where(eq(approvals.id, queued.approvalId));
+    expect(row).toMatchObject({ argumentsPreviewKind: "mcp_redacted_v1", approvalScope: "action", projectId: f.projectId });
+    const queueView = await app.inject({ method: "GET", url: "/v1/approvals?status=pending", headers: AUTH });
+    expect(queueView.statusCode).toBe(200);
+    const presented = queueView.json().approvals.find((item: { id: string }) => item.id === row!.id);
+    expect(presented).toMatchObject({ argumentsPreviewKind: "mcp_redacted_v1", approvalScope: "action", projectName: f.name, serverName: `redact-${RUN}` });
     expect(JSON.stringify(row!.argumentsPreview)).toContain(SAFE);
     expect(JSON.stringify(row!.argumentsPreview)).not.toContain(RAW);
     expect(row!.argumentsDigest).not.toBe(approvalArgumentsDigest({ projectId: f.projectId, arguments: { text: RAW } }));
@@ -289,5 +294,31 @@ describe("MCP redacted execution, real upstream and database", () => {
   it("public configuration still refuses this incomplete feature", async () => {
     const result = await app.inject({ method: "POST", url: "/v1/compliance/profiles", headers: AUTH, payload: { tag: `public-${RUN}`, piiMode: "redact" } });
     expect(result.statusCode).toBe(400);
+  });
+
+  it("new MCP rows preserve project attribution for the bulk sensitivity fence", async () => {
+    const f = await fixture();
+    await f.mode("block");
+    const queued = await f.call({ text: "clean" });
+    expect(queued.kind).toBe("approval_required");
+    if (queued.kind !== "approval_required") throw new Error("not queued");
+    const key = await post(`/v1/users/${approverId}/keys`, { name: "bulk-review-test" });
+    const bulk = await app.inject({ method: "POST", url: "/v1/approvals/bulk", headers: { authorization: `Bearer ${key.token}` },
+      payload: { approvalIds: [queued.approvalId], decision: "approved", reason: "test sensitivity attribution" } });
+    expect(bulk.statusCode).toBe(207);
+    expect(bulk.json().results).toContainEqual(expect.objectContaining({ approvalId: queued.approvalId, error: "bulk_forbidden_sensitive", ok: false }));
+    expect((await db.select().from(approvals).where(eq(approvals.id, queued.approvalId)))[0]!.status).toBe("pending");
+  });
+
+  it("unknown historical review metadata is not reused for a fresh pending request", async () => {
+    const f = await fixture();
+    const first = await f.call();
+    if (first.kind !== "approval_required") throw new Error("not queued");
+    await db.update(approvals).set({ argumentsPreviewKind: null, approvalScope: null }).where(eq(approvals.id, first.approvalId));
+    const fresh = await f.call();
+    expect(fresh.kind).toBe("approval_required");
+    if (fresh.kind !== "approval_required") throw new Error("not queued");
+    expect(fresh.approvalId).not.toBe(first.approvalId);
+    expect((await db.select().from(approvals).where(eq(approvals.id, fresh.approvalId)))[0]!.argumentsPreviewKind).toBe("mcp_redacted_v1");
   });
 });

@@ -4,7 +4,7 @@ last_updated: 2026-09-30
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
-last_session: sessions/2026-09-30-session-04.md
+last_session: sessions/2026-09-30-session-05.md
 roadmap: ../docs/product/ROADMAP.md
 ---
 
@@ -21,9 +21,19 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
-**2026-09-30 - Approver action review in progress (ADR-0144).** This chapter
-owns approval presentation and migration 0121. It closes the missing UI
-preview without enabling the still-incomplete public redaction policy.
+**2026-09-30 - Approver action review implemented (ADR-0144).** Migration
+0121 records preview provenance and consent scope without inventing legacy
+facts. MCP approvals retain project attribution for bulk sensitivity checks.
+One review dialog now serves Inbox, Approvals Queue and Workbench; bulk
+approvals require a current local review, and malformed/legacy/expired rows
+remain deniable but cannot be approved through these screens. 85 focused
+tests and five real browser journeys passed, including UI approval -> real
+MCP effective-payload delivery, stale-binding refusal, and desktop/mobile
+keyboard/layout checks. DB/gateway builds and web typecheck/build passed.
+Prior commit `6d8f940` is confirmed CI and integration green. Current batch
+CI awaits its push. Public redaction remains disabled; next work is prepared
+model/connector integration and final output-policy/resource-bound gates,
+then residual P1 verification and P3 delivery. Broad Credo parity is open.
 
 **2026-09-30 - MCP redacted-action integration (ADR-0143).** Migration 0120
 stores admitted input schemas and extends policy-generation invalidation.
@@ -37,9 +47,9 @@ typecheck, DB build and pinned frozen/offline lockfile validation passed.
 Retry/breaker fixtures now use real HTTP after fake-socket close errors made
 an earlier assertion-only pass insufficient. A temporary control-removal
 mutation was blocked by the safety reviewer and was not applied. Previous
-commit `57aadb7` is confirmed CI and integration green; this batch's CI awaits
-the push. Public redaction settings remain disabled. The SPA does not yet
-render the stored `argumentsPreview`; this is the next operator-facing gate.
+commit `57aadb7` was confirmed CI and integration green; `6d8f940` is now
+confirmed green too (runs 36792230546 and 36792230566). Public redaction settings
+remain disabled. ADR-0144 subsequently closed the stored-preview UI gap.
 Model/connector wiring,
 mid-call policy transitions, provider/schema resource bounds, the residual P1
 verification, P3 integrations and full Credo workflow parity remain open.

@@ -21,6 +21,9 @@ export default defineConfig({
   use: {
     baseURL: process.env.E2E_BASE_URL ?? "http://127.0.0.1:3105",
     browserName: "chromium",
+    launchOptions: process.env.E2E_CHROMIUM_EXECUTABLE
+      ? { executablePath: process.env.E2E_CHROMIUM_EXECUTABLE }
+      : undefined,
     viewport: { width: 1400, height: 900 },
     trace: "retain-on-failure",
   },

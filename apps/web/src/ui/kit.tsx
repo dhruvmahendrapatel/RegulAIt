@@ -577,6 +577,7 @@ export function Table<T>(props: {
 export function Modal(props: {
   open: boolean;
   title: string;
+  className?: string;
   children?: ReactNode;
   onClose: () => void;
   actions?: ReactNode;
@@ -598,7 +599,7 @@ export function Modal(props: {
   return (
     <div className={s.scrim} onMouseDown={(e) => e.target === e.currentTarget && props.onClose()}>
       <div
-        className={[s.modal, props.wide ? s.modalWide : ""].join(" ")}
+        className={[s.modal, props.wide ? s.modalWide : "", props.className ?? ""].join(" ")}
         role="dialog"
         aria-modal="true"
         aria-label={props.title}

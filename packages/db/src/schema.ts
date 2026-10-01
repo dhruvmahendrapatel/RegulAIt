@@ -1287,6 +1287,9 @@ export const approvals = pgTable(
     /** the SCRUBBED (ADR-0099) rendering of those same arguments — what the
      * approver actually reads. Never the input to the digest. */
     argumentsPreview: jsonb("arguments_preview"),
+    /** ADR-0144: issuance facts, never inferred from caller-controlled preview keys. */
+    argumentsPreviewKind: text("arguments_preview_kind", { enum: ["arguments_v1", "mcp_redacted_v1"] }),
+    approvalScope: text("approval_scope", { enum: ["action", "tool"] }),
     // ADR-0105 (migration 0107) — CONSENT CONTEXT + EXPIRY. Both NULLABLE for
     // the same reason ADR-0104's pair is: a row queued before 0107 has
     // neither, and inventing either would be manufacturing a fact nobody
@@ -1308,6 +1311,9 @@ export const approvals = pgTable(
   },
   (t) => [
     index("approvals_status_idx").on(t.status),
+    check("approvals_preview_kind_check", sql`${t.argumentsPreviewKind} IN ('arguments_v1', 'mcp_redacted_v1')`),
+    check("approvals_scope_check", sql`${t.approvalScope} IN ('action', 'tool')`),
+    check("approvals_redacted_scope_check", sql`${t.argumentsPreviewKind} IS DISTINCT FROM 'mcp_redacted_v1' OR ${t.approvalScope} IS NOT DISTINCT FROM 'action'`),
     index("approvals_user_server_tool_idx").on(t.userId, t.serverId, t.toolName),
     // the shape of ADR-0104's matcher lookup
     index("approvals_payload_binding_idx").on(
