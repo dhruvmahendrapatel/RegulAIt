@@ -69,9 +69,13 @@ the immediate implementation sequence.
   project attribution and invalidates local bulk review on binding changes.
   85 focused tests and five real browser journeys passed, including approval
   to actual MCP delivery and mobile layout/keyboard checks. This is not a
-  server guarantee of human attention. Model/connector integration, transitions
-  into redaction mid-call, complete final-output policy checks and bounded
-  provider/schema handling remain release gates; the full feature is not done.
+  server guarantee of human attention. ADR-0145 integrates frozen connector
+  payloads, final-send admission checks and policy-change output withholding,
+  including transitions from non-redact modes. 287 focused gateway tests pass,
+  including 23 connector boundary tests using real loopback HTTP/webhook calls.
+  This is not live-vendor coverage. Model integration, MCP mid-call transitions,
+  complete final-output policy checks and bounded provider/schema handling
+  remain release gates; the full feature is not done.
 - Model-output blocking now covers thinking/tool-call content and callbacks,
   with 204 gateway regressions and a four-case negative control (ADR-0142).
   This closes enumerated leaks in existing block mode, not all redaction gates.

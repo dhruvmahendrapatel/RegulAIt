@@ -268,7 +268,7 @@ export function flattenFindings(findings: readonly GuardrailFinding[]): Dispatch
  * never masquerade as denials.
  */
 export async function recordGuardrailDecision(
-  db: Db,
+  db: Pick<Db, "insert">,
   args: {
     userId: string;
     objectType: "agent" | "connector" | "mcp_server";

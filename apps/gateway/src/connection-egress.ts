@@ -119,6 +119,7 @@ export type ConnectionSurface = "connector" | "git_connection" | "pm_connection"
 export interface ConnectionEgressDeps {
   resolve?: EgressResolver;
   fetchImpl?: typeof fetch;
+  beforeSend?: () => Promise<void>;
 }
 
 export interface ConnectionEgressCheck {
@@ -195,6 +196,7 @@ export function connectionGuardedFetch(
     allowList,
     ...(deps.resolve ? { resolve: deps.resolve } : {}),
     ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
+    ...(deps.beforeSend ? { beforeSend: deps.beforeSend } : {}),
   });
 }
 

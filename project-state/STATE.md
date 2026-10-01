@@ -4,7 +4,7 @@ last_updated: 2026-09-30
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
-last_session: sessions/2026-09-30-session-05.md
+last_session: sessions/2026-09-30-session-06.md
 roadmap: ../docs/product/ROADMAP.md
 ---
 
@@ -21,10 +21,20 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
-**2026-09-30 - Connector redaction boundaries in progress (ADR-0145).** This
-chapter owns connector invocation, final-send hooks and migration 0122.
-Public redaction remains gated. The prior approval review chapter is pushed
-as `03aaea7`; CI 36794552034 and Integrations 36794551926 are in progress.
+**2026-09-30 - Internal connector redaction implemented (ADR-0145).** Migration
+0122 invalidates connector admissions on configuration, entitlement and egress
+changes. Frozen effective payloads reach adapters; routing identity is never
+rewritten. Final-send checks refuse stale calls, and mid-call/response-release
+changes withhold results without replay. Evidence contains effective content
+or fixed refusal messages; completed calls retain honest billing. 287 tests
+across 13 files passed, including 23 new connector tests; gateway typecheck/build,
+DB build and whitespace checks passed. Public redaction remains disabled:
+model integration, MCP mid-call output checks and provider resource bounds
+remain open. CI 36794869504 on design commit `96c60b3` failed only two spend
+fixtures that seeded future entries before 06:00 UTC on month start. The fixture
+is corrected with a deterministic regression test; new remote CI is pending.
+Integrations 36794869524 passed. Prior `03aaea7` CI was cancelled by the design
+push; its Integrations 36794551926 passed. P1/P3 and broader parity remain open.
 
 **2026-09-30 - Approver action review implemented (ADR-0144).** Migration
 0121 records preview provenance and consent scope without inventing legacy

@@ -1,6 +1,6 @@
 # ADR-0145: Connector Redaction Boundaries
 
-Status: Accepted (implementation in progress)
+Status: Accepted (internal connector path implemented; public mode gated)
 Date: 2026-09-30
 
 ## Decision
@@ -36,7 +36,17 @@ provider collection safety, retroactive cancellation or distributed atomic
 network side effects. Connector adapter validation remains in place; these
 are decoded payloads, not a proof about arbitrary vendor behavior.
 
-Verify the real HTTP connector route, received effective bytes, unchanged
-destination, final-send policy changes, mid-call output policy changes,
-ledger/trace leakage, billing, concurrent callers and adjacent egress/PII
-regressions. Record results before marking implementation complete.
+Verification: 287 tests passed across 13 gateway files on a fresh PostgreSQL
+database, including 23 connector boundary tests. Real loopback HTTP/webhook
+fixtures verify received effective bytes, unchanged routing, final-send grant,
+destination and mode changes, mid-call and response-release policy changes,
+safe evidence, completed-call billing and independent concurrent callers.
+Sensitive redirects remain egress refusals without exposing their locations.
+Gateway typecheck/build, DB build and whitespace checks passed.
+
+This is fixture-tested adapter integration, not a live vendor matrix. Routing
+identifiers containing PII are refused, so redaction is not usable for every
+connector object shape. The global epoch intentionally over-invalidates calls
+when unrelated governance changes occur. Provider collection/cancellation
+bounds, model integration and MCP mid-call output transitions remain separate
+release gates. No automatic replay or rollback of external effects is claimed.
