@@ -76,6 +76,7 @@ const fixtures = (): DemoIntakeFixtures => ({
     { key: "r1", useCaseKey: "approved", title: `c6 mitigated ${RUN}`, description: "s", category: "hallucination", likelihood: "high", impact: "medium", targetStatus: "mitigating", residual: { likelihood: "low", impact: "medium" }, controls: ["eu-ai-act:art-15-accuracy-robustness"] },
     { key: "r2", useCaseKey: "approved", vendorKey: "va", title: `c6 accepted ${RUN}`, description: "s", category: "third_party_ai", likelihood: "low", impact: "medium", targetStatus: "accepted", controls: [], acceptanceNote: "carried knowingly" },
     { key: "r3", useCaseKey: "approved", title: `c6 closed ${RUN}`, description: "s", category: "prompt_injection", likelihood: "medium", impact: "medium", targetStatus: "closed", controls: ["soc-2:CC7.2-monitoring"], closeReason: "feature removed" },
+    { key: "r5", vendorKey: "va", title: `c6 vendor-only ${RUN}`, description: "s", category: "third_party_ai", likelihood: "high", impact: "high", targetStatus: "open", controls: [] },
     { key: "r4", useCaseKey: "review", title: `c6 open bias ${RUN}`, description: "s", category: "bias_fairness", likelihood: "medium", impact: "high", targetStatus: "open", controls: [] },
   ],
   modelCards: [
@@ -132,6 +133,9 @@ describe("seedDemoIntake", () => {
     expect(rs("accepted").vendorId).toBeTruthy();
     expect(rs("closed").status).toBe("closed");
     expect(rs("open bias").status).toBe("open");
+    // a vendor-only risk carries no use case, so the graph shows it as inherited
+    expect(rs("vendor-only").vendorId).toBeTruthy();
+    expect(rs("vendor-only").useCaseId).toBeNull();
 
     const cards = await db.select().from(modelCards).where(eq(modelCards.intendedUse, `c6 card ${RUN}`));
     expect(cards).toHaveLength(1);
@@ -142,6 +146,6 @@ describe("seedDemoIntake", () => {
     const second = await seedDemoIntake(app, fixtures(), { bootstrapToken: BOOT });
     expect(second.failed, second.failed.join("\n")).toEqual([]);
     expect(second.created.filter((c) => !c.startsWith("shadow-AI"))).toEqual([]);
-    expect(second.skipped.length).toBeGreaterThanOrEqual(3 + 5 + 4 + 1);
+    expect(second.skipped.length).toBeGreaterThanOrEqual(3 + 5 + 5 + 1);
   }, 120_000);
 });

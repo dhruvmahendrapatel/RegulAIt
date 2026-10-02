@@ -220,19 +220,22 @@ export async function seedDemoIntake(
   // --- risks -----------------------------------------------------------------------------
   const riskList: Json[] = (await call("GET", "/v1/risks", undefined, ada.auth)).body.risks ?? [];
   for (const k of fixtures.risks) {
-    const ucId = useCaseId.get(k.useCaseKey);
-    if (!ucId) {
-      report.notes.push(`risk '${k.title}': use case '${k.useCaseKey}' was not seeded`);
+    const ucId = k.useCaseKey ? useCaseId.get(k.useCaseKey) : undefined;
+    const vId = k.vendorKey ? vendorId.get(k.vendorKey) : undefined;
+    if ((k.useCaseKey && !ucId) || (k.vendorKey && !vId) || (!ucId && !vId)) {
+      report.notes.push(
+        `risk '${k.title}': subject not seeded (use case '${k.useCaseKey ?? "-"}', vendor '${k.vendorKey ?? "-"}')`,
+      );
       continue;
     }
-    if (riskList.some((x) => x.title === k.title && x.useCaseId === ucId)) {
+    if (riskList.some((x) => x.title === k.title && (x.useCaseId ?? null) === (ucId ?? null) && (x.vendorId ?? null) === (vId ?? null))) {
       report.skipped.push(`risk ${k.title}`);
       continue;
     }
-    const vId = k.vendorKey ? vendorId.get(k.vendorKey) : undefined;
     const r = await call("POST", "/v1/risks", {
       title: k.title, description: k.description, category: k.category,
-      likelihood: k.likelihood, impact: k.impact, useCaseId: ucId,
+      likelihood: k.likelihood, impact: k.impact,
+      ...(ucId ? { useCaseId: ucId } : {}),
       ...(k.mitigation ? { mitigation: k.mitigation } : {}),
       ...(vId ? { vendorId: vId } : {}),
       ...(demoProject ? { projectId: demoProject.id } : {}),

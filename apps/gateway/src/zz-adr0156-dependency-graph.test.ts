@@ -53,7 +53,7 @@ beforeAll(async () => {
     .insert(users)
     .values({ email: `g156-${RUN}@example.com`, displayName: "Graph owner" })
     .returning({ id: users.id });
-  ids.owner = owner.id;
+  ids.owner = owner!.id;
 
   const [a] = await db
     .insert(agents)
@@ -63,8 +63,8 @@ beforeAll(async () => {
     .insert(agents)
     .values({ name: `g156-agent-b-${RUN}`, provider: "mock", tier: 1, model: `g156-other-${RUN}` })
     .returning({ id: agents.id });
-  ids.agentA = a.id;
-  ids.agentB = b.id;
+  ids.agentA = a!.id;
+  ids.agentB = b!.id;
   modelKeyA = `model:mock:g156-model-${RUN}`;
 
   const [uc] = await db
@@ -78,7 +78,7 @@ beforeAll(async () => {
       intendedAgentIds: [ids.agentA],
     })
     .returning({ id: aiUseCases.id });
-  ids.useCase = uc.id;
+  ids.useCase = uc!.id;
 
   const [v] = await db
     .insert(aiVendors)
@@ -90,13 +90,13 @@ beforeAll(async () => {
       linkedAgentProviders: ["mock"],
     })
     .returning({ id: aiVendors.id });
-  ids.vendor = v.id;
+  ids.vendor = v!.id;
 
   const [srv] = await db
     .insert(mcpServers)
     .values({ name: `g156-mcp-${RUN}`, url: "https://mcp.example.invalid" })
     .returning({ id: mcpServers.id });
-  ids.server = srv.id;
+  ids.server = srv!.id;
 
   // observed: one tool span under an llm span carrying agent A
   const [t] = await db
@@ -105,11 +105,11 @@ beforeAll(async () => {
     .returning({ id: traces.id });
   const [parent] = await db
     .insert(traceSpans)
-    .values({ traceId: t.id, seq: 0, kind: "llm", name: "dispatch", startedAt: new Date(), agentId: ids.agentA })
+    .values({ traceId: t!.id, seq: 0, kind: "llm", name: "dispatch", startedAt: new Date(), agentId: ids.agentA })
     .returning({ id: traceSpans.id });
   await db.insert(traceSpans).values([
-    { traceId: t.id, parentSpanId: parent.id, seq: 1, kind: "tool", name: "lookup", startedAt: new Date(), mcpServerId: ids.server },
-    { traceId: t.id, parentSpanId: parent.id, seq: 2, kind: "tool", name: "lookup", startedAt: new Date(), mcpServerId: ids.server },
+    { traceId: t!.id, parentSpanId: parent!.id, seq: 1, kind: "tool", name: "lookup", startedAt: new Date(), mcpServerId: ids.server },
+    { traceId: t!.id, parentSpanId: parent!.id, seq: 2, kind: "tool", name: "lookup", startedAt: new Date(), mcpServerId: ids.server },
   ]);
 
   const risk = (v: Partial<typeof aiRisks.$inferInsert>) => ({
@@ -134,8 +134,8 @@ beforeAll(async () => {
       risk({ agentId: ids.agentB, likelihood: "medium", impact: "high", status: "accepted", acceptanceNote: "carried knowingly", acceptedByUserId: ids.owner, acceptedAt: new Date() }),
     ])
     .returning({ id: aiRisks.id });
-  ids.riskVendor = inserted[0].id;
-  ids.riskAgent = inserted[1].id;
+  ids.riskVendor = inserted[0]!.id;
+  ids.riskAgent = inserted[1]!.id;
 }, 120_000);
 
 afterAll(async () => {

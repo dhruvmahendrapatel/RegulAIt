@@ -1245,3 +1245,15 @@ Rule: any change that adds an `app.delete(...)` route runs
 `node scripts/preflight-ui-affordances.mjs` before push. If the button belongs
 to another agent's surface, add a TEMPORARY `DELIBERATELY_API_ONLY` entry that
 names the owning task, and make deleting it part of that task's acceptance.
+
+### M-054 (2026-10-02) - Typechecked before writing the test, not after
+
+ADR-0156: `tsc --noEmit` ran clean on the gateway, then the integration test
+was written and only run through vitest (which strips types). The test's
+`const [row] = await db.insert(...).returning()` destructures violate
+`noUncheckedIndexedAccess`; the error surfaced only on the next commit's
+typecheck.
+
+Rule: the gateway typecheck runs AFTER the last file of a change is written,
+immediately before commit — never as an intermediate step that later edits
+can invalidate.

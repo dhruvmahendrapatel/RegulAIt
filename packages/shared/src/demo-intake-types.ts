@@ -57,7 +57,10 @@ export interface DemoUseCase {
 
 export interface DemoRisk {
   key: string;
-  useCaseKey: string;
+  /** at least one of useCaseKey / vendorKey. A VENDOR-ONLY risk (no use case)
+   * is how the dependency graph (ADR-0156) shows a use case INHERITING a
+   * rating from its vendor instead of carrying it itself. */
+  useCaseKey?: string;
   vendorKey?: string;
   title: string;
   description: string;
