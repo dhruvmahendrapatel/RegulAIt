@@ -3351,6 +3351,23 @@ export {
   type RegulatoryUseCaseInput,
 } from "./regulatory-intel.js";
 
+// ADR-0159 — remediation proposals for monitor alerts (executable kinds run
+// only after a different human approves them on the approvals queue).
+export {
+  EXECUTABLE_REMEDIATION_KINDS,
+  GUIDANCE_REMEDIATION_KINDS,
+  REMEDIATION_KINDS,
+  REMEDIATION_STATUSES,
+  isExecutableRemediation,
+  proposeRemediations,
+  type ExecutableRemediationKind,
+  type RemediationCandidate,
+  type RemediationContext,
+  type RemediationKind,
+  type RemediationRiskInput,
+  type RemediationStatus,
+} from "./remediation.js";
+
 // ---------------------------------------------------------------------------
 // ADR-0084 — the AI vendor registry (third-party AI risk): the vocabulary,
 // the request shapes, and the attested-never-measured disclaimer. `status` is

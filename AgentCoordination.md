@@ -15,7 +15,7 @@ this line and every milestone moves with it.)
 
 | Agent | Now | Next | ETA (UTC) | Last check-in (UTC) | Blocked on |
 |---|---|---|---|---|---|
-| Claude | C10 remediation proposals | reviews at :00 | C10 10-02 05:00 | 10-02 02:30 | — |
+| Claude | C11 continuous trace evaluation (next) | reviews at :02 | — | 10-02 02:55 | — |
 | Codex | X3 / X1 | X2 → X4 → X5 → X7 → X8 | — | 10-02 01:15 | — |
 | Gemini | G1 risks rewrite | G3 corrections → G5 → G4 | — | 10-02 01:50 | — |
 
@@ -62,8 +62,11 @@ Rules:
    | Gemini | `packages/shared/src/demo-intake/**`, `docs/product/DEMO_SCRIPT_2026-10-05.md`, `docs/product/DEMO_TALK_TRACK_2026-10-05.md` |
 
 3. **Number reservations** (§4.1/4.2 — never take an unreserved number):
-   - Migrations: Claude `0123`–`0124` (journal `when` 1785058000000, 1785059000000);
-     Codex `0125`–`0126` (1785060000000, 1785061000000); Gemini none.
+   - Migrations: Claude only — `0123`–`0125` used (`when` 1785058000000,
+     1785059000000, 1785060000000); next `0126`–`0130` (`when` +1000000 each).
+     Codex and Gemini own no `packages/db` files, so they take none (the
+     earlier Codex reservation is retired: an out-of-order `when` is silently
+     skipped by the migrator — CONTRIBUTING_PARALLEL_SESSIONS §4).
      **Never run `drizzle-kit generate`.**
    - ADRs: Claude `0147`–`0150` (all used) and `0156`–`0160`; Codex `0151`–`0153`;
      Gemini `0154`–`0155`.
@@ -201,8 +204,8 @@ live model is a bonus, never a dependency.
   monitor alert, a deterministic remediation proposal (link control X,
   request model-card approval, assign an owner, re-assess vendor) that a human
   approves on the existing approvals queue; nothing executes without
-  approval. Contract §4.7 (published before build).
-  Status: TODO (Claude, after C9)
+  approval. Contract §4.7.
+  Status: READY-FOR-REVIEW (self-verified: 5 shared + 4 integration tests) — LIVE
 
 ### Codex — web UI (apps/web), browser verification
 
@@ -254,6 +257,11 @@ and an explicit "unmeasured" state.
   link (use case → X2 page, agent → agent card, vendor → vendor page), detail
   panel showing `detail.path` for inherited-risk alerts, "Acknowledge" with a
   required note, and "Evaluate now" (POST evaluate) with the result counts.
+  **Plus C10 (§4.7):** in the alert detail, a "Remediation" panel listing
+  `candidates` — executable ones with "Propose…" (pick an approver ≠ you) and
+  guidance ones as numbered steps — and this alert's `proposals` with status.
+  Also add `remediation` to the approval-kind mirror in
+  `ApprovalsAdminPage.tsx` (it says "ten kinds"; there are now eleven).
   Status: TODO (contract live by 10-02 06:00 UTC; build against §4.5 example)
 - **X8 — "Add risk from library"** on the risk register and X2 Risks tab: a
   searchable picker over G2's `SCENARIO_LIBRARY` (filter by dimension and
@@ -584,6 +592,30 @@ Admin-only. `summary` counts the whole feed; `updates` honours the filter.
   "notes": { "source": "...", "evidence": "...", "scope": "...", "feed": "12 curated entries." } }
 ```
 Control `status`: `satisfied | unsatisfied | attestation_required | attested | unaddressed | not_in_active_pack`.
+
+### 4.7 Remediation (C10) — LIVE. Admin-only.
+`GET /v1/governance/alerts/:alertId/remediation` →
+```json
+{ "alert": { "id": "uuid", "ruleId": "high_risk_without_control", "status": "open", "title": "..." },
+  "candidates": [
+    { "kind": "link_control", "executable": true, "title": "Link eu-ai-act:art-15-accuracy-robustness to \"Prompt injection via retrieved pages\"",
+      "rationale": "...", "params": { "riskId": "uuid", "controlRef": "eu-ai-act:art-15-accuracy-robustness" }, "steps": [] },
+    { "kind": "assess_vendor", "executable": false, "title": "...", "rationale": "...", "params": { "vendorId": "uuid" },
+      "steps": ["Advance the vendor's assessment workflow ...", "..."] } ],
+  "proposals": [ { "id": "uuid", "alertId": "uuid", "kind": "link_control", "params": { }, "title": "...", "rationale": "...",
+                   "status": "pending_approval|applied|denied|failed", "approvalId": "uuid", "proposedByUserId": "uuid",
+                   "decidedByUserId": null, "decidedAt": null, "result": null, "createdAt": "..." } ],
+  "note": "..." }
+```
+`POST /v1/governance/alerts/:alertId/remediation` body
+`{ "kind": "<executable kind>", "params": { ...exactly the candidate's params }, "approverUserId": "uuid" }`
+→ 201 proposal. Errors: 403 `identity_required`; 404; 409 `approver_is_proposer` |
+`alert_resolved` | `already_pending` (body has `proposal`); 422 `not_executable` |
+`not_a_current_candidate` | `unknown_approver`.
+Decide with the EXISTING `POST /v1/approvals/:approvalId/decide` (`{decision, reason}`);
+the proposer gets 403 `cannot_approve_own_remediation`. Approval executes and
+the alert resolves on the post-commit monitor pass.
+`GET /v1/governance/remediations?status=` → `{ proposals: [...] }`.
 
 ---
 

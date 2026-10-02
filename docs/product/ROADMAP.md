@@ -815,7 +815,7 @@ Demo-critical items for 2026-10-05 are tracked in `AgentCoordination.md`
 |---|---|---|
 | Trace ingestion and continuous evaluation | partial | `tracing.ts`, `evals.ts`; continuous scheduled evaluation of traces not yet |
 | Human-in-the-loop escalation for high-risk actions | exists | approvals, execution modes (ADR-0124), inbox |
-| Remediation agents (GAIA-equivalent) for automated controls | missing | copilot proposes via approvals only (ADR-0056); no remediation agents |
+| Remediation agents (GAIA-equivalent) for automated controls | partial | ADR-0159: planned remediation per alert; control links and owner assignment execute after arm's-length approval; other kinds are guidance; no model-driven agent [X7] |
 | Real-time compliance monitoring and alerts | exists (API) | governance monitor (ADR-0157): 7 rules, hourly sweep, alerts with acknowledge/auto-resolve via audit log; trust dashboard [C1, X3]; alerts UI [X7] |
 
 Post-demo order (proposal, needs owner confirmation): residual-risk and

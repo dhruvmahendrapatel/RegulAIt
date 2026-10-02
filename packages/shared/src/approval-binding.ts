@@ -85,6 +85,8 @@ export const APPROVAL_OBJECT_TYPES = [
   "training_job",
   "grant_certification",
   "sod_override",
+  // ADR-0159: an executable remediation for a governance-monitor alert
+  "remediation",
 ] as const;
 export type ApprovalObjectType = (typeof APPROVAL_OBJECT_TYPES)[number];
 
@@ -100,6 +102,7 @@ export const APPROVAL_OBJECT_TYPE_LABELS: Record<ApprovalObjectType, string> = {
   training_job: "RegulAIt-LLM training run",
   grant_certification: "certification-campaign item",
   sod_override: "separation-of-duties override",
+  remediation: "governance remediation",
 };
 
 /**

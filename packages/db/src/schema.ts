@@ -1043,6 +1043,8 @@ export const auditLog = pgTable(
         // text column — no DDL needed.
         "governance_alert",
         "governance_monitor",
+        // ADR-0159: a remediation proposed / applied / denied / failed
+        "remediation",
       ],
     })
       .notNull()
@@ -7852,6 +7854,41 @@ export const governanceAlerts = pgTable(
       .on(t.ruleId, t.subjectKey)
       .where(sql`${t.status} <> 'resolved'`),
     index("governance_alerts_status_idx").on(t.status, t.lastDetectedAt),
+  ],
+);
+
+// ---------------------------------------------------------------------------
+// ADR-0159 (migration 0125) — executable remediation proposals for monitor
+// alerts, each bound to one approvals row and executed by the decide path.
+export const REMEDIATION_PROPOSAL_KINDS = ["link_control", "assign_agent_owner"] as const;
+export const REMEDIATION_PROPOSAL_STATUSES = ["pending_approval", "applied", "denied", "failed"] as const;
+export const remediationProposals = pgTable(
+  "remediation_proposals",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    alertId: uuid("alert_id").references(() => governanceAlerts.id, { onDelete: "set null" }),
+    kind: text("kind", { enum: REMEDIATION_PROPOSAL_KINDS }).notNull(),
+    params: jsonb("params").$type<Record<string, string>>().notNull(),
+    title: text("title").notNull(),
+    rationale: text("rationale").notNull(),
+    status: text("status", { enum: REMEDIATION_PROPOSAL_STATUSES }).notNull().default("pending_approval"),
+    approvalId: uuid("approval_id").references(() => approvals.id, { onDelete: "set null" }),
+    proposedByUserId: uuid("proposed_by_user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    decidedByUserId: uuid("decided_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    result: jsonb("result").$type<Record<string, unknown>>(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("remediation_proposals_approval_uq")
+      .on(t.approvalId)
+      .where(sql`${t.approvalId} IS NOT NULL`),
+    uniqueIndex("remediation_proposals_pending_action_uq")
+      .on(t.kind, t.params)
+      .where(sql`${t.status} = 'pending_approval'`),
+    index("remediation_proposals_alert_idx").on(t.alertId),
   ],
 );
 

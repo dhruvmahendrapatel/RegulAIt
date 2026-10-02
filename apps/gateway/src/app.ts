@@ -150,6 +150,12 @@ import { registerAgentCardRoutes } from "./agent-card.js";
 import { registerDependencyGraphRoutes } from "./dependency-graph.js";
 import { registerGovernanceMonitorRoutes } from "./governance-monitor.js";
 import { registerRegulatoryIntelRoutes } from "./regulatory-intel.js";
+import {
+  applyRemediationDecision,
+  precheckRemediationDecision,
+  registerRemediationRoutes,
+} from "./remediation.js";
+import { runGovernanceMonitor } from "./governance-monitor.js";
 import { registerPosturePresetRoutes } from "./posture-preset.js";
 import { registerExecutionControlRoutes } from "./execution-control.js";
 import { registerInventoryRoutes } from "./inventory.js";
@@ -3055,6 +3061,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       const refusal = await precheckSodOverrideDecision(db, row, deciderUserId, body.decision);
       if (refusal) return fail(refusal.status, refusal.body);
     }
+    // ADR-0159 — `cannot_approve_own_remediation`, keyed on the DECIDER so the
+    // proposer cannot reach their own change through delegation or override.
+    if (row.objectType === "remediation") {
+      const refusal = await precheckRemediationDecision(db, row, deciderUserId);
+      if (refusal) return fail(refusal.status, refusal.body);
+    }
     // Separation-of-duties guard: the person deciding IS the person who
     // triggered the governed action. Still decidable (alternate-approver
     // routing is deliberately out of scope) but never silently — a recorded
@@ -3234,6 +3246,17 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       // denial. Never a second mint endpoint.
       if (updated.objectType === "sod_override") {
         await applySodOverrideDecision(tx as unknown as Db, updated, body.decision, deciderUserId);
+      }
+      // ADR-0159 remediation: approved = the STORED kind+params execute HERE,
+      // inside the decision's transaction; the monitor re-evaluates after
+      // commit so a cleared condition resolves its alert straight away.
+      if (updated.objectType === "remediation") {
+        const applied = await applyRemediationDecision(tx as unknown as Db, updated, body.decision, deciderUserId);
+        if (applied) {
+          postCommit = async (d: Db) => {
+            await runGovernanceMonitor(d, { actorUserId: deciderUserId });
+          };
+        }
       }
       return { updated, postCommit };
     });
@@ -3609,6 +3632,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerGovernanceMonitorRoutes(app, db);
   // ADR-0158 — regulatory intelligence joined to our packs and use cases
   registerRegulatoryIntelRoutes(app, db);
+  // ADR-0159 — remediation proposals for monitor alerts
+  registerRemediationRoutes(app, db);
   // ADR-0084 — the AI vendor registry beside the use-case registry whose
   // rails it copies. Propose/list/detail/edit/attest are non-admin
   // (owner-or-admin in-handler); RETIRE stays admin through the default gate.
