@@ -2897,7 +2897,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     const governanceRemediationLabelFor = (stageId: string | null): string | null => {
       if (!stageId?.startsWith(GOVERNANCE_REMEDIATION_PREFIX)) return null;
       const title = governanceRemediationById.get(stageId.slice(GOVERNANCE_REMEDIATION_PREFIX.length));
-      return title ? `governance remediation · ${title}` : null;
+      return title ?? null; // the SPA's stage label already says "Governance remediation"
     };
     const sodOverrideLabelFor = (stageId: string | null): string | null => {
       if (!stageId?.startsWith(SOD_OVERRIDE_PREFIX)) return null;

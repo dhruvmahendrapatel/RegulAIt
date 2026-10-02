@@ -83,3 +83,26 @@ describe("approval action review", () => {
     expect(approvalReviewKey(raw(fields))).not.toBe(approvalReviewKey(raw()));
   });
 });
+
+describe("approval stage labels never show a raw platform sentinel", () => {
+  it("names every stage sentinel the gateway emits, and humanizes unknown ones", async () => {
+    const { approvalStageLabel } = await import("../../api/format");
+    const cases: Array<[string, string]> = [
+      ["__remediation__:x", "Governance remediation"],
+      ["__model_card__:x", "Model card"],
+      ["__grant_cert__:x", "Access certification"],
+      ["__sod_override__:x", "Separation-of-duties override"],
+      ["__infra_action__:x", "Infra action"],
+      ["__infra_remediation__:x", "Infra remediation"],
+      ["__nodebudget__:x", "Worker budget"],
+      ["__nodebudget_measured__:x", "Worker budget"],
+      ["__spend_anomaly__", "Spend anomaly"],
+      ["__project_budget__", "Budget overage"],
+      ["__budget__:x", "Run budget"],
+      ["__reclassification__", "Reclassification"],
+      ["__future_kind__:abc", "Future kind"],
+    ];
+    for (const [stageId, label] of cases) expect(approvalStageLabel({ stageId })).toBe(label);
+    expect(approvalStageLabel({ stageId: "signoff" })).toBeNull();
+  });
+});

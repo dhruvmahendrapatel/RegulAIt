@@ -119,7 +119,7 @@ describe("ADR-0159 remediation", () => {
     // the approver's inbox names WHAT will change, never the raw stage sentinel
     const inbox = await call("GET", "/v1/approvals?status=pending", approver.auth);
     const row = inbox.json().approvals.find((a: any) => a.id === proposal.approvalId);
-    expect(row).toMatchObject({ objectType: "remediation", objectLabel: `governance remediation · ${proposal.title}` });
+    expect(row).toMatchObject({ objectType: "remediation", objectLabel: proposal.title });
 
     const own = await decide(proposer);
     expect(own.statusCode).toBe(403);

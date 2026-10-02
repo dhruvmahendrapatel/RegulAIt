@@ -51,5 +51,15 @@ export function approvalStageLabel(a: {
   if (s.startsWith("__infra_remediation__")) return "Infra remediation";
   // ADR-0159: a governance-monitor remediation awaiting an independent approver
   if (s.startsWith("__remediation__")) return "Governance remediation";
+  if (s.startsWith("__model_card__")) return "Model card";
+  if (s.startsWith("__grant_cert__")) return "Access certification";
+  if (s.startsWith("__sod_override__")) return "Separation-of-duties override";
+  if (s.startsWith("__infra_action__")) return "Infra action";
+  if (s.startsWith("__nodebudget")) return "Worker budget";
+  if (s.startsWith("__spend_anomaly__")) return "Spend anomaly";
+  // any other platform sentinel: words, never the raw `__name__:<id>` an
+  // approver cannot read (a new kind added server-side still renders legibly)
+  const sentinel = /^__([a-z_]+?)__/.exec(s);
+  if (sentinel) return sentinel[1]!.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
   return null;
 }
