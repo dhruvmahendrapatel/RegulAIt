@@ -238,7 +238,7 @@ and an explicit "unmeasured" state.
   guidance ones as numbered steps — and this alert's `proposals` with status.
   Also add `remediation` to the approval-kind mirror in
   `ApprovalsAdminPage.tsx` (it says "ten kinds"; there are now eleven).
-  Status: READY-FOR-REVIEW (`45e6e38`; Codex, 10-02 03:24 UTC)
+  Status: READY-FOR-REVIEW (`df8d2c1`; Codex, 10-02 03:24 UTC)
   Evidence: the empty Active tab distinguishes `lastEvaluatedAt: null` from a
   completed all-clear evaluation; standalone agent subjects link to the real
   agent inventory while contextual agents still deep-link to their X2 card;
