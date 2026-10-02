@@ -59,12 +59,13 @@ function makeApp() {
 
 /**
  * DELIBERATELY UNAUTHENTICATED. `rateLimitKey` buckets a caller presenting a
- * Bearer token under `key:<token>` with the far larger apiKeyMax ceiling; only
- * an anonymous caller lands in the `ip:` bucket these tests are about. The
- * limiter runs in an onRequest hook ahead of authentication precisely so that
- * an unauthenticated flood is bounded, so a 401 still counts — which is the
- * behaviour under test. (The first draft of this file sent AUTH and every
- * assertion failed against a 500-request ceiling; the bug was the test's.)
+ * Bearer token under `ipk:<ip>` with the far larger apiKeyMax ceiling (ADR-0167:
+ * still the IP, never the token); only an anonymous caller lands in the `ip:`
+ * bucket these tests are about. The limiter runs in an onRequest hook ahead of
+ * authentication precisely so that an unauthenticated flood is bounded, so a
+ * 401 still counts — which is the behaviour under test. (The first draft of
+ * this file sent AUTH and every assertion failed against a 500-request
+ * ceiling; the bug was the test's.)
  */
 const hit = (app: ReturnType<typeof buildApp>, ip: string) =>
   app.inject({ method: "GET", url: "/v1/users", remoteAddress: ip });

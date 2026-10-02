@@ -1,4 +1,4 @@
-import Fastify from "fastify";
+import Fastify, { type FastifyReply, type FastifyRequest, type FastifyServerOptions } from "fastify";
 import {
   and,
   desc,
@@ -70,12 +70,14 @@ import { resolveTimeoutConfig, setTimeoutConfig, type TimeoutConfig } from "./ti
 import { resolveBreakerConfig, setBreakerConfig, type BreakerConfig } from "./upstream-breaker.js";
 import { resolveRetryConfig, setRetryConfig, type RetryConfig } from "./upstream-retry.js";
 import {
+  rateLimitCredentialKey,
   rateLimitKey,
   rateLimitMax,
   rateLimitWindowMs,
   resolveRateLimitConfig,
   type RateLimitConfig,
 } from "./rate-limit.js";
+import { requestLogFields } from "./gateway-logger.js";
 import { visibleTools, type ToolRef } from "@regulait/policy-kernel";
 import {
   assignRoleSchema,
@@ -222,6 +224,20 @@ import { activeDelegatorsFor, activeDelegationFrom } from "./delegations.js";
 declare module "fastify" {
   interface FastifyRequest {
     authCtx: AuthContext;
+    /** ADR-0167: the post-auth bucket this request's RESOLVED credential counts
+     * against, set immediately before the credential-tier limiter runs */
+    rateLimitCredentialKey?: string;
+  }
+  interface FastifyInstance {
+    /**
+     * ADR-0167 — the credential tier of the HTTP rate limiter. Called by the
+     * auth preHandler (api keys, virtual keys, bootstrap) and by the SCIM
+     * scope's own token check, AFTER the bearer resolved to a stored row.
+     * Sends the 429 itself and returns true when the request was refused;
+     * returns false (and sets the x-ratelimit-* headers) otherwise. Absent
+     * when the limiter is disabled.
+     */
+    rateLimitCredential?: (req: FastifyRequest, reply: FastifyReply, key: string) => Promise<boolean>;
   }
 }
 
@@ -253,6 +269,11 @@ export interface BuildAppOptions {
    * environment (see rate-limit.ts); this override exists so a test can pin
    * tiny windows without touching process.env. */
   rateLimit?: Partial<RateLimitConfig>;
+  /** ADR-0167 (CFG-02): Fastify's logger option. `false` (the default here)
+   * keeps the ~100 test files that construct apps silent; `startGateway`
+   * passes a redacting pino config resolved from the environment, so the
+   * SERVING process logs refusals and failures. See gateway-logger.ts. */
+  logger?: FastifyServerOptions["logger"];
   /** ADR-0029 amendment: the Strict-Transport-Security value sent on genuinely
    * secure responses, or `null` for none. Defaults to REGULAIT_HSTS (which
    * itself defaults to `max-age=86400`). Exposed so a test can assert both
@@ -405,6 +426,9 @@ const INERT_SERVER_GRANT = {
  * than this pages with `cursor`, or takes the streamed CSV export. */
 export const AUDIT_MAX_PAGE_SIZE = 1000;
 const AUDIT_DEFAULT_PAGE_SIZE = 100;
+/** ADR-0167 (CFG-08): how long /health waits for `select 1` before answering
+ * 503 degraded instead of queueing behind an exhausted pool */
+export const HEALTH_DB_TIMEOUT_MS = 2_000;
 
 /**
  * THE filter set for the audit trail. Both the screen read (`GET /v1/audit`)
@@ -537,7 +561,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   setBreakerConfig(resolveBreakerConfig(process.env, opts.breaker ?? {}));
   setRetryConfig(resolveRetryConfig(process.env, opts.retry ?? {}));
   const app = Fastify({
-    logger: false,
+    logger: opts.logger ?? false,
     trustProxy,
     requestTimeout: timeoutCfg.requestTimeoutMs,
     bodyLimit: timeoutCfg.bodyLimitBytes,
@@ -616,6 +640,20 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         }
       } as unknown as NonNullable<Parameters<typeof fastifyRateLimit>[1]>["store"],
     });
+    /** the shared 429 shape — both tiers refuse identically */
+    const refuseRateLimited = (
+      reply: FastifyReply,
+      verdict: { max: number; timeWindow: number; ttlInSeconds: number },
+    ) =>
+      reply
+        .status(429)
+        .header("x-ratelimit-remaining", "0")
+        .header("retry-after", String(verdict.ttlInSeconds))
+        .send({
+          error: "rate_limited",
+          detail: `too many requests — limit ${verdict.max} per ${Math.round(verdict.timeWindow / 1000)}s`,
+          retryAfterSeconds: verdict.ttlInSeconds,
+        });
     let limiter: ReturnType<typeof app.createRateLimit> | null = null;
     app.addHook("onRequest", async (req, reply) => {
       limiter ??= app.createRateLimit();
@@ -627,19 +665,54 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         .header("x-ratelimit-remaining", String(verdict.remaining))
         .header("x-ratelimit-reset", String(verdict.ttlInSeconds));
       if (!verdict.isExceeded) return;
-      return reply
-        .status(429)
-        .header("x-ratelimit-remaining", "0")
-        .header("retry-after", String(verdict.ttlInSeconds))
-        .send({
-          error: "rate_limited",
-          detail: `too many requests — limit ${verdict.max} per ${Math.round(verdict.timeWindow / 1000)}s`,
-          retryAfterSeconds: verdict.ttlInSeconds,
-        });
+      return refuseRateLimited(reply, verdict);
     });
+
+    // ADR-0167 — THE CREDENTIAL TIER. The onRequest tier above keys every
+    // bucket on the client IP, because before authentication the bearer is an
+    // unverified string and a bucket named after it is a bucket the caller
+    // mints at will (AUTHZ-01/CFG-01: rotating the header voided the per-IP
+    // ceiling and cost one Postgres INSERT per request). The per-credential
+    // allowance that lets a busy service account outrun its NAT neighbours
+    // therefore runs HERE, after the bearer resolved to a stored row, keyed on
+    // that row's id. Same plugin, same shared store (child() returns the one
+    // instance), a second key generator that reads the key the caller stamped.
+    let credLimiter: ReturnType<typeof app.createRateLimit> | null = null;
+    app.decorate(
+      "rateLimitCredential",
+      async (req: FastifyRequest, reply: FastifyReply, key: string): Promise<boolean> => {
+        credLimiter ??= app.createRateLimit({
+          keyGenerator: (r: FastifyRequest) => r.rateLimitCredentialKey ?? `ip:${r.ip}`,
+          max: (_r: FastifyRequest, k: string) => rateLimitMax(rateCfg, k),
+          timeWindow: (_r: FastifyRequest, k: string) => rateLimitWindowMs(rateCfg, k),
+          allowList: () => false,
+        });
+        req.rateLimitCredentialKey = key;
+        const verdict = await credLimiter(req);
+        if (verdict.isAllowed) return false;
+        reply
+          .header("x-ratelimit-limit", String(verdict.max))
+          .header("x-ratelimit-remaining", String(verdict.remaining))
+          .header("x-ratelimit-reset", String(verdict.ttlInSeconds));
+        if (!verdict.isExceeded) return false;
+        await refuseRateLimited(reply, verdict);
+        return true;
+      },
+    );
   }
 
-  app.setErrorHandler((err, _req, reply) => {
+  // ADR-0167 (CFG-02) — every refusal and failure leaves a line. With the
+  // logger off (tests) this is a no-op; in the serving process it is the one
+  // place a 401/403/404/429 flood or a 5xx becomes visible to an operator
+  // without a database query. Credential KIND only, never the credential.
+  app.addHook("onResponse", async (req, reply) => {
+    if (reply.statusCode < 400) return;
+    const fields = requestLogFields(req, reply.statusCode);
+    if (reply.statusCode >= 500) req.log.error(fields, "request failed");
+    else req.log.warn(fields, "request refused");
+  });
+
+  app.setErrorHandler((err, req, reply) => {
     if (err instanceof z.ZodError) {
       return reply.status(400).send({ error: "validation", issues: err.issues });
     }
@@ -666,7 +739,33 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     const pgCode = (err as { cause?: { code?: string } }).cause?.code;
     if (pgCode === "23505") return reply.status(409).send({ error: "conflict" });
     if (pgCode === "23503") return reply.status(400).send({ error: "invalid_reference" });
-    app.log.error(err);
+    // ADR-0167 (SEC-03): Fastify's OWN client-side refusals — a body over the
+    // limit (413), a malformed JSON body (400), an unknown content type (415)
+    // — are FastifyErrors carrying `code: FST_ERR_*` and a 4xx statusCode.
+    // They used to fall through to the 500 below, which reported a client
+    // fault as a server fault, discarded the reason, and made the two import
+    // routes' honest "payloads are bounded at N bytes" messages unreachable.
+    // Scoped to the FST_ERR_ prefix on purpose: a third-party error that
+    // happens to carry a statusCode (an undici or provider error) must not
+    // have its message echoed to the caller by this branch.
+    const fastifyErr = err as { code?: unknown; statusCode?: unknown };
+    if (
+      typeof fastifyErr.code === "string" &&
+      fastifyErr.code.startsWith("FST_ERR_") &&
+      typeof fastifyErr.statusCode === "number" &&
+      fastifyErr.statusCode >= 400 &&
+      fastifyErr.statusCode < 500
+    ) {
+      const detail = err instanceof Error ? err.message : String(err);
+      req.log.warn({ code: fastifyErr.code, status: fastifyErr.statusCode }, detail);
+      return reply.status(fastifyErr.statusCode).send({
+        error: fastifyErr.code.replace(/^FST_ERR_(CTP_)?/, "").toLowerCase(),
+        detail,
+      });
+    }
+    req.log.error({ err, method: req.method, url: req.url }, "unhandled error");
+    // DEBUG_ERRORS=1 additionally prints the stack to stderr even when the
+    // logger is off — documented in docs/deployment/INSTALL.md.
     if (process.env.DEBUG_ERRORS) console.error("GATEWAY ERR:", err);
     return reply.status(500).send({ error: "internal" });
   });
@@ -976,6 +1075,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       return reply.status(401).send({ error: ctx, detail: AUTH_REFUSAL_DETAIL[ctx] });
     }
     if (!ctx) return reply.status(401).send({ error: "unauthenticated" });
+    // ADR-0167 — the credential tier of the rate limiter, now that the bearer
+    // is a stored row and its id can name a bucket nobody else can mint.
+    const credKey = rateLimitCredentialKey(ctx);
+    if (credKey && app.rateLimitCredential && (await app.rateLimitCredential(req, reply, credKey))) {
+      return reply;
+    }
     // ADR-0039: header API-key auth under api_key_ip_policy. Each request
     // presents the credential anew, so ANY enforcing level checks every
     // request (there is no session to distinguish "login" from "use", and
@@ -3384,10 +3489,23 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // balancer or uptime check gets a status. Both are auth-exempt.
   app.get("/", async (_req, reply) => reply.redirect("/ui", 302));
   app.get("/health", async (_req, reply) => {
-    try {
-      await db.execute(sql`select 1`);
-    } catch {
-      return reply.status(503).send({ status: "degraded", database: "unreachable" });
+    // ADR-0167 (CFG-08): the probe RACES a short deadline. `select 1` goes
+    // through the same pool every request uses, so with the pool exhausted it
+    // would queue behind them and the liveness check would hang rather than
+    // answer — a probe that cannot say "degraded" is not a probe. The query is
+    // left to settle on its own; it is one slot, and the answer is already out.
+    const probe = db.execute(sql`select 1`).then(
+      () => "ok" as const,
+      () => "unreachable" as const,
+    );
+    let timer: NodeJS.Timeout | undefined;
+    const deadline = new Promise<"timeout">((resolve) => {
+      timer = setTimeout(() => resolve("timeout"), HEALTH_DB_TIMEOUT_MS);
+    });
+    const database = await Promise.race([probe, deadline]);
+    if (timer) clearTimeout(timer);
+    if (database !== "ok") {
+      return reply.status(503).send({ status: "degraded", database });
     }
     return { status: "ok", database: "ok" };
   });
@@ -3709,7 +3827,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0021 — org-wide functional defaults (org_settings singleton). The
   // GET/PUT routes are admin-only (deliberately NOT in NON_ADMIN_ROUTES); the
   // audit auto-prune scheduler is OFF by default and unref'd, stopped on close.
-  registerOrgSettingsRoutes(app, db);
+  registerOrgSettingsRoutes(app, db, { dataKey: opts.dataKey });
   registerPosturePresetRoutes(app, db);
   // ADR-0124 — the kill switch and safe modes
   registerExecutionControlRoutes(app, db);
@@ -3768,7 +3886,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // and firing the exporter is admin-only through the default gate. No trace
   // route can change anything a governance decision depends on — it is a read
   // surface over rows other subsystems already wrote.
-  registerTracingRoutes(app, db);
+  registerTracingRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0058 — REGULATORY COMPLIANCE PACKS. Authoring/activating a pack and
   // recording an attestation are admin (not in NON_ADMIN_ROUTES); EVALUATING a
   // pack is reachable by a non-admin and runs ADR-0047's own

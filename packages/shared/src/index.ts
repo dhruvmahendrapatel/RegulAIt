@@ -1389,6 +1389,10 @@ export const reportChecksSchema = z.object({
       }),
     )
     .min(1),
+  /** ADR-0167 (AUTHZ-06): REQUIRED when the reporter is the change's own
+   * initiator and any result is `passed` — reporting your own check green is
+   * a self-attestation, and the reason is what the approver reads. */
+  reason: z.string().max(2000).optional(),
 });
 
 /** §2 re-run a check stage that is parked at blocked_on_check, after the failing

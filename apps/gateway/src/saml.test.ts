@@ -955,3 +955,102 @@ describe("ADR-0036 — verified-assertion readers (unit)", () => {
     expect(assertionRecipients({ Subject: [{}] })).toEqual([]);
   });
 });
+
+// ===========================================================================
+// ADR-0167 (AUTHZ-04) — the login is bound to the browser that started it
+// ===========================================================================
+//
+// The ACS claimed the correlation row by RelayState alone and minted a session
+// for whoever posted it, so an attacker who started a login, authenticated at
+// the IdP and handed the resulting POST to a victim signed the victim in as
+// THEMSELVES. The binding is a `SameSite=None; Secure` cookie set at /start —
+// the ACS is a cross-site POST, which a Lax cookie never accompanies — so it
+// exists only over a genuinely secure request. This suite's `app` trusts no
+// proxy and speaks plain http, so a second app behind one trusted hop carries
+// `x-forwarded-proto: https`, exactly what Caddy sends upstream.
+describe("ADR-0167 — the SP-initiated login completes only in the browser that started it", () => {
+  const PROXY = "127.0.0.1";
+  const HTTPS_BASE = "https://localhost:80";
+  const SP_ENTITY_HTTPS = spEntityId(HTTPS_BASE, {} as NodeJS.ProcessEnv);
+  const TLS = { "x-forwarded-proto": "https" };
+  let proxied: ReturnType<typeof buildApp>;
+
+  beforeAll(async () => {
+    proxied = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY, trustProxy: [PROXY] });
+    await proxied.ready();
+  });
+  afterAll(async () => {
+    await proxied.close();
+  });
+
+  /** /start over TLS: the correlation row plus the binding cookie the browser would hold */
+  const startSecure = async (providerId: string) => {
+    const r = await proxied.inject({ method: "GET", url: `/auth/saml/${providerId}/start?returnTo=/app`, headers: TLS });
+    expect(r.statusCode).toBe(302);
+    const relayState = new URL(r.headers.location as string).searchParams.get("RelayState")!;
+    const [row] = await db.select().from(samlLoginStates).where(eq(samlLoginStates.relayState, relayState));
+    expect(row).toBeTruthy();
+    const binding = r.cookies.find((c) => c.name === "regulait_saml_login");
+    const setCookie = ([] as string[]).concat(r.headers["set-cookie"] as string | string[]).join("\n");
+    return { relayState, requestId: row!.requestId, binding, setCookie };
+  };
+
+  const postSecureAcs = (providerId: string, signedXml: string, relayState: string, cookie?: string) =>
+    proxied.inject({
+      method: "POST",
+      url: `/auth/saml/${providerId}/acs`,
+      headers: { ...FORM, ...TLS, ...(cookie ? { cookie } : {}) },
+      payload:
+        `SAMLResponse=${encodeURIComponent(Buffer.from(signedXml, "utf8").toString("base64"))}` +
+        `&RelayState=${encodeURIComponent(relayState)}`,
+    });
+
+  it("over TLS, /start sets a SameSite=None; Secure binding cookie scoped to the login path; over plain http it sets none", async () => {
+    const p = await mkProvider();
+    const s = await startSecure(p.id);
+    expect(s.binding).toBeTruthy();
+    expect(s.setCookie).toContain("regulait_saml_login=");
+    expect(s.setCookie).toContain("SameSite=None");
+    expect(s.setCookie).toContain("Secure");
+    expect(s.setCookie).toContain("HttpOnly");
+    expect(s.setCookie).toContain("Path=/auth/saml");
+    // plain http cannot carry a None cookie, so none is set and none is demanded
+    const plain = await app.inject({ method: "GET", url: `/auth/saml/${p.id}/start?returnTo=/app` });
+    expect(plain.statusCode).toBe(302);
+    expect(plain.cookies.find((c) => c.name === "regulait_saml_login")).toBeUndefined();
+  });
+
+  it("the same signed assertion is REFUSED without the binding cookie (audited, before the XML is parsed) and ACCEPTED with it", async () => {
+    const p = await mkProvider();
+    const email = `bind-${randomBytes(4).toString("hex")}@saml-test.example`;
+    await mkUser(email, "Bound User");
+    const s = await startSecure(p.id);
+    const { xml } = buildResponse({
+      providerId: p.id,
+      email,
+      inResponseTo: s.requestId,
+      audience: SP_ENTITY_HTTPS,
+      recipient: `${HTTPS_BASE}/auth/saml/${p.id}/acs`,
+    });
+    const signed = signAssertion(xml, keyA);
+
+    // the victim's browser: a valid, correlated, signed response — and no cookie
+    const victim = await postSecureAcs(p.id, signed, s.relayState);
+    expect(victim.statusCode).toBe(401);
+    expect(victim.json().error).toBe("login_not_bound_to_this_browser");
+    expect(victim.cookies.find((c) => c.name === "regulait_session")).toBeUndefined();
+    const row = await latestAudit("saml-login-browser-mismatch");
+    expect(row).toBeTruthy();
+    expect((row!.detail as { bindingCookiePresent?: boolean }).bindingCookiePresent).toBe(false);
+
+    // a forged value is a mismatch too
+    const forged = await postSecureAcs(p.id, signed, s.relayState, "regulait_saml_login=not-the-hmac");
+    expect(forged.statusCode).toBe(401);
+    expect(forged.json().error).toBe("login_not_bound_to_this_browser");
+
+    // the browser that started it: signed in
+    const own = await postSecureAcs(p.id, signed, s.relayState, `regulait_saml_login=${s.binding!.value}`);
+    expect(own.statusCode, own.body).toBe(302);
+    expect(own.cookies.find((c) => c.name === "regulait_session")).toBeTruthy();
+  });
+});

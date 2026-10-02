@@ -335,6 +335,11 @@ export interface CheckResult {
   status: string;
   severity?: string;
   detail?: string;
+  /** ADR-0167 (AUTHZ-06): true when the change's own initiator posted this
+   * result — the badge every approver should see before trusting the colour */
+  selfReported?: boolean;
+  reportedByUserId?: string | null;
+  reason?: string | null;
 }
 
 export interface WorkflowDetailResponse {

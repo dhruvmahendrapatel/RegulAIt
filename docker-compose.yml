@@ -51,6 +51,12 @@ services:
     # far more than a dev-sized shutdown checkpoint needs, so the common case
     # becomes a clean "database system is shut down".
     stop_grace_period: 60s
+    # ADR-0167 (CFG-07): the stack comes back on its own after a host reboot.
+    # This used to live only in the dev box's user-data override, so a
+    # customer install (scripts/install.sh renders no override) stayed down
+    # after its first reboot. `unless-stopped` honours an operator's explicit
+    # `docker compose stop`, which a reboot is not.
+    restart: unless-stopped
     networks: [regulait]
 
   # --- WORM anchor store (ADR-0060) ------------------------------------------
@@ -96,6 +102,7 @@ services:
       retries: 30
     volumes:
       - minio_data:/data
+    restart: unless-stopped
     networks: [regulait]
 
   # One-shot: create the anchor bucket WITH OBJECT LOCK, then exit.
@@ -254,6 +261,26 @@ services:
       # is the documented local-dev entry point (README) and the on-box
       # SSM verification step (`curl -sf localhost:3000/...`) relies on it.
       - "127.0.0.1:3000:3000"
+    # ADR-0167 (CFG-07): see the note on `db`. The image carries the same
+    # HEALTHCHECK; it is restated here so `depends_on: condition:
+    # service_healthy` works for anything stacked on the gateway, and so a
+    # wedged process shows as `unhealthy` in `docker compose ps`.
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health').then((r)=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 90s
+      retries: 3
+    # ADR-0167 (CFG-02): the gateway now logs every refusal and failure
+    # (structured, credentials redacted — see apps/gateway/src/gateway-logger.ts),
+    # so the container log is bounded rather than left to fill the disk.
+    # `docker compose logs gateway` is the operator's first stop on a 5xx.
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
     networks: [regulait]
 
   # --- TLS terminator (profile: tls) -----------------------------------------

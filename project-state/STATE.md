@@ -54,6 +54,22 @@ raw questionnaire markdown/JSON and developer copy (navigate via "Open the use-c
 never the list drawer); mixed "RegulAIt"/"regulAIt" brand casing; mock-provider disclaimers in
 Avery's "Recently decided".
 
+**2026-10-02 (security review batch) - sixteen confirmed findings closed (ADR-0167, migration 0128).**
+The owner's "security and reliability first" review returned 16 findings, two-verifier
+confirmed. One rule fixed them: a control is keyed on, checks, or reports the thing the caller
+cannot choose. The edge rate limiter now has an IP-keyed pre-auth tier and a stored-id-keyed
+credential tier (AUTHZ-01/CFG-01 — rotating a junk bearer used to void the per-IP ceiling and
+cost one INSERT per request), plus an `sso:` bucket and a 256 KiB ACS cap (CFG-06/SEC-02, xmldom
+pinned to 0.8.15). Credential-derived connector hosts go through the egress guard (SEC-01); the
+simulation list is scoped (AUTHZ-02); OIDC/SAML logins are browser-bound (AUTHZ-04); published
+dev secrets are named at boot and refuse a deployed box (AUTHZ-05/CFG-03); self-reported check
+passes need a reason, a stamp, an audit row and a badge (AUTHZ-06); parser 413/400/415 are no
+longer 500s (SEC-03); OTLP headers are enveloped (SEC-06, migration 0128); the gateway logs with
+redaction (CFG-02); the pool is bounded and `/health` races a deadline (CFG-08); the image runs
+as `node` with a digest pin, healthcheck and restart policies (CFG-07). Every fix has a negative
+control. Open: the compose `--profile tls` path still boots on the defaults (loudly), the SAML
+binding is TLS-only, the remaining `pnpm audit` HIGHs wait for the upgrade batch (PENDING S4).
+
 **2026-10-02 (Codex review) - MCP consent bound to its target (ADR-0166, AER-039/040).**
 Codex's HIGH finding was real: an admin could repoint an MCP server (`url`,
 `allowPrivateRanges`) under the same id and an approval signed for upstream A was spent

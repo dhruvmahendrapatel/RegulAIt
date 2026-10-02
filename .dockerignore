@@ -7,3 +7,10 @@ docs
 project-state
 graphify-out
 *.md
+# ADR-0167 (CFG-07): test code and the browser e2e suite are not part of the
+# runtime image — they widen the surface and the size for nothing the image
+# ever executes. The build (`pnpm -r build`) does not need them.
+**/*.test.ts
+**/*.spec.ts
+apps/web/e2e
+scratchpad

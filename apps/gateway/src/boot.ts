@@ -41,6 +41,10 @@ import { describeDataKey, verifyDataKeyOnBoot, type DataKeyBootResult } from "./
 import { Scheduler, resolveSchedulerConfig, syncSchedulerJobs } from "./scheduler.js";
 import { schedulerJobRegistry } from "./scheduler-jobs.js";
 import { captureAnchor, flushPendingAnchors, resolveAnchorSink } from "./audit-chain.js";
+import { backfillOtlpHeaderCiphertext } from "./org-settings.js";
+import { DevSecretsBootError, assessDevSecrets, realAdminExists } from "./dev-secrets.js";
+import { describeGatewayLogger, resolveGatewayLogger } from "./gateway-logger.js";
+import { describeDbPool, resolveDbPoolConfig } from "@regulait/db";
 
 /** ADR-0035: how often the chain head is captured when anchoring is on. */
 const DEFAULT_ANCHOR_INTERVAL_MS = 15 * 60_000;
@@ -76,7 +80,12 @@ export interface StartedGateway {
 export async function startGateway(opts: StartGatewayOptions): Promise<StartedGateway> {
   const { db, migrationsFolder, port = 3000, host = "0.0.0.0", log = console.log, env = process.env, ...appOpts } = opts;
 
-  const app = buildApp(db, appOpts);
+  // ADR-0167 (CFG-02): the SERVING process logs. Resolved here, not inside
+  // buildApp, so the ~100 test files that construct apps stay silent; forced
+  // off under vitest for the same reason the timers below are.
+  const underTest = env.VITEST !== undefined || env.NODE_ENV === "test";
+  const logger = appOpts.logger ?? (underTest ? false : resolveGatewayLogger(env));
+  const app = buildApp(db, { ...appOpts, logger });
 
   // migrations are idempotent — booting always converges the schema
   await runMigrations(db, migrationsFolder);
@@ -91,6 +100,33 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
     // plugin resources behind on the way out.
     await app.close().catch(() => {});
     throw err;
+  }
+
+  // ADR-0167 (AUTHZ-05 / CFG-03): the published dev-grade secrets are named,
+  // and on a box that shows a sign of being deployed they REFUSE the boot —
+  // before listen, like the data-key gate, so a refused deployment leaves no
+  // socket behind. See dev-secrets.ts for exactly what refuses and what warns.
+  const secrets = assessDevSecrets(env, {
+    bootstrapToken: appOpts.bootstrapToken,
+    dataKey: appOpts.dataKey,
+    realAdminExists: await realAdminExists(db).catch(() => false),
+  });
+  if (secrets.refuse) {
+    await app.close().catch(() => {});
+    throw new DevSecretsBootError(secrets);
+  }
+
+  // ADR-0167 (SEC-06): a pre-0128 row still holding the OTLP collector
+  // headers in the clear is enveloped now, under the key the gate just proved
+  // — and before listen, so no export can read the plaintext first. A failure
+  // here is logged, never fatal: the legacy row still exports.
+  let otlpBackfill: "enveloped" | "nothing" = "nothing";
+  if (appOpts.dataKey) {
+    try {
+      otlpBackfill = await backfillOtlpHeaderCiphertext(db, appOpts.dataKey);
+    } catch (err) {
+      log(`[regulait] OTLP header envelope backfill failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   // ADR-0064 — the scheduler's shutdown hook MUST be registered BEFORE listen.
@@ -242,6 +278,23 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   if (dataKey.code === "recorded" || dataKey.code === "rotation_accepted") {
     log(`             ${dataKey.message}`);
   }
+  if (otlpBackfill === "enveloped") {
+    log("             OTLP collector headers found in the clear were enveloped under this key (ADR-0167)");
+  }
+  // ADR-0167: say out loud whether the break-glass door is open, and whether
+  // anything running here is a secret anyone with the repository already has.
+  // An operator who cannot see this from the boot log will not go looking.
+  log(`  bootstrap: ${secrets.bootstrapLine}`);
+  for (const finding of secrets.findings) {
+    log(`  secrets:   DEV-GRADE — ${finding}`);
+  }
+  if (secrets.overridden && secrets.refusing.length > 0) {
+    log(`             (booting anyway: REGULAIT_ALLOW_DEV_SECRETS=1 overrides the refusal on ${secrets.networkFacingSignal})`);
+  }
+  // ADR-0167 (CFG-08): the pool's bounds and whether the database hop is TLS.
+  log(`  database:  ${describeDbPool(resolveDbPoolConfig(env))}`);
+  // ADR-0167 (CFG-02): whether refusals and failures leave a trace at all.
+  log(`  logging:   ${describeGatewayLogger(logger)}`);
   // ADR-0064: say out loud whether the six sweeps will actually run on this
   // box. An operator who believes their MRM expiry sweep is running and has not
   // set the variable must be able to see that from the boot log rather than

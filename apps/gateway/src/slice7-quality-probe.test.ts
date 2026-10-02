@@ -344,7 +344,8 @@ describe("an eval-bound check stays machine-decided through the recheck path", (
     // proves the 422 above is about the eval binding, not a broken endpoint
     const res = await app.inject({
       method: "POST", headers: runnerAuth, url: `/v1/workflows/instances/${instanceId}/checks`,
-      payload: { stageId: "checks", results: [{ check: "unit_tests", status: "passed" }] },
+      // (ADR-0167: the runner initiated this change, so its own green needs a reason)
+      payload: { stageId: "checks", results: [{ check: "unit_tests", status: "passed" }], reason: "suite green" },
     });
     expect(res.statusCode).toBe(200);
   });

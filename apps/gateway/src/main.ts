@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { createDb } from "@regulait/db";
 import { startGateway } from "./boot.js";
 import { DataKeyBootError } from "./data-key.js";
+import { DevSecretsBootError } from "./dev-secrets.js";
 
 const connectionString =
   process.env.DATABASE_URL ?? "postgres://regulait:regulait@localhost:5432/regulait";
@@ -27,10 +28,11 @@ try {
     dataKey: process.env.REGULAIT_DATA_KEY,
   });
 } catch (err) {
-  if (err instanceof DataKeyBootError) {
+  if (err instanceof DataKeyBootError || err instanceof DevSecretsBootError) {
     // Not a stack trace. This is the message an operator reads at 3am in the
     // middle of a restore, and it is the only signal that arrives while the
-    // correct key may still be recoverable from the source box.
+    // correct key may still be recoverable from the source box. (ADR-0167: the
+    // dev-secrets refusal reads the same way — one message, what to do next.)
     console.error(`\n${err.message}\n`);
     process.exit(1);
   }

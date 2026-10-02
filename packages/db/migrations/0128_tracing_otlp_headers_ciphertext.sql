@@ -1,0 +1,15 @@
+-- ADR-0167 (SEC-06) — the OTLP collector auth headers join the data-key envelope.
+--
+-- `org_settings.tracing_otlp_headers` (migration 0082) stored the headers the
+-- gateway sends to a trace collector as PLAINTEXT jsonb. The product itself
+-- treats the value as a secret (the settings read redacts it; "an OTLP
+-- collector header is usually a bearer token"), yet it sat outside the
+-- REGULAIT_DATA_KEY envelope every other admin-registered endpoint credential
+-- lives in — readable from a pg_dump, and untouched by a key rotation.
+--
+-- The envelope column. The gateway encrypts at write, decrypts only at export,
+-- and on boot backfills any legacy plaintext row into this column, after which
+-- the jsonb column carries only header NAMES (values replaced by a marker) so
+-- the settings screen can still list which headers are set. The jsonb column
+-- is dropped by a later migration once every deployment has booted past this.
+ALTER TABLE "org_settings" ADD COLUMN IF NOT EXISTS "tracing_otlp_headers_ciphertext" text;

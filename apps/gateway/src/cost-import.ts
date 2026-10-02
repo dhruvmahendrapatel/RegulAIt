@@ -376,7 +376,10 @@ export function registerCostImportRoutes(app: FastifyInstance, db: Db): void {
   // THE IMPORT — the untrusted path
   // =======================================================================
 
-  app.post("/v1/cost-imports", async (req, reply) => {
+  // ADR-0167 (SEC-03): see the same note on /v1/shadow-ai/imports — the raw
+  // limit must admit the advertised bound or the honest 413 below is
+  // unreachable and the caller gets a 500 instead.
+  app.post("/v1/cost-imports", { bodyLimit: COST_IMPORT_MAX_BYTES + 64 * 1024 }, async (req, reply) => {
     const raw = req.body;
     const rawJson = JSON.stringify(raw ?? null);
 
@@ -931,7 +934,7 @@ export function registerCostImportRoutes(app: FastifyInstance, db: Db): void {
    * Same for one person given two different cost centres. An email that names
    * no RegulAIt user is refused per-row; a roster never invents a person.
    */
-  app.post("/v1/cost-imports/roster", async (req, reply) => {
+  app.post("/v1/cost-imports/roster", { bodyLimit: COST_IMPORT_MAX_BYTES + 64 * 1024 }, async (req, reply) => {
     const raw = req.body;
     const rawJson = JSON.stringify(raw ?? null);
     if (rawJson.length > COST_IMPORT_MAX_BYTES) {

@@ -61,12 +61,17 @@ import {
 import { createSamlProviderSchema, updateSamlProviderSchema } from "@regulait/shared";
 import { z } from "zod";
 import {
+  SAML_BINDING_COOKIE,
   auditAuth,
   createSession,
   loadUserByEmail,
+  readCookie,
   refuseIpBlockedLogin,
   requestIsSecure,
   sessionCookie,
+  ssoBindingCookie,
+  ssoBindingMatches,
+  ssoBrowserBinding,
 } from "./auth.js";
 import { refuseIfFeatureNotLicensed } from "./licensing.js";
 import { loadOrgSettings } from "./org-settings.js";
@@ -82,6 +87,16 @@ export interface SamlRouteOptions {
  * the OIDC state row's ten minutes, for the same reason (a human completing a
  * login at their IdP, not an unbounded window for a captured assertion). */
 export const SAML_STATE_MINUTES = 10;
+/** ADR-0167 (CFG-06): the two short-lived tables are swept at most this often
+ * per process, not on every anonymous ACS post */
+export const SAML_SWEEP_INTERVAL_MS = 60_000;
+/** ADR-0167 (SEC-02): a base64 SAMLResponse larger than this is refused
+ * before it is decoded — 256 KiB of base64 is ~190 KB of XML, several times
+ * the largest real assertion and a tiny fraction of the global body limit */
+export const SAML_RESPONSE_MAX_CHARS = 256 * 1024;
+/** the raw form body the ACS accepts: the response above plus RelayState and
+ * encoding slack, well under the 1 MiB global limit */
+export const SAML_ACS_BODY_LIMIT_BYTES = SAML_RESPONSE_MAX_CHARS + 16 * 1024;
 
 /**
  * Clock-skew tolerance for NotBefore / NotOnOrAfter, in MINUTES. Bounded and
@@ -387,9 +402,18 @@ export function registerSamlRoutes(app: FastifyInstance, db: Db, opts: SamlRoute
   /** opportunistic sweep of both short-lived tables — cheap, indexed, and it
    * keeps the replay seen-set from growing without bound. Rows past their
    * expiry are refused on their own timestamps anyway, so deleting them
-   * weakens nothing. */
+   * weakens nothing.
+   *
+   * ADR-0167 (CFG-06): run at most once a minute per process, not once per
+   * request. The ACS is unauthenticated; two DELETEs per anonymous POST made
+   * the login surface the cheapest write amplifier in the product. Hygiene,
+   * not enforcement — ADR-0064's rule holds, so throttling it costs nothing. */
+  let lastSweepAt = 0;
   const sweep = async () => {
-    const now = new Date();
+    const nowMs = Date.now();
+    if (nowMs - lastSweepAt < SAML_SWEEP_INTERVAL_MS) return;
+    lastSweepAt = nowMs;
+    const now = new Date(nowMs);
     await db.delete(samlLoginStates).where(lt(samlLoginStates.expiresAt, now));
     await db.delete(samlAssertionIds).where(lt(samlAssertionIds.expiresAt, now));
   };
@@ -449,6 +473,19 @@ export function registerSamlRoutes(app: FastifyInstance, db: Db, opts: SamlRoute
     });
     const saml = samlFor(db, provider, acsUrl, spEntityId(base), opts, requestId);
     const url = await saml.getAuthorizeUrlAsync(relayState, undefined, {});
+    // ADR-0167 (AUTHZ-04): bind this login to THIS browser. The ACS is a
+    // cross-site POST, so the cookie must be SameSite=None + Secure — which
+    // only a secure request can set (see the note in auth.ts).
+    if (requestIsSecure(req)) {
+      void reply.header(
+        "set-cookie",
+        ssoBindingCookie(SAML_BINDING_COOKIE, ssoBrowserBinding(opts.dataKey, relayState), {
+          path: "/auth/saml",
+          secure: true,
+          crossSite: true,
+        }),
+      );
+    }
     return reply.redirect(url, 302);
   });
 
@@ -479,12 +516,27 @@ export function registerSamlRoutes(app: FastifyInstance, db: Db, opts: SamlRoute
       },
     );
 
-    scope.post("/auth/saml/:providerId/acs", async (req, reply) => {
+    // ADR-0167 (SEC-02/CFG-06): the ACS body is bounded well below the global
+    // 1 MiB limit. A real SAMLResponse is tens of KB; what a megabyte buys an
+    // anonymous caller is a megabyte of attacker XML through a parser with
+    // known quadratic paths, synchronously on the event loop. The route-level
+    // `bodyLimit` refuses the raw body (413, mapped honestly by the error
+    // handler); the zod `max` below refuses a decoded response that would
+    // still be too large to parse.
+    scope.post("/auth/saml/:providerId/acs", { bodyLimit: SAML_ACS_BODY_LIMIT_BYTES }, async (req, reply) => {
       const { providerId } = providerParam.parse(req.params);
       const body = z
-        .object({ SAMLResponse: z.string().min(1), RelayState: z.string().optional() })
+        .object({
+          SAMLResponse: z.string().min(1).max(SAML_RESPONSE_MAX_CHARS),
+          RelayState: z.string().max(1024).optional(),
+        })
         .safeParse(req.body ?? {});
-      if (!body.success) return reply.status(400).send({ error: "missing_saml_response" });
+      if (!body.success) {
+        const tooBig = body.error.issues.some((i) => i.code === "too_big");
+        return reply
+          .status(tooBig ? 413 : 400)
+          .send({ error: tooBig ? "saml_response_too_large" : "missing_saml_response" });
+      }
       const provider = await loadEnabled(providerId);
       if (!provider) return reply.status(404).send({ error: "unknown_provider" });
       await sweep();
@@ -525,6 +577,21 @@ export function registerSamlRoutes(app: FastifyInstance, db: Db, opts: SamlRoute
               ),
             )
         : [];
+
+      // ADR-0167 (AUTHZ-04): an SP-initiated login completes only in the
+      // browser that started it. Checked BEFORE the XML is parsed, so a
+      // planted response is refused at the cost of a cookie comparison. Only
+      // over a secure request — the binding cookie cannot exist otherwise
+      // (SameSite=None requires Secure) — and only for a correlated login:
+      // IdP-initiated stays behind `allowIdpInitiated` below, unchanged.
+      if (state && requestIsSecure(req)) {
+        const presentedBinding = readCookie(req.headers.cookie, SAML_BINDING_COOKIE);
+        if (!ssoBindingMatches(presentedBinding, ssoBrowserBinding(opts.dataKey, state.relayState))) {
+          return refuse(401, "login_not_bound_to_this_browser", "saml-login-browser-mismatch",
+            `SAML login for provider '${provider.name}' refused: the login was started in a different browser (login CSRF) — no session minted`,
+            { bindingCookiePresent: presentedBinding !== null });
+        }
+      }
 
       // ---- signature + audience + timestamps + InResponseTo: the LIBRARY --
       let profile: Profile;

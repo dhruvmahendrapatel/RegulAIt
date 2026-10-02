@@ -519,10 +519,16 @@ describe("air_gapped: the compiled vendor endpoint is refused, and never dialled
     expect((row!.detail as Record<string, unknown>).surface).toBe("connector");
   });
 
-  it("a connector whose default we CANNOT NAME is refused rather than assumed safe", async () => {
+  it("a connector whose destination is NAMED BY ITS CREDENTIAL is adjudicated as a typed host, under every posture", async () => {
+    // ADR-0167 (SEC-01): `https://<account>.snowflakecomputing.com` is derived
+    // from an admin-typed credential field, so it is a typed destination and
+    // the allow-list decides — it used to be refused under strict only as
+    // "not statically knowable", and reached the network UNGUARDED under hosted
     const res = await invokeConnector(snowflakeConnectorId);
     expect(res.statusCode).toBe(403);
-    expect(res.json().code).toBe("compiled_default_unknown");
+    expect(res.json().error).toBe("egress_blocked");
+    expect(res.json().code).toBe("host_not_allowlisted");
+    expect(String(res.json().detail)).toContain("acme-eu.snowflakecomputing.com");
     expect(hits).toHaveLength(0);
   });
 

@@ -74,6 +74,7 @@ import {
   deployOverrideSchema,
   recheckSchema,
   reportChecksSchema,
+  scrubAuditText,
   retireTemplateSchema,
   startInstanceSchema,
   submitArtifactSchema,
@@ -94,6 +95,12 @@ type CheckReport = {
   status: "passed" | "failed";
   severity?: string | null;
   detail?: string | null;
+  /** ADR-0167 (AUTHZ-06) — PROVENANCE: who posted this result, and whether
+   * that person is the change's own initiator. Absent on rows written before
+   * the stamp existed. */
+  reportedByUserId?: string | null;
+  selfReported?: boolean;
+  reason?: string | null;
 };
 /** Defensive read of context[`reported:<stageId>`] — tolerate anything and keep
  * only well-formed pass/fail rows, so a malformed context value can never crash
@@ -720,6 +727,12 @@ async function runGitExecutions(
               status: rep.status,
               severity: rep.severity ?? null,
               detail: rep.detail ?? `reported ${rep.status}`,
+              // ADR-0167 (AUTHZ-06): the provenance rides into the evaluated
+              // result, so the rail and the approval view can say "the
+              // initiator reported this green" rather than showing CI's colour
+              ...(rep.selfReported
+                ? { selfReported: true, reportedByUserId: rep.reportedByUserId ?? null, reason: rep.reason ?? null }
+                : {}),
             }
           : { check: name, status: "passed" as const, severity: null, detail: `ran against ${against}` };
       });
@@ -1740,6 +1753,28 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     const accepted = body.results.filter((r) => declared.has(r.check));
     if (accepted.length === 0) return reply.status(422).send({ error: "no_declared_checks_reported" });
 
+    // ADR-0167 (AUTHZ-06) — PROVENANCE, and the separation-of-duties rule the
+    // deploy-override below already applies. This route admits the INITIATOR
+    // (loadInstanceFor), so the person a check stage exists to gate could
+    // declare `security_scan: passed` and advance their own change, with
+    // nothing in the context or the audit trail distinguishing that from a CI
+    // report. Still permitted — the demo, the seed and a team without CI all
+    // report by hand — but never silent: every stored result carries who
+    // posted it, a self-reported PASS requires a recorded reason, and the
+    // self-report is an audit row of its own. (Reporting your own check as
+    // FAILED needs no reason: that is the honest direction.)
+    const selfReported = req.authCtx.userId === loaded.instance.initiatorUserId;
+    // scrubbed with ADR-0099's own scrubber before it lands in the context
+    // jsonb (ADR-0102 covers reason COLUMNS; this one rides a jsonb value)
+    const reason = scrubAuditText(body.reason?.trim() ?? "");
+    if (selfReported && accepted.some((r) => r.status === "passed") && !reason) {
+      return reply.status(400).send({
+        error: "check_report_reason_required",
+        detail:
+          "you initiated this change, so reporting one of its own checks as passed is a self-attestation; record why it passed (the CI run, the remediation, the ticket) — a real CI reports under its own identity",
+      });
+    }
+
     // locked read-modify-write of context[reported:<stageId>] so a concurrent
     // executor claim serializes with the report instead of racing it
     await db.transaction(async (tx) => {
@@ -1754,11 +1789,39 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
         normalizeCheckReports(ctx[`reported:${body.stageId}`]).map((r) => [r.check, r]),
       );
       for (const r of accepted) {
-        merged.set(r.check, { check: r.check, status: r.status, severity: r.severity ?? null, detail: r.detail ?? null });
+        merged.set(r.check, {
+          check: r.check,
+          status: r.status,
+          severity: r.severity ?? null,
+          detail: r.detail ?? null,
+          reportedByUserId: req.authCtx.userId,
+          selfReported,
+          reason: reason || null,
+        });
       }
       ctx[`reported:${body.stageId}`] = [...merged.values()];
       await tx.update(workflowInstances).set({ context: ctx }).where(eq(workflowInstances.id, row.id));
     });
+    if (selfReported) {
+      const summary = accepted.map((r) => `${r.check}=${r.status}`).join(", ");
+      await db.insert(auditLog).values({
+        userId: req.authCtx.userId,
+        objectType: "workflow",
+        objectId: loaded.instance.id,
+        detail: {
+          stageId: body.stageId,
+          selfReported: true,
+          initiatorUserId: loaded.instance.initiatorUserId,
+          results: accepted.map((r) => ({ check: r.check, status: r.status })),
+        },
+        effect: "allow",
+        ruleId: "workflow:checks-self-reported",
+        ruleChain: [],
+        reason: reason
+          ? `initiator reported their own change's checks (${summary}): ${reason}`
+          : `initiator reported their own change's checks (${summary})`,
+      });
+    }
 
     // evaluate now only if this stage is the one currently executing
     const [afterWrite] = await db

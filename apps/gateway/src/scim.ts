@@ -645,6 +645,14 @@ export function registerScimRoutes(app: FastifyInstance, db: Db) {
         // is not an oracle for which of an attacker's guesses used to be real.
         return scimError(reply, 401, "this SCIM token is not valid");
       }
+      // ADR-0167: the per-TOKEN allowance (ADR-0037's "limited per
+      // scim_token") is applied here, once the token is a stored row, keyed on
+      // that row's id. Before this line the request already counted against
+      // the per-IP SCIM bucket in the onRequest tier — a bearer the gateway
+      // has not looked up cannot name a bucket.
+      if (app.rateLimitCredential && (await app.rateLimitCredential(req, reply, `cred:scim:${row.id}`))) {
+        return reply;
+      }
       await db.update(scimTokens).set({ lastUsedAt: new Date() }).where(eq(scimTokens.id, row.id));
       req.scimToken = row;
     });

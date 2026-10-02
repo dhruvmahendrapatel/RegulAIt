@@ -297,8 +297,19 @@ function MergeGateEvidence(props: { inst: WorkflowDetailResponse }) {
       {checkRows.length > 0 && (
         <div className={v.rowTight}>
           {checkRows.map((c, i) => (
-            <Badge key={`${c.check}-${i}`} tone={c.status === "passed" ? "ok" : "danger"} title={c.detail ?? ""}>
+            <Badge
+              key={`${c.check}-${i}`}
+              // ADR-0167 (AUTHZ-06): a pass the initiator reported themselves is
+              // not CI's colour — the approver sees that before signing off
+              tone={c.selfReported ? "warn" : c.status === "passed" ? "ok" : "danger"}
+              title={
+                c.selfReported
+                  ? `Reported by the change's own initiator, not by CI${c.reason ? ` — reason: ${c.reason}` : ""}${c.detail ? ` (${c.detail})` : ""}`
+                  : (c.detail ?? "")
+              }
+            >
               {c.check} · {c.status}
+              {c.selfReported ? " · self-reported" : ""}
             </Badge>
           ))}
         </div>

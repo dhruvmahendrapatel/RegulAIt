@@ -101,6 +101,7 @@ import { auditLog, type Db } from "@regulait/db";
 import {
   checkEgress,
   createGuardedFetch,
+  normalizeHost,
   type EgressAllowed,
   type EgressAllowEntry,
   type EgressDecision,
@@ -108,6 +109,11 @@ import {
   type EgressResolver,
 } from "./egress-guard.js";
 import { loadEgressAllowList } from "./custom-providers.js";
+import {
+  auditCompiledDefaultDenied,
+  decideCompiledDefault,
+  loadCompiledEgressContext,
+} from "./compiled-egress.js";
 
 const NIL_USER = "00000000-0000-0000-0000-000000000000";
 
@@ -320,6 +326,137 @@ export async function refuseConnectionEgressWrite(
     reason: detail,
   });
   return { error: "egress_blocked", code: decision.code, detail };
+}
+
+/**
+ * ADR-0167 (SEC-01) — the call-time guard for an adapter whose destination is
+ * NAMED BY ITS CREDENTIAL.
+ *
+ * "No override means no check" (the header of this module) is an SSRF
+ * argument about hosts nobody can type. Three connector kinds reach a host
+ * somebody DID type, through the credential rather than the `baseUrl`: the
+ * Entra login host (`loginBaseUrl`) for teams and outlook, and
+ * `https://<account>.snowflakecomputing.com` for snowflake. With no `baseUrl`
+ * override those adapters were handed the GLOBAL fetch, so an admin-typed
+ * credential field reached the network with no allow-list, no private-range
+ * or IMDS check, no DNS pin, redirects followed and no audit row — and the
+ * non-admin invoke route echoed the upstream body back. ADR-0034 §"only an
+ * admin can set it" is explicit that admin-only is not a mitigation here.
+ *
+ * Two rules, kept separate because they answer different questions:
+ *
+ *   1. The TYPED host (`typedBaseUrl`) is a typed destination and is
+ *      adjudicated exactly like a `baseUrl` override — the allow-list decides,
+ *      under every posture, and the decision is audited either way.
+ *   2. The vendor's COMPILED hosts the same call will reach (the Bot
+ *      Connector service, Graph, the default Entra login host) follow the
+ *      deployment posture precisely as `decideCompiledDefault` applies it to
+ *      every other compiled default: adjudicated under `strict`, admitted
+ *      under `hosted`. Under a permissive posture they are therefore handed
+ *      to the guarded fetch as synthetic allow entries — still pinned, still
+ *      redirect-refusing, still private-range-blocking; only the "is it
+ *      listed" question is answered by the posture rather than the table.
+ *
+ * The returned fetch re-adjudicates EVERY request URL, so a host this
+ * function did not pre-check (the service host after the login host) is
+ * refused mid-call, and `egressRefusal` turns that into the same honest 403.
+ */
+export async function guardCredentialDerivedCall(
+  db: Db,
+  args: {
+    surface: ConnectionSurface;
+    kind: string;
+    /** the host an admin typed into the credential, or null when the
+     * credential names none (teams/outlook with the default login host) */
+    typedBaseUrl: string | null;
+    /** the vendor's compiled hosts the adapter will also reach */
+    compiledBaseUrls: string[];
+    userId?: string | null;
+    objectId?: string | null;
+    label: string;
+    detail?: Record<string, unknown>;
+    deps?: ConnectionEgressDeps;
+  },
+): Promise<
+  | { ok: true; fetchImpl: typeof fetch; destination: EgressDestination | null }
+  | { ok: false; code: string; reason: string }
+> {
+  // the posture comes from the compiled-default context; the allow-list is
+  // loaded HERE regardless of posture (that context reads none under
+  // `hosted`, by design), because the typed host below is adjudicated
+  // against the table under every posture
+  const { posture } = await loadCompiledEgressContext(db);
+  const allowList = await loadEgressAllowList(db);
+  for (const url of args.compiledBaseUrls) {
+    const compiled = decideCompiledDefault({
+      posture,
+      surface: args.surface,
+      kind: args.kind,
+      defaultBaseUrl: url,
+      allowList,
+    });
+    if (!compiled.ok) {
+      await auditCompiledDefaultDenied(db, {
+        ...(args.userId !== undefined ? { userId: args.userId } : {}),
+        surface: args.surface,
+        ...(args.objectId !== undefined ? { objectId: args.objectId } : {}),
+        kind: args.kind,
+        decision: compiled,
+        posture,
+        ...(args.detail ? { detail: args.detail } : {}),
+      });
+      return { ok: false, code: compiled.code, reason: compiled.reason };
+    }
+  }
+  const listed = new Set(allowList.map((e) => normalizeHost(e.host)));
+  const synthetic: EgressAllowEntry[] = [];
+  if (posture !== "strict") {
+    for (const url of args.compiledBaseUrls) {
+      let host: string;
+      try {
+        host = normalizeHost(new URL(url).hostname);
+      } catch {
+        continue;
+      }
+      if (!host || listed.has(host)) continue;
+      listed.add(host);
+      synthetic.push({ host, allowPrivateRanges: false, allowPlaintextHttp: false });
+    }
+  }
+  const effective = synthetic.length ? [...allowList, ...synthetic] : allowList;
+
+  let destination: EgressDestination | null = null;
+  if (args.typedBaseUrl) {
+    const decision = await checkEgress(args.typedBaseUrl, {
+      allowList: effective,
+      ...(args.deps?.resolve ? { resolve: args.deps.resolve } : {}),
+    });
+    if (!decision.ok) {
+      const reason = `${args.label}: ${decision.reason}`;
+      await auditConnectionEgressDenied(db, {
+        surface: args.surface,
+        ...(args.userId !== undefined ? { userId: args.userId } : {}),
+        ...(args.objectId !== undefined ? { objectId: args.objectId } : {}),
+        phase: "call",
+        baseUrl: args.typedBaseUrl,
+        ...(args.detail ? { detail: args.detail } : {}),
+        decision,
+        reason,
+      });
+      return { ok: false, code: decision.code, reason };
+    }
+    destination = egressDestination(decision);
+    await auditConnectionEgressCall(db, {
+      surface: args.surface,
+      ...(args.userId !== undefined ? { userId: args.userId } : {}),
+      ...(args.objectId !== undefined ? { objectId: args.objectId } : {}),
+      phase: "call",
+      baseUrl: args.typedBaseUrl,
+      ...(args.detail ? { detail: args.detail } : {}),
+      destination,
+    });
+  }
+  return { ok: true, fetchImpl: connectionGuardedFetch(effective, args.deps ?? {}), destination };
 }
 
 /**

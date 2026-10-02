@@ -7,53 +7,84 @@
  * invisible to a per-account lockout, and general abuse of the governed
  * dispatch surfaces was unmetered.
  *
- * Two buckets, both keyed on the REAL client IP:
+ * TWO TIERS, and the split is the security property (ADR-0167, AUTHZ-01 /
+ * CFG-01). Every bucket a request is counted against BEFORE it authenticates
+ * is keyed on something the caller cannot choose — the REAL client IP:
  *
- *   - a generous global bucket, so ordinary interactive and CI traffic never
- *     notices it;
- *   - a much stricter bucket on the three unauthenticated credential-accepting
- *     endpoints (/auth/login, /auth/mfa/verify, /auth/login-with-key), which is
- *     what actually stops spraying.
+ *   - `ip:<ip>`    the generous global bucket for anonymous requests, so
+ *                  ordinary interactive and CI traffic never notices it;
+ *   - `ipk:<ip>`   a larger per-IP bucket for requests CARRYING a bearer. A
+ *                  busy service account behind one NAT must not be throttled
+ *                  into uselessness by, or throttle, its neighbours, so the
+ *                  bearer-carrying ceiling is the api-key ceiling rather than
+ *                  the anonymous one. It is still keyed on the IP: a bearer
+ *                  the gateway has not verified is just a string the caller
+ *                  typed, and a bucket named after it would be a bucket the
+ *                  caller mints at will;
+ *   - `auth:<ip>`  a much stricter bucket on the three unauthenticated
+ *                  credential-accepting endpoints (/auth/login,
+ *                  /auth/mfa/verify, /auth/login-with-key), which is what
+ *                  actually stops spraying;
+ *   - `sso:<ip>`   a moderate bucket on the two SSO return legs (the SAML ACS
+ *                  and the OIDC callback). An ACS failure costs an XML parse, a
+ *                  signature check and a hash-chained audit row, so it must not
+ *                  ride the anonymous allowance — but a corporate NAT signs
+ *                  hundreds of people in at 9am, so it cannot ride the
+ *                  10-per-5-minutes spray bucket either (CFG-06).
  *
- * "The real client IP" is only meaningful because of item 3: `req.ip` is now
- * the socket peer unless an explicitly named proxy forwarded the request. With
- * a blanket `trustProxy: true` an attacker would simply rotate
+ * The per-CREDENTIAL buckets (`cred:key:<id>`, `cred:vkey:<id>`,
+ * `cred:bootstrap`, `cred:scim:<id>`) are applied in a SECOND limiter call,
+ * AFTER the bearer has resolved to a stored row — see `rateLimitCredentialKey`,
+ * the auth preHandler in app.ts and the SCIM scope's own token check in
+ * scim.ts. The bucket name is the credential's stored id, never anything
+ * derived from the presented string. ADR-0037's "limited PER scim_token"
+ * lives entirely in that tier: before the token resolves a SCIM request is
+ * just a bearer-carrying request from an address, and counts as one.
+ *
+ * Why the pre-auth tier must be IP-keyed, stated once: the shared store
+ * (ADR-0125) writes one Postgres row per NEW bucket. Naming buckets after an
+ * unverified header let one address rotate the header and (a) never meet any
+ * ceiling and (b) cost the database one INSERT per request — the exact
+ * amplifier ADR-0125 says the local pre-filter prevents. With IP-keyed
+ * buckets the number of rows is bounded by distinct callers, which is the
+ * property the ADR actually claimed.
+ *
+ * "The real client IP" is only meaningful because of item 3: `req.ip` is the
+ * socket peer unless an explicitly named proxy forwarded the request. With a
+ * blanket `trustProxy: true` an attacker would simply rotate
  * `x-forwarded-for` and get a fresh bucket per request, which is why these two
  * items ship together and why the rate limiter must never be configured to
  * key on a header the deployment does not trust.
- *
- * Authenticated API-key clients get their own, larger bucket keyed on the key
- * itself rather than sharing one per-IP bucket — a legitimately busy service
- * account behind one NAT must not be throttled into uselessness by, or
- * throttle, its neighbours.
  *
  * ADR-0021 CONVENTION DEBT (stated plainly, not hidden): under the standing
  * admin-configurability mandate these limits belong in `org_settings` next to
  * loginLockoutThreshold. `org_settings` has no rate-limit columns today and
  * this batch deliberately adds no migration, so the values live in the
- * constants below with env overrides. Adding
- * `http_rate_limit_max` / `http_rate_limit_window_seconds` /
- * `auth_rate_limit_max` / `auth_rate_limit_window_seconds` /
- * `api_key_rate_limit_max` to `org_settings` (and reading them through
- * loadOrgSettings) is the natural follow-up.
+ * constants below with env overrides.
  */
 import type { FastifyRequest } from "fastify";
+import type { AuthContext } from "./auth.js";
 
 export interface RateLimitConfig {
   enabled: boolean;
-  /** requests per window, per client IP, across everything else */
+  /** requests per window, per client IP, for anonymous requests */
   globalMax: number;
   globalWindowMs: number;
   /** requests per window, per client IP, on the credential endpoints */
   authMax: number;
   authWindowMs: number;
-  /** requests per window for a caller presenting an API key (its own bucket) */
+  /** requests per window for one RESOLVED api key / virtual key / bootstrap
+   * token (its own bucket), and the per-IP ceiling for bearer-carrying
+   * requests before the bearer resolves */
   apiKeyMax: number;
   /** ADR-0037: requests per window for one SCIM token. A full directory sync
    * is BURSTY by nature, so this bucket is generous — its job is to bound a
    * misconfigured or runaway IdP connector, not to fail legitimate syncs. */
   scimMax: number;
   scimWindowMs: number;
+  /** CFG-06: requests per window, per client IP, on the SSO return legs */
+  ssoMax: number;
+  ssoWindowMs: number;
 }
 
 export const RATE_LIMIT_DEFAULTS: Readonly<RateLimitConfig> = Object.freeze({
@@ -73,6 +104,11 @@ export const RATE_LIMIT_DEFAULTS: Readonly<RateLimitConfig> = Object.freeze({
   // is the SCIM-correct backpressure signal every connector honours.
   scimMax: 3000,
   scimWindowMs: 60_000,
+  // 120 SSO completions per IP per minute: two a second sustained from one
+  // office address, far above a login storm, far below the parse budget an
+  // attacker would need to matter.
+  ssoMax: 120,
+  ssoWindowMs: 60_000,
 });
 
 /** the unauthenticated, credential-accepting endpoints */
@@ -80,6 +116,12 @@ export const AUTH_RATE_LIMIT_ROUTES: ReadonlySet<string> = new Set([
   "/auth/login",
   "/auth/mfa/verify",
   "/auth/login-with-key",
+]);
+
+/** CFG-06: the SSO return legs — unauthenticated, and expensive to refuse */
+export const SSO_RATE_LIMIT_ROUTES: ReadonlySet<string> = new Set([
+  "/auth/saml/:providerId/acs",
+  "/auth/oidc/callback",
 ]);
 
 function envInt(env: NodeJS.ProcessEnv, name: string, dflt: number): number {
@@ -123,17 +165,10 @@ export function resolveRateLimitConfig(
       "REGULAIT_SCIM_RATE_LIMIT_WINDOW_MS",
       RATE_LIMIT_DEFAULTS.scimWindowMs,
     ),
+    ssoMax: envInt(env, "REGULAIT_SSO_RATE_LIMIT_MAX", RATE_LIMIT_DEFAULTS.ssoMax),
+    ssoWindowMs: envInt(env, "REGULAIT_SSO_RATE_LIMIT_WINDOW_MS", RATE_LIMIT_DEFAULTS.ssoWindowMs),
     ...override,
   };
-}
-
-/** true when this request is on the ADR-0037 SCIM surface. Matched on the URL
- * PATH rather than on the route table so it holds for a 404 under /scim/v2 as
- * well — an unmatched path must not fall back into the generous global bucket
- * and become a way to probe the surface for free. */
-export function isScimRateLimited(req: FastifyRequest): boolean {
-  const url = req.routeOptions?.url ?? req.url.split("?")[0]!;
-  return url.startsWith("/scim/v2/") || url === "/scim/v2";
 }
 
 /** true when this request is one of the credential-accepting endpoints */
@@ -142,48 +177,60 @@ export function isAuthRateLimited(req: FastifyRequest): boolean {
   return AUTH_RATE_LIMIT_ROUTES.has(url);
 }
 
+/** true when this request is an SSO return leg (CFG-06) */
+export function isSsoRateLimited(req: FastifyRequest): boolean {
+  const url = req.routeOptions?.url ?? req.url.split("?")[0]!;
+  return SSO_RATE_LIMIT_ROUTES.has(url);
+}
+
+/** does the request carry a bearer credential at all? Presence only — the
+ * value is never read here, because nothing about it has been verified. */
+export function carriesBearer(req: FastifyRequest): boolean {
+  const auth = req.headers.authorization;
+  return typeof auth === "string" && auth.toLowerCase().startsWith("bearer ");
+}
+
 /**
- * The bucket a request counts against.
- *
- * `auth:<ip>` for the credential endpoints (a separate, much smaller bucket,
- * so a spray cannot hide inside the generous global allowance and a busy API
- * client cannot exhaust the login allowance for everyone on its IP);
- * `key:<prefix>` for a caller presenting a bearer credential (its own, larger
- * allowance — a legitimate service account is not throttled by its neighbours
- * and cannot exhaust theirs); the client IP otherwise.
- *
- * Only the first 32 chars of the credential are used, and it is never logged;
- * the value exists solely as an in-memory bucket key.
+ * The PRE-AUTH bucket a request counts against. Every branch is keyed on
+ * `req.ip`; the only thing the Authorization header decides is WHICH per-IP
+ * ceiling applies (anonymous vs bearer-carrying), never the bucket's name.
  */
 export function rateLimitKey(req: FastifyRequest): string {
   if (isAuthRateLimited(req)) return `auth:${req.ip}`;
-  // ADR-0037: the SCIM surface is limited PER scim_token, not per IP and not
-  // in the shared api-key bucket. One IdP connector calls from one address for
-  // thousands of users, so an IP bucket would either throttle a legitimate
-  // sync or have to be so wide it bounds nothing; and a runaway connector must
-  // not be able to spend the allowance of the org's real API clients.
-  if (isScimRateLimited(req)) {
-    const auth = req.headers.authorization;
-    return typeof auth === "string" && auth.toLowerCase().startsWith("bearer ")
-      ? `scim:${auth.slice(7, 39)}`
-      : `scim:anon:${req.ip}`;
+  if (isSsoRateLimited(req)) return `sso:${req.ip}`;
+  return carriesBearer(req) ? `ipk:${req.ip}` : `ip:${req.ip}`;
+}
+
+/**
+ * The POST-AUTH bucket for a RESOLVED bearer credential, or null when the
+ * request authenticated some other way (a session cookie rides the per-IP
+ * tier like every browser request). Named by the stored row's id — the one
+ * thing an attacker rotating strings cannot produce.
+ */
+export function rateLimitCredentialKey(ctx: AuthContext): string | null {
+  switch (ctx.via) {
+    case "bootstrap":
+      return "cred:bootstrap";
+    case "api-key":
+      return ctx.apiKeyId ? `cred:key:${ctx.apiKeyId}` : null;
+    case "virtual-key":
+      return ctx.virtualKeyId ? `cred:vkey:${ctx.virtualKeyId}` : null;
+    default:
+      return null;
   }
-  const auth = req.headers.authorization;
-  if (typeof auth === "string" && auth.toLowerCase().startsWith("bearer ")) {
-    return `key:${auth.slice(7, 39)}`;
-  }
-  return `ip:${req.ip}`;
 }
 
 export function rateLimitMax(cfg: RateLimitConfig, key: string): number {
   if (key.startsWith("auth:")) return cfg.authMax;
-  if (key.startsWith("scim:")) return cfg.scimMax;
-  if (key.startsWith("key:")) return cfg.apiKeyMax;
+  if (key.startsWith("sso:")) return cfg.ssoMax;
+  if (key.startsWith("cred:scim:")) return cfg.scimMax;
+  if (key.startsWith("ipk:") || key.startsWith("cred:")) return cfg.apiKeyMax;
   return cfg.globalMax;
 }
 
 export function rateLimitWindowMs(cfg: RateLimitConfig, key: string): number {
   if (key.startsWith("auth:")) return cfg.authWindowMs;
-  if (key.startsWith("scim:")) return cfg.scimWindowMs;
+  if (key.startsWith("sso:")) return cfg.ssoWindowMs;
+  if (key.startsWith("cred:scim:")) return cfg.scimWindowMs;
   return cfg.globalWindowMs;
 }

@@ -3571,7 +3571,15 @@ export const orgSettings = pgTable(
     tracingOtlpEndpoint: text("tracing_otlp_endpoint"),
     /** operator-supplied export headers (e.g. an OTLP collector's auth header).
      * Values are returned REDACTED by the settings read surface. */
+    /** ADR-0167 (SEC-06): since migration 0128 this holds header NAMES only
+     * (every value is the `[redacted]` marker) — the values live enveloped in
+     * the column below. A pre-0128 row still carrying plaintext values is
+     * enveloped by the gateway's boot-time backfill. */
     tracingOtlpHeaders: jsonb("tracing_otlp_headers"),
+    /** ADR-0167 (SEC-06): the collector headers as a REGULAIT_DATA_KEY
+     * envelope over the JSON map — a collector API key is a credential like
+     * every other admin-registered endpoint secret */
+    tracingOtlpHeadersCiphertext: text("tracing_otlp_headers_ciphertext"),
     tracingOtlpServiceName: text("tracing_otlp_service_name").notNull().default("regulait-gateway"),
 
     updatedBy: uuid("updated_by"),

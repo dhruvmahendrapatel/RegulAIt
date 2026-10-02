@@ -564,6 +564,56 @@ export const TEAMS_MULTITENANT_SEGMENT = "botframework.com";
 /** the app-only scope the Bot Connector accepts */
 export const TEAMS_BOT_SCOPE = "https://api.botframework.com/.default";
 
+/**
+ * ADR-0167 (SEC-01): a login-host override is a plain absolute http(s) URL —
+ * a host, optionally a path, and nothing else. The adapters append
+ * `/<tenant>/oauth2/v2.0/token`, so a value carrying credentials, a query or a
+ * fragment would let the typed field choose the whole request rather than
+ * the host. WHICH hosts are reachable is the egress guard's decision at call
+ * time, not this schema's: a loopback fake in a test is admitted by an allow
+ * entry, never by the shape.
+ */
+export const loginBaseUrlSchema = z
+  .string()
+  .url()
+  .max(2048)
+  .refine(
+    (v) => {
+      try {
+        const u = new URL(v);
+        return (
+          (u.protocol === "https:" || u.protocol === "http:") &&
+          u.hostname !== "" &&
+          u.username === "" &&
+          u.password === "" &&
+          u.search === "" &&
+          u.hash === ""
+        );
+      } catch {
+        return false;
+      }
+    },
+    { message: "must be a plain http(s) URL with a host and at most a path — no credentials, query or fragment" },
+  );
+
+/** ADR-0167 (SEC-01): what a failed token exchange tells the caller. The
+ * login service's own `error` / `error_description` are what an operator
+ * needs; the raw body is NEVER echoed — once a typed login host is reachable,
+ * the body is whatever that host chose to say, and reflecting it to the
+ * (non-admin) invoker would make the connector a read oracle for it. */
+export function tokenErrorDetail(text: string, status: number): string {
+  try {
+    const parsed = JSON.parse(text) as { error?: unknown; error_description?: unknown };
+    const parts = [parsed.error, parsed.error_description]
+      .filter((p): p is string => typeof p === "string" && p.length > 0)
+      .map((p) => p.slice(0, 300));
+    if (parts.length > 0) return `HTTP ${status}: ${parts.join(" — ")}`;
+  } catch {
+    /* not JSON: say so, do not echo */
+  }
+  return `HTTP ${status} (${text.length}-byte non-JSON response body withheld)`;
+}
+
 export const teamsCredentialSchema = z
   .object({
     appId: z.string().min(1),
@@ -571,7 +621,7 @@ export const teamsCredentialSchema = z
     /** omitted ⇒ multi-tenant bot (`botframework.com`) */
     tenantId: z.string().min(1).optional(),
     /** sovereign-cloud override for the Entra login host */
-    loginBaseUrl: z.string().url().optional(),
+    loginBaseUrl: loginBaseUrlSchema.optional(),
   })
   .strict();
 export type TeamsCredential = z.infer<typeof teamsCredentialSchema>;
@@ -656,9 +706,10 @@ export class TeamsConnectorProvider implements ConnectorProvider {
     const text = await res.text();
     if (res.status < 200 || res.status >= 300) {
       // the app password itself is never echoed; the login service's own
-      // `error`/`error_description` is what an operator needs
+      // `error`/`error_description` is what an operator needs — and ONLY
+      // those (ADR-0167): the raw body is withheld
       throw new ConnectorProviderError(
-        `teams token request failed: ${text}`,
+        `teams token request failed: ${tokenErrorDetail(text, res.status)}`,
         res.status === 400 || res.status === 401 ? 401 : res.status,
       );
     }
@@ -846,7 +897,7 @@ export const outlookCredentialSchema = z
     tenantId: z.string().min(1),
     /** the mailbox the approval is SENT FROM (`/users/{senderUpn}/sendMail`) */
     senderUpn: z.string().min(1),
-    loginBaseUrl: z.string().url().optional(),
+    loginBaseUrl: loginBaseUrlSchema.optional(),
   })
   .strict();
 export type OutlookCredential = z.infer<typeof outlookCredentialSchema>;
@@ -923,7 +974,10 @@ export class OutlookConnectorProvider implements ConnectorProvider {
       );
     }
     if (res.status >= 400) {
-      throw new ConnectorProviderError(`outlook token request failed: ${text}`, res.status);
+      throw new ConnectorProviderError(
+        `outlook token request failed: ${tokenErrorDetail(text, res.status)}`,
+        res.status,
+      );
     }
     const decoded = decodeBody(res.status, text).body as { access_token?: unknown } | null;
     const token = decoded && typeof decoded === "object" ? decoded.access_token : null;
@@ -1455,8 +1509,15 @@ export class JiraConnectorProvider implements ConnectorProvider {
  * is what gets encrypted into connector_credentials.token_ciphertext). */
 export const snowflakeCredentialSchema = z
   .object({
-    /** account identifier, e.g. "myorg-acct123" (no .snowflakecomputing.com) */
-    account: z.string().min(1),
+    /** account identifier, e.g. "myorg-acct123" (no .snowflakecomputing.com).
+     * ADR-0167 (SEC-01): it becomes a HOSTNAME LABEL, so it is one — a `/`,
+     * `?`, `@` or `:` here would let the field choose a different host or
+     * path than `<account>.snowflakecomputing.com`. */
+    account: z
+      .string()
+      .min(1)
+      .max(255)
+      .regex(/^[A-Za-z0-9_.-]+$/, "account must be a hostname label: letters, digits, '_', '.' and '-' only"),
     /** the Snowflake user the key pair is registered to */
     user: z.string().min(1),
     /** PEM-encoded RSA private key (PKCS#8 "BEGIN PRIVATE KEY" or encrypted
@@ -1660,15 +1721,18 @@ export class SnowflakeConnectorProvider implements ConnectorProvider {
     }
     const text = await res.text();
     if (res.status < 200 || res.status >= 300) {
-      // SQL API error bodies carry {message, code} — surface both, not raw JSON
-      let detail = text;
+      // SQL API error bodies carry {message, code} — surface both, not raw
+      // JSON; and a NON-JSON body is withheld rather than echoed (ADR-0167):
+      // the account host is admin-typed, so its response is not ours to relay
+      let detail = `HTTP ${res.status} (${text.length}-byte non-JSON response body withheld)`;
       try {
         const parsed = JSON.parse(text) as { message?: string; code?: string };
         if (parsed && typeof parsed.message === "string") {
-          detail = parsed.code ? `${parsed.message} (code ${parsed.code})` : parsed.message;
+          const message = parsed.message.slice(0, 500);
+          detail = parsed.code ? `${message} (code ${parsed.code})` : message;
         }
       } catch {
-        /* keep raw text */
+        /* not JSON: the coarse line above stands */
       }
       throw new ConnectorProviderError(
         `snowflake POST /api/v2/statements failed: ${detail}`,
@@ -1876,8 +1940,9 @@ export function resolveConnectorProvider(
 // `snowflake` is the honest `undefined` here. Its default is derived from the
 // DECRYPTED CREDENTIAL (`https://<account>.snowflakecomputing.com`), so it is
 // knowable at call time but not statically, and this registry deliberately does
-// not take a credential. An air-gapped deployment that wants a Snowflake
-// connector sets an explicit `baseUrl` — which is the guarded path anyway.
+// not take a credential. `connectorCredentialHosts` below is the call-time
+// half: given the decrypted token it names the typed host and the compiled
+// ones, and the gateway guards both (ADR-0167).
 
 export function connectorDefaultBaseUrl(kind: string): string | null | undefined {
   switch (kind) {
@@ -1890,8 +1955,13 @@ export function connectorDefaultBaseUrl(kind: string): string | null | undefined
       // reaches the Entra login host, which this registry cannot name here
       // because it is credential-derived (`loginBaseUrl`); that host is
       // adjudicated at call time by the guarded fetch, which re-checks every
-      // request URL.
+      // request URL (and, since ADR-0167, on the connector invoke path too —
+      // see `connectorCredentialHosts`).
       return TEAMS_DEFAULT_BASE_URL;
+    case "outlook":
+      // ADR-0167: the Graph default, so a strict posture adjudicates it like
+      // every other compiled vendor host instead of refusing it as unknown
+      return OUTLOOK_DEFAULT_GRAPH_BASE_URL;
     case "github":
       return GITHUB_DEFAULT_BASE_URL;
     // these cannot be constructed without an explicit baseUrl (the adapter
@@ -1906,5 +1976,58 @@ export function connectorDefaultBaseUrl(kind: string): string | null | undefined
     default:
       // includes `snowflake` — credential-derived, see above
       return undefined;
+  }
+}
+
+/**
+ * ADR-0167 (SEC-01): the kinds whose adapters reach a host NAMED BY THE
+ * CREDENTIAL rather than only by the connector row. The gateway must hand
+ * these a guarded fetch even with no `baseUrl` override, because "no override
+ * means no check" only holds for hosts nobody typed.
+ */
+export const CREDENTIAL_HOST_CONNECTOR_KINDS: ReadonlySet<string> = new Set([
+  "teams",
+  "outlook",
+  "snowflake",
+]);
+
+/**
+ * The hosts an adapter of `kind` reaches with NO `baseUrl` override, split
+ * into the one an admin TYPED into the credential (adjudicated like any typed
+ * destination) and the vendor's COMPILED ones (which follow the deployment
+ * posture). Throws `ConnectorProviderError` for a credential the kind cannot
+ * parse — the same error the adapter itself would raise.
+ */
+export function connectorCredentialHosts(
+  kind: string,
+  token: string | null,
+): { typed: string | null; compiled: string[] } {
+  switch (kind) {
+    case "snowflake":
+      return {
+        typed: token
+          ? `https://${parseSnowflakeCredential(token).account.toLowerCase()}.snowflakecomputing.com`
+          : null,
+        compiled: [],
+      };
+    case "teams": {
+      const cred = token ? parseTeamsCredential(token) : null;
+      return {
+        typed: cred?.loginBaseUrl ?? null,
+        compiled: [TEAMS_DEFAULT_BASE_URL, ...(cred?.loginBaseUrl ? [] : [TEAMS_DEFAULT_LOGIN_BASE_URL])],
+      };
+    }
+    case "outlook": {
+      const cred = token ? parseOutlookCredential(token) : null;
+      return {
+        typed: cred?.loginBaseUrl ?? null,
+        compiled: [
+          OUTLOOK_DEFAULT_GRAPH_BASE_URL,
+          ...(cred?.loginBaseUrl ? [] : [OUTLOOK_DEFAULT_LOGIN_BASE_URL]),
+        ],
+      };
+    }
+    default:
+      return { typed: null, compiled: [] };
   }
 }

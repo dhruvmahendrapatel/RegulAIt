@@ -436,7 +436,15 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
   // THE IMPORT — the untrusted path
   // =======================================================================
 
-  app.post("/v1/shadow-ai/imports", async (req, reply) => {
+  // ADR-0167 (SEC-03): the route's own byte bound below is measured on the
+  // PARSED body, so it can only fire if Fastify accepted the raw body first.
+  // The global limit is 1 MiB; the advertised bound is EVIDENCE_MAX_BYTES, so
+  // this route raises its raw limit to the advertised bound plus encoding
+  // slack — otherwise every payload between 1 MiB and the bound was a 413 the
+  // error handler reported as a 500, and the honest message never fired.
+  const importBodyLimit = { bodyLimit: EVIDENCE_MAX_BYTES + 64 * 1024 };
+
+  app.post("/v1/shadow-ai/imports", importBodyLimit, async (req, reply) => {
     const raw = req.body;
     const rawJson = JSON.stringify(raw ?? null);
 
@@ -559,7 +567,7 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
    *      running them anyway is what makes that a property rather than a claim.
    *   4. THE ONE PIPELINE.
    */
-  app.post("/v1/shadow-ai/imports/raw", async (req, reply) => {
+  app.post("/v1/shadow-ai/imports/raw", importBodyLimit, async (req, reply) => {
     const raw = req.body;
 
     const parsedReq = rawEvidenceImportRequestSchema.safeParse(raw);

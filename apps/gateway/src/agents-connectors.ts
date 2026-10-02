@@ -36,10 +36,14 @@ import { refuseSodMint } from "./sod.js";
 import { evaluateAgent, evaluateConnector } from "@regulait/policy-kernel";
 import { agentHaltOf, loadExecutionMode, postureOf } from "./execution-posture.js";
 import {
+  CREDENTIAL_HOST_CONNECTOR_KINDS,
   ConnectorProviderError,
+  connectorCredentialHosts,
   connectorDefaultBaseUrl,
   isConnectorProviderKind,
+  parseOutlookCredential,
   parseSnowflakeCredential,
+  parseTeamsCredential,
   resolveConnectorProvider,
 } from "@regulait/connector-provider";
 import {
@@ -170,6 +174,7 @@ import { checkCredentialBaseUrl, credentialGuardedFetch } from "./credential-egr
 import {
   ConnectionEgressBlockedError,
   guardConnectionCall,
+  guardCredentialDerivedCall,
   refuseConnectionEgressWrite,
   type ConnectionSurface,
 } from "./connection-egress.js";
@@ -4674,9 +4679,22 @@ export function registerAgentConnectorRoutes(
     // passphrase?}). Validate the shape HERE, at connection-create time, so a
     // malformed credential 400s with an actionable message instead of failing
     // opaquely at first invoke. Single-field kinds are untouched.
-    if (connector.providerKind === "snowflake") {
+    //
+    // ADR-0167 (SEC-01): teams and outlook join snowflake. Their JSON names a
+    // HOST (`loginBaseUrl`, and snowflake's `account` becomes one), and the
+    // tightened schemas refuse a value that could choose more than a host —
+    // credentials, a query, a fragment, a `/` in an account. Which hosts are
+    // REACHABLE is decided at invoke time by the egress guard, exactly as for
+    // a typed baseUrl; this is the shape, not the policy.
+    const shapeParsers: Record<string, (token: string) => unknown> = {
+      snowflake: parseSnowflakeCredential,
+      teams: parseTeamsCredential,
+      outlook: parseOutlookCredential,
+    };
+    const parseShape = connector.providerKind ? shapeParsers[connector.providerKind] : undefined;
+    if (parseShape) {
       try {
-        parseSnowflakeCredential(body.token);
+        parseShape(body.token);
       } catch (err) {
         if (err instanceof ConnectorProviderError) {
           return reply
@@ -5155,12 +5173,64 @@ export function registerAgentConnectorRoutes(
           throw err;
         }
         connectorFetch = guarded.fetchImpl;
+      } else if (CREDENTIAL_HOST_CONNECTOR_KINDS.has(connector.providerKind)) {
+        // ADR-0167 (SEC-01) — a destination NAMED BY THE CREDENTIAL. With no
+        // baseUrl these three kinds used to fall into the compiled-default
+        // branch below, which (under the default posture) checks nothing and
+        // hands the adapter the GLOBAL fetch — so an admin-typed `loginBaseUrl`
+        // or snowflake `account` reached the network with no allow-list, no
+        // private-range/IMDS check, no DNS pin, redirects followed and no audit
+        // row, and the upstream body came back to the non-admin invoker. The
+        // typed host is now adjudicated like a typed baseUrl, the vendor's
+        // compiled hosts follow the posture exactly as below, and the adapter
+        // gets the guarded fetch — which re-checks every URL it is handed.
+        let hosts: { typed: string | null; compiled: string[] };
+        try {
+          hosts = connectorCredentialHosts(connector.providerKind, token);
+        } catch (err) {
+          if (err instanceof ConnectorProviderError) {
+            return out
+              .status(400)
+              .send({ decision, error: "invalid_connector_credential", detail: err.message });
+          }
+          throw err;
+        }
+        const guarded = await guardCredentialDerivedCall(db, {
+          surface: "connector",
+          kind: connector.providerKind,
+          typedBaseUrl: hosts.typed,
+          compiledBaseUrls: hosts.compiled,
+          userId,
+          objectId: connectorId,
+          label: `connector '${connector.name}' (${connector.providerKind})`,
+          detail: {
+            connectorKind: connector.providerKind,
+            operation: body.operation,
+            source: "connector_credential",
+            ...(projectId ? { projectId } : {}),
+          },
+          deps: { beforeSend: beforeConnectorSend },
+        });
+        if (!guarded.ok) {
+          const alsoReaches =
+            connector.providerKind === "snowflake"
+              ? ""
+              : " (this kind reaches the Microsoft Entra login host as well as the service host — a typed login host needs an Egress Allow Hosts entry)";
+          // `guarded.reason` already names the connector (the label above)
+          return out.status(403).send({
+            decision,
+            error: "egress_blocked",
+            code: guarded.code,
+            detail: `${guarded.reason}${alsoReaches} (an admin adds permitted destinations under Egress Allow Hosts)`,
+          });
+        }
+        connectorFetch = guarded.fetchImpl;
       } else {
-        // ADR-0062 — the compiled connector endpoint. `snowflake` resolves to
-        // "not statically knowable" (its default is derived from the decrypted
-        // credential) and is therefore REFUSED under a strict posture rather
-        // than assumed safe; every kind that cannot exist without an explicit
-        // baseUrl resolves to "nothing to adjudicate".
+        // ADR-0062 — the compiled connector endpoint. Every kind that cannot
+        // exist without an explicit baseUrl resolves to "nothing to
+        // adjudicate"; a kind whose default this registry cannot name is
+        // REFUSED under a strict posture rather than assumed safe. (The
+        // credential-derived kinds take the branch above, ADR-0167.)
         const { posture, allowList } = await loadCompiledEgressContext(db);
         const compiled = decideCompiledDefault({
           posture,
