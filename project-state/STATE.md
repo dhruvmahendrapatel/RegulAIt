@@ -21,6 +21,18 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-10-02 (afternoon) - Demo hardening: runbook proven, fallback deck, visual QA.**
+DEMO_SCRIPT §0 was executed verbatim on an empty database (17/17, 23 s); a second
+`demo:prepare` on the same database is safe (settings unchanged, only traffic accrues) and the
+real journey passes twice on one database. `apps/web/e2e/fallback-deck.mjs` builds a
+self-contained offline walkthrough (16 slides: real screenshots, the real deploy-gate output, each
+beat's Say line) — runbook "Fallback" section. A screenshot QA sweep of every demo page found
+internals on screen (stage ids, snake_case, nil-UUID actors, ADR/migration refs, `(s)` plurals,
+clipped graph labels, a contradictory "not tagged" badge, an empty Stack tab for the hero); two
+batches fixed them (cb55473, ee0a328) with display helpers in `apps/web/src/api/format.ts`. The
+trust tiles now partition (`risksUnmitigated`: found = mitigated + accepted + not yet
+mitigated). The hero use case now links claude-opus + Anthropic at the intake stack step.
+
 **2026-10-02 (Codex review) - MCP consent bound to its target (ADR-0166, AER-039/040).**
 Codex's HIGH finding was real: an admin could repoint an MCP server (`url`,
 `allowPrivateRanges`) under the same id and an approval signed for upstream A was spent
