@@ -42,6 +42,7 @@ import {
   roles,
   serverGrants,
   sodOverrideRequests,
+  remediationProposals,
   sql,
   teamMembers,
   teams,
@@ -151,6 +152,7 @@ import { registerDependencyGraphRoutes } from "./dependency-graph.js";
 import { registerGovernanceMonitorRoutes } from "./governance-monitor.js";
 import { registerRegulatoryIntelRoutes } from "./regulatory-intel.js";
 import {
+  REMEDIATION_PREFIX as GOVERNANCE_REMEDIATION_PREFIX,
   applyRemediationDecision,
   precheckRemediationDecision,
   registerRemediationRoutes,
@@ -2872,6 +2874,31 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           .where(inArray(sodOverrideRequests.id, sodOverrideIds))
       : [];
     const sodOverrideById = new Map(sodOverrideRows.map((r) => [r.id, r.label]));
+    // ADR-0159: a governance remediation's queue row names WHAT will change
+    // (the proposal's title, e.g. "Assign an owner to X") — never the raw id
+    const governanceRemediationIds = ids(
+      rows.map((r) =>
+        r.objectType === "remediation" &&
+        r.stageId?.startsWith(GOVERNANCE_REMEDIATION_PREFIX) &&
+        uuidOk(r.stageId.slice(GOVERNANCE_REMEDIATION_PREFIX.length))
+          ? r.stageId.slice(GOVERNANCE_REMEDIATION_PREFIX.length)
+          : null,
+      ),
+    );
+    const governanceRemediationById = new Map(
+      (governanceRemediationIds.length
+        ? await db
+            .select({ id: remediationProposals.id, title: remediationProposals.title })
+            .from(remediationProposals)
+            .where(inArray(remediationProposals.id, governanceRemediationIds))
+        : []
+      ).map((r) => [r.id, r.title]),
+    );
+    const governanceRemediationLabelFor = (stageId: string | null): string | null => {
+      if (!stageId?.startsWith(GOVERNANCE_REMEDIATION_PREFIX)) return null;
+      const title = governanceRemediationById.get(stageId.slice(GOVERNANCE_REMEDIATION_PREFIX.length));
+      return title ? `governance remediation · ${title}` : null;
+    };
     const sodOverrideLabelFor = (stageId: string | null): string | null => {
       if (!stageId?.startsWith(SOD_OVERRIDE_PREFIX)) return null;
       return sodOverrideById.get(stageId.slice(SOD_OVERRIDE_PREFIX.length)) ?? null;
@@ -2929,6 +2956,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           (r.objectType === "model_card" ? modelCardLabelFor(r.stageId) : null) ??
           (r.objectType === "grant_certification" ? grantCertLabelFor(r.stageId) : null) ??
           (r.objectType === "sod_override" ? sodOverrideLabelFor(r.stageId) : null) ??
+          (r.objectType === "remediation" ? governanceRemediationLabelFor(r.stageId) : null) ??
           r.toolName ??
           null,
         // ADR-0022: this row reached the caller via an active delegation —

@@ -116,6 +116,11 @@ describe("ADR-0159 remediation", () => {
     const decide = (who: typeof proposer) =>
       call("POST", `/v1/approvals/${proposal.approvalId}/decide`, who.auth, { decision: "approved", reason: "control fits the mechanism" });
 
+    // the approver's inbox names WHAT will change, never the raw stage sentinel
+    const inbox = await call("GET", "/v1/approvals?status=pending", approver.auth);
+    const row = inbox.json().approvals.find((a: any) => a.id === proposal.approvalId);
+    expect(row).toMatchObject({ objectType: "remediation", objectLabel: `governance remediation · ${proposal.title}` });
+
     const own = await decide(proposer);
     expect(own.statusCode).toBe(403);
     expect(own.json().error).toBe("cannot_approve_own_remediation");
