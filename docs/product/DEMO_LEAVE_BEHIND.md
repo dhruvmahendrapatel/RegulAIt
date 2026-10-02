@@ -1,20 +1,41 @@
 # RegulAIt: Evidence-Based AI Governance
-RegulAIt bridges the gap between regulatory requirements and technical reality. Unlike traditional governance tools that rely on spreadsheets and point-in-time surveys, RegulAIt connects directly to your AI execution layer.
+
+RegulAIt governs AI from the execution path. The gateway that authorises every agent, model,
+connector and MCP-tool call also records what happened, so governance is measured from what the
+platform saw — and labelled as an attestation where it cannot be.
 
 ## 1. Discover & Register
-You can't govern what you don't know exists. RegulAIt begins by integrating with your environment to discover Shadow AI usage. When an unregistered AI tool is found, developers can quickly bring it into the fold using our Assisted Intake Wizard (**ADR-0149**). Using deterministic rules, the wizard drafts risk questionnaires and proposes regulatory tiers based on plain-language descriptions—such as classifying an agent under the EU AI Act High-Risk tier—eliminating manual guesswork.
+RegulAIt classifies the evidence you import — SaaS exports, egress logs, code scans — to find AI
+in use that nobody registered. A finding becomes a governed proposal in one step: the intake
+wizard pre-fills only what the evidence established, and the proposer answers the EU AI Act
+screening. The risk tier is computed from those structured answers by deterministic rules, with
+the reasons shown (ADR-0085); suggested frameworks, risks and controls are accepted, edited or
+rejected by a person (ADR-0149).
 
 ## 2. Assess & Deploy
-Once a use case is registered, RegulAIt maps it against established frameworks like the EU AI Act, NIST AI RMF, and ISO 42001. A comprehensive Use-Case 360 view provides a complete agentic dependency graph (**ADR-0156**), tracing the relationships between your use case, autonomous agents, models, and third-party vendors.
-
-Before any deployment, separation of duties is enforced. A risk reviewer must evaluate the inherent and residual risk scores (**ADR-0147**) and approve the use case, writing an immutable audit record. Our CI/CD Deploy Gate (**ADR-0161**) integrates this approval directly into your pipelines, blocking unapproved or non-compliant systems from reaching production.
+Each use case has a 360 view of its frameworks, risks, stack, dependencies, approvals and audit
+trail. Risks carry declared inherent and residual positions — likelihood and impact chosen by a
+person, residual tied to named controls; no scores, no arithmetic (ADR-0147). A dependency graph
+(its own page, and a tab on each use case) shows how a high risk recorded against a vendor, model
+or agent propagates to everything that depends on it (ADR-0156). Sign-off goes to a named
+governance approver, never the proposer (ADR-0165). When a pipeline calls the deploy gate, it
+refuses a release that is not approved, uses an agent outside the approved stack, is halted,
+fails the model-risk gate, or has an open high alert (ADR-0161).
 
 ## 3. Monitor & Respond
-Governance is continuous. The Trust Dashboard provides a live, six-dimension view of your AI posture driven entirely by evidence coverage, rather than subjective trust scores (**ADR-0148**). If a dependency inherits a new risk, the Governance Monitor triggers an alert on its next pass (**ADR-0157**). From there, you can trace the exact path of the risk and propose an executable remediation—such as linking a new control—which then undergoes a strict human approval process (**ADR-0159**). Furthermore, continuous trace evaluations expose violation counts using shipped detectors without leaking sensitive payload data (**ADR-0160**).
+The trust dashboard shows, per dimension, the share of applicable controls with evidence; a
+dimension with nothing to measure is shown as a gap (ADR-0148). The governance monitor raises and
+resolves alerts as conditions change (ADR-0157), including content flagged by continuous trace
+evaluation — counts only (ADR-0160) — and approved traffic that cost routing served from an
+unapproved agent (ADR-0164). From an alert, an executable remediation runs only after a different
+person approves it (ADR-0159). Alerts reach Slack or Teams by severity (ADR-0162), and everything
+lands in one hash-chained audit trail exportable as a signed bundle (ADR-0060).
 
 ---
 
-### What We Never Claim
-- **No Fabricated Scores:** We measure the coverage of evidence. If a dimension is unmeasured, we explicitly label it as a gap rather than inventing a "98% safe" score.
-- **Attestations are Labelled:** We distinguish between runtime evidence and static attestations. If a control relies on a manual model-card review, it is clearly labelled as such.
-- **Human in the Loop:** RegulAIt automates discovery and monitoring, but it does not auto-remediate. Nothing changes your governed state without a second human's explicit approval.
+### What we never claim
+- **No fabricated scores.** We report evidence coverage; an unmeasured dimension is a gap.
+- **Attestations are labelled.** Controls met by a documented review are marked as such.
+- **Remediation is human-approved.** A remediation proposal changes governed state only after a
+  second person approves it. (Administrators can still edit records directly — audited.)
+- **Screening is not legal advice.** The tier is a calculator over your answers.
