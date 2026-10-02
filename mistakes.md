@@ -1281,3 +1281,12 @@ Rule: before pushing any gateway change that writes a table I have not
 written before, grep the `*-guard.test.ts` / inventory tests for that table
 name and run them — and run the FULL gateway suite locally at least once per
 multi-feature batch, before CI does it for me.
+
+### M-057 (2026-10-02) - Hand-typed timestamps ran up to an hour ahead of the clock
+
+Board messages and review statuses were stamped "03:35", "03:50", "04:00"
+while the real UTC time was ~03:00 — guessed from how much work felt done.
+On a coordination board, a future timestamp misleads every agent reading ages.
+
+Rule: never type a time. Use `date -u +"%m-%d %H:%M"` (or `pnpm checkin`,
+which stamps the row itself) for anything written to AgentCoordination.md.
