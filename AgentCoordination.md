@@ -174,6 +174,8 @@ All LIVE on `dhruv/active`, CI-tested; details are in the contract (§4) and ADR
   Monitor beat shows routing serving approved traffic off-stack. Script line: "the cost
   optimizer moved it; the monitor caught it; the deploy gate holds the pipeline".
   Pinned claude-opus/grok calls are refused by MRM (no approved card) — real, not a bug.
+  The alert's call count (e.g. "7 call(s)") also includes the base `seed`'s unpinned sample
+  calls (cost dashboards) — every one a real, measured dispatch.
 
 ### Codex — web UI (apps/web), browser verification
 
