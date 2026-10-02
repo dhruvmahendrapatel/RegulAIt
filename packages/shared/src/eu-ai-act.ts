@@ -376,9 +376,9 @@ export const EU_AI_ACT_RULESET_V1: readonly EuAiActRule[] = deepFreeze([
  * pattern).
  */
 export const EU_AI_ACT_SCREENING_DISCLAIMER =
-  "EU AI Act SCREENING result, computed deterministically by rule set v" +
+  "EU AI Act screening result, computed deterministically by rule set v" +
   EU_AI_ACT_RULESET_VERSION +
-  " — a fixed, dated encoding of a SUBSET of the published text of Regulation (EU) 2024/1689 " +
+  " — a fixed, dated encoding of a subset of the published text of Regulation (EU) 2024/1689 " +
   "(Art. 5 prohibitions, Art. 6 + Annex III high-risk classification, Art. 50 transparency). " +
   "The answers are self-reported by the proposer; the Act's exemptions, derogations and evolving " +
   "guidance are not fully encoded, and the encoding will date — revisions ship as a new rule-set " +

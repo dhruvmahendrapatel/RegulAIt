@@ -24,6 +24,8 @@ describe("display helpers — the UI never shows identifiers where words belong"
   it("names frameworks, providers and evidence kinds, with a readable fallback", () => {
     expect(frameworkLabel("eu-ai-act")).toBe("EU AI Act");
     expect(frameworkLabel("hipaa")).toBe("HIPAA");
+    // the high-risk pack's cascade tag — never "EU AI act high risk"
+    expect(frameworkLabel("eu-ai-act-high-risk")).toBe("EU AI Act (high-risk)");
     expect(frameworkLabel("some-new-pack")).toBe("Some new pack");
     expect(providerLabel("openai")).toBe("OpenAI");
     expect(providerLabel("acme_llm")).toBe("Acme LLM");

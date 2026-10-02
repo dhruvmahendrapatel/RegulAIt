@@ -99,7 +99,7 @@ Everything runs on the keyless **mock** provider. No live model, no external net
 
 ### 2A. Use-case 360 and risks — Ada
 - **URL:** **Open the use-case workspace** (link after submit) → `/ui/admin/governance/use-cases/<id>`
-  (go through this link — the Use cases *list* drawer shows the raw questionnaire and is not demo-ready)
+  (the Use cases list also opens it: click a row, then **Open the use-case workspace** in its drawer)
 - **Screen:** status **under review**, **high tier**, 7 tabs: Overview, Frameworks, Risks, Stack,
   Dependencies, Approvals, Audit.
 - **Action:**

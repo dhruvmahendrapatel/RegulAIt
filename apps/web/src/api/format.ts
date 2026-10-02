@@ -61,6 +61,8 @@ export function plural(n: number, one: string, many = `${one}s`): string {
 
 const FRAMEWORK_LABELS: Record<string, string> = {
   "eu-ai-act": "EU AI Act",
+  // the cascade tag the EU AI Act high-risk pack recommends (compliance-packs.ts)
+  "eu-ai-act-high-risk": "EU AI Act (high-risk)",
   "nist-ai-rmf": "NIST AI RMF",
   "iso-42001": "ISO/IEC 42001",
   "iso-27001": "ISO/IEC 27001",

@@ -17,14 +17,15 @@
  *    the enforcement cascade reads; editing a profile changes this card on the
  *    next load.
  */
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
-import { ago } from "../../../api/format";
+import { ago, fmtAt, frameworkLabel, humanize, plural, shortId } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, InfoButton, Input, Select, Table, TagPicker, Textarea, type Tone } from "../../../ui/kit";
 import { QueryGate, optionEls, useAction, useAgents, useComplianceProfiles, useProjects, agentOpts } from "../adminKit";
+import { EU_AFFECTED, EU_AUTONOMY, EU_BIOMETRIC, EU_DOMAINS, EU_FLAGS, QuestionnaireView } from "./UseCaseQuestionnaire";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -138,45 +139,72 @@ const statusTone = (s: UseCaseStatus): Tone =>
 const tierTone = (t: EuTier): Tone =>
   t === "prohibited" ? "danger" : t === "high" ? "warn" : t === "limited" ? "info" : "ok";
 
-// the screening questionnaire vocabulary — mirrors euAiActAnswersSchema in
-// @regulait/shared (the server refuses anything else, so drift fails loudly)
-const EU_DOMAINS = [
-  ["general-business", "General business use"],
-  ["internal-productivity", "Internal productivity / tooling"],
-  ["employment-hr", "Employment / HR (recruitment, evaluation)"],
-  ["education", "Education / vocational training"],
-  ["essential-services", "Essential services (credit, benefits, insurance)"],
-  ["law-enforcement", "Law enforcement"],
-  ["migration-border", "Migration / asylum / border control"],
-  ["justice-democracy", "Justice / democratic processes"],
-  ["critical-infrastructure", "Critical infrastructure"],
-] as const;
-const EU_AUTONOMY = [
-  ["narrow-procedural", "Narrow procedural task — a human fully decides"],
-  ["informs-human", "Informs a human decision"],
-  ["human-reviews", "Decides, a human reviews"],
-  ["fully-automated", "Fully automated decisions"],
-] as const;
-const EU_BIOMETRIC = [
-  ["none", "No biometric use"],
-  ["verification", "1:1 verification only (unlock/login)"],
-  ["remote-identification", "Remote biometric identification"],
-] as const;
-const EU_AFFECTED = [
-  ["employees", "Employees"],
-  ["customers", "Customers"],
-  ["general-public", "General public"],
-  ["vulnerable-groups", "Vulnerable groups"],
-] as const;
-const EU_FLAGS = [
-  ["emotionRecognition", "Emotion recognition"],
-  ["socialScoring", "Social scoring"],
-  ["manipulativeTechniques", "Manipulative or deceptive techniques"],
-  ["profilesNaturalPersons", "Profiles natural persons"],
-  ["safetyComponent", "Safety component of a regulated product"],
-  ["interactsWithHumans", "People interact with it directly"],
-  ["generatesSyntheticContent", "Generates synthetic content"],
-] as const;
+// ---- display words for stored values (the values themselves are unchanged) ----
+const PII_MODE_LABEL: Record<string, string> = { block: "Block", warn: "Warn", log: "Log only" };
+const MCP_MODE_LABEL: Record<string, string> = { read_only: "Read only", read_write: "Read and write" };
+const piiLabel = (m: string) => PII_MODE_LABEL[m] ?? humanize(m);
+const mcpLabel = (m: string) => MCP_MODE_LABEL[m] ?? humanize(m);
+
+/** where the intake workflow is, in the words of the person waiting on it */
+const INSTANCE_STATUS_LABEL: Record<string, string> = {
+  running: "Running",
+  blocked_on_plan: "Waiting for planning to finish",
+  blocked_on_artifact: "Waiting for the questionnaire",
+  blocked_on_approval: "Waiting for sign-off",
+  completed: "Completed",
+  denied: "Rejected at sign-off",
+  aborted: "Stopped",
+};
+const instanceStatusLabel = (s: string) => INSTANCE_STATUS_LABEL[s] ?? humanize(s);
+
+const ALIGNMENT_LABEL: Record<string, string> = {
+  aligned: "Aligned",
+  undershoot: "Grant gap",
+  not_approved: "Not approved",
+  no_intent_recorded: "No intent recorded",
+};
+
+/** the alignment explanation, keyed on its status (the server's note is written
+ * for operators; the claim it makes is the same) */
+function alignmentNote(status: string, useCaseStatus: UseCaseStatus): string {
+  if (status === "not_approved")
+    return useCaseStatus === "rejected"
+      ? "Alignment is checked against approved intent only. This use case was rejected, so its intended agents were never approved intent."
+      : useCaseStatus === "retired"
+        ? "Alignment is checked against approved intent only. This use case was retired, so its intended agents are no longer approved intent."
+        : "Alignment is checked against approved intent only. This use case is not approved yet, so there is nothing to check.";
+  if (status === "no_intent_recorded")
+    return "This approved use case names no intended agents, so there is nothing to compare grants against.";
+  if (status === "undershoot")
+    return "At least one intended agent is not granted to anyone on this use case (its owner or the linked project's members) — a provisioning gap, not evidence of use.";
+  return "Every intended agent is granted to someone on this use case (its owner or the linked project's members). This compares grants with intent only, never observed traffic.";
+}
+
+/** "EU AI Act, NIST AI RMF" — compliance tags by their framework names */
+const tagList = (tags: string[]) => tags.map(frameworkLabel).join(", ");
+
+/**
+ * whether the linked project carries this use case's tags, in one clause. Only a tag a compliance
+ * profile defines has requirements to lose — a missing unprofiled tag is noted, never a warning.
+ */
+function projectClassificationNote(carried: string[], notCarried: string[], unprofiled: string[]): { text: string; tone: "ok" | "warn" | "neutral" } {
+  const enforceable = notCarried.filter((t) => !unprofiled.includes(t));
+  const quiet = notCarried.filter((t) => unprofiled.includes(t));
+  if (notCarried.length === 0) return { text: `Classified with ${tagList(carried)}, matching this use case.`, tone: "ok" };
+  if (enforceable.length === 0) {
+    const head = carried.length ? `Classified with ${tagList(carried)}; not` : "Not";
+    return { text: `${head} classified with ${tagList(quiet)} — nothing is lost until a compliance profile defines ${quiet.length === 1 ? "it" : "them"}.`, tone: "neutral" };
+  }
+  const missing = `${tagList(enforceable)}, so ${enforceable.length === 1 ? "that tag's" : "those tags'"} requirements are not enforced there.`;
+  return { text: carried.length ? `Classified with ${tagList(carried)}, but not yet with ${missing}` : `Not yet classified with ${missing}`, tone: "warn" };
+}
+
+/** a server sentence that starts lowercase, as a sentence */
+const capFirst = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
+
+/** a pack title carries its version note after " — v2 …"; lists show the name only */
+const packName = (title: string) => title.split(/ — v\d/)[0]!;
+
 const INTAKE_STEPS = ["What it is", "Data & risk", "Intended use", "Review"] as const;
 
 const EU_ANSWERS_FENCE_RE = /```eu-ai-act-answers[\s\S]*?```/g;
@@ -192,6 +220,8 @@ export default function UseCasesPage() {
     queryFn: () => api.get<{ useCases: UseCaseRow[] }>("/v1/use-cases"),
   });
   const [openId, setOpenId] = useState<string | null>(null);
+  // the detail renders below the table: bring it into view when a row opens it
+  const detailRef = useRef<HTMLDivElement | null>(null);
   const detail = useQuery({
     queryKey: ["admin", "use-case", openId],
     queryFn: () => api.get<UseCaseDetail>(`/v1/use-cases/${openId}`),
@@ -256,6 +286,10 @@ export default function UseCasesPage() {
     await Promise.all([list.refetch(), openId ? detail.refetch() : Promise.resolve(null)]);
   };
   const d = detail.data;
+  const openedId = d?.useCase.id ?? null;
+  useEffect(() => {
+    if (openId && openedId === openId) detailRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [openId, openedId]);
 
   return (
     <>
@@ -350,10 +384,10 @@ export default function UseCasesPage() {
               <>
                 <Field label="Data sensitivity">
                   <Select value={sensitivity} onChange={(e) => setSensitivity(e.target.value)}>
-                    <option value="public">public</option>
-                    <option value="internal">internal</option>
-                    <option value="confidential">confidential</option>
-                    <option value="regulated">regulated</option>
+                    <option value="public">Public</option>
+                    <option value="internal">Internal</option>
+                    <option value="confidential">Confidential</option>
+                    <option value="regulated">Regulated</option>
                   </Select>
                 </Field>
                 {/*
@@ -376,7 +410,7 @@ export default function UseCasesPage() {
                   </label>
                   <InfoButton label="the compliance-tags field">
                     <p>
-                      These are the <em>same</em> tags the pillar-3 cascade keys on. A tag that matches a compliance
+                      These are the <em>same</em> tags the compliance cascade keys on. A tag that matches a compliance
                       profile pulls in its consequences — required workflow stages, PII handling mode, audit retention,
                       connector data-scope defaults.
                     </p>
@@ -435,10 +469,10 @@ export default function UseCasesPage() {
                 <div><dt>Name</dt><dd>{name || <em>—</em>}</dd></div>
                 <div><dt>What it does</dt><dd>{desc || <em>—</em>}</dd></div>
                 <div><dt>Why</dt><dd>{context || <em>—</em>}</dd></div>
-                <div><dt>Sensitivity</dt><dd>{sensitivity}</dd></div>
+                <div><dt>Sensitivity</dt><dd>{humanize(sensitivity)}</dd></div>
                 <div>
                   <dt>Compliance tags</dt>
-                  <dd>{tags.length ? tags.join(", ") : <em>none — this use case inherits no cascade</em>}</dd>
+                  <dd>{tags.length ? tagList(tags) : <em>none — this use case inherits no cascade</em>}</dd>
                 </div>
                 <div>
                   <dt>Intended agent</dt>
@@ -493,15 +527,15 @@ export default function UseCasesPage() {
                   {
                     key: "status",
                     header: "Status",
-                    render: (r) => <Badge tone={statusTone(r.status)}>{r.status.replace("_", " ")}</Badge>,
+                    render: (r) => <Badge tone={statusTone(r.status)}>{humanize(r.status)}</Badge>,
                   },
-                  { key: "sens", header: "Sensitivity", render: (r) => r.dataSensitivity },
+                  { key: "sens", header: "Sensitivity", render: (r) => humanize(r.dataSensitivity) },
                   {
                     key: "tags",
                     header: "Compliance tags",
-                    render: (r) => (r.complianceTags.length ? r.complianceTags.join(", ") : <span className={v.faint}>none</span>),
+                    render: (r) => (r.complianceTags.length ? tagList(r.complianceTags) : <span className={v.faint}>None</span>),
                   },
-                  { key: "owner", header: "Owner", render: (r) => r.ownerName ?? r.ownerUserId },
+                  { key: "owner", header: "Owner", render: (r) => r.ownerName ?? shortId(r.ownerUserId) },
                   { key: "created", header: "Proposed", render: (r) => ago(r.createdAt) },
                 ]}
               />
@@ -510,33 +544,59 @@ export default function UseCasesPage() {
         </QueryGate>
 
         {/* ---------------- detail ---------------- */}
+        <div ref={detailRef} />
         {openId && (
           <QueryGate loading={detail.isLoading} error={detail.error} onRetry={() => void detail.refetch()}>
             {d && (
               <Card
                 title={`Use case: ${d.useCase.name}`}
-                actions={<Button variant="ghost" onClick={() => setOpenId(null)}>Close</Button>}
+                actions={
+                  <>
+                    {/* the governed 360 workspace — frameworks, risks, stack,
+                        approvals and audit live there, not in this drawer */}
+                    <Link to={`/admin/governance/use-cases/${d.useCase.id}`}>Open the use-case workspace</Link>
+                    <Button variant="ghost" onClick={() => setOpenId(null)}>Close</Button>
+                  </>
+                }
               >
                 <div className={v.stack}>
-                  <div>
-                    <Badge tone={statusTone(d.useCase.status)}>{d.useCase.status.replace("_", " ")}</Badge>{" "}
+                  <div className={v.row}>
+                    <Badge tone={statusTone(d.useCase.status)}>{humanize(d.useCase.status)}</Badge>
                     <span className={v.faint}>
                       {d.useCase.status === "retired"
-                        ? `retired: ${d.useCase.retiredReason}`
+                        ? d.useCase.retiredReason || "No retirement reason was recorded."
                         : d.useCase.decidedAt
-                          ? `decided ${ago(d.useCase.decidedAt)} by the intake instance's sign-off`
-                          : "status follows the linked intake workflow — it is decided, never edited here"}
+                          ? `Decided ${ago(d.useCase.decidedAt)} at the intake sign-off`
+                          : "Status follows the intake workflow — it is decided at sign-off, never edited here."}
                     </span>
                   </div>
-                  <div className={v.faint}>{d.useCase.description}</div>
-                  <div className={v.faint}>Business context: {d.useCase.businessContext}</div>
+                  <dl className={a.review}>
+                    <div><dt>What it does</dt><dd>{d.useCase.description || <em>—</em>}</dd></div>
+                    <div><dt>Business context</dt><dd>{d.useCase.businessContext || <em>—</em>}</dd></div>
+                    <div><dt>Data sensitivity</dt><dd>{humanize(d.useCase.dataSensitivity)}</dd></div>
+                    <div>
+                      <dt>Compliance tags</dt>
+                      <dd>{d.useCase.complianceTags.length ? tagList(d.useCase.complianceTags) : <em>None</em>}</dd>
+                    </div>
+                    <div>
+                      <dt>Owner</dt>
+                      {/* GET /v1/use-cases/:id carries no ownerName; the list row
+                          for the same id does, so the drawer agrees with the table */}
+                      <dd>
+                        {d.useCase.ownerName ??
+                          list.data?.useCases.find((u) => u.id === d.useCase.id)?.ownerName ??
+                          shortId(d.useCase.ownerUserId)}
+                      </dd>
+                    </div>
+                    <div><dt>Proposed</dt><dd>{fmtAt(d.useCase.createdAt)}</dd></div>
+                  </dl>
 
                   {/* ADR-0089 B3 — intent capture: which registered agents
                       this use case intends. Editable ONLY pre-decision —
                       after the sign-off, the intent is part of what was
                       decided and changing it is a NEW use case. Feeds the
                       SAME intendedAgentIds column the alignment flags read. */}
-                  <Card title="Intended agents (the intent the alignment flags stand on)">
+                  <Card title="Intended agents">
                     <div className={v.stack}>
                       {d.useCase.status === "proposed" || d.useCase.status === "under_review" ? (
                         <div className={a.formRow}>
@@ -579,11 +639,11 @@ export default function UseCasesPage() {
                       ) : (
                         <div className={v.faint}>
                           {d.useCase.intendedAgentIds.length === 0
-                            ? "No intent was recorded before the decision — the register says so rather than guessing."
-                            : "Intent is part of what was decided and is no longer editable — changing it means proposing a NEW use case."}
+                            ? "No intended agents were recorded before the decision."
+                            : "The intended agents are part of what was decided and can no longer be edited — changing them means proposing a new use case."}
                         </div>
                       )}
-                      <div>
+                      <div className={v.row}>
                         <Badge
                           tone={
                             d.intendedVsGranted.status === "aligned"
@@ -593,22 +653,22 @@ export default function UseCasesPage() {
                                 : "neutral"
                           }
                         >
-                          {d.intendedVsGranted.status.replace(/_/g, " ")}
-                        </Badge>{" "}
-                        <span className={v.faint}>{d.intendedVsGranted.note}</span>
+                          {ALIGNMENT_LABEL[d.intendedVsGranted.status] ?? humanize(d.intendedVsGranted.status)}
+                        </Badge>
+                        <span className={v.faint}>{alignmentNote(d.intendedVsGranted.status, d.useCase.status)}</span>
                       </div>
                       {(d.intendedVsGranted.agents ?? []).map(
                         (agRow: NonNullable<UseCaseDetail["intendedVsGranted"]["agents"]>[number]) => (
-                          <div key={agRow.agentId}>
+                          <div key={agRow.agentId} className={v.row}>
                             <Badge tone={agRow.grantedToParticipants ? "ok" : "warn"}>
-                              {agRow.agentName ?? agRow.agentId}
-                            </Badge>{" "}
+                              {agRow.agentName ?? shortId(agRow.agentId)}
+                            </Badge>
                             <span className={v.faint}>
                               {agRow.registered
                                 ? agRow.grantedToParticipants
-                                  ? `granted to ${agRow.participantHolders} participant(s)`
-                                  : "no participant holds a grant — a provisioning gap, not evidence of use"
-                                : "no longer in the registry (intent survives agent deletion by design)"}
+                                  ? `Granted to ${plural(agRow.participantHolders, "participant")}`
+                                  : "Not granted to anyone on this use case — a provisioning gap, not evidence of use"
+                                : "No longer in the agent registry (the recorded intent is kept on purpose)"}
                             </span>
                           </div>
                         ),
@@ -618,19 +678,21 @@ export default function UseCasesPage() {
 
                   {/* the linked workflow's state */}
                   {d.instance && (
-                    <Card title="Intake workflow (pillar-2 rails)">
+                    <Card title="Intake workflow">
                       <div className={v.stack}>
-                        <div>
+                        <div className={v.row}>
                           {d.instance.stages.map((s) => (
                             <Badge
                               key={s.id}
                               tone={s.id === d.instance!.currentStageId ? "info" : "neutral"}
-                              title={s.type}
+                              title={humanize(s.type)}
                             >
-                              {s.id}
+                              {humanize(s.id)}
                             </Badge>
-                          ))}{" "}
-                          <span className={v.faint}>instance {d.instance.status.replace(/_/g, " ")}</span>
+                          ))}
+                          {d.instance.status !== "blocked_on_approval" && (
+                            <span className={v.faint}>{instanceStatusLabel(d.instance.status)}</span>
+                          )}
                         </div>
                         {d.instance.status === "blocked_on_plan" && (
                           <div>
@@ -645,7 +707,8 @@ export default function UseCasesPage() {
                               Finish planning
                             </Button>{" "}
                             <span className={v.faint}>
-                              The instance rests at the plan stage (ADR-0079) while the proposal is refined.
+                              The workflow rests at the plan stage while the proposal is refined. Finish planning to
+                              open the questionnaire.
                             </span>
                           </div>
                         )}
@@ -661,29 +724,30 @@ export default function UseCasesPage() {
 
                   {/* questionnaire: submitted artifact, or the blank form to fill */}
                   {d.questionnaire ? (
-                    <Card title={`Intake questionnaire (artifact v${d.questionnaire.version})`}>
-                      <pre className={v.pre ?? undefined} style={{ whiteSpace: "pre-wrap", margin: 0 }}>
-                        {d.questionnaire.content}
-                      </pre>
+                    <Card
+                      title={`Intake questionnaire · version ${d.questionnaire.version}`}
+                      actions={<span className={v.faint}>Submitted {fmtAt(d.questionnaire.createdAt)}</span>}
+                    >
+                      <QuestionnaireView content={d.questionnaire.content} />
                     </Card>
                   ) : d.instance && d.instance.status === "blocked_on_artifact" ? (
                     <Card title="Intake questionnaire — fill and submit">
                       <div className={v.stack}>
                         <div className={v.faint}>
-                          The form is the deliverable — nothing is pre-filled by a model. Submitting stores it as the
-                          instance&apos;s versioned artifact and sends the use case to review.
+                          Answer each section in your own words — nothing here is pre-filled by a model. Submitting
+                          saves it as a versioned record and sends the use case to review.
                         </div>
                         <Textarea
                           rows={14}
                           value={answers || d.questionnaireTemplate || ""}
                           onChange={(e) => setAnswers(e.target.value)}
                         />
-                        <Card title="EU AI Act risk screening (ADR-0085)">
+                        <Card title="EU AI Act screening questions">
                           <div className={v.stack}>
                             <div className={v.faint}>
-                              The platform computes the risk tier (prohibited / high / limited / minimal)
-                              server-side from these structured answers when you submit — a submitted tier is
-                              refused; only the answers count. Screening, not legal advice.
+                              When you submit, the platform works out the risk tier (prohibited, high, limited or
+                              minimal) from these answers. A tier cannot be submitted directly — only the answers
+                              count. This is a screening aid, not legal advice.
                             </div>
                             <div className={a.formRow}>
                               <Field label="Purpose domain" grow>
@@ -775,130 +839,161 @@ export default function UseCasesPage() {
                         fontWeight: 600,
                       }}
                     >
-                      <Badge tone="danger">prohibited</Badge> {d.euAiActScreening.refusal}
+                      <Badge tone="danger">Prohibited</Badge> {d.euAiActScreening.refusal}
                     </div>
                   )}
                   <Card title="EU AI Act risk screening">
                     <div className={v.stack}>
                       {d.euAiActScreening.tier ? (
-                        <div>
+                        <div className={v.row}>
                           <Badge tone={tierTone(d.euAiActScreening.tier)}>
-                            {d.euAiActScreening.tier}
-                          </Badge>{" "}
+                            {d.euAiActScreening.tier === "prohibited"
+                              ? "Prohibited"
+                              : `${humanize(d.euAiActScreening.tier)} risk`}
+                          </Badge>
                           <span className={v.faint}>
-                            computed server-side from the questionnaire&apos;s answers by rule set v
-                            {d.euAiActScreening.rulesetVersion} — {d.euAiActScreening.enforcement}
+                            Worked out from the questionnaire&apos;s answers by rule set v
+                            {d.euAiActScreening.rulesetVersion}. The tier informs the human sign-off and blocks
+                            nothing by itself; approval only gates agent use where the organization has turned on the
+                            use-case gate (Settings → Organization), which is off by default.
                           </span>
                         </div>
                       ) : (
                         <div className={v.faint}>
                           Not screened
                           {d.euAiActScreening.answersStatus === "invalid"
-                            ? ` — the submitted answers block is invalid: ${d.euAiActScreening.answersError}`
-                            : " — the questionnaire has no structured answers block yet. The tier is computed server-side when one is submitted; it is never guessed from prose."}
+                            ? ` — the submitted screening answers could not be read: ${d.euAiActScreening.answersError}`
+                            : " yet — the tier is worked out when the questionnaire is submitted with its screening answers. It is never guessed from prose."}
                         </div>
                       )}
                       {(d.euAiActScreening.reasons ?? []).map((r) => (
-                        <div key={r.ruleId}>
-                          <Badge tone={tierTone(r.tier as EuTier)}>{r.ref}</Badge>{" "}
-                          <span className={v.faint}>{r.reason}</span>
+                        <div key={r.ruleId} className={v.row}>
+                          <Badge tone={tierTone(r.tier as EuTier)}>{r.ref}</Badge>
+                          <span className={v.faint}>{capFirst(r.reason)}</span>
                         </div>
                       ))}
                       {d.euAiActScreening.tier === "minimal" && (
                         <div className={v.faint}>
-                          No rule in the compiled rule set matched — which is exactly as much as a
-                          screening can honestly say.
+                          No rule in the rule set matched — which is exactly as much as a screening can honestly
+                          say.
                         </div>
                       )}
                       {d.euAiActScreening.cascade && (
                         <div className={v.stack}>
-                          <div className={v.faint}>{d.euAiActScreening.cascade.note}</div>
+                          <div className={v.faint}>
+                            {d.euAiActScreening.tier === "prohibited"
+                              ? "A prohibited result is a reason to refuse at sign-off, not to add tags. The cited controls show the high-risk obligations that would apply even to a narrowed version of this proposal."
+                              : "A high-risk result recommends carrying the tags below. Where a compliance profile exists for a tag, adding it to this use case and its project turns the recommendation into enforced requirements; where none exists, creating the profile is the missing step."}
+                          </div>
                           {d.euAiActScreening.cascade.recommendedTags.map((t) => (
-                            <div key={t.tag}>
-                              <Badge tone={t.profileExists ? "info" : "warn"}>{t.tag}</Badge>{" "}
+                            <div key={t.tag} className={v.row}>
+                              <Badge tone={t.profileExists ? "info" : "warn"}>{frameworkLabel(t.tag)}</Badge>
                               <span className={v.faint}>
-                                from {t.fromPack} —{" "}
-                                {t.profileExists
+                                {d.euAiActScreening.tier === "prohibited"
                                   ? t.carriedByUseCase
-                                    ? "profile exists and this use case carries the tag"
-                                    : "a §8.3 profile exists; add the tag to this use case (and the governed project) to bind its consequences"
-                                  : "no §8.3 compliance profile exists for this tag yet — creating one is what makes the recommendation enforceable"}
+                                    ? "This use case carries the tag."
+                                    : t.profileExists
+                                      ? "A compliance profile exists for this tag."
+                                      : "No compliance profile defines this tag yet."
+                                  : t.profileExists
+                                    ? t.carriedByUseCase
+                                      ? "A compliance profile exists and this use case carries the tag."
+                                      : "A compliance profile exists. Add the tag to this use case and its project to apply its requirements."
+                                    : "No compliance profile defines this tag yet. Creating one is what makes the recommendation enforceable."}{" "}
+                                Source: {packName(t.fromPack)}.
                               </span>
                             </div>
                           ))}
                           {d.euAiActScreening.cascade.packs.map((p) => (
-                            <div key={p.id} className={v.faint}>
-                              Pack citation (read-only): {p.title} (v{p.version}) —{" "}
-                              {p.controls.map((c) => c.controlRef).join(", ")}
-                            </div>
+                            <details key={p.id} className={v.faint}>
+                              <summary style={{ cursor: "pointer" }}>
+                                Cited: {packName(p.title)} (version {p.version}) · {plural(p.controls.length, "control")}
+                              </summary>
+                              {p.controls.length > 0 && <ul>{p.controls.map((c) => <li key={c.controlRef}>{c.title}</li>)}</ul>}
+                            </details>
                           ))}
                         </div>
                       )}
-                      <div className={v.faint}>{d.euAiActScreening.disclaimer}</div>
+                      {d.euAiActScreening.tier ? <div className={v.faint}>{d.euAiActScreening.disclaimer}</div> : null}
                     </div>
                   </Card>
 
                   {/* cascade consequences — derived from the real cascade rules */}
-                  <Card title="Cascade consequences of the compliance tags">
+                  <Card title="What the compliance tags require">
                     <div className={v.stack}>
-                      <div className={v.faint}>{d.cascadeConsequences.note}</div>
-                      {d.cascadeConsequences.combined && (
+                      <div className={v.faint}>
+                        {d.useCase.complianceTags.length === 0
+                          ? "This use case carries no compliance tags, so no compliance profile adds requirements."
+                          : d.cascadeConsequences.profiles.length === 0
+                            ? "No compliance profile covers these tags yet, so they add no requirements."
+                            : "Worked out live from the compliance profiles — the same rules enforced on a classified project. They apply where the linked project carries these tags."}
+                      </div>
+                      {d.cascadeConsequences.combined && d.cascadeConsequences.profiles.length > 0 && (
                         <div className={a.formRow}>
-                          <Field label="PII mode (strictest)">
-                            <Input readOnly value={d.cascadeConsequences.combined.piiMode} />
+                          <Field label="PII handling (strictest)">
+                            <Input readOnly value={piiLabel(d.cascadeConsequences.combined.piiMode)} />
                           </Field>
-                          <Field label="MCP default">
-                            <Input readOnly value={d.cascadeConsequences.combined.mcpDefaultMode} />
+                          <Field label="MCP tool access">
+                            <Input readOnly value={mcpLabel(d.cascadeConsequences.combined.mcpDefaultMode)} />
                           </Field>
-                          <Field label="Audit retention (days)">
-                            <Input readOnly value={d.cascadeConsequences.combined.auditRetentionDays ?? "org default"} />
-                          </Field>
-                          <Field label="Forced workflow stages">
+                          <Field label="Audit retention">
                             <Input
                               readOnly
-                              value={d.cascadeConsequences.combined.forcedStageIds.join(", ") || "none"}
+                              value={
+                                d.cascadeConsequences.combined.auditRetentionDays == null
+                                  ? "Organization default"
+                                  : plural(d.cascadeConsequences.combined.auditRetentionDays, "day")
+                              }
+                            />
+                          </Field>
+                          <Field label="Required workflow stages">
+                            <Input
+                              readOnly
+                              value={d.cascadeConsequences.combined.forcedStageIds.map(humanize).join(", ") || "None"}
                             />
                           </Field>
                         </div>
                       )}
                       {d.cascadeConsequences.profiles.map((p) => (
-                        <div key={p.tag}>
-                          <Badge tone="info">{p.tag}</Badge>{" "}
+                        <div key={p.tag} className={v.row}>
+                          <Badge tone="info">{frameworkLabel(p.tag)}</Badge>
                           <span className={v.faint}>
-                            pii {p.piiMode}, mcp {p.mcpDefaultMode}
+                            PII handling: {piiLabel(p.piiMode)} · MCP tool access: {mcpLabel(p.mcpDefaultMode)}
                             {p.requiredTemplates.length > 0 &&
-                              `, forces ${p.requiredTemplates.map((t) => t.name).join(", ")}`}
+                              ` · Requires the ${p.requiredTemplates.map((t) => t.name).join(", ")} ${p.requiredTemplates.length === 1 ? "workflow" : "workflows"}`}
                           </span>
                         </div>
                       ))}
                       {d.cascadeConsequences.unrecognizedTags.length > 0 && (
-                        <div>
-                          <Badge tone="warn">unrecognized</Badge>{" "}
+                        <div className={v.row}>
+                          <Badge tone="warn">No profile</Badge>
                           <span className={v.faint}>
-                            {d.cascadeConsequences.unrecognizedTags.join(", ")} — no compliance profile defines these
-                            tags, so the cascade currently forces nothing for them
+                            No compliance profile defines {tagList(d.cascadeConsequences.unrecognizedTags)} yet, so{" "}
+                            {d.cascadeConsequences.unrecognizedTags.length === 1 ? "this tag doesn't" : "these tags don't"}{" "}
+                            add workflow requirements.
                           </span>
                         </div>
                       )}
-                      {d.cascadeConsequences.project && (
-                        <div>
-                          <Badge tone={d.cascadeConsequences.project.tagsNotCarried.length ? "warn" : "ok"}>
-                            project {d.cascadeConsequences.project.name}
-                          </Badge>{" "}
-                          <span className={v.faint}>
-                            carries {d.cascadeConsequences.project.tagsCarried.join(", ") || "none of these tags"}
-                            {d.cascadeConsequences.project.tagsNotCarried.length > 0 &&
-                              ` — NOT yet classified with ${d.cascadeConsequences.project.tagsNotCarried.join(", ")}, so those consequences are not enforced there`}
-                          </span>
-                        </div>
-                      )}
+                      {d.cascadeConsequences.project && d.useCase.complianceTags.length > 0 && (() => {
+                        const note = projectClassificationNote(
+                          d.cascadeConsequences.project.tagsCarried,
+                          d.cascadeConsequences.project.tagsNotCarried,
+                          d.cascadeConsequences.unrecognizedTags,
+                        );
+                        return (
+                          <div className={v.row}>
+                            <Badge tone={note.tone}>Project: {d.cascadeConsequences.project.name}</Badge>
+                            <span className={v.faint}>{note.text}</span>
+                          </div>
+                        );
+                      })()}
                     </div>
                   </Card>
 
                   {/* retire (admin) */}
                   {d.useCase.status !== "retired" && (
                     <div className={a.formRow}>
-                      <Field label="Retire (admin) — reason is required and audited" grow>
+                      <Field label="Retire this use case — a reason is required and recorded in the audit log" grow>
                         <Input
                           value={retireReason}
                           onChange={(e) => setRetireReason(e.target.value)}
