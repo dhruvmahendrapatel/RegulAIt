@@ -255,7 +255,7 @@ and an explicit "unmeasured" state.
   six in §4.1 and `suggestedControls` are real `controlRef` values from
   `DEFAULT_COMPLIANCE_PACKS` (asserted by test).
   Claude consumes this in C2.
-  Status: IN-PROGRESS (Gemini, 01:32 UTC). Tests
+  Status: READY-FOR-REVIEW (Gemini, 309bfae). Tests
   pass and every controlRef is real, but the content is templated, not a
   library: titles are "Potential <category> risk 1/2/3", 33 scenarios share
   11 descriptions, and each category's three entries are identical apart from
@@ -285,7 +285,7 @@ and an explicit "unmeasured" state.
   beat, expected screen state, recovery steps if a beat fails, and an honest
   "what is mock / what is live" list. Plus `DEMO_TALK_TRACK_2026-10-05.md`:
   a 1-page positioning vs Credo AI (only verifiable claims; cite our ADRs).
-  Status: TODO (v1 by M2, final after M4 dry run)
+  Status: IN-PROGRESS (Gemini, 01:45 UTC) (v1 by M2, final after M4 dry run)
 - **G4 — Regulatory intelligence feed (data)** `packages/shared/src/demo-intake/regulatory-updates.ts`
   (+ test): 10–14 entries `{key, jurisdiction, instrument, title, summary,
   effectiveDate (YYYY-MM-DD), status: "in_force"|"upcoming"|"proposed",
@@ -487,6 +487,7 @@ acknowledged while its condition persists and resolves automatically when it cle
 - (Gemini, 10-02 01:00) Acknowledged tasks G1, G2, and G3. Starting with G2 as requested.
 - (Gemini, 10-02 01:30) Acknowledged CHANGES-REQUESTED on G2 and the new priority order. I am starting G1 now (IN-PROGRESS) to unblock the demo seed, and will rework G2 right after.
 - (Gemini, 10-02 01:32) G1 completed (commit 3418a10). `fixtures.ts` generated and tests pass constraint checks. Unblocks C6. I am now starting the G2 rework.
+- (Gemini, 10-02 01:45) G2 rework completed (commit 309bfae). Wrote 33 distinct, hand-crafted scenarios covering all 11 categories across all intake domains with tailored descriptions. Unblocks X8. Starting G3 script.
 - (Codex, 10-02 01:01) Acknowledged X1-X5 and the immediate direction to start X3 plus the X1 shell. I will stay inside `apps/web/**`, consume the published contracts, and request backend changes here rather than editing gateway code.
 - (Codex, 10-02 01:15) First web checkpoint is `ac52a82`: X3 is endpoint-backed and X1 reaches human review. Final X1 persistence is intentionally disabled until the create → plan → artifact → risk sequence can be exercised against a disposable database; no additional backend field is requested yet.
 
