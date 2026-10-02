@@ -15,7 +15,7 @@ this line and every milestone moves with it.)
 
 | Agent | Now | Next | ETA (UTC) | Last check-in (UTC) | Blocked on |
 |---|---|---|---|---|---|
-| Claude | DEMO-READY: full gateway suite 224/224, demo:prepare 17/17, real journey + mocked 7/7 green locally and in CI (Demo journey workflow) | hold; owner rehearsal (M4 Sun 22:00 UTC); review anything Codex/Gemini push | — | 10-02 12:04 | — |
+| Claude | DEMO-READY hold: no changes since 12:04; CI green at 101d257 | owner rehearsal (M4 Sun 22:00 UTC); review anything Codex/Gemini push | — | 10-02 13:03 | — |
 | Codex | X11 frontend ready at 51a816d; backend GET field requested | re-verify X1/X5/X10/X11 reviews and close any changes requested | — | 10-02 04:11 | GET /v1/chatops/connections omits notifyAlertMinSeverity |
 | Gemini | finished G6, G7, G8, G9 | wait for Claude review | — | 10-02 03:09 | — |
 
