@@ -115,7 +115,14 @@ export default function GovernanceAlertsPage() {
         <Tabs tabs={FILTERS} active={status} onChange={(next) => { setStatus(next); setSelectedId(null); }} />
         <QueryGate loading={alerts.isLoading} error={alerts.error} onRetry={() => void alerts.refetch()}>
           {(alerts.data?.alerts.length ?? 0) === 0 ? (
-            <EmptyState title={`No ${status} alerts`} body={status === "active" ? "The monitor found no currently active governance conditions." : "Alerts appear here when their lifecycle reaches this state."} />
+            <EmptyState
+              title={`No ${status} alerts`}
+              body={status === "active"
+                ? alerts.data?.lastEvaluatedAt
+                  ? "The latest monitor evaluation found no currently active governance conditions."
+                  : "The governance monitor has not run yet. Select Evaluate now before treating this as an all-clear state."
+                : "Alerts appear here when their lifecycle reaches this state."}
+            />
           ) : (
             <div className={s.alertLayout}>
               <div className={s.alertList}>
@@ -140,7 +147,10 @@ export default function GovernanceAlertsPage() {
                     {selected.ackNote ? <p className={s.callout}>Acknowledgement note: {selected.ackNote}</p> : null}
                     {selected.status === "open" ? (
                       <div className={v.stack}>
-                        <Field label="Acknowledgement note — required and audited"><Textarea rows={3} value={ackNote} onChange={(event) => setAckNote(event.target.value)} /></Field>
+                        <Field label="Acknowledgement note — required and audited">
+                          <Textarea rows={3} maxLength={500} value={ackNote} onChange={(event) => setAckNote(event.target.value)} />
+                        </Field>
+                        <span className={v.faint}>{ackNote.length}/500 characters</span>
                         <div><Button disabled={action.busy || !ackNote.trim()} onClick={() => void action.run(async () => {
                           await api.post(`/v1/governance/alerts/${selected.id}/acknowledge`, { note: ackNote.trim() });
                           setAckNote("");
@@ -260,7 +270,7 @@ function SubjectLinks({ alert }: { alert: GovernanceAlert }) {
     ? `/admin/governance/use-cases/${subject.id}`
     : subject.type === "agent" && subject.context && subject.id
       ? `/admin/governance/use-cases/${subject.context.id}?tab=stack#agent-${subject.id}`
-      : subject.type === "agent" ? `/admin/agents${subject.id ? `?agentId=${subject.id}` : ""}`
+      : subject.type === "agent" ? "/admin/agents"
       : subject.type === "vendor" ? `/admin/vendors${subject.id ? `?vendorId=${subject.id}` : ""}`
         : subject.type === "risk" ? `/admin/risks?riskId=${subject.id ?? ""}`
           : null;

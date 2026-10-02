@@ -164,7 +164,10 @@ test("enterprise governance demo surfaces render and complete their core actions
   await page.getByRole("button", { name: /inherits a HIGH rating/ }).click();
   await page.getByRole("button", { name: "Evaluate now" }).click();
   await expect(page.getByText(/Evaluation raised 0, refreshed 1/)).toBeVisible();
-  await page.getByLabel("Acknowledgement note — required and audited").fill("Owner assigned; vendor evidence review scheduled.");
+  const acknowledgement = page.getByLabel("Acknowledgement note — required and audited");
+  await acknowledgement.fill("x".repeat(501));
+  await expect(acknowledgement).toHaveValue("x".repeat(500));
+  await acknowledgement.fill("Owner assigned; vendor evidence review scheduled.");
   await page.getByRole("button", { name: "Acknowledge" }).click();
   await expect(page.getByText("Alert acknowledged")).toBeVisible();
   await expect(page.getByText("Reassess Acme Model Services")).toBeVisible();
@@ -193,4 +196,33 @@ test("enterprise governance demo surfaces render and complete their core actions
   await page.getByRole("button", { name: "Compare with registry (writes nothing)" }).click();
   await expect(page.getByText("tools.unknown.example", { exact: true })).toBeVisible();
   await shotBoth(page, "08-mcp-discovery");
+});
+
+test("alerts distinguish a monitor that has never run and use a valid agent inventory link", async ({ page }) => {
+  await page.route("**/v1/governance/alerts?status=active", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ alerts: [], counts: { open: 0, acknowledged: 0, resolved: 0 }, lastEvaluatedAt: null, rules: [] }),
+    });
+  });
+  await page.goto("/ui/admin/governance/alerts");
+  await expect(page.getByText("The governance monitor has not run yet. Select Evaluate now before treating this as an all-clear state.")).toBeVisible();
+
+  await page.unroute("**/v1/governance/alerts?status=active");
+  await page.route("**/v1/governance/alerts?status=active", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        alerts: [{ ...alerts.alerts[0], subject: { key: `agent:${AGENT}`, type: "agent", id: AGENT, label: "Credit assistant", context: null } }],
+        counts: { open: 1, acknowledged: 0, resolved: 0 },
+        lastEvaluatedAt: "2026-10-02T12:00:00Z",
+        rules: [],
+      }),
+    });
+  });
+  await page.reload();
+  await page.getByRole("button", { name: /inherits a HIGH rating/ }).click();
+  await expect(page.getByRole("link", { name: "Open agent" })).toHaveAttribute("href", "/ui/admin/agents");
 });
