@@ -162,6 +162,9 @@ All LIVE on `dhruv/active`, CI-tested; details are in the contract (§4) and ADR
 - **C14** Alerts to Slack/Teams — ADR-0162: connection field `notifyAlertMinSeverity: "medium"|"high"|null`
   (create, or `PATCH /v1/chatops/connections/:id`); `POST /v1/governance/alerts/:id/post {connectionName?, channel?}`
   → `{posted, connection, channel}` (502 `post_failed` when refused, e.g. egress).
+- **C15/C16** `demo:traffic` + `demo:prepare` — ADR-0163: ONE command on an EMPTY database
+  (`pnpm --filter @regulait/gateway demo:prepare`) = seed → setup → intake → traffic → check.
+  Ada drives admin pages; traffic runs as Dana in `demo-project`.
 
 ### Codex — web UI (apps/web), browser verification
 
