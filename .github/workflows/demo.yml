@@ -26,10 +26,6 @@ on:
       - '.github/workflows/demo.yml'
   workflow_dispatch:
 
-concurrency:
-  group: demo-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
-
 jobs:
   changes:
     runs-on: ubuntu-latest
@@ -57,6 +53,12 @@ jobs:
   demo-journey:
     needs: changes
     if: needs.changes.outputs.demo == 'true'
+    # job-level, not workflow-level: a later push that skips the journey (docs,
+    # board check-ins) never enters this group, so it cannot cancel a journey
+    # that is already running; a later push that runs it does
+    concurrency:
+      group: demo-journey-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
