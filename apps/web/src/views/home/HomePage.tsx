@@ -31,6 +31,7 @@ import {
   StatusDot,
 } from "../../ui/kit";
 import v from "../views.module.css";
+import { TrustSnapshotCard } from "../admin/governance/TrustDashboardPage";
 
 export default function HomePage() {
   const { auth } = useSession();
@@ -45,6 +46,7 @@ export default function HomePage() {
         {auth?.isAdmin && <OrientationCard />}
         {auth?.isAdmin && <SuiteLauncher />}
         {auth?.isAdmin && <SetupCard />}
+        {auth?.isAdmin && <TrustSnapshotCard />}
         <div className={v.grid2}>
           <ApprovalsCard />
           <SpendCard />
