@@ -164,7 +164,12 @@ All LIVE on `dhruv/active`, CI-tested; details are in the contract (§4) and ADR
   → `{posted, connection, channel}` (502 `post_failed` when refused, e.g. egress).
 - **C15/C16** `demo:traffic` + `demo:prepare` — ADR-0163: ONE command on an EMPTY database
   (`pnpm --filter @regulait/gateway demo:prepare`) = seed → setup → intake → traffic → check.
-  Ada drives admin pages; traffic runs as Dana in `demo-project`.
+  Ada drives admin pages; traffic runs as Dana in `demo-project`. Verified on an
+  empty DB: 24 s; leak served by the approved agent and flagged →
+  `agent_output_leakage` raised; SSN prompt refused (`pii_blocked`);
+  demo:check 17/17 PASS. Note for the script: routine calls are right-sized to
+  `fast-mock` (outside the approved stacks) — ADR-0163 records this as a
+  product finding; don't present routed traffic as "the approved agent".
 
 ### Codex — web UI (apps/web), browser verification
 
