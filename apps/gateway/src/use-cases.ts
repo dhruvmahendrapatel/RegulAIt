@@ -65,8 +65,10 @@ import {
   desc,
   eq,
   inArray,
+  or,
   projectMembers,
   projects,
+  sql,
   users,
   workflowArtifacts,
   workflowInstances,
@@ -354,10 +356,13 @@ export async function syncUseCaseForInstance(
 // ---------------------------------------------------------------------------
 
 /**
- * Newest ACTIVE template named `ai-use-case-intake` wins — an admin can route
- * use-case approvals to a governance owner by creating one from the gallery
- * shape with a concrete approver. Only when none exists is the built-in shape
- * minted, through the ONE template-creation path (ADR-0077 discipline).
+ * Newest ACTIVE intake template wins — `ai-use-case-intake` itself or a named
+ * variant `ai-use-case-intake/<label>` (ADR-0165). An admin routes use-case
+ * approvals to a governance owner by creating a variant from the gallery shape
+ * with a concrete approver; template names are unique even once retired, so
+ * without variants the built-in shape — minted on the first use case — could
+ * never be superseded. Only when none exists is the built-in shape minted,
+ * through the ONE template-creation path (ADR-0077 discipline).
  */
 async function resolveIntakeTemplate(
   db: Db,
@@ -365,7 +370,12 @@ async function resolveIntakeTemplate(
   const rows = await db
     .select()
     .from(workflowTemplates)
-    .where(eq(workflowTemplates.name, AI_USE_CASE_INTAKE_TEMPLATE_NAME))
+    .where(
+      or(
+        eq(workflowTemplates.name, AI_USE_CASE_INTAKE_TEMPLATE_NAME),
+        sql`${workflowTemplates.name} like ${`${AI_USE_CASE_INTAKE_TEMPLATE_NAME}/%`}`,
+      ),
+    )
     .orderBy(desc(workflowTemplates.createdAt));
   const active = rows.find((t) => t.retiredAt === null);
   if (active) return { ok: true, templateId: active.id };

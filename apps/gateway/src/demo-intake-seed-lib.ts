@@ -39,7 +39,10 @@ export interface DemoSeedReport {
   notes: string[];
 }
 
+/** vendors: the vendor-assessment template still routes to its requester */
 const SEED_REASON = "seeded demo record (demo:intake) — self-review recorded for the demo dataset";
+/** use cases: decided by the independent governance approver (ADR-0165) */
+const SEED_REASON_USE_CASE = "seeded demo record (demo:intake) — decided by the governance approver";
 
 export async function seedDemoIntake(
   app: FastifyInstance,
@@ -83,6 +86,35 @@ export async function seedDemoIntake(
   }
   const ada = await persona("admin@regulait.local", "Ada Admin", true);
   const dana = await persona("dana@regulait.local", "Dana Developer", false);
+  const avery = await persona("avery@regulait.local", "Avery Approver", false);
+
+  // --- use-case sign-offs go to an independent governance approver -------------------
+  // The built-in `ai-use-case-intake` shape routes sign-off back to the requester
+  // (self-review with a recorded reason). The demo, like a real deployment, names
+  // a governance owner: a newer intake VARIANT (ADR-0165) routes every new use
+  // case's sign-off to Avery — so a proposal registered in the UI lands in
+  // Avery's Inbox, never in its proposer's.
+  {
+    const VARIANT = "ai-use-case-intake/governance-owner";
+    const templates: Json[] = (await call("GET", "/v1/workflows/templates", undefined, ada.auth)).body.templates ?? [];
+    const routed = templates.some(
+      (t) =>
+        String(t.name).startsWith(VARIANT) && t.retiredAt == null && JSON.stringify(t.definition ?? {}).includes(avery.id),
+    );
+    if (routed) report.skipped.push("use-case sign-off routed to Avery");
+    else {
+      // names stay unique after retirement — take a fresh one if this name was used before
+      const name = templates.some((t) => t.name === VARIANT) ? `${VARIANT}-${Date.now()}` : VARIANT;
+      const r = await call(
+        "POST",
+        "/v1/workflows/template-gallery/ai-use-case-intake/create",
+        { name, approverUserId: avery.id },
+        ada.auth,
+      );
+      if (ok(r.status)) report.created.push("use-case sign-off routed to Avery");
+      else fail("use-case sign-off routing", r);
+    }
+  }
 
   // --- agents by name (from seed.ts) ---------------------------------------------------
   const agentList: Json[] = (await call("GET", "/v1/agents")).body.agents ?? [];
@@ -207,8 +239,9 @@ export async function seedDemoIntake(
     if (!(await driveToReview(instanceId, md, dana.auth, `use case ${u.name}`))) return;
     if (u.targetStatus === "under_review") return;
     const decision = u.targetStatus === "rejected" ? "denied" : "approved";
-    const reason = u.decisionReason ? `${u.decisionReason} — ${SEED_REASON}` : SEED_REASON;
-    if (!(await decide(instanceId, decision, reason, dana.auth, `use case ${u.name}`))) return;
+    const reason = u.decisionReason ? `${u.decisionReason} — ${SEED_REASON_USE_CASE}` : SEED_REASON_USE_CASE;
+    // Avery, the independent governance approver, decides (separation of duties)
+    if (!(await decide(instanceId, decision, reason, avery.auth, `use case ${u.name}`))) return;
     if (u.targetStatus === "retired") {
       // retirement is an admin act (the default gate), not the proposer's
       const ret = await call("POST", `/v1/use-cases/${id}/retire`, { reason: u.decisionReason ?? "retired (seeded)" }, ada.auth);

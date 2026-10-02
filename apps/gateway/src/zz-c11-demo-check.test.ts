@@ -12,7 +12,9 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createDb, runMigrations, type Db } from "@regulait/db";
+import { and, createDb, isNull, runMigrations, sql, workflowTemplates, type Db } from "@regulait/db";
+
+const like = (col: unknown, pattern: string) => sql`${col} like ${pattern}`;
 import { DEMO_INTAKE_FIXTURES } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { runDemoCheck, type DemoCheck } from "./demo-check-lib.js";
@@ -50,6 +52,13 @@ beforeAll(async () => {
 }, 180_000);
 
 afterAll(async () => {
+  // the seeder routes use-case sign-offs to Avery with an intake VARIANT
+  // (ADR-0165); on a shared database that would redirect every later test
+  // file's use-case sign-off, so retire it here (M-040 order independence)
+  await db
+    .update(workflowTemplates)
+    .set({ retiredAt: new Date(), retiredReason: "zz-c11 cleanup" })
+    .where(and(like(workflowTemplates.name, "ai-use-case-intake/governance-owner%"), isNull(workflowTemplates.retiredAt)));
   app.server.closeAllConnections();
   await app.close();
 });
