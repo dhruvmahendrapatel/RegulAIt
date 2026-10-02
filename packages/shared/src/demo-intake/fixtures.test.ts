@@ -146,6 +146,15 @@ describe("DEMO_INTAKE_FIXTURES", () => {
     }
   });
 
+  it("all risks have unique titles and no title matches /^Risk \\d+$/", () => {
+    const titles = new Set<string>();
+    for (const r of risks) {
+      expect(titles.has(r.title), `duplicate risk title: '${r.title}'`).toBe(false);
+      titles.add(r.title);
+      expect(r.title).not.toMatch(/^Risk \d+$/);
+    }
+  });
+
   // ---------------------------------------------------------------------------
   // G5 — vendor-scoped risk for dependency-graph beat
   // ---------------------------------------------------------------------------
@@ -171,12 +180,12 @@ describe("DEMO_INTAKE_FIXTURES", () => {
   // Model cards
   // ---------------------------------------------------------------------------
 
-  it("has model cards for all unique intendedAgentNames", () => {
+  it("leaves exactly one intended agent (grok) without a model card to trigger the monitor beat", () => {
     const agentNamesWithCards = new Set(modelCards.map((mc) => mc.agentName));
     const allIntendedAgentNames = new Set(allUseCases.flatMap((uc) => uc.intendedAgentNames));
-    for (const agentName of allIntendedAgentNames) {
-      expect(agentNamesWithCards.has(agentName), `no model card for agent '${agentName}'`).toBe(true);
-    }
+    const missing = Array.from(allIntendedAgentNames).filter((a) => !agentNamesWithCards.has(a));
+    expect(missing.length).toBe(1);
+    expect(missing[0]).toBe("grok");
   });
 
   it("has at least 2 model cards with an assessed biasFairness entry", () => {
@@ -197,8 +206,8 @@ describe("DEMO_INTAKE_FIXTURES", () => {
   // Shadow AI
   // ---------------------------------------------------------------------------
 
-  it("has exactly 6 shadow AI findings", () => {
-    expect(shadowAi.length).toBe(6);
+  it("has exactly 4 shadow AI findings", () => {
+    expect(shadowAi.length).toBe(4);
   });
 
   it("shadow AI findings have synthetic grantedBy addresses", () => {

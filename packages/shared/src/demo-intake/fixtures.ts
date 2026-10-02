@@ -1297,20 +1297,7 @@ export const DEMO_INTAKE_FIXTURES: DemoIntakeFixtures = {
       ],
       standardRefs: [],
     },
-    {
-      agentName: "grok",
-      intendedUse:
-        "Real-time query answering and data summarisation for internal finance and analytics use cases.",
-      dataClaims: {
-        trainingData: "xAI training corpus with web-crawl and real-time X/Twitter data, 2025",
-        personalDataUsed: false,
-      },
-      limitations:
-        "Training data includes real-time social content; financial forecasting outputs must be " +
-        "grounded against authoritative warehouse data. No bias assessment completed for financial tasks.",
-      biasFairness: [],
-      standardRefs: [],
-    },
+
     {
       agentName: "fast-mock",
       intendedUse:
@@ -1350,40 +1337,28 @@ export const DEMO_INTAKE_FIXTURES: DemoIntakeFixtures = {
   // -------------------------------------------------------------------------
   shadowAi: [
     {
-      appName: "Grammarly Business",
-      vendorHost: "grammarly.com",
+      appName: "Credit Team LLM Prototype",
+      vendorHost: "api.anthropic.com",
       grantedBy: "user-17@acme.example",
-      installCount: 83,
+      installCount: 1,
     },
     {
-      appName: "Notion AI",
-      vendorHost: "notion.so",
+      appName: "ChatGPT Web",
+      vendorHost: "chat.openai.com",
       grantedBy: "user-44@acme.example",
       installCount: 27,
     },
     {
-      appName: "GitHub Copilot",
-      vendorHost: "github.com",
+      appName: "Claude Web",
+      vendorHost: "claude.ai",
       grantedBy: "user-03@acme.example",
       installCount: 156,
     },
     {
-      appName: "Jasper AI",
-      vendorHost: "jasper.ai",
+      appName: "OpenAI API Testing",
+      vendorHost: "api.openai.com",
       grantedBy: "user-29@acme.example",
       installCount: 6,
-    },
-    {
-      appName: "Otter.ai",
-      vendorHost: "otter.ai",
-      grantedBy: "user-51@acme.example",
-      installCount: 34,
-    },
-    {
-      appName: "Midjourney",
-      vendorHost: "midjourney.com",
-      grantedBy: "user-22@acme.example",
-      installCount: 11,
     },
   ],
 };
