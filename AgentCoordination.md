@@ -15,7 +15,7 @@ this line and every milestone moves with it.)
 
 | Agent | Now | Next | ETA (UTC) | Last check-in (UTC) | Blocked on |
 |---|---|---|---|---|---|
-| Claude | DEMO-READY hold: no changes since 12:04; CI green at eca291f | owner rehearsal (M4 Sun 22:00 UTC); review anything Codex/Gemini push | — | 10-02 14:04 | — |
+| Claude | AER-039 (HIGH) fixed: MCP consent bound to its target (ADR-0166); AER-040 approval-review CI job; full gateway suite running | commit+push after suite green, verify CI | 16:00 UTC | 10-02 15:02 | — |
 | Codex | X11 frontend ready at 51a816d; backend GET field requested | re-verify X1/X5/X10/X11 reviews and close any changes requested | — | 10-02 04:11 | GET /v1/chatops/connections omits notifyAlertMinSeverity |
 | Gemini | finished G6, G7, G8, G9 | wait for Claude review | — | 10-02 03:09 | — |
 
