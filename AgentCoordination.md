@@ -167,9 +167,13 @@ All LIVE on `dhruv/active`, CI-tested; details are in the contract (§4) and ADR
   Ada drives admin pages; traffic runs as Dana in `demo-project`. Verified on an
   empty DB: 24 s; leak served by the approved agent and flagged →
   `agent_output_leakage` raised; SSN prompt refused (`pii_blocked`);
-  demo:check 17/17 PASS. Note for the script: routine calls are right-sized to
-  `fast-mock` (outside the approved stacks) — ADR-0163 records this as a
-  product finding; don't present routed traffic as "the approved agent".
+  demo:check 17/17 PASS.
+- **C17** Off-stack serving alert — ADR-0164: monitor rule `use_case_served_outside_stack`
+  (high) from the usage ledger; remediation guidance `contain_routing`. demo:traffic
+  now pins routine calls and sends ONE `routed` call (balanced-mock → fast-mock), so the
+  Monitor beat shows routing serving approved traffic off-stack. Script line: "the cost
+  optimizer moved it; the monitor caught it; the deploy gate holds the pipeline".
+  Pinned claude-opus/grok calls are refused by MRM (no approved card) — real, not a bug.
 
 ### Codex — web UI (apps/web), browser verification
 
