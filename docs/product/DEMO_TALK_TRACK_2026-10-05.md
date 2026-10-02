@@ -1,49 +1,91 @@
-# RegulAIt vs. Credo AI: Positioning Talk Track
+# RegulAIt Positioning Talk Track — AI Intake Demo (v2)
 
 **Date:** 2026-10-05
-**Audience:** Internal Sales & Demo Leads
+**Audience:** internal — whoever presents the demo
+**Rule:** every claim here is something the demo shows or an ADR documents. Say what RegulAIt
+does; do not characterise how any other product works internally.
 
 ---
 
-## Core Positioning: "Evidence Over Attestation"
+## Core positioning: evidence over attestation
 
-When talking to prospects comparing RegulAIt to traditional GRC platforms, the key differentiation lies in **how risk is evidenced**. 
+RegulAIt sits on the execution path. The same gateway that governs every agent, model, connector
+and MCP-tool call records what happened, so governance can be measured from what the platform
+actually saw — and is labelled as an attestation where it cannot be.
 
-RegulAIt connects directly to the execution layer. We don't ask developers if their app is secure; we check the gateway logs and the actual guardrail configurations.
+### 1. Trust metrics that are evidence coverage, never a fabricated score
+- Each of the six dimensions (bias, security, privacy, reliability, safety, compliance) is the
+  share of **applicable active-pack controls** that have evidence (ADR-0148).
+- **Unmeasured** means no active-pack control applies to that dimension — shown as a gap, never as
+  zero. When a control applies but nothing evidences it (e.g. no assessed model card for bias),
+  the dimension is **measured at 0 %** (ADR-0150).
+- Privacy and safety coverage is evidenced by **guardrail configuration** (the controls are met by
+  configured detectors, ADR-0150). Guardrail block counts are a different signal: they resolve
+  risks in the register (ADR-0147).
 
-### Key Differentiator 1: Live, Ledger-Backed Trust Metrics
-**Our Claim:** RegulAIt's Trust Dashboard never fabricates a metric. If we can't measure it, we show an explicit gap.
-**The Proof:** 
-- As outlined in **ADR-0148 (Trust dashboard API)**, our six trust dimensions (Bias, Security, Privacy, Reliability, Safety, Compliance) measure evidence coverage from collectors over platform ledgers; attestation-based controls are labelled. 
-- For example, if a model's bias hasn't been formally assessed in a model card (per **ADR-0147**), the dashboard explicitly labels it "unmeasured". We measure the *coverage of evidence*, not a subjective "Trust Score".
+### 2. Intake that screens from structured answers
+- The EU AI Act tier is computed by deterministic rules from the proposer's **structured
+  answers** (`classifyEuAiActTier`, ADR-0085) — a calculator, not a lawyer, and never from a
+  free-text description.
+- The intake assistant suggests frameworks, risks, controls and questionnaire drafts from the same
+  answers; every suggestion carries its source and is accepted, edited or rejected by a person
+  (ADR-0149).
+- A shadow-AI finding pre-fills only what the evidence established — name and observed use;
+  every screening answer is left for the proposer.
 
-### Key Differentiator 2: The Agentic Dependency Graph
-**Our Claim:** Traditional AI GRC tools track static models. RegulAIt tracks autonomous, multi-step agents and their runtime dependencies.
-**The Proof:**
-- **ADR-0156 (Dependency graph + risk propagation)** introduced a live dependency graph (`GET /v1/inventory/graph`) that links Use Cases → Agents → MCP Servers / Tools.
-- We track both *declared* edges (what was approved) and *observed* edges (what the agent actually called at runtime). 
-- If a third-party vendor introduces a vulnerability, the risk automatically propagates up the graph to the Use Case, triggering alerts.
+### 3. Separation of duties by construction
+- Use-case sign-offs go to a named governance approver (ADR-0165); the proposer cannot approve
+  their own registration, and an executable remediation cannot be approved by the person who
+  proposed it (ADR-0159).
 
-### Key Differentiator 3: Automated Governance Monitoring
-**Our Claim:** RegulAIt shifts governance from a point-in-time audit to continuous monitoring.
-**The Proof:**
-- **ADR-0157 (Governance monitor + alerts)** acts as a continuous rule engine over our risk register and dependency graph.
-- If an agent is running without an approved model card, or a high-risk system drops its mitigating controls, the Monitor raises on the next monitor pass (hourly, or on demand).
+### 4. The agentic dependency graph
+- Nodes: use case, agent, model, vendor, MCP server, connector. Edges are **declared** (what was
+  approved) and **observed** (what agents actually called at runtime) (ADR-0156).
+- A high risk **recorded** against a vendor, model or agent propagates to everything that depends
+  on it **as a maximum**, and the path to the source is shown.
 
-### Key Differentiator 4: Intake Assistance Without the Burden
-**Our Claim:** We reduce friction for developers by using deterministic rules to draft risk questionnaires based on plain-language descriptions, while any AI narrative generation is optional, governed, and clearly labelled.
-**The Proof:**
-- **ADR-0149 (Intake assistant API)** powers our Intake Wizard. A developer describes an app, and the system automatically proposes the EU AI Act risk tier and maps the necessary framework controls (e.g., NIST AI RMF, ISO 42001) using deterministic rules. We guide the user instead of handing them a blank 100-question spreadsheet.
+### 5. Continuous monitoring, not point-in-time review
+- The governance monitor runs nine rules over the graph, the risk register, trust coverage and
+  runtime evidence — hourly and on demand; alerts are condition episodes that raise, refresh and
+  resolve (ADR-0157).
+- **Continuous trace evaluation** re-runs the shipped detectors over stored responses every 15
+  minutes and reports **counts only** — it found a credential the inline guardrail let through
+  (ADR-0160).
+- **Routing outside the approved stack**: when cost optimization serves an approved use case's
+  traffic from an agent its approval never named, the monitor says so, with the measured call
+  count. It changes no routing; a person decides (ADR-0164).
+
+### 6. Respond, with a human in the loop
+- From an alert, the planner proposes remediations. Two kinds are **executable** — link a control,
+  assign an owner — and run only after a **different** human approves them; everything else is
+  guidance with steps (ADR-0159).
+- Alerts can also be posted to Slack or Teams by severity threshold, through the same egress
+  allow-list as everything else (ADR-0162).
+
+### 7. Enforcement where releases happen
+- **Deploy gate**: a pipeline asks `POST /v1/gates/deploy` whether a use case may ship. Approval,
+  the approved stack, halts, the model-risk decision and open alerts combine into allow/deny with
+  reasons; an open HIGH alert blocks, an acknowledged one warns; every answer is audited with the
+  build ref (ADR-0161). Shown live with `demo:gate`.
+
+### 8. Regulatory intelligence joined to our own state
+- A curated, source-dated feed of obligations (e.g. the Digital Omnibus on AI moving Annex III
+  high-risk obligations to 2 December 2027) joined to active packs, live control status and the
+  use cases in scope (ADR-0158).
 
 ---
 
-## Verifiable Claims to Highlight in Demos
+## Lines to use in the demo
 
-1. **"Our guardrail metrics reflect actual API blocks."** (Show the Privacy/Safety dimensions on the Trust Dashboard).
-2. **"Our agent cards link to the inventory record, which separates GRANTED from OBSERVED tools (ADR-0082)."** (Show the Use-Case 360 Stack tab).
-3. **"We support EU AI Act tiering right at intake."** (Show the Intake Assistant).
-4. **"Our remediations require human approval."** (Show that executable remediations trigger an approval workflow, per **ADR-0159**).
-5. **"We continuously evaluate traces with shipped detectors, exposing only violation counts."** (Show the trace evaluation counts, backed by **ADR-0160**).
-6. **"Our CI/CD deploy gate enforces compliance programmatically."** (Show a pipeline step being blocked by an open high alert and then allowed upon acknowledgment, per **ADR-0161**).
+1. "Coverage is evidence, and an unmeasured dimension is a gap, not a zero." (Trust dashboard)
+2. "The inventory separates what an agent is GRANTED from what it was OBSERVED doing
+   (ADR-0082)." (`/ui/admin/inventory`; the agent card is on Use-case 360 → Stack)
+3. "The tier comes from the structured answers — deterministic and explainable." (Intake)
+4. "Nothing changes governed state until a different human approves it." (Remediation, ADR-0159)
+5. "We evaluate stored responses continuously and keep only counts." (Trace evaluation, ADR-0160)
+6. "The pipeline asks the same governance state the runtime enforces." (Deploy gate, ADR-0161)
+7. "The optimizer saved money by moving approved traffic — and the monitor told us it left the
+   approved stack." (ADR-0164)
 
-*Note: Never claim that RegulAIt automatically fixes risks. We automate the discovery, mapping, and monitoring of risks, but remediation and approval are always human-gated.*
+**Never claim** that RegulAIt fixes risks automatically. Discovery, mapping and monitoring are
+automated; remediation and approval are human-gated.

@@ -1,130 +1,183 @@
-# AI Intake Demo Script — 2026-10-05
+# AI Intake Demo Script — 2026-10-05 (v2)
 
-**Objective:** Showcase the three phases of agentic AI governance (Discover & Register, Assess & Deploy, Monitor & Respond) through a single, cohesive journey: Acme Bank deploying a credit-limit-increase assistant.
+**Objective:** show the three phases of agentic AI governance — **Discover & Register → Assess &
+Deploy → Monitor & Respond** — as one journey: Acme Bank finds an unregistered credit-team LLM
+prototype, registers it, gets it approved by an independent reviewer, and then governs it in
+production.
 
----
-
-## 0. Setup and Preparation
-- **Database:** Ensure a clean seeded database by running `pnpm --filter @regulait/gateway seed`, then `demo:setup`, then `demo:intake` (in that order), followed by `pnpm --filter @regulait/gateway demo:check` (the script must say "all beats PASS or known WARN" before the demo starts). The `seed` command prints one-time passwords for the personas below — keep them handy to log in.
-- **Browser:** Two browser profiles ready (to switch personas seamlessly without logging in and out).
-  - Profile A: **Dana** (Developer / Proposer)
-  - Profile B: **Avery** (Risk Reviewer / Approver)
-- **Fallback Rule:** Every beat uses the keyless **mock** provider. No live models are required.
-
----
-
-## 1. Phase 1: Discover & Register
-
-### Beat 1A: Shadow AI Discovery *(CONDITIONAL on task X4)*
-- **Persona:** Dana
-- **URL:** `/ui/admin/shadow-ai` (or via Inbox)
-- **Screen State:** A list of discovered shadow-AI usage. One item highlights an unregistered LLM tool (a credit-limit-increase assistant) in use.
-- **Action:**
-  1. Click on the shadow-AI finding.
-  2. Click **"Register as use case"**. *(Fallback if X4 is incomplete: just open the intake wizard directly at `/ui/admin/governance/intake`)*
-- **Talking Point:** "Governance often begins not with a formal request, but by discovering shadow AI. Here, RegulAIt has detected an unregistered credit assistant being tested. Instead of simply blocking it, Dana can easily bring it into the governed fold."
-
-### Beat 1B: AI Intake Wizard
-- **Persona:** Dana
-- **URL:** `/ui/admin/governance/intake` (Prefilled from Shadow AI, or direct)
-- **Screen State:** The Intake Wizard with steps: Describe → Assistant suggestions → Questionnaire → Link stack → Review & submit.
-- **Action:**
-  1. Under "Describe", enter a plain language description of the credit-limit-increase assistant.
-  2. Click **Next** to generate Assistant Suggestions.
-  3. Review the auto-generated suggestions (EU AI Act tier proposal, frameworks, risks). Note the `source: rules` badge (deterministic logic). The narrative draft will be labelled `mock` unless a live model is configured.
-  4. Accept the suggestions and proceed to the Questionnaire. (Observe pre-filled answers from `fixtures.ts`: essential-services + profilesNaturalPersons).
-  5. Proceed to the "Stack" step: Link the `mock-balanced` model, vendor, and agent.
-  6. Review & Submit.
-- **Talking Point:** "Instead of making developers fill out massive spreadsheets, RegulAIt's deterministic rules propose a regulatory tier based on a plain-language description. It suggests we trigger EU AI Act High-Risk classification because we're making credit decisions. The obligations apply from Dec 2027 — we're getting ahead of them."
-- **Recovery Step:** If the assistant API (`POST /v1/use-cases/intake/assist`) fails, manually fill in the first 3 fields of the questionnaire and proceed to Submit.
+**Rule for this script:** every beat below is one `demo:check` reports **PASS** on a fresh
+database, and the whole journey (register → approve → alert → remediate → graph → regulatory →
+signed export) runs green in `apps/web/e2e/demo-intake.spec.ts` against that database. Read the
+live numbers off `demo:check` on the day — the figures quoted here are from the 2026-10-02 run.
 
 ---
 
-## 2. Phase 2: Assess & Deploy
+## 0. Setup (one command, then the gateway)
 
-### Beat 2A: Use-Case 360 and Risk Linking
-- **Persona:** Dana
-- **URL:** `/ui/admin/governance/use-cases/<new_use_case_id>`
-- **Screen State:** Use-case 360 page showing status as `under_review`, Tier as `High`, and the 6 tabs (Overview, Frameworks, Risks, Stack, Approvals, Audit).
-- **Action:**
-  1. Navigate to the **Stack** tab. Show the Agent Card (`/v1/agents/:id/card`), highlighting purpose and data sources. Note that *observed* tools live on the inventory record linked from the agent card.
-  2. Navigate to the **Risks** tab. 
-  3. Click **Add risk from library** *(CONDITIONAL on X8; fallback is to create the risk using the manual form)*.
-  4. Pick an agentic risk scenario (e.g., *Credit model disparate impact*) and add it to the use case.
-  5. Link a suggested control (e.g., `eu-ai-act:art-14-human-oversight`).
-  6. Show the Inherent vs. Residual risk reduction.
-- **Talking Point:** "The use-case 360 view connects the agent, the model, and the vendor. Because this is high-risk, RegulAIt mapped EU AI Act, NIST AI RMF, and ISO 42001 frameworks automatically. We can pull specific agentic risks from our curated library and link platform controls to reduce our residual risk."
-- **Recovery Step:** If linking controls fails, highlight the inherent risk scores and move on to the Approvals tab.
+Environment for every command (one terminal, same values throughout):
 
-### Beat 2B: Approval Gate
-- **Persona:** Avery (Risk Reviewer)
-- **URL:** `/ui/admin/governance/inbox` or `/ui/admin/governance/use-cases/<new_use_case_id>` (Approvals tab)
-- **Screen State:** A pending approval request for the new use case.
-- **Action:**
-  1. Review the linked risks and controls.
-  2. Click **Approve** and provide a short note.
-  3. Check the **Audit** tab to show the recorded immutable audit row.
-- **Talking Point:** "With separation of duties, Avery reviews the residual risk and the linked controls. Approving it writes an immutable audit record, safely gating the deployment."
+```bash
+export DATABASE_URL=postgres://regulait:regulait@127.0.0.1:5432/regulait_demo   # an EMPTY database
+export REGULAIT_BOOTSTRAP_TOKEN=<any long random string>
+export REGULAIT_DATA_KEY=$(openssl rand -hex 32)        # 64 hex chars — keep it for the whole demo
+export REGULAIT_EPHEMERAL_LICENSE=1 REGULAIT_LICENSE_KEYRING=$HOME/.regulait-demo-keys
+```
 
-### Beat 2C: CI/CD Deploy Gate (Optional)
-- **Persona:** Dana (via CI/CD pipeline)
-- **Action:**
-  1. A pipeline step calls `POST /v1/gates/deploy`.
-  2. The request is initially DENIED due to an open high alert.
-  3. After the alert is acknowledged in the UI, the pipeline step runs again and is ALLOWED.
-- **Talking Point:** "RegulAIt integrates directly into the deployment pipeline. If a critical issue remains unacknowledged, the CI/CD gate blocks the release, enforcing compliance programmatically."
+1. `pnpm --filter @regulait/gateway demo:prepare` — seed → demo:setup → demo:intake →
+   demo:traffic → demo:check in ~25 s. It must end **17 pass, 0 warn, 0 fail**. The seed step
+   prints each persona's **one-time password** — copy them.
+2. `PORT=3105 pnpm --filter @regulait/gateway start` — the gateway serves the UI at
+   `http://127.0.0.1:3105/ui`.
+3. Two browser profiles, each signs in once with its one-time password and sets a new one:
+   - **Profile A — Ada** (`admin@regulait.local`): governance admin. Drives every `/ui/admin/*`
+     page and **proposes** remediations.
+   - **Profile B — Avery** (`avery@regulait.local`): independent approver. Works only in
+     `/ui/inbox`. Use-case sign-offs are routed to Avery (ADR-0165), so the proposer is never
+     the approver.
+4. Optional — a third terminal for the pipeline beat (2C) with the same environment.
+
+Everything runs on the keyless **mock** provider. No live model, no external network.
 
 ---
 
-## 3. Phase 3: Monitor & Respond
+## Phase 1 — Discover & Register
 
-### Beat 3A: Trust Dashboard
-- **Persona:** Avery
+### 1A. Shadow AI discovery — Ada
+- **URL:** `/ui/admin/shadow-ai`
+- **Screen:** 4 findings from imported evidence (egress / SaaS exports). The first:
+  *Credit Team LLM Prototype* — Anthropic usage, source `saas_export`.
+- **Action:** on that finding, click **Register as use case**.
+- **Say:** "Governance usually starts by finding AI nobody registered. RegulAIt classifies the
+  evidence you already have; we bring the system into the governed path instead of just blocking
+  it. Detection is a signal, not proof — the coverage panel says exactly which sources we saw."
+
+### 1B. AI intake — Ada
+- **URL:** `/ui/admin/governance/intake?source=shadow-ai…` (opened by 1A)
+- **Screen:** the banner *"Prefilled only from shadow-AI record …: name and observed-use
+  description."* Every screening answer is **blank** — the finding did not establish them.
+- **Action — Ada enters the EU AI Act answers** (credit context):
+  purpose **Essential services** · people affected **Customers** · decision autonomy **Human
+  reviews every recommendation** · biometric **None** · sectors **financial services** · data
+  categories **personal + financial** · deployment **Customer-facing** · profiles natural persons
+  **Yes** · interacts with people **Yes** · generates content **Yes** · EU nexus **Yes** ·
+  external vendor **Yes** · everything else **No**.
+  Then **Draft suggestions**.
+- **Screen:** *Proposed tier: high* with the rule reasons; frameworks and risks, each with a
+  `rules` source badge. Accept or edit each suggestion, **Continue** through the questionnaire and
+  stack, and on **Review** point at *Data sensitivity: regulated — derived from the declared data
+  categories*. **Submit for human review**.
+- **Say:** "The tier is computed from the structured EU AI Act answers by deterministic rules —
+  not from a description, and never from a model. Suggestions are suggestions: each one is
+  accepted, edited or rejected by a person. High-risk obligations apply from 2 December 2027
+  under the Digital Omnibus — we're screening for them today."
+- **If the assistant call fails:** fill the questionnaire by hand; submission is the same path.
+
+---
+
+## Phase 2 — Assess & Deploy
+
+### 2A. Use-case 360 and risks — Ada
+- **URL:** **Open the use-case workspace** (link after submit) → `/ui/admin/governance/use-cases/<id>`
+- **Screen:** status **under review**, **high tier**, 7 tabs: Overview, Frameworks, Risks, Stack,
+  Dependencies, Approvals, Audit.
+- **Action:**
+  1. **Stack** — the agent card: declared purpose, data sources, owner, model cards with their
+     sign-off.
+  2. **Risks** — **Add risk from library**: search, pick an agentic scenario, choose likelihood
+     and impact yourself (nothing is pre-rated), **Assess and add**; link a suggested control and
+     set a residual rating.
+- **Say:** "One governed view of the system. Risk scenarios suggest structure only — the
+  registrant declares likelihood and impact, and residual risk is recorded against a named
+  control."
+
+### 2B. Independent approval — Avery
+- **URL:** `/ui/inbox` (Profile B)
+- **Screen:** *Sign-off · signoff · AI use-case intake: Govern Credit Team LLM Prototype —
+  requested by Ada Admin*, with the submitted questionnaire.
+- **Action:** **Approve** (optional reason). The row moves to *Recently decided*.
+- **Back in Profile A:** the use case now reads **approved**; the **Audit** tab shows the decision.
+- **Say:** "Separation of duties is structural: the sign-off is routed to an independent
+  approver, so the person who registered it cannot approve it. The decision is one audited row."
+
+### 2C. CI/CD deploy gate — the pipeline (terminal)
+- **Action:** `pnpm --filter @regulait/gateway demo:gate -- "Real-Time Fraud Detection Engine" production build-4417`
+- **Screen:** `DENY` with two **BLOCK open_high_alert** lines (an inherited HIGH rating, and
+  traffic served outside the approved stack) and a **WARN** for an unowned agent; *pipeline
+  STOPPED*; exit code 1.
+- **Then:** in Profile A, acknowledge those two alerts (3B shows how), re-run the command:
+  `ALLOW` with the same items now **WARN acknowledged_high_alert**; exit 0.
+- **Say:** "The pipeline asks the same governance state the runtime enforces — approval, the
+  approved stack, halts, the model-risk gate, open alerts. An open HIGH alert blocks; once a
+  person has acknowledged it, it becomes a warning. Every answer is audited with the build ref."
+
+---
+
+## Phase 3 — Monitor & Respond
+
+### 3A. Trust dashboard — Ada
 - **URL:** `/ui/admin/governance/trust`
-- **Screen State:** Six-dimension radar chart, KPI tiles, 3x3 heatmap, and dimension drill-downs.
-- **Action:**
-  1. Highlight the six-axis radar (Bias, Security, Privacy, Reliability, Safety, Compliance).
-  2. Note the "Evidence coverage %" (not a fabricated "score").
-  3. Show the `bias` axis gap. An axis is "unmeasured" when no active pack control applies to it.
-  4. Click into the `security` drill-down.
-- **Talking Point:** "Once deployed, we provide evidence coverage, with attestation-based controls labelled (like documented model-card assessments for bias). This Trust Dashboard is driven purely by evidence coverage from collectors over platform ledgers. Unmeasured dimensions show up as a clear gap, keeping us honest."
+- **Screen:** six-axis radar, KPI tiles, heatmap. 2026-10-02 figures: bias 100 %, security 50 %,
+  privacy **unmeasured**, reliability 0 %, safety 0 %, compliance 80 %.
+- **Action:** point at the unmeasured axis (privacy), then open the **security** drill-down.
+- **Say:** "Each axis is evidence coverage: the share of applicable active-pack controls with
+  evidence — measured from platform ledgers and guardrail configuration, with attestation-based
+  controls labelled. An axis with no applicable control is shown as unmeasured, never as a score."
 
-### Beat 3B: Continuous Governance Escalation
-- **Persona:** Avery
-- **URL:** `/ui/admin/governance/alerts`
-- **Screen State:** Governance Monitor alerts list.
+### 3B. Governance alerts and remediation — Ada, then Avery
+- **URL:** `/ui/admin/governance/alerts` → **Evaluate now**
+- **Screen:** the monitor's alerts (14 active on 2026-10-02) from its 9 rules, including:
+  - *"… inherits a HIGH rating from Acme Internal AI Platform"* — with the propagation path;
+  - *"balanced-mock returned flagged content in 1 of N evaluated response(s) (semantic_dlp)"* —
+    continuous trace evaluation caught a credential the inline guardrail let through;
+  - *"N call(s) for Internal IT Knowledge Base Bot (to balanced-mock) were served by
+    fast-mock, which is outside its approved stack"* — the cost optimizer moved approved traffic
+    to an agent the approval never covered;
+  - *"… depends on premium-mock, which is unowned"*.
 - **Action:**
-  1. The monitor runs hourly (or on "Evaluate now") and alerts on 7 specific governance rules.
-  2. Click into an inherited-risk alert to see `detail.pathLabels` (e.g., Use Case → Agent → Vendor).
-  3. Click **Acknowledge** with a mandatory note.
-  4. Under Remediation, propose the executable remediation (link control) to Avery.
-  5. Switch to Avery's profile, review the proposal, and approve it. The alert resolves automatically.
-- **Talking Point:** "When a dependency inherits a new risk, the Governance Monitor triggers an alert. From the alert, we can propose an executable remediation to a reviewer. Nothing changes governed state until a different human approves it."
-- **Recovery Step:** If the real-time alert is delayed, click **Evaluate now** to force the `governance-monitor-sweep` job.
+  1. Open an **unowned-agent** alert → **Acknowledge** with a note.
+  2. Under **Remediation**, the executable candidate *"Make Dana Developer the owner of …"*:
+     choose **Avery** as independent approver → **Propose…**.
+  3. **Avery** (`/ui/inbox`): *Governance remediation · Make Dana Developer the owner of …* →
+     **Approve**.
+  4. **Ada:** reload the alert — the approved action ran (the agent now has an owner) and the
+     alert is **resolved**; **Evaluate now** confirms the condition is gone.
+  5. Open the leakage or off-stack alert: its remediation is **guidance** only (tighten the output
+     guardrail / keep traffic on the approved stack) — a person decides.
+- **Say:** "Nothing changes governed state until a different human approves it. The platform
+  executes only the approved action; everything else is guidance with steps."
+- **If an alert is missing:** **Evaluate now** runs the same sweep as the hourly job.
 
-### Beat 3C: Dependency Graph
-- **Persona:** Avery
+### 3C. Dependency graph — Ada
 - **URL:** `/ui/admin/governance/graph`
-- **Action:**
-  1. Show a use case inheriting a HIGH rating.
-  2. Trace the path from the use case down to the offending vendor.
-- **Talking Point:** "We can see exactly where the risk propagated in our dependency graph, tracking both declared and observed edges."
+- **Screen:** use case → agent → model → vendor (declared) plus observed runtime edges; 3 use
+  cases inherit their rating (e.g. *Internal IT Knowledge Base Bot*, high).
+- **Action:** select the use case and follow the path to the vendor whose recorded HIGH risk it
+  inherits; **Open this agent** lands on the agent in the catalog.
+- **Say:** "A high risk recorded against a vendor propagates to everything that depends on it, as
+  a maximum, and we show the path."
 
-### Beat 3D: Regulatory Intelligence
-- **Persona:** Avery
+### 3D. Regulatory intelligence — Ada
 - **URL:** `/ui/admin/governance/regulatory`
-- **Action:**
-  1. Show the Digital Omnibus on AI entry and the Dec 2027 Annex III date.
-  2. Highlight which of OUR use cases are in scope.
-- **Talking Point:** "RegulAIt keeps track of the shifting regulatory landscape. We can immediately see that the Digital Omnibus changed the EU AI Act dates and identify exactly which of our deployed systems are affected by the December 2027 deadline."
+- **Screen:** 13 source-dated entries; in force / next effective; the Digital Omnibus on AI
+  (Regulation (EU) 2026/1744, in force 2026-07-27) moving Annex III high-risk obligations to
+  2 December 2027; our use cases in scope and the control gaps.
+- **Say:** "Each entry is dated against its source and joined to our own controls and use cases —
+  which systems a change touches, and what we have not evidenced yet."
+
+### 3E. Evidence — Ada
+- **URL:** `/ui/admin/audit`
+- **Action:** **Download signed bundle** — an offline-verifiable `.tar.gz` (CSV, manifest,
+  signature) of the filtered audit trail: the registration, Avery's decisions, the alerts, the
+  gate answers, and the runtime refusal of a prompt carrying an SSN in the HIPAA project.
+- **Say:** "Everything you saw is in one hash-chained audit trail, exportable for an auditor."
 
 ---
 
-## Honest Disclaimer: What is Mock vs. Live?
-- **Mock:**
-  - The model provider is a keyless mock (`mock-balanced`). No live AI API calls are strictly required for the demo to succeed.
-  - The initial "Shadow AI" discovery event is a seeded artifact.
-- **Live:**
-  - The API endpoints (Trust dashboard, Intake assist, Use-case 360, Graph API).
-  - **Metrics:** All dashboard metrics are driven by real database queries over the seeded ledgers (no hardcoded "98% safe" numbers).
-  - **Risk Math:** The Inherent vs Residual logic is fully backed by the database schema (ADR-0147).
+## What is mock vs. live
+
+- **Mock:** the model provider (keyless mock agents); the shadow-AI evidence is a seeded import;
+  the governed traffic is generated by `demo:traffic` through the real dispatch path.
+- **Live:** every page and API shown; dashboard figures are queries over the seeded ledgers; the
+  monitor, trace evaluation, remediation, deploy gate and approvals are the product code paths.
+- **Never claim** automatic remediation: discovery, mapping and monitoring are automated;
+  changes to governed state are human-approved.
