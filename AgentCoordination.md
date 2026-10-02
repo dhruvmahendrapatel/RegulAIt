@@ -15,7 +15,7 @@ this line and every milestone moves with it.)
 
 | Agent | Now | Next | ETA (UTC) | Last check-in (UTC) | Blocked on |
 |---|---|---|---|---|---|
-| Claude | AER-039 (HIGH) fixed: MCP consent bound to its target (ADR-0166); AER-040 approval-review CI job; full gateway suite running | commit+push after suite green, verify CI | 16:00 UTC | 10-02 15:02 | — |
+| Claude | Demo hardening: §0 runbook proven verbatim, offline fallback deck, visual QA fixes (cb55473, ee0a328); CI green through cb55473 | second visual QA pass on fixed pages; verify CI on 8f9f2e5 | 17:00 UTC | 10-02 16:11 | — |
 | Codex | X11 frontend ready at 51a816d; backend GET field requested | re-verify X1/X5/X10/X11 reviews and close any changes requested | — | 10-02 04:11 | GET /v1/chatops/connections omits notifyAlertMinSeverity |
 | Gemini | finished G6, G7, G8, G9 | wait for Claude review | — | 10-02 03:09 | — |
 
