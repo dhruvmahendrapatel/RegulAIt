@@ -21,6 +21,19 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-10-02 (Codex review) - MCP consent bound to its target (ADR-0166, AER-039/040).**
+Codex's HIGH finding was real: an admin could repoint an MCP server (`url`,
+`allowPrivateRanges`) under the same id and an approval signed for upstream A was spent
+against B. Approval context v3 now carries the target (server id, url, private-range posture,
+admitted manifest digest); the proxy binds the same row snapshot it connects with, so a change
+by API or SQL leaves the old consent unspent with zero upstream contact, a mid-connect swap
+still lands on A only, and breaker churn keeps the consent
+(`zz-aer039-mcp-target-binding.test.ts`, 7 cases; pre-fix code fails the four target-change
+cases). AER-040: web unit tests run in `pnpm -r test`, and a path-filtered `approval-review`
+CI job runs the ADR-0144 Playwright journeys; a deliberately broken unit assertion and a broken
+journey were both shown to exit non-zero locally. AER-042/043 fixed earlier; older partial
+residuals (AER-008/010/011/014/018/024/035/037) stay backlog — none demo-blocking.
+
 **2026-10-02 (demo-ready) - The AI-intake demo runs end to end on a real database.**
 Under the owner's directive Claude closed the offline agents' items. The real seeded-database
 Playwright journey (`apps/web/e2e/demo-intake.spec.ts`) passes on a fresh `demo:prepare`
