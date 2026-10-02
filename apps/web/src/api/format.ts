@@ -49,5 +49,7 @@ export function approvalStageLabel(a: {
     return "Context conflict" + (a.contextConflict?.key ? " · " + a.contextConflict.key : "");
   if (s.startsWith("__budget__")) return "Run budget";
   if (s.startsWith("__infra_remediation__")) return "Infra remediation";
+  // ADR-0159: a governance-monitor remediation awaiting an independent approver
+  if (s.startsWith("__remediation__")) return "Governance remediation";
   return null;
 }

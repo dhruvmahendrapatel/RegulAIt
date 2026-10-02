@@ -69,7 +69,16 @@ async function mock(route: Route) {
   else if (p === "/v1/agents") body = { agents: [{ id: AGENT, name: "Credit assistant", provider: "mock", model: "mock-balanced" }] };
   else if (p === "/v1/vendors") body = { vendors: [{ id: "v", name: "Acme Model Services", category: "model_provider", status: "approved" }] };
   else if (p === "/v1/use-cases/intake/assist") body = { tier: { value: "high", reasons: [{ ruleId: "annex-iii", tier: "high", ref: "Annex III", reason: "Essential service" }], rulesetVersion: 1, source: "rules", disclaimer: "Screening, not legal advice." }, frameworks: [{ framework: "eu-ai-act", title: "EU AI Act", why: "EU nexus and high-risk purpose", source: "rules" }, { framework: "nist-ai-rmf", title: "NIST AI RMF", why: "Agentic financial workflow", source: "rules" }], risks: [{ scenarioKey: "credit-bias", title: "Disparate credit recommendation outcomes", description: "Profiling data may produce materially different recommendations across protected groups.", category: "bias_fairness", dimension: "bias", likelihood: "medium", impact: "high", suggestedControls: ["eu-ai-act:art-14-human-oversight"], why: "Profiles natural persons", source: "rules" }], euAiActBlock: "```eu-ai-act-answers\n{\"purposeDomain\":\"essential-services\",\"profilesNaturalPersons\":true}\n```", questionnaire: Array.from({ length: 8 }, (_, i) => ({ id: `q${i + 1}`, heading: `${i + 1}. ${["Purpose and business context", "Affected people", "Data", "Human oversight", "Operations", "Monitoring", "Security", "Accountability"][i]}`, text: `Draft answer ${i + 1}`, source: "rules" })), blocking: null, narrative: { status: "drafted", source: "mock" }, disclaimer: "Suggestions only." };
-  else if (p === "/v1/use-cases" && method === "POST") body = { id: ID, instance: { id: "instance" } };
+  else if (p === "/v1/use-cases" && method === "POST") {
+    // AER-042: the mock enforces the gateway's create contract for the field a
+    // past build got wrong, so a mocked pass can no longer hide a real 400
+    const sent = route.request().postDataJSON() as { dataSensitivity?: string };
+    if (!["public", "internal", "confidential", "regulated"].includes(String(sent.dataSensitivity))) {
+      await route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ error: "validation", detail: `dataSensitivity: Invalid enum value, received '${sent.dataSensitivity}'` }) });
+      return;
+    }
+    body = { id: ID, instance: { id: "instance" } };
+  }
   else if (p === "/v1/risks" && method === "POST") body = { id: RISK };
   else if (p === "/v1/reports/trust") body = trust;
   else if (p === `/v1/use-cases/${ID}/overview`) body = overview;
@@ -338,7 +347,7 @@ test("prohibited screening remains reviewable and can be submitted for an indepe
   await expect(submit).toBeEnabled();
   const created = page.waitForRequest((request) => new URL(request.url()).pathname === "/v1/use-cases" && request.method() === "POST");
   await submit.click();
-  await created;
+  expect((await created).postDataJSON().dataSensitivity).toBe("regulated"); // personal + financial → strictest
   await expect(page.getByText("Submitted for human review.")).toBeVisible();
 });
 

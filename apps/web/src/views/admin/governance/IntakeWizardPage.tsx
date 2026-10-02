@@ -7,6 +7,7 @@ import { Badge, Button, Card, Field, Input, Select, Textarea } from "../../../ui
 import { useAction, useAgents } from "../adminKit";
 import v from "../../views.module.css";
 import s from "./demoGovernance.module.css";
+import { deriveDataSensitivity } from "./dataSensitivity";
 
 type Source = "rules" | "mock" | "model";
 type Decision = "accepted" | "rejected";
@@ -178,7 +179,7 @@ export default function IntakeWizardPage() {
         name: title.trim(),
         description: description.trim(),
         businessContext: description.trim(),
-        dataSensitivity: "restricted",
+        dataSensitivity: deriveDataSensitivity(dataCategories),
         complianceTags: acceptedFrameworks.map((item) => item.framework),
         intendedAgentIds: agentId ? [agentId] : [],
       });
@@ -400,6 +401,7 @@ export default function IntakeWizardPage() {
               <div className={v.listRow}><strong>Name</strong><span className={v.grow}>{title}</span></div>
               <div className={v.listRow}><strong>Description</strong><span className={v.grow}>{description}</span></div>
               <div className={v.listRow}><strong>Questionnaire</strong><span className={v.grow}>{acceptedQuestions.length} accepted sections plus the EU AI Act answers block</span></div>
+              <div className={v.listRow}><strong>Data sensitivity</strong><span className={v.grow}><Badge tone="info">{deriveDataSensitivity(dataCategories)}</Badge> <span className={v.faint}>derived from the declared data categories (the strictest one wins)</span></span></div>
               <div className={v.listRow}><strong>Sources</strong><span className={`${v.grow} ${v.row}`}>{sourceSummary.map((source) => <Badge key={source} tone="info">{source}</Badge>)}</span></div>
               {assist.data.blocking ? (
                 <div className={v.errLine} role="alert">
