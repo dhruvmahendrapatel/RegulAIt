@@ -16,7 +16,7 @@ this line and every milestone moves with it.)
 | Agent | Now | Next | ETA (UTC) | Last check-in (UTC) | Blocked on |
 |---|---|---|---|---|---|
 | Claude | reviews done (X2/X6/X9 VERIFIED; G3-G5 VERIFIED); C12+C13 shipped | re-review X1/X3/X4/X5/X7/X8 and G6 as they land; next backend item | — | 10-02 03:04 | — |
-| Codex | X10 enterprise UI polish ready for review at fd93bdd | X11 ChatOps governance alert delivery controls | — | 10-02 04:04 | — |
+| Codex | X11 frontend ready at 51a816d; backend GET field requested | re-verify X1/X5/X10/X11 reviews and close any changes requested | — | 10-02 04:10 | GET /v1/chatops/connections omits notifyAlertMinSeverity |
 | Gemini | finished G6, G7, G8, G9 | wait for Claude review | — | 10-02 03:09 | — |
 
 ## Check-in protocol (owner directive 10-02: every agent, at least hourly)
@@ -276,7 +276,16 @@ and an explicit "unmeasured" state.
   "Governance alerts" select per workspace (Off / High only / Medium and
   above → `PATCH /v1/chatops/connections/:id`); on the X7 alert detail, a
   "Post to chat" button (`POST /v1/governance/alerts/:id/post`) that shows the
-  502 reason when refused. Status: TODO (Codex, after X10)
+  502 reason when refused. Status: READY-FOR-REVIEW (web at `51a816d`;
+  blocked on C14 read-contract correction, Codex 10-02 04:59 UTC)
+  Evidence: web `tsc --noEmit` PASS; web build PASS (196 modules); isolated
+  Playwright PASS 7/7, including the exact PATCH payload and surfaced 502
+  refusal reason; affordance parity PASS 54/54. Updated and visually inspected
+  the governance-alerts light/dark screenshots. Remaining backend dependency:
+  `GET /v1/chatops/connections` does not currently project
+  `notifyAlertMinSeverity`, although create stores it and PATCH returns it, so
+  a saved threshold would appear Off after reload until the GET projection is
+  corrected.
 - **X6 — Dependency graph view** — VERIFIED 10-02 (see §6).
 ### Gemini — demo content, fixtures, script
 
@@ -608,6 +617,7 @@ the alert resolves on the post-commit monitor pass.
 - (Codex, 10-02 04:17) X5 is READY-FOR-REVIEW at `7aa9d6e`. Please run the promised real seeded-DB `demo-intake.spec.ts` on an explicitly disposable database; Codex only compiled/listed it and ran the isolated 4/4 mock suite.
 - (Codex, 10-02 04:27) X1 is READY-FOR-REVIEW at `d6c7e8a`: exact PROHIBITED banner, normal governed submission, focused browser regression PASS, full isolated suite 5/5, build PASS.
 - (Codex, 10-02 04:44) X10 is READY-FOR-REVIEW at `fd93bdd`; all listed X2/X4/X6/X7/X9 polish items are implemented, isolated browser suite 6/6, build and affordance census pass.
+- (Codex, 10-02 04:59) X11 web work is READY-FOR-REVIEW at `51a816d`: threshold control, manual alert post, exact 502 refusal display, mock browser coverage 7/7, build and affordance census pass. C14 correction needed in Claude-owned gateway: `GET /v1/chatops/connections` omits `notifyAlertMinSeverity`; please include `r.notifyAlertMinSeverity` in the returned connection projection so the saved selection survives reload. POST already stores it and PATCH returns it.
 
 ---
 
