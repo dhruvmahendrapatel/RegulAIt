@@ -289,3 +289,39 @@ test("shadow-AI registration prefills evidence only and requires proposer answer
     autonomousActions: false,
   });
 });
+
+test("prohibited screening remains reviewable and can be submitted for an independent refusal", async ({ page }) => {
+  await page.route("**/v1/use-cases/intake/assist", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        tier: {
+          value: "prohibited",
+          reasons: [{ ruleId: "art-5-social-scoring", tier: "prohibited", ref: "EU AI Act Art. 5", reason: "Social scoring of natural persons is prohibited." }],
+          rulesetVersion: 1,
+          source: "rules",
+          disclaimer: "Screening, not legal advice.",
+        },
+        frameworks: [{ framework: "eu-ai-act", title: "EU AI Act", why: "EU nexus and an Article 5 trigger", source: "rules" }],
+        risks: [],
+        euAiActBlock: "```eu-ai-act-answers\n{\"socialScoring\":true}\n```",
+        questionnaire: [],
+        blocking: { reason: "Social scoring of natural persons is prohibited." },
+        narrative: { status: "not_requested" },
+        disclaimer: "Suggestions only.",
+      }),
+    });
+  });
+  await page.goto("/ui/admin/governance/intake");
+  await page.getByLabel("Social scoring").selectOption("yes");
+  await page.getByRole("button", { name: "Draft suggestions" }).click();
+  await expect(page.getByRole("alert")).toContainText("Screened PROHIBITED (Art. 5) — a reviewer must refuse it at sign-off; it cannot go live.");
+  for (let step = 0; step < 3; step += 1) await page.getByRole("button", { name: "Continue" }).click();
+  const submit = page.getByRole("button", { name: "Submit for human review" });
+  await expect(submit).toBeEnabled();
+  const created = page.waitForRequest((request) => new URL(request.url()).pathname === "/v1/use-cases" && request.method() === "POST");
+  await submit.click();
+  await created;
+  await expect(page.getByText("Submitted for human review.")).toBeVisible();
+});

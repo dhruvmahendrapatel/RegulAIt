@@ -328,7 +328,12 @@ export default function IntakeWizardPage() {
               <div className={s.callout}>
                 Proposed tier: <strong>{assist.data.tier.value}</strong> · ruleset v{assist.data.tier.rulesetVersion}. {assist.data.tier.disclaimer}
               </div>
-              {assist.data.blocking ? <div className={v.errLine} role="alert">Prohibited-use screening blocked this proposal: {typeof assist.data.blocking === "string" ? assist.data.blocking : assist.data.blocking.reason ?? "See the rule reasons."}</div> : null}
+              {assist.data.blocking ? (
+                <div className={v.errLine} role="alert">
+                  <strong>Screened PROHIBITED (Art. 5) — a reviewer must refuse it at sign-off; it cannot go live.</strong>{" "}
+                  {typeof assist.data.blocking === "string" ? assist.data.blocking : assist.data.blocking.reason ?? "See the rule reasons."}
+                </div>
+              ) : null}
               <h2 className={v.sectionTitle}>Frameworks</h2>
               {assist.data.frameworks.map((item) => (
                 <Suggestion key={item.framework} title={item.title} body={suggestionEdits[`framework:${item.framework}`] ?? item.why} source={item.source} decision={decisions[`framework:${item.framework}`]} onDecision={(value) => setDecision(`framework:${item.framework}`, value)} onEdit={(value) => setSuggestionEdits((current) => ({ ...current, [`framework:${item.framework}`]: value }))} />
@@ -400,13 +405,13 @@ export default function IntakeWizardPage() {
               <div className={v.listRow}><strong>Sources</strong><span className={`${v.grow} ${v.row}`}>{sourceSummary.map((source) => <Badge key={source} tone="info">{source}</Badge>)}</span></div>
               {assist.data.blocking ? (
                 <div className={v.errLine} role="alert">
-                  This proposal screened as prohibited. The platform does not expose a direct “save rejected” transition, so submission is disabled rather than misrepresenting a proposed record as rejected.
+                  <strong>Screened PROHIBITED (Art. 5) — a reviewer must refuse it at sign-off; it cannot go live.</strong>{" "}
+                  {typeof assist.data.blocking === "string" ? assist.data.blocking : assist.data.blocking.reason ?? "See the rule reasons."}
                 </div>
-              ) : (
-                <div className={s.callout}>
-                  Submission creates the use case, advances planning, stores the human-edited questionnaire, creates each accepted risk, and links its suggested controls. If a later step fails, retry resumes from the last successful checkpoint rather than duplicating records.
-                </div>
-              )}
+              ) : null}
+              <div className={s.callout}>
+                Submission creates the use case, advances planning, stores the human-edited questionnaire, creates each accepted risk, and links its suggested controls. If a later step fails, retry resumes from the last successful checkpoint rather than duplicating records. A prohibited screening remains a proposal until the independent reviewer records the required refusal.
+              </div>
               {submitAction.error ? <p className={v.errLine} role="alert">{submitAction.error} The completed steps have been retained; retry to resume.</p> : null}
               {submittedUseCaseId ? (
                 <div className={s.callout} role="status">
@@ -416,7 +421,7 @@ export default function IntakeWizardPage() {
                 <div>
                   <Button
                     variant="primary"
-                    disabled={submitAction.busy || Boolean(assist.data.blocking)}
+                    disabled={submitAction.busy}
                     onClick={() => void submitAction.run(submit, "Use case submitted for human review")}
                   >
                     {submitAction.busy ? "Submitting…" : "Submit for human review"}
