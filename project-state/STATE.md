@@ -4217,7 +4217,8 @@ region-allowlist SCP; OQ-002 (budget cap) resolved to $5/month; OQ-003 (GitHub a
 to personal `dhruvmahendrapatel`.
 
 ## Known follow-ups (not urgent, not blocking)
-- **Concurrent reads on one pg client in MRM autofill (pg@9 hazard).** `computeCardAutofill` /
+- ~~**Concurrent reads on one pg client in MRM autofill (pg@9 hazard).**~~ **CLOSED 2026-10-02 by
+  PR #115 (0f5d0b2): card-autofill reads run sequentially on a transaction handle.** `computeCardAutofill` /
   `computeCardStaleness` (`apps/gateway/src/mrm-autofill.ts`) run reads through `Promise.all`;
   when handed a transaction they share one client, so pg 8 queues them (correct today) and prints
   a DeprecationWarning during `demo:prepare` → `demo:setup`; pg 9 will make it an error. Fix: run

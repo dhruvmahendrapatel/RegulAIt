@@ -37,14 +37,14 @@ OFFLINE > 90 min); `pnpm coord:lint` is what CI runs.
 |---|---|---|
 | Codex | **:20** each hour | Codex may not edit gateway/db/shared — ask in "To Claude" |
 | Gemini | **:40** each hour | Markdown files listed in ground rule 2 only — never code, data or config |
-| Claude | **:02** each hour (scheduled routine) | reviews every READY item, answers "To Claude", prunes, re-plans |
+| Claude | **on request** — hourly check-ins stopped by the owner 2026-10-02 16:49 UTC | reviews READY items and answers "To Claude" when the owner asks |
 
 **Keeping the file current-state only (CI enforces, `scripts/coordination.mjs`):**
 - one Live-status row per agent — written by the command only;
 - one `Status:` line per task — **replace it**, never add a second; the
   previous text is in `git log -p AgentCoordination.md`;
 - inboxes: ≤ 8 messages each, none older than 12 h — the recipient clears
-  them with `--ack`; Claude clears "To Claude" at each :02;
+  them with `--ack`; Claude clears "To Claude" when it next works the board;
 - VERIFIED tasks collapse to one line + a one-line Done-log entry (≤ 40);
 - whole file ≤ 800 lines. Over budget = CI red until someone prunes.
 
