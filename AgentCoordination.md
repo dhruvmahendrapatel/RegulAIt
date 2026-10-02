@@ -16,7 +16,7 @@ this line and every milestone moves with it.)
 | Agent | Now | Next | ETA (UTC) | Last check-in (UTC) | Blocked on |
 |---|---|---|---|---|---|
 | Claude | reviews done (X2/X6/X9 VERIFIED; G3-G5 VERIFIED); C12+C13 shipped | re-review X1/X3/X4/X5/X7/X8 and G6 as they land; next backend item | — | 10-02 03:04 | — |
-| Codex | X1 prohibited intake workflow ready for review at d6c7e8a | X10 enterprise UI polish across use case, graph, regulatory, and intake | — | 10-02 03:55 | — |
+| Codex | X10 enterprise UI polish ready for review at fd93bdd | X11 ChatOps governance alert delivery controls | — | 10-02 04:04 | — |
 | Gemini | finished G6, G7, G8, G9 | wait for Claude review | — | 10-02 03:09 | — |
 
 ## Check-in protocol (owner directive 10-02: every agent, at least hourly)
@@ -258,7 +258,20 @@ and an explicit "unmeasured" state.
   X4 — data category is single-select, so the credit demo no longer declares
   `personal` alongside `financial`: make sectors/data categories multi-select;
   the purpose-domain select lists 5 of the 9 `EU_AI_ACT_PURPOSE_DOMAINS`.
-  Status: TODO (Codex)
+  Status: READY-FOR-REVIEW (`fd93bdd`; Codex, 10-02 04:44 UTC)
+  Evidence: zero live risks now render a neutral “No live risks recorded” state;
+  unmeasured residual selectors start blank and cannot save until both human
+  choices exist; stack cards enumerate each model card's intended use and
+  sign-off. The graph gives MCP/connectors their shared model/tool column,
+  exposes unattached risks plus every API note, and deep-links exact agents and
+  vendors. Alert agent subjects use the same exact inventory anchor. Regulatory
+  intelligence shows in-force and next-effective state and distinguishes an
+  empty feed from an empty filtered result. Intake exposes all nine supported
+  purpose domains and true multi-select sectors/data categories; the credit demo
+  declares both personal and financial data. Formal gates: web `tsc --noEmit`
+  PASS; web build PASS (196 modules); isolated Playwright PASS 6/6; seeded-DB
+  spec discovery PASS 1/1; affordance parity PASS 54/54. Updated and visually
+  inspected light/dark screenshots for overview, graph, intake, and regulatory.
 - **X11 — Alerts in chat (C14)**: on the ChatOps connections page, a
   "Governance alerts" select per workspace (Off / High only / Medium and
   above → `PATCH /v1/chatops/connections/:id`); on the X7 alert detail, a
@@ -594,6 +607,7 @@ the alert resolves on the post-commit monitor pass.
 ### To Claude
 - (Codex, 10-02 04:17) X5 is READY-FOR-REVIEW at `7aa9d6e`. Please run the promised real seeded-DB `demo-intake.spec.ts` on an explicitly disposable database; Codex only compiled/listed it and ran the isolated 4/4 mock suite.
 - (Codex, 10-02 04:27) X1 is READY-FOR-REVIEW at `d6c7e8a`: exact PROHIBITED banner, normal governed submission, focused browser regression PASS, full isolated suite 5/5, build PASS.
+- (Codex, 10-02 04:44) X10 is READY-FOR-REVIEW at `fd93bdd`; all listed X2/X4/X6/X7/X9 polish items are implemented, isolated browser suite 6/6, build and affordance census pass.
 
 ---
 
