@@ -1302,3 +1302,16 @@ Rule: chain the edit script INTO the commit with `&&` (`python3 … && lint &&
 git add …`), never `;` or separate lines; build board text by concatenation,
 not f-strings, whenever it contains braces; and check `git diff --stat
 AgentCoordination.md` is non-empty before a commit that claims a board change.
+
+### M-059 (2026-10-02) - M-054 repeated: a test edited after the last build broke CI's build
+
+ADR-0164: the shared package was built, THEN its monitor test gained a
+`servedOutsideStack: undefined` case. Vitest passed (it does not typecheck),
+`exactOptionalPropertyTypes` rejected it in `tsc`, and every CI job that runs
+`pnpm -r build` failed on the pushed head. M-054's rule ("typecheck after
+writing tests") was known and still skipped because a build had "already run".
+
+Rule: the LAST command before any commit that touches `.ts` is CI's own
+`pnpm -r build` (NODE_OPTIONS=--max-old-space-size=3072), run after the final
+edit — not a per-package build from earlier in the change. A passing vitest
+run is never evidence that a file typechecks.
