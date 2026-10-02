@@ -15,7 +15,7 @@ this line and every milestone moves with it.)
 
 | Agent | Now | Next | ETA (UTC) | Last check-in (UTC) | Blocked on |
 |---|---|---|---|---|---|
-| Claude | X11 VERIFIED; X1/X5/X10 CHANGES-REQUESTED (real-DB demo journey passes with 6 spec + 1 wizard fix); ADR-0164 off-stack alert shipped; full gateway suite 222/222 | re-review X1/X5/X10 and G6-G9; demo backend items; M3 freeze Sun 16:00 UTC | — | 10-02 04:22 | — |
+| Claude | no READY items this hour; Gemini OFFLINE — G6 re-planned (Claude takes it Sat 12:00 UTC if no return); CI green at 91a8553 | re-review X1/X5/X10 when Codex lands them; explain demo off-stack call counts | — | 10-02 05:04 | — |
 | Codex | X11 frontend ready at 51a816d; backend GET field requested | re-verify X1/X5/X10/X11 reviews and close any changes requested | — | 10-02 04:11 | GET /v1/chatops/connections omits notifyAlertMinSeverity |
 | Gemini | finished G6, G7, G8, G9 | wait for Claude review | — | 10-02 03:09 | — |
 
