@@ -111,6 +111,32 @@ function evalScope(card: CardSubject, agentIds: string[]): SQL | undefined {
   return or(...parts);
 }
 
+/**
+ * Runs one section's independent reads. Every entry is a LAZY drizzle query (it
+ * executes only when awaited) or an already-settled `Promise.resolve`, so
+ * nothing starts before this helper drives it. On the pooled `Db` the reads run
+ * concurrently — each checks out its own client. On a transaction handle they
+ * run one at a time: a transaction is ONE pg client, and calling
+ * `client.query()` while that client is already executing a query is
+ * deprecated in pg 8 (it prints a DeprecationWarning and queues) and removed in
+ * pg 9.
+ */
+async function readAll<T extends readonly unknown[] | []>(
+  reads: T,
+  sequential: boolean,
+): Promise<{ -readonly [K in keyof T]: Awaited<T[K]> }> {
+  if (!sequential) return Promise.all(reads);
+  const out: unknown[] = [];
+  for (const read of reads) out.push(await read);
+  return out as { -readonly [K in keyof T]: Awaited<T[K]> };
+}
+
+/** pass `inTransaction: true` when `db` is a transaction handle, so the reads
+ * run sequentially on its single client (see `readAll`) */
+export interface LedgerReadOptions {
+  inTransaction?: boolean;
+}
+
 export interface CardAutofill {
   computedAt: string;
   window: { start: string; end: string; days: number };
@@ -142,7 +168,9 @@ export async function computeCardAutofill(
   db: Db,
   card: CardSubject,
   now: Date = new Date(),
+  opts: LedgerReadOptions = {},
 ): Promise<CardAutofill> {
+  const sequential = opts.inTransaction === true;
   const windowStart = new Date(now.getTime() - MRM_AUTOFILL_WINDOW_DAYS * 24 * 60 * 60 * 1000);
   const subjects = await resolveSubjectAgents(db, card);
   const agentIds = subjects.map((a) => a.id);
@@ -153,7 +181,7 @@ export async function computeCardAutofill(
     eq(evalRuns.datasetId, evalDatasets.id),
     eq(evalRuns.datasetVersion, evalDatasets.version),
   );
-  const [evalsEver, evalsInWindow, latestEval, groundedInWindow, latestGrounded] = await Promise.all([
+  const [evalsEver, evalsInWindow, latestEval, groundedInWindow, latestGrounded] = await readAll([
     db.select({ n: count() }).from(evalRuns).where(evalWhere),
     db.select({ n: count() }).from(evalRuns).where(and(evalWhere, gte(evalRuns.startedAt, windowStart))),
     db
@@ -195,7 +223,7 @@ export async function computeCardAutofill(
       .where(and(evalWhere, inArray(evalDatasets.scorerKind, [...GROUNDEDNESS_SCORER_KINDS])))
       .orderBy(desc(evalRuns.startedAt))
       .limit(1),
-  ]);
+  ], sequential);
   const evals = {
     runsEver: evalsEver[0]?.n ?? 0,
     runsInWindow: evalsInWindow[0]?.n ?? 0,
@@ -219,7 +247,7 @@ export async function computeCardAutofill(
   // backing agents, and an endpoint no agent uses has nothing to scope here.
   const redteamWhere = agentIds.length > 0 ? inArray(redteamRuns.agentId, agentIds) : null;
   const [rtEver, rtInWindow, latestRt] = redteamWhere
-    ? await Promise.all([
+    ? await readAll([
         db.select({ n: count() }).from(redteamRuns).where(redteamWhere),
         db
           .select({ n: count() })
@@ -240,7 +268,7 @@ export async function computeCardAutofill(
           .where(redteamWhere)
           .orderBy(desc(redteamRuns.startedAt))
           .limit(1),
-      ])
+      ], sequential)
     : [[{ n: 0 }], [{ n: 0 }], []];
   const redteam = latestRt[0]
     ? {
@@ -261,7 +289,7 @@ export async function computeCardAutofill(
       };
 
   // --- guardrail configs in force (ADR-0042) — configuration, not proof ----
-  const [orgConfig, agentOverrides] = await Promise.all([
+  const [orgConfig, agentOverrides] = await readAll([
     // ADR-0107 (F01): the ORG-DEFAULT row is the one with a NULL `scope_id`,
     // and `guardrail_configs_org_uq` is UNIQUE on (scope) only WHERE
     // `scope_id IS NULL`. Asking for scope='org' alone was outside that index,
@@ -280,7 +308,7 @@ export async function computeCardAutofill(
           .from(guardrailConfigs)
           .where(and(eq(guardrailConfigs.scope, "agent"), inArray(guardrailConfigs.scopeId, agentIds)))
       : Promise.resolve([]),
-  ]);
+  ], sequential);
   const modes = (row: (typeof orgConfig)[number]) => ({
     promptInjection: row.promptInjectionMode,
     jailbreak: row.jailbreakMode,
@@ -302,7 +330,7 @@ export async function computeCardAutofill(
   // --- usage / spend (the ONE pillar-5 ledger) -----------------------------
   const usageWhere = agentIds.length > 0 ? inArray(usageEvents.agentId, agentIds) : null;
   const [usageAgg, usageLast] = usageWhere
-    ? await Promise.all([
+    ? await readAll([
         db
           .select({ n: count(), costUsd: sql<number>`coalesce(sum(${usageEvents.costUsd}), 0)::float8` })
           .from(usageEvents)
@@ -311,7 +339,7 @@ export async function computeCardAutofill(
           .select({ lastAt: sql<string>`max(${usageEvents.at})` })
           .from(usageEvents)
           .where(usageWhere),
-      ])
+      ], sequential)
     : [[{ n: 0, costUsd: 0 }], [{ lastAt: null }]];
   const usage = {
     dispatchesInWindow: usageAgg[0]?.n ?? 0,
@@ -325,7 +353,7 @@ export async function computeCardAutofill(
 
   // --- active grants: direct ∪ role-derived, minus revocations -------------
   const [direct, roleGrants, assignments, revoked, roleRows] = agentIds.length
-    ? await Promise.all([
+    ? await readAll([
         db
           .select({ userId: agentGrants.userId, agentId: agentGrants.agentId })
           .from(agentGrants)
@@ -340,7 +368,7 @@ export async function computeCardAutofill(
           .from(agentRevocations)
           .where(inArray(agentRevocations.agentId, agentIds)),
         db.select({ id: roles.id, name: roles.name }).from(roles),
-      ])
+      ], sequential)
     : [[], [], [], [], []];
   const roleUserIds = new Map<string, string[]>();
   for (const a of assignments) {
@@ -364,7 +392,7 @@ export async function computeCardAutofill(
   // --- drift standing (ADR-0044 §5, driven by ADR-0064) --------------------
   // the drift "ledger" is eval_runs itself: pinned baselines plus the
   // scheduled re-measurements the sweep hands to the one runner.
-  const [baselines, latestScheduled, regressionsInWindow] = await Promise.all([
+  const [baselines, latestScheduled, regressionsInWindow] = await readAll([
     db
       .select({ n: count() })
       .from(evalRuns)
@@ -392,7 +420,7 @@ export async function computeCardAutofill(
           gte(evalRuns.startedAt, windowStart),
         ),
       ),
-  ]);
+  ], sequential);
   const drift = {
     baselinesPinned: baselines[0]?.n ?? 0,
     latestScheduledRun: latestScheduled[0] ?? null,
@@ -410,7 +438,7 @@ export async function computeCardAutofill(
       (x): x is string => !!x,
     ),
   );
-  const [useCaseRows, riskRows, vendorRows] = await Promise.all([
+  const [useCaseRows, riskRows, vendorRows] = await readAll([
     agentIds.length
       ? db
           .select({ id: aiUseCases.id, name: aiUseCases.name, status: aiUseCases.status, intendedAgentIds: aiUseCases.intendedAgentIds })
@@ -432,7 +460,7 @@ export async function computeCardAutofill(
         linkedCustomProviderIds: aiVendors.linkedCustomProviderIds,
       })
       .from(aiVendors),
-  ]);
+  ], sequential);
   const links = {
     useCases: useCaseRows
       .filter((u) => (u.intendedAgentIds ?? []).some((id) => agentIds.includes(id)))
@@ -557,7 +585,9 @@ export async function computeCardStaleness(
   card: CardSubject,
   chain: Array<Pick<ModelCardApprovalRow, "status" | "decidedAt">>,
   now: Date = new Date(),
+  opts: LedgerReadOptions = {},
 ): Promise<CardStaleness> {
+  const sequential = opts.inTransaction === true;
   const certifications = chain
     .filter((a) => a.decidedAt && a.status !== "pending" && a.status !== "denied")
     .sort((a, b) => b.decidedAt!.getTime() - a.decidedAt!.getTime());
@@ -580,7 +610,7 @@ export async function computeCardStaleness(
   const evalWhere = evalScope(card, agentIds);
 
   const [evalsSince, rtSince, guardrailsSince, grantsSince, revocationsSince, risksSince, regressionsSince] =
-    await Promise.all([
+    await readAll([
       db.select({ n: count() }).from(evalRuns).where(and(evalWhere, gt(evalRuns.startedAt, since))),
       agentIds.length
         ? db
@@ -631,7 +661,7 @@ export async function computeCardStaleness(
             gt(evalRuns.startedAt, since),
           ),
         ),
-    ]);
+    ], sequential);
 
   const changes = {
     evalRuns: evalsSince[0]?.n ?? 0,
