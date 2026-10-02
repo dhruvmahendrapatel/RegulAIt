@@ -46,7 +46,13 @@
 
 .radarLabel {
   fill: var(--text-dim);
-  font: 600 11px var(--font-body);
+  font: 600 11px var(--font-sans);
+}
+
+.radarGapLabel {
+  fill: var(--text-faint);
+  font: 600 9px var(--font-sans);
+  text-transform: uppercase;
 }
 
 .heatmap {
@@ -472,7 +478,7 @@
 
 .graphHeadings text {
   fill: var(--text-faint);
-  font: 600 11px var(--font-body);
+  font: 600 11px var(--font-sans);
   text-anchor: middle;
   text-transform: uppercase;
 }
@@ -529,7 +535,7 @@
 
 .graphNodeLabel {
   fill: var(--text);
-  font: 600 10px var(--font-body);
+  font: 600 10px var(--font-sans);
   text-anchor: middle;
 }
 

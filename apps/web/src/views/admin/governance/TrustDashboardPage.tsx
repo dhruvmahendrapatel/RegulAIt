@@ -59,9 +59,20 @@ export default function TrustDashboardPage() {
   const q = useQuery(trustQuery());
   const alerts = useQuery({
     queryKey: ["governance", "alerts", "active"],
-    queryFn: () => api.get<{ counts: { open: number; acknowledged: number } }>("/v1/governance/alerts?status=active"),
+    queryFn: () => api.get<{ counts: { open: number; acknowledged: number }; lastEvaluatedAt: string | null }>("/v1/governance/alerts?status=active"),
   });
   const [active, setActive] = useState<DimensionKey>("bias");
+  const activeAlerts = (alerts.data?.counts.open ?? 0) + (alerts.data?.counts.acknowledged ?? 0);
+  const monitorLabel = alerts.isLoading
+    ? "Loading governance monitor…"
+    : alerts.isError
+      ? "Governance monitor unavailable"
+      : !alerts.data?.lastEvaluatedAt
+        ? "Governance monitor not evaluated"
+        : `${activeAlerts} active governance alert(s)`;
+  const monitorTone = alerts.isError || !alerts.data?.lastEvaluatedAt
+    ? "neutral"
+    : (alerts.data.counts.open > 0 ? "danger" : "ok");
 
   return (
     <>
@@ -76,7 +87,7 @@ export default function TrustDashboardPage() {
         }
       />
       <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
-        {q.data ? <><div className={v.row} style={{ marginBottom: "var(--s2)" }}><Link to="/admin/governance/alerts"><Badge tone={(alerts.data?.counts.open ?? 0) > 0 ? "danger" : "ok"}>{(alerts.data?.counts.open ?? 0) + (alerts.data?.counts.acknowledged ?? 0)} active governance alert(s)</Badge></Link></div><TrustReportView report={q.data} active={active} onActive={setActive} /></> : null}
+        {q.data ? <><div className={v.row} style={{ marginBottom: "var(--s2)" }}><Link to="/admin/governance/alerts"><Badge tone={monitorTone}>{monitorLabel}</Badge></Link></div><TrustReportView report={q.data} active={active} onActive={setActive} /></> : null}
       </QueryGate>
     </>
   );
@@ -236,6 +247,11 @@ function Radar({ dimensions }: { dimensions: TrustDimension[] }) {
             <text className={s.radarLabel} x={label.x} y={label.y} textAnchor="middle">
               {dimension.label}
             </text>
+            {!dimension.measured ? (
+              <text className={s.radarGapLabel} x={label.x} y={label.y + 14} textAnchor="middle">
+                unmeasured
+              </text>
+            ) : null}
           </g>
         );
       })}

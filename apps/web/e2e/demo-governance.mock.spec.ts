@@ -130,6 +130,7 @@ test("enterprise governance demo surfaces render and complete their core actions
 
   await page.goto("/ui/admin/governance/trust");
   await expect(page.getByRole("heading", { name: "Trust & evidence" })).toBeVisible();
+  await expect(page.locator('svg[aria-label^="Evidence coverage radar"]').getByText("unmeasured", { exact: true })).toBeVisible();
   await shotBoth(page, "03-trust-dashboard");
 
   await page.goto(`/ui/admin/governance/use-cases/${ID}`);
@@ -225,4 +226,17 @@ test("alerts distinguish a monitor that has never run and use a valid agent inve
   await page.reload();
   await page.getByRole("button", { name: /inherits a HIGH rating/ }).click();
   await expect(page.getByRole("link", { name: "Open agent" })).toHaveAttribute("href", "/ui/admin/agents");
+});
+
+test("trust dashboard does not show an all-clear badge before the monitor runs", async ({ page }) => {
+  await page.route("**/v1/governance/alerts?status=active", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ alerts: [], counts: { open: 0, acknowledged: 0, resolved: 0 }, lastEvaluatedAt: null, rules: [] }),
+    });
+  });
+  await page.goto("/ui/admin/governance/trust");
+  await expect(page.getByText("Governance monitor not evaluated", { exact: true })).toBeVisible();
+  await expect(page.getByText("0 active governance alert(s)", { exact: true })).toHaveCount(0);
 });
