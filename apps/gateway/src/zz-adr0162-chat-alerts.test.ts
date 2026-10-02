@@ -119,6 +119,8 @@ afterAll(async () => {
 
 describe("ADR-0162 governance alerts in chat", () => {
   it("posts newly raised HIGH alerts to an opted-in workspace, not medium ones, with no buttons", async () => {
+    const listed = (await call("GET", "/v1/chatops/connections", admin.auth)).json().connections.find((c: any) => c.id === connectionId);
+    expect(listed.notifyAlertMinSeverity).toBe("high");
     const r = await call("POST", "/v1/governance/monitor/evaluate", admin.auth);
     expect(r.statusCode, r.body).toBe(200);
     expect(r.json().notified.posted).toBeGreaterThanOrEqual(1);
@@ -137,6 +139,8 @@ describe("ADR-0162 governance alerts in chat", () => {
     const p = await call("PATCH", `/v1/chatops/connections/${connectionId}`, admin.auth, { notifyAlertMinSeverity: null });
     expect(p.statusCode, p.body).toBe(200);
     expect(p.json().notifyAlertMinSeverity).toBeNull();
+    const listed = (await call("GET", "/v1/chatops/connections", admin.auth)).json().connections.find((c: any) => c.id === connectionId);
+    expect(listed).toHaveProperty("notifyAlertMinSeverity", null); // the list reads the saved value back
     const audits = await db
       .select()
       .from(auditLog)

@@ -243,6 +243,8 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
         defaultChannel: r.defaultChannel,
         allowFencedDecide: r.allowFencedDecide,
         enabled: r.enabled,
+        // ADR-0162 — the alert threshold, so a saved selection survives reload
+        notifyAlertMinSeverity: r.notifyAlertMinSeverity,
         createdAt: r.createdAt,
         // the signing secret is NEVER returned: a reader who could see it could
         // forge callbacks, which is strictly worse than reading a bot token
