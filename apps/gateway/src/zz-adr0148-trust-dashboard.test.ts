@@ -44,7 +44,7 @@ type Dashboard = {
     controlsApplicable: number; controlsEvidenced: number;
     risks: Record<string, number>;
   }>;
-  totals: { risksFound: number; risksMitigated: number; risksAccepted: number; risksOpen: number };
+  totals: { risksFound: number; risksMitigated: number; risksAccepted: number; risksOpen: number; risksUnmitigated: number };
   heatmap: Array<{ likelihood: string; impact: string; count: number }>;
   residualHeatmap: Array<{ likelihood: string; impact: string; count: number }>;
 };
@@ -187,6 +187,9 @@ describe("risks found vs mitigated, and the heatmaps", () => {
     expect(d.totals.risksMitigated).toBe(2);
     expect(d.totals.risksAccepted).toBe(1);
     expect(d.totals.risksOpen).toBe(2);
+    // the tiles' partition: only the link-only risk is live AND unmitigated, and the three add up
+    expect(d.totals.risksUnmitigated).toBe(1);
+    expect(d.totals.risksMitigated + d.totals.risksAccepted + d.totals.risksUnmitigated).toBe(d.totals.risksFound);
 
     const byKey = Object.fromEntries(d.dimensions.map((x) => [x.key, x.risks]));
     expect(byKey.security!.open).toBe(1);

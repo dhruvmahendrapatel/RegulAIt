@@ -15,7 +15,7 @@ const trust = {
   dimensions: [
     ["bias", "Bias", true, 64], ["security", "Security", true, 82], ["privacy", "Privacy", true, 71], ["reliability", "Reliability", true, 58], ["safety", "Safety", false, null], ["compliance", "Compliance", true, 76],
   ].map(([key, label, measured, pct]) => ({ key, label, measured, evidenceCoveragePct: pct, controlsEvidenced: measured ? 7 : 0, controlsApplicable: measured ? 10 : 0, risks: { open: 2, mitigating: 1, accepted: 0, closed: 3 } })),
-  totals: { risksFound: 31, risksMitigated: 22, risksAccepted: 2, risksOpen: 7, evidenceCoveragePct: 71, controlsEvidenced: 30, controlsApplicable: 42, useCases: { approved: 4 } },
+  totals: { risksFound: 31, risksMitigated: 22, risksAccepted: 2, risksOpen: 9, risksUnmitigated: 7, evidenceCoveragePct: 71, controlsEvidenced: 30, controlsApplicable: 42, useCases: { approved: 4 } },
   heatmap: ["low", "medium", "high"].flatMap((likelihood, li) => ["low", "medium", "high"].map((impact, ii) => ({ likelihood, impact, count: li + ii }))),
   residualHeatmap: ["low", "medium", "high"].flatMap((likelihood, li) => ["low", "medium", "high"].map((impact, ii) => ({ likelihood, impact, count: Math.max(0, 3 - li - ii) }))),
   definitions: { evidenceCoveragePct: "Applicable controls with current evidence.", risksMitigated: "Risks with linked controls or residual position.", heatmap: "Open, mitigating, and accepted risks.", measured: "Whether applicable controls are available." },

@@ -38,6 +38,7 @@ interface TrustReport {
     risksMitigated: number;
     risksAccepted: number;
     risksOpen: number;
+    risksUnmitigated: number;
     evidenceCoveragePct: number | null;
     controlsEvidenced: number;
     controlsApplicable: number;
@@ -112,9 +113,12 @@ function TrustReportView(props: {
       </div>
 
       <div className={v.grid4}>
-        <Stat value={d.totals.risksFound.toLocaleString()} label="Risks found" />
-        <Stat value={d.totals.risksMitigated.toLocaleString()} label="Risks mitigated" />
-        <Stat value={d.totals.risksOpen.toLocaleString()} label="Risks open" />
+        <Stat
+          value={d.totals.risksFound.toLocaleString()}
+          label={d.totals.risksAccepted > 0 ? `Risks found · ${d.totals.risksAccepted.toLocaleString()} accepted` : "Risks found"}
+        />
+        <Stat value={d.totals.risksMitigated.toLocaleString()} label="Mitigated" />
+        <Stat value={d.totals.risksUnmitigated.toLocaleString()} label="Not yet mitigated" />
         <Stat value={formatCoverage(d.totals.evidenceCoveragePct)} label="Evidence coverage" />
       </div>
 
@@ -301,7 +305,7 @@ export function TrustSnapshotCard() {
       ) : q.data ? (
         <div className={v.stack}>
           <div className={v.grid3}>
-            <div className={v.stat}><span className={v.statValue}>{q.data.totals.risksOpen}</span><span className={v.statLabel}>risks open</span></div>
+            <div className={v.stat}><span className={v.statValue}>{q.data.totals.risksUnmitigated}</span><span className={v.statLabel}>not yet mitigated</span></div>
             <div className={v.stat}><span className={v.statValue}>{q.data.totals.risksMitigated}</span><span className={v.statLabel}>risks mitigated</span></div>
             <div className={v.stat}><span className={v.statValue}>{formatCoverage(q.data.totals.evidenceCoveragePct)}</span><span className={v.statLabel}>evidence coverage</span></div>
           </div>

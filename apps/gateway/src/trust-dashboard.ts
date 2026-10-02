@@ -62,6 +62,9 @@ export const TRUST_DEFINITIONS = {
     "risks that are closed, or live with at least one linked control and a declared residual " +
     "position (ADR-0147). Accepted risks are counted separately — acceptance is a decision to " +
     "carry a risk, not a mitigation.",
+  risksUnmitigated:
+    "live risks (open or mitigating) that are not yet mitigated. With mitigated and accepted it " +
+    "partitions every risk found: found = mitigated + accepted + unmitigated.",
   heatmap:
     "live (not closed) risks by DECLARED likelihood and impact — human judgments on a three-level " +
     "scale, never arithmetic. `residualHeatmap` uses the declared residual position where one exists.",
@@ -146,12 +149,14 @@ export async function computeTrustDashboard(
   const residualHeat = new Map<string, number>();
   let mitigated = 0;
   let accepted = 0;
+  let unmitigated = 0;
   for (const r of riskRows) {
     const dim = RISK_CATEGORY_DIMENSION[r.category as AiRiskCategory] ?? "compliance";
     risksByDim.get(dim)![r.status as RiskStatus] += 1;
     if (r.status === "accepted") accepted += 1;
     const hasResidual = r.residualLikelihood !== null && r.residualImpact !== null;
     if (r.status === "closed" || (r.status !== "accepted" && linked.has(r.id) && hasResidual)) mitigated += 1;
+    else if (r.status !== "accepted") unmitigated += 1;
     if (r.status !== "closed") {
       const k = `${r.likelihood}|${r.impact}`;
       heat.set(k, (heat.get(k) ?? 0) + 1);
@@ -200,6 +205,9 @@ export async function computeTrustDashboard(
       risksMitigated: mitigated,
       risksAccepted: accepted,
       risksOpen: riskRows.filter((r) => r.status === "open" || r.status === "mitigating").length,
+      // the partition the dashboard tiles show: found = mitigated + accepted + unmitigated.
+      // `risksOpen` (every live risk) overlaps `risksMitigated` and must not sit beside it.
+      risksUnmitigated: unmitigated,
       evidenceCoveragePct: pct(totalEvidenced, totalApplicable),
       controlsEvidenced: totalEvidenced,
       controlsApplicable: totalApplicable,
