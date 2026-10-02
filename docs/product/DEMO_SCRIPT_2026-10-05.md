@@ -37,13 +37,22 @@ $env:REGULAIT_DATA_KEY = -join ((1..32) | ForEach-Object { '{0:x2}' -f (Get-Rand
 $env:REGULAIT_EPHEMERAL_LICENSE = "1"; $env:REGULAIT_LICENSE_KEYRING = "$HOME\.regulait-demo-keys"
 ```
 
+Then the **export-signing key** for beat 3E (ADR-0116: the deployment, not the product, holds it —
+without it "Download signed bundle" answers 409): run
+`pnpm --filter @regulait/gateway demo:export-key` and set the two variables it prints
+(`REGULAIT_EXPORT_SIGNING_KEY`, `REGULAIT_EXPORT_SIGNING_KEY_ID`) in the same terminal. It
+creates the key under `~/.regulait-demo-keys` once and reuses it, so the fingerprint it prints is
+stable across rehearsal and demo. (bash shortcut: `eval "$(pnpm -s --filter @regulait/gateway
+demo:export-key -- --env)"`.)
+
 To start over, recreate the database (`docker rm -f regulait-demo-pg`, re-run the `docker run`)
 — the journey changes it, and `demo:prepare` seeds an empty database only. A full rehearsal of the UI journey, unattended:
 `E2E_BASE_URL=http://127.0.0.1:3105 pnpm --filter @regulait/web exec playwright test -c
 playwright.demo-real.config.ts` (needs `REGULAIT_BOOTSTRAP_TOKEN=e2e-bootstrap-token`).
 
 1. `pnpm --filter @regulait/gateway demo:prepare` — seed → demo:setup → demo:intake →
-   demo:traffic → demo:check in ~25 s. It must end **17 pass, 0 warn, 0 fail**. The seed step
+   demo:traffic → demo:check in ~25 s. It must end **18 pass, 0 warn, 0 fail** (a FAIL on
+   "3 Evidence" means the export key variables are not set in this terminal). The seed step
    prints each persona's **one-time password** — copy them.
 2. `PORT=3105 pnpm --filter @regulait/gateway start` (PowerShell: `$env:PORT = "3105"` first) —
    the gateway serves the UI at `http://127.0.0.1:3105/ui`.
@@ -192,6 +201,8 @@ Everything runs on the keyless **mock** provider. No live model, no external net
 - **Action:** **Download signed bundle** — an offline-verifiable `.tar.gz` (CSV, manifest,
   signature) of the filtered audit trail: the registration, Avery's decisions, the alerts, the
   gate answers, and the runtime refusal of a prompt carrying an SSN in the HIPAA project.
+- **Optional (bash):** `scripts/verify-export-bundle.sh <downloaded file> --fingerprint <the value
+  demo:export-key printed>` — verifies offline, with no call to the platform.
 - **Say:** "Everything you saw is in one hash-chained audit trail, exportable for an auditor."
 
 ---

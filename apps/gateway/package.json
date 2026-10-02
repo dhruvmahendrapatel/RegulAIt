@@ -17,7 +17,8 @@
     "demo:check": "node dist/demo-check.js",
     "demo:traffic": "node dist/demo-traffic.js",
     "demo:prepare": "node dist/demo-prepare.js",
-    "demo:gate": "node dist/demo-gate.js"
+    "demo:gate": "node dist/demo-gate.js",
+    "demo:export-key": "node dist/demo-export-key.js"
   },
   "dependencies": {
     "@aws-sdk/client-acm": "^3.700.0",

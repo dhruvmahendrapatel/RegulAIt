@@ -219,6 +219,20 @@ export async function runDemoCheck(
   const inbox = await call("GET", "/v1/approvals?status=pending", auth);
   add("2 Approval gate", inbox.status === 200 ? "PASS" : "FAIL", `approvals queue reachable (${inbox.status})`);
 
+  // --- 3 Evidence (ADR-0116): the closing beat downloads a SIGNED bundle, which needs the
+  // deployment's export key — without it the button answers 409 in front of the audience
+  const signing = await call("GET", "/v1/exports/signing-key", auth);
+  if (signing.status === 200 && signing.body.configured) {
+    add("3 Evidence", "PASS", `signed export ready — key '${signing.body.keyId}' (${signing.body.fingerprint})`);
+  } else {
+    add(
+      "3 Evidence",
+      "FAIL",
+      `no usable export signing key (${signing.body.ruleId ?? signing.body.error ?? signing.status}) — "Download signed bundle" would answer 409`,
+      "run `pnpm --filter @regulait/gateway demo:export-key`, set the two variables it prints in this terminal, then re-run (and start the gateway from the same terminal)",
+    );
+  }
+
   return out;
 }
 

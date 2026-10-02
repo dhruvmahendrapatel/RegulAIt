@@ -3979,6 +3979,25 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       return;
     }
 
+    // AER-008: check the signing key BEFORE the export is recorded. A keyless deployment must leave
+    // an accurate refusal in the trail — never an "exported" row for a bundle that was not produced.
+    const signingKey = resolveExportSigningKey();
+    if (!signingKey.ok) {
+      await db.insert(auditLog).values({
+        userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+        objectType: "audit_export",
+        objectId: null,
+        effect: "deny",
+        ruleId: "audit-export-unsigned-refused",
+        ruleChain: [signingKey.ruleId],
+        reason:
+          "a signed audit export was requested and REFUSED because the export signing key is not usable " +
+          `(${signingKey.ruleId}) — no bundle was produced and an unsigned one is not emitted in its place`,
+        detail: { refusal: signingKey.ruleId },
+      });
+      return reply.status(409).send({ error: signingKey.ruleId, detail: signingKey.reason });
+    }
+
     const collected = await collectCsv<Row>(spec);
     await db.insert(auditLog).values({
       userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
@@ -4029,6 +4048,20 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       licenseId: license.document?.licenseId ?? null,
     });
     if (!bundle.ok) {
+      // the key passed the preflight but the build still refused (e.g. the file changed underneath):
+      // the "exported" row above is now false, so the trail records the correction next to it
+      await db.insert(auditLog).values({
+        userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+        objectType: "audit_export",
+        objectId: null,
+        effect: "deny",
+        ruleId: "audit-export-signed-failed",
+        ruleChain: [bundle.ruleId],
+        reason:
+          "the signed audit export recorded just before this row was NOT produced — building the bundle " +
+          `was refused (${bundle.ruleId}); no archive left the platform`,
+        detail: { refusal: bundle.ruleId },
+      });
       return reply.status(409).send({ error: bundle.ruleId, detail: bundle.reason });
     }
     for (const [k, v] of Object.entries(securityHeaders("application/gzip"))) reply.header(k, v);

@@ -664,7 +664,9 @@ export function ReasonModal(props: {
 export async function downloadCsv(path: string, filename: string, onError: (msg: string) => void) {
   const res = await fetch(path, { credentials: "include" });
   if (!res.ok) {
-    onError(`CSV download failed (${res.status})`);
+    // name the refusal (e.g. a signed export with no signing key) instead of a bare status code
+    const body = (await res.json().catch(() => null)) as { error?: string } | null;
+    onError(`Download failed (${res.status}${body?.error ? ` — ${body.error}` : ""})`);
     return;
   }
   const url = URL.createObjectURL(await res.blob());

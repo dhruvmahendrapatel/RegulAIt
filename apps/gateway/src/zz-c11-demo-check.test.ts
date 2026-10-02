@@ -10,6 +10,9 @@
  * the Discover beat is checked against matching evidence rather than skipped.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { generateKeyPairSync } from "node:crypto";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { and, createDb, isNull, runMigrations, sql, workflowTemplates, type Db } from "@regulait/db";
@@ -29,8 +32,17 @@ const BOOT = `c11-boot-${Math.random().toString(36).slice(2, 8)}`;
 let db: Db;
 let app: ReturnType<typeof buildApp>;
 let checks: DemoCheck[] = [];
+// the 3 Evidence beat needs the deployment's export-signing key (what `demo:export-key` sets up)
+const prevKey = process.env.REGULAIT_EXPORT_SIGNING_KEY;
+const prevKeyId = process.env.REGULAIT_EXPORT_SIGNING_KEY_ID;
+let keyDir = "";
 
 beforeAll(async () => {
+  keyDir = mkdtempSync(path.join(tmpdir(), "c11-export-key-"));
+  const keyPath = path.join(keyDir, "c11.key");
+  writeFileSync(keyPath, generateKeyPairSync("ed25519").privateKey.export({ type: "pkcs8", format: "pem" }));
+  process.env.REGULAIT_EXPORT_SIGNING_KEY = keyPath;
+  process.env.REGULAIT_EXPORT_SIGNING_KEY_ID = "c11-demo-export";
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT });
@@ -53,6 +65,11 @@ beforeAll(async () => {
 }, 180_000);
 
 afterAll(async () => {
+  if (prevKey === undefined) delete process.env.REGULAIT_EXPORT_SIGNING_KEY;
+  else process.env.REGULAIT_EXPORT_SIGNING_KEY = prevKey;
+  if (prevKeyId === undefined) delete process.env.REGULAIT_EXPORT_SIGNING_KEY_ID;
+  else process.env.REGULAIT_EXPORT_SIGNING_KEY_ID = prevKeyId;
+  if (keyDir) rmSync(keyDir, { recursive: true, force: true });
   // the seeder routes use-case sign-offs to Avery with an intake VARIANT
   // (ADR-0165); on a shared database that would redirect every later test
   // file's use-case sign-off, so retire it here (M-040 order independence)
@@ -70,6 +87,7 @@ describe("demo:check over the real dataset", () => {
     for (const b of [
       "0 Personas", "1 Shadow AI", "1 Intake assistant", "2 Register", "2 Use-case 360", "2 Risks",
       "3 Trust dashboard", "3 Dependency graph", "3 Monitor", "3 Regulatory", "2 Approval gate", "2 Deploy gate",
+      "3 Evidence",
     ]) {
       expect(beats.has(b), `missing beat ${b}`).toBe(true);
     }
@@ -83,6 +101,20 @@ describe("demo:check over the real dataset", () => {
   it("the hero's intake answers land on HIGH", () => {
     expect(checks.find((c) => c.beat === "1 Intake assistant")!.level).toBe("PASS");
   });
+
+  it("3 Evidence FAILs — with the fix — when the export-signing key is missing (the 3E button would 409)", async () => {
+    expect(checks.find((c) => c.beat === "3 Evidence")!.level).toBe("PASS");
+    const key = process.env.REGULAIT_EXPORT_SIGNING_KEY;
+    delete process.env.REGULAIT_EXPORT_SIGNING_KEY;
+    try {
+      const keyless = await runDemoCheck(app, { bootstrapToken: BOOT, fixtures: null });
+      const evidence = keyless.find((c) => c.beat === "3 Evidence")!;
+      expect(evidence.level).toBe("FAIL");
+      expect(evidence.fix).toContain("demo:export-key");
+    } finally {
+      process.env.REGULAIT_EXPORT_SIGNING_KEY = key;
+    }
+  }, 120_000);
 });
 
 describe("demo:gate — the deploy-gate beat as a CI step", () => {

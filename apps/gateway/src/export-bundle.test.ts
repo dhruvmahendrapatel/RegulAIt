@@ -772,6 +772,75 @@ describe("the OTHER export producer — /v1/audit.csv", () => {
   });
 });
 
+// AER-008 — the trail must say what happened. A keyless signed export used to write its
+// "exported" success row first and refuse afterwards, so every refused click left a false record.
+describe("AER-008 — a refused signed export leaves an accurate trail, never a false success row", () => {
+  const countRule = async (ruleId: string) => (await db.select().from(auditLog).where(eq(auditLog.ruleId, ruleId))).length;
+
+  it("audit trail: keyless → one refusal row, ZERO 'audit-export-signed' rows; with the key → exactly one success row", async () => {
+    delete process.env.REGULAIT_EXPORT_SIGNING_KEY;
+    delete process.env.REGULAIT_EXPORT_SIGNING_KEY_ID;
+    const before = { ok: await countRule("audit-export-signed"), refused: await countRule("audit-export-unsigned-refused") };
+    const refused = await app.inject({ method: "GET", url: "/v1/audit.csv?signed=1", headers: AUTH });
+    expect(refused.statusCode).toBe(409);
+    expect(refused.json().error).toBe("export-signing-key-absent");
+    expect(await countRule("audit-export-signed")).toBe(before.ok);
+    expect(await countRule("audit-export-unsigned-refused")).toBe(before.refused + 1);
+    const [row] = await db
+      .select()
+      .from(auditLog)
+      .where(eq(auditLog.ruleId, "audit-export-unsigned-refused"));
+    expect(row!.effect).toBe("deny");
+    expect(row!.reason).toContain("no bundle was produced");
+
+    // POSITIVE CONTROL: the same request with the key writes exactly one success row
+    useRealKey();
+    const ok = await app.inject({ method: "GET", url: "/v1/audit.csv?signed=1&objectType=audit_export", headers: AUTH });
+    expect(ok.statusCode).toBe(200);
+    expect(ok.headers["content-type"]).toContain("gzip");
+    expect(await countRule("audit-export-signed")).toBe(before.ok + 1);
+    expect(await countRule("audit-export-unsigned-refused")).toBe(before.refused + 1);
+  });
+
+  it("report run: keyless → one refusal row, ZERO 'report-exported' rows; with the key → exactly one", async () => {
+    delete process.env.REGULAIT_EXPORT_SIGNING_KEY;
+    delete process.env.REGULAIT_EXPORT_SIGNING_KEY_ID;
+    const before = { ok: await countRule("report-exported"), refused: await countRule("report-export-unsigned-refused") };
+    const refused = await app.inject({
+      method: "GET",
+      url: `/v1/reports/runs/${runId}/export?format=csv&signed=1`,
+      headers: AUTH,
+    });
+    expect(refused.statusCode).toBe(409);
+    expect(await countRule("report-exported")).toBe(before.ok);
+    expect(await countRule("report-export-unsigned-refused")).toBe(before.refused + 1);
+
+    useRealKey();
+    const ok = await app.inject({
+      method: "GET",
+      url: `/v1/reports/runs/${runId}/export?format=csv&signed=1`,
+      headers: AUTH,
+    });
+    expect(ok.statusCode).toBe(200);
+    expect(await countRule("report-exported")).toBe(before.ok + 1);
+    expect(await countRule("report-export-unsigned-refused")).toBe(before.refused + 1);
+  });
+
+  it("an unparseable key file is caught by the preflight too — no success row", async () => {
+    // a well-formed key id and a key file that exists but is not a private key: the preflight
+    // refuses at parse time, so it covers key-shaped refusals beyond an unset variable
+    const bogus = path.join(workDir, "not-a-key.pem");
+    writeFileSync(bogus, "-----BEGIN PRIVATE KEY-----\nnot base64 at all\n-----END PRIVATE KEY-----\n");
+    process.env.REGULAIT_EXPORT_SIGNING_KEY = bogus;
+    process.env.REGULAIT_EXPORT_SIGNING_KEY_ID = "xbundle-bogus";
+    const before = await countRule("audit-export-signed");
+    const refused = await app.inject({ method: "GET", url: "/v1/audit.csv?signed=1", headers: AUTH });
+    expect(refused.statusCode).toBe(409);
+    expect(await countRule("audit-export-signed")).toBe(before);
+    useRealKey();
+  });
+});
+
 describe("the JSON export path is covered too, not just CSV", () => {
   it("bundles and verifies a JSON report artifact", async () => {
     useRealKey();

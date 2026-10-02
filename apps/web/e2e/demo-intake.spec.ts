@@ -168,4 +168,10 @@ test("seeded credit-assistant journey: discover, register, assess, approve, moni
   await page.goto("/ui/admin/audit");
   await expect(page.getByRole("button", { name: "Download signed bundle" })).toBeVisible();
   await shotBoth(page, "real-11-signed-audit-export");
+  // 3E — the bundle actually downloads (a keyless deployment answers 409 here: AER-008 / demo:export-key)
+  const download = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Download signed bundle" }).click();
+  const bundle = await download;
+  expect(bundle.suggestedFilename()).toMatch(/\.tar\.gz$/);
+  expect(readFileSync(await bundle.path()).subarray(0, 2).toString("hex")).toBe("1f8b"); // gzip magic
 });
