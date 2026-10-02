@@ -2888,6 +2888,8 @@ export {
   TEAMS_AUTHORIZATION_HEADER,
   chatContentFenced,
   chatDecidable,
+  alertMeetsThreshold,
+  composeAlertCard,
   composeApprovalCard,
   composeDecidedCard,
   parseChatInteraction,

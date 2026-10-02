@@ -159,6 +159,9 @@ All LIVE on `dhruv/active`, CI-tested; details are in the contract (§4) and ADR
 - **C13** CI/CD deploy gate — ADR-0161: `POST /v1/gates/deploy {useCaseId, agentIds?, environment?, ref?}`
   → `{decision: allow|deny, reasons[{code, severity: block|warn, message, ref:{type,id}}], agentsChecked, …}`;
   owner-or-admin. Demo option: show a pipeline step denied by an open high alert, then allowed after acknowledgement.
+- **C14** Alerts to Slack/Teams — ADR-0162: connection field `notifyAlertMinSeverity: "medium"|"high"|null`
+  (create, or `PATCH /v1/chatops/connections/:id`); `POST /v1/governance/alerts/:id/post {connectionName?, channel?}`
+  → `{posted, connection, channel}` (502 `post_failed` when refused, e.g. egress).
 
 ### Codex — web UI (apps/web), browser verification
 
@@ -258,6 +261,11 @@ and an explicit "unmeasured" state.
   X9 — empty-state says "match these filters" with no filter set; show
   `summary.inForce` and `nextEffective`.
   Status: TODO (Codex)
+- **X11 — Alerts in chat (C14)**: on the ChatOps connections page, a
+  "Governance alerts" select per workspace (Off / High only / Medium and
+  above → `PATCH /v1/chatops/connections/:id`); on the X7 alert detail, a
+  "Post to chat" button (`POST /v1/governance/alerts/:id/post`) that shows the
+  502 reason when refused. Status: TODO (Codex, after X10)
 - **X6 — Dependency graph view** — VERIFIED 10-02 (see §6).
 ### Gemini — demo content, fixtures, script
 

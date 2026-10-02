@@ -54,6 +54,7 @@ import { computeDependencyGraph } from "./dependency-graph.js";
 import { computeTrustDashboard } from "./trust-dashboard.js";
 import { ownershipFlagFor } from "./inventory.js";
 import { traceSummaryForAgents } from "./trace-evaluation.js";
+import { notifyGovernanceAlerts } from "./chatops.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 
@@ -66,6 +67,8 @@ export const MONITOR_AUDIT_RULE_IDS = {
 
 export interface MonitorRunResult {
   evaluatedAt: string;
+  /** ADR-0162 — chat deliveries of newly raised alerts */
+  notified: { posted: number; failed: number };
   raised: number;
   refreshed: number;
   resolved: number;
@@ -200,6 +203,7 @@ export async function runGovernanceMonitor(
     .where(ne(governanceAlerts.status, "resolved"));
   const plan = reconcileAlerts(active, findings, new Set(MONITOR_RULE_IDS));
 
+  const raisedIds: string[] = [];
   for (const f of plan.raise) {
     // ON CONFLICT: a concurrent pass (scheduler + manual evaluate) may have
     // opened the same episode a moment ago — the partial unique index is the
@@ -218,6 +222,7 @@ export async function runGovernanceMonitor(
       .onConflictDoNothing()
       .returning({ id: governanceAlerts.id });
     if (!inserted[0]) continue;
+    raisedIds.push(inserted[0].id);
     await db.insert(auditLog).values({
       userId: actor,
       objectType: "governance_alert",
@@ -270,8 +275,19 @@ export async function runGovernanceMonitor(
     reason: `governance monitor evaluated: ${n} active alert(s)`,
   });
 
+  // ADR-0162 — newly RAISED alerts go to opted-in chat workspaces. Best
+  // effort: a chat outage must never fail a monitor pass (each failure is
+  // audited by the courier).
+  let notified = { posted: 0, failed: 0 };
+  try {
+    notified = await notifyGovernanceAlerts(db, raisedIds, opts.actorUserId ?? null);
+  } catch {
+    /* audited inside the courier where it can be; never fatal here */
+  }
+
   return {
     evaluatedAt: now.toISOString(),
+    notified,
     raised: plan.raise.length,
     refreshed: plan.refresh.length,
     resolved: plan.resolve.length,

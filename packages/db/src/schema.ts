@@ -5524,6 +5524,9 @@ export const chatopsConnections = pgTable("chatops_connections", {
    * not a re-authenticated session, so the most sensitive classes are in-app
    * only until an admin deliberately opts this workspace in. */
   allowFencedDecide: boolean("allow_fenced_decide").notNull().default(false),
+  /** ADR-0162 (migration 0127) — minimum governance-alert severity posted to
+   * this workspace; null = alerts are not posted (opt-in) */
+  notifyAlertMinSeverity: text("notify_alert_min_severity", { enum: ["medium", "high"] }),
   enabled: boolean("enabled").notNull().default(true),
   createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

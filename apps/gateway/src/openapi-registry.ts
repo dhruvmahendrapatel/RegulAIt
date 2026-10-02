@@ -403,6 +403,8 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/governance/trace-evaluations": "internal",
   "POST /v1/governance/trace-evaluations/run": "internal",
   "POST /v1/gates/deploy": "internal",
+  "PATCH /v1/chatops/connections/:connectionId": "internal",
+  "POST /v1/governance/alerts/:alertId/post": "internal",
   "POST /v1/governance/monitor/evaluate": "internal",
   "POST /v1/governance/alerts/:alertId/acknowledge": "internal",
   // ADR-0090 — grant certification campaigns. Internal: admin governance
@@ -1091,6 +1093,8 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/governance/trace-evaluations": "reports",
   "POST /v1/governance/trace-evaluations/run": "reports",
   "POST /v1/gates/deploy": "use-cases",
+  "PATCH /v1/chatops/connections/:connectionId": "chatops",
+  "POST /v1/governance/alerts/:alertId/post": "reports",
   "POST /v1/governance/monitor/evaluate": "reports",
   "POST /v1/governance/alerts/:alertId/acknowledge": "reports",
   // ADR-0092 — access recommendations (the deterministic half)

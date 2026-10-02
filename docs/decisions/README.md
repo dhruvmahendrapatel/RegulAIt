@@ -6,6 +6,7 @@ superseding a decision means a new ADR plus a status flip on the old one.
 
 | ID | Title | Status | Date |
 |---|---|---|---|
+| [0162](0162-governance-alerts-to-chat.md) | Monitor alerts to Slack/Teams: per-workspace opt-in severity threshold; newly raised only; same guarded courier (egress allow-list), no buttons; manual post; audited, never fatal (migration 0127). | Accepted | 2026-10-02 |
 | [0161](0161-ci-cd-deploy-gate.md) | CI/CD deploy gate: `POST /v1/gates/deploy` combines use-case approval, approved stack, agent availability, the MRM decision and open monitor alerts into allow/deny with reasons; owner-or-admin; audited. | Accepted | 2026-10-02 |
 | [0160](0160-continuous-trace-evaluation.md) | Continuous trace evaluation: shipped detectors re-run over stored previews every 15 min (output leaks flag, input attempts count, scrub markers count as credentials); counts only; feeds the monitor (migration 0126). | Accepted | 2026-10-02 |
 | [0159](0159-remediation-proposals.md) | Remediation for monitor alerts: deterministic planner; executable kinds (link control, assign agent owner) run only after a different human approves, inside the one decide path; guidance otherwise (migration 0125). | Accepted | 2026-10-02 |

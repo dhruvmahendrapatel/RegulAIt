@@ -77,6 +77,9 @@ import {
   connectors,
   desc,
   eq,
+  governanceAlerts,
+  inArray,
+  isNotNull,
   oidcProviders,
   samlProviders,
   users,
@@ -85,6 +88,9 @@ import {
 } from "@regulait/db";
 import {
   CHATOPS_PROVIDERS,
+  MONITOR_RULES,
+  alertMeetsThreshold,
+  composeAlertCard,
   chatContentFenced,
   chatDecidable,
   composeApprovalCard,
@@ -131,7 +137,26 @@ export const CHATOPS_RULE_IDS = {
   decideRefusedByDecidePath: "chatops-decide-refused-by-decide-path",
   decided: "chatops-decided",
   decideIdempotentReplay: "chatops-decide-idempotent-replay",
+  /** ADR-0162 */
+  alertPosted: "chatops-alert-posted",
+  alertPostFailed: "chatops-alert-post-failed",
+  alertSettingsChanged: "chatops-alert-settings-changed",
 } as const;
+
+/**
+ * ADR-0162 — the governance monitor reaches chat through the ONE guarded
+ * courier this file owns. `registerChatOpsRoutes` registers a notifier per
+ * database handle; the monitor (route or scheduler — both run on the same
+ * handle) calls `notifyGovernanceAlerts` with the ids it just RAISED. A
+ * deployment that never registered ChatOps simply notifies nobody.
+ */
+export type AlertNotifier = (alertIds: string[], actorUserId: string | null) => Promise<{ posted: number; failed: number }>;
+const alertNotifiers = new WeakMap<object, AlertNotifier>();
+export async function notifyGovernanceAlerts(db: Db, alertIds: string[], actorUserId: string | null) {
+  const notify = alertNotifiers.get(db as object);
+  if (!notify || alertIds.length === 0) return { posted: 0, failed: 0 };
+  return notify(alertIds, actorUserId);
+}
 
 /** the ONE decide function, handed in by app.ts. Chat never gets its own. */
 export type DecideOne = (input: {
@@ -158,6 +183,8 @@ const createConnectionSchema = z
     signingSecret: z.string().min(8).max(500).optional(),
     defaultChannel: z.string().min(1).max(200),
     allowFencedDecide: z.boolean().default(false),
+    /** ADR-0162 — opt-in; null/absent = governance alerts are not posted here */
+    notifyAlertMinSeverity: z.enum(["medium", "high"]).nullable().optional(),
     enabled: z.boolean().default(true),
   })
   .strict();
@@ -283,6 +310,7 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
           body.signingSecret === undefined ? null : encryptSecret(opts.dataKey, body.signingSecret),
         defaultChannel: body.defaultChannel,
         allowFencedDecide: body.allowFencedDecide,
+        notifyAlertMinSeverity: body.notifyAlertMinSeverity ?? null,
         enabled: body.enabled,
         createdByUserId: req.authCtx.userId ?? null,
       })
@@ -576,6 +604,101 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
       `approval ${approvalId} mirrored to ${conn.provider} channel ${channel}${card.redacted ? " with its CONTENT WITHHELD (sensitivity fence): a link was posted, not the payload" : ""}${decidable ? "" : " and WITHOUT decide buttons (in-app only)"}`,
       { approvalId, channel, redacted: card.redacted, decidable });
     return { messageId: msg!.id, redacted: card.redacted, decidable, messageRef: posted.messageRef };
+  });
+
+  // =======================================================================
+  // ADR-0162 — governance-monitor alerts to chat (information only)
+  // =======================================================================
+
+  const alertPortalUrl = (alertId: string) => `/admin/governance/alerts?alert=${alertId}`;
+
+  async function postAlert(
+    alert: typeof governanceAlerts.$inferSelect,
+    conn: typeof chatopsConnections.$inferSelect,
+    channel: string,
+    actorUserId: string | null,
+  ): Promise<boolean> {
+    const card = composeAlertCard({
+      alertId: alert.id,
+      severity: alert.severity,
+      ruleLabel: (MONITOR_RULES as Record<string, { label: string }>)[alert.ruleId]?.label ?? alert.ruleId,
+      title: alert.title,
+      portalUrl: alertPortalUrl(alert.id),
+    });
+    let posted: Awaited<ReturnType<typeof postCard>>;
+    try {
+      posted = await postCard(conn, channel, card, actorUserId, "monitor-alert");
+    } catch (err) {
+      posted = { ok: false, status: 502, body: { error: err instanceof Error ? err.message : String(err) } };
+    }
+    await audit(
+      actorUserId,
+      "chatops_connection",
+      conn.id,
+      posted.ok ? CHATOPS_RULE_IDS.alertPosted : CHATOPS_RULE_IDS.alertPostFailed,
+      posted.ok ? "allow" : "deny",
+      posted.ok
+        ? `governance alert ${alert.id} (${alert.severity}) posted to ${conn.provider} channel ${channel}`
+        : `governance alert ${alert.id} NOT posted to '${conn.name}': ${String(posted.body.error ?? posted.status)}`,
+      { alertId: alert.id, ruleId: alert.ruleId, severity: alert.severity, channel, ...(posted.ok ? {} : { status: posted.status }) },
+    );
+    return posted.ok;
+  }
+
+  alertNotifiers.set(db as object, async (alertIds, actorUserId) => {
+    const out = { posted: 0, failed: 0 };
+    const conns = await db
+      .select()
+      .from(chatopsConnections)
+      .where(and(eq(chatopsConnections.enabled, true), isNotNull(chatopsConnections.notifyAlertMinSeverity)));
+    if (conns.length === 0) return out;
+    const alerts = await db.select().from(governanceAlerts).where(inArray(governanceAlerts.id, alertIds));
+    for (const alert of alerts) {
+      for (const conn of conns) {
+        if (!alertMeetsThreshold(alert.severity, conn.notifyAlertMinSeverity)) continue;
+        if (await postAlert(alert, conn, conn.defaultChannel, actorUserId)) out.posted += 1;
+        else out.failed += 1;
+      }
+    }
+    return out;
+  });
+
+  /** opt a workspace in or out of alert delivery (admin) */
+  app.patch("/v1/chatops/connections/:connectionId", async (req, reply) => {
+    const { connectionId } = z.object({ connectionId: z.string().uuid() }).parse(req.params);
+    const body = z.object({ notifyAlertMinSeverity: z.enum(["medium", "high"]).nullable() }).strict().parse(req.body);
+    const [before] = await db.select().from(chatopsConnections).where(eq(chatopsConnections.id, connectionId));
+    if (!before) return reply.status(404).send({ error: "not_found" });
+    const [after] = await db
+      .update(chatopsConnections)
+      .set({ notifyAlertMinSeverity: body.notifyAlertMinSeverity })
+      .where(eq(chatopsConnections.id, connectionId))
+      .returning();
+    await audit(req.authCtx.userId, "chatops_connection", connectionId, CHATOPS_RULE_IDS.alertSettingsChanged, "allow",
+      `governance alerts to '${before.name}': ${before.notifyAlertMinSeverity ?? "off"} → ${body.notifyAlertMinSeverity ?? "off"}`,
+      { from: before.notifyAlertMinSeverity, to: body.notifyAlertMinSeverity });
+    return { id: after!.id, name: after!.name, notifyAlertMinSeverity: after!.notifyAlertMinSeverity };
+  });
+
+  /** post one alert now, regardless of the threshold (admin) */
+  app.post("/v1/governance/alerts/:alertId/post", async (req, reply) => {
+    const { alertId } = z.object({ alertId: z.string().uuid() }).parse(req.params);
+    const body = postSchema.parse(req.body ?? {});
+    const [alert] = await db.select().from(governanceAlerts).where(eq(governanceAlerts.id, alertId));
+    if (!alert) return reply.status(404).send({ error: "not_found" });
+    const [conn] = body.connectionName
+      ? await db.select().from(chatopsConnections).where(eq(chatopsConnections.name, body.connectionName))
+      : await db
+          .select()
+          .from(chatopsConnections)
+          .where(eq(chatopsConnections.enabled, true))
+          .orderBy(asc(chatopsConnections.createdAt), asc(chatopsConnections.id))
+          .limit(1);
+    if (!conn) return reply.status(400).send({ error: "no_chatops_connection" });
+    if (!conn.enabled) return reply.status(422).send({ error: "connection_disabled" });
+    const ok = await postAlert(alert, conn, body.channel ?? conn.defaultChannel, req.authCtx.userId);
+    if (!ok) return reply.status(502).send({ error: "post_failed", detail: "see the chatops-alert-post-failed audit row" });
+    return { posted: true, connection: conn.name, channel: body.channel ?? conn.defaultChannel };
   });
 
   // =======================================================================
