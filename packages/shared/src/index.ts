@@ -3566,3 +3566,5 @@ export const authzCheckRequestSchema = z.object({
     .optional(),
 });
 export type AuthzCheckRequest = z.infer<typeof authzCheckRequestSchema>;
+
+export { REGULATORY_UPDATES } from "./demo-intake/regulatory-updates.js";

@@ -5,7 +5,7 @@
 ---
 
 ## 0. Setup and Preparation
-- **Database:** Ensure a clean seeded database by running `pnpm --filter @regulait/gateway seed`, then `demo:setup`, then `demo:intake` (in that order). The `seed` command prints one-time passwords for the personas below — keep them handy to log in.
+- **Database:** Ensure a clean seeded database by running `pnpm --filter @regulait/gateway seed`, then `demo:setup`, then `demo:intake` (in that order), followed by `pnpm --filter @regulait/gateway demo:check` (the script must say "all beats PASS or known WARN" before the demo starts). The `seed` command prints one-time passwords for the personas below — keep them handy to log in.
 - **Browser:** Two browser profiles ready (to switch personas seamlessly without logging in and out).
   - Profile A: **Dana** (Developer / Proposer)
   - Profile B: **Avery** (Risk Reviewer / Approver)
@@ -35,7 +35,7 @@
   4. Accept the suggestions and proceed to the Questionnaire. (Observe pre-filled answers from `fixtures.ts`: essential-services + profilesNaturalPersons).
   5. Proceed to the "Stack" step: Link the `mock-balanced` model, vendor, and agent.
   6. Review & Submit.
-- **Talking Point:** "Instead of making developers fill out massive spreadsheets, RegulAIt's deterministic rules propose a regulatory tier based on a plain-language description. It suggests we trigger EU AI Act High-Risk requirements because we're making credit decisions."
+- **Talking Point:** "Instead of making developers fill out massive spreadsheets, RegulAIt's deterministic rules propose a regulatory tier based on a plain-language description. It suggests we trigger EU AI Act High-Risk classification because we're making credit decisions. The obligations apply from Dec 2027 — we're getting ahead of them."
 - **Recovery Step:** If the assistant API (`POST /v1/use-cases/intake/assist`) fails, manually fill in the first 3 fields of the questionnaire and proceed to Submit.
 
 ---
