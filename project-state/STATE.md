@@ -21,6 +21,17 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-10-02 - Dependency graph + governance monitor (ADR-0156, ADR-0157).**
+`GET /v1/inventory/graph`: use case → agent → model → vendor (declared) and
+agent → MCP server / connector / agent (observed), every node with its own and
+max-propagated declared risk plus the path to the source. Governance monitor:
+seven rules over graph + trust coverage + risk register, alerts as condition
+episodes (migration 0124), hourly job + on-demand evaluate, acknowledge with
+note, delivered via the audit log. Demo data: G2 scenario library verified;
+G1 fixtures and G3 script returned for changes; the full seed pipeline runs
+clean on a fresh DB (53 objects, 0 failures). New tasks X7/X8 (Codex), G4/G5
+(Gemini). Ground rule 8: typecheck before READY (M-054 and the G1/G2 break).
+
 **2026-10-01 - AI-intake demo backend live (ADR-0147-0150); agents coordinated
 via AgentCoordination.md.** Demo Monday 2026-10-05 06:00 CDT. Claude (master)
 shipped: trust dashboard API (six-dimension evidence coverage, gap not zero),
