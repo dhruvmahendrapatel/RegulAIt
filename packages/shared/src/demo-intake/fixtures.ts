@@ -560,27 +560,6 @@ export const DEMO_INTAKE_FIXTURES: DemoIntakeFixtures = {
   risks: [
     // ---- bias_fairness (3) ----
     {
-      key: "risk-1",
-      useCaseKey: "hero-credit-limit",
-      title: "Credit model produces disparate approval rates across demographic groups",
-      description:
-        "The credit-limit model may learn proxy variables for protected characteristics " +
-        "from historical lending data, systematically under-approving qualified applicants " +
-        "from certain groups and exposing the bank to fair-lending regulatory action.",
-      category: "bias_fairness",
-      likelihood: "high",
-      impact: "high",
-      targetStatus: "mitigating",
-      mitigation:
-        "Fairness assessment documented in the model card; adverse-action reason codes provided per ECOA.",
-      controls: [
-        "eu-ai-act:art-10-bias-examination",
-        "eu-ai-act:art-9-risk-management-system",
-        "nist-ai-rmf:MEASURE-2.11",
-      ],
-      residual: { likelihood: "low", impact: "high" },
-    },
-    {
       key: "risk-2",
       useCaseKey: "uc-1",
       title: "Resume screener down-ranks candidates from certain geographic ZIP codes",
@@ -682,27 +661,6 @@ export const DEMO_INTAKE_FIXTURES: DemoIntakeFixtures = {
 
     // ---- prompt_injection (3) ----
     {
-      key: "risk-7",
-      useCaseKey: "hero-credit-limit",
-      title: "Injected instruction in customer message overrides credit-decision prompt",
-      description:
-        "A customer can embed adversarial text in their free-text application narrative " +
-        "to override the credit-decision system prompt, potentially granting a higher " +
-        "credit limit than the bank's policy would approve.",
-      category: "prompt_injection",
-      likelihood: "high",
-      impact: "high",
-      targetStatus: "mitigating",
-      mitigation:
-        "Prompt-injection guardrail set to block mode; system-prompt is isolated from user input via structured roles.",
-      controls: [
-        "eu-ai-act:art-15-accuracy-robustness",
-        "nist-ai-rmf:MEASURE-2.7",
-        "eu-ai-act:art-9-risk-management-system",
-      ],
-      residual: { likelihood: "low", impact: "medium" },
-    },
-    {
       key: "risk-8",
       useCaseKey: "uc-7",
       title: "Indirect injection in a code repository comment rewrites generated code",
@@ -741,27 +699,6 @@ export const DEMO_INTAKE_FIXTURES: DemoIntakeFixtures = {
     },
 
     // ---- data_leakage_pii (3) ----
-    {
-      key: "risk-10",
-      useCaseKey: "hero-credit-limit",
-      title: "Customer PII included in prompt reaches third-party model provider",
-      description:
-        "The agent constructs prompts containing customer name, income, and credit " +
-        "history; these reach the external model-provider API without scrubbing, " +
-        "creating a GDPR data-processor agreement breach.",
-      category: "data_leakage_pii",
-      likelihood: "medium",
-      impact: "high",
-      targetStatus: "mitigating",
-      mitigation:
-        "PII-block cascade active on the financial-services compliance profile; DPA with provider signed.",
-      controls: [
-        "iso-27001:A.8.12",
-        "eu-ai-act:art-12-record-keeping",
-        "nist-ai-rmf:MEASURE-2.7",
-      ],
-      residual: { likelihood: "low", impact: "medium" },
-    },
     {
       key: "risk-11",
       useCaseKey: "uc-2",
@@ -1106,28 +1043,6 @@ export const DEMO_INTAKE_FIXTURES: DemoIntakeFixtures = {
     },
 
     // ---- unsafe_output (3) ----
-    {
-      key: "risk-28",
-      useCaseKey: "hero-credit-limit",
-      title: "Credit assistant generates manipulative sales language to maximise limit",
-      description:
-        "Without output guardrails, the model might craft persuasive language " +
-        "urging customers to accept the highest available credit limit, employing " +
-        "dark-pattern framing that constitutes manipulative technique under Art. 5.",
-      category: "unsafe_output",
-      likelihood: "medium",
-      impact: "high",
-      targetStatus: "mitigating",
-      mitigation:
-        "Output reviewed against the anti-manipulation rule in the guardrail config; " +
-        "jailbreak and toxicity detectors both set to block mode.",
-      controls: [
-        "eu-ai-act:art-15-accuracy-robustness",
-        "eu-ai-act:art-14-human-oversight",
-        "nist-ai-rmf:MANAGE-2.2",
-      ],
-      residual: { likelihood: "low", impact: "medium" },
-    },
     {
       key: "risk-29",
       useCaseKey: "uc-9",

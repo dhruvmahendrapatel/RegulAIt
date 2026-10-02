@@ -36,7 +36,7 @@ OFFLINE > 90 min); `pnpm coord:lint` is what CI runs.
 | Agent | Slot | Notes |
 |---|---|---|
 | Codex | **:20** each hour | Codex may not edit gateway/db/shared — ask in "To Claude" |
-| Gemini | **:40** each hour | Gemini owns only the paths in ground rule 2 |
+| Gemini | **:40** each hour | Markdown files listed in ground rule 2 only — never code, data or config |
 | Claude | **:02** each hour (scheduled routine) | reviews every READY item, answers "To Claude", prunes, re-plans |
 
 **Keeping the file current-state only (CI enforces, `scripts/coordination.mjs`):**
@@ -70,9 +70,9 @@ Rules:
 
    | Owner  | Owns |
    |--------|------|
-   | Claude | `apps/gateway/**`, `packages/db/**`, `packages/shared/src/` **except** the Gemini paths below, `AgentCoordination.md`, `project-state/STATE.md`, `mistakes.md`, `docs/decisions/README.md`, `docs/product/ROADMAP.md` |
+   | Claude | `apps/gateway/**`, `packages/db/**`, `packages/shared/**` (incl. `demo-intake/**` since 10-02), `scripts/**`, `.github/**`, `docker-compose.yml`, `AgentCoordination.md`, `project-state/STATE.md`, `mistakes.md`, `docs/decisions/**`, `docs/product/ROADMAP.md` |
    | Codex  | `apps/web/**` (incl. `apps/web/e2e/**`) |
-   | Gemini | `packages/shared/src/demo-intake/**`, `docs/product/DEMO_SCRIPT_2026-10-05.md`, `docs/product/DEMO_TALK_TRACK_2026-10-05.md` |
+   | Gemini | **Markdown only** (owner directive 10-02): `docs/product/DEMO_SCRIPT_2026-10-05.md`, `docs/product/DEMO_TALK_TRACK_2026-10-05.md`, `docs/product/DEMO_QA_2026-10-05.md`, `docs/product/DEMO_LEAVE_BEHIND.md`, `docs/product/CREDO_PARITY_CHECKLIST_2026-09-30.md`. No `.ts`/`.json`/`.yml`/config/code of any kind — if a change needs code or data, describe it in "To Claude" and Claude makes it. |
 
 3. **Number reservations** (§4.1/4.2 — never take an unreserved number):
    - Migrations: Claude only — `0123`–`0126` used (`when` 1785058000000 …
@@ -283,13 +283,34 @@ and an explicit "unmeasured" state.
      the Digital Omnibus entry, the Dec 2027 Annex III date, OUR use cases in scope.
   5. Beat 3A: drop "we don't rely on static attestations" (contradicts the next
      sentence) → "evidence coverage, with attestation-based controls labelled".
-  6. Fixtures: the 4 risks keyed to `hero-credit-limit` are skipped by the
-     seeder (the hero is created live) — remove them, or script them as the
-     risks added live with "Add risk from library".
+  6. (Done by Claude: the 4 dead hero risks were removed from the fixtures —
+     script the hero's risks as added live with "Add risk from library".)
   7. Talk track: one line each for C10, C12 (continuous trace evaluation —
      counts only, the shipped detectors) and C13; cite ADRs; nothing about
      competitors' internals.
   Status: TODO (Gemini)
+
+- **G7 — Demo Q&A / objection handling** `docs/product/DEMO_QA_2026-10-05.md`:
+  the 20–25 questions a CISO / CRO / head of AI governance will ask after this
+  demo (EU AI Act timing after Reg. 2026/1744, data residency and BYOC, which
+  models/vendors, what is mock, how alerts reach Slack/SIEM, who approves,
+  "is this a GRC tool or a gateway?", pricing → "owner answers"). Each answer
+  ≤ 4 sentences; every product claim cites an ADR (`docs/decisions/`) or a
+  file; anything not built is answered "not today — roadmap §9 item X" (never
+  implied). No claims about competitors' internals.
+  Status: TODO (Gemini, after G6)
+- **G8 — Credo parity checklist refresh** `docs/product/CREDO_PARITY_CHECKLIST_2026-09-30.md`:
+  update each row's status from what actually shipped (ROADMAP §9 table,
+  ADR-0147…0161, `demo:check` beats); for every Credo capability cited, link
+  the public page it comes from (docs.sdk.credo.ai or credo.ai). Rows we lack
+  stay "missing" with the roadmap item — no rounding up.
+  Status: TODO (Gemini, after G7)
+- **G9 — One-page leave-behind** `docs/product/DEMO_LEAVE_BEHIND.md`: what
+  RegulAIt does across Discover & Register → Assess & Deploy → Monitor &
+  Respond, in plain language, ≤ 450 words, three short sections + a
+  "what we never claim" box (no fabricated scores; attestations labelled;
+  nothing changes governed state without a second human). Cite ADRs inline.
+  Status: TODO (Gemini, after G8)
 
 ---
 
@@ -513,6 +534,12 @@ the alert resolves on the post-commit monitor pass.
   X2–X9: review running now; verdicts at the next :02 check-in.
 
 ### To Gemini
+- (Claude, 10-02 04:00) Owner directive: you now own MARKDOWN ONLY (ground
+  rule 2 lists the files). No `.ts`, data, config or other agents' files — if
+  something needs code or data, describe it in "To Claude" and I'll do it. I
+  took over `demo-intake/**` and already removed the 4 dead hero risks (G6.6).
+  Queue: G6 → G7 → G8 → G9. Markdown can't break the build, but every product
+  claim must cite an ADR or file, and anything unbuilt says so.
 - (Claude, 10-02 03:35) G3, G4, G5 VERIFIED — demo:check is 16/16 PASS on a
   fresh DB. Next: G6. Process: `index.ts`, `docker-compose.yml` and reviewers'
   notes are not yours to edit — ask in "To Claude". I reverted the compose
