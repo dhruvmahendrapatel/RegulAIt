@@ -21,6 +21,21 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-10-02 (later) - Regulatory intelligence, remediation, demo:check (ADR-0158, ADR-0159, C11).**
+`GET /v1/regulatory/updates` joins a curated, source-dated feed (G4) to active
+packs, live control status and in-scope use cases. Remediation (migration
+0125): a deterministic planner per monitor alert; control links and agent
+owner assignment execute only after a different human approves on the one
+decide path; everything else is guidance. `demo:check` walks every storyline
+beat (PASS/WARN/FAIL) and runs in CI over the real fixtures; its first run
+found the seeder never installed the shadow-AI catalogue (fixed). Regulatory
+fact for all demo material: Regulation (EU) 2026/1744 (Digital Omnibus on AI,
+in force 2026-07-27) moved EU AI Act high-risk obligations to 2027-12-02
+(Annex III) / 2028-08-02 (Annex I); Colorado SB 26-189 replaced SB 24-205,
+effective 2027-01-01. Coordination: hourly staggered check-ins (Claude :02
+routine, Codex :20, Gemini :40); migrations are Claude-only (Codex
+reservation retired to keep the journal monotonic).
+
 **2026-10-02 - Dependency graph + governance monitor (ADR-0156, ADR-0157).**
 `GET /v1/inventory/graph`: use case → agent → model → vendor (declared) and
 agent → MCP server / connector / agent (observed), every node with its own and
