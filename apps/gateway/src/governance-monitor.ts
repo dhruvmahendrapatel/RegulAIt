@@ -82,7 +82,14 @@ export interface MonitorRunResult {
 
 export async function runGovernanceMonitor(
   db: Db,
-  opts: { now?: Date; actorUserId?: string | null } = {},
+  opts: {
+    now?: Date;
+    actorUserId?: string | null;
+    /** AER-043 TEST SEAM: awaited after the active-alert read and the plan,
+     *  before any write — lets a test hold this pass while a concurrent one
+     *  commits. Absent in production (never passed). */
+    afterPlan?: (plan: ReturnType<typeof reconcileAlerts>) => Promise<void>;
+  } = {},
 ): Promise<MonitorRunResult> {
   const now = opts.now ?? new Date();
   const actor = opts.actorUserId ?? NO_IDENTITY;
@@ -210,6 +217,7 @@ export async function runGovernanceMonitor(
     .from(governanceAlerts)
     .where(ne(governanceAlerts.status, "resolved"));
   const plan = reconcileAlerts(active, findings, new Set(MONITOR_RULE_IDS));
+  if (opts.afterPlan) await opts.afterPlan(plan);
 
   const raisedIds: string[] = [];
   for (const f of plan.raise) {
