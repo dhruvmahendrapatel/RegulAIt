@@ -152,8 +152,9 @@ caught on read. **The sweeps buy timeliness, never correctness.**
   stored faithfully, redacted at the presentation boundary. Three residuals carried forward:
   **(1) AT REST IS UNPROTECTED — the operator procedure for "someone pasted a key into chat" is
   still ROTATE IT.** A `pg_dump`, a restored backup or a `psql` session reads it in the clear; (c)
-  stopped the API echoing it, it did not contain it. **(2)** `eval_results.output_text` remains
-  unassessed for the same leak — ADR-0111 named it, ADR-0112 did not take it (**S22**).
+  stopped the API echoing it, it did not contain it. **(2)** `eval_results.output_text` — named by ADR-0111, not taken by ADR-0112 — was assessed
+  and closed as **S22** by ADR-0115 (scrubbed at the API boundary; at-rest exposure retained, as for
+  conversations).
   **(3)** the live `POST /v1/agents/:id/invoke` response echoes the current turn unscrubbed, by
   deliberate decision — it is the caller's own answer travelling back to the caller who just typed
   the input, persisting nothing and reaching no third party. Recorded alongside ADR-0111's 5b/5c so

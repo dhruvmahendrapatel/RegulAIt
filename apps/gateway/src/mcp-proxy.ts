@@ -248,8 +248,9 @@ export type GovernedToolCallOutcome =
       supersededApprovalIds: string[];
       requeuedApprovalId: string | null;
     }
-  /** ADR-0103: the ATTRIBUTED project's pillar-5 budget is exhausted, so this
-   * paid tool call may not run. Distinct from `denied` (entitlement) and from
+  /** ADR-0103: the ATTRIBUTED project's pillar-5 budget is exhausted, so the
+   * project's dispatches are FROZEN and this tool call may not run (priced or
+   * not — the amendment names it a project dispatch freeze, AER-002). Distinct from `denied` (entitlement) and from
    * the run/node budget the orchestrator enforces separately — this is the
    * PROJECT ledger, and it carries the same status/error the model path
    * returns so the two surfaces name the same condition identically. */

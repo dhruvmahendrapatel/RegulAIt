@@ -1306,12 +1306,13 @@ export const approvals = pgTable(
     // recorded.
     /** the POLICY fingerprint this consent was granted under: sha256 hex over
      * the matched approval rules paired with their ACTIVE `config_versions`
-     * ids (ADR-0073), the required approver and the approval scope. Re-derived
-     * at consumption and compared in the same atomic UPDATE predicate that
-     * spends the row, so a policy activation cannot be raced. NULL = a legacy
-     * row that predates the feature; it is ACCEPTED, because it is still
-     * payload-bound under ADR-0104 — see ADR-0105 for why that call was made
-     * rather than fail-closed. */
+     * ids (ADR-0073), the required approver, the approval scope and — since
+     * v3 (ADR-0166) — the MCP target. Re-derived at evaluation and compared at
+     * consumption, which also re-checks the consent policy epoch (migration
+     * 0119) under the same row lock, so a policy activation cannot be raced
+     * (AER-004). NULL = a legacy row that predates the feature; it is NOT
+     * spendable — the consume predicate requires a matching digest, so a
+     * legacy row is retired and re-queued for a fresh, context-bound review. */
     contextDigest: text("context_digest"),
     /** when this consent stops being spendable, stamped at QUEUE time from
      * `org_settings.approval_ttl_hours`. NULL = never expires: either a legacy
