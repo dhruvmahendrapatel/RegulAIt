@@ -1,26 +1,31 @@
-import { expect, test, type Page } from "@playwright/test";
-import { mkdirSync, readFileSync } from "node:fs";
+import { expect, test, type Browser, type Page } from "@playwright/test";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const state = JSON.parse(readFileSync(path.join(here, ".e2e-state.json"), "utf8")) as { baseUrl: string };
+const stateFile = path.join(here, ".e2e-state.json");
+const state = existsSync(stateFile)
+  ? JSON.parse(readFileSync(stateFile, "utf8")) as { baseUrl: string }
+  : { baseUrl: process.env.E2E_BASE_URL ?? "http://127.0.0.1:4174" };
 const SHOTS = path.join(here, "artifacts", "demo");
 mkdirSync(SHOTS, { recursive: true });
 
-async function freshAdmin(page: Page) {
+async function freshUser(page: Page, email: string, password: string) {
   const headers = { authorization: "Bearer e2e-bootstrap-token", "content-type": "application/json" };
   const users = await (await fetch(`${state.baseUrl}/v1/users`, { headers })).json() as { users: Array<{ id: string; email: string }> };
-  const id = users.users.find((user) => user.email === "admin@regulait.local")!.id;
+  const id = users.users.find((user) => user.email === email)?.id;
+  expect(id, `seeded persona ${email} must exist`).toBeTruthy();
   const minted = await (await fetch(`${state.baseUrl}/v1/users/${id}/set-initial-password`, { method: "POST", headers, body: JSON.stringify({ force: true }) })).json() as { password: string };
   await page.goto("/ui");
-  await page.getByLabel("Email").fill("admin@regulait.local");
+  await page.getByLabel("Email").fill(email);
   await page.getByLabel("Password", { exact: true }).fill(minted.password);
   await page.getByRole("button", { name: "Sign in" }).click();
   await page.getByLabel("Current (one-time) password").fill(minted.password);
-  await page.getByLabel("New password", { exact: true }).fill("E2e-Demo-Intake!");
-  await page.getByLabel("Confirm new password").fill("E2e-Demo-Intake!");
+  await page.getByLabel("New password", { exact: true }).fill(password);
+  await page.getByLabel("Confirm new password").fill(password);
   await page.getByRole("button", { name: "Set password & continue" }).click();
+  await expect(page.getByRole("heading", { name: /Welcome back/ })).toBeVisible();
 }
 
 async function shotBoth(page: Page, name: string) {
@@ -30,13 +35,43 @@ async function shotBoth(page: Page, name: string) {
   }
 }
 
-test("seeded credit-assistant journey: discover, register, assess, approve, monitor, export", async ({ page }) => {
-  await freshAdmin(page);
+async function openAvery(browser: Browser) {
+  const page = await browser.newPage();
+  await freshUser(page, "avery@regulait.local", "E2e-Demo-Avery!");
+  return page;
+}
+
+test("seeded credit-assistant journey: discover, register, assess, approve, monitor, remediate", async ({ page, browser }) => {
+  await freshUser(page, "admin@regulait.local", "E2e-Demo-Intake!");
   await page.goto("/ui/admin/shadow-ai");
   await expect(page.getByRole("heading", { name: "Shadow-AI discovery" })).toBeVisible();
   await shotBoth(page, "real-01-discover");
 
-  await page.goto("/ui/admin/governance/intake");
+  await page.getByRole("link", { name: "Register as use case" }).first().click();
+  await expect(page).toHaveURL(/\/ui\/admin\/governance\/intake\?source=shadow-ai/);
+  await expect(page.getByText(/Prefilled only from shadow-AI record/)).toBeVisible();
+  for (const [label, value] of [
+    ["Primary purpose domain", "essential-services"],
+    ["People affected", "customers"],
+    ["Decision autonomy", "human-reviews"],
+    ["Biometric use", "none"],
+    ["Primary sector", "financial-services"],
+    ["Primary data category", "financial"],
+    ["Deployment audience", "customer-facing"],
+  ] as const) await page.getByLabel(label).selectOption(value);
+  for (const [label, value] of [
+    ["Emotion recognition", "no"],
+    ["Social scoring", "no"],
+    ["Manipulative techniques", "no"],
+    ["Profiles natural persons", "yes"],
+    ["Safety component", "no"],
+    ["Interacts directly with people", "yes"],
+    ["Generates synthetic content", "yes"],
+    ["Has an EU nexus", "yes"],
+    ["Can take autonomous actions", "no"],
+    ["Uses an external AI vendor", "yes"],
+  ] as const) await page.getByLabel(label).selectOption(value);
+  await expect(page.getByRole("button", { name: "Draft suggestions" })).toBeEnabled();
   await page.getByRole("button", { name: "Draft suggestions" }).click();
   await expect(page.getByText(/Proposed tier:/)).toContainText("high");
   await shotBoth(page, "real-02-assist");
@@ -52,19 +87,55 @@ test("seeded credit-assistant journey: discover, register, assess, approve, moni
   await expect(page.getByText("Add risk from library")).toBeVisible();
   await shotBoth(page, "real-04-risks-controls");
 
-  await page.goto("/ui/admin/approvals");
-  await expect(page.getByRole("heading", { name: /Approvals/ })).toBeVisible();
-  await shotBoth(page, "real-05-approval-queue");
+  const avery = await openAvery(browser);
+  await avery.goto("/ui/inbox");
+  await expect(avery.getByRole("heading", { name: "Inbox" })).toBeVisible();
+  const signoff = avery.locator("div").filter({ hasText: /^signoff/ }).filter({ has: avery.getByRole("button", { name: "Approve" }) }).first();
+  await expect(signoff).toBeVisible();
+  await shotBoth(avery, "real-05-avery-signoff");
+  await signoff.getByRole("button", { name: "Approve" }).click();
+  await expect(avery.getByText("Approved", { exact: true })).toBeVisible();
+  await expect(avery.getByText("Recently decided")).toBeVisible();
+  await shotBoth(avery, "real-05b-avery-approved");
 
-  await page.goto("/ui/admin/governance/trust");
-  await expect(page.getByRole("heading", { name: "Trust & evidence" })).toBeVisible();
-  await shotBoth(page, "real-06-monitor");
+  await page.goto("/ui/admin/governance/alerts");
+  await expect(page.getByRole("heading", { name: "Governance alerts" })).toBeVisible();
+  await page.getByRole("button", { name: "Evaluate now" }).click();
+  await expect(page.getByRole("status")).toContainText("Evaluation raised");
+  const alert = page.locator("button").filter({ has: page.getByText("high", { exact: true }) }).first();
+  await expect(alert).toBeVisible();
+  await alert.click();
+  await page.getByLabel("Acknowledgement note — required and audited").fill("Ada owns the response and is escalating the evidence-backed remediation.");
+  await page.getByRole("button", { name: "Acknowledge" }).click();
+  await expect(page.getByText(/Acknowledgement note: Ada owns the response/)).toBeVisible();
+  await shotBoth(page, "real-06-alert-acknowledged");
+
+  const approver = page.getByLabel("Independent approver").first();
+  await expect(approver).toBeVisible();
+  await approver.selectOption({ label: "Avery Approver" });
+  await page.getByRole("button", { name: "Propose…" }).first().click();
+  await expect(page.getByText("pending approval", { exact: true })).toBeVisible();
+  await shotBoth(page, "real-07-remediation-proposed");
+
+  await avery.goto("/ui/inbox");
+  const remediation = avery.locator("div").filter({ hasText: /remediation/i }).filter({ has: avery.getByRole("button", { name: "Approve" }) }).first();
+  await expect(remediation).toBeVisible();
+  await remediation.getByRole("button", { name: "Approve" }).click();
+  await expect(avery.getByText("Approved", { exact: true })).toBeVisible();
+  await shotBoth(avery, "real-08-remediation-approved");
+  await avery.close();
+
+  await page.goto("/ui/admin/governance/graph");
+  await expect(page.getByRole("heading", { name: "AI dependency graph" })).toBeVisible();
+  await expect(page.getByText(/nodes/).first()).toBeVisible();
+  await shotBoth(page, "real-09-dependency-graph");
 
   await page.goto("/ui/admin/governance/regulatory");
   await expect(page.getByRole("heading", { name: "Regulatory & policy intelligence" })).toBeVisible();
-  await shotBoth(page, "real-06b-regulatory-intelligence");
+  await expect(page.getByText(/in force/i).first()).toBeVisible();
+  await shotBoth(page, "real-10-regulatory-intelligence");
 
   await page.goto("/ui/admin/audit");
   await expect(page.getByRole("button", { name: "Download signed bundle" })).toBeVisible();
-  await shotBoth(page, "real-07-signed-audit-export");
+  await shotBoth(page, "real-11-signed-audit-export");
 });
