@@ -199,6 +199,8 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await setPolicy("opt_in");
+  // restore ADR-0020's shipped posture (shared database, M-040)
+  await app.inject({ method: "PUT", url: "/v1/interception/settings", headers: AUTH, payload: { anthropicCompatEnabled: false } });
   await app.close();
 });
 

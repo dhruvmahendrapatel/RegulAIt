@@ -72,6 +72,7 @@ import {
   type Db,
 } from "@regulait/db";
 import {
+  SCENARIO_LIBRARY,
   AI_RISK_CATEGORIES,
   AI_RISK_REGISTER_DISCLAIMER,
   DEFAULT_RISK_LIBRARY,
@@ -713,6 +714,17 @@ export function registerRiskRoutes(app: FastifyInstance, db: Db): void {
     library: DEFAULT_RISK_LIBRARY,
     categoryEvidence: RISK_CATEGORY_EVIDENCE,
     disclaimer: AI_RISK_REGISTER_DISCLAIMER,
+  }));
+
+  // Demo G2 / X8: the agentic risk-scenario library, served so the browser
+  // never imports @regulait/shared (whose root also exports server-only
+  // helpers). Scenarios carry NO likelihood or impact on purpose: those are
+  // the declared judgment of the person registering the risk.
+  app.get("/v1/risks/scenarios", async () => ({
+    scenarios: SCENARIO_LIBRARY,
+    note:
+      "Scenarios suggest a title, description, category, dimension, domains and controls. Likelihood and impact " +
+      "are not suggested — the person registering the risk declares them.",
   }));
 
   // Register: non-admin on purpose — naming a risk is the front door, and the

@@ -74,3 +74,16 @@ describe("demo:check over the real dataset", () => {
     expect(checks.find((c) => c.beat === "1 Intake assistant")!.level).toBe("PASS");
   });
 });
+
+describe("G2/X8 scenario library over the API", () => {
+  it("serves the scenarios without likelihood or impact (the registrant declares those)", async () => {
+    const r = await app.inject({ method: "GET", url: "/v1/risks/scenarios", headers: { authorization: `Bearer ${BOOT}` } });
+    expect(r.statusCode, r.body).toBe(200);
+    const scenarios = r.json().scenarios as Array<Record<string, unknown>>;
+    expect(scenarios.length).toBeGreaterThanOrEqual(33);
+    for (const s of scenarios) {
+      expect(s).not.toHaveProperty("likelihood");
+      expect(s).not.toHaveProperty("impact");
+    }
+  });
+});

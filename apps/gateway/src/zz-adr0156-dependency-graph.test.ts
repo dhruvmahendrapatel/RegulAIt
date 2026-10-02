@@ -162,7 +162,7 @@ describe("ADR-0156 the AI-system dependency graph", () => {
   });
 
   it("propagates the vendor's risk to the use case, with a walkable path", async () => {
-    const g = (await get("/v1/inventory/graph")).json() as { nodes: Node[] };
+    const g = (await get("/v1/inventory/graph")).json() as { nodes: Node[]; edges: Edge[] };
     const node = (k: string) => g.nodes.find((n) => n.key === k)!;
 
     const vendor = node(`vendor:${ids.vendor}`);
@@ -171,13 +171,20 @@ describe("ADR-0156 the AI-system dependency graph", () => {
     const agentA = node(`agent:${ids.agentA}`);
     // residual (low × medium = 2) is the agent's own rating, not inherent 4
     expect(agentA.ownRisk).toMatchObject({ score: 2, band: "low", riskId: ids.riskAgent });
-    expect(agentA.propagatedRisk).toMatchObject({ score: 9, sourceNodeKey: `vendor:${ids.vendor}` });
+    // Shared database (M-040): another file's vendor may ALSO link the `mock`
+    // provider with an equal 9, and a tie is broken deterministically, not in
+    // our favour. So pin the SHAPE — a vendor supplying this model is the
+    // source, at 9 — and pin our vendor by its own node.
+    const supplying = (k: string | null) => !!k && k.startsWith("vendor:") && g.edges.some((e: any) => e.from === modelKeyA && e.to === k && e.kind === "supplied_by");
+    expect(agentA.propagatedRisk.score).toBe(9);
+    expect(supplying(agentA.propagatedRisk.sourceNodeKey)).toBe(true);
 
     const uc = node(`use_case:${ids.useCase}`);
     // the closed 9 on the use case itself does not count
     expect(uc.ownRisk).toMatchObject({ score: 0, band: "none", openRisks: 0 });
-    expect(uc.propagatedRisk).toMatchObject({ score: 9, band: "high", sourceRiskId: ids.riskVendor });
-    expect(uc.propagatedRisk.path).toEqual([`use_case:${ids.useCase}`, `agent:${ids.agentA}`, modelKeyA, `vendor:${ids.vendor}`]);
+    expect(uc.propagatedRisk).toMatchObject({ score: 9, band: "high" });
+    expect(uc.propagatedRisk.path.slice(0, 3)).toEqual([`use_case:${ids.useCase}`, `agent:${ids.agentA}`, modelKeyA]);
+    expect(supplying(uc.propagatedRisk.path[3] ?? null)).toBe(true);
 
     // accepted risk counts (medium × high = 6)
     expect(node(`agent:${ids.agentB}`).ownRisk).toMatchObject({ score: 6, band: "high" });

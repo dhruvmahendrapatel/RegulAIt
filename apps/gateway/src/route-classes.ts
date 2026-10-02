@@ -172,6 +172,8 @@ export const NON_ADMIN_ROUTES = new Set([
   "POST /v1/risks",
   "GET /v1/risks",
   "GET /v1/risks/library",
+  // G2/X8: the scenario library — same class as the risk library
+  "GET /v1/risks/scenarios",
   "GET /v1/risks/:riskId",
   "PATCH /v1/risks/:riskId",
   "POST /v1/risks/:riskId/transition",
