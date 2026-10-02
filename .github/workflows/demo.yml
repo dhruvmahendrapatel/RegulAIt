@@ -1,0 +1,104 @@
+name: Demo journey
+
+# The AI-intake demo (2026-10-05) end to end, in a real browser, on a real
+# database: `demo:prepare` on an empty Postgres → the gateway → the seeded-DB
+# Playwright journey (register from shadow AI → independent approval → alert →
+# remediation approved by a second person → graph → regulatory → signed audit
+# export), then the mocked UI suite.
+#
+# BUDGET (see ci.yml's header): ~6 billed minutes a run (install + build
+# dominate). It runs only when a PR touches the code the demo exercises, or on
+# demand (`workflow_dispatch`) — NOT on every push.
+on:
+  pull_request:
+    paths:
+      - 'apps/web/**'
+      - 'apps/gateway/src/demo-*'
+      - 'apps/gateway/src/use-cases.ts'
+      - 'apps/gateway/src/governance-monitor.ts'
+      - 'apps/gateway/src/remediation.ts'
+      - 'apps/gateway/src/deploy-gate.ts'
+      - 'apps/gateway/src/shadow-ai.ts'
+      - 'packages/shared/src/demo-intake/**'
+      - '.github/workflows/demo.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: demo-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  demo-journey:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: regulait
+          POSTGRES_PASSWORD: regulait
+          POSTGRES_DB: regulait_demo
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U regulait -d regulait_demo"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgres://regulait:regulait@localhost:5432/regulait_demo
+      # the spec mints one-time passwords with this token
+      REGULAIT_BOOTSTRAP_TOKEN: e2e-bootstrap-token
+      # 64-hex test-fixture key, same shape secrets.ts asserts. Not a secret.
+      REGULAIT_DATA_KEY: dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+      REGULAIT_EPHEMERAL_LICENSE: '1'
+      E2E_BASE_URL: http://127.0.0.1:3105
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm -r build
+
+      - name: demo:prepare (empty database → 17/17 demo:check)
+        run: pnpm --filter @regulait/gateway demo:prepare
+        env:
+          REGULAIT_LICENSE_KEYRING: ${{ runner.temp }}/license-keys
+
+      - name: Start the gateway
+        run: |
+          PORT=3105 REGULAIT_AUTH_RATE_LIMIT_MAX=1000 REGULAIT_RATE_LIMIT_MAX=20000 \
+            nohup node apps/gateway/dist/main.js > "$RUNNER_TEMP/gateway.log" 2>&1 &
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:3105/health && exit 0; sleep 1; done
+          cat "$RUNNER_TEMP/gateway.log"; exit 1
+        env:
+          REGULAIT_LICENSE_KEYRING: ${{ runner.temp }}/license-keys
+
+      - run: pnpm --filter @regulait/web exec playwright install --with-deps chromium
+
+      - name: Real seeded-database journey
+        run: pnpm --filter @regulait/web exec playwright test -c playwright.demo-real.config.ts
+
+      - name: Mocked UI suite
+        run: pnpm --filter @regulait/web exec playwright test -c playwright.demo-mock.config.ts
+
+      - name: Keep the evidence when it fails
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-journey-failure
+          path: |
+            apps/web/test-results
+            apps/web/e2e/artifacts/demo/real-*.png
+            ${{ runner.temp }}/gateway.log
+          retention-days: 7
