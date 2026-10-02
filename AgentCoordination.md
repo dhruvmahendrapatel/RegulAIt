@@ -16,7 +16,7 @@ this line and every milestone moves with it.)
 | Agent | Now | Next | ETA (UTC) | Last check-in (UTC) | Blocked on |
 |---|---|---|---|---|---|
 | Claude | reviews done (X2/X6/X9 VERIFIED; G3-G5 VERIFIED); C12+C13 shipped | re-review X1/X3/X4/X5/X7/X8 and G6 as they land; next backend item | — | 10-02 03:04 | — |
-| Codex | X4 corrected and ready for review | X8 consume live scenarios endpoint; remove package alias | — | 10-02 03:37 | — |
+| Codex | X8 follow-up corrected and ready for review | X5 complete end-to-end demo journey and date consistency | — | 10-02 03:41 | — |
 | Gemini | finished G6, G7, G8, G9 | wait for Claude review | — | 10-02 03:09 | — |
 
 ## Check-in protocol (owner directive 10-02: every agent, at least hourly)
@@ -225,21 +225,17 @@ and an explicit "unmeasured" state.
   searchable picker over G2's `SCENARIO_LIBRARY` (filter by dimension and
   domain) that prefills `POST /v1/risks` (title, description, category) and
   then links the scenario's `suggestedControls` via `POST /v1/risks/:id/controls`.
-  Status: CHANGES-REQUESTED (Claude, 10-02 03:31, review of bd9571b): the core fix is
-  RIGHT (the person must choose likelihood and impact, no defaults, no invented
-  fallbacks). One change: drop the `@regulait/shared` alias in vite.config.ts
-  and the tsconfig `paths` entry — aliasing the whole package name to one file
-  silently breaks any future `@regulait/shared` import in the web app. Fetch
-  the scenarios from the NEW `GET /v1/risks/scenarios` → `{ scenarios, note }`
-  (Claude added it; no likelihood/impact in the payload by design).
-  Evidence: `RiskLibraryPicker.tsx` imports `SCENARIO_LIBRARY` from
-  `@regulait/shared`, uses its required dimension/domain without fallbacks, and
-  requires explicit likelihood + impact selections before enabling the POST.
+  Status: READY-FOR-REVIEW (`bd9571b`, `4f30e21`; Codex, 10-02 03:41 UTC)
+  Evidence: `RiskLibraryPicker.tsx` fetches the reviewed, rating-free scenarios
+  from `GET /v1/risks/scenarios`; the temporary whole-package alias and TS path
+  override are removed. The UI uses the API's required dimension/domain fields
+  without fallbacks and requires explicit likelihood + impact selections before
+  enabling the POST.
   `demo-governance.mock.spec.ts` asserts the button is disabled before both
   choices and that the chosen `high` × `low` values reach the request. Formal
   gates: `corepack pnpm --filter @regulait/web exec tsc --noEmit` PASS;
-  `corepack pnpm --filter @regulait/web build` PASS (197 modules); isolated
-  Playwright PASS 1/1; affordance census PASS 54/54. Updated light/dark
+  `corepack pnpm --filter @regulait/web build` PASS (196 modules); isolated
+  Playwright PASS 4/4; affordance census PASS 54/54. Updated light/dark
   `05-use-case-risks` screenshots.
 - **X9 — Regulatory intelligence page** — VERIFIED 10-02 (see §6).
 - **X10 — Polish (after X3/X4/X5/X7/X8)** from the X2/X6/X9 reviews:
