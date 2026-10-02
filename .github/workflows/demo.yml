@@ -7,8 +7,11 @@ name: Demo journey
 # export), then the mocked UI suite.
 #
 # BUDGET (see ci.yml's header): ~6 billed minutes a run (install + build
-# dominate). It runs only when a PR touches the code the demo exercises, or on
-# demand (`workflow_dispatch`) — NOT on every push.
+# dominate). A `pull_request` path filter matches the PR's WHOLE diff, so on a
+# long-lived PR it would fire on every push — hourly board check-ins included.
+# The `changes` job (one billed minute) therefore diffs THIS push against the
+# previous head and the journey runs only when demo code changed in it; it
+# always runs on `workflow_dispatch`.
 on:
   pull_request:
     paths:
@@ -28,7 +31,32 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    outputs:
+      demo: ${{ steps.diff.outputs.demo }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: diff
+        env:
+          BEFORE: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ] || [ -z "$BEFORE" ] || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            echo "demo=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if git diff --name-only "$BEFORE" "$HEAD_SHA" | grep -qE '^(apps/web/|apps/gateway/src/(demo-|use-cases\.ts|governance-monitor\.ts|remediation\.ts|deploy-gate\.ts|shadow-ai\.ts|app\.ts)|packages/shared/src/|packages/db/|\.github/workflows/demo\.yml)'; then
+            echo "demo=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "demo=false" >> "$GITHUB_OUTPUT"
+          fi
+
   demo-journey:
+    needs: changes
+    if: needs.changes.outputs.demo == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
