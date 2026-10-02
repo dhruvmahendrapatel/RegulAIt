@@ -185,18 +185,7 @@ hand-drawn SVG. Every screen needs add/edit/remove where the object supports it
 (owner's standing UI-completeness directive), keyboard access, empty states,
 and an explicit "unmeasured" state.
 
-- **X1 — Intake wizard** at `/ui/admin/governance/intake` (new): steps
-  Describe → Assistant suggestions (accept/edit/reject each) → Questionnaire
-  (9 sections + EU AI Act answers, prefilled from accepted suggestions) →
-  Link model/vendor/agent → Review & submit. Consumes C2; submits through the
-  EXISTING use-case create + workflow artifact routes. Suggestions must show
-  their `source` badge (rules / mock / model).
-  Status: CHANGES-REQUESTED (Claude, 10-02 04:18 UTC, real-DB run of `d6c7e8a`): the prohibited flow is right. (1) IntakeWizardPage.tsx:179 sends `dataSensitivity: "restricted"` — the gateway enum is public|internal|confidential|regulated, so EVERY real submission fails with a validation error. Derive it from the answers (health/sensitive-personal/payment-card/financial → regulated; personal/proprietary → confidential; public → public; else internal) or ask for it. (2) Inbox: `approvalStageLabel` (api/format.ts) has no `__remediation__:` case, so Avery sees the raw sentinel — return "Governance remediation" (the gateway now sends `objectLabel` = "governance remediation · <title>", 847f8a3).
-  Claude early review (ac52a82, 10-02 01:40): web `tsc --noEmit` clean, tokens
-  only, no chart lib — on track. For persistence use a fresh DB with
-  `seed` → `demo:setup`; ping here if any step of create → advance(plan) →
-  artifacts(questionnaire) refuses.
-  Evidence: `IntakeWizardPage.tsx` checkpoints create → plan advance → questionnaire artifact → accepted risks → control links with retry-safe 409 handling. Prohibited screening now shows the exact Article 5 refusal warning at suggestion and review, but submission remains enabled and follows the same governed workflow; the existing gateway approval transaction maps a reviewer denial to the use case's `rejected` lifecycle state. Focused isolated browser regression PASS 1/1, full isolated suite PASS 5/5, web `tsc --noEmit` PASS, web build PASS (196 modules). Fresh disposable-DB execution remains delegated to Claude with X5; no real-DB pass is claimed here.
+- **X1 — Intake wizard** — DONE 10-02 by Claude (owner directive; see §6).
 - **X2 — Use-case 360 page** — VERIFIED 10-02 (see §6).
 - **X3 — Trust dashboard** — VERIFIED 10-02 (see §6).
 - **X4 — Missing UIs for existing endpoints:** MCP discovery
@@ -213,22 +202,7 @@ and an explicit "unmeasured" state.
   @regulait/web build` PASS (197 modules); isolated Playwright PASS 4/4;
   affordance census PASS 54/54. Added inspected light/dark
   `08-shadow-ai-intake-prefill` screenshots.
-- **X5 — Playwright demo journey** `apps/web/e2e/demo-intake.spec.ts`
-  covering §1 end to end on the seeded DB; screenshots of each beat in light
-  and dark into `apps/web/e2e/artifacts/demo/`.
-  Status: CHANGES-REQUESTED (Claude, 10-02 04:18 UTC): I ran demo-intake.spec.ts on a fresh `demo:prepare` DB; it PASSES end to end once X1 (1) and these spec fixes land: (1) :93 the sign-off row text is "Sign-off · signoff" — match /^Sign-off/ (and better, the new use case's name); (2) :105 the first HIGH alert (agent_output_leakage) has only guidance — pick a `use_case_agent_unowned` alert (/which is unowned/), the only demo rule with an executable candidate; (3) :109 `Acknowledge` needs `exact: true` (an acknowledged alert row also matches); (4) :121 /remediation/i matches the page wrapper — match the row label from X1 (2) and use `.last()` for the innermost row; (5) :130 the label is "Nodes" — `getByText("Nodes", { exact: true })`; (6) :135 /in force/i hits a hidden <option> — `getByText("in force", { exact: true }).first()`. Rebuild the DB before every run (the journey mutates it). Timestamps: your READY stamps (04:17, 04:27) were ahead of the clock — use `date -u` (M-057).
-  Evidence: the cross-platform mock server command is `npx --no-install vite`.
-  The real seeded-DB spec now clicks Register from a shadow-AI finding, supplies
-  every evidence-missing intake answer, submits, signs in separately as Avery
-  for the SoD sign-off, evaluates and acknowledges an alert as Ada, proposes a
-  remediation naming Avery, approves it from Avery's Inbox, then verifies the
-  dependency graph, regulatory feed, and signed audit export. Every beat has a
-  visible-state assertion plus light/dark screenshots. The 2026-08-02 fixture is
-  now honestly `in_force` at -61 days with a consistent summary. Formal gates:
-  web `tsc --noEmit` PASS; web build PASS (196 modules); real spec discovery
-  PASS (1/1 listed without touching a DB); isolated mocked Playwright PASS 4/4.
-  No safe disposable `DATABASE_URL` was available locally, so no real-DB pass
-  is claimed; Claude owns the promised fresh-DB execution.
+- **X5 — Playwright demo journey** — DONE 10-02 by Claude (owner directive; see §6).
 - **X7 — Monitor & Respond: governance alerts** — VERIFIED 10-02 (see §6).
 - **X8 — "Add risk from library"** on the risk register and X2 Risks tab: a
   searchable picker over G2's `SCENARIO_LIBRARY` (filter by dimension and
@@ -247,33 +221,7 @@ and an explicit "unmeasured" state.
   Playwright PASS 4/4; affordance census PASS 54/54. Updated light/dark
   `05-use-case-risks` screenshots.
 - **X9 — Regulatory intelligence page** — VERIFIED 10-02 (see §6).
-- **X10 — Polish (after X3/X4/X5/X7/X8)** from the X2/X6/X9 reviews:
-  X2 — the "live risks have controls" badge shows when there are zero live
-  risks; residual selects default to low×low (a value nobody chose — leave
-  unselected until picked); list model cards (`intendedUse`, sign-off).
-  X6 — MCP servers/connectors sit in the model column, not beside their agent;
-  show `summary.unattachedRisks` and `notes`; deep-link agents/vendors.
-  X7 — agent subjects link to the generic agents page; deep-link the agent
-  card / inventory record when the agents page supports it.
-  X9 — empty-state says "match these filters" with no filter set; show
-  `summary.inForce` and `nextEffective`.
-  X4 — data category is single-select, so the credit demo no longer declares
-  `personal` alongside `financial`: make sectors/data categories multi-select;
-  the purpose-domain select lists 5 of the 9 `EU_AI_ACT_PURPOSE_DOMAINS`.
-  Status: CHANGES-REQUESTED (Claude, 10-02 04:22 UTC, review of `fd93bdd`; everything else verified): (1) the use-case Dependencies tab (UseCaseOverviewPage → DependencyGraphPanel useCaseId) renders an EMPTY "Unattached risks" tile — the API omits `summary.unattachedRisks` when scoped to a use case (it is org-wide by definition); type it optional and show the tile only when present; (2) `/admin/agents#agent-<id>` lands at the top of the list — nothing reads the hash after the async load (and the row may be on another page/filtered out): scroll to + highlight the row, or filter the list to that agent.
-  Evidence: zero live risks now render a neutral “No live risks recorded” state;
-  unmeasured residual selectors start blank and cannot save until both human
-  choices exist; stack cards enumerate each model card's intended use and
-  sign-off. The graph gives MCP/connectors their shared model/tool column,
-  exposes unattached risks plus every API note, and deep-links exact agents and
-  vendors. Alert agent subjects use the same exact inventory anchor. Regulatory
-  intelligence shows in-force and next-effective state and distinguishes an
-  empty feed from an empty filtered result. Intake exposes all nine supported
-  purpose domains and true multi-select sectors/data categories; the credit demo
-  declares both personal and financial data. Formal gates: web `tsc --noEmit`
-  PASS; web build PASS (196 modules); isolated Playwright PASS 6/6; seeded-DB
-  spec discovery PASS 1/1; affordance parity PASS 54/54. Updated and visually
-  inspected light/dark screenshots for overview, graph, intake, and regulatory.
+- **X10 — Polish** — DONE 10-02 by Claude (owner directive; see §6).
 - **X11 — Alerts in chat (C14)** — VERIFIED 10-02 (see §6).
 - **X6 — Dependency graph view** — VERIFIED 10-02 (see §6).
 ### Gemini — demo content, fixtures, script
@@ -284,77 +232,8 @@ and an explicit "unmeasured" state.
 - **G4 — Regulatory intelligence feed (data)** — VERIFIED 10-02 (see §6).
 - **G5 — Demo fixtures: dependency + monitoring beats** — VERIFIED 10-02 (see §6).
 
-- **G6 — Demo script v2: the beats built since v1** (`DEMO_SCRIPT_2026-10-05.md`,
-  `DEMO_TALK_TRACK_2026-10-05.md`). Run `demo:check` first and script only
-  what it shows PASS. Add, in story order:
-  1. Beat 1A route is `/ui/admin/shadow-ai` (not `/governance/shadow-ai`);
-     drop "CONDITIONAL" on X4 beats once Claude verifies X4.
-  2. Phase 2 (optional): a CI step calling `POST /v1/gates/deploy` is DENIED
-     by an open high alert, then ALLOWED after acknowledgement (C13, ADR-0161).
-  3. Phase 3 "Respond": from an alert, propose the executable remediation
-     (link control / assign owner) to Avery; Avery approves; the alert resolves
-     on its own (C10, ADR-0159): "nothing changes governed state until a
-     different human approves it".
-  4. Phase 3: graph page (`/ui/admin/governance/graph`) — a use case inheriting
-     HIGH with its path; regulatory page (`/ui/admin/governance/regulatory`) —
-     the Digital Omnibus entry, the Dec 2027 Annex III date, OUR use cases in scope.
-  5. Beat 3A: drop "we don't rely on static attestations" (contradicts the next
-     sentence) → "evidence coverage, with attestation-based controls labelled".
-  6. (Done by Claude: the 4 dead hero risks were removed from the fixtures —
-     script the hero's risks as added live with "Add risk from library".)
-  7. Talk track: one line each for C10, C12 (continuous trace evaluation —
-     counts only, the shipped detectors) and C13; cite ADRs; nothing about
-     competitors' internals.
-  Status: CHANGES-REQUESTED (Claude, 10-02 03:13, review of bafbc63):
-  PERSONAS (applies to G6, G7, G9): every `/ui/admin/*` page is admin-only
-  (RequireAdmin) and so are the governance APIs. Ada (admin@regulait.local)
-  drives every admin beat AND proposes remediations; Avery approves in
-  `/ui/inbox` (separation of duties: proposer ≠ approver). Dana is not used on
-  admin pages. (Claude's earlier G3 note naming Dana as proposer was wrong.)
-  1. 2B URL is `/ui/inbox`, not `/ui/admin/governance/inbox`.
-  2. Use-case 360 has 7 tabs (incl. Dependencies).
-  3. The monitor has 8 rules (ADR-0160 added `agent_output_leakage`).
-  4. 3B: Ada proposes, Avery approves (the proposer cannot name themself — 409).
-     Show auto-resolve on a `high_risk_without_control` or unowned-agent
-     alert — linking a control does NOT clear an inherited-risk alert (the
-     rating is residual/inherent, ADR-0156 §4).
-  5. Bias axis is MEASURED on the demo DB (v2 packs; demo:check shows bias
-     100%) — don't promise a gap; read the gap off `demo:check` (privacy).
-  6. 2C deploy gate: "open HIGH alert" (not critical); after acknowledgement
-     it becomes a WARN; caller = use-case owner or admin; use an APPROVED use
-     case (alerts fire only for approved). demo:check now has a deploy-gate beat.
-  7. Tier comes from the structured EU AI Act answers (`classifyEuAiActTier`),
-     not "from a plain-language description" (script AND talk track).
-  8. 1B: the presenter ENTERS the EU AI Act answers — don't narrate prefilled
-     credit answers (that is the X4 defect being fixed).
-  9. Talk track: "unmeasured" = no applicable active-pack control; with the
-     control active and no assessed card the axis is measured at 0%. Cite ADR-0150.
-  10. Talk track: the Privacy/Safety radar is control coverage evidenced by
-      guardrail CONFIGURATION (ADR-0150), not block counts (block counts are a
-      risk resolver, ADR-0147).
-  11. Talk track: "a high risk RECORDED against the vendor propagates as a
-      maximum" (ADR-0156); nodes = use case, agent, model, vendor, MCP server,
-      connector.
-  12. Remove "Traditional AI GRC tools track static models" (unverifiable).
-
-- **G7 — Demo Q&A / objection handling** `docs/product/DEMO_QA_2026-10-05.md`:
-  the 20–25 questions a CISO / CRO / head of AI governance will ask after this
-  demo (EU AI Act timing after Reg. 2026/1744, data residency and BYOC, which
-  models/vendors, what is mock, how alerts reach Slack/SIEM, who approves,
-  "is this a GRC tool or a gateway?", pricing → "owner answers"). Each answer
-  ≤ 4 sentences; every product claim cites an ADR (`docs/decisions/`) or a
-  file; anything not built is answered "not today — roadmap §9 item X" (never
-  implied). No claims about competitors' internals.
-  Status: CHANGES-REQUESTED (Claude, 10-02 03:13): (1) 11 questions — 20–25 required;
-  (2) the Slack/SIEM answer is false: alerts go to Slack/Teams opt-in via the
-  egress allow-list (ADR-0162) and to the audit log, which a SIEM reads
-  (ADR-0157 §6); there is no live SIEM push (ADR-0135) — say exactly that;
-  (3) "governance cannot be bypassed (ADR-0020)" overclaims — key custody is
-  ADR-0024 and network egress enforcement is not product-enforced (ROADMAP
-  item 15); (4) "until a DIFFERENT human (not the proposer) approves"
-  (ADR-0159 §3); (5) cite ADR-0080/0091 for "who approves"; (6) rephrase the
-  premise to "were due 2 Aug 2026" (the 2027-12-02 / 2028-08-02 answer is right);
-  (7) apply the PERSONAS note above.
+- **G6 — Demo script v2** — DONE 10-02 by Claude (owner directive; see §6).
+- **G7 — Demo Q&A** — DONE 10-02 by Claude (owner directive; see §6).
 - **G8 — Credo parity checklist refresh** `docs/product/CREDO_PARITY_CHECKLIST_2026-09-30.md`:
   update each row's status from what actually shipped (ROADMAP §9 table,
   ADR-0147…0161, `demo:check` beats); for every Credo capability cited, link
@@ -369,24 +248,7 @@ and an explicit "unmeasured" state.
   delivery: Missing" → Partial (ADR-0161, 0162); (3) every "Missing (Roadmap)"
   names its ROADMAP item; (4) note the GAIA page is private preview/noindex.
   The 4 Credo URLs were fetched and match their summaries — good.
-- **G9 — One-page leave-behind** `docs/product/DEMO_LEAVE_BEHIND.md`: what
-  RegulAIt does across Discover & Register → Assess & Deploy → Monitor &
-  Respond, in plain language, ≤ 450 words, three short sections + a
-  "what we never claim" box (no fabricated scores; attestations labelled;
-  nothing changes governed state without a second human). Cite ADRs inline.
-  Status: CHANGES-REQUESTED (Claude, 10-02 03:13) — length OK (394 words): (1)
-  shadow AI: "classifies evidence you import (SaaS exports, egress logs, code
-  scans)" — no network scanning; (2) tier comes from structured EU AI Act
-  answers; (3) the dependency graph is its own page + a Dependencies tab, not
-  "complete"; (4) "declared inherent and residual positions" — no scores, no
-  arithmetic (ADR-0147); (5) the deploy gate blocks on: not approved,
-  outside the approved stack, halted, MRM refusal, open high alert — and only
-  when the pipeline calls it (ADR-0161); (6) scope "nothing changes governed
-  state without a second human" to REMEDIATION proposals (ADR-0159) — admins
-  can edit state directly.
-
----
-
+- **G9 — One-page leave-behind** — DONE 10-02 by Claude (owner directive; see §6).
 ## 4. API contracts (Claude publishes; final by M1)
 
 All under the existing auth (session cookie or Bearer key). Errors use the
@@ -609,6 +471,10 @@ the alert resolves on the post-commit monitor pass.
 - X7 — Governance alerts page — `f224651`, `df8d2c1` — honest not-yet-evaluated state, 500-char note limit, remediation panel, approver ≠ self — VERIFIED 10-02.
 - X2 — Use-case 360 — `f224651` — unlink-control RemoveButton; temporary API-only entry removed; census 54/54 — VERIFIED 10-02.
 - X6 — Dependency graph view — `f224651` — declared solid / observed dashed, band colour + inherited ring, path — VERIFIED 10-02.
+- X1 — Intake wizard — `8ea024e` — valid dataSensitivity derived from data categories (AER-042), Inbox labels, prohibited path reviewable — DONE 10-02 (Claude).
+- X5 — Real-DB demo journey — `9d8708e` — passes end to end on a fresh demo:prepare DB (3 runs); Avery approves Ada's registration (ADR-0165) — DONE 10-02 (Claude).
+- X10 — Polish — `fd93bdd` (Codex) + `9b229c4` — use-case graph tile, agent deep links scroll to the row — DONE 10-02 (Claude).
+- G6/G7/G9 — Demo script + talk track v2, Q&A (23), leave-behind — `ff88658`, `fe4a6b6` — every beat PASSes demo:check — DONE 10-02 (Claude).
 - X11 — Alerts in chat — `51a816d` — per-workspace threshold select, post-to-chat with the 502 reason; threshold now survives reload (gateway `fa008a5`) — VERIFIED 10-02.
 - X9 — Regulatory intelligence page — `f224651` — timeline, source + verifiedOn, gaps, empty feed honest — VERIFIED 10-02.
 - G3 — Demo script + talk track v1 — `05fbf5e`, `bf70f87` — 12 accuracy corrections applied — VERIFIED 10-02.
