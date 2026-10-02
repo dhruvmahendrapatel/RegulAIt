@@ -136,6 +136,10 @@ test("enterprise governance demo surfaces render and complete their core actions
   });
   await expect(page.getByText("Review assistant suggestions", { exact: true })).toBeVisible();
   await shotBoth(page, "01-intake-suggestions");
+  // nothing is accepted until the proposer decides (ADR-0149)
+  await expect(page.getByText("not reviewed").first()).toBeVisible();
+  await expect(page.getByRole("button", { name: "Continue" })).toBeDisabled();
+  await page.getByRole("button", { name: /Accept all remaining/ }).click();
   await page.getByRole("button", { name: "Continue" }).click();
   await page.getByRole("button", { name: "Continue" }).click();
   await page.getByRole("button", { name: "Continue" }).click();
@@ -342,6 +346,7 @@ test("prohibited screening remains reviewable and can be submitted for an indepe
   await page.getByLabel("Social scoring").selectOption("yes");
   await page.getByRole("button", { name: "Draft suggestions" }).click();
   await expect(page.getByRole("alert")).toContainText("Screened PROHIBITED (Art. 5) — a reviewer must refuse it at sign-off; it cannot go live.");
+  await page.getByRole("button", { name: /Accept all remaining/ }).click();
   for (let step = 0; step < 3; step += 1) await page.getByRole("button", { name: "Continue" }).click();
   const submit = page.getByRole("button", { name: "Submit for human review" });
   await expect(submit).toBeEnabled();

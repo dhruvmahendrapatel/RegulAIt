@@ -129,11 +129,10 @@ export default function IntakeWizardPage() {
         ...(agentId ? { agentId } : {}),
       }),
     onSuccess: (data) => {
-      setDecisions(Object.fromEntries([
-        ...data.frameworks.map((item) => [`framework:${item.framework}`, "accepted" as const]),
-        ...data.risks.map((item) => [`risk:${item.scenarioKey}`, "accepted" as const]),
-        ...data.questionnaire.map((item) => [`question:${item.id}`, "accepted" as const]),
-      ]));
+      // frameworks and risks start UNDECIDED — the proposer accepts, edits or
+      // rejects each (ADR-0149); questionnaire drafts are included and edited
+      // answer by answer on the next step
+      setDecisions(Object.fromEntries(data.questionnaire.map((item) => [`question:${item.id}`, "accepted" as const])));
       setQuestionnaire(Object.fromEntries(data.questionnaire.map((item) => [item.id, item.text])));
       setStep(1);
     },
@@ -158,7 +157,21 @@ export default function IntakeWizardPage() {
     safetyComponent && interactsWithHumans && generative && sectors.length > 0 && dataCategories.length > 0 && deployment &&
     euNexus && autonomousActions && usesExternalVendor,
   );
-  const canContinue = step === 0 ? Boolean(title.trim() && description.trim() && intakeAnswersComplete) : Boolean(assist.data);
+  // ADR-0149: a suggestion is the proposer's to accept, edit or reject — none
+  // counts as accepted until someone decides it ("Accept all remaining" is
+  // that decision, made deliberately for the rest)
+  const suggestionKeys = assist.data
+    ? [...assist.data.frameworks.map((item) => `framework:${item.framework}`), ...assist.data.risks.map((item) => `risk:${item.scenarioKey}`)]
+    : [];
+  const undecidedSuggestions = suggestionKeys.filter((key) => !decisions[key]);
+  const acceptAllRemaining = () =>
+    setDecisions((current) => ({ ...current, ...Object.fromEntries(undecidedSuggestions.map((key) => [key, "accepted" as Decision])) }));
+  const canContinue =
+    step === 0
+      ? Boolean(title.trim() && description.trim() && intakeAnswersComplete)
+      : step === 1
+        ? Boolean(assist.data) && undecidedSuggestions.length === 0
+        : Boolean(assist.data);
   const setDecision = (key: string, value: Decision) => setDecisions((current) => ({ ...current, [key]: value }));
 
   const questionnaireMarkdown = () => {
@@ -333,6 +346,16 @@ export default function IntakeWizardPage() {
                   {typeof assist.data.blocking === "string" ? assist.data.blocking : assist.data.blocking.reason ?? "See the rule reasons."}
                 </div>
               ) : null}
+              <div className={v.row}>
+                <Button size="sm" disabled={undecidedSuggestions.length === 0} onClick={acceptAllRemaining}>
+                  Accept all remaining ({undecidedSuggestions.length})
+                </Button>
+                <span className={v.faint}>
+                  {undecidedSuggestions.length === 0
+                    ? "Every suggestion has a decision."
+                    : "Accept, edit or reject each suggestion before you continue — nothing is accepted until you decide."}
+                </span>
+              </div>
               <h2 className={v.sectionTitle}>Frameworks</h2>
               {assist.data.frameworks.map((item) => (
                 <Suggestion key={item.framework} title={item.title} body={suggestionEdits[`framework:${item.framework}`] ?? item.why} source={item.source} decision={decisions[`framework:${item.framework}`]} onDecision={(value) => setDecision(`framework:${item.framework}`, value)} onEdit={(value) => setSuggestionEdits((current) => ({ ...current, [`framework:${item.framework}`]: value }))} />
@@ -482,9 +505,10 @@ function MultiAnswerField(props: { label: string; values: string[]; options: rea
 function Suggestion(props: { title: string; body: string; source: Source; decision?: Decision; onDecision: (value: Decision) => void; onEdit: (value: string) => void; meta?: string }) {
   const [editing, setEditing] = useState(false);
   const rejected = props.decision === "rejected";
+  const accepted = props.decision === "accepted";
   return (
     <section className={`${s.suggestion} ${rejected ? s.suggestionRejected : ""}`}>
-      <div className={s.suggestionHeader}><strong>{props.title}</strong><Badge tone="info">{props.source}</Badge><Badge tone={rejected ? "neutral" : "ok"}>{rejected ? "rejected" : "accepted"}</Badge></div>
+      <div className={s.suggestionHeader}><strong>{props.title}</strong><Badge tone="info">{props.source}</Badge><Badge tone={rejected ? "neutral" : accepted ? "ok" : "warn"}>{rejected ? "rejected" : accepted ? "accepted" : "not reviewed"}</Badge></div>
       {props.meta ? <p className={v.faint}>{props.meta}</p> : null}
       {editing ? (
         <Field label={`Edit ${props.title}`}><Textarea rows={4} value={props.body} onChange={(event) => props.onEdit(event.target.value)} /></Field>
@@ -492,7 +516,7 @@ function Suggestion(props: { title: string; body: string; source: Source; decisi
         <p className={v.dim}>{props.body}</p>
       )}
       <div className={s.suggestionActions}>
-        <Button size="sm" variant={rejected ? "default" : "primary"} onClick={() => props.onDecision("accepted")}>Accept</Button>
+        <Button size="sm" variant={accepted ? "default" : "primary"} onClick={() => props.onDecision("accepted")}>Accept</Button>
         <Button size="sm" variant="ghost" onClick={() => setEditing((value) => !value)}>{editing ? "Done editing" : "Edit"}</Button>
         <Button size="sm" variant={rejected ? "danger" : "ghost"} onClick={() => props.onDecision("rejected")}>Reject</Button>
       </div>

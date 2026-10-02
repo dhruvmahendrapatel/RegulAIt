@@ -82,9 +82,10 @@ Everything runs on the keyless **mock** provider. No live model, no external net
   external vendor **Yes** · everything else **No**.
   Then **Draft suggestions**.
 - **Screen:** *Proposed tier: high* with the rule reasons; frameworks and risks, each with a
-  `rules` source badge. Accept or edit each suggestion, **Continue** through the questionnaire and
-  stack, and on **Review** point at *Data sensitivity: regulated — derived from the declared data
-  categories*. **Submit for human review**.
+  `rules` source badge and **not reviewed** — Continue stays disabled until each has a decision.
+  Reject one (e.g. SOC 2) to show it, then **Accept all remaining**. **Continue** through the
+  questionnaire and stack, and on **Review** point at *Data sensitivity: regulated — derived from
+  the declared data categories*. **Submit for human review**.
 - **Say:** "The tier is computed from the structured EU AI Act answers by deterministic rules —
   not from a description, and never from a model. Suggestions are suggestions: each one is
   accepted, edited or rejected by a person. High-risk obligations apply from 2 December 2027

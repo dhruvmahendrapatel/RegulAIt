@@ -76,6 +76,7 @@ test("seeded credit-assistant journey: discover, register, assess, approve, moni
   await page.getByRole("button", { name: "Draft suggestions" }).click();
   await expect(page.getByText(/Proposed tier:/)).toContainText("high");
   await shotBoth(page, "real-02-assist");
+  await page.getByRole("button", { name: /Accept all remaining/ }).click();
   for (let step = 0; step < 3; step += 1) await page.getByRole("button", { name: "Continue" }).click();
     await page.getByRole("button", { name: "Submit for human review" }).click();
   const workspace = page.getByRole("link", { name: "Open the use-case workspace" });
