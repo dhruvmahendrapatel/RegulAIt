@@ -19,8 +19,10 @@ describe("AgentCoordination.md lint", () => {
   });
 
   it("refuses an appended second Status line on a task", () => {
-    const bad = real.replace(/^(- \*\*C1 — [^\n]*\n)/m, "$1  Status: one\n  Status: two\n");
-    expect(lint(bad, NOW).join("\n")).toMatch(/task C1 has \d+ Status lines/);
+    // a synthetic task, so the test never depends on how a live task is worded
+    const bad = real + "\n- **X99 — synthetic task**\n  Status: one\n  Status: two\n";
+    expect(lint(bad, NOW).join("\n")).toMatch(/task X99 has 2 Status lines/);
+    expect(lint(real + "\n- **X99 — synthetic task**\n  Status: one\n", NOW).join("\n")).not.toMatch(/task X99/);
   });
 
   it("refuses a stale message and an overfull inbox", () => {
