@@ -9,24 +9,35 @@
  *   - a URL change through the API, or by direct SQL, leaves the old consent
  *     UNSPENT (stale, re-queued) with ZERO contact on either upstream; the
  *     fresh review binds upstream B, and only after it is approved does B run;
- *   - a private-range posture change, and admitted-manifest drift, do the same;
+ *   - a private-range posture change (API or SQL), and admitted-manifest drift
+ *     (SQL, or a real manifest resync after the upstream's input schema
+ *     changed), do the same;
  *   - a URL change that lands mid-connect cannot route the signed call to B:
  *     evaluation and connection read one row snapshot, so the bytes go to A;
- *   - breaker churn (operational state on the same row) does NOT invalidate it.
+ *   - breaker churn and health-probe bookkeeping (operational state on the same
+ *     row) do NOT invalidate it;
+ *   - the approver's queue row (GET /v1/approvals — what the Inbox, Review
+ *     Workbench and Approvals page render) names the BOUND target: host,
+ *     posture and manifest digest as recorded at queue time — never the URL,
+ *     and never the server row's current values.
  *
  * Both fake upstreams count HTTP requests and tool invocations; every
  * fail-closed assertion is a zero delta on both. Shared database: per-run tool
- * names and server rows; assertions are deltas (M-008).
+ * names and server rows; assertions are deltas (M-008). The resync case flips
+ * the org's `mcpAdmissionMode` to `log` and restores the prior value.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import { and, approvals, asc, auditLog, createDb, desc, eq, mcpServers, runMigrations, type Db } from "@regulait/db";
+import { and, approvals, asc, auditLog, createDb, desc, eq, inArray, mcpServers, runMigrations, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { governedEvaluate } from "./governed-evaluate.js";
 import { executeGovernedToolCall } from "./mcp-proxy.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -45,10 +56,15 @@ const snapshot = () => ({ A: { ...hits.A }, B: { ...hits.B } });
 let db: Db;
 let app: ReturnType<typeof buildApp>;
 const upstream: Record<"A" | "B", { url: string; close: () => Promise<void> }> = {} as never;
+let gatewayUrl = "";
+const createdServerIds: string[] = [];
 let callerId = "";
+let callerToken = "";
 let approverId = "";
 /** barrier hook: runs once, inside upstream A's first request, before it is served */
 let onFirstHitA: (() => Promise<void>) | null = null;
+/** schema drift: while set, upstream A's tool takes an extra optional input */
+let driftA = false;
 
 async function startUpstream(name: "A" | "B") {
   const httpServer = http.createServer((req, res) => {
@@ -61,7 +77,8 @@ async function startUpstream(name: "A" | "B") {
       void (async () => {
         if (hook) await hook();
         const server = new McpServer({ name: `aer039-${name}`, version: "0.0.1" });
-        server.registerTool(TOOL, { description: TOOL, inputSchema: { text: z.string() } }, async ({ text }) => {
+        const inputSchema = { text: z.string(), ...(name === "A" && driftA ? { note: z.string().optional() } : {}) };
+        server.registerTool(TOOL, { description: TOOL, inputSchema }, async ({ text }) => {
           hits[name].tool++;
           return { content: [{ type: "text", text: `${name} ran: ${text}` }] };
         });
@@ -97,6 +114,7 @@ async function freshServer(label: string): Promise<string> {
   const s = await app.inject({ method: "POST", headers: AUTH, url: "/v1/servers", payload: { name: `aer039-${label}-${RUN}`, url: upstream.A.url } });
   expect(s.statusCode, s.body).toBe(201);
   const serverId = s.json().id as string;
+  createdServerIds.push(serverId);
   await app.inject({ method: "POST", headers: AUTH, url: `/v1/servers/${serverId}/tools`, payload: { name: TOOL, kind: "write" } });
   await app.inject({ method: "POST", headers: AUTH, url: "/v1/grants/tools", payload: { userId: callerId, serverId, toolName: TOOL } });
   const rule = await app.inject({
@@ -150,18 +168,69 @@ async function expectRefusedWithoutContact(serverId: string, signed: string, tex
   expect(row!.status).not.toBe("consumed");
 }
 
+/** the approver's queue row for one approval — the GET the Inbox, Review Workbench and Approvals page render */
+async function reviewRow(approvalId: string): Promise<Record<string, unknown> & { boundTarget?: unknown }> {
+  const r = await app.inject({ method: "GET", headers: AUTH, url: `/v1/approvals?approverUserId=${approverId}` });
+  expect(r.statusCode, r.body).toBe(200);
+  const row = (r.json().approvals as Array<{ id: string }>).find((a) => a.id === approvalId);
+  expect(row, `approval ${approvalId} is not in the approver's queue`).toBeDefined();
+  return row as Record<string, unknown> & { boundTarget?: unknown };
+}
+
+/** the newest pending row — the replacement consent a stale one was re-queued as */
+async function freshPending(serverId: string): Promise<string> {
+  const pending = await rowsFor(serverId, "pending");
+  expect(pending.length).toBeGreaterThan(0);
+  return pending[pending.length - 1]!.id;
+}
+
+const hostOf = (u: string) => new URL(u).host;
+
+const manifestDigestOf = async (serverId: string) =>
+  (await db.select({ d: mcpServers.admissionManifestDigest }).from(mcpServers).where(eq(mcpServers.id, serverId)))[0]!.d;
+
+/** a REAL manifest resync: the caller lists tools through the gateway's MCP
+ * proxy, which fetches the upstream manifest and re-adjudicates it
+ * (`syncUpstreamTools` → `recordManifestScan` — the same pair the ADR-0100
+ * admission re-scan sweep drives), recomputing `admissionManifestDigest` */
+async function resyncManifest(serverId: string) {
+  const client = new Client({ name: "aer039-resync", version: "0.0.1" });
+  await client.connect(
+    new StreamableHTTPClientTransport(new URL(`${gatewayUrl}/mcp/${serverId}`), {
+      requestInit: { headers: { authorization: `Bearer ${callerToken}` } },
+    }),
+  );
+  try {
+    await client.listTools();
+  } finally {
+    await client.close();
+  }
+}
+
+/** the org's admission posture: the scan that computes the manifest digest runs only when it is not `off` */
+async function setAdmissionMode(mcpAdmissionMode: string) {
+  const r = await app.inject({ method: "PUT", headers: AUTH, url: "/v1/org/settings", payload: { mcpAdmissionMode } });
+  expect(r.statusCode, r.body).toBe(200);
+}
+
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "e".repeat(64) });
-  await app.listen({ port: 0, host: "127.0.0.1" });
+  gatewayUrl = await app.listen({ port: 0, host: "127.0.0.1" });
   upstream.A = await startUpstream("A");
   upstream.B = await startUpstream("B");
   callerId = await mkUser(`aer039-caller-${RUN}@example.com`);
   approverId = await mkUser(`aer039-approver-${RUN}@example.com`);
+  const key = await app.inject({ method: "POST", headers: AUTH, url: `/v1/users/${callerId}/keys`, payload: { name: "aer039-key" } });
+  expect(key.statusCode, key.body).toBe(201);
+  callerToken = key.json().token as string;
 }, 120_000);
 
 afterAll(async () => {
+  // the upstreams die with this file: rows left pointing at them would be dead
+  // weight in every later estate-wide sweep (ADR-0100 re-scan, health probe)
+  if (createdServerIds.length > 0) await db.delete(mcpServers).where(inArray(mcpServers.id, createdServerIds));
   app.server.closeAllConnections();
   await app.close();
   await upstream.A.close();
@@ -189,6 +258,11 @@ describe("AER-039 — a consent names its MCP target", () => {
     expect(patch.statusCode, patch.body).toBe(200);
 
     await expectRefusedWithoutContact(serverId, signed, text);
+
+    // the fresh review NAMES B before anyone signs it; the retired one still names A
+    const replacementId = await freshPending(serverId);
+    expect((await reviewRow(replacementId)).boundTarget).toMatchObject({ host: hostOf(upstream.B.url) });
+    expect((await reviewRow(signed)).boundTarget).toMatchObject({ host: hostOf(upstream.A.url) });
 
     // the replacement consent is for B: queue it, approve it, and only then does B receive the call
     const pending = await rowsFor(serverId, "pending");
@@ -275,5 +349,111 @@ describe("AER-039 — a consent names its MCP target", () => {
     expect(snapshot().A.tool - before.A.tool).toBe(1);
     const [row] = await db.select().from(approvals).where(eq(approvals.id, signed));
     expect(row!.status).toBe("consumed");
+  });
+
+  it("a private-range posture change through the API leaves the consent unspent; the fresh review carries the new posture", async () => {
+    const serverId = await freshServer("posture-api");
+    const text = `posture-api-${RUN}`;
+    const signed = await queueAndApprove(serverId, text);
+    // inherit-the-org-default (null) → explicitly allowed: passes the write-time egress check, moves the target
+    const patch = await app.inject({ method: "PATCH", headers: AUTH, url: `/v1/servers/${serverId}`, payload: { allowPrivateRanges: true } });
+    expect(patch.statusCode, patch.body).toBe(200);
+
+    await expectRefusedWithoutContact(serverId, signed, text);
+
+    const replacement = await freshPending(serverId);
+    expect((await reviewRow(replacement)).boundTarget).toEqual({
+      host: hostOf(upstream.A.url),
+      allowPrivateRanges: true,
+      admissionManifestDigest: null,
+    });
+    // control: the consent signed under the NEW posture executes on A, exactly once
+    await approve(replacement);
+    const before = snapshot();
+    expect((await call(serverId, text)).kind).toBe("allowed");
+    expect(snapshot().A.tool - before.A.tool).toBe(1);
+    expect(snapshot().B).toEqual(before.B);
+  });
+
+  it("schema drift seen by a real manifest resync invalidates the consent; resyncing an unchanged manifest does not", async () => {
+    const serverId = await freshServer("resync");
+    const text = `resync-${RUN}`;
+    const prior = (await app.inject({ method: "GET", headers: AUTH, url: "/v1/org/settings" })).json().settings.mcpAdmissionMode as string;
+    await setAdmissionMode("log");
+    try {
+      await resyncManifest(serverId);
+      const admitted = await manifestDigestOf(serverId);
+      expect(admitted).toMatch(/^[0-9a-f]{16}$/);
+      const signed = await queueAndApprove(serverId, text);
+      expect((await reviewRow(signed)).boundTarget).toMatchObject({ admissionManifestDigest: admitted });
+
+      // control: resyncing the SAME manifest re-derives the same digest, and the consent still matches
+      await resyncManifest(serverId);
+      expect(await manifestDigestOf(serverId)).toBe(admitted);
+      const evaluated = await governedEvaluate(db, callerId, serverId, { serverId, name: TOOL, kind: "write" }, { text }, null, null);
+      expect(evaluated.approvedApprovalId).toBe(signed);
+
+      // the upstream's tool input schema changes; the next real resync records the new manifest
+      driftA = true;
+      await resyncManifest(serverId);
+      const drifted = await manifestDigestOf(serverId);
+      expect(drifted).toMatch(/^[0-9a-f]{16}$/);
+      expect(drifted).not.toBe(admitted);
+
+      await expectRefusedWithoutContact(serverId, signed, text);
+      const replacement = await freshPending(serverId);
+      expect((await reviewRow(replacement)).boundTarget).toMatchObject({ admissionManifestDigest: drifted });
+      // control: the consent signed for the drifted manifest executes, exactly once
+      await approve(replacement);
+      const before = snapshot();
+      expect((await call(serverId, text)).kind).toBe("allowed");
+      expect(snapshot().A.tool - before.A.tool).toBe(1);
+    } finally {
+      driftA = false;
+      await setAdmissionMode(prior);
+    }
+  });
+
+  it("health-probe bookkeeping (a lastHealthProbeAt-only update) does NOT invalidate the consent", async () => {
+    const serverId = await freshServer("probe");
+    const text = `probe-${RUN}`;
+    const signed = await queueAndApprove(serverId, text);
+    // the AER-037 health sweep's rotation cursor, written at selection time and touching nothing else
+    await db.update(mcpServers).set({ lastHealthProbeAt: new Date() }).where(eq(mcpServers.id, serverId));
+    const before = snapshot();
+    const out = await call(serverId, text);
+    expect(out.kind).toBe("allowed");
+    expect(snapshot().A.tool - before.A.tool).toBe(1);
+    expect(snapshot().B).toEqual(before.B);
+    const [row] = await db.select().from(approvals).where(eq(approvals.id, signed));
+    expect(row!.status).toBe("consumed");
+  });
+
+  it("the approver's review names the BOUND target: host only, and not the server's current values", async () => {
+    const serverId = await freshServer("review");
+    const text = `review-${RUN}`;
+    const signed = await queueAndApprove(serverId, text);
+    const bound = { host: hostOf(upstream.A.url), allowPrivateRanges: null, admissionManifestDigest: null };
+    expect((await reviewRow(signed)).boundTarget).toEqual(bound);
+
+    // an admin re-points the server at B through a URL that carries a credential
+    // (userinfo is refused at write time; a path or query token is not)
+    const secretUrl = `${upstream.B.url}mcp?api_key=hunter2-${RUN}`;
+    const patch = await app.inject({
+      method: "PATCH",
+      headers: AUTH,
+      url: `/v1/servers/${serverId}`,
+      payload: { url: secretUrl, allowPrivateRanges: true },
+    });
+    expect(patch.statusCode, patch.body).toBe(200);
+
+    // the signed row still names what was SIGNED, although the server row now says B
+    expect((await reviewRow(signed)).boundTarget).toEqual(bound);
+
+    // the re-queued review names B by host, under the posture it was queued with — never the credential
+    await expectRefusedWithoutContact(serverId, signed, text);
+    const replacement = await reviewRow(await freshPending(serverId));
+    expect(replacement.boundTarget).toEqual({ host: hostOf(upstream.B.url), allowPrivateRanges: true, admissionManifestDigest: null });
+    expect(JSON.stringify(replacement)).not.toContain(`hunter2-${RUN}`);
   });
 });

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { Approval } from "../../api/types";
 import { Badge, Button, CodeBlock, Modal, StatusBadge } from "../../ui/kit";
-import { inspectApprovalAction } from "./approvalReview";
+import { describeBoundTarget, inspectApprovalAction } from "./approvalReview";
 import s from "./actionReview.module.css";
 
 export function McpActionReview(props: {
@@ -62,6 +62,7 @@ export function McpActionReview(props: {
         <dl className={s.facts}>
           <dt>Tool</dt><dd>{approval.toolName ?? "Not recorded"}</dd>
           <dt>Server</dt><dd>{approval.serverName ?? approval.serverId ?? "Not recorded"}</dd>
+          <dt>Target</dt><dd>{describeBoundTarget(approval)}</dd>
           <dt>Project</dt><dd>{approval.projectName ?? approval.projectId ?? "Unattributed"}</dd>
           <dt>Requested by</dt><dd>{approval.requestedByName ?? approval.userId}</dd>
           <dt>Consent scope</dt><dd>{approval.approvalScope === "action" ? "Exact action" : approval.approvalScope === "tool" ? "Other arguments for this tool are permitted" : "Not recorded"}</dd>

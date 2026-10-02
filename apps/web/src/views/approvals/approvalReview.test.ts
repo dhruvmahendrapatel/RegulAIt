@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Approval } from "../../api/types";
-import { approvalReviewKey, inspectApprovalAction } from "./approvalReview";
+import { approvalReviewKey, describeBoundTarget, inspectApprovalAction } from "./approvalReview";
 
 const hash = "a".repeat(64);
 const raw = (overrides: Partial<Approval> = {}): Approval => ({
@@ -79,8 +79,37 @@ describe("approval action review", () => {
   it.each([
     { id: "new-id" }, { argumentsDigest: "b".repeat(64) }, { contextDigest: "b".repeat(64) },
     { approvalScope: "tool" }, { argumentsPreviewKind: "mcp_redacted_v1" }, { expiresAt: "2030-01-01T00:00:00Z" },
+    { boundTarget: { host: "mcp-b.internal:9000", allowPrivateRanges: null, admissionManifestDigest: null } },
   ] as Partial<Approval>[])("review cannot transfer across a changed binding: %j", (fields) => {
     expect(approvalReviewKey(raw(fields))).not.toBe(approvalReviewKey(raw()));
+  });
+});
+
+describe("AER-039 — the review names the bound MCP target", () => {
+  it("shows the recorded host, private-range posture and a short manifest digest", () => {
+    const view = describeBoundTarget(raw({
+      boundTarget: { host: "mcp-b.internal:9000", allowPrivateRanges: false, admissionManifestDigest: "1a2b3c4d5e6f7a8b" },
+    }));
+    expect(view).toBe("mcp-b.internal:9000 · private ranges blocked · manifest 1a2b3c4d");
+  });
+
+  it("says what the posture and manifest were, including inherited and unscanned", () => {
+    expect(describeBoundTarget(raw({ boundTarget: { host: "127.0.0.1:4100", allowPrivateRanges: true, admissionManifestDigest: null } })))
+      .toBe("127.0.0.1:4100 · private ranges allowed · manifest not scanned");
+    expect(describeBoundTarget(raw({ boundTarget: { host: "[::1]:4100", allowPrivateRanges: null, admissionManifestDigest: "zz" } })))
+      .toBe("[::1]:4100 · private ranges per org default · manifest not recorded");
+  });
+
+  it.each([undefined, null, "mcp-b.internal", []] as unknown[])("an unrecorded target is never invented: %j", (boundTarget) => {
+    expect(describeBoundTarget(raw({ boundTarget } as Partial<Approval>))).toBe("Not recorded");
+  });
+
+  it("never renders anything but a host (a URL can carry credentials)", () => {
+    const view = describeBoundTarget(raw({
+      boundTarget: { host: "user:secret@mcp-b.internal/path", allowPrivateRanges: null, admissionManifestDigest: null },
+    }));
+    expect(view).not.toContain("secret");
+    expect(view.startsWith("host not recorded")).toBe(true);
   });
 });
 

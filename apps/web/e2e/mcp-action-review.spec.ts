@@ -17,6 +17,7 @@ const password = "E2e-Admin-Phase2!";
 const manifest: Array<Record<string, unknown>> = [];
 const received: unknown[] = [];
 let upstream: http.Server;
+let upstreamHost: string;
 let serverId: string;
 let callerId: string;
 let approverId: string;
@@ -77,7 +78,8 @@ test.beforeAll(async () => {
   await new Promise<void>((resolve) => upstream.listen(0, "127.0.0.1", resolve));
   const address = upstream.address();
   if (!address || typeof address === "string") throw new Error("Missing upstream address");
-  serverId = (await api("/v1/servers", { name: `${prefix}-server`, url: `http://127.0.0.1:${address.port}/` })).id;
+  upstreamHost = `127.0.0.1:${address.port}`;
+  serverId =(await api("/v1/servers", { name: `${prefix}-server`, url: `http://127.0.0.1:${address.port}/` })).id;
 });
 
 test.afterAll(async () => {
@@ -125,6 +127,8 @@ test("admin sees the effective action, approves, and only that snapshot reaches 
   await expect(dialog.getByText("PII redacted", { exact: true })).toBeVisible();
   await expect(dialog.getByText("Exact action", { exact: true })).toBeVisible();
   await expect(dialog.getByText(`${prefix}-server`, { exact: true })).toBeVisible();
+  // AER-039: the target the consent is bound to, by host — never the URL
+  await expect(dialog.getByText(new RegExp(`^${upstreamHost.replaceAll(".", "\\.")} · private ranges `))).toBeVisible();
   await expect(dialog.getByRole("heading", { name: "Effective arguments" })).toBeVisible();
   await expect(dialog.locator("pre")).toContainText("[EMAIL]");
   await expect(dialog.locator("pre")).not.toContainText("alice@example.test");

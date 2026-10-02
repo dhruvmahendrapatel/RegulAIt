@@ -1863,3 +1863,65 @@ function auditTarget(row: { url: string; allowPrivateRanges: boolean | null; adm
   }
   return { host, allowPrivateRanges: row.allowPrivateRanges ?? null, admissionManifestDigest: row.admissionManifestDigest ?? null };
 }
+
+/** AER-039 — the target a queued MCP consent is bound to, as an approver sees it */
+export interface ApprovalBoundTarget {
+  host: string | null;
+  allowPrivateRanges: boolean | null;
+  admissionManifestDigest: string | null;
+}
+
+/**
+ * AER-039 — the target each MCP consent was BOUND to, for the review surface.
+ *
+ * Read back from the tool-call audit row the queueing call wrote (`auditTarget`
+ * above, beside the same `contextDigest`), never from the server row's CURRENT
+ * values: an approver signs what the call was evaluated against, and a server
+ * edited since must not be shown as the thing being signed. The context digest
+ * commits to the full target, so ANY audit row carrying the consent's own digest
+ * names exactly its target; the time window is only a scan bound on the
+ * (user_id, at) index. The queueing row precedes `requested_at`; the five
+ * minutes after it absorb gateway/database clock skew (audit `at` is stamped by
+ * the gateway, `requested_at` by Postgres). No such row — a pre-v3 consent, a
+ * row not queued by the proxy — is null: shown as not recorded, never filled in
+ * from the live row.
+ */
+export async function boundTargetsForApprovals(
+  db: Db,
+  approvalIds: string[],
+): Promise<Map<string, ApprovalBoundTarget | null>> {
+  const out = new Map<string, ApprovalBoundTarget | null>();
+  if (approvalIds.length === 0) return out;
+  // Raw SQL on purpose: drizzle un-qualifies column refs inside a single-table
+  // select's SQL field, which would compare audit_log's columns with themselves.
+  const res = await db.execute(sql`
+    select a.id as "approvalId", (
+      select l.detail -> 'target' from audit_log l
+      where l.user_id = a.user_id
+        and l.server_id = a.server_id
+        and l.tool_name = a.tool_name
+        and l.at <= a.requested_at + interval '5 minutes'
+        and l.at > a.requested_at - interval '1 hour'
+        and l.detail ->> 'contextDigest' = a.context_digest
+        and jsonb_typeof(l.detail -> 'target') = 'object'
+      order by l.at desc
+      limit 1
+    ) as "target"
+    from approvals a
+    where a.id in (${sql.join(approvalIds.map((id) => sql`${id}`), sql`, `)})
+  `);
+  for (const row of (res as unknown as { rows: Array<{ approvalId: string; target: unknown }> }).rows) {
+    const t = row.target;
+    if (t === null || typeof t !== "object" || Array.isArray(t)) {
+      out.set(row.approvalId, null);
+      continue;
+    }
+    const v = t as Record<string, unknown>;
+    out.set(row.approvalId, {
+      host: typeof v.host === "string" ? v.host : null,
+      allowPrivateRanges: typeof v.allowPrivateRanges === "boolean" ? v.allowPrivateRanges : null,
+      admissionManifestDigest: typeof v.admissionManifestDigest === "string" ? v.admissionManifestDigest : null,
+    });
+  }
+  return out;
+}

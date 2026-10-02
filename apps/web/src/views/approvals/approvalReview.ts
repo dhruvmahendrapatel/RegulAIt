@@ -63,8 +63,22 @@ export function inspectApprovalAction(approval: Approval, now = Date.now()): Act
   return view;
 }
 
-/** A review is not transferable to a different issued action or policy. */
+/** AER-039: the MCP target the consent is bound to, as the queue recorded it —
+ * never the server's current row. Host only: a full URL can carry credentials. */
+export function describeBoundTarget(approval: Approval): string {
+  const target: unknown = approval.boundTarget;
+  if (!record(target)) return "Not recorded";
+  const host = typeof target.host === "string" && /^[A-Za-z0-9._~%:[\]-]+$/.test(target.host) ? target.host : "host not recorded";
+  const posture = target.allowPrivateRanges === true ? "private ranges allowed"
+    : target.allowPrivateRanges === false ? "private ranges blocked" : "private ranges per org default";
+  const manifest = typeof target.admissionManifestDigest === "string" && /^[a-f0-9]{8,}$/.test(target.admissionManifestDigest)
+    ? `manifest ${target.admissionManifestDigest.slice(0, 8)}`
+    : target.admissionManifestDigest == null ? "manifest not scanned" : "manifest not recorded";
+  return `${host} · ${posture} · ${manifest}`;
+}
+
+/** A review is not transferable to a different issued action, policy or target. */
 export function approvalReviewKey(approval: Approval): string {
   return JSON.stringify([approval.id, approval.argumentsDigest, approval.contextDigest,
-    approval.argumentsPreviewKind, approval.approvalScope, approval.expiresAt]);
+    approval.argumentsPreviewKind, approval.approvalScope, approval.expiresAt, approval.boundTarget ?? null]);
 }

@@ -390,6 +390,9 @@ export interface Approval {
   approvalScope?: "action" | "tool" | null;
   contextDigest?: string | null;
   expiresAt?: string | null;
+  /** AER-039: the MCP target this consent is bound to, as recorded at queue
+   * time — host only (a URL can carry credentials). null = not recorded. */
+  boundTarget?: ApprovalBoundTarget | null;
   selfReview?: boolean;
   requestedByName?: string | null;
   approverName?: string | null;
@@ -401,6 +404,12 @@ export interface Approval {
     conflicting: ConflictSide;
     current: ConflictSide | null;
   };
+}
+
+export interface ApprovalBoundTarget {
+  host: string | null;
+  allowPrivateRanges: boolean | null;
+  admissionManifestDigest: string | null;
 }
 
 export interface ConflictSide {

@@ -275,7 +275,7 @@ export interface BuildAppOptions {
   recommendationJudge?: RecommendationJudge | null;
 }
 import { z } from "zod";
-import { registerMcpProxy } from "./mcp-proxy.js";
+import { boundTargetsForApprovals, registerMcpProxy } from "./mcp-proxy.js";
 import { ExternalEffectBlockedError } from "./external-effects.js";
 import { registerAgentConnectorRoutes } from "./agents-connectors.js";
 import { registerCustomProviderRoutes } from "./custom-providers.js";
@@ -2693,7 +2693,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     const runIds = ids(rows.map((r) => r.runId));
     const projectIds = ids(rows.map((r) => r.projectId));
     const approvalServerIds = ids(rows.map((r) => r.serverId));
-    const [userRows, instanceRows, runRows, projectRows, approvalServerRows] = await Promise.all([
+    const [userRows, instanceRows, runRows, projectRows, approvalServerRows, boundTargetFor] = await Promise.all([
       userIds.length
         ? db
             .select({ id: users.id, displayName: users.displayName, email: users.email })
@@ -2721,6 +2721,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       approvalServerIds.length
         ? db.select({ id: mcpServers.id, name: mcpServers.name }).from(mcpServers).where(inArray(mcpServers.id, approvalServerIds))
         : [],
+      // AER-039 (ADR-0166): the target each MCP consent is BOUND to, from its
+      // queue audit row — what the approver signs, not the server's live row
+      boundTargetsForApprovals(
+        db,
+        rows.filter((r) => r.objectType === "mcp_tool" && r.contextDigest !== null).map((r) => r.id),
+      ),
     ]);
     const nameOf = new Map(userRows.map((u) => [u.id, u.displayName || u.email]));
     const instanceLabel = new Map(
@@ -2929,6 +2935,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         ...r,
         serverName: r.serverId ? approvalServerLabel.get(r.serverId) ?? null : null,
         projectName: r.projectId ? projectLabel.get(r.projectId) ?? null : null,
+        // AER-039: host + posture + manifest digest only — never the URL
+        ...(r.objectType === "mcp_tool" ? { boundTarget: boundTargetFor.get(r.id) ?? null } : {}),
         // Finding-6 separation-of-duties surface: the person who would sign
         // IS the user who triggered the governed action — the UI badges it,
         // deciding it requires a recorded reason. Three ways that happens,
