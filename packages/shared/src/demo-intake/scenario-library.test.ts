@@ -54,9 +54,7 @@ describe("SCENARIO_LIBRARY", () => {
     }
     
     for (const s of SCENARIO_LIBRARY) {
-      if (counts[s.category] !== undefined) {
-        counts[s.category] = (counts[s.category] ?? 0) + 1;
-      }
+      counts[s.category] = (counts[s.category] ?? 0) + 1;
     }
     
     for (const cat of AI_RISK_CATEGORIES) {
