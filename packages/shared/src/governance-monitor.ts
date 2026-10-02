@@ -18,6 +18,18 @@
 import type { PropagatedRating, RiskBand } from "./dependency-graph.js";
 import type { TrustDimension } from "./risks.js";
 
+/** guardrail detector ids as words for alert titles (`semantic_dlp` → `semantic DLP`) */
+const DETECTOR_LABELS: Record<string, string> = {
+  semantic_dlp: "semantic DLP",
+  pii: "PII",
+  prompt_injection: "prompt injection",
+  jailbreak: "jailbreak",
+  toxicity: "toxicity",
+};
+export function detectorLabel(detector: string): string {
+  return DETECTOR_LABELS[detector] ?? detector.replace(/_/g, " ");
+}
+
 export const MONITOR_SEVERITIES = ["low", "medium", "high"] as const;
 export type MonitorSeverity = (typeof MONITOR_SEVERITIES)[number];
 
@@ -230,7 +242,8 @@ export function evaluateMonitorRules(input: MonitorInput): MonitorFinding[] {
           severity: sev("agent_output_leakage"),
           title:
             `${a.name} returned flagged content in ${a.outputLeaks.flagged} of ${a.outputLeaks.evaluated} ` +
-            `evaluated response(s) (${Object.keys(a.outputLeaks.byDetector).sort().join(", ")})`,
+            `evaluated ${a.outputLeaks.evaluated === 1 ? "response" : "responses"} ` +
+            `(${Object.keys(a.outputLeaks.byDetector).sort().map(detectorLabel).join(", ")})`,
           detail: { useCaseId: uc.id, agentId: a.id, ...a.outputLeaks },
         });
       }
@@ -252,8 +265,8 @@ export function evaluateMonitorRules(input: MonitorInput): MonitorFinding[] {
         subjectKey: `${subjectKey}>agent:${o.servedAgentId}`,
         severity: sev("use_case_served_outside_stack"),
         title:
-          `${o.calls} call(s) for ${uc.name} (to ${o.requested.map((r) => r.name).join(", ")}) were served by ` +
-          `${o.servedAgentName}, which is outside its approved stack`,
+          `${o.calls} ${o.calls === 1 ? "call" : "calls"} for ${uc.name} (to ${o.requested.map((r) => r.name).join(", ")}) ` +
+          `${o.calls === 1 ? "was" : "were"} served by ${o.servedAgentName}, which is outside its approved stack`,
         detail: {
           useCaseId: uc.id,
           servedAgentId: o.servedAgentId,

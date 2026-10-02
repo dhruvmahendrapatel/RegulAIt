@@ -49,7 +49,7 @@ test("seeded credit-assistant journey: discover, register, assess, approve, moni
 
   await page.getByRole("link", { name: "Register as use case" }).first().click();
   await expect(page).toHaveURL(/\/ui\/admin\/governance\/intake\?source=shadow-ai/);
-  await expect(page.getByText(/Prefilled only from shadow-AI record/)).toBeVisible();
+  await expect(page.getByText(/Prefilled from a shadow-AI finding/)).toBeVisible();
   for (const [label, value] of [
     ["Primary purpose domain", "essential-services"],
     ["People affected", "customers"],
@@ -98,7 +98,7 @@ test("seeded credit-assistant journey: discover, register, assess, approve, moni
   await expect(avery.getByRole("heading", { name: "Inbox" })).toBeVisible();
   // THIS run's registration — routed to Avery, the independent governance approver
   // (demo:intake installs the intake template naming Avery), never to its proposer
-  const signoff = avery.locator("div").filter({ hasText: /^Sign-off · signoff · AI use-case intake: Govern / }).filter({ has: avery.getByRole("button", { name: "Approve" }) }).last();
+  const signoff = avery.locator("div").filter({ hasText: /^Sign-off · AI use-case intake: Govern / }).filter({ has: avery.getByRole("button", { name: "Approve" }) }).last();
   await expect(signoff).toBeVisible();
   await shotBoth(avery, "real-05-avery-signoff");
   await signoff.getByRole("button", { name: "Approve" }).click();

@@ -468,7 +468,7 @@ describe("the inventory is actionable and states its own coverage", () => {
     expect(body.coverage.statement).toMatch(/ships no collector/);
     expect(body.coverage.statement).toMatch(/does not prove its absence/);
     expect(body.coverage.sourcesPossible).toBe(4);
-    expect(body.posture).toMatch(/SIGNAL, NOT PROOF/);
+    expect(body.posture).toMatch(/signal, not proof of misuse/);
     const severities = body.findings.map((f: { severity: string }) => f.severity);
     const rank: Record<string, number> = { critical: 3, high: 2, medium: 1, low: 0 };
     for (let i = 1; i < severities.length; i += 1) {

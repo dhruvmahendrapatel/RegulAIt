@@ -272,7 +272,7 @@ test("shadow-AI registration prefills evidence only and requires proposer answer
   await page.getByRole("link", { name: "Register as use case" }).click();
   await expect(page).toHaveURL(/source=shadow-ai/);
   await expect(page.getByLabel("Use-case name")).toHaveValue("Govern team-17");
-  await expect(page.getByLabel("What will the system do?")).toHaveValue(/Evidence sources: egress_log/);
+  await expect(page.getByLabel("What will the system do?")).toHaveValue(/Evidence: Egress logs/);
   const draft = page.getByRole("button", { name: "Draft suggestions" });
   await expect(draft).toBeDisabled();
   await expect(page.getByLabel("Primary purpose domain")).toHaveValue("");

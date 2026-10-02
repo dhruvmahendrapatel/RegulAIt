@@ -147,9 +147,9 @@ Everything runs on the keyless **mock** provider. No live model, no external net
 - **URL:** `/ui/admin/governance/alerts` → **Evaluate now**
 - **Screen:** the monitor's alerts (14 active on 2026-10-02) from its 9 rules, including:
   - *"… inherits a HIGH rating from Acme Internal AI Platform"* — with the propagation path;
-  - *"balanced-mock returned flagged content in 1 of N evaluated response(s) (semantic_dlp)"* —
+  - *"balanced-mock returned flagged content in 1 of N evaluated responses (semantic DLP)"* —
     continuous trace evaluation caught a credential the inline guardrail let through;
-  - *"N call(s) for Internal IT Knowledge Base Bot (to balanced-mock) were served by
+  - *"N calls for Internal IT Knowledge Base Bot (to balanced-mock) were served by
     fast-mock, which is outside its approved stack"* — the cost optimizer moved approved traffic
     to an agent the approval never covered;
   - *"… depends on premium-mock, which is unowned"*.

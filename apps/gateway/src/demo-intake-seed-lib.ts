@@ -40,9 +40,9 @@ export interface DemoSeedReport {
 }
 
 /** vendors: the vendor-assessment template still routes to its requester */
-const SEED_REASON = "seeded demo record (demo:intake) — self-review recorded for the demo dataset";
+const SEED_REASON = "Demo dataset record — self-review recorded";
 /** use cases: decided by the independent governance approver (ADR-0165) */
-const SEED_REASON_USE_CASE = "seeded demo record (demo:intake) — decided by the governance approver";
+const SEED_REASON_USE_CASE = "Demo dataset record — decided by the governance approver";
 
 export async function seedDemoIntake(
   app: FastifyInstance,

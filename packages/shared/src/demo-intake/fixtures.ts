@@ -305,7 +305,7 @@ export const DEMO_INTAKE_FIXTURES: DemoIntakeFixtures = {
       complianceTags: [],
       targetStatus: "retired",
       decisionReason:
-        "Superseded by the Multi-Modal Brand Assistant (uc-10); system decommissioned.",
+        "Superseded by the Multi-Modal Brand Assistant; system decommissioned.",
       intendedAgentNames: ["fast-mock"],
       intake: {
         title: "Marketing Campaign Copy Generator",

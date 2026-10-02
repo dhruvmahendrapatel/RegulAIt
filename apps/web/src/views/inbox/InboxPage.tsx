@@ -10,7 +10,7 @@ import { Link } from "react-router-dom";
 import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../api/client";
 import type { Approval, CheckResult, WorkflowDetailResponse } from "../../api/types";
-import { ago, approvalStageLabel } from "../../api/format";
+import { ago, approvalStageLabel, humanize } from "../../api/format";
 import { useSession } from "../../session/SessionContext";
 import { PageHeader } from "../../shell/AppShell";
 import {
@@ -35,10 +35,10 @@ const approvalLabel = (a: Approval): string => {
   if (sentinel) return sentinel;
   if (a.objectType === "infra_operation")
     return "Infra remediation" + (a.objectLabel ? ` · ${a.objectLabel}` : "");
-  return (
-    (a.objectType === "workflow" ? "Sign-off · " : a.objectType === "run" ? "Run escalation · " : "") +
-    (a.stageId ?? "")
-  );
+  const stage = humanize(a.stageId);
+  if (a.objectType === "workflow") return /sign-off$/i.test(stage) ? stage : `Sign-off · ${stage}`;
+  if (a.objectType === "run") return `Run escalation · ${stage}`;
+  return stage;
 };
 
 const approvalTarget = (a: Approval): string | null => {
@@ -276,7 +276,7 @@ function MergeGateEvidence(props: { inst: WorkflowDetailResponse }) {
       {Object.values(latest).map((art) => (
         <details key={art.id}>
           <summary className={v.faint} style={{ cursor: "pointer" }}>
-            submitted {art.output} v{art.version}
+            Submitted: {humanize(art.output)} (v{art.version})
           </summary>
           <div style={{ marginTop: "var(--s0)" }}>
             <CodeBlock maxHeight="200px">{art.content}</CodeBlock>

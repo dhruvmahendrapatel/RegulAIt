@@ -138,7 +138,7 @@ export default function GovernanceAlertsPage() {
               {selected ? (
                 <Card title={selected.subject.label}>
                   <div className={v.stack}>
-                    <div className={v.row}><SeverityBadge severity={selected.severity} /><Badge tone="neutral">{selected.ruleId}</Badge></div>
+                    <div className={v.row}><SeverityBadge severity={selected.severity} /><Badge tone="neutral">{selected.ruleLabel}</Badge></div>
                     <p>{selected.title}</p>
                     <SubjectLinks alert={selected} />
                     <div className={v.row}>

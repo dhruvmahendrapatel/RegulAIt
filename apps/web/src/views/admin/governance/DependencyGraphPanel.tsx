@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { api } from "../../../api/client";
+import { plural } from "../../../api/format";
 import { Badge, Button, Card, EmptyState } from "../../../ui/kit";
 import { QueryGate } from "../adminKit";
 import v from "../../views.module.css";
@@ -116,7 +117,7 @@ export function DependencyGraphPanel({ useCaseId }: { useCaseId?: string }) {
                   if (!from || !to) return null;
                   return (
                     <g key={`${edge.from}-${edge.to}-${index}`}>
-                      <line x1={from.x + 58} y1={from.y} x2={to.x - 58} y2={to.y} className={edge.basis === "observed" ? s.graphEdgeObserved : s.graphEdge} />
+                      <line x1={from.x + 80} y1={from.y} x2={to.x - 80} y2={to.y} className={edge.basis === "observed" ? s.graphEdgeObserved : s.graphEdge} />
                       {edge.basis === "observed" && edge.observedCount != null ? <text x={(from.x + to.x) / 2} y={(from.y + to.y) / 2 - 5} className={s.graphEdgeLabel}>{edge.observedCount} calls</text> : null}
                     </g>
                   );
@@ -126,10 +127,13 @@ export function DependencyGraphPanel({ useCaseId }: { useCaseId?: string }) {
                   const inherited = node.ownRisk.band !== node.propagatedRisk.band;
                   return (
                     <g key={node.key} role="button" tabIndex={0} aria-label={`${node.label}, propagated risk ${node.propagatedRisk.band}`} onClick={() => setSelectedKey(node.key)} onKeyDown={(event) => event.key === "Enter" && setSelectedKey(node.key)} className={s.graphNode}>
-                      {inherited ? <rect x={point.x - 65} y={point.y - 33} width="130" height="66" rx="12" className={s.graphInheritedRing} /> : null}
-                      <rect x={point.x - 59} y={point.y - 27} width="118" height="54" rx="9" className={`${s.graphNodeBox} ${s[`graphBand_${node.propagatedRisk.band}`]}`} />
-                      <text x={point.x} y={point.y - 5} className={s.graphNodeType}>{node.type.replace("_", " ")}</text>
-                      <text x={point.x} y={point.y + 12} className={s.graphNodeLabel}>{shortLabel(node.label)}</text>
+                      <title>{node.label}</title>
+                      {inherited ? <rect x={point.x - 86} y={point.y - 33} width="172" height="66" rx="12" className={s.graphInheritedRing} /> : null}
+                      <rect x={point.x - 80} y={point.y - 27} width="160" height="54" rx="9" className={`${s.graphNodeBox} ${s[`graphBand_${node.propagatedRisk.band}`]}`} />
+                      <text x={point.x} y={point.y - 12} className={s.graphNodeType}>{node.type.replace("_", " ")}</text>
+                      {labelLines(node.label).map((line, i, all) => (
+                        <text key={i} x={point.x} y={point.y + (all.length === 1 ? 8 : 3 + i * 13)} className={s.graphNodeLabel}>{line}</text>
+                      ))}
                     </g>
                   );
                 })}
@@ -158,7 +162,7 @@ function GraphNodeDetail({ node, nodes }: { node: GraphNode; nodes: GraphNode[] 
         <div className={v.row}>
           <Badge tone={BAND_TONE[node.ownRisk.band]}>own: {node.ownRisk.band}</Badge>
           <Badge tone={BAND_TONE[node.propagatedRisk.band]}>propagated: {node.propagatedRisk.band}</Badge>
-          <span className={v.faint}>{node.ownRisk.openRisks} open risk(s)</span>
+          <span className={v.faint}>{plural(node.ownRisk.openRisks, "open risk")}</span>
         </div>
         {node.propagatedRisk.path.length > 0 ? (
           <div>
@@ -181,6 +185,23 @@ function GraphStat({ label, value }: { label: string; value: number }) {
   return <div className={v.stat}><span className={v.statValue}>{value}</span><span className={v.statLabel}>{label}</span></div>;
 }
 
-function shortLabel(label: string) {
-  return label.length > 20 ? `${label.slice(0, 19)}…` : label;
+/** a node label on at most two lines of ~26 characters, broken at spaces; the full label is the node's tooltip */
+function labelLines(label: string, max = 26): string[] {
+  const lines: string[] = [];
+  let line = "";
+  for (const word of label.split(/\s+/)) {
+    const next = line ? `${line} ${word}` : word;
+    if (next.length <= max) { line = next; continue; }
+    if (line) lines.push(line);
+    line = word;
+    if (lines.length === 2) break;
+  }
+  if (lines.length < 2 && line) lines.push(line);
+  const out = lines.slice(0, 2).map((l) => (l.length > max ? `${l.slice(0, max - 1)}…` : l));
+  const shown = out.join(" ").replace(/…$/, "");
+  if (shown.length < label.length && !out[out.length - 1]!.endsWith("…")) {
+    const last = out[out.length - 1]!;
+    out[out.length - 1] = `${last.length >= max ? last.slice(0, max - 1) : last}…`;
+  }
+  return out;
 }

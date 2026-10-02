@@ -93,7 +93,7 @@ describe("ADR-0164 off-stack serving", () => {
     expect(rest).toEqual([]);
     expect(alert).toMatchObject({ severity: "high", status: "open" });
     expect(alert!.title).toBe(
-      `2 call(s) for g164 use case ${RUN} (to g164-approved-${RUN}) were served by g164-cheap-${RUN}, which is outside its approved stack`,
+      `2 calls for g164 use case ${RUN} (to g164-approved-${RUN}) were served by g164-cheap-${RUN}, which is outside its approved stack`,
     );
     expect(alert!.detail).toMatchObject({ calls: 2, servedAgentId: ids.cheap, requested: [{ agentId: ids.approved, calls: 2 }], windowDays: 7 });
 

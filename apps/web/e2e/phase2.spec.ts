@@ -307,7 +307,7 @@ test("approvals queue: decide a pending approval with a recorded reason", async 
 
 test("audit log: retention card, filterable table, CSV export", async () => {
   await nav("Audit log", "Audit log");
-  await expect(page.getByText("Retention (§8.4)", { exact: false })).toBeVisible();
+  await expect(page.getByText("Retention", { exact: true })).toBeVisible();
   await expect(page.locator("tbody tr").first()).toBeVisible();
   const downloadP = page.waitForEvent("download");
   await page.getByRole("button", { name: "Download CSV" }).click();
@@ -322,7 +322,7 @@ test("audit log: A4 deploy-mode filter, including the honest unknown / pre-0044 
   const modeFilter = page.getByLabel("Filter by deploy mode");
   await expect(modeFilter).toBeVisible();
   // the control must NAME the un-backfillable bucket rather than hiding it
-  await expect(modeFilter.locator("option", { hasText: "unknown / pre-0044" })).toHaveCount(1);
+  await expect(modeFilter.locator("option", { hasText: "None recorded" })).toHaveCount(1);
   // …and the page must say out loud why unknown is not a mode
   await expect(page.getByText("un-backfillable", { exact: false })).toBeVisible();
   // (a plain locator, not getByRole: the kit's <th> cells expose as `cell`,

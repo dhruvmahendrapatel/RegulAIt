@@ -138,7 +138,7 @@ describe("ADR-0164 served outside the approved stack", () => {
     expect(f).toEqual([
       expect.objectContaining({ ruleId: "use_case_served_outside_stack", subjectKey: "use_case:u>agent:b", severity: "high" }),
     ]);
-    expect(f[0]!.title).toBe("3 call(s) for UC (to approved-agent) were served by fast-mock, which is outside its approved stack");
+    expect(f[0]!.title).toBe("3 calls for UC (to approved-agent) were served by fast-mock, which is outside its approved stack");
     expect(f[0]!.detail).toMatchObject({ useCaseId: "u", servedAgentId: "b", calls: 3, windowDays: 7 });
   });
   it("is silent with no off-stack dispatches (empty, absent, or zero calls)", () => {

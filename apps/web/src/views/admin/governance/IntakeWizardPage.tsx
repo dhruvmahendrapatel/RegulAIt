@@ -272,7 +272,7 @@ export default function IntakeWizardPage() {
             <form className={v.stack} onSubmit={(event) => { event.preventDefault(); assist.mutate(); }}>
               {fromShadowAi ? (
                 <div className={s.callout} role="status">
-                  Prefilled only from shadow-AI record {prefill.get("findingId") ?? "evidence"}: name and observed-use description. Complete every screening answer below; the finding did not establish them.
+                  Prefilled from a shadow-AI finding — only its name and observed use. Complete every screening answer below; the finding did not establish them.
                 </div>
               ) : null}
               <Field label="Use-case name"><Input value={title} onChange={(event) => setTitle(event.target.value)} required /></Field>

@@ -2,6 +2,7 @@ import { Fragment, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
+import { plural } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Card, EmptyState } from "../../../ui/kit";
 import { QueryGate, Stat } from "../adminKit";
@@ -56,6 +57,30 @@ const trustQuery = () => ({
 
 const formatCoverage = (value: number | null) => (value == null ? "Unmeasured" : `${value}%`);
 
+/** plain-language reading guide; the API's `definitions` carry the same meaning for integrators (ADR-0148) */
+const READING_GUIDE: Array<[string, string]> = [
+  [
+    "Evidence coverage",
+    "For each dimension, the share of applicable controls in your active compliance packs that platform evidence or a live attestation currently satisfies. It measures coverage — not compliance, and not a trust score.",
+  ],
+  [
+    "Unmeasured",
+    "No active pack has a control for that dimension. It is drawn as a gap to close, never as zero.",
+  ],
+  [
+    "Mitigated",
+    "Closed risks, and live risks with at least one linked control and a declared residual position. Accepted risks are a recorded decision to carry the risk and are counted separately.",
+  ],
+  [
+    "Not yet mitigated",
+    "Live risks without that mitigation. Mitigated, accepted and not yet mitigated add up to the risks found.",
+  ],
+  [
+    "Heatmap",
+    "Live risks placed by declared likelihood and impact — human judgments on a three-level scale, never computed scores. The residual view uses the declared residual position where one exists.",
+  ],
+];
+
 export default function TrustDashboardPage() {
   const q = useQuery(trustQuery());
   const alerts = useQuery({
@@ -70,7 +95,7 @@ export default function TrustDashboardPage() {
       ? "Governance monitor unavailable"
       : !alerts.data?.lastEvaluatedAt
         ? "Governance monitor not evaluated"
-        : `${activeAlerts} active governance alert(s)`;
+        : `${plural(activeAlerts, "active governance alert")}`;
   const monitorTone = alerts.isError || !alerts.data?.lastEvaluatedAt
     ? "neutral"
     : (alerts.data.counts.open > 0 ? "danger" : "ok");
@@ -176,10 +201,10 @@ function TrustReportView(props: {
 
       <Card title="How to read this dashboard">
         <div className={v.stack}>
-          {Object.entries(d.definitions).map(([key, value]) => (
-            <div key={key} className={v.listRow}>
-              <strong className={v.mono}>{key}</strong>
-              <span className={v.dim}>{value}</span>
+          {READING_GUIDE.map(([term, text]) => (
+            <div key={term} className={v.listRow}>
+              <strong>{term}</strong>
+              <span className={v.dim}>{text}</span>
             </div>
           ))}
         </div>

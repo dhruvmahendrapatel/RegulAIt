@@ -1184,7 +1184,7 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
       })),
       coverage: coverageScorecard([...byKind.values()]),
       posture:
-        "Detection is SIGNAL, NOT PROOF OF MISUSE. An SDK dependency is a capability, not a violation; an endpoint " +
+        "Detection is a signal, not proof of misuse. An SDK dependency is a capability, not a violation; an endpoint " +
         "hit may be a sanctioned integration. Every row is a lead for human triage — hence the disposition states.",
     };
   });

@@ -346,8 +346,9 @@ export async function syncUseCaseForInstance(
     ruleId: `use-case-${next}`,
     ruleChain: [],
     reason: decided
-      ? `AI use case '${useCase.name}' ${next} by the intake instance's terminal decision on the one approvals queue`
-      : `AI use case '${useCase.name}' moved to ${next} — intake instance is ${instance.status}`,
+      ? `AI use case '${useCase.name}' ${next.replace(/_/g, " ")} by the intake workflow's final decision`
+      : `AI use case '${useCase.name}' moved to ${next.replace(/_/g, " ")} — intake workflow is ` +
+        (instance.status === "blocked_on_approval" ? "awaiting sign-off" : instance.status.replace(/_/g, " ")),
   });
 }
 
@@ -823,7 +824,7 @@ export function registerUseCaseRoutes(
       effect: "allow",
       ruleId: "use-case-proposed",
       ruleChain: [],
-      reason: `AI use case '${body.name}' proposed — intake instance ${started.instance.id} started on the pillar-2 rails`,
+      reason: `AI use case '${body.name}' proposed — intake workflow started`,
     });
     return reply.status(201).send({
       ...row,
@@ -1107,8 +1108,8 @@ export function registerUseCaseRoutes(
     let projectIds: string[] | null = null;
     let evidenceKind: "project" | "no_project" | "not_entitled" = "no_project";
     let evidenceReason =
-      "this use case is not attributed to a project, and pack evidence is collected per project — " +
-      "so the controls below are MAPPED but not evidenced. Attributing it to a project is the " +
+      "This use case is not attributed to a project, and pack evidence is collected per project, " +
+      "so the controls below are mapped but not yet evidenced. Attributing it to a project is the " +
       "missing step, not a limitation of the framework.";
 
     if (useCase.projectId && project) {
@@ -1133,12 +1134,12 @@ export function registerUseCaseRoutes(
         projectIds = decision.projectIds;
         evidenceKind = "project";
         evidenceReason =
-          `evidence is counted over PROJECT '${project.name}' for ${resolved.label} — which means ` +
-          "it describes everything governed in that project, not this use case alone. A use case " +
-          "and a project are not the same scope, and the numbers below do not pretend otherwise.";
+          `Evidence is counted over the project '${project.name}' for ${resolved.label}, so it ` +
+          "describes everything governed in that project, not this use case alone — a use case and " +
+          "a project are not the same scope.";
       } else {
         evidenceKind = "not_entitled";
-        evidenceReason = `mapped but not evidenced: ${decision.reason}`;
+        evidenceReason = `Mapped but not evidenced: ${decision.reason}`;
       }
     }
 

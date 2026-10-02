@@ -18,6 +18,7 @@ import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import type { AuditEntry } from "../../../api/types";
+import { actorLabel, fmtAt, frameworkLabel, humanize, plural } from "../../../api/format";
 import type { AuditRetention } from "../../../api/adminTypes";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Select, Table, type Tone } from "../../../ui/kit";
@@ -32,11 +33,12 @@ const effectTone = (effect: string): Tone =>
 /** the four filter values the backend accepts; `unknown` maps to
  * `deploy_mode IS NULL`, which is a first-class bucket, not an "other". */
 const MODE_OPTS = [
-  { v: "hosted", l: "hosted" },
-  { v: "byoc", l: "byoc" },
-  { v: "air_gapped", l: "air_gapped" },
-  { v: "unknown", l: "unknown / pre-0044" },
+  { v: "hosted", l: "Hosted" },
+  { v: "byoc", l: "BYOC" },
+  { v: "air_gapped", l: "Air-gapped" },
+  { v: "unknown", l: "None recorded" },
 ];
+const modeLabel = (mode: string) => MODE_OPTS.find((o) => o.v === mode)?.l ?? mode;
 
 export default function AuditLogPage() {
   const users = useUsers();
@@ -81,7 +83,7 @@ export default function AuditLogPage() {
         info={<p>Every governed decision, lifecycle action and settings change lands here — one trail, all eight pillars. Filter by user and by deploy mode; the table shows the latest 100 rows, and the CSV export carries the full filtered trail.</p>}
       />
       <div className={v.stack}>
-        <Card title="Retention (§8.4) — a single global floor">
+        <Card title="Retention">
           {ret == null ? (
             <span className={v.dim}>Loading retention…</span>
           ) : ret.retainedDays == null ? (
@@ -93,8 +95,8 @@ export default function AuditLogPage() {
               <span>
                 Global floor <strong>{ret.retainedDays} days</strong>{" "}
                 <span className={v.dim}>
-                  (from {(ret.floorSource ?? []).join(", ") || "—"}) · <strong>{ret.prunable}</strong>{" "}
-                  row(s) older than the floor
+                  (set by {(ret.floorSource ?? []).map(frameworkLabel).join(", ") || "the organisation default"}) ·{" "}
+                  <strong>{plural(ret.prunable, "row")}</strong> older than that
                 </span>
               </span>
               <span className={v.grow} />
@@ -104,9 +106,9 @@ export default function AuditLogPage() {
             </div>
           )}
           <p className={v.faint}>
-            Retention is the longest auditRetentionDays across every compliance profile
-            (longest-floor-wins) composed with the org default — a shorter-retention framework can never
-            shorten another framework's trail. The prune itself is audited.
+            Retention is the longest period any active compliance profile requires, combined with the
+            organisation default — a framework with a shorter period never shortens another framework's
+            trail. Pruning is itself audited.
           </p>
         </Card>
 
@@ -147,14 +149,9 @@ export default function AuditLogPage() {
             </Button>
           </div>
           <p className={v.faint}>
-            A row carries a deploy mode only when the action was deploy-mode-scoped — a workflow
-            deploy/rollback, or a governed infra change on a target-pinned resource. Everything else
-            (MCP calls, membership, settings edits) has <strong>no mode to have</strong>, and every row
-            written before migration 0044 has none either: that mode was never recorded, so it is{" "}
-            <strong>un-backfillable</strong> and is not inferred here. Both land in one honest{" "}
-            <strong>unknown / pre-0044</strong> bucket — it is <em>not</em> a fourth mode and{" "}
-            <em>not</em> a synonym for “hosted”. Per-mode retention only differentiates rows written
-            after 0044 for the same reason.
+            Only deploy-scoped actions — workflow deploys and rollbacks, governed infrastructure changes —
+            carry a deploy mode. Other rows (tool calls, membership, settings) show <strong>none</strong>, and
+            older rows recorded before deploy modes existed are never back-filled or guessed.
           </p>
           <Table<AuditEntry & { rowKey: string }>
             columns={[
@@ -162,34 +159,34 @@ export default function AuditLogPage() {
                 key: "at",
                 header: "At",
                 sort: (e) => e.at,
-                render: (e) => <span className={v.mono}>{String(e.at).slice(0, 19).replace("T", " ")}</span>,
+                render: (e) => <span className={v.mono} style={{ whiteSpace: "nowrap" }} title={String(e.at)}>{fmtAt(e.at)}</span>,
               },
               {
                 key: "user",
                 header: "User",
-                render: (e) => nameOf.get(e.userId) ?? e.userId.slice(0, 8) + "…",
+                render: (e) => actorLabel(e.userId, nameOf),
               },
-              { key: "object", header: "Object", sort: (e) => e.objectType ?? "", render: (e) => e.objectType ?? "—" },
+              { key: "object", header: "Object", sort: (e) => e.objectType ?? "", render: (e) => (e.objectType ? humanize(e.objectType) : "—") },
               {
                 key: "effect",
                 header: "Effect",
                 sort: (e) => e.effect,
                 render: (e) => <Badge tone={effectTone(e.effect)}>{e.effect.replaceAll("_", " ")}</Badge>,
               },
-              { key: "rule", header: "Rule", render: (e) => <span className={v.mono}>{e.ruleId}</span> },
+              { key: "rule", header: "Rule", render: (e) => <span className={v.mono} style={{ whiteSpace: "nowrap" }}>{e.ruleId}</span> },
               {
                 key: "deployMode",
                 header: "Deploy mode",
                 sort: (e) => e.deployMode ?? "unknown",
                 render: (e) =>
                   e.deployMode ? (
-                    <Badge tone="info">{e.deployMode}</Badge>
+                    <Badge tone="info">{modeLabel(e.deployMode)}</Badge>
                   ) : (
                     <span
                       className={v.dim}
-                      title="No mode was recorded for this row — either it is not a deploy-mode-scoped action, or it predates migration 0044. Un-backfillable by design; never assume a mode."
+                      title="No deploy mode was recorded: the action is not deploy-scoped, or it predates deploy modes. Never back-filled."
                     >
-                      unknown
+                      none
                     </span>
                   ),
               },
@@ -203,7 +200,7 @@ export default function AuditLogPage() {
                 title="No audit rows match"
                 body={
                   deployMode && deployMode !== "unknown"
-                    ? `No row records a ${deployMode} deploy mode yet — only deploy-mode-scoped actions written after migration 0044 carry one. Clear the filter to see the full trail.`
+                    ? `No row records the ${modeLabel(deployMode)} deploy mode yet — only deploy-scoped actions carry one. Clear the filter to see the full trail.`
                     : "Every governed action writes here — try clearing the filter."
                 }
               />
@@ -214,7 +211,7 @@ export default function AuditLogPage() {
 
       <ConfirmModal
         open={confirmPrune}
-        title={`Delete ${ret?.prunable ?? 0} audit row(s)?`}
+        title={`Delete ${plural(ret?.prunable ?? 0, "audit row")}?`}
         body={`Rows older than the ${ret?.retainedDays ?? "—"}-day global floor are removed permanently. The prune itself writes an audit row.`}
         danger
         confirmLabel="Prune"
@@ -227,7 +224,7 @@ export default function AuditLogPage() {
               {},
             );
             toast(
-              `Pruned ${r.deleted} audit row(s) — floor ${r.retainedDays}d from ${(r.floorSource ?? []).join(", ")}`,
+              `Pruned ${plural(r.deleted, "audit row")} — ${r.retainedDays}-day floor set by ${(r.floorSource ?? []).map(frameworkLabel).join(", ")}`,
               "success",
             );
           }, null);
@@ -290,7 +287,7 @@ function ChainIntegrityCard() {
     : "neutral";
 
   return (
-    <Card title="Chain integrity (ADR-0060) — tamper-evident hash chain + WORM anchor">
+    <Card title="Chain integrity — tamper-evident hash chain with a write-once anchor">
       <div className={v.row}>
         <span className={v.dim}>
           Every chained row commits to the one before it; the head is anchored to write-once storage.
@@ -313,7 +310,7 @@ function ChainIntegrityCard() {
               chain {report.status}
             </Badge>
             <span className={v.dim}>
-              {report.scanned.rows} row(s) recomputed{report.scanned.bounded ? " (bounded range)" : ""}
+              {plural(report.scanned.rows, "row")} recomputed{report.scanned.bounded ? " (bounded range)" : ""}
             </span>
             {report.firstBreak && (
               <Badge tone="danger">first break at seq {report.firstBreak.seq}</Badge>
@@ -326,11 +323,11 @@ function ChainIntegrityCard() {
               {report.anchor.sinkMode ? ` · ${report.anchor.sinkMode}` : ""}
             </Badge>
             <Badge tone={report.anchor.tamperResistant ? "ok" : "warn"}>
-              {report.anchor.tamperResistant ? "tamper-resistant (observed)" : "NOT tamper-resistant"}
+              {report.anchor.tamperResistant ? "Tamper-resistant (observed)" : "Not tamper-resistant"}
             </Badge>
-            {report.anchor.matches === false && <Badge tone="danger">anchor MISMATCH</Badge>}
+            {report.anchor.matches === false && <Badge tone="danger">Anchor mismatch</Badge>}
             {report.anchor.unanchoredRows != null && report.anchor.unanchoredRows > 0 && (
-              <span className={v.dim}>{report.anchor.unanchoredRows} row(s) newer than the last anchor</span>
+              <span className={v.dim}>{plural(report.anchor.unanchoredRows, "row")} newer than the last anchor</span>
             )}
           </div>
           <p className={v.faint}>{report.anchor.disclosure}</p>

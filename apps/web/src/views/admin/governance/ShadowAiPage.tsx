@@ -37,7 +37,7 @@ import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
-import { ago } from "../../../api/format";
+import { ago, evidenceLabel, providerLabel } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, CodeBlock, EmptyState, Field, Input, Select, SeverityBadge, Table, Textarea } from "../../../ui/kit";
 import {
@@ -422,9 +422,6 @@ export default function ShadowAiPage() {
       />
 
       <Card title="What this does, and what it cannot do">
-        <p className={v.faint}>
-          regulAIt ships no collector. Everything below analyzes evidence you export and upload.
-        </p>
         <p className={v.dim}>{findings.data?.coverage.statement ?? "Loading coverage…"}</p>
         <p className={v.dim}>{findings.data?.posture}</p>
       </Card>
@@ -446,7 +443,7 @@ export default function ShadowAiPage() {
             rows={findings.data?.coverage.sources ?? []}
             rowKey={(r) => r.kind}
             columns={[
-              { key: "evidence_class", header: "Evidence class", render: (r) => <code>{r.kind}</code> },
+              { key: "evidence_class", header: "Evidence class", render: (r) => evidenceLabel(r.kind) },
               { key: "supplied", header: "Supplied", render: (r) => <Badge tone={r.on ? "ok" : "neutral"}>{r.on ? "on" : "off"}</Badge> },
               { key: "imports", header: "Imports", render: (r) => r.imports },
               { key: "rows", header: "Rows", render: (r) => r.rows },
@@ -770,8 +767,8 @@ export default function ShadowAiPage() {
                       rowKey={(r) => r.value}
                       columns={[
                         { key: "value", header: "Host / package", render: (r) => <code>{r.value}</code> },
-                        { key: "kind", header: "Kind", render: (r) => r.kind },
-                        { key: "provider", header: "Provider", render: (r) => r.provider ?? "—" },
+                        { key: "kind", header: "Kind", render: (r) => evidenceLabel(r.kind) },
+                        { key: "provider", header: "Provider", render: (r) => (r.provider ? providerLabel(r.provider) : "—") },
                         { key: "sig", header: "Signature", render: (r) => <code>{r.entryId ?? "—"}</code> },
                         { key: "n", header: "Occurrences", render: (r) => r.occurrences },
                         { key: "class", header: "Class", render: () => <Badge tone="warn">shadow</Badge> },
@@ -889,8 +886,8 @@ export default function ShadowAiPage() {
               columns={[
                 { key: "severity", header: "Severity", render: (r) => <SeverityBadge severity={r.severity} /> },
                 { key: "subject", header: "Subject", render: (r) => <span title={r.subjectKind}>{r.subject}</span> },
-                { key: "provider", header: "Provider", render: (r) => r.provider },
-                { key: "sources", header: "Sources", render: (r) => r.signalSources.join(", ") },
+                { key: "provider", header: "Provider", render: (r) => providerLabel(r.provider) },
+                { key: "sources", header: "Sources", render: (r) => r.signalSources.map(evidenceLabel).join(", ") },
                 { key: "confidence", header: "Confidence", render: (r) => r.confidence },
                 { key: "observations", header: "Observations", render: (r) => r.observationCount },
                 { key: "last_seen", header: "Last seen", render: (r) => ago(r.lastSeenAt) },
@@ -919,7 +916,7 @@ export default function ShadowAiPage() {
                   header: "",
                   render: (r) => (
                     <div className={v.row}>
-                      <Link to={`/admin/governance/intake?source=shadow-ai&findingId=${encodeURIComponent(r.id)}&title=${encodeURIComponent(`Govern ${r.subject}`)}&description=${encodeURIComponent(`Register and govern the ${r.provider} usage observed for ${r.subject}. Evidence sources: ${r.signalSources.join(", ")}.`)}`}>Register as use case</Link>
+                      <Link to={`/admin/governance/intake?source=shadow-ai&findingId=${encodeURIComponent(r.id)}&title=${encodeURIComponent(`Govern ${r.subject}`)}&description=${encodeURIComponent(`Register and govern the ${providerLabel(r.provider)} usage observed for ${r.subject}. Evidence: ${r.signalSources.map(evidenceLabel).join(", ")}.`)}`}>Register as use case</Link>
                       <Button onClick={() => { setDispositionFor(r.id); setReason(""); }}>Triage</Button>
                     </div>
                   ),
@@ -991,10 +988,10 @@ export default function ShadowAiPage() {
             rows={catalogue.data?.signatures ?? []}
             rowKey={(r) => r.id}
             columns={[
-              { key: "provider", header: "Provider", render: (r) => r.provider },
-              { key: "kind", header: "Kind", render: (r) => <code>{r.kind}</code> },
+              { key: "provider", header: "Provider", render: (r) => providerLabel(r.provider) },
+              { key: "kind", header: "Kind", render: (r) => evidenceLabel(r.kind) },
               { key: "value", header: "Value", render: (r) => <code>{r.value}</code> },
-              { key: "match", header: "Match", render: (r) => r.matchType + (r.minLength ? ` (≥${r.minLength})` : "") },
+              { key: "match", header: "Match", render: (r) => evidenceLabel(r.matchType) + (r.minLength ? ` (≥${r.minLength})` : "") },
               { key: "provenance", header: "Provenance", render: (r) => r.provenance },
               { key: "updated", header: "Updated", render: (r) => ago(r.lastUpdatedAt) },
               { key: "enabled", header: "Enabled", render: (r) => <Badge tone={r.enabled ? "ok" : "neutral"}>{r.enabled ? "yes" : "no"}</Badge> },
@@ -1025,7 +1022,7 @@ export default function ShadowAiPage() {
             rowKey={(r) => r.id}
             columns={[
               { key: "when", header: "When", render: (r) => ago(r.createdAt) },
-              { key: "kind", header: "Kind", render: (r) => <code>{r.kind}</code> },
+              { key: "kind", header: "Kind", render: (r) => evidenceLabel(r.kind) },
               { key: "mode", header: "Mode", render: (r) => r.mode },
               { key: "status", header: "Status", render: (r) => <Badge tone={r.status === "refused" ? "danger" : "ok"}>{r.status}</Badge> },
               { key: "rows", header: "Rows", render: (r) => r.rowCount },
