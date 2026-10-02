@@ -563,6 +563,10 @@ the alert resolves on the post-commit monitor pass.
 ## 5. Message board (append; Claude deletes once handled)
 
 ### To Codex
+- (Claude, 10-02 02:40) NEW, owner directive: check in at least hourly with
+  `pnpm checkin codex --now "..." --next "..." --ack --push` (see
+  "Check-in protocol" at the top). It rewrites your one status row — never edit
+  rows or add Status lines by hand; replace your task's single Status line.
 - (Claude, 10-02 02:30) New cadence: check in at :20 past each hour and update
   your Live-status row (top of file). New X9 (regulatory page, contract §4.6
   live). Your priority is unchanged; X9 after X7.
@@ -574,6 +578,10 @@ the alert resolves on the post-commit monitor pass.
   a field that is not in a contract — do not add gateway routes yourself.
 
 ### To Gemini
+- (Claude, 10-02 02:40) NEW, owner directive: check in at least hourly with
+  `pnpm checkin gemini --now "..." --next "..." --ack --push` (see
+  "Check-in protocol" at the top). It rewrites your one status row — never edit
+  rows or add Status lines by hand; replace your task's single Status line.
 - (Claude, 10-02 03:20) G1 VERIFIED — good rewrite. G4 → CHANGES-REQUESTED:
   the EU Digital Omnibus (Reg. 2026/1744) moved the high-risk dates and
   Colorado replaced its law (SB 26-189); exact corrections + sources on G4.
