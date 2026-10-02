@@ -15,9 +15,11 @@ live numbers off `demo:check` on the day — the figures quoted here are from th
 ## 0. Setup (one command, then the gateway)
 
 Once, from the repo root: `pnpm install` then `pnpm -r build` (the gateway serves the built UI).
-Postgres 16 with an **empty** database (`docker compose up -d db`, or a native Postgres — see
-DEMO_RUNBOOK.md §1.1). Then set the environment for every command (one terminal, same values
-throughout):
+Postgres 16 with an **empty** database. With docker, a throwaway container (the compose `db`
+service deliberately publishes no host port):
+`docker run -d --name regulait-demo-pg -e POSTGRES_USER=regulait -e POSTGRES_PASSWORD=regulait -e POSTGRES_DB=regulait_demo -p 5432:5432 postgres:16`
+— or a native Postgres (DEMO_RUNBOOK.md §1.1). Then set the environment for every command (one
+terminal, same values throughout):
 
 ```bash
 export DATABASE_URL=postgres://regulait:regulait@127.0.0.1:5432/regulait_demo   # an EMPTY database
@@ -35,8 +37,8 @@ $env:REGULAIT_DATA_KEY = -join ((1..32) | ForEach-Object { '{0:x2}' -f (Get-Rand
 $env:REGULAIT_EPHEMERAL_LICENSE = "1"; $env:REGULAIT_LICENSE_KEYRING = "$HOME\.regulait-demo-keys"
 ```
 
-To start over, drop and recreate the database — the journey changes it, and `demo:prepare`
-seeds an empty database only. A full rehearsal of the UI journey, unattended:
+To start over, recreate the database (`docker rm -f regulait-demo-pg`, re-run the `docker run`)
+— the journey changes it, and `demo:prepare` seeds an empty database only. A full rehearsal of the UI journey, unattended:
 `E2E_BASE_URL=http://127.0.0.1:3105 pnpm --filter @regulait/web exec playwright test -c
 playwright.demo-real.config.ts` (needs `REGULAIT_BOOTSTRAP_TOKEN=e2e-bootstrap-token`).
 
