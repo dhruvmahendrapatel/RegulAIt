@@ -42,5 +42,8 @@ RegulAIt connects directly to the execution layer. We don't ask developers if th
 1. **"Our guardrail metrics reflect actual API blocks."** (Show the Privacy/Safety dimensions on the Trust Dashboard).
 2. **"Our agent cards link to the inventory record, which separates GRANTED from OBSERVED tools (ADR-0082)."** (Show the Use-Case 360 Stack tab).
 3. **"We support EU AI Act tiering right at intake."** (Show the Intake Assistant).
+4. **"Our remediations require human approval."** (Show that executable remediations trigger an approval workflow, per **ADR-0159**).
+5. **"We continuously evaluate traces with shipped detectors, exposing only violation counts."** (Show the trace evaluation counts, backed by **ADR-0160**).
+6. **"Our CI/CD deploy gate enforces compliance programmatically."** (Show a pipeline step being blocked by an open high alert and then allowed upon acknowledgment, per **ADR-0161**).
 
 *Note: Never claim that RegulAIt automatically fixes risks. We automate the discovery, mapping, and monitoring of risks, but remediation and approval are always human-gated.*

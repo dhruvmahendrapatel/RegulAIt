@@ -17,7 +17,7 @@
 
 ### Beat 1A: Shadow AI Discovery *(CONDITIONAL on task X4)*
 - **Persona:** Dana
-- **URL:** `/ui/admin/governance/shadow-ai` (or via Inbox)
+- **URL:** `/ui/admin/shadow-ai` (or via Inbox)
 - **Screen State:** A list of discovered shadow-AI usage. One item highlights an unregistered LLM tool (a credit-limit-increase assistant) in use.
 - **Action:**
   1. Click on the shadow-AI finding.
@@ -49,8 +49,8 @@
 - **Action:**
   1. Navigate to the **Stack** tab. Show the Agent Card (`/v1/agents/:id/card`), highlighting purpose and data sources. Note that *observed* tools live on the inventory record linked from the agent card.
   2. Navigate to the **Risks** tab. 
-  3. Show the automatically mapped risks. Click **Add risk from library** *(CONDITIONAL on X8; fallback is to create the risk using the manual form)*.
-  4. Pick an agentic risk scenario (e.g., *Credit model disparate impact*).
+  3. Click **Add risk from library** *(CONDITIONAL on X8; fallback is to create the risk using the manual form)*.
+  4. Pick an agentic risk scenario (e.g., *Credit model disparate impact*) and add it to the use case.
   5. Link a suggested control (e.g., `eu-ai-act:art-14-human-oversight`).
   6. Show the Inherent vs. Residual risk reduction.
 - **Talking Point:** "The use-case 360 view connects the agent, the model, and the vendor. Because this is high-risk, RegulAIt mapped EU AI Act, NIST AI RMF, and ISO 42001 frameworks automatically. We can pull specific agentic risks from our curated library and link platform controls to reduce our residual risk."
@@ -66,6 +66,14 @@
   3. Check the **Audit** tab to show the recorded immutable audit row.
 - **Talking Point:** "With separation of duties, Avery reviews the residual risk and the linked controls. Approving it writes an immutable audit record, safely gating the deployment."
 
+### Beat 2C: CI/CD Deploy Gate (Optional)
+- **Persona:** Dana (via CI/CD pipeline)
+- **Action:**
+  1. A pipeline step calls `POST /v1/gates/deploy`.
+  2. The request is initially DENIED due to an open high alert.
+  3. After the alert is acknowledged in the UI, the pipeline step runs again and is ALLOWED.
+- **Talking Point:** "RegulAIt integrates directly into the deployment pipeline. If a critical issue remains unacknowledged, the CI/CD gate blocks the release, enforcing compliance programmatically."
+
 ---
 
 ## 3. Phase 3: Monitor & Respond
@@ -79,7 +87,7 @@
   2. Note the "Evidence coverage %" (not a fabricated "score").
   3. Show the `bias` axis gap. An axis is "unmeasured" when no active pack control applies to it.
   4. Click into the `security` drill-down.
-- **Talking Point:** "Once deployed, we don't rely on static attestations. This Trust Dashboard is driven purely by evidence coverage from collectors over platform ledgers, with attestation-based controls clearly labelled (like documented model-card assessments for bias). Unmeasured dimensions show up as a clear gap, keeping us honest."
+- **Talking Point:** "Once deployed, we provide evidence coverage, with attestation-based controls labelled (like documented model-card assessments for bias). This Trust Dashboard is driven purely by evidence coverage from collectors over platform ledgers. Unmeasured dimensions show up as a clear gap, keeping us honest."
 
 ### Beat 3B: Continuous Governance Escalation
 - **Persona:** Avery
@@ -89,9 +97,26 @@
   1. The monitor runs hourly (or on "Evaluate now") and alerts on 7 specific governance rules.
   2. Click into an inherited-risk alert to see `detail.pathLabels` (e.g., Use Case → Agent → Vendor).
   3. Click **Acknowledge** with a mandatory note.
-  4. Generate a signed Audit Export (`?signed=1`). *(CONDITIONAL on X4)*
-- **Talking Point:** "When a dependency inherits a new risk, the Governance Monitor triggers an alert on the next monitor pass. We can see exactly where the risk propagated in our dependency graph and export a cryptographically signed audit trail for the regulators."
+  4. Under Remediation, propose the executable remediation (link control) to Avery.
+  5. Switch to Avery's profile, review the proposal, and approve it. The alert resolves automatically.
+- **Talking Point:** "When a dependency inherits a new risk, the Governance Monitor triggers an alert. From the alert, we can propose an executable remediation to a reviewer. Nothing changes governed state until a different human approves it."
 - **Recovery Step:** If the real-time alert is delayed, click **Evaluate now** to force the `governance-monitor-sweep` job.
+
+### Beat 3C: Dependency Graph
+- **Persona:** Avery
+- **URL:** `/ui/admin/governance/graph`
+- **Action:**
+  1. Show a use case inheriting a HIGH rating.
+  2. Trace the path from the use case down to the offending vendor.
+- **Talking Point:** "We can see exactly where the risk propagated in our dependency graph, tracking both declared and observed edges."
+
+### Beat 3D: Regulatory Intelligence
+- **Persona:** Avery
+- **URL:** `/ui/admin/governance/regulatory`
+- **Action:**
+  1. Show the Digital Omnibus on AI entry and the Dec 2027 Annex III date.
+  2. Highlight which of OUR use cases are in scope.
+- **Talking Point:** "RegulAIt keeps track of the shifting regulatory landscape. We can immediately see that the Digital Omnibus changed the EU AI Act dates and identify exactly which of our deployed systems are affected by the December 2027 deadline."
 
 ---
 
