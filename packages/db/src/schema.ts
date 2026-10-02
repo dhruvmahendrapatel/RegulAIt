@@ -7893,6 +7893,32 @@ export const remediationProposals = pgTable(
 );
 
 // ---------------------------------------------------------------------------
+// ADR-0160 (migration 0126) — continuous trace evaluation results. Counts
+// only; unique span id makes overlapping sweeps idempotent.
+export const TRACE_EVALUATION_OUTCOME_VALUES = ["evaluated", "withheld", "no_content"] as const;
+export const traceEvaluations = pgTable(
+  "trace_evaluations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    spanId: uuid("span_id").notNull(),
+    traceId: uuid("trace_id").notNull(),
+    agentId: uuid("agent_id"),
+    spanStartedAt: timestamp("span_started_at", { withTimezone: true }).notNull(),
+    outcome: text("outcome", { enum: TRACE_EVALUATION_OUTCOME_VALUES }).notNull(),
+    flagged: boolean("flagged").notNull().default(false),
+    findings: jsonb("findings")
+      .$type<Array<{ phase: "input" | "output"; detector: string; category: string; count: number }>>()
+      .notNull()
+      .default([]),
+    evaluatedAt: timestamp("evaluated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("trace_evaluations_span_uq").on(t.spanId),
+    index("trace_evaluations_agent_started_idx").on(t.agentId, t.spanStartedAt),
+  ],
+);
+
+// ---------------------------------------------------------------------------
 // ADR-0090 (migration 0092) — grant certification campaigns (gap L22).
 //
 // Saviynt's core loop — periodic owner-driven review of entitlements with

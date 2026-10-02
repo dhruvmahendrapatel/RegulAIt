@@ -707,6 +707,9 @@ describe("every sweep is registered", () => {
         // ADR-0065: remote training jobs run on somebody else's compute for
         // hours; polling them is a scheduler job, never a setInterval.
         SCHEDULER_JOB_NAMES.trainingPoll,
+        // ADR-0160: continuous trace evaluation (counts only). Driven
+        // end-to-end in zz-adr0160-trace-evaluation.test.ts.
+        SCHEDULER_JOB_NAMES.traceEvaluation,
       ].sort(),
     );
     for (const def of registry.values()) {

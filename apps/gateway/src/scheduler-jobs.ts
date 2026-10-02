@@ -46,6 +46,7 @@ import { runMcpAdmissionRescan } from "./mcp-admission-rescan.js";
 import { runMcpRegistrySync } from "./mcp-registry.js";
 import { runMcpHealthProbeSweep } from "./mcp-health-probe.js";
 import { runGovernanceMonitor } from "./governance-monitor.js";
+import { runTraceEvaluationSweep } from "./trace-evaluation.js";
 import { toRegistry, type SchedulerJobDefinition, type SchedulerJobRegistry } from "./scheduler.js";
 
 const HOUR = 3600;
@@ -74,6 +75,7 @@ export const SCHEDULER_JOB_NAMES = {
   mcpRegistrySync: "mcp-registry-sync-sweep",
   mcpHealthProbe: "mcp-health-probe-sweep",
   governanceMonitor: "governance-monitor-sweep",
+  traceEvaluation: "trace-evaluation-sweep",
 } as const;
 
 export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): SchedulerJobDefinition[] {
@@ -489,6 +491,22 @@ export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): Schedu
       run: async (ctx) => {
         const out = await runGovernanceMonitor(ctx.db, { actorUserId: ctx.actorUserId, now: ctx.now });
         return { itemsProcessed: out.raised + out.resolved, detail: { ...out } };
+      },
+    },
+    {
+      // ADR-0160. Re-runs the shipped heuristic detectors over stored previews
+      // of completed model calls (counts only). Feeds the monitor's
+      // agent_output_leakage rule; changes nothing a dispatch reads.
+      name: SCHEDULER_JOB_NAMES.traceEvaluation,
+      description:
+        "Evaluate up to 500 newly completed model-call spans per pass with the shipped guardrail detectors " +
+        "(output: PII, credential material, toxicity; input: injection/jailbreak attempts). Counts only, no " +
+        "model call. Withheld or uncaptured content is recorded as not evaluated.",
+      adr: "ADR-0160",
+      defaultIntervalSeconds: 15 * 60,
+      run: async (ctx) => {
+        const out = await runTraceEvaluationSweep(ctx.db, { now: ctx.now });
+        return { itemsProcessed: out.scanned, detail: { ...out } };
       },
     },
   ];

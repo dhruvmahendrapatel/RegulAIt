@@ -96,6 +96,28 @@ describe("ADR-0157 monitor rules", () => {
   });
 });
 
+describe("ADR-0160 output leakage rule", () => {
+  it("fires per (use case, agent) only when flagged > 0, and only for approved use cases", () => {
+    const leaky = agent("a", { outputLeaks: { flagged: 2, evaluated: 40, byDetector: { pii: 2 } } });
+    const f = evaluateMonitorRules(base({
+      useCases: [
+        { id: "u", name: "UC", status: "approved", propagated: none, agentIds: ["a"], vendorIds: [] },
+        { id: "p", name: "Proposal", status: "proposed", propagated: none, agentIds: ["a"], vendorIds: [] },
+      ],
+      agents: new Map([["a", leaky]]),
+    }));
+    expect(f).toEqual([
+      expect.objectContaining({ ruleId: "agent_output_leakage", subjectKey: "use_case:u>agent:a", severity: "high" }),
+    ]);
+    expect(f[0]!.title).toContain("2 of 40");
+    const clean = evaluateMonitorRules(base({
+      useCases: [{ id: "u", name: "UC", status: "approved", propagated: none, agentIds: ["a"], vendorIds: [] }],
+      agents: new Map([["a", agent("a", { outputLeaks: { flagged: 0, evaluated: 40, byDetector: {} } })]]),
+    }));
+    expect(clean).toEqual([]);
+  });
+});
+
 describe("ADR-0157 reconciliation", () => {
   const finding = (subjectKey: string) => ({
     ruleId: "high_risk_without_control" as const, subjectKey, severity: "high" as const, title: "t", detail: {},

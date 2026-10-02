@@ -3368,6 +3368,21 @@ export {
   type RemediationStatus,
 } from "./remediation.js";
 
+// ADR-0160 — continuous trace evaluation (the shipped detectors re-run over
+// stored trace previews; counts only).
+export {
+  TRACE_EVALUATION_NOTES,
+  TRACE_EVALUATION_OUTCOMES,
+  TRACE_INPUT_DETECTORS,
+  TRACE_OUTPUT_DETECTORS,
+  evaluateTraceContent,
+  summarizeTraceEvaluations,
+  type AgentTraceSummary,
+  type TraceEvaluation,
+  type TraceEvaluationOutcome,
+  type TraceFinding,
+} from "./trace-evaluation.js";
+
 // ---------------------------------------------------------------------------
 // ADR-0084 — the AI vendor registry (third-party AI risk): the vocabulary,
 // the request shapes, and the attested-never-measured disclaimer. `status` is

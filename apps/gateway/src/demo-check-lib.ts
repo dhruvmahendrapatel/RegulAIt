@@ -174,6 +174,18 @@ export async function runDemoCheck(
     );
   }
 
+  // --- 3 Continuous trace evaluation ----------------------------------------------------------------
+  await call("POST", "/v1/governance/trace-evaluations/run", auth);
+  const te = await call("GET", "/v1/governance/trace-evaluations", auth);
+  if (te.status !== 200) add("3 Trace evaluation", "FAIL", `trace evaluations ${te.status}`);
+  else
+    add(
+      "3 Trace evaluation",
+      te.body.totals?.evaluated ? "PASS" : "WARN",
+      `${te.body.totals?.evaluated ?? 0} response(s) evaluated, ${te.body.totals?.flagged ?? 0} flagged, across ${(te.body.agents ?? []).length} agent(s)`,
+      te.body.totals?.evaluated ? undefined : "no model traffic yet — run a few mock dispatches before the demo",
+    );
+
   // --- 3 Regulatory intelligence -----------------------------------------------------------------
   const reg = await call("GET", "/v1/regulatory/updates", auth);
   if (reg.status !== 200) add("3 Regulatory", "FAIL", `regulatory ${reg.status}`);

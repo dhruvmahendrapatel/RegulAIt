@@ -55,6 +55,13 @@ export const MONITOR_RULES = {
       "An agent the approved use case depends on has no unexpired model-card approval (ADR-0045), so the " +
       "MRM gate would refuse it when enforced.",
   },
+  agent_output_leakage: {
+    label: "Agent in production returned flagged content",
+    severity: "high",
+    description:
+      "Continuous trace evaluation (ADR-0160) found PII, credential material or toxic content in what an agent " +
+      "of an approved use case returned in the evaluation window — content the inline guardrails let through.",
+  },
   high_risk_without_control: {
     label: "High risk with no mitigating control",
     severity: "high",
@@ -103,6 +110,8 @@ export interface MonitorAgentInput {
   /** "owned" | "unowned" | "orphaned" (ADR-0089) */
   ownership: "owned" | "unowned" | "orphaned";
   modelCardApproved: boolean;
+  /** ADR-0160 — trace evaluation over the window, when any ran */
+  outputLeaks?: { flagged: number; evaluated: number; byDetector: Record<string, number> } | null;
 }
 
 export interface MonitorVendorInput {
@@ -191,6 +200,17 @@ export function evaluateMonitorRules(input: MonitorInput): MonitorFinding[] {
           severity: sev("use_case_agent_unowned"),
           title: `${uc.name} depends on ${a.name}, which is ${a.ownership}`,
           detail: { useCaseId: uc.id, agentId: a.id, ownership: a.ownership },
+        });
+      }
+      if (a.outputLeaks && a.outputLeaks.flagged > 0) {
+        out.push({
+          ruleId: "agent_output_leakage",
+          subjectKey: pairKey,
+          severity: sev("agent_output_leakage"),
+          title:
+            `${a.name} returned flagged content in ${a.outputLeaks.flagged} of ${a.outputLeaks.evaluated} ` +
+            `evaluated response(s) (${Object.keys(a.outputLeaks.byDetector).sort().join(", ")})`,
+          detail: { useCaseId: uc.id, agentId: a.id, ...a.outputLeaks },
         });
       }
       if (!a.modelCardApproved) {

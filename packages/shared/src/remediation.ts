@@ -28,6 +28,7 @@ export const GUIDANCE_REMEDIATION_KINDS = [
   "obtain_model_card_approval",
   "close_coverage_gap",
   "author_control",
+  "tighten_output_guardrail",
 ] as const;
 export const REMEDIATION_KINDS = [...EXECUTABLE_REMEDIATION_KINDS, ...GUIDANCE_REMEDIATION_KINDS] as const;
 export type RemediationKind = (typeof REMEDIATION_KINDS)[number];
@@ -207,6 +208,25 @@ export function proposeRemediations(ctx: RemediationContext): RemediationCandida
           ],
         },
       ];
+    case "agent_output_leakage": {
+      const detectors = Object.keys((alert.detail.byDetector as Record<string, number>) ?? {}).sort();
+      return [
+        {
+          kind: "tighten_output_guardrail",
+          executable: false,
+          title: `Set ${detectors.join(", ") || "the flagged detectors"} to block on output for ${label(s.tail)}`,
+          rationale:
+            "The inline guardrails let this content through — usually because the detector is set to log or warn. " +
+            "Blocking is a guardrail policy change (ADR-0042), made deliberately by a person.",
+          params: { agentId: s.id },
+          steps: [
+            "Open the agent's guardrail policy and set the flagged detectors to block for the output phase.",
+            "Review the flagged traces (counts on the alert; open them in Traces) and decide whether disclosure occurred.",
+            "Re-run trace evaluation; the alert resolves when a window passes with no flagged output.",
+          ],
+        },
+      ];
+    }
     case "dimension_coverage_below_floor":
       return [
         {

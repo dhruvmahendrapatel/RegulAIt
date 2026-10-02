@@ -75,13 +75,13 @@ Rules:
    | Gemini | `packages/shared/src/demo-intake/**`, `docs/product/DEMO_SCRIPT_2026-10-05.md`, `docs/product/DEMO_TALK_TRACK_2026-10-05.md` |
 
 3. **Number reservations** (§4.1/4.2 — never take an unreserved number):
-   - Migrations: Claude only — `0123`–`0125` used (`when` 1785058000000,
-     1785059000000, 1785060000000); next `0126`–`0130` (`when` +1000000 each).
+   - Migrations: Claude only — `0123`–`0126` used (`when` 1785058000000 …
+     1785061000000); next `0127`–`0130` (`when` +1000000 each).
      Codex and Gemini own no `packages/db` files, so they take none (the
      earlier Codex reservation is retired: an out-of-order `when` is silently
      skipped by the migrator — CONTRIBUTING_PARALLEL_SESSIONS §4).
      **Never run `drizzle-kit generate`.**
-   - ADRs: Claude `0147`–`0150` (all used) and `0156`–`0160`; Codex `0151`–`0153`;
+   - ADRs: Claude `0147`–`0150`, `0156`–`0160` (all used) and `0161`–`0170`; Codex `0151`–`0153`;
      Gemini `0154`–`0155`.
      ADR index rows in `docs/decisions/README.md` are added by Claude on review.
 4. **Honesty rules carried from the repo** (CLAUDE.md, mistakes.md):
@@ -152,9 +152,10 @@ All LIVE on `dhruv/active`, CI-tested; details are in the contract (§4) and ADR
 - **C6** `demo:intake` seeder (installs shadow-AI catalogue first) · **C11** `demo:check` (PASS/WARN/FAIL per beat; runs in CI)
 - **C7** Dependency graph + propagated risk — ADR-0156, §4.4 · **C8** Governance monitor + alerts — ADR-0157, §4.5
 - **C9** Regulatory intelligence — ADR-0158, §4.6 (feed wired after G4 passes) · **C10** Remediation — ADR-0159, §4.7
-- **C12 — Continuous trace evaluation** (next, post-demo-critical): scheduled
-  deterministic evaluation of recent traces feeding the monitor.
-  Status: TODO (Claude)
+- **C12** Continuous trace evaluation — ADR-0160: `GET /v1/governance/trace-evaluations?days=`
+  (per-agent `{spans, evaluated, withheld, noContent, flagged, leaksByDetector,
+  attemptsByDetector, coveragePct, agentName}`), `POST …/run`; monitor rule
+  `agent_output_leakage`. A compact card for X3/X7 is optional.
 
 ### Codex — web UI (apps/web), browser verification
 

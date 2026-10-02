@@ -53,6 +53,7 @@ import {
 import { computeDependencyGraph } from "./dependency-graph.js";
 import { computeTrustDashboard } from "./trust-dashboard.js";
 import { ownershipFlagFor } from "./inventory.js";
+import { traceSummaryForAgents } from "./trace-evaluation.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 
@@ -131,6 +132,10 @@ export async function runGovernanceMonitor(
         ),
       );
     const approvedSet = new Set(approved.map((a) => a.agentId));
+    // ADR-0160 — what each agent actually returned, per continuous trace evaluation
+    const traces = new Map(
+      (await traceSummaryForAgents(db, { now, agentIds: relevantAgentIds })).map((t) => [t.agentId, t]),
+    );
     for (const a of rows) {
       agentMap.set(a.id, {
         id: a.id,
@@ -140,6 +145,13 @@ export async function runGovernanceMonitor(
         lifecycleStatus: a.lifecycleStatus,
         ownership: ownershipFlagFor(a.ownerUserId, a.ownerDisabledAt !== null),
         modelCardApproved: approvedSet.has(a.id),
+        outputLeaks: traces.has(a.id)
+          ? {
+              flagged: traces.get(a.id)!.flagged,
+              evaluated: traces.get(a.id)!.evaluated,
+              byDetector: traces.get(a.id)!.leaksByDetector,
+            }
+          : null,
       });
     }
   }
