@@ -4,7 +4,7 @@ last_updated: 2026-10-02
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
-last_session: sessions/2026-10-01-session-01.md
+last_session: sessions/2026-10-02-session-01.md
 roadmap: ../docs/product/ROADMAP.md
 ---
 
@@ -20,6 +20,17 @@ roadmap: ../docs/product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**2026-10-02 (demo-ready) - The AI-intake demo runs end to end on a real database.**
+Under the owner's directive Claude closed the offline agents' items. The real seeded-database
+Playwright journey (`apps/web/e2e/demo-intake.spec.ts`) passes on a fresh `demo:prepare`
+database: register from shadow AI → Avery approves (ADR-0165 routes use-case sign-offs to a
+named approver) → alert → remediation approved by a second person → graph → regulatory → signed
+export; a `Demo journey` CI workflow runs it with the mocked UI suite. Fixed on the way: the
+intake wizard's invalid `dataSensitivity` (every real submission failed, AER-042), raw stage
+sentinels in the Inbox, and concurrent monitor over-reporting (AER-043). `demo:gate` shows the
+deploy gate as a CI step. Demo script/talk track v2, Q&A and leave-behind are current; every
+beat PASSes `demo:check`. Runbook: DEMO_SCRIPT_2026-10-05.md §0.
 
 **2026-10-02 (latest) - Monitor & Respond completed for the demo (ADR-0160..0164).**
 Continuous trace evaluation re-runs the shipped detectors over stored

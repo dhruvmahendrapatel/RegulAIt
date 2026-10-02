@@ -788,35 +788,35 @@ Demo-critical items for 2026-10-05 are tracked in `AgentCoordination.md`
 | Capability | Status | Where / gap |
 |---|---|---|
 | Central inventory: use cases, models, vendors, agents | exists | `use-cases.ts`, `mrm.ts`, `vendors.ts`, `agents-connectors.ts`, `inventory.ts`; use-case 360 overview API [C3], UI [X2] |
-| Agent cards (purpose, tools, data sources, guardrails) | exists (API) | `GET /v1/agents/:id/card` [C5] |
+| Agent cards (purpose, tools, data sources, guardrails) | exists | `GET /v1/agents/:id/card` [C5]; shown on the use-case 360 Stack tab [X2] |
 | Platform & MCP server governance | exists | `mcp-proxy.ts`, `mcp-registry.ts`, admission/egress ADRs |
-| Dependency graph (agents, sub-agents, models, tools, data) | exists (API) | `dependency-graph.ts` (ADR-0156): declared + observed edges, max-propagated risk with path; no graph UI yet [X6] |
-| Shadow-AI discovery and classification | partial | classifies imported evidence (`shadow-ai.ts`); no network scanning; MCP discovery has no UI [X4] |
-| AI-assisted intake & registration | missing | ADR-0080 forbade pre-fill; governed, suggestion-only assistant [C2, X1, ADR-0149] |
+| Dependency graph (agents, sub-agents, models, tools, data) | exists | `dependency-graph.ts` (ADR-0156): declared + observed edges, max-propagated risk with path; graph page + use-case Dependencies tab [X6] |
+| Shadow-AI discovery and classification | partial | classifies imported evidence (`shadow-ai.ts`), MCP discovery UI, register-as-use-case [X4]; no network scanning |
+| AI-assisted intake & registration | exists | suggestion-only intake assistant (ADR-0149) + intake wizard [X1]; sign-off routed to a named approver via intake template variants (ADR-0165) |
 
 ### Phase 2 — Assess & Deploy  (modules: Risk Intelligence; Compliance & Policy Engine)
 
 | Capability | Status | Where / gap |
 |---|---|---|
-| Agentic risk assessment library with mapped controls | partial | 9 categories, no scenario library, no bias/safety category [C4, G2] |
+| Agentic risk assessment library with mapped controls | exists | scenario library with suggested controls, rating-free (`GET /v1/risks/scenarios`) [G2, X8]; bias/safety categories (ADR-0147) |
 | Inherent → residual risk with control linkage | exists | ADR-0147: residual likelihood/impact and pack-control links per risk [C4] |
 | Policy inheritance and aggregate risk scoring | partial | risk now propagates across connected entities (max, ADR-0156); packs remain org-level, no policy inheritance yet |
 | Automated red-teaming and drift detection | partial | `redteam.ts`, `evals.ts`; drift baselines not continuous |
-| Regulatory & policy intelligence (obligations → our controls and use cases) | exists (API) | `regulatory-intel.ts` (ADR-0158); curated feed [G4]; UI [X9] |
-| Pre-built policy packs: EU AI Act, NIST AI RMF, ISO 42001, SOC 2 (+ ISO 27001 partial, HIPAA, PCI-DSS, FINRA) | exists | `compliance-packs.ts`; per-use-case framework mapping has no UI [X2] |
+| Regulatory & policy intelligence (obligations → our controls and use cases) | exists | `regulatory-intel.ts` (ADR-0158); curated, source-dated feed [G4]; page [X9] |
+| Pre-built policy packs: EU AI Act, NIST AI RMF, ISO 42001, SOC 2 (+ ISO 27001 partial, HIPAA, PCI-DSS, FINRA) | exists | `compliance-packs.ts`; per-use-case framework mapping on the use-case 360 Frameworks tab [X2] |
 | Governance workflows with approval gates | exists | workflows + approvals with separation of duties |
-| Automated evidence generation and audit trails | exists | collectors, hash-chained audit, signed exports (no UI for signed export) [X4] |
+| Automated evidence generation and audit trails | exists | collectors, hash-chained audit, signed exports (audit + reports download buttons) [X4] |
 | Custom guardrails and compliance mapping | exists | ADR-0042 guardrails; custom packs |
-| Enforcement integration with CI/CD, CASBs, API gateways | partial | CI/CD deploy gate (ADR-0161) and Kong adapter exist; CASB not built |
+| Enforcement integration with CI/CD, CASBs, API gateways | partial | CI/CD deploy gate (ADR-0161, `demo:gate`) and Kong adapter exist; CASB not built |
 
 ### Phase 3 — Monitor & Respond  (module: Governance in production)
 
 | Capability | Status | Where / gap |
 |---|---|---|
-| Trace ingestion and continuous evaluation | exists (API) | `tracing.ts`; ADR-0160 scheduled evaluation of every model response with the shipped detectors, feeding the monitor; model-tier detectors not wired |
+| Trace ingestion and continuous evaluation | exists | `tracing.ts`; ADR-0160 scheduled evaluation of every model response with the shipped detectors, feeding the monitor (shown as alerts); model-tier detectors not wired |
 | Human-in-the-loop escalation for high-risk actions | exists | approvals, execution modes (ADR-0124), inbox |
-| Remediation agents (GAIA-equivalent) for automated controls | partial | ADR-0159: planned remediation per alert; control links and owner assignment execute after arm's-length approval; other kinds are guidance; no model-driven agent [X7] |
-| Real-time compliance monitoring and alerts | exists | governance monitor (ADR-0157) + trace evaluation (ADR-0160) + off-stack serving from the usage ledger (ADR-0164); alerts via audit log/SIEM and Slack/Teams (ADR-0162); alerts UI [X7] |
+| Remediation agents (GAIA-equivalent) for automated controls | partial | ADR-0159: planned remediation per alert, proposed from the alerts page [X7]; control links and owner assignment execute after arm's-length approval; other kinds are guidance; no model-driven agent |
+| Real-time compliance monitoring and alerts | exists | governance monitor (ADR-0157) + trace evaluation (ADR-0160) + off-stack serving from the usage ledger (ADR-0164); alerts via the audit log (exportable; no live SIEM push, ADR-0135) and Slack/Teams (ADR-0162); alerts UI [X7], chat settings [X11] |
 
 Post-demo order (proposal, needs owner confirmation): residual-risk and
 control linkage hardening → dependency graph + risk propagation → continuous
