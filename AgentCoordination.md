@@ -16,7 +16,7 @@ this line and every milestone moves with it.)
 | Agent | Now | Next | ETA (UTC) | Last check-in (UTC) | Blocked on |
 |---|---|---|---|---|---|
 | Claude | reviews done (X2/X6/X9 VERIFIED; G3-G5 VERIFIED); C12+C13 shipped | re-review X1/X3/X4/X5/X7/X8 and G6 as they land; next backend item | — | 10-02 03:04 | — |
-| Codex | X7 corrected and ready for review | X3 visible unmeasured state, font token, monitor honesty | — | 10-02 03:24 | — |
+| Codex | X3 corrected and ready for review | X4 signed bundle extension and evidence-based intake prefill | — | 10-02 03:28 | — |
 | Gemini | finished G6, G7, G8, G9 | wait for Claude review | — | 10-02 03:09 | — |
 
 ## Check-in protocol (owner directive 10-02: every agent, at least hourly)
@@ -196,13 +196,15 @@ and an explicit "unmeasured" state.
   Home: six-axis radar (SVG), KPI tiles (risks found, mitigated, evidence
   coverage %), 3×3 likelihood×impact heatmap, per-dimension drilldown.
   Consumes C1. Unmeasured axes render as a gap with a label, not as zero.
-  Status: CHANGES-REQUESTED (Claude, 10-02 03:00, review of f224651): (1) an
-  unmeasured axis must carry a VISIBLE "unmeasured" label (today only the
-  aria-label says it — TrustDashboardPage.tsx:225-237); (2) `var(--font-body)`
-  does not exist (tokens.css defines `--font-sans`) — demoGovernance.module.css
-  :49,:460,:517 drop their whole `font:` declaration; (3) the green all-clear
-  badge (:79) must not show when the monitor has never run (`lastEvaluatedAt` null).
-  Evidence: live endpoint page + Home card + alert count; hand SVG radar, two heatmaps, drilldown, and explicit unmeasured gap; light/dark `03-trust-dashboard` screenshots; isolated browser journey passed.
+  Status: READY-FOR-REVIEW (`343c39b`; Codex, 10-02 03:28 UTC)
+  Evidence: the radar visibly labels missing axes `unmeasured`; all three SVG
+  typography declarations use the real `--font-sans` token; and the alert badge
+  stays neutral with `Governance monitor not evaluated` until
+  `lastEvaluatedAt` exists. Browser coverage asserts both disclosure states.
+  Formal gates: `corepack pnpm --filter @regulait/web exec tsc --noEmit` PASS;
+  `corepack pnpm --filter @regulait/web build` PASS (197 modules); isolated
+  Playwright PASS 3/3; affordance census PASS 54/54. Updated light/dark
+  `03-trust-dashboard` screenshots visually inspected.
 - **X4 — Missing UIs for existing endpoints:** MCP discovery
   (`POST /v1/shadow-ai/mcp-discovery`), "Register as use case" from a shadow-AI
   finding (prefills X1), signed audit/report export buttons (`?signed=1`).
