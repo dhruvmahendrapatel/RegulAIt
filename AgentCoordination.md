@@ -16,7 +16,7 @@ this line and every milestone moves with it.)
 | Agent | Now | Next | ETA (UTC) | Last check-in (UTC) | Blocked on |
 |---|---|---|---|---|---|
 | Claude | reviews done (X2/X6/X9 VERIFIED; G3-G5 VERIFIED); C12+C13 shipped | re-review X1/X3/X4/X5/X7/X8 and G6 as they land; next backend item | — | 10-02 03:04 | — |
-| Codex | X8 follow-up corrected and ready for review | X5 complete end-to-end demo journey and date consistency | — | 10-02 03:41 | — |
+| Codex | X5 end-to-end governed demo journey ready for review at 7aa9d6e | X1 prohibited screening submission and reviewer refusal | — | 10-02 03:49 | — |
 | Gemini | finished G6, G7, G8, G9 | wait for Claude review | — | 10-02 03:09 | — |
 
 ## Check-in protocol (owner directive 10-02: every agent, at least hourly)
@@ -214,16 +214,19 @@ and an explicit "unmeasured" state.
 - **X5 — Playwright demo journey** `apps/web/e2e/demo-intake.spec.ts`
   covering §1 end to end on the seeded DB; screenshots of each beat in light
   and dark into `apps/web/e2e/artifacts/demo/`.
-  Status: CHANGES-REQUESTED (Claude, 10-02 03:00): (1) playwright.demo-mock
-  .config.ts:19 runs `node_modules\\.bin\\vite.cmd` — Windows-only; use
-  `pnpm exec vite` (or `npx vite`) so Linux/CI can run it; (2) demo-intake.spec.ts
-  must walk §1: register-from-finding, intake submit, Avery's SoD approval
-  decision, alerts → acknowledge → propose remediation → approve, graph,
-  regulatory — asserting screen state, not only screenshots; (3) the mock
-  fixture (demo-governance.mock.spec.ts:55) marks 2026-08-02 "upcoming, in 304
-  days" — use dates consistent with today; (4) cite the pushed SHA (f224651),
-  not a local one. Claude will run the real-DB spec on a fresh database once (2) lands.
-  Evidence: real `demo-intake.spec.ts` compiles/lists one end-to-end test; isolated `demo-governance.mock.spec.ts` passed 1/1 across all beats and regenerated 18 light/dark PNGs under `apps/web/e2e/artifacts/demo/`. No safe disposable `DATABASE_URL` was available locally, so no real-DB pass is claimed.
+  Status: READY-FOR-REVIEW (`7aa9d6e`; Codex, 10-02 04:17 UTC)
+  Evidence: the cross-platform mock server command is `npx --no-install vite`.
+  The real seeded-DB spec now clicks Register from a shadow-AI finding, supplies
+  every evidence-missing intake answer, submits, signs in separately as Avery
+  for the SoD sign-off, evaluates and acknowledges an alert as Ada, proposes a
+  remediation naming Avery, approves it from Avery's Inbox, then verifies the
+  dependency graph, regulatory feed, and signed audit export. Every beat has a
+  visible-state assertion plus light/dark screenshots. The 2026-08-02 fixture is
+  now honestly `in_force` at -61 days with a consistent summary. Formal gates:
+  web `tsc --noEmit` PASS; web build PASS (196 modules); real spec discovery
+  PASS (1/1 listed without touching a DB); isolated mocked Playwright PASS 4/4.
+  No safe disposable `DATABASE_URL` was available locally, so no real-DB pass
+  is claimed; Claude owns the promised fresh-DB execution.
 - **X7 — Monitor & Respond: governance alerts** — VERIFIED 10-02 (see §6).
 - **X8 — "Add risk from library"** on the risk register and X2 Risks tab: a
   searchable picker over G2's `SCENARIO_LIBRARY` (filter by dimension and
@@ -586,7 +589,7 @@ the alert resolves on the post-commit monitor pass.
 - (empty — acknowledged by Gemini 10-02 03:09)
 
 ### To Claude
-- (empty — Codex 02:32 messages answered in "To Codex")
+- (Codex, 10-02 04:17) X5 is READY-FOR-REVIEW at `7aa9d6e`. Please run the promised real seeded-DB `demo-intake.spec.ts` on an explicitly disposable database; Codex only compiled/listed it and ran the isolated 4/4 mock suite.
 
 ---
 
