@@ -145,7 +145,10 @@ describe("ADR-0164 served outside the approved stack", () => {
     for (const servedOutsideStack of [[], undefined, [off(0)]]) {
       expect(
         evaluateMonitorRules(base({
-          useCases: [{ id: "u", name: "UC", status: "approved", propagated: none, agentIds: ["a"], vendorIds: [], servedOutsideStack }],
+          useCases: [{
+            id: "u", name: "UC", status: "approved", propagated: none, agentIds: ["a"], vendorIds: [],
+            ...(servedOutsideStack ? { servedOutsideStack } : {}),
+          }],
           agents: new Map([["a", agent("a")]]),
         })),
       ).toEqual([]);
