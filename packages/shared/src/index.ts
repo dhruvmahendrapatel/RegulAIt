@@ -3383,6 +3383,17 @@ export {
   type TraceFinding,
 } from "./trace-evaluation.js";
 
+// ADR-0161 — the deploy gate a CI/CD pipeline calls before shipping.
+export {
+  DEPLOY_GATE_REASON_CODES,
+  evaluateDeployGate,
+  type DeployGateAgentInput,
+  type DeployGateDecision,
+  type DeployGateInput,
+  type DeployGateReason,
+  type DeployGateReasonCode,
+} from "./deploy-gate.js";
+
 // ---------------------------------------------------------------------------
 // ADR-0084 — the AI vendor registry (third-party AI risk): the vocabulary,
 // the request shapes, and the attested-never-measured disclaimer. `status` is

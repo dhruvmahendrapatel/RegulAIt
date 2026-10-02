@@ -807,7 +807,7 @@ Demo-critical items for 2026-10-05 are tracked in `AgentCoordination.md`
 | Governance workflows with approval gates | exists | workflows + approvals with separation of duties |
 | Automated evidence generation and audit trails | exists | collectors, hash-chained audit, signed exports (no UI for signed export) [X4] |
 | Custom guardrails and compliance mapping | exists | ADR-0042 guardrails; custom packs |
-| Enforcement integration with CI/CD, CASBs, API gateways | partial | Kong adapter exists; CI/CD and CASB not built |
+| Enforcement integration with CI/CD, CASBs, API gateways | partial | CI/CD deploy gate (ADR-0161) and Kong adapter exist; CASB not built |
 
 ### Phase 3 — Monitor & Respond  (module: Governance in production)
 

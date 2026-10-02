@@ -157,6 +157,7 @@ import {
 } from "./remediation.js";
 import { runGovernanceMonitor } from "./governance-monitor.js";
 import { registerTraceEvaluationRoutes } from "./trace-evaluation.js";
+import { registerDeployGateRoutes } from "./deploy-gate.js";
 import { registerPosturePresetRoutes } from "./posture-preset.js";
 import { registerExecutionControlRoutes } from "./execution-control.js";
 import { registerInventoryRoutes } from "./inventory.js";
@@ -3637,6 +3638,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerRemediationRoutes(app, db);
   // ADR-0160 — continuous trace evaluation
   registerTraceEvaluationRoutes(app, db);
+  // ADR-0161 — the CI/CD deploy gate
+  registerDeployGateRoutes(app, db);
   // ADR-0084 — the AI vendor registry beside the use-case registry whose
   // rails it copies. Propose/list/detail/edit/attest are non-admin
   // (owner-or-admin in-handler); RETIRE stays admin through the default gate.

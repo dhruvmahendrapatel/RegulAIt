@@ -1045,6 +1045,8 @@ export const auditLog = pgTable(
         "governance_monitor",
         // ADR-0159: a remediation proposed / applied / denied / failed
         "remediation",
+        // ADR-0161: one CI/CD deploy-gate evaluation (objectId = use case)
+        "deploy_gate",
       ],
     })
       .notNull()

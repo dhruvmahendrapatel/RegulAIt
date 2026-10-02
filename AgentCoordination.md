@@ -156,6 +156,9 @@ All LIVE on `dhruv/active`, CI-tested; details are in the contract (§4) and ADR
   (per-agent `{spans, evaluated, withheld, noContent, flagged, leaksByDetector,
   attemptsByDetector, coveragePct, agentName}`), `POST …/run`; monitor rule
   `agent_output_leakage`. A compact card for X3/X7 is optional.
+- **C13** CI/CD deploy gate — ADR-0161: `POST /v1/gates/deploy {useCaseId, agentIds?, environment?, ref?}`
+  → `{decision: allow|deny, reasons[{code, severity: block|warn, message, ref:{type,id}}], agentsChecked, …}`;
+  owner-or-admin. Demo option: show a pipeline step denied by an open high alert, then allowed after acknowledgement.
 
 ### Codex — web UI (apps/web), browser verification
 

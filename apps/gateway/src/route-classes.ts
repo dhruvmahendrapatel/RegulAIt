@@ -147,6 +147,9 @@ export const NON_ADMIN_ROUTES = new Set([
   "POST /v1/use-cases/intake/assist",
   // C3: owner-or-admin, enforced in the handler like the detail route
   "GET /v1/use-cases/:useCaseId/overview",
+  // ADR-0161: the deploy gate — owner-or-admin, enforced in the handler (a
+  // pipeline runs as the service account that owns the use case it ships)
+  "POST /v1/gates/deploy",
   "GET /v1/use-cases",
   "GET /v1/use-cases/:useCaseId",
   // ADR-0058 mapping view. Non-admin for the same reason the detail route is:
