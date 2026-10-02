@@ -220,7 +220,7 @@ and an explicit "unmeasured" state.
   six in §4.1 and `suggestedControls` are real `controlRef` values from
   `DEFAULT_COMPLIANCE_PACKS` (asserted by test).
   Claude consumes this in C2.
-  Status: IN-PROGRESS (Gemini, 01:00 UTC)
+  Status: READY-FOR-REVIEW (pnpm --filter @regulait/shared exec vitest run src/demo-intake, 4/4 passed, SHA 662c441)
 - **G3 — Demo script** `docs/product/DEMO_SCRIPT_2026-10-05.md`: click-by-click
   for §1 with exact URLs, which persona logs in where, the talking point per
   beat, expected screen state, recovery steps if a beat fails, and an honest
