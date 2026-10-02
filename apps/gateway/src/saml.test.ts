@@ -1034,8 +1034,25 @@ describe("ADR-0167 — the SP-initiated login completes only in the browser that
     });
     const signed = signAssertion(xml, keyA);
 
-    // the victim's browser: a valid, correlated, signed response — and no cookie
-    const victim = await postSecureAcs(p.id, signed, s.relayState);
+    // the browser that started it: signed in
+    const own = await postSecureAcs(p.id, signed, s.relayState, `regulait_saml_login=${s.binding!.value}`);
+    expect(own.statusCode, own.body).toBe(302);
+    expect(own.cookies.find((c) => c.name === "regulait_session")).toBeTruthy();
+
+    // a second login, planted in the victim's browser: a valid, correlated,
+    // signed response — and no cookie
+    const s2 = await startSecure(p.id);
+    const planted = signAssertion(
+      buildResponse({
+        providerId: p.id,
+        email,
+        inResponseTo: s2.requestId,
+        audience: SP_ENTITY_HTTPS,
+        recipient: `${HTTPS_BASE}/auth/saml/${p.id}/acs`,
+      }).xml,
+      keyA,
+    );
+    const victim = await postSecureAcs(p.id, planted, s2.relayState);
     expect(victim.statusCode).toBe(401);
     expect(victim.json().error).toBe("login_not_bound_to_this_browser");
     expect(victim.cookies.find((c) => c.name === "regulait_session")).toBeUndefined();
@@ -1043,14 +1060,17 @@ describe("ADR-0167 — the SP-initiated login completes only in the browser that
     expect(row).toBeTruthy();
     expect((row!.detail as { bindingCookiePresent?: boolean }).bindingCookiePresent).toBe(false);
 
+    // the mismatch SPENT the state (like the OIDC one): even the right browser
+    // cannot complete that login any more — a planted RelayState is not retryable
+    const retried = await postSecureAcs(p.id, planted, s2.relayState, `regulait_saml_login=${s2.binding!.value}`);
+    expect(retried.statusCode).toBe(401);
+    expect(retried.json().error).not.toBe("login_not_bound_to_this_browser");
+    expect(retried.cookies.find((c) => c.name === "regulait_session")).toBeUndefined();
+
     // a forged value is a mismatch too
-    const forged = await postSecureAcs(p.id, signed, s.relayState, "regulait_saml_login=not-the-hmac");
+    const s3 = await startSecure(p.id);
+    const forged = await postSecureAcs(p.id, planted, s3.relayState, "regulait_saml_login=not-the-hmac");
     expect(forged.statusCode).toBe(401);
     expect(forged.json().error).toBe("login_not_bound_to_this_browser");
-
-    // the browser that started it: signed in
-    const own = await postSecureAcs(p.id, signed, s.relayState, `regulait_saml_login=${s.binding!.value}`);
-    expect(own.statusCode, own.body).toBe(302);
-    expect(own.cookies.find((c) => c.name === "regulait_session")).toBeTruthy();
   });
 });

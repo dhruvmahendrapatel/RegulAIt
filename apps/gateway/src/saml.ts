@@ -587,6 +587,11 @@ export function registerSamlRoutes(app: FastifyInstance, db: Db, opts: SamlRoute
       if (state && requestIsSecure(req)) {
         const presentedBinding = readCookie(req.headers.cookie, SAML_BINDING_COOKIE);
         if (!ssoBindingMatches(presentedBinding, ssoBrowserBinding(opts.dataKey, state.relayState))) {
+          // spent either way, like the OIDC state: a planted RelayState is not
+          // retryable until it expires, and the IdP is never contacted for it
+          await db
+            .delete(samlLoginStates)
+            .where(and(eq(samlLoginStates.relayState, state.relayState), eq(samlLoginStates.providerId, providerId)));
           return refuse(401, "login_not_bound_to_this_browser", "saml-login-browser-mismatch",
             `SAML login for provider '${provider.name}' refused: the login was started in a different browser (login CSRF) — no session minted`,
             { bindingCookiePresent: presentedBinding !== null });

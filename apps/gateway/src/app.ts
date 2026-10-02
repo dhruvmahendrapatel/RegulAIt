@@ -564,6 +564,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   setRetryConfig(resolveRetryConfig(process.env, opts.retry ?? {}));
   const app = Fastify({
     logger: opts.logger ?? false,
+    // ADR-0167 §9: the gateway's own hook writes one line per refusal with the
+    // route and the credential KIND. Fastify's per-request lines would print
+    // the full URL — the OIDC callback's code and state, every query string —
+    // unredacted at info, so they stay off whatever the level.
+    disableRequestLogging: true,
     trustProxy,
     requestTimeout: timeoutCfg.requestTimeoutMs,
     bodyLimit: timeoutCfg.bodyLimitBytes,

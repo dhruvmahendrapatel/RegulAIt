@@ -174,7 +174,10 @@ migration once every deployment has booted past this one.
 `buildApp` ran with `logger: false`, so every `app.log.*` was a no-op and a 500's reason was
 discarded unless an undocumented `DEBUG_ERRORS` was set. The logger is resolved on the boot path
 (`gateway-logger.ts`, pino as shipped with Fastify — no new dependency), forced off under vitest,
-with `authorization`, `cookie`, `x-api-key` and `set-cookie` redacted; every 4xx is one `warn`
+with `authorization`, `cookie`, `x-api-key` and `set-cookie` redacted. Fastify's own per-request
+lines (`incoming request` / `request completed`) are disabled: they print the full URL at info, which
+for the OIDC callback is the authorization code and state — the review caught this live, and the
+logger test now proves no line at info carries a query string. Every 4xx is one `warn`
 line with route, method, IP and credential *kind*, every 5xx an `error` line; `LOG_LEVEL`,
 `REGULAIT_LOG=off` and `DEBUG_ERRORS` are documented in INSTALL.md; compose caps the file.
 

@@ -97,6 +97,32 @@ describe("what a refusal leaves behind", () => {
     expect(everything).not.toContain("should-not-appear");
   });
 
+  it("at info, no request line carries the URL — the OIDC callback's code and state never reach the log", async () => {
+    // Fastify's own per-request lines ("incoming request" / "request completed")
+    // print req.url with its query string unredacted; the gateway disables them
+    // and writes only its own refusal/error lines (ADR-0167 §9).
+    const infoLines: Array<Record<string, unknown>> = [];
+    const sink = new Writable({
+      write(chunk, _enc, cb) {
+        for (const raw of String(chunk).split("\n")) if (raw.trim()) infoLines.push(JSON.parse(raw) as Record<string, unknown>);
+        cb();
+      },
+    });
+    const resolved = resolveGatewayLogger({ LOG_LEVEL: "info" } as NodeJS.ProcessEnv);
+    const verbose = buildApp(db, { bootstrapToken: BOOT, logger: { ...(resolved as object), stream: sink } as never });
+    try {
+      const res = await verbose.inject({ method: "GET", url: "/auth/me?probe_secret=QSECRET123&code=QCODE456&state=QSTATE789" });
+      expect([200, 401]).toContain(res.statusCode);
+      const everything = JSON.stringify(infoLines);
+      expect(everything).not.toContain("QSECRET123");
+      expect(everything).not.toContain("QCODE456");
+      expect(infoLines.map((l) => l.msg)).not.toContain("incoming request");
+      expect(infoLines.map((l) => l.msg)).not.toContain("request completed");
+    } finally {
+      await verbose.close();
+    }
+  });
+
   it("a successful request below the threshold leaves no line at all at warn", async () => {
     lines.length = 0;
     const res = await app.inject({ method: "GET", url: "/health" });
