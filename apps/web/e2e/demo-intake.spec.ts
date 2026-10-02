@@ -108,6 +108,12 @@ test("seeded credit-assistant journey: discover, register, assess, approve, moni
   expect(afterSignoff.useCases.find((u) => u.name.startsWith("Govern "))?.status).toBe("approved");
   await shotBoth(avery, "real-05b-avery-approved");
 
+  // 3A — the trust dashboard (evidence coverage), as the presenter shows it before the alerts
+  await page.goto("/ui/admin/governance/trust");
+  await expect(page.getByRole("heading", { name: "Trust & evidence" })).toBeVisible();
+  await expect(page.getByText("Evidence coverage by dimension")).toBeVisible();
+  await shotBoth(page, "real-05c-trust-dashboard");
+
   await page.goto("/ui/admin/governance/alerts");
   await expect(page.getByRole("heading", { name: "Governance alerts" })).toBeVisible();
   await page.getByRole("button", { name: "Evaluate now" }).click();

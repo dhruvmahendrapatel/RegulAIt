@@ -201,3 +201,19 @@ Everything runs on the keyless **mock** provider. No live model, no external net
   monitor, trace evaluation, remediation, deploy gate and approvals are the product code paths.
 - **Never claim** automatic remediation: discovery, mapping and monitoring are automated;
   changes to governed state are human-approved.
+
+## Fallback — if the live demo fails
+
+Build an offline walkthrough of every beat from REAL screenshots the night before, on the
+rehearsal machine, and keep it open in a browser tab:
+
+1. On a fresh `demo:prepare` database, before anything else touches it:
+   `pnpm -s --filter @regulait/gateway demo:gate -- "Real-Time Fraud Detection Engine" production build-4417 > apps/web/e2e/artifacts/demo/real-gate.txt`
+   (the DENY is expected; PowerShell: `| Out-File -Encoding utf8 apps\web\e2e\artifacts\demo\real-gate.txt`).
+2. Start the gateway and run the real journey (§0, "A full rehearsal of the UI journey").
+3. `node apps/web/e2e/fallback-deck.mjs` → `apps/web/e2e/artifacts/demo/fallback-deck.html`, one
+   self-contained file (no network). → / Space next, ← back; each slide shows the beat, the
+   persona, the screenshot (scroll inside it) and the script's **Say** line.
+
+If the projector or laptop fails, the same file opens on any machine. Say plainly that these are
+screenshots of the product taken from a real run, not the live system.

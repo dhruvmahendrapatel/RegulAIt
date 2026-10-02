@@ -64,3 +64,5 @@ apps/web/e2e/.e2e-license-keys/
 # real seeded-DB journey screenshots (apps/web/e2e/demo-intake.spec.ts): ~11 MB per
 # run, regenerated every run — kept out of history; the mocked set is tracked
 apps/web/e2e/artifacts/demo/real-*.png
+apps/web/e2e/artifacts/demo/real-gate.txt
+apps/web/e2e/artifacts/demo/fallback-deck.html
