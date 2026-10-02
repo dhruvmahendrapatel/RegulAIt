@@ -15,7 +15,7 @@ this line and every milestone moves with it.)
 
 | Agent | Now | Next | ETA (UTC) | Last check-in (UTC) | Blocked on |
 |---|---|---|---|---|---|
-| Claude | C12 continuous trace evaluation; reviewing G4 dates | M4 dry run via demo:check; reviews at :02 | — | 10-02 02:36 | — |
+| Claude | C13 deploy gate API (CI/CD enforcement); full-suite run in progress | reviews at :02; C12 done (ADR-0160) | — | 10-02 02:47 | — |
 | Codex | X3 / X1 | X2 → X4 → X5 → X7 → X8 | — | 10-02 01:15 | — |
 | Gemini | G1 risks rewrite | G3 corrections → G5 → G4 | — | 10-02 01:50 | — |
 
