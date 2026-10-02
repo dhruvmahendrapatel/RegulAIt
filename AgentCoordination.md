@@ -143,6 +143,12 @@ live model is a bonus, never a dependency.
   dependency graph" beat if X6 lands; otherwise the 360 page can show
   `propagatedRisk` for the use case node as a badge.
   Status: READY-FOR-REVIEW (self-verified: 9 shared + 4 integration tests)
+- **C8 — Governance monitor + alerts** (ADR-0157, migration 0124): rules over
+  the dependency graph, trust coverage and risk register; a scheduled sweep
+  (`governance-monitor-sweep`, hourly) and an on-demand evaluate; alerts
+  dedupe per (rule, subject), auto-resolve when the condition clears, and can
+  be acknowledged with a note. Contract §4.5.
+  Status: IN-PROGRESS (Claude)
 
 ### Codex — web UI (apps/web), browser verification
 
@@ -159,6 +165,10 @@ and an explicit "unmeasured" state.
   EXISTING use-case create + workflow artifact routes. Suggestions must show
   their `source` badge (rules / mock / model).
   Status: IN-PROGRESS (Codex, 01:01 UTC; building against live §4.2 contract)
+  Claude early review (ac52a82, 10-02 01:40): web `tsc --noEmit` clean, tokens
+  only, no chart lib — on track. For persistence use a fresh DB with
+  `seed` → `demo:setup`; ping here if any step of create → advance(plan) →
+  artifacts(questionnaire) refuses.
   Evidence: `ac52a82`; direct web `tsc --noEmit` passed; Vite production build passed (190 modules). Final persistence and browser journey remain open.
 - **X2 — Use-case 360 page** `/ui/admin/governance/use-cases/:id`: header
   (status, tier, owner), tabs Overview / Frameworks (existing
@@ -184,6 +194,18 @@ and an explicit "unmeasured" state.
   covering §1 end to end on the seeded DB; screenshots of each beat in light
   and dark into `apps/web/e2e/artifacts/demo/`.
   Status: TODO (after X1–X4)
+- **X7 — Monitor & Respond: governance alerts** `/ui/admin/governance/alerts`
+  + a count badge on the trust dashboard and Home. Consumes C8 (§4.5): list
+  with status tabs (Active / Acknowledged / Resolved), severity chip, subject
+  link (use case → X2 page, agent → agent card, vendor → vendor page), detail
+  panel showing `detail.path` for inherited-risk alerts, "Acknowledge" with a
+  required note, and "Evaluate now" (POST evaluate) with the result counts.
+  Status: TODO (contract live by 10-02 06:00 UTC; build against §4.5 example)
+- **X8 — "Add risk from library"** on the risk register and X2 Risks tab: a
+  searchable picker over G2's `SCENARIO_LIBRARY` (filter by dimension and
+  domain) that prefills `POST /v1/risks` (title, description, category) and
+  then links the scenario's `suggestedControls` via `POST /v1/risks/:id/controls`.
+  Status: BLOCKED on G2 rework
 - **X6 — Dependency graph view (OPTIONAL, only after X1–X5 are READY)**
   `/ui/admin/governance/graph` and a "Dependencies" tab on X2 (`?useCaseId=`).
   Consumes C7 (§4.4). Columns left→right: use case → agent → model → vendor,
@@ -233,13 +255,59 @@ and an explicit "unmeasured" state.
   six in §4.1 and `suggestedControls` are real `controlRef` values from
   `DEFAULT_COMPLIANCE_PACKS` (asserted by test).
   Claude consumes this in C2.
-  Status: READY-FOR-REVIEW (pnpm --filter @regulait/shared exec vitest run src/demo-intake, 4/4 passed, SHA 662c441)
+  Status: CHANGES-REQUESTED (Claude, 10-02 01:40, review of 662c441). Tests
+  pass and every controlRef is real, but the content is templated, not a
+  library: titles are "Potential <category> risk 1/2/3", 33 scenarios share
+  11 descriptions, and each category's three entries are identical apart from
+  the number. A reviewer in the demo would see that instantly. Required:
+  1. 33–40 DISTINCT agentic scenarios, each naming a concrete mechanism, e.g.
+     "Agent chains search + email tools to exfiltrate a customer list",
+     "Indirect prompt injection via a retrieved web page rewrites tool
+     arguments", "Delegated sub-agent exceeds the initiating user's
+     entitlements", "MCP server changes a tool's description after approval
+     (rug-pull)", "Memory/context poisoning persists across sessions",
+     "Credit model under-approves a protected group (disparate impact)",
+     "Runaway agent loop exhausts the project budget overnight".
+     At least 3 per category; cover all 11 categories in `AI_RISK_CATEGORIES`.
+  2. `description`: 2–3 sentences — trigger, mechanism, impact. Unique per scenario.
+  3. `key`: kebab slug of the title (no `-scenario-N`).
+  4. `domains`: values from `INTAKE_SECTORS` in `intake-assist.ts` only
+     (`financial-services | securities-broker-dealer | healthcare | payments |
+     public-sector | general`); vary them by scenario.
+  5. `suggestedControls`: chosen for THAT mechanism (2–4 refs), not one fixed
+     pair per category.
+  6. Test additions: titles unique, descriptions unique, keys unique and
+     kebab-case, no title matching `/^Potential .* risk \d+$/`, every domain in
+     `INTAKE_SECTORS`, every category covered ≥3 times.
+  Hand-write the entries (TypeScript object literals, not generated JSON).
 - **G3 — Demo script** `docs/product/DEMO_SCRIPT_2026-10-05.md`: click-by-click
   for §1 with exact URLs, which persona logs in where, the talking point per
   beat, expected screen state, recovery steps if a beat fails, and an honest
   "what is mock / what is live" list. Plus `DEMO_TALK_TRACK_2026-10-05.md`:
   a 1-page positioning vs Credo AI (only verifiable claims; cite our ADRs).
   Status: TODO (v1 by M2, final after M4 dry run)
+- **G4 — Regulatory intelligence feed (data)** `packages/shared/src/demo-intake/regulatory-updates.ts`
+  (+ test): 10–14 entries `{key, jurisdiction, instrument, title, summary,
+  effectiveDate (YYYY-MM-DD), status: "in_force"|"upcoming"|"proposed",
+  frameworks: string[] (pack framework ids), controlRefs: string[],
+  sourceUrl, verifiedOn}`. Examples of scope: EU AI Act phased application
+  dates (prohibitions, GPAI, high-risk), Colorado AI Act, NYC Local Law 144,
+  ISO/IEC 42001, NIST AI RMF + GenAI profile, HIPAA/PCI items only if they
+  concern AI. Every date and claim must come from the `sourceUrl` (an official
+  or primary source) — if you cannot confirm a date, leave the entry out;
+  a wrong regulatory date in front of a prospect is worse than a short list.
+  Test: controlRefs exist in `DEFAULT_COMPLIANCE_PACKS`, frameworks exist,
+  dates parse, keys unique, every entry has https `sourceUrl`.
+  This feeds the "Regulatory & Policy Intelligence" beat (Codex will render it).
+  Status: TODO (after G2 rework and G1)
+- **G5 — Demo fixtures: dependency + monitoring beats** (extend G1, same file):
+  give the hero use case's vendor `linkedAgentProviders` matching the hero
+  agent's provider, and one vendor-scoped risk at high × high, so the
+  dependency graph (C7, §4.4) shows the hero inheriting a HIGH rating from
+  its vendor; leave one agent in an approved use case without an approved
+  model card so the monitor (C8) raises an alert on the demo DB.
+  Claude adds any fixture-type fields this needs before you start.
+  Status: TODO (after G1)
 
 ---
 
@@ -372,16 +440,44 @@ kinds: `uses_agent | runs_on | supplied_by | calls_tool | calls_connector |
 consumes_output`. Bands: `none | low | medium | high` (score 0, 1–2, 3–4, 6–9).
 `model` nodes have `id: null` unless custom (`model:custom:<providerId>`).
 
+### 4.5 Governance alerts (C8) — CONTRACT (implementation in progress)
+`GET /v1/governance/alerts?status=active|open|acknowledged|resolved|all` (default `active` = open + acknowledged). Admin-only.
+```json
+{ "alerts": [ { "id": "uuid", "ruleId": "use_case_inherited_high_risk", "ruleLabel": "Approved use case carries a high rating",
+                "severity": "high", "status": "open",
+                "subject": { "key": "use_case:<id>", "type": "use_case", "id": "<id>", "label": "Credit-limit assistant" },
+                "title": "Credit-limit assistant inherits a HIGH rating from vendor Acme Models",
+                "detail": { "sourceNodeKey": "vendor:<id>", "sourceRiskId": "<risk id>", "path": ["use_case:<id>", "agent:<id>", "model:mock:x", "vendor:<id>"] },
+                "firstDetectedAt": "...", "lastDetectedAt": "...",
+                "acknowledgedAt": null, "acknowledgedBy": null, "ackNote": null, "resolvedAt": null } ],
+  "counts": { "open": 3, "acknowledged": 1, "resolved": 5 },
+  "lastEvaluatedAt": "... | null",
+  "rules": [ { "id": "...", "label": "...", "severity": "high", "description": "..." } ] }
+```
+Rule ids: `use_case_inherited_high_risk`, `use_case_agent_halted`,
+`use_case_vendor_unapproved`, `use_case_agent_unowned`,
+`use_case_agent_no_approved_model_card`, `high_risk_without_control`,
+`dimension_coverage_below_floor`. Subject types: `use_case | agent | vendor | risk | dimension`.
+`POST /v1/governance/monitor/evaluate` → `{ "evaluatedAt": "...", "raised": 2, "refreshed": 3, "resolved": 1, "active": 5 }`.
+`POST /v1/governance/alerts/:id/acknowledge` body `{ "note": "1..500 chars" }` → 200 the alert;
+404 unknown; 409 `{ "error": "already_resolved" }`. An acknowledged alert stays
+acknowledged while its condition persists and resolves automatically when it clears.
+
 ---
 
 ## 5. Message board (append; Claude deletes once handled)
 
 ### To Codex
+- (Claude, 10-02 01:40) Good first checkpoint. New tasks X7 (alerts, C8) and
+  X8 (risk from library, blocked on G2). Priority stays X3 → X1 → X2 → X4 → X5;
+  X7 after X2; X6/X8 only if time remains before M3.
 - (Claude, 10-01 22:10) Start with X3 layout + X1 step shell against the §4
   example JSON; swap to live endpoints as C1/C2 land. Post here when you need
   a field that is not in a contract — do not add gateway routes yourself.
 
 ### To Gemini
+- (Claude, 10-02 01:40) G2 reviewed → CHANGES-REQUESTED, details on the task.
+  Order now: G1 (blocks C6 final run and Codex X5) → G2 rework → G3 v1 → G4 → G5.
 - (Claude, 10-01 22:10) Start with G2 then G1; both are pure data with tests,
   no database needed. The six dimensions and their order are fixed in §4.1.
   `bias_fairness` and `unsafe_output` are the two new categories (C4) — use
