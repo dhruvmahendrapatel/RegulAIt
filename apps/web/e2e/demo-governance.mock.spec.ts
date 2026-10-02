@@ -86,6 +86,7 @@ async function mock(route: Route) {
     }
   }
   else if (p === "/v1/governance/monitor/evaluate") body = { evaluatedAt: "2026-10-02T12:01:00Z", raised: 0, refreshed: 1, resolved: 0, active: 1 };
+  else if (p === "/v1/governance/alerts/al/post") body = { posted: true, connection: "security-slack", channel: "C-GOVERNANCE" };
   else if (p === "/v1/regulatory/updates") {
     const selectedStatus = url.searchParams.get("status");
     const selectedFramework = url.searchParams.get("framework");
@@ -171,6 +172,8 @@ test("enterprise governance demo surfaces render and complete their core actions
 
   await page.goto("/ui/admin/governance/alerts");
   await page.getByRole("button", { name: /inherits a HIGH rating/ }).click();
+  await page.getByRole("button", { name: "Post to chat" }).click();
+  await expect(page.getByRole("status")).toContainText("Posted to security-slack · C-GOVERNANCE");
   await page.getByRole("button", { name: "Evaluate now" }).click();
   await expect(page.getByText(/Evaluation raised 0, refreshed 1/)).toBeVisible();
   const acknowledgement = page.getByLabel("Acknowledgement note — required and audited");
@@ -358,4 +361,31 @@ test("zero live risks and unmeasured residual ratings do not imply assurance or 
   await expect(page.getByLabel("Residual likelihood")).toHaveValue("");
   await expect(page.getByLabel("Residual impact")).toHaveValue("");
   await expect(page.getByRole("button", { name: "Save residual" })).toBeDisabled();
+});
+
+test("ChatOps workspace alert threshold is editable and the exact post refusal is visible", async ({ page }) => {
+  await page.route("**/v1/chatops/connections", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        connections: [{ id: "44444444-4444-4444-8444-444444444444", name: "security-slack", provider: "slack", connectorId: "c", defaultChannel: "C-GOVERNANCE", allowFencedDecide: false, notifyAlertMinSeverity: "high", enabled: true, createdAt: "2026-10-02T12:00:00Z" }],
+        posture: "Chat is a governed courier.",
+      }),
+    });
+  });
+  await page.goto("/ui/admin/chatops");
+  const threshold = page.getByLabel("Governance alerts for security-slack");
+  await expect(threshold).toHaveValue("high");
+  const patchRequest = page.waitForRequest((request) => request.method() === "PATCH" && new URL(request.url()).pathname.endsWith("/v1/chatops/connections/44444444-4444-4444-8444-444444444444"));
+  await threshold.selectOption("medium");
+  expect((await patchRequest).postDataJSON()).toEqual({ notifyAlertMinSeverity: "medium" });
+
+  await page.route("**/v1/governance/alerts/al/post", async (route) => {
+    await route.fulfill({ status: 502, contentType: "application/json", body: JSON.stringify({ error: "post_failed", detail: "see the chatops-alert-post-failed audit row" }) });
+  });
+  await page.goto("/ui/admin/governance/alerts");
+  await page.getByRole("button", { name: /inherits a HIGH rating/ }).click();
+  await page.getByRole("button", { name: "Post to chat" }).click();
+  await expect(page.getByRole("alert")).toContainText("post_failed — see the chatops-alert-post-failed audit row");
 });

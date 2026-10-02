@@ -73,6 +73,7 @@ export default function GovernanceAlertsPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [ackNote, setAckNote] = useState("");
   const [evaluation, setEvaluation] = useState<EvaluationResult | null>(null);
+  const [postResult, setPostResult] = useState<string | null>(null);
   const action = useAction();
   const alerts = useQuery({
     queryKey: ["governance", "alerts", status],
@@ -140,6 +141,15 @@ export default function GovernanceAlertsPage() {
                     <div className={v.row}><SeverityBadge severity={selected.severity} /><Badge tone="neutral">{selected.ruleId}</Badge></div>
                     <p>{selected.title}</p>
                     <SubjectLinks alert={selected} />
+                    <div className={v.row}>
+                      <Button size="sm" disabled={action.busy} onClick={() => void action.run(async () => {
+                        const posted = await api.post<{ posted: true; connection: string; channel: string }>(`/v1/governance/alerts/${selected.id}/post`);
+                        setPostResult(`Posted to ${posted.connection} · ${posted.channel}`);
+                      }, "Governance alert posted to chat")}>Post to chat</Button>
+                      <span className={v.faint}>Uses the first enabled workspace unless the API is given an explicit connection.</span>
+                    </div>
+                    {postResult ? <p className={s.callout} role="status">{postResult}</p> : null}
+                    {action.error ? <p className={v.errLine} role="alert">{action.error}</p> : null}
                     {(selected.detail.pathLabels ?? selected.detail.path)?.length ? (
                       <div><strong>Inherited-risk path</strong><ol className={s.pathList}>{(selected.detail.pathLabels ?? selected.detail.path ?? []).map((part) => <li key={part}>{part}</li>)}</ol></div>
                     ) : null}

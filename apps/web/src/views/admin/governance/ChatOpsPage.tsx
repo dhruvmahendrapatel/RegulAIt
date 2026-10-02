@@ -17,7 +17,7 @@
  *    per workspace with its consequence spelled out, defaulting off.
  */
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
@@ -32,6 +32,7 @@ interface Connection {
   connectorId: string;
   defaultChannel: string;
   allowFencedDecide: boolean;
+  notifyAlertMinSeverity?: "medium" | "high" | null;
   enabled: boolean;
   createdAt: string;
 }
@@ -54,6 +55,7 @@ interface LinksResponse {
 }
 
 export default function ChatOpsPage() {
+  const queryClient = useQueryClient();
   const connections = useQuery({
     queryKey: ["chatops", "connections"],
     queryFn: () => api.get<ConnectionsResponse>("/v1/chatops/connections"),
@@ -103,6 +105,33 @@ export default function ChatOpsPage() {
                 { key: "name", header: "Name", render: (r) => r.name },
                 { key: "provider", header: "Provider", render: (r) => <code>{r.provider}</code> },
                 { key: "channel", header: "Default channel", render: (r) => r.defaultChannel },
+                {
+                  key: "alerts",
+                  header: "Governance alerts",
+                  render: (r) => (
+                    <Select
+                      aria-label={`Governance alerts for ${r.name}`}
+                      value={r.notifyAlertMinSeverity ?? "off"}
+                      disabled={act.busy}
+                      onChange={(event) => {
+                        const next = event.target.value === "off" ? null : event.target.value as "medium" | "high";
+                        void act.run(async () => {
+                          const updated = await api.patch<{ notifyAlertMinSeverity: "medium" | "high" | null }>(`/v1/chatops/connections/${r.id}`, { notifyAlertMinSeverity: next });
+                          queryClient.setQueryData<ConnectionsResponse>(["chatops", "connections"], (current) => current ? ({
+                            ...current,
+                            connections: current.connections.map((connection) => connection.id === r.id
+                              ? { ...connection, notifyAlertMinSeverity: updated.notifyAlertMinSeverity }
+                              : connection),
+                          }) : current);
+                        }, "Governance alert delivery updated");
+                      }}
+                    >
+                      <option value="off">Off</option>
+                      <option value="high">High only</option>
+                      <option value="medium">Medium and above</option>
+                    </Select>
+                  ),
+                },
                 {
                   key: "fenced",
                   header: "Sensitive approvals",
