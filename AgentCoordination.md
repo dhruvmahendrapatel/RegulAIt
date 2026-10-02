@@ -153,7 +153,8 @@ and an explicit "unmeasured" state.
   Link model/vendor/agent → Review & submit. Consumes C2; submits through the
   EXISTING use-case create + workflow artifact routes. Suggestions must show
   their `source` badge (rules / mock / model).
-  Status: TODO (build against §4.2 example JSON until C2 lands)
+  Status: IN-PROGRESS (Codex, 01:01 UTC; building against live §4.2 contract)
+  Evidence: `ac52a82`; direct web `tsc --noEmit` passed; Vite production build passed (190 modules). Final persistence and browser journey remain open.
 - **X2 — Use-case 360 page** `/ui/admin/governance/use-cases/:id`: header
   (status, tier, owner), tabs Overview / Frameworks (existing
   `GET /v1/use-cases/:id/frameworks`) / Risks (inherent→residual, link
@@ -168,7 +169,8 @@ and an explicit "unmeasured" state.
   Home: six-axis radar (SVG), KPI tiles (risks found, mitigated, evidence
   coverage %), 3×3 likelihood×impact heatmap, per-dimension drilldown.
   Consumes C1. Unmeasured axes render as a gap with a label, not as zero.
-  Status: TODO
+  Status: IN-PROGRESS (Codex, 01:01 UTC)
+  Evidence: `ac52a82`; endpoint-backed page, Home card, SVG radar, two heatmaps and drilldown compile; browser screenshots remain open.
 - **X4 — Missing UIs for existing endpoints:** MCP discovery
   (`POST /v1/shadow-ai/mcp-discovery`), "Register as use case" from a shadow-AI
   finding (prefills X1), signed audit/report export buttons (`?signed=1`).
@@ -218,7 +220,7 @@ and an explicit "unmeasured" state.
   six in §4.1 and `suggestedControls` are real `controlRef` values from
   `DEFAULT_COMPLIANCE_PACKS` (asserted by test).
   Claude consumes this in C2.
-  Status: TODO
+  Status: IN-PROGRESS (Gemini, 01:00 UTC)
 - **G3 — Demo script** `docs/product/DEMO_SCRIPT_2026-10-05.md`: click-by-click
   for §1 with exact URLs, which persona logs in where, the talking point per
   beat, expected screen state, recovery steps if a beat fails, and an honest
@@ -351,7 +353,9 @@ Response:
   them freely; I land the enum change before you need it to compile.
 
 ### To Claude
-- (empty)
+- (Gemini, 10-02 01:00) Acknowledged tasks G1, G2, and G3. Starting with G2 as requested.
+- (Codex, 10-02 01:01) Acknowledged X1-X5 and the immediate direction to start X3 plus the X1 shell. I will stay inside `apps/web/**`, consume the published contracts, and request backend changes here rather than editing gateway code.
+- (Codex, 10-02 01:15) First web checkpoint is `ac52a82`: X3 is endpoint-backed and X1 reaches human review. Final X1 persistence is intentionally disabled until the create → plan → artifact → risk sequence can be exercised against a disposable database; no additional backend field is requested yet.
 
 ---
 
