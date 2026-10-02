@@ -10,6 +10,7 @@ import s from "./demoGovernance.module.css";
 
 type Source = "rules" | "mock" | "model";
 type Decision = "accepted" | "rejected";
+type BooleanAnswer = "" | "yes" | "no";
 
 interface IntakeSuggestion {
   source: Source;
@@ -55,16 +56,30 @@ const STEPS = ["Describe", "Suggestions", "Questionnaire", "Link stack", "Review
 
 export default function IntakeWizardPage() {
   const [prefill] = useSearchParams();
+  const fromShadowAi = prefill.get("source") === "shadow-ai";
   const [step, setStep] = useState(0);
   const [title, setTitle] = useState(prefill.get("title") ?? "Credit-limit-increase assistant");
   const [description, setDescription] = useState(
     prefill.get("description") ?? "Helps Acme Bank customers request a credit-limit increase using profile and financial data, with a human reviewing every recommendation.",
   );
-  const [purposeDomain, setPurposeDomain] = useState("essential-services");
-  const [profilesNaturalPersons, setProfilesNaturalPersons] = useState(true);
-  const [generative, setGenerative] = useState(true);
-  const [autonomousActions, setAutonomousActions] = useState(false);
-  const [usesExternalVendor, setUsesExternalVendor] = useState(true);
+  const initial = <T,>(demoValue: T, unanswered: T) => fromShadowAi ? unanswered : demoValue;
+  const [purposeDomain, setPurposeDomain] = useState(initial("essential-services", ""));
+  const [affectedPerson, setAffectedPerson] = useState(initial("customers", ""));
+  const [decisionAutonomy, setDecisionAutonomy] = useState(initial("human-reviews", ""));
+  const [biometricUse, setBiometricUse] = useState(initial("none", ""));
+  const [emotionRecognition, setEmotionRecognition] = useState<BooleanAnswer>(initial("no", ""));
+  const [socialScoring, setSocialScoring] = useState<BooleanAnswer>(initial("no", ""));
+  const [manipulativeTechniques, setManipulativeTechniques] = useState<BooleanAnswer>(initial("no", ""));
+  const [profilesNaturalPersons, setProfilesNaturalPersons] = useState<BooleanAnswer>(initial("yes", ""));
+  const [safetyComponent, setSafetyComponent] = useState<BooleanAnswer>(initial("no", ""));
+  const [interactsWithHumans, setInteractsWithHumans] = useState<BooleanAnswer>(initial("yes", ""));
+  const [generative, setGenerative] = useState<BooleanAnswer>(initial("yes", ""));
+  const [sector, setSector] = useState(initial("financial-services", ""));
+  const [dataCategory, setDataCategory] = useState(initial("financial", ""));
+  const [deployment, setDeployment] = useState(initial("customer-facing", ""));
+  const [euNexus, setEuNexus] = useState<BooleanAnswer>(initial("yes", ""));
+  const [autonomousActions, setAutonomousActions] = useState<BooleanAnswer>(initial("no", ""));
+  const [usesExternalVendor, setUsesExternalVendor] = useState<BooleanAnswer>(initial("yes", ""));
   const [decisions, setDecisions] = useState<Record<string, Decision>>({});
   const [suggestionEdits, setSuggestionEdits] = useState<Record<string, string>>({});
   const [questionnaire, setQuestionnaire] = useState<Record<string, string>>({});
@@ -86,25 +101,25 @@ export default function IntakeWizardPage() {
         description: description.trim(),
         euAiAct: {
           purposeDomain,
-          affectedPersons: ["customers"],
-          decisionAutonomy: "human-reviews",
-          biometricUse: "none",
-          emotionRecognition: false,
-          socialScoring: false,
-          manipulativeTechniques: false,
-          profilesNaturalPersons,
-          safetyComponent: false,
-          interactsWithHumans: true,
-          generatesSyntheticContent: generative,
+          affectedPersons: affectedPerson === "none" ? [] : [affectedPerson],
+          decisionAutonomy,
+          biometricUse,
+          emotionRecognition: emotionRecognition === "yes",
+          socialScoring: socialScoring === "yes",
+          manipulativeTechniques: manipulativeTechniques === "yes",
+          profilesNaturalPersons: profilesNaturalPersons === "yes",
+          safetyComponent: safetyComponent === "yes",
+          interactsWithHumans: interactsWithHumans === "yes",
+          generatesSyntheticContent: generative === "yes",
         },
         context: {
-          sectors: ["financial-services"],
-          dataCategories: ["personal", "financial"],
-          deployment: "customer-facing",
-          euNexus: true,
-          usesExternalVendor,
-          generative,
-          autonomousActions,
+          sectors: sector === "none" ? [] : [sector],
+          dataCategories: dataCategory === "none" ? [] : [dataCategory],
+          deployment,
+          euNexus: euNexus === "yes",
+          usesExternalVendor: usesExternalVendor === "yes",
+          generative: generative === "yes",
+          autonomousActions: autonomousActions === "yes",
           toolsUsed: [],
         },
         draftNarrative: true,
@@ -134,7 +149,13 @@ export default function IntakeWizardPage() {
     ].filter(Boolean))] as Source[];
   }, [assist.data]);
 
-  const canContinue = step === 0 ? Boolean(title.trim() && description.trim()) : Boolean(assist.data);
+  const intakeAnswersComplete = Boolean(
+    purposeDomain && affectedPerson && decisionAutonomy && biometricUse &&
+    emotionRecognition && socialScoring && manipulativeTechniques && profilesNaturalPersons &&
+    safetyComponent && interactsWithHumans && generative && sector && dataCategory && deployment &&
+    euNexus && autonomousActions && usesExternalVendor,
+  );
+  const canContinue = step === 0 ? Boolean(title.trim() && description.trim() && intakeAnswersComplete) : Boolean(assist.data);
   const setDecision = (key: string, value: Decision) => setDecisions((current) => ({ ...current, [key]: value }));
 
   const questionnaireMarkdown = () => {
@@ -233,11 +254,17 @@ export default function IntakeWizardPage() {
         {step === 0 && (
           <Card title="Describe the proposed AI system">
             <form className={v.stack} onSubmit={(event) => { event.preventDefault(); assist.mutate(); }}>
+              {fromShadowAi ? (
+                <div className={s.callout} role="status">
+                  Prefilled only from shadow-AI record {prefill.get("findingId") ?? "evidence"}: name and observed-use description. Complete every screening answer below; the finding did not establish them.
+                </div>
+              ) : null}
               <Field label="Use-case name"><Input value={title} onChange={(event) => setTitle(event.target.value)} required /></Field>
               <Field label="What will the system do?"><Textarea rows={5} value={description} onChange={(event) => setDescription(event.target.value)} required /></Field>
               <div className={v.grid2}>
                 <Field label="Primary purpose domain">
-                  <Select value={purposeDomain} onChange={(event) => setPurposeDomain(event.target.value)}>
+                  <Select value={purposeDomain} onChange={(event) => setPurposeDomain(event.target.value)} required>
+                    <option value="">Choose a purpose domain</option>
                     <option value="essential-services">Essential services</option>
                     <option value="employment-hr">Employment / HR</option>
                     <option value="education">Education</option>
@@ -245,14 +272,50 @@ export default function IntakeWizardPage() {
                     <option value="general-business">General business</option>
                   </Select>
                 </Field>
-                <Field label="Decision autonomy"><Input value="Human reviews every recommendation" readOnly /></Field>
+                <Field label="People affected">
+                  <Select value={affectedPerson} onChange={(event) => setAffectedPerson(event.target.value)} required>
+                    <option value="">Choose who is affected</option><option value="none">No natural persons</option><option value="employees">Employees</option><option value="customers">Customers</option><option value="general-public">General public</option><option value="vulnerable-groups">Vulnerable groups</option>
+                  </Select>
+                </Field>
+                <Field label="Decision autonomy">
+                  <Select value={decisionAutonomy} onChange={(event) => setDecisionAutonomy(event.target.value)} required>
+                    <option value="">Choose decision autonomy</option><option value="narrow-procedural">Narrow procedural task</option><option value="informs-human">Informs a human</option><option value="human-reviews">Human reviews every recommendation</option><option value="fully-automated">Fully automated</option>
+                  </Select>
+                </Field>
+                <Field label="Biometric use">
+                  <Select value={biometricUse} onChange={(event) => setBiometricUse(event.target.value)} required>
+                    <option value="">Choose biometric use</option><option value="none">None</option><option value="verification">1:1 verification</option><option value="remote-identification">Remote identification</option>
+                  </Select>
+                </Field>
+                <Field label="Primary sector">
+                  <Select value={sector} onChange={(event) => setSector(event.target.value)} required>
+                    <option value="">Choose a sector</option><option value="none">No sector selected</option><option value="financial-services">Financial services</option><option value="securities-broker-dealer">Securities / broker-dealer</option><option value="healthcare">Healthcare</option><option value="payments">Payments</option><option value="public-sector">Public sector</option><option value="general">General</option>
+                  </Select>
+                </Field>
+                <Field label="Primary data category">
+                  <Select value={dataCategory} onChange={(event) => setDataCategory(event.target.value)} required>
+                    <option value="">Choose a data category</option><option value="none">No governed data category</option><option value="personal">Personal</option><option value="sensitive-personal">Sensitive personal</option><option value="health">Health</option><option value="payment-card">Payment card</option><option value="financial">Financial</option><option value="proprietary">Proprietary</option><option value="public">Public</option>
+                  </Select>
+                </Field>
+                <Field label="Deployment audience">
+                  <Select value={deployment} onChange={(event) => setDeployment(event.target.value)} required>
+                    <option value="">Choose deployment audience</option><option value="internal">Internal</option><option value="customer-facing">Customer-facing</option><option value="public">Public</option>
+                  </Select>
+                </Field>
               </div>
-              <div className={s.checkboxGrid}>
-                <Check checked={profilesNaturalPersons} onChange={setProfilesNaturalPersons} label="Profiles natural persons" />
-                <Check checked={generative} onChange={setGenerative} label="Generates content" />
-                <Check checked={autonomousActions} onChange={setAutonomousActions} label="Can take autonomous actions" />
-                <Check checked={usesExternalVendor} onChange={setUsesExternalVendor} label="Uses an external AI vendor" />
+              <div className={v.grid2}>
+                <BooleanAnswerField label="Emotion recognition" value={emotionRecognition} onChange={setEmotionRecognition} />
+                <BooleanAnswerField label="Social scoring" value={socialScoring} onChange={setSocialScoring} />
+                <BooleanAnswerField label="Manipulative techniques" value={manipulativeTechniques} onChange={setManipulativeTechniques} />
+                <BooleanAnswerField label="Profiles natural persons" value={profilesNaturalPersons} onChange={setProfilesNaturalPersons} />
+                <BooleanAnswerField label="Safety component" value={safetyComponent} onChange={setSafetyComponent} />
+                <BooleanAnswerField label="Interacts directly with people" value={interactsWithHumans} onChange={setInteractsWithHumans} />
+                <BooleanAnswerField label="Generates synthetic content" value={generative} onChange={setGenerative} />
+                <BooleanAnswerField label="Has an EU nexus" value={euNexus} onChange={setEuNexus} />
+                <BooleanAnswerField label="Can take autonomous actions" value={autonomousActions} onChange={setAutonomousActions} />
+                <BooleanAnswerField label="Uses an external AI vendor" value={usesExternalVendor} onChange={setUsesExternalVendor} />
               </div>
+              {!intakeAnswersComplete ? <p className={v.faint}>Complete every screening and context answer before drafting suggestions. Blank does not mean “no.”</p> : null}
               {assist.isError && <p className={v.errLine} role="alert">{(assist.error as Error).message}</p>}
               <div><Button variant="primary" type="submit" disabled={!canContinue || assist.isPending}>{assist.isPending ? "Drafting…" : "Draft suggestions"}</Button></div>
             </form>
@@ -376,8 +439,16 @@ export default function IntakeWizardPage() {
   );
 }
 
-function Check(props: { checked: boolean; onChange: (value: boolean) => void; label: string }) {
-  return <label className={s.checkbox}><input type="checkbox" checked={props.checked} onChange={(event) => props.onChange(event.target.checked)} /><span>{props.label}</span></label>;
+function BooleanAnswerField(props: { value: BooleanAnswer; onChange: (value: BooleanAnswer) => void; label: string }) {
+  return (
+    <Field label={props.label}>
+      <Select value={props.value} onChange={(event) => props.onChange(event.target.value as BooleanAnswer)} required>
+        <option value="">Choose yes or no</option>
+        <option value="yes">Yes</option>
+        <option value="no">No</option>
+      </Select>
+    </Field>
+  );
 }
 
 function Suggestion(props: { title: string; body: string; source: Source; decision?: Decision; onDecision: (value: Decision) => void; onEdit: (value: string) => void; meta?: string }) {

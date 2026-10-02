@@ -919,7 +919,7 @@ export default function ShadowAiPage() {
                   header: "",
                   render: (r) => (
                     <div className={v.row}>
-                      <Link to={`/admin/governance/intake?title=${encodeURIComponent(`Govern ${r.subject}`)}&description=${encodeURIComponent(`Register and govern the ${r.provider} usage observed for ${r.subject}. Evidence sources: ${r.signalSources.join(", ")}.`)}`}>Register as use case</Link>
+                      <Link to={`/admin/governance/intake?source=shadow-ai&findingId=${encodeURIComponent(r.id)}&title=${encodeURIComponent(`Govern ${r.subject}`)}&description=${encodeURIComponent(`Register and govern the ${r.provider} usage observed for ${r.subject}. Evidence sources: ${r.signalSources.join(", ")}.`)}`}>Register as use case</Link>
                       <Button onClick={() => { setDispositionFor(r.id); setReason(""); }}>Triage</Button>
                     </div>
                   ),

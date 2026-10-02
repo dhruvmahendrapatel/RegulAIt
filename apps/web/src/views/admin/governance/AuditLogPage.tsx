@@ -140,7 +140,7 @@ export default function AuditLogPage() {
               title="Download an offline-verifiable bundle containing the full filtered audit CSV, manifest, and signature"
               onClick={() => {
                 const join = qs ? "&" : "?";
-                void downloadCsv(`/v1/audit.csv${qs}${join}signed=1`, "audit-log.signed.zip", (msg) => toast(msg, "error"));
+                void downloadCsv(`/v1/audit.csv${qs}${join}signed=1`, "audit-log.signed.tar.gz", (msg) => toast(msg, "error"));
               }}
             >
               Download signed bundle

@@ -240,3 +240,52 @@ test("trust dashboard does not show an all-clear badge before the monitor runs",
   await expect(page.getByText("Governance monitor not evaluated", { exact: true })).toBeVisible();
   await expect(page.getByText("0 active governance alert(s)", { exact: true })).toHaveCount(0);
 });
+
+test("shadow-AI registration prefills evidence only and requires proposer answers", async ({ page }) => {
+  await page.goto("/ui/admin/shadow-ai");
+  await page.getByRole("link", { name: "Register as use case" }).click();
+  await expect(page).toHaveURL(/source=shadow-ai/);
+  await expect(page.getByLabel("Use-case name")).toHaveValue("Govern team-17");
+  await expect(page.getByLabel("What will the system do?")).toHaveValue(/Evidence sources: egress_log/);
+  const draft = page.getByRole("button", { name: "Draft suggestions" });
+  await expect(draft).toBeDisabled();
+  await expect(page.getByLabel("Primary purpose domain")).toHaveValue("");
+  await expect(page.getByLabel("Decision autonomy")).toHaveValue("");
+  await expect(page.getByLabel("Profiles natural persons")).toHaveValue("");
+  await shotBoth(page, "08-shadow-ai-intake-prefill");
+
+  await page.getByLabel("Primary purpose domain").selectOption("general-business");
+  await page.getByLabel("People affected").selectOption("employees");
+  await page.getByLabel("Decision autonomy").selectOption("narrow-procedural");
+  await page.getByLabel("Biometric use").selectOption("verification");
+  await page.getByLabel("Primary sector").selectOption("healthcare");
+  await page.getByLabel("Primary data category").selectOption("health");
+  await page.getByLabel("Deployment audience").selectOption("internal");
+  for (const label of [
+    "Emotion recognition", "Social scoring", "Manipulative techniques", "Profiles natural persons",
+    "Safety component", "Interacts directly with people", "Generates synthetic content", "Has an EU nexus",
+    "Can take autonomous actions", "Uses an external AI vendor",
+  ]) {
+    await page.getByLabel(label).selectOption("no");
+  }
+  await expect(draft).toBeEnabled();
+  const assistRequest = page.waitForRequest((request) => new URL(request.url()).pathname === "/v1/use-cases/intake/assist" && request.method() === "POST");
+  await draft.click();
+  const payload = (await assistRequest).postDataJSON();
+  expect(payload.euAiAct).toMatchObject({
+    purposeDomain: "general-business",
+    affectedPersons: ["employees"],
+    decisionAutonomy: "narrow-procedural",
+    biometricUse: "verification",
+    profilesNaturalPersons: false,
+  });
+  expect(payload.context).toMatchObject({
+    sectors: ["healthcare"],
+    dataCategories: ["health"],
+    deployment: "internal",
+    euNexus: false,
+    usesExternalVendor: false,
+    generative: false,
+    autonomousActions: false,
+  });
+});
