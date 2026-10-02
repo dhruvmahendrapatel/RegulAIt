@@ -32,6 +32,7 @@ jobs:
     timeout-minutes: 3
     outputs:
       demo: ${{ steps.diff.outputs.demo }}
+      review: ${{ steps.diff.outputs.review }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -42,7 +43,14 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           if [ "${{ github.event_name }}" != "pull_request" ] || [ -z "$BEFORE" ] || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
-            echo "demo=true" >> "$GITHUB_OUTPUT"; exit 0
+            echo "demo=true" >> "$GITHUB_OUTPUT"; echo "review=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          # ADR-0144 approver-review journeys (AER-040): the approval UI, the
+          # proxy/evaluation that binds consent, and the shared binding code
+          if git diff --name-only "$BEFORE" "$HEAD_SHA" | grep -qE '^(apps/web/src/(views/(approvals|inbox)/|api/)|apps/web/e2e/mcp-action-review\.spec\.ts|apps/gateway/src/(mcp-proxy|governed-evaluate|app)\.ts|packages/shared/src/approval-binding\.ts|packages/db/|\.github/workflows/demo\.yml)'; then
+            echo "review=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "review=false" >> "$GITHUB_OUTPUT"
           fi
           if git diff --name-only "$BEFORE" "$HEAD_SHA" | grep -qE '^(apps/web/|apps/gateway/src/(demo-|use-cases\.ts|governance-monitor\.ts|remediation\.ts|deploy-gate\.ts|shadow-ai\.ts|app\.ts)|packages/shared/src/|packages/db/|\.github/workflows/demo\.yml)'; then
             echo "demo=true" >> "$GITHUB_OUTPUT"
@@ -131,4 +139,64 @@ jobs:
             apps/web/test-results
             apps/web/e2e/artifacts/demo/real-*.png
             ${{ runner.temp }}/gateway.log
+          retention-days: 7
+
+  # AER-040: the ADR-0144 approver-review journeys (effective-action review,
+  # malformed/legacy/expired refusal, metadata impersonation, re-review on a
+  # changed binding) in a real browser against a real gateway + database. The
+  # spec's global setup creates its own scratch database and gateway.
+  approval-review:
+    needs: changes
+    if: needs.changes.outputs.review == 'true'
+    concurrency:
+      group: approval-review-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: regulait
+          POSTGRES_PASSWORD: regulait
+          POSTGRES_DB: regulait
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U regulait -d regulait"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      E2E_PG: postgres://regulait:regulait@localhost:5432
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm -r build
+
+      - run: pnpm --filter @regulait/web exec playwright install --with-deps chromium
+
+      - name: Approver-review journeys (ADR-0144)
+        run: pnpm --filter @regulait/web exec playwright test e2e/mcp-action-review.spec.ts
+
+      - name: Keep the evidence when it fails
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: approval-review-failure
+          path: |
+            apps/web/test-results
+            apps/web/e2e/gateway-e2e.log
           retention-days: 7
