@@ -48,7 +48,7 @@
     "@regulait/shared": "workspace:*",
     "@regulait/training-provider": "workspace:*",
     "@regulait/workflow-kernel": "workspace:*",
-    "fastify": "^5.4.0",
+    "fastify": "^5.12.5",
     "openid-client": "^6.8.4",
     "zod": "^3.25.67",
     "zod-to-json-schema": "3.25.2"
