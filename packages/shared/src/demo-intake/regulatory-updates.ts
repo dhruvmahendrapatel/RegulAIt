@@ -7,21 +7,11 @@
  * estimated (an uncertain regulatory date in front of a prospect is worse than
  * a short list).
  *
- * Fields:
- *  key          — kebab-slug, stable identifier for the feed renderer
- *  jurisdiction — geographic scope (EU, US-CO, US-NYC, etc.)
- *  instrument   — the regulation or standard name
- *  title        — short human-readable label
- *  summary      — 2–3 sentence plain-English description
- *  effectiveDate — YYYY-MM-DD, the date the cited provision applies
- *  status       — "in_force" | "upcoming" | "proposed"
- *  frameworks   — pack framework ids this entry is relevant to
- *  controlRefs  — real controlRef values from DEFAULT_COMPLIANCE_PACKS
- *  sourceUrl    — primary or official source; must be HTTPS
- *  verifiedOn   — YYYY-MM-DD this data point was last verified by Gemini
+ * Type: `RegulatoryUpdate` from `packages/shared/src/regulatory-intel.ts` (Claude-owned).
+ * Claude wires the export into `packages/shared/src/index.ts` on review.
  */
 
-import type { RegulatoryUpdate } from "./regulatory-updates.types.js";
+import type { RegulatoryUpdate } from "../regulatory-intel.js";
 
 export const REGULATORY_UPDATES: RegulatoryUpdate[] = [
   // ---- EU AI Act — phased application ----

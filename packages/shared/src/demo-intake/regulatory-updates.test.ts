@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { REGULATORY_UPDATES } from "./regulatory-updates.js";
 import { DEFAULT_COMPLIANCE_PACKS } from "../compliance-packs.js";
 import { COMPLIANCE_PACK_FRAMEWORKS } from "../compliance-packs.js";
+import { REGULATORY_UPDATE_STATUSES } from "../regulatory-intel.js";
 
 describe("REGULATORY_UPDATES", () => {
   // ---------------------------------------------------------------------------
@@ -59,7 +60,7 @@ describe("REGULATORY_UPDATES", () => {
   // ---------------------------------------------------------------------------
 
   it("status values are one of the allowed enum values", () => {
-    const allowed = new Set<string>(["in_force", "upcoming", "proposed"]);
+    const allowed = new Set<string>(REGULATORY_UPDATE_STATUSES);
     for (const u of REGULATORY_UPDATES) {
       expect(allowed.has(u.status), `invalid status '${u.status}' on '${u.key}'`).toBe(true);
     }
