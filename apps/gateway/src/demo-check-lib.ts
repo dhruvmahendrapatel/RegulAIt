@@ -199,6 +199,22 @@ export async function runDemoCheck(
       reg.body.summary?.total ? undefined : "G4 (and the index export)",
     );
 
+  // --- 2 Deploy gate (ADR-0161): a pipeline asks before shipping ----------------------------------
+  if (showcase) {
+    const g = await call("POST", "/v1/gates/deploy", auth, { useCaseId: showcase.id, environment: "demo-check", ref: "demo-check" });
+    if (g.status !== 200) add("2 Deploy gate", "FAIL", `gate ${g.status} ${g.body.error ?? ""}`);
+    else {
+      const blocks = (g.body.reasons ?? []).filter((r: Json) => r.severity === "block");
+      add(
+        "2 Deploy gate",
+        "PASS",
+        `"${showcase.name}": ${g.body.decision}` +
+          (blocks.length ? ` — ${blocks.map((r: Json) => r.code).join(", ")}` : "") +
+          ` (${(g.body.reasons ?? []).length - blocks.length} warning(s))`,
+      );
+    }
+  }
+
   // --- approvals queue (the gate beat) ------------------------------------------------------------
   const inbox = await call("GET", "/v1/approvals?status=pending", auth);
   add("2 Approval gate", inbox.status === 200 ? "PASS" : "FAIL", `approvals queue reachable (${inbox.status})`);

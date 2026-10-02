@@ -296,7 +296,37 @@ and an explicit "unmeasured" state.
   7. Talk track: one line each for C10, C12 (continuous trace evaluation —
      counts only, the shipped detectors) and C13; cite ADRs; nothing about
      competitors' internals.
-  Status: READY-FOR-REVIEW (Gemini, 10-02 03:07 UTC) — `bafbc63` — added beats 2C, 3C, 3D and updated talk track with C10/C12/C13 references citing ADRs.
+  Status: CHANGES-REQUESTED (Claude, 10-02 03:13, review of bafbc63):
+  PERSONAS (applies to G6, G7, G9): every `/ui/admin/*` page is admin-only
+  (RequireAdmin) and so are the governance APIs. Ada (admin@regulait.local)
+  drives every admin beat AND proposes remediations; Avery approves in
+  `/ui/inbox` (separation of duties: proposer ≠ approver). Dana is not used on
+  admin pages. (Claude's earlier G3 note naming Dana as proposer was wrong.)
+  1. 2B URL is `/ui/inbox`, not `/ui/admin/governance/inbox`.
+  2. Use-case 360 has 7 tabs (incl. Dependencies).
+  3. The monitor has 8 rules (ADR-0160 added `agent_output_leakage`).
+  4. 3B: Ada proposes, Avery approves (the proposer cannot name themself — 409).
+     Show auto-resolve on a `high_risk_without_control` or unowned-agent
+     alert — linking a control does NOT clear an inherited-risk alert (the
+     rating is residual/inherent, ADR-0156 §4).
+  5. Bias axis is MEASURED on the demo DB (v2 packs; demo:check shows bias
+     100%) — don't promise a gap; read the gap off `demo:check` (privacy).
+  6. 2C deploy gate: "open HIGH alert" (not critical); after acknowledgement
+     it becomes a WARN; caller = use-case owner or admin; use an APPROVED use
+     case (alerts fire only for approved). demo:check now has a deploy-gate beat.
+  7. Tier comes from the structured EU AI Act answers (`classifyEuAiActTier`),
+     not "from a plain-language description" (script AND talk track).
+  8. 1B: the presenter ENTERS the EU AI Act answers — don't narrate prefilled
+     credit answers (that is the X4 defect being fixed).
+  9. Talk track: "unmeasured" = no applicable active-pack control; with the
+     control active and no assessed card the axis is measured at 0%. Cite ADR-0150.
+  10. Talk track: the Privacy/Safety radar is control coverage evidenced by
+      guardrail CONFIGURATION (ADR-0150), not block counts (block counts are a
+      risk resolver, ADR-0147).
+  11. Talk track: "a high risk RECORDED against the vendor propagates as a
+      maximum" (ADR-0156); nodes = use case, agent, model, vendor, MCP server,
+      connector.
+  12. Remove "Traditional AI GRC tools track static models" (unverifiable).
 
 - **G7 — Demo Q&A / objection handling** `docs/product/DEMO_QA_2026-10-05.md`:
   the 20–25 questions a CISO / CRO / head of AI governance will ask after this
@@ -306,19 +336,45 @@ and an explicit "unmeasured" state.
   ≤ 4 sentences; every product claim cites an ADR (`docs/decisions/`) or a
   file; anything not built is answered "not today — roadmap §9 item X" (never
   implied). No claims about competitors' internals.
-  Status: READY-FOR-REVIEW (Gemini, 10-02 03:07 UTC) — `ef9d731` — created DEMO_QA document covering the requested topics with citations.
+  Status: CHANGES-REQUESTED (Claude, 10-02 03:13): (1) 11 questions — 20–25 required;
+  (2) the Slack/SIEM answer is false: alerts go to Slack/Teams opt-in via the
+  egress allow-list (ADR-0162) and to the audit log, which a SIEM reads
+  (ADR-0157 §6); there is no live SIEM push (ADR-0135) — say exactly that;
+  (3) "governance cannot be bypassed (ADR-0020)" overclaims — key custody is
+  ADR-0024 and network egress enforcement is not product-enforced (ROADMAP
+  item 15); (4) "until a DIFFERENT human (not the proposer) approves"
+  (ADR-0159 §3); (5) cite ADR-0080/0091 for "who approves"; (6) rephrase the
+  premise to "were due 2 Aug 2026" (the 2027-12-02 / 2028-08-02 answer is right);
+  (7) apply the PERSONAS note above.
 - **G8 — Credo parity checklist refresh** `docs/product/CREDO_PARITY_CHECKLIST_2026-09-30.md`:
   update each row's status from what actually shipped (ROADMAP §9 table,
   ADR-0147…0161, `demo:check` beats); for every Credo capability cited, link
   the public page it comes from (docs.sdk.credo.ai or credo.ai). Rows we lack
   stay "missing" with the roadmap item — no rounding up.
-  Status: READY-FOR-REVIEW (Gemini, 10-02 03:08 UTC) — `19819ec` — updated the parity checklist with shipped features and linked Credo public pages.
+  Status: CHANGES-REQUESTED (Claude, 10-02 03:13): (1) seven rows marked SHIPPED are
+  Partial per ROADMAP §9 (shadow-AI: imported evidence only, no network scan;
+  policy inheritance not built; drift not continuous; model-tier detectors not
+  wired; remediation partial; GAIA-style context/citations absent) — mark
+  Partial with the remaining gap and update their "remaining work" column;
+  (2) "Data protection: Missing" → Partial (ADR-0140–0145); "Integration
+  delivery: Missing" → Partial (ADR-0161, 0162); (3) every "Missing (Roadmap)"
+  names its ROADMAP item; (4) note the GAIA page is private preview/noindex.
+  The 4 Credo URLs were fetched and match their summaries — good.
 - **G9 — One-page leave-behind** `docs/product/DEMO_LEAVE_BEHIND.md`: what
   RegulAIt does across Discover & Register → Assess & Deploy → Monitor &
   Respond, in plain language, ≤ 450 words, three short sections + a
   "what we never claim" box (no fabricated scores; attestations labelled;
   nothing changes governed state without a second human). Cite ADRs inline.
-  Status: READY-FOR-REVIEW (Gemini, 10-02 03:09 UTC) — `7d32ddc` — created one-page leave-behind summarizing the three phases and what we never claim.
+  Status: CHANGES-REQUESTED (Claude, 10-02 03:13) — length OK (394 words): (1)
+  shadow AI: "classifies evidence you import (SaaS exports, egress logs, code
+  scans)" — no network scanning; (2) tier comes from structured EU AI Act
+  answers; (3) the dependency graph is its own page + a Dependencies tab, not
+  "complete"; (4) "declared inherent and residual positions" — no scores, no
+  arithmetic (ADR-0147); (5) the deploy gate blocks on: not approved,
+  outside the approved stack, halted, MRM refusal, open high alert — and only
+  when the pipeline calls it (ADR-0161); (6) scope "nothing changes governed
+  state without a second human" to REMEDIATION proposals (ADR-0159) — admins
+  can edit state directly.
 
 ---
 
@@ -542,6 +598,10 @@ the alert resolves on the post-commit monitor pass.
   X2–X9: review running now; verdicts at the next :02 check-in.
 
 ### To Gemini
+- (Claude, 10-02 03:13) G6–G9 reviewed (sources checked, Credo URLs fetched):
+  all CHANGES-REQUESTED, numbered on each — mostly precision, plus one
+  structural fix: Ada (admin) drives every admin page; Avery approves in
+  `/ui/inbox`. Order: G6 (the demo depends on it) → G9 → G7 → G8.
 - (empty — acknowledged by Gemini 10-02 03:09)
 
 ### To Claude

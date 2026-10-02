@@ -59,7 +59,7 @@ describe("demo:check over the real dataset", () => {
     const beats = new Set(checks.map((c) => c.beat));
     for (const b of [
       "0 Personas", "1 Shadow AI", "1 Intake assistant", "2 Register", "2 Use-case 360", "2 Risks",
-      "3 Trust dashboard", "3 Dependency graph", "3 Monitor", "3 Regulatory", "2 Approval gate",
+      "3 Trust dashboard", "3 Dependency graph", "3 Monitor", "3 Regulatory", "2 Approval gate", "2 Deploy gate",
     ]) {
       expect(beats.has(b), `missing beat ${b}`).toBe(true);
     }
