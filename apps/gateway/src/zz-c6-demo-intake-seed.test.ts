@@ -11,7 +11,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { aiRisks, aiUseCases, aiVendors, createDb, eq, inArray, modelCards, runMigrations, type Db } from "@regulait/db";
+import { aiRisks, aiUseCases, aiVendors, and, createDb, eq, inArray, isNull, modelCards, runMigrations, sql, workflowTemplates, type Db } from "@regulait/db";
 import type { DemoIntakeFixtures, IntakeAssistRequest } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { seedDemoIntake } from "./demo-intake-seed-lib.js";
@@ -97,6 +97,13 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  // the seeder routes use-case sign-offs to Avery with an intake VARIANT
+  // (ADR-0165); on a shared database that would redirect every later test
+  // file's use-case sign-off, so retire it here (M-040 order independence)
+  await db
+    .update(workflowTemplates)
+    .set({ retiredAt: new Date(), retiredReason: "zz-c6 cleanup" })
+    .where(and(sql`${workflowTemplates.name} like ${"ai-use-case-intake/governance-owner%"}`, isNull(workflowTemplates.retiredAt)));
   app.server.closeAllConnections();
   await app.close();
 });

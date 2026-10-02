@@ -1315,3 +1315,16 @@ Rule: the LAST command before any commit that touches `.ts` is CI's own
 `pnpm -r build` (NODE_OPTIONS=--max-old-space-size=3072), run after the final
 edit — not a per-package build from earlier in the change. A passing vitest
 run is never evidence that a file typechecks.
+
+### M-060 (2026-10-02) - A shared seeder gained a cross-file side effect; only one caller cleaned up
+
+ADR-0165 made `seedDemoIntake` install an active intake template variant that routes EVERY
+later use-case sign-off to Avery. I retired it in `zz-c11`'s afterAll but not in
+`zz-c6-demo-intake-seed.test.ts`, which also runs the seeder — so on the shared test database
+the full suite failed 12 tests in 5 files wherever c6 ran first. Targeted runs passed because
+they never put c6 before the use-case files.
+
+Rule: when a shared helper gains a side effect that outlives the test (an active template,
+a setting, an allow-list entry), `grep -l <helper> *.test.ts` and give EVERY caller the cleanup —
+then prove it with a two-invocation run on one database (the caller first, the affected files
+second), plus the same run without the cleanup as the positive control.
