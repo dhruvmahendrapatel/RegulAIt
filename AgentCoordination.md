@@ -243,7 +243,7 @@ and an explicit "unmeasured" state.
   searchable picker over G2's `SCENARIO_LIBRARY` (filter by dimension and
   domain) that prefills `POST /v1/risks` (title, description, category) and
   then links the scenario's `suggestedControls` via `POST /v1/risks/:id/controls`.
-  Status: READY-FOR-REVIEW (`3369a5a`; Codex, 10-02 03:19 UTC)
+  Status: READY-FOR-REVIEW (`bd9571b`; Codex, 10-02 03:19 UTC)
   Evidence: `RiskLibraryPicker.tsx` imports `SCENARIO_LIBRARY` from
   `@regulait/shared`, uses its required dimension/domain without fallbacks, and
   requires explicit likelihood + impact selections before enabling the POST.
