@@ -242,11 +242,19 @@ export async function runGovernanceMonitor(
       reason: `governance alert raised (${f.severity}): ${f.title}`,
     });
   }
+  // AER-043: counts are the rows THIS pass actually changed, not what it
+  // planned — a concurrent pass (scheduler + manual evaluate) may have raised
+  // or resolved the same alert first, and the loser must not report or audit
+  // an effect it did not have.
+  let refreshedCount = 0;
+  let resolvedCount = 0;
   for (const { id, finding } of plan.refresh) {
-    await db
+    const touched = await db
       .update(governanceAlerts)
       .set({ lastDetectedAt: now, title: finding.title, detail: finding.detail, severity: finding.severity })
-      .where(eq(governanceAlerts.id, id));
+      .where(and(eq(governanceAlerts.id, id), ne(governanceAlerts.status, "resolved")))
+      .returning({ id: governanceAlerts.id });
+    refreshedCount += touched.length;
   }
   for (const id of plan.resolve) {
     const [row] = await db
@@ -255,6 +263,7 @@ export async function runGovernanceMonitor(
       .where(and(eq(governanceAlerts.id, id), ne(governanceAlerts.status, "resolved")))
       .returning({ title: governanceAlerts.title, ruleId: governanceAlerts.ruleId, subjectKey: governanceAlerts.subjectKey });
     if (!row) continue;
+    resolvedCount += 1;
     await db.insert(auditLog).values({
       userId: actor,
       objectType: "governance_alert",
@@ -276,7 +285,7 @@ export async function runGovernanceMonitor(
     userId: actor,
     objectType: "governance_monitor",
     objectId: null,
-    detail: { raised: plan.raise.length, refreshed: plan.refresh.length, resolved: plan.resolve.length, active: n },
+    detail: { raised: raisedIds.length, refreshed: refreshedCount, resolved: resolvedCount, active: n },
     effect: "allow",
     ruleId: MONITOR_AUDIT_RULE_IDS.evaluated,
     ruleChain: [],
@@ -296,9 +305,9 @@ export async function runGovernanceMonitor(
   return {
     evaluatedAt: now.toISOString(),
     notified,
-    raised: plan.raise.length,
-    refreshed: plan.refresh.length,
-    resolved: plan.resolve.length,
+    raised: raisedIds.length,
+    refreshed: refreshedCount,
+    resolved: resolvedCount,
     active: n,
   };
 }
