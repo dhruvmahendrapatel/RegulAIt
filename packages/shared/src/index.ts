@@ -3338,6 +3338,19 @@ export {
   type MonitorVendorInput,
 } from "./governance-monitor.js";
 
+// ADR-0158 — regulatory intelligence: the feed shape (G4 authors the data) and
+// the pure join to this organisation's packs, controls and use cases.
+export {
+  REGULATORY_INTEL_NOTES,
+  REGULATORY_UPDATE_STATUSES,
+  computeRegulatoryImpact,
+  type RegulatoryControlState,
+  type RegulatoryImpact,
+  type RegulatoryUpdate,
+  type RegulatoryUpdateStatus,
+  type RegulatoryUseCaseInput,
+} from "./regulatory-intel.js";
+
 // ---------------------------------------------------------------------------
 // ADR-0084 — the AI vendor registry (third-party AI risk): the vocabulary,
 // the request shapes, and the attested-never-measured disclaimer. `status` is

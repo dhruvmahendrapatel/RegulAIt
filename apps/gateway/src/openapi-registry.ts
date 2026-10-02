@@ -396,6 +396,7 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/agents/:agentId/card": "internal",
   "GET /v1/inventory/graph": "internal",
   "GET /v1/governance/alerts": "internal",
+  "GET /v1/regulatory/updates": "internal",
   "POST /v1/governance/monitor/evaluate": "internal",
   "POST /v1/governance/alerts/:alertId/acknowledge": "internal",
   // ADR-0090 — grant certification campaigns. Internal: admin governance
@@ -1077,6 +1078,7 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/agents/:agentId/card": "inventory",
   "GET /v1/inventory/graph": "inventory",
   "GET /v1/governance/alerts": "reports",
+  "GET /v1/regulatory/updates": "reports",
   "POST /v1/governance/monitor/evaluate": "reports",
   "POST /v1/governance/alerts/:alertId/acknowledge": "reports",
   // ADR-0092 — access recommendations (the deterministic half)

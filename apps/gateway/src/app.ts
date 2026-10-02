@@ -149,6 +149,7 @@ import { registerUseCaseOverviewRoutes } from "./use-case-overview.js";
 import { registerAgentCardRoutes } from "./agent-card.js";
 import { registerDependencyGraphRoutes } from "./dependency-graph.js";
 import { registerGovernanceMonitorRoutes } from "./governance-monitor.js";
+import { registerRegulatoryIntelRoutes } from "./regulatory-intel.js";
 import { registerPosturePresetRoutes } from "./posture-preset.js";
 import { registerExecutionControlRoutes } from "./execution-control.js";
 import { registerInventoryRoutes } from "./inventory.js";
@@ -3606,6 +3607,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerDependencyGraphRoutes(app, db);
   // ADR-0157 — governance monitor alerts (Monitor & Respond)
   registerGovernanceMonitorRoutes(app, db);
+  // ADR-0158 — regulatory intelligence joined to our packs and use cases
+  registerRegulatoryIntelRoutes(app, db);
   // ADR-0084 — the AI vendor registry beside the use-case registry whose
   // rails it copies. Propose/list/detail/edit/attest are non-admin
   // (owner-or-admin in-handler); RETIRE stays admin through the default gate.

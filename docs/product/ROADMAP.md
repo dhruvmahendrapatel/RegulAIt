@@ -802,6 +802,7 @@ Demo-critical items for 2026-10-05 are tracked in `AgentCoordination.md`
 | Inherent → residual risk with control linkage | missing | declared likelihood/impact only [C4] |
 | Policy inheritance and aggregate risk scoring | partial | risk now propagates across connected entities (max, ADR-0156); packs remain org-level, no policy inheritance yet |
 | Automated red-teaming and drift detection | partial | `redteam.ts`, `evals.ts`; drift baselines not continuous |
+| Regulatory & policy intelligence (obligations → our controls and use cases) | exists (API) | `regulatory-intel.ts` (ADR-0158); curated feed [G4]; UI [X9] |
 | Pre-built policy packs: EU AI Act, NIST AI RMF, ISO 42001, SOC 2 (+ ISO 27001 partial, HIPAA, PCI-DSS, FINRA) | exists | `compliance-packs.ts`; per-use-case framework mapping has no UI [X2] |
 | Governance workflows with approval gates | exists | workflows + approvals with separation of duties |
 | Automated evidence generation and audit trails | exists | collectors, hash-chained audit, signed exports (no UI for signed export) [X4] |

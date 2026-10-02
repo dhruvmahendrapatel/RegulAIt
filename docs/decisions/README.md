@@ -6,6 +6,7 @@ superseding a decision means a new ADR plus a status flip on the old one.
 
 | ID | Title | Status | Date |
 |---|---|---|---|
+| [0158](0158-regulatory-intelligence-impact.md) | Regulatory intelligence: a curated, source-dated feed joined to our active packs, live control evaluation and in-scope use cases; gaps reported, never dropped; no legal determination. | Accepted | 2026-10-02 |
 | [0157](0157-governance-monitor-alerts.md) | Governance monitor: seven rules over the dependency graph, trust coverage and risk register; alerts as condition episodes (refresh / auto-resolve / acknowledge with note), delivered via the audit log; hourly job + on-demand (migration 0124). | Accepted | 2026-10-02 |
 | [0156](0156-ai-system-dependency-graph-risk-propagation.md) | AI-system dependency graph (use case → agent → model → vendor declared; MCP/connector/feeds observed) with max-propagated declared risk and a walkable source path; `GET /v1/inventory/graph`. | Accepted | 2026-10-02 |
 | [0150](0150-bias-and-safety-pack-controls.md) | eu-ai-act@2 and nist-ai-rmf@2 add bias (documented model-card fairness assessments) and safety (toxicity at block) controls; demo activates latest versions. | Accepted | 2026-10-01 |
