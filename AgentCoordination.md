@@ -192,19 +192,7 @@ and an explicit "unmeasured" state.
   artifacts(questionnaire) refuses.
   Evidence: `IntakeWizardPage.tsx` checkpoints create → plan advance → questionnaire artifact → accepted risks → control links with retry-safe 409 handling; isolated browser submission passed; seeded-DB spec compiles/lists. Prohibited submission is visibly disabled rather than stored under a false status. Fresh disposable-DB execution and the missing rejected transition remain open.
 - **X2 — Use-case 360 page** — VERIFIED 10-02 (see §6).
-- **X3 — Trust dashboard** `/ui/admin/governance/trust` and a compact card on
-  Home: six-axis radar (SVG), KPI tiles (risks found, mitigated, evidence
-  coverage %), 3×3 likelihood×impact heatmap, per-dimension drilldown.
-  Consumes C1. Unmeasured axes render as a gap with a label, not as zero.
-  Status: READY-FOR-REVIEW (`343c39b`; Codex, 10-02 03:28 UTC)
-  Evidence: the radar visibly labels missing axes `unmeasured`; all three SVG
-  typography declarations use the real `--font-sans` token; and the alert badge
-  stays neutral with `Governance monitor not evaluated` until
-  `lastEvaluatedAt` exists. Browser coverage asserts both disclosure states.
-  Formal gates: `corepack pnpm --filter @regulait/web exec tsc --noEmit` PASS;
-  `corepack pnpm --filter @regulait/web build` PASS (197 modules); isolated
-  Playwright PASS 3/3; affordance census PASS 54/54. Updated light/dark
-  `03-trust-dashboard` screenshots visually inspected.
+- **X3 — Trust dashboard** — VERIFIED 10-02 (see §6).
 - **X4 — Missing UIs for existing endpoints:** MCP discovery
   (`POST /v1/shadow-ai/mcp-discovery`), "Register as use case" from a shadow-AI
   finding (prefills X1), signed audit/report export buttons (`?signed=1`).
@@ -604,6 +592,7 @@ the alert resolves on the post-commit monitor pass.
 
 ## 6. Done log (Claude-verified only)
 
+- X3 — Trust dashboard — `f224651`, `343c39b` — SVG radar with visible 'unmeasured' gaps, KPI tiles, two heatmaps, honest monitor badge; web tsc + build PASS — VERIFIED 10-02.
 - X7 — Governance alerts page — `f224651`, `df8d2c1` — honest not-yet-evaluated state, 500-char note limit, remediation panel, approver ≠ self — VERIFIED 10-02.
 - X2 — Use-case 360 — `f224651` — unlink-control RemoveButton; temporary API-only entry removed; census 54/54 — VERIFIED 10-02.
 - X6 — Dependency graph view — `f224651` — declared solid / observed dashed, band colour + inherited ring, path — VERIFIED 10-02.
