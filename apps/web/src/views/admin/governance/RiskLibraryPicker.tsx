@@ -1,6 +1,5 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { SCENARIO_LIBRARY, type DemoRiskScenario } from "@regulait/shared";
 import { ApiError, api } from "../../../api/client";
 import { Badge, Button, Card, EmptyState, Field, Input, Select } from "../../../ui/kit";
 import { QueryGate, optionEls, useAction } from "../adminKit";
@@ -8,11 +7,20 @@ import v from "../../views.module.css";
 import s from "./demoGovernance.module.css";
 
 type RiskRating = "low" | "medium" | "high";
+interface RiskScenario {
+  key: string;
+  title: string;
+  description: string;
+  category: string;
+  dimension: string;
+  domains: string[];
+  suggestedControls: string[];
+}
 
 export function RiskLibraryPicker(props: { useCaseId?: string; agentId?: string; onAdded?: () => void }) {
-  const library = useQuery({
-    queryKey: ["admin", "risk-library"],
-    queryFn: () => api.get<{ library: DemoRiskScenario[]; disclaimer: string }>("/v1/risks/library"),
+  const scenarios = useQuery({
+    queryKey: ["admin", "risk-scenarios"],
+    queryFn: () => api.get<{ scenarios: RiskScenario[]; note: string }>("/v1/risks/scenarios"),
   });
   const action = useAction();
   const [search, setSearch] = useState("");
@@ -22,7 +30,7 @@ export function RiskLibraryPicker(props: { useCaseId?: string; agentId?: string;
   const [likelihood, setLikelihood] = useState<RiskRating | "">("");
   const [impact, setImpact] = useState<RiskRating | "">("");
 
-  const normalized = useMemo(() => SCENARIO_LIBRARY, []);
+  const normalized = scenarios.data?.scenarios ?? [];
   const dimensions = [...new Set(normalized.map((entry) => entry.dimension))].sort();
   const domains = [...new Set(normalized.flatMap((entry) => entry.domains))].sort();
   const needle = search.trim().toLowerCase();
@@ -66,7 +74,7 @@ export function RiskLibraryPicker(props: { useCaseId?: string; agentId?: string;
 
   return (
     <Card title="Add risk from library">
-      <QueryGate loading={library.isLoading} error={library.error} onRetry={() => void library.refetch()}>
+      <QueryGate loading={scenarios.isLoading} error={scenarios.error} onRetry={() => void scenarios.refetch()}>
         <div className={v.stack}>
           <div className={s.libraryFilters}>
             <Field label="Search scenarios"><Input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="prompt injection, runaway loop…" /></Field>
@@ -113,7 +121,7 @@ export function RiskLibraryPicker(props: { useCaseId?: string; agentId?: string;
               ))}
             </div>
           )}
-          <p className={v.faint}>{library.data?.disclaimer}</p>
+          <p className={v.faint}>{scenarios.data?.note}</p>
         </div>
       </QueryGate>
     </Card>
