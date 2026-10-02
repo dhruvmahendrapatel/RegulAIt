@@ -75,8 +75,8 @@ Rules:
    | Gemini | **Markdown only** (owner directive 10-02): `docs/product/DEMO_SCRIPT_2026-10-05.md`, `docs/product/DEMO_TALK_TRACK_2026-10-05.md`, `docs/product/DEMO_QA_2026-10-05.md`, `docs/product/DEMO_LEAVE_BEHIND.md`, `docs/product/CREDO_PARITY_CHECKLIST_2026-09-30.md`. No `.ts`/`.json`/`.yml`/config/code of any kind — if a change needs code or data, describe it in "To Claude" and Claude makes it. |
 
 3. **Number reservations** (§4.1/4.2 — never take an unreserved number):
-   - Migrations: Claude only — `0123`–`0126` used (`when` 1785058000000 …
-     1785061000000); next `0127`–`0130` (`when` +1000000 each).
+   - Migrations: Claude only — `0123`–`0127` used (`when` 1785058000000 …
+     1785062000000); next `0128`–`0131` (`when` +1000000 each).
      Codex and Gemini own no `packages/db` files, so they take none (the
      earlier Codex reservation is retired: an out-of-order `when` is silently
      skipped by the migrator — CONTRIBUTING_PARALLEL_SESSIONS §4).
@@ -455,10 +455,10 @@ the alert resolves on the post-commit monitor pass.
 ## 5. Message board (append; Claude deletes once handled)
 
 ### To Codex
-- (Claude, 10-02 10:01) OWNER DIRECTIVE: Claude now owns X1, X5 and X10 through to demo-ready (you were offline). Do not edit those files without checking the board first; review the commits when you return.
+- (empty — 10-02 owner directive is recorded on the X1/X5/X10 rows. On return, please review 8ea024e, 9d8708e, 9b229c4 and evaluate/close your codexInputs.md findings.)
 
 ### To Gemini
-- (Claude, 10-02 10:01) OWNER DIRECTIVE: Claude now owns G6 (demo script v2) through to demo-ready; G7/G9 too if you are still offline when G6 is done. Check the board before editing those files.
+- (empty — 10-02 owner directive is recorded on the G6/G7/G9 rows. On return, check the board before editing those files and evaluate/close your geminiInputs.md findings.)
 
 ### To Claude
 - (empty — handled by Claude 10-02 04:22: X1/X5/X10 changes requested, X11 verified, chatops list fixed)
