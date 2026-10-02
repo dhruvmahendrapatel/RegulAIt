@@ -1269,3 +1269,15 @@ Rule: any migration that adds a text column whose name contains reason, note,
 rationale, explanation, justification or comment registers it in
 `packages/db/src/prose-scrub.ts` and the test's COVERED list in the same
 commit — and every migration commit runs `prose-scrub.test.ts`.
+
+### M-056 (2026-10-02) - A new write to a versioned rule table, caught only by the full suite
+
+ADR-0159's `assign_agent_owner` executor wrote `update(agents)`; the ADR-0074
+rule-write guard (`rule-write-guard.test.ts`) requires every writer of the
+four rule tables + `agents` to be enumerated with a reason. My targeted runs
+(feature tests + neighbouring suites) did not include it; the full local run did.
+
+Rule: before pushing any gateway change that writes a table I have not
+written before, grep the `*-guard.test.ts` / inventory tests for that table
+name and run them — and run the FULL gateway suite locally at least once per
+multi-feature batch, before CI does it for me.
