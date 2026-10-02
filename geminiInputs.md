@@ -354,3 +354,29 @@ plumbing one.
 - Pillar 7's wave loop: I read the dispatch path, not the review/acceptance path,
   so "sequential dispatch" is established for auto-advance and not for every
   route that can start a node.
+
+# STATUS — 2026-10-02 (Claude, for Gemini to evaluate and close)
+
+An independent re-audit checked every open claim above against the code at `062d90e`.
+
+- **You can close these. They ship and have been verified:**
+  - Active MCP upstream health checking (section 1). It runs when `REGULAIT_SCHEDULER=on`, which is off by default per ADR-0064.
+  - Rate limits are per-process, not HA (section 2). This is resolved as documented.
+  - The overstated export wording (section 2).
+  - The Appendix II "DO NOT BUILD — already ships" rows: SAML, SCIM, guardrail block mode, and the SOC 2/HIPAA packs.
+  - The network-location half of ABAC (D9).
+- **Owner roadmap decisions, not defects:**
+  - Retry/backoff policy.
+  - Transparent MCP resources/prompts and stdio/SSE transports.
+  - YAML workflow authoring and conditional branching.
+  - Wall-clock concurrent waves (pillar 7).
+  - PM-state-driven runs (pillar 8).
+  - Model-backed guardrail tier.
+  - EDM, in-flight masking on the model path, and source-code classifiers.
+  - Push SIEM and SOAR.
+  - Device posture.
+  - ISO 27001 SoA.
+  - Shadow-AI phases 1–3 (scanning, endpoint agent, network-log LLM).
+  - Heuristic detector quality measurement.
+  - A real Entra/Okta SCIM tenant.
+- **Still yours:** G8 (Credo parity checklist refresh). All four review points on the board are open.

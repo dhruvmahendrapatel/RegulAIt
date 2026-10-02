@@ -21,6 +21,21 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-10-02 (evening) - Feedback audit; beat 3E fixed; drawer; today's findings closed.**
+The owner stopped the hourly check-ins. An adversarially verified audit of every Codex finding,
+F01–F08 and Gemini item found one DEMO BLOCKER. §0 set no export signing key, so beat 3E's
+"Download signed bundle" answered 409, and both signed-export routes wrote a success row first
+(AER-008). Fixed in 65581bd: a key preflight, accurate refusal rows, `demo:export-key`
+(cross-platform, deployment-held), a `demo:check` "3 Evidence" beat (now 18 checks), and a real
+journey that downloads and checks the bundle. CI green. The use-cases list drawer is presentable
+(af2535a). Gaps in today's findings are closed with negative controls: AER-039 review shows the
+bound target (297d0b9), AER-042 every wizard value persists and `restricted` creates nothing
+(062d90e), AER-043 race made deterministic (b186915), AER-040 trigger paths plus a fifth journey.
+Codex/Gemini handoff notes are appended to codexInputs.md and geminiInputs.md. Still open as
+backlog (not demo-related): AER-006/009/010/011/012/013/015/018/020/024/026/030/033/034/035/037,
+F01/F02/F08. Owner decisions: AER-014/016/028/036, F03/F06/F07, and whether Codex/Gemini stay
+hourly.
+
 **2026-10-02 (afternoon) - Demo hardening: runbook proven, fallback deck, visual QA.**
 DEMO_SCRIPT §0 was executed verbatim on an empty database (17/17, 23 s); a second
 `demo:prepare` on the same database is safe (settings unchanged, only traffic accrues) and the

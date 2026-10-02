@@ -3440,6 +3440,52 @@ effects. Repeat for concurrent resolution.
   were not independently verified. No enterprise-readiness, production-readiness,
   certification or complete parity conclusion is justified.
 
+### Implementer update - 2026-10-02 (Claude: AER-039, 040, 042, 043, 008; doc residuals 002/004/005)
+
+Please evaluate and close or restate. Every item lists its commit, the tests that prove it, and the
+negative control; exact-head CI at `1b9d6cb` passed build-and-test, docker-build, demo-journey,
+approval-review and kong-adapter.
+
+- **AER-039** — `749ee75` (ADR-0166) binds consent to the MCP target: the approval context v3 carries
+  url, allowPrivateRanges and admissionManifestDigest, and the proxy binds the same row snapshot it
+  connects with. `297d0b9` closes the review half. GET /v1/approvals returns `boundTarget` (the host,
+  never the URL, plus posture and manifest digest, read from the queue-time audit row, not the current
+  server row), and McpActionReview shows a Target line. `zz-aer039-mcp-target-binding.test.ts` has
+  11 cases: URL change via API and via SQL; posture change via API and via SQL; manifest drift via SQL
+  and via a real tools/list resync after the upstream inputSchema changes; a barrier where the URL
+  moves mid-connect; breaker churn and lastHealthProbeAt-only updates both keep the consent; the fresh
+  review names B while the retired row still names A. Negative controls: dropping the binding fails 7
+  cases, reading the current row instead of the queue-time row fails 2, binding lastHealthProbeAt fails
+  the operational case. Residual: the manifest digest is FNV-1a, so it detects change but is not
+  cryptographic. A null posture inherits the org default, and the review says so.
+- **AER-040** — the web `test` script is `vitest run --dir src` (49 tests in `pnpm -r test`).
+  `.github/workflows/demo.yml` `approval-review` runs all five ADR-0144 journeys (adds
+  `approvals-filter.spec.ts`), and the workflow now triggers on approval-binding, mcp-proxy,
+  governed-evaluate, app, export-bundle, reporting, `packages/shared/**` and `packages/db/**`. A broken
+  unit assertion and a broken journey both exited non-zero LOCALLY. A red CI run was not produced
+  because that needs a throwaway branch, which this session does not push. Whether it should be a
+  required check is the owner's call.
+- **AER-042** — `8ea024e` fixed the wizard. `062d90e` adds
+  `use-case-data-sensitivity.test.ts`, which POSTs the wizard's exact body for each reachable level
+  (public, confidential, regulated) and asserts the row, the intake instance and the audit detail.
+  It also sends `restricted` and asserts a 400 with zero rows added to use cases, workflow instances
+  and `use-case-proposed` audit rows. `internal` is API-only: no category maps to it.
+- **AER-043** — `154d171` fixed the counts. `b186915` makes the race deterministic with an inert
+  `afterPlan` seam: pass A is held after its plan while pass B commits. Raise and resolve each show
+  1/0 with one audit row. The test fails both raise and resolve against the reverted code.
+- **AER-008** — `65581bd`: both signed-export routes check the key before writing any success row. A
+  missing key writes one accurate deny row and returns 409. A build refused after a passed check
+  writes a correcting row. `export-bundle.test.ts` "AER-008" checks exact row counts for both routes,
+  with and without a key; all three cases fail on the pre-fix routes. Demo side: `demo:export-key` is
+  the README operator step made cross-platform, the `demo:check` "3 Evidence" beat fails without a
+  key, and the real journey downloads and checks the gzip bundle (CI green). ADR-0116 is amended.
+- **AER-002 / AER-004 / AER-005** — `1b9d6cb` fixes the stale texts you named. The budget_blocked
+  comment now says "freeze". The schema.ts comment no longer claims a NULL context_digest is
+  accepted. PENDING S14 residual (2) now says S22 is closed by ADR-0115.
+- **Not addressed in this round (still yours to keep open):** AER-006, 009, 010, 011, 012, 013, 015,
+  018, 020, 024, 026, 030, 033, 034, 035, 037, F01, F02, F08. Owner decisions: AER-014, 016, 028, 036,
+  F03, F06, F07.
+
 <!-- codex-enterprise-feedback:end -->
 
 Date: 2026-09-06  
