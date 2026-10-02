@@ -29,6 +29,7 @@ export const GUIDANCE_REMEDIATION_KINDS = [
   "close_coverage_gap",
   "author_control",
   "tighten_output_guardrail",
+  "contain_routing",
 ] as const;
 export const REMEDIATION_KINDS = [...EXECUTABLE_REMEDIATION_KINDS, ...GUIDANCE_REMEDIATION_KINDS] as const;
 export type RemediationKind = (typeof REMEDIATION_KINDS)[number];
@@ -227,6 +228,24 @@ export function proposeRemediations(ctx: RemediationContext): RemediationCandida
         },
       ];
     }
+    case "use_case_served_outside_stack":
+      return [
+        {
+          kind: "contain_routing",
+          executable: false,
+          title: `Keep ${label(s.context ?? "")} on its approved stack, or approve ${label(s.tail)} for it`,
+          rationale:
+            "The use case was approved for a named set of agents; routing served its traffic from another. Either " +
+            "the routing policy changes or the approval does — both are deliberate decisions, not a monitor's.",
+          params: { agentId: s.id },
+          steps: [
+            "Open the routing decisions for the requested agent(s) named on the alert and confirm which rule moved the calls.",
+            "Either pin the use case's traffic (callers send costSensitivity: quality-sensitive, or the routing rule excludes it), " +
+              "or amend the use case to include the serving agent and send it back through review.",
+            "The alert resolves once a window passes with no off-stack dispatches.",
+          ],
+        },
+      ];
     case "dimension_coverage_below_floor":
       return [
         {

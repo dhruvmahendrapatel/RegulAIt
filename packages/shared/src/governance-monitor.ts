@@ -62,6 +62,14 @@ export const MONITOR_RULES = {
       "Continuous trace evaluation (ADR-0160) found PII, credential material or toxic content in what an agent " +
       "of an approved use case returned in the evaluation window — content the inline guardrails let through.",
   },
+  use_case_served_outside_stack: {
+    label: "Approved use case traffic served outside its approved stack",
+    severity: "high",
+    description:
+      "A call made to an agent of an approved use case was dispatched to an agent the use case's approval does " +
+      "not name — typically right-size routing (pillar 6) moving it to a cheaper agent. The approval covered the " +
+      "stack the reviewers saw; the monitor reports the measured dispatches (usage ledger) and changes no routing.",
+  },
   high_risk_without_control: {
     label: "High risk with no mitigating control",
     severity: "high",
@@ -99,6 +107,19 @@ export interface MonitorUseCaseInput {
   /** transitive dependencies from the graph */
   agentIds: string[];
   vendorIds: string[];
+  /** ADR-0164 — dispatches requested for an agent of the approved stack but
+   * served by one outside it, per served agent, over the window */
+  servedOutsideStack?: OffStackServing[];
+}
+
+export interface OffStackServing {
+  servedAgentId: string;
+  servedAgentName: string;
+  /** the approved-stack agents the calls were made to */
+  requested: Array<{ agentId: string; name: string; calls: number }>;
+  calls: number;
+  lastServedAt: string;
+  windowDays: number;
 }
 
 export interface MonitorAgentInput {
@@ -222,6 +243,26 @@ export function evaluateMonitorRules(input: MonitorInput): MonitorFinding[] {
           detail: { useCaseId: uc.id, agentId: a.id },
         });
       }
+    }
+
+    for (const o of uc.servedOutsideStack ?? []) {
+      if (o.calls <= 0) continue;
+      out.push({
+        ruleId: "use_case_served_outside_stack",
+        subjectKey: `${subjectKey}>agent:${o.servedAgentId}`,
+        severity: sev("use_case_served_outside_stack"),
+        title:
+          `${o.calls} call(s) for ${uc.name} (to ${o.requested.map((r) => r.name).join(", ")}) were served by ` +
+          `${o.servedAgentName}, which is outside its approved stack`,
+        detail: {
+          useCaseId: uc.id,
+          servedAgentId: o.servedAgentId,
+          requested: o.requested,
+          calls: o.calls,
+          lastServedAt: o.lastServedAt,
+          windowDays: o.windowDays,
+        },
+      });
     }
 
     for (const vendorId of uc.vendorIds) {

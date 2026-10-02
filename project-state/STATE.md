@@ -1,6 +1,6 @@
 ---
 phase: p1-security-in-progress
-last_updated: 2026-10-01
+last_updated: 2026-10-02
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
@@ -20,6 +20,21 @@ roadmap: ../docs/product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**2026-10-02 (latest) - Monitor & Respond completed for the demo (ADR-0160..0164).**
+Continuous trace evaluation re-runs the shipped detectors over stored
+response previews every 15 minutes and feeds the monitor (`agent_output_leakage`,
+migration 0126). `POST /v1/gates/deploy` answers a pipeline's "cleared to
+ship?" from existing state (approval, approved stack, halts, MRM decision,
+open alerts). Newly raised alerts post to opted-in Slack/Teams workspaces by
+severity threshold (migration 0127). `demo:prepare` builds the demo from an
+EMPTY database in one command (seed → setup → intake → governed mock traffic
+→ demo:check, 17/17 PASS, ~22s). ADR-0164 turns the ADR-0163 routing finding
+into a detection: `use_case_served_outside_stack` (high) reads the usage
+ledger for approved use-case calls served by an agent outside the approved
+stack; routing itself is unchanged (a routing guard is an owner decision).
+Demo: Monday 2026-10-05 11:00 UTC; M3 freeze Sun 16:00 UTC; M4 dry run Sun
+22:00 UTC.
 
 **2026-10-02 (later) - Regulatory intelligence, remediation, demo:check (ADR-0158, ADR-0159, C11).**
 `GET /v1/regulatory/updates` joins a curated, source-dated feed (G4) to active

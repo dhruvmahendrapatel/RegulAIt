@@ -787,8 +787,8 @@ Demo-critical items for 2026-10-05 are tracked in `AgentCoordination.md`
 
 | Capability | Status | Where / gap |
 |---|---|---|
-| Central inventory: use cases, models, vendors, agents | exists | `use-cases.ts`, `mrm.ts`, `vendors.ts`, `agents-connectors.ts`, `inventory.ts`; no single 360 view [C3, X2] |
-| Agent cards (purpose, tools, data sources, guardrails) | partial | data exists across tables; no card [C5] |
+| Central inventory: use cases, models, vendors, agents | exists | `use-cases.ts`, `mrm.ts`, `vendors.ts`, `agents-connectors.ts`, `inventory.ts`; use-case 360 overview API [C3], UI [X2] |
+| Agent cards (purpose, tools, data sources, guardrails) | exists (API) | `GET /v1/agents/:id/card` [C5] |
 | Platform & MCP server governance | exists | `mcp-proxy.ts`, `mcp-registry.ts`, admission/egress ADRs |
 | Dependency graph (agents, sub-agents, models, tools, data) | exists (API) | `dependency-graph.ts` (ADR-0156): declared + observed edges, max-propagated risk with path; no graph UI yet [X6] |
 | Shadow-AI discovery and classification | partial | classifies imported evidence (`shadow-ai.ts`); no network scanning; MCP discovery has no UI [X4] |
@@ -799,7 +799,7 @@ Demo-critical items for 2026-10-05 are tracked in `AgentCoordination.md`
 | Capability | Status | Where / gap |
 |---|---|---|
 | Agentic risk assessment library with mapped controls | partial | 9 categories, no scenario library, no bias/safety category [C4, G2] |
-| Inherent → residual risk with control linkage | missing | declared likelihood/impact only [C4] |
+| Inherent → residual risk with control linkage | exists | ADR-0147: residual likelihood/impact and pack-control links per risk [C4] |
 | Policy inheritance and aggregate risk scoring | partial | risk now propagates across connected entities (max, ADR-0156); packs remain org-level, no policy inheritance yet |
 | Automated red-teaming and drift detection | partial | `redteam.ts`, `evals.ts`; drift baselines not continuous |
 | Regulatory & policy intelligence (obligations → our controls and use cases) | exists (API) | `regulatory-intel.ts` (ADR-0158); curated feed [G4]; UI [X9] |
@@ -816,7 +816,7 @@ Demo-critical items for 2026-10-05 are tracked in `AgentCoordination.md`
 | Trace ingestion and continuous evaluation | exists (API) | `tracing.ts`; ADR-0160 scheduled evaluation of every model response with the shipped detectors, feeding the monitor; model-tier detectors not wired |
 | Human-in-the-loop escalation for high-risk actions | exists | approvals, execution modes (ADR-0124), inbox |
 | Remediation agents (GAIA-equivalent) for automated controls | partial | ADR-0159: planned remediation per alert; control links and owner assignment execute after arm's-length approval; other kinds are guidance; no model-driven agent [X7] |
-| Real-time compliance monitoring and alerts | exists | governance monitor (ADR-0157) + trace evaluation (ADR-0160); alerts via audit log/SIEM and Slack/Teams (ADR-0162); alerts UI [X7] |
+| Real-time compliance monitoring and alerts | exists | governance monitor (ADR-0157) + trace evaluation (ADR-0160) + off-stack serving from the usage ledger (ADR-0164); alerts via audit log/SIEM and Slack/Teams (ADR-0162); alerts UI [X7] |
 
 Post-demo order (proposal, needs owner confirmation): residual-risk and
 control linkage hardening → dependency graph + risk propagation → continuous

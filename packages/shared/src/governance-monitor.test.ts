@@ -118,6 +118,41 @@ describe("ADR-0160 output leakage rule", () => {
   });
 });
 
+describe("ADR-0164 served outside the approved stack", () => {
+  const off = (calls: number) => ({
+    servedAgentId: "b",
+    servedAgentName: "fast-mock",
+    requested: [{ agentId: "a", name: "approved-agent", calls }],
+    calls,
+    lastServedAt: "2026-10-02T00:00:00.000Z",
+    windowDays: 7,
+  });
+  it("fires per (approved use case, serving agent), names the requested agents, and only for approved use cases", () => {
+    const f = evaluateMonitorRules(base({
+      useCases: [
+        { id: "u", name: "UC", status: "approved", propagated: none, agentIds: ["a"], vendorIds: [], servedOutsideStack: [off(3)] },
+        { id: "p", name: "Proposal", status: "proposed", propagated: none, agentIds: ["a"], vendorIds: [], servedOutsideStack: [off(9)] },
+      ],
+      agents: new Map([["a", agent("a")]]),
+    }));
+    expect(f).toEqual([
+      expect.objectContaining({ ruleId: "use_case_served_outside_stack", subjectKey: "use_case:u>agent:b", severity: "high" }),
+    ]);
+    expect(f[0]!.title).toBe("3 call(s) for UC (to approved-agent) were served by fast-mock, which is outside its approved stack");
+    expect(f[0]!.detail).toMatchObject({ useCaseId: "u", servedAgentId: "b", calls: 3, windowDays: 7 });
+  });
+  it("is silent with no off-stack dispatches (empty, absent, or zero calls)", () => {
+    for (const servedOutsideStack of [[], undefined, [off(0)]]) {
+      expect(
+        evaluateMonitorRules(base({
+          useCases: [{ id: "u", name: "UC", status: "approved", propagated: none, agentIds: ["a"], vendorIds: [], servedOutsideStack }],
+          agents: new Map([["a", agent("a")]]),
+        })),
+      ).toEqual([]);
+    }
+  });
+});
+
 describe("ADR-0157 reconciliation", () => {
   const finding = (subjectKey: string) => ({
     ruleId: "high_risk_without_control" as const, subjectKey, severity: "high" as const, title: "t", detail: {},

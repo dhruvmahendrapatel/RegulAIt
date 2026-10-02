@@ -53,4 +53,16 @@ describe("ADR-0159 remediation planner", () => {
       expect(out.every((c) => !c.executable && c.steps.length > 0)).toBe(true);
     }
   });
+
+  it("off-stack serving is guidance only: contain routing or amend the approval", () => {
+    const out = proposeRemediations(
+      ctx({
+        alert: { ruleId: "use_case_served_outside_stack", subjectKey: "use_case:u>agent:b", detail: {} },
+        labels: new Map([["use_case:u", "Fraud triage"], ["agent:b", "fast-mock"]]),
+      }),
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ kind: "contain_routing", executable: false, params: { agentId: "b" } });
+    expect(out[0]!.title).toBe("Keep Fraud triage on its approved stack, or approve fast-mock for it");
+  });
 });

@@ -6,6 +6,7 @@ superseding a decision means a new ADR plus a status flip on the old one.
 
 | ID | Title | Status | Date |
 |---|---|---|---|
+| [0164](0164-monitor-off-stack-serving.md) | Monitor rule `use_case_served_outside_stack` (high): approved use-case dispatches served by an agent outside its approved stack, read from the usage ledger; detection only; guidance remediation; demo:traffic sends one deliberate routed call. | Accepted | 2026-10-02 |
 | [0163](0163-demo-traffic-and-one-command-prepare.md) | `demo:traffic` (governed mock traffic incl. a credential leak, a PII block and an injection attempt; reports the agent that actually served) and `demo:prepare` (one command, empty DB → demo:check). Records the routing-outside-approved-stack finding. | Accepted | 2026-10-02 |
 | [0162](0162-governance-alerts-to-chat.md) | Monitor alerts to Slack/Teams: per-workspace opt-in severity threshold; newly raised only; same guarded courier (egress allow-list), no buttons; manual post; audited, never fatal (migration 0127). | Accepted | 2026-10-02 |
 | [0161](0161-ci-cd-deploy-gate.md) | CI/CD deploy gate: `POST /v1/gates/deploy` combines use-case approval, approved stack, agent availability, the MRM decision and open monitor alerts into allow/deny with reasons; owner-or-admin; audited. | Accepted | 2026-10-02 |

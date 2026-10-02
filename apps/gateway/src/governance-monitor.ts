@@ -24,6 +24,7 @@ import {
   agents,
   aiRiskControls,
   aiRisks,
+  aiUseCases,
   and,
   auditLog,
   count,
@@ -38,7 +39,10 @@ import {
   or,
   gt,
   sql,
+  usageEvents,
   users,
+  gte,
+  isNotNull,
   type Db,
 } from "@regulait/db";
 import {
@@ -49,11 +53,12 @@ import {
   reconcileAlerts,
   type MonitorAgentInput,
   type MonitorVendorInput,
+  type OffStackServing,
 } from "@regulait/shared";
 import { computeDependencyGraph } from "./dependency-graph.js";
 import { computeTrustDashboard } from "./trust-dashboard.js";
 import { ownershipFlagFor } from "./inventory.js";
-import { traceSummaryForAgents } from "./trace-evaluation.js";
+import { TRACE_EVAL_WINDOW_DAYS, traceSummaryForAgents } from "./trace-evaluation.js";
 import { notifyGovernanceAlerts } from "./chatops.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
@@ -93,6 +98,8 @@ export async function runGovernanceMonitor(
     while (q.length) for (const n of deps.get(q.shift()!) ?? []) if (!seen.has(n)) (seen.add(n), q.push(n));
     return seen;
   };
+  // ADR-0164 — approved-use-case traffic that routing served off the approved stack
+  const offStack = await offStackServingByUseCase(db, now);
   const useCases = graph.nodes
     .filter((n) => n.type === "use_case")
     .map((n) => {
@@ -104,6 +111,7 @@ export async function runGovernanceMonitor(
         propagated: n.propagatedRisk,
         agentIds: r.filter((k) => k.startsWith("agent:")).map((k) => k.slice(6)),
         vendorIds: r.filter((k) => k.startsWith("vendor:")).map((k) => k.slice(7)),
+        servedOutsideStack: offStack.get(n.id!) ?? [],
       };
     });
 
@@ -293,6 +301,76 @@ export async function runGovernanceMonitor(
     resolved: plan.resolve.length,
     active: n,
   };
+}
+
+/**
+ * ADR-0164 — measured dispatches, per APPROVED use case, that were requested
+ * for an agent of its approved stack (`intended_agent_ids`) and served by an
+ * agent outside it. Read from the usage ledger, which stamps both the
+ * requested and the served agent on every dispatch; nothing here reads or
+ * changes routing. Same window as continuous trace evaluation.
+ */
+export async function offStackServingByUseCase(db: Db, now: Date): Promise<Map<string, OffStackServing[]>> {
+  const out = new Map<string, OffStackServing[]>();
+  const ucs = await db
+    .select({ id: aiUseCases.id, intendedAgentIds: aiUseCases.intendedAgentIds })
+    .from(aiUseCases)
+    .where(eq(aiUseCases.status, "approved"));
+  const stackIds = [...new Set(ucs.flatMap((u) => (u.intendedAgentIds ?? []) as string[]))];
+  if (stackIds.length === 0) return out;
+  const since = new Date(now.getTime() - TRACE_EVAL_WINDOW_DAYS * 86_400_000);
+  const rows = await db
+    .select({
+      requested: usageEvents.requestedAgentId,
+      served: usageEvents.agentId,
+      calls: count(),
+      last: sql<Date>`max(${usageEvents.at})`,
+    })
+    .from(usageEvents)
+    .where(
+      and(
+        eq(usageEvents.objectType, "agent"),
+        inArray(usageEvents.requestedAgentId, stackIds),
+        isNotNull(usageEvents.agentId),
+        ne(usageEvents.agentId, usageEvents.requestedAgentId),
+        gte(usageEvents.at, since),
+      ),
+    )
+    .groupBy(usageEvents.requestedAgentId, usageEvents.agentId);
+  if (rows.length === 0) return out;
+  const nameIds = [...new Set(rows.flatMap((r) => [r.requested!, r.served!]))];
+  const names = new Map(
+    (await db.select({ id: agents.id, name: agents.name }).from(agents).where(inArray(agents.id, nameIds))).map((a) => [a.id, a.name]),
+  );
+  const nameOf = (id: string) => names.get(id) ?? id;
+  for (const uc of ucs) {
+    const stack = new Set((uc.intendedAgentIds ?? []) as string[]);
+    const byServed = new Map<string, OffStackServing>();
+    for (const r of rows) {
+      if (!stack.has(r.requested!) || stack.has(r.served!)) continue;
+      const calls = Number(r.calls);
+      const last = new Date(r.last).toISOString();
+      const o = byServed.get(r.served!) ?? {
+        servedAgentId: r.served!,
+        servedAgentName: nameOf(r.served!),
+        requested: [],
+        calls: 0,
+        lastServedAt: last,
+        windowDays: TRACE_EVAL_WINDOW_DAYS,
+      };
+      o.requested.push({ agentId: r.requested!, name: nameOf(r.requested!), calls });
+      o.calls += calls;
+      if (last > o.lastServedAt) o.lastServedAt = last;
+      byServed.set(r.served!, o);
+    }
+    if (byServed.size) {
+      out.set(
+        uc.id,
+        [...byServed.values()].map((o) => ({ ...o, requested: o.requested.sort((a, b) => a.name.localeCompare(b.name)) })),
+      );
+    }
+  }
+  return out;
 }
 
 /** `use_case:<id>>agent:<id>` → the dependency is the subject; the use case is context */

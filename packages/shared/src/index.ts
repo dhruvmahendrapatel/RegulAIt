@@ -3338,6 +3338,7 @@ export {
   type MonitorSeverity,
   type MonitorUseCaseInput,
   type MonitorVendorInput,
+  type OffStackServing,
 } from "./governance-monitor.js";
 
 // ADR-0158 — regulatory intelligence: the feed shape (G4 authors the data) and
