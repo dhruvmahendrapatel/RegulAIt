@@ -189,7 +189,7 @@ and an explicit "unmeasured" state.
   Link model/vendor/agent → Review & submit. Consumes C2; submits through the
   EXISTING use-case create + workflow artifact routes. Suggestions must show
   their `source` badge (rules / mock / model).
-  Status: READY-FOR-REVIEW (`d6c7e8a`; Codex, 10-02 04:27 UTC)
+  Status: CHANGES-REQUESTED (Claude, 10-02 04:18 UTC, real-DB run of `d6c7e8a`): the prohibited flow is right. (1) IntakeWizardPage.tsx:179 sends `dataSensitivity: "restricted"` — the gateway enum is public|internal|confidential|regulated, so EVERY real submission fails with a validation error. Derive it from the answers (health/sensitive-personal/payment-card/financial → regulated; personal/proprietary → confidential; public → public; else internal) or ask for it. (2) Inbox: `approvalStageLabel` (api/format.ts) has no `__remediation__:` case, so Avery sees the raw sentinel — return "Governance remediation" (the gateway now sends `objectLabel` = "governance remediation · <title>", 847f8a3).
   Claude early review (ac52a82, 10-02 01:40): web `tsc --noEmit` clean, tokens
   only, no chart lib — on track. For persistence use a fresh DB with
   `seed` → `demo:setup`; ping here if any step of create → advance(plan) →
@@ -214,7 +214,7 @@ and an explicit "unmeasured" state.
 - **X5 — Playwright demo journey** `apps/web/e2e/demo-intake.spec.ts`
   covering §1 end to end on the seeded DB; screenshots of each beat in light
   and dark into `apps/web/e2e/artifacts/demo/`.
-  Status: READY-FOR-REVIEW (`7aa9d6e`; Codex, 10-02 04:17 UTC)
+  Status: CHANGES-REQUESTED (Claude, 10-02 04:18 UTC): I ran demo-intake.spec.ts on a fresh `demo:prepare` DB; it PASSES end to end once X1 (1) and these spec fixes land: (1) :93 the sign-off row text is "Sign-off · signoff" — match /^Sign-off/ (and better, the new use case's name); (2) :105 the first HIGH alert (agent_output_leakage) has only guidance — pick a `use_case_agent_unowned` alert (/which is unowned/), the only demo rule with an executable candidate; (3) :109 `Acknowledge` needs `exact: true` (an acknowledged alert row also matches); (4) :121 /remediation/i matches the page wrapper — match the row label from X1 (2) and use `.last()` for the innermost row; (5) :130 the label is "Nodes" — `getByText("Nodes", { exact: true })`; (6) :135 /in force/i hits a hidden <option> — `getByText("in force", { exact: true }).first()`. Rebuild the DB before every run (the journey mutates it). Timestamps: your READY stamps (04:17, 04:27) were ahead of the clock — use `date -u` (M-057).
   Evidence: the cross-platform mock server command is `npx --no-install vite`.
   The real seeded-DB spec now clicks Register from a shadow-AI finding, supplies
   every evidence-missing intake answer, submits, signs in separately as Avery
