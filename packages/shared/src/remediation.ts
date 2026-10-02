@@ -137,7 +137,7 @@ export function proposeRemediations(ctx: RemediationContext): RemediationCandida
         params: { riskId: risk.id },
         steps: [
           "Confirm the linked controls are operating.",
-          "Declare the residual likelihood and impact (PUT /v1/risks/:id/residual).",
+          "Declare the residual likelihood and impact on the risk (use case → Risks tab).",
           "If the risk is carried knowingly, accept it with a note; if it no longer applies, close it with a reason.",
         ],
       });

@@ -73,7 +73,7 @@ export default function UseCaseOverviewPage() {
           <div className={v.stack}>
             <Card>
               <div className={s.workspaceHeader}>
-                <div><div className={v.row}><Badge tone={statusTone(data.useCase.status)}>{data.useCase.status.replace(/_/g, " ")}</Badge><Badge tone={data.screening.tier === "prohibited" ? "danger" : data.screening.tier === "high" ? "warn" : "info"}>{data.screening.screened ? `${humanize(data.screening.tier)} tier` : "Tier unmeasured"}</Badge></div><p className={v.dim}>{data.useCase.description || "No description recorded."}</p></div>
+                <div><div className={v.row}><Badge tone={statusTone(data.useCase.status)}>{humanize(data.useCase.status)}</Badge><Badge tone={data.screening.tier === "prohibited" ? "danger" : data.screening.tier === "high" ? "warn" : "info"}>{data.screening.screened ? `${humanize(data.screening.tier)} tier` : "Tier unmeasured"}</Badge></div><p className={v.dim}>{data.useCase.description || "No description recorded."}</p></div>
                 <div className={s.workspaceMeta}><span><strong>Owner</strong><br />{data.useCase.ownerName ?? "Unassigned"}</span><span><strong>Questionnaire</strong><br />{data.questionnaire.submitted ? `v${data.questionnaire.version} submitted` : "not submitted"}</span></div>
               </div>
               <div className={v.row}>
@@ -153,7 +153,7 @@ function RisksTab({ useCaseId, risks, onRefresh }: { useCaseId: string; risks: O
 }
 
 function StackTab({ data }: { data: OverviewResponse["stack"] }) {
-  return <div className={v.stack}><Card title="Agents">{data.agents.length === 0 ? <EmptyState title="No intended agents linked" body="The intake records the agent this use case will run on. Choose one at the stack step of the intake, or link it from the agent inventory." /> : data.agents.map((agent) => <AgentCard key={agent.id} id={agent.id} fallback={agent} />)}</Card><Card title="Vendors">{data.vendors.length === 0 ? <EmptyState title="No vendors resolved from this stack" /> : data.vendors.map((vendor) => <div key={vendor.id} className={v.listRow}><span className={v.grow}><strong>{vendor.name}</strong><br /><span className={v.faint}>{humanize(vendor.category)} · via {vendor.linkedVia.join(", ")}</span></span><Badge tone={vendor.status === "approved" ? "ok" : "warn"}>{vendor.status}</Badge></div>)}</Card></div>;
+  return <div className={v.stack}><Card title="Agents">{data.agents.length === 0 ? <EmptyState title="No intended agents linked" body="The intake records the agent this use case will run on. Choose one at the stack step of the intake, or link it from the agent inventory." /> : data.agents.map((agent) => <AgentCard key={agent.id} id={agent.id} fallback={agent} />)}</Card><Card title="Vendors">{data.vendors.length === 0 ? <EmptyState title="No vendors resolved from this stack" /> : data.vendors.map((vendor) => <div key={vendor.id} className={v.listRow}><span className={v.grow}><strong>{vendor.name}</strong><br /><span className={v.faint}>{humanize(vendor.category)} · via {vendor.linkedVia.join(", ")}</span></span><Badge tone={vendor.status === "approved" ? "ok" : "warn"}>{humanize(vendor.status)}</Badge></div>)}</Card></div>;
 }
 
 function AgentCard({ id, fallback }: { id: string; fallback: OverviewResponse["stack"]["agents"][number] }) {
@@ -170,11 +170,24 @@ function AgentCard({ id, fallback }: { id: string; fallback: OverviewResponse["s
           <p className={v.dim}>
             {providerLabel(card.data.agent.provider)} · {card.data.agent.model ?? "default model"} · Owner: {card.data.owner.name ?? (card.data.owner.state === "unowned" ? "unassigned" : humanize(card.data.owner.state))}
           </p>
-          <div><strong>Declared purpose</strong><ul>{card.data.purpose.intendedUses.map((use) => <li key={use}>{use}</li>)}</ul></div>
           <div>
-            <strong>Model cards</strong>
+            <strong>Declared purpose</strong>
+            {card.data.purpose.intendedUses.length
+              ? <ul>{card.data.purpose.intendedUses.map((use) => <li key={use}>{use}</li>)}</ul>
+              : <p className={v.dim}>No declared purpose recorded.</p>}
+          </div>
+          <div>
+            <div className={v.row}>
+              <strong>Model cards</strong>
+              {fallback.modelCards.length ? <span className={v.faint}>{fallback.modelCards.filter((c) => c.signOff === "approved").length} of {fallback.modelCards.length} approved</span> : null}
+            </div>
             {fallback.modelCards.length ? (
-              <ul>{fallback.modelCards.map((modelCard) => <li key={modelCard.id}>{modelCard.intendedUse && !card.data!.purpose.intendedUses.includes(modelCard.intendedUse) ? `${modelCard.intendedUse} · ` : ""}Sign-off: <Badge tone={modelCard.signOff === "approved" ? "ok" : "warn"}>{modelCard.signOff === "none" ? "Not signed off" : humanize(modelCard.signOff)}</Badge></li>)}</ul>
+              <ul>{fallback.modelCards.map((modelCard) => (
+                <li key={modelCard.id}>
+                  <Badge tone={modelCard.signOff === "approved" ? "ok" : "warn"}>{modelCard.signOff === "none" ? "Not signed off" : humanize(modelCard.signOff)}</Badge>{" "}
+                  {modelCard.intendedUse ? truncate(modelCard.intendedUse, 90) : "No intended use recorded"}
+                </li>
+              ))}</ul>
             ) : <p className={v.dim}>No model card is linked to this agent.</p>}
           </div>
           <p className={v.faint}>{sentenceCase(card.data.dataSources.note)}</p>
@@ -185,6 +198,8 @@ function AgentCard({ id, fallback }: { id: string; fallback: OverviewResponse["s
     </div>
   );
 }
+
+const truncate = (text: string, max: number) => (text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text);
 
 const sentenceCase = (text: string) => (text ? `${text.charAt(0).toUpperCase()}${text.slice(1).replace(/\.$/, "")}.` : text);
 

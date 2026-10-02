@@ -536,10 +536,10 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
     adapters: describeEvidenceAdapters(),
     posture: EVIDENCE_ADAPTER_POSTURE,
     pipeline:
-      "An adapter turns a raw file into the SAME evidence rows POST /v1/shadow-ai/imports already accepts, and hands " +
-      "them to the SAME dry-run/apply pipeline. It is a layer, not a second importer: it cannot reach a code path " +
-      "the row-shaped import cannot, cannot skip the escalation screen or the strict row schemas, and cannot write " +
-      "anything the row-shaped import could not write.",
+      "An adapter turns a raw file into the same evidence rows the standard import accepts, and hands them to the " +
+      "same preview-then-apply pipeline. It is a layer, not a second importer: it cannot reach a code path the " +
+      "standard import cannot, cannot skip the escalation screen or the strict row checks, and cannot write " +
+      "anything the standard import could not write.",
   }));
 
   /**

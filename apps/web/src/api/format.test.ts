@@ -7,6 +7,11 @@ describe("display helpers — the UI never shows identifiers where words belong"
     expect(humanize("compliance-signoff")).toBe("Compliance sign-off");
     expect(humanize("signoff")).toBe("Sign-off");
     expect(humanize(null)).toBe("");
+    // acronyms survive: no "Ai use case", "Pci", "Use case eu tier"
+    expect(humanize("ai_use_case")).toBe("AI use case");
+    expect(humanize("pci")).toBe("PCI");
+    expect(humanize("use-case-eu-tier")).toBe("Use case EU tier");
+    expect(humanize("api_key_prefix")).toBe("API key prefix");
   });
 
   it("plural never writes (s)", () => {
@@ -21,7 +26,8 @@ describe("display helpers — the UI never shows identifiers where words belong"
     expect(frameworkLabel("hipaa")).toBe("HIPAA");
     expect(frameworkLabel("some-new-pack")).toBe("Some new pack");
     expect(providerLabel("openai")).toBe("OpenAI");
-    expect(providerLabel("acme_llm")).toBe("Acme llm");
+    expect(providerLabel("acme_llm")).toBe("Acme LLM");
+    expect(providerLabel("azure_openai")).toBe("Azure OpenAI");
     expect(evidenceLabel("saas_export")).toBe("SaaS export");
     expect(evidenceLabel("new_kind")).toBe("New kind");
   });

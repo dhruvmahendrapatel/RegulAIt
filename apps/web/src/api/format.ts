@@ -38,12 +38,19 @@ export const shortId = (id: string) => id.slice(0, 8) + "…";
 /** an identifier (`use_case_questionnaire`, `compliance-signoff`, `saas_export`) as words a
  * reader can scan: separators become spaces, "signoff" becomes "sign-off", first letter up.
  * Display only — never parse the result back. */
+const ACRONYMS: Record<string, string> = {
+  ai: "AI", api: "API", aws: "AWS", byoc: "BYOC", dlp: "DLP", eu: "EU", gcp: "GCP", hipaa: "HIPAA",
+  id: "ID", iso: "ISO", llm: "LLM", mcp: "MCP", mrm: "MRM", nist: "NIST", openai: "OpenAI", pci: "PCI",
+  phi: "PHI", pii: "PII", saas: "SaaS", sdk: "SDK", sla: "SLA", soc: "SOC", sso: "SSO", url: "URL",
+};
+
 export function humanize(id: string | null | undefined): string {
   const words = (id ?? "")
     .trim()
     .replace(/[_-]+/g, " ")
     .replace(/\bsignoff\b/gi, "sign-off")
-    .replace(/\s+/g, " ");
+    .replace(/\s+/g, " ")
+    .replace(/\b[a-z]+\b/gi, (w) => ACRONYMS[w.toLowerCase()] ?? w);
   return words.replace(/^./, (c) => c.toUpperCase());
 }
 
@@ -79,6 +86,9 @@ const PROVIDER_LABELS: Record<string, string> = {
   meta: "Meta",
   microsoft: "Microsoft",
   aws: "AWS",
+  aws_bedrock: "AWS Bedrock",
+  azure_openai: "Azure OpenAI",
+  google_vertex: "Google Vertex AI",
   mock: "Mock",
 };
 

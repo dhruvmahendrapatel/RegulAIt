@@ -18,7 +18,7 @@ import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import type { AuditEntry } from "../../../api/types";
-import { actorLabel, fmtAt, frameworkLabel, humanize, plural } from "../../../api/format";
+import { UUID_RE, actorLabel, fmtAt, frameworkLabel, humanize, plural, shortId } from "../../../api/format";
 import type { AuditRetention } from "../../../api/adminTypes";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Select, Table, type Tone } from "../../../ui/kit";
@@ -173,7 +173,7 @@ export default function AuditLogPage() {
                 sort: (e) => e.effect,
                 render: (e) => <Badge tone={effectTone(e.effect)}>{e.effect.replaceAll("_", " ")}</Badge>,
               },
-              { key: "rule", header: "Rule", render: (e) => <span className={v.mono} style={{ whiteSpace: "nowrap" }}>{e.ruleId}</span> },
+              { key: "rule", header: "Rule", render: (e) => <span style={{ whiteSpace: "nowrap" }} title={e.ruleId}>{UUID_RE.test(e.ruleId) ? `Policy rule ${shortId(e.ruleId)}` : humanize(e.ruleId)}</span> },
               {
                 key: "deployMode",
                 header: "Deploy mode",

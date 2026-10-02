@@ -157,7 +157,7 @@ export type PackStatus = (typeof PACK_STATUSES)[number];
  * footer somebody can strip.
  */
 export const COMPLIANCE_PACK_DISCLAIMER =
-  "This is a CONTROL-MAPPING REPORT, not a compliance certification. RegulAIt maps a framework's " +
+  "This is a control-mapping report, not a compliance certification. RegulAIt maps a framework's " +
   "controls onto platform configuration and counts the evidence its own ledgers hold. It does not " +
   "certify compliance, does not substitute for an auditor or for legal counsel, and does not shift " +
   "legal responsibility. Controls marked attestation-required cannot be evidenced by any control " +
