@@ -11,7 +11,7 @@
 (Assumed from the owner's commit timezone. If that is wrong, the owner corrects
 this line and every milestone moves with it.)
 
-## Live status (each agent edits ONLY its own row, at every check-in)
+## Live status — one row per agent, OVERWRITTEN by `pnpm checkin` (never edit by hand)
 
 | Agent | Now | Next | ETA (UTC) | Last check-in (UTC) | Blocked on |
 |---|---|---|---|---|---|
@@ -19,31 +19,44 @@ this line and every milestone moves with it.)
 | Codex | X3 / X1 | X2 → X4 → X5 → X7 → X8 | — | 10-02 01:15 | — |
 | Gemini | G1 risks rewrite | G3 corrections → G5 → G4 | — | 10-02 01:50 | — |
 
-## Check-in cadence (owner directive 10-02: coordinate on a fixed rhythm)
+## Check-in protocol (owner directive 10-02: every agent, at least hourly)
 
-Staggered so each agent reads the others' output from the previous slot.
-Claude's check-in is a scheduled routine. Codex and Gemini: if your runtime
-can schedule, schedule yourself at your slot with the prompt "AgentCoordination
-check-in: pull dhruv/active, follow your row in 'Check-in cadence' in
-AgentCoordination.md, then continue your top task"; if it cannot, run that
-check-in after every commit and at least hourly.
+**The command — run it at your slot AND after every push:**
+```
+pnpm checkin <claude|codex|gemini> --now "<what you are doing>" --next "<then>" \
+  [--eta "HH:MM UTC"] [--blocked "<on what>"] --ack --push
+```
+It pulls, rewrites YOUR row above with the UTC time (it can only overwrite —
+there is no history to grow), prints your inbox ("To <you>") and your open
+tasks with their one Status line, clears the inbox messages you just read
+(`--ack`), lints the file, and commits + pushes ONLY this file. Then act on
+what it printed. `pnpm coord:status` shows everyone's age (STALE > 60 min,
+OFFLINE > 90 min); `pnpm coord:lint` is what CI runs.
 
-| Agent | Checks in at | Every check-in |
+| Agent | Slot | Notes |
 |---|---|---|
-| Codex | **:20** past each hour, and after every push | pull → read §5 "To Codex" + your task statuses → update your Live-status row → act → push |
-| Gemini | **:40** past each hour, and after every push | pull → read §5 "To Gemini" + your task statuses → update your Live-status row → act → push |
-| Claude | **:02** past each hour (scheduled routine), and on every CI event | pull → review every READY-FOR-REVIEW item on a fresh DB → VERIFIED / CHANGES-REQUESTED → answer "To Claude" → clean handled messages → re-plan, update Live status → push |
+| Codex | **:20** each hour | Codex may not edit gateway/db/shared — ask in "To Claude" |
+| Gemini | **:40** each hour | Gemini owns only the paths in ground rule 2 |
+| Claude | **:02** each hour (scheduled routine) | reviews every READY item, answers "To Claude", prunes, re-plans |
+
+**Keeping the file current-state only (CI enforces, `scripts/coordination.mjs`):**
+- one Live-status row per agent — written by the command only;
+- one `Status:` line per task — **replace it**, never add a second; the
+  previous text is in `git log -p AgentCoordination.md`;
+- inboxes: ≤ 8 messages each, none older than 12 h — the recipient clears
+  them with `--ack`; Claude clears "To Claude" at each :02;
+- VERIFIED tasks collapse to one line + a one-line Done-log entry (≤ 40);
+- whole file ≤ 800 lines. Over budget = CI red until someone prunes.
 
 Rules:
 - **Handoff SLA:** anything marked READY-FOR-REVIEW is reviewed at Claude's
   next :02 check-in (≤ 60 min). Don't wait idle — start your next task.
-- **Blocked > 20 min:** set `BLOCKED (reason)` on the task AND post in
+- **Blocked > 20 min:** `--blocked "<reason>"` on your check-in AND a line in
   "To Claude"; take the next unblocked task meanwhile.
 - **Contract changes** (a field you need that isn't in §4) go to "To Claude";
-  Claude answers by the next :02 with either the field (and contract update)
-  or an alternative. Never add a route or field outside your own files.
-- **Heartbeat:** an agent whose "Last check-in" is > 90 min old is treated as
-  offline; Claude re-plans around it and tells the owner.
+  never add a route or field outside your own files.
+- **OFFLINE (> 90 min without a check-in):** Claude re-plans around you and
+  tells the owner.
 - **Build gate:** ground rule 8 (typecheck) before every READY.
 
 ---
@@ -132,88 +145,16 @@ live model is a bonus, never a dependency.
 
 ### Claude — gateway, data model, contracts, review
 
-- **C0 — Coordination + roadmap.** Done (ROADMAP §9; this file).
-  Status: VERIFIED
-- **C1 — Trust dashboard API** `GET /v1/reports/trust[?projectId=]` — LIVE
-  (ADR-0148). Admin-only. Exact shape in §4.1 (updated to the built
-  payload). Note for X3: bias is unmeasured unless a v2 pack is active (C1b) —
-  always support drawing the gap.
-  Status: READY-FOR-REVIEW (self-verified: 4/4 + shared 4/4)
-- **C1b — Bias & safety controls** (ADR-0150): `eu-ai-act@2`, `nist-ai-rmf@2`
-  with fairness (documented model-card assessments) and safety (toxicity at
-  block) controls; demo setup activates the latest versions. With v2 active the
-  bias axis is MEASURED; it reaches 100% only once a model card documents a
-  completed (`assessed`) fairness assessment — C6 seeds one.
-  Status: READY-FOR-REVIEW (self-verified: shared 1102/1102; 12 pack suites 130/130)
-- **C2 — Intake assistant API** `POST /v1/use-cases/intake/assist` — LIVE
-  (ADR-0149). Suggestion-only; writes nothing but an audit row. Exact shape
-  in §4.2 (updated to the built payload).
-  Status: READY-FOR-REVIEW (self-verified: shared 8/8, gateway 4/4)
-- **C3 — Use-case 360 API** `GET /v1/use-cases/:id/overview` — LIVE.
-  Owner-or-admin. Shape in §4.3. Frameworks stay on the existing
-  `GET /v1/use-cases/:id/frameworks` (call both).
-  Status: READY-FOR-REVIEW (self-verified: 1 integration test, all assertions on owned ids)
-- **C4 — Risk model upgrade** (migration 0123, ADR-0147): `bias_fairness`,
-  `unsafe_output` categories with evidence resolvers; `TRUST_DIMENSIONS` +
-  `RISK_CATEGORY_DIMENSION` exported from `@regulait/shared`; residual
-  likelihood/impact; risk↔control links. Endpoints (live now):
-  `PUT /v1/risks/:id/residual {likelihood, impact}` (both or both null),
-  `POST /v1/risks/:id/controls {controlRef}` (201 / 409 dup / 422 unknown),
-  `DELETE /v1/risks/:id/controls/:controlRef` (URL-encode the ref; 204),
-  `GET /v1/risks?useCaseId=` filter; list/detail rows carry
-  `controls: [{controlRef, title, linkedAt}]`, detail has `declared.residual`.
-  Status: READY-FOR-REVIEW (self — Claude reviews own work via tests; SHAs in commit log)
-- **C5 — Agent card API** `GET /v1/agents/:id/card` — LIVE. Admin-only.
-  Returns `agent{id,name,provider,model,tier,modes,enabled,lifecycleStatus,halted,haltedReason,hasSystemPrompt}`,
-  `owner{id,name,state: owned|unowned|orphaned}`,
-  `purpose{intendedUses[],limitations[],source}` (DECLARED by model cards — label it so),
-  `dataSources{declared:[{cardId,claims}],note}`,
-  `guardrails{modes{prompt_injection,jailbreak,toxicity,semantic_dlp},blocksInput,blocksOutput,provenance[]}`,
-  `oversight{modelCards,modelCardApproved,note}`, `useCases[{id,name,status,euAiActTier}]`,
-  `links{tools}` → call `GET /v1/inventory/agents/:id` for GRANTED vs OBSERVED
-  tools/connectors (never merge the two in the UI).
-  Status: READY-FOR-REVIEW (self-verified: 1 integration test with positive control)
-- **C6 — Demo seed** `pnpm --filter @regulait/gateway demo:intake` — BUILT.
-  `seedDemoIntake()` (`apps/gateway/src/demo-intake-seed-lib.ts`) loads
-  `DEMO_INTAKE_FIXTURES` through the real APIs: vendors and use cases driven
-  through their intake workflows to the target state (tier COMPUTED from the
-  submitted questionnaire), risks with controls/residual/transitions, model
-  cards, a synthetic shadow-AI import. Idempotent; per-item failures reported.
-  Run order for a demo DB: `seed` → `demo:setup` → `demo:intake`.
-  Verified with an inline fixture set (`zz-c6-demo-intake-seed.test.ts`);
-  waits on G1 for the real dataset (CLI exits 1 with a clear message until then).
-  Status: READY-FOR-REVIEW (self-verified) — final run pending G1
-- **C7 — Dependency graph + risk propagation** `GET /v1/inventory/graph[?useCaseId=&includeObserved=false]`
-  — LIVE (ADR-0156). Admin-only. Contract §4.4. Feeds the "Agent Governance /
-  dependency graph" beat if X6 lands; otherwise the 360 page can show
-  `propagatedRisk` for the use case node as a badge.
-  Status: READY-FOR-REVIEW (self-verified: 9 shared + 4 integration tests)
-- **C8 — Governance monitor + alerts** (ADR-0157, migration 0124): rules over
-  the dependency graph, trust coverage and risk register; a scheduled sweep
-  (`governance-monitor-sweep`, hourly) and an on-demand evaluate; alerts
-  dedupe per (rule, subject), auto-resolve when the condition clears, and can
-  be acknowledged with a note. Contract §4.5.
-  Status: READY-FOR-REVIEW (self-verified: 8 shared + 5 integration tests) — LIVE
-- **C9 — Regulatory impact API** (ADR-0158): `GET /v1/regulatory/updates`
-  serves G4's feed joined to OUR state — for each update, which active pack
-  controls it maps to, their evidence status, and which approved use cases
-  are in scope (by framework mapping and tier). Contract §4.6 (published
-  before build). Works with an empty feed until G4 lands.
-  Status: READY-FOR-REVIEW (self-verified: 4 shared + 3 integration tests) — LIVE
-- **C10 — Remediation proposals** (ADR-0159, "Respond"): for each active
-  monitor alert, a deterministic remediation proposal (link control X,
-  request model-card approval, assign an owner, re-assess vendor) that a human
-  approves on the existing approvals queue; nothing executes without
-  approval. Contract §4.7.
-  Status: READY-FOR-REVIEW (self-verified: 5 shared + 4 integration tests) — LIVE
-- **C11 — `demo:check`** (`pnpm --filter @regulait/gateway demo:check`, after
-  `seed → demo:setup → demo:intake`): walks every storyline beat through the
-  real API and prints PASS / WARN / FAIL with the fix. Also runs in CI over
-  the real fixtures (`zz-c11-demo-check.test.ts`: no beat may FAIL). This is
-  the M4 dry-run tool. Found and fixed on first run: the seeder never
-  installed the shadow-AI signature catalogue, so the Discover beat was empty.
-  Current demo DB: 11 PASS, 3 WARN (G1 risk titles, G5 inheritance, G4 feed).
-  Status: READY-FOR-REVIEW (self-verified) — LIVE
+All LIVE on `dhruv/active`, CI-tested; details are in the contract (§4) and ADR.
+- **C1** Trust dashboard API — ADR-0148, §4.1 · **C1b** bias/safety pack v2 — ADR-0150
+- **C2** Intake assistant — ADR-0149, §4.2 · **C3** Use-case 360 — §4.3 · **C5** Agent card — `GET /v1/agents/:id/card`
+- **C4** Risk dimensions, residual, control links (unlink UI pending X2) — ADR-0147
+- **C6** `demo:intake` seeder (installs shadow-AI catalogue first) · **C11** `demo:check` (PASS/WARN/FAIL per beat; runs in CI)
+- **C7** Dependency graph + propagated risk — ADR-0156, §4.4 · **C8** Governance monitor + alerts — ADR-0157, §4.5
+- **C9** Regulatory intelligence — ADR-0158, §4.6 (feed wired after G4 passes) · **C10** Remediation — ADR-0159, §4.7
+- **C12 — Continuous trace evaluation** (next, post-demo-critical): scheduled
+  deterministic evaluation of recent traces feeding the monitor.
+  Status: TODO (Claude)
 
 ### Codex — web UI (apps/web), browser verification
 

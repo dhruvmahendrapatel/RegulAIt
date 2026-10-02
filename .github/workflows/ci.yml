@@ -187,6 +187,14 @@ jobs:
       - name: Pre-flight — every governed object the UI lists can be added and removed from it (B9c)
         run: node scripts/preflight-ui-affordances.mjs
 
+      # AgentCoordination.md stays a CURRENT-STATE file: one Live-status row per
+      # agent, one Status line per task, inboxes acked within 12h, a line
+      # budget. History lives in git. `pnpm checkin` is the only writer of a row.
+      - name: Coordination file lint (structure only — never agent staleness)
+        run: |
+          node scripts/coordination.mjs lint
+          pnpm exec vitest run scripts/coordination.test.mjs
+
   docker-build:
     # The quickstart path must never rot: prove the compose image still builds.
     #
