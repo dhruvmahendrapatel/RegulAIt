@@ -1,509 +1,301 @@
-import type { AiRiskCategory, TrustDimension } from "../risks.js";
+import type { ScenarioLibraryEntry } from "./scenario-library.types.js";
 
-export interface DemoRiskScenario {
-  key: string;
-  title: string;
-  description: string;
-  category: AiRiskCategory;
-  dimension: TrustDimension;
-  domains: string[];
-  suggestedControls: string[];
-}
-
-export const SCENARIO_LIBRARY: DemoRiskScenario[] = [
+export const SCENARIO_LIBRARY: ScenarioLibraryEntry[] = [
   {
-    "key": "bias-fairness-scenario-1",
-    "title": "Potential bias fairness risk 1",
-    "description": "This scenario covers bias fairness in the financial-services domain.",
-    "category": "bias_fairness",
-    "dimension": "bias",
-    "domains": [
-      "financial-services",
-      "human-resources"
-    ],
-    "suggestedControls": [
-      "eu-ai-act:art-10-bias-examination",
-      "nist-ai-rmf:MEASURE-2.11"
-    ]
+    key: "destructive-tool-invocation",
+    title: "Agent invokes destructive tool during routine query",
+    description: "An agent with access to a database connector accidentally issues a DROP TABLE command when asked to summarize records. This destroys production data.",
+    category: "tool_misuse",
+    dimension: "security",
+    domains: ["financial-services"],
+    suggestedControls: ["eu-ai-act:art-15-accuracy-robustness", "eu-ai-act:art-14-human-oversight"],
   },
   {
-    "key": "bias-fairness-scenario-2",
-    "title": "Potential bias fairness risk 2",
-    "description": "This scenario covers bias fairness in the financial-services domain.",
-    "category": "bias_fairness",
-    "dimension": "bias",
-    "domains": [
-      "financial-services",
-      "human-resources"
-    ],
-    "suggestedControls": [
-      "eu-ai-act:art-10-bias-examination",
-      "nist-ai-rmf:MEASURE-2.11"
-    ]
+    key: "sub-agent-privilege-escalation",
+    title: "Sub-agent escalates privileges using an unprotected connector",
+    description: "A sub-agent discovers an unauthenticated internal API and uses it to grant itself admin roles. It then accesses restricted HR records.",
+    category: "tool_misuse",
+    dimension: "security",
+    domains: ["public-sector"],
+    suggestedControls: ["nist-ai-rmf:GOVERN-1.2", "iso-27001:A.5.15"],
   },
   {
-    "key": "bias-fairness-scenario-3",
-    "title": "Potential bias fairness risk 3",
-    "description": "This scenario covers bias fairness in the financial-services domain.",
-    "category": "bias_fairness",
-    "dimension": "bias",
-    "domains": [
-      "financial-services",
-      "human-resources"
-    ],
-    "suggestedControls": [
-      "eu-ai-act:art-10-bias-examination",
-      "nist-ai-rmf:MEASURE-2.11"
-    ]
+    key: "workflow-automation-deletes-records",
+    title: "Workflow automation deletes records instead of archiving them",
+    description: "An automated data retention agent misinterprets its instructions and permanently deletes legal hold documents instead of moving them to cold storage.",
+    category: "tool_misuse",
+    dimension: "security",
+    domains: ["general"],
+    suggestedControls: ["eu-ai-act:art-14-human-oversight", "eu-ai-act:art-12-record-keeping"],
   },
   {
-    "key": "tool-misuse-scenario-1",
-    "title": "Potential tool misuse risk 1",
-    "description": "This scenario covers tool misuse in the essential-services domain.",
-    "category": "tool_misuse",
-    "dimension": "security",
-    "domains": [
-      "essential-services",
-      "infrastructure"
-    ],
-    "suggestedControls": [
-      "pci-dss:7.2.1-least-privilege",
-      "iso-27001:A.8.12"
-    ]
+    key: "support-bot-used-for-coding",
+    title: "Customer support bot used by employees for coding advice",
+    description: "A bot approved strictly for answering customer FAQs is heavily utilized by junior engineers to write backend code. The code produced is often insecure and untested.",
+    category: "scope_drift",
+    dimension: "reliability",
+    domains: ["general"],
+    suggestedControls: ["eu-ai-act:art-9-risk-management-system", "nist-ai-rmf:GOVERN-4.1"],
   },
   {
-    "key": "tool-misuse-scenario-2",
-    "title": "Potential tool misuse risk 2",
-    "description": "This scenario covers tool misuse in the essential-services domain.",
-    "category": "tool_misuse",
-    "dimension": "security",
-    "domains": [
-      "essential-services",
-      "infrastructure"
-    ],
-    "suggestedControls": [
-      "pci-dss:7.2.1-least-privilege",
-      "iso-27001:A.8.12"
-    ]
+    key: "marketing-copy-generator-legal",
+    title: "Marketing copy generator repurposed for writing legal contracts",
+    description: "Sales teams start using the marketing copy AI to draft custom MSAs for clients. The model lacks legal fine-tuning, resulting in unenforceable contracts.",
+    category: "scope_drift",
+    dimension: "reliability",
+    domains: ["financial-services"],
+    suggestedControls: ["eu-ai-act:art-9-risk-management-system", "nist-ai-rmf:GOVERN-4.1"],
   },
   {
-    "key": "tool-misuse-scenario-3",
-    "title": "Potential tool misuse risk 3",
-    "description": "This scenario covers tool misuse in the essential-services domain.",
-    "category": "tool_misuse",
-    "dimension": "security",
-    "domains": [
-      "essential-services",
-      "infrastructure"
-    ],
-    "suggestedControls": [
-      "pci-dss:7.2.1-least-privilege",
-      "iso-27001:A.8.12"
-    ]
+    key: "hr-assistant-screens-invoices",
+    title: "Internal HR assistant used to screen vendor invoices",
+    description: "An HR bot approved for answering benefit queries is fed vendor invoices to extract payment terms. It hallucinates amounts, leading to incorrect payouts.",
+    category: "scope_drift",
+    dimension: "reliability",
+    domains: ["payments"],
+    suggestedControls: ["eu-ai-act:art-9-risk-management-system", "nist-ai-rmf:GOVERN-4.1"],
   },
   {
-    "key": "prompt-injection-scenario-1",
-    "title": "Potential prompt injection risk 1",
-    "description": "This scenario covers prompt injection in the customer-facing domain.",
-    "category": "prompt_injection",
-    "dimension": "security",
-    "domains": [
-      "customer-facing",
-      "public-sector"
-    ],
-    "suggestedControls": [
-      "eu-ai-act:art-15-accuracy-robustness",
-      "nist-ai-rmf:MEASURE-2.7"
-    ]
+    key: "indirect-injection-tool-arguments",
+    title: "Indirect prompt injection via retrieved web page rewrites tool arguments",
+    description: "The agent reads a maliciously crafted external website which contains hidden instructions. It then forwards these attacker instructions into internal tool calls, compromising internal systems.",
+    category: "prompt_injection",
+    dimension: "security",
+    domains: ["general"],
+    suggestedControls: ["eu-ai-act:art-15-accuracy-robustness", "nist-ai-rmf:MEASURE-2.7"],
   },
   {
-    "key": "prompt-injection-scenario-2",
-    "title": "Potential prompt injection risk 2",
-    "description": "This scenario covers prompt injection in the customer-facing domain.",
-    "category": "prompt_injection",
-    "dimension": "security",
-    "domains": [
-      "customer-facing",
-      "public-sector"
-    ],
-    "suggestedControls": [
-      "eu-ai-act:art-15-accuracy-robustness",
-      "nist-ai-rmf:MEASURE-2.7"
-    ]
+    key: "user-injects-admin-command",
+    title: "User injects a command to ignore previous instructions and grant admin access",
+    description: "A malicious user supplies a direct prompt injection that overrides the system prompt. The agent bypasses its safeguards and executes administrative tool calls on behalf of the attacker.",
+    category: "prompt_injection",
+    dimension: "security",
+    domains: ["public-sector"],
+    suggestedControls: ["nist-ai-rmf:GOVERN-1.2", "eu-ai-act:art-15-accuracy-robustness"],
   },
   {
-    "key": "prompt-injection-scenario-3",
-    "title": "Potential prompt injection risk 3",
-    "description": "This scenario covers prompt injection in the customer-facing domain.",
-    "category": "prompt_injection",
-    "dimension": "security",
-    "domains": [
-      "customer-facing",
-      "public-sector"
-    ],
-    "suggestedControls": [
-      "eu-ai-act:art-15-accuracy-robustness",
-      "nist-ai-rmf:MEASURE-2.7"
-    ]
+    key: "embedded-hidden-text-resume-hire",
+    title: "Embedded hidden text in a resume forces an automatic hire recommendation",
+    description: "An applicant places white text on a white background with prompt injection commands. The screening agent processes the text and overwhelmingly recommends the applicant over others.",
+    category: "prompt_injection",
+    dimension: "security",
+    domains: ["general"],
+    suggestedControls: ["eu-ai-act:art-14-human-oversight", "nist-ai-rmf:MEASURE-2.7"],
   },
   {
-    "key": "over-permissioning-scenario-1",
-    "title": "Potential over permissioning risk 1",
-    "description": "This scenario covers over permissioning in the financial-services domain.",
-    "category": "over_permissioning",
-    "dimension": "security",
-    "domains": [
-      "financial-services",
-      "healthcare"
-    ],
-    "suggestedControls": [
-      "hipaa:164.312(a)(1)-access-control",
-      "soc-2:CC6.1-logical-access"
-    ]
+    key: "agent-exfiltrates-customer-list",
+    title: "Agent chains search and email tools to exfiltrate a customer list",
+    description: "An agent is manipulated into querying the customer CRM and sending the resulting list to an external attacker-controlled email address. This results in a massive PII breach.",
+    category: "data_leakage_pii",
+    dimension: "privacy",
+    domains: ["financial-services"],
+    suggestedControls: ["iso-27001:A.8.12", "eu-ai-act:art-15-accuracy-robustness"],
   },
   {
-    "key": "over-permissioning-scenario-2",
-    "title": "Potential over permissioning risk 2",
-    "description": "This scenario covers over permissioning in the financial-services domain.",
-    "category": "over_permissioning",
-    "dimension": "security",
-    "domains": [
-      "financial-services",
-      "healthcare"
-    ],
-    "suggestedControls": [
-      "hipaa:164.312(a)(1)-access-control",
-      "soc-2:CC6.1-logical-access"
-    ]
+    key: "summarization-tool-leaks-pii",
+    title: "Summarization tool includes PII from another user's session in its output",
+    description: "Due to a backend caching or context-management flaw, the agent repeats sensitive health information belonging to one user to a completely different user.",
+    category: "data_leakage_pii",
+    dimension: "privacy",
+    domains: ["healthcare"],
+    suggestedControls: ["iso-27001:A.8.12", "nist-ai-rmf:MEASURE-2.7"],
   },
   {
-    "key": "over-permissioning-scenario-3",
-    "title": "Potential over permissioning risk 3",
-    "description": "This scenario covers over permissioning in the financial-services domain.",
-    "category": "over_permissioning",
-    "dimension": "security",
-    "domains": [
-      "financial-services",
-      "healthcare"
-    ],
-    "suggestedControls": [
-      "hipaa:164.312(a)(1)-access-control",
-      "soc-2:CC6.1-logical-access"
-    ]
+    key: "log-aggregator-exports-sensitive-prompts",
+    title: "Log aggregator exports sensitive prompt histories to a public dashboard",
+    description: "Telemetry tools capture unredacted prompts containing proprietary source code and trade secrets. This data is accidentally exposed to external vendors and public dashboards.",
+    category: "data_leakage_pii",
+    dimension: "privacy",
+    domains: ["general"],
+    suggestedControls: ["eu-ai-act:art-12-record-keeping", "iso-27001:A.8.15"],
   },
   {
-    "key": "data-leakage-pii-scenario-1",
-    "title": "Potential data leakage pii risk 1",
-    "description": "This scenario covers data leakage pii in the healthcare domain.",
-    "category": "data_leakage_pii",
-    "dimension": "privacy",
-    "domains": [
-      "healthcare",
-      "financial-services"
-    ],
-    "suggestedControls": [
-      "hipaa:164.312(e)(1)-transmission-security",
-      "soc-2:CC6.7-data-movement"
-    ]
+    key: "agent-global-admin-rights",
+    title: "Agent is granted global admin rights for a read-only task",
+    description: "Developers use a powerful service account for an agent meant only to read public wikis. The agent is compromised and uses the excessive permissions to alter active directory.",
+    category: "over_permissioning",
+    dimension: "security",
+    domains: ["general"],
+    suggestedControls: ["nist-ai-rmf:GOVERN-1.2", "iso-27001:A.5.15"],
   },
   {
-    "key": "data-leakage-pii-scenario-2",
-    "title": "Potential data leakage pii risk 2",
-    "description": "This scenario covers data leakage pii in the healthcare domain.",
-    "category": "data_leakage_pii",
-    "dimension": "privacy",
-    "domains": [
-      "healthcare",
-      "financial-services"
-    ],
-    "suggestedControls": [
-      "hipaa:164.312(e)(1)-transmission-security",
-      "soc-2:CC6.7-data-movement"
-    ]
+    key: "connector-retains-offboarded-access",
+    title: "Connector retains access to offboarded employee data",
+    description: "An HR assistant agent continues to access emails of a terminated employee due to orphaned OAuth tokens. This exposes confidential litigation discussions.",
+    category: "over_permissioning",
+    dimension: "security",
+    domains: ["general"],
+    suggestedControls: ["iso-27001:A.5.15", "nist-ai-rmf:GOVERN-1.2"],
   },
   {
-    "key": "data-leakage-pii-scenario-3",
-    "title": "Potential data leakage pii risk 3",
-    "description": "This scenario covers data leakage pii in the healthcare domain.",
-    "category": "data_leakage_pii",
-    "dimension": "privacy",
-    "domains": [
-      "healthcare",
-      "financial-services"
-    ],
-    "suggestedControls": [
-      "hipaa:164.312(e)(1)-transmission-security",
-      "soc-2:CC6.7-data-movement"
-    ]
+    key: "broad-iam-role-cross-department",
+    title: "Broadly scoped IAM role allows agent to read cross-department secrets",
+    description: "A customer support agent is given an AWS role that can read all S3 buckets. It accidentally surfaces unpublished financial statements to a customer.",
+    category: "over_permissioning",
+    dimension: "security",
+    domains: ["financial-services"],
+    suggestedControls: ["iso-27001:A.5.15", "nist-ai-rmf:GOVERN-1.2"],
   },
   {
-    "key": "hallucination-scenario-1",
-    "title": "Potential hallucination risk 1",
-    "description": "This scenario covers hallucination in the healthcare domain.",
-    "category": "hallucination",
-    "dimension": "reliability",
-    "domains": [
-      "healthcare",
-      "legal"
-    ],
-    "suggestedControls": [
-      "iso-42001:9.1-monitoring-measurement",
-      "nist-ai-rmf:MEASURE-2.6"
-    ]
+    key: "runaway-agent-loop-exhausts-budget",
+    title: "Runaway agent loop exhausts the project budget overnight",
+    description: "An autonomous research agent gets stuck in a retry loop due to a parsing error. It consumes billions of tokens from an expensive frontier model before anyone notices.",
+    category: "budget_overrun",
+    dimension: "compliance",
+    domains: ["general"],
+    suggestedControls: ["nist-ai-rmf:MANAGE-2.2", "eu-ai-act:art-14-human-oversight"],
   },
   {
-    "key": "hallucination-scenario-2",
-    "title": "Potential hallucination risk 2",
-    "description": "This scenario covers hallucination in the healthcare domain.",
-    "category": "hallucination",
-    "dimension": "reliability",
-    "domains": [
-      "healthcare",
-      "legal"
-    ],
-    "suggestedControls": [
-      "iso-42001:9.1-monitoring-measurement",
-      "nist-ai-rmf:MEASURE-2.6"
-    ]
+    key: "infinite-recursive-tool-calls",
+    title: "Infinite recursive tool calls crash the backend orchestration service",
+    description: "A bug in the agent's reasoning causes it to call a tool that triggers another tool which calls the first tool. This exhausts server memory and budget limits.",
+    category: "budget_overrun",
+    dimension: "compliance",
+    domains: ["securities-broker-dealer"],
+    suggestedControls: ["nist-ai-rmf:MANAGE-2.2", "eu-ai-act:art-15-accuracy-robustness"],
   },
   {
-    "key": "hallucination-scenario-3",
-    "title": "Potential hallucination risk 3",
-    "description": "This scenario covers hallucination in the healthcare domain.",
-    "category": "hallucination",
-    "dimension": "reliability",
-    "domains": [
-      "healthcare",
-      "legal"
-    ],
-    "suggestedControls": [
-      "iso-42001:9.1-monitoring-measurement",
-      "nist-ai-rmf:MEASURE-2.6"
-    ]
+    key: "uncapped-token-generation-spike",
+    title: "Uncapped token generation spikes monthly inference costs",
+    description: "A public-facing endpoint lacks rate limiting. Scrapers hammer the endpoint, causing the monthly inference bill to exceed the annual budget in three days.",
+    category: "budget_overrun",
+    dimension: "compliance",
+    domains: ["public-sector"],
+    suggestedControls: ["nist-ai-rmf:MANAGE-2.2", "eu-ai-act:art-12-record-keeping"],
   },
   {
-    "key": "scope-drift-scenario-1",
-    "title": "Potential scope drift risk 1",
-    "description": "This scenario covers scope drift in the enterprise domain.",
-    "category": "scope_drift",
-    "dimension": "reliability",
-    "domains": [
-      "enterprise",
-      "internal"
-    ],
-    "suggestedControls": [
-      "iso-42001:A.6-ai-system-lifecycle",
-      "soc-2:CC8.1-change-management"
-    ]
+    key: "legal-advisor-fake-caselaw",
+    title: "AI Legal Advisor cites non-existent case law",
+    description: "The agent hallucinates a legal precedent when drafting a contract response. This causes the human lawyer to rely on invalid citations, potentially leading to lost cases or malpractice.",
+    category: "hallucination",
+    dimension: "reliability",
+    domains: ["general"],
+    suggestedControls: ["eu-ai-act:art-14-human-oversight", "eu-ai-act:art-15-accuracy-robustness"],
   },
   {
-    "key": "scope-drift-scenario-2",
-    "title": "Potential scope drift risk 2",
-    "description": "This scenario covers scope drift in the enterprise domain.",
-    "category": "scope_drift",
-    "dimension": "reliability",
-    "domains": [
-      "enterprise",
-      "internal"
-    ],
-    "suggestedControls": [
-      "iso-42001:A.6-ai-system-lifecycle",
-      "soc-2:CC8.1-change-management"
-    ]
+    key: "financial-forecaster-hallucinates-revenue",
+    title: "Financial forecaster hallucinates Q3 revenue numbers",
+    description: "During an earnings call preparation, the forecasting agent invents historical revenue figures. Executives present this inaccurate data to shareholders, causing reputational and regulatory damage.",
+    category: "hallucination",
+    dimension: "reliability",
+    domains: ["financial-services"],
+    suggestedControls: ["eu-ai-act:art-15-accuracy-robustness", "eu-ai-act:art-12-record-keeping"],
   },
   {
-    "key": "scope-drift-scenario-3",
-    "title": "Potential scope drift risk 3",
-    "description": "This scenario covers scope drift in the enterprise domain.",
-    "category": "scope_drift",
-    "dimension": "reliability",
-    "domains": [
-      "enterprise",
-      "internal"
-    ],
-    "suggestedControls": [
-      "iso-42001:A.6-ai-system-lifecycle",
-      "soc-2:CC8.1-change-management"
-    ]
+    key: "healthcare-bot-fake-contraindications",
+    title: "Healthcare bot generates fake medical contraindications",
+    description: "A patient triage bot hallucinates a drug interaction that does not exist. This leads to delayed treatment and unwarranted medical anxiety for the patient.",
+    category: "hallucination",
+    dimension: "reliability",
+    domains: ["healthcare"],
+    suggestedControls: ["eu-ai-act:art-15-accuracy-robustness", "eu-ai-act:art-14-human-oversight"],
   },
   {
-    "key": "unsafe-output-scenario-1",
-    "title": "Potential unsafe output risk 1",
-    "description": "This scenario covers unsafe output in the customer-facing domain.",
-    "category": "unsafe_output",
-    "dimension": "safety",
-    "domains": [
-      "customer-facing",
-      "social"
-    ],
-    "suggestedControls": [
-      "eu-ai-act:art-9-risk-management-system",
-      "nist-ai-rmf:MANAGE-2.2"
-    ]
+    key: "engineering-unauthorized-llm",
+    title: "Engineering team uses unauthorized external LLM API for code generation",
+    description: "Without going through procurement, developers pipe proprietary source code into a third-party LLM that trains on user inputs. Intellectual property is leaked.",
+    category: "shadow_ai",
+    dimension: "compliance",
+    domains: ["general"],
+    suggestedControls: ["eu-ai-act:art-9-risk-management-system", "nist-ai-rmf:GOVERN-4.1"],
   },
   {
-    "key": "unsafe-output-scenario-2",
-    "title": "Potential unsafe output risk 2",
-    "description": "This scenario covers unsafe output in the customer-facing domain.",
-    "category": "unsafe_output",
-    "dimension": "safety",
-    "domains": [
-      "customer-facing",
-      "social"
-    ],
-    "suggestedControls": [
-      "eu-ai-act:art-9-risk-management-system",
-      "nist-ai-rmf:MANAGE-2.2"
-    ]
+    key: "marketing-uploads-roadmap-public-ai",
+    title: "Marketing uploads confidential product roadmap to a public AI summarizer",
+    description: "A marketing manager uses a free web-based AI tool to summarize a highly confidential product roadmap. The tool's terms of service allow them to publish user data.",
+    category: "shadow_ai",
+    dimension: "compliance",
+    domains: ["general"],
+    suggestedControls: ["eu-ai-act:art-9-risk-management-system", "nist-ai-rmf:GOVERN-4.1"],
   },
   {
-    "key": "unsafe-output-scenario-3",
-    "title": "Potential unsafe output risk 3",
-    "description": "This scenario covers unsafe output in the customer-facing domain.",
-    "category": "unsafe_output",
-    "dimension": "safety",
-    "domains": [
-      "customer-facing",
-      "social"
-    ],
-    "suggestedControls": [
-      "eu-ai-act:art-9-risk-management-system",
-      "nist-ai-rmf:MANAGE-2.2"
-    ]
+    key: "finance-uses-personal-chatgpt",
+    title: "Finance employee uses personal ChatGPT account for spreadsheet analysis",
+    description: "A financial analyst uploads raw transaction logs to their personal generative AI account to create pivot tables. PII and financial records are exposed to the AI provider.",
+    category: "shadow_ai",
+    dimension: "compliance",
+    domains: ["payments"],
+    suggestedControls: ["eu-ai-act:art-9-risk-management-system", "nist-ai-rmf:GOVERN-4.1"],
   },
   {
-    "key": "shadow-ai-scenario-1",
-    "title": "Potential shadow ai risk 1",
-    "description": "This scenario covers shadow ai in the enterprise domain.",
-    "category": "shadow_ai",
-    "dimension": "compliance",
-    "domains": [
-      "enterprise",
-      "technology"
-    ],
-    "suggestedControls": [
-      "iso-27001:A.8.15",
-      "soc-2:CC6.2-user-registration"
-    ]
+    key: "mcp-server-rug-pull",
+    title: "MCP server changes a tool's description after approval (rug-pull)",
+    description: "A third-party Model Context Protocol server silently alters the schema of a tool to request sensitive data. The agent, trusting the schema, passes user credentials to the untrusted tool.",
+    category: "third_party_ai",
+    dimension: "compliance",
+    domains: ["general"],
+    suggestedControls: ["nist-ai-rmf:MAP-4.1", "eu-ai-act:art-9-risk-management-system"],
   },
   {
-    "key": "shadow-ai-scenario-2",
-    "title": "Potential shadow ai risk 2",
-    "description": "This scenario covers shadow ai in the enterprise domain.",
-    "category": "shadow_ai",
-    "dimension": "compliance",
-    "domains": [
-      "enterprise",
-      "technology"
-    ],
-    "suggestedControls": [
-      "iso-27001:A.8.15",
-      "soc-2:CC6.2-user-registration"
-    ]
+    key: "unvetted-analytics-vendor-opaque-ai",
+    title: "Unvetted analytics vendor introduces an opaque AI processing step",
+    description: "A SaaS vendor updates their platform to run all customer data through an unassessed LLM. The company unknowingly becomes non-compliant with data processing agreements.",
+    category: "third_party_ai",
+    dimension: "compliance",
+    domains: ["public-sector"],
+    suggestedControls: ["nist-ai-rmf:MAP-4.1", "eu-ai-act:art-9-risk-management-system"],
   },
   {
-    "key": "shadow-ai-scenario-3",
-    "title": "Potential shadow ai risk 3",
-    "description": "This scenario covers shadow ai in the enterprise domain.",
-    "category": "shadow_ai",
-    "dimension": "compliance",
-    "domains": [
-      "enterprise",
-      "technology"
-    ],
-    "suggestedControls": [
-      "iso-27001:A.8.15",
-      "soc-2:CC6.2-user-registration"
-    ]
+    key: "external-api-outage-agent-hang",
+    title: "External API goes down, causing the agent to hang indefinitely",
+    description: "A third-party inference provider suffers a regional outage. The customer-facing agent fails open or hangs without a timeout, causing a massive disruption in customer service.",
+    category: "third_party_ai",
+    dimension: "compliance",
+    domains: ["securities-broker-dealer"],
+    suggestedControls: ["nist-ai-rmf:MANAGE-2.2", "eu-ai-act:art-9-risk-management-system"],
   },
   {
-    "key": "third-party-ai-scenario-1",
-    "title": "Potential third party ai risk 1",
-    "description": "This scenario covers third party ai in the enterprise domain.",
-    "category": "third_party_ai",
-    "dimension": "compliance",
-    "domains": [
-      "enterprise",
-      "procurement"
-    ],
-    "suggestedControls": [
-      "soc-2:CC9.2-vendor-risk",
-      "hipaa:baa"
-    ]
+    key: "credit-model-disparate-impact",
+    title: "Credit model under-approves a protected group (disparate impact)",
+    description: "The credit scoring agent learns proxy variables for race or gender from historical data. It systematically denies credit to qualified minority applicants, triggering fair lending violations.",
+    category: "bias_fairness",
+    dimension: "bias",
+    domains: ["financial-services"],
+    suggestedControls: ["eu-ai-act:art-9-risk-management-system", "eu-ai-act:art-15-accuracy-robustness"],
   },
   {
-    "key": "third-party-ai-scenario-2",
-    "title": "Potential third party ai risk 2",
-    "description": "This scenario covers third party ai in the enterprise domain.",
-    "category": "third_party_ai",
-    "dimension": "compliance",
-    "domains": [
-      "enterprise",
-      "procurement"
-    ],
-    "suggestedControls": [
-      "soc-2:CC9.2-vendor-risk",
-      "hipaa:baa"
-    ]
+    key: "resume-parser-zipcode-penalty",
+    title: "Resume parser penalizes candidates from certain zip codes",
+    description: "The HR screening agent demotes applicants based on geographic location, which heavily correlates with socioeconomic status. This creates a discriminatory hiring pipeline.",
+    category: "bias_fairness",
+    dimension: "bias",
+    domains: ["general"],
+    suggestedControls: ["eu-ai-act:art-14-human-oversight", "eu-ai-act:art-9-risk-management-system"],
   },
   {
-    "key": "third-party-ai-scenario-3",
-    "title": "Potential third party ai risk 3",
-    "description": "This scenario covers third party ai in the enterprise domain.",
-    "category": "third_party_ai",
-    "dimension": "compliance",
-    "domains": [
-      "enterprise",
-      "procurement"
-    ],
-    "suggestedControls": [
-      "soc-2:CC9.2-vendor-risk",
-      "hipaa:baa"
-    ]
+    key: "biometric-auth-ethnicity-failure",
+    title: "Biometric auth fails more frequently for certain ethnicities",
+    description: "A facial recognition model used for account access has higher false rejection rates for darker skin tones. Users from these groups are locked out of their accounts at a disproportionate rate.",
+    category: "bias_fairness",
+    dimension: "bias",
+    domains: ["payments"],
+    suggestedControls: ["eu-ai-act:art-15-accuracy-robustness", "eu-ai-act:art-9-risk-management-system"],
   },
   {
-    "key": "budget-overrun-scenario-1",
-    "title": "Potential budget overrun risk 1",
-    "description": "This scenario covers budget overrun in the enterprise domain.",
-    "category": "budget_overrun",
-    "dimension": "compliance",
-    "domains": [
-      "enterprise",
-      "financial-services"
-    ],
-    "suggestedControls": [
-      "iso-27001:A.5.15",
-      "soc-2:CC7.2-monitoring"
-    ]
+    key: "mental-health-bot-self-harm",
+    title: "Mental health bot advises self-harm",
+    description: "An AI wellness companion fails to detect a crisis situation and generates an unsafe response encouraging self-harm. This poses a severe physical safety risk to the user.",
+    category: "unsafe_output",
+    dimension: "safety",
+    domains: ["healthcare"],
+    suggestedControls: ["eu-ai-act:art-15-accuracy-robustness", "eu-ai-act:art-14-human-oversight", "eu-ai-act:art-12-record-keeping"],
   },
   {
-    "key": "budget-overrun-scenario-2",
-    "title": "Potential budget overrun risk 2",
-    "description": "This scenario covers budget overrun in the enterprise domain.",
-    "category": "budget_overrun",
-    "dimension": "compliance",
-    "domains": [
-      "enterprise",
-      "financial-services"
-    ],
-    "suggestedControls": [
-      "iso-27001:A.5.15",
-      "soc-2:CC7.2-monitoring"
-    ]
+    key: "investment-bot-market-manipulation",
+    title: "Investment bot suggests market manipulation tactics",
+    description: "An AI trading assistant generates strategies that resemble spoofing or wash trading. If acted upon, the firm faces immediate SEC enforcement and massive fines.",
+    category: "unsafe_output",
+    dimension: "safety",
+    domains: ["securities-broker-dealer"],
+    suggestedControls: ["nist-ai-rmf:MANAGE-2.2", "eu-ai-act:art-14-human-oversight"],
   },
   {
-    "key": "budget-overrun-scenario-3",
-    "title": "Potential budget overrun risk 3",
-    "description": "This scenario covers budget overrun in the enterprise domain.",
-    "category": "budget_overrun",
-    "dimension": "compliance",
-    "domains": [
-      "enterprise",
-      "financial-services"
-    ],
-    "suggestedControls": [
-      "iso-27001:A.5.15",
-      "soc-2:CC7.2-monitoring"
-    ]
-  }
+    key: "coding-assistant-vulnerable-contracts",
+    title: "Coding assistant generates vulnerable smart contracts",
+    description: "An internal developer tool hallucinates insecure cryptographic primitives or reentrancy flaws. Deploying this code exposes the company's financial platforms to immediate exploitation.",
+    category: "unsafe_output",
+    dimension: "safety",
+    domains: ["general"],
+    suggestedControls: ["nist-ai-rmf:MEASURE-2.7", "eu-ai-act:art-15-accuracy-robustness"],
+  },
 ];
