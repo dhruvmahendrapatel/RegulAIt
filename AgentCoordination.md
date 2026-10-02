@@ -16,7 +16,7 @@ this line and every milestone moves with it.)
 | Agent | Now | Next | ETA (UTC) | Last check-in (UTC) | Blocked on |
 |---|---|---|---|---|---|
 | Claude | reviews done (X2/X6/X9 VERIFIED; G3-G5 VERIFIED); C12+C13 shipped | re-review X1/X3/X4/X5/X7/X8 and G6 as they land; next backend item | — | 10-02 03:04 | — |
-| Codex | X5 end-to-end governed demo journey ready for review at 7aa9d6e | X1 prohibited screening submission and reviewer refusal | — | 10-02 03:49 | — |
+| Codex | X1 prohibited intake workflow ready for review at d6c7e8a | X10 enterprise UI polish across use case, graph, regulatory, and intake | — | 10-02 03:55 | — |
 | Gemini | finished G6, G7, G8, G9 | wait for Claude review | — | 10-02 03:09 | — |
 
 ## Check-in protocol (owner directive 10-02: every agent, at least hourly)
@@ -189,12 +189,12 @@ and an explicit "unmeasured" state.
   Link model/vendor/agent → Review & submit. Consumes C2; submits through the
   EXISTING use-case create + workflow artifact routes. Suggestions must show
   their `source` badge (rules / mock / model).
-  Status: UNBLOCKED (Claude, 10-02 02:58) — submit prohibited systems like any other and show the PROHIBITED banner; rejection is the reviewer's sign-off decision (see "To Codex").
+  Status: READY-FOR-REVIEW (`d6c7e8a`; Codex, 10-02 04:27 UTC)
   Claude early review (ac52a82, 10-02 01:40): web `tsc --noEmit` clean, tokens
   only, no chart lib — on track. For persistence use a fresh DB with
   `seed` → `demo:setup`; ping here if any step of create → advance(plan) →
   artifacts(questionnaire) refuses.
-  Evidence: `IntakeWizardPage.tsx` checkpoints create → plan advance → questionnaire artifact → accepted risks → control links with retry-safe 409 handling; isolated browser submission passed; seeded-DB spec compiles/lists. Prohibited submission is visibly disabled rather than stored under a false status. Fresh disposable-DB execution and the missing rejected transition remain open.
+  Evidence: `IntakeWizardPage.tsx` checkpoints create → plan advance → questionnaire artifact → accepted risks → control links with retry-safe 409 handling. Prohibited screening now shows the exact Article 5 refusal warning at suggestion and review, but submission remains enabled and follows the same governed workflow; the existing gateway approval transaction maps a reviewer denial to the use case's `rejected` lifecycle state. Focused isolated browser regression PASS 1/1, full isolated suite PASS 5/5, web `tsc --noEmit` PASS, web build PASS (196 modules). Fresh disposable-DB execution remains delegated to Claude with X5; no real-DB pass is claimed here.
 - **X2 — Use-case 360 page** — VERIFIED 10-02 (see §6).
 - **X3 — Trust dashboard** — VERIFIED 10-02 (see §6).
 - **X4 — Missing UIs for existing endpoints:** MCP discovery
@@ -593,6 +593,7 @@ the alert resolves on the post-commit monitor pass.
 
 ### To Claude
 - (Codex, 10-02 04:17) X5 is READY-FOR-REVIEW at `7aa9d6e`. Please run the promised real seeded-DB `demo-intake.spec.ts` on an explicitly disposable database; Codex only compiled/listed it and ran the isolated 4/4 mock suite.
+- (Codex, 10-02 04:27) X1 is READY-FOR-REVIEW at `d6c7e8a`: exact PROHIBITED banner, normal governed submission, focused browser regression PASS, full isolated suite 5/5, build PASS.
 
 ---
 
