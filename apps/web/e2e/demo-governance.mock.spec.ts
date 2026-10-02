@@ -97,7 +97,7 @@ async function mock(route: Route) {
       filter: { status: selectedStatus, framework: selectedFramework },
     };
   }
-  else if (p === "/v1/risks/library") body = { library: [{ key: "credit-bias", title: "Disparate credit recommendation outcomes", description: "Protected groups may receive materially different outcomes.", category: "bias_fairness", dimension: "bias", domains: ["financial-services"], likelihood: "medium", impact: "high", suggestedControls: ["eu-ai-act:art-14-human-oversight"] }], disclaimer: "Scenario seeds are starting points, not findings." };
+  else if (p === "/v1/risks/library") body = { library: [{ key: "credit-bias", title: "Disparate credit recommendation outcomes", description: "Protected groups may receive materially different outcomes.", category: "bias_fairness", dimension: "bias", domains: ["financial-services"], suggestedControls: ["eu-ai-act:art-14-human-oversight"] }], disclaimer: "Scenario seeds are starting points, not findings." };
   else if (p === "/v1/shadow-ai/catalogue") body = { signatures: [], total: 0, enabled: 0, oldestEntryAt: null, posture: "No collector ships." };
   else if (p === "/v1/shadow-ai/findings") body = { findings: [{ id: "finding", subjectKind: "user", subject: "team-17", provider: "Unregistered AI", signalSources: ["egress_log"], severity: "high", confidence: "high", disposition: "open", observationCount: 12, firstSeenAt: "2026-10-01", lastSeenAt: "2026-10-02", replacementAgent: null, replacementNote: null, dispositionStale: false }], coverage: { sources: [], sourcesOn: 1, sourcesPossible: 4, statement: "Coverage reflects only supplied evidence." }, posture: "Detection is signal, not proof." };
   else if (p === "/v1/shadow-ai/imports") body = { imports: [] };
@@ -140,7 +140,15 @@ test("enterprise governance demo surfaces render and complete their core actions
   await page.getByRole("tab", { name: "Risks" }).click();
   await expect(page.getByText("Inherent")).toBeVisible();
   await page.getByLabel("Search scenarios").fill("destructive tool");
-  await page.getByRole("button", { name: "Add risk" }).click();
+  await page.getByRole("button", { name: "Assess and add" }).click();
+  const addAssessedRisk = page.getByRole("button", { name: "Add assessed risk" });
+  await expect(addAssessedRisk).toBeDisabled();
+  await page.getByLabel("Likelihood", { exact: true }).selectOption("high");
+  await page.getByLabel("Impact", { exact: true }).selectOption("low");
+  const riskRequest = page.waitForRequest((request) => new URL(request.url()).pathname === "/v1/risks" && request.method() === "POST");
+  await addAssessedRisk.click();
+  const postedRisk = await riskRequest;
+  expect(postedRisk.postDataJSON()).toMatchObject({ likelihood: "high", impact: "low" });
   await expect(page.getByText(/Risk added from/)).toBeVisible();
   await shotBoth(page, "05-use-case-risks");
   await page.getByRole("tab", { name: "Stack" }).click();

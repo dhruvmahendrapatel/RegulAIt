@@ -15,7 +15,7 @@ export default defineConfig({
     trace: "retain-on-failure",
   },
   webServer: {
-    command: "node_modules\\.bin\\vite.cmd --host 127.0.0.1 --port 4179",
+    command: "npx --no-install vite --host 127.0.0.1 --port 4179",
     url: "http://127.0.0.1:4179/ui/",
     reuseExistingServer: false,
     timeout: 30_000,
