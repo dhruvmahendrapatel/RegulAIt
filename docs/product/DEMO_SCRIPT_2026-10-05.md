@@ -14,7 +14,10 @@ live numbers off `demo:check` on the day — the figures quoted here are from th
 
 ## 0. Setup (one command, then the gateway)
 
-Environment for every command (one terminal, same values throughout):
+Once, from the repo root: `pnpm install` then `pnpm -r build` (the gateway serves the built UI).
+Postgres 16 with an **empty** database (`docker compose up -d db`, or a native Postgres — see
+DEMO_RUNBOOK.md §1.1). Then set the environment for every command (one terminal, same values
+throughout):
 
 ```bash
 export DATABASE_URL=postgres://regulait:regulait@127.0.0.1:5432/regulait_demo   # an EMPTY database
@@ -23,11 +26,25 @@ export REGULAIT_DATA_KEY=$(openssl rand -hex 32)        # 64 hex chars — keep 
 export REGULAIT_EPHEMERAL_LICENSE=1 REGULAIT_LICENSE_KEYRING=$HOME/.regulait-demo-keys
 ```
 
+Windows PowerShell equivalent:
+
+```powershell
+$env:DATABASE_URL = "postgres://regulait:regulait@127.0.0.1:5432/regulait_demo"
+$env:REGULAIT_BOOTSTRAP_TOKEN = "<any long random string>"
+$env:REGULAIT_DATA_KEY = -join ((1..32) | ForEach-Object { '{0:x2}' -f (Get-Random -Maximum 256) })
+$env:REGULAIT_EPHEMERAL_LICENSE = "1"; $env:REGULAIT_LICENSE_KEYRING = "$HOME\.regulait-demo-keys"
+```
+
+To start over, drop and recreate the database — the journey changes it, and `demo:prepare`
+seeds an empty database only. A full rehearsal of the UI journey, unattended:
+`E2E_BASE_URL=http://127.0.0.1:3105 pnpm --filter @regulait/web exec playwright test -c
+playwright.demo-real.config.ts` (needs `REGULAIT_BOOTSTRAP_TOKEN=e2e-bootstrap-token`).
+
 1. `pnpm --filter @regulait/gateway demo:prepare` — seed → demo:setup → demo:intake →
    demo:traffic → demo:check in ~25 s. It must end **17 pass, 0 warn, 0 fail**. The seed step
    prints each persona's **one-time password** — copy them.
-2. `PORT=3105 pnpm --filter @regulait/gateway start` — the gateway serves the UI at
-   `http://127.0.0.1:3105/ui`.
+2. `PORT=3105 pnpm --filter @regulait/gateway start` (PowerShell: `$env:PORT = "3105"` first) —
+   the gateway serves the UI at `http://127.0.0.1:3105/ui`.
 3. Two browser profiles, each signs in once with its one-time password and sets a new one:
    - **Profile A — Ada** (`admin@regulait.local`): governance admin. Drives every `/ui/admin/*`
      page and **proposes** remediations.
