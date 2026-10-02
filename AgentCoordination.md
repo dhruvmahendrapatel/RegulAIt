@@ -258,9 +258,6 @@ and an explicit "unmeasured" state.
   X4 — data category is single-select, so the credit demo no longer declares
   `personal` alongside `financial`: make sectors/data categories multi-select;
   the purpose-domain select lists 5 of the 9 `EU_AI_ACT_PURPOSE_DOMAINS`.
-  Approvals — `ApprovalsAdminPage.tsx` OBJECT_TYPES lacks `remediation`
-  (ADR-0159; Avery approves remediations in the demo) — add "governance
-  remediation" and fix the "eleven kinds" comment count.
   Status: TODO (Codex)
 - **X11 — Alerts in chat (C14)**: on the ChatOps connections page, a
   "Governance alerts" select per workspace (Off / High only / Medium and
