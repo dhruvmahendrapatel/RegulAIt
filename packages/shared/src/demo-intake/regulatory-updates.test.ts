@@ -66,6 +66,18 @@ describe("REGULATORY_UPDATES", () => {
     }
   });
 
+  it("status matches the relationship between effectiveDate and verifiedOn", () => {
+    for (const u of REGULATORY_UPDATES) {
+      const effective = new Date(u.effectiveDate).getTime();
+      const verified = new Date(u.verifiedOn).getTime();
+      if (u.status === "in_force") {
+        expect(effective, `'${u.key}' is in_force but effectiveDate is after verifiedOn`).toBeLessThanOrEqual(verified);
+      } else if (u.status === "upcoming") {
+        expect(effective, `'${u.key}' is upcoming but effectiveDate is before or on verifiedOn`).toBeGreaterThan(verified);
+      }
+    }
+  });
+
   // ---------------------------------------------------------------------------
   // Framework ids
   // ---------------------------------------------------------------------------

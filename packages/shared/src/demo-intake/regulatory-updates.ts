@@ -21,12 +21,12 @@ export const REGULATORY_UPDATES: RegulatoryUpdate[] = [
     instrument: "EU AI Act (Regulation 2024/1689)",
     title: "EU AI Act — Prohibited AI practices become enforceable",
     summary:
-      "Chapter II prohibitions (Art. 5) entered full application on 2 February 2026. " +
+      "Chapter II prohibitions (Art. 5) entered full application on 2 February 2025. " +
       "Deploying prohibited AI practices — including social scoring of natural persons and " +
       "real-time biometric identification in public spaces — now carries fines up to " +
       "€35 million or 7 % of global annual turnover. Existing systems must have been " +
       "discontinued or remediated before this date.",
-    effectiveDate: "2026-02-02",
+    effectiveDate: "2025-02-02",
     status: "in_force",
     frameworks: ["eu-ai-act"],
     controlRefs: [
@@ -34,7 +34,7 @@ export const REGULATORY_UPDATES: RegulatoryUpdate[] = [
       "eu-ai-act:art-14-human-oversight",
     ],
     sourceUrl: "https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX%3A32024R1689",
-    verifiedOn: "2026-09-28",
+    verifiedOn: "2026-10-01",
   },
   {
     key: "eu-ai-act-gpai-in-force",
@@ -56,7 +56,25 @@ export const REGULATORY_UPDATES: RegulatoryUpdate[] = [
       "eu-ai-act:art-72-post-market-monitoring",
     ],
     sourceUrl: "https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX%3A32024R1689",
-    verifiedOn: "2026-09-28",
+    verifiedOn: "2026-10-01",
+  },
+  {
+    key: "eu-digital-omnibus-on-ai",
+    jurisdiction: "EU",
+    instrument: "Digital Omnibus on AI (Regulation (EU) 2026/1744)",
+    title: "EU Digital Omnibus on AI — Amends AI Act timelines",
+    summary:
+      "Regulation (EU) 2026/1744 (Digital Omnibus on AI) entered into force on 27 July 2026. " +
+      "It significantly amends the application timelines for high-risk AI systems under the EU AI Act, " +
+      "moving the deadline for Annex III systems to 2 December 2027 and Annex I systems to 2 August 2028.",
+    effectiveDate: "2026-07-27",
+    status: "in_force",
+    frameworks: ["eu-ai-act"],
+    controlRefs: [
+      "eu-ai-act:art-9-risk-management-system",
+    ],
+    sourceUrl: "https://eur-lex.europa.eu/eli/reg/2026/1744/oj/eng",
+    verifiedOn: "2026-10-01",
   },
   {
     key: "eu-ai-act-high-risk-annex-i-in-force",
@@ -67,19 +85,20 @@ export const REGULATORY_UPDATES: RegulatoryUpdate[] = [
       "High-risk AI systems listed in Annex I (safety components for products covered by " +
       "Union harmonisation legislation) must comply with Chapter III requirements — " +
       "risk management, data governance, transparency, human oversight, accuracy, " +
-      "and cybersecurity — from 2 August 2026. A 12-month grace period applies for " +
-      "systems already on the market before that date.",
-    effectiveDate: "2026-08-02",
+      "and cybersecurity — from 2 August 2028. This date was moved from the original " +
+      "2026 deadline by the Digital Omnibus on AI (Regulation 2026/1744).",
+    effectiveDate: "2028-08-02",
     status: "upcoming",
     frameworks: ["eu-ai-act"],
+    scope: { euAiActTiers: ["high"] },
     controlRefs: [
       "eu-ai-act:art-9-risk-management-system",
       "eu-ai-act:art-14-human-oversight",
       "eu-ai-act:art-15-accuracy-robustness",
       "eu-ai-act:art-12-record-keeping",
     ],
-    sourceUrl: "https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX%3A32024R1689",
-    verifiedOn: "2026-09-28",
+    sourceUrl: "https://eur-lex.europa.eu/eli/reg/2026/1744/oj/eng",
+    verifiedOn: "2026-10-01",
   },
   {
     key: "eu-ai-act-high-risk-annex-iii-in-force",
@@ -89,20 +108,20 @@ export const REGULATORY_UPDATES: RegulatoryUpdate[] = [
     summary:
       "High-risk AI systems in Annex III areas — including credit scoring (Art. 26 essential " +
       "services), employment/HR, law enforcement, and education — must satisfy Chapter III " +
-      "obligations from 2 August 2026. Financial institutions using AI to assess " +
-      "creditworthiness or set credit limits face the full conformity-assessment, " +
-      "registration, and post-market monitoring regime.",
-    effectiveDate: "2026-08-02",
+      "obligations from 2 December 2027. This date was moved from the original 2026 deadline " +
+      "by the Digital Omnibus on AI (Regulation 2026/1744).",
+    effectiveDate: "2027-12-02",
     status: "upcoming",
     frameworks: ["eu-ai-act"],
+    scope: { euAiActTiers: ["high"] },
     controlRefs: [
       "eu-ai-act:art-9-risk-management-system",
       "eu-ai-act:art-10-bias-examination",
       "eu-ai-act:art-14-human-oversight",
       "eu-ai-act:art-72-post-market-monitoring",
     ],
-    sourceUrl: "https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX%3A32024R1689",
-    verifiedOn: "2026-09-28",
+    sourceUrl: "https://eur-lex.europa.eu/eli/reg/2026/1744/oj/eng",
+    verifiedOn: "2026-10-01",
   },
   {
     key: "eu-ai-act-transparency-in-force",
@@ -115,14 +134,14 @@ export const REGULATORY_UPDATES: RegulatoryUpdate[] = [
       "the GPAI code of practice. Customer-facing AI assistants must notify users that " +
       "they are interacting with an AI system.",
     effectiveDate: "2026-08-02",
-    status: "upcoming",
+    status: "in_force",
     frameworks: ["eu-ai-act"],
     controlRefs: [
       "eu-ai-act:art-4-ai-literacy",
       "eu-ai-act:art-12-record-keeping",
     ],
     sourceUrl: "https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX%3A32024R1689",
-    verifiedOn: "2026-09-28",
+    verifiedOn: "2026-10-01",
   },
 
   // ---- NIST AI RMF ----
@@ -198,27 +217,25 @@ export const REGULATORY_UPDATES: RegulatoryUpdate[] = [
 
   // ---- Colorado AI Act ----
   {
-    key: "colorado-ai-act-sb24-205",
+    key: "colorado-ai-act-sb26-189",
     jurisdiction: "US-CO",
-    instrument: "Colorado SB 24-205 (Colorado AI Act)",
+    instrument: "Colorado SB 26-189 (Colorado AI Act)",
     title: "Colorado AI Act — High-risk AI system requirements",
     summary:
-      "Colorado SB 24-205, signed 17 May 2024 and effective 1 February 2026, requires " +
-      "developers and deployers of 'high-risk AI systems' (those that make or inform " +
-      "consequential decisions in employment, housing, education, credit, healthcare, " +
-      "or insurance) to perform impact assessments, implement risk management programmes, " +
-      "and provide consumer notification and appeal rights. Credit-decision AI systems " +
-      "are explicitly in scope.",
-    effectiveDate: "2026-02-01",
-    status: "in_force",
+      "Colorado SB 26-189, signed 14 May 2026, repealed and re-enacted the original Colorado " +
+      "AI Act (SB 24-205). Effective 1 January 2027, developers and deployers of high-risk " +
+      "AI systems must perform impact assessments, implement risk management programmes, " +
+      "and provide consumer notification and appeal rights.",
+    effectiveDate: "2027-01-01",
+    status: "upcoming",
     frameworks: ["nist-ai-rmf", "eu-ai-act"],
     controlRefs: [
       "eu-ai-act:art-9-risk-management-system",
       "eu-ai-act:art-14-human-oversight",
       "nist-ai-rmf:GOVERN-1.2",
     ],
-    sourceUrl: "https://leg.colorado.gov/bills/sb24-205",
-    verifiedOn: "2026-09-28",
+    sourceUrl: "https://leg.colorado.gov/bills/sb26-189",
+    verifiedOn: "2026-10-01",
   },
 
   // ---- NYC Local Law 144 ----
