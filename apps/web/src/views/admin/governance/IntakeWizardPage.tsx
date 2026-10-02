@@ -53,6 +53,8 @@ interface SubmissionCheckpoint {
 }
 
 const STEPS = ["Describe", "Suggestions", "Questionnaire", "Link stack", "Review"];
+const SECTOR_OPTIONS = ["financial-services", "securities-broker-dealer", "healthcare", "payments", "public-sector", "general"] as const;
+const DATA_CATEGORY_OPTIONS = ["personal", "sensitive-personal", "health", "payment-card", "financial", "proprietary", "public"] as const;
 
 export default function IntakeWizardPage() {
   const [prefill] = useSearchParams();
@@ -74,8 +76,8 @@ export default function IntakeWizardPage() {
   const [safetyComponent, setSafetyComponent] = useState<BooleanAnswer>(initial("no", ""));
   const [interactsWithHumans, setInteractsWithHumans] = useState<BooleanAnswer>(initial("yes", ""));
   const [generative, setGenerative] = useState<BooleanAnswer>(initial("yes", ""));
-  const [sector, setSector] = useState(initial("financial-services", ""));
-  const [dataCategory, setDataCategory] = useState(initial("financial", ""));
+  const [sectors, setSectors] = useState<string[]>(initial(["financial-services"], []));
+  const [dataCategories, setDataCategories] = useState<string[]>(initial(["personal", "financial"], []));
   const [deployment, setDeployment] = useState(initial("customer-facing", ""));
   const [euNexus, setEuNexus] = useState<BooleanAnswer>(initial("yes", ""));
   const [autonomousActions, setAutonomousActions] = useState<BooleanAnswer>(initial("no", ""));
@@ -113,8 +115,8 @@ export default function IntakeWizardPage() {
           generatesSyntheticContent: generative === "yes",
         },
         context: {
-          sectors: sector === "none" ? [] : [sector],
-          dataCategories: dataCategory === "none" ? [] : [dataCategory],
+          sectors,
+          dataCategories,
           deployment,
           euNexus: euNexus === "yes",
           usesExternalVendor: usesExternalVendor === "yes",
@@ -152,7 +154,7 @@ export default function IntakeWizardPage() {
   const intakeAnswersComplete = Boolean(
     purposeDomain && affectedPerson && decisionAutonomy && biometricUse &&
     emotionRecognition && socialScoring && manipulativeTechniques && profilesNaturalPersons &&
-    safetyComponent && interactsWithHumans && generative && sector && dataCategory && deployment &&
+    safetyComponent && interactsWithHumans && generative && sectors.length > 0 && dataCategories.length > 0 && deployment &&
     euNexus && autonomousActions && usesExternalVendor,
   );
   const canContinue = step === 0 ? Boolean(title.trim() && description.trim() && intakeAnswersComplete) : Boolean(assist.data);
@@ -269,7 +271,11 @@ export default function IntakeWizardPage() {
                     <option value="employment-hr">Employment / HR</option>
                     <option value="education">Education</option>
                     <option value="law-enforcement">Law enforcement</option>
+                    <option value="migration-border">Migration / border control</option>
+                    <option value="justice-democracy">Justice / democracy</option>
+                    <option value="critical-infrastructure">Critical infrastructure</option>
                     <option value="general-business">General business</option>
+                    <option value="internal-productivity">Internal productivity</option>
                   </Select>
                 </Field>
                 <Field label="People affected">
@@ -287,16 +293,8 @@ export default function IntakeWizardPage() {
                     <option value="">Choose biometric use</option><option value="none">None</option><option value="verification">1:1 verification</option><option value="remote-identification">Remote identification</option>
                   </Select>
                 </Field>
-                <Field label="Primary sector">
-                  <Select value={sector} onChange={(event) => setSector(event.target.value)} required>
-                    <option value="">Choose a sector</option><option value="none">No sector selected</option><option value="financial-services">Financial services</option><option value="securities-broker-dealer">Securities / broker-dealer</option><option value="healthcare">Healthcare</option><option value="payments">Payments</option><option value="public-sector">Public sector</option><option value="general">General</option>
-                  </Select>
-                </Field>
-                <Field label="Primary data category">
-                  <Select value={dataCategory} onChange={(event) => setDataCategory(event.target.value)} required>
-                    <option value="">Choose a data category</option><option value="none">No governed data category</option><option value="personal">Personal</option><option value="sensitive-personal">Sensitive personal</option><option value="health">Health</option><option value="payment-card">Payment card</option><option value="financial">Financial</option><option value="proprietary">Proprietary</option><option value="public">Public</option>
-                  </Select>
-                </Field>
+                <MultiAnswerField label="Sectors" values={sectors} options={SECTOR_OPTIONS} onChange={setSectors} />
+                <MultiAnswerField label="Data categories" values={dataCategories} options={DATA_CATEGORY_OPTIONS} onChange={setDataCategories} />
                 <Field label="Deployment audience">
                   <Select value={deployment} onChange={(event) => setDeployment(event.target.value)} required>
                     <option value="">Choose deployment audience</option><option value="internal">Internal</option><option value="customer-facing">Customer-facing</option><option value="public">Public</option>
@@ -452,6 +450,29 @@ function BooleanAnswerField(props: { value: BooleanAnswer; onChange: (value: Boo
         <option value="yes">Yes</option>
         <option value="no">No</option>
       </Select>
+    </Field>
+  );
+}
+
+function MultiAnswerField(props: { label: string; values: string[]; options: readonly string[]; onChange: (values: string[]) => void }) {
+  const toggle = (option: string, checked: boolean) => props.onChange(checked
+    ? [...props.values, option]
+    : props.values.filter((value) => value !== option));
+  return (
+    <Field label={`${props.label} — select all that apply`}>
+      <div className={v.stackTight}>
+        {props.options.map((option) => (
+          <label className={s.checkbox} key={option}>
+            <input
+              type="checkbox"
+              aria-label={`${props.label}: ${option}`}
+              checked={props.values.includes(option)}
+              onChange={(event) => toggle(option, event.target.checked)}
+            />
+            <span>{option.replaceAll("-", " ")}</span>
+          </label>
+        ))}
+      </div>
     </Field>
   );
 }

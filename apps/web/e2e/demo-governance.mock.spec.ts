@@ -118,7 +118,12 @@ test.beforeEach(async ({ page }) => { await page.route("**/*", async (route) => 
 
 test("enterprise governance demo surfaces render and complete their core actions", async ({ page }) => {
   await page.goto("/ui/admin/governance/intake");
+  const assistRequest = page.waitForRequest((request) => new URL(request.url()).pathname === "/v1/use-cases/intake/assist" && request.method() === "POST");
   await page.getByRole("button", { name: "Draft suggestions" }).click();
+  expect((await assistRequest).postDataJSON().context).toMatchObject({
+    sectors: ["financial-services"],
+    dataCategories: ["personal", "financial"],
+  });
   await expect(page.getByText("Review assistant suggestions", { exact: true })).toBeVisible();
   await shotBoth(page, "01-intake-suggestions");
   await page.getByRole("button", { name: "Continue" }).click();
@@ -154,8 +159,11 @@ test("enterprise governance demo surfaces render and complete their core actions
   await shotBoth(page, "05-use-case-risks");
   await page.getByRole("tab", { name: "Stack" }).click();
   await expect(page.getByText("Declared purpose")).toBeVisible();
+  await expect(page.getByText(/Credit support/)).toBeVisible();
   await page.getByRole("tab", { name: "Dependencies" }).click();
   await expect(page.getByRole("img", { name: /AI dependency/ })).toBeVisible();
+  await expect(page.getByText("Unattached risks", { exact: true })).toBeVisible();
+  await expect(page.getByText(graph.notes.unattached)).toBeVisible();
   await page.getByRole("tab", { name: "Approvals" }).click();
   await expect(page.getByText("Approval history")).toBeVisible();
   await page.getByRole("tab", { name: "Audit" }).click();
@@ -184,6 +192,8 @@ test("enterprise governance demo surfaces render and complete their core actions
 
   await page.goto("/ui/admin/governance/regulatory");
   await expect(page.getByRole("heading", { name: "Regulatory & policy intelligence" })).toBeVisible();
+  await expect(page.getByText("In force", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("No upcoming effective date is present in this feed.")).toBeVisible();
   await expect(page.getByText("inactive pack gap", { exact: false })).toBeVisible();
   await page.getByText("Mapped controls and impacted use cases").last().click();
   await expect(page.getByRole("link", { name: "Credit-limit-increase assistant" }).last()).toBeVisible();
@@ -225,7 +235,7 @@ test("alerts distinguish a monitor that has never run and use a valid agent inve
   });
   await page.reload();
   await page.getByRole("button", { name: /inherits a HIGH rating/ }).click();
-  await expect(page.getByRole("link", { name: "Open agent" })).toHaveAttribute("href", "/ui/admin/agents");
+  await expect(page.getByRole("link", { name: "Open agent" })).toHaveAttribute("href", `/ui/admin/agents#agent-${AGENT}`);
 });
 
 test("trust dashboard does not show an all-clear badge before the monitor runs", async ({ page }) => {
@@ -250,6 +260,9 @@ test("shadow-AI registration prefills evidence only and requires proposer answer
   const draft = page.getByRole("button", { name: "Draft suggestions" });
   await expect(draft).toBeDisabled();
   await expect(page.getByLabel("Primary purpose domain")).toHaveValue("");
+  expect(await page.getByLabel("Primary purpose domain").locator("option").evaluateAll((options) => options.map((option) => (option as HTMLOptionElement).value))).toEqual([
+    "", "essential-services", "employment-hr", "education", "law-enforcement", "migration-border", "justice-democracy", "critical-infrastructure", "general-business", "internal-productivity",
+  ]);
   await expect(page.getByLabel("Decision autonomy")).toHaveValue("");
   await expect(page.getByLabel("Profiles natural persons")).toHaveValue("");
   await shotBoth(page, "08-shadow-ai-intake-prefill");
@@ -258,8 +271,8 @@ test("shadow-AI registration prefills evidence only and requires proposer answer
   await page.getByLabel("People affected").selectOption("employees");
   await page.getByLabel("Decision autonomy").selectOption("narrow-procedural");
   await page.getByLabel("Biometric use").selectOption("verification");
-  await page.getByLabel("Primary sector").selectOption("healthcare");
-  await page.getByLabel("Primary data category").selectOption("health");
+  await page.getByLabel("Sectors: healthcare").check();
+  await page.getByLabel("Data categories: health").check();
   await page.getByLabel("Deployment audience").selectOption("internal");
   for (const label of [
     "Emotion recognition", "Social scoring", "Manipulative techniques", "Profiles natural persons",
@@ -324,4 +337,25 @@ test("prohibited screening remains reviewable and can be submitted for an indepe
   await submit.click();
   await created;
   await expect(page.getByText("Submitted for human review.")).toBeVisible();
+});
+
+test("zero live risks and unmeasured residual ratings do not imply assurance or user choices", async ({ page }) => {
+  await page.route(`**/v1/use-cases/${ID}/overview`, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        ...overview,
+        risks: [{ ...overview.risks[0], residual: null }],
+        summary: { ...overview.summary, liveRisks: 0, liveWithoutControls: 0 },
+      }),
+    });
+  });
+  await page.goto(`/ui/admin/governance/use-cases/${ID}`);
+  await expect(page.getByText("No live risks recorded", { exact: true })).toBeVisible();
+  await expect(page.getByText("Live risks have controls", { exact: true })).toHaveCount(0);
+  await page.getByRole("tab", { name: "Risks" }).click();
+  await expect(page.getByLabel("Residual likelihood")).toHaveValue("");
+  await expect(page.getByLabel("Residual impact")).toHaveValue("");
+  await expect(page.getByRole("button", { name: "Save residual" })).toBeDisabled();
 });

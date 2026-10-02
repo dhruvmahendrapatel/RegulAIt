@@ -270,6 +270,7 @@ function SubjectLinks({ alert }: { alert: GovernanceAlert }) {
     ? `/admin/governance/use-cases/${subject.id}`
     : subject.type === "agent" && subject.context && subject.id
       ? `/admin/governance/use-cases/${subject.context.id}?tab=stack#agent-${subject.id}`
+      : subject.type === "agent" && subject.id ? `/admin/agents#agent-${subject.id}`
       : subject.type === "agent" ? "/admin/agents"
       : subject.type === "vendor" ? `/admin/vendors${subject.id ? `?vendorId=${subject.id}` : ""}`
         : subject.type === "risk" ? `/admin/risks?riskId=${subject.id ?? ""}`

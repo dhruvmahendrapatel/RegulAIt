@@ -96,15 +96,16 @@ export function DependencyGraphPanel({ useCaseId }: { useCaseId?: string }) {
           <EmptyState title="No governed dependencies found" body="Link an agent, model, vendor, MCP server, or connector to make the dependency chain visible." />
         ) : (
           <>
-            <div className={v.grid3}>
+            <div className={v.grid4}>
               <GraphStat label="Nodes" value={graph.data.summary.nodes} />
               <GraphStat label="Inherited exposure" value={graph.data.summary.inheritedExposure} />
               <GraphStat label="Propagated high" value={graph.data.summary.propagatedHigh} />
+              <GraphStat label="Unattached risks" value={graph.data.summary.unattachedRisks} />
             </div>
             <div className={s.graphScroller}>
               <svg className={s.graph} viewBox={`0 0 800 ${height}`} role="img" aria-label="AI dependency and propagated risk graph">
                 <g className={s.graphHeadings}>
-                  <text x="90" y="25">Use case</text><text x="290" y="25">Agent</text><text x="500" y="25">Model / tool</text><text x="710" y="25">Vendor</text>
+                  <text x="90" y="25">Use case</text><text x="290" y="25">Agent</text><text x="500" y="25">Model / MCP / connector</text><text x="710" y="25">Vendor</text>
                 </g>
                 {graph.data.edges.map((edge, index) => {
                   const from = layout.get(edge.from);
@@ -132,6 +133,12 @@ export function DependencyGraphPanel({ useCaseId }: { useCaseId?: string }) {
               </svg>
             </div>
             <p className={v.faint}>Solid edges are declared. Dashed edges are observed in the last {graph.data.window.days} days. A cyan ring means propagated exposure differs from the node’s own risk.</p>
+            <div className={v.stackTight}>
+              <p className={v.faint}>{graph.data.notes.propagation}</p>
+              <p className={v.faint}>{graph.data.notes.ratings}</p>
+              <p className={v.faint}>{graph.data.notes.observed}</p>
+              <p className={v.faint}>{graph.data.notes.unattached}</p>
+            </div>
             {selected ? <GraphNodeDetail node={selected} nodes={graph.data.nodes} /> : <p className={v.dim}>Select a node to inspect its inherited-risk path and source.</p>}
           </>
         )}
@@ -158,8 +165,8 @@ function GraphNodeDetail({ node, nodes }: { node: GraphNode; nodes: GraphNode[] 
         ) : <p className={v.dim}>No inherited path; this node’s propagated position comes from its own risks.</p>}
         <div className={v.row}>
           {node.type === "use_case" && node.id ? <Link to={`/admin/governance/use-cases/${node.id}`}>Open use case</Link> : null}
-          {node.type === "agent" && node.id ? <Link to="/admin/agents">Open agent inventory</Link> : null}
-          {node.type === "vendor" && node.id ? <Link to="/admin/vendors">Open vendor register</Link> : null}
+          {node.type === "agent" && node.id ? <Link to={`/admin/agents#agent-${node.id}`}>Open this agent</Link> : null}
+          {node.type === "vendor" && node.id ? <Link to={`/admin/vendors?vendorId=${node.id}`}>Open this vendor</Link> : null}
           {node.propagatedRisk.sourceRiskId ? <Link to={`/admin/risks?riskId=${node.propagatedRisk.sourceRiskId}`}>Open source risk</Link> : null}
         </div>
       </div>

@@ -101,10 +101,14 @@ export default function RegulatoryIntelligencePage() {
             <>
               <div className={v.grid4}>
                 <RegulatoryStat label="Feed entries" value={query.data.summary.total} />
+                <RegulatoryStat label="In force" value={query.data.summary.inForce} tone="ok" />
                 <RegulatoryStat label="Upcoming" value={query.data.summary.upcoming} tone="info" />
                 <RegulatoryStat label="Proposed" value={query.data.summary.proposed} tone="warn" />
                 <RegulatoryStat label="With control gaps" value={query.data.summary.withControlGaps} tone={query.data.summary.withControlGaps ? "danger" : "ok"} />
               </div>
+              <p className={s.callout}>{query.data.summary.nextEffective
+                ? `Next effective entry: ${query.data.updates.find((update) => update.key === query.data?.summary.nextEffective)?.title ?? query.data.summary.nextEffective}.`
+                : "No upcoming effective date is present in this feed."}</p>
 
               <Card>
                 <div className={s.libraryFilters}>
@@ -124,7 +128,7 @@ export default function RegulatoryIntelligencePage() {
               </Card>
 
               {updates.length === 0 ? (
-                <EmptyState title="No entries match these filters" body={query.data.notes.feed} />
+                <EmptyState title={status || framework ? "No entries match these filters" : "No regulatory entries are available"} body={query.data.notes.feed} />
               ) : (
                 <ol className={s.timeline} aria-label="Regulatory effective-date timeline">
                   {updates.map((update) => <RegulatoryTimelineEntry key={update.key} update={update} />)}

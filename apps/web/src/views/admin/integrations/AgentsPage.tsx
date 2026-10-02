@@ -53,7 +53,7 @@ export default function AgentsPage() {
         <Card flush title="Catalog">
           <Table<AdminAgent>
             columns={[
-              { key: "name", header: "Name", sort: (x) => x.name, render: (x) => x.name },
+              { key: "name", header: "Name", sort: (x) => x.name, render: (x) => <span id={`agent-${x.id}`}>{x.name}</span> },
               {
                 key: "provider",
                 header: "Provider",
