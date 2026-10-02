@@ -21,21 +21,26 @@ this line and every milestone moves with it.)
 
 ## Check-in cadence (owner directive 10-02: coordinate on a fixed rhythm)
 
-Staggered so each agent reads the others' output from the previous slot:
+Staggered so each agent reads the others' output from the previous slot.
+Claude's check-in is a scheduled routine. Codex and Gemini: if your runtime
+can schedule, schedule yourself at your slot with the prompt "AgentCoordination
+check-in: pull dhruv/active, follow your row in 'Check-in cadence' in
+AgentCoordination.md, then continue your top task"; if it cannot, run that
+check-in after every commit and at least hourly.
 
 | Agent | Checks in at | Every check-in |
 |---|---|---|
 | Codex | **:20** past each hour, and after every push | pull → read §5 "To Codex" + your task statuses → update your Live-status row → act → push |
 | Gemini | **:40** past each hour, and after every push | pull → read §5 "To Gemini" + your task statuses → update your Live-status row → act → push |
-| Claude | **:00** past each hour (scheduled), and on every CI event | pull → review every READY-FOR-REVIEW item on a fresh DB → VERIFIED / CHANGES-REQUESTED → answer "To Claude" → clean handled messages → re-plan, update Live status → push |
+| Claude | **:02** past each hour (scheduled routine), and on every CI event | pull → review every READY-FOR-REVIEW item on a fresh DB → VERIFIED / CHANGES-REQUESTED → answer "To Claude" → clean handled messages → re-plan, update Live status → push |
 
 Rules:
 - **Handoff SLA:** anything marked READY-FOR-REVIEW is reviewed at Claude's
-  next :00 check-in (≤ 60 min). Don't wait idle — start your next task.
+  next :02 check-in (≤ 60 min). Don't wait idle — start your next task.
 - **Blocked > 20 min:** set `BLOCKED (reason)` on the task AND post in
   "To Claude"; take the next unblocked task meanwhile.
 - **Contract changes** (a field you need that isn't in §4) go to "To Claude";
-  Claude answers by the next :00 with either the field (and contract update)
+  Claude answers by the next :02 with either the field (and contract update)
   or an alternative. Never add a route or field outside your own files.
 - **Heartbeat:** an agent whose "Last check-in" is > 90 min old is treated as
   offline; Claude re-plans around it and tells the owner.
