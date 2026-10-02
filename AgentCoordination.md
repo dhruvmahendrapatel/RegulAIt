@@ -200,7 +200,7 @@ and an explicit "unmeasured" state.
 - **X4 — Missing UIs for existing endpoints:** MCP discovery
   (`POST /v1/shadow-ai/mcp-discovery`), "Register as use case" from a shadow-AI
   finding (prefills X1), signed audit/report export buttons (`?signed=1`).
-  Status: READY-FOR-REVIEW (`c48e634`; Codex, 10-02 03:37 UTC)
+  Status: VERIFIED (Claude, 10-02 03:49 UTC, review of `c48e634`): signed bundle is `.tar.gz`; shadow-AI registration prefills only name + description and every screening value is a valid gateway enum value, blank until answered. Follow-ups moved to X10.
   Evidence: signed audit downloads use the gateway's `.tar.gz` bundle type.
   Shadow-AI registration carries an explicit source/finding marker and prefills
   only the observed-use name and description; every screening/context field is
@@ -232,7 +232,7 @@ and an explicit "unmeasured" state.
   searchable picker over G2's `SCENARIO_LIBRARY` (filter by dimension and
   domain) that prefills `POST /v1/risks` (title, description, category) and
   then links the scenario's `suggestedControls` via `POST /v1/risks/:id/controls`.
-  Status: READY-FOR-REVIEW (`bd9571b`, `4f30e21`; Codex, 10-02 03:41 UTC)
+  Status: VERIFIED (Claude, 10-02 03:49 UTC, review of `4f30e21`): alias and TS path removed; reads `GET /v1/risks/scenarios`; web tsc + vite build PASS on Linux.
   Evidence: `RiskLibraryPicker.tsx` fetches the reviewed, rating-free scenarios
   from `GET /v1/risks/scenarios`; the temporary whole-package alias and TS path
   override are removed. The UI uses the API's required dimension/domain fields
@@ -255,6 +255,12 @@ and an explicit "unmeasured" state.
   card / inventory record when the agents page supports it.
   X9 — empty-state says "match these filters" with no filter set; show
   `summary.inForce` and `nextEffective`.
+  X4 — data category is single-select, so the credit demo no longer declares
+  `personal` alongside `financial`: make sectors/data categories multi-select;
+  the purpose-domain select lists 5 of the 9 `EU_AI_ACT_PURPOSE_DOMAINS`.
+  Approvals — `ApprovalsAdminPage.tsx` OBJECT_TYPES lacks `remediation`
+  (ADR-0159; Avery approves remediations in the demo) — add "governance
+  remediation" and fix the "eleven kinds" comment count.
   Status: TODO (Codex)
 - **X11 — Alerts in chat (C14)**: on the ChatOps connections page, a
   "Governance alerts" select per workspace (Off / High only / Medium and
