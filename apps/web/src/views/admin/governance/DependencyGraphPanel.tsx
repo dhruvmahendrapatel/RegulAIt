@@ -31,7 +31,7 @@ interface GraphResponse {
   generatedAt: string;
   scope: { useCaseId: string | null; includeObserved: boolean };
   window: { days: number; applies: string };
-  summary: { nodes: number; edges: number; byType: Record<string, number>; propagatedHigh: number; inheritedExposure: number; unattachedRisks: number };
+  summary: { nodes: number; edges: number; byType: Record<string, number>; propagatedHigh: number; inheritedExposure: number; unattachedRisks?: number };
   nodes: GraphNode[];
   edges: GraphEdge[];
   notes: { propagation: string; ratings: string; observed: string; unattached: string };
@@ -96,11 +96,14 @@ export function DependencyGraphPanel({ useCaseId }: { useCaseId?: string }) {
           <EmptyState title="No governed dependencies found" body="Link an agent, model, vendor, MCP server, or connector to make the dependency chain visible." />
         ) : (
           <>
-            <div className={v.grid4}>
+            {/* unattachedRisks is org-wide: the API omits it when scoped to one use case */}
+            <div className={graph.data.summary.unattachedRisks === undefined ? v.grid3 : v.grid4}>
               <GraphStat label="Nodes" value={graph.data.summary.nodes} />
               <GraphStat label="Inherited exposure" value={graph.data.summary.inheritedExposure} />
               <GraphStat label="Propagated high" value={graph.data.summary.propagatedHigh} />
-              <GraphStat label="Unattached risks" value={graph.data.summary.unattachedRisks} />
+              {graph.data.summary.unattachedRisks === undefined ? null : (
+                <GraphStat label="Unattached risks" value={graph.data.summary.unattachedRisks} />
+              )}
             </div>
             <div className={s.graphScroller}>
               <svg className={s.graph} viewBox={`0 0 800 ${height}`} role="img" aria-label="AI dependency and propagated risk graph">

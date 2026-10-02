@@ -4,8 +4,8 @@
  * agent grants, the per-user agent policy (default, cost ceiling, routing,
  * run budget), and the per-user entitlement view.
  */
-import { useState } from "react";
-import { Link } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { Link, useLocation } from "react-router-dom";
 import { api } from "../../../api/client";
 import type { AdminAgent, CustomModelProvider, UserAgentPolicyView } from "../../../api/adminTypes";
 import { fmtUsd } from "../../../api/format";
@@ -33,6 +33,16 @@ export default function AgentsPage() {
   const customProviders = useCustomProviders();
   const act = useAction();
 
+  // `#agent-<id>` deep links (dependency graph, governance alerts): once the
+  // list has loaded, scroll that agent's row into view and mark it, so the
+  // link lands on the agent rather than at the top of the catalog
+  const { hash } = useLocation();
+  const linkedAgentId = hash.startsWith("#agent-") ? hash.slice("#agent-".length) : null;
+  useEffect(() => {
+    if (!linkedAgentId || !agents.data) return;
+    document.getElementById(`agent-${linkedAgentId}`)?.scrollIntoView({ block: "center" });
+  }, [linkedAgentId, agents.data]);
+
   const aOpts = agentOpts(agents.data?.agents);
   const uOpts = userOpts(users.data?.users);
   // ADR-0034: an agent bound to a custom endpoint shows WHICH endpoint, not
@@ -53,7 +63,12 @@ export default function AgentsPage() {
         <Card flush title="Catalog">
           <Table<AdminAgent>
             columns={[
-              { key: "name", header: "Name", sort: (x) => x.name, render: (x) => <span id={`agent-${x.id}`}>{x.name}</span> },
+              { key: "name", header: "Name", sort: (x) => x.name, render: (x) => (
+                  <span id={`agent-${x.id}`}>
+                    {x.name}
+                    {x.id === linkedAgentId ? <> <Badge tone="info">linked</Badge></> : null}
+                  </span>
+                ) },
               {
                 key: "provider",
                 header: "Provider",
