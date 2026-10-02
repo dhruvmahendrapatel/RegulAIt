@@ -60,3 +60,7 @@ demo-license-keys/
 # the PUBLIC half is written; the private half is never persisted anywhere.
 # Regenerated on every run. Never a source artifact, never a release key.
 apps/web/e2e/.e2e-license-keys/
+
+# real seeded-DB journey screenshots (apps/web/e2e/demo-intake.spec.ts): ~11 MB per
+# run, regenerated every run — kept out of history; the mocked set is tracked
+apps/web/e2e/artifacts/demo/real-*.png
