@@ -268,6 +268,10 @@ export async function seedDemoIntake(
 
   // --- shadow AI evidence (imported, never claimed as discovered) --------------------------
   if (fixtures.shadowAi.length > 0) {
+    // the matcher holds no provider names — with an empty signature catalogue
+    // every observation is "unmatched" and the Discover beat shows nothing
+    const cat = await call("POST", "/v1/shadow-ai/catalogue/seed", {}, ada.auth);
+    if (!ok(cat.status)) fail("shadow-AI catalogue seed", cat);
     const r = await call("POST", "/v1/shadow-ai/imports", {
       kind: "saas_export",
       mode: "apply",
@@ -276,8 +280,16 @@ export async function seedDemoIntake(
         appName: s.appName, vendorHost: s.vendorHost, grantedBy: s.grantedBy, installCount: s.installCount,
       })),
     }, ada.auth);
-    if (ok(r.status)) report.created.push(`shadow-AI import (${fixtures.shadowAi.length} rows)`);
-    else fail("shadow-AI import", r);
+    if (ok(r.status)) {
+      report.created.push(`shadow-AI import (${fixtures.shadowAi.length} rows)`);
+      const matched = Number(r.body.matched ?? r.body.summary?.matched ?? 0);
+      if (matched === 0) {
+        report.notes.push(
+          "shadow-AI import matched 0 rows — use vendor hosts the signature catalogue knows " +
+            "(GET /v1/shadow-ai/catalogue), e.g. api.openai.com, claude.ai",
+        );
+      }
+    } else fail("shadow-AI import", r);
   }
 
   return report;

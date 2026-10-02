@@ -82,7 +82,7 @@ const fixtures = (): DemoIntakeFixtures => ({
   modelCards: [
     { agentName: AGENT, intendedUse: `c6 card ${RUN}`, dataClaims: { categories: ["financial"] }, limitations: "none known", biasFairness: [{ dimension: "age", method: "parity", status: "assessed", resultRef: "eval-1" }], standardRefs: ["nist-ai-rmf:MEASURE-2.11"] },
   ],
-  shadowAi: [{ appName: `c6 app ${RUN}`, vendorHost: "ai.example.com", grantedBy: "user-17@acme.example", installCount: 3 }],
+  shadowAi: [{ appName: `c6 app ${RUN}`, vendorHost: "api.openai.com", grantedBy: "user-17@acme.example", installCount: 3 }],
 });
 
 beforeAll(async () => {
@@ -140,6 +140,8 @@ describe("seedDemoIntake", () => {
     const cards = await db.select().from(modelCards).where(eq(modelCards.intendedUse, `c6 card ${RUN}`));
     expect(cards).toHaveLength(1);
     expect(first.created).toContain("shadow-AI import (1 rows)");
+    // positive control: the catalogue is installed, so a provider host MATCHES
+    expect(first.notes.some((n) => n.includes("matched 0 rows"))).toBe(false);
 
     // IDEMPOTENT: nothing new on a second run (the shadow import is evidence
     // and is re-imported by design — deduplication is the importer's job)

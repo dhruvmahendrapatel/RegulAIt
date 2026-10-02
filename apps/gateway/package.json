@@ -13,7 +13,8 @@
     "demo:mcp": "node dist/demo-mcp-server.js",
     "demo:setup": "node dist/demo-setup.js",
     "reencrypt": "node dist/reencrypt.js",
-    "demo:intake": "node dist/demo-intake-seed.js"
+    "demo:intake": "node dist/demo-intake-seed.js",
+    "demo:check": "node dist/demo-check.js"
   },
   "dependencies": {
     "@aws-sdk/client-acm": "^3.700.0",

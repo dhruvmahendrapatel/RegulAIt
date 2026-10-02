@@ -15,7 +15,7 @@ this line and every milestone moves with it.)
 
 | Agent | Now | Next | ETA (UTC) | Last check-in (UTC) | Blocked on |
 |---|---|---|---|---|---|
-| Claude | C11 continuous trace evaluation (next) | reviews at :02 | — | 10-02 02:55 | — |
+| Claude | C12 continuous trace evaluation | reviews at :02; M4 dry run with demo:check | — | 10-02 03:10 | — |
 | Codex | X3 / X1 | X2 → X4 → X5 → X7 → X8 | — | 10-02 01:15 | — |
 | Gemini | G1 risks rewrite | G3 corrections → G5 → G4 | — | 10-02 01:50 | — |
 
@@ -206,6 +206,14 @@ live model is a bonus, never a dependency.
   approves on the existing approvals queue; nothing executes without
   approval. Contract §4.7.
   Status: READY-FOR-REVIEW (self-verified: 5 shared + 4 integration tests) — LIVE
+- **C11 — `demo:check`** (`pnpm --filter @regulait/gateway demo:check`, after
+  `seed → demo:setup → demo:intake`): walks every storyline beat through the
+  real API and prints PASS / WARN / FAIL with the fix. Also runs in CI over
+  the real fixtures (`zz-c11-demo-check.test.ts`: no beat may FAIL). This is
+  the M4 dry-run tool. Found and fixed on first run: the seeder never
+  installed the shadow-AI signature catalogue, so the Discover beat was empty.
+  Current demo DB: 11 PASS, 3 WARN (G1 risk titles, G5 inheritance, G4 feed).
+  Status: READY-FOR-REVIEW (self-verified) — LIVE
 
 ### Codex — web UI (apps/web), browser verification
 
@@ -375,6 +383,9 @@ and an explicit "unmeasured" state.
      It runs hourly or on "Evaluate now"; it alerts on the 7 rules in §4.5.
      Show an inherited-risk alert with `detail.pathLabels` (needs G5) and
      acknowledge it. Signed export is X4 — CONDITIONAL.
+  7b. Add `pnpm --filter @regulait/gateway demo:check` to §0 setup (after
+      demo:intake) — the script must say "all beats PASS or known WARN" before
+      the demo starts.
   TALK_TRACK:
   8. Remove every statement about how Credo AI works internally ("relies
      heavily on manual attestations", "would only catch this during a
@@ -411,7 +422,15 @@ and an explicit "unmeasured" state.
   dependency graph (C7, §4.4) shows the hero inheriting a HIGH rating from
   its vendor; leave one agent in an approved use case without an approved
   model card so the monitor (C8) raises an alert on the demo DB.
-  Claude adds any fixture-type fields this needs before you start.
+  **Also (found by C11):** the `shadowAi` rows must use hosts the signature
+  catalogue knows or nothing matches — e.g. the credit team's prototype
+  calling `api.openai.com` or `api.anthropic.com`, staff using `claude.ai` /
+  `chat.openai.com` (`GET /v1/shadow-ai/catalogue` lists them). Grammarly,
+  Notion, Jasper etc. are not catalogued and produce no finding.
+  And keep the alert count readable: give the demo agents owners/model cards
+  except the ONE gap you want the Monitor beat to show (C11 warns above 15).
+  Done when `demo:check` shows no WARN for Shadow AI / Dependency graph / Monitor.
+  Fixture types already allow vendor-only risks (Claude, a452557).
   Status: TODO (after G1)
 
 ---
