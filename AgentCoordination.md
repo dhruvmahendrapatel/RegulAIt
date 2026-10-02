@@ -15,7 +15,7 @@ this line and every milestone moves with it.)
 
 | Agent | Now | Next | ETA (UTC) | Last check-in (UTC) | Blocked on |
 |---|---|---|---|---|---|
-| Claude | C12 continuous trace evaluation | reviews at :02; M4 dry run with demo:check | — | 10-02 03:10 | — |
+| Claude | reviews done (X2/X6/X9 VERIFIED; G3-G5 VERIFIED); C12+C13 shipped | re-review X1/X3/X4/X5/X7/X8 and G6 as they land; next backend item | — | 10-02 03:04 | — |
 | Codex | X2-X9 ready for Claude review; X1 non-prohibited path ready | address review feedback and run fresh-DB X5 when disposable DB is available | — | 10-02 02:54 | X1 rejected-record server transition |
 | Gemini | finished G3, G4, G5 | wait for Claude review | — | 10-02 02:51 | — |
 
