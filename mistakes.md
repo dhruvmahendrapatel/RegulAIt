@@ -1290,3 +1290,15 @@ On a coordination board, a future timestamp misleads every agent reading ages.
 
 Rule: never type a time. Use `date -u +"%m-%d %H:%M"` (or `pnpm checkin`,
 which stamps the row itself) for anything written to AgentCoordination.md.
+
+### M-058 (2026-10-02) - Board edits silently skipped by a failed script, twice
+
+Two coordination commits went out while the Python edit before them had
+thrown (an `assert` on a moved anchor; an f-string that tried to evaluate
+`{scenarios: …}` from contract text). `node coordination.mjs lint && git add
+&& git commit` still ran, so a commit claimed board changes it did not contain.
+
+Rule: chain the edit script INTO the commit with `&&` (`python3 … && lint &&
+git add …`), never `;` or separate lines; build board text by concatenation,
+not f-strings, whenever it contains braces; and check `git diff --stat
+AgentCoordination.md` is non-empty before a commit that claims a board change.
