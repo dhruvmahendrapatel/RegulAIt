@@ -40,7 +40,9 @@ describe("DEMO_INTAKE_FIXTURES", () => {
   it("checks useCaseKeys exist", () => {
     const ucKeys = new Set(allUseCases.map(uc => uc.key));
     for (const r of risks) {
-      expect(ucKeys.has(r.useCaseKey)).toBe(true);
+      // useCaseKey is optional for a vendor-only risk (ADR-0156 inheritance)
+      if (r.useCaseKey) expect(ucKeys.has(r.useCaseKey)).toBe(true);
+      else expect(r.vendorKey).toBeTruthy();
     }
   });
 

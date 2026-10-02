@@ -3293,6 +3293,11 @@ export {
   type DemoRiskTarget,
 } from "./demo-intake-types.js";
 
+// Demo tasks G1/G2 (Gemini, Claude-reviewed): the demo dataset the C6 seeder
+// loads, and the agentic risk-scenario library the risk picker offers.
+export { DEMO_INTAKE_FIXTURES } from "./demo-intake/fixtures.js";
+export { SCENARIO_LIBRARY, type DemoRiskScenario } from "./demo-intake/scenario-library.js";
+
 // ADR-0156 — the AI-system dependency graph and max-propagation of declared risk.
 export {
   DEPENDENCY_GRAPH_NOTES,

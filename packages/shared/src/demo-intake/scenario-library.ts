@@ -1,4 +1,17 @@
-import type { ScenarioLibraryEntry } from "./scenario-library.types.js";
+import type { AiRiskCategory, TrustDimension } from "../risks.js";
+
+export interface DemoRiskScenario {
+  key: string;
+  title: string;
+  description: string;
+  category: AiRiskCategory;
+  dimension: TrustDimension;
+  /** values from INTAKE_SECTORS */
+  domains: string[];
+  /** real controlRefs from DEFAULT_COMPLIANCE_PACKS */
+  suggestedControls: string[];
+}
+export type ScenarioLibraryEntry = DemoRiskScenario;
 
 export const SCENARIO_LIBRARY: ScenarioLibraryEntry[] = [
   {
