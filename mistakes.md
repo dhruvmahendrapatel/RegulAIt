@@ -1328,3 +1328,19 @@ Rule: when a shared helper gains a side effect that outlives the test (an active
 a setting, an allow-list entry), `grep -l <helper> *.test.ts` and give EVERY caller the cleanup —
 then prove it with a two-invocation run on one database (the caller first, the affected files
 second), plus the same run without the cleanup as the positive control.
+
+### M-061 (2026-10-02) - Leftover gateways silently served later verification runs
+
+Verifying the demo, I started gateways with `(cd apps/gateway && PORT=… nohup node dist/main.js &
+echo $! > pid)`. `a && b &` backgrounds the whole list, so `$!` was a subshell's PID, not node's;
+"stopping" the gateway killed the subshell and left node listening. The next run's gateway lost
+the port race, its health check passed against the OLD process, and (a) the approval-review
+spec's own gateway on 3105 tested against my §0 gateway (4 false failures), (b) a "fresh"
+verification journey wrote into the previous run's database. Results were saved only by luck
+(the code under test happened to be the same).
+
+Rule: a script that starts a server records the server's own PID (`(cd dir; exec node …) &`),
+refuses to start when the port already answers (`curl -sf …/health && exit 1`), and stops
+servers by pattern before AND after (`pkill -f "[n]ode dist/main.js"` — the bracket keeps
+pkill from matching its own shell). After any verification, check the target database holds
+exactly the rows the run wrote.
