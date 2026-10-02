@@ -6,6 +6,7 @@ superseding a decision means a new ADR plus a status flip on the old one.
 
 | ID | Title | Status | Date |
 |---|---|---|---|
+| [0166](0166-consent-bound-to-mcp-target.md) | An MCP consent is bound to its target: approval context v3 includes server URL, private-range posture and admitted manifest digest; editing any re-queues the consent with zero upstream contact (AER-039). | Accepted | 2026-10-02 |
 | [0165](0165-intake-template-variants.md) | Use-case sign-off routing at any time through named intake template variants (`ai-use-case-intake/<label>`, newest active wins); demo:intake routes sign-offs to Avery. | Accepted | 2026-10-02 |
 | [0164](0164-monitor-off-stack-serving.md) | Monitor rule `use_case_served_outside_stack` (high): approved use-case dispatches served by an agent outside its approved stack, read from the usage ledger; detection only; guidance remediation; demo:traffic sends one deliberate routed call. | Accepted | 2026-10-02 |
 | [0163](0163-demo-traffic-and-one-command-prepare.md) | `demo:traffic` (governed mock traffic incl. a credential leak, a PII block and an injection attempt; reports the agent that actually served) and `demo:prepare` (one command, empty DB → demo:check). Records the routing-outside-approved-stack finding. | Accepted | 2026-10-02 |

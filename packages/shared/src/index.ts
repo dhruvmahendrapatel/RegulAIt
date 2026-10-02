@@ -2605,6 +2605,7 @@ export {
   normalizeApprovalArguments,
   sortApprovalRuleVersions,
   type ApprovalContextRef,
+  type ApprovalTargetRef,
   type ApprovalObjectType,
   type ApprovalPayloadRef,
   type PreparedPiiApproval,

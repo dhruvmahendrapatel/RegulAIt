@@ -312,7 +312,7 @@ export function effectiveApprovalScope(
  * contract: bumping it makes every pre-existing context digest stop matching,
  * which is a re-queue (fail-closed), never an accidental match.
  */
-export const APPROVAL_CONTEXT_DIGEST_VERSION = "regulait.approval-context.v2";
+export const APPROVAL_CONTEXT_DIGEST_VERSION = "regulait.approval-context.v3";
 
 /** One governing approval rule and the `config_versions` row currently ACTIVE
  * for it. `activeVersionId` is null when the rule has no version rows — the
@@ -320,6 +320,23 @@ export const APPROVAL_CONTEXT_DIGEST_VERSION = "regulait.approval-context.v2";
 export interface ApprovalRuleVersionRef {
   ruleId: string;
   activeVersionId: string | null;
+}
+
+/**
+ * AER-039 — WHERE the approved bytes go. The execution-relevant identity of the
+ * MCP upstream a consent is spent against: its destination, its private-range
+ * egress posture, and the digest of the tool manifest its admission verdict
+ * was computed over. An admin editing any of these under the same server id is
+ * a NEW action target, so a consent signed for the old one stops matching (it
+ * goes stale and is re-queued, fail-closed). Operational churn on the server
+ * row — breaker counters, health cursors — is deliberately NOT here.
+ */
+export interface ApprovalTargetRef {
+  kind: "mcp_server";
+  serverId: string;
+  url: string;
+  allowPrivateRanges: boolean | null;
+  admissionManifestDigest: string | null;
 }
 
 /** The identity of the POLICY CONTEXT a consent was granted under. */
@@ -332,6 +349,8 @@ export interface ApprovalContextRef {
   requiredApproverUserId?: string | null;
   /** the strictest scope across the matched rules */
   approvalScope: ApprovalScope;
+  /** AER-039 — the upstream the call executes against (v3) */
+  target?: ApprovalTargetRef | null;
 }
 
 /**
@@ -376,6 +395,15 @@ export function approvalContextDigest(ref: ApprovalContextRef): string {
         .map((p) => ({ policyId: p.policyId, version: p.version, source: p.source })),
       requiredApproverUserId: ref.requiredApproverUserId ?? null,
       approvalScope: ref.approvalScope,
+      target: ref.target
+        ? {
+            kind: ref.target.kind,
+            serverId: ref.target.serverId,
+            url: ref.target.url,
+            allowPrivateRanges: ref.target.allowPrivateRanges ?? null,
+            admissionManifestDigest: ref.target.admissionManifestDigest ?? null,
+          }
+        : null,
     })}`,
   );
 }

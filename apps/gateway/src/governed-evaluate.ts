@@ -30,6 +30,7 @@ import {
   approvalContextDigest,
   effectiveApprovalScope,
   type ApprovalScope,
+  type ApprovalTargetRef,
   type ConsentRetirementReason,
   type PreparedPiiApproval,
 } from "@regulait/shared";
@@ -213,6 +214,13 @@ export async function governedEvaluate(
    */
   simulate?: { versionId: string },
   preparedPii?: PreparedPiiApproval,
+  /**
+   * AER-039 — the upstream this call will execute against, from the SAME
+   * server row the caller connects with (the proxy passes it, so the consent
+   * is bound to exactly the destination that receives the bytes). Omitted =
+   * derived from the current server row, for callers that never execute.
+   */
+  target?: ApprovalTargetRef | null,
 ): Promise<GovernedEvaluation> {
   if (preparedPii && preparedPii.originalArgumentsDigest !== approvalArgumentsDigest({ projectId, arguments: args })) {
     throw new Error("Prepared PII action does not match the original arguments");
@@ -317,7 +325,15 @@ export async function governedEvaluate(
       )
       .orderBy(asc(approvals.requestedAt))
       .limit(50),
-    db.select({ name: mcpServers.name }).from(mcpServers).where(eq(mcpServers.id, serverId)),
+    db
+      .select({
+        name: mcpServers.name,
+        url: mcpServers.url,
+        allowPrivateRanges: mcpServers.allowPrivateRanges,
+        admissionManifestDigest: mcpServers.admissionManifestDigest,
+      })
+      .from(mcpServers)
+      .where(eq(mcpServers.id, serverId)),
   ]);
 
   // Display names for the decision's reason prose — the ids in ruleId /
@@ -620,6 +636,8 @@ export async function governedEvaluate(
     })),
     requiredApproverUserId: pendingDecision.approverUserId ?? null,
     approvalScope,
+    // AER-039: the consent names WHERE the bytes go, not only what they are
+    target: target ?? approvalTargetForServer(serverId, serverRows[0]),
   });
 
   // WHICH approved row satisfies this call.
@@ -804,5 +822,20 @@ export async function governedEvaluate(
     policyEpoch,
     retiredApprovals,
     ...(candidateDecision ? { candidateDecision } : {}),
+  };
+}
+
+/** AER-039 — the execution-relevant identity of an MCP upstream, from its row */
+export function approvalTargetForServer(
+  serverId: string,
+  row: { url: string; allowPrivateRanges: boolean | null; admissionManifestDigest: string | null } | undefined,
+): ApprovalTargetRef | null {
+  if (!row) return null;
+  return {
+    kind: "mcp_server",
+    serverId,
+    url: row.url,
+    allowPrivateRanges: row.allowPrivateRanges ?? null,
+    admissionManifestDigest: row.admissionManifestDigest ?? null,
   };
 }

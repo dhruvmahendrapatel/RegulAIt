@@ -55,7 +55,7 @@ import {
   runGuardrails,
   type DispatchGuardrails,
 } from "./guardrails.js";
-import { governedEvaluate, type RetiredApproval } from "./governed-evaluate.js";
+import { approvalTargetForServer, governedEvaluate, type RetiredApproval } from "./governed-evaluate.js";
 import { prepareMcpPiiAction, redactMcpResult } from "./mcp-pii.js";
 import { abacPrincipalFromRequest, type AbacPrincipalContext } from "./abac-principal.js";
 import {
@@ -663,6 +663,8 @@ async function executeGovernedToolCallInner(
       args.principal,
       undefined,
       preparedPii,
+      // AER-039: bind the consent to the row this call connects with
+      approvalTargetForServer(serverId, serverRow),
     );
 
     if (preparedPii && preparationGeneration?.epoch !== policyEpoch) {
@@ -696,7 +698,9 @@ async function executeGovernedToolCallInner(
       // project for the same call; the two records now agree.
       // NULL for an unattributed call, exactly as the usage row is: an
       // unattributed refusal is not evidence about any project.
-      detail: { argumentsDigest, approvalScope, contextDigest, projectId },
+      // AER-039: WHERE the call was bound to go — host and manifest identity
+      // only (a URL can carry credentials; the digest above binds the rest)
+      detail: { argumentsDigest, approvalScope, contextDigest, projectId, target: auditTarget(serverRow) },
       effect: decision.effect,
       ruleId: decision.ruleId,
       ruleChain: decision.ruleChain,
@@ -1846,4 +1850,15 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
     await proxy.connect(transport);
     await transport.handleRequest(req.raw, reply.raw, req.body);
   });
+}
+
+/** AER-039 — the upstream a call was bound to, safe for the audit ledger */
+function auditTarget(row: { url: string; allowPrivateRanges: boolean | null; admissionManifestDigest: string | null }) {
+  let host: string | null = null;
+  try {
+    host = new URL(row.url).host;
+  } catch {
+    host = null;
+  }
+  return { host, allowPrivateRanges: row.allowPrivateRanges ?? null, admissionManifestDigest: row.admissionManifestDigest ?? null };
 }

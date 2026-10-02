@@ -166,6 +166,25 @@ describe("ADR-0105 — the consent-context fingerprint", () => {
     approvalScope: "action" as const,
   };
 
+  it("AER-039: the MCP target is part of the consent — destination, egress posture and admitted manifest each change it", () => {
+    const target = {
+      kind: "mcp_server" as const,
+      serverId: "55555555-5555-4555-8555-555555555555",
+      url: "https://tools-a.example.test/mcp",
+      allowPrivateRanges: false,
+      admissionManifestDigest: "a".repeat(64),
+    };
+    const signed = approvalContextDigest({ ...base, target });
+    expect(signed).not.toBe(approvalContextDigest(base));
+    expect(approvalContextDigest({ ...base, target: { ...target, url: "https://tools-b.example.test/mcp" } })).not.toBe(signed);
+    expect(approvalContextDigest({ ...base, target: { ...target, allowPrivateRanges: true } })).not.toBe(signed);
+    expect(approvalContextDigest({ ...base, target: { ...target, admissionManifestDigest: "b".repeat(64) } })).not.toBe(signed);
+    // the same target (a fresh object) is the same consent — key order and identity are not inputs
+    expect(approvalContextDigest({ ...base, target: { admissionManifestDigest: "a".repeat(64), allowPrivateRanges: false, url: target.url, serverId: target.serverId, kind: "mcp_server" } })).toBe(signed);
+    // and the version tag moved, so every pre-target consent re-queues rather than matching by accident
+    expect(APPROVAL_CONTEXT_DIGEST_VERSION).toBe("regulait.approval-context.v3");
+  });
+
   it("is a sha256 hex string, and a DIFFERENT one from the payload digest", () => {
     expect(approvalContextDigest(base)).toMatch(/^[0-9a-f]{64}$/);
     // the two digests are separate namespaces — a version tag each — so no
