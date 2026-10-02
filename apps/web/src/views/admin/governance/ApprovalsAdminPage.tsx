@@ -8,6 +8,7 @@
  */
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { useSearchParams } from "react-router-dom";
 import { api } from "../../../api/client";
 import type { Approval } from "../../../api/types";
 import type { Delegation } from "../../../api/adminTypes";
@@ -35,7 +36,7 @@ import v from "../../views.module.css";
 const labelOf = (r: Approval) => r.objectType === "mcp_tool" ? r.toolName ?? "MCP action" : approvalStageLabel(r) ?? r.stageId ?? r.objectType;
 
 /**
- * Mirrors `APPROVAL_OBJECT_TYPES` in @regulait/shared — the ten kinds THE ONE
+ * Mirrors `APPROVAL_OBJECT_TYPES` in @regulait/shared — the eleven kinds THE ONE
  * QUEUE holds. The SPA deliberately does not import the shared package (the
  * convention used for every other mirrored enum here), and the gateway parses
  * this parameter with that exact enum, so a value drifting out of the shared
@@ -57,9 +58,11 @@ const OBJECT_TYPES: Array<[string, string]> = [
   ["training_job", "RegulAIt-LLM training run"],
   ["grant_certification", "certification-campaign item"],
   ["sod_override", "separation-of-duties override"],
+  ["remediation", "governance-alert remediation"],
 ];
 
 export default function ApprovalsAdminPage() {
+  const [searchParams] = useSearchParams();
   const { auth } = useSession();
   const me = auth?.userId ?? null;
   const act = useAction();
@@ -80,9 +83,9 @@ export default function ApprovalsAdminPage() {
   // rows, so with only `status` the copilot proposals waiting on one person may
   // not be IN the response at all. `objectType` and `approverUserId` narrow in
   // the endpoint for the same reason `status` does.
-  const [status, setStatus] = useState<string>("pending");
-  const [objectType, setObjectType] = useState<string>("");
-  const [approver, setApprover] = useState<string>("");
+  const [status, setStatus] = useState<string>(() => searchParams.get("status") ?? "pending");
+  const [objectType, setObjectType] = useState<string>(() => searchParams.get("objectType") ?? "");
+  const [approver, setApprover] = useState<string>(() => searchParams.get("approverUserId") ?? "");
   const filters = { status, objectType, approverUserId: approver };
   const queueUrl = () => {
     const p = new URLSearchParams();

@@ -55,6 +55,7 @@ export const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // CSS only, and an empty ledger says "unmeasured", never zero.
       { label: "Posture", to: "/admin/posture" },
       { label: "Trust & evidence", to: "/admin/governance/trust" },
+      { label: "Governance alerts", to: "/admin/governance/alerts" },
       // ADR-0047 — the BOARD-facing read of the same two ledgers the Cost
       // dashboard and the Audit log render operationally. Nothing new is
       // stored: a report is a read-only projection, scoped to the caller's own
@@ -101,6 +102,8 @@ export const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // enforces.
       { label: "Use cases", to: "/admin/use-cases" },
       { label: "AI intake", to: "/admin/governance/intake" },
+      { label: "Dependency graph", to: "/admin/governance/graph" },
+      { label: "Regulatory intelligence", to: "/admin/governance/regulatory" },
       // ADR-0045 — the RISK-ACCEPTANCE gate beside the quality gate: "has a
       // human accepted the risk of using this model for this purpose, and is
       // that acceptance still valid?" A high eval score is an input to that

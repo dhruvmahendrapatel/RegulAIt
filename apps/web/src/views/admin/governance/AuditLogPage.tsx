@@ -134,6 +134,17 @@ export default function AuditLogPage() {
             >
               Download CSV
             </Button>
+            <Button
+              size="sm"
+              variant="primary"
+              title="Download an offline-verifiable bundle containing the full filtered audit CSV, manifest, and signature"
+              onClick={() => {
+                const join = qs ? "&" : "?";
+                void downloadCsv(`/v1/audit.csv${qs}${join}signed=1`, "audit-log.signed.zip", (msg) => toast(msg, "error"));
+              }}
+            >
+              Download signed bundle
+            </Button>
           </div>
           <p className={v.faint}>
             A row carries a deploy mode only when the action was deploy-mode-scoped — a workflow

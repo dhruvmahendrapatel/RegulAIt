@@ -19,7 +19,7 @@
  *    org's own attestations or reports.
  */
 import { useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
@@ -95,6 +95,7 @@ const CATEGORY_LABELS: Record<string, string> = {
 
 export default function VendorsPage() {
   const act = useAction();
+  const [searchParams] = useSearchParams();
 
   const list = useQuery({
     queryKey: ["admin", "vendors"],
@@ -109,7 +110,7 @@ export default function VendorsPage() {
     ...new Set((packs.data?.packs ?? []).filter((p) => p.status === "active").map((p) => p.framework)),
   ];
 
-  const [openId, setOpenId] = useState<string | null>(null);
+  const [openId, setOpenId] = useState<string | null>(() => searchParams.get("vendorId"));
   const [framework, setFramework] = useState("");
   const detail = useQuery({
     queryKey: ["admin", "vendor", openId, framework],

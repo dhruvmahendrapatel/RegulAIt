@@ -36,15 +36,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
  * should have a button now"; adding one is a decision, so it should be a diff
  * somebody reviews.
  */
-const DELIBERATELY_API_ONLY = new Map([
-  // (route pattern) -> why no screen reaches it
-  [
-    "/v1/risks/:x/controls/:x",
-    "TEMPORARY (ADR-0147). Unlink-control button is part of AgentCoordination.md " +
-      "task X2 (Use-case 360 → Risks tab, apps/web owned by the Codex agent). " +
-      "X2 is not VERIFIED until it ships the button AND deletes this entry.",
-  ],
-]);
+const DELIBERATELY_API_ONLY = new Map([]);
 
 const walk = (dir, out = []) => {
   for (const e of readdirSync(dir)) {

@@ -18,6 +18,7 @@
  *    evidence measured at that moment is frozen into the audit trail.
  */
 import { useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
@@ -26,6 +27,7 @@ import { Badge, Button, Card, EmptyState, Field, Input, Select, Table, Textarea,
 import { QueryGate, optionEls, useAction, useAgents, useProjects, agentOpts } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
+import { RiskLibraryPicker } from "./RiskLibraryPicker";
 
 type RiskStatus = "open" | "mitigating" | "accepted" | "closed";
 
@@ -103,6 +105,7 @@ function measuredCells(m: Record<string, unknown>): string {
 }
 
 export default function RisksPage() {
+  const [searchParams] = useSearchParams();
   const agents = useAgents();
   const projects = useProjects();
   const act = useAction();
@@ -115,7 +118,7 @@ export default function RisksPage() {
     queryKey: ["admin", "risks"],
     queryFn: () => api.get<{ risks: RiskRow[] }>("/v1/risks"),
   });
-  const [openId, setOpenId] = useState<string | null>(null);
+  const [openId, setOpenId] = useState<string | null>(searchParams.get("riskId"));
   const detail = useQuery({
     queryKey: ["admin", "risk", openId],
     queryFn: () => api.get<RiskDetail>(`/v1/risks/${openId}`),
@@ -162,6 +165,7 @@ export default function RisksPage() {
         info={<p>The register that makes the measurements legible as risk: a named scenario, an owner, the mitigating control we actually enforce, and a residual-risk acceptance record. Evidence is computed live from the real ledgers at read time — never hand-ticked — and likelihood/impact stay declared human judgments beside it, never blended into a score.</p>}
       />
       <div className={v.stack}>
+        <RiskLibraryPicker onAdded={() => void refreshAll()} />
         {/* ---------------- register ---------------- */}
         <Card title="Register a risk">
           <form
@@ -207,6 +211,8 @@ export default function RisksPage() {
                   <option value="hallucination">hallucination</option>
                   <option value="shadow_ai">shadow AI</option>
                   <option value="third_party_ai">third-party AI (vendors)</option>
+                  <option value="bias_fairness">bias / fairness</option>
+                  <option value="unsafe_output">unsafe output</option>
                 </Select>
               </Field>
             </div>

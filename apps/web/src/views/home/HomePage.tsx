@@ -32,6 +32,7 @@ import {
 } from "../../ui/kit";
 import v from "../views.module.css";
 import { TrustSnapshotCard } from "../admin/governance/TrustDashboardPage";
+import { GovernanceAlertsSnapshot } from "../admin/governance/GovernanceAlertsPage";
 
 export default function HomePage() {
   const { auth } = useSession();
@@ -47,6 +48,7 @@ export default function HomePage() {
         {auth?.isAdmin && <SuiteLauncher />}
         {auth?.isAdmin && <SetupCard />}
         {auth?.isAdmin && <TrustSnapshotCard />}
+        {auth?.isAdmin && <GovernanceAlertsSnapshot />}
         <div className={v.grid2}>
           <ApprovalsCard />
           <SpendCard />

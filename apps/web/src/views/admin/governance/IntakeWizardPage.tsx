@@ -1,10 +1,10 @@
-import { useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { useMemo, useRef, useState } from "react";
+import { Link, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { api } from "../../../api/client";
+import { ApiError, api } from "../../../api/client";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, Field, Input, Select, Textarea } from "../../../ui/kit";
-import { useAgents } from "../adminKit";
+import { useAction, useAgents } from "../adminKit";
 import v from "../../views.module.css";
 import s from "./demoGovernance.module.css";
 
@@ -39,14 +39,26 @@ interface IntakeAssistResponse {
 }
 
 interface VendorSummary { id: string; name: string; category: string; status: string }
+interface CreatedUseCase { id: string; instance: { id: string } | null }
+interface CreatedRisk { id: string }
+
+interface SubmissionCheckpoint {
+  useCaseId?: string;
+  instanceId?: string;
+  planningAdvanced?: boolean;
+  questionnaireSubmitted?: boolean;
+  riskIds: Record<string, string>;
+  linkedControls: Record<string, string[]>;
+}
 
 const STEPS = ["Describe", "Suggestions", "Questionnaire", "Link stack", "Review"];
 
 export default function IntakeWizardPage() {
+  const [prefill] = useSearchParams();
   const [step, setStep] = useState(0);
-  const [title, setTitle] = useState("Credit-limit-increase assistant");
+  const [title, setTitle] = useState(prefill.get("title") ?? "Credit-limit-increase assistant");
   const [description, setDescription] = useState(
-    "Helps Acme Bank customers request a credit-limit increase using profile and financial data, with a human reviewing every recommendation.",
+    prefill.get("description") ?? "Helps Acme Bank customers request a credit-limit increase using profile and financial data, with a human reviewing every recommendation.",
   );
   const [purposeDomain, setPurposeDomain] = useState("essential-services");
   const [profilesNaturalPersons, setProfilesNaturalPersons] = useState(true);
@@ -58,6 +70,9 @@ export default function IntakeWizardPage() {
   const [questionnaire, setQuestionnaire] = useState<Record<string, string>>({});
   const [agentId, setAgentId] = useState("");
   const [vendorId, setVendorId] = useState("");
+  const [submittedUseCaseId, setSubmittedUseCaseId] = useState<string | null>(null);
+  const checkpoint = useRef<SubmissionCheckpoint>({ riskIds: {}, linkedControls: {} });
+  const submitAction = useAction();
 
   const agents = useAgents();
   const vendors = useQuery({
@@ -121,6 +136,80 @@ export default function IntakeWizardPage() {
 
   const canContinue = step === 0 ? Boolean(title.trim() && description.trim()) : Boolean(assist.data);
   const setDecision = (key: string, value: Decision) => setDecisions((current) => ({ ...current, [key]: value }));
+
+  const questionnaireMarkdown = () => {
+    if (!assist.data) return "";
+    const sections = acceptedQuestions.map((item) => {
+      const edited = questionnaire[item.id] ?? item.text;
+      return `## ${item.heading}\n\n${edited.trim()}`;
+    });
+    return [...sections, `## 9. EU AI Act risk screening\n\n${assist.data.euAiActBlock.trim()}`].join("\n\n");
+  };
+
+  const submit = async () => {
+    if (!assist.data) return;
+    const progress = checkpoint.current;
+
+    if (!progress.useCaseId) {
+      const created = await api.post<CreatedUseCase>("/v1/use-cases", {
+        name: title.trim(),
+        description: description.trim(),
+        businessContext: description.trim(),
+        dataSensitivity: "restricted",
+        complianceTags: acceptedFrameworks.map((item) => item.framework),
+        intendedAgentIds: agentId ? [agentId] : [],
+      });
+      progress.useCaseId = created.id;
+      progress.instanceId = created.instance?.id;
+    }
+
+    if (!progress.instanceId) {
+      throw new Error("The use case was created, but the intake workflow instance was not returned. Retry after an operator checks the workflow setup.");
+    }
+    if (!progress.planningAdvanced) {
+      await api.post(`/v1/workflows/instances/${progress.instanceId}/advance`, { stageId: "plan" });
+      progress.planningAdvanced = true;
+    }
+    if (!progress.questionnaireSubmitted) {
+      await api.post(`/v1/workflows/instances/${progress.instanceId}/artifacts`, {
+        stageId: "questionnaire",
+        content: questionnaireMarkdown(),
+      });
+      progress.questionnaireSubmitted = true;
+    }
+
+    for (const risk of acceptedRisks) {
+      let riskId = progress.riskIds[risk.scenarioKey];
+      if (!riskId) {
+        const created = await api.post<CreatedRisk>("/v1/risks", {
+          title: risk.title,
+          description: suggestionEdits[`risk:${risk.scenarioKey}`] ?? risk.description,
+          category: risk.category,
+          likelihood: risk.likelihood,
+          impact: risk.impact,
+          useCaseId: progress.useCaseId,
+          ...(agentId ? { agentId } : {}),
+          ...(vendorId ? { vendorId } : {}),
+        });
+        riskId = created.id;
+        progress.riskIds[risk.scenarioKey] = riskId;
+      }
+
+      const linked = progress.linkedControls[risk.scenarioKey] ?? [];
+      for (const controlRef of risk.suggestedControls) {
+        if (linked.includes(controlRef)) continue;
+        try {
+          await api.post(`/v1/risks/${riskId}/controls`, { controlRef });
+        } catch (error) {
+          if (!(error instanceof ApiError) || error.status !== 409) throw error;
+        }
+        linked.push(controlRef);
+      }
+      progress.linkedControls[risk.scenarioKey] = linked;
+    }
+
+    setSubmittedUseCaseId(progress.useCaseId);
+  };
 
   return (
     <>
@@ -246,8 +335,32 @@ export default function IntakeWizardPage() {
               <div className={v.listRow}><strong>Description</strong><span className={v.grow}>{description}</span></div>
               <div className={v.listRow}><strong>Questionnaire</strong><span className={v.grow}>{acceptedQuestions.length} accepted sections plus the EU AI Act answers block</span></div>
               <div className={v.listRow}><strong>Sources</strong><span className={`${v.grow} ${v.row}`}>{sourceSummary.map((source) => <Badge key={source} tone="info">{source}</Badge>)}</span></div>
-              <div className={s.callout}>Final persistence is deliberately not part of this first shell commit. Until the create → plan → artifact → risk sequence is verified atomically, this screen will not create a partial governance record.</div>
-              <div><Button disabled>Submit for human review</Button> <Link to="/admin/use-cases">Use the existing intake form</Link></div>
+              {assist.data.blocking ? (
+                <div className={v.errLine} role="alert">
+                  This proposal screened as prohibited. The platform does not expose a direct “save rejected” transition, so submission is disabled rather than misrepresenting a proposed record as rejected.
+                </div>
+              ) : (
+                <div className={s.callout}>
+                  Submission creates the use case, advances planning, stores the human-edited questionnaire, creates each accepted risk, and links its suggested controls. If a later step fails, retry resumes from the last successful checkpoint rather than duplicating records.
+                </div>
+              )}
+              {submitAction.error ? <p className={v.errLine} role="alert">{submitAction.error} The completed steps have been retained; retry to resume.</p> : null}
+              {submittedUseCaseId ? (
+                <div className={s.callout} role="status">
+                  Submitted for human review. <Link to={`/admin/governance/use-cases/${submittedUseCaseId}`}>Open the use-case workspace</Link>.
+                </div>
+              ) : (
+                <div>
+                  <Button
+                    variant="primary"
+                    disabled={submitAction.busy || Boolean(assist.data.blocking)}
+                    onClick={() => void submitAction.run(submit, "Use case submitted for human review")}
+                  >
+                    {submitAction.busy ? "Submitting…" : "Submit for human review"}
+                  </Button>{" "}
+                  <Link to="/admin/use-cases">Open the classic register</Link>
+                </div>
+              )}
             </div>
           </Card>
         )}

@@ -57,6 +57,10 @@ const formatCoverage = (value: number | null) => (value == null ? "Unmeasured" :
 
 export default function TrustDashboardPage() {
   const q = useQuery(trustQuery());
+  const alerts = useQuery({
+    queryKey: ["governance", "alerts", "active"],
+    queryFn: () => api.get<{ counts: { open: number; acknowledged: number } }>("/v1/governance/alerts?status=active"),
+  });
   const [active, setActive] = useState<DimensionKey>("bias");
 
   return (
@@ -72,7 +76,7 @@ export default function TrustDashboardPage() {
         }
       />
       <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
-        {q.data ? <TrustReportView report={q.data} active={active} onActive={setActive} /> : null}
+        {q.data ? <><div className={v.row} style={{ marginBottom: "var(--s2)" }}><Link to="/admin/governance/alerts"><Badge tone={(alerts.data?.counts.open ?? 0) > 0 ? "danger" : "ok"}>{(alerts.data?.counts.open ?? 0) + (alerts.data?.counts.acknowledged ?? 0)} active governance alert(s)</Badge></Link></div><TrustReportView report={q.data} active={active} onActive={setActive} /></> : null}
       </QueryGate>
     </>
   );

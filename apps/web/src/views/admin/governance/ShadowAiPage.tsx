@@ -34,6 +34,7 @@
  *    opt-in and is labelled as such.
  */
 import { useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
@@ -193,6 +194,23 @@ interface DiscoveryResult {
   retention: string;
   posture: string;
 }
+interface McpDiscoveryResult {
+  posture: string;
+  observed: number;
+  unregistered: number;
+  registryCount: number;
+  results: Array<{
+    host: string;
+    path: string | null;
+    indicators: string[];
+    confidence: string;
+    occurrences: number;
+    samples: string[];
+    registered: boolean;
+    registeredAs: string | null;
+    verdict: string;
+  }>;
+}
 
 const DISCOVERY_KINDS: Array<{ v: string; l: string }> = [
   { v: "dns_log", l: "DNS query log (generic lines)" },
@@ -266,6 +284,7 @@ export default function ShadowAiPage() {
   const rawAct = useApiAction();
   /** first-party discovery keeps the structured classification the same way */
   const discAct = useApiAction();
+  const mcpAct = useApiAction();
 
   const [evidence, setEvidence] = useState(EXAMPLE);
   const [preview, setPreview] = useState<unknown>(null);
@@ -288,6 +307,8 @@ export default function ShadowAiPage() {
   const [discSubject, setDiscSubject] = useState("");
   const [discContent, setDiscContent] = useState("");
   const [discResult, setDiscResult] = useState<DiscoveryResult | null>(null);
+  const [mcpContent, setMcpContent] = useState("");
+  const [mcpResult, setMcpResult] = useState<McpDiscoveryResult | null>(null);
 
   const refresh = () => {
     void catalogue.refetch();
@@ -362,6 +383,14 @@ export default function ShadowAiPage() {
     );
     if (res) setDiscResult(res);
     if (mode === "apply") refresh();
+  };
+
+  const submitMcpDiscovery = async (mode: "preview" | "apply") => {
+    const result = await mcpAct.run<McpDiscoveryResult>(
+      () => api.post<McpDiscoveryResult>("/v1/shadow-ai/mcp-discovery", { content: mcpContent, mode }),
+      mode === "preview" ? "MCP evidence compared with this deployment's registry — nothing was written." : "MCP discovery result recorded in the audit trail.",
+    );
+    if (result) setMcpResult(result);
   };
 
   const bySeverity = useMemo(() => {
@@ -803,6 +832,29 @@ export default function ShadowAiPage() {
         </QueryGate>
       </Card>
 
+      <Card title="MCP server discovery (operator-supplied evidence)">
+        <div className={v.stack}>
+          <p className={v.dim}>Paste logs that contain MCP transport paths, protocol headers, or JSON-RPC methods. regulAIt compares observed hosts with this deployment’s MCP registry; it does not scan, connect to, or crawl your estate.</p>
+          <Field label="MCP log evidence"><Textarea rows={7} value={mcpContent} onChange={(event) => setMcpContent(event.target.value)} spellCheck={false} placeholder={'POST https://tools.example/mcp MCP-Protocol-Version: 2025-06-18 {"method":"tools/list"}'} /></Field>
+          <div className={v.row}>
+            <Button disabled={mcpAct.busy || !mcpContent.trim()} onClick={() => void submitMcpDiscovery("preview")}>Compare with registry (writes nothing)</Button>
+            <Button variant="primary" disabled={mcpAct.busy || !mcpContent.trim() || !mcpResult || mcpResult.unregistered === 0} onClick={() => void submitMcpDiscovery("apply")}>Record unregistered hosts</Button>
+          </div>
+          <OutcomePanel outcome={mcpAct.outcome} />
+          {mcpResult ? <div className={v.stack}>
+            <div className={a.statRow}><Stat value={mcpResult.observed} label="Observed MCP hosts" /><Stat value={mcpResult.unregistered} label="Unregistered" /><Stat value={mcpResult.registryCount} label="Registry entries" /></div>
+            {mcpResult.results.length === 0 ? <EmptyState title="No MCP indicators found" body="No supported MCP transport path, protocol header, or JSON-RPC method appeared in the supplied text." /> : <Table rows={mcpResult.results} rowKey={(row) => row.host} columns={[
+              { key: "host", header: "Host", render: (row) => <><code>{row.host}</code>{row.path ? <span className={v.faint}> {row.path}</span> : null}</> },
+              { key: "confidence", header: "Confidence", render: (row) => <Badge tone={row.confidence === "high" ? "warn" : "info"}>{row.confidence}</Badge> },
+              { key: "registry", header: "Registry", render: (row) => <Badge tone={row.registered ? "ok" : "danger"}>{row.registered ? row.registeredAs ?? "registered" : "unregistered"}</Badge> },
+              { key: "evidence", header: "Evidence", render: (row) => <span className={v.dim}>{row.indicators.join(", ")} · {row.occurrences} line(s)</span> },
+              { key: "verdict", header: "Verdict", render: (row) => <span className={v.dim}>{row.verdict}</span> },
+            ]} />}
+            <p className={v.faint}>{mcpResult.posture}</p>
+          </div> : null}
+        </div>
+      </Card>
+
       <Card title="Import evidence (rows already in regulAIt's shape)">
         <p className={v.faint}>
           An evidence file is untrusted input: size-bounded, schema-checked, and refused outright if it carries a
@@ -866,7 +918,10 @@ export default function ShadowAiPage() {
                   key: "triage",
                   header: "",
                   render: (r) => (
-                    <Button onClick={() => { setDispositionFor(r.id); setReason(""); }}>Triage</Button>
+                    <div className={v.row}>
+                      <Link to={`/admin/governance/intake?title=${encodeURIComponent(`Govern ${r.subject}`)}&description=${encodeURIComponent(`Register and govern the ${r.provider} usage observed for ${r.subject}. Evidence sources: ${r.signalSources.join(", ")}.`)}`}>Register as use case</Link>
+                      <Button onClick={() => { setDispositionFor(r.id); setReason(""); }}>Triage</Button>
+                    </div>
                   ),
                 },
               ]}

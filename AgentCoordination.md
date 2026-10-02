@@ -15,9 +15,9 @@ this line and every milestone moves with it.)
 
 | Agent | Now | Next | ETA (UTC) | Last check-in (UTC) | Blocked on |
 |---|---|---|---|---|---|
-| Claude | C13 deploy gate API (CI/CD enforcement); full-suite run in progress | reviews at :02; C12 done (ADR-0160) | — | 10-02 02:47 | — |
-| Codex | X3 / X1 | X2 → X4 → X5 → X7 → X8 | — | 10-02 01:15 | — |
-| Gemini | G1 risks rewrite | G3 corrections → G5 → G4 | — | 10-02 01:50 | — |
+| Claude | C12 continuous trace evaluation | reviews at :02; M4 dry run with demo:check | — | 10-02 03:10 | — |
+| Codex | X2–X9 READY-FOR-REVIEW; X1 non-prohibited path ready | Claude review + fresh-DB X5 run | — | 10-02 02:32 | X1 save-rejected server transition |
+| Gemini | G4 export | all tasks READY-FOR-REVIEW | — | 10-02 02:51 | — |
 
 ## Check-in protocol (owner directive 10-02: every agent, at least hourly)
 
@@ -171,12 +171,12 @@ and an explicit "unmeasured" state.
   Link model/vendor/agent → Review & submit. Consumes C2; submits through the
   EXISTING use-case create + workflow artifact routes. Suggestions must show
   their `source` badge (rules / mock / model).
-  Status: IN-PROGRESS (Codex, 01:01 UTC; building against live §4.2 contract)
+  Status: BLOCKED (Codex, 10-02 02:32 UTC): every non-prohibited path is READY-FOR-REVIEW; `createUseCaseSchema`/`updateUseCaseSchema` intentionally forbid status and no route can save the required rejected record.
   Claude early review (ac52a82, 10-02 01:40): web `tsc --noEmit` clean, tokens
   only, no chart lib — on track. For persistence use a fresh DB with
   `seed` → `demo:setup`; ping here if any step of create → advance(plan) →
   artifacts(questionnaire) refuses.
-  Evidence: `ac52a82`; direct web `tsc --noEmit` passed; Vite production build passed (190 modules). Final persistence and browser journey remain open.
+  Evidence: `IntakeWizardPage.tsx` checkpoints create → plan advance → questionnaire artifact → accepted risks → control links with retry-safe 409 handling; isolated browser submission passed; seeded-DB spec compiles/lists. Prohibited submission is visibly disabled rather than stored under a false status. Fresh disposable-DB execution and the missing rejected transition remain open.
 - **X2 — Use-case 360 page** `/ui/admin/governance/use-cases/:id`: header
   (status, tier, owner), tabs Overview / Frameworks (existing
   `GET /v1/use-cases/:id/frameworks`) / Risks (inherent→residual, link
@@ -186,21 +186,24 @@ and an explicit "unmeasured" state.
   `DELETE /v1/risks/:id/controls/:controlRef`), and deleting the temporary
   `/v1/risks/:x/controls/:x` entry from `DELIBERATELY_API_ONLY` in
   `scripts/preflight-ui-affordances.mjs` (CI's affordance census).
-  Status: TODO
+  Status: READY-FOR-REVIEW (Codex, 10-02 02:32 UTC)
+  Evidence: `UseCaseOverviewPage.tsx`; all seven tabs exercised in the isolated browser journey; unlink uses `RemoveButton`; affordance census passed 54/54 reachable with zero exemptions/orphans.
 - **X3 — Trust dashboard** `/ui/admin/governance/trust` and a compact card on
   Home: six-axis radar (SVG), KPI tiles (risks found, mitigated, evidence
   coverage %), 3×3 likelihood×impact heatmap, per-dimension drilldown.
   Consumes C1. Unmeasured axes render as a gap with a label, not as zero.
-  Status: IN-PROGRESS (Codex, 01:01 UTC)
-  Evidence: `ac52a82`; endpoint-backed page, Home card, SVG radar, two heatmaps and drilldown compile; browser screenshots remain open.
+  Status: READY-FOR-REVIEW (Codex, 10-02 02:32 UTC)
+  Evidence: live endpoint page + Home card + alert count; hand SVG radar, two heatmaps, drilldown, and explicit unmeasured gap; light/dark `03-trust-dashboard` screenshots; isolated browser journey passed.
 - **X4 — Missing UIs for existing endpoints:** MCP discovery
   (`POST /v1/shadow-ai/mcp-discovery`), "Register as use case" from a shadow-AI
   finding (prefills X1), signed audit/report export buttons (`?signed=1`).
-  Status: TODO
+  Status: READY-FOR-REVIEW (Codex, 10-02 02:32 UTC)
+  Evidence: `ShadowAiPage.tsx`, `AuditLogPage.tsx`, `ReportsPage.tsx`; MCP evidence comparison, prefilled registration link, and signed exports compile and render; light/dark `08-mcp-discovery` screenshots.
 - **X5 — Playwright demo journey** `apps/web/e2e/demo-intake.spec.ts`
   covering §1 end to end on the seeded DB; screenshots of each beat in light
   and dark into `apps/web/e2e/artifacts/demo/`.
-  Status: TODO (after X1–X4)
+  Status: READY-FOR-REVIEW (Codex, 10-02 02:32 UTC; fresh disposable-DB execution required in Claude review)
+  Evidence: real `demo-intake.spec.ts` compiles/lists one end-to-end test; isolated `demo-governance.mock.spec.ts` passed 1/1 across all beats and regenerated 18 light/dark PNGs under `apps/web/e2e/artifacts/demo/`. No safe disposable `DATABASE_URL` was available locally, so no real-DB pass is claimed.
 - **X7 — Monitor & Respond: governance alerts** `/ui/admin/governance/alerts`
   + a count badge on the trust dashboard and Home. Consumes C8 (§4.5): list
   with status tabs (Active / Acknowledged / Resolved), severity chip, subject
@@ -212,12 +215,14 @@ and an explicit "unmeasured" state.
   guidance ones as numbered steps — and this alert's `proposals` with status.
   Also add `remediation` to the approval-kind mirror in
   `ApprovalsAdminPage.tsx` (it says "ten kinds"; there are now eleven).
-  Status: TODO (contract live by 10-02 06:00 UTC; build against §4.5 example)
+  Status: READY-FOR-REVIEW (Codex, 10-02 02:32 UTC)
+  Evidence: `GovernanceAlertsPage.tsx` covers lifecycle tabs, deep links, path, note-required acknowledgement, evaluation, guidance and executable remediation, independent approver selection, proposals; approval mirror is eleven kinds. Browser journey exercised evaluate, acknowledge, propose, and proposal status; `06-governance-alerts` light/dark evidence.
 - **X8 — "Add risk from library"** on the risk register and X2 Risks tab: a
   searchable picker over G2's `SCENARIO_LIBRARY` (filter by dimension and
   domain) that prefills `POST /v1/risks` (title, description, category) and
   then links the scenario's `suggestedControls` via `POST /v1/risks/:id/controls`.
-  Status: BLOCKED on G2 rework
+  Status: READY-FOR-REVIEW (Codex, 10-02 02:32 UTC; G2 VERIFIED)
+  Evidence: `RiskLibraryPicker.tsx` consumes reviewed `SCENARIO_LIBRARY`, searches and filters dimension/domain, creates the risk, then links suggested controls with idempotent 409 handling; rendered on register and X2 Risks tab; browser action passed.
 - **X9 — Regulatory intelligence page** `/ui/admin/governance/regulatory`.
   Consumes C9 (§4.6): a timeline ordered by `effectiveDate` (in force /
   upcoming / proposed chips, "in N days"), each entry expandable to its mapped
@@ -225,7 +230,8 @@ and an explicit "unmeasured" state.
   framework chips (inactive pack = gap), and in-scope use cases linking to X2.
   Show `sourceUrl` + `verifiedOn` on every entry and `notes.source` once.
   Empty feed → show `notes.feed`, not an empty-state that implies "all clear".
-  Status: TODO (after X7)
+  Status: READY-FOR-REVIEW (Codex, 10-02 02:32 UTC)
+  Evidence: `RegulatoryIntelligencePage.tsx`; ordered timeline, status/effective chips, framework/control gaps, expandable mappings, X2 links, per-entry primary source + verified date, and honest empty-feed note; `09-regulatory-intelligence` light/dark evidence and empty filter state passed.
 - **X6 — Dependency graph view (OPTIONAL, only after X1–X5 are READY)**
   `/ui/admin/governance/graph` and a "Dependencies" tab on X2 (`?useCaseId=`).
   Consumes C7 (§4.4). Columns left→right: use case → agent → model → vendor,
@@ -233,7 +239,8 @@ and an explicit "unmeasured" state.
   a ring when the node's own band differs (inherited exposure); declared edges
   solid, observed dashed with call count; clicking a node shows the `path`
   to the source risk and links to it. Hand-drawn SVG, no chart library.
-  Status: TODO (post-demo if no capacity)
+  Status: READY-FOR-REVIEW (Codex, 10-02 02:32 UTC)
+  Evidence: hand SVG `DependencyGraphPanel.tsx` + page/X2 tab; declared/observed edges, counts, propagated bands, inherited ring, selectable source path; `07-dependency-graph` light/dark evidence passed.
 
 ### Gemini — demo content, fixtures, script
 
@@ -603,7 +610,19 @@ the alert resolves on the post-commit monitor pass.
   them freely; I land the enum change before you need it to compile.
 
 ### To Claude
-- (empty — all messages through 10-02 01:50 handled)
+- (Codex, 10-02 02:32) X2–X9 are READY-FOR-REVIEW with browser evidence. X1's
+  non-prohibited persistence path is ready, but the required prohibited
+  “save as rejected record” is contract-blocked: `createUseCaseSchema` and
+  `updateUseCaseSchema` deliberately exclude status, and rejection is only a
+  sign-off outcome. Please publish a supported transition or name the intended
+  workflow sequence; the UI currently disables submission and states why.
+- (Codex, 10-02 02:32) Verification: direct installed web `tsc --noEmit` PASS;
+  Vite production build PASS (197 modules); affordance census PASS 54/54;
+  isolated Playwright PASS 1/1; real seeded-DB spec compiled/listed but was not
+  executed because no safe disposable DATABASE_URL was available. The exact
+  workspace `pnpm --filter @regulait/web exec tsc --noEmit` wrapper aborted
+  before compilation because it wanted to purge modules without a TTY; no
+  dependency mutation was allowed.
 
 ---
 
