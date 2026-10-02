@@ -138,6 +138,11 @@ live model is a bonus, never a dependency.
   Verified with an inline fixture set (`zz-c6-demo-intake-seed.test.ts`);
   waits on G1 for the real dataset (CLI exits 1 with a clear message until then).
   Status: READY-FOR-REVIEW (self-verified) — final run pending G1
+- **C7 — Dependency graph + risk propagation** `GET /v1/inventory/graph[?useCaseId=&includeObserved=false]`
+  — LIVE (ADR-0156). Admin-only. Contract §4.4. Feeds the "Agent Governance /
+  dependency graph" beat if X6 lands; otherwise the 360 page can show
+  `propagatedRisk` for the use case node as a badge.
+  Status: READY-FOR-REVIEW (self-verified: 9 shared + 4 integration tests)
 
 ### Codex — web UI (apps/web), browser verification
 
@@ -179,6 +184,14 @@ and an explicit "unmeasured" state.
   covering §1 end to end on the seeded DB; screenshots of each beat in light
   and dark into `apps/web/e2e/artifacts/demo/`.
   Status: TODO (after X1–X4)
+- **X6 — Dependency graph view (OPTIONAL, only after X1–X5 are READY)**
+  `/ui/admin/governance/graph` and a "Dependencies" tab on X2 (`?useCaseId=`).
+  Consumes C7 (§4.4). Columns left→right: use case → agent → model → vendor,
+  MCP servers/connectors beside their agent; node colour = `propagatedRisk.band`,
+  a ring when the node's own band differs (inherited exposure); declared edges
+  solid, observed dashed with call count; clicking a node shows the `path`
+  to the source risk and links to it. Hand-drawn SVG, no chart library.
+  Status: TODO (post-demo if no capacity)
 
 ### Gemini — demo content, fixtures, script
 
@@ -336,6 +349,28 @@ Response:
 ```
 `residual` is null when none is declared. `summary.*` are for header badges
 ("1 live risk has no control", "1 agent lacks an approved model card").
+
+### 4.4 `GET /v1/inventory/graph?useCaseId=<uuid?>&includeObserved=<true|false>` — LIVE
+Admin-only. Edges point from DEPENDENT to DEPENDENCY.
+```json
+{ "generatedAt": "...", "scope": { "useCaseId": null, "includeObserved": true },
+  "window": { "days": 90, "applies": "observed edges only" },
+  "summary": { "nodes": 9, "edges": 10, "byType": { "agent": 2, "model": 2, "use_case": 1, "vendor": 1, "mcp_server": 1 },
+               "propagatedHigh": 4, "inheritedExposure": 3, "unattachedRisks": 0 },
+  "nodes": [ { "key": "use_case:<id>", "type": "use_case", "id": "<id>", "label": "Credit-limit assistant",
+               "attributes": { "status": "approved", "euAiActTier": "high" },
+               "ownRisk": { "score": 0, "band": "none", "riskId": null, "openRisks": 0 },
+               "propagatedRisk": { "score": 9, "band": "high", "sourceNodeKey": "vendor:<id>", "sourceRiskId": "<risk id>",
+                                   "path": ["use_case:<id>", "agent:<id>", "model:mock:mock-balanced", "vendor:<id>"] } } ],
+  "edges": [ { "from": "use_case:<id>", "to": "agent:<id>", "kind": "uses_agent", "basis": "declared" },
+             { "from": "agent:<id>", "to": "mcp_server:<id>", "kind": "calls_tool", "basis": "observed",
+               "observedCount": 12, "lastSeenAt": "..." } ],
+  "notes": { "propagation": "...", "ratings": "...", "observed": "...", "unattached": "..." } }
+```
+Node types: `use_case | agent | model | vendor | mcp_server | connector`. Edge
+kinds: `uses_agent | runs_on | supplied_by | calls_tool | calls_connector |
+consumes_output`. Bands: `none | low | medium | high` (score 0, 1–2, 3–4, 6–9).
+`model` nodes have `id: null` unless custom (`model:custom:<providerId>`).
 
 ---
 

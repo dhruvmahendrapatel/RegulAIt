@@ -790,7 +790,7 @@ Demo-critical items for 2026-10-05 are tracked in `AgentCoordination.md`
 | Central inventory: use cases, models, vendors, agents | exists | `use-cases.ts`, `mrm.ts`, `vendors.ts`, `agents-connectors.ts`, `inventory.ts`; no single 360 view [C3, X2] |
 | Agent cards (purpose, tools, data sources, guardrails) | partial | data exists across tables; no card [C5] |
 | Platform & MCP server governance | exists | `mcp-proxy.ts`, `mcp-registry.ts`, admission/egress ADRs |
-| Dependency graph (agents, sub-agents, models, tools, data) | partial | `lineage.ts`; no graph UI, no risk propagation |
+| Dependency graph (agents, sub-agents, models, tools, data) | exists (API) | `dependency-graph.ts` (ADR-0156): declared + observed edges, max-propagated risk with path; no graph UI yet [X6] |
 | Shadow-AI discovery and classification | partial | classifies imported evidence (`shadow-ai.ts`); no network scanning; MCP discovery has no UI [X4] |
 | AI-assisted intake & registration | missing | ADR-0080 forbade pre-fill; governed, suggestion-only assistant [C2, X1, ADR-0149] |
 

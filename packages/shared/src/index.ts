@@ -3293,6 +3293,26 @@ export {
   type DemoRiskTarget,
 } from "./demo-intake-types.js";
 
+// ADR-0156 — the AI-system dependency graph and max-propagation of declared risk.
+export {
+  DEPENDENCY_GRAPH_NOTES,
+  GRAPH_EDGE_KINDS,
+  GRAPH_NODE_TYPES,
+  NO_RISK,
+  RISK_BANDS,
+  effectiveRiskRating,
+  propagateRisk,
+  rateRisk,
+  type GraphEdgeBasis,
+  type GraphEdgeInput,
+  type GraphEdgeKind,
+  type GraphNodeType,
+  type GraphRiskInput,
+  type PropagatedRating,
+  type RiskBand,
+  type RiskRating,
+} from "./dependency-graph.js";
+
 // ---------------------------------------------------------------------------
 // ADR-0084 — the AI vendor registry (third-party AI risk): the vocabulary,
 // the request shapes, and the attested-never-measured disclaimer. `status` is
