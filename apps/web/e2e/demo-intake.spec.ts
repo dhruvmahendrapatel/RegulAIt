@@ -77,7 +77,11 @@ test("seeded credit-assistant journey: discover, register, assess, approve, moni
   await expect(page.getByText(/Proposed tier:/)).toContainText("high");
   await shotBoth(page, "real-02-assist");
   await page.getByRole("button", { name: /Accept all remaining/ }).click();
-  for (let step = 0; step < 3; step += 1) await page.getByRole("button", { name: "Continue" }).click();
+  for (let step = 0; step < 2; step += 1) await page.getByRole("button", { name: "Continue" }).click();
+  // the stack step: the agent and vendor the shadow evidence pointed at (Anthropic usage)
+  await page.getByLabel("Model / agent").selectOption({ label: "claude-opus · anthropic/claude-opus-5" });
+  await page.getByLabel("Vendor").selectOption({ label: "Anthropic · approved" });
+  await page.getByRole("button", { name: "Continue" }).click();
     await page.getByRole("button", { name: "Submit for human review" }).click();
   const workspace = page.getByRole("link", { name: "Open the use-case workspace" });
   await expect(workspace).toBeVisible();
@@ -88,6 +92,13 @@ test("seeded credit-assistant journey: discover, register, assess, approve, moni
   await workspace.click();
   await expect(page.getByRole("tab", { name: "Risks" })).toBeVisible();
   await shotBoth(page, "real-03-use-case-360");
+  // 2A.1 — the Stack tab shows the linked agent's card; Dependencies shows the chain to its vendor
+  await page.getByRole("tab", { name: "Stack" }).click();
+  await expect(page.getByText("claude-opus").first()).toBeVisible();
+  await shotBoth(page, "real-03b-stack");
+  await page.getByRole("tab", { name: "Dependencies" }).click();
+  await expect(page.getByRole("img", { name: "AI dependency and propagated risk graph" })).toBeVisible();
+  await shotBoth(page, "real-03c-dependencies");
 
   await page.getByRole("tab", { name: "Risks" }).click();
   await expect(page.getByText("Add risk from library")).toBeVisible();

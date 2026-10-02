@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { api } from "../../../api/client";
+import { frameworkLabel } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Card, EmptyState, Field, Select } from "../../../ui/kit";
 import { QueryGate } from "../adminKit";
@@ -99,7 +100,7 @@ export default function RegulatoryIntelligencePage() {
         <QueryGate loading={query.isLoading} error={query.error} onRetry={() => void query.refetch()}>
           {query.data ? (
             <>
-              <div className={v.grid4}>
+              <div className={v.grid5}>
                 <RegulatoryStat label="Feed entries" value={query.data.summary.total} />
                 <RegulatoryStat label="In force" value={query.data.summary.inForce} tone="ok" />
                 <RegulatoryStat label="Upcoming" value={query.data.summary.upcoming} tone="info" />
@@ -120,7 +121,7 @@ export default function RegulatoryIntelligencePage() {
                   <Field label="Framework">
                     <Select value={framework} onChange={(event) => setFramework(event.target.value)}>
                       <option value="">All frameworks</option>
-                      {frameworks.map((id) => <option key={id} value={id}>{formatWords(id)}</option>)}
+                      {frameworks.map((id) => <option key={id} value={id}>{frameworkLabel(id)}</option>)}
                     </Select>
                   </Field>
                   <div className={v.faint}>Generated {formatDateTime(query.data.generatedAt)} · impact window {query.data.window.days} days</div>
@@ -174,7 +175,7 @@ function RegulatoryTimelineEntry({ update }: { update: RegulatoryUpdate }) {
           <div className={v.row}>
             {update.frameworks.map((item) => (
               <Badge key={item.framework} tone={item.packActive ? "primary" : "danger"} title={item.packActive ? `Active pack version ${item.activeVersion ?? "unknown"}` : "No active pack: framework gap"}>
-                {formatWords(item.framework)}{item.packActive ? ` v${item.activeVersion ?? "?"}` : " · inactive pack gap"}
+                {frameworkLabel(item.framework)}{item.packActive ? ` v${item.activeVersion ?? "?"}` : " · pack not active (gap)"}
               </Badge>
             ))}
           </div>
@@ -235,9 +236,13 @@ function controlTone(status: ControlStatus): "ok" | "warn" | "danger" | "neutral
 
 function relativeEffectiveDate(days: number): string {
   if (days === 0) return "effective today";
-  if (days > 0) return `in ${days} day${days === 1 ? "" : "s"}`;
-  const elapsed = Math.abs(days);
-  return `${elapsed} day${elapsed === 1 ? "" : "s"} ago`;
+  const n = Math.abs(days);
+  // days for the near term, then months, then whole years — "1590 days ago" is not a date a reader can place
+  const span =
+    n < 60 ? `${n} day${n === 1 ? "" : "s"}`
+    : n < 730 ? `${Math.round(n / 30.44)} months`
+    : `${Math.floor(n / 365.25)} years`;
+  return days > 0 ? `in ${span}` : `${span} ago`;
 }
 
 function formatWords(value: string): string {

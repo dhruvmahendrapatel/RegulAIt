@@ -72,8 +72,8 @@ Everything runs on the keyless **mock** provider. No live model, no external net
 
 ### 1B. AI intake — Ada
 - **URL:** `/ui/admin/governance/intake?source=shadow-ai…` (opened by 1A)
-- **Screen:** the banner *"Prefilled only from shadow-AI record …: name and observed-use
-  description."* Every screening answer is **blank** — the finding did not establish them.
+- **Screen:** the banner *"Prefilled from a shadow-AI finding — only its name and observed
+  use."* Every screening answer is **blank** — the finding did not establish them.
 - **Action — Ada enters the EU AI Act answers** (credit context):
   purpose **Essential services** · people affected **Customers** · decision autonomy **Human
   reviews every recommendation** · biometric **None** · sectors **financial services** · data
@@ -84,8 +84,9 @@ Everything runs on the keyless **mock** provider. No live model, no external net
 - **Screen:** *Proposed tier: high* with the rule reasons; frameworks and risks, each with a
   `rules` source badge and **not reviewed** — Continue stays disabled until each has a decision.
   Reject one (e.g. SOC 2) to show it, then **Accept all remaining**. **Continue** through the
-  questionnaire and stack, and on **Review** point at *Data sensitivity: regulated — derived from
-  the declared data categories*. **Submit for human review**.
+  questionnaire; on **Link the governed stack** choose **claude-opus** and the vendor
+  **Anthropic** (what the shadow evidence pointed at). On **Review** point at *Data sensitivity:
+  regulated — derived from the declared data categories*. **Submit for human review**.
 - **Say:** "The tier is computed from the structured EU AI Act answers by deterministic rules —
   not from a description, and never from a model. Suggestions are suggestions: each one is
   accepted, edited or rejected by a person. High-risk obligations apply from 2 December 2027
@@ -101,8 +102,9 @@ Everything runs on the keyless **mock** provider. No live model, no external net
 - **Screen:** status **under review**, **high tier**, 7 tabs: Overview, Frameworks, Risks, Stack,
   Dependencies, Approvals, Audit.
 - **Action:**
-  1. **Stack** — the agent card: declared purpose, data sources, owner, model cards with their
-     sign-off.
+  1. **Stack** — the agent card for **claude-opus**: declared purpose, owner (unassigned), and
+     **no approved model card** — the header already flags "1 agent lacks an approved model card".
+     **Dependencies** shows the chain use case → claude-opus → model → Anthropic.
   2. **Risks** — **Add risk from library**: search, pick an agentic scenario, choose likelihood
      and impact yourself (nothing is pre-rated), **Assess and add**; link a suggested control and
      set a residual rating.

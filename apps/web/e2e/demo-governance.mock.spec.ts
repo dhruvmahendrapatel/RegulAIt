@@ -156,7 +156,7 @@ test("enterprise governance demo surfaces render and complete their core actions
   await expect(page.getByRole("heading", { name: "Credit-limit-increase assistant" })).toBeVisible();
   await shotBoth(page, "04-use-case-overview");
   await page.getByRole("tab", { name: "Frameworks" }).click();
-  await expect(page.getByText("EU AI Act v2")).toBeVisible();
+  await expect(page.getByText("EU AI Act · v2")).toBeVisible();
   await page.getByRole("tab", { name: "Risks" }).click();
   await expect(page.getByText("Inherent")).toBeVisible();
   await page.getByLabel("Search scenarios").fill("destructive tool");
@@ -210,7 +210,7 @@ test("enterprise governance demo surfaces render and complete their core actions
   await expect(page.getByRole("heading", { name: "Regulatory & policy intelligence" })).toBeVisible();
   await expect(page.getByText("In force", { exact: true }).first()).toBeVisible();
   await expect(page.getByText("No upcoming effective date is present in this feed.")).toBeVisible();
-  await expect(page.getByText("inactive pack gap", { exact: false })).toBeVisible();
+  await expect(page.getByText("pack not active (gap)", { exact: false }).first()).toBeVisible();
   await page.getByText("Mapped controls and impacted use cases").last().click();
   await expect(page.getByRole("link", { name: "Credit-limit-increase assistant" }).last()).toBeVisible();
   await shotBoth(page, "09-regulatory-intelligence");

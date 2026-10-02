@@ -38,6 +38,8 @@ const BEATS = [
     persona: "Ada",
     shots: [
       ["real-03-use-case-360", "Use-case 360"],
+      ["real-03b-stack", "The agent the evidence pointed at, with its model-card status"],
+      ["real-03c-dependencies", "Use case → agent → model → vendor, with inherited risk"],
       ["real-04-risks-controls", "Risks with declared inherent and residual positions, tied to controls"],
     ],
   },

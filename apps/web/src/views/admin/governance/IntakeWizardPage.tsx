@@ -2,6 +2,7 @@ import { useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { ApiError, api } from "../../../api/client";
+import { humanize } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, Field, Input, Select, Textarea } from "../../../ui/kit";
 import { useAction, useAgents } from "../adminKit";
@@ -56,6 +57,9 @@ interface SubmissionCheckpoint {
 const STEPS = ["Describe", "Suggestions", "Questionnaire", "Link stack", "Review"];
 const SECTOR_OPTIONS = ["financial-services", "securities-broker-dealer", "healthcare", "payments", "public-sector", "general"] as const;
 const DATA_CATEGORY_OPTIONS = ["personal", "sensitive-personal", "health", "payment-card", "financial", "proprietary", "public"] as const;
+
+/** a rule's lowercase clause as a sentence: capital first letter, one closing period */
+const sentence = (text: string) => `${text.charAt(0).toUpperCase()}${text.slice(1).replace(/\.$/, "")}.`;
 
 export default function IntakeWizardPage() {
   const [prefill] = useSearchParams();
@@ -358,11 +362,11 @@ export default function IntakeWizardPage() {
               </div>
               <h2 className={v.sectionTitle}>Frameworks</h2>
               {assist.data.frameworks.map((item) => (
-                <Suggestion key={item.framework} title={item.title} body={suggestionEdits[`framework:${item.framework}`] ?? item.why} source={item.source} decision={decisions[`framework:${item.framework}`]} onDecision={(value) => setDecision(`framework:${item.framework}`, value)} onEdit={(value) => setSuggestionEdits((current) => ({ ...current, [`framework:${item.framework}`]: value }))} />
+                <Suggestion key={item.framework} title={item.title} body={suggestionEdits[`framework:${item.framework}`] ?? sentence(item.why)} source={item.source} decision={decisions[`framework:${item.framework}`]} onDecision={(value) => setDecision(`framework:${item.framework}`, value)} onEdit={(value) => setSuggestionEdits((current) => ({ ...current, [`framework:${item.framework}`]: value }))} />
               ))}
               <h2 className={v.sectionTitle}>Risk scenarios</h2>
               {assist.data.risks.map((item) => (
-                <Suggestion key={item.scenarioKey} title={item.title} body={suggestionEdits[`risk:${item.scenarioKey}`] ?? `${item.description} ${item.why}`} source={item.source} decision={decisions[`risk:${item.scenarioKey}`]} onDecision={(value) => setDecision(`risk:${item.scenarioKey}`, value)} onEdit={(value) => setSuggestionEdits((current) => ({ ...current, [`risk:${item.scenarioKey}`]: value }))} meta={`${item.dimension} · ${item.likelihood} likelihood · ${item.impact} impact`} />
+                <Suggestion key={item.scenarioKey} title={item.title} body={suggestionEdits[`risk:${item.scenarioKey}`] ?? `${item.description} Suggested because ${item.why.replace(/\.$/, "")}.`} source={item.source} decision={decisions[`risk:${item.scenarioKey}`]} onDecision={(value) => setDecision(`risk:${item.scenarioKey}`, value)} onEdit={(value) => setSuggestionEdits((current) => ({ ...current, [`risk:${item.scenarioKey}`]: value }))} meta={`${humanize(item.dimension)} · ${item.likelihood} likelihood · ${item.impact} impact`} />
               ))}
               <p className={v.faint}>{assist.data.disclaimer}</p>
             </div>
@@ -494,7 +498,7 @@ function MultiAnswerField(props: { label: string; values: string[]; options: rea
               checked={props.values.includes(option)}
               onChange={(event) => toggle(option, event.target.checked)}
             />
-            <span>{option.replaceAll("-", " ")}</span>
+            <span>{humanize(option)}</span>
           </label>
         ))}
       </div>

@@ -113,7 +113,11 @@ export default function AppShell(props: { children: ReactNode }) {
       key={n.to}
       to={n.to}
       end={n.to === "/"}
-      className={({ isActive }) => (isActive ? s.navItemActive! : s.navItem!)}
+      className={({ isActive }) =>
+        isActive || (n.also ?? []).some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`))
+          ? s.navItemActive!
+          : s.navItem!
+      }
       onClick={() => {
         setSideOpen(false);
         setFilter("");

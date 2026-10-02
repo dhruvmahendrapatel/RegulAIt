@@ -80,7 +80,7 @@ export function DependencyGraphPanel({ useCaseId }: { useCaseId?: string }) {
   }, [graph.data?.nodes]);
 
   const selected = (graph.data?.nodes ?? []).find((node) => node.key === selectedKey) ?? null;
-  const height = Math.max(270, ...[...layout.values()].map((point) => point.y + 70));
+  const height = Math.max(150, ...[...layout.values()].map((point) => point.y + 70));
 
   return (
     <div className={v.stack}>

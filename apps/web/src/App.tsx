@@ -176,6 +176,7 @@ export default function App() {
                         <Route path="governance/intake" element={<IntakeWizardPage />} />
                         <Route path="governance/trust" element={<TrustDashboardPage />} />
                         <Route path="governance/use-cases/:id" element={<UseCaseOverviewPage />} />
+                        <Route path="governance/use-cases" element={<Navigate to="/admin/use-cases" replace />} />
                         <Route path="governance/alerts" element={<GovernanceAlertsPage />} />
                         <Route path="governance/graph" element={<DependencyGraphPage />} />
                         <Route path="governance/regulatory" element={<RegulatoryIntelligencePage />} />

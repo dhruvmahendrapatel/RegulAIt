@@ -18,6 +18,8 @@
 export interface NavEntry {
   label: string;
   to: string;
+  /** other route prefixes that belong to this entry (a detail page living under another path) */
+  also?: string[];
 }
 
 export const WORKSPACE: NavEntry[] = [
@@ -100,7 +102,7 @@ export const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // of AI proposed, questionnaired, and signed off before anything ran?" —
       // an approved use case carries the same compliance tags the cascade
       // enforces.
-      { label: "Use cases", to: "/admin/use-cases" },
+      { label: "Use cases", to: "/admin/use-cases", also: ["/admin/governance/use-cases"] },
       { label: "AI intake", to: "/admin/governance/intake" },
       { label: "Dependency graph", to: "/admin/governance/graph" },
       { label: "Regulatory intelligence", to: "/admin/governance/regulatory" },
@@ -461,8 +463,10 @@ export function suiteOfPath(pathname: string): Suite {
   for (const suite of SUITES) {
     for (const section of suite.sections) {
       for (const item of section.items) {
-        if (path === item.to || path.startsWith(`${item.to}/`)) {
-          if (!best || item.to.length > best.len) best = { suite, len: item.to.length };
+        for (const prefix of [item.to, ...(item.also ?? [])]) {
+          if (path === prefix || path.startsWith(`${prefix}/`)) {
+            if (!best || prefix.length > best.len) best = { suite, len: prefix.length };
+          }
         }
       }
     }
