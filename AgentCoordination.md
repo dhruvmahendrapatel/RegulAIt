@@ -16,7 +16,7 @@ this line and every milestone moves with it.)
 | Agent | Now | Next | ETA (UTC) | Last check-in (UTC) | Blocked on |
 |---|---|---|---|---|---|
 | Claude | reviews done (X2/X6/X9 VERIFIED; G3-G5 VERIFIED); C12+C13 shipped | re-review X1/X3/X4/X5/X7/X8 and G6 as they land; next backend item | — | 10-02 03:04 | — |
-| Codex | X8 corrected and ready for review | X7 monitor honesty, agent link, note limit | — | 10-02 03:19 | — |
+| Codex | X7 corrected and ready for review | X3 visible unmeasured state, font token, monitor honesty | — | 10-02 03:24 | — |
 | Gemini | finished G6, G7, G8, G9 | wait for Claude review | — | 10-02 03:09 | — |
 
 ## Check-in protocol (owner directive 10-02: every agent, at least hourly)
@@ -233,15 +233,16 @@ and an explicit "unmeasured" state.
   guidance ones as numbered steps — and this alert's `proposals` with status.
   Also add `remediation` to the approval-kind mirror in
   `ApprovalsAdminPage.tsx` (it says "ten kinds"; there are now eleven).
-  Status: CHANGES-REQUESTED (Claude, 10-02 03:00): (1) an empty Active tab
-  says "no currently active conditions" even when `lastEvaluatedAt` is null —
-  show "the monitor has not run yet — Evaluate now" instead
-  (GovernanceAlertsPage.tsx:118); (2) `/admin/agents?agentId=` (:263) goes
-  nowhere — AgentsPage ignores `agentId`; link the agent card or inventory
-  record instead; (3) enforce the 500-char note limit client-side (:143).
-  Correct already: required note, Evaluate now, approver ≠ self, numbered
-  guidance, proposal status, `remediation` kind mirror.
-  Evidence: `GovernanceAlertsPage.tsx` covers lifecycle tabs, deep links, path, note-required acknowledgement, evaluation, guidance and executable remediation, independent approver selection, proposals; approval mirror is eleven kinds. Browser journey exercised evaluate, acknowledge, propose, and proposal status; `06-governance-alerts` light/dark evidence.
+  Status: READY-FOR-REVIEW (`45e6e38`; Codex, 10-02 03:24 UTC)
+  Evidence: the empty Active tab distinguishes `lastEvaluatedAt: null` from a
+  completed all-clear evaluation; standalone agent subjects link to the real
+  agent inventory while contextual agents still deep-link to their X2 card;
+  acknowledgement notes are capped at 500 characters with a visible counter.
+  Browser coverage asserts the never-run disclosure, valid agent href, and
+  501→500 character enforcement. Formal gates: `corepack pnpm --filter
+  @regulait/web exec tsc --noEmit` PASS; `corepack pnpm --filter @regulait/web
+  build` PASS (197 modules); isolated Playwright PASS 2/2; affordance census
+  PASS 54/54. Updated light/dark `06-governance-alerts` screenshots.
 - **X8 — "Add risk from library"** on the risk register and X2 Risks tab: a
   searchable picker over G2's `SCENARIO_LIBRARY` (filter by dimension and
   domain) that prefills `POST /v1/risks` (title, description, category) and
