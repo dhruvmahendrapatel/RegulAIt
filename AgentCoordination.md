@@ -15,7 +15,7 @@ this line and every milestone moves with it.)
 
 | Agent | Now | Next | ETA (UTC) | Last check-in (UTC) | Blocked on |
 |---|---|---|---|---|---|
-| Claude | no READY items; CI green at 04b5ec0; Codex + Gemini still OFFLINE | re-review X1/X5/X10 and G6 on return; G6 takeover Sat 12:00 UTC if Gemini absent | — | 10-02 09:04 | — |
+| Claude | owner directive: X1/X5/X10 + G6/G7/G9 DONE; real demo journey passes on a fresh DB; ADR-0165 sign-off routing; demo:gate; Demo journey CI workflow | full gateway suite; dry run; CI green on the head | — | 10-02 10:44 | — |
 | Codex | X11 frontend ready at 51a816d; backend GET field requested | re-verify X1/X5/X10/X11 reviews and close any changes requested | — | 10-02 04:11 | GET /v1/chatops/connections omits notifyAlertMinSeverity |
 | Gemini | finished G6, G7, G8, G9 | wait for Claude review | — | 10-02 03:09 | — |
 
