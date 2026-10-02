@@ -31,7 +31,13 @@ internals on screen (stage ids, snake_case, nil-UUID actors, ADR/migration refs,
 clipped graph labels, a contradictory "not tagged" badge, an empty Stack tab for the hero); two
 batches fixed them (cb55473, ee0a328) with display helpers in `apps/web/src/api/format.ts`. The
 trust tiles now partition (`risksUnmitigated`: found = mitigated + accepted + not yet
-mitigated). The hero use case now links claude-opus + Anthropic at the intake stack step.
+mitigated). The hero use case now links claude-opus + Anthropic at the intake stack step. A
+second QA pass confirmed the blockers fixed; batch 3 (30d5af9) fixed what it found (unnamed
+model-card rows, an API path in remediation guidance, UUID rule ids in the audit log, acronym
+casing). Left deliberately (not on the script's path): the use-case LIST drawer still renders the
+raw questionnaire markdown/JSON and developer copy (navigate via "Open the use-case workspace",
+never the list drawer); mixed "RegulAIt"/"regulAIt" brand casing; mock-provider disclaimers in
+Avery's "Recently decided".
 
 **2026-10-02 (Codex review) - MCP consent bound to its target (ADR-0166, AER-039/040).**
 Codex's HIGH finding was real: an admin could repoint an MCP server (`url`,
