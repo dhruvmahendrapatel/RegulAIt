@@ -5,6 +5,7 @@ import {
   and,
   auditLog,
   createDb,
+  desc,
   eq,
   evalDatasets,
   evalRuns,
@@ -530,5 +531,59 @@ describe("staleness — a certified card whose world moved says so", () => {
     expect(view.staleness.summary).toBeNull();
     expect(view.staleness.changesSinceCertification!.evalRuns).toBe(0);
     expect(view.staleness.changesSinceCertification!.guardrailChanges).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The decide path recomputes the autofill INSIDE the decision's transaction,
+// and a transaction is ONE pg client. Issuing a query on a client that is
+// already executing one is deprecated in pg 8 and removed in pg 9, so the
+// snapshot's reads must run one at a time there. Instrumented at the pg
+// client itself — the warning prints once per process, so it cannot be the
+// assertion.
+// ---------------------------------------------------------------------------
+
+describe("the decide-path snapshot never overlaps queries on the transaction's client", () => {
+  it("no client.query() is issued while that client is already executing one", async () => {
+    type PgClientProto = { query: (...args: unknown[]) => unknown; _activeQuery?: unknown };
+    const proto = (db.$client as unknown as { Client: { prototype: PgClientProto } }).Client.prototype;
+    const original = proto.query;
+    let overlapping = 0;
+    proto.query = function (this: PgClientProto, ...args: unknown[]) {
+      // `_activeQuery`, not the public getter — the getter is itself deprecated
+      if (this._activeQuery != null) overlapping += 1;
+      return original.apply(this, args);
+    };
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: `/v1/mrm/cards/${cardId}/sign-off`,
+        headers: AUTH,
+        payload: {
+          approverUserId: rikaId,
+          validUntil: new Date(Date.now() + 365 * 86_400_000).toISOString(),
+          reason: "mrmaf single-client recertification",
+        },
+      });
+      expect(res.statusCode).toBe(201);
+      const decided = await app.inject({
+        method: "POST",
+        url: `/v1/approvals/${res.json().approvalId}/decide`,
+        headers: rikaAuth,
+        payload: { decision: "approved", reason: "mrmaf single-client review" },
+      });
+      expect(decided.statusCode).toBe(200);
+    } finally {
+      proto.query = original;
+    }
+    // the snapshot was really computed on this decision, so the reads ran
+    const [auditRow] = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.ruleId, "mrm-sign-off-approved"), eq(auditLog.objectId, cardId)))
+      .orderBy(desc(auditLog.at))
+      .limit(1);
+    expect((auditRow!.detail as { autofillSnapshot?: unknown }).autofillSnapshot).toBeDefined();
+    expect(overlapping).toBe(0);
   });
 });
