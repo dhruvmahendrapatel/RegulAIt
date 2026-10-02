@@ -3299,6 +3299,147 @@ behavior were not independently verified in this run.
   runner (run 36800804373); it now counts upstream connections and asserts zero
   new connections once open, after a positive control.
 
+### Automated enterprise-readiness run — 2026-10-02 01:03:23 CDT (UTC-05:00)
+
+**Target branch, synchronization and reviewed range**
+
+- Exclusive target: `dhruv/active`. The checkout began clean and aligned at
+  `b5b69977ef6896be252ce1325d77c47630b220c8`. `git fetch origin
+  dhruv/active` followed by `git pull --ff-only origin dhruv/active` advanced
+  it nine commits to `b46d0c90c410f1fe4121cb055797902ddb840db7`; local and
+  upstream SHAs then agreed.
+- Incremental review range:
+  `cd503b340d94df8b66708ab2024680580d869ca6..b46d0c90c410f1fe4121cb055797902ddb840db7`,
+  with focused source review of the post-`3a91a93` governance-demo additions
+  and the still-open high-risk findings. This is a large feature range (167
+  files); the targeted review below is not a complete security audit.
+- The required suite and repository instructions were read before review. No
+  product code, ADR, STATE, PathForward or sibling repository was edited.
+
+**Exact commands/tests and outcomes**
+
+- `git diff --check cd503b3..HEAD` found pre-existing trailing whitespace in
+  two demo prose files and one scenario-library test. This is formatting debt,
+  not a runtime failure.
+- `corepack pnpm --filter @regulait/shared test` — PASS: 54 files / 1,187
+  tests.
+- The first direct gateway typecheck failed because the just-pulled shared/db
+  workspace declarations had not been rebuilt. Following the repository's
+  required order, `corepack pnpm -r build` passed (web: 196 modules), then
+  `corepack pnpm --filter @regulait/gateway typecheck` passed. The initial
+  failure is a reproduced invocation-order constraint, not a source failure.
+- The first isolated browser invocation could not find Playwright's default
+  browser. Re-running with the already-installed, explicitly pinned
+  `E2E_CHROMIUM_EXECUTABLE` passed 7/7 mocked governance journeys. This suite
+  rewrites tracked reference screenshots; those command-induced image changes
+  remain unstaged because the environment refused their restoration. They are
+  not product edits and must not be committed.
+- Exact-head GitHub Actions were inspected read-only. CI run `36967387569` and
+  Integrations run `36967387580` both passed at `b46d0c9`: gateway 222 files /
+  3,144 passed / 9 skipped; shared 54 files / 1,187 passed; web and Docker
+  builds passed; the Kong deny-path assertions passed. The standard gate still
+  does not run the web approval-review unit file or Playwright.
+- No local database suite, migration, cloud, live-provider or deployment test
+  was run. The real-DB intake failure below is direct source observation plus
+  the repository's recorded fresh-database reproduction, not independently
+  rerun by this automation.
+
+#### AER-041 — RESOLVED/DONE — Native cache identity is bound to the exact request and serving configuration
+
+**Fixing commit:** `3a91a93ac612f80ee120e82e7697cacc05e57b24`.
+**Evidence type:** direct source observation plus exact-head database CI.
+
+`semanticCacheNativeKey` now commits to verbatim generation-affecting request
+fields, project attribution, planner rewrite dials and current serving
+configuration (`apps/gateway/src/semantic-cache-shared.ts`). Lookup re-reads
+that configuration; store refuses routed/fallback answers and re-derives the
+configuration after dispatch before writing
+(`apps/gateway/src/agents-connectors.ts`). Legacy normalized rows miss closed.
+Exact-head CI run `36967387569` executed
+`zz-aer041-native-cache-identity.test.ts` 6/6, including the paired mutation,
+byte-identical hit, version/model, field-omission, collision and legacy-row
+controls. This satisfies AER-041's acceptance criteria.
+
+Residual limitations are deliberate and disclosed: routed answers do not
+populate this cache; live canary assignment and provider rebinding were not
+separately exercised here. Those do not contradict the fixed cache identity.
+
+#### AER-042 — HIGH / OPEN — The intake UI sends a value the create-use-case contract rejects, so every real submission fails
+
+**Evidence type:** direct source observation corroborated by the repository's
+fresh-database demo run.
+
+`apps/web/src/views/admin/governance/IntakeWizardPage.tsx:181` posts
+`dataSensitivity: "restricted"`. The authoritative create schema accepts only
+the `AI_USE_CASE_DATA_SENSITIVITIES` enum (`public`, `internal`,
+`confidential`, `regulated`) at `packages/shared/src/index.ts:3196-3200`.
+The mocked browser route accepts the body without applying that schema, so the
+local 7/7 mocked pass is vacuous for this contract. `AgentCoordination.md`
+records that the fresh real-database journey reproduced the validation
+failure.
+
+**Impact:** the new governed intake path can draft and review suggestions but
+cannot create any use case against the real gateway. This blocks the primary
+end-to-end registration journey while screenshots and mocked tests remain
+green.
+
+**Recommended remediation:** derive the value from the user's declared data
+categories (or ask explicitly) using the shared enum, and make the mock reject
+unknown values with the same schema rather than accepting arbitrary JSON.
+
+**Acceptance evidence required:**
+
+1. Unit-test the complete category-to-sensitivity mapping, including multiple
+   categories and the empty/unknown fail-closed case.
+2. In a fresh disposable database, submit public, internal, confidential and
+   regulated examples through the browser and assert the persisted value.
+3. Add a negative browser/API contract case proving `restricted` is rejected
+   and the UI presents a useful error without creating a partial workflow/use
+   case.
+4. Keep the prohibited Article 5 journey reviewable and independently
+   rejectable after this correction.
+
+#### AER-043 — MEDIUM / OPEN — Concurrent monitor runs over-report alert transitions in their response and audit evidence
+
+**Evidence type:** direct source observation; concurrency behavior was not
+executed locally.
+
+`runGovernanceMonitor` correctly uses a partial unique index plus
+`onConflictDoNothing()` so concurrent scheduler/manual runs cannot duplicate an
+active alert, and it records the ids actually inserted in `raisedIds`.
+However, the evaluated audit detail and returned result use
+`plan.raise.length` and `plan.resolve.length`
+(`apps/gateway/src/governance-monitor.ts:279,299-301`), not the successful
+insert/update counts. A losing concurrent run can therefore report and audit
+that it raised or resolved an alert when its write affected zero rows.
+
+**Impact:** operator/API metrics and the audit trail can disagree with the
+governance-alert ledger precisely under the scheduler/manual overlap the code
+claims to support. This is failure-honesty and audit-integrity debt; alert
+deduplication itself remains intact.
+
+**Recommended remediation and acceptance test:** count the rows actually
+inserted/refreshed/resolved and use those counts consistently in the response
+and audit row. Run two monitor passes behind a barrier against the same finding
+and prove one reports `raised: 1`, the other `raised: 0`, exactly one raised
+audit row exists, and both evaluated audit rows match their own committed
+effects. Repeat for concurrent resolution.
+
+**Other lifecycle and remaining uncertainty**
+
+- **AER-039 remains OPEN/HIGH.** This range did not bind approvals to mutable
+  MCP server target/admission identity.
+- **AER-040 remains OPEN/MEDIUM.** Exact-head CI still runs an echo-only web
+  `test` script and no Playwright job; local mocked Playwright 7/7 does not make
+  those checks durable.
+- **AER-010, AER-018, AER-035 and AER-037 retain their previous partial/open
+  classifications.** This targeted run did not execute their unmet negative,
+  barrier or restart matrices.
+- Migration upgrade/rollback, backup/restore, multi-node monitor concurrency,
+  live provider cancellation, real browser/database journeys and vendor parity
+  were not independently verified. No enterprise-readiness, production-readiness,
+  certification or complete parity conclusion is justified.
+
 <!-- codex-enterprise-feedback:end -->
 
 Date: 2026-09-06  
