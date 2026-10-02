@@ -45,6 +45,7 @@ import { runCanaryObservationPrune } from "./config-versions.js";
 import { runMcpAdmissionRescan } from "./mcp-admission-rescan.js";
 import { runMcpRegistrySync } from "./mcp-registry.js";
 import { runMcpHealthProbeSweep } from "./mcp-health-probe.js";
+import { runGovernanceMonitor } from "./governance-monitor.js";
 import { toRegistry, type SchedulerJobDefinition, type SchedulerJobRegistry } from "./scheduler.js";
 
 const HOUR = 3600;
@@ -72,6 +73,7 @@ export const SCHEDULER_JOB_NAMES = {
   mcpAdmissionRescan: "mcp-admission-rescan-sweep",
   mcpRegistrySync: "mcp-registry-sync-sweep",
   mcpHealthProbe: "mcp-health-probe-sweep",
+  governanceMonitor: "governance-monitor-sweep",
 } as const;
 
 export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): SchedulerJobDefinition[] {
@@ -469,6 +471,24 @@ export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): Schedu
             oldestProbeAt: out.oldestProbeAt?.toISOString() ?? null,
           },
         };
+      },
+    },
+    {
+      // ADR-0157. Re-evaluates the governance monitor's rules over the
+      // dependency graph, trust coverage and risk register; raises, refreshes
+      // and resolves alerts. A monitor, not a control: no dispatch decision
+      // reads the alert rows.
+      name: SCHEDULER_JOB_NAMES.governanceMonitor,
+      description:
+        "Evaluate the governance monitor rules (approved use cases inheriting a high rating, depending on " +
+        "halted/unowned agents, unapproved vendors or agents without an approved model card; live high " +
+        "risks with no control; trust-dimension coverage below floor) and raise, refresh or resolve " +
+        "alerts. Enforcement does not depend on it.",
+      adr: "ADR-0157",
+      defaultIntervalSeconds: HOUR,
+      run: async (ctx) => {
+        const out = await runGovernanceMonitor(ctx.db, { actorUserId: ctx.actorUserId, now: ctx.now });
+        return { itemsProcessed: out.raised + out.resolved, detail: { ...out } };
       },
     },
   ];

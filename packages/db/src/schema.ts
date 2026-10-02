@@ -1038,6 +1038,11 @@ export const auditLog = pgTable(
         // bundle's manifest commits to a chain head that already contains the
         // record of its own creation. Plain text column — no DDL needed.
         "audit_export",
+        // ADR-0157: a governance-monitor alert raised / resolved /
+        // acknowledged, and the monitor pass itself (objectId null). Plain
+        // text column — no DDL needed.
+        "governance_alert",
+        "governance_monitor",
       ],
     })
       .notNull()
@@ -7815,6 +7820,38 @@ export const aiRiskControls = pgTable(
   (t) => [
     primaryKey({ name: "ai_risk_controls_pk", columns: [t.riskId, t.controlRef] }),
     index("ai_risk_controls_ref_idx").on(t.controlRef),
+  ],
+);
+
+// ---------------------------------------------------------------------------
+// ADR-0157 (migration 0124) — governance monitor alerts. One row per
+// (rule, subject) condition EPISODE; the partial unique index allows at most
+// one active (open/acknowledged) episode per condition. A recurrence after
+// resolution is a new row, so the history is never overwritten.
+export const GOVERNANCE_ALERT_SEVERITIES = ["low", "medium", "high"] as const;
+export const GOVERNANCE_ALERT_STATUSES = ["open", "acknowledged", "resolved"] as const;
+export const governanceAlerts = pgTable(
+  "governance_alerts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    ruleId: text("rule_id").notNull(),
+    subjectKey: text("subject_key").notNull(),
+    severity: text("severity", { enum: GOVERNANCE_ALERT_SEVERITIES }).notNull(),
+    title: text("title").notNull(),
+    detail: jsonb("detail").$type<Record<string, unknown>>().notNull().default({}),
+    status: text("status", { enum: GOVERNANCE_ALERT_STATUSES }).notNull().default("open"),
+    firstDetectedAt: timestamp("first_detected_at", { withTimezone: true }).notNull().defaultNow(),
+    lastDetectedAt: timestamp("last_detected_at", { withTimezone: true }).notNull().defaultNow(),
+    acknowledgedByUserId: uuid("acknowledged_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    acknowledgedAt: timestamp("acknowledged_at", { withTimezone: true }),
+    ackNote: text("ack_note"),
+    resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("governance_alerts_active_uq")
+      .on(t.ruleId, t.subjectKey)
+      .where(sql`${t.status} <> 'resolved'`),
+    index("governance_alerts_status_idx").on(t.status, t.lastDetectedAt),
   ],
 );
 

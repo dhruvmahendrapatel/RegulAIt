@@ -862,6 +862,13 @@
       "when": 1785058000000,
       "tag": "0123_risk_dimensions_residual_controls",
       "breakpoints": true
+    },
+    {
+      "idx": 124,
+      "version": "7",
+      "when": 1785059000000,
+      "tag": "0124_governance_alerts",
+      "breakpoints": true
     }
   ]
 }

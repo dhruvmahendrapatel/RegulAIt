@@ -188,9 +188,17 @@ describe("ADR-0156 the AI-system dependency graph", () => {
     expect(r.statusCode).toBe(200);
     const g = r.json() as { nodes: Node[]; edges: Edge[]; scope: any };
     const keys = new Set(g.nodes.map((n) => n.key));
-    expect(keys).toEqual(
-      new Set([`use_case:${ids.useCase}`, `agent:${ids.agentA}`, modelKeyA, `vendor:${ids.vendor}`, `mcp_server:${ids.server}`]),
-    );
+    const expected = [`use_case:${ids.useCase}`, `agent:${ids.agentA}`, modelKeyA, `vendor:${ids.vendor}`, `mcp_server:${ids.server}`];
+    for (const k of expected) expect(keys.has(k)).toBe(true);
+    // the database is shared (M-040): another file's vendor may also link the
+    // `mock` provider, so the only extra nodes allowed are vendors supplying
+    // this use case's model — never agent B, never an unrelated model
+    const extras = [...keys].filter((k) => !expected.includes(k));
+    for (const k of extras) {
+      expect(k.startsWith("vendor:")).toBe(true);
+      expect(g.edges.some((e) => e.from === modelKeyA && e.to === k && e.kind === "supplied_by")).toBe(true);
+    }
+    expect(keys.has(`agent:${ids.agentB}`)).toBe(false);
     for (const e of g.edges) expect(keys.has(e.from) && keys.has(e.to)).toBe(true);
     expect(g.scope).toEqual({ useCaseId: ids.useCase, includeObserved: true });
 

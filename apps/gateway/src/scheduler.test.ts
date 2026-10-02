@@ -675,6 +675,10 @@ describe("every sweep is registered", () => {
         // this list pins its registration.
         SCHEDULER_JOB_NAMES.costReconciliation,
         SCHEDULER_JOB_NAMES.evalDrift,
+        // ADR-0157: the governance monitor — raises, refreshes and resolves
+        // alerts; decides nothing a dispatch reads. Driven end-to-end in
+        // zz-adr0157-governance-monitor.test.ts; this list pins its registration.
+        SCHEDULER_JOB_NAMES.governanceMonitor,
         // ADR-0100: re-fetches and re-adjudicates MCP tool manifests so a
         // server nobody calls is still caught. Drives the LIVE path
         // (connectUpstream + syncUpstreamTools + recordManifestScan) — there

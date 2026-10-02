@@ -148,7 +148,7 @@ live model is a bonus, never a dependency.
   (`governance-monitor-sweep`, hourly) and an on-demand evaluate; alerts
   dedupe per (rule, subject), auto-resolve when the condition clears, and can
   be acknowledged with a note. Contract §4.5.
-  Status: IN-PROGRESS (Claude)
+  Status: READY-FOR-REVIEW (self-verified: 8 shared + 5 integration tests) — LIVE
 
 ### Codex — web UI (apps/web), browser verification
 
@@ -440,12 +440,12 @@ kinds: `uses_agent | runs_on | supplied_by | calls_tool | calls_connector |
 consumes_output`. Bands: `none | low | medium | high` (score 0, 1–2, 3–4, 6–9).
 `model` nodes have `id: null` unless custom (`model:custom:<providerId>`).
 
-### 4.5 Governance alerts (C8) — CONTRACT (implementation in progress)
+### 4.5 Governance alerts (C8) — LIVE
 `GET /v1/governance/alerts?status=active|open|acknowledged|resolved|all` (default `active` = open + acknowledged). Admin-only.
 ```json
 { "alerts": [ { "id": "uuid", "ruleId": "use_case_inherited_high_risk", "ruleLabel": "Approved use case carries a high rating",
                 "severity": "high", "status": "open",
-                "subject": { "key": "use_case:<id>", "type": "use_case", "id": "<id>", "label": "Credit-limit assistant" },
+                "subject": { "key": "use_case:<id>", "type": "use_case", "id": "<id>", "label": "Credit-limit assistant", "context": null },
                 "title": "Credit-limit assistant inherits a HIGH rating from vendor Acme Models",
                 "detail": { "sourceNodeKey": "vendor:<id>", "sourceRiskId": "<risk id>", "path": ["use_case:<id>", "agent:<id>", "model:mock:x", "vendor:<id>"] },
                 "firstDetectedAt": "...", "lastDetectedAt": "...",
@@ -459,8 +459,13 @@ Rule ids: `use_case_inherited_high_risk`, `use_case_agent_halted`,
 `use_case_agent_no_approved_model_card`, `high_risk_without_control`,
 `dimension_coverage_below_floor`. Subject types: `use_case | agent | vendor | risk | dimension`.
 `POST /v1/governance/monitor/evaluate` → `{ "evaluatedAt": "...", "raised": 2, "refreshed": 3, "resolved": 1, "active": 5 }`.
-`POST /v1/governance/alerts/:id/acknowledge` body `{ "note": "1..500 chars" }` → 200 the alert;
-404 unknown; 409 `{ "error": "already_resolved" }`. An acknowledged alert stays
+Pair-keyed rules (`use_case_agent_*`, `use_case_vendor_unapproved`) have
+`subject.key = "use_case:<id>>agent:<id>"`: `subject` is the agent/vendor and
+`subject.context = { key, id, label }` is the use case. `detail.pathLabels`
+(inherited-risk alerts) is the human-readable path.
+`POST /v1/governance/alerts/:id/acknowledge` body `{ "note": "1..500 chars" }` →
+200 `{ id, status, acknowledgedAt, ackNote }`; 400 empty note; 403 no identity
+(bootstrap token); 404 unknown; 409 `{ "error": "already_resolved" }`. An acknowledged alert stays
 acknowledged while its condition persists and resolves automatically when it clears.
 
 ---

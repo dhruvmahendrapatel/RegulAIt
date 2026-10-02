@@ -800,7 +800,7 @@ Demo-critical items for 2026-10-05 are tracked in `AgentCoordination.md`
 |---|---|---|
 | Agentic risk assessment library with mapped controls | partial | 9 categories, no scenario library, no bias/safety category [C4, G2] |
 | Inherent → residual risk with control linkage | missing | declared likelihood/impact only [C4] |
-| Policy inheritance and aggregate risk scoring | missing | packs are org-level; no inheritance across connected entities; aggregate view only as six-dimension coverage [C1] |
+| Policy inheritance and aggregate risk scoring | partial | risk now propagates across connected entities (max, ADR-0156); packs remain org-level, no policy inheritance yet |
 | Automated red-teaming and drift detection | partial | `redteam.ts`, `evals.ts`; drift baselines not continuous |
 | Pre-built policy packs: EU AI Act, NIST AI RMF, ISO 42001, SOC 2 (+ ISO 27001 partial, HIPAA, PCI-DSS, FINRA) | exists | `compliance-packs.ts`; per-use-case framework mapping has no UI [X2] |
 | Governance workflows with approval gates | exists | workflows + approvals with separation of duties |
@@ -815,7 +815,7 @@ Demo-critical items for 2026-10-05 are tracked in `AgentCoordination.md`
 | Trace ingestion and continuous evaluation | partial | `tracing.ts`, `evals.ts`; continuous scheduled evaluation of traces not yet |
 | Human-in-the-loop escalation for high-risk actions | exists | approvals, execution modes (ADR-0124), inbox |
 | Remediation agents (GAIA-equivalent) for automated controls | missing | copilot proposes via approvals only (ADR-0056); no remediation agents |
-| Real-time compliance monitoring and alerts | partial | posture report, spend alerts; trust dashboard [C1, X3]; no alert rules on posture change |
+| Real-time compliance monitoring and alerts | exists (API) | governance monitor (ADR-0157): 7 rules, hourly sweep, alerts with acknowledge/auto-resolve via audit log; trust dashboard [C1, X3]; alerts UI [X7] |
 
 Post-demo order (proposal, needs owner confirmation): residual-risk and
 control linkage hardening → dependency graph + risk propagation → continuous

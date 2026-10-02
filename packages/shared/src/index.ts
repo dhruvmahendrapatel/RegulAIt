@@ -3313,6 +3313,26 @@ export {
   type RiskRating,
 } from "./dependency-graph.js";
 
+// ADR-0157 — the governance monitor: rule catalogue, evaluator, reconciliation.
+export {
+  DEFAULT_COVERAGE_FLOOR_PCT,
+  MONITOR_RULE_IDS,
+  MONITOR_RULES,
+  MONITOR_SEVERITIES,
+  evaluateMonitorRules,
+  reconcileAlerts,
+  type ActiveAlertRef,
+  type MonitorAgentInput,
+  type MonitorDimensionInput,
+  type MonitorFinding,
+  type MonitorInput,
+  type MonitorRiskInput,
+  type MonitorRuleId,
+  type MonitorSeverity,
+  type MonitorUseCaseInput,
+  type MonitorVendorInput,
+} from "./governance-monitor.js";
+
 // ---------------------------------------------------------------------------
 // ADR-0084 — the AI vendor registry (third-party AI risk): the vocabulary,
 // the request shapes, and the attested-never-measured disclaimer. `status` is
