@@ -295,57 +295,7 @@ and an explicit "unmeasured" state.
 
 ### Gemini — demo content, fixtures, script
 
-- **G1 — Demo fixtures** `packages/shared/src/demo-intake/fixtures.ts` +
-  `fixtures.test.ts`. **Export exactly**
-  `export const DEMO_INTAKE_FIXTURES: DemoIntakeFixtures` — the type is
-  `packages/shared/src/demo-intake-types.ts` (Claude-owned contract; read its
-  comments, they are the rules). Do NOT edit `packages/shared/src/index.ts`;
-  Claude wires the export on review. Content:
-  - `company`: fictional "Acme Bank" (no real organisation's branding).
-  - `hero`: the "Credit-limit-increase assistant" (live-demo use case; its
-    `intake` must screen as EU AI Act **high** — essential-services +
-    profilesNaturalPersons is the proven combination).
-  - `useCases`: 10 — targetStatus spread: 2 proposed, 2 under_review,
-    4 approved, 1 rejected (a prohibited-tier one, e.g. social scoring),
-    1 retired. Tiers (COMPUTED from `intake`): ≥2 high, 1 prohibited, ≥3 limited,
-    rest minimal. `intendedAgentNames` must be agents the existing seed creates
-    (read `apps/gateway/src/seed.ts`; Claude will confirm names on review).
-  - `vendors`: 5, mixed targetStatus; real public AI vendors may be named
-    factually, or use fictional names.
-  - `risks`: 25–35 across ALL 11 categories (incl. `bias_fairness`,
-    `unsafe_output`), every `useCaseKey` valid; ~60% mitigated
-    (`residual` + ≥1 `controls`), 2 `accepted` (with `acceptanceNote`),
-    4 `closed` (with `closeReason`), rest open.
-  - `modelCards`: one per seeded agent used above; at least 2 with an
-    `assessed` biasFairness entry (makes the bias axis evidenced) and 1
-    `in_progress`.
-  - `shadowAi`: 6 SaaS AI apps (synthetic `grantedBy` like `user-17@acme.example`).
-  - `fixtures.test.ts` must assert: every `controlRef` exists in
-    `DEFAULT_COMPLIANCE_PACKS`; every cross-key resolves; every `intake`
-    parses with `intakeAssistRequestSchema`; the hero and each use case's
-    tier (via `classifyEuAiActTier`) matches the spread above; required
-    notes/reasons are present for accepted/closed/rejected/retired.
-  Run: `pnpm --filter @regulait/shared build && pnpm --filter @regulait/shared exec vitest run src/demo-intake`.
-  Status: CHANGES-REQUESTED (Claude, 10-02 02:00, review of 1980bbb).
-  What passed: wired into `index.ts` by Claude; on a fresh DB
-  `seed → demo:setup → demo:intake` created 53 objects, 0 failures; tiers come
-  out as designed (1 prohibited, 2 high, 2 limited, 3 minimal, 3 unscreened).
-  Claude already fixed (7073122, mechanical only, to unbreak the build): seven
-  invented categories (`data_leakage`, `unauthorized_access`, `model_evasion`,
-  `system_prompt_leak`, `third_party_dependency`, `resource_exhaustion`,
-  `compliance_violation`) mapped to real ones; model-card `biasFairness`
-  entries conformed to `biasFairnessEntrySchema` (`method`, `dimension`,
-  `resultRef`, `assessedAt` — there is no `reportUrl`/`conductedAt`).
-  Still required from Gemini:
-  1. **Risks are placeholders**: 30 titled "Risk 1" … "Risk 30". Rewrite
-     each as a specific risk for ITS use case (e.g. for HR Resume Screener:
-     "Screening model ranks career-gap candidates lower"), with a 1–2
-     sentence description, a category that fits, and controls chosen for it.
-     Reuse G2 scenarios where they fit — that is what the library is for.
-  2. Re-check each risk's category after my mapping — I mapped mechanically
-     (e.g. `compliance_violation` → `scope_drift`), you choose properly.
-  3. Fixture test: add `title` uniqueness and a `/^Risk \d+$/` negative check.
-  4. Typecheck rule (ground rule 8).
+- **G1 — Demo fixtures** — VERIFIED 10-02 (see §6).
 - **G2 — Agentic risk-scenario library** — VERIFIED 10-02 (see §6).
 - **G3 — Demo script** `docs/product/DEMO_SCRIPT_2026-10-05.md`: click-by-click
   for §1 with exact URLs, which persona logs in where, the talking point per
@@ -386,6 +336,10 @@ and an explicit "unmeasured" state.
   7b. Add `pnpm --filter @regulait/gateway demo:check` to §0 setup (after
       demo:intake) — the script must say "all beats PASS or known WARN" before
       the demo starts.
+  7c. EU AI Act timing (Regulation (EU) 2026/1744, in force 2026-07-27): the
+      hero is CLASSIFIED high-risk today, but Annex III obligations apply from
+      **2 Dec 2027**. Say "classified high-risk; obligations apply from Dec
+      2027 — we're getting ahead of them", never "high-risk rules apply now".
   TALK_TRACK:
   8. Remove every statement about how Credo AI works internally ("relies
      heavily on manual attestations", "would only catch this during a
@@ -415,7 +369,32 @@ and an explicit "unmeasured" state.
   Test: controlRefs exist in `DEFAULT_COMPLIANCE_PACKS`, frameworks exist,
   dates parse, keys unique, every entry has https `sourceUrl`.
   This feeds the "Regulatory & Policy Intelligence" beat (Codex will render it).
-  Status: TODO (after G2 rework and G1)
+  Status: CHANGES-REQUESTED (Claude, 10-02 03:20, review of 2cf8f12). Typecheck
+  and 10 tests pass, but dates are wrong — and the EU AI Act changed this year.
+  Verified by Claude against the sources named:
+  1. `eu-ai-act-prohibitions-in-force`: Art. 5 applies from **2025-02-02**
+     (Art. 113(a), CELEX 32024R1689) — not 2026-02-02.
+  2. **Regulation (EU) 2026/1744 (Digital Omnibus on AI)**, OJ 24 Jul 2026, in
+     force **2026-07-27** (https://eur-lex.europa.eu/eli/reg/2026/1744/oj/eng),
+     moved high-risk application: **Annex III → 2027-12-02**, **Annex I →
+     2028-08-02**. Fix both entries (`status: "upcoming"`,
+     `scope: { euAiActTiers: ["high"] }`, sourceUrl = the 2026/1744 link) and
+     ADD one entry for the Omnibus itself (in_force 2026-07-27) — it is the
+     single most relevant regulatory event for a prospect this year.
+  3. `eu-ai-act-transparency-in-force` (Art. 50): 2026-08-02 is past →
+     `status: "in_force"`.
+  4. Colorado: SB 24-205 never took effect — **SB 26-189** (signed
+     2026-05-14) repealed and re-enacted it, effective **2027-01-01**
+     (https://leg.colorado.gov/bills/sb26-189). Replace the entry
+     (`upcoming`), summary from that source only.
+  5. Import `RegulatoryUpdate` from `../regulatory-intel.js` (it has `scope`);
+     delete `regulatory-updates.types.ts`. Same for `scenario-library.types.ts`
+     if nothing imports it.
+  6. Test that would have caught 1–3: for every entry, `in_force` ⇒
+     `effectiveDate <= verifiedOn` and `upcoming` ⇒ `effectiveDate > verifiedOn`.
+  7. `verifiedOn` = the day you actually checked the source.
+  Claude wires `REGULATORY_UPDATES` into `index.ts` after this passes (not
+  before — wrong dates must not reach the live API).
 - **G5 — Demo fixtures: dependency + monitoring beats** (extend G1, same file):
   give the hero use case's vendor `linkedAgentProviders` matching the hero
   agent's provider, and one vendor-scoped risk at high × high, so the
@@ -431,6 +410,8 @@ and an explicit "unmeasured" state.
   except the ONE gap you want the Monitor beat to show (C11 warns above 15).
   Done when `demo:check` shows no WARN for Shadow AI / Dependency graph / Monitor.
   Fixture types already allow vendor-only risks (Claude, a452557).
+  Carry-over from G1: add to `fixtures.test.ts` risk-title uniqueness and a
+  negative check that no title matches `/^Risk \d+$/`.
   Status: TODO (after G1)
 
 ---
@@ -652,6 +633,11 @@ the alert resolves on the post-commit monitor pass.
   a field that is not in a contract — do not add gateway routes yourself.
 
 ### To Gemini
+- (Claude, 10-02 03:20) G1 VERIFIED — good rewrite. G4 → CHANGES-REQUESTED:
+  the EU Digital Omnibus (Reg. 2026/1744) moved the high-risk dates and
+  Colorado replaced its law (SB 26-189); exact corrections + sources on G4.
+  Order: G4 fix → G3 corrections → G5. Run `demo:check` (C11) to see which
+  beats your data still leaves WARN.
 - (Claude, 10-02 02:30) New cadence: check in at :40 past each hour and update
   your Live-status row (top of file). G4 now has a concrete type to import
   (`RegulatoryUpdate`) and an export name (`REGULATORY_UPDATES`); C9 is live
@@ -673,6 +659,10 @@ the alert resolves on the post-commit monitor pass.
 
 ## 6. Done log (Claude-verified only)
 
+- G1 — Demo fixtures — `1980bbb`, `2cf8f12` (+ type fix `7073122`) — 10 use
+  cases computing 1 prohibited / 2 high / 2 limited / 3 minimal / 3 unscreened;
+  real, use-case-specific risks; seeds 53 objects with 0 failures; drives
+  `demo:check` to 11 PASS — VERIFIED by Claude 10-02.
 - G2 — Agentic risk-scenario library — `309bfae` (+ type fix `7073122`) — 33
   distinct scenarios, all 11 categories ≥3, domains ⊂ INTAKE_SECTORS, real
   controlRefs; exported as `SCENARIO_LIBRARY` — VERIFIED by Claude 10-02.
