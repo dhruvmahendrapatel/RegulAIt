@@ -4199,6 +4199,12 @@ region-allowlist SCP; OQ-002 (budget cap) resolved to $5/month; OQ-003 (GitHub a
 to personal `dhruvmahendrapatel`.
 
 ## Known follow-ups (not urgent, not blocking)
+- **Concurrent reads on one pg client in MRM autofill (pg@9 hazard).** `computeCardAutofill` /
+  `computeCardStaleness` (`apps/gateway/src/mrm-autofill.ts`) run reads through `Promise.all`;
+  when handed a transaction they share one client, so pg 8 queues them (correct today) and prints
+  a DeprecationWarning during `demo:prepare` → `demo:setup`; pg 9 will make it an error. Fix: run
+  those reads before the transaction, or sequentially when given a tx (keep `Promise.all` on the
+  pool). Found 2026-10-02 by instrumenting `Client.prototype.query` (~48 concurrent reads).
 - ~~`planning` is a vocabulary item, not a control~~ **CLOSED 2026-08-15 by
   [ADR-0079](../docs/decisions/0079-plan-only-stage-enforcement.md).** The kernel now RESTS at a
   planning stage (`blocked_on_plan`, left by an explicit `/advance`), an invoke may name an

@@ -307,7 +307,7 @@ const LICENSE_KEY_ID = "regulait-demo-ephemeral";
 let licenseNote: string;
 const licenseStatus = await probe("GET", "/v1/licenses/status");
 if (licenseStatus.body?.state === "valid") {
-  licenseNote = `  license already installed and valid (tier '${licenseStatus.body?.license?.tier ?? "?"}')`;
+  licenseNote = `  license already installed and valid (tier '${licenseStatus.body?.tier ?? "unknown"}')`;
 } else {
   mkdirSync(keyringDir, { recursive: true });
   const { publicKey, privateKey } = generateKeyPairSync("ed25519");
