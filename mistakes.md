@@ -1257,3 +1257,15 @@ typecheck.
 Rule: the gateway typecheck runs AFTER the last file of a change is written,
 immediately before commit — never as an intermediate step that later edits
 can invalidate.
+
+### M-055 (2026-10-02) - New prose column shipped without the ADR-0102 scrub registration
+
+Migration 0124 added `governance_alerts.ack_note`; CI failed in
+`prose-scrub.test.ts`, which asks Postgres for every `%reason%`/`%note%`/
+`%rationale%` text column and requires each to be scrubbed or explicitly
+excluded. My targeted runs never included that suite.
+
+Rule: any migration that adds a text column whose name contains reason, note,
+rationale, explanation, justification or comment registers it in
+`packages/db/src/prose-scrub.ts` and the test's COVERED list in the same
+commit — and every migration commit runs `prose-scrub.test.ts`.

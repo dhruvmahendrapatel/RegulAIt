@@ -181,6 +181,10 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.aiUseCases, ["retiredReason"]],
   [s.aiVendors, ["retiredReason"]],
   [s.aiRisks, ["acceptanceNote"]],
+  // ADR-0157 / ADR-0159 — an alert acknowledgement is operator prose; a
+  // remediation's rationale embeds risk and agent titles a person typed.
+  [s.governanceAlerts, ["ackNote"]],
+  [s.remediationProposals, ["rationale"]],
   // --- machine-written free text that quotes an error, and ADR-0111's
   //     EXPORTED OBSERVABILITY COPY ---
   //
