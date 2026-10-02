@@ -19,6 +19,7 @@ import { DEMO_INTAKE_FIXTURES } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { runDemoCheck, type DemoCheck } from "./demo-check-lib.js";
 import { seedDemoIntake } from "./demo-intake-seed-lib.js";
+import { runDemoGate } from "./demo-gate-lib.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -81,6 +82,23 @@ describe("demo:check over the real dataset", () => {
 
   it("the hero's intake answers land on HIGH", () => {
     expect(checks.find((c) => c.beat === "1 Intake assistant")!.level).toBe("PASS");
+  });
+});
+
+describe("demo:gate — the deploy-gate beat as a CI step", () => {
+  it("prints the gate's own decision for an approved use case, with the exit code a pipeline acts on", async () => {
+    const approved = DEMO_INTAKE_FIXTURES.useCases.find((u) => u.targetStatus === "approved")!;
+    const r = await runDemoGate(app, { bootstrapToken: BOOT, useCase: approved.name, environment: "staging", ref: "c11-build" });
+    expect(r.lines.join("\n")).toContain(`"${approved.name}"`);
+    expect(r.lines.join("\n")).toMatch(/^(ALLOW|DENY) /m);
+    expect(r.exitCode).toBe(r.ok ? 0 : 1);
+    expect(r.lines.join("\n")).toContain("audited as deploy-gate-");
+  });
+
+  it("an unknown use case is a setup error (exit 2), not a decision", async () => {
+    const r = await runDemoGate(app, { bootstrapToken: BOOT, useCase: "no such system c11" });
+    expect(r.exitCode).toBe(2);
+    expect(r.lines[0]).toContain("no use case matches");
   });
 });
 
