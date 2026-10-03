@@ -16,15 +16,18 @@ import {
   runMigrations,
   type Db,
 } from "@regulait/db";
-import { connectorProviderKindSchema } from "@regulait/shared";
+import { CHATOPS_PROVIDERS, connectorProviderKindSchema, verifyChatSignature } from "@regulait/shared";
 import {
   CONNECTOR_PROVIDER_KINDS,
   CREDENTIAL_HOST_CONNECTOR_KINDS,
   OUTLOOK_DEFAULT_GRAPH_BASE_URL,
   connectorCredentialHosts,
   connectorDefaultBaseUrl,
+  outlookCredentialSchema,
+  teamsCredentialSchema,
 } from "@regulait/connector-provider";
 import { buildApp } from "./app.js";
+import { CHATOPS_OUTBOUND_PROVIDERS } from "./chatops.js";
 import { COMPILED_DEFAULT_RULE_ID, decideCompiledDefault } from "./compiled-egress.js";
 import type { EgressAllowEntry } from "./egress-guard.js";
 
@@ -306,38 +309,77 @@ const here = path.dirname(fileURLToPath(import.meta.url));
  * the assertion behind it. */
 const CONNECTORS_PAGE = path.resolve(here, "../../web/src/views/admin/integrations/ConnectorsPage.tsx");
 
-/** the non-empty entries of the page's PROVIDER_KINDS literal ("" is governance-only) */
-function connectorsPageKinds(): string[] {
-  const source = ts.createSourceFile(
-    CONNECTORS_PAGE,
-    readFileSync(CONNECTORS_PAGE, "utf8"),
-    ts.ScriptTarget.Latest,
-    true,
-    ts.ScriptKind.TSX,
-  );
-  const found: string[][] = [];
+/** The ChatOps admin page — same convention: its provider list is a mirror. */
+const CHATOPS_PAGE = path.resolve(here, "../../web/src/views/admin/governance/ChatOpsPage.tsx");
+
+const readPage = (file: string) =>
+  ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+const pageName = (source: ts.SourceFile) => path.basename(source.fileName);
+
+/** the ONE variable declaration named `name` in a page, with its initializer */
+function pageConst(source: ts.SourceFile, name: string): ts.Expression {
+  const found: ts.Expression[] = [];
   const visit = (node: ts.Node) => {
-    if (
-      ts.isVariableDeclaration(node) &&
-      ts.isIdentifier(node.name) &&
-      node.name.text === "PROVIDER_KINDS" &&
-      node.initializer &&
-      ts.isArrayLiteralExpression(node.initializer)
-    ) {
-      found.push(
-        node.initializer.elements.map((e) => {
-          if (!ts.isStringLiteral(e)) {
-            throw new Error(`ConnectorsPage PROVIDER_KINDS: non-literal entry '${e.getText(source)}'`);
-          }
-          return e.text;
-        }),
-      );
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === name && node.initializer) {
+      found.push(node.initializer);
     }
     ts.forEachChild(node, visit);
   };
   visit(source);
-  if (found.length !== 1) throw new Error(`ConnectorsPage.tsx: expected ONE PROVIDER_KINDS array literal, found ${found.length}`);
-  return found[0]!.filter((k) => k !== "");
+  if (found.length !== 1) throw new Error(`${pageName(source)}: expected ONE ${name} declaration, found ${found.length}`);
+  return found[0]!;
+}
+
+/** a string-array literal, refusing anything this read cannot see through */
+function stringArray(source: ts.SourceFile, label: string, node: ts.Expression): string[] {
+  if (!ts.isArrayLiteralExpression(node)) throw new Error(`${pageName(source)} ${label}: not an array literal ('${node.getText(source)}')`);
+  return node.elements.map((e) => {
+    if (!ts.isStringLiteral(e)) throw new Error(`${pageName(source)} ${label}: non-literal entry '${e.getText(source)}'`);
+    return e.text;
+  });
+}
+const pageArray = (source: ts.SourceFile, name: string) => stringArray(source, name, pageConst(source, name));
+
+/**
+ * The reviewer's nit on criterion 9: pinning the literal is not pinning what
+ * renders. The <Select> whose `value` is `valueExpr` must render its options
+ * from `LIST.map(...)` and carry no hard-coded <option> beside it — so swapping
+ * the map for typed-out options (that drop outlook) fails here.
+ */
+function assertSelectRendersList(source: ts.SourceFile, valueExpr: string, list: string): void {
+  const selects: ts.JsxElement[] = [];
+  const visit = (node: ts.Node) => {
+    if (ts.isJsxElement(node) && node.openingElement.tagName.getText(source) === "Select") {
+      const value = node.openingElement.attributes.properties.find(
+        (a): a is ts.JsxAttribute => ts.isJsxAttribute(a) && a.name.getText(source) === "value",
+      );
+      const init = value?.initializer;
+      if (init && ts.isJsxExpression(init) && init.expression?.getText(source) === valueExpr) selects.push(node);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  if (selects.length !== 1) throw new Error(`${pageName(source)}: expected ONE <Select value={${valueExpr}}>, found ${selects.length}`);
+  const children = selects[0]!.children.filter((c) => !(ts.isJsxText(c) && c.containsOnlyTriviaWhiteSpaces));
+  const maps = children.filter(
+    (c) =>
+      ts.isJsxExpression(c) &&
+      !!c.expression &&
+      ts.isCallExpression(c.expression) &&
+      ts.isPropertyAccessExpression(c.expression.expression) &&
+      c.expression.expression.name.text === "map" &&
+      c.expression.expression.expression.getText(source) === list,
+  );
+  expect(maps.length, `${pageName(source)}: <Select value={${valueExpr}}> must render {${list}.map(...)}`).toBe(1);
+  expect(
+    children.length,
+    `${pageName(source)}: <Select value={${valueExpr}}> renders something beside {${list}.map(...)}: ${children.map((c) => c.getText(source)).join(" | ")}`,
+  ).toBe(1);
+}
+
+/** the non-empty entries of the page's PROVIDER_KINDS literal ("" is governance-only) */
+function connectorsPageKinds(): string[] {
+  return pageArray(readPage(CONNECTORS_PAGE), "PROVIDER_KINDS").filter((k) => k !== "");
 }
 
 /** parseable credentials for the kinds whose destination the CREDENTIAL names */
@@ -352,6 +394,8 @@ const hostOf = (url: string) => new URL(url).hostname;
 describe("AER-015 — what the page offers is what strict egress can name", () => {
   it("9: the page offers exactly the adapter union, and the strict guard names every kind's destination", () => {
     const uiKinds = connectorsPageKinds();
+    // … and that list is what the Execution adapter select actually renders
+    assertSelectRendersList(readPage(CONNECTORS_PAGE), "f.providerKind", "PROVIDER_KINDS");
     // the named positives — the two the page used to omit
     expect(uiKinds).toContain("teams");
     expect(uiKinds).toContain("outlook");
@@ -409,6 +453,65 @@ describe("AER-015 — what the page offers is what strict egress can name", () =
     });
     expect(unknown.ok).toBe(false);
     expect(!unknown.ok && unknown.code).toBe("compiled_default_unknown");
+  });
+
+  it("9b: the ChatOps page offers every ChatOps provider, labels it from the outbound list, and withholds the secret where the API refuses one", () => {
+    const page = readPage(CHATOPS_PAGE);
+    // the defect: outlook was accepted by POST /v1/chatops/connections and the
+    // select offered only slack and a stale "teams (inbound only)"
+    const offered = pageArray(page, "CHATOPS_PROVIDERS");
+    expect(offered).toContain("outlook");
+    expect([...offered].sort()).toEqual([...CHATOPS_PROVIDERS].sort());
+    expect(new Set(offered).size).toBe(offered.length);
+    assertSelectRendersList(page, "provider", "CHATOPS_PROVIDERS");
+
+    // the label's "the courier cannot post to it yet" reads this mirror — so it
+    // must BE the gateway's outbound list, or teams' old stale label comes back
+    expect([...pageArray(page, "CHATOPS_OUTBOUND_PROVIDERS")].sort()).toEqual([...CHATOPS_OUTBOUND_PROVIDERS].sort());
+
+    // send-only = the providers the shared verifier refuses BY DESIGN; the
+    // page omits their signing secret because the route 400s one
+    const sendOnly = CHATOPS_PROVIDERS.filter((provider) => {
+      const verdict = verifyChatSignature({ provider, signingSecret: "x".repeat(16), rawBody: "{}", headers: {} });
+      return !verdict.ok && verdict.code === "inbound_unsupported_by_design";
+    });
+    expect(sendOnly).toContain("outlook");
+    expect([...pageArray(page, "CHATOPS_SEND_ONLY_PROVIDERS")].sort()).toEqual([...sendOnly].sort());
+  });
+
+  it("9c: the credential card's JSON hint names exactly the keys each adapter's schema takes", () => {
+    const page = readPage(CONNECTORS_PAGE);
+    const fields = pageConst(page, "JSON_CREDENTIAL_FIELDS");
+    if (!ts.isObjectLiteralExpression(fields)) throw new Error("ConnectorsPage JSON_CREDENTIAL_FIELDS: not an object literal");
+    const schemas: Record<string, typeof teamsCredentialSchema | typeof outlookCredentialSchema> = {
+      teams: teamsCredentialSchema,
+      outlook: outlookCredentialSchema,
+    };
+    const seen: string[] = [];
+    for (const prop of fields.properties) {
+      if (!ts.isPropertyAssignment(prop) || !(ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name)) || !ts.isObjectLiteralExpression(prop.initializer)) {
+        throw new Error(`ConnectorsPage JSON_CREDENTIAL_FIELDS: cannot read '${prop.getText(page)}'`);
+      }
+      const kind = prop.name.text;
+      seen.push(kind);
+      const schema = schemas[kind];
+      expect(schema, `JSON_CREDENTIAL_FIELDS names '${kind}', which has no JSON credential schema here`).toBeDefined();
+      const part = (key: string) => {
+        const p = (prop.initializer as ts.ObjectLiteralExpression).properties.find(
+          (q): q is ts.PropertyAssignment => ts.isPropertyAssignment(q) && q.name.getText(page) === key,
+        );
+        if (!p) throw new Error(`ConnectorsPage JSON_CREDENTIAL_FIELDS.${kind}: no '${key}'`);
+        return stringArray(page, `JSON_CREDENTIAL_FIELDS.${kind}.${key}`, p.initializer);
+      };
+      const shape = schema!.shape as Record<string, { isOptional(): boolean }>;
+      const required = Object.keys(shape).filter((k) => !shape[k]!.isOptional());
+      const optional = Object.keys(shape).filter((k) => shape[k]!.isOptional());
+      expect([...part("required")].sort(), `${kind}: required keys`).toEqual([...required].sort());
+      expect([...part("optional")].sort(), `${kind}: optional keys`).toEqual([...optional].sort());
+    }
+    // the two JSON-credential adapters the page offers both carry the hint
+    expect([...seen].sort()).toEqual(Object.keys(schemas).sort());
+    expect(outlookCredentialSchema.shape.senderUpn.isOptional()).toBe(false);
   });
 });
 

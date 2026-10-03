@@ -25,6 +25,48 @@ import { Badge, Button, Card, EmptyState, Field, Input, Select, Table } from "..
 import { QueryGate, useAction, useConnectors } from "../adminKit";
 import v from "../../views.module.css";
 
+/**
+ * The ChatOps providers a workspace can be registered for. A hand-maintained
+ * mirror of shared's `CHATOPS_PROVIDERS` (the web package depends on no
+ * workspace package); the gateway's adr0121 suite reads this literal as source
+ * and fails if the two drift — AER-015: outlook was accepted by the API and
+ * could not be picked here.
+ */
+export const CHATOPS_PROVIDERS = ["slack", "teams", "outlook"];
+/** Mirror of the gateway's `CHATOPS_OUTBOUND_PROVIDERS` (ADR-0113): the ones
+ * the courier can post a card to. Pinned by the same suite. */
+export const CHATOPS_OUTBOUND_PROVIDERS = ["slack", "teams"];
+/** Providers with NO inbound path by decision (ADR-0121): registered with no
+ * signing secret, and the API refuses one. Pinned by the same suite against
+ * shared's `verifyChatSignature` (`inbound_unsupported_by_design`). */
+export const CHATOPS_SEND_ONLY_PROVIDERS = ["outlook"];
+
+/** the option label, saying only what is true of the provider today */
+export function chatOpsProviderLabel(provider: string): string {
+  const notes: string[] = [];
+  if (CHATOPS_SEND_ONLY_PROVIDERS.includes(provider)) {
+    notes.push("send-only by design — no signing secret; approvers decide from the portal link");
+  }
+  if (!CHATOPS_OUTBOUND_PROVIDERS.includes(provider)) {
+    notes.push("the courier cannot post to it yet");
+  }
+  return notes.length > 0 ? `${provider} (${notes.join("; ")})` : provider;
+}
+
+/** the POST /v1/chatops/connections body: a send-only provider carries no
+ * signing secret (the API answers 400 signing_secret_not_applicable if it does) */
+export function chatOpsConnectionBody(input: {
+  name: string;
+  provider: string;
+  connectorId: string;
+  signingSecret: string;
+  defaultChannel: string;
+  allowFencedDecide: boolean;
+}): Record<string, unknown> {
+  const { signingSecret, ...rest } = input;
+  return CHATOPS_SEND_ONLY_PROVIDERS.includes(input.provider) ? rest : { ...rest, signingSecret };
+}
+
 interface Connection {
   id: string;
   name: string;
@@ -70,6 +112,7 @@ export default function ChatOpsPage() {
   const [signingSecret, setSigningSecret] = useState("");
   const [defaultChannel, setDefaultChannel] = useState("");
   const [allowFencedDecide, setAllowFencedDecide] = useState(false);
+  const sendOnly = CHATOPS_SEND_ONLY_PROVIDERS.includes(provider);
 
   const [linkConnection, setLinkConnection] = useState("");
   const [chatUserId, setChatUserId] = useState("");
@@ -173,8 +216,11 @@ export default function ChatOpsPage() {
         </Field>
         <Field label="Provider">
           <Select value={provider} onChange={(e) => setProvider(e.target.value)}>
-            <option value="slack">slack</option>
-            <option value="teams">teams (inbound only — no outbound adapter yet)</option>
+            {CHATOPS_PROVIDERS.map((p) => (
+              <option key={p} value={p}>
+                {chatOpsProviderLabel(p)}
+              </option>
+            ))}
           </Select>
         </Field>
         <Field label="Connector (holds the bot token)">
@@ -187,11 +233,22 @@ export default function ChatOpsPage() {
             ))}
           </Select>
         </Field>
-        <Field label="Signing secret (write-only — never displayed again)">
-          <Input type="password" value={signingSecret} onChange={(e) => setSigningSecret(e.target.value)} />
-        </Field>
-        <Field label="Default channel">
-          <Input value={defaultChannel} onChange={(e) => setDefaultChannel(e.target.value)} placeholder="C0123456789" />
+        {sendOnly ? (
+          <p className={v.faint}>
+            {provider} has no inbound path, so there is no signing secret to set: an email is an unauthenticated
+            assertion, not a signed callback, and approvals are decided from the portal link the message carries.
+          </p>
+        ) : (
+          <Field label="Signing secret (write-only — never displayed again)">
+            <Input type="password" value={signingSecret} onChange={(e) => setSigningSecret(e.target.value)} />
+          </Field>
+        )}
+        <Field label={sendOnly ? "Default recipient mailbox" : "Default channel"}>
+          <Input
+            value={defaultChannel}
+            onChange={(e) => setDefaultChannel(e.target.value)}
+            placeholder={sendOnly ? "approvers@acme.com" : "C0123456789"}
+          />
         </Field>
         <Field label="Allow deciding SENSITIVE (compliance-fenced) approvals from chat">
           <Select value={allowFencedDecide ? "yes" : "no"} onChange={(e) => setAllowFencedDecide(e.target.value === "yes")}>
@@ -208,14 +265,10 @@ export default function ChatOpsPage() {
               void act
                 .run(
                   () =>
-                    api.post("/v1/chatops/connections", {
-                      name,
-                      provider,
-                      connectorId,
-                      signingSecret,
-                      defaultChannel,
-                      allowFencedDecide,
-                    }),
+                    api.post(
+                      "/v1/chatops/connections",
+                      chatOpsConnectionBody({ name, provider, connectorId, signingSecret, defaultChannel, allowFencedDecide }),
+                    ),
                   "Workspace connected",
                 )
                 .then((ok) => {
