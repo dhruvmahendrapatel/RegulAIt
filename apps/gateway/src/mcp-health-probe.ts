@@ -76,15 +76,18 @@
  * jumps the queue.
  *
  * The cursor is stamped when a row is SELECTED, not after it answers — in the
- * same statement that selects it, under `for update skip locked`. Three things
- * follow, and all three are wanted: a row whose probe fails still moves to the
- * back (its breaker, not this cursor, is what keeps it urgent); two concurrent
- * passes claim DISJOINT sets rather than racing over the same head, because
- * the second skips the rows the first has locked (the test file overlaps two
- * passes to show it); and a pass that dies half way leaves its rows late
- * rather than starved.
+ * same statement that selects it, and that statement runs only once an
+ * advisory transaction lock shared by every claim is held
+ * (`claimHealthProbeBatch`). Three things follow, and all three are wanted: a
+ * row whose probe fails still moves to the back (its breaker, not this cursor,
+ * is what keeps it urgent); two concurrent passes claim DISJOINT sets, because
+ * a claim's snapshot is taken only after every earlier claim has committed its
+ * stamps — `skip locked` alone did not give that, since a pass whose snapshot
+ * predated the other's commit re-claimed its rows once their locks were gone
+ * (the test file drives that exact interleaving); and a pass that dies half
+ * way leaves its rows late rather than starved.
  */
-import { asc, eq, inArray, mcpServers, sql, type Db } from "@regulait/db";
+import { asc, eq, inArray, mcpServers, sql, type Db, type SQL } from "@regulait/db";
 import { McpAdmissionHeldError } from "./mcp-admission.js";
 import { McpEgressBlockedError } from "./mcp-egress.js";
 import { connectUpstream } from "./mcp-proxy.js";
@@ -161,6 +164,131 @@ type ProbeRow = BreakerRow & {
   lastHealthProbeAt: Date | null;
 };
 
+type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
+
+/**
+ * The advisory-lock key every health-probe CLAIM serializes on. One global key,
+ * because the rotation is one global queue. Arbitrary but fixed, and distinct
+ * from the audit chain's `AUDIT_CHAIN_LOCK_KEY` (6_000_000_060); the `037` is
+ * the finding.
+ */
+export const HEALTH_PROBE_CLAIM_LOCK_KEY = 6_000_000_037;
+
+/**
+ * Which rows a probe is POSSIBLE against right now: the breaker is closed, or
+ * it is open and its cooldown has elapsed — the same rule `breakerStateOf`
+ * applies, expressed in SQL so a pass can exclude the rest rather than select
+ * and skip them.
+ */
+export function healthProbeEligibility(): SQL {
+  const cooldown = sql`make_interval(secs => ${breakerConfig().cooldownMs / 1000})`;
+  return sql`(${mcpServers.breakerOpenedAt} is null or now() - ${mcpServers.breakerOpenedAt} >= ${cooldown})`;
+}
+
+/**
+ * CLAIM up to `limit` rows matching `eligible` for one pass: select them in
+ * probe order and stamp their rotation cursor, so the next pass — concurrent
+ * or later — takes the rows behind them. Returns the claimed rows as they were
+ * BEFORE the stamp, in probe order (the loop wants `breakerOpenedAt` for the
+ * election and the old cursor for the order).
+ *
+ * ── WHY A TRANSACTION AND AN ADVISORY LOCK, AND NOT JUST `skip locked` ──────
+ * The first fix (AER-037) stamped the batch with a second UPDATE after the
+ * SELECT, and a pass arriving in the gap took the same head. The second fix
+ * folded both into one statement under `for update skip locked` and claimed
+ * that two concurrent passes therefore claim disjoint sets. That held only for
+ * a pass that reaches a row while the other's claim is still IN PROGRESS (the
+ * row is locked, so it is skipped). It did not hold for this interleaving:
+ * pass B takes its statement snapshot while pass A's claim is uncommitted, A
+ * commits, and only then does B try to lock A's rows. They are no longer
+ * locked, so B locks them; Postgres re-checks the row against the WHERE clause
+ * — which does not look at the cursor — and B claims A's rows again, sorted by
+ * the cursors its stale snapshot still shows. Same rows probed twice, the rows
+ * behind them reached by neither.
+ *
+ * So every claim now runs in a short transaction whose FIRST statement takes
+ * `pg_advisory_xact_lock(HEALTH_PROBE_CLAIM_LOCK_KEY)`, and whose SECOND is the
+ * claim. Under READ COMMITTED each statement takes a fresh snapshot, so the
+ * claim's snapshot is taken only after the lock is granted — i.e. after any
+ * earlier claim has COMMITTED its stamps (the xact lock is released at commit,
+ * never before). Every claim therefore sorts over the cursors every earlier
+ * claim wrote, and two claims cannot pick the same row. A cursor predicate in
+ * the WHERE clause (which the lock re-check does re-evaluate) was the
+ * alternative, and was rejected: it needs a minimum-gap constant, and no value
+ * is right — too small and a slow claim still slips through it, too large and
+ * a legitimate back-to-back pass (a manual run straight after a scheduled one,
+ * on an estate smaller than the cap) finds nothing to probe.
+ *
+ * The lock is held for one indexed SELECT-and-UPDATE of at most `limit` rows,
+ * never across the probes (those run after this returns, on no transaction),
+ * so a second pass waits milliseconds, not a sweep. `for update skip locked`
+ * stays, now only for rows a NON-claim writer holds at that instant — a live
+ * request's breaker update: such a row is left for the next pass rather than
+ * waited on, and since it is not stamped it stays at the front of the queue.
+ *
+ * The returned batch is read through the stamp's RETURNING (an inner join of
+ * `picked` to `claimed`), so it is exactly the rows whose cursor this claim
+ * moved — not merely the rows it selected.
+ *
+ * `eligible` is a parameter rather than computed here so the caller's counts
+ * and its claim use the same predicate; the sweep passes
+ * `healthProbeEligibility()`.
+ */
+export async function claimHealthProbeBatch(db: Db | Tx, limit: number, eligible: SQL): Promise<ProbeRow[]> {
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(${HEALTH_PROBE_CLAIM_LOCK_KEY})`);
+    const picked = tx.$with("picked").as(
+      tx
+        .select({
+          id: mcpServers.id,
+          name: mcpServers.name,
+          url: mcpServers.url,
+          allowPrivateRanges: mcpServers.allowPrivateRanges,
+          breakerOpenedAt: mcpServers.breakerOpenedAt,
+          breakerLastError: mcpServers.breakerLastError,
+          breakerConsecutiveFailures: mcpServers.breakerConsecutiveFailures,
+          lastHealthProbeAt: mcpServers.lastHealthProbeAt,
+        })
+        .from(mcpServers)
+        .where(eligible)
+        .orderBy(
+          sql`(${mcpServers.breakerOpenedAt} is null) asc`,
+          sql`${mcpServers.lastHealthProbeAt} asc nulls first`,
+          asc(mcpServers.name),
+        )
+        .limit(limit)
+        .for("update", { skipLocked: true }),
+    );
+    const claimed = tx.$with("claimed").as(
+      tx
+        .update(mcpServers)
+        .set({ lastHealthProbeAt: new Date() })
+        .from(picked)
+        .where(eq(mcpServers.id, picked.id))
+        .returning({ claimedId: mcpServers.id }),
+    );
+    return (await tx
+      .with(picked, claimed)
+      .select({
+        id: picked.id,
+        name: picked.name,
+        url: picked.url,
+        allowPrivateRanges: picked.allowPrivateRanges,
+        breakerOpenedAt: picked.breakerOpenedAt,
+        breakerLastError: picked.breakerLastError,
+        breakerConsecutiveFailures: picked.breakerConsecutiveFailures,
+        lastHealthProbeAt: picked.lastHealthProbeAt,
+      })
+      .from(picked)
+      .innerJoin(claimed, eq(claimed.claimedId, picked.id))
+      .orderBy(
+        sql`(${picked.breakerOpenedAt} is null) asc`,
+        sql`${picked.lastHealthProbeAt} asc nulls first`,
+        asc(picked.name),
+      )) as ProbeRow[];
+  });
+}
+
 /**
  * Probe UP TO `limit` upstreams — circuit-broken ones first, then the least
  * recently considered — and feed the result to ADR-0126's breaker.
@@ -190,8 +318,7 @@ export async function runMcpHealthProbeSweep(
   // row the two disagree about (skew of milliseconds, at a boundary) is selected
   // and then fast-skipped, which is the pre-existing `skippedCircuitOpen` path —
   // so the disagreement costs one row of budget and never a wrong outcome.
-  const cooldown = sql`make_interval(secs => ${breakerConfig().cooldownMs / 1000})`;
-  const probable = sql`(${mcpServers.breakerOpenedAt} is null or now() - ${mcpServers.breakerOpenedAt} >= ${cooldown})`;
+  const probable = healthProbeEligibility();
 
   const [{ n: eligible, cooling: inCooldown, never: neverProbed, oldest: oldestProbeAt } = {
     n: 0,
@@ -222,73 +349,9 @@ export async function runMcpHealthProbeSweep(
   // cursors are equal (every row on a fresh install), so a pass over unchanged
   // data is reproducible.
   //
-  // THE CLAIM. The first fix selected the batch and then stamped it with a
-  // second UPDATE, and the comment between them said two concurrent passes
-  // "select disjoint sets". Nothing enforced that: a second pass could run the
-  // same SELECT in the gap before the first pass's stamp landed, pick the same
-  // head, stamp it again and probe it again — the same rows probed twice by
-  // two sweeps, and the rows behind them reached by neither, on an estate
-  // whose scheduler page reported two full passes.
-  //
-  // Now the rows are row-locked AS THEY ARE SELECTED (`for update skip
-  // locked`) and stamped in the same statement, so there is no gap: a pass
-  // that arrives while another is mid-claim skips the rows that pass holds and
-  // takes the next ones in the same order, instead of blocking behind them or
-  // duplicating them. The locks last exactly as long as the statement (this is
-  // autocommit; nothing is held while the probes below run), and the stamp is
-  // visible to the next pass the moment they are released.
-  //
-  // Three parts, one round trip: `picked` selects and locks; `claimed` stamps
-  // the cursor on exactly those rows (a data-modifying CTE runs once whether
-  // or not the outer query reads it); the outer query returns `picked` — the
-  // rows as they were BEFORE the stamp, in probe order, which is what the loop
-  // below wants (`breakerOpenedAt` for the election, the old cursor for the
-  // order).
-  //
-  // The stamp is taken when a row is SELECTED, not after it answers, and the
-  // header says why: a row whose probe fails, hangs or is refused by our own
-  // gates still moves to the back of the queue and cannot monopolise every
-  // pass, and a pass that dies half way leaves its rows late rather than
-  // starved.
-  const picked = db.$with("picked").as(
-    db
-      .select({
-        id: mcpServers.id,
-        name: mcpServers.name,
-        url: mcpServers.url,
-        allowPrivateRanges: mcpServers.allowPrivateRanges,
-        breakerOpenedAt: mcpServers.breakerOpenedAt,
-        breakerLastError: mcpServers.breakerLastError,
-        breakerConsecutiveFailures: mcpServers.breakerConsecutiveFailures,
-        lastHealthProbeAt: mcpServers.lastHealthProbeAt,
-      })
-      .from(mcpServers)
-      .where(probable)
-      .orderBy(
-        sql`(${mcpServers.breakerOpenedAt} is null) asc`,
-        sql`${mcpServers.lastHealthProbeAt} asc nulls first`,
-        asc(mcpServers.name),
-      )
-      .limit(limit)
-      .for("update", { skipLocked: true }),
-  );
-  const claimed = db.$with("claimed").as(
-    db
-      .update(mcpServers)
-      .set({ lastHealthProbeAt: new Date() })
-      .from(picked)
-      .where(eq(mcpServers.id, picked.id))
-      .returning({ id: mcpServers.id }),
-  );
-  const batch = (await db
-    .with(picked, claimed)
-    .select()
-    .from(picked)
-    .orderBy(
-      sql`(${picked.breakerOpenedAt} is null) asc`,
-      sql`${picked.lastHealthProbeAt} asc nulls first`,
-      asc(picked.name),
-    )) as ProbeRow[];
+  // THE CLAIM — selection and cursor stamp in one statement, serialized
+  // against every other pass's claim. `claimHealthProbeBatch` says how and why.
+  const batch = await claimHealthProbeBatch(db, limit, probable);
 
   const out: McpHealthProbeResult = {
     eligible,

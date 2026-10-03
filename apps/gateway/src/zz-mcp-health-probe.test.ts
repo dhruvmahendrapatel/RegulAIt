@@ -25,7 +25,13 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createDb, eq, inArray, mcpServers, notInArray, runMigrations, sql, type Db } from "@regulait/db";
-import { runMcpHealthProbeSweep, type McpHealthProbeResult } from "./mcp-health-probe.js";
+import {
+  claimHealthProbeBatch,
+  healthProbeEligibility,
+  HEALTH_PROBE_CLAIM_LOCK_KEY,
+  runMcpHealthProbeSweep,
+  type McpHealthProbeResult,
+} from "./mcp-health-probe.js";
 import { resolveBreakerConfig, setBreakerConfig, breakerConfig } from "./upstream-breaker.js";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
@@ -459,6 +465,121 @@ describe("AER-037 — two concurrent passes claim DISJOINT sets", () => {
     } finally {
       await db.execute(sql.raw(`drop trigger if exists ${fnName} on mcp_servers`));
       await db.execute(sql.raw(`drop function if exists ${fnName}()`));
+    }
+  }, 60_000);
+});
+
+// ===========================================================================
+// AER-037 — the interleaving `skip locked` alone did not cover: a claim whose
+// SNAPSHOT predates the other claim's commit but whose LOCKS come after it.
+// ===========================================================================
+//
+// The overlap test above holds A's row locks for B's whole statement, so B only
+// ever meets rows that are still locked and skips them. The reviewer's case is
+// the other ordering: B takes its statement snapshot while A's claim is
+// uncommitted, A commits, and only THEN does B reach A's rows. Unlocked by
+// then, they are locked by B, re-checked against the WHERE clause (which does
+// not look at the cursor) and claimed a second time.
+//
+// Driven deterministically, with no sleeps:
+//  1. A second connection holds a GATE advisory lock.
+//  2. Claim A runs inside a transaction the test keeps open, so its stamps are
+//     uncommitted (and, after the fix, so is its claim lock).
+//  3. Claim B starts with `eligible` extended by a function that waits on the
+//     gate. Evaluated per row during B's scan, it parks B AFTER B's snapshot and
+//     BEFORE B locks anything. After the fix, B parks earlier still, on the
+//     claim lock, before its claim statement has a snapshot at all.
+//  4. Once B is seen waiting on an advisory lock, A commits; then the gate is
+//     released; then B finishes.
+// The two claimed sets must be disjoint and together cover the six rows.
+
+describe("AER-037 — a claim whose snapshot predates another claim's commit", () => {
+  const LIMIT = 3;
+  const COUNT = 2 * LIMIT;
+  const tag = `zz-snap-${randomUUID().slice(0, 8)}`;
+  const ids: string[] = [];
+  const names: string[] = [];
+
+  beforeAll(async () => {
+    for (let i = 0; i < COUNT; i += 1) {
+      const name = `${tag}-${String(COUNT - i).padStart(2, "0")}`;
+      names.push(name);
+      ids.push(await register(name, DEAD_URL));
+    }
+    // park the rest of the estate — the rotation block says why this is safe;
+    // this file's earlier blocks left breakers open and cursors null on their
+    // own rows, which would otherwise jump this queue
+    await db
+      .update(mcpServers)
+      .set({ lastHealthProbeAt: new Date(), breakerOpenedAt: null, breakerLastError: null })
+      .where(notInArray(mcpServers.id, ids));
+  }, 60_000);
+
+  it("claim B, started before claim A commits, takes none of A's rows", async () => {
+    expect(tag).toMatch(/^zz-snap-[0-9a-f]{8}$/);
+    const gateFn = `zz_aer037_gate_${tag.slice(-8)}`;
+    const K1 = 37_037;
+    const gate = 1 + Math.floor(Math.random() * 2_000_000_000);
+    // the gate is a SHARED xact lock, so B's per-row calls stack harmlessly
+    // and all release with B's own statement or transaction
+    await db.execute(
+      sql.raw(`
+      create or replace function ${gateFn}() returns boolean as $$
+      begin
+        perform pg_advisory_xact_lock_shared(${K1}, ${gate});
+        return true;
+      end $$ language plpgsql volatile;
+    `),
+    );
+    const holder = createDb(DATABASE_URL!);
+    const gateConn = await (holder.$client as unknown as {
+      connect: () => Promise<{ query: (t: string) => Promise<unknown>; release: () => void }>;
+    }).connect();
+    let b: Promise<Array<{ name: string }>> | undefined;
+    try {
+      await gateConn.query(`select pg_advisory_lock(${K1}, ${gate})`);
+
+      let tookA: string[] = [];
+      await db.transaction(async (outer) => {
+        // A — claimed and stamped, NOT committed until this callback returns
+        tookA = (await claimHealthProbeBatch(outer, LIMIT, healthProbeEligibility())).map((r) => r.name);
+
+        // B — on its own pooled connection; not awaited, it is about to park
+        b = claimHealthProbeBatch(db, LIMIT, sql`${healthProbeEligibility()} and ${sql.raw(gateFn)}()`);
+
+        // B is parked on an advisory lock: the gate (its snapshot taken, no
+        // row locked yet) or, with the claim serialized, the claim lock
+        const deadline = Date.now() + 15_000;
+        for (;;) {
+          const r = (await db.execute(sql`
+            select count(*)::int as "n" from pg_locks
+            where locktype = 'advisory' and not granted
+              and ((objsubid = 2 and classid = ${K1} and objid = ${gate})
+                or (objsubid = 1 and ((classid::bigint << 32) | objid::bigint) = ${HEALTH_PROBE_CLAIM_LOCK_KEY}))
+          `)) as unknown as { rows: Array<{ n: number }> };
+          if (r.rows[0]!.n >= 1) break;
+          if (Date.now() > deadline) throw new Error("claim B never parked on an advisory lock");
+          await new Promise((res) => setTimeout(res, 20));
+        }
+      });
+      // A has COMMITTED. Only now may B reach any row.
+      await gateConn.query(`select pg_advisory_unlock(${K1}, ${gate})`);
+      const tookB = (await b!).map((r) => r.name);
+
+      const oursA = tookA.filter((n) => names.includes(n)).sort();
+      const oursB = tookB.filter((n) => names.includes(n)).sort();
+      expect(oursA, `claim A: ${JSON.stringify(tookA)}`).toHaveLength(LIMIT);
+      expect(
+        oursA.filter((n) => oursB.includes(n)),
+        `claim B re-claimed A's rows: A=${JSON.stringify(oursA)} B=${JSON.stringify(oursB)}`,
+      ).toEqual([]);
+      expect([...oursA, ...oursB].sort(), "together they cover every row once").toEqual([...names].sort());
+    } finally {
+      await gateConn.query(`select pg_advisory_unlock_all()`).catch(() => undefined);
+      await b?.catch(() => undefined);
+      gateConn.release();
+      await holder.$client.end();
+      await db.execute(sql.raw(`drop function if exists ${gateFn}()`));
     }
   }, 60_000);
 });
