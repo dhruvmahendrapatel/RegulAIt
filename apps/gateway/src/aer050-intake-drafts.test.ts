@@ -8,7 +8,7 @@
  *           untouched for 30 days are pruned. POST /v1/use-cases honours an
  *           Idempotency-Key: same caller + key → the original body (200,
  *           `Idempotent-Replay: true`) and ONE use case, even when the
- *           duplicates race; keys are per caller and expire after 24h.
+ *           duplicates race; keys are per caller and expire with the draft lifetime (30 days).
  *  AER-052  `frameworkRationales` is stored on create/PATCH, returned by the
  *           detail read, and refused for a framework the use case does not carry.
  *  AER-053  `unsure` on the Classify answers (create, PATCH) and in the
@@ -252,13 +252,23 @@ describe("AER-050 idempotent POST /v1/use-cases", () => {
     expect(claims[0]!.useCaseId).toBe([...ids][0]);
   });
 
-  it("a key older than 24 hours no longer replays", async () => {
+  it("a key outlives a day (a resumed draft still replays) but not the 30-day draft lifetime", async () => {
     const key = { "idempotency-key": `expiry-${RUN}` };
     const first = await create("idem-expiry", {}, "owner", key);
     expect(first.statusCode).toBe(201);
+    const age = (hours: number) =>
+      db
+        .update(useCaseIdempotencyKeys)
+        .set({ createdAt: new Date(Date.now() - hours * 3_600_000) })
+        .where(and(eq(useCaseIdempotencyKeys.userId, users.owner.id), eq(useCaseIdempotencyKeys.key, `expiry-${RUN}`)));
+    // two days on — the draft (and its key) is still alive, so this replays
+    await age(48);
+    const resumed = await create("idem-expiry", {}, "owner", key);
+    expect(resumed.statusCode, resumed.body).toBe(200);
+    expect(resumed.json().id).toBe(first.json().id);
     await db
       .update(useCaseIdempotencyKeys)
-      .set({ createdAt: new Date(Date.now() - 25 * 3_600_000) })
+      .set({ createdAt: new Date(Date.now() - 31 * 24 * 3_600_000) })
       .where(and(eq(useCaseIdempotencyKeys.userId, users.owner.id), eq(useCaseIdempotencyKeys.key, `expiry-${RUN}`)));
     const later = await create("idem-expiry", {}, "owner", key);
     expect(later.statusCode, later.body).toBe(201);

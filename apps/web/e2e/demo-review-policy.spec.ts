@@ -153,6 +153,8 @@ test("review policy: two role reviews, a send-back, a prefilled resubmission and
     generative: true,
     autonomousActions: false,
     toolsUsed: [],
+    // ADR-0171: the answers the owner marked "Not sure" (none here)
+    unsure: [],
   });
 
   // 3. both role members see their own review; Dana (Privacy) sends it back

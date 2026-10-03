@@ -1253,8 +1253,11 @@ export function useCaseArtifactRefusal(
   return null;
 }
 
-/** AER-050: how long a claimed Idempotency-Key replays its original response */
-export const USE_CASE_IDEMPOTENCY_WINDOW_MS = 24 * 60 * 60 * 1000;
+/** AER-050: how long a claimed Idempotency-Key replays its original response.
+ * As long as a draft lives (use-case-drafts.ts, 30 days): the draft carries the
+ * key, so a resume-and-retry after a lost response must still replay rather
+ * than create a second use case. */
+export const USE_CASE_IDEMPOTENCY_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
 /** the stored original body for (caller, key), if claimed inside the window */
 async function idempotentReplayFor(db: Db, userId: string, key: string): Promise<Record<string, unknown> | null> {

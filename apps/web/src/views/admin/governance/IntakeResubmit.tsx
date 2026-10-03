@@ -470,7 +470,10 @@ function ResubmitForm(props: { useCaseId: string; detail: Detail; record: string
 }
 
 /** the draft is being kept on the server */
-const draftKept = (status: DraftStatus) => status.kind !== "off" && status.kind !== "error" && status.kind !== "done";
+// a pending Resume / Start fresh offer saves nothing until the user chooses,
+// so it must not be described (or relied on) as keeping their changes
+const draftKept = (status: DraftStatus) =>
+  status.kind !== "off" && status.kind !== "error" && status.kind !== "done" && status.kind !== "offer";
 
 function ResubmitDraftLine(props: { status: DraftStatus; dirty: boolean; unsaved: boolean }) {
   const { status } = props;

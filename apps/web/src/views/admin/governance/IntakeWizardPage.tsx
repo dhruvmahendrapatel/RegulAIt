@@ -847,7 +847,10 @@ function RegisterUseCase() {
 }
 
 /** the draft is being kept on the server (or will be once the person chooses at the resume offer) */
-const draftKept = (status: DraftStatus) => status.kind !== "off" && status.kind !== "error" && status.kind !== "done";
+// a pending Resume / Start fresh offer saves nothing until the user chooses,
+// so it must not be described (or relied on) as keeping their changes
+const draftKept = (status: DraftStatus) =>
+  status.kind !== "off" && status.kind !== "error" && status.kind !== "done" && status.kind !== "offer";
 
 /** " of “Name”" for the resume offer, when the saved draft has a name */
 const draftName = (state: unknown) => {

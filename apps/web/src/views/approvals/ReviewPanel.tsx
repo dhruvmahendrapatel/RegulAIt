@@ -298,6 +298,12 @@ function ReviewDrawer(props: { approval: Approval; onClose: () => void; onDecide
                       </>
                     ) : <span className={r.muted}>Not screened yet</span>}
                     {/* ADR-0171: a "not sure" answer counted as yes — the reviewer confirms it */}
+                    {detail.isError ? (
+                      <p className={r.muted}>
+                        The owner's notes (answers they were not sure about, framework explanations) could not be loaded.{" "}
+                        <button type="button" className={r.linkButton} onClick={() => void detail.refetch()}>Retry</button>
+                      </p>
+                    ) : null}
                     {unsure.length ? <p>Owner unsure about: {unsure.map(questionLabel).join(", ")}. <span className={r.muted}>Each was counted as yes; confirm it with the owner.</span></p> : null}
                   </EvidenceRow>
                   {(ov.useCase.complianceTags ?? []).length ? (
