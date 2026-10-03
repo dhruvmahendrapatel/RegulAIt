@@ -122,6 +122,22 @@
   text-transform: uppercase;
 }
 
+/* A KPI strip: the figures share one surface and are divided by hairlines,
+   never a row of separate Stat cards. */
+.kpiStrip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  row-gap: var(--s2);
+}
+.kpiStrip > * {
+  padding: 0 var(--s3);
+  border-left: 1px solid var(--border);
+}
+.kpiStrip > :first-child {
+  padding-left: 0;
+  border-left: 0;
+}
+
 .dim {
   color: var(--text-dim);
   font-size: var(--text-sm);

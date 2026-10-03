@@ -33,7 +33,7 @@
  *    failure for a discovery product; `report_and_continue` is the explicit
  *    opt-in and is labelled as such.
  */
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
@@ -421,20 +421,125 @@ export default function ShadowAiPage() {
         sub="Inventory ungoverned LLM usage from evidence you already have — and pull it into governance."
       />
 
-      <Card title="What this does, and what it cannot do">
-        <p className={v.dim}>{findings.data?.coverage.statement ?? "Loading coverage…"}</p>
-        <p className={v.dim}>{findings.data?.posture}</p>
+      <div className={v.stack}>
+      {/* what this can and cannot see, stated once, on the face of the page */}
+      <p className={v.dim}>
+        {findings.data?.coverage.statement ?? "Loading coverage…"}
+        {findings.data?.posture ? <> · {findings.data.posture}</> : null}
+      </p>
+
+      <Card>
+        <div className={v.kpiStrip}>
+          <KpiFigure value={bySeverity.critical} label="Critical (leaked credential)" />
+          <KpiFigure value={bySeverity.high} label="High (observed model traffic)" />
+          <KpiFigure value={(bySeverity.medium ?? 0) + (bySeverity.low ?? 0)} label="Medium / low" />
+          <KpiFigure
+            value={`${findings.data?.coverage.sourcesOn ?? 0} / ${findings.data?.coverage.sourcesPossible ?? 4}`}
+            label="Evidence classes supplied"
+          />
+        </div>
       </Card>
 
-      <div className={a.statRow}>
-        <Stat value={bySeverity.critical} label="Critical (leaked credential)" />
-        <Stat value={bySeverity.high} label="High (observed model traffic)" />
-        <Stat value={(bySeverity.medium ?? 0) + (bySeverity.low ?? 0)} label="Medium / low" />
-        <Stat
-          value={`${findings.data?.coverage.sourcesOn ?? 0} / ${findings.data?.coverage.sourcesPossible ?? 4}`}
-          label="Evidence classes supplied"
-        />
-      </div>
+      {/* the findings are the point of the page: they come straight after the figures */}
+      <Card title="Inventory">
+        <p className={v.faint}>Every row is a lead for triage, not a verdict.</p>
+        <QueryGate loading={findings.isLoading} error={findings.error} onRetry={refresh}>
+          {(findings.data?.findings.length ?? 0) === 0 ? (
+            <EmptyState title="No findings yet" body="Import an egress-log, code-scan, SaaS or self-reported evidence file above." />
+          ) : (
+            <Table<Finding>
+              rows={findings.data?.findings ?? []}
+              rowKey={(r) => r.id}
+              columns={[
+                { key: "severity", header: "Severity", render: (r) => <SeverityBadge severity={r.severity} /> },
+                { key: "subject", header: "Subject", render: (r) => <span title={r.subjectKind}>{r.subject}</span> },
+                { key: "provider", header: "Provider", render: (r) => providerLabel(r.provider) },
+                { key: "sources", header: "Sources", render: (r) => r.signalSources.map(evidenceLabel).join(", ") },
+                { key: "confidence", header: "Confidence", render: (r) => r.confidence },
+                { key: "observations", header: "Observations", render: (r) => r.observationCount },
+                { key: "last_seen", header: "Last seen", render: (r) => ago(r.lastSeenAt) },
+                {
+                  key: "replacement",
+                  header: "Governed replacement",
+                  render: (r) =>
+                    r.replacementAgent ? (
+                      <Badge tone="ok">{r.replacementAgent.name}</Badge>
+                    ) : (
+                      <span className={v.dim}>{r.replacementNote ?? "none registered"}</span>
+                    ),
+                },
+                {
+                  key: "disposition",
+                  header: "Disposition",
+                  render: (r) => (
+                    <>
+                      <Badge tone={r.disposition === "open" ? "warn" : "neutral"}>{r.disposition}</Badge>
+                      {r.dispositionStale ? <Badge tone="danger">seen again since</Badge> : null}
+                    </>
+                  ),
+                },
+                {
+                  key: "triage",
+                  header: "",
+                  render: (r) => (
+                    <div className={v.row} style={{ flexWrap: "nowrap", whiteSpace: "nowrap" }}>
+                      <Link to={`/admin/governance/intake?source=shadow-ai&findingId=${encodeURIComponent(r.id)}&title=${encodeURIComponent(`Govern ${r.subject}`)}&description=${encodeURIComponent(`Register and govern the ${providerLabel(r.provider)} usage observed for ${r.subject}. Evidence: ${r.signalSources.map(evidenceLabel).join(", ")}.`)}`}>Register as use case</Link>
+                      <Button variant="ghost" onClick={() => { setDispositionFor(r.id); setReason(""); }}>Triage</Button>
+                    </div>
+                  ),
+                },
+              ]}
+            />
+          )}
+        </QueryGate>
+
+        {dispositionFor ? (
+          <section className={a.subSection}>
+            <div className={v.sectionTitle}>Record a disposition</div>
+            <p className={v.faint}>
+              Moving a finding off &lsquo;open&rsquo; requires a reason — a later reviewer has to be able to audit the
+              judgement.
+            </p>
+            <Field label="Disposition">
+              <Select value={disposition} onChange={(e) => setDisposition(e.target.value)}>
+                {["confirmed", "sanctioned", "false_positive", "remediated", "open"].map((d) => (
+                  <option key={d} value={d}>{d}</option>
+                ))}
+              </Select>
+            </Field>
+            <Field label="Reason">
+              <Input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="why this judgement" />
+            </Field>
+            <div className={v.row}>
+              <Button
+                variant="primary"
+                disabled={act.busy}
+                onClick={() =>
+                  void act
+                    .run(
+                      () =>
+                        api.post(`/v1/shadow-ai/findings/${dispositionFor}/disposition`, {
+                          disposition,
+                          ...(reason.trim() ? { reason: reason.trim() } : {}),
+                        }),
+                      "Disposition recorded",
+                    )
+                    .then((ok) => {
+                      if (ok) {
+                        setDispositionFor(null);
+                        refresh();
+                      }
+                    })
+                }
+              >
+                Record
+              </Button>
+              <Button onClick={() => setDispositionFor(null)}>Cancel</Button>
+            </div>
+          </section>
+        ) : null}
+      </Card>
+
 
       <Card title="Coverage scorecard">
         <p className={v.faint}>Gaps are shown, never papered over.</p>
@@ -537,11 +642,11 @@ export default function ShadowAiPage() {
                 <div className={v.sectionTitle}>What has and has not been checked</div>
                 {/* VERBATIM — several of these say outright that the adapter has
                     never been run against a real vendor export. */}
-                <p className={a.snippet} data-testid="raw-verification">
+                <p className={`${a.snippet} ${a.snippetProse}`} data-testid="raw-verification">
                   {selectedAdapter.verification}
                 </p>
                 <div className={v.sectionTitle}>What this adapter cannot do</div>
-                <p className={a.snippet} data-testid="raw-limits">
+                <p className={`${a.snippet} ${a.snippetProse}`} data-testid="raw-limits">
                   {selectedAdapter.limits}
                 </p>
                 {ADAPTER_CONFIG_HINT[selectedAdapter.id] && (
@@ -839,7 +944,7 @@ export default function ShadowAiPage() {
           </div>
           <OutcomePanel outcome={mcpAct.outcome} />
           {mcpResult ? <div className={v.stack}>
-            <div className={a.statRow}><Stat value={mcpResult.observed} label="Observed MCP hosts" /><Stat value={mcpResult.unregistered} label="Unregistered" /><Stat value={mcpResult.registryCount} label="Registry entries" /></div>
+            <div className={v.kpiStrip}><KpiFigure value={mcpResult.observed} label="Observed MCP hosts" /><KpiFigure value={mcpResult.unregistered} label="Unregistered" /><KpiFigure value={mcpResult.registryCount} label="Registry entries" /></div>
             {mcpResult.results.length === 0 ? <EmptyState title="No MCP indicators found" body="No supported MCP transport path, protocol header, or JSON-RPC method appeared in the supplied text." /> : <Table rows={mcpResult.results} rowKey={(row) => row.host} columns={[
               { key: "host", header: "Host", render: (row) => <><code>{row.host}</code>{row.path ? <span className={v.faint}> {row.path}</span> : null}</> },
               { key: "confidence", header: "Confidence", render: (row) => <Badge tone={row.confidence === "high" ? "warn" : "info"}>{row.confidence}</Badge> },
@@ -874,104 +979,6 @@ export default function ShadowAiPage() {
         ) : null}
       </Card>
 
-      <Card title="Inventory">
-        <p className={v.faint}>Every row is a lead for triage, not a verdict.</p>
-        <QueryGate loading={findings.isLoading} error={findings.error} onRetry={refresh}>
-          {(findings.data?.findings.length ?? 0) === 0 ? (
-            <EmptyState title="No findings yet" body="Import an egress-log, code-scan, SaaS or self-reported evidence file above." />
-          ) : (
-            <Table<Finding>
-              rows={findings.data?.findings ?? []}
-              rowKey={(r) => r.id}
-              columns={[
-                { key: "severity", header: "Severity", render: (r) => <SeverityBadge severity={r.severity} /> },
-                { key: "subject", header: "Subject", render: (r) => <span title={r.subjectKind}>{r.subject}</span> },
-                { key: "provider", header: "Provider", render: (r) => providerLabel(r.provider) },
-                { key: "sources", header: "Sources", render: (r) => r.signalSources.map(evidenceLabel).join(", ") },
-                { key: "confidence", header: "Confidence", render: (r) => r.confidence },
-                { key: "observations", header: "Observations", render: (r) => r.observationCount },
-                { key: "last_seen", header: "Last seen", render: (r) => ago(r.lastSeenAt) },
-                {
-                  key: "replacement",
-                  header: "Governed replacement",
-                  render: (r) =>
-                    r.replacementAgent ? (
-                      <Badge tone="ok">{r.replacementAgent.name}</Badge>
-                    ) : (
-                      <span className={v.dim}>{r.replacementNote ?? "none registered"}</span>
-                    ),
-                },
-                {
-                  key: "disposition",
-                  header: "Disposition",
-                  render: (r) => (
-                    <>
-                      <Badge tone={r.disposition === "open" ? "warn" : "neutral"}>{r.disposition}</Badge>
-                      {r.dispositionStale ? <Badge tone="danger">seen again since</Badge> : null}
-                    </>
-                  ),
-                },
-                {
-                  key: "triage",
-                  header: "",
-                  render: (r) => (
-                    <div className={v.row}>
-                      <Link to={`/admin/governance/intake?source=shadow-ai&findingId=${encodeURIComponent(r.id)}&title=${encodeURIComponent(`Govern ${r.subject}`)}&description=${encodeURIComponent(`Register and govern the ${providerLabel(r.provider)} usage observed for ${r.subject}. Evidence: ${r.signalSources.map(evidenceLabel).join(", ")}.`)}`}>Register as use case</Link>
-                      <Button onClick={() => { setDispositionFor(r.id); setReason(""); }}>Triage</Button>
-                    </div>
-                  ),
-                },
-              ]}
-            />
-          )}
-        </QueryGate>
-
-        {dispositionFor ? (
-          <Card title="Record a disposition">
-            <p className={v.faint}>
-              Moving a finding off &lsquo;open&rsquo; requires a reason — a later reviewer has to be able to audit the
-              judgement.
-            </p>
-            <Field label="Disposition">
-              <Select value={disposition} onChange={(e) => setDisposition(e.target.value)}>
-                {["confirmed", "sanctioned", "false_positive", "remediated", "open"].map((d) => (
-                  <option key={d} value={d}>{d}</option>
-                ))}
-              </Select>
-            </Field>
-            <Field label="Reason">
-              <Input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="why this judgement" />
-            </Field>
-            <div className={v.row}>
-              <Button
-                variant="primary"
-                disabled={act.busy}
-                onClick={() =>
-                  void act
-                    .run(
-                      () =>
-                        api.post(`/v1/shadow-ai/findings/${dispositionFor}/disposition`, {
-                          disposition,
-                          ...(reason.trim() ? { reason: reason.trim() } : {}),
-                        }),
-                      "Disposition recorded",
-                    )
-                    .then((ok) => {
-                      if (ok) {
-                        setDispositionFor(null);
-                        refresh();
-                      }
-                    })
-                }
-              >
-                Record
-              </Button>
-              <Button onClick={() => setDispositionFor(null)}>Cancel</Button>
-            </div>
-          </Card>
-        ) : null}
-      </Card>
-
       <Card title="Detection catalogue">
         <p className={v.faint}>{catalogue.data?.posture ?? ""}</p>
         <QueryGate loading={catalogue.isLoading} error={catalogue.error} onRetry={refresh}>
@@ -1000,6 +1007,7 @@ export default function ShadowAiPage() {
                 header: "",
                 render: (r) => (
                   <Button
+                    variant="ghost"
                     disabled={act.busy}
                     onClick={() => void act.run(() => api.del(`/v1/shadow-ai/catalogue/${r.id}`), "Signature removed").then((ok) => ok && refresh())}
                   >
@@ -1031,7 +1039,17 @@ export default function ShadowAiPage() {
           />
         </QueryGate>
       </Card>
+      </div>
     </>
+  );
+}
+
+function KpiFigure(props: { value: ReactNode; label: string }) {
+  return (
+    <div className={v.stat}>
+      <span className={v.statValue}>{props.value}</span>
+      <span className={v.statLabel}>{props.label}</span>
+    </div>
   );
 }
 

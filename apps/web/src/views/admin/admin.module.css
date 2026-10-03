@@ -159,6 +159,26 @@
   letter-spacing: 0.04em;
 }
 
+/* a sub-section inside a card: a heading and a top hairline, no second box */
+.subSection {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  margin-top: var(--s2);
+  padding-top: var(--s2);
+  border-top: 1px solid var(--border);
+}
+.subSection > :first-child {
+  margin-top: 0;
+}
+
+/* verbatim sentences (adapter verification and limits) keep the snippet's
+   box but read as prose: sans, not monospace */
+.snippetProse {
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+}
+
 /* copy-paste config snippet */
 .snippet {
   font-family: var(--font-mono);
@@ -264,10 +284,12 @@
   border: 1px solid var(--border);
   background: var(--surface-2);
 }
+/* an accepted outcome is the expected result: stated plainly, no fill or
+   border. Refusals (.outcomeDeny) stay loud. */
 .outcomeOk {
-  border-color: var(--ok);
-  background: var(--ok-soft);
-  color: var(--ok-soft-text);
+  padding: 0;
+  border: 0;
+  background: none;
 }
 .outcomeDeny {
   border-color: var(--danger);
