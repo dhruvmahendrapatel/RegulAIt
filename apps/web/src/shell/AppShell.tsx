@@ -12,7 +12,7 @@ import { api } from "../api/client";
 import type { Approval } from "../api/types";
 import { useSession } from "../session/SessionContext";
 import { useTheme } from "../ui/useTheme";
-import { Lockup, WORDMARK } from "../ui/Brand";
+import { Lockup } from "../ui/Brand";
 import { InfoButton } from "../ui/kit";
 import { ADMIN_GROUPS, SUITES, WORKSPACE, suiteHome, suiteOfPath, type NavEntry } from "./suites";
 import s from "./shell.module.css";
@@ -226,9 +226,9 @@ export default function AppShell(props: { children: ReactNode }) {
         {/* The two "legacy ↗" bridges are gone: ADR-0033 deleted the
             single-file shells they pointed at, so a link here would be a dead
             end — the exact failure phase 1 refused to ship. */}
-        {/* No endorsement line here: the brand puts it in footers, sign-in
-            screens and legal surfaces — never in the app chrome. */}
-        <div className={s.sideFoot}>Governed AI delivery platform</div>
+        {/* No endorsement line and no tagline here: the brand puts those in
+            footers, sign-in screens and legal surfaces — never in the app
+            chrome, where they only add a fourth text style to the rail. */}
       </aside>
 
       <div className={s.mainCol}>
@@ -241,8 +241,9 @@ export default function AppShell(props: { children: ReactNode }) {
           >
             ☰
           </button>
+          {/* No "regulAIt workspace" label: the lockup in the rail already
+              says whose product this is, and the topbar is part of the canvas. */}
           <span className={s.topbarSpacer} />
-          <span className={s.orgName}>{WORDMARK} workspace</span>
           <button
             className={s.iconBtn}
             aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
