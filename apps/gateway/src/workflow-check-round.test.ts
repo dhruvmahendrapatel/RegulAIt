@@ -4,7 +4,16 @@ import { fileURLToPath } from "node:url";
 import { and, auditLog, createDb, eq, orgSettings, runMigrations, sql, workflowInstances, type Db } from "@regulait/db";
 import { resolveProvider, type MockGitProvider } from "@regulait/git-provider";
 import { buildApp } from "./app.js";
-import { CHECK_PENDING_DETAIL, workflowTestHooks } from "./workflows.js";
+import {
+  applyWorkflowApprovalDecision,
+  CHECK_PENDING_DETAIL,
+  EFFECT_HISTORY_KEY,
+  EFFECT_STAMPS_KEY,
+  reopenWorkflowInstance,
+  workflowTestHooks,
+  type EffectHistoryEntry,
+  type EffectStamp,
+} from "./workflows.js";
 
 /**
  * AER-048 — the check executor, check reports and re-opens are bound to a
@@ -313,6 +322,8 @@ async function auditFor(instanceId: string) {
 }
 
 type Evaluated = { check: string; status: string; detail?: string };
+const historyOf = (ctx: Record<string, unknown>) => (ctx[EFFECT_HISTORY_KEY] as EffectHistoryEntry[] | undefined) ?? [];
+const stampsOf = (ctx: Record<string, unknown>) => (ctx[EFFECT_STAMPS_KEY] as Record<string, EffectStamp> | undefined) ?? {};
 const statusOf = (ctx: Record<string, unknown>, stage: string, check: string) =>
   ((ctx[`checks:${stage}`] as Evaluated[] | undefined) ?? []).find((r) => r.check === check)?.status;
 
@@ -540,38 +551,54 @@ describe("AER-048 — check executor, reports and re-opens bind to the round / s
 });
 
 describe("AER-048 review — discarded results keep their external-effect records; a holder that fails re-evaluates", () => {
-  it("(5) a DEPLOY whose result is discarded by a re-open keeps its deploy record — re-entry does not deploy again", async () => {
+  it("(5) AER-049: a DEPLOY discarded by a re-open is kept as the OLD round's history — the new round deploys afresh", async () => {
     const id = await startInstance("wr-deploy");
     await submitArtifact(id, "v1 requirements");
     const park = parkFirstCommit(id, "deploy");
     const decide = approveGate(id); // the deploy executor deploys, then parks before committing
     await park.arrived;
-    await submitArtifact(id, "v2 requirements"); // re-open
+    await submitArtifact(id, "v2 requirements"); // re-open → round 1
     park.release();
     expect((await decide).statusCode).toBe(200);
 
     const after = await view(id);
     expect(after.status).toBe("blocked_on_approval");
-    // the deployment happened, and its record survived the discard
-    expect(after.context["deploy:deploy"]).toMatchObject({ target: "wr-staging", environment: "staging" });
+    expect(after.round).toBe(1);
+    // the deployment happened, but it belongs to round 0: its record is NOT
+    // live (it would make round 1 skip its own deploy) — it is round 0's history
+    expect(after.context["deploy:deploy"]).toBeUndefined();
+    const r0 = historyOf(after.context).find((e) => e.round === 0 && e.keys.includes("deploy:deploy"))!;
+    expect(r0).toBeTruthy();
+    expect(r0.source).toBe("discarded-executor");
+    expect(r0.archivedInRound).toBe(1);
+    expect(r0.values["deploy:deploy"]).toMatchObject({ target: "wr-staging", environment: "staging" });
     const audit = await auditFor(id);
     const discarded = audit.filter((a) => a.ruleId === "workflow:executor-result-discarded");
     expect(discarded).toHaveLength(1);
-    const detail = discarded[0]!.detail as { effectRecords: Record<string, { deployId?: string }>; salvagedEffectRecords: string[] };
-    expect(detail.salvagedEffectRecords).toContain("deploy:deploy");
+    const detail = discarded[0]!.detail as {
+      effectRecords: Record<string, { deployId?: string }>;
+      salvagedEffectRecords: string[];
+      archivedEffectRecords: string[];
+    };
+    expect(detail.salvagedEffectRecords).toEqual([]);
+    expect(detail.archivedEffectRecords).toContain("deploy:deploy");
     // the audit carries the VALUES, so the deploy is traceable/reversible from the trail alone
-    expect(detail.effectRecords["deploy:deploy"]!.deployId).toBe((after.context["deploy:deploy"] as { deployId: string }).deployId);
+    expect(detail.effectRecords["deploy:deploy"]!.deployId).toBe((r0.values["deploy:deploy"] as { deployId: string }).deployId);
+    expect(audit.filter((a) => a.ruleId === "workflow:effects-archived")).toHaveLength(1);
     expect(audit.filter((a) => a.ruleId === "external-effect:deploy.deploy")).toHaveLength(1);
 
-    // round 1 is signed off: the deploy stage re-enters and does NOT deploy again
+    // round 1 is signed off: the deploy stage re-enters and DEPLOYS round 1
     expect((await approveGate(id)).statusCode).toBe(200);
     const done = await view(id);
     expect(done.status).toBe("blocked_on_approval");
     expect(done.state.currentStageIndex).toBe(4);
-    expect((await auditFor(id)).filter((a) => a.ruleId === "external-effect:deploy.deploy")).toHaveLength(1);
+    expect(done.context["deploy:deploy"]).toMatchObject({ target: "wr-staging" });
+    expect(stampsOf(done.context)["deploy:deploy"]).toEqual({ round: 1, stageId: "deploy" });
+    expect(historyOf(done.context).some((e) => e.round === 0 && e.keys.includes("deploy:deploy"))).toBe(true);
+    expect((await auditFor(id)).filter((a) => a.ruleId === "external-effect:deploy.deploy")).toHaveLength(2);
   });
 
-  it("(6) a MERGE whose result is discarded keeps mergeSha — re-entry does not merge again; the PR body carries the round", async () => {
+  it("(6) AER-049: a MERGE discarded by a re-open goes to round 0's history — round 1 opens a NEW branch and PR and merges it", async () => {
     const id = await startInstance("wr-git");
     await submitArtifact(id, "v1 requirements");
     expect((await approveGate(id)).statusCode).toBe(200); // branch + PR, then the merge gate
@@ -583,6 +610,12 @@ describe("AER-048 review — discarded results keep their external-effect record
     const body = mock.repos.get("wr/app")!.prs.get(prId)!.body;
     expect(body).toContain(`regulait-instance: ${id}`);
     expect(body).toContain("regulait-round: 0");
+    expect(body).not.toContain("regulait-supersedes");
+    expect(stampsOf(v.context)).toMatchObject({
+      branch: { round: 0, stageId: "branch" },
+      prId: { round: 0, stageId: "open_pr" },
+      prUrl: { round: 0, stageId: "open_pr" },
+    });
 
     const park = parkFirstCommit(id, "merge");
     const decide = approveGate(id, "merge_gate"); // merges, then parks before committing
@@ -591,22 +624,31 @@ describe("AER-048 review — discarded results keep their external-effect record
     park.release();
     expect((await decide).statusCode).toBe(200);
     v = await view(id);
-    expect(v.context.mergeSha).toBe(`sha-merge-${prId}`);
     expect(v.round).toBe(1);
+    // nothing of round 0 is live: branch/PR were archived by the re-open, the
+    // late merge by the discard — all of it is round 0's history
+    for (const k of ["branch", "prId", "prUrl", "mergeSha"]) expect(v.context[k]).toBeUndefined();
+    const r0 = historyOf(v.context).filter((e) => e.round === 0);
+    expect(r0.flatMap((e) => e.keys).sort()).toEqual(["branch", "mergeSha", "prId", "prUrl"]);
+    expect(r0.find((e) => e.keys.includes("mergeSha"))!.values.mergeSha).toBe(`sha-merge-${prId}`);
 
-    // round 1 runs the whole tail again: branch / PR / merge are all recorded,
-    // so none is performed a second time and the merge does not 405
+    // round 1 runs the whole tail again against a FRESH branch and PR
     expect((await approveGate(id)).statusCode).toBe(200);
+    v = await view(id);
+    expect(v.context.branch).toBe(`regulait/${id.slice(0, 8)}-r1`);
+    const pr1 = v.context.prId as string;
+    expect(pr1).not.toBe(prId);
     const merged = await approveGate(id, "merge_gate");
     expect(merged.statusCode).toBe(200);
     expect(merged.json().executionError).toBeUndefined();
     v = await view(id);
     expect(v.context.lastError).toBeUndefined();
+    expect(v.context.mergeSha).toBe(`sha-merge-${pr1}`);
     expect(v.state.currentStageIndex).toBe(7); // the final gate
     const audit = await auditFor(id);
-    expect(audit.filter((a) => a.ruleId === "external-effect:git.merge_pull_request")).toHaveLength(1);
-    expect(audit.filter((a) => a.ruleId === "external-effect:git.open_pull_request")).toHaveLength(1);
-    expect(audit.filter((a) => a.ruleId === "external-effect:git.create_branch")).toHaveLength(1);
+    expect(audit.filter((a) => a.ruleId === "external-effect:git.merge_pull_request")).toHaveLength(2);
+    expect(audit.filter((a) => a.ruleId === "external-effect:git.open_pull_request")).toHaveLength(2);
+    expect(audit.filter((a) => a.ruleId === "external-effect:git.create_branch")).toHaveLength(2);
   });
 
   it("(7) a check executor that THROWS after a report arrived during its claim re-evaluates once — the green report is not stranded", async () => {
@@ -661,5 +703,223 @@ describe("AER-048 review — discarded results keep their external-effect record
     const fresh = await view(id);
     expect(fresh.context["runId:build"]).toBeTruthy();
     expect(fresh.context["runId:build"]).not.toBe(oldRun);
+  });
+});
+
+describe("AER-049 — a re-open past merge or deploy is a new review round: effect records belong to the round that produced them", () => {
+  it("(a)+(d) a re-open AFTER the merge → the review runs again → a NEW branch, a NEW PR (carrying the new round) and a new merge; history keeps round 0", async () => {
+    const id = await startInstance("wr-git");
+    await submitArtifact(id, "v1 requirements");
+    expect((await approveGate(id)).statusCode).toBe(200);
+    expect((await approveGate(id, "merge_gate")).statusCode).toBe(200);
+    let v = await view(id);
+    expect(v.state.currentStageIndex).toBe(7); // merged, at the final gate
+    const pr0 = v.context.prId as string;
+    const round0 = { branch: v.context.branch, prId: pr0, prUrl: v.context.prUrl, mergeSha: v.context.mergeSha };
+    expect(round0.mergeSha).toBe(`sha-merge-${pr0}`);
+
+    await submitArtifact(id, "v2 requirements — changed after the merge"); // re-open → round 1
+    v = await view(id);
+    expect(v.round).toBe(1);
+    expect(v.status).toBe("blocked_on_approval"); // the review runs again
+    expect(v.state.currentStageIndex).toBe(2);
+    for (const k of ["branch", "prId", "prUrl", "mergeSha"]) expect(v.context[k]).toBeUndefined();
+    const archivedR0 = historyOf(v.context).filter((e) => e.round === 0);
+    expect(archivedR0).toHaveLength(1);
+    expect(archivedR0[0]!.source).toBe("reopen");
+    expect(archivedR0[0]!.archivedInRound).toBe(1);
+    expect(archivedR0[0]!.values).toEqual(round0);
+    const archivedAudit = (await auditFor(id)).filter((a) => a.ruleId === "workflow:effects-archived");
+    expect(archivedAudit).toHaveLength(1);
+    expect(archivedAudit[0]!.detail).toMatchObject({ event: "artifact_submitted", closedRound: 0, round: 1, archived: [{ round: 0, values: round0 }] });
+
+    // round 1: the sign-off, then a FRESH branch + PR, the merge gate, a new merge
+    expect((await approveGate(id)).statusCode).toBe(200);
+    v = await view(id);
+    expect(v.context.branch).toBe(`regulait/${id.slice(0, 8)}-r1`);
+    const pr1 = v.context.prId as string;
+    expect(pr1).not.toBe(pr0);
+    // (d) the new PR's body carries the NEW round, and names the PR it supersedes
+    const mock = resolveProvider({ provider: "mock", token: "x" }) as MockGitProvider;
+    const body1 = mock.repos.get("wr/app")!.prs.get(pr1)!.body;
+    expect(body1).toContain(`regulait-instance: ${id}`);
+    expect(body1).toContain("regulait-round: 1");
+    expect(body1).not.toContain("regulait-round: 0");
+    expect(body1).toContain(`regulait-supersedes: round 0 pull request ${String(round0.prUrl)}`);
+    expect(body1).toContain("v2 requirements");
+    expect(mock.repos.get("wr/app")!.prs.get(pr1)!.head).toBe(`regulait/${id.slice(0, 8)}-r1`);
+
+    const merged = await approveGate(id, "merge_gate");
+    expect(merged.statusCode).toBe(200);
+    expect(merged.json().executionError).toBeUndefined();
+    v = await view(id);
+    expect(v.context.mergeSha).toBe(`sha-merge-${pr1}`);
+    expect(v.state.currentStageIndex).toBe(7);
+    expect(stampsOf(v.context)).toMatchObject({
+      branch: { round: 1 },
+      prId: { round: 1 },
+      mergeSha: { round: 1, stageId: "merge" },
+    });
+    // round 0's history is untouched by round 1
+    expect(historyOf(v.context).filter((e) => e.round === 0)[0]!.values).toEqual(round0);
+    const audit = await auditFor(id);
+    expect(audit.filter((a) => a.ruleId === "external-effect:git.create_branch")).toHaveLength(2);
+    expect(audit.filter((a) => a.ruleId === "external-effect:git.open_pull_request")).toHaveLength(2);
+    expect(audit.filter((a) => a.ruleId === "external-effect:git.merge_pull_request")).toHaveLength(2);
+  });
+
+  it("(b) a sign-off RETURNED after the deploy → resubmission → a new review → round 1 DEPLOYS again; history keeps round 0's deploy", async () => {
+    const id = await startInstance("wr-deploy");
+    await submitArtifact(id, "v1 requirements");
+    expect((await approveGate(id)).statusCode).toBe(200); // deploys, then the final gate
+    let v = await view(id);
+    expect(v.state.currentStageIndex).toBe(4);
+    const dep0 = v.context["deploy:deploy"];
+    expect(dep0).toMatchObject({ target: "wr-staging" });
+    expect(stampsOf(v.context)["deploy:deploy"]).toEqual({ round: 0, stageId: "deploy" });
+
+    // the final reviewer sends it back for information → round 1 (the kernel
+    // event the ADR-0168 decide path applies; over HTTP "returned" is offered
+    // on intake sign-offs only)
+    const ret = await applyWorkflowApprovalDecision(db, { instanceId: id, stageId: "done" }, "returned", anaId);
+    expect(ret).toBeNull();
+    v = await view(id);
+    expect(v.round).toBe(1);
+    expect(v.status).toBe("blocked_on_artifact");
+    expect(v.context["deploy:deploy"]).toBeUndefined();
+    expect(v.context.deployUrl).toBeUndefined();
+    const r0 = historyOf(v.context).find((e) => e.round === 0)!;
+    expect(r0.keys.sort()).toEqual(["deploy:deploy", "deployUrl"]);
+    expect(r0.values["deploy:deploy"]).toEqual(dep0);
+
+    await submitArtifact(id, "v2 requirements"); // resubmitted in round 1 (not a further re-open)
+    v = await view(id);
+    expect(v.round).toBe(1);
+    expect(v.status).toBe("blocked_on_approval");
+    expect((await approveGate(id)).statusCode).toBe(200);
+    v = await view(id);
+    expect(v.state.currentStageIndex).toBe(4);
+    expect(v.context["deploy:deploy"]).toMatchObject({ target: "wr-staging" });
+    expect(stampsOf(v.context)["deploy:deploy"]).toEqual({ round: 1, stageId: "deploy" });
+    const deploys = (await auditFor(id)).filter((a) => a.ruleId === "external-effect:deploy.deploy");
+    expect(deploys).toHaveLength(2);
+    expect(deploys.map((a) => (a.detail as { round: number }).round).sort()).toEqual([0, 1]);
+  });
+
+  it("(c) WITHIN a round a discarded deploy executor's record is kept live — the stage re-entered in the same round does not deploy again", async () => {
+    const id = await startInstance("wr-deploy");
+    await submitArtifact(id, "v1 requirements");
+    const park = parkFirstCommit(id, "deploy");
+    const decide = approveGate(id); // deploys, then parks before committing
+    await park.arrived;
+    // a re-taker took the lapsed claim and died before doing anything (same
+    // round, same stage entry) — the parked executor no longer holds the claim
+    await db
+      .update(workflowInstances)
+      .set({
+        context: sql`${workflowInstances.context} || ${JSON.stringify({ executingClaim: "wr-lapsed-retaker", executingSince: "1970-01-01T00:00:00.000Z" })}::jsonb`,
+      })
+      .where(eq(workflowInstances.id, id));
+    park.release();
+    expect((await decide).statusCode).toBe(200);
+    let v = await view(id);
+    expect(v.round).toBe(0);
+    expect(v.status).toBe("awaiting_execution");
+    expect(v.context["deploy:deploy"]).toMatchObject({ target: "wr-staging" }); // salvaged LIVE (same round)
+    expect(stampsOf(v.context)["deploy:deploy"]).toEqual({ round: 0, stageId: "deploy" });
+    expect(historyOf(v.context)).toEqual([]);
+    const discarded = (await auditFor(id)).filter((a) => a.ruleId === "workflow:executor-result-discarded");
+    expect(discarded).toHaveLength(1);
+    expect((discarded[0]!.detail as { salvagedEffectRecords: string[] }).salvagedEffectRecords).toContain("deploy:deploy");
+
+    // the stage is retried in the same round: the record is the idempotency key
+    const adv = await app.inject({
+      method: "POST",
+      headers: piaAuth,
+      url: `/v1/workflows/instances/${id}/advance`,
+      payload: { stageId: "deploy" },
+    });
+    expect(adv.statusCode).toBe(200);
+    v = await view(id);
+    expect(v.state.currentStageIndex).toBe(4);
+    const audit = await auditFor(id);
+    expect(audit.filter((a) => a.ruleId === "external-effect:deploy.deploy")).toHaveLength(1);
+    expect(audit.filter((a) => a.ruleId === "workflow:effects-archived")).toHaveLength(0);
+  });
+
+  it("the generic re-open (recertification): a COMPLETED instance re-opened to its sign-off archives the deploy and round 1 deploys again", async () => {
+    const id = await startInstance("wr-deploy");
+    await submitArtifact(id, "v1 requirements");
+    expect((await approveGate(id)).statusCode).toBe(200);
+    expect((await approveGate(id, "done")).statusCode).toBe(200);
+    let v = await view(id);
+    expect(v.status).toBe("completed");
+    const dep0 = v.context["deploy:deploy"];
+
+    const reopened = await reopenWorkflowInstance(db, id, {
+      stageId: "gate",
+      reason: "wr: approval expired — recertification",
+      actorUserId: adminId,
+      dataKey: "e".repeat(64),
+    });
+    await reopened.postCommit(db);
+    expect(reopened.round).toBe(1);
+    expect(reopened.state.status).toBe("blocked_on_approval");
+    v = await view(id);
+    expect(v.round).toBe(1);
+    expect(v.state.currentStageIndex).toBe(2);
+    expect(v.context["deploy:deploy"]).toBeUndefined();
+    expect(historyOf(v.context).find((e) => e.round === 0)!.values["deploy:deploy"]).toEqual(dep0);
+    const audit = await auditFor(id);
+    expect(audit.filter((a) => a.ruleId === "workflow:reopen")).toHaveLength(1);
+    expect(audit.filter((a) => a.ruleId === "workflow:effects-archived")).toHaveLength(1);
+
+    expect((await approveGate(id)).statusCode).toBe(200);
+    v = await view(id);
+    expect(v.state.currentStageIndex).toBe(4);
+    expect(stampsOf(v.context)["deploy:deploy"]).toEqual({ round: 1, stageId: "deploy" });
+    expect((await auditFor(id)).filter((a) => a.ruleId === "external-effect:deploy.deploy")).toHaveLength(2);
+
+    // a stage not yet passed cannot be re-opened
+    await expect(reopenWorkflowInstance(db, id, { stageId: "done", reason: "x", actorUserId: adminId })).rejects.toThrow(
+      /not before the current stage/,
+    );
+  });
+
+  it("records of a stage BEFORE the re-open point stay live (it does not run again); only the stages that re-run are archived", async () => {
+    await makeTemplate("wr-upstream", "wr-upstream", [
+      { id: "intake", type: "trigger" },
+      { id: "branch", type: "git_operation", action: "create_branch", connection: "wr-git", repo: "wr/up", branchPrefix: "wrup" },
+      { id: "req", type: "artifact_generation", output: "requirements_file" },
+      { id: "gate", type: "human_approval", approvers: [anaId] },
+      { id: "open_pr", type: "git_operation", action: "open_pr", connection: "wr-git", repo: "wr/up" },
+      { id: "merge", type: "git_operation", action: "merge", connection: "wr-git", repo: "wr/up" },
+      { id: "done", type: "human_approval", approvers: [anaId] },
+    ]);
+    const id = await startInstance("wr-upstream");
+    let v = await view(id);
+    const branch0 = v.context.branch as string;
+    expect(branch0).toBe(`wrup/${id.slice(0, 8)}`);
+    await submitArtifact(id, "v1 requirements");
+    expect((await approveGate(id)).statusCode).toBe(200);
+    v = await view(id);
+    const pr0 = v.context.prId as string;
+    expect(v.context.mergeSha).toBe(`sha-merge-${pr0}`);
+
+    await submitArtifact(id, "v2 requirements"); // re-open at req (after the branch stage)
+    v = await view(id);
+    expect(v.context.branch).toBe(branch0); // upstream: kept, with its round-0 stamp
+    expect(stampsOf(v.context).branch).toEqual({ round: 0, stageId: "branch" });
+    expect(historyOf(v.context)[0]!.keys.sort()).toEqual(["mergeSha", "prId", "prUrl"]);
+
+    expect((await approveGate(id)).statusCode).toBe(200);
+    v = await view(id);
+    const pr1 = v.context.prId as string;
+    expect(pr1).not.toBe(pr0);
+    expect(v.context.mergeSha).toBe(`sha-merge-${pr1}`);
+    const audit = await auditFor(id);
+    expect(audit.filter((a) => a.ruleId === "external-effect:git.create_branch")).toHaveLength(1);
+    expect(audit.filter((a) => a.ruleId === "external-effect:git.open_pull_request")).toHaveLength(2);
+    expect(audit.filter((a) => a.ruleId === "external-effect:git.merge_pull_request")).toHaveLength(2);
   });
 });

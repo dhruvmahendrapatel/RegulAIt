@@ -172,14 +172,17 @@ async function applyEvent(
     // gate is pending — belongs to the new round, exactly as in round one.)
     // ADR-0168: a RETURNED sign-off re-opens from the artifact stage it went
     // back to (the kernel parked the instance there) — the same staleness.
+    // AER-049: the generic `reopen` (recertification, or any caller of
+    // reopenWorkflowInstance) re-opens from the stage it names.
     const reopenedFrom =
-      event.kind === "artifact_submitted"
+      event.kind === "artifact_submitted" || event.kind === "reopen"
         ? def.stages.findIndex((st) => st.id === event.stageId)
         : event.kind === "approval_returned"
           ? state.currentStageIndex
           : -1;
     const staleCheckStages: string[] = [];
     const staleRunStages: string[] = [];
+    let archivedEffects: EffectHistoryEntry[] = [];
     let context: Record<string, unknown> | undefined;
     // AER-048 — THE ROUND TOKENS (migration 0130), bumped here because every
     // state change goes through this one locked transaction. `round` moves on
@@ -200,22 +203,25 @@ async function applyEvent(
       const ctx = { ...(instance.context as Record<string, unknown>) };
       let changed = false;
       if (isReopen) {
+        // AER-049: every effect record of a stage that runs again — a deploy,
+        // a rollback, the branch / PR / merge, a planned nested run — moves to
+        // `effects:history` with the round that produced it. The new round
+        // merges and deploys afresh; an earlier round's record is never an
+        // idempotency key for it. (AER-048 review item 5, subsumed: a nested
+        // run planned in the OLD round no longer satisfies the new one — the
+        // old run row stays, and its late completion no longer matches runId.)
+        archivedEffects = archiveEffectRecords(def, ctx, reopenedFrom, instance.round, instance.round + 1, new Date().toISOString());
+        for (const entry of archivedEffects) {
+          for (const k of entry.keys) if (k.startsWith("runId:")) staleRunStages.push(k.slice("runId:".length));
+        }
         def.stages.forEach((st, i) => {
           if (i <= reopenedFrom) return;
-          // AER-048 (review item 5): a nested run planned in the OLD round
-          // must not satisfy the new one — the build stage plans a fresh run
-          // against the new artifact. The old run row stays (it is history,
-          // and its late completion is ignored: it no longer matches runId).
-          if (st.type === "automated_build" && `runId:${st.id}` in ctx) {
-            staleRunStages.push(st.id);
-            delete ctx[`runId:${st.id}`];
-          }
           if (st.type !== "automated_check") return;
           const keys = [`reported:${st.id}`, `checks:${st.id}`, `evals:${st.id}`, `awaitingReport:${st.id}`];
           if (keys.some((k) => k in ctx)) staleCheckStages.push(st.id);
           for (const k of keys) delete ctx[k];
         });
-        changed = staleCheckStages.length > 0 || staleRunStages.length > 0;
+        changed = staleCheckStages.length > 0 || archivedEffects.length > 0;
       }
       // a claim taken under an earlier entry belongs to an executor whose
       // result will be discarded — it must not block this entry's executor
@@ -264,11 +270,33 @@ async function applyEvent(
       // stays null (unknown/not-applicable — honestly un-backfillable).
       deployMode: deployMode ?? null,
     });
+    // AER-049: the archive is on the trail with the values — what an earlier
+    // round shipped stays traceable from the audit alone.
+    if (archivedEffects.length > 0) {
+      await tx.insert(auditLog).values({
+        userId: actorUserId ?? instance.initiatorUserId,
+        objectType: "workflow",
+        objectId: instance.id,
+        detail: {
+          event: event.kind,
+          reopenedFrom: def.stages[reopenedFrom]?.id ?? null,
+          closedRound: instance.round,
+          round,
+          archived: archivedEffects.map((e) => ({ round: e.round, keys: e.keys, values: e.values })),
+        },
+        effect: "allow",
+        ruleId: "workflow:effects-archived",
+        ruleChain: [],
+        reason:
+          `re-open into round ${round}: the effect records of round(s) ${[...new Set(archivedEffects.map((e) => e.round))].join(", ")} ` +
+          `(${archivedEffects.flatMap((e) => e.keys).join(", ")}) moved to effects:history — the new round merges/deploys afresh`,
+      });
+    }
 
     // A re-open stales EVERY outstanding gate downstream, and a terminal
     // denial/abort must leave no live rows in the one inbox — supersede all
     // pending rows for the instance in each of these cases.
-    if (event.kind === "artifact_submitted" || isDenial || isReturn) {
+    if (event.kind === "artifact_submitted" || event.kind === "reopen" || isDenial || isReturn) {
       await tx
         .update(approvals)
         .set({ status: "superseded" })
@@ -512,6 +540,40 @@ export async function applyWorkflowApprovalDecision(
   // merge) — executed post-commit, against the real Db
   return async (db) => {
     await runGitExecutions(db, instanceId, r.effects, deciderUserId, dataKey);
+  };
+}
+
+/**
+ * AER-049 — THE GENERIC RE-OPEN. Takes the instance back to `stageId` (a stage
+ * it already passed; a COMPLETED instance included — e.g. the recertification
+ * sweep re-opening an approved intake to its sign-off) through the kernel's
+ * `reopen` event, so it gets exactly what every other re-open gets under the
+ * one instance lock: the round moves on, the stage entry moves on, stale check
+ * results are cleared, outstanding gates are superseded, the effect records of
+ * every stage that runs again move to `effects:history` (audited
+ * `workflow:effects-archived`), and the gate(s) it runs forward into are
+ * requested again. May run on the caller's open transaction (it nests as a
+ * savepoint). Returns the post-commit step — executing any git/deploy/build
+ * stage the re-open runs straight into — for the caller to run once its
+ * transaction is durable. Throws WorkflowStateError when the instance cannot
+ * be re-opened there (aborted/denied/rolled back, or a stage not yet passed).
+ */
+export async function reopenWorkflowInstance(
+  dbx: DbOrTx,
+  instanceId: string,
+  opts: { stageId: string; reason: string; actorUserId: string | null; dataKey?: string },
+): Promise<{ state: InstanceState; round: number; postCommit: ApprovalPostCommit }> {
+  const r = await applyEvent(dbx, instanceId, { kind: "reopen", stageId: opts.stageId, reason: opts.reason }, opts.actorUserId);
+  const [row] = await dbx
+    .select({ round: workflowInstances.round })
+    .from(workflowInstances)
+    .where(eq(workflowInstances.id, instanceId));
+  return {
+    state: r.state,
+    round: row?.round ?? 0,
+    postCommit: async (db) => {
+      await runGitExecutions(db, instanceId, r.effects, opts.actorUserId, opts.dataKey);
+    },
   };
 }
 
@@ -1446,9 +1508,15 @@ async function runGitExecutions(
 
       const change = instance.change as { description: string };
       if (stage.action === "create_branch") {
-        const branch = `${stage.branchPrefix ?? "regulait"}/${instance.id.slice(0, 8)}`;
-        // Idempotent replay (§2 re-open): if we already created this branch,
-        // re-execution succeeds without a provider call instead of 422ing forever.
+        // AER-049: a round after the first works on a FRESH branch named for
+        // its round (`<base>-r<round>`) — the earlier round's branch (and its
+        // PR, merged or not) is history, never reused. Round 0 keeps the
+        // original name.
+        const baseBranch = `${stage.branchPrefix ?? "regulait"}/${instance.id.slice(0, 8)}`;
+        const branch = instance.round > 0 ? `${baseBranch}-r${instance.round}` : baseBranch;
+        // Idempotent replay WITHIN the round: if we already created this
+        // branch, re-execution succeeds without a provider call instead of
+        // 422ing forever.
         if (context.branch !== branch) {
           await runExternalWrite(
             db,
@@ -1468,20 +1536,32 @@ async function runGitExecutions(
           .where(eq(workflowArtifacts.instanceId, instance.id))
           .orderBy(desc(workflowArtifacts.version))
           .limit(1);
+        // AER-049: the newest earlier-round PR this one replaces (a re-open
+        // moved it to effects:history), named in the body for the reviewer
+        const superseded = effectHistory(context)
+          .filter((e) => e.round < instance.round && typeof e.values.prId === "string")
+          .sort((a, b) => b.round - a.round)[0];
         const pr = await runExternalWrite(db, "git.open_pull_request", () => provider.openPullRequest(stage.repo!, {
           head: String(context.branch ?? ""),
           base: stage.base ?? "main",
           title: change.description,
           // AER-048 (review item 2): the two machine-readable lines a CI
           // reads at run start to bind its check report — POST .../checks
-          // requires `round` from an API key. (A later re-open moves the
-          // round on; CI re-reads it from GET /v1/workflows/instances/:id,
-          // and a 409 stale_check_report names the current one.)
+          // requires `round` from an API key. AER-049: a re-open past this
+          // stage opens a NEW pull request for the new round, so the round
+          // written here is the round of THIS pull request; CI may still
+          // re-read it from GET /v1/workflows/instances/:id, and a 409
+          // stale_check_report names the current one.
           body:
             `Workflow instance ${instance.id}
 regulait-instance: ${instance.id}
 regulait-round: ${instance.round}
-
+` +
+            (superseded
+              ? `regulait-supersedes: round ${superseded.round} pull request ${String(superseded.values.prUrl ?? superseded.values.prId)}
+`
+              : "") +
+            `
 ` +
             (latestArtifact
               ? `Signed-off ${latestArtifact.output} v${latestArtifact.version}:
@@ -1645,6 +1725,110 @@ function isEffectRecordKey(k: string): boolean {
   );
 }
 
+/**
+ * AER-049 — EFFECT RECORDS BELONG TO THE ROUND THAT PRODUCED THEM.
+ *
+ * Owner decision (ADR-0168 afternoon amendment, item 1): "if something is
+ * changing then we need an additional review round". Every effect record an
+ * executor commits is STAMPED in `effects:stamps` with the round
+ * (workflow_instances.round) and the stage that produced it. A re-open that
+ * bumps the round (artifact resubmitted after its stage completed,
+ * approval_returned, the generic `reopen` — recertification) MOVES every live
+ * record of a stage that will run again into the append-only `effects:history`
+ * list, so the new round's merge/deploy run again against a FRESH branch / PR /
+ * deployment and never count an earlier round's as "already done". Records of
+ * stages BEFORE the re-open point (which do not run again) stay live, keeping
+ * their original stamp. Within one round the AER-048 salvage/idempotency
+ * holds: a discarded executor's records are kept live, so nothing is performed
+ * twice in the same round; a record salvaged from an executor of an EARLIER
+ * round goes straight to history.
+ */
+export const EFFECT_STAMPS_KEY = "effects:stamps";
+export const EFFECT_HISTORY_KEY = "effects:history";
+
+/** one live record's stamp */
+export interface EffectStamp {
+  round: number;
+  stageId: string;
+}
+
+/** one append-only history entry: the records of ONE round that were archived */
+export interface EffectHistoryEntry {
+  round: number;
+  keys: string[];
+  values: Record<string, unknown>;
+  at: string;
+  /** why they left the live context */
+  source: "reopen" | "discarded-executor";
+  /** the round that replaced them */
+  archivedInRound: number;
+}
+
+function effectStamps(ctx: Record<string, unknown>): Record<string, EffectStamp> {
+  const v = ctx[EFFECT_STAMPS_KEY];
+  return v && typeof v === "object" && !Array.isArray(v) ? { ...(v as Record<string, EffectStamp>) } : {};
+}
+
+function effectHistory(ctx: Record<string, unknown>): EffectHistoryEntry[] {
+  const v = ctx[EFFECT_HISTORY_KEY];
+  return Array.isArray(v) ? [...(v as EffectHistoryEntry[])] : [];
+}
+
+/** the stage that produced an effect record: its stamp, else (a record written
+ * before stamps existed) the stage the key names or the git/deploy stage that
+ * writes it; null when nothing says (archived conservatively) */
+function effectRecordStageIndex(def: WorkflowDefinition, key: string, stamp: EffectStamp | undefined): number | null {
+  const byId = (id: string) => {
+    const i = def.stages.findIndex((st) => st.id === id);
+    return i >= 0 ? i : null;
+  };
+  if (stamp) return byId(stamp.stageId);
+  const colon = key.indexOf(":");
+  if (colon > 0) return byId(key.slice(colon + 1));
+  const gitAction = key === "branch" ? "create_branch" : key === "prId" || key === "prUrl" ? "open_pr" : key === "mergeSha" ? "merge" : null;
+  const i = def.stages.findIndex((st) =>
+    gitAction ? st.type === "git_operation" && st.action === gitAction : key === "deployUrl" && st.type === "deployment",
+  );
+  return i >= 0 ? i : null;
+}
+
+/**
+ * AER-049: archive (in place, on `ctx`) every live effect record of a stage at
+ * or after `fromIndex` — the stages a re-open runs again. Grouped by the round
+ * each record was produced in (an unstamped record belongs to `closingRound`).
+ * Returns what moved, for the `workflow:effects-archived` audit row.
+ */
+function archiveEffectRecords(
+  def: WorkflowDefinition,
+  ctx: Record<string, unknown>,
+  fromIndex: number,
+  closingRound: number,
+  newRound: number,
+  at: string,
+): EffectHistoryEntry[] {
+  const stamps = effectStamps(ctx);
+  const byRound = new Map<number, Record<string, unknown>>();
+  for (const k of Object.keys(ctx)) {
+    if (!isEffectRecordKey(k)) continue;
+    const idx = effectRecordStageIndex(def, k, stamps[k]);
+    if (idx !== null && idx < fromIndex) continue; // upstream: not re-run, stays live
+    const round = stamps[k]?.round ?? closingRound;
+    const values = byRound.get(round) ?? {};
+    values[k] = ctx[k];
+    byRound.set(round, values);
+    delete ctx[k];
+    delete stamps[k];
+  }
+  if (byRound.size === 0) return [];
+  const entries: EffectHistoryEntry[] = [...byRound.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([round, values]) => ({ round, keys: Object.keys(values), values, at, source: "reopen", archivedInRound: newRound }));
+  ctx[EFFECT_HISTORY_KEY] = [...effectHistory(ctx), ...entries];
+  if (Object.keys(stamps).length > 0) ctx[EFFECT_STAMPS_KEY] = stamps;
+  else delete ctx[EFFECT_STAMPS_KEY];
+  return entries;
+}
+
 /** the effect-record keys an executor set, with their values (for the audit) */
 function effectRecordsOf(snapshot: Record<string, unknown>, context: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(
@@ -1732,21 +1916,66 @@ async function commitStageResult(
       // It is merged when the row does not already say something else about
       // it (absent, or unchanged since the claim); a run planned in a round
       // that has since been re-opened is never carried into the new round.
+      //
+      // AER-049: that holds WITHIN the round the executor started in. If the
+      // instance has since been re-opened into a new round, the effect belongs
+      // to the round that is over: it goes straight to `effects:history`
+      // (never into the live context, where it would make the new round skip
+      // its own merge/deploy), and the archive is audited like a re-open's.
       const salvaged: Record<string, unknown> = {};
+      const archived: Record<string, unknown> = {};
+      const crossRound = row.round !== guard.round;
       if (local) {
+        const stamps = effectStamps(fresh);
         for (const k of ownedKeyChanges(local.snapshot, local.context)) {
           if (!isEffectRecordKey(k) || !(k in local.context)) continue;
-          if (k.startsWith("runId:") && row.round !== guard.round) continue;
+          if (crossRound) {
+            archived[k] = local.context[k];
+            continue;
+          }
           const untouched = !(k in fresh) || JSON.stringify(fresh[k]) === JSON.stringify(local.snapshot[k]);
           if (!untouched) continue;
           fresh[k] = local.context[k];
+          stamps[k] = { round: guard.round, stageId: guard.stageId };
           salvaged[k] = local.context[k];
+        }
+        if (Object.keys(salvaged).length > 0) fresh[EFFECT_STAMPS_KEY] = stamps;
+        if (Object.keys(archived).length > 0) {
+          const entry: EffectHistoryEntry = {
+            round: guard.round,
+            keys: Object.keys(archived),
+            values: archived,
+            at: new Date().toISOString(),
+            source: "discarded-executor",
+            archivedInRound: row.round,
+          };
+          fresh[EFFECT_HISTORY_KEY] = [...effectHistory(fresh), entry];
         }
       }
       const ours = fresh.executing === guard.stageId && fresh.executingClaim === guard.claimId;
       if (ours) releaseStageClaim(fresh);
-      if (ours || Object.keys(salvaged).length > 0) {
+      if (ours || Object.keys(salvaged).length > 0 || Object.keys(archived).length > 0) {
         await tx.update(workflowInstances).set({ context: fresh }).where(eq(workflowInstances.id, row.id));
+      }
+      if (Object.keys(archived).length > 0) {
+        await tx.insert(auditLog).values({
+          userId: actorUserId ?? "00000000-0000-0000-0000-000000000000",
+          objectType: "workflow",
+          objectId: guard.instanceId,
+          detail: {
+            event: "executor-result-discarded",
+            stageId: guard.stageId,
+            closedRound: guard.round,
+            round: row.round,
+            archived: [{ round: guard.round, keys: Object.keys(archived), values: archived }],
+          },
+          effect: "allow",
+          ruleId: "workflow:effects-archived",
+          ruleChain: [],
+          reason:
+            `stage '${guard.stageId}' executor of round ${guard.round} finished after the re-open into round ${row.round}: ` +
+            `its effect record(s) (${Object.keys(archived).join(", ")}) went to effects:history, not the live context — the new round merges/deploys afresh`,
+        });
       }
       await tx.insert(auditLog).values({
         userId: actorUserId ?? "00000000-0000-0000-0000-000000000000",
@@ -1764,6 +1993,7 @@ async function commitStageResult(
           // salvaged into the row or not — the effect is traceable from here
           ...(local ? { effectRecords: effectRecordsOf(local.snapshot, local.context) } : {}),
           salvagedEffectRecords: Object.keys(salvaged),
+          archivedEffectRecords: Object.keys(archived),
         },
         effect: "deny",
         ruleId: "workflow:executor-result-discarded",
@@ -1772,11 +2002,28 @@ async function commitStageResult(
           `stage '${guard.stageId}' executor result discarded: ${stale} — no verdict was written and no transition was applied` +
           (Object.keys(salvaged).length > 0
             ? `; the record of the external effect(s) it performed was kept (${Object.keys(salvaged).join(", ")})`
+            : "") +
+          (Object.keys(archived).length > 0
+            ? `; the record of the external effect(s) it performed in round ${guard.round} went to effects:history (${Object.keys(archived).join(", ")})`
             : ""),
       });
       return { committed: false, reason: stale };
     }
     const decision = decide(fresh, row);
+    // AER-049: stamp every effect record this executor committed with the
+    // round (and stage) that produced it — the claim's round is the row's
+    // round here, since a re-open would have moved the stage entry on
+    if (local) {
+      const stamps = effectStamps(fresh);
+      let stamped = false;
+      for (const k of ownedKeyChanges(local.snapshot, local.context)) {
+        if (!isEffectRecordKey(k)) continue;
+        if (k in fresh) stamps[k] = { round: row.round, stageId: guard.stageId };
+        else delete stamps[k];
+        stamped = true;
+      }
+      if (stamped) fresh[EFFECT_STAMPS_KEY] = stamps;
+    }
     releaseStageClaim(fresh);
     await tx.update(workflowInstances).set({ context: fresh }).where(eq(workflowInstances.id, row.id));
     for (const a of decision.audits ?? []) await tx.insert(auditLog).values(a);
