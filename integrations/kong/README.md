@@ -8,8 +8,9 @@
 > [`.github/workflows/integrations.yml`](../../.github/workflows/integrations.yml).
 > First green run 2026-09-27.
 >
-> **Covered precisely:** Kong 3.6, DB-less, `key-auth`, one governed route. Other
-> Kong versions, DB-backed mode and other auth plugins are NOT covered — and the
+> **Covered precisely:** Kong 3.6, DB-less, `key-auth`, two governed routes
+> bound to distinct server/tool pairs with crossed entitlements. Other Kong
+> versions, DB-backed mode and other auth plugins are NOT covered — and the
 > priority ordering this plugin depends on is version-specific, so a different
 > Kong is unverified until the harness runs against it.
 
@@ -88,6 +89,14 @@ each refusal. That now runs on every change, and asserts exactly that for:
 
 - an unauthenticated request (`key-auth` refuses before this plugin runs);
 - a policy `deny`;
+- **two routes bound to distinct server/tool pairs** with crossed entitlements
+  (AER-030): the consumer entitled to tool A is allowed on route A and refused
+  on route B, a second consumer the reverse — and the ledger shows each route
+  asked about its own binding, which a plugin asking one question for every
+  route could not produce;
+- forged `x-regulait-server-id` / `x-regulait-tool` / `x-regulait-decision` /
+  `x-regulait-reason` headers, each sent by the consumer the claim would have
+  helped, each refused as `forged_protocol_header` with nothing proxied;
 - an **`approval_required`** — refused with a `403` AND carrying
   `x-regulait-decision: approval_required`, because a caller that treats every
   403 alike loses the distinction the approvals queue exists to make;

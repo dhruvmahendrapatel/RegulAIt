@@ -24,7 +24,8 @@ Adapter: [`integrations/kong/`](../../integrations/kong/) (a Kong plugin).
 > the decision context the adapter claims to send is read back from the PDP's own `contextApplied`
 > ledger, including that `args` is NOT claimed. First green run 2026-09-27.
 >
-> What that covers precisely: Kong 3.6, DB-less, `key-auth`, one governed route. Other Kong
+> What that covers precisely: Kong 3.6, DB-less, `key-auth`, two governed routes bound to distinct
+> server/tool pairs with crossed entitlements, and forged server/tool/decision headers refused. Other Kong
 > versions, DB-backed mode and other auth plugins are not covered, and the priority ordering this
 > plugin depends on is version-specific — so treat a different Kong as unverified until the harness
 > runs against it.

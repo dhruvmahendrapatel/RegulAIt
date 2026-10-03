@@ -280,6 +280,38 @@ async function main() {
     throw new Error(`could not deactivate the subject: ${deactivated.status} ${JSON.stringify(deactivated.json).slice(0, 200)}`);
   }
 
+  // AER-030 — A SECOND ROUTE BOUND TO A DISTINCT SERVER AND TOOL, with the
+  // entitlements CROSSED: the entitled consumer is allowed on route A and
+  // refused on route B, a second consumer the other way round. Every earlier
+  // route in this file bound the same server/tool, so a plugin that ignored
+  // its per-route config and asked one question for all of them would have
+  // passed every assertion — the per-route binding is the whole reason the
+  // plugin replaced the pre-function (handler.lua, reason 3), and it had never
+  // been tested.
+  //
+  // Tool B is a READ tool on the OTHER seeded server that the PDP already
+  // refuses the entitled user; found by asking the PDP rather than by assuming
+  // the seed's order, because the seed's roles make several tools hers.
+  const serverB = servers.find((s) => s.id !== server.id);
+  if (!serverB) throw new Error("the seed registered one server — the two-route case needs two");
+  const toolsB = ((await api("GET", `${base}/v1/servers/${serverB.id}/tools`, undefined, boot)).json.tools ?? [])
+    .filter((t) => t.kind === "read");
+  let toolB = null;
+  for (const t of toolsB) {
+    const probe = await api("POST", `${base}/v1/authz/check`,
+      { userId: entitled.id, serverId: serverB.id, toolName: t.name }, boot);
+    if (probe.json.decision === "deny") {
+      toolB = t;
+      break;
+    }
+  }
+  if (!toolB) throw new Error(`no read tool on ${serverB.name} refuses the entitled user — the crossed case needs one`);
+  const other = (
+    await api("POST", `${base}/v1/users`, { email: `kong-other-${Date.now()}@kong.example`, displayName: "Kong other" }, boot)
+  ).json;
+  if (!other?.id) throw new Error(`could not create the second route's subject: ${JSON.stringify(other).slice(0, 200)}`);
+  await api("POST", `${base}/v1/grants/tools`, { userId: other.id, serverId: serverB.id, toolName: toolB.name }, boot);
+
   // Kong's OWN ids for its consumers, declared rather than left to Kong's
   // deterministic generation, so assertion (n) can check the exact identity
   // the ledger recorded rather than only a username.
@@ -287,6 +319,7 @@ async function main() {
     entitled: randomUUID(),
     stranger: randomUUID(),
     pending: randomUUID(),
+    other: randomUUID(),
     unmapped: randomUUID(),
     ambiguous: randomUUID(),
     deleted: randomUUID(),
@@ -339,12 +372,25 @@ services:
       - name: anonymous-route
         paths: ["/anonymous"]
         strip_path: true
+      # AER-030 — the second governed route, bound to a DIFFERENT server and
+      # tool than governed-route. Same upstream, same PDP, same auth plugin:
+      # the only thing that differs is the plugin instance's config, which is
+      # what makes "each route asks about what IT fronts" testable at all.
+      - name: second-route
+        paths: ["/second"]
+        strip_path: true
 consumers:
   - username: entitled
     id: "${kongIds.entitled}"
     custom_id: "${entitled.id}"
     keyauth_credentials:
       - key: entitled-key
+  # AER-030 — entitled to tool B on server B and to nothing on server A
+  - username: other
+    id: "${kongIds.other}"
+    custom_id: "${other.id}"
+    keyauth_credentials:
+      - key: other-key
   - username: stranger
     id: "${kongIds.stranger}"
     custom_id: "${stranger.id}"
@@ -485,6 +531,20 @@ plugins:
       pdp_key: "{vault://env/regulait-pdp-key}"
       server_id: "${server.id}"
       tool_name: "${tool.name}"
+      timeout_ms: 2000
+  - name: key-auth
+    route: second-route
+    config:
+      key_names: ["apikey"]
+  - name: regulait-authz
+    route: second-route
+    config:
+      pdp_url: "http://host.docker.internal:${GATEWAY_PORT}"
+      pdp_key: "{vault://env/regulait-pdp-key}"
+      # THE DISTINCT BINDING (AER-030)
+      server_id: "${serverB.id}"
+      tool_name: "${toolB.name}"
+      project_id: "${project.id}"
       timeout_ms: 2000
 `;
   writeFileSync(path.join(dir, "kong.yml"), declarative);
@@ -715,6 +775,53 @@ plugins:
       `status ${r.status}, count ${await upstreamCount()}`);
   }
 
+  // (o) TWO ROUTES, TWO BINDINGS, CROSSED ENTITLEMENTS (AER-030). Route A
+  //     fronts tool A, route B fronts tool B on another server; `entitled` may
+  //     use A only, `other` may use B only. Four requests, two allowed and two
+  //     refused, and the refusals can only come from each route asking about
+  //     ITS OWN binding — a plugin asking one question for every route would
+  //     answer the same way on both.
+  const second = `http://127.0.0.1:${KONG_PROXY_PORT}/second/anything`;
+  await upstreamReset();
+  r = await fetch(second, { headers: { apikey: "other-key" } });
+  check("route B: the consumer entitled to tool B reaches the upstream",
+    r.status === 200 && (await upstreamCount()) === 1, `status ${r.status}, count ${await upstreamCount()}`);
+  await upstreamReset();
+  r = await fetch(proxy, { headers: { apikey: "other-key" } });
+  check("route A: the same consumer is refused — route A asks about tool A, which it lacks",
+    r.status === 403 && (await upstreamCount()) === 0, `status ${r.status}, count ${await upstreamCount()}`);
+  await upstreamReset();
+  r = await fetch(second, { headers: { apikey: "entitled-key" } });
+  check("route B: the consumer entitled to tool A is refused — route B asks about tool B",
+    r.status === 403 && r.headers.get("x-regulait-decision") === "deny" && (await upstreamCount()) === 0,
+    `status ${r.status}, decision ${r.headers.get("x-regulait-decision")}, count ${await upstreamCount()}`);
+  // (the fourth leg, entitled on route A, is assertion (b) above)
+
+  // (p) FORGED SERVER / TOOL / DECISION HEADERS (AER-030) — each sent by the
+  //     consumer the claim would have helped, each refused with its own reason
+  //     before any question is asked, and nothing proxied. The binding comes
+  //     from the route's config and the decision from the PDP; a request
+  //     cannot name either.
+  for (const [key, url, forged, what] of [
+    ["other-key", proxy, { "x-regulait-server-id": serverB.id, "x-regulait-tool": toolB.name },
+      "a consumer refused on route A claims route A fronts the tool it IS entitled to"],
+    ["entitled-key", second, { "x-regulait-server-id": server.id, "x-regulait-tool": tool.name },
+      "a consumer refused on route B claims route B fronts tool A"],
+    ["stranger-key", proxy, { "x-regulait-decision": "allow" },
+      "a denied consumer asserts the decision"],
+    ["stranger-key", proxy, { "x-regulait-decision": "allow", "x-regulait-reason": "forged" },
+      "a denied consumer asserts the decision and its reason"],
+    ["entitled-key", proxy, { "x-regulait-decision": "allow" },
+      "an entitled consumer asserting the decision is refused all the same"],
+  ]) {
+    await upstreamReset();
+    r = await fetch(url, { headers: { apikey: key, ...forged } });
+    check(`${what}: refused as forged_protocol_header, never proxied`,
+      r.status === 403 && r.headers.get("x-regulait-reason") === "forged_protocol_header" &&
+        (await upstreamCount()) === 0,
+      `status ${r.status}, reason ${r.headers.get("x-regulait-reason")}, count ${await upstreamCount()}`);
+  }
+
   // (f) APPROVAL_REQUIRED — a DENY that is not a policy refusal (AER-034).
   //     The README claimed this was asserted and it was not. It is the one
   //     outcome a proxy filter cannot express (two outcomes, no third), so it
@@ -801,6 +908,26 @@ plugins:
     check("a deactivated subject's refusal is filed under the consumer that presented it",
       dpc !== null && dpc.id === kongIds.disabled && dpc.username === "disabled",
       `proxyConsumer=${JSON.stringify(dpc)} on ${disabledRows.length} subject_disabled row(s)`);
+
+    // (o, continued) AER-030 — THE LEDGER SHOWS EACH ROUTE ASKED ABOUT ITS OWN
+    //     BINDING. `other`'s rows must include an allow on (server B, tool B)
+    //     and a deny on (server A, tool A); `entitled` must have a deny on
+    //     (server B, tool B). A plugin asking one question for both routes
+    //     could not produce that set.
+    const byConsumer = (name) => rows.filter((row) => ((row.detail ?? {}).proxyConsumer ?? {}).username === name);
+    const otherRows = byConsumer("other");
+    const otherAllowB = otherRows.some(
+      (row) => row.effect === "allow" && row.serverId === serverB.id && row.toolName === toolB.name,
+    );
+    const otherDenyA = otherRows.some(
+      (row) => row.effect === "deny" && row.serverId === server.id && row.toolName === tool.name,
+    );
+    const entitledDenyB = byConsumer("entitled").some(
+      (row) => row.effect === "deny" && row.serverId === serverB.id && row.toolName === toolB.name,
+    );
+    check("the ledger shows route B asked about server B / tool B and route A about server A / tool A",
+      otherAllowB && otherDenyA && entitledDenyB,
+      `other: allow(B)=${otherAllowB} deny(A)=${otherDenyA}; entitled: deny(B)=${entitledDenyB} over ${otherRows.length} row(s) for 'other'`);
   }
 
   // (i2) AER-036 — A DECLARED ORIGIN THAT CONTRADICTS THE CREDENTIAL IS REFUSED.
