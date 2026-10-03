@@ -328,18 +328,24 @@
   font-size: var(--text-md);
 }
 
+/* inherent → residual as one line of text, not a tinted panel */
 .riskFlow {
-  display: grid;
-  grid-template-columns: minmax(120px, 1fr) auto minmax(120px, 1fr);
-  align-items: center;
-  gap: var(--s2);
-  padding: var(--s2);
-  border-radius: var(--radius-md);
-  background: var(--surface-2);
-  text-align: center;
+  margin: 0;
+  font-variant-numeric: tabular-nums;
 }
 
-.agentCard,
+.riskFlow strong {
+  font-weight: 600;
+}
+
+/* agents in the Stack tab are sections inside the one Agents card:
+   a hairline between them, no box around each */
+.agentCard + .agentCard {
+  margin-top: var(--s2);
+  padding-top: var(--s2);
+  border-top: 1px solid var(--border);
+}
+
 .libraryEntry {
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
@@ -347,7 +353,6 @@
   background: var(--surface-1);
 }
 
-.agentCard + .agentCard,
 .libraryEntry + .libraryEntry {
   margin-top: var(--s1);
 }
@@ -542,11 +547,11 @@
   border-bottom: 1px solid var(--border);
 }
 
+/* the graph sits on the card itself: no inner box, and capped so four
+   columns do not stretch across a wide screen */
 .graphScroller {
   overflow: auto;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--surface-2);
+  max-width: 960px;
 }
 
 .graph {
@@ -578,6 +583,11 @@
   fill: var(--text-faint);
   font: 10px var(--font-mono);
   text-anchor: middle;
+  /* a halo in the card colour keeps the label readable where it crosses an edge */
+  paint-order: stroke;
+  stroke: var(--surface-1);
+  stroke-width: 4px;
+  stroke-linejoin: round;
 }
 
 .graphNode {
@@ -595,15 +605,47 @@
   fill: var(--surface-1);
 }
 
-.graphBand_none { fill: var(--surface-1); }
-.graphBand_low { fill: var(--rg-low-tint); }
-.graphBand_medium { fill: var(--rg-medium-tint); }
-.graphBand_high { fill: var(--rg-critical-tint); }
+/* propagated severity is the node's outline, in the same scale SeverityBadge
+   uses; the fill stays the surface so a busy graph does not turn pink */
+.graphBand_low { stroke: var(--rg-low); stroke-width: 2; }
+.graphBand_medium { stroke: var(--rg-medium-deep); stroke-width: 2; }
+.graphBand_high { stroke: var(--rg-high); stroke-width: 2.5; }
 
+/* inherited exposure: a quiet dashed ring, not a second cyan signal */
 .graphInheritedRing {
   fill: none;
-  stroke: var(--rg-signal);
-  stroke-width: 3;
+  stroke: var(--rg-ink-muted);
+  stroke-width: 1.5;
+  stroke-dasharray: 4 3;
+}
+
+.statLine {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s1) var(--s3);
+  margin: 0;
+  color: var(--text-dim);
+  font-size: var(--text-sm);
+}
+
+.statLine strong {
+  margin-right: 4px;
+  color: var(--text);
+  font-size: var(--text-md);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.nodeDetail {
+  padding-top: var(--s2);
+  border-top: 1px solid var(--border);
+}
+
+.notesList {
+  margin: 0;
+  padding-left: var(--s3);
+  color: var(--text-faint);
+  font-size: var(--text-sm);
 }
 
 .graphNodeType {

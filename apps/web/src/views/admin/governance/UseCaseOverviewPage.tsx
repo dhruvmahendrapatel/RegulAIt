@@ -173,22 +173,26 @@ function FrameworksTab({ query }: { query: ReturnType<typeof useQuery<Frameworks
   return <QueryGate loading={query.isLoading} error={query.error} onRetry={() => void query.refetch()}>{query.data ? <div className={v.stack}><p className={s.callout}>{query.data.evidenceScope.note}</p>{query.data.frameworks.length === 0 ? <EmptyState title="No active framework mappings" /> : query.data.frameworks.map((framework) => <Card key={framework.id} title={`${packTitle(framework.title)} · v${framework.version}`} actions={<CascadeBadge framework={framework} />}><div className={v.stack}><p className={v.faint}>{plural(framework.controls.length, "mapped control")}{packNote(framework.title) ? ` · ${packNote(framework.title)}` : ""}</p><Table rows={framework.controls} rowKey={(control) => control.controlRef} columns={[{ key: "control", header: "Control", render: (control) => <code style={{ whiteSpace: "nowrap" }}>{control.controlRef}</code> }, { key: "title", header: "Title", render: (control) => control.title }, { key: "coverage", header: "Platform coverage", render: (control) => <Badge tone={COVERAGE_TONE[control.coverage] ?? "neutral"}>{humanize(control.coverage)}</Badge> }]} /></div></Card>)}<p className={v.faint}>{query.data.disclaimer}</p></div> : null}</QueryGate>;
 }
 
+/** open is the state that needs attention; mitigating and accepted are decided workflow states */
+const RISK_STATUS_TONE: Record<string, Tone> = { open: "warn", mitigating: "neutral", accepted: "neutral", closed: "ok" };
+
 function RisksTab({ useCaseId, risks, onRefresh }: { useCaseId: string; risks: OverviewRisk[]; onRefresh: () => Promise<void> }) {
   const action = useAction();
   const [controlRefs, setControlRefs] = useState<Record<string, string>>({});
   const [residuals, setResiduals] = useState<Record<string, { likelihood: string; impact: string }>>({});
   return (
     <div className={v.stack}>
-      <RiskLibraryPicker useCaseId={useCaseId} onAdded={() => void onRefresh()} />
       {risks.length === 0 ? <EmptyState title="No risks linked to this use case" body="Add a scenario from the library to make the inherent and residual position explicit." /> : risks.map((risk) => {
         const draft = residuals[risk.id] ?? { likelihood: risk.residual?.likelihood ?? "", impact: risk.residual?.impact ?? "" };
-        return <Card key={risk.id} title={risk.title} actions={<div className={v.row}><Badge tone="neutral">{risk.dimension}</Badge><Badge tone={risk.status === "closed" ? "ok" : "warn"}>{risk.status}</Badge></div>}><div className={v.stack}>
-          <div className={s.riskFlow}><span><strong>Inherent</strong><br />{risk.inherent.likelihood} × {risk.inherent.impact}</span><span aria-hidden>→</span><span><strong>Residual</strong><br />{risk.residual ? `${risk.residual.likelihood} × ${risk.residual.impact}` : "unmeasured"}</span></div>
+        return <Card key={risk.id} title={risk.title} actions={<div className={v.row}><span className={v.faint}>{risk.dimension}</span><Badge tone={RISK_STATUS_TONE[risk.status] ?? "neutral"}>{risk.status}</Badge></div>}><div className={v.stack}>
+          <p className={s.riskFlow}><span className={v.dim}>Inherent</span> <strong>{risk.inherent.likelihood} × {risk.inherent.impact}</strong> <span aria-hidden>→</span> <span className={v.dim}>Residual</span> <strong>{risk.residual ? `${risk.residual.likelihood} × ${risk.residual.impact}` : "unmeasured"}</strong></p>
           <div><strong>Linked controls</strong>{risk.controls.length === 0 ? <p className={v.dim}>No controls linked.</p> : risk.controls.map((control) => <div key={control.controlRef} className={v.listRow}><span className={v.grow}><code>{control.controlRef}</code><br /><span className={v.faint}>{control.title}</span></span><RemoveButton what={`control ${control.controlRef}`} consequence={<>The control link is removed from this risk. The risk and its audit history remain.</>} onRemove={() => api.del(`/v1/risks/${risk.id}/controls/${encodeURIComponent(control.controlRef)}`)} onDone={() => void onRefresh()} /></div>)}</div>
-          <div className={s.libraryFilters}><Field label="Control reference" helpLabel="the mitigation link created here" help={<p>Enter the canonical reference of an existing control. Linking it records that this control mitigates the selected use-case risk; it does not by itself prove the control is implemented or evidenced.</p>}><Input value={controlRefs[risk.id] ?? ""} onChange={(event) => setControlRefs((current) => ({ ...current, [risk.id]: event.target.value }))} placeholder="eu-ai-act:art-14-human-oversight" /></Field><Field label=" "><Button disabled={action.busy || !(controlRefs[risk.id] ?? "").trim()} onClick={() => void action.run(async () => { await api.post(`/v1/risks/${risk.id}/controls`, { controlRef: controlRefs[risk.id]!.trim() }); setControlRefs((current) => ({ ...current, [risk.id]: "" })); await onRefresh(); }, "Control linked")}>Link control</Button></Field></div>
+          <div className={s.libraryFilters}><Field label="Control reference" helpLabel="the mitigation link created here" help={<p>Enter the canonical reference of an existing control. Linking it records that this control mitigates the selected use-case risk; it does not by itself prove the control is implemented or evidenced.</p>}><Input value={controlRefs[risk.id] ?? ""} onChange={(event) => setControlRefs((current) => ({ ...current, [risk.id]: event.target.value }))} placeholder="Control reference" /></Field><Field label=" "><Button disabled={action.busy || !(controlRefs[risk.id] ?? "").trim()} onClick={() => void action.run(async () => { await api.post(`/v1/risks/${risk.id}/controls`, { controlRef: controlRefs[risk.id]!.trim() }); setControlRefs((current) => ({ ...current, [risk.id]: "" })); await onRefresh(); }, "Control linked")}>Link control</Button></Field></div>
           <div className={s.libraryFilters}><Field label="Residual likelihood"><Select value={draft.likelihood} onChange={(event) => setResiduals((current) => ({ ...current, [risk.id]: { ...draft, likelihood: event.target.value } }))}><option value="">Choose likelihood</option><option>low</option><option>medium</option><option>high</option></Select></Field><Field label="Residual impact"><Select value={draft.impact} onChange={(event) => setResiduals((current) => ({ ...current, [risk.id]: { ...draft, impact: event.target.value } }))}><option value="">Choose impact</option><option>low</option><option>medium</option><option>high</option></Select></Field><Field label=" "><Button disabled={action.busy || !draft.likelihood || !draft.impact} onClick={() => void action.run(async () => { await api.put(`/v1/risks/${risk.id}/residual`, draft); await onRefresh(); }, "Residual position updated")}>Save residual</Button></Field></div>
         </div></Card>;
       })}
+      {/* this use case's own risks come first; the generic library sits below them */}
+      <RiskLibraryPicker useCaseId={useCaseId} onAdded={() => void onRefresh()} />
     </div>
   );
 }
@@ -203,8 +207,8 @@ function AgentCard({ id, fallback }: { id: string; fallback: OverviewResponse["s
     <div id={`agent-${id}`} className={s.agentCard}>
       <div className={v.row}>
         <strong>{fallback.name}</strong>
-        <Badge tone={fallback.halted ? "danger" : "ok"}>{fallback.halted ? "Halted" : humanize(fallback.lifecycleStatus)}</Badge>
-        <Badge tone={fallback.modelCardApproved ? "ok" : "warn"}>{fallback.modelCardApproved ? "Model card approved" : "No approved model card"}</Badge>
+        {/* model-card approval is stated once, in the Model cards section below */}
+        {fallback.halted ? <Badge tone="danger">Halted</Badge> : <span className={v.faint}>{humanize(fallback.lifecycleStatus)}</span>}
       </div>
       {card.isError ? <p className={v.errLine}>Agent card could not be loaded: {(card.error as Error).message}</p> : card.data ? (
         <div className={v.stack}>
@@ -226,13 +230,12 @@ function AgentCard({ id, fallback }: { id: string; fallback: OverviewResponse["s
               <ul>{fallback.modelCards.map((modelCard) => (
                 <li key={modelCard.id}>
                   <Badge tone={modelCard.signOff === "approved" ? "ok" : "warn"}>{modelCard.signOff === "none" ? "Not signed off" : humanize(modelCard.signOff)}</Badge>{" "}
-                  {modelCard.intendedUse ? truncate(modelCard.intendedUse, 90) : "No intended use recorded"}
+                  {!modelCard.intendedUse ? "No intended use recorded" : card.data!.purpose.intendedUses.includes(modelCard.intendedUse) ? null : truncate(modelCard.intendedUse, 90)}
                 </li>
               ))}</ul>
             ) : <p className={v.dim}>No model card is linked to this agent.</p>}
           </div>
-          <p className={v.faint}>{sentenceCase(card.data.dataSources.note)}</p>
-          <p className={v.faint}>{sentenceCase(card.data.oversight.note)}</p>
+          <p className={v.faint}>{[card.data.dataSources.note, card.data.oversight.note].filter(Boolean).map(sentenceCase).join(" ")}</p>
           <Link to={`/admin/agents#agent-${id}`}>Open this agent in the full inventory</Link>
         </div>
       ) : <p className={v.dim}>Loading agent card…</p>}
