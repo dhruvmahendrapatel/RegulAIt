@@ -65,28 +65,50 @@ export default function IntakeWizardPage() {
   const [prefill] = useSearchParams();
   const fromShadowAi = prefill.get("source") === "shadow-ai";
   const [step, setStep] = useState(0);
-  const [title, setTitle] = useState(prefill.get("title") ?? "Credit-limit-increase assistant");
-  const [description, setDescription] = useState(
-    prefill.get("description") ?? "Helps Acme Bank customers request a credit-limit increase using profile and financial data, with a human reviewing every recommendation.",
-  );
-  const initial = <T,>(demoValue: T, unanswered: T) => fromShadowAi ? unanswered : demoValue;
-  const [purposeDomain, setPurposeDomain] = useState(initial("essential-services", ""));
-  const [affectedPerson, setAffectedPerson] = useState(initial("customers", ""));
-  const [decisionAutonomy, setDecisionAutonomy] = useState(initial("human-reviews", ""));
-  const [biometricUse, setBiometricUse] = useState(initial("none", ""));
-  const [emotionRecognition, setEmotionRecognition] = useState<BooleanAnswer>(initial("no", ""));
-  const [socialScoring, setSocialScoring] = useState<BooleanAnswer>(initial("no", ""));
-  const [manipulativeTechniques, setManipulativeTechniques] = useState<BooleanAnswer>(initial("no", ""));
-  const [profilesNaturalPersons, setProfilesNaturalPersons] = useState<BooleanAnswer>(initial("yes", ""));
-  const [safetyComponent, setSafetyComponent] = useState<BooleanAnswer>(initial("no", ""));
-  const [interactsWithHumans, setInteractsWithHumans] = useState<BooleanAnswer>(initial("yes", ""));
-  const [generative, setGenerative] = useState<BooleanAnswer>(initial("yes", ""));
-  const [sectors, setSectors] = useState<string[]>(initial(["financial-services"], []));
-  const [dataCategories, setDataCategories] = useState<string[]>(initial(["personal", "financial"], []));
-  const [deployment, setDeployment] = useState(initial("customer-facing", ""));
-  const [euNexus, setEuNexus] = useState<BooleanAnswer>(initial("yes", ""));
-  const [autonomousActions, setAutonomousActions] = useState<BooleanAnswer>(initial("no", ""));
-  const [usesExternalVendor, setUsesExternalVendor] = useState<BooleanAnswer>(initial("yes", ""));
+  const [title, setTitle] = useState(prefill.get("title") ?? "");
+  const [description, setDescription] = useState(prefill.get("description") ?? "");
+  // Every answer starts BLANK. A new operator opening this page must describe
+  // their own system — a pre-selected sample read as a record that already
+  // existed (UXJ-06). The worked example is one explicit click away below.
+  const [purposeDomain, setPurposeDomain] = useState("");
+  const [affectedPerson, setAffectedPerson] = useState("");
+  const [decisionAutonomy, setDecisionAutonomy] = useState("");
+  const [biometricUse, setBiometricUse] = useState("");
+  const [emotionRecognition, setEmotionRecognition] = useState<BooleanAnswer>("");
+  const [socialScoring, setSocialScoring] = useState<BooleanAnswer>("");
+  const [manipulativeTechniques, setManipulativeTechniques] = useState<BooleanAnswer>("");
+  const [profilesNaturalPersons, setProfilesNaturalPersons] = useState<BooleanAnswer>("");
+  const [safetyComponent, setSafetyComponent] = useState<BooleanAnswer>("");
+  const [interactsWithHumans, setInteractsWithHumans] = useState<BooleanAnswer>("");
+  const [generative, setGenerative] = useState<BooleanAnswer>("");
+  const [sectors, setSectors] = useState<string[]>([]);
+  const [dataCategories, setDataCategories] = useState<string[]>([]);
+  const [deployment, setDeployment] = useState("");
+  const [euNexus, setEuNexus] = useState<BooleanAnswer>("");
+  const [autonomousActions, setAutonomousActions] = useState<BooleanAnswer>("");
+  const [usesExternalVendor, setUsesExternalVendor] = useState<BooleanAnswer>("");
+  /** the worked example (a fictional bank's credit-limit assistant) — only on request */
+  const fillExample = () => {
+    setTitle("Credit-limit-increase assistant");
+    setDescription("Helps Acme Bank customers request a credit-limit increase using profile and financial data, with a human reviewing every recommendation.");
+    setPurposeDomain("essential-services");
+    setAffectedPerson("customers");
+    setDecisionAutonomy("human-reviews");
+    setBiometricUse("none");
+    setEmotionRecognition("no");
+    setSocialScoring("no");
+    setManipulativeTechniques("no");
+    setProfilesNaturalPersons("yes");
+    setSafetyComponent("no");
+    setInteractsWithHumans("yes");
+    setGenerative("yes");
+    setSectors(["financial-services"]);
+    setDataCategories(["personal", "financial"]);
+    setDeployment("customer-facing");
+    setEuNexus("yes");
+    setAutonomousActions("no");
+    setUsesExternalVendor("yes");
+  };
   const [decisions, setDecisions] = useState<Record<string, Decision>>({});
   const [suggestionEdits, setSuggestionEdits] = useState<Record<string, string>>({});
   const [questionnaire, setQuestionnaire] = useState<Record<string, string>>({});
@@ -278,7 +300,12 @@ export default function IntakeWizardPage() {
                 <div className={s.callout} role="status">
                   Prefilled from a shadow-AI finding — only its name and observed use. Complete every screening answer below; the finding did not establish them.
                 </div>
-              ) : null}
+              ) : (
+                <div className={v.row}>
+                  <span className={v.faint}>New here? Load a worked example to see what a complete description looks like, then replace it with your own.</span>
+                  <Button size="sm" variant="ghost" onClick={fillExample}>Fill in an example</Button>
+                </div>
+              )}
               <Field label="Use-case name"><Input value={title} onChange={(event) => setTitle(event.target.value)} required /></Field>
               <Field label="What will the system do?"><Textarea rows={5} value={description} onChange={(event) => setDescription(event.target.value)} required /></Field>
               <div className={v.grid2}>

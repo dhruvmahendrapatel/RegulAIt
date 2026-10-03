@@ -128,6 +128,8 @@ test.beforeEach(async ({ page }) => { await page.route("**/*", async (route) => 
 
 test("enterprise governance demo surfaces render and complete their core actions", async ({ page }) => {
   await page.goto("/ui/admin/governance/intake");
+  // UXJ-06: the page opens blank; the worked example is loaded on request
+  await page.getByRole("button", { name: "Fill in an example" }).click();
   const assistRequest = page.waitForRequest((request) => new URL(request.url()).pathname === "/v1/use-cases/intake/assist" && request.method() === "POST");
   await page.getByRole("button", { name: "Draft suggestions" }).click();
   expect((await assistRequest).postDataJSON().context).toMatchObject({
@@ -343,6 +345,8 @@ test("prohibited screening remains reviewable and can be submitted for an indepe
     });
   });
   await page.goto("/ui/admin/governance/intake");
+  // UXJ-06: the page opens blank; the worked example is loaded on request
+  await page.getByRole("button", { name: "Fill in an example" }).click();
   await page.getByLabel("Social scoring").selectOption("yes");
   await page.getByRole("button", { name: "Draft suggestions" }).click();
   await expect(page.getByRole("alert")).toContainText("Screened PROHIBITED (Art. 5) — a reviewer must refuse it at sign-off; it cannot go live.");

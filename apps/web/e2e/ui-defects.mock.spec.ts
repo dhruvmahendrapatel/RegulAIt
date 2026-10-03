@@ -126,3 +126,22 @@ for (const c of FAILING_LISTS) {
     await expect(alert).toHaveCount(0);
   });
 }
+
+test("UXJ-06: the intake opens blank — the worked example is loaded only on request", async ({ page }) => {
+  await routeApi(page, async (route, p) => {
+    if (p === "/auth/me") return json(route, authMe(USER_A));
+    if (p === "/v1/me") return json(route, { userId: USER_A.id, isAdmin: true, user: USER_A });
+    if (p === "/v1/agents") return json(route, { agents: [] });
+    if (p === "/v1/vendors") return json(route, { vendors: [] });
+    return json(route, {});
+  });
+  await page.goto("/ui/admin/governance/intake");
+  await expect(page.getByLabel("Use-case name")).toHaveValue("");
+  await expect(page.getByLabel("What will the system do?")).toHaveValue("");
+  await expect(page.getByLabel("Social scoring")).toHaveValue("");
+  await expect(page.getByRole("button", { name: "Draft suggestions" })).toBeDisabled();
+  await page.getByRole("button", { name: "Fill in an example" }).click();
+  await expect(page.getByLabel("Use-case name")).toHaveValue("Credit-limit-increase assistant");
+  await expect(page.getByLabel("Social scoring")).toHaveValue("no");
+  await expect(page.getByRole("button", { name: "Draft suggestions" })).toBeEnabled();
+});
