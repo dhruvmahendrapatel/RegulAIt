@@ -270,9 +270,22 @@
 /* A link inside a callout sentence is underlined: Signal 700 against the
    callout's label ink is 1.2:1, so colour alone could not tell "Open the
    use-case workspace" from the words around it (AER-029). */
-.callout a {
+.callout a,
+.refusal a {
   text-decoration: underline;
   text-underline-offset: 0.15em;
+}
+
+/* AER-046: a refused intake retry — the reasons, the way out (open the
+   existing record), and the explicit start-over, spaced as one block */
+.refusal {
+  display: grid;
+  gap: var(--s1);
+  justify-items: start;
+}
+.refusal p,
+.refusal ul {
+  margin: 0;
 }
 
 .workspaceHeader {

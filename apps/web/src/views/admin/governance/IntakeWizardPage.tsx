@@ -9,6 +9,7 @@ import { useAction, useAgents } from "../adminKit";
 import v from "../../views.module.css";
 import s from "./demoGovernance.module.css";
 import { deriveDataSensitivity } from "./dataSensitivity";
+import { canonicalDigest, emptyCheckpoint, planSubmission, type SubmissionCheckpoint, type SubmissionInputs } from "./intakeCheckpoint";
 
 type Source = "rules" | "mock" | "model";
 type Decision = "accepted" | "rejected";
@@ -45,13 +46,12 @@ interface VendorSummary { id: string; name: string; category: string; status: st
 interface CreatedUseCase { id: string; instance: { id: string } | null }
 interface CreatedRisk { id: string }
 
-interface SubmissionCheckpoint {
-  useCaseId?: string;
-  instanceId?: string;
-  planningAdvanced?: boolean;
-  questionnaireSubmitted?: boolean;
-  riskIds: Record<string, string>;
-  linkedControls: Record<string, string[]>;
+/** AER-046: a retry the earlier records cannot be brought in line with — nothing was sent */
+class RetryRefused extends Error {
+  constructor(readonly useCaseId: string, readonly reasons: string[]) {
+    super("This retry was not sent: the use case was already created from your earlier answers, and the gateway cannot apply these changes to it.");
+    this.name = "RetryRefused";
+  }
 }
 
 const STEPS = ["Describe", "Suggestions", "Questionnaire", "Link stack", "Review"];
@@ -115,7 +115,9 @@ export default function IntakeWizardPage() {
   const [agentId, setAgentId] = useState("");
   const [vendorId, setVendorId] = useState("");
   const [submittedUseCaseId, setSubmittedUseCaseId] = useState<string | null>(null);
-  const checkpoint = useRef<SubmissionCheckpoint>({ riskIds: {}, linkedControls: {} });
+  // AER-046: each entry is bound to the digest of the inputs that wrote it (intakeCheckpoint.ts)
+  const checkpoint = useRef<SubmissionCheckpoint>(emptyCheckpoint());
+  const [retryRefused, setRetryRefused] = useState<RetryRefused | null>(null);
   const submitAction = useAction();
   // A stage change unmounts the button that caused it ("Draft suggestions",
   // "Continue" on the last-but-one stage), which drops keyboard focus on
@@ -221,69 +223,100 @@ export default function IntakeWizardPage() {
     return [...sections, `## 9. EU AI Act risk screening\n\n${assist.data.euAiActBlock.trim()}`].join("\n\n");
   };
 
+  /** exactly what each step sends, read once per attempt so every request of it sees the same inputs */
+  const submissionInputs = (): SubmissionInputs => ({
+    useCase: {
+      name: title.trim(),
+      description: description.trim(),
+      businessContext: description.trim(),
+      dataSensitivity: deriveDataSensitivity(dataCategories),
+      complianceTags: acceptedFrameworks.map((item) => item.framework),
+      intendedAgentIds: agentId ? [agentId] : [],
+    },
+    questionnaire: questionnaireMarkdown(),
+    risks: acceptedRisks.map((risk) => ({
+      key: risk.scenarioKey,
+      inputs: {
+        title: risk.title,
+        description: suggestionEdits[`risk:${risk.scenarioKey}`] ?? risk.description,
+        category: risk.category,
+        likelihood: risk.likelihood,
+        impact: risk.impact,
+        ...(agentId ? { agentId } : {}),
+        ...(vendorId ? { vendorId } : {}),
+      },
+      controls: risk.suggestedControls,
+    })),
+  });
+
   const submit = async () => {
     if (!assist.data) return;
+    setRetryRefused(null);
     const progress = checkpoint.current;
-
-    if (!progress.useCaseId) {
-      const created = await api.post<CreatedUseCase>("/v1/use-cases", {
-        name: title.trim(),
-        description: description.trim(),
-        businessContext: description.trim(),
-        dataSensitivity: deriveDataSensitivity(dataCategories),
-        complianceTags: acceptedFrameworks.map((item) => item.framework),
-        intendedAgentIds: agentId ? [agentId] : [],
-      });
-      progress.useCaseId = created.id;
-      progress.instanceId = created.instance?.id;
+    const inputs = submissionInputs();
+    // AER-046: decide every step BEFORE the first request — a retry whose
+    // edits the written records cannot take is refused with nothing sent
+    const plan = planSubmission(progress, inputs);
+    if (plan.kind === "refuse") {
+      const refused = new RetryRefused(plan.useCaseId, plan.reasons);
+      setRetryRefused(refused);
+      throw refused;
     }
 
-    if (!progress.instanceId) {
+    if (plan.useCase.action === "create") {
+      const created = await api.post<CreatedUseCase>("/v1/use-cases", inputs.useCase);
+      progress.useCase = { id: created.id, instanceId: created.instance?.id, inputs: inputs.useCase, digest: canonicalDigest(inputs.useCase) };
+    } else if (plan.useCase.action === "update") {
+      await api.patch(`/v1/use-cases/${progress.useCase!.id}`, plan.useCase.patch);
+      progress.useCase = { ...progress.useCase!, inputs: inputs.useCase, digest: canonicalDigest(inputs.useCase) };
+    }
+    const useCase = progress.useCase!;
+
+    if (!useCase.instanceId) {
       throw new Error("The use case was created, but the intake workflow instance was not returned. Retry after an operator checks the workflow setup.");
     }
     if (!progress.planningAdvanced) {
-      await api.post(`/v1/workflows/instances/${progress.instanceId}/advance`, { stageId: "plan" });
+      await api.post(`/v1/workflows/instances/${useCase.instanceId}/advance`, { stageId: "plan" });
       progress.planningAdvanced = true;
     }
-    if (!progress.questionnaireSubmitted) {
-      await api.post(`/v1/workflows/instances/${progress.instanceId}/artifacts`, {
+    if (plan.questionnaire !== "reuse") {
+      // a resubmission is a NEW VERSION: the kernel re-opens the questionnaire
+      // stage and supersedes the sign-off that was waiting on the stale one
+      await api.post(`/v1/workflows/instances/${useCase.instanceId}/artifacts`, {
         stageId: "questionnaire",
-        content: questionnaireMarkdown(),
+        content: inputs.questionnaire,
       });
-      progress.questionnaireSubmitted = true;
+      progress.questionnaire = { digest: canonicalDigest(inputs.questionnaire) };
     }
 
-    for (const risk of acceptedRisks) {
-      let riskId = progress.riskIds[risk.scenarioKey];
-      if (!riskId) {
-        const created = await api.post<CreatedRisk>("/v1/risks", {
-          title: risk.title,
-          description: suggestionEdits[`risk:${risk.scenarioKey}`] ?? risk.description,
-          category: risk.category,
-          likelihood: risk.likelihood,
-          impact: risk.impact,
-          useCaseId: progress.useCaseId,
-          ...(agentId ? { agentId } : {}),
-          ...(vendorId ? { vendorId } : {}),
-        });
-        riskId = created.id;
-        progress.riskIds[risk.scenarioKey] = riskId;
+    for (const { key, step, controlsToLink } of plan.risks) {
+      const risk = inputs.risks.find((item) => item.key === key)!;
+      if (step.action === "create") {
+        const created = await api.post<CreatedRisk>("/v1/risks", { ...risk.inputs, useCaseId: useCase.id });
+        progress.risks[key] = { id: created.id, inputs: risk.inputs, digest: canonicalDigest(risk.inputs), linkedControls: [] };
+      } else if (step.action === "update") {
+        await api.patch(`/v1/risks/${progress.risks[key]!.id}`, step.patch);
+        progress.risks[key] = { ...progress.risks[key]!, inputs: risk.inputs, digest: canonicalDigest(risk.inputs) };
       }
-
-      const linked = progress.linkedControls[risk.scenarioKey] ?? [];
-      for (const controlRef of risk.suggestedControls) {
-        if (linked.includes(controlRef)) continue;
+      const written = progress.risks[key]!;
+      for (const controlRef of controlsToLink) {
         try {
-          await api.post(`/v1/risks/${riskId}/controls`, { controlRef });
+          await api.post(`/v1/risks/${written.id}/controls`, { controlRef });
         } catch (error) {
           if (!(error instanceof ApiError) || error.status !== 409) throw error;
         }
-        linked.push(controlRef);
+        written.linkedControls.push(controlRef);
       }
-      progress.linkedControls[risk.scenarioKey] = linked;
     }
 
-    setSubmittedUseCaseId(progress.useCaseId);
+    setSubmittedUseCaseId(useCase.id);
+  };
+
+  /** the proposer's explicit choice to leave the earlier record as it is and submit these answers as a new use case */
+  const startOver = () => {
+    checkpoint.current = emptyCheckpoint();
+    setRetryRefused(null);
+    submitAction.setError(null);
   };
 
   return (
@@ -502,9 +535,18 @@ export default function IntakeWizardPage() {
                 </div>
               ) : null}
               <div className={s.callout}>
-                Submission creates the use case, advances planning, stores the human-edited questionnaire, creates each accepted risk, and links its suggested controls. If a later step fails, retry resumes from the last successful checkpoint rather than duplicating records. A prohibited screening remains a proposal until the independent reviewer records the required refusal.
+                Submission creates the use case, advances planning, stores the human-edited questionnaire, creates each accepted risk, and links its suggested controls. If a later step fails, retry resumes from the last successful checkpoint rather than duplicating records; an answer you change before retrying is applied to what was already written (an updated record, a new questionnaire version), or the retry is refused when the gateway cannot edit it. A prohibited screening remains a proposal until the independent reviewer records the required refusal.
               </div>
-              {submitAction.error ? <p className={v.errLine} role="alert">{submitAction.error} The completed steps have been retained; retry to resume.</p> : null}
+              {retryRefused ? (
+                <div className={`${v.errLine} ${s.refusal}`} role="alert">
+                  <p>{retryRefused.message}</p>
+                  <ul>{retryRefused.reasons.map((reason) => <li key={reason}>{reason}</li>)}</ul>
+                  <p>
+                    Undo those changes and submit again to finish that record, <Link to={`/admin/governance/use-cases/${retryRefused.useCaseId}`}>open the existing use case</Link>, or start over: the earlier record stays in the register as a proposal.
+                  </p>
+                  <Button size="sm" onClick={startOver}>Start over as a new use case</Button>
+                </div>
+              ) : submitAction.error ? <p className={v.errLine} role="alert">{submitAction.error} The completed steps have been retained; retry to resume.</p> : null}
               {submittedUseCaseId ? (
                 <div className={s.callout} role="status">
                   Submitted for human review. <Link to={`/admin/governance/use-cases/${submittedUseCaseId}`}>Open the use-case workspace</Link>.
