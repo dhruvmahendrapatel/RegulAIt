@@ -123,3 +123,26 @@ the phase1/phase2 spa-journeys. Gateway coverage: `zz-adr0168-use-case-condition
 - Later the same day (`7a40d77`, ADR-0167 AER-048 amendment) the `approval_returned` re-open also
   bumps the workflow round, so a returned use case's resubmission runs in a new round and earlier
   check reports cannot count for it.
+
+## Amendment 2026-10-03 (owner, afternoon) — the rest of the flow moves before the demo
+
+The owner moved the deferred items forward ("these are also important for Monday — build them
+before Monday") and decided AER-049:
+
+1. **AER-049 — a change after merge or deploy needs a new review round.** Merge, PR and deploy
+   records belong to the round that produced them. A re-open after something shipped is a change:
+   it runs the review again (as the review policy requires for the tier) and produces a fresh PR /
+   deploy; earlier rounds' records are kept as history, never reused as "already done".
+2. **The number of reviews is configurable ("one or more").** An admin-editable **review policy**
+   names reviewer roles (e.g. privacy, security, legal, model risk) with their members and, per EU
+   AI Act tier, which roles must sign — each named role is one required review. No roles configured
+   keeps today's single named approver. The same policy names who may **accept risk**.
+3. **Risk acceptance** is a decision a named risk acceptor can record on a sign-off, against
+   specific risks, with a rationale; the risks read *accepted* and the acceptance is audited.
+4. **Resubmission** — a use case sent back for information is updated and resubmitted from the
+   registration screen (prefilled), producing a new questionnaire version and a new review round.
+5. **Expiry sweep** — a scheduled job moves use cases whose approval expired back into review
+   (a new sign-off per the policy), audited; the deploy gate keeps refusing until re-approved.
+6. **Agent stewardship (item 8)** — every agent carries a named steward and a successor, a
+   lifecycle status and a next-review date; an agent whose steward is deactivated is flagged as
+   orphaned.
