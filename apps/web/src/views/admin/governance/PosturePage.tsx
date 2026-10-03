@@ -135,6 +135,31 @@ function Headline(props: { value: React.ReactNode; label: string; line: React.Re
   );
 }
 
+/**
+ * One column per calendar day across the whole window, zero where nothing
+ * was spent. The server only lists days that had rows, so a window with one
+ * busy day drew ONE bar the full width of the card (UIB-04). The window ends
+ * on the latest day present (or today when nothing is) and is UTC, like the
+ * server's day keys.
+ */
+export function fillDailyWindow<T extends { day: string }>(
+  points: T[],
+  days: number,
+  zero: (day: string) => T,
+  today: Date = new Date(),
+): T[] {
+  const byDay = new Map(points.map((p) => [p.day, p]));
+  const last = [...byDay.keys()].sort().at(-1) ?? today.toISOString().slice(0, 10);
+  const end = new Date(`${last}T00:00:00Z`);
+  if (Number.isNaN(end.getTime())) return points;
+  const out: T[] = [];
+  for (let i = days - 1; i >= 0; i -= 1) {
+    const day = new Date(end.getTime() - i * 86_400_000).toISOString().slice(0, 10);
+    out.push(byDay.get(day) ?? zero(day));
+  }
+  return out;
+}
+
 /** compact inline SVG column trend — same token classes as adminKit's owned
  * BarChart, no chart library (the repo's standing rule) */
 function ColumnTrend(props: {
@@ -278,7 +303,7 @@ export default function PosturePage() {
             <div className={v.grid2}>
               <Card title={`Daily AI spend — last 14 days (estimate)`}>
                 <ColumnTrend
-                  points={d.spend.dailyTrend.map((x) => ({ label: x.day.slice(5), value: x.costUsd }))}
+                  points={fillDailyWindow(d.spend.dailyTrend, 14, (day) => ({ day, costUsd: 0 })).map((x) => ({ label: x.day.slice(5), value: x.costUsd }))}
                   title="Daily spend, last 14 days"
                   format={fmtUsd}
                 />
