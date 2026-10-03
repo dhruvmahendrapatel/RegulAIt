@@ -858,26 +858,83 @@ describe("what this surface deliberately does NOT do", () => {
  * AER-011 / ADR-0136 — THE KEY IS THE REQUEST'S IDENTITY, FIELD BY FIELD.
  *
  * The cases under "the technique the IDE path was missing" prove that system,
- * role, message boundary and max_tokens miss. These cover the remaining
- * identity fields the compat commitment names — the response contract,
- * extended thinking, the attributed project and the prompt/config version set
- * — and each is measured THREE ways so it cannot pass vacuously (M-033): the
+ * role, message boundary and max_tokens miss. These cover the other identity
+ * fields a request can change on its own — the vendor surface, the requested
+ * model string, a prompt-caching marker, the response contract, extended
+ * thinking, the attributed project and the prompt/config version set — and
+ * each is measured THREE ways so it cannot pass vacuously (M-033): the
  * base request is primed (one usage row, then a hit with none); the variant,
  * differing in exactly that one field, must MISS against the base row (one
  * more usage row, no saving); then the variant is asked again and must HIT its
  * own row — proving the variant is cacheable, so its miss was about identity
  * and not about a field that is never cached.
  *
- * Omission control (run, not retained): dropping any one of `responseFormat`,
- * `thinking`, `projectId`, `promptVersions` or `agentConfigVersions` from the
- * commitment in `compat-core.ts` turns exactly that field's case red — the
- * variant comes back as a false hit.
+ * Omission controls. RETAINED: the field ledger below names every field the
+ * compat commitment hands the key, so dropping any one of them from
+ * `compat-core.ts` turns the ledger test red on its own. RUN, not retained
+ * (per-field counts are in the commit messages): dropping a field whose
+ * ledger entry names a case turns that case red as well — the variant comes
+ * back as a false hit.
  *
  * This block activates versions on the file's agent, which is why it runs
  * LAST: every later ask in the file would be served under the new version set.
  */
 describe("AER-011 — identical requests that differ in one identity field miss", () => {
   type Call = () => Promise<{ statusCode: number }>;
+
+  /**
+   * THE FIELD LEDGER — the omission control, retained. `canonicalJson` commits
+   * to every field it is handed, so the only way a field leaves the key is by
+   * leaving the literal `compat-core.ts` hands to `semanticCacheRequestKey`.
+   * Every field is either named by the case that goes red (as a false HIT) when
+   * it is dropped, or says why no request can isolate it. Dropping, adding or
+   * renaming a field turns the test below red, so a change to the key's
+   * identity is a change to this ledger, made by someone who read it.
+   */
+  const COMPAT_KEY_LEDGER: Record<string, string> = {
+    surface: "case: surface",
+    requestedModel: "case: model string",
+    requestedAgentId:
+      "scope: lookupSemanticCache reads only the requested agent's rows, so another agent's row is unreachable with or without this field",
+    servedAgentId:
+      "no case: differs from the requested agent only when routing serves another agent, which no request in this file can make it do",
+    servedModel: "no case: changes only when routing serves another agent or an admin edits the served agent's row",
+    servedProvider: "no case: changes only when routing serves another agent or an admin edits the served agent's row",
+    servedCustomProviderId:
+      "no case: changes only when routing serves another agent or an admin edits the served agent's row",
+    servedSystemPrompt:
+      "no case: changes only when an admin edits the served agent's row (a versioned prompt change is promptVersions)",
+    promptVersions: "case: prompt version",
+    agentConfigVersions: "case: config version",
+    projectId: "case: project",
+    messages: "cases: case and whitespace; role and message boundary (the technique the IDE path was missing)",
+    system: "case: the `system` variant of the identity loop (the technique the IDE path was missing)",
+    cacheSystem: "case: cache_control",
+    responseFormat: "case: response_format",
+    thinking: "case: thinking",
+    maxTokens: "case: the `max_tokens` variant of the identity loop (the technique the IDE path was missing)",
+    toolChoice:
+      "inert on every cacheable request: tool_choice with no tools maps to no choice, and a tool-bearing turn is never cached — case: tool_choice with no tools",
+  };
+
+  it("the ledger names exactly the fields the compat commitment hands the key", () => {
+    const sf = parse("compat-core.ts");
+    const commits: ts.CallExpression[] = [];
+    const visit = (n: ts.Node) => {
+      if (ts.isCallExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === "semanticCacheRequestKey") commits.push(n);
+      ts.forEachChild(n, visit);
+    };
+    visit(sf);
+    expect(commits.length, "compat-core.ts must build its key in exactly one place").toBe(1);
+    const literal = commits[0]!.arguments[0];
+    expect(literal !== undefined && ts.isObjectLiteralExpression(literal), "the commitment must be an object literal").toBe(true);
+    const fields = (literal as ts.ObjectLiteralExpression).properties.map((p) => {
+      // a spread would commit fields this ledger cannot see
+      expect(ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p), `\`${p.getText()}\` must name its field`).toBe(true);
+      return (p as ts.PropertyAssignment | ts.ShorthandPropertyAssignment).name.getText();
+    });
+    expect(fields.sort()).toEqual(Object.keys(COMPAT_KEY_LEDGER).sort());
+  });
 
   /** one OpenAI-shaped call, naming the agent exactly as `ask` does */
   const askOpenAi = (text: string, extra: Record<string, unknown> = {}) =>
@@ -959,6 +1016,55 @@ describe("AER-011 — identical requests that differ in one identity field miss"
     const p2 = await mkProject("p2");
     const prompt = `aer011 project ${RUN}`;
     await pairedMiss(() => ask(authA, prompt, {}, p1), () => ask(authA, prompt, {}, p2));
+  });
+
+  it("surface: the same words on the Anthropic and the OpenAI surface are different requests", async () => {
+    // Every other committed field is identical between these two calls (same
+    // agent, model string, max_tokens and message; no system, format, thinking
+    // or tool choice), so `surface` is the one difference the key sees.
+    const prompt = `aer011 surface ${RUN}`;
+    await pairedMiss(() => ask(authA, prompt), () => askOpenAi(prompt));
+  });
+
+  it("cache_control: a prompt-caching marker on the system block is a different request", async () => {
+    // Conservative on purpose. Prompt caching changes what the provider BILLS,
+    // not what it answers, but the commitment names every field the provider
+    // receives (ADR-0136), and `cacheSystem` reaches it. So the marker is a new
+    // request that pays once, never a reason to reuse an answer. The same system
+    // TEXT goes on both sides: the shim joins text blocks into the same string.
+    const prompt = `aer011 cache control ${RUN}`;
+    const system = "Answer in one sentence.";
+    await pairedMiss(
+      () => ask(authA, prompt, { system }),
+      () => ask(authA, prompt, { system: [{ type: "text", text: system, cache_control: { type: "ephemeral" } }] }),
+    );
+  });
+
+  it("model string: the same named agent asked under another model string is a different request", async () => {
+    // With the agent named in the header the model string is advisory (it
+    // picks nothing), so the served agent, and every served field, is the same
+    // on both sides. Only `requestedModel` differs.
+    const prompt = `aer011 model string ${RUN}`;
+    await pairedMiss(() => ask(authA, prompt), () => ask(authA, prompt, { model: `aer011-alias-${RUN}` }));
+  });
+
+  it("tool_choice with no tools is NOT a different request: it maps to no choice, so it hits the tool-free row", async () => {
+    // `toolChoice` is in the commitment, yet on a cacheable request it is always
+    // null. The shim maps `auto`/`none` with no tools to no choice at all, and
+    // refuses `any`/`tool` with no tools with a 400. A tool-bearing turn is never
+    // cached. So these are the same request, and that is asserted: a shim change
+    // that let a choice through would turn this red and send the field back to a
+    // reviewer.
+    const prompt = `aer011 tool choice ${RUN}`;
+    await setPolicy("always");
+    await prime(() => ask(authA, prompt));
+    const usage = await usageCount(userA);
+    const savings = await cacheSavingsCount(userA);
+    const res = await ask(authA, prompt, { tool_choice: { type: "auto" } });
+    expect(res.statusCode).toBe(200);
+    // HIT: no provider call, one saving
+    expect(await usageCount(userA)).toBe(usage);
+    expect(await cacheSavingsCount(userA)).toBe(savings + 1);
   });
 
   it("prompt version: a newly activated system-prompt version invalidates earlier rows, even with the same text", async () => {
