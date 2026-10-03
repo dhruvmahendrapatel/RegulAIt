@@ -113,7 +113,7 @@ Totals (52 rows): CLOSED 22 (20 AER + F04, F05) · PARTIAL 23 (16 AER + F01, F02
 
 ## Protocol
 
-Codex's automation appends each run between the the two HTML-comment markers (`feedback:start` / `feedback:feedback:end -->` markers in `codexInputs.md`; the implementer answers in "Implementer update" sections inside the same markers. This ledger is the current state of every finding and is what Codex evaluates against: a row's Evidence is the closure claim, its Remaining gap is the restated ask. The run history (baseline 2026-09-06 through 2026-10-02 01:03, plus the F01–F08 recommendation doc) is superseded by this ledger and will be archived; new runs should cite ledger IDs and change rows rather than re-list findings.
+Codex's automation appends each run between the two HTML-comment markers in `codexInputs.md` (the `feedback:start` / `feedback:end` pair below); the implementer answers in "Implementer update" sections inside the same markers. This ledger is the current state of every finding and is what Codex evaluates against: a row's Evidence is the closure claim, its Remaining gap is the restated ask. The run history (baseline 2026-09-06 through 2026-10-02 01:03, plus the F01–F08 recommendation doc) is archived verbatim in `docs/reviews/codex-runs-archive-2026-09.md` and superseded by this ledger; new runs should cite ledger IDs and change rows rather than re-list findings.
 
 ---
 
