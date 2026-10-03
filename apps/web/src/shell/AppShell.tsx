@@ -89,7 +89,7 @@ export default function AppShell(props: { children: ReactNode }) {
     () => SUITES.filter((su) => !su.admin || auth?.isAdmin),
     [auth?.isAdmin],
   );
-  const activeSuite = useMemo(() => suiteOfPath(pathname), [pathname]);
+  const activeSuite = useMemo(() => suiteOfPath(pathname, Boolean(auth?.isAdmin)), [pathname, auth?.isAdmin]);
   const filterResults = useMemo(() => {
     if (!q) return [];
     return suites
@@ -113,7 +113,11 @@ export default function AppShell(props: { children: ReactNode }) {
       key={n.to}
       to={n.to}
       end={n.to === "/"}
-      className={({ isActive }) => (isActive ? s.navItemActive! : s.navItem!)}
+      className={({ isActive }) =>
+        isActive || (n.also ?? []).some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`))
+          ? s.navItemActive!
+          : s.navItem!
+      }
       onClick={() => {
         setSideOpen(false);
         setFilter("");
@@ -378,7 +382,7 @@ export function PageHeader(props: {
           </ol>
         </nav>
       )}
-      <div style={{ display: "flex", alignItems: "flex-start", gap: "var(--s2)" }}>
+      <div className={s.pageHeaderRow}>
         {/*
           The info trigger is a SIBLING of the <h1>, never a child of it. Inside
           the heading its label joins the heading's accessible name, so every

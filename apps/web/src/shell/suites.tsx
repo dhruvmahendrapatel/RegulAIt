@@ -18,6 +18,8 @@
 export interface NavEntry {
   label: string;
   to: string;
+  /** other route prefixes that belong to this entry (a detail page living under another path) */
+  also?: string[];
 }
 
 export const WORKSPACE: NavEntry[] = [
@@ -54,6 +56,8 @@ export const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // every figure computed from the ledgers at load, print-friendly with
       // CSS only, and an empty ledger says "unmeasured", never zero.
       { label: "Posture", to: "/admin/posture" },
+      { label: "Trust & evidence", to: "/admin/governance/trust" },
+      { label: "Governance alerts", to: "/admin/governance/alerts" },
       // ADR-0047 — the BOARD-facing read of the same two ledgers the Cost
       // dashboard and the Audit log render operationally. Nothing new is
       // stored: a report is a read-only projection, scoped to the caller's own
@@ -98,7 +102,10 @@ export const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // of AI proposed, questionnaired, and signed off before anything ran?" —
       // an approved use case carries the same compliance tags the cascade
       // enforces.
-      { label: "Use cases", to: "/admin/use-cases" },
+      { label: "Use cases", to: "/admin/use-cases", also: ["/admin/governance/use-cases"] },
+      { label: "AI intake", to: "/admin/governance/intake" },
+      { label: "Dependency graph", to: "/admin/governance/graph" },
+      { label: "Regulatory intelligence", to: "/admin/governance/regulatory" },
       // ADR-0045 — the RISK-ACCEPTANCE gate beside the quality gate: "has a
       // human accepted the risk of using this model for this purpose, and is
       // that acceptance still valid?" A high eval score is an input to that
@@ -450,14 +457,20 @@ export function suiteHome(suite: Suite): string {
  * so detail routes (/runs/:id, /projects/:id/context) resolve through their
  * list entry. Routes outside every suite (/, /account) fall back to Workspace.
  */
-export function suiteOfPath(pathname: string): Suite {
+export function suiteOfPath(pathname: string, isAdmin = true): Suite {
   const path = pathname.replace(/\/+$/, "") || "/";
   let best: { suite: Suite; len: number } | null = null;
-  for (const suite of SUITES) {
+  // An admin-only suite is not this person's suite, whatever the URL says: a
+  // non-admin who types /admin/users gets the refusal card inside the
+  // Workspace navigation, not the whole Identity & access rail beside a card
+  // saying it is not in their navigation (UIW-03).
+  for (const suite of SUITES.filter((su) => !su.admin || isAdmin)) {
     for (const section of suite.sections) {
       for (const item of section.items) {
-        if (path === item.to || path.startsWith(`${item.to}/`)) {
-          if (!best || item.to.length > best.len) best = { suite, len: item.to.length };
+        for (const prefix of [item.to, ...(item.also ?? [])]) {
+          if (path === prefix || path.startsWith(`${prefix}/`)) {
+            if (!best || prefix.length > best.len) best = { suite, len: prefix.length };
+          }
         }
       }
     }

@@ -1,4 +1,9 @@
-import Fastify from "fastify";
+import Fastify, {
+  LogController,
+  type FastifyReply,
+  type FastifyRequest,
+  type FastifyServerOptions,
+} from "fastify";
 import {
   and,
   desc,
@@ -42,6 +47,7 @@ import {
   roles,
   serverGrants,
   sodOverrideRequests,
+  remediationProposals,
   sql,
   teamMembers,
   teams,
@@ -67,13 +73,16 @@ import { schedulerHealth } from "./scheduler-health.js";
 import { SharedRateLimitStore } from "./rate-limit-store.js";
 import { resolveTimeoutConfig, setTimeoutConfig, type TimeoutConfig } from "./timeouts.js";
 import { resolveBreakerConfig, setBreakerConfig, type BreakerConfig } from "./upstream-breaker.js";
+import { resolveRetryConfig, setRetryConfig, type RetryConfig } from "./upstream-retry.js";
 import {
+  rateLimitCredentialKey,
   rateLimitKey,
   rateLimitMax,
   rateLimitWindowMs,
   resolveRateLimitConfig,
   type RateLimitConfig,
 } from "./rate-limit.js";
+import { requestLogFields } from "./gateway-logger.js";
 import { visibleTools, type ToolRef } from "@regulait/policy-kernel";
 import {
   assignRoleSchema,
@@ -110,6 +119,8 @@ import {
   updateUserSchema,
   advisoryDetail,
   authzCheckRequestSchema,
+  /** B9b — the ten kinds the one queue holds; the `objectType` filter's enum */
+  APPROVAL_OBJECT_TYPES,
   type AuthzDecision,
 } from "@regulait/shared";
 import { governedEvaluate } from "./governed-evaluate.js";
@@ -141,6 +152,21 @@ import { applyModelCardApprovalDecision, registerMrmRoutes } from "./mrm.js";
 import { registerRedTeamRoutes } from "./redteam.js";
 import { registerReportingRoutes } from "./reporting.js";
 import { registerPostureRoutes } from "./posture.js";
+import { registerTrustDashboardRoutes } from "./trust-dashboard.js";
+import { registerUseCaseOverviewRoutes } from "./use-case-overview.js";
+import { registerAgentCardRoutes } from "./agent-card.js";
+import { registerDependencyGraphRoutes } from "./dependency-graph.js";
+import { registerGovernanceMonitorRoutes } from "./governance-monitor.js";
+import { registerRegulatoryIntelRoutes } from "./regulatory-intel.js";
+import {
+  REMEDIATION_PREFIX as GOVERNANCE_REMEDIATION_PREFIX,
+  applyRemediationDecision,
+  precheckRemediationDecision,
+  registerRemediationRoutes,
+} from "./remediation.js";
+import { runGovernanceMonitor } from "./governance-monitor.js";
+import { registerTraceEvaluationRoutes } from "./trace-evaluation.js";
+import { registerDeployGateRoutes } from "./deploy-gate.js";
 import { registerPosturePresetRoutes } from "./posture-preset.js";
 import { registerExecutionControlRoutes } from "./execution-control.js";
 import { registerInventoryRoutes } from "./inventory.js";
@@ -187,22 +213,38 @@ import {
   registerLicensingRoutes,
   resolveLicense,
 } from "./licensing.js";
-import { registerAuditChainRoutes, type AnchorSink } from "./audit-chain.js";
+import { registerAuditChainRoutes, resolveAnchorSink, type AnchorSink } from "./audit-chain.js";
 import {
   assignedApprovalIdsFor,
   ensureAssignment,
   evaluateAssignmentSla,
   materializeAndEvaluate,
+  pendingApprovalsNeedingAttention,
   registerWorkbenchRoutes,
   routingActive,
 } from "./workbench.js";
 import { abacPrincipalFromRequest } from "./abac-principal.js";
+import { listLimitQuery } from "./list-limit.js";
 import { evaluateIpEnvelope } from "./net-policy.js";
 import { activeDelegatorsFor, activeDelegationFrom } from "./delegations.js";
 
 declare module "fastify" {
   interface FastifyRequest {
     authCtx: AuthContext;
+    /** ADR-0167: the post-auth bucket this request's RESOLVED credential counts
+     * against, set immediately before the credential-tier limiter runs */
+    rateLimitCredentialKey?: string;
+  }
+  interface FastifyInstance {
+    /**
+     * ADR-0167 — the credential tier of the HTTP rate limiter. Called by the
+     * auth preHandler (api keys, virtual keys, bootstrap) and by the SCIM
+     * scope's own token check, AFTER the bearer resolved to a stored row.
+     * Sends the 429 itself and returns true when the request was refused;
+     * returns false (and sets the x-ratelimit-* headers) otherwise. Absent
+     * when the limiter is disabled.
+     */
+    rateLimitCredential?: (req: FastifyRequest, reply: FastifyReply, key: string) => Promise<boolean>;
   }
 }
 
@@ -213,6 +255,17 @@ export interface BuildAppOptions {
   timeouts?: Partial<TimeoutConfig>;
   /** ADR-0126 circuit-breaker thresholds; same reason */
   breaker?: Partial<BreakerConfig>;
+  /**
+   * ADR-0128 retry/backoff policy; a test pins `maxAttempts: 1` to assert that
+   * the whole mechanism is switchable off.
+   *
+   * PROCESS-WIDE, exactly like `timeouts` and `breaker` above: it sets a module
+   * singleton, because a gateway process has one policy. So in a test file that
+   * builds SEVERAL apps, the last `buildApp` wins for all of them — switch the
+   * policy with `setRetryConfig` at the point it matters instead of expecting
+   * two apps to disagree.
+   */
+  retry?: Partial<RetryConfig>;
   /** hex AES-256 key for encrypting stored git tokens (REGULAIT_DATA_KEY) */
   dataKey?: string;
   /** ADR-0031: which peers may speak for the client via X-Forwarded-*.
@@ -223,6 +276,11 @@ export interface BuildAppOptions {
    * environment (see rate-limit.ts); this override exists so a test can pin
    * tiny windows without touching process.env. */
   rateLimit?: Partial<RateLimitConfig>;
+  /** ADR-0167 (CFG-02): Fastify's logger option. `false` (the default here)
+   * keeps the ~100 test files that construct apps silent; `startGateway`
+   * passes a redacting pino config resolved from the environment, so the
+   * SERVING process logs refusals and failures. See gateway-logger.ts. */
+  logger?: FastifyServerOptions["logger"];
   /** ADR-0029 amendment: the Strict-Transport-Security value sent on genuinely
    * secure responses, or `null` for none. Defaults to REGULAIT_HSTS (which
    * itself defaults to `max-age=86400`). Exposed so a test can assert both
@@ -245,7 +303,8 @@ export interface BuildAppOptions {
   recommendationJudge?: RecommendationJudge | null;
 }
 import { z } from "zod";
-import { registerMcpProxy } from "./mcp-proxy.js";
+import { boundTargetsForApprovals, registerMcpProxy } from "./mcp-proxy.js";
+import { ExternalEffectBlockedError } from "./external-effects.js";
 import { registerAgentConnectorRoutes } from "./agents-connectors.js";
 import { registerCustomProviderRoutes } from "./custom-providers.js";
 import { registerExternalScorerRoutes } from "./external-scorers.js";
@@ -269,7 +328,7 @@ import {
 import { registerAnthropicCompat } from "./compat-anthropic.js";
 import { registerOpenAiCompat } from "./compat-openai.js";
 import { registerModelsDiscovery } from "./compat-models.js";
-import { registerVirtualKeyRoutes, VIRTUAL_KEY_ALLOWED_ROUTES } from "./virtual-keys.js";
+import { registerVirtualKeyRoutes, routesForPurpose } from "./virtual-keys.js";
 // ADR-0097 — the tool-poisoning admission gate (part A) and the RFC 9728
 // protected-resource metadata + WWW-Authenticate challenge (part B).
 import {
@@ -374,6 +433,9 @@ const INERT_SERVER_GRANT = {
  * than this pages with `cursor`, or takes the streamed CSV export. */
 export const AUDIT_MAX_PAGE_SIZE = 1000;
 const AUDIT_DEFAULT_PAGE_SIZE = 100;
+/** ADR-0167 (CFG-08): how long /health waits for `select 1` before answering
+ * 503 degraded instead of queueing behind an exhausted pool */
+export const HEALTH_DB_TIMEOUT_MS = 2_000;
 
 /**
  * THE filter set for the audit trail. Both the screen read (`GET /v1/audit`)
@@ -504,8 +566,17 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   const timeoutCfg = resolveTimeoutConfig(process.env, opts.timeouts ?? {});
   setTimeoutConfig(timeoutCfg);
   setBreakerConfig(resolveBreakerConfig(process.env, opts.breaker ?? {}));
+  setRetryConfig(resolveRetryConfig(process.env, opts.retry ?? {}));
   const app = Fastify({
-    logger: false,
+    logger: opts.logger ?? false,
+    // ADR-0167 §9: the gateway's own hook writes one line per refusal with the
+    // route and the credential KIND. Fastify's per-request lines would print
+    // the full URL — the OIDC callback's code and state, every query string —
+    // unredacted at info, so they stay off whatever the level. (The top-level
+    // `disableRequestLogging` is deprecated in fastify 5.12 — FSTDEP023 on
+    // every boot — and goes away in 6; the LogController carries the same
+    // switch.)
+    logController: new LogController({ disableRequestLogging: true }),
     trustProxy,
     requestTimeout: timeoutCfg.requestTimeoutMs,
     bodyLimit: timeoutCfg.bodyLimitBytes,
@@ -584,6 +655,20 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         }
       } as unknown as NonNullable<Parameters<typeof fastifyRateLimit>[1]>["store"],
     });
+    /** the shared 429 shape — both tiers refuse identically */
+    const refuseRateLimited = (
+      reply: FastifyReply,
+      verdict: { max: number; timeWindow: number; ttlInSeconds: number },
+    ) =>
+      reply
+        .status(429)
+        .header("x-ratelimit-remaining", "0")
+        .header("retry-after", String(verdict.ttlInSeconds))
+        .send({
+          error: "rate_limited",
+          detail: `too many requests — limit ${verdict.max} per ${Math.round(verdict.timeWindow / 1000)}s`,
+          retryAfterSeconds: verdict.ttlInSeconds,
+        });
     let limiter: ReturnType<typeof app.createRateLimit> | null = null;
     app.addHook("onRequest", async (req, reply) => {
       limiter ??= app.createRateLimit();
@@ -595,19 +680,54 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         .header("x-ratelimit-remaining", String(verdict.remaining))
         .header("x-ratelimit-reset", String(verdict.ttlInSeconds));
       if (!verdict.isExceeded) return;
-      return reply
-        .status(429)
-        .header("x-ratelimit-remaining", "0")
-        .header("retry-after", String(verdict.ttlInSeconds))
-        .send({
-          error: "rate_limited",
-          detail: `too many requests — limit ${verdict.max} per ${Math.round(verdict.timeWindow / 1000)}s`,
-          retryAfterSeconds: verdict.ttlInSeconds,
-        });
+      return refuseRateLimited(reply, verdict);
     });
+
+    // ADR-0167 — THE CREDENTIAL TIER. The onRequest tier above keys every
+    // bucket on the client IP, because before authentication the bearer is an
+    // unverified string and a bucket named after it is a bucket the caller
+    // mints at will (AUTHZ-01/CFG-01: rotating the header voided the per-IP
+    // ceiling and cost one Postgres INSERT per request). The per-credential
+    // allowance that lets a busy service account outrun its NAT neighbours
+    // therefore runs HERE, after the bearer resolved to a stored row, keyed on
+    // that row's id. Same plugin, same shared store (child() returns the one
+    // instance), a second key generator that reads the key the caller stamped.
+    let credLimiter: ReturnType<typeof app.createRateLimit> | null = null;
+    app.decorate(
+      "rateLimitCredential",
+      async (req: FastifyRequest, reply: FastifyReply, key: string): Promise<boolean> => {
+        credLimiter ??= app.createRateLimit({
+          keyGenerator: (r: FastifyRequest) => r.rateLimitCredentialKey ?? `ip:${r.ip}`,
+          max: (_r: FastifyRequest, k: string) => rateLimitMax(rateCfg, k),
+          timeWindow: (_r: FastifyRequest, k: string) => rateLimitWindowMs(rateCfg, k),
+          allowList: () => false,
+        });
+        req.rateLimitCredentialKey = key;
+        const verdict = await credLimiter(req);
+        if (verdict.isAllowed) return false;
+        reply
+          .header("x-ratelimit-limit", String(verdict.max))
+          .header("x-ratelimit-remaining", String(verdict.remaining))
+          .header("x-ratelimit-reset", String(verdict.ttlInSeconds));
+        if (!verdict.isExceeded) return false;
+        await refuseRateLimited(reply, verdict);
+        return true;
+      },
+    );
   }
 
-  app.setErrorHandler((err, _req, reply) => {
+  // ADR-0167 (CFG-02) — every refusal and failure leaves a line. With the
+  // logger off (tests) this is a no-op; in the serving process it is the one
+  // place a 401/403/404/429 flood or a 5xx becomes visible to an operator
+  // without a database query. Credential KIND only, never the credential.
+  app.addHook("onResponse", async (req, reply) => {
+    if (reply.statusCode < 400) return;
+    const fields = requestLogFields(req, reply.statusCode);
+    if (reply.statusCode >= 500) req.log.error(fields, "request failed");
+    else req.log.warn(fields, "request refused");
+  });
+
+  app.setErrorHandler((err, req, reply) => {
     if (err instanceof z.ZodError) {
       return reply.status(400).send({ error: "validation", issues: err.issues });
     }
@@ -628,10 +748,39 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     if (err instanceof ConfigVersionUnresolvableError) {
       return reply.status(409).send({ error: "config_version_unresolvable", detail: err.message });
     }
+    if (err instanceof ExternalEffectBlockedError) {
+      return reply.status(err.statusCode).send({ error: err.code, detail: err.message });
+    }
     const pgCode = (err as { cause?: { code?: string } }).cause?.code;
     if (pgCode === "23505") return reply.status(409).send({ error: "conflict" });
     if (pgCode === "23503") return reply.status(400).send({ error: "invalid_reference" });
-    app.log.error(err);
+    // ADR-0167 (SEC-03): Fastify's OWN client-side refusals — a body over the
+    // limit (413), a malformed JSON body (400), an unknown content type (415)
+    // — are FastifyErrors carrying `code: FST_ERR_*` and a 4xx statusCode.
+    // They used to fall through to the 500 below, which reported a client
+    // fault as a server fault, discarded the reason, and made the two import
+    // routes' honest "payloads are bounded at N bytes" messages unreachable.
+    // Scoped to the FST_ERR_ prefix on purpose: a third-party error that
+    // happens to carry a statusCode (an undici or provider error) must not
+    // have its message echoed to the caller by this branch.
+    const fastifyErr = err as { code?: unknown; statusCode?: unknown };
+    if (
+      typeof fastifyErr.code === "string" &&
+      fastifyErr.code.startsWith("FST_ERR_") &&
+      typeof fastifyErr.statusCode === "number" &&
+      fastifyErr.statusCode >= 400 &&
+      fastifyErr.statusCode < 500
+    ) {
+      const detail = err instanceof Error ? err.message : String(err);
+      req.log.warn({ code: fastifyErr.code, status: fastifyErr.statusCode }, detail);
+      return reply.status(fastifyErr.statusCode).send({
+        error: fastifyErr.code.replace(/^FST_ERR_(CTP_)?/, "").toLowerCase(),
+        detail,
+      });
+    }
+    req.log.error({ err, method: req.method, url: req.url }, "unhandled error");
+    // DEBUG_ERRORS=1 additionally prints the stack to stderr even when the
+    // logger is off — documented in docs/deployment/INSTALL.md.
     if (process.env.DEBUG_ERRORS) console.error("GATEWAY ERR:", err);
     return reply.status(500).send({ error: "internal" });
   });
@@ -941,6 +1090,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       return reply.status(401).send({ error: ctx, detail: AUTH_REFUSAL_DETAIL[ctx] });
     }
     if (!ctx) return reply.status(401).send({ error: "unauthenticated" });
+    // ADR-0167 — the credential tier of the rate limiter, now that the bearer
+    // is a stored row and its id can name a bucket nobody else can mint.
+    const credKey = rateLimitCredentialKey(ctx);
+    if (credKey && app.rateLimitCredential && (await app.rateLimitCredential(req, reply, credKey))) {
+      return reply;
+    }
     // ADR-0039: header API-key auth under api_key_ip_policy. Each request
     // presents the credential anew, so ANY enforcing level checks every
     // request (there is no session to distinguish "login" from "use", and
@@ -995,11 +1150,18 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   app.addHook("preHandler", async (req, reply) => {
     if (req.authCtx.via !== "virtual-key") return;
     const route = `${req.method} ${req.routeOptions.url ?? ""}`;
-    if (!VIRTUAL_KEY_ALLOWED_ROUTES.has(route)) {
+    // AER-027: the allow-list is chosen by the key's PURPOSE, and the
+    // separation runs both ways — a dispatch key cannot ask an authorization
+    // question about another person, and a pdp key cannot spend anybody's
+    // budget. An unrecognised purpose resolves to the empty set rather than a
+    // default, so a credential this build does not understand reaches nothing.
+    const allowed = routesForPurpose(req.authCtx.virtualKeyPurpose);
+    if (!allowed.has(route)) {
+      const purpose = req.authCtx.virtualKeyPurpose ?? "dispatch";
       return reply.status(403).send({
         error: "virtual_key_scope",
         detail:
-          `a virtual key may only reach this deployment's model-dispatch surfaces (${[...VIRTUAL_KEY_ALLOWED_ROUTES].join(", ")}); ` +
+          `a '${purpose}' virtual key may only reach ${[...allowed].join(", ") || "<nothing: unrecognised purpose>"}; ` +
           `'${route}' is not one of them. Use the owner's own API key or session for anything else.`,
       });
     }
@@ -1010,7 +1172,19 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // visible tools, and calling tools through the proxy.
   app.addHook("preHandler", async (req, reply) => {
     const route = `${req.method} ${req.routeOptions.url ?? ""}`;
-    if (!NON_ADMIN_ROUTES.has(route) && !req.authCtx.isAdmin) {
+    // AER-027: a purpose-scoped virtual key satisfies this gate for the routes
+    // on ITS OWN allow-list, and nothing else. The hook above has already
+    // refused it everywhere outside that set, so this is not a second chance —
+    // it is the same one decision read once more.
+    //
+    // This changes exactly ONE route's behaviour: `POST /v1/authz/check` with a
+    // 'pdp' key. Every dispatch route a virtual key can reach is already in
+    // NON_ADMIN_ROUTES, so a dispatch key gains nothing here. Making the
+    // endpoint plainly non-admin instead would have let ANY authenticated user
+    // ask authorization questions about anyone, which is worse than the problem.
+    const scopedKeyMayReach =
+      req.authCtx.via === "virtual-key" && routesForPurpose(req.authCtx.virtualKeyPurpose).has(route);
+    if (!NON_ADMIN_ROUTES.has(route) && !req.authCtx.isAdmin && !scopedKeyMayReach) {
       return reply.status(403).send({ error: "admin_only" });
     }
   });
@@ -1065,7 +1239,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0012: portal-driven API-parity gap fill — the bulk user table needs
   // a list endpoint, not only POST. disabledAt rides along (ADR-0022) so the
   // portal can grey deactivated accounts and offer Reactivate.
-  app.get("/v1/users", async () => ({
+  // REL-10: bounded — `limit` (default LIST_DEFAULT_LIMIT, max LIST_MAX_LIMIT)
+  app.get("/v1/users", async (req) => ({
     users: await db
       .select({
         id: users.id,
@@ -1083,7 +1258,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         hasPassword: sql<boolean>`${users.passwordHash} is not null`,
         mustChangePassword: users.mustChangePassword,
       })
-      .from(users),
+      .from(users)
+      .orderBy(users.createdAt)
+      .limit(listLimitQuery.parse(req.query).limit),
   }));
 
   // --- ADR-0022 identity lifecycle (admin-only via the default gate) --------
@@ -2108,16 +2285,66 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       });
     }
 
+    // AER-028 — THE SAME QUESTION THE DISPATCH WOULD ASK.
+    //
+    // These four were `undefined, null, null, undefined`, and the consequence
+    // was not that rules were skipped: the kernel FAILS CLOSED on a data-scope
+    // rule whose argument is missing, so any deployment with one got `deny`
+    // from the PDP for calls that would really have been allowed. Safe
+    // direction, wrong answer, and wrong in the way that gets a PDP switched
+    // off. `ceilingTools` stays null because a Team-Lead ceiling is a property
+    // of a RUN, and a proxy request is not inside one.
     const { decision } = await governedEvaluate(
       db,
       body.userId,
       body.serverId,
       { serverId: tool.serverId, name: tool.name, kind: tool.kind },
-      undefined,
+      body.args,
       null,
-      null,
-      undefined,
+      body.projectId ?? null,
+      // AER-036 / schema v2: NOTE WHAT IS DELIBERATELY ABSENT. There is no
+      // `clientIp` here and `authzCheckRequestSchema` does not accept one,
+      // because on this route `req.ip` is the PROXY's address and the proxy is
+      // asking about a subject somewhere else entirely. Forwarding either value
+      // would be the AER-036 mistake in a new field: an attribute that reads as
+      // the subject's network location and is actually somebody else's. Absent
+      // is correct, and a v2 policy's `context has clientIp` guard is what
+      // decides what to do about it.
+      body.principal
+        ? {
+            sessionOrigin: body.principal.sessionOrigin ?? null,
+            mfaCompleted: body.principal.mfaCompleted ?? null,
+          }
+        : undefined,
     );
+
+    // What the decision was actually computed ON. A proxy that believes it is
+    // sending arguments and is not would otherwise see only a stream of denies
+    // with no way to tell a policy refusal from its own misconfiguration —
+    // which is the single most likely way this integration gets misdeployed.
+    // Names only, never values: this response crosses into a data plane.
+    // AER-036: `principal` used to appear here whenever the KEY existed, so a
+    // caller that sent `principal: {}` — or `{ sessionOrigin: null }` — was told
+    // its principal context had been applied when the kernel had received
+    // nothing but defaults. On the one field a proxy is most likely to get wrong,
+    // that is a green light for a misconfiguration.
+    //
+    // It now appears only when a value actually arrived AND was accepted by the
+    // closed vocabulary, and it is joined by `principal.asserted`: on THIS route
+    // the origin is always the caller's claim rather than something this gateway
+    // observed, and a response that does not distinguish the two invites a reader
+    // to treat a proxy's configuration as evidence. The subject is believed here
+    // for the same reason (ADR-0127 §3) — the difference is that the subject's
+    // status is documented and this one was not.
+    const principalApplied =
+      body.principal !== undefined &&
+      (body.principal.sessionOrigin != null || body.principal.mfaCompleted != null);
+    const contextApplied = [
+      body.args !== undefined ? "args" : null,
+      body.projectId ? "projectId" : null,
+      principalApplied ? "principal" : null,
+      principalApplied ? "principal.asserted" : null,
+    ].filter((x): x is string => x !== null);
 
     const mapped: AuthzDecision =
       decision.effect === "allow"
@@ -2134,12 +2361,34 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       ruleId: decision.ruleId,
       ruleChain: decision.ruleChain,
       reason: decision.reason,
-      detail: advisoryDetail({ askedByUserId: req.authCtx.userId ?? null, via: "authz_check" }),
+      detail: advisoryDetail({
+        askedByUserId: req.authCtx.userId ?? null,
+        via: "authz_check",
+        // AER-027: which credential asked. A pdp virtual key is a distinct
+        // audit principal from an administrator doing the same thing by hand,
+        // and the ledger should not blur them.
+        credential: req.authCtx.via,
+        ...(req.authCtx.virtualKeyId ? { virtualKeyId: req.authCtx.virtualKeyId } : {}),
+        contextApplied,
+        // AER-036: the VALUE the decision ran on, not just that a field was
+        // present. `contextApplied` is what crosses into a data plane and stays
+        // names-only; the ledger is internal, and "which origin was this decided
+        // under" is unanswerable afterwards without it — which is exactly the
+        // question asked when a callout and a dispatch disagree.
+        ...(principalApplied
+          ? {
+              assertedPrincipal: {
+                sessionOrigin: body.principal?.sessionOrigin ?? null,
+                mfaCompleted: body.principal?.mfaCompleted ?? null,
+              },
+            }
+          : {}),
+      }),
     });
 
     // `reason` here is the RULE ID, not the prose. It is stable, it is enough
     // for a proxy to correlate with the ledger, and it names no person.
-    return reply.status(200).send({ decision: mapped, reason: decision.ruleId });
+    return reply.status(200).send({ decision: mapped, reason: decision.ruleId, contextApplied });
   });
 
   app.post("/v1/evaluate", async (req, reply) => {
@@ -2428,8 +2677,27 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // while a delegation window to them is active (ADR-0022), the pending
   // approvals of their delegator(s), marked delegatedFrom.
   app.get("/v1/approvals", async (req) => {
-    const { status } = z
-      .object({ status: z.enum(["pending", "approved", "denied", "consumed", "superseded"]).optional() })
+    // B9b — THREE server-side filters, not one.
+    //
+    // The queue is fleet-wide and capped at 100 rows, which is what makes this
+    // a correctness matter rather than a convenience: with one dimension, the
+    // only way to find "the copilot proposals waiting on me" is to page through
+    // everything, and the cap means the rows you want may not be in the
+    // response at all. Every filter here narrows IN THE ENDPOINT, for the same
+    // reason `status` does — the queue's materialization and visibility rules
+    // (ADR-0022 delegation widening, ADR-0046 routing) run inside this handler,
+    // so a client-side filter would be filtering a list the server already
+    // decided you could see, one capped page at a time.
+    //
+    // `approverUserId` is a DISPLAY filter, never a widening: it is intersected
+    // with `scopeCondition` below, so a non-admin filtering by somebody else's
+    // id sees only the rows they could already see.
+    const { status, objectType, approverUserId } = z
+      .object({
+        status: z.enum(["pending", "approved", "denied", "consumed", "superseded"]).optional(),
+        objectType: z.enum(APPROVAL_OBJECT_TYPES).optional(),
+        approverUserId: z.string().uuid().optional(),
+      })
       .parse(req.query);
     // ADR-0022 delegation widening: a non-admin sees their own rows PLUS the
     // PENDING rows of anyone actively delegating to them (pending only — a
@@ -2452,10 +2720,15 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // Guarded by `routingActive`: with no enabled rule — the shipped state —
     // this whole block is one COUNT and the queue behaves exactly as it did
     // before migration 0058, writing nothing.
+    //
+    // REL-09: bounded to the rows a read could change (unassigned, or past a
+    // warn/due mark their state does not yet reflect), oldest first, capped —
+    // never the whole fleet's pending set per reader. See
+    // pendingApprovalsNeedingAttention.
     const workbenchOn = await routingActive(db);
     if (workbenchOn) {
-      const pendingAll = await db.select().from(approvals).where(eq(approvals.status, "pending"));
-      await materializeAndEvaluate(db, pendingAll, me || null);
+      const needing = await pendingApprovalsNeedingAttention(db);
+      await materializeAndEvaluate(db, needing, me || null);
     }
     // ADR-0046 §1: routing decides WHOSE QUEUE a row shows in. A non-admin
     // therefore also sees the rows assigned (or escalated) to a role or team
@@ -2473,9 +2746,13 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
             ...(assignedIds.length ? [inArray(approvals.id, assignedIds)] : []),
           ],
         );
-    const conditions = [status ? eq(approvals.status, status) : undefined, scopeCondition].filter(
-      (c) => c !== undefined,
-    );
+    const conditions = [
+      status ? eq(approvals.status, status) : undefined,
+      objectType ? eq(approvals.objectType, objectType) : undefined,
+      // ANDed with `scopeCondition`, never substituted for it
+      approverUserId ? eq(approvals.approverUserId, approverUserId) : undefined,
+      scopeCondition,
+    ].filter((c) => c !== undefined);
     const rows = await db
       .select()
       .from(approvals)
@@ -2543,7 +2820,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     const instanceIds = ids(rows.map((r) => r.instanceId));
     const runIds = ids(rows.map((r) => r.runId));
     const projectIds = ids(rows.map((r) => r.projectId));
-    const [userRows, instanceRows, runRows, projectRows] = await Promise.all([
+    const approvalServerIds = ids(rows.map((r) => r.serverId));
+    const [userRows, instanceRows, runRows, projectRows, approvalServerRows, boundTargetFor] = await Promise.all([
       userIds.length
         ? db
             .select({ id: users.id, displayName: users.displayName, email: users.email })
@@ -2568,6 +2846,15 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
             .from(projects)
             .where(inArray(projects.id, projectIds))
         : [],
+      approvalServerIds.length
+        ? db.select({ id: mcpServers.id, name: mcpServers.name }).from(mcpServers).where(inArray(mcpServers.id, approvalServerIds))
+        : [],
+      // AER-039 (ADR-0166): the target each MCP consent is BOUND to, from its
+      // queue audit row — what the approver signs, not the server's live row
+      boundTargetsForApprovals(
+        db,
+        rows.filter((r) => r.objectType === "mcp_tool" && r.contextDigest !== null).map((r) => r.id),
+      ),
     ]);
     const nameOf = new Map(userRows.map((u) => [u.id, u.displayName || u.email]));
     const instanceLabel = new Map(
@@ -2575,6 +2862,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     );
     const runLabel = new Map(runRows.map((r) => [r.id, r.name]));
     const projectLabel = new Map(projectRows.map((p) => [p.id, p.name]));
+    const approvalServerLabel = new Map(approvalServerRows.map((s) => [s.id, s.name]));
     // ADR-0022 UX: infra_operation rows finally say WHAT they govern. Their
     // stageId sentinel carries the finding/ledger id — resolve it to the
     // resource plus a one-line finding/action summary, same enrichment
@@ -2720,6 +3008,31 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           .where(inArray(sodOverrideRequests.id, sodOverrideIds))
       : [];
     const sodOverrideById = new Map(sodOverrideRows.map((r) => [r.id, r.label]));
+    // ADR-0159: a governance remediation's queue row names WHAT will change
+    // (the proposal's title, e.g. "Assign an owner to X") — never the raw id
+    const governanceRemediationIds = ids(
+      rows.map((r) =>
+        r.objectType === "remediation" &&
+        r.stageId?.startsWith(GOVERNANCE_REMEDIATION_PREFIX) &&
+        uuidOk(r.stageId.slice(GOVERNANCE_REMEDIATION_PREFIX.length))
+          ? r.stageId.slice(GOVERNANCE_REMEDIATION_PREFIX.length)
+          : null,
+      ),
+    );
+    const governanceRemediationById = new Map(
+      (governanceRemediationIds.length
+        ? await db
+            .select({ id: remediationProposals.id, title: remediationProposals.title })
+            .from(remediationProposals)
+            .where(inArray(remediationProposals.id, governanceRemediationIds))
+        : []
+      ).map((r) => [r.id, r.title]),
+    );
+    const governanceRemediationLabelFor = (stageId: string | null): string | null => {
+      if (!stageId?.startsWith(GOVERNANCE_REMEDIATION_PREFIX)) return null;
+      const title = governanceRemediationById.get(stageId.slice(GOVERNANCE_REMEDIATION_PREFIX.length));
+      return title ?? null; // the SPA's stage label already says "Governance remediation"
+    };
     const sodOverrideLabelFor = (stageId: string | null): string | null => {
       if (!stageId?.startsWith(SOD_OVERRIDE_PREFIX)) return null;
       return sodOverrideById.get(stageId.slice(SOD_OVERRIDE_PREFIX.length)) ?? null;
@@ -2748,6 +3061,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     return {
       approvals: rows.map((r) => ({
         ...r,
+        serverName: r.serverId ? approvalServerLabel.get(r.serverId) ?? null : null,
+        projectName: r.projectId ? projectLabel.get(r.projectId) ?? null : null,
+        // AER-039: host + posture + manifest digest only — never the URL
+        ...(r.objectType === "mcp_tool" ? { boundTarget: boundTargetFor.get(r.id) ?? null } : {}),
         // Finding-6 separation-of-duties surface: the person who would sign
         // IS the user who triggered the governed action — the UI badges it,
         // deciding it requires a recorded reason. Three ways that happens,
@@ -2775,6 +3092,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           (r.objectType === "model_card" ? modelCardLabelFor(r.stageId) : null) ??
           (r.objectType === "grant_certification" ? grantCertLabelFor(r.stageId) : null) ??
           (r.objectType === "sod_override" ? sodOverrideLabelFor(r.stageId) : null) ??
+          (r.objectType === "remediation" ? governanceRemediationLabelFor(r.stageId) : null) ??
           r.toolName ??
           null,
         // ADR-0022: this row reached the caller via an active delegation —
@@ -2907,6 +3225,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // path means bulk and ChatOps inherit both.
     if (row.objectType === "sod_override") {
       const refusal = await precheckSodOverrideDecision(db, row, deciderUserId, body.decision);
+      if (refusal) return fail(refusal.status, refusal.body);
+    }
+    // ADR-0159 — `cannot_approve_own_remediation`, keyed on the DECIDER so the
+    // proposer cannot reach their own change through delegation or override.
+    if (row.objectType === "remediation") {
+      const refusal = await precheckRemediationDecision(db, row, deciderUserId);
       if (refusal) return fail(refusal.status, refusal.body);
     }
     // Separation-of-duties guard: the person deciding IS the person who
@@ -3089,6 +3413,17 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       if (updated.objectType === "sod_override") {
         await applySodOverrideDecision(tx as unknown as Db, updated, body.decision, deciderUserId);
       }
+      // ADR-0159 remediation: approved = the STORED kind+params execute HERE,
+      // inside the decision's transaction; the monitor re-evaluates after
+      // commit so a cleared condition resolves its alert straight away.
+      if (updated.objectType === "remediation") {
+        const applied = await applyRemediationDecision(tx as unknown as Db, updated, body.decision, deciderUserId);
+        if (applied) {
+          postCommit = async (d: Db) => {
+            await runGovernanceMonitor(d, { actorUserId: deciderUserId });
+          };
+        }
+      }
       return { updated, postCommit };
     });
     if (!outcome.updated) {
@@ -3177,10 +3512,23 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // balancer or uptime check gets a status. Both are auth-exempt.
   app.get("/", async (_req, reply) => reply.redirect("/ui", 302));
   app.get("/health", async (_req, reply) => {
-    try {
-      await db.execute(sql`select 1`);
-    } catch {
-      return reply.status(503).send({ status: "degraded", database: "unreachable" });
+    // ADR-0167 (CFG-08): the probe RACES a short deadline. `select 1` goes
+    // through the same pool every request uses, so with the pool exhausted it
+    // would queue behind them and the liveness check would hang rather than
+    // answer — a probe that cannot say "degraded" is not a probe. The query is
+    // left to settle on its own; it is one slot, and the answer is already out.
+    const probe = db.execute(sql`select 1`).then(
+      () => "ok" as const,
+      () => "unreachable" as const,
+    );
+    let timer: NodeJS.Timeout | undefined;
+    const deadline = new Promise<"timeout">((resolve) => {
+      timer = setTimeout(() => resolve("timeout"), HEALTH_DB_TIMEOUT_MS);
+    });
+    const database = await Promise.race([probe, deadline]);
+    if (timer) clearTimeout(timer);
+    if (database !== "ok") {
+      return reply.status(503).send({ status: "degraded", database });
     }
     return { status: "ok", database: "ok" };
   });
@@ -3304,7 +3652,15 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // over the real ledgers at request time — no rollup, no snapshot. Admin-only
   // through the default gate, the ADR-0047 position for an org-scoped report.
   // The anchor sink rides in so tamper resistance is OBSERVED, never config.
-  registerPostureRoutes(app, db, ...(opts.auditAnchorSink !== undefined ? [{ sink: opts.auditAnchorSink }] : []));
+  // ADR-0060 / AER-012: ONE anchor sink per app. The three readers below
+  // (posture, chain verification, the posture preset) used to resolve a sink
+  // each — three S3 clients, three observation caches, a bucket flip seen at
+  // three different times. Resolved once here; the boot path passes the same
+  // instance it anchors WITH, so the readers grade the medium the writer uses.
+  const anchorSink: AnchorSink | null = opts.auditAnchorSink !== undefined ? opts.auditAnchorSink : resolveAnchorSink();
+  registerPostureRoutes(app, db, { sink: anchorSink });
+  // ADR-0148 — the six-dimension trust dashboard (demo task C1)
+  registerTrustDashboardRoutes(app, db);
   // ADR-0082 — the standing agent dependency inventory: per registered agent,
   // GRANTED (what the entitlement rows allow) vs OBSERVED (what run/usage/
   // trace history recorded), never blended — an aggregation over existing
@@ -3407,7 +3763,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // via the DEFAULT gate: `GET /v1/audit/verify` reports the whole trail's
   // shape, and taking an anchor is a governed act that itself lands in the
   // trail.
-  registerAuditChainRoutes(app, db, ...(opts.auditAnchorSink !== undefined ? [{ sink: opts.auditAnchorSink }] : []));
+  registerAuditChainRoutes(app, db, { sink: anchorSink });
 
   registerAgentConnectorRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0034 — admin-registered custom LLM providers + the egress allow-list
@@ -3451,6 +3807,22 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0077 — the cascade-annotated template gallery (admin-gated by default)
   registerTemplateGalleryRoutes(app, db);
   registerUseCaseRoutes(app, db, { dataKey: opts.dataKey });
+  // demo task C3 — the use-case 360 read
+  registerUseCaseOverviewRoutes(app, db);
+  // demo task C5 — the agent card
+  registerAgentCardRoutes(app, db);
+  // ADR-0156 — the AI-system dependency graph with propagated declared risk
+  registerDependencyGraphRoutes(app, db);
+  // ADR-0157 — governance monitor alerts (Monitor & Respond)
+  registerGovernanceMonitorRoutes(app, db);
+  // ADR-0158 — regulatory intelligence joined to our packs and use cases
+  registerRegulatoryIntelRoutes(app, db);
+  // ADR-0159 — remediation proposals for monitor alerts
+  registerRemediationRoutes(app, db);
+  // ADR-0160 — continuous trace evaluation
+  registerTraceEvaluationRoutes(app, db);
+  // ADR-0161 — the CI/CD deploy gate
+  registerDeployGateRoutes(app, db);
   // ADR-0084 — the AI vendor registry beside the use-case registry whose
   // rails it copies. Propose/list/detail/edit/attest are non-admin
   // (owner-or-admin in-handler); RETIRE stays admin through the default gate.
@@ -3484,8 +3856,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0021 — org-wide functional defaults (org_settings singleton). The
   // GET/PUT routes are admin-only (deliberately NOT in NON_ADMIN_ROUTES); the
   // audit auto-prune scheduler is OFF by default and unref'd, stopped on close.
-  registerOrgSettingsRoutes(app, db);
-  registerPosturePresetRoutes(app, db);
+  registerOrgSettingsRoutes(app, db, { dataKey: opts.dataKey });
+  registerPosturePresetRoutes(app, db, { sink: anchorSink });
   // ADR-0124 — the kill switch and safe modes
   registerExecutionControlRoutes(app, db);
 
@@ -3543,7 +3915,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // and firing the exporter is admin-only through the default gate. No trace
   // route can change anything a governance decision depends on — it is a read
   // surface over rows other subsystems already wrote.
-  registerTracingRoutes(app, db);
+  registerTracingRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0058 — REGULATORY COMPLIANCE PACKS. Authoring/activating a pack and
   // recording an attestation are admin (not in NON_ADMIN_ROUTES); EVALUATING a
   // pack is reachable by a non-admin and runs ADR-0047's own
@@ -3762,6 +4134,25 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       return;
     }
 
+    // AER-008: check the signing key BEFORE the export is recorded. A keyless deployment must leave
+    // an accurate refusal in the trail — never an "exported" row for a bundle that was not produced.
+    const signingKey = resolveExportSigningKey();
+    if (!signingKey.ok) {
+      await db.insert(auditLog).values({
+        userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+        objectType: "audit_export",
+        objectId: null,
+        effect: "deny",
+        ruleId: "audit-export-unsigned-refused",
+        ruleChain: [signingKey.ruleId],
+        reason:
+          "a signed audit export was requested and REFUSED because the export signing key is not usable " +
+          `(${signingKey.ruleId}) — no bundle was produced and an unsigned one is not emitted in its place`,
+        detail: { refusal: signingKey.ruleId },
+      });
+      return reply.status(409).send({ error: signingKey.ruleId, detail: signingKey.reason });
+    }
+
     const collected = await collectCsv<Row>(spec);
     await db.insert(auditLog).values({
       userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
@@ -3812,6 +4203,20 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       licenseId: license.document?.licenseId ?? null,
     });
     if (!bundle.ok) {
+      // the key passed the preflight but the build still refused (e.g. the file changed underneath):
+      // the "exported" row above is now false, so the trail records the correction next to it
+      await db.insert(auditLog).values({
+        userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+        objectType: "audit_export",
+        objectId: null,
+        effect: "deny",
+        ruleId: "audit-export-signed-failed",
+        ruleChain: [bundle.ruleId],
+        reason:
+          "the signed audit export recorded just before this row was NOT produced — building the bundle " +
+          `was refused (${bundle.ruleId}); no archive left the platform`,
+        detail: { refusal: bundle.ruleId },
+      });
       return reply.status(409).send({ error: bundle.ruleId, detail: bundle.reason });
     }
     for (const [k, v] of Object.entries(securityHeaders("application/gzip"))) reply.header(k, v);

@@ -19,8 +19,9 @@
  * A kill switch that locked the door behind you would be a worse outage than
  * the one it was thrown for: an operator must be able to see what is happening
  * and lift the halt. This is enforced by construction rather than by an
- * exemption list — the dial lives in the three EXECUTION entry points, and
- * read routes do not pass through them.
+ * exemption list — the dial lives in the AI/MCP execution entry points and
+ * the final-call boundary for non-AI provider writes. Read routes do not
+ * pass through that write boundary.
  *
  * WHAT ELSE KEEPS RUNNING, ON PURPOSE. The scheduler's own governance sweeps
  * (model-card expiry, admission re-scan, red-team, SLA timers) are the product

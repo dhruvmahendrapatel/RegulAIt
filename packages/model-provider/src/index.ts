@@ -1346,7 +1346,20 @@ export class GoogleProvider implements ModelProvider {
           },
         }),
       },
-    );
+    ).catch((err: unknown) => {
+      // AER-021: our deadline, not the vendor's failure. `deadlineBoundFetch`
+      // arms an `AbortSignal.timeout`, so a hung endpoint rejects here — and
+      // "we stopped waiting" must not be reported as "google failed", because
+      // the two send an operator to different places.
+      if (isModelDeadlineError(err)) {
+        throw new ModelProviderError(
+          `google dispatch exceeded the ${modelDispatchTimeout()}ms model deadline`,
+          504,
+          { cause: err },
+        );
+      }
+      throw err;
+    });
     if (!res.ok) {
       let message = res.statusText;
       try {
@@ -1391,26 +1404,50 @@ export class GoogleProvider implements ModelProvider {
       }
     };
 
-    if (useStream) {
-      // incremental SSE parse so onText fires as chunks arrive
-      const reader = res.body?.getReader();
-      if (!reader) throw new ModelProviderError("google dispatch failed: empty stream body");
-      const decoder = new TextDecoder();
-      let buffer = "";
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        for (;;) {
-          const nl = buffer.indexOf("\n");
-          if (nl === -1) break;
-          const line = buffer.slice(0, nl).trim();
-          buffer = buffer.slice(nl + 1);
-          if (line.startsWith("data: ")) absorb(JSON.parse(line.slice(6)) as GeminiChunk);
+    // AER-021 — THE BODY IS INSIDE THE DEADLINE TOO, and this is the half a
+    // naive fix misses. Headers arriving is not the end of the wait: the old
+    // code could hang forever in `reader.read()` or `res.json()` on a response
+    // that never finished. Because the signal handed to `fetch` also errors the
+    // response BODY stream, the same deadline covers both — and a timeout here
+    // is named as one rather than surfacing as a parse failure.
+    try {
+      if (useStream) {
+        // incremental SSE parse so onText fires as chunks arrive
+        const reader = res.body?.getReader();
+        if (!reader) throw new ModelProviderError("google dispatch failed: empty stream body");
+        try {
+          const decoder = new TextDecoder();
+          let buffer = "";
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            for (;;) {
+              const nl = buffer.indexOf("\n");
+              if (nl === -1) break;
+              const line = buffer.slice(0, nl).trim();
+              buffer = buffer.slice(nl + 1);
+              if (line.startsWith("data: ")) absorb(JSON.parse(line.slice(6)) as GeminiChunk);
+            }
+          }
+        } finally {
+          // release the stream whether we finished, timed out or threw — a
+          // half-read body left open is a held socket
+          await reader.cancel().catch(() => {});
         }
+      } else {
+        absorb((await res.json()) as GeminiChunk);
       }
-    } else {
-      absorb((await res.json()) as GeminiChunk);
+    } catch (err) {
+      if (isModelDeadlineError(err)) {
+        throw new ModelProviderError(
+          `google dispatch exceeded the ${modelDispatchTimeout()}ms model deadline while reading the ` +
+            `response body`,
+          504,
+          { cause: err },
+        );
+      }
+      throw err;
     }
 
     const refusal = blockReason !== null || mapGoogleStop(finishReason) === "refusal";
@@ -2392,6 +2429,68 @@ export function modelDispatchTimeout(): number {
   return modelDispatchTimeoutMs;
 }
 
+/** marker so wrapping twice is a no-op rather than two armed signals */
+const DEADLINE_BOUND = Symbol.for("regulait.model.deadlineBoundFetch");
+
+/**
+ * AER-021 — THE DEADLINE EVERY RAW-FETCH ADAPTER GETS WHETHER ITS AUTHOR
+ * THOUGHT ABOUT IT OR NOT.
+ *
+ * ADR-0126 bounded model dispatch by passing `modelDispatchTimeout()` to each
+ * SDK constructor — which covered Anthropic, OpenAI, xAI and custom, and missed
+ * `GoogleProvider` completely, because Google is the one adapter written against
+ * raw `fetch`. A hung Gemini endpoint could hold gateway work forever, ignoring
+ * the operator's `REGULAIT_MODEL_TIMEOUT_MS` entirely, while the ADR and the
+ * roadmap both claimed no unbounded wait remained on any model path.
+ *
+ * The narrow fix is to add a signal in `GoogleProvider.dispatch`. That was
+ * rejected: it leaves the NEXT raw-fetch adapter free to omit it just as
+ * silently. This wrapper is applied in `resolveModelProvider`, the single funnel
+ * every production dispatch is built through, so a provider added later inherits
+ * the bound without its author doing anything — the omission becomes structurally
+ * impossible rather than something to remember.
+ *
+ * ── WHY THE TIMER IS NEVER CLEARED EARLY ───────────────────────────────────
+ * `AbortSignal.timeout` is the same primitive `mcp-egress.ts` uses for the MCP
+ * connect deadline, and it is the right one here for a reason specific to
+ * streaming: aborting the signal a fetch was given **also errors the response
+ * BODY stream**, so the deadline stays live through `reader.read()` and
+ * `res.json()` — which is exactly where the Google adapter used to hang after
+ * headers had already arrived. A wrapper cannot know when the caller has
+ * finished reading a body, so there is nothing to clear on; the signal simply
+ * expires. `AbortSignal.timeout` does not hold the event loop open, and an abort
+ * that lands after a fully-consumed body is a no-op.
+ *
+ * A caller-supplied signal is PRESERVED and composed with `AbortSignal.any`, so
+ * this can never take away a cancellation the caller already arranged.
+ */
+export function deadlineBoundFetch(inner: typeof fetch = fetch): typeof fetch {
+  if ((inner as { [DEADLINE_BOUND]?: true })[DEADLINE_BOUND]) return inner;
+  const bound: typeof fetch = (input, init) => {
+    const deadline = AbortSignal.timeout(modelDispatchTimeout());
+    const caller = init?.signal ?? null;
+    return inner(input, {
+      ...init,
+      signal: caller ? AbortSignal.any([caller, deadline]) : deadline,
+    });
+  };
+  Object.defineProperty(bound, DEADLINE_BOUND, { value: true });
+  return bound;
+}
+
+/**
+ * Was this failure our model deadline rather than the provider's refusal?
+ *
+ * `AbortSignal.timeout` rejects with a DOMException named `TimeoutError`; an
+ * abort from a composed caller signal is `AbortError`. Both are distinguished
+ * from a provider error so the ledger can say "we stopped waiting" rather than
+ * "the vendor failed" — they send an operator to different places.
+ */
+export function isModelDeadlineError(err: unknown): boolean {
+  const e = err as { name?: string } | null;
+  return e?.name === "TimeoutError" || e?.name === "AbortError";
+}
+
 /** shared mock instance so state persists across resolutions in one process */
 const sharedMock = new MockModelProvider();
 
@@ -2399,6 +2498,12 @@ export function resolveModelProvider(
   config: ModelProviderConfig,
   fetchImpl?: typeof fetch,
 ): ModelProvider {
+  // AER-021: bind the model deadline to the fetch ONCE, here, so every adapter
+  // built through this funnel is bounded — including the raw-fetch ones and
+  // including any added later. SDK-backed adapters also receive the number
+  // through their constructor options; double-binding is harmless (whichever
+  // deadline expires first wins, and they are the same number).
+  const boundFetch = deadlineBoundFetch(fetchImpl ?? fetch);
   switch (config.provider) {
     case "anthropic":
       if (!config.apiKey) {
@@ -2407,7 +2512,7 @@ export function resolveModelProvider(
       return new AnthropicProvider({
         apiKey: config.apiKey,
         baseUrl: config.baseUrl ?? null,
-        ...(fetchImpl ? { fetchImpl } : {}),
+        fetchImpl: boundFetch,
       });
     case "openai":
       if (!config.apiKey) {
@@ -2416,7 +2521,7 @@ export function resolveModelProvider(
       return new OpenAiProvider({
         apiKey: config.apiKey,
         baseUrl: config.baseUrl ?? null,
-        ...(fetchImpl ? { fetchImpl } : {}),
+        fetchImpl: boundFetch,
       });
     case "google":
       if (!config.apiKey) {
@@ -2425,7 +2530,7 @@ export function resolveModelProvider(
       return new GoogleProvider({
         apiKey: config.apiKey,
         baseUrl: config.baseUrl ?? null,
-        ...(fetchImpl ? { fetchImpl } : {}),
+        fetchImpl: boundFetch,
       });
     case "xai":
       if (!config.apiKey) {
@@ -2434,7 +2539,7 @@ export function resolveModelProvider(
       return new XaiProvider({
         apiKey: config.apiKey,
         baseUrl: config.baseUrl ?? null,
-        ...(fetchImpl ? { fetchImpl } : {}),
+        fetchImpl: boundFetch,
       });
     // ADR-0034: an admin-registered endpoint. NO API KEY IS REQUIRED — that is
     // the whole point of supporting local Ollama and air-gapped gateways — but
@@ -2451,7 +2556,7 @@ export function resolveModelProvider(
         apiKey: config.apiKey ?? null,
         baseUrl: config.baseUrl,
         wireProtocol: config.wireProtocol,
-        ...(fetchImpl ? { fetchImpl } : {}),
+        fetchImpl: boundFetch,
       });
     // ADR-0065 — a locally trained artifact. It CANNOT be built from a config
     // object: serving it needs the artifact payload, which lives in the

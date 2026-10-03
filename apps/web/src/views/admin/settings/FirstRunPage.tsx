@@ -27,6 +27,7 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../../api/client";
+import { humanize } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, Field, Meter, Select, Textarea } from "../../../ui/kit";
 import { QueryGate } from "../adminKit";
@@ -64,6 +65,25 @@ const DEEP_LINK: Record<string, { to: string; cta: string }> = {
   compliance_pack: { to: "/admin/compliance", cta: "Open Compliance" },
   first_governed_call: { to: "/chat", cta: "Open Chat" },
 };
+
+/**
+ * A live signal as a sentence, never as JSON (UXJ-08). Each step's evidence
+ * is a small object the gateway reads from real rows; the keys are its field
+ * names, so they are humanized and the values are counted or listed.
+ */
+export function evidenceLines(evidence: Record<string, unknown>): string[] {
+  const out: string[] = [];
+  for (const [key, value] of Object.entries(evidence ?? {})) {
+    const label = humanize(key.replace(/([a-z0-9])([A-Z])/g, "$1 $2").toLowerCase());
+    if (key === "note" && typeof value === "string") out.push(value);
+    else if (Array.isArray(value)) out.push(value.length === 0 ? `${label}: none` : `${label}: ${value.map(String).join(", ")}`);
+    else if (typeof value === "boolean") out.push(`${label}: ${value ? "yes" : "no"}`);
+    else if (typeof value === "number") out.push(`${label}: ${value.toLocaleString()}`);
+    else if (value == null) out.push(`${label}: none`);
+    else out.push(`${label}: ${String(value)}`);
+  }
+  return out;
+}
 
 const tone = (s: WizardStep) =>
   s.status === "done" ? (s.drift ? "warn" : "ok") : s.status === "skipped" ? "neutral" : s.status === "in_progress" ? "warn" : "neutral";
@@ -130,7 +150,7 @@ export default function FirstRunPage() {
                 <Badge tone={d.satisfiedCount === d.totalCount ? "ok" : "warn"}>
                   {d.satisfiedCount} / {d.totalCount} verified live
                 </Badge>
-                {d.resumeAt && <Badge tone="warn">resume at: {d.resumeAt.replaceAll("_", " ")}</Badge>}
+                {d.resumeAt && <Badge tone="warn">Resume at: {d.steps.find((s) => s.key === d.resumeAt)?.title ?? humanize(d.resumeAt)}</Badge>}
               </div>
               <div style={{ margin: "var(--s2) 0" }}>
                 <Meter value={d.satisfiedCount} max={d.totalCount} label="verified setup progress" />
@@ -145,21 +165,27 @@ export default function FirstRunPage() {
             {d.steps.map((s) => {
               const link = DEEP_LINK[s.key];
               const blocked = s.blockedBy.length > 0;
+              const titleOf = (key: string) => d.steps.find((x) => x.key === key)?.title ?? humanize(key);
+              const lines = evidenceLines(s.evidence);
               return (
                 <Card key={s.key}>
                   <div className={v.row}>
                     <strong style={{ fontSize: "var(--text-sm)" }}>{s.title}</strong>
-                    <Badge tone={tone(s)}>{s.status.replaceAll("_", " ")}</Badge>
+                    <Badge tone={tone(s)}>{humanize(s.status)}</Badge>
                     <Badge tone={s.satisfied ? "ok" : "neutral"}>
-                      {s.satisfied ? "verified live" : "not verified"}
+                      {s.satisfied ? "Verified live" : "Not verified"}
                     </Badge>
-                    {s.drift && <Badge tone="danger">drift</Badge>}
-                    {blocked && <Badge tone="warn">blocked by {s.blockedBy.join(", ")}</Badge>}
+                    {s.drift && <Badge tone="danger" title="Recorded done, but the deployment no longer satisfies it">Drift</Badge>}
+                    {blocked && <Badge tone="warn">Blocked by {s.blockedBy.map(titleOf).join(", ")}</Badge>}
                   </div>
                   <div className={v.dim}>{s.why}</div>
-                  <div className={v.faint}>
-                    <code>{JSON.stringify(s.evidence)}</code>
-                  </div>
+                  {lines.length > 0 && (
+                    <ul className={v.faint} style={{ margin: 0, paddingLeft: "var(--s3)" }} data-testid="step-evidence">
+                      {lines.map((line) => (
+                        <li key={line}>{line}</li>
+                      ))}
+                    </ul>
+                  )}
                   <div className={v.row} style={{ marginTop: "var(--s2)" }}>
                     {link && (
                       <Link to={link.to}>

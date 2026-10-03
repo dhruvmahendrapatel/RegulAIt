@@ -37,6 +37,12 @@ import GuardrailsPage from "./views/admin/governance/GuardrailsPage";
 import EvalsPage from "./views/admin/governance/EvalsPage";
 import ModelRiskPage from "./views/admin/governance/ModelRiskPage";
 import UseCasesPage from "./views/admin/governance/UseCasesPage";
+import IntakeWizardPage from "./views/admin/governance/IntakeWizardPage";
+import TrustDashboardPage from "./views/admin/governance/TrustDashboardPage";
+import UseCaseOverviewPage from "./views/admin/governance/UseCaseOverviewPage";
+import GovernanceAlertsPage from "./views/admin/governance/GovernanceAlertsPage";
+import DependencyGraphPage from "./views/admin/governance/DependencyGraphPage";
+import RegulatoryIntelligencePage from "./views/admin/governance/RegulatoryIntelligencePage";
 import VendorsPage from "./views/admin/governance/VendorsPage";
 import RisksPage from "./views/admin/governance/RisksPage";
 import InventoryPage from "./views/admin/governance/InventoryPage";
@@ -167,6 +173,13 @@ export default function App() {
                         <Route path="model-risk" element={<ModelRiskPage />} />
                         {/* ADR-0080 */}
                         <Route path="use-cases" element={<UseCasesPage />} />
+                        <Route path="governance/intake" element={<IntakeWizardPage />} />
+                        <Route path="governance/trust" element={<TrustDashboardPage />} />
+                        <Route path="governance/use-cases/:id" element={<UseCaseOverviewPage />} />
+                        <Route path="governance/use-cases" element={<Navigate to="/admin/use-cases" replace />} />
+                        <Route path="governance/alerts" element={<GovernanceAlertsPage />} />
+                        <Route path="governance/graph" element={<DependencyGraphPage />} />
+                        <Route path="governance/regulatory" element={<RegulatoryIntelligencePage />} />
                         {/* ADR-0084 */}
                         <Route path="vendors" element={<VendorsPage />} />
                         {/* ADR-0081 */}

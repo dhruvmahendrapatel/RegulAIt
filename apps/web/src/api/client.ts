@@ -4,9 +4,13 @@
  *    JS; `credentials: "include"` keeps it riding on every call;
  *  - every state-changing request carries the `x-regulait-csrf: 1` header —
  *    the browser-model-independent CSRF wall the gateway enforces;
- *  - a 401 mid-app means the session died: the registered handler routes the
- *    shell back to /login with a return-to.
+ *  - a 401 that says the SESSION is gone routes the shell back to /login with
+ *    a return-to, via the registered handler. A 401 that says the thing just
+ *    submitted was wrong (a TOTP code, the current password, a login attempt)
+ *    stays with the form that sent it — see isSessionLoss().
  */
+
+import { humanize } from "./format";
 
 export const CSRF_HEADER = "x-regulait-csrf";
 
@@ -38,6 +42,49 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * A zod issue as a sentence an operator can act on. Zod's own wording
+ * ("String must contain at least 1 character(s)", "Invalid uuid") names the
+ * type system, not the field; the field key arrives camel-cased. Both reached
+ * the screen verbatim (UIA-03 / UIB-02). Anything this does not recognise is
+ * passed through unchanged — a hand-written refinement message ("first stage
+ * must be a trigger") is already prose.
+ */
+const ISSUE_PHRASES: Array<[RegExp, (m: RegExpMatchArray) => string]> = [
+  [/^Required$/, () => "is required"],
+  [/^String must contain at least (\d+) character\(s\)$/, (m) => (m[1] === "1" ? "is required" : `must be at least ${m[1]} characters`)],
+  [/^String must contain at most (\d+) character\(s\)$/, (m) => `must be at most ${m[1]} characters`],
+  [/^Array must contain at least (\d+) element\(s\)$/, (m) => (m[1] === "1" ? "needs at least one entry" : `needs at least ${m[1]} entries`)],
+  [/^Array must contain at most (\d+) element\(s\)$/, (m) => `can hold at most ${m[1]} entries`],
+  [/^Invalid uuid$/i, () => "is not a valid ID"],
+  [/^Invalid url$/i, () => "is not a valid URL"],
+  [/^Invalid email$/i, () => "is not a valid email address"],
+  [/^Invalid datetime$/i, () => "is not a valid date and time"],
+  [/^Number must be greater than or equal to (.+)$/, (m) => `must be ${m[1]} or more`],
+  [/^Number must be less than or equal to (.+)$/, (m) => `must be ${m[1]} or less`],
+  [/^Number must be greater than (.+)$/, (m) => `must be more than ${m[1]}`],
+  [/^Number must be less than (.+)$/, (m) => `must be less than ${m[1]}`],
+  [/^Expected (\w+), received (?:\w+)$/, (m) => `must be ${/^[aeiou]/i.test(m[1]!) ? "an" : "a"} ${m[1]}`],
+  [/^Invalid enum value\. Expected (.+), received .+$/, (m) => `must be one of ${m[1]!.replace(/'/g, "\u2018").replace(/\s*\|\s*/g, ", ").replace(/\u2018/g, "")}`],
+];
+
+/** `budgetUsd` → "Budget USD", `items.2.connectorId` → "Connector ID"; "" for the body itself */
+function fieldLabel(path: string): string {
+  const last = path.split(".").filter((seg) => seg && !/^\d+$/.test(seg)).pop() ?? "";
+  if (!last) return "";
+  return humanize(last.replace(/([a-z0-9])([A-Z])/g, "$1 $2").toLowerCase());
+}
+
+export function issueText(path: string, message: string): string {
+  const label = fieldLabel(path);
+  for (const [re, phrase] of ISSUE_PHRASES) {
+    const m = message.match(re);
+    if (m) return `${label || "This request"} ${phrase(m)}`;
+  }
+  const prose = message.replace(/^./, (c) => c.toUpperCase());
+  return label ? `${label}: ${message}` : prose;
+}
+
 /** every reason the server volunteered, most specific first (mirrors the
  * legacy UIs' shared errDetails so messages read identically). */
 function errDetails(json: ApiErrorPayload | null): string[] {
@@ -51,7 +98,7 @@ function errDetails(json: ApiErrorPayload | null): string[] {
       // JavaScript error instead of the reason the platform gave. A refusal
       // that cannot be rendered is, in practice, a refusal with no reason.
       const path = Array.isArray(i.path) ? i.path.join(".") : typeof i.path === "string" ? i.path : "";
-      out.push((path || "body") + ": " + i.message);
+      out.push(issueText(path, typeof i.message === "string" ? i.message : String(i.message)));
     }
   }
   if (typeof json.detail === "string") out.push(json.detail);
@@ -61,9 +108,39 @@ function errDetails(json: ApiErrorPayload | null): string[] {
   return out;
 }
 
+/**
+ * The gateway's bare refusal codes as sentences (UXJ-04). The code itself
+ * stays on `payload.error` for the callers that branch on it and for the
+ * outcome badge; this is only what a person reads.
+ */
+const CODE_SENTENCES: Record<string, string> = {
+  unauthenticated: "Your session has ended — sign in again",
+  internal: "Something went wrong on the server — try again, and tell an administrator if it keeps happening",
+  internal_error: "Something went wrong on the server — try again, and tell an administrator if it keeps happening",
+  conflict: "This conflicts with a record that already exists",
+  unavailable: "This record isn't available — it may not exist, or it may belong to someone else",
+  not_found: "No such record",
+  unknown_project: "No project with this ID exists",
+  not_a_project_member: "You're not a member of this project",
+  forbidden: "Your account doesn't have permission for this",
+  admin_only: "Only an administrator can do this",
+  rate_limited: "Too many requests — wait a moment and try again",
+  network: "Couldn't reach the server — check your connection and try again",
+};
+/** codes whose details already say everything; the code adds nothing a reader needs */
+const DETAILS_SUFFICE = new Set(["validation", "not_found"]);
+
+/** a refusal code as words: a known one as its sentence, any other as `humanize(code)` */
+export function codeSentence(code: string): string {
+  if (/^HTTP \d+$/.test(code)) return code;
+  return CODE_SENTENCES[code] ?? humanize(code);
+}
+
 export function errMessage(status: number, json: ApiErrorPayload | null): string {
-  const head = (json && json.error) || "HTTP " + status;
+  const code = json && typeof json.error === "string" && json.error ? json.error : "HTTP " + status;
   const details = errDetails(json);
+  if (details.length && DETAILS_SUFFICE.has(code)) return details.join("; ");
+  const head = codeSentence(code);
   return details.length ? head + " — " + details.join("; ") : head;
 }
 
@@ -73,19 +150,70 @@ export function setUnauthorizedHandler(fn: (() => void) | null) {
   onUnauthorized = fn;
 }
 
+/**
+ * The 401 reasons the gateway's auth preHandler sends when the CREDENTIAL no
+ * longer authenticates (apps/gateway/src/app.ts preHandler, plus auth.ts's
+ * AUTH_REFUSAL_DETAIL set). Every other 401 is a route's own verdict on the
+ * request body — `invalid_code` from /auth/totp/activate,
+ * `current_password_incorrect` from /auth/change-password, the uniform
+ * `invalid_credentials` from /auth/login — and the session behind it is intact.
+ * Treating those as "session gone" bounced the user to a blank /login for a
+ * typo (UIW-01).
+ */
+const SESSION_LOST_CODES = new Set([
+  "unauthenticated",
+  "user_disabled",
+  "ip_not_allowed",
+  "disabled",
+  "virtual_key_revoked",
+  "virtual_key_expired",
+  "api_key_expired",
+  "api_key_revoked",
+]);
+/**
+ * Routes a user hits BEFORE they have a session. A 401 here is the verdict on
+ * the attempt (`invalid_credentials`, `invalid_key`, a wrong MFA code) and
+ * there is no session to lose, so the handler never fires — whatever the code
+ * says. The session-bound self-service routes (/auth/totp/*,
+ * /auth/change-password) are NOT here on purpose: their own verdicts
+ * (`invalid_code`, `current_password_incorrect`) are not in the set above and
+ * stay inline, but the preHandler's `unauthenticated` on the same path means
+ * the session behind the form has died — a forced password change or MFA
+ * enrolment that idled out must still land on /login, not show the raw code
+ * on a dead shell.
+ */
+const PRE_SESSION_PREFIXES = ["/auth/login", "/auth/mfa/verify"];
+
+/** does this 401 mean the session is gone (route to /login), or only that the
+ * request was refused (the form shows it inline)? */
+export function isSessionLoss(path: string, payload: ApiErrorPayload | null): boolean {
+  const route = path.split("?")[0] ?? path;
+  if (PRE_SESSION_PREFIXES.some((p) => route.startsWith(p))) return false;
+  const code = payload?.error;
+  // no code at all is not something the gateway sends; read it the old way
+  if (typeof code !== "string" || code === "") return true;
+  return SESSION_LOST_CODES.has(code);
+}
+
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const res = await fetch(path, {
-    method,
-    credentials: "include",
-    headers: {
-      [CSRF_HEADER]: "1",
-      ...(body !== undefined ? { "content-type": "application/json" } : {}),
-    },
-    ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-  });
+  let res: Response;
+  try {
+    res = await fetch(path, {
+      method,
+      credentials: "include",
+      headers: {
+        [CSRF_HEADER]: "1",
+        ...(body !== undefined ? { "content-type": "application/json" } : {}),
+      },
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+    });
+  } catch (cause) {
+    // the browser's "Failed to fetch" is not a reason anyone can act on
+    throw new Error(CODE_SENTENCES.network, { cause });
+  }
   if (res.status === 401) {
-    onUnauthorized?.();
     const payload = await parseBody(res);
+    if (isSessionLoss(path, payload)) onUnauthorized?.();
     throw new ApiError(401, payload ?? { error: "unauthenticated" });
   }
   const json = await parseBody(res);

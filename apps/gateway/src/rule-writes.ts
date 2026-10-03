@@ -176,7 +176,10 @@ export async function currentEffectiveBody(
  * version.
  */
 export async function applyRuleEdit<T = Record<string, unknown>>(
-  db: Db,
+  // AER-035: `DbOrTxDeep` rather than `Db`, so a caller can run this inside its
+  // own transaction. `tx.transaction()` opens a SAVEPOINT rather than a second
+  // connection (see that type's own note), so the nesting stays ONE transaction.
+  db: DbOrTxDeep,
   args: {
     artifactType: ConfigArtifactType;
     artifactId: string;

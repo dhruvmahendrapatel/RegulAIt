@@ -13,6 +13,7 @@ import {
   orchestrationRunEvents,
   orchestrationRuns,
   projectContextItems,
+  sql,
   traceSpans,
   traces,
   userAgentPolicies,
@@ -1102,6 +1103,34 @@ async function dispatchRunNodeInner(
             };
             traceStatus = "denied";
             break;
+          /**
+           * AER-022 — the upstream is circuit-broken, and this case existing at
+           * all is the finding's point: a delegated worker used to call the
+           * governed primitive with NO breaker involvement, so it could pay the
+           * full tool deadline against a known-dead server indefinitely while
+           * the proxy route refused the same server instantly.
+           *
+           * Worded as NOT the worker's fault and NOT governance. The worker is
+           * told to stop asking, with the cooldown, so a tool-using loop does not
+           * burn its remaining turns re-trying a server nobody can reach.
+           */
+          case "upstream_circuit_open":
+            block = {
+              type: "tool_result",
+              toolUseId: tc.id,
+              content:
+                `the MCP server for '${tc.name}' is unavailable and calls to it are being refused: ` +
+                `${toolOut.reason} Do not retry this tool for at least ` +
+                `${Math.ceil(toolOut.retryAfterMs / 1000)}s; use another approach or report that the ` +
+                `server is down.`,
+              isError: true,
+            };
+            // Its own status, not "denied": every other value in this switch is
+            // either a governance decision or an allow, and folding an OUTAGE in
+            // with the denials would make an operator reading run traces see a
+            // policy problem where there is a network one.
+            traceStatus = "upstream_circuit_open";
+            break;
           // ADR-0019 §8.4: the run's project is block-mode and the tool
           // ARGUMENTS carried PII — denied pre-call, nothing billed. Reported
           // back to the worker by CATEGORY, never by content.
@@ -1454,6 +1483,41 @@ async function evaluateNodeOwner(
     }),
     unknownAgent: false,
   };
+}
+
+/**
+ * REL-07 — the ESTIMATED spend (`budget.spentUsd`, the number the §5.2 cap is
+ * enforced against) is incremented IN SQL, never read-modify-written.
+ *
+ * Both `node_started` paths (the manual event route and the auto-advance
+ * wave loop) used to snapshot `budget` from the run row BEFORE
+ * `applyRunEvent`, then write `{ ...budget, spentUsd: budget.spentUsd +
+ * nodeCost }` afterwards. Two concurrent starts — pillar 7's whole point is
+ * independent subtasks in parallel — both read the same base and the second
+ * write erased the first's increment, so the cap admitted nodes that should
+ * have escalated. Worse, spreading the STALE object also overwrote
+ * `measuredSpentUsd`/`measuredPerNodeUsd`, re-opening the lost-update hole
+ * `chargeRunBudget` closes with FOR UPDATE.
+ *
+ * `jsonb_set` on the live column touches exactly one key under the row's own
+ * lock; nothing else in the envelope is rewritten. A run with no budget
+ * envelope is left alone (the callers already skip it).
+ */
+/** REL-10: the list bounds for GET /v1/runs */
+export const RUNS_LIST_DEFAULT_LIMIT = 200;
+export const RUNS_LIST_MAX_LIMIT = 1_000;
+
+export async function chargeRunEstimate(dbx: DbOrTx, runId: string, deltaUsd: number): Promise<void> {
+  await dbx
+    .update(orchestrationRuns)
+    .set({
+      budget: sql`jsonb_set(
+        ${orchestrationRuns.budget},
+        '{spentUsd}',
+        to_jsonb(round((coalesce((${orchestrationRuns.budget}->>'spentUsd')::numeric, 0) + ${deltaUsd})::numeric, 6))
+      )`,
+    })
+    .where(and(eq(orchestrationRuns.id, runId), sql`${orchestrationRuns.budget} is not null`));
 }
 
 /**
@@ -2188,10 +2252,7 @@ export function registerOrchestrationRoutes(
 
     const { run, effects } = await applyRunEvent(db, runId, event, req.authCtx.userId, opts.dataKey);
     if (event.kind === "node_started" && budget && nodeCost !== null) {
-      await db
-        .update(orchestrationRuns)
-        .set({ budget: { ...budget, spentUsd: Number((budget.spentUsd + nodeCost).toFixed(6)) } })
-        .where(eq(orchestrationRuns.id, runId));
+      await chargeRunEstimate(db, runId, nodeCost); // REL-07: atomic, never a snapshot write
     }
     // EPIC-06 §3/§5: node status changes mirror outbound to the linked work
     // item. A mirror failure never fails the run event — it is surfaced here.
@@ -2476,12 +2537,7 @@ export function registerOrchestrationRoutes(
         }
         await applyRunEvent(db, runId, { kind: "node_started", nodeId }, actor, opts.dataKey);
         if (budget && gate.nodeCost !== null) {
-          await db
-            .update(orchestrationRuns)
-            .set({
-              budget: { ...budget, spentUsd: Number((budget.spentUsd + gate.nodeCost).toFixed(6)) },
-            })
-            .where(eq(orchestrationRuns.id, runId));
+          await chargeRunEstimate(db, runId, gate.nodeCost); // REL-07: atomic, never a snapshot write
         }
 
         const runForDispatch = await reload();
@@ -2706,9 +2762,17 @@ export function registerOrchestrationRoutes(
   });
 
   // fleet view for admins; non-admins see exactly their own initiated runs
+  //
+  // REL-10: BOUNDED. Every row carries its full task graph and state JSON,
+  // and the list used to be the whole table on every open of the Runs page.
+  // Newest first, `limit` (default RUNS_LIST_DEFAULT_LIMIT, max
+  // RUNS_LIST_MAX_LIMIT); `status` narrows before the cap applies.
   app.get("/v1/runs", async (req, reply) => {
-    const { status } = z
-      .object({ status: z.enum(["planned", "running", "completed", "aborted"]).optional() })
+    const { status, limit } = z
+      .object({
+        status: z.enum(["planned", "running", "completed", "aborted"]).optional(),
+        limit: z.coerce.number().int().min(1).max(RUNS_LIST_MAX_LIMIT).default(RUNS_LIST_DEFAULT_LIMIT),
+      })
       .parse(req.query);
     const conditions = [];
     if (status) conditions.push(eq(orchestrationRuns.status, status));
@@ -2720,7 +2784,8 @@ export function registerOrchestrationRoutes(
       .select()
       .from(orchestrationRuns)
       .where(conditions.length ? and(...conditions) : undefined)
-      .orderBy(desc(orchestrationRuns.createdAt));
+      .orderBy(desc(orchestrationRuns.createdAt))
+      .limit(limit);
     return { runs: rows };
   });
 }

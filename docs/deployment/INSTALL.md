@@ -256,6 +256,26 @@ the only thing standing between you and losing it.
 
 [DATA_BOUNDARY.md](DATA_BOUNDARY.md), per mode, with the greps to verify it yourself.
 
+### 5. Read the logs (ADR-0167)
+
+The gateway logs structured JSON lines to stdout (`docker compose logs gateway`; the compose file
+caps the file at 5 × 50 MB). Every refused request (401/403/404/429) is one `warn` line with the
+route, method, client IP and the **kind** of credential presented (never the credential); every
+5xx is an `error` line with the stack. Credentials in request headers (`authorization`, `cookie`,
+`x-api-key`) and `set-cookie` are redacted before anything is written.
+
+| Variable | Effect |
+|---|---|
+| `LOG_LEVEL` | `fatal` … `trace`; default `info`. `warn` keeps only refusals and failures. |
+| `REGULAIT_LOG=off` | Silences the process entirely (the boot posture block still says so). |
+| `DEBUG_ERRORS=1` | Additionally prints every unhandled 500 to stderr, even with logging off — a dev convenience, not a log. |
+
+The boot posture block (`proxy / hsts / egress / data key / bootstrap / secrets / database /
+logging / scheduler`) is printed once at startup; `secrets: DEV-GRADE` lines mean the
+published compose defaults are in use, and a deployment with `REGULAIT_DEPLOY_MODE` or
+`REGULAIT_HSTS` set **refuses to start** on them (override, if you really mean it, with
+`REGULAIT_ALLOW_DEV_SECRETS=1`).
+
 ---
 
 ## Full flag reference

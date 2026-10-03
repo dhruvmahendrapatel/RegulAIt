@@ -62,6 +62,14 @@ docker compose --profile tls up -d --build
 docker compose logs -f caddy          # watch for "certificate obtained successfully"
 ```
 
+**Before you publish :443, set real secrets** (ADR-0167). A bare checkout boots on the compose
+defaults — `REGULAIT_BOOTSTRAP_TOKEN=dev-bootstrap` is a full-admin credential printed in this
+repository, and the default `REGULAIT_DATA_KEY` opens every stored secret. Put real values in
+`.env` (or run `scripts/install.sh`, which generates them). The gateway prints `secrets: DEV-GRADE`
+in its boot posture block whenever the defaults are in use, and refuses to start on them once
+`REGULAIT_DEPLOY_MODE` or `REGULAIT_HSTS` is set; a `--profile tls` bring-up sets neither, so
+check `docker compose logs gateway | grep secrets:` yourself.
+
 Terraform's user-data already does this on first boot, including deriving `REGULAIT_TLS_HOST`
 from IMDS and writing it into `docker-compose.override.yml`.
 

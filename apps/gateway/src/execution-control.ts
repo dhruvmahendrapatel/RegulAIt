@@ -93,6 +93,7 @@ const haltSchema = z.object({ reason: reasonSchema }).strict();
 
 export function registerExecutionControlRoutes(app: FastifyInstance, db: Db) {
   const audit = async (
+    writer: Pick<Db, "insert">,
     userId: string | null,
     objectType: "org_settings" | "agent" | "mcp_tool",
     objectId: string | null,
@@ -103,7 +104,7 @@ export function registerExecutionControlRoutes(app: FastifyInstance, db: Db) {
     reason: string,
     detail: Record<string, unknown>,
   ) => {
-    await db.insert(auditLog).values({
+    await writer.insert(auditLog).values({
       userId: userId ?? "00000000-0000-0000-0000-000000000000",
       objectType,
       objectId,
@@ -214,64 +215,53 @@ export function registerExecutionControlRoutes(app: FastifyInstance, db: Db) {
       }
     }
 
-    const before = await loadOrgSettings(db);
-    const wasMode = before.executionMode as ExecutionMode;
-    if (wasMode === body.mode) {
-      // rule 5 — idempotent, and says so rather than minting a second row
-      return {
-        mode: wasMode,
-        changed: false,
-        note: `already in '${wasMode}' mode since ${before.executionModeSetAt?.toISOString() ?? "install"} — nothing was written`,
-      };
-    }
+    await loadOrgSettings(db);
+    return db.transaction(async (tx) => {
+      const [before] = await tx.select().from(orgSettings)
+        .where(eq(orgSettings.id, ORG_SETTINGS_ID)).for("update");
+      const wasMode = before!.executionMode as ExecutionMode;
+      if (wasMode === body.mode) {
+        return {
+          mode: wasMode,
+          changed: false,
+          note: `already in '${wasMode}' mode since ${before!.executionModeSetAt?.toISOString() ?? "install"} — nothing was written`,
+        };
+      }
 
-    const now = new Date();
-    const [updated] = await db
-      .update(orgSettings)
-      .set({
+      const now = new Date();
+      const [updated] = await tx.update(orgSettings).set({
         executionMode: body.mode,
-        // clearing the reason on the way back to normal keeps the DB CHECK's
-        // meaning exact: a reason present means a restriction is in force
         executionModeReason: body.mode === "normal" ? null : body.reason!,
-        // cleared on every mode change that is not require_approval, so a
-        // stale approver can never be resurrected by a later mode flip
-        executionModeApproverUserId:
-          body.mode === "require_approval" ? body.approverUserId! : null,
+        executionModeApproverUserId: body.mode === "require_approval" ? body.approverUserId! : null,
         executionModeSetByUserId: req.authCtx.userId ?? null,
         executionModeSetAt: now,
         updatedBy: req.authCtx.userId,
         updatedAt: now,
-      })
-      .where(eq(orgSettings.id, ORG_SETTINGS_ID))
-      .returning();
+      }).where(eq(orgSettings.id, ORG_SETTINGS_ID)).returning();
 
-    const restricting = body.mode !== "normal";
-    await audit(
-      req.authCtx.userId ?? null,
-      "org_settings",
-      null,
-      restricting
-        ? EXECUTION_CONTROL_RULE_IDS.modeSet
-        : EXECUTION_CONTROL_RULE_IDS.modeCleared,
-      restricting ? "deny" : "allow",
-      restricting
-        ? `execution mode ${wasMode} -> ${body.mode}: ${body.reason}`
-        : `execution resumed (${wasMode} -> normal): ${body.reason}`,
-      { from: wasMode, to: body.mode, via: req.authCtx.via },
-    );
+      const restricting = body.mode !== "normal";
+      await audit(
+        tx, req.authCtx.userId ?? null, "org_settings", null,
+        restricting ? EXECUTION_CONTROL_RULE_IDS.modeSet : EXECUTION_CONTROL_RULE_IDS.modeCleared,
+        restricting ? "deny" : "allow",
+        restricting
+          ? `execution mode ${wasMode} -> ${body.mode}: ${body.reason}`
+          : `execution resumed (${wasMode} -> normal): ${body.reason}`,
+        { from: wasMode, to: body.mode, via: req.authCtx.via },
+      );
 
-    return {
-      mode: updated!.executionMode,
-      changed: true,
-      previousMode: wasMode,
-      meaning: EXECUTION_MODE_NOTES[body.mode],
-      effectiveImmediately: true,
-      note:
-        body.mode === "halted"
+      return {
+        mode: updated!.executionMode,
+        changed: true,
+        previousMode: wasMode,
+        meaning: EXECUTION_MODE_NOTES[body.mode],
+        effectiveImmediately: true,
+        note: body.mode === "halted"
           ? "Every governed call is now refused. Nothing in flight was cancelled and no queued " +
             "approval was destroyed; when this lifts, the queue is where you left it."
           : EXECUTION_MODE_NOTES[body.mode],
-    };
+      };
+    });
   });
 
   // ── one agent ───────────────────────────────────────────────────────────
@@ -280,71 +270,61 @@ export function registerExecutionControlRoutes(app: FastifyInstance, db: Db) {
   app.post("/v1/agents/:agentId/halt", async (req, reply) => {
     const { agentId } = agentParam.parse(req.params);
     const body = haltSchema.parse(req.body);
-    const [before] = await db.select().from(agents).where(eq(agents.id, agentId));
-    if (!before) return reply.status(404).send({ error: "unknown_agent" });
-    if (before.haltedAt) {
+    const result = await db.transaction(async (tx) => {
+      const [before] = await tx.select().from(agents).where(eq(agents.id, agentId)).for("update");
+      if (!before) return null;
+      if (before.haltedAt) {
+        return {
+          agentId, halted: true, changed: false,
+          note: `already halted since ${before.haltedAt.toISOString()}: ${before.haltedReason}`,
+        };
+      }
+      const now = new Date();
+      await tx.update(agents)
+        .set({ haltedAt: now, haltedReason: body.reason, haltedByUserId: req.authCtx.userId ?? null })
+        .where(eq(agents.id, agentId));
+      await audit(
+        tx, req.authCtx.userId ?? null, "agent", agentId,
+        EXECUTION_CONTROL_RULE_IDS.agentHalted, "deny",
+        `agent '${before.name}' HALTED: ${body.reason}`,
+        { via: req.authCtx.via },
+      );
       return {
-        agentId,
-        halted: true,
-        changed: false,
-        note: `already halted since ${before.haltedAt.toISOString()}: ${before.haltedReason}`,
+        agentId, halted: true, changed: true,
+        note: `every dispatch to '${before.name}' is now refused, and it can no longer be selected as a ` +
+          "routing or fallback target. This is separate from `enabled`: lifting the halt will not " +
+          "put a deliberately-disabled agent back into service.",
       };
-    }
-    const now = new Date();
-    await db
-      .update(agents)
-      .set({ haltedAt: now, haltedReason: body.reason, haltedByUserId: req.authCtx.userId ?? null })
-      .where(eq(agents.id, agentId));
-    await audit(
-      req.authCtx.userId ?? null,
-      "agent",
-      agentId,
-      EXECUTION_CONTROL_RULE_IDS.agentHalted,
-      "deny",
-      `agent '${before.name}' HALTED: ${body.reason}`,
-      { via: req.authCtx.via },
-    );
-    return {
-      agentId,
-      halted: true,
-      changed: true,
-      note:
-        `every dispatch to '${before.name}' is now refused, and it can no longer be selected as a ` +
-        "routing or fallback target. This is separate from `enabled`: lifting the halt will not " +
-        "put a deliberately-disabled agent back into service.",
-    };
+    });
+    return result ?? reply.status(404).send({ error: "unknown_agent" });
   });
 
   app.post("/v1/agents/:agentId/unhalt", async (req, reply) => {
     const { agentId } = agentParam.parse(req.params);
     const body = haltSchema.parse(req.body);
-    const [before] = await db.select().from(agents).where(eq(agents.id, agentId));
-    if (!before) return reply.status(404).send({ error: "unknown_agent" });
-    if (!before.haltedAt) {
-      return { agentId, halted: false, changed: false, note: "not halted — nothing was written" };
-    }
-    await db
-      .update(agents)
-      .set({ haltedAt: null, haltedReason: null, haltedByUserId: null })
-      .where(eq(agents.id, agentId));
-    await audit(
-      req.authCtx.userId ?? null,
-      "agent",
-      agentId,
-      EXECUTION_CONTROL_RULE_IDS.agentUnhalted,
-      "allow",
-      `agent '${before.name}' halt LIFTED: ${body.reason} (was halted for: ${before.haltedReason})`,
-      { via: req.authCtx.via, previousReason: before.haltedReason },
-    );
-    return {
-      agentId,
-      halted: false,
-      changed: true,
-      note: before.enabled
-        ? `'${before.name}' is dispatchable again for anyone already granted it`
-        : `'${before.name}' halt lifted, but it remains DISABLED in the registry — a separate ` +
-          "decision, and lifting a halt deliberately does not reverse it",
-    };
+    const result = await db.transaction(async (tx) => {
+      const [before] = await tx.select().from(agents).where(eq(agents.id, agentId)).for("update");
+      if (!before) return null;
+      if (!before.haltedAt) {
+        return { agentId, halted: false, changed: false, note: "not halted — nothing was written" };
+      }
+      await tx.update(agents).set({ haltedAt: null, haltedReason: null, haltedByUserId: null })
+        .where(eq(agents.id, agentId));
+      await audit(
+        tx, req.authCtx.userId ?? null, "agent", agentId,
+        EXECUTION_CONTROL_RULE_IDS.agentUnhalted, "allow",
+        `agent '${before.name}' halt LIFTED: ${body.reason} (was halted for: ${before.haltedReason})`,
+        { via: req.authCtx.via, previousReason: before.haltedReason },
+      );
+      return {
+        agentId, halted: false, changed: true,
+        note: before.enabled
+          ? `'${before.name}' is dispatchable again for anyone already granted it`
+          : `'${before.name}' halt lifted, but it remains DISABLED in the registry — a separate ` +
+            "decision, and lifting a halt deliberately does not reverse it",
+      };
+    });
+    return result ?? reply.status(404).send({ error: "unknown_agent" });
   });
 
   // ── one tool ────────────────────────────────────────────────────────────
@@ -356,89 +336,61 @@ export function registerExecutionControlRoutes(app: FastifyInstance, db: Db) {
   app.post("/v1/servers/:serverId/tools/:toolName/halt", async (req, reply) => {
     const { serverId, toolName } = toolParam.parse(req.params);
     const body = haltSchema.parse(req.body);
-    const [before] = await db
-      .select()
-      .from(mcpTools)
-      .where(and(eq(mcpTools.serverId, serverId), eq(mcpTools.name, toolName)));
-    if (!before) return reply.status(404).send({ error: "unknown_tool" });
-    if (before.haltedAt) {
-      return {
-        serverId,
-        toolName,
-        halted: true,
-        changed: false,
-        note: `already halted since ${before.haltedAt.toISOString()}: ${before.haltedReason}`,
-      };
-    }
-    const [server] = await db
-      .select({ name: mcpServers.name })
-      .from(mcpServers)
-      .where(eq(mcpServers.id, serverId));
-    await db
-      .update(mcpTools)
-      .set({
-        haltedAt: new Date(),
-        haltedReason: body.reason,
+    const result = await db.transaction(async (tx) => {
+      const [before] = await tx.select().from(mcpTools)
+        .where(and(eq(mcpTools.serverId, serverId), eq(mcpTools.name, toolName))).for("update");
+      if (!before) return null;
+      if (before.haltedAt) {
+        return {
+          serverId, toolName, halted: true, changed: false,
+          note: `already halted since ${before.haltedAt.toISOString()}: ${before.haltedReason}`,
+        };
+      }
+      const [server] = await tx.select({ name: mcpServers.name }).from(mcpServers)
+        .where(eq(mcpServers.id, serverId));
+      await tx.update(mcpTools).set({
+        haltedAt: new Date(), haltedReason: body.reason,
         haltedByUserId: req.authCtx.userId ?? null,
-      })
-      .where(eq(mcpTools.id, before.id));
-    await audit(
-      req.authCtx.userId ?? null,
-      "mcp_tool",
-      before.id,
-      EXECUTION_CONTROL_RULE_IDS.toolHalted,
-      "deny",
-      `tool '${toolName}' on server '${server?.name ?? serverId}' HALTED: ${body.reason}`,
-      { serverId, toolName, via: req.authCtx.via },
-    );
-    return {
-      serverId,
-      toolName,
-      halted: true,
-      changed: true,
-      note:
-        `every call to '${toolName}' is now refused. Its server, its sibling tools and every other ` +
-        "agent are unaffected — this is the scope that lets you stop one bad tool without " +
-        "stopping the business.",
-    };
+      }).where(eq(mcpTools.id, before.id));
+      await audit(
+        tx, req.authCtx.userId ?? null, "mcp_tool", before.id,
+        EXECUTION_CONTROL_RULE_IDS.toolHalted, "deny",
+        `tool '${toolName}' on server '${server?.name ?? serverId}' HALTED: ${body.reason}`,
+        { serverId, toolName, via: req.authCtx.via },
+      );
+      return {
+        serverId, toolName, halted: true, changed: true,
+        note: `every call to '${toolName}' is now refused. Its server, its sibling tools and every other ` +
+          "agent are unaffected — this is the scope that lets you stop one bad tool without " +
+          "stopping the business.",
+      };
+    });
+    return result ?? reply.status(404).send({ error: "unknown_tool" });
   });
 
   app.post("/v1/servers/:serverId/tools/:toolName/unhalt", async (req, reply) => {
     const { serverId, toolName } = toolParam.parse(req.params);
     const body = haltSchema.parse(req.body);
-    const [before] = await db
-      .select()
-      .from(mcpTools)
-      .where(and(eq(mcpTools.serverId, serverId), eq(mcpTools.name, toolName)));
-    if (!before) return reply.status(404).send({ error: "unknown_tool" });
-    if (!before.haltedAt) {
+    const result = await db.transaction(async (tx) => {
+      const [before] = await tx.select().from(mcpTools)
+        .where(and(eq(mcpTools.serverId, serverId), eq(mcpTools.name, toolName))).for("update");
+      if (!before) return null;
+      if (!before.haltedAt) {
+        return { serverId, toolName, halted: false, changed: false, note: "not halted — nothing was written" };
+      }
+      await tx.update(mcpTools).set({ haltedAt: null, haltedReason: null, haltedByUserId: null })
+        .where(eq(mcpTools.id, before.id));
+      await audit(
+        tx, req.authCtx.userId ?? null, "mcp_tool", before.id,
+        EXECUTION_CONTROL_RULE_IDS.toolUnhalted, "allow",
+        `tool '${toolName}' halt LIFTED: ${body.reason} (was halted for: ${before.haltedReason})`,
+        { serverId, toolName, via: req.authCtx.via, previousReason: before.haltedReason },
+      );
       return {
-        serverId,
-        toolName,
-        halted: false,
-        changed: false,
-        note: "not halted — nothing was written",
+        serverId, toolName, halted: false, changed: true,
+        note: `'${toolName}' is callable again by anyone already granted it`,
       };
-    }
-    await db
-      .update(mcpTools)
-      .set({ haltedAt: null, haltedReason: null, haltedByUserId: null })
-      .where(eq(mcpTools.id, before.id));
-    await audit(
-      req.authCtx.userId ?? null,
-      "mcp_tool",
-      before.id,
-      EXECUTION_CONTROL_RULE_IDS.toolUnhalted,
-      "allow",
-      `tool '${toolName}' halt LIFTED: ${body.reason} (was halted for: ${before.haltedReason})`,
-      { serverId, toolName, via: req.authCtx.via, previousReason: before.haltedReason },
-    );
-    return {
-      serverId,
-      toolName,
-      halted: false,
-      changed: true,
-      note: `'${toolName}' is callable again by anyone already granted it`,
-    };
+    });
+    return result ?? reply.status(404).send({ error: "unknown_tool" });
   });
 }

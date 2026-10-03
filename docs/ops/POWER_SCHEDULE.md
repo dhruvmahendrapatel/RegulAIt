@@ -50,9 +50,11 @@ Roughly 60–90 seconds after `start-instances`:
 1. The instance boots with **the same public IP** (an Elastic IP — this is the
    whole reason one exists; see below).
 2. `docker.service` starts (`systemctl enable`d by user-data on first boot).
-3. `db`, `gateway` and `caddy` all restart themselves — every one of them carries
-   `restart: unless-stopped`, and a shutdown-initiated stop is not an operator
-   `docker stop`, so the restart intent survives.
+3. `db`, `gateway`, `minio` and `caddy` all restart themselves — every one of them
+   carries `restart: unless-stopped` in `docker-compose.yml` itself (ADR-0167; the
+   dev box's user-data override restates it for `db` and `gateway`, which is where
+   the policy used to live exclusively), and a shutdown-initiated stop is not an
+   operator `docker stop`, so the restart intent survives.
 4. `regulait-boot-resync.service` runs, re-enables swap, and re-points Caddy if
    (and only if) the address has somehow drifted.
 

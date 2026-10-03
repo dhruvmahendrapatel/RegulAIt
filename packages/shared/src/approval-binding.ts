@@ -48,11 +48,62 @@
  * about which dimension failed to match.
  */
 import { canonicalJson, sha256Hex } from "./audit-chain.js";
-import { scrubAuditDetail } from "./audit-scrub.js";
+import { AUDIT_SCRUB_MAX_DEPTH, scrubAuditDetail } from "./audit-scrub.js";
+import { INTERNATIONAL_PII_CATEGORIES, type InternationalPiiCategory } from "./pii-international.js";
+import { PII_REDACTION_VERSION } from "./pii.js";
+import { PII_PAYLOAD_LIMITS, PII_PAYLOAD_VERSION, redactPiiPayload, type PiiJsonValue } from "./pii-payload.js";
 
 /** The scope of an approval rule's consent (`approval_rules.approval_scope`). */
 export const APPROVAL_SCOPES = ["action", "tool"] as const;
 export type ApprovalScope = (typeof APPROVAL_SCOPES)[number];
+
+/**
+ * Every kind of governed object that can sit in THE ONE QUEUE
+ * (`approvals.object_type`) — the list `schema.ts` carries as a TS-only
+ * widening, named once here so the queue's filter, the portal's select and the
+ * saved views all draw on the same ten strings.
+ *
+ * The column has no DB CHECK (migration 0001), so this constant is the only
+ * enumeration there is: a new kind that forgets to be added here is invisible
+ * to the queue filter rather than rejected by it, which is why this lives beside
+ * the other approval constants instead of being inlined at a call site.
+ *
+ * MCP tool calls, workflow sign-offs, run escalations, project budget overages,
+ * infrastructure operations, MRM model-card sign-offs, copilot proposals,
+ * RegulAIt-LLM training runs, certification-campaign items and SoD overrides —
+ * ten kinds, one inbox, one decide path. That is the claim, and a per-kind
+ * filter is how an approver works it without it becoming a second queue.
+ */
+export const APPROVAL_OBJECT_TYPES = [
+  "mcp_tool",
+  "workflow",
+  "run",
+  "project",
+  "infra_operation",
+  "model_card",
+  "copilot_proposal",
+  "training_job",
+  "grant_certification",
+  "sod_override",
+  // ADR-0159: an executable remediation for a governance-monitor alert
+  "remediation",
+] as const;
+export type ApprovalObjectType = (typeof APPROVAL_OBJECT_TYPES)[number];
+
+/** what each queue kind IS, for a select an approver reads rather than decodes */
+export const APPROVAL_OBJECT_TYPE_LABELS: Record<ApprovalObjectType, string> = {
+  mcp_tool: "MCP tool call",
+  workflow: "workflow stage sign-off",
+  run: "agent run escalation",
+  project: "project budget overage",
+  infra_operation: "infrastructure operation",
+  model_card: "model-card sign-off (MRM)",
+  copilot_proposal: "governance-copilot proposal",
+  training_job: "RegulAIt-LLM training run",
+  grant_certification: "certification-campaign item",
+  sod_override: "separation-of-duties override",
+  remediation: "governance remediation",
+};
 
 /**
  * ADR-0104: consent is ACTION-scoped unless an operator says otherwise. Pillar
@@ -128,6 +179,74 @@ export function approvalArgumentsPreview(
   return scrubAuditDetail(normalizeApprovalArguments(args));
 }
 
+/** Separate namespace: legacy raw-only approvals cannot authorize a transform. */
+export const PII_APPROVAL_DIGEST_VERSION = "regulait.pii-approval-binding.v1";
+
+/**
+ * Prepare one immutable redacted action for approval and eventual execution.
+ * The original digest remains bound even when different originals redact to
+ * identical effective arguments. The provider must receive effectiveArguments,
+ * never the credential-scrubbed preview. Callers must force action scope and
+ * recheck live policy/epoch before consuming consent and sending this snapshot.
+ * This helper does not perform authorization or enable the redaction mode.
+ */
+export function preparePiiApproval(
+  ref: ApprovalPayloadRef,
+  international: readonly InternationalPiiCategory[],
+) {
+  const raw = normalizeApprovalArguments(ref.arguments);
+  // Do not create a persisted preview deeper than the credential scrubber
+  // actually visits. At this bound any deepest object can only be empty.
+  const transformed = redactPiiPayload(raw, international, { ...PII_PAYLOAD_LIMITS, maxDepth: AUDIT_SCRUB_MAX_DEPTH });
+  // The input API requires an arguments bag, not a scalar or array. Check at
+  // runtime too, before a loosely typed caller can bind the wrong wire shape.
+  if (transformed.value === null || typeof transformed.value !== "object" || Array.isArray(transformed.value)) {
+    throw new Error("PII approval arguments must be a JSON object");
+  }
+  const effectiveArguments = transformed.value as { readonly [key: string]: PiiJsonValue };
+  const projectId = ref.projectId ?? null;
+  const originalArgumentsDigest = approvalArgumentsDigest({ projectId, arguments: raw });
+  const effectiveArgumentsDigest = approvalArgumentsDigest({ projectId, arguments: effectiveArguments });
+  const enabled = new Set(international);
+  const transformation = Object.freeze({
+    mode: "redact" as const,
+    textVersion: PII_REDACTION_VERSION,
+    payloadVersion: PII_PAYLOAD_VERSION,
+    internationalCategories: Object.freeze(INTERNATIONAL_PII_CATEGORIES.filter((category) => enabled.has(category))),
+  });
+  const argumentsDigest = sha256Hex(`${PII_APPROVAL_DIGEST_VERSION}\n${canonicalJson({
+    projectId, originalArgumentsDigest, effectiveArgumentsDigest, transformation,
+  })}`);
+  // Never put the original payload in the preview. The remaining credentials
+  // in the effective payload still use the existing audit scrubber.
+  const freezePreview = (value: unknown): unknown => {
+    if (value !== null && typeof value === "object") {
+      for (const child of Object.values(value)) freezePreview(child);
+      Object.freeze(value);
+    }
+    return value;
+  };
+  const argumentsPreview = freezePreview({
+    transformation,
+    originalArgumentsDigest,
+    effectiveArgumentsDigest,
+    effectiveArguments: approvalArgumentsPreview(effectiveArguments),
+  });
+  return Object.freeze({
+    projectId,
+    approvalScope: "action" as const,
+    argumentsDigest,
+    originalArgumentsDigest,
+    effectiveArgumentsDigest,
+    transformation,
+    effectiveArguments,
+    argumentsPreview,
+    hits: Object.freeze(transformed.hits.map((hit) => Object.freeze(hit))),
+  });
+}
+
+export type PreparedPiiApproval = ReturnType<typeof preparePiiApproval>;
+
 /**
  * STRICTEST-WINS across every approval rule that matched this call: if ANY of
  * them is action-scoped, the call's consent is action-scoped. A rule body that
@@ -193,7 +312,7 @@ export function effectiveApprovalScope(
  * contract: bumping it makes every pre-existing context digest stop matching,
  * which is a re-queue (fail-closed), never an accidental match.
  */
-export const APPROVAL_CONTEXT_DIGEST_VERSION = "regulait.approval-context.v1";
+export const APPROVAL_CONTEXT_DIGEST_VERSION = "regulait.approval-context.v3";
 
 /** One governing approval rule and the `config_versions` row currently ACTIVE
  * for it. `activeVersionId` is null when the rule has no version rows — the
@@ -203,14 +322,35 @@ export interface ApprovalRuleVersionRef {
   activeVersionId: string | null;
 }
 
+/**
+ * AER-039 — WHERE the approved bytes go. The execution-relevant identity of the
+ * MCP upstream a consent is spent against: its destination, its private-range
+ * egress posture, and the digest of the tool manifest its admission verdict
+ * was computed over. An admin editing any of these under the same server id is
+ * a NEW action target, so a consent signed for the old one stops matching (it
+ * goes stale and is re-queued, fail-closed). Operational churn on the server
+ * row — breaker counters, health cursors — is deliberately NOT here.
+ */
+export interface ApprovalTargetRef {
+  kind: "mcp_server";
+  serverId: string;
+  url: string;
+  allowPrivateRanges: boolean | null;
+  admissionManifestDigest: string | null;
+}
+
 /** The identity of the POLICY CONTEXT a consent was granted under. */
 export interface ApprovalContextRef {
   /** the rules that MATCHED this call, with their resolved active versions */
   ruleVersions: ReadonlyArray<ApprovalRuleVersionRef>;
+  /** every active ABAC policy that could govern this call */
+  abacPolicies?: ReadonlyArray<{ policyId: string; version: number | null; source: string }>;
   /** who policy currently requires to sign — `decision.approverUserId` */
   requiredApproverUserId?: string | null;
   /** the strictest scope across the matched rules */
   approvalScope: ApprovalScope;
+  /** AER-039 — the upstream the call executes against (v3) */
+  target?: ApprovalTargetRef | null;
 }
 
 /**
@@ -250,8 +390,20 @@ export function approvalContextDigest(ref: ApprovalContextRef): string {
         ruleId: p.ruleId,
         activeVersionId: p.activeVersionId ?? null,
       })),
+      abacPolicies: [...(ref.abacPolicies ?? [])]
+        .sort((a, b) => a.policyId.localeCompare(b.policyId))
+        .map((p) => ({ policyId: p.policyId, version: p.version, source: p.source })),
       requiredApproverUserId: ref.requiredApproverUserId ?? null,
       approvalScope: ref.approvalScope,
+      target: ref.target
+        ? {
+            kind: ref.target.kind,
+            serverId: ref.target.serverId,
+            url: ref.target.url,
+            allowPrivateRanges: ref.target.allowPrivateRanges ?? null,
+            admissionManifestDigest: ref.target.admissionManifestDigest ?? null,
+          }
+        : null,
     })}`,
   );
 }

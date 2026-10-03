@@ -736,3 +736,315 @@ unchanged.
 No migration: `copilot_proposals` (0100) and both target tables already carry
 every column this needed. Migration 0103 was reserved for this batch and is
 deliberately NOT used.
+
+---
+
+## Amendment — 2026-09-27 (batch B9a): consent is never asked for a diff that cannot be applied, and the propose half gets a UI
+
+### The correction this amendment makes, before anything else
+
+The B8c amendment above closed "an approved proposal is not applied by
+anything" and reported the loop complete. It was not. Two things were missing,
+and the first is a governance defect rather than a gap:
+
+**Diff validation lived in the APPLIER only.** `POST /v1/copilot/proposals`
+parsed `copilotProposalSchema` — which types `diff` as `z.record(z.unknown())`
+and therefore accepts any object at all — and then wrote the proposal row AND
+an ordinary `approvals` row. The per-kind diff schemas ran at apply time. So a
+malformed diff was recorded, a real Approvals-Queue item was opened, a named
+human read a title and a rationale and consented, and only then did the product
+answer `proposal_diff_invalid`.
+
+That leaves a **real human approval permanently on the audit record against a
+change that could never happen**. In a product whose entire claim is that
+consent is traceable, that is the worst possible place to discover a validation
+error: the ledger now holds a person's recorded approval of nothing, and it
+cannot be distinguished later from an approval of something real that was never
+applied.
+
+The evidence that this was not theoretical: the existing test in
+`apps/gateway/src/copilot.test.ts` proposed `diff: { revoke: [{ userId,
+toolName }] }` — a shape no applier branch can read — and asserted **201**. The
+test had to be changed by this batch, which is the clearest possible statement
+of what was wrong.
+
+### Decision
+
+**1. One authority on diff validity, called from both ends.**
+`validateCopilotProposalDiff(kind, diff)` (`apps/gateway/src/copilot.ts`) is
+now the only place that decides whether a diff is well-formed. The propose
+route calls it and refuses `422 proposal_diff_invalid` with an audited deny
+**before any approval row exists**; the applier calls the same function and the
+four inline copies of that parsing are gone from it.
+
+The applier's call is **not redundant**. Rows proposed before this existed are
+still in the table, and a nested payload schema can tighten after a proposal is
+recorded. Defence in depth at a mutation door is not a duplication worth
+trading away — but two *different* implementations of the same check would
+have been, which is why this is one function rather than two.
+
+**What it checks:** shape (the four `.strict()` per-kind diff schemas), the
+nested payload schemas of the two kinds that carry one
+(`createApprovalRuleSchema`, `updateProjectSchema` — the exact zod the public
+routes parse with, never a copy), and `budget_adjustment`'s key restriction to
+`COPILOT_BUDGET_ADJUSTMENT_FIELDS`, which is structural.
+
+**What it deliberately does not check:** that the target still exists. A grant,
+rule or project can be removed between proposing and applying; that is a fact
+about the world at apply time, not a defect in the diff. Enforcing it at
+propose time would also make a proposal expire silently. Those checks stay
+where they can only be answered — in the applier, against the database, at the
+moment of the write. A test pins this: a `grant_revocation` naming a grant id
+that does not exist is **recorded** (201), and refused at apply with
+`proposal_target_gone`.
+
+**One new refusal:** a `policy_tightening` whose `patch` is `{}`.
+`applyRuleEdit` treats an empty patch as a no-op, so without this an approver
+could consent to a "tightening" that moves nothing and the proposal would then
+record itself as applied.
+
+**2. The propose half gets a UI.** Before this batch the copilot page could
+LIST proposals and APPLY approved ones, but there was no form — so the
+product's single most governed write was the one an admin could not reach
+without curl, and the four accepted diff shapes were documented nowhere a user
+could see them. `apps/web/src/views/admin/governance/CopilotProposalForm.tsx`
+covers all four kinds, and its shape follows from point 1:
+
+- **The target is chosen from the real object, never typed.** A grant comes out
+  of that user's or that role's own entitlement list carrying its real grant
+  id; a rule out of that kind's rule table; a project out of the project list.
+  A retyped uuid is the most likely cause of a refused proposal, and there is
+  no text box here for one to be retyped into. Role-conferred entitlements are
+  excluded from the per-user grant kinds, with the reason stated on screen,
+  because they carry no grant row to remove.
+- **A patch names only what moves.** Both `applyRuleEdit` and `PATCH
+  /v1/projects/:projectId` take a partial patch, so each editable field has its
+  own inclusion toggle and shows the current value either way: absent is not
+  the same as set to what it already is, and an admin who cannot see the
+  current value cannot tell a tightening from a loosening.
+- **A derived rule inherits its scope.** A `rule_to_approval`'s `create` takes
+  subject, server and deploy binding from the source rule rather than asking
+  for them again — a requirement "derived from" a rule that binds different
+  subjects is not derived from it, and those six fields are exactly where
+  `createApprovalRuleSchema`'s `superRefine` would otherwise fire.
+- **The diff is rendered before it is sent**, and a refusal is shown verbatim
+  (the gateway's sentences name the enforcing schema). The recorded object is
+  what a named human will be asked to approve; a proposer who has not read it
+  is asking someone else to consent to something they did not read either.
+
+`AskResponse` in `CopilotPage.tsx` gained the `query` field the ask endpoint has
+always returned (`copilot.ts` strips only `evidence`). The interface simply
+never declared it, which is why the page could not offer to propose from an
+answer at all.
+
+### Consequences
+
+- A proposal and its approval now stand or fall together: no approval is opened
+  against a diff the applier would refuse. The reverse is still possible and
+  still correct — an approved proposal whose target vanished refuses at apply
+  with `proposal_target_gone` and stays unapplied.
+- `scripts/preflight-ui-affordances.mjs`'s add-affordance list drops from two
+  entries to one: `/v1/copilot/proposals` is closed, `/v1/redteam/libraries`
+  remains. **Correction (same day):** the first version of this paragraph, of the
+  index row, and of `STATE.md`'s recap all said "0 add gaps". That was wrong — I
+  read the census output as though closing the copilot entry emptied the list,
+  and `/v1/redteam/libraries` was printed directly beneath it. Two delete orphans
+  also remained at that point (`/v1/approvals/views/:x`,
+  `/v1/llm/backend-configs/:x`); the first is closed by batch B9b.
+- Tests: the four apply-time refusal assertions in
+  `zz-zz-copilot-live.test.ts` moved to propose time, each now also asserting
+  that **no approval row was opened** — the half a status-code check misses. One
+  new test inserts a pre-gate row directly and asserts the applier still
+  refuses it, which is the only path that can now reach that code. New e2e
+  `apps/web/e2e/zz-zz-zz-zz-zz-zz-zz-zz-zz-zz-zz-copilot-propose.spec.ts`
+  compares the previewed JSON byte-for-byte against the diff the server
+  recorded, because a preview that drifts from the payload is worse than no
+  preview.
+
+### Honest limits after this amendment
+
+1. The form covers the four kinds that exist. A fifth proposal kind needs a
+   builder here as well as an applier branch, and nothing enforces that pairing
+   — the affordance census would catch a missing form only if the kind also
+   introduced a new route.
+2. Diff validity is not target validity, by design (see above). A proposal can
+   still be approved and then refused at apply because the world moved. The
+   proposals table shows `appliedAt` but does not yet surface "approved, and
+   would now fail" — an admin learns it by clicking Apply.
+3. The propose-time check cannot validate what only the database knows: a
+   `policy_tightening` patch is checked against the rule kind's field list at
+   apply (`validateRuleVersionBody` inside `applyRuleEdit`), not here, because
+   that authority lives behind the choke point and duplicating it would be the
+   second source of truth this amendment exists to avoid.
+4. All limits of the earlier amendments stand unchanged.
+
+No migration: every column this needed already exists.
+
+---
+
+## Amendment — 2026-09-27 (AER-035): applying a proposal is ONE transaction over a LOCKED row
+
+### The correction this amendment makes, before anything else
+
+The B8c amendment said the applier was "not transactional across its audit row"
+and filed that under honest limits. That framing was too small, and the B9a
+amendment repeated it without re-examining it. The applier was **not
+transactional at all, and not concurrency-safe**, which is a different and worse
+fact: it did not merely record a change slightly out of step, it could apply the
+same change twice.
+
+The route read the proposal, checked `applied_at`, ran the mutation, wrote the
+marker and appended the audit row as **five independent statements with no lock
+and no transaction**. Two consequences:
+
+**1. Two concurrent requests could both spend one human's consent.** Both see
+`applied_at = NULL`, both pass the consent gate, both mutate.
+`rule_to_approval` is the material case: `createApprovalRuleRow` is an
+unconditional insert with a fresh id and no proposal reference, so **one
+approval could create two live governance rules**, while the proposal row
+recorded only whichever `applied_result` committed last.
+
+**2. A crash could leave any two of the three facts disagreeing.** After the
+mutation but before the marker: a real change, still replayable. After the
+marker but before the audit: an applied change with **no audit row naming who
+applied it** — in a product whose entire claim is that every governed change is
+attributable, that is the worse of the two.
+
+The existing tests did not catch it because they proved only *sequential* replay
+refusal: one request completes before the second begins. That is a different
+property, and passing it says nothing about the first.
+
+**Measured, not argued.** With the lock removed, twenty simultaneous applies of
+one approved `rule_to_approval` proposal produced **ten successes and ten
+approval rules** from a single human approval. With it: one and one.
+
+### Decision
+
+**The whole apply is one transaction, opened with `SELECT … FOR UPDATE` on the
+proposal row.**
+
+- **The lock is the serialization point.** A second concurrent apply waits
+  there, then sees the `applied_at` its predecessor committed and takes the
+  ordinary `proposal_already_applied` refusal. No new error code, no new state
+  machine — the existing idempotency gate simply became correct.
+- **Every choke point joins the transaction.** `applyRuleEdit`,
+  `createApprovalRuleRow`, `applyProjectPatch` and the eight
+  `delete*GrantById` functions were widened from `Db` to the ADR-0074
+  `DbOrTx` / `DbOrTxDeep` types (plus a new `DbOrTxWrite` for the ones that
+  DELETE). This is the structural trick ADR-0074 already established for
+  exactly this reason, reused rather than reinvented: `tx.transaction()` opens a
+  SAVEPOINT, so `applyRuleEdit → newVersion → activateVersion` nested inside the
+  applier's transaction is still ONE database transaction.
+- **The success audit is written with the transaction handle.** The local
+  `audit()` helper gained an optional writer defaulting to the top-level handle,
+  so every other caller is byte-identical and this one commits its row with the
+  change it describes.
+- **Refusals are audited AFTER the rollback, deliberately.** A refusal throws,
+  which rolls the transaction back; a deny row written inside it would roll back
+  too, leaving the one case an operator most needs to find unrecorded. So the
+  refusal carries the proposal's identity on the error and the deny row is
+  appended outside. A test asserts both halves: no applied marker, and the deny
+  row present anyway.
+- **No idempotency column was added, and that is a decision rather than an
+  omission.** AER-035 suggested one for crash recovery. With the mutation, the
+  marker and the audit in one commit there is no half-applied state to recover
+  from — a crash rolls back all three — so a column would guard a window that
+  no longer exists.
+
+### Consequences
+
+- `POST /v1/copilot/proposals/:id/apply` serializes per proposal. The cost is a
+  row lock held for the duration of one apply, which is bounded by the choke
+  point it calls; the alternative was a governance boundary where a retry could
+  duplicate a change.
+- New test file `zz-aer035-apply-atomicity.test.ts`: twenty simultaneous applies
+  for each of the four kinds, asserting **what the world now holds** (one
+  approval rule, one recorded rule edit, the grant gone, the budget written
+  once) rather than a tally of HTTP 200s — a route can return one success and
+  still have applied twice. For `policy_tightening`, whose write is idempotent,
+  the countable artifact is the choke point's own audit row, because the *value*
+  cannot distinguish one application from two. The losers are asserted to answer
+  `proposal_already_applied` specifically: for `grant_revocation`, a
+  `proposal_target_gone` would have meant they ran the removal and found it
+  already done — a second execution wearing a different refusal's name.
+
+### Honest limits after this amendment
+
+1. The lock is per proposal. Two DIFFERENT proposals that both edit the same
+   rule still interleave; `applyRuleEdit`'s own artifact-row lock (ADR-0074) is
+   what orders those, and this amendment does not widen it.
+2. ~~No fault-injection test exists for a crash *between* statements inside the
+   transaction; the argument that all three facts commit together is the
+   database's, not a test's. AER-035's acceptance item 3 is met by construction
+   rather than by injected failure, and that distinction is left visible here
+   rather than claimed as evidence.~~ **CLOSED 2026-09-28 — item 3 now has an
+   injected failure at the last write.** The review was right that the existing
+   coverage did not reach it: the refusal test fires *before* any target
+   mutation, so it proved the transaction can abort, not that the abort undoes
+   the mutation and the applied marker. Those are written seconds apart inside
+   the same transaction, and "they are in one transaction" was a claim about the
+   source rather than an observed property.
+
+   The fault is injected **in Postgres, not in the application**: a
+   `before insert` trigger on `audit_log`, scoped by rule id *and* object id to
+   one proposal, raises exactly when the applier writes its success audit row —
+   the last write of the transaction, therefore strictly after the target
+   mutation and after `applied_at`. Nothing in the shipped code changes, there is
+   no failpoint left behind, and the timing is deterministic rather than raced.
+   `rule_to_approval` is the kind chosen because its insert has a fresh id, so a
+   surviving rule is unmistakable — it is the same mutation whose unlocked
+   version produced ten rules from one approval.
+
+   Three things are then asserted: **no approval rule** (the mutation rolled back
+   with the audit row), **no applied marker** (a surviving `applied_at` would mean
+   consent spent on a change that never happened, and the proposal could never be
+   applied again), and **no success audit row**. The test then **applies the same
+   proposal again with the trigger gone and gets a 200 with exactly one rule** —
+   which is both the recovery assertion and this test's own non-vacuity proof: it
+   shows the earlier failure was the injected one rather than the proposal having
+   been inapplicable all along.
+
+   **On acceptance item 4 (process crash / recovery), stated rather than faked:**
+   an uncommitted transaction discarded when a backend dies is a Postgres
+   guarantee, not a path in this repository's code. What this repository has to
+   prove is that all three writes are inside one transaction — because if they
+   are, a crash cannot leave two of them behind, and if they are not, no amount of
+   crash testing makes them safe. That is what the trigger observes. A harness
+   that killed the process would be testing Postgres's durability and would pass
+   whether or not our boundary was drawn correctly.
+
+   **The usual non-vacuity probe could not be run, and the reason is better than
+   the probe would have been.** The obvious way to check that this test would
+   catch a broken boundary is to move one of the three writes onto the plain `db`
+   handle instead of `tx` and watch the test redden. Both attempts —
+   `createApprovalRuleRow(db, …)` and the success `audit(…, db)` — **deadlocked
+   instead of diverging**, and neither test run ever finished. That is not a
+   flaw in the experiment: the transaction holds `FOR UPDATE` on the proposal row
+   and, once it has written anything to the ledger,
+   `pg_advisory_xact_lock(AUDIT_CHAIN_LOCK_KEY)` (`audit-chain.ts:154`). A second
+   connection needing either one waits for a transaction that is itself waiting
+   for that connection.
+
+   So the boundary is not merely documented, it is **structurally enforced**: a
+   future refactor that took one of these writes out of the transaction would
+   hang in this suite rather than silently producing two facts out of three.
+   What the test relies on instead is its own paired positive case (M-033): the
+   same proposal, the trigger dropped, asserted to return 200 with exactly one
+   rule and a non-null `applied_at` — so the three absences are read against a
+   demonstrated presence rather than against nothing.
+3. `applyRuleEdit`'s SAVEPOINT nesting is exercised by the existing suite
+   through the ordinary route, not by a test written for the nested case
+   specifically.
+4. **The APPROVAL row is read inside the transaction but not locked.** A
+   `decide` that denies the approval can commit between our read of `approved`
+   and the mutation, so a proposal can be applied against consent that was
+   withdrawn moments earlier. The window is narrow and was wider before this
+   amendment, and it is left open deliberately: locking the approval too would
+   make this route and the decide path take two locks, and a lock-ordering
+   mistake at a governance boundary is worse than a narrow read-committed window.
+   Closing it properly means deciding the order and testing for deadlock, which
+   is its own change.
+5. All limits of the earlier amendments stand unchanged, except the "not
+   transactional across its audit row" limit of B8c, which this replaces.
+
+No migration.

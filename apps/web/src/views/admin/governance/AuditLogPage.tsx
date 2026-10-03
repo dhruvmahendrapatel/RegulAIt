@@ -15,9 +15,10 @@
  * different real things and cannot be resolved into a mode retroactively.
  */
 import { useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import type { AuditEntry } from "../../../api/types";
+import { UUID_RE, actorLabel, fmtAt, frameworkLabel, humanize, plural, shortId } from "../../../api/format";
 import type { AuditRetention } from "../../../api/adminTypes";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Select, Table, type Tone } from "../../../ui/kit";
@@ -32,11 +33,20 @@ const effectTone = (effect: string): Tone =>
 /** the four filter values the backend accepts; `unknown` maps to
  * `deploy_mode IS NULL`, which is a first-class bucket, not an "other". */
 const MODE_OPTS = [
-  { v: "hosted", l: "hosted" },
-  { v: "byoc", l: "byoc" },
-  { v: "air_gapped", l: "air_gapped" },
-  { v: "unknown", l: "unknown / pre-0044" },
+  { v: "hosted", l: "Hosted" },
+  { v: "byoc", l: "BYOC" },
+  { v: "air_gapped", l: "Air-gapped" },
+  { v: "unknown", l: "None recorded" },
 ];
+const modeLabel = (mode: string) => MODE_OPTS.find((o) => o.v === mode)?.l ?? mode;
+
+/** one page of GET /v1/audit — the server decides the page size */
+interface AuditPage {
+  entries: AuditEntry[];
+  pageSize: number;
+  hasMore: boolean;
+  nextCursor: string | null;
+}
 
 export default function AuditLogPage() {
   const users = useUsers();
@@ -58,9 +68,16 @@ export default function AuditLogPage() {
     queryKey: ["admin", "audit-retention"],
     queryFn: () => api.get<AuditRetention>("/v1/audit/retention"),
   });
-  const audit = useQuery({
+  // Cursor-paged: the server hands back 100 rows and a cursor for the older
+  // ones. The table used to stop at the first page with no sign that 306
+  // older rows existed (UIA-02); now it says how many are shown and loads
+  // older pages on request.
+  const audit = useInfiniteQuery({
     queryKey: ["admin", "audit", userId, deployMode],
-    queryFn: () => api.get<{ entries: AuditEntry[] }>(`/v1/audit${qs}`),
+    queryFn: ({ pageParam }) =>
+      api.get<AuditPage>(`/v1/audit${qs}${pageParam ? `${qs ? "&" : "?"}cursor=${encodeURIComponent(pageParam)}` : ""}`),
+    initialPageParam: null as string | null,
+    getNextPageParam: (last) => (last.hasMore && last.nextCursor ? last.nextCursor : null),
   });
 
   const nameOf = useMemo(
@@ -68,7 +85,10 @@ export default function AuditLogPage() {
     [users.data],
   );
   const rows = useMemo(
-    () => (audit.data?.entries ?? []).map((e, i) => ({ ...e, rowKey: e.id ?? `${e.at}-${i}` })),
+    () =>
+      (audit.data?.pages ?? [])
+        .flatMap((p) => p.entries ?? [])
+        .map((e, i) => ({ ...e, rowKey: e.id ?? `${e.at}-${i}` })),
     [audit.data],
   );
   const ret = retention.data;
@@ -78,10 +98,10 @@ export default function AuditLogPage() {
       <PageHeader
         title="Audit log"
         sub="Every governed decision, lifecycle action and settings change."
-        info={<p>Every governed decision, lifecycle action and settings change lands here — one trail, all eight pillars. Filter by user and by deploy mode; the table shows the latest 100 rows, and the CSV export carries the full filtered trail.</p>}
+        info={<p>Every governed decision, lifecycle action and settings change lands here — one trail, all eight pillars. Filter by user and by deploy mode; the table loads the newest rows first and older ones on request, and the CSV export carries the full filtered trail.</p>}
       />
       <div className={v.stack}>
-        <Card title="Retention (§8.4) — a single global floor">
+        <Card title="Retention">
           {ret == null ? (
             <span className={v.dim}>Loading retention…</span>
           ) : ret.retainedDays == null ? (
@@ -93,8 +113,8 @@ export default function AuditLogPage() {
               <span>
                 Global floor <strong>{ret.retainedDays} days</strong>{" "}
                 <span className={v.dim}>
-                  (from {(ret.floorSource ?? []).join(", ") || "—"}) · <strong>{ret.prunable}</strong>{" "}
-                  row(s) older than the floor
+                  (set by {(ret.floorSource ?? []).map(frameworkLabel).join(", ") || "the organisation default"}) ·{" "}
+                  <strong>{plural(ret.prunable, "row")}</strong> older than that
                 </span>
               </span>
               <span className={v.grow} />
@@ -104,9 +124,9 @@ export default function AuditLogPage() {
             </div>
           )}
           <p className={v.faint}>
-            Retention is the longest auditRetentionDays across every compliance profile
-            (longest-floor-wins) composed with the org default — a shorter-retention framework can never
-            shorten another framework's trail. The prune itself is audited.
+            Retention is the longest period any active compliance profile requires, combined with the
+            organisation default — a framework with a shorter period never shortens another framework's
+            trail. Pruning is itself audited.
           </p>
         </Card>
 
@@ -127,23 +147,29 @@ export default function AuditLogPage() {
             <span className={v.grow} />
             <Button
               size="sm"
-              title="Download the FULL filtered trail (the table shows the latest 100 rows)"
+              title="Download the FULL filtered trail, not only the rows loaded in the table"
               onClick={() =>
                 void downloadCsv(`/v1/audit.csv${qs}`, "audit-log.csv", (msg) => toast(msg, "error"))
               }
             >
               Download CSV
             </Button>
+            <Button
+              size="sm"
+              variant="primary"
+              title="Download an offline-verifiable bundle containing the full filtered audit CSV, manifest, and signature"
+              onClick={() => {
+                const join = qs ? "&" : "?";
+                void downloadCsv(`/v1/audit.csv${qs}${join}signed=1`, "audit-log.signed.tar.gz", (msg) => toast(msg, "error"));
+              }}
+            >
+              Download signed bundle
+            </Button>
           </div>
           <p className={v.faint}>
-            A row carries a deploy mode only when the action was deploy-mode-scoped — a workflow
-            deploy/rollback, or a governed infra change on a target-pinned resource. Everything else
-            (MCP calls, membership, settings edits) has <strong>no mode to have</strong>, and every row
-            written before migration 0044 has none either: that mode was never recorded, so it is{" "}
-            <strong>un-backfillable</strong> and is not inferred here. Both land in one honest{" "}
-            <strong>unknown / pre-0044</strong> bucket — it is <em>not</em> a fourth mode and{" "}
-            <em>not</em> a synonym for “hosted”. Per-mode retention only differentiates rows written
-            after 0044 for the same reason.
+            Only deploy-scoped actions — workflow deploys and rollbacks, governed infrastructure changes —
+            carry a deploy mode. Other rows (tool calls, membership, settings) show <strong>none</strong>, and
+            older rows recorded before deploy modes existed are never back-filled or guessed.
           </p>
           <Table<AuditEntry & { rowKey: string }>
             columns={[
@@ -151,34 +177,34 @@ export default function AuditLogPage() {
                 key: "at",
                 header: "At",
                 sort: (e) => e.at,
-                render: (e) => <span className={v.mono}>{String(e.at).slice(0, 19).replace("T", " ")}</span>,
+                render: (e) => <span className={v.mono} style={{ whiteSpace: "nowrap" }} title={String(e.at)}>{fmtAt(e.at)}</span>,
               },
               {
                 key: "user",
                 header: "User",
-                render: (e) => nameOf.get(e.userId) ?? e.userId.slice(0, 8) + "…",
+                render: (e) => actorLabel(e.userId, nameOf),
               },
-              { key: "object", header: "Object", sort: (e) => e.objectType ?? "", render: (e) => e.objectType ?? "—" },
+              { key: "object", header: "Object", sort: (e) => e.objectType ?? "", render: (e) => (e.objectType ? humanize(e.objectType) : "—") },
               {
                 key: "effect",
                 header: "Effect",
                 sort: (e) => e.effect,
                 render: (e) => <Badge tone={effectTone(e.effect)}>{e.effect.replaceAll("_", " ")}</Badge>,
               },
-              { key: "rule", header: "Rule", render: (e) => <span className={v.mono}>{e.ruleId}</span> },
+              { key: "rule", header: "Rule", render: (e) => <span style={{ whiteSpace: "nowrap" }} title={e.ruleId}>{UUID_RE.test(e.ruleId) ? `Policy rule ${shortId(e.ruleId)}` : humanize(e.ruleId)}</span> },
               {
                 key: "deployMode",
                 header: "Deploy mode",
                 sort: (e) => e.deployMode ?? "unknown",
                 render: (e) =>
                   e.deployMode ? (
-                    <Badge tone="info">{e.deployMode}</Badge>
+                    <Badge tone="info">{modeLabel(e.deployMode)}</Badge>
                   ) : (
                     <span
                       className={v.dim}
-                      title="No mode was recorded for this row — either it is not a deploy-mode-scoped action, or it predates migration 0044. Un-backfillable by design; never assume a mode."
+                      title="No deploy mode was recorded: the action is not deploy-scoped, or it predates deploy modes. Never back-filled."
                     >
-                      unknown
+                      none
                     </span>
                   ),
               },
@@ -187,23 +213,39 @@ export default function AuditLogPage() {
             rows={rows}
             rowKey={(e) => e.rowKey}
             loading={audit.isLoading}
+            error={audit.error}
+            onRetry={() => void (audit.isFetchNextPageError ? audit.fetchNextPage() : audit.refetch())}
             empty={
               <EmptyState
                 title="No audit rows match"
                 body={
                   deployMode && deployMode !== "unknown"
-                    ? `No row records a ${deployMode} deploy mode yet — only deploy-mode-scoped actions written after migration 0044 carry one. Clear the filter to see the full trail.`
+                    ? `No row records the ${modeLabel(deployMode)} deploy mode yet — only deploy-scoped actions carry one. Clear the filter to see the full trail.`
                     : "Every governed action writes here — try clearing the filter."
                 }
               />
             }
           />
+          {rows.length > 0 && (
+            <div className={v.row} data-testid="audit-paging">
+              <span className={v.dim}>
+                {audit.hasNextPage
+                  ? `Showing the newest ${plural(rows.length, "row")} — older rows exist`
+                  : `Showing all ${plural(rows.length, "row")}`}
+              </span>
+              {audit.hasNextPage && (
+                <Button size="sm" disabled={audit.isFetchingNextPage} onClick={() => void audit.fetchNextPage()}>
+                  {audit.isFetchingNextPage ? "Loading…" : "Load older"}
+                </Button>
+              )}
+            </div>
+          )}
         </Card>
       </div>
 
       <ConfirmModal
         open={confirmPrune}
-        title={`Delete ${ret?.prunable ?? 0} audit row(s)?`}
+        title={`Delete ${plural(ret?.prunable ?? 0, "audit row")}?`}
         body={`Rows older than the ${ret?.retainedDays ?? "—"}-day global floor are removed permanently. The prune itself writes an audit row.`}
         danger
         confirmLabel="Prune"
@@ -216,7 +258,7 @@ export default function AuditLogPage() {
               {},
             );
             toast(
-              `Pruned ${r.deleted} audit row(s) — floor ${r.retainedDays}d from ${(r.floorSource ?? []).join(", ")}`,
+              `Pruned ${plural(r.deleted, "audit row")} — ${r.retainedDays}-day floor set by ${(r.floorSource ?? []).map(frameworkLabel).join(", ")}`,
               "success",
             );
           }, null);
@@ -237,11 +279,23 @@ interface VerifyReport {
     source: "caller_supplied" | "worm_sink" | "database" | "none";
     tamperResistant: boolean;
     sinkMode: string | null;
+    seq: number | null;
     matches: boolean | null;
     unanchoredRows: number | null;
     disclosure: string;
+    /** an anchor in the store past this chain's head: another chain sharing
+     * the store, or rows removed after it was taken — reported, never graded
+     * as a hash mismatch (UIA-01) */
+    aheadOfHead: { seq: number; capturedAt: string; disclosure: string } | null;
   };
 }
+
+const ANCHOR_SOURCE_LABEL: Record<VerifyReport["anchor"]["source"], string> = {
+  caller_supplied: "supplied by the caller",
+  worm_sink: "write-once sink",
+  database: "this database",
+  none: "none",
+};
 
 /**
  * Chain integrity (ADR-0060), on demand rather than on load: verification
@@ -279,7 +333,7 @@ function ChainIntegrityCard() {
     : "neutral";
 
   return (
-    <Card title="Chain integrity (ADR-0060) — tamper-evident hash chain + WORM anchor">
+    <Card title="Chain integrity — tamper-evident hash chain with a write-once anchor">
       <div className={v.row}>
         <span className={v.dim}>
           Every chained row commits to the one before it; the head is anchored to write-once storage.
@@ -302,7 +356,7 @@ function ChainIntegrityCard() {
               chain {report.status}
             </Badge>
             <span className={v.dim}>
-              {report.scanned.rows} row(s) recomputed{report.scanned.bounded ? " (bounded range)" : ""}
+              {plural(report.scanned.rows, "row")} recomputed{report.scanned.bounded ? " (bounded range)" : ""}
             </span>
             {report.firstBreak && (
               <Badge tone="danger">first break at seq {report.firstBreak.seq}</Badge>
@@ -311,18 +365,35 @@ function ChainIntegrityCard() {
           {report.firstBreak && <p className={v.errLine}>{report.firstBreak.reason}</p>}
           <div className={v.rowTight}>
             <Badge tone={anchorTone}>
-              anchor: {report.anchor.source}
-              {report.anchor.sinkMode ? ` · ${report.anchor.sinkMode}` : ""}
+              Anchor: {ANCHOR_SOURCE_LABEL[report.anchor.source] ?? humanize(report.anchor.source)}
+              {report.anchor.seq != null ? ` at seq ${report.anchor.seq}` : ""}
+              {report.anchor.sinkMode ? ` · ${humanize(report.anchor.sinkMode)}` : ""}
             </Badge>
             <Badge tone={report.anchor.tamperResistant ? "ok" : "warn"}>
-              {report.anchor.tamperResistant ? "tamper-resistant (observed)" : "NOT tamper-resistant"}
+              {report.anchor.tamperResistant ? "Tamper-resistant (observed)" : "Not tamper-resistant"}
             </Badge>
-            {report.anchor.matches === false && <Badge tone="danger">anchor MISMATCH</Badge>}
+            {report.anchor.matches === false && <Badge tone="danger">Anchor mismatch</Badge>}
+            {report.anchor.matches === true && <Badge tone="ok">Anchor matches</Badge>}
+            {report.anchor.matches === null && report.anchor.aheadOfHead && (
+              <Badge tone="danger" title={report.anchor.aheadOfHead.disclosure}>
+                Not verified — anchor past chain head (seq {report.anchor.aheadOfHead.seq})
+              </Badge>
+            )}
+            {report.anchor.matches !== null && report.anchor.aheadOfHead && (
+              <Badge tone="warn" title={report.anchor.aheadOfHead.disclosure}>
+                Anchor past chain head (seq {report.anchor.aheadOfHead.seq})
+              </Badge>
+            )}
             {report.anchor.unanchoredRows != null && report.anchor.unanchoredRows > 0 && (
-              <span className={v.dim}>{report.anchor.unanchoredRows} row(s) newer than the last anchor</span>
+              <span className={v.dim}>{plural(report.anchor.unanchoredRows, "row")} newer than the last anchor</span>
             )}
           </div>
           <p className={v.faint}>{report.anchor.disclosure}</p>
+          {report.anchor.aheadOfHead && (
+            <p className={v.faint} data-testid="anchor-ahead">
+              {report.anchor.aheadOfHead.disclosure}
+            </p>
+          )}
           {report.legacy.unchainedRowsBeforeGenesis > 0 && (
             <p className={v.faint}>{report.legacy.disclosure}</p>
           )}

@@ -1585,10 +1585,10 @@ export function describeEvidenceAdapters(): Array<{
  * so the gateway, the tests and the ADR cannot drift from each other.
  */
 export const EVIDENCE_ADAPTER_POSTURE =
-  "An adapter READS A FILE YOU EXPORTED. regulAIt still ships no collector, still sits on no network path, and " +
-  "still discovers nothing on its own: these adapters remove the manual reshaping step between your export and " +
+  "An adapter reads a file you exported. regulAIt ships no collector, sits on no network path, and " +
+  "discovers nothing on its own: these adapters remove the manual reshaping step between your export and " +
   "regulAIt's evidence model, and change nothing about coverage. Coverage remains exactly what you exported. " +
-  "Every adapter states, separately, whether it implements a PUBLISHED grammar or was mapped by you — and none of " +
+  "Each adapter states whether it implements a published format or was mapped by you — and none of " +
   "them has been verified against a live export from any vendor's product by this project.";
 
 // ===========================================================================

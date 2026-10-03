@@ -15,8 +15,10 @@ import { buildApp } from "./app.js";
 /**
  * PILLAR 6 §8/§10 — semantic caching, end to end: a REAL per-(user,agent)
  * exact-match response cache. An opt-in (semanticCache:true) dispatch whose
- * normalized input (whitespace/case-insensitive) already has a fresh stored
- * answer for the SAME user+agent is served straight from the cache — the
+ * byte-identical request (ADR-0146 — no case/whitespace normalisation; the
+ * full request/configuration matrix lives in zz-aer041-native-cache-identity)
+ * already has a fresh stored answer for the SAME user+agent is served straight
+ * from the cache — the
  * provider is skipped (no usage_events, no spend), the response is flagged
  * cached:true, and ONE semantic_caching cost_events row records the whole-call
  * saving. The governance boundary is absolute (§12): the lookup is scoped by
@@ -121,7 +123,44 @@ afterAll(async () => {
 });
 
 describe("semantic caching — real per-(user,agent) exact-match cache", () => {
-  it("(a) MISS then a normalized-equal re-ask is a HIT: served from cache, no new usage row, one cost row", async () => {
+  it("rechecks current output PII policy on the native invoke hit before serving or recording savings", async () => {
+    const suffix = Math.random().toString(36).slice(2, 8);
+    const u = await makeUser(`sc-policy-${suffix}@example.com`);
+    await grant(u.id, agentId);
+    const prompt = `native cache output pii ${suffix}`;
+    const settings = await app.inject({ method: "GET", url: "/v1/org/settings", headers: AUTH });
+    const prior = settings.json().settings.defaultPiiMode as string;
+    try {
+      const first = await invoke(u.auth, agentId, { input: prompt, semanticCache: true });
+      expect(first.cached).toBeFalsy();
+      const row = (await cacheRows(u.id))[0];
+      expect(row).toBeDefined();
+      const cachedText = `native-sensitive-${suffix}@example.com`;
+      await db.update(semanticCache).set({ outputText: cachedText }).where(eq(semanticCache.id, row!.id));
+      const policy = await app.inject({
+        method: "PUT", url: "/v1/org/settings", headers: AUTH, payload: { defaultPiiMode: "block" },
+      });
+      expect(policy.statusCode).toBe(200);
+      const beforeUsage = await usageCount(u.id);
+      const beforeSavings = (await cacheHitRows(u.id)).length;
+      const denied = await app.inject({
+        method: "POST", url: `/v1/agents/${agentId}/invoke`, headers: u.auth,
+        payload: { mode: "chat", dispatch: true, input: prompt, semanticCache: true },
+      });
+      expect(denied.statusCode).toBe(403);
+      expect(denied.json().error).toBe("pii_blocked");
+      expect(denied.body).not.toContain(cachedText);
+      expect(await usageCount(u.id)).toBe(beforeUsage);
+      expect((await cacheHitRows(u.id)).length).toBe(beforeSavings);
+    } finally {
+      const restored = await app.inject({
+        method: "PUT", url: "/v1/org/settings", headers: AUTH, payload: { defaultPiiMode: prior },
+      });
+      expect(restored.statusCode).toBe(200);
+    }
+  });
+
+  it("(a) MISS then a byte-identical re-ask is a HIT: served from cache, no new usage row, one cost row", async () => {
     const u = await makeUser("sc-hit@example.com");
     await grant(u.id, agentId);
 
@@ -140,9 +179,12 @@ describe("semantic caching — real per-(user,agent) exact-match cache", () => {
     // one cache row was stored for this (user, agent)
     expect(await cacheRows(u.id)).toHaveLength(1);
 
-    // SECOND: same user+agent, normalized-equal input (extra whitespace + case)
+    // SECOND: same user+agent, byte-identical input. This used to send a
+    // case/whitespace VARIANT and expect a hit — that pinned AER-041's defect
+    // (case-sensitive identifiers collided). A variant now misses; see
+    // zz-aer041-native-cache-identity.test.ts.
     const second = await invoke(u.auth, agentId, {
-      input: "  explain   THE   cap    theorem\tclearly  ",
+      input: "Explain the CAP theorem clearly",
       semanticCache: true,
     });
     expect(second.cached).toBe(true);

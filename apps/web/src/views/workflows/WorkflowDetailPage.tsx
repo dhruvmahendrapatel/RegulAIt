@@ -9,14 +9,15 @@ import { Link, useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../api/client";
 import type { CheckResult, WorkflowDetailResponse } from "../../api/types";
-import { ago } from "../../api/format";
+import { ago, humanize } from "../../api/format";
+import { QuestionnaireView } from "../admin/governance/UseCaseQuestionnaire";
 import { PageHeader } from "../../shell/AppShell";
 import {
   Badge,
   Button,
   Card,
   CodeBlock,
-  ErrorState,
+  RecordError,
   IdChip,
   SkeletonBlock,
   StatusBadge,
@@ -34,6 +35,9 @@ export default function WorkflowDetailPage() {
   const queryClient = useQueryClient();
   const [artifactText, setArtifactText] = useState("");
   const [deployReason, setDeployReason] = useState("");
+  // ADR-0167 (AUTHZ-06): the initiator marking their own failed check as
+  // passing is a self-attestation — the gateway refuses it without a reason
+  const [checkReason, setCheckReason] = useState("");
   const [actionError, setActionError] = useState<string | null>(null);
 
   const q = useQuery({
@@ -54,15 +58,15 @@ export default function WorkflowDetailPage() {
     );
   }
   if (q.isError || !q.data) {
-    const err = q.error as { status?: number; message?: string } | null;
     return (
       <>
         <PageHeader title="Workflow" />
         <Card>
-          <ErrorState
-            message={err?.message ?? "unknown error"}
-            access={err?.status === 403}
+          <RecordError
+            noun="workflow"
+            error={q.error}
             onRetry={() => void q.refetch()}
+            action={<Link to="/workflows">← All workflows</Link>}
           />
         </Card>
       </>
@@ -142,9 +146,9 @@ export default function WorkflowDetailPage() {
                       ? s.stageFailed
                       : s.stage;
               return (
-                <span key={stage.id} className={cls}>
-                  {stage.id}
-                  <span className={s.stageType}>{stage.type}</span>
+                <span key={stage.id} className={cls} title={`${stage.id} · ${stage.type}`}>
+                  {humanize(stage.id)}
+                  <span className={s.stageType}>{humanize(stage.type)}</span>
                 </span>
               );
             })}
@@ -280,52 +284,82 @@ export default function WorkflowDetailPage() {
           </Card>
         )}
 
-        {inst.status === "blocked_on_check" && current && (
-          <Card>
-            <span className={v.rowTight}>
-              <Badge tone="danger">checks failed</Badge>
-              <span className={v.dim}>
-                {failedChecks.map((c) => c.check).join(", ") || "a required check"} must pass before
-                this can proceed.
-              </span>
-            </span>
-            {failedChecks.map((c) => (
-              <div key={c.check} className={v.row} style={{ marginTop: "var(--s1)" }}>
-                <span className={v.mono}>{c.check}</span>
-                {c.severity && <Badge tone="warn">{c.severity}</Badge>}
-                <Button
-                  size="sm"
-                  title="Record this check as remediated (reports a passing result)"
-                  onClick={() =>
-                    void act(
-                      () =>
-                        api.post(`/v1/workflows/instances/${inst.id}/checks`, {
-                          stageId: current.id,
-                          results: [{ check: c.check, status: "passed", detail: "remediated" }],
-                        }),
-                      `Marked ${c.check} passing — re-run checks to proceed`,
-                    )
-                  }
-                >
-                  mark passing
-                </Button>
-              </div>
-            ))}
-            <div className={v.row} style={{ marginTop: "var(--s2)" }}>
-              <Button
-                variant="primary"
-                onClick={() =>
-                  void act(
-                    () => api.post(`/v1/workflows/instances/${inst.id}/recheck`, { stageId: current.id }),
-                    "Re-ran checks",
-                  )
-                }
-              >
-                Re-run checks
-              </Button>
-            </div>
-          </Card>
-        )}
+        {inst.status === "blocked_on_check" &&
+          current &&
+          (() => {
+            // ADR-0167 (AUTHZ-06): when the person marking a check passing is
+            // the one who asked for the change, that is a self-attestation —
+            // the gateway requires a recorded reason, stamps the result as
+            // self-reported, and writes an audit row. An arm's-length admin
+            // keeps the one-click action.
+            const selfReporting = Boolean(me?.userId && me.userId === inst.initiatorUserId);
+            const checkReasonMissing = selfReporting && !checkReason.trim();
+            return (
+              <Card>
+                <span className={v.rowTight}>
+                  <Badge tone="danger">checks failed</Badge>
+                  <span className={v.dim}>
+                    {failedChecks.map((c) => c.check).join(", ") || "a required check"} must pass before
+                    this can proceed.
+                  </span>
+                </span>
+                {selfReporting && (
+                  <label className={v.dim} style={{ display: "block", marginTop: "var(--s2)" }}>
+                    You initiated this change, so marking one of its own checks passing is a self-attestation
+                    — record why it now passes (required, shown to approvers as “self-reported”):
+                    <textarea
+                      value={checkReason}
+                      onChange={(e) => setCheckReason(e.target.value)}
+                      rows={2}
+                      style={{ display: "block", width: "100%", marginTop: "var(--s1)" }}
+                      placeholder="e.g. re-ran the scan after upgrading lodash; CI run #412 is green"
+                    />
+                  </label>
+                )}
+                {failedChecks.map((c) => (
+                  <div key={c.check} className={v.row} style={{ marginTop: "var(--s1)" }}>
+                    <span className={v.mono}>{c.check}</span>
+                    {c.severity && <Badge tone="warn">{c.severity}</Badge>}
+                    <Button
+                      size="sm"
+                      disabled={checkReasonMissing}
+                      title={
+                        checkReasonMissing
+                          ? "A recorded reason is required when the initiator marks their own check passing"
+                          : "Record this check as remediated (reports a passing result)"
+                      }
+                      onClick={() =>
+                        void act(
+                          () =>
+                            api.post(`/v1/workflows/instances/${inst.id}/checks`, {
+                              stageId: current.id,
+                              results: [{ check: c.check, status: "passed", detail: "remediated" }],
+                              ...(checkReason.trim() ? { reason: checkReason.trim() } : {}),
+                            }),
+                          `Marked ${c.check} passing — re-run checks to proceed`,
+                        )
+                      }
+                    >
+                      mark passing
+                    </Button>
+                  </div>
+                ))}
+                <div className={v.row} style={{ marginTop: "var(--s2)" }}>
+                  <Button
+                    variant="primary"
+                    onClick={() =>
+                      void act(
+                        () => api.post(`/v1/workflows/instances/${inst.id}/recheck`, { stageId: current.id }),
+                        "Re-ran checks",
+                      )
+                    }
+                  >
+                    Re-run checks
+                  </Button>
+                </div>
+              </Card>
+            );
+          })()}
 
         {inst.status === "blocked_on_deploy" &&
           current &&
@@ -410,10 +444,14 @@ export default function WorkflowDetailPage() {
             {artifacts!.map((a) => (
               <details key={a.id} style={{ marginBottom: "var(--s1)" }}>
                 <summary className={v.dim} style={{ cursor: "pointer" }}>
-                  {a.output} v{a.version}
+                  {humanize(a.output)} (v{a.version})
                 </summary>
                 <div style={{ marginTop: "var(--s0)" }}>
-                  <CodeBlock maxHeight="260px">{a.content}</CodeBlock>
+                  {a.output === "use_case_questionnaire" ? (
+                    <QuestionnaireView content={a.content} />
+                  ) : (
+                    <CodeBlock maxHeight="260px">{a.content}</CodeBlock>
+                  )}
                 </div>
               </details>
             ))}
@@ -426,6 +464,18 @@ export default function WorkflowDetailPage() {
               <div key={c.check} className={v.listRow} style={{ alignItems: "center" }}>
                 <span className={v.mono}>{c.check}</span>
                 {c.severity && <Badge tone="warn">{c.severity}</Badge>}
+                {c.selfReported && (
+                  <Badge
+                    tone="warn"
+                    title={
+                      c.reason
+                        ? `Reported by the change's own initiator, not by CI — their recorded reason: ${c.reason}`
+                        : "Reported by the change's own initiator, not by CI"
+                    }
+                  >
+                    self-reported
+                  </Badge>
+                )}
                 <span className={v.faint}>{c.detail ?? ""}</span>
                 <span className={v.grow} />
                 <StatusBadge status={c.status} />

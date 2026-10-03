@@ -154,6 +154,35 @@ describe("deploy target CRUD (admin)", () => {
 });
 
 describe("deploy → verify → rollback", () => {
+  it("a deployment halted after approval stays unexecuted and retryable", async () => {
+    await registerTemplate("wd-halt", "wd-halt-change", "wd-prod");
+    const id = await start("wd-halt-change");
+    const stopped = await app.inject({
+      method: "PUT", url: "/v1/execution/mode", headers: AUTH,
+      payload: { mode: "halted", reason: "test final-call deploy stop" },
+    });
+    expect(stopped.statusCode).toBe(200);
+    try {
+      await approveGate(id);
+      const paused = await view(id);
+      expect(paused.status).toBe("awaiting_execution");
+      expect(paused.context["deploy:deploy"]).toBeUndefined();
+      expect(paused.context.lastError).toContain("execution mode is 'halted'");
+    } finally {
+      const resumed = await app.inject({
+        method: "PUT", url: "/v1/execution/mode", headers: AUTH,
+        payload: { mode: "normal", reason: "test final-call deploy resume" },
+      });
+      expect(resumed.statusCode).toBe(200);
+    }
+    const retry = await app.inject({
+      method: "POST", url: `/v1/workflows/instances/${id}/advance`, headers: piaAuth,
+      payload: { stageId: "deploy" },
+    });
+    expect(retry.statusCode).toBe(200);
+    expect((await view(id)).context["deploy:deploy"]).toBeDefined();
+  });
+
   it("a passing post-deploy verify deploys, skips rollback, and advances to the final gate", async () => {
     await registerTemplate("wd-ok", "wd-ok-change", "wd-prod");
     const id = await start("wd-ok-change");

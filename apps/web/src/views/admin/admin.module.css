@@ -370,3 +370,19 @@
 @media (max-width: 560px) {
   .review > div { grid-template-columns: 1fr; gap: 2px; }
 }
+
+/**
+ * An INLINE EDITOR opened from a table row (B9c). Visually inset rather than a
+ * second Card: the thing being edited is the row above it, and a nested Card
+ * reads as a separate object. Uses the same border/surface tokens as `.outcome`
+ * so the two stack without a seam when a refusal renders inside one.
+ */
+.subCard {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  padding: var(--s2);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+}

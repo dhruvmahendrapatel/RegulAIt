@@ -17,6 +17,7 @@ import {
   costEvents,
   eq,
   gt,
+  governancePolicyEpoch,
   interceptionSettings,
   INTERCEPTION_SETTINGS_ID,
   isNull,
@@ -39,6 +40,7 @@ import {
   toolPayloadPreview,
   admissionFindingSummary,
   type PiiHit,
+  type PreparedPiiApproval,
   type ScannableTool,
 } from "@regulait/shared";
 // ADR-0070 — the tool span. A governed tool call is the other half of what a
@@ -53,14 +55,25 @@ import {
   runGuardrails,
   type DispatchGuardrails,
 } from "./guardrails.js";
-import { governedEvaluate, type RetiredApproval } from "./governed-evaluate.js";
+import { approvalTargetForServer, governedEvaluate, type RetiredApproval } from "./governed-evaluate.js";
+import { prepareMcpPiiAction, redactMcpResult } from "./mcp-pii.js";
 import { abacPrincipalFromRequest, type AbacPrincipalContext } from "./abac-principal.js";
 import {
+  auditMcpEgressDenied,
   auditMcpUpstreamUnreachable,
+  checkMcpServerUrl,
   guardedMcpConnect,
   McpEgressBlockedError,
 } from "./mcp-egress.js";
 import { timeouts } from "./timeouts.js";
+import {
+  attemptsForToolKind,
+  classifyUpstreamError,
+  isDeadlineError,
+  newRetryReport,
+  withUpstreamRetry,
+  type RetryReport,
+} from "./upstream-retry.js";
 import {
   breakerAdmits,
   recordUpstreamFailure,
@@ -133,20 +146,86 @@ function toolKind(tool: Tool): "read" | "write" {
  * needs an egress_allow_hosts entry. A refusal is audited and throws
  * McpEgressBlockedError with nothing leaving the box; on allow, every HTTP
  * request of the session goes through the pinned guarded fetch. */
+/**
+ * AER-024 — ADMISSION AND EGRESS ARE ADJUDICATED BEFORE THE BREAKER IS ASKED.
+ *
+ * The breaker (ADR-0126) used to be consulted first on both upstream paths,
+ * and an open breaker answered `503 mcp_upstream_circuit_open` before
+ * `connectUpstream` ever ran `assertAdmitted` (ADR-0097) or the egress URL
+ * check (ADR-0043). So a server that was HELD by admission, or that pointed
+ * at a destination this deployment refuses to reach, hid behind "upstream
+ * unavailable" for as long as its circuit stayed open: the caller was told to
+ * retry later, no deny row was filed, and a half-open probe election could be
+ * spent on a request that was never permitted to go out.
+ *
+ * This preflight runs the SAME two gates `connectUpstream` runs, in the same
+ * order (admission first — a held server is refused with no DNS lookup, the
+ * standard ADR-0097 holds itself to — then the egress decision), and it is
+ * SIDE-EFFECT-FREE TOWARDS THE UPSTREAM in the sense that matters: nothing
+ * is connected to, nothing is sent, and the breaker is neither read nor
+ * elected. It is NOT network-free — for an admitted server the egress check
+ * resolves a hostname URL (one DNS lookup, bounded by the guard's deadline),
+ * and that lookup now happens on every request while the breaker is open,
+ * where the old order answered 503 at once. A held server is refused before
+ * any lookup. A refusal is audited the way the connect-time guard audits it
+ * (`mcp-admission-held` / `mcp-server-egress-blocked`, phase `connect`) and
+ * thrown as the same error class, so every caller's existing mapping of
+ * those two refusals applies unchanged. `connectUpstream` still re-adjudicates
+ * both gates on its own (a retry attempt must never become a bypass); on the
+ * allow path that is one extra read, on the refuse path it is never reached.
+ */
+export async function preflightUpstream(
+  db: Db,
+  serverRow: { id: string; url: string; allowPrivateRanges: boolean | null },
+): Promise<void> {
+  await assertAdmitted(db, serverRow.id);
+  const { decision, posture } = await checkMcpServerUrl(db, serverRow.url, serverRow.allowPrivateRanges);
+  if (!decision.ok) {
+    await auditMcpEgressDenied(db, {
+      serverId: serverRow.id,
+      url: serverRow.url,
+      phase: "connect",
+      decision,
+      reason: `MCP upstream connect refused: ${decision.reason}`,
+      openByDefault: posture.openByDefault,
+    });
+    throw new McpEgressBlockedError(decision);
+  }
+}
+
 export async function connectUpstream(
   db: Db,
   serverRow: { id: string; url: string; allowPrivateRanges: boolean | null },
+  opts: { retry?: RetryReport; retryAttempts?: number } = {},
 ): Promise<Client> {
-  // ADR-0097 — THE ADMISSION GATE, and note the ORDER. It runs BEFORE
-  // `guardedMcpConnect`, which is the only function in this codebase that
-  // opens an outbound MCP socket, so a held server is refused with provably
-  // zero outbound attempt — the same standard ADR-0043 holds itself to, proven
-  // the same way (a recording resolver that must see no lookup at all).
-  // Re-read per connect, never cached: the verdict recorded at the last sync is
-  // not a fact about this request, and a row written straight into Postgres
-  // must be adjudicated too.
-  await assertAdmitted(db, serverRow.id);
-  return guardedMcpConnect(db, serverRow);
+  // ADR-0128 — THE RETRY SEQUENCE WRAPS BOTH GATES, and that is the point of
+  // putting it here rather than inside `guardedMcpConnect`. A handshake is
+  // idempotent so it may be repeated; an egress block or an admission hold is
+  // OUR adjudication, is classified non-retryable, and therefore exits on the
+  // first attempt with the gates having run exactly once. Wrapping the gates
+  // also means a retry cannot become a bypass: every attempt re-adjudicates.
+  //
+  // The budget for the WHOLE sequence is the one configured connect deadline,
+  // so retrying never extends the bound an operator set — see upstream-retry.ts.
+  return withUpstreamRetry(
+    async ({ deadlineMs }) => {
+      // ADR-0097 — THE ADMISSION GATE, and note the ORDER. It runs BEFORE
+      // `guardedMcpConnect`, which is the only function in this codebase that
+      // opens an outbound MCP socket, so a held server is refused with provably
+      // zero outbound attempt — the same standard ADR-0043 holds itself to,
+      // proven the same way (a recording resolver that must see no lookup at
+      // all). Re-read per connect, never cached: the verdict recorded at the
+      // last sync is not a fact about this request, and a row written straight
+      // into Postgres must be adjudicated too.
+      await assertAdmitted(db, serverRow.id);
+      return guardedMcpConnect(db, serverRow, { connectDeadlineMs: deadlineMs });
+    },
+    {
+      budgetMs: timeouts().mcpConnectMs,
+      ...(opts.retryAttempts !== undefined ? { maxAttempts: opts.retryAttempts } : {}),
+      ...(opts.retry ? { report: opts.retry } : {}),
+    },
+  );
 }
 
 /** The one governed tool-call primitive, shared by the MCP proxy route (a
@@ -173,6 +252,13 @@ export type GovernedToolCallOutcome =
       costUsd?: number | null;
     }
   | { kind: "unknown_tool" }
+  /**
+   * AER-022: this upstream is circuit-broken (ADR-0126) and nothing was
+   * attempted. Distinct from every governance outcome around it because it says
+   * nothing about the CALLER's entitlement — the call was fine and the server is
+   * not — and distinct from a plain failure because we can say when to come back.
+   */
+  | { kind: "upstream_circuit_open"; reason: string; retryAfterMs: number }
   | { kind: "denied"; decision: Decision }
   | { kind: "pii_blocked"; reason: string; pii: McpPii }
   /** ADR-0042: a content-safety detector refused the tool ARGUMENTS. Distinct
@@ -211,12 +297,49 @@ export type GovernedToolCallOutcome =
       supersededApprovalIds: string[];
       requeuedApprovalId: string | null;
     }
-  /** ADR-0103: the ATTRIBUTED project's pillar-5 budget is exhausted, so this
-   * paid tool call may not run. Distinct from `denied` (entitlement) and from
+  /** ADR-0103: the ATTRIBUTED project's pillar-5 budget is exhausted, so the
+   * project's dispatches are FROZEN and this tool call may not run (priced or
+   * not — the amendment names it a project dispatch freeze, AER-002). Distinct from `denied` (entitlement) and from
    * the run/node budget the orchestrator enforces separately — this is the
    * PROJECT ledger, and it carries the same status/error the model path
    * returns so the two surfaces name the same condition identically. */
   | { kind: "budget_blocked"; status: number; error: string; detail?: string };
+
+/** Consume only if the policy snapshot used to evaluate this call is still current. */
+export async function consumeBoundApproval(
+  db: Db,
+  input: {
+    approvalId: string;
+    policyEpoch: number;
+    approvalScope: "action" | "tool";
+    argumentsDigest: string;
+    contextDigest: string;
+  },
+): Promise<boolean> {
+  return db.transaction(async (tx) => {
+    const [generation] = await tx
+      .select({ epoch: governancePolicyEpoch.epoch })
+      .from(governancePolicyEpoch)
+      .for("share");
+    if (!generation || generation.epoch !== input.policyEpoch) return false;
+    const consumed = await tx
+      .update(approvals)
+      .set({ status: "consumed" })
+      .where(
+        and(
+          eq(approvals.id, input.approvalId),
+          eq(approvals.status, "approved"),
+          ...(input.approvalScope === "action"
+            ? [eq(approvals.argumentsDigest, input.argumentsDigest)]
+            : []),
+          eq(approvals.contextDigest, input.contextDigest),
+          or(isNull(approvals.expiresAt), gt(approvals.expiresAt, sql`now()`))!,
+        ),
+      )
+      .returning({ id: approvals.id });
+    return consumed.length === 1;
+  });
+}
 
 /**
  * ADR-0105 — RETIRE A CONSENT THAT NO LONGER SATISFIES THE CALL, VISIBLY.
@@ -286,31 +409,12 @@ async function supersedeStaleConsent(
  * model and connector paths hold). */
 export interface McpPii {
   mode: PiiMode;
-  action: "block" | "warn" | "log";
+  action: "block" | "warn" | "log" | "redact";
   inputHits: PiiHit[];
   outputHits: PiiHit[];
   withheld: boolean;
 }
 
-/**
- * Is this failure a DEADLINE rather than a refusal?
- *
- * Three shapes reach here and they come from different layers, which is why
- * this is a predicate and not an `instanceof`: `AbortSignal.timeout` rejects
- * with a DOMException named `TimeoutError`, the MCP SDK raises `McpError` with
- * `ErrorCode.RequestTimeout` (-32001) when ITS timer fires first, and undici
- * surfaces some connect deadlines as an `Error` whose `cause.code` is one of
- * the ETIMEDOUT family. Missing one would silently downgrade a timeout to
- * "unreachable", which points an operator at the wrong thing.
- */
-function isDeadlineError(err: unknown): boolean {
-  if (err instanceof McpError && err.code === ErrorCode.RequestTimeout) return true;
-  const e = err as { name?: string; code?: unknown; cause?: { code?: unknown } } | null;
-  if (!e) return false;
-  if (e.name === "TimeoutError" || e.name === "AbortError") return true;
-  const code = e.code ?? e.cause?.code;
-  return code === "ETIMEDOUT" || code === "UND_ERR_CONNECT_TIMEOUT" || code === "UND_ERR_HEADERS_TIMEOUT";
-}
 
 export async function executeGovernedToolCall(
   db: Db,
@@ -352,7 +456,8 @@ export async function executeGovernedToolCall(
   // whatever it returned. A refusal (entitlement, PII, guardrail, pending
   // approval) is a `denied` span carrying its reason, not an absent one.
   const traceStartedAt = new Date();
-  const outcome = await executeGovernedToolCallInner(db, _dataKey, args);
+  const traceInput: { value?: Record<string, unknown> } = {};
+  const outcome = await executeGovernedToolCallInner(db, _dataKey, args, traceInput);
   if (args.trace) {
     const denied =
       outcome.kind === "denied" ||
@@ -406,7 +511,7 @@ export async function executeGovernedToolCall(
       // TOOL I/O. Arguments are what the model asked for; content is what the
       // governed path already decided the caller may see — on a PII/guardrail
       // withhold, that is the marker, not the payload.
-      inputText: capture ? toolPayloadPreview(args.arguments, max) : null,
+      inputText: capture && traceInput.value ? toolPayloadPreview(traceInput.value, max) : null,
       outputText:
         capture && outcome.kind === "allowed" ? toolPayloadPreview(outcome.content, max) : null,
       contentWithheld:
@@ -427,9 +532,13 @@ async function executeGovernedToolCallInner(
   db: Db,
   _dataKey: string | undefined,
   args: Parameters<typeof executeGovernedToolCall>[2],
+  traceInput: { value?: Record<string, unknown> },
 ): Promise<GovernedToolCallOutcome> {
   const { userId, serverId, toolName } = args;
   const projectId = args.projectId ?? null;
+  const [preparationGeneration] = await db.select({ epoch: governancePolicyEpoch.epoch }).from(governancePolicyEpoch);
+  const piiMode: PiiMode | null = await projectPiiMode(db, projectId);
+  const piiIntl = await piiInternationalCategories(db);
   const [serverRow] = await db.select().from(mcpServers).where(eq(mcpServers.id, serverId));
   if (!serverRow) return { kind: "unknown_tool" };
 
@@ -446,6 +555,7 @@ async function executeGovernedToolCallInner(
   // Unknown tool: sync the manifest once in case it's newly added upstream.
   let kind = toolRow?.kind;
   let upstream: Client | null = null;
+  const redactActive = piiMode === "redact";
   const closeUpstream = async () => {
     if (upstream) {
       const u = upstream;
@@ -453,13 +563,143 @@ async function executeGovernedToolCallInner(
       await u.close();
     }
   };
+  // AER-022 — THE BREAKER, AT THE ONE SHARED OPERATION BOUNDARY.
+  //
+  // ADR-0126 put admission and recording in the HTTP proxy ROUTE only. That left
+  // two holes an upstream could drive through: this primitive opens its own
+  // connection and runs its own `listTools`/`callTool`, and pillar-7's delegated
+  // workers call it DIRECTLY (`orchestration.ts`), never passing the route at
+  // all. So an upstream that completed `initialize` and then hung every real
+  // operation was never circuit-broken, and each proxy request RESET the
+  // accumulated failures on its successful handshake.
+  //
+  // The election lives here rather than in the route because there must be
+  // exactly ONE per operation: `breakerAdmits` moves `breaker_opened_at` in a
+  // conditional UPDATE to elect a single half-open prober, so two callers would
+  // mean the route wins and this primitive then fast-fails — breaking the very
+  // recovery path the election exists to protect. The route delegates tool
+  // calls without connecting; it separately elects for manifest requests.
+  //
+  // MEMOISED, AND CONSULTED AT THE POINT OF CONTACT — not at the top of this
+  // function. There are two places below that reach an upstream (the manifest
+  // sync, and the call itself), and the breaker must guard both without holding
+  // two elections. Checking once at the top would have done that, but it would
+  // also have put the breaker AHEAD OF THE KERNEL: a call this deployment
+  // forbids would come back "upstream unavailable" and file no deny row, which
+  // inverts this product's first rule — governance decides, and an outage never
+  // silently stands in for a decision. So the election happens on first contact
+  // and its verdict is reused, leaving the governance decision where it was.
+  let breakerVerdict: { refusedUntilMs: number; reason: string } | null = null;
+  let breakerElected = false;
+  const breakerRefusesUpstream = async (): Promise<GovernedToolCallOutcome | null> => {
+    if (!breakerElected) {
+      // AER-024: our own two refusals come BEFORE the breaker is asked, so a
+      // held or egress-refused server is named as such — audited, as a policy
+      // decision — rather than reported as an outage for as long as its
+      // circuit is open. Thrown, not returned: both errors already have their
+      // mapping on every surface, and neither counts as an upstream failure
+      // (`operationFailed` classifies them as our own refusal).
+      try {
+        await preflightUpstream(db, serverRow);
+      } catch (err) {
+        if (redactActive) throw new Error("MCP upstream connection refused under PII redaction");
+        throw err;
+      }
+      breakerElected = true;
+      breakerVerdict = await breakerAdmits(db, serverRow);
+    }
+    return breakerVerdict === null
+      ? null
+      : {
+          kind: "upstream_circuit_open",
+          reason: breakerVerdict.reason,
+          retryAfterMs: breakerVerdict.refusedUntilMs,
+        };
+  };
+
+  /**
+   * AER-022 — a SUCCESSFUL OPERATION is the only thing that closes the breaker.
+   *
+   * The bug this replaces recorded success after `initialize`. A handshake proves
+   * the socket answered; it does not prove the server works, so treating it as
+   * health erased exactly the failures that mattered. Called after `listTools`
+   * and after `callTool` — the operations a caller actually wanted.
+   */
+  //
+  // Once per operation, not once per call: this primitive may run BOTH a
+  // `listTools` (the manifest-sync path above) and a `callTool`, and
+  // `recordUpstreamSuccess` reads the failure count off the row SNAPSHOT taken
+  // before either ran. Without the latch the second success would re-clear an
+  // already-cleared breaker and file a SECOND "recovered" transition for one
+  // recovery — the audit ledger's whole job here is that a transition means a
+  // transition.
+  let breakerCleared = false;
+  const operationSucceeded = async () => {
+    if (breakerCleared) return;
+    breakerCleared = true;
+    await recordUpstreamSuccess(db, serverRow);
+  };
+
+  /**
+   * One attributable upstream failure. OUR OWN refusals are never charged here —
+   * an admission hold (ADR-0097) or an egress block (ADR-0043) is a decision this
+   * gateway made, and an air-gapped install refuses every host by design, so
+   * counting them would report every upstream as broken where nothing is wrong.
+   * Governance outcomes never reach this function at all: they are returned as
+   * values rather than thrown.
+   */
+  const operationFailed = async (err: unknown) => {
+    if (classifyUpstreamError(err).why === "our_own_refusal") return;
+    await recordUpstreamFailure(db, serverRow, redactActive
+      ? "MCP upstream failed during PII-redacted dispatch"
+      : err instanceof Error ? err.message : String(err));
+  };
+
   try {
     if (!kind) {
-      upstream = await connectUpstream(db, serverRow);
-      const upstreamTools = await syncUpstreamTools(db, serverId, upstream);
+      // AER-022: connect + `tools/list` is a real upstream OPERATION, so its
+      // outcome belongs to the breaker — this is one of the two paths that used
+      // to contact an upstream with no breaker involvement whatsoever.
+      const refused = await breakerRefusesUpstream();
+      if (refused) return refused;
+      let upstreamTools;
+      try {
+        upstream = await connectUpstream(db, serverRow);
+        upstreamTools = await syncUpstreamTools(db, serverId, upstream);
+      } catch (err) {
+        await operationFailed(err);
+        if (redactActive) throw new Error("MCP upstream discovery failed under PII redaction");
+        throw err;
+      }
       const found = upstreamTools.find((t) => t.name === toolName);
-      if (!found) return { kind: "unknown_tool" };
+      if (!found) {
+        await operationSucceeded();
+        return { kind: "unknown_tool" };
+      }
       kind = toolKind(found);
+    }
+
+    // The generation was read before the server/tool snapshot above. A first
+    // manifest sync changes it; redacted callers retry using that stored schema.
+    let preparedPii: PreparedPiiApproval | undefined;
+    const refuseTransformation = async (reason: string): Promise<GovernedToolCallOutcome> => {
+      const decision: Decision = { effect: "deny", ruleId: "pii-transformation-refused", ruleChain: [], reason };
+      await db.insert(auditLog).values({ userId, serverId, toolName, ...decision, detail: { projectId, phase: "pii" } });
+      return { kind: "denied", decision };
+    };
+    if (piiMode === "redact") {
+      const [currentTool] = await db.select().from(mcpTools).where(and(eq(mcpTools.serverId, serverId), eq(mcpTools.name, toolName)));
+      try {
+        preparedPii = prepareMcpPiiAction(projectId, args.arguments, piiIntl, currentTool?.inputSchema);
+        // The preparation validated ordinary JSON. Snapshot the original too,
+        // so caller mutation cannot move either data-scope checks or identity.
+        args = { ...args, arguments: structuredClone(args.arguments ?? {}) };
+        traceInput.value = preparedPii.effectiveArguments;
+      } catch {
+        return refuseTransformation("MCP PII transformation or input schema validation failed");
+      }
+    } else {
+      traceInput.value = args.arguments ?? {};
     }
 
     const {
@@ -468,6 +708,7 @@ async function executeGovernedToolCallInner(
       argumentsDigest,
       approvalScope,
       contextDigest,
+      policyEpoch,
       retiredApprovals,
     } = await governedEvaluate(
       db,
@@ -482,7 +723,15 @@ async function executeGovernedToolCallInner(
       // ADR-0040: the ABAC principal bag's session facts, when a request is
       // behind this call.
       args.principal,
+      undefined,
+      preparedPii,
+      // AER-039: bind the consent to the row this call connects with
+      approvalTargetForServer(serverId, serverRow),
     );
+
+    if (preparedPii && preparationGeneration?.epoch !== policyEpoch) {
+      return refuseTransformation("PII policy changed during action preparation; retry for fresh evaluation");
+    }
 
     // ADR-0104 — THE FORENSIC HALF, and it is unconditional.
     //
@@ -511,7 +760,9 @@ async function executeGovernedToolCallInner(
       // project for the same call; the two records now agree.
       // NULL for an unattributed call, exactly as the usage row is: an
       // unattributed refusal is not evidence about any project.
-      detail: { argumentsDigest, approvalScope, contextDigest, projectId },
+      // AER-039: WHERE the call was bound to go — host and manifest identity
+      // only (a URL can carry credentials; the digest above binds the rest)
+      detail: { argumentsDigest, approvalScope, contextDigest, projectId, target: auditTarget(serverRow) },
       effect: decision.effect,
       ruleId: decision.ruleId,
       ruleChain: decision.ruleChain,
@@ -671,6 +922,9 @@ async function executeGovernedToolCallInner(
             eq(approvals.serverId, serverId),
             eq(approvals.toolName, toolName),
             eq(approvals.status, "pending"),
+            eq(approvals.contextDigest, contextDigest),
+            eq(approvals.argumentsPreviewKind, preparedPii ? "mcp_redacted_v1" : "arguments_v1"),
+            eq(approvals.approvalScope, approvalScope),
             ...(approvalScope === "action"
               ? [eq(approvals.argumentsDigest, argumentsDigest)]
               : []),
@@ -703,13 +957,13 @@ async function executeGovernedToolCallInner(
               approverUserId: decision.approverUserId!,
               // ADR-0104: the fingerprint the consent will be BOUND to, and
               // beside it the SCRUBBED payload the approver actually reads.
-              // Both are stored under either scope — a tool-scoped approval
-              // still deserves to show a human what raised it. The digest is
-              // taken from the RAW arguments upstream in `governedEvaluate`;
-              // the preview is derived from the same raw value here, so
-              // redaction cannot move the consent identity.
+              // Redaction forces action scope and supplies a preview of the
+              // effective snapshot; consent also binds the original digest.
               argumentsDigest,
-              argumentsPreview: approvalArgumentsPreview(args.arguments),
+              argumentsPreview: preparedPii?.argumentsPreview ?? approvalArgumentsPreview(args.arguments),
+              argumentsPreviewKind: preparedPii ? "mcp_redacted_v1" : "arguments_v1",
+              approvalScope,
+              projectId,
               // ADR-0105: the POLICY identity this consent is being asked for,
               // and the clock it dies on. Both stamped HERE, at queue time —
               // the digest so the signature is bound to the policy the
@@ -757,12 +1011,10 @@ async function executeGovernedToolCallInner(
     // check runs on the tool ARGUMENTS, before the approval is consumed and
     // before the upstream is contacted, so a block executes nothing, consumes
     // no approval and bills nothing.
-    const piiMode: PiiMode | null = await projectPiiMode(db, projectId ?? null);
     // ADR-0117: the jurisdiction set, resolved once for this tool call and
     // shared by the argument gate and the tool-result gate below.
-    const piiIntl = await piiInternationalCategories(db);
-    let inputHits: PiiHit[] = [];
-    if (piiMode) {
+    let inputHits: PiiHit[] = preparedPii ? [...preparedPii.hits] : [];
+    if (piiMode && !preparedPii) {
       const chk = enforcePII(piiMode, { input: JSON.stringify(args.arguments ?? null) }, piiIntl);
       inputHits = chk.hits;
       if (chk.action === "block") {
@@ -833,50 +1085,49 @@ async function executeGovernedToolCallInner(
       }
     }
 
+    if (!upstream) {
+      const refused = await breakerRefusesUpstream();
+      if (refused) return refused;
+      try {
+        upstream = await connectUpstream(db, serverRow);
+      } catch (err) {
+        await operationFailed(err);
+        if (redactActive) throw new Error("MCP upstream connection failed under PII redaction");
+        throw err;
+      }
+    }
+    if (preparedPii) {
+      const [liveGeneration] = await db.select({ epoch: governancePolicyEpoch.epoch }).from(governancePolicyEpoch);
+      if (liveGeneration?.epoch !== policyEpoch) {
+        return refuseTransformation("PII or governance policy changed before execution; retry for fresh evaluation");
+      }
+    }
+
     if (approvedApprovalId) {
       // Atomically consume the approval; losing the race means another call
       // already spent it, so this call must go back through the queue.
       //
-      // ADR-0105 — THE WHOLE TEST IS IN THE PREDICATE, NOT AROUND IT.
-      //
-      // The matcher in `governedEvaluate` already refused a stale or expired
-      // row. This is the same test again, expressed as part of the SINGLE
-      // atomic statement that changes the row's state — so between the moment
-      // the decision was taken and the moment the consent is actually spent
-      // there is no window in which a row can be checked as good and then
-      // spent as bad. Two calls racing for one consent still resolve to exactly
-      // one winner (the `status = 'approved'` conjunct, unchanged), and a
-      // caller whose evaluation is already behind a policy activation cannot
-      // spend on the strength of it.
+      // A shared lock on the policy epoch orders this consume against policy
+      // writes. Their database triggers update the same row. If any write
+      // committed after evaluation began, this call must evaluate again.
       //
       //   * `arguments_digest` is asserted ONLY under action scope. Under the
       //     ADR-0104 `tool` escape hatch a different payload's digest — or a
       //     legacy NULL — is exactly what the row is allowed to carry, so
       //     asserting it there would quietly delete the escape hatch.
-      //   * `context_digest` must equal this call's, OR be NULL. A NULL is a
-      //     row queued before migration 0107; it is accepted because it is
-      //     still payload-bound under ADR-0104, and ADR-0105 argues that call
-      //     rather than leaving it implicit.
+      //   * `context_digest` must equal this call's. Legacy NULL rows re-queue.
       //   * `expires_at` must be absent or in the future, evaluated by the
       //     DATABASE's clock (`now()`), not this process's — the row is being
       //     changed there and the freshness question has to be answered there
       //     too.
-      const consumed = await db
-        .update(approvals)
-        .set({ status: "consumed" })
-        .where(
-          and(
-            eq(approvals.id, approvedApprovalId),
-            eq(approvals.status, "approved"),
-            ...(approvalScope === "action"
-              ? [eq(approvals.argumentsDigest, argumentsDigest)]
-              : []),
-            or(isNull(approvals.contextDigest), eq(approvals.contextDigest, contextDigest))!,
-            or(isNull(approvals.expiresAt), gt(approvals.expiresAt, sql`now()`))!,
-          ),
-        )
-        .returning({ id: approvals.id });
-      if (consumed.length === 0) {
+      const consumed = await consumeBoundApproval(db, {
+        approvalId: approvedApprovalId,
+        policyEpoch,
+        approvalScope,
+        argumentsDigest,
+        contextDigest,
+      });
+      if (!consumed) {
         // ADR-0105 — CLASSIFY, do not return one opaque failure. Re-read the
         // row and say which of the three actually happened: somebody else spent
         // it, it lapsed, or the policy moved underneath it. The first is a
@@ -916,18 +1167,44 @@ async function executeGovernedToolCallInner(
       }
     }
 
-    if (!upstream) upstream = await connectUpstream(db, serverRow);
     // An upstream FAILURE throws out of here before any metering — a failed
     // call bills nothing, exactly like a failed model dispatch or connector
     // invoke.
-    const content = await upstream.callTool(
-      { name: toolName, arguments: args.arguments },
-      undefined,
-      // G2: by far the most generous of the three deadlines, because this is
-      // the upstream doing real work — a build, a query, a scan. A bound that
-      // severs legitimate work is worse than the hang it replaced.
-      { timeout: timeouts().mcpCallToolMs },
-    );
+    // ADR-0128 — THE ONE PLACE A RETRY WOULD HAVE BEEN A BUG. A `tools/call` is
+    // an arbitrary side-effecting operation on somebody else's system: a blind
+    // retry can open two pull requests or charge two cards, and it does so
+    // precisely when the network is unreliable. AER-038: readOnlyHint is not
+    // an idempotency contract either, so every tool receives one attempt.
+    let content: Awaited<ReturnType<typeof upstream.callTool>>;
+    try {
+      content = await withUpstreamRetry(
+        ({ deadlineMs }) =>
+          upstream!.callTool({ name: toolName, arguments: preparedPii?.effectiveArguments ?? args.arguments }, undefined, {
+            timeout: deadlineMs,
+          }),
+        {
+          // G2: by far the most generous of the three deadlines, because this is
+          // the upstream doing real work — a build, a query, a scan. A bound that
+          // severs legitimate work is worse than the hang it replaced.
+          budgetMs: timeouts().mcpCallToolMs,
+          maxAttempts: attemptsForToolKind(kind),
+        },
+      );
+    } catch (err) {
+      // AER-022: a hung or failing `tools/call` now counts, so an upstream that
+      // initializes cleanly and then fails every real operation is broken after
+      // the threshold instead of never.
+      //
+      // A `try`/`catch` rather than `.catch()`: an async `.catch` handler that
+      // rethrows still widens the inferred type to include `undefined`, which
+      // no longer satisfies the SDK's `tools/call` handler signature.
+      await operationFailed(err);
+      if (redactActive) throw new Error("MCP upstream call failed under PII redaction");
+      throw err;
+    }
+    // AER-022: THE operation succeeded. This — not the handshake — is what closes
+    // a breaker, and it is what the old placement got wrong.
+    await operationSucceeded();
 
     // §8.4 OUTPUT check: the tool already ran, so a block here is BILL-AND-
     // WITHHOLD — the usage row below records the honest spend, but the result
@@ -935,7 +1212,21 @@ async function executeGovernedToolCallInner(
     let outputHits: PiiHit[] = [];
     let resultContent: unknown = content;
     let withheld = false;
-    if (piiMode) {
+    if (preparedPii) {
+      try {
+        // Re-read output policy too. A tightened policy while the tool ran may
+        // withhold the result, but cannot undo the already executed operation.
+        const outputMode = await projectPiiMode(db, projectId);
+        const outputIntl = [...new Set([...piiIntl, ...await piiInternationalCategories(db)])];
+        const transformed = redactMcpResult(content, outputIntl);
+        outputHits = transformed.hits;
+        resultContent = transformed.value;
+        if (outputMode === "block" && outputHits.length) throw new Error("PII output blocked");
+      } catch {
+        withheld = true;
+        resultContent = { content: [{ type: "text", text: "[output withheld: PII transformation could not be safely completed]" }], isError: true };
+      }
+    } else if (piiMode) {
       const chk = enforcePII(piiMode, { output: JSON.stringify(content ?? null) }, piiIntl);
       outputHits = chk.hits;
       if (chk.action === "block") {
@@ -947,9 +1238,9 @@ async function executeGovernedToolCallInner(
       }
     }
     const anyHits = inputHits.length > 0 || outputHits.length > 0;
-    const piiAction: McpPii["action"] = withheld ? "block" : piiMode === "warn" ? "warn" : "log";
+    const piiAction: McpPii["action"] = withheld ? "block" : preparedPii ? "redact" : piiMode === "warn" ? "warn" : "log";
     const pii: McpPii | null =
-      piiMode && anyHits
+      piiMode && (anyHits || preparedPii || withheld)
         ? { mode: piiMode, action: piiAction, inputHits, outputHits, withheld }
         : null;
 
@@ -1046,7 +1337,9 @@ async function executeGovernedToolCallInner(
         effect: "deny",
         ruleId: "pii-blocked",
         ruleChain: [],
-        reason: `output contains PII: ${piiCategoryList(outputHits)} — billed and withheld`,
+        reason: preparedPii
+          ? "Output could not be released under the PII policy; billed and withheld"
+          : `output contains PII: ${piiCategoryList(outputHits)} — billed and withheld`,
       });
     } else if (piiMode === "warn" && anyHits) {
       await db.insert(auditLog).values({
@@ -1093,7 +1386,13 @@ export async function syncUpstreamTools(
   trigger: McpAdmissionTrigger = "sync",
 ): Promise<Tool[]> {
   // G2: a manifest is small, so a slow one is a sick upstream, not a busy one.
-  const { tools } = await client.listTools(undefined, { timeout: timeouts().mcpListToolsMs });
+  // ADR-0128: and reading a manifest is idempotent by definition, so it is one
+  // of the two MCP operations that may simply be asked again — within the same
+  // one deadline, which is the whole sequence's budget.
+  const { tools } = await withUpstreamRetry(
+    ({ deadlineMs }) => client.listTools(undefined, { timeout: deadlineMs }),
+    { budgetMs: timeouts().mcpListToolsMs },
+  );
   // ADR-0097 — SCAN BEFORE UPSERT. This is the one moment the gateway sees a
   // manifest, and scanning here rather than after the upsert is what keeps a
   // poisoned description out of `mcp_tools` ENTIRELY: under `enforce` a dirty
@@ -1119,10 +1418,11 @@ export async function syncUpstreamTools(
         name: tool.name,
         kind: toolKind(tool),
         description: tool.description ?? null,
+        inputSchema: tool.inputSchema,
       })
       .onConflictDoUpdate({
         target: [mcpTools.serverId, mcpTools.name],
-        set: { kind: toolKind(tool), description: tool.description ?? null },
+        set: { kind: toolKind(tool), description: tool.description ?? null, inputSchema: tool.inputSchema },
       });
   }
   return tools;
@@ -1163,8 +1463,21 @@ export async function resolveNodeToolContext(
     if (!serverRow) continue;
     let upstream: Client | null = null;
     try {
-      upstream = await connectUpstream(db, serverRow);
-      const upstreamTools = await syncUpstreamTools(db, serverId, upstream);
+      // AER-024: a held or egress-refused server is refused (and audited) here,
+      // before it can spend a breaker probe election it was never allowed to use
+      await preflightUpstream(db, serverRow);
+      if (await breakerAdmits(db, serverRow)) continue;
+      let upstreamTools;
+      try {
+        upstream = await connectUpstream(db, serverRow);
+        upstreamTools = await syncUpstreamTools(db, serverId, upstream);
+      } catch (err) {
+        if (classifyUpstreamError(err).why !== "our_own_refusal") {
+          await recordUpstreamFailure(db, serverRow, err instanceof Error ? err.message : String(err));
+        }
+        throw err;
+      }
+      await recordUpstreamSuccess(db, serverRow);
       const entitlements = await loadEntitlements(db, userId, serverId);
       const refs: ToolRef[] = upstreamTools.map((t) => ({
         serverId,
@@ -1307,34 +1620,18 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
       }
     }
 
-    // ADR-0126 / G2 — the breaker, consulted before anything is attempted.
-    // Reading it cost nothing: it rides the `serverRow` already fetched above.
-    //
-    // It sits AFTER the egress guard's own refusal path and BEFORE the connect,
-    // because a circuit-broken upstream must not be contacted at all — that is
-    // the entire point. 503 with Retry-After, because unlike 502/504 this is a
-    // refusal the gateway is making on its own initiative and it can say when
-    // to come back.
-    const breaker = await breakerAdmits(db, serverRow);
-    if (breaker) {
-      return reply
-        .status(503)
-        .header("retry-after", String(Math.ceil(breaker.refusedUntilMs / 1000)))
-        .send({
-          error: "mcp_upstream_circuit_open",
-          detail: breaker.reason,
-          retryAfterMs: breaker.refusedUntilMs,
-        });
-    }
-
     // ADR-0043: the connect-time egress verdict surfaces HERE, before the
     // reply is hijacked into an MCP transport, as the route's ordinary
     // pre-hijack refusal shape — a plain 403 naming the real reason. The
     // refusal is already audited inside the guard and nothing left the box.
-    let upstream: Client;
-    try {
-      upstream = await connectUpstream(db, serverRow);
-    } catch (err) {
+    let upstream: Client | null = null;
+    // ADR-0128: the sequence reports into this, so the ONE failure row below can
+    // say how hard we tried. A row per attempt was deliberately not written —
+    // see upstream-retry.ts for why, which is verbatim the breaker's reasoning.
+    const connectRetry = newRetryReport();
+    const needsManifest = ListToolsRequestSchema.safeParse(req.body).success;
+    /** The two refusals that are OURS, as the route's plain pre-hijack 403. */
+    const ownRefusal = (err: unknown) => {
       if (err instanceof McpEgressBlockedError) {
         return reply.status(403).send({
           error: "egress_blocked",
@@ -1353,6 +1650,38 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
           findings: err.findings,
         });
       }
+      return null;
+    };
+    if (needsManifest) {
+      // AER-024: admission and egress are adjudicated BEFORE the breaker is
+      // asked. An open circuit used to answer 503 here first, so a held or
+      // egress-refused server was reported as an outage — "retry later" — for
+      // as long as its breaker stayed open, with no deny row. The preflight is
+      // side-effect-free towards the upstream and the breaker alike.
+      try {
+        await preflightUpstream(db, serverRow);
+      } catch (err) {
+        const refused = ownRefusal(err);
+        if (refused) return refused;
+        throw err;
+      }
+      const refusal = await breakerAdmits(db, serverRow);
+      if (refusal) {
+        return reply.status(503)
+          .header("retry-after", String(Math.ceil(refusal.refusedUntilMs / 1000)))
+          .send({ error: "mcp_upstream_circuit_open", detail: refusal.reason,
+            retryAfterMs: refusal.refusedUntilMs });
+      }
+    }
+    try {
+      // Tool calls own admission in the shared primitive. Protocol setup is
+      // local; only a manifest request needs a connection at this boundary.
+      if (needsManifest) {
+        upstream = await connectUpstream(db, serverRow, { retry: connectRetry });
+      }
+    } catch (err) {
+      const refused = ownRefusal(err);
+      if (refused) return refused;
       // ROADMAP G2 — the third refusal shape, and the one the demo runbook had
       // a troubleshooting row for: the server is registered, the egress guard
       // permitted it and admission cleared it, and the upstream did not answer.
@@ -1379,11 +1708,18 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
         reason: detail,
         timedOut,
         deadlineMs: timeouts().mcpConnectMs,
+        attempts: connectRetry.attempts,
+        retryDelaysMs: connectRetry.delaysMs,
+        retryVerdict: connectRetry.lastWhy,
       });
       // count it towards the breaker. This is the ONLY place a connect failure
       // is counted: an egress refusal and an admission hold return above, and
       // neither is the upstream's fault — tripping a breaker on our own policy
       // decision would mean a governance change looked like an outage.
+      // ONE failure for the whole sequence, not one per attempt. The breaker's
+      // threshold was chosen against the unit "one user-visible failed
+      // operation"; counting attempts would silently make it three times more
+      // trigger-happy without anybody changing its configuration.
       await recordUpstreamFailure(db, serverRow, detail);
       return reply.status(timedOut ? 504 : 502).send({
         error: timedOut ? "mcp_upstream_timeout" : "mcp_upstream_unreachable",
@@ -1392,10 +1728,8 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
       });
     }
 
-    // The connect succeeded, so whatever the breaker thought, this upstream is
-    // answering. Resets the count and — only if the circuit was actually open —
-    // files the recovery transition. A healthy call writes nothing.
-    await recordUpstreamSuccess(db, serverRow);
+    // A handshake cannot establish recovery. Each handler records success
+    // only after its list or call operation actually finishes.
 
     const proxy = new Server(
       { name: "regulait-gateway", version: "0.1.0" },
@@ -1408,12 +1742,17 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
       // into something dirty is refused HERE — as a real MCP error naming the
       // reason, never a fabricated empty tool list. The dirty manifest was not
       // stored either (syncUpstreamTools scans before it upserts).
-      const upstreamTools = await syncUpstreamTools(db, serverId, upstream).catch((err: unknown) => {
+      if (!upstream) throw new McpError(ErrorCode.InternalError, "Missing manifest connection");
+      const upstreamTools = await syncUpstreamTools(db, serverId, upstream).catch(async (err: unknown) => {
         if (err instanceof McpAdmissionHeldError) {
           throw new McpError(ErrorCode.InvalidRequest, `Denied by policy: ${err.detail}`);
         }
+        if (classifyUpstreamError(err).why !== "our_own_refusal") {
+          await recordUpstreamFailure(db, serverRow, err instanceof Error ? err.message : String(err));
+        }
         throw err;
       });
+      await recordUpstreamSuccess(db, serverRow);
       const entitlements = await loadEntitlements(db, userId, serverId);
       const refs: ToolRef[] = upstreamTools.map((t) => ({
         serverId,
@@ -1495,6 +1834,17 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
         // session row, never from a header the caller could set.
         principal: abacPrincipalFromRequest(req),
         trace: toolTrace,
+      }).catch(async (err: unknown) => {
+        // AER-024: the reply is already hijacked, so the primitive's admission
+        // hold / egress refusal cannot be the pre-hijack 403 the manifest path
+        // answers. It is the SAME named policy refusal the manifest handler
+        // raises post-hijack — never a generic internal error, and never the
+        // breaker's "retry later".
+        if (err instanceof McpAdmissionHeldError || err instanceof McpEgressBlockedError) {
+          await finishTrace(db, toolTrace, "denied");
+          throw new McpError(ErrorCode.InvalidRequest, `Denied by policy: ${err.message}`);
+        }
+        throw err;
       });
       await finishTrace(
         db,
@@ -1570,6 +1920,15 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
                   `and is pending sign-off. Retry after approval.`
                 : ` Retry to raise a fresh approval.`),
           );
+        // Tool admission happens after governance, inside the MCP handler.
+        // The response is already hijacked, so expose the retry window in the
+        // MCP error; manifest admission can still return a pre-hijack HTTP 503.
+        case "upstream_circuit_open":
+          throw new McpError(
+            ErrorCode.InternalError,
+            `Upstream unavailable: ${outcome.reason}. Retry after ` +
+              `${Math.ceil(outcome.retryAfterMs / 1000)}s.`,
+          );
         case "allowed":
           return outcome.content as Record<string, unknown>;
       }
@@ -1580,9 +1939,82 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
     reply.hijack();
     reply.raw.on("close", () => {
       void transport.close();
-      void upstream.close();
+      void upstream?.close();
     });
     await proxy.connect(transport);
     await transport.handleRequest(req.raw, reply.raw, req.body);
   });
+}
+
+/** AER-039 — the upstream a call was bound to, safe for the audit ledger */
+function auditTarget(row: { url: string; allowPrivateRanges: boolean | null; admissionManifestDigest: string | null }) {
+  let host: string | null = null;
+  try {
+    host = new URL(row.url).host;
+  } catch {
+    host = null;
+  }
+  return { host, allowPrivateRanges: row.allowPrivateRanges ?? null, admissionManifestDigest: row.admissionManifestDigest ?? null };
+}
+
+/** AER-039 — the target a queued MCP consent is bound to, as an approver sees it */
+export interface ApprovalBoundTarget {
+  host: string | null;
+  allowPrivateRanges: boolean | null;
+  admissionManifestDigest: string | null;
+}
+
+/**
+ * AER-039 — the target each MCP consent was BOUND to, for the review surface.
+ *
+ * Read back from the tool-call audit row the queueing call wrote (`auditTarget`
+ * above, beside the same `contextDigest`), never from the server row's CURRENT
+ * values: an approver signs what the call was evaluated against, and a server
+ * edited since must not be shown as the thing being signed. The context digest
+ * commits to the full target, so ANY audit row carrying the consent's own digest
+ * names exactly its target; the time window is only a scan bound on the
+ * (user_id, at) index. The queueing row precedes `requested_at`; the five
+ * minutes after it absorb gateway/database clock skew (audit `at` is stamped by
+ * the gateway, `requested_at` by Postgres). No such row — a pre-v3 consent, a
+ * row not queued by the proxy — is null: shown as not recorded, never filled in
+ * from the live row.
+ */
+export async function boundTargetsForApprovals(
+  db: Db,
+  approvalIds: string[],
+): Promise<Map<string, ApprovalBoundTarget | null>> {
+  const out = new Map<string, ApprovalBoundTarget | null>();
+  if (approvalIds.length === 0) return out;
+  // Raw SQL on purpose: drizzle un-qualifies column refs inside a single-table
+  // select's SQL field, which would compare audit_log's columns with themselves.
+  const res = await db.execute(sql`
+    select a.id as "approvalId", (
+      select l.detail -> 'target' from audit_log l
+      where l.user_id = a.user_id
+        and l.server_id = a.server_id
+        and l.tool_name = a.tool_name
+        and l.at <= a.requested_at + interval '5 minutes'
+        and l.at > a.requested_at - interval '1 hour'
+        and l.detail ->> 'contextDigest' = a.context_digest
+        and jsonb_typeof(l.detail -> 'target') = 'object'
+      order by l.at desc
+      limit 1
+    ) as "target"
+    from approvals a
+    where a.id in (${sql.join(approvalIds.map((id) => sql`${id}`), sql`, `)})
+  `);
+  for (const row of (res as unknown as { rows: Array<{ approvalId: string; target: unknown }> }).rows) {
+    const t = row.target;
+    if (t === null || typeof t !== "object" || Array.isArray(t)) {
+      out.set(row.approvalId, null);
+      continue;
+    }
+    const v = t as Record<string, unknown>;
+    out.set(row.approvalId, {
+      host: typeof v.host === "string" ? v.host : null,
+      allowPrivateRanges: typeof v.allowPrivateRanges === "boolean" ? v.allowPrivateRanges : null,
+      admissionManifestDigest: typeof v.admissionManifestDigest === "string" ? v.admissionManifestDigest : null,
+    });
+  }
+  return out;
 }

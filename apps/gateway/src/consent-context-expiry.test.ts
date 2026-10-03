@@ -19,7 +19,8 @@ import {
 } from "@regulait/db";
 import { DEFAULT_APPROVAL_TTL_HOURS } from "@regulait/shared";
 import { buildApp } from "./app.js";
-import { executeGovernedToolCall } from "./mcp-proxy.js";
+import { governedEvaluate } from "./governed-evaluate.js";
+import { consumeBoundApproval, executeGovernedToolCall } from "./mcp-proxy.js";
 
 /**
  * F14 / ADR-0105 — A CONSENT IS BOUND TO THE POLICY THAT DEMANDED IT, AND IT
@@ -65,9 +66,12 @@ const APPROVER_SWAP = `f14_approver_${RUN}`;
 const TTL = `f14_ttl_${RUN}`;
 const STABLE = `f14_stable_${RUN}`;
 const RACE = `f14_race_${RUN}`;
+const LEGACY = `f14_legacy_${RUN}`;
+const EPOCH = `f14_epoch_${RUN}`;
+const ABAC_ONLY = `f14_abac_only_${RUN}`;
 /** never called — it exists only to be the SUBJECT of an unrelated rule edit */
 const UNRELATED = `f14_unrelated_${RUN}`;
-const TOOLS = [VERSIONED, APPROVER_SWAP, TTL, STABLE, RACE, UNRELATED];
+const TOOLS = [VERSIONED, APPROVER_SWAP, TTL, STABLE, RACE, LEGACY, EPOCH, ABAC_ONLY, UNRELATED];
 
 /** The two independent proofs that a refused call never reached upstream. */
 const upstreamHits = { http: 0, tool: 0 };
@@ -241,6 +245,7 @@ beforeAll(async () => {
       url: "/v1/grants/tools",
       payload: { userId: callerId, serverId, toolName: name },
     });
+    if (name === ABAC_ONLY) continue;
     // `approvalScope` omitted: the shipped ADR-0104 default, 'action'.
     // `writeOnly: true` gives every rule a versionable field that can later be
     // widened to `false` — a genuinely STRICTER posture (the rule then gates
@@ -410,7 +415,10 @@ describe("F14 (b) — a consent does not live forever", () => {
       payload: { approvalTtlHours: null },
     });
     expect(put.statusCode).toBe(200);
+    expect(put.json().approvalTtlPosture).toBe("nonexpiring_high_risk");
     try {
+      const exposed = await app.inject({ method: "GET", headers: AUTH, url: "/v1/org/settings" });
+      expect(exposed.json().approvalTtlPosture).toBe("nonexpiring_high_risk");
       const before = new Set((await rowsFor(TTL, "pending")).map((r) => r.id));
       const out = await call(TTL, { text: `f14-ttl-null-${RUN}` });
       expect(out.kind).toBe("approval_required");
@@ -430,6 +438,7 @@ describe("F14 (b) — a consent does not live forever", () => {
     }
     const back = await app.inject({ method: "GET", headers: AUTH, url: "/v1/org/settings" });
     expect(back.json().settings.approvalTtlHours).toBe(DEFAULT_APPROVAL_TTL_HOURS);
+    expect(back.json().approvalTtlPosture).toBe("bounded");
   });
 });
 
@@ -459,6 +468,85 @@ describe("F14 — the compatibility rule, in the direction that must NOT invalid
 });
 
 describe("F14 — atomicity", () => {
+  it("refuses a legacy approved row with no policy context and re-queues it", async () => {
+    const args = { text: `f14-legacy-${RUN}` };
+    const signed = await queueAndApprove(LEGACY, args);
+    await db.update(approvals).set({ contextDigest: null }).where(eq(approvals.id, signed));
+    const before = snapshotUpstream();
+    const out = await call(LEGACY, args);
+    expect(out.kind).toBe("approval_context_stale");
+    expect(snapshotUpstream()).toEqual(before);
+    if (out.kind === "approval_context_stale") {
+      expect(out.supersededApprovalIds).toContain(signed);
+      expect(out.requeuedApprovalId).toBeTruthy();
+    }
+    const [old] = await db.select().from(approvals).where(eq(approvals.id, signed));
+    expect(old!.status).toBe("superseded");
+  });
+
+  it("cannot spend an approval evaluated before a policy version activation", async () => {
+    const args = { text: `f14-epoch-${RUN}` };
+    const signed = await queueAndApprove(EPOCH, args);
+    const evaluated = await governedEvaluate(db, callerId, serverId,
+      { serverId, name: EPOCH, kind: "write" }, args);
+    expect(evaluated.decision.effect).toBe("allow");
+    expect(evaluated.approvedApprovalId).toBe(signed);
+    await activateRuleVersion(ruleIdFor.get(EPOCH)!, { writeOnly: false });
+
+    const before = snapshotUpstream();
+    const consumed = await consumeBoundApproval(db, {
+      approvalId: signed,
+      policyEpoch: evaluated.policyEpoch,
+      approvalScope: evaluated.approvalScope,
+      argumentsDigest: evaluated.argumentsDigest,
+      contextDigest: evaluated.contextDigest,
+    });
+    expect(consumed).toBe(false);
+    expect(snapshotUpstream()).toEqual(before);
+    expect((await db.select().from(approvals).where(eq(approvals.id, signed)))[0]!.status)
+      .toBe("approved");
+    const retry = await call(EPOCH, args);
+    expect(retry.kind).toBe("approval_context_stale");
+    expect(snapshotUpstream()).toEqual(before);
+  });
+
+  it("invalidates a pure ABAC approval when only the ABAC policy changes", async () => {
+    const source = `forbid (principal, action == RegulAIt::Action::"McpToolCall", resource)
+      when { resource.toolName == "${ABAC_ONLY}" };`;
+    const created = await app.inject({ method: "POST", headers: AUTH,
+      url: "/v1/abac/policies", payload: {
+        name: `f14-abac-${RUN}`, source, mode: "require_approval", approverUserId: approverA,
+      } });
+    expect(created.statusCode, created.body).toBe(201);
+    const policyId = created.json().policy.id as string;
+    try {
+      const activated = await app.inject({ method: "POST", headers: AUTH,
+        url: `/v1/abac/policies/${policyId}/activate`, payload: { version: 1 } });
+      expect(activated.statusCode, activated.body).toBe(200);
+      const args = { text: `f14-abac-${RUN}` };
+      const signed = await queueAndApprove(ABAC_ONLY, args);
+      const revised = await app.inject({ method: "POST", headers: AUTH,
+        url: `/v1/abac/policies/${policyId}/versions`, payload: {
+          source: `forbid (principal, action == RegulAIt::Action::"McpToolCall", resource)
+            when { resource.toolName == "${ABAC_ONLY}" && resource.kind == "write" };`,
+          mode: "require_approval", approverUserId: approverA,
+        } });
+      expect(revised.statusCode, revised.body).toBe(201);
+      const changed = await app.inject({ method: "POST", headers: AUTH,
+        url: `/v1/abac/policies/${policyId}/activate`, payload: { version: 2 } });
+      expect(changed.statusCode, changed.body).toBe(200);
+      const before = snapshotUpstream();
+      const out = await call(ABAC_ONLY, args);
+      expect(out.kind).toBe("approval_context_stale");
+      expect(snapshotUpstream()).toEqual(before);
+      if (out.kind === "approval_context_stale") expect(out.supersededApprovalIds).toContain(signed);
+    } finally {
+      const removed = await app.inject({ method: "DELETE", headers: AUTH,
+        url: `/v1/abac/policies/${policyId}` });
+      expect(removed.statusCode).toBe(200);
+    }
+  });
+
   it("two concurrent calls holding ONE consent: exactly one succeeds, and the upstream runs exactly once", async () => {
     const args = { text: `f14-race-${RUN}` };
     const signed = await queueAndApprove(RACE, args);

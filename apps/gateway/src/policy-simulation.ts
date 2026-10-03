@@ -897,20 +897,52 @@ export function registerPolicySimulationRoutes(app: FastifyInstance, db: Db): vo
     });
   });
 
-  app.get("/v1/policy-simulations", async (req) => {
+  /**
+   * ADR-0167 (AUTHZ-02): the LIST is scoped exactly as the detail route below
+   * is. It used to return every stored row to any authenticated caller — the
+   * named blast radius of an admin's org-wide preview included — so a plain
+   * non-admin could read out of the archive, via the list, the very thing the
+   * detail route refused them. Two rules now: a non-admin sees a run only when
+   * they REQUESTED it or its stored scope lies entirely inside their own team
+   * visibility; and the list is a SUMMARY (counts, headline, fidelity) — the
+   * named users/projects/tools and the scope itself stay on the detail route,
+   * where the scope check guards them.
+   */
+  app.get("/v1/policy-simulations", async (req, reply) => {
     const q = z
       .object({
         policyVersionId: z.string().uuid().optional(),
         limit: z.coerce.number().int().min(1).max(200).default(50),
       })
       .parse(req.query);
+    const callerId = req.authCtx.userId ?? null;
+    if (!req.authCtx.isAdmin && !callerId) {
+      return reply.status(403).send({ error: "simulation_scope_denied" });
+    }
+    // a non-admin's visible rows are filtered AFTER the read (the scope is
+    // jsonb), so the window is widened and cut back to `limit` afterwards —
+    // a narrow caller must not get a short page merely because wider runs
+    // happen to be newer
+    const window = req.authCtx.isAdmin ? q.limit : Math.min(q.limit * 4, 800);
     const rows = await db
       .select()
       .from(policySimulations)
       .where(q.policyVersionId ? eq(policySimulations.policyVersionId, q.policyVersionId) : undefined)
       .orderBy(desc(policySimulations.createdAt))
-      .limit(q.limit);
-    return { simulations: rows, fidelity: REPLAY_FIDELITY_DISCLOSURE };
+      .limit(window);
+    let visibleRows = rows;
+    if (!req.authCtx.isAdmin) {
+      const visible = new Set(await visibleSubjectsFor(db, callerId!));
+      visibleRows = rows
+        .filter(
+          (row) =>
+            row.requestedByUserId === callerId ||
+            (row.scopeUserIds !== null && (row.scopeUserIds ?? []).every((u) => visible.has(u))),
+        )
+        .slice(0, q.limit);
+    }
+    const summaries = visibleRows.map(({ blastRadius: _radius, scopeUserIds: _scope, ...summary }) => summary);
+    return { simulations: summaries, fidelity: REPLAY_FIDELITY_DISCLOSURE };
   });
 
   app.get("/v1/policy-simulations/:id", async (req, reply) => {

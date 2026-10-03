@@ -1,0 +1,359 @@
+/**
+ * ACTIVE upstream health probing — and the two things it must never do.
+ *
+ * The easy half (a dead upstream gets its breaker opened before a user finds it)
+ * is asserted first because it is the feature. The two hard halves are why this
+ * file is longer than the feature:
+ *
+ *  1. **OUR refusals must never open a breaker.** An egress block and an
+ *     admission hold are decisions RegulAIt made. Charging them to the breaker
+ *     would make an air-gapped install — where every outbound host is refused by
+ *     design — report every upstream as circuit-broken on a deployment where
+ *     nothing is wrong, and would send an operator hunting a network fault
+ *     instead of reading a manifest finding. Asserted by counts AND by the
+ *     breaker columns being untouched, because a count could be right while the
+ *     row was written anyway.
+ *  2. **It must not join a herd.** A probe against an open breaker enters the
+ *     breaker's own one-winner election; if a real request is already probing,
+ *     this sweep must fast-skip rather than add a second connect.
+ *
+ * And the one that is easy to get backwards: a probe that FAILS against an
+ * already-open breaker must not be reported as a recovery.
+ *
+ * Writes (breaker columns, audit transitions) and registers servers, so `zz-`
+ * (M-018). Every assertion is scoped to ids this file created (M-008).
+ */
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { createDb, eq, inArray, mcpServers, notInArray, runMigrations, type Db } from "@regulait/db";
+import { runMcpHealthProbeSweep } from "./mcp-health-probe.js";
+import { resolveBreakerConfig, setBreakerConfig, breakerConfig } from "./upstream-breaker.js";
+import { fileURLToPath } from "node:url";
+import { randomUUID } from "node:crypto";
+import path from "node:path";
+
+const DATABASE_URL = process.env.DATABASE_URL;
+if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
+const migrationsFolder = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "../../../packages/db/migrations",
+);
+
+let db: Db;
+let priorBreaker: ReturnType<typeof breakerConfig>;
+/** every server id this file creates, so nothing asserts over the deployment */
+const mine: string[] = [];
+
+/** an address nothing is listening on — a genuine upstream failure */
+const DEAD_URL = "http://127.0.0.1:9/";
+
+/**
+ * A host the egress guard REFUSES, chosen so the refusal does not depend on
+ * shared state (M-040, and M-042 for making the same mistake twice).
+ *
+ * The first version of the two tests below used loopback with
+ * `allowPrivateRanges: false`, which passed alone and FAILED IN THE FULL RUN:
+ * `mcp-proxy.test.ts` inserts an `egress_allow_hosts` row for `127.0.0.1` with
+ * the private-range and plaintext opt-ins, so by the time this file ran the
+ * "blocked" host was allow-listed and the refusal never happened — both tests
+ * then asserted `> 0` against 0. Exactly the failure g2's own egress test carries
+ * a paragraph about.
+ *
+ * A literal TEST-NET-3 address (RFC 5737), randomised per run, needs no shared
+ * state at all: it is PUBLIC, so the private-range posture is irrelevant whatever
+ * the org default says, default-deny refuses it as `host_not_allowlisted`, and no
+ * other suite allow-lists it.
+ */
+const blockedUrl = () => `http://203.0.113.${1 + Math.floor(Math.random() * 250)}:9/`;
+
+const register = async (name: string, url: string) => {
+  const [row] = await db
+    .insert(mcpServers)
+    .values({ name, url, allowPrivateRanges: true })
+    .returning({ id: mcpServers.id });
+  mine.push(row!.id);
+  return row!.id;
+};
+
+const breakerOf = async (id: string) => {
+  const [row] = await db
+    .select({
+      openedAt: mcpServers.breakerOpenedAt,
+      failures: mcpServers.breakerConsecutiveFailures,
+      lastError: mcpServers.breakerLastError,
+    })
+    .from(mcpServers)
+    .where(eq(mcpServers.id, id));
+  return row!;
+};
+
+/** only this file's servers, so a shared deployment's rows never leak in */
+const probeMine = async () => {
+  // The sweep has no per-server filter by design — it is a sweep. So the
+  // assertions below read the BREAKER COLUMNS of this file's own rows rather
+  // than the sweep's aggregate counts wherever the deployment could contribute.
+  return runMcpHealthProbeSweep(db, { limit: 500 });
+};
+
+beforeAll(async () => {
+  db = createDb(DATABASE_URL);
+  await runMigrations(db, migrationsFolder);
+  // A threshold of 1 makes "one failure opens it" the unit under test rather
+  // than "three failures do", which would only test the loop.
+  priorBreaker = breakerConfig();
+  setBreakerConfig(resolveBreakerConfig(process.env, { failureThreshold: 1, cooldownMs: 60_000 }));
+}, 120_000);
+
+afterAll(async () => {
+  setBreakerConfig(priorBreaker);
+  for (const id of mine) await db.delete(mcpServers).where(eq(mcpServers.id, id));
+  await db.$client.end();
+});
+
+describe("the feature — a dead upstream is broken before a user finds it", () => {
+  it("opens the breaker on an upstream nobody has called", async () => {
+    const id = await register(`probe-dead-${randomUUID()}`, DEAD_URL);
+
+    const before = await breakerOf(id);
+    expect(before.openedAt, "a freshly registered server starts closed").toBeNull();
+    expect(before.failures).toBe(0);
+
+    const out = await probeMine();
+    expect(out.probed).toBeGreaterThan(0);
+
+    const after = await breakerOf(id);
+    expect(after.openedAt, "the probe opened it without any user request").not.toBeNull();
+    expect(after.failures).toBeGreaterThanOrEqual(1);
+    expect(after.lastError, "and recorded WHY, so the refusal can name a cause").toBeTruthy();
+    expect(out.opened).toContain(await nameOf(id));
+  }, 60_000);
+
+  it("a second pass does NOT re-probe it — the cooldown is respected", async () => {
+    // The breaker refuses during cooldown, so the sweep must not spend a connect
+    // on an upstream it is already refusing traffic for.
+    //
+    // AER-037 changed WHERE that happens, not whether it happens. It used to be
+    // selected and then refused by `breakerAdmits` (`skippedCircuitOpen`); it is
+    // now excluded from selection in SQL (`inCooldown`), because selecting a row
+    // that can only be skipped spends a bounded pass's budget on a certain skip.
+    // The claim this test makes is unchanged and the assertion names the
+    // mechanism that now implements it.
+    const id = await register(`probe-cooldown-${randomUUID()}`, DEAD_URL);
+    await probeMine();
+    const opened = (await breakerOf(id)).openedAt;
+    expect(opened).not.toBeNull();
+
+    const second = await probeMine();
+    expect(second.inCooldown).toBeGreaterThan(0);
+    // and the open timestamp did not move: an unprobed upstream is untouched
+    expect((await breakerOf(id)).openedAt?.getTime()).toBe(opened?.getTime());
+  }, 60_000);
+});
+
+describe("OUR refusals never open a breaker", () => {
+  it("an EGRESS-BLOCKED host is counted separately and leaves the breaker closed", async () => {
+    // A public host nobody allow-listed is the egress guard's own refusal — the
+    // shape an air-gapped install produces for EVERY host. If this opened a
+    // breaker, such an install would report every upstream as broken while
+    // nothing was actually wrong.
+    const [row] = await db
+      .insert(mcpServers)
+      .values({
+        name: `probe-egress-${randomUUID()}`,
+        url: blockedUrl(),
+        allowPrivateRanges: false,
+      })
+      .returning({ id: mcpServers.id });
+    const id = row!.id;
+    mine.push(id);
+
+    const out = await probeMine();
+    expect(out.skippedOurRefusal, "counted as ours, not as the upstream's").toBeGreaterThan(0);
+
+    const after = await breakerOf(id);
+    expect(after.openedAt, "an egress refusal must not open a breaker").toBeNull();
+    expect(after.failures, "and must not increment the failure count either").toBe(0);
+    expect(after.lastError).toBeNull();
+    expect(out.opened).not.toContain(await nameOf(id));
+  }, 60_000);
+
+  it("the counts distinguish the two, so an operator can tell them apart", async () => {
+    // THE CONTROL for the test above: in one pass, a dead upstream and an
+    // egress-refused one must land in DIFFERENT buckets. Without this, both
+    // tests would pass if the sweep counted everything as `skippedOurRefusal`.
+    const dead = await register(`probe-mix-dead-${randomUUID()}`, DEAD_URL);
+    const [blockedRow] = await db
+      .insert(mcpServers)
+      .values({
+        name: `probe-mix-egress-${randomUUID()}`,
+        url: blockedUrl(),
+        allowPrivateRanges: false,
+      })
+      .returning({ id: mcpServers.id });
+    const blocked = blockedRow!.id;
+    mine.push(blocked);
+
+    const out = await probeMine();
+    expect(out.failed, "the dead one is an upstream failure").toBeGreaterThan(0);
+    expect(out.skippedOurRefusal, "the blocked one is our refusal").toBeGreaterThan(0);
+
+    expect((await breakerOf(dead)).openedAt, "dead: broken").not.toBeNull();
+    expect((await breakerOf(blocked)).openedAt, "blocked: untouched").toBeNull();
+  }, 60_000);
+});
+
+describe("the sweep reports what the breaker did, not what it guessed", () => {
+  it("a probe that FAILS against an open breaker is not reported as a recovery", async () => {
+    // The easy bug: "we probed an open breaker" read as "it came back". The
+    // cooldown is set to 0 so the breaker is half-open and this sweep wins the
+    // election — it really does probe — and the probe really does fail.
+    const id = await register(`probe-still-dead-${randomUUID()}`, DEAD_URL);
+    await probeMine();
+    expect((await breakerOf(id)).openedAt).not.toBeNull();
+
+    setBreakerConfig(resolveBreakerConfig(process.env, { failureThreshold: 1, cooldownMs: 0 }));
+    try {
+      const out = await probeMine();
+      expect(out.recovered, "still dead — not a recovery").not.toContain(await nameOf(id));
+      expect((await breakerOf(id)).openedAt, "and still broken").not.toBeNull();
+    } finally {
+      setBreakerConfig(resolveBreakerConfig(process.env, { failureThreshold: 1, cooldownMs: 60_000 }));
+    }
+  }, 60_000);
+
+  it("reports zero probes and no failures when there is nothing reachable to charge", async () => {
+    // A pass that selects nothing must not claim to have probed anything:
+    // `probed` counts attempts that reached the upstream question.
+    //
+    // The registry is made non-empty EXPLICITLY, with a server whose breaker is
+    // closed. `capped` compares the cap against `eligible`, and since AER-037
+    // `eligible` excludes upstreams whose cooldown has not elapsed — so on a
+    // registry where every breaker happened to be open (which earlier tests in
+    // this file arrange) nothing is probable, `eligible` is 0 and `capped` is
+    // correctly false. Leaning on "some other test left rows around" made this
+    // assertion depend on which of them ran.
+    const fresh = await register(`probe-zero-limit-${randomUUID()}`, DEAD_URL);
+    const out = await runMcpHealthProbeSweep(db, { limit: 0 });
+    expect(out.probed).toBe(0);
+    expect(out.failed).toBe(0);
+    expect(out.opened).toEqual([]);
+    expect(out.recovered).toEqual([]);
+    expect(out.eligible, "at least the server just registered is probable").toBeGreaterThan(0);
+    expect(out.capped, "a zero limit over a probable registry is capped").toBe(true);
+    // and the pass really did leave it alone rather than probing it anyway
+    expect((await breakerOf(fresh)).openedAt).toBeNull();
+  }, 60_000);
+});
+
+async function nameOf(id: string): Promise<string> {
+  const [row] = await db.select({ name: mcpServers.name }).from(mcpServers).where(eq(mcpServers.id, id));
+  return row!.name;
+}
+
+// ===========================================================================
+// AER-037 — the cap starved the tail of the estate forever.
+// ===========================================================================
+//
+// The first version of this sweep ordered by `breaker_opened_at desc, name asc`
+// and applied `LIMIT`. That order is CONSTANT, so past the cap every five-minute
+// pass probed the same lexicographically first cohort and the tail was never
+// actively probed at all — keeping exactly the "first user discovers the outage"
+// behaviour this file exists to remove, while `capped: true` reported the
+// truncation honestly and said nothing about progress.
+//
+// THE CLAIM THAT REPLACED IT is about the estate across passes, not about one
+// pass, so the test has to be about several. It is also the only test here that
+// needs the rest of the deployment out of the way: the sweep has no per-server
+// filter by design, and a rotation over a set you do not control is not a
+// rotation you can assert.
+
+describe("AER-037 — a bounded pass rotates, so the tail is late and never starved", () => {
+  const LIMIT = 3;
+  const COUNT = 2 * LIMIT + 1; // deliberately not a multiple: the remainder pass
+  const rotation: string[] = [];
+
+  /**
+   * Park every server this file did not create: a `now()` rotation cursor and a
+   * closed breaker, so the ordering under test runs over a known set.
+   *
+   * SAFE, and migration 0116/0118 say why in their own headers: both columns are
+   * operational observations, rewritten constantly and safe to lose — never
+   * evidence. Test files here run sequentially (`fileParallelism: false`), so no
+   * other suite is mid-assertion on them.
+   */
+  const parkTheRestOfTheEstate = async () => {
+    await db
+      .update(mcpServers)
+      .set({ lastHealthProbeAt: new Date(), breakerOpenedAt: null, breakerLastError: null })
+      .where(notInArray(mcpServers.id, rotation));
+  };
+
+  /** which of OUR rows a pass actually selected, read from the cursor it stamps */
+  const cursors = async () => {
+    const rows = await db
+      .select({ id: mcpServers.id, at: mcpServers.lastHealthProbeAt })
+      .from(mcpServers)
+      .where(inArray(mcpServers.id, rotation));
+    return new Map(rows.map((r) => [r.id, r.at?.getTime() ?? null]));
+  };
+
+  beforeAll(async () => {
+    for (let i = 0; i < COUNT; i += 1) {
+      // Named so that NAME order and REGISTRATION order disagree, because the
+      // defect was name order: if the rotation were still lexicographic this
+      // test would pass for the wrong reason.
+      rotation.push(await register(`zz-rot-${String(COUNT - i).padStart(2, "0")}-${randomUUID()}`, DEAD_URL));
+    }
+    await parkTheRestOfTheEstate();
+  }, 60_000);
+
+  it("reaches EVERY upstream across bounded passes, each exactly once", async () => {
+    const selected: string[][] = [];
+    let before = await cursors();
+
+    // ceil(7 / 3) = 3 passes to cover the set
+    for (let pass = 0; pass < 3; pass += 1) {
+      const out = await runMcpHealthProbeSweep(db, { limit: LIMIT });
+      const after = await cursors();
+      selected.push(rotation.filter((id) => after.get(id) !== before.get(id)));
+      before = after;
+
+      // the operator-facing numbers an AER-037 diagnosis needs: a pass that
+      // truncates must say how much is left, and `neverProbed` must FALL
+      if (pass === 0) {
+        expect(out.capped).toBe(true);
+        expect(out.backlog).toBeGreaterThan(0);
+      }
+    }
+
+    // THE PROPERTY: full coverage, and no row taken twice before all were taken
+    // once. The defect would have produced the same three ids three times.
+    const all = selected.flat();
+    expect(new Set(all).size).toBe(COUNT);
+    expect(all).toHaveLength(COUNT);
+    // and the first pass really was bounded, rather than the limit being ignored
+    expect(selected[0]).toHaveLength(LIMIT);
+  }, 60_000);
+
+  it("does not spend a bounded pass on breakers that nobody may probe", async () => {
+    // Every row above is now circuit-broken with a 60s cooldown (threshold 1),
+    // so a probe against any of them is impossible until it elapses. Selecting
+    // them anyway would be a SECOND way to starve the tail: the budget goes to
+    // rows that can only be skipped.
+    const out = await runMcpHealthProbeSweep(db, { limit: LIMIT });
+
+    expect(out.inCooldown).toBeGreaterThanOrEqual(COUNT);
+    // NON-VACUITY: the rows really are in that state, read from the column
+    const openCount = (
+      await db
+        .select({ openedAt: mcpServers.breakerOpenedAt })
+        .from(mcpServers)
+        .where(inArray(mcpServers.id, rotation))
+    ).filter((r) => r.openedAt !== null).length;
+    expect(openCount).toBe(COUNT);
+    // and none of ours was selected — their cursors did not move
+    const before = await cursors();
+    await runMcpHealthProbeSweep(db, { limit: LIMIT });
+    const after = await cursors();
+    for (const id of rotation) expect(after.get(id)).toBe(before.get(id));
+  }, 60_000);
+});

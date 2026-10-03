@@ -4,7 +4,7 @@
  * estimated savings, CSV export — plus membership management for owners.
  */
 import { useMemo, useState } from "react";
-import { useParams } from "react-router-dom";
+import { Link, useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../../api/client";
 import type { ProjectCosts, ProjectMember } from "../../api/types";
@@ -18,7 +18,7 @@ import {
   Card,
   ConfirmModal,
   EmptyState,
-  ErrorState,
+  RecordError,
   Field,
   Select,
   SkeletonBlock,
@@ -89,15 +89,22 @@ export default function ProjectDetailPage() {
     );
   }
   if (costsQ.isError) {
-    const err = costsQ.error as { status?: number; message?: string };
+    // A project that is not in the caller's list has no chrome to show: a
+    // title, a role badge, an id chip and three tabs for a record that does not
+    // exist (or is not theirs) read as though it did (UIW-08).
     return (
       <>
-        <ProjectChrome projectId={projectId} project={project} myRole={myRole} tab="overview" />
+        {project ? (
+          <ProjectChrome projectId={projectId} project={project} myRole={myRole} tab="overview" />
+        ) : (
+          <PageHeader title="Project" />
+        )}
         <Card>
-          <ErrorState
-            message={err.message ?? "unknown error"}
-            access={err.status === 403}
+          <RecordError
+            noun="project"
+            error={costsQ.error}
             onRetry={() => void costsQ.refetch()}
+            action={<Link to="/projects">← All projects</Link>}
           />
         </Card>
       </>

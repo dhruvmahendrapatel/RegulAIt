@@ -186,6 +186,16 @@ const AUDITED_WRITERS: AuditedWriter[] = [
       "through `applyRuleEdit` and raises this count.",
   },
   {
+    file: "remediation.ts",
+    method: "update",
+    expr: "agents",
+    why:
+      "ADR-0159 `assign_agent_owner`, executed inside the approval decision's transaction — writes ONLY " +
+      "`ownerUserId`, the same accountability column the audited POST /v1/agents/:id/owner route writes. Not an " +
+      "agent_config versioned field, so no read-model divergence is possible. A remediation kind that wrote " +
+      "model or a price column would have to go through applyRuleEdit and raise this count.",
+  },
+  {
     file: "agents-connectors.ts",
     method: "insert",
     expr: "agents",

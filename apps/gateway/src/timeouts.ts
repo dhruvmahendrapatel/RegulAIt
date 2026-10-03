@@ -79,6 +79,16 @@ export interface TimeoutConfig {
    * case and makes the number something an operator can see.
    */
   modelDispatchMs: number;
+
+  /**
+   * REL-12 — the deadline a GUARDED fetch gets when its caller supplied none.
+   * The MCP, scorer and model paths all pass their own signal; the OTLP trace
+   * export, the OIDC discovery/token fetch and every future caller that
+   * forgets did not, and a black-holed collector or IdP pinned the handler
+   * forever. A caller's own `signal` always wins (it is simply not
+   * composed); this only bounds the forgotten case.
+   */
+  outboundDefaultMs: number;
 }
 
 export const TIMEOUT_DEFAULTS: Readonly<TimeoutConfig> = Object.freeze({
@@ -87,6 +97,7 @@ export const TIMEOUT_DEFAULTS: Readonly<TimeoutConfig> = Object.freeze({
   mcpConnectMs: 10_000,
   mcpListToolsMs: 15_000,
   mcpCallToolMs: 120_000,
+  outboundDefaultMs: 60_000,
   // owned by the package that uses it; see model-provider's own note
   modelDispatchMs: MODEL_DISPATCH_TIMEOUT_MS_DEFAULT,
 });
@@ -115,6 +126,7 @@ export function resolveTimeoutConfig(
     mcpListToolsMs: envInt(env, "REGULAIT_MCP_LIST_TIMEOUT_MS", TIMEOUT_DEFAULTS.mcpListToolsMs),
     mcpCallToolMs: envInt(env, "REGULAIT_MCP_CALL_TIMEOUT_MS", TIMEOUT_DEFAULTS.mcpCallToolMs),
     modelDispatchMs: envInt(env, "REGULAIT_MODEL_TIMEOUT_MS", TIMEOUT_DEFAULTS.modelDispatchMs),
+    outboundDefaultMs: envInt(env, "REGULAIT_OUTBOUND_TIMEOUT_MS", TIMEOUT_DEFAULTS.outboundDefaultMs),
     ...override,
   };
 }

@@ -446,10 +446,19 @@ describe("ADR-0058 — a pack added as DATA is evaluated with no code change", (
       .where(eq(compliancePacks.id, packId));
   });
 
-  it("seeds the six launch packs as ROWS, idempotently", async () => {
+  it("seeds the catalogue as ROWS, idempotently", async () => {
+    // ORDER-INDEPENDENT (M-040): another suite sharing this database may have
+    // seeded some or all of the catalogue already, so the first call must
+    // create exactly what is MISSING — and created + skipped must cover it all.
+    const existing = await db
+      .select({ framework: compliancePacks.framework, version: compliancePacks.version })
+      .from(compliancePacks);
+    const have = new Set(existing.map((e) => `${e.framework}@${e.version}`));
+    const missing = DEFAULT_COMPLIANCE_PACKS.filter((p) => !have.has(`${p.framework}@${p.version}`));
     const first = await post("/v1/compliance/packs/seed", {});
     expect(first.statusCode).toBe(201);
-    expect(first.json().created.length).toBe(DEFAULT_COMPLIANCE_PACKS.length);
+    expect(first.json().created.length).toBe(missing.length);
+    expect(first.json().created.length + first.json().skipped.length).toBe(DEFAULT_COMPLIANCE_PACKS.length);
     const second = await post("/v1/compliance/packs/seed", {});
     expect(second.json().created).toHaveLength(0);
     expect(second.json().skipped.length).toBe(DEFAULT_COMPLIANCE_PACKS.length);

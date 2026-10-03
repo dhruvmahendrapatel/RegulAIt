@@ -37,6 +37,7 @@ import {
 } from "../../../ui/kit";
 import {
   QueryGate,
+  RemoveButton,
   Stat,
   agentOpts,
   optionEls,
@@ -595,6 +596,38 @@ export default function EvalsPage() {
                         : `${(r.context ?? []).length} chunk(s)${r.contextInPrompt === false ? " (scoring only)" : ""}`,
                   },
                   { key: "scorer", header: "Scorer", render: (r) => <code>{r.scorerKind ?? "(default)"}</code> },
+                  {
+                    key: "actions",
+                    header: "",
+                    align: "right",
+                    render: (r) => (
+                      <RemoveButton
+                        what="this case"
+                        // A frozen dataset is one a run has already scored
+                        // against. Deleting a case out from under a recorded
+                        // score would make that score describe a suite that no
+                        // longer exists — the comparison the gate relies on
+                        // would silently be against a different measurement.
+                        disabledReason={
+                          detail.data?.frozen
+                            ? "this dataset version is frozen — a run has scored against it, so its cases cannot change. Create a new version to edit the suite."
+                            : undefined
+                        }
+                        consequence={
+                          <p>
+                            The case is deleted from this dataset version. Scores already recorded
+                            keep the version they were measured against, so no past result changes;
+                            what changes is what the next run measures — and a regression gate
+                            compares against a suite with one fewer case.
+                          </p>
+                        }
+                        onRemove={() =>
+                          api.del(`/v1/evals/datasets/${detail.data!.dataset.id}/cases/${r.id}`)
+                        }
+                        onDone={() => void detail.refetch()}
+                      />
+                    ),
+                  },
                 ]}
               />
 

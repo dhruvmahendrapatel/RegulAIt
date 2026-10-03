@@ -164,6 +164,8 @@ export default function RolesPage() {
             rows={roles.data?.roles ?? []}
             rowKey={(r) => r.id}
             loading={roles.isLoading}
+            error={roles.error}
+            onRetry={() => void roles.refetch()}
             onRowClick={(r) => setActiveRoleId(r.id === activeRoleId ? "" : r.id)}
             rowLabel={(r) => `Open grants for ${r.name}`}
             empty={<EmptyState title="No roles yet" body="Create the first provisioning bundle above." />}

@@ -101,6 +101,36 @@ beforeAll(async () => {
 });
 
 describe("budget-cap escalation decisions mirror onto the run-level parent item", () => {
+  it("a halted PM sync creates no link and succeeds only after the stop is lifted", async () => {
+    const created = await app.inject({
+      method: "POST", headers: benAuth, url: "/v1/runs",
+      payload: { graph: { run: "o8-halted-sync", escalationApproverUserId: approverId, nodes: [mkNode("n1")] } },
+    });
+    expect(created.statusCode).toBe(201);
+    const runId = created.json().id as string;
+    const mode = (value: "normal" | "halted") => app.inject({
+      method: "PUT", headers: AUTH, url: "/v1/execution/mode",
+      payload: { mode: value, reason: `pm sync ${value}` },
+    });
+    expect((await mode("halted")).statusCode).toBe(200);
+    try {
+      const denied = await app.inject({
+        method: "POST", headers: benAuth, url: `/v1/runs/${runId}/pm-sync`,
+        payload: { connectionName: "o8-pm" },
+      });
+      expect(denied.statusCode).toBe(409);
+      const links = await app.inject({ method: "GET", headers: benAuth, url: `/v1/pm/links?runId=${runId}` });
+      expect(links.json().links).toHaveLength(0);
+    } finally {
+      expect((await mode("normal")).statusCode).toBe(200);
+    }
+    const resumed = await app.inject({
+      method: "POST", headers: benAuth, url: `/v1/runs/${runId}/pm-sync`,
+      payload: { connectionName: "o8-pm" },
+    });
+    expect(resumed.statusCode).toBe(201);
+  });
+
   it("an APPROVED sanction lands as a comment (never a transition), audited", async () => {
     const { approvalId, parentExternalId } = await escalatedRun("o8-approve");
     const decided = await app.inject({

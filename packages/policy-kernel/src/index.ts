@@ -138,6 +138,17 @@ export function executionGate(
    * claimed to queue would be worse than not offering the mode.
    */
   canQueue: boolean,
+  /**
+   * AER-017: true when the CALLER goes on to resolve entitlement itself, and so
+   * will consult `executionApprovalHold` after its own denials. Only the
+   * conditional `require_approval` hold is withheld; every STOP is returned
+   * either way, because a stop is free to run first and must.
+   *
+   * Defaults to false so the two paths that cannot queue — model dispatch and
+   * connector calls — are untouched: for them `require_approval` mode is a
+   * refusal, which is a stop, and belongs here.
+   */
+  stopsOnly = false,
 ): { effect: DecisionEffect; ruleId: string; reason: string; approverUserId?: string } | null {
   // A SUBJECT HALT OUTRANKS THE DIAL. It is narrower and more specific, and an
   // operator who stopped one tool during an incident means it regardless of
@@ -176,9 +187,24 @@ export function executionGate(
       };
     case "require_approval":
       if (canQueue) {
-        // The work is queued behind a human rather than lost. Returning
-        // `require_approval` hands it to the SAME approvals machinery an
-        // ordinary rule would, so nothing downstream is special-cased.
+        // AER-017 — THE HOLD IS NOT A STOP, AND MUST NOT BE RETURNED FROM HERE
+        // WHEN THE CALLER WILL EVALUATE ENTITLEMENT.
+        //
+        // `halted`, a subject halt and `read_only` can only ever DENY, which is
+        // why ADR-0124 was right to run them ahead of every grant, rule, limit
+        // and scope. `require_approval` is different in kind: it is a
+        // CONDITIONAL ALLOW, the one effect this function can return that leads
+        // to execution. Returned before entitlement is resolved it produced two
+        // defects at once — an ungranted caller was invited into the approvals
+        // queue (approval manufacturing entitlement, which `evaluate`'s own
+        // docstring forbids), and the approval could never be consumed, because
+        // this early return sits in front of the consume logic. Operators
+        // approved work that could not run, forever.
+        //
+        // So a caller that resolves entitlement (`stopsOnly`) gets NOTHING here
+        // and consults `executionApprovalHold` after its denials. A caller that
+        // cannot queue still gets the refusal below, because that IS a stop.
+        if (stopsOnly) return null;
         return {
           effect: "require_approval",
           ruleId: EXECUTION_RULE_IDS.requireApproval,
@@ -640,6 +666,27 @@ export function matchingApprovalRules(
 }
 
 /**
+ * AER-017 — the deployment-wide approval HOLD, evaluated after entitlement.
+ *
+ * Returns the descriptor when the dial is set to `require_approval`, or null.
+ * It is deliberately a separate function from `executionGate` rather than a
+ * mode of it: the gate answers "must this stop before we even look?", and this
+ * answers "does an otherwise-ALLOWED call still need a human?". Collapsing the
+ * two is what produced AER-017.
+ *
+ * FAIL CLOSED on a missing approver, exactly as ADR-0040's ABAC hold does: a
+ * hold with nobody to route the queue entry to is unusable, and degrading it to
+ * a DENY is the only reading that does not let the call through.
+ */
+export function executionApprovalHold(
+  execution: ExecutionPosture,
+): { approverUserId: string } | { unusable: true } | null {
+  if (execution.mode !== "require_approval") return null;
+  if (!execution.approverUserId) return { unusable: true };
+  return { approverUserId: execution.approverUserId };
+}
+
+/**
  * Pure, zero-I/O policy evaluation. Rules run in fixed order; the first
  * terminal match wins and everything evaluated is recorded in ruleChain for
  * the audit log.
@@ -654,7 +701,11 @@ export function evaluate(input: EvaluationInput): Decision {
   // ran after entitlement resolution would still be a stop, but it would also
   // be one more thing to get right in the wrong order later.
   const toolLabel = `tool '${input.tool.name}'`;
-  const gated = executionGate(input.execution, input.tool.kind === "write", toolLabel, true);
+  // AER-017: `stopsOnly` — the STOPS keep ADR-0124's ordering and run ahead of
+  // everything, because they can only deny. The conditional `require_approval`
+  // hold is evaluated further down, after this function has resolved the
+  // entitlement it is a restriction ON.
+  const gated = executionGate(input.execution, input.tool.kind === "write", toolLabel, true, true);
   if (gated) {
     return {
       effect: gated.effect,
@@ -883,6 +934,54 @@ export function evaluate(input: EvaluationInput): Decision {
     };
   }
   chain.push({ rule: "rate-limit", outcome: "no-match" });
+
+  // AER-017 — THE DEPLOYMENT-WIDE HOLD, and note where it sits.
+  //
+  // AFTER every denial (grants, data scope, rate limits, an ABAC forbid) so the
+  // dial can only ever restrict a call the rest of the policy would have
+  // allowed: an ungranted, over-limit, out-of-scope or forbidden call is denied
+  // and never offered a queue. BEFORE the other holds so that during an incident
+  // the reason an operator reads is the dial they just turned, which is the most
+  // actionable thing on the screen.
+  //
+  // One human sign-off per call satisfies whichever hold is checked first, which
+  // is the pre-existing contract for the ABAC hold and the approval rules and is
+  // unchanged here — "nothing runs unattended while this mode is set" is
+  // satisfied by one attendant, not by one per rule that happens to match.
+  const executionHold = executionApprovalHold(input.execution);
+  if (executionHold) {
+    if ("unusable" in executionHold) {
+      chain.push({ rule: "execution-require-approval", outcome: "deny" });
+      return {
+        effect: "deny",
+        ruleId: EXECUTION_RULE_IDS.requireApproval,
+        ruleChain: chain,
+        reason:
+          "this deployment requires human approval for every governed call but names no " +
+          "approver, so there is nobody to route the queue entry to — failing closed. Set an " +
+          "approver on the execution dial, or use read-only mode.",
+      };
+    }
+    if (input.approvedApprovalId) {
+      chain.push({
+        rule: "execution-require-approval",
+        outcome: "satisfied-by-approval",
+        grantId: input.approvedApprovalId,
+      });
+    } else {
+      chain.push({ rule: "execution-require-approval", outcome: "require-approval" });
+      return {
+        effect: "require_approval",
+        ruleId: EXECUTION_RULE_IDS.requireApproval,
+        ruleChain: chain,
+        reason:
+          "this deployment requires human approval for every governed call, including " +
+          `${toolLabel}. Nothing runs unattended while this mode is set; the call is queued, ` +
+          "not refused.",
+        approverUserId: executionHold.approverUserId,
+      };
+    }
+  }
 
   // ADR-0040: an ABAC policy in "require approval" mode pauses the call —
   // through the SAME §3 Approvals Queue, satisfied by the SAME already-approved

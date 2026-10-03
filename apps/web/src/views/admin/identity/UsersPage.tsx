@@ -195,22 +195,13 @@ export default function UsersPage() {
             rows={rows}
             rowKey={(u) => u.id}
             loading={users.isLoading}
+            error={users.error}
+            onRetry={() => void users.refetch()}
             onRowClick={(u) => setSelectedId(u.id === selectedId ? null : u.id)}
             rowLabel={(u) => `Manage ${u.displayName || u.email}`}
             empty={<EmptyState title="No users yet" body="Create the first developer account above." />}
           />
         </Card>
-
-        {users.isError && (
-          <Card>
-            <div className={v.errLine} role="alert">
-              {(users.error as Error).message}
-            </div>
-            <Button size="sm" onClick={() => void users.refetch()}>
-              Retry
-            </Button>
-          </Card>
-        )}
 
         {selected && (
           <UserDetail
@@ -689,6 +680,8 @@ function OverridesPanel(props: { userId: string }) {
         rows={mine}
         rowKey={(r) => r.id}
         loading={mcpRevs.isLoading}
+        error={mcpRevs.error}
+        onRetry={() => void mcpRevs.refetch()}
         empty={<EmptyState title="No MCP revocations for this user" />}
       />
 
@@ -750,6 +743,8 @@ function OverridesPanel(props: { userId: string }) {
             rows={agentRevs.data?.revocations ?? []}
             rowKey={(r) => r.id}
             loading={agentRevs.isLoading}
+            error={agentRevs.error}
+            onRetry={() => void agentRevs.refetch()}
             empty={<EmptyState title="No agent revocations" />}
           />
         </div>
@@ -817,6 +812,8 @@ function OverridesPanel(props: { userId: string }) {
             rows={connRevs.data?.revocations ?? []}
             rowKey={(r) => r.id}
             loading={connRevs.isLoading}
+            error={connRevs.error}
+            onRetry={() => void connRevs.refetch()}
             empty={<EmptyState title="No connector revocations" />}
           />
         </div>
@@ -868,6 +865,8 @@ function ApiKeysCard() {
         rows={q.data?.keys ?? []}
         rowKey={(k) => k.id}
         loading={q.isLoading}
+        error={q.error}
+        onRetry={() => void q.refetch()}
         empty={
           <EmptyState
             title="No API keys yet"

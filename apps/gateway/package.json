@@ -12,7 +12,13 @@
     "seed": "node dist/seed.js",
     "demo:mcp": "node dist/demo-mcp-server.js",
     "demo:setup": "node dist/demo-setup.js",
-    "reencrypt": "node dist/reencrypt.js"
+    "reencrypt": "node dist/reencrypt.js",
+    "demo:intake": "node dist/demo-intake-seed.js",
+    "demo:check": "node dist/demo-check.js",
+    "demo:traffic": "node dist/demo-traffic.js",
+    "demo:prepare": "node dist/demo-prepare.js",
+    "demo:gate": "node dist/demo-gate.js",
+    "demo:export-key": "node dist/demo-export-key.js"
   },
   "dependencies": {
     "@aws-sdk/client-acm": "^3.700.0",
@@ -48,12 +54,15 @@
     "@regulait/shared": "workspace:*",
     "@regulait/training-provider": "workspace:*",
     "@regulait/workflow-kernel": "workspace:*",
-    "fastify": "^5.4.0",
+    "ajv": "8.20.0",
+    "ajv-formats": "3.0.1",
+    "fastify": "^5.12.2",
     "openid-client": "^6.8.4",
     "zod": "^3.25.67",
     "zod-to-json-schema": "3.25.2"
   },
   "devDependencies": {
+    "@types/node": "26.1.1",
     "vitest": "^3.2.4",
     "xml-crypto": "6.1.2"
   }

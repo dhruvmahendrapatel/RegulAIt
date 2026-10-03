@@ -339,24 +339,51 @@ describe("the circuit breaker", () => {
     });
 
   it("opens after the threshold, and then refuses WITHOUT contacting the upstream", async () => {
-    const id = await brRegister(closedUrl);
+    // THE INSTRUMENT, AND WHY IT IS NOT A STOPWATCH. This test used to
+    // assert "contacts nobody" through a wall-clock proxy — ten refusals in
+    // under one 300ms connect deadline. On the shared CI runner the ten full
+    // governed requests (auth, server row, attribution, breaker read) took
+    // 593ms with the breaker contacting nobody, and the identical code had
+    // passed on the previous commit. A timing bound measures the runner, not
+    // the breaker. So the upstream is now a listener that COUNTS connections
+    // and slams each one shut — a genuine upstream failure as far as the client
+    // is concerned — and the claim is that the count stops moving the moment
+    // the circuit opens. That is the property, measured directly, on any
+    // machine at any speed.
+    let connections = 0;
+    const slammer = net.createServer((sock) => {
+      connections += 1;
+      sock.destroy();
+    });
+    const port = await listenOnEphemeral(slammer);
+    try {
+      const id = await brRegister(`http://127.0.0.1:${port}/`);
 
-    // below the threshold: each attempt really goes out and really fails
-    expect((await brCall(id)).statusCode).toBe(502);
-    expect((await brCall(id)).statusCode).toBe(502);
+      // below the threshold: each attempt really goes out and really fails
+      expect((await brCall(id)).statusCode).toBe(502);
+      expect((await brCall(id)).statusCode).toBe(502);
+      // POSITIVE CONTROL for the instrument (M-033): those failures were real
+      // connections, so the counter is measuring what it claims to measure.
+      const contactedWhileClosed = connections;
+      expect(contactedWhileClosed).toBeGreaterThanOrEqual(2);
 
-    // threshold crossed — now it is refused by us, not by the network
-    const third = await brCall(id);
-    expect(third.statusCode).toBe(503);
-    expect(third.json().error).toBe("mcp_upstream_circuit_open");
-    // and it tells the caller when to come back, which 502 cannot
-    expect(third.headers["retry-after"]).toBeDefined();
+      // threshold crossed — now it is refused by us, not by the network
+      const third = await brCall(id);
+      expect(third.statusCode).toBe(503);
+      expect(third.json().error).toBe("mcp_upstream_circuit_open");
+      // and it tells the caller when to come back, which 502 cannot
+      expect(third.headers["retry-after"]).toBeDefined();
 
-    // THE PROPERTY THAT MATTERS: an open circuit is fast because it contacts
-    // nobody. Ten refusals must cost far less than one 300ms connect deadline.
-    const started = Date.now();
-    for (let i = 0; i < 10; i += 1) expect((await brCall(id)).statusCode).toBe(503);
-    expect(Date.now() - started).toBeLessThan(300);
+      // THE PROPERTY THAT MATTERS: an open circuit contacts nobody. Ten more
+      // refusals, and the listener must not have seen one new connection.
+      for (let i = 0; i < 10; i += 1) expect((await brCall(id)).statusCode).toBe(503);
+      expect(connections, "an open circuit must not touch the upstream").toBe(
+        contactedWhileClosed,
+      );
+    } finally {
+      // every accepted socket was destroyed on arrival, so close() returns
+      await new Promise<void>((resolve) => slammer.close(() => resolve()));
+    }
   }, 30_000);
 
   it("files the OPENING in the ledger, but not each refusal — an outage is not a log flood", async () => {

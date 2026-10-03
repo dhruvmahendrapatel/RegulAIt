@@ -71,9 +71,18 @@ export interface AuthContext {
    * but is NEVER admin, whatever the owner is, and reaches only the routes in
    * `VIRTUAL_KEY_ALLOWED_ROUTES`. */
   via: "bootstrap" | "api-key" | "session" | "virtual-key";
+  /** AER-027: which allow-list this virtual key is bound to. 'dispatch' is
+   *  ADR-0066's model surfaces; 'pdp' is `POST /v1/authz/check` and nothing
+   *  else. Set only when `via === "virtual-key"`. */
+  virtualKeyPurpose?: "dispatch" | "pdp";
   /** ADR-0066: set only when `via === "virtual-key"`. The dispatch core reads
    * it to apply the key's allow-list and budget, and the ledger stamps it. */
   virtualKeyId?: string;
+  /** ADR-0167: the `api_keys` row a header credential resolved to. Set only
+   * when `via === "api-key"`; it names the post-auth rate-limit bucket, so the
+   * bucket is the STORED id and never anything derived from the presented
+   * string. */
+  apiKeyId?: string;
 }
 
 /**
@@ -178,6 +187,7 @@ export async function authenticate(
       isAdmin: false,
       via: "virtual-key",
       virtualKeyId: resolved.row.id,
+      virtualKeyPurpose: resolved.row.purpose ?? "dispatch",
     };
   }
 
@@ -218,7 +228,7 @@ export async function authenticate(
   }
 
   await db.update(apiKeys).set({ lastUsedAt: new Date() }).where(eq(apiKeys.id, row.keyId));
-  return { userId: row.userId, isAdmin: row.isAdmin, via: "api-key" };
+  return { userId: row.userId, isAdmin: row.isAdmin, via: "api-key", apiKeyId: row.keyId };
 }
 
 /**
@@ -413,6 +423,66 @@ export function sessionCookie(token: string, secure: boolean, maxAgeSeconds: num
 
 export function clearSessionCookie(secure: boolean): string {
   return `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0` + (secure ? "; Secure" : "");
+}
+
+// --- ADR-0167 (AUTHZ-04): SSO login state is bound to the browser that started it ---
+//
+// /auth/oidc/:id/start and /auth/saml/:id/start stored a single-use state row
+// and redirected; the callback / ACS claimed the row by the `state` (or
+// `RelayState`) in the request and minted a session for WHOEVER presented it.
+// PKCE and the nonce bind the CODE to the server-side row; nothing bound the
+// row to a user agent. So an attacker could start a login, authenticate at the
+// IdP as themselves, and hand the resulting callback URL to a victim, whose
+// browser would complete the exchange and be signed in to the ATTACKER's
+// account — classic login CSRF, with everything the victim then typed landing
+// where the attacker can read it.
+//
+// The binding is a cookie set at /start whose value is an HMAC of the state
+// under the data key (so it needs no column, survives a replica change, and
+// cannot be computed by anyone without the key); the return leg requires it to
+// match. The cookie never leaves the login path and lives as long as the
+// state row does.
+//
+//   - OIDC: the callback is a top-level GET, which a `SameSite=Lax` cookie
+//     accompanies. Lax, HttpOnly, Secure when the request is.
+//   - SAML: the ACS is a CROSS-SITE top-level POST from the IdP, which a Lax
+//     cookie never accompanies. The binding therefore rides `SameSite=None;
+//     Secure`, which browsers accept only over TLS — so for SAML the cookie is
+//     set, and required, only when the request is genuinely secure. A SAML
+//     deployment over plaintext http is already handing its session cookie to
+//     the wire; it is not made worse here, and it is not pretended to be bound.
+//
+// IdP-initiated SAML (no RelayState row) has no /start to bind to and stays
+// behind the provider's explicit `allowIdpInitiated` switch, unchanged.
+
+export const OIDC_BINDING_COOKIE = "regulait_oidc_login";
+export const SAML_BINDING_COOKIE = "regulait_saml_login";
+const SSO_BINDING_MAX_AGE_SECONDS = OIDC_STATE_MINUTES * 60;
+/** the HMAC key when no data key is configured: per-process, which is correct
+ * for a single replica and honestly weaker for several — a multi-replica
+ * deployment has a data key (ADR-0063) */
+const processBindingSecret = randomBytes(32);
+
+export function ssoBrowserBinding(dataKeyHex: string | undefined, state: string): string {
+  const trimmed = dataKeyHex?.trim() ?? "";
+  const key = /^[0-9a-f]{64}$/i.test(trimmed) ? Buffer.from(trimmed, "hex") : processBindingSecret;
+  return createHmac("sha256", key).update(`sso-browser-binding\0${state}`).digest("base64url");
+}
+
+export function ssoBindingMatches(presented: string | null, expected: string): boolean {
+  return presented !== null && safeEqual(presented, expected);
+}
+
+export function ssoBindingCookie(
+  name: string,
+  value: string,
+  opts: { path: string; secure: boolean; crossSite: boolean },
+): string {
+  const sameSite = opts.crossSite ? "None" : "Lax";
+  return (
+    `${name}=${value}; Path=${opts.path}; HttpOnly; SameSite=${sameSite}; Max-Age=${SSO_BINDING_MAX_AGE_SECONDS}` +
+    (opts.secure || opts.crossSite ? "; Secure" : "")
+  );
 }
 
 export interface SessionAuth {
@@ -1604,6 +1674,15 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
       code_challenge: codeChallenge,
       code_challenge_method: "S256",
     });
+    // ADR-0167 (AUTHZ-04): this login completes only in THIS browser
+    void reply.header(
+      "set-cookie",
+      ssoBindingCookie(OIDC_BINDING_COOKIE, ssoBrowserBinding(opts.dataKey, state), {
+        path: "/auth/oidc",
+        secure: requestIsSecure(req),
+        crossSite: false,
+      }),
+    );
     return reply.redirect(authUrl.href, 302);
   });
 
@@ -1622,6 +1701,20 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
       .returning();
     const login = claimed[0];
     if (!login) return reply.status(401).send({ error: "invalid_or_expired_state" });
+    // ADR-0167 (AUTHZ-04): the row is claimed either way (single-use holds),
+    // but it completes a login only in the browser that opened it. Refused
+    // BEFORE the token exchange, so a planted callback costs the IdP nothing.
+    const presentedBinding = readCookie(req.headers.cookie, OIDC_BINDING_COOKIE);
+    if (!ssoBindingMatches(presentedBinding, ssoBrowserBinding(opts.dataKey, state))) {
+      await auditAuth(db, null, null, "oidc-login-browser-mismatch", "deny",
+        `OIDC callback refused: the login was started in a different browser (login CSRF) — state consumed, no session minted`,
+        { phase: "oidc-callback", providerId: login.providerId, bindingCookiePresent: presentedBinding !== null },
+        "oidc_provider");
+      return reply.status(401).send({
+        error: "login_not_bound_to_this_browser",
+        detail: "this sign-in was started in a different browser session — start again from the login page",
+      });
+    }
     const [provider] = await db
       .select()
       .from(oidcProviders)

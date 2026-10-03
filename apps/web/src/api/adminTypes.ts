@@ -293,7 +293,19 @@ export interface ConnectionTestResult {
 }
 
 export interface UserAgentPolicyView {
-  agents: Array<{ agentId: string; name: string; provider: string; tier: number; revoked?: boolean }>;
+  agents: Array<{
+    agentId: string;
+    name: string;
+    provider: string;
+    tier: number;
+    revoked?: boolean;
+    /** the row this entitlement came from — a DIRECT grant is the only kind
+     *  that can be deleted; a role-granted agent has no grant of its own. */
+    grantId?: string;
+    source?: "direct" | "role";
+    /** provenance: every role that also confers this agent */
+    roles?: string[];
+  }>;
   defaultAgentId: string | null;
   ceilingAgentId: string | null;
   routingMode: string | null;

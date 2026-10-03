@@ -114,10 +114,10 @@ export default function DataKeyPage() {
           <Card title="This deployment's key">
             <div className={a.statRow}>
               <Stat
-                value={<code>{s?.recordedFingerprint ?? "—"}</code>}
+                value={<code className={v.statCode}>{s?.recordedFingerprint ?? "—"}</code>}
                 label="recorded fingerprint (what the ciphertext was written under)"
               />
-              <Stat value={<code>{s?.fingerprint ?? "not set"}</code>} label="running key in the gateway" />
+              <Stat value={<code className={v.statCode}>{s?.fingerprint ?? "not set"}</code>} label="running key in the gateway" />
               <Stat
                 value={
                   <Badge tone={s?.matches ? "ok" : "danger"}>{s?.matches ? "matches" : "does NOT match"}</Badge>

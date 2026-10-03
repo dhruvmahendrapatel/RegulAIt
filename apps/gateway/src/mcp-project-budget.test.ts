@@ -13,6 +13,7 @@ import {
   createDb,
   eq,
   mcpServers,
+  projects,
   runMigrations,
   usageEvents,
   type Db,
@@ -53,6 +54,7 @@ const AUTH = { authorization: `Bearer ${BOOT}` };
 
 const PAID = `f02_paid_${RUN}`;
 const FREE = `f02_free_${RUN}`;
+const PROFILE_TAG = `f02-finreg-${RUN}`;
 
 /** The two independent proofs that a blocked call never reached upstream. */
 const upstreamHits = { http: 0, tool: 0 };
@@ -178,6 +180,13 @@ beforeAll(async () => {
       payload: { userId, serverId, toolName: name },
     });
   }
+  // a framework whose budgetEnforcement is 'block' — the ADR-0027 O2 cascade
+  // dimension the strictest-wins case below exercises on this path
+  const profile = await app.inject({
+    method: "POST", headers: AUTH, url: "/v1/compliance/profiles",
+    payload: { tag: PROFILE_TAG, budgetEnforcement: "block", piiMode: "log" },
+  });
+  expect(profile.statusCode).toBe(201);
 });
 
 afterAll(async () => {
@@ -304,6 +313,58 @@ describe("the treatments that must NOT change", () => {
         .from(auditLog)
         .where(and(eq(auditLog.objectId, projectId), eq(auditLog.ruleId, "project-budget-cap")));
       expect(audited.length).toBeGreaterThan(0);
+    } finally {
+      await app.inject({
+        method: "PUT", headers: AUTH, url: "/v1/org/settings",
+        payload: { budgetEnforcement: restore },
+      });
+    }
+  });
+});
+
+describe("the gate's other verdicts carry over to the MCP path unchanged", () => {
+  it("a SANCTIONED overage lets the paid call through and bills it", async () => {
+    const projectId = await mkProject({
+      name: `f02-overage-${RUN}`, budgetUsd: 0.01, budgetApproverUserId: approverId,
+    });
+    await spend(projectId, 0.5);
+    // what the named approver's decision on the __project_budget__ row writes
+    await db.update(projects).set({ overageApproved: true, overageApprovedPeriod: null }).where(eq(projects.id, projectId));
+    const beforeTool = upstreamHits.tool;
+    const usageBefore = await mcpUsageCount(PAID, projectId);
+    const out = await executeGovernedToolCall(db, undefined, {
+      userId, serverId, toolName: PAID, projectId, arguments: {},
+    });
+    expect(out.kind).toBe("allowed");
+    expect(upstreamHits.tool).toBe(beforeTool + 1);
+    expect(await mcpUsageCount(PAID, projectId)).toBe(usageBefore + 1);
+  });
+
+  it("a compliance profile's budgetEnforcement 'block' overrides org warn_only (strictest wins) — blocked, untouched, unbilled", async () => {
+    const current = await app.inject({ method: "GET", headers: AUTH, url: "/v1/org/settings" });
+    const restore = current.json().budgetEnforcement ?? "block";
+    await app.inject({
+      method: "PUT", headers: AUTH, url: "/v1/org/settings",
+      payload: { budgetEnforcement: "warn_only" },
+    });
+    try {
+      const projectId = await mkProject({
+        name: `f02-compliance-block-${RUN}`, budgetUsd: 0.01, budgetApproverUserId: approverId,
+        classifications: [PROFILE_TAG],
+      });
+      await spend(projectId, 0.5);
+      const before = snapshotUpstream();
+      const usageBefore = await mcpUsageCount(PAID, projectId);
+      const out = await executeGovernedToolCall(db, undefined, {
+        userId, serverId, toolName: PAID, projectId, arguments: {},
+      });
+      expect(out.kind).toBe("budget_blocked");
+      if (out.kind === "budget_blocked") {
+        expect(out.status).toBe(409);
+        expect(out.detail).toContain("blocking forced by the compliance cascade");
+      }
+      expect(snapshotUpstream()).toEqual(before);
+      expect(await mcpUsageCount(PAID, projectId)).toBe(usageBefore);
     } finally {
       await app.inject({
         method: "PUT", headers: AUTH, url: "/v1/org/settings",

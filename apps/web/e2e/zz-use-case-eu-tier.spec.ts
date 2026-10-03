@@ -101,7 +101,7 @@ test("a social-scoring use case screens PROHIBITED — banner, Art. 5 reason, di
   await expect(page.getByText("Intake questionnaire — fill and submit")).toBeVisible();
 
   // the structured screening controls: tick the prohibited practice
-  await expect(page.getByText("EU AI Act risk screening (ADR-0085)")).toBeVisible();
+  await expect(page.getByText("EU AI Act screening questions")).toBeVisible();
   await page.getByLabel("Social scoring", { exact: true }).check();
   await page.getByRole("button", { name: "Submit questionnaire" }).click();
   await expect(
@@ -120,6 +120,6 @@ test("a social-scoring use case screens PROHIBITED — banner, Art. 5 reason, di
   await expect(page.getByText(/Awaiting sign-off/)).toBeVisible();
   // the registry row (rendered as a link-row) shows the decided-not-blocked status
   await expect(
-    page.getByRole("link", { name: /uct-e2e-citizen-score/ }).getByText("under review"),
+    page.getByRole("link", { name: /uct-e2e-citizen-score/ }).getByText("Under review"),
   ).toBeVisible();
 });

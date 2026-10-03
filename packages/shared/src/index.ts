@@ -14,7 +14,11 @@ import { APPROVAL_SCOPES } from "./approval-binding.js";
 // updateOrgSettingsSchema below, so it is imported as well as re-exported.
 import { INTERNATIONAL_PII_CATEGORIES } from "./pii-international.js";
 
-export { detectPII, type PiiHit, type PiiCategory, type BasePiiCategory } from "./pii.js";
+export { detectPII, redactPII, PII_REDACTION_VERSION, type PiiHit, type PiiCategory, type BasePiiCategory } from "./pii.js";
+export {
+  redactPiiPayload, PiiPayloadError, PII_PAYLOAD_VERSION, PII_PAYLOAD_LIMITS,
+  type PiiJsonValue, type PiiPayloadLimits, type PiiPayloadErrorCode,
+} from "./pii-payload.js";
 // ADR-0117 — the opt-in international national-identifier detectors.
 export {
   INTERNATIONAL_DETECTORS,
@@ -1385,6 +1389,10 @@ export const reportChecksSchema = z.object({
       }),
     )
     .min(1),
+  /** ADR-0167 (AUTHZ-06): REQUIRED when the reporter is the change's own
+   * initiator and any result is `passed` — reporting your own check green is
+   * a self-attestation, and the reason is what the approver reads. */
+  reason: z.string().max(2000).optional(),
 });
 
 /** §2 re-run a check stage that is parked at blocked_on_check, after the failing
@@ -2585,18 +2593,26 @@ export {
 export {
   APPROVAL_CONTEXT_DIGEST_VERSION,
   APPROVAL_DIGEST_VERSION,
+  PII_APPROVAL_DIGEST_VERSION,
+  /** B9b — the ten kinds THE ONE QUEUE holds, and their labels */
+  APPROVAL_OBJECT_TYPES,
+  APPROVAL_OBJECT_TYPE_LABELS,
   APPROVAL_SCOPES,
   CONSENT_RETIREMENT_REASONS,
   DEFAULT_APPROVAL_SCOPE,
   DEFAULT_APPROVAL_TTL_HOURS,
   approvalArgumentsDigest,
   approvalArgumentsPreview,
+  preparePiiApproval,
   approvalContextDigest,
   effectiveApprovalScope,
   normalizeApprovalArguments,
   sortApprovalRuleVersions,
   type ApprovalContextRef,
+  type ApprovalTargetRef,
+  type ApprovalObjectType,
   type ApprovalPayloadRef,
+  type PreparedPiiApproval,
   type ApprovalRuleVersionRef,
   type ApprovalScope,
   type ConsentRetirementReason,
@@ -2761,6 +2777,7 @@ export {
   findMcpEndpoints,
   MCP_DISCOVERY_POSTURE,
   MCP_SDK_PACKAGES,
+  scrubEvidenceSample,
   type McpEndpointObservation,
   type McpEvidenceConfidence,
 } from "./mcp-discovery.js";
@@ -2877,6 +2894,8 @@ export {
   TEAMS_AUTHORIZATION_HEADER,
   chatContentFenced,
   chatDecidable,
+  alertMeetsThreshold,
+  composeAlertCard,
   composeApprovalCard,
   composeDecidedCard,
   parseChatInteraction,
@@ -3016,7 +3035,7 @@ export {
 // ADR-0058 — REGULATORY COMPLIANCE PACKS, the pure half: the pack/control and
 // collector vocabularies, the satisfaction rule (an attestation-required
 // control returns BEFORE any count is consulted, so it can never reach
-// 'satisfied'), the verdict-free scorecard, and the six launch packs as SEED
+// 'satisfied'), the verdict-free scorecard, and the pack catalogue as SEED
 // DATA the gateway inserts as ordinary rows.
 export {
   COMPLIANCE_PACK_DISCLAIMER,
@@ -3217,14 +3236,22 @@ export {
   AI_RISK_REGISTER_DISCLAIMER,
   AI_RISK_STATUSES,
   DEFAULT_RISK_LIBRARY,
+  RISK_CATEGORY_DIMENSION,
   RISK_CATEGORY_EVIDENCE,
   RISK_EVIDENCE_RESOLVERS,
+  TRUST_DIMENSIONS,
+  TRUST_DIMENSION_LABELS,
   acceptRiskSchema,
   createRiskSchema,
+  linkRiskControlSchema,
   riskLibraryEntrySchema,
+  setResidualRiskSchema,
   transitionRiskSchema,
   updateRiskSchema,
   type AcceptRiskInput,
+  type LinkRiskControlInput,
+  type SetResidualRiskInput,
+  type TrustDimension,
   type AiRiskCategory,
   type AiRiskLevel,
   type AiRiskStatus,
@@ -3234,6 +3261,147 @@ export {
   type TransitionRiskInput,
   type UpdateRiskInput,
 } from "./risks.js";
+// ADR-0148 — trust-dimension classification for compliance controls
+export {
+  CONTROL_DIMENSION_OVERRIDES,
+  dimensionForControl,
+  type ControlForDimension,
+} from "./trust-dimensions.js";
+// ADR-0149 — the intake assistant's deterministic half
+export {
+  CATEGORY_SUGGESTED_CONTROLS,
+  INTAKE_DATA_CATEGORIES,
+  INTAKE_DEPLOYMENTS,
+  INTAKE_SECTIONS,
+  INTAKE_SECTORS,
+  buildIntakeNarrativePrompt,
+  composeQuestionnaireDraft,
+  intakeAssistRequestSchema,
+  parseIntakeNarrative,
+  renderQuestionnaireMarkdown,
+  suggestIntake,
+  type FrameworkSuggestion,
+  type IntakeAssistRequest,
+  type IntakeSuggestions,
+  type QuestionnaireSectionDraft,
+  type RiskSuggestion,
+  type SuggestionSource,
+} from "./intake-assist.js";
+// demo task G1/C6 — the fixture contract between Gemini's data and the seeder
+export {
+  DEMO_DATA_SENSITIVITIES,
+  type DemoIntakeFixtures,
+  type DemoModelCard,
+  type DemoRisk,
+  type DemoShadowFinding,
+  type DemoUseCase,
+  type DemoUseCaseTarget,
+  type DemoVendor,
+  type DemoVendorTarget,
+  type DemoRiskTarget,
+} from "./demo-intake-types.js";
+
+// Demo tasks G1/G2 (Gemini, Claude-reviewed): the demo dataset the C6 seeder
+// loads, and the agentic risk-scenario library the risk picker offers.
+export { DEMO_INTAKE_FIXTURES } from "./demo-intake/fixtures.js";
+export { SCENARIO_LIBRARY, type DemoRiskScenario } from "./demo-intake/scenario-library.js";
+
+// ADR-0156 — the AI-system dependency graph and max-propagation of declared risk.
+export {
+  DEPENDENCY_GRAPH_NOTES,
+  GRAPH_EDGE_KINDS,
+  GRAPH_NODE_TYPES,
+  NO_RISK,
+  RISK_BANDS,
+  effectiveRiskRating,
+  propagateRisk,
+  rateRisk,
+  type GraphEdgeBasis,
+  type GraphEdgeInput,
+  type GraphEdgeKind,
+  type GraphNodeType,
+  type GraphRiskInput,
+  type PropagatedRating,
+  type RiskBand,
+  type RiskRating,
+} from "./dependency-graph.js";
+
+// ADR-0157 — the governance monitor: rule catalogue, evaluator, reconciliation.
+export {
+  DEFAULT_COVERAGE_FLOOR_PCT,
+  MONITOR_RULE_IDS,
+  MONITOR_RULES,
+  MONITOR_SEVERITIES,
+  evaluateMonitorRules,
+  reconcileAlerts,
+  type ActiveAlertRef,
+  type MonitorAgentInput,
+  type MonitorDimensionInput,
+  type MonitorFinding,
+  type MonitorInput,
+  type MonitorRiskInput,
+  type MonitorRuleId,
+  type MonitorSeverity,
+  type MonitorUseCaseInput,
+  type MonitorVendorInput,
+  type OffStackServing,
+} from "./governance-monitor.js";
+
+// ADR-0158 — regulatory intelligence: the feed shape (G4 authors the data) and
+// the pure join to this organisation's packs, controls and use cases.
+export {
+  REGULATORY_INTEL_NOTES,
+  REGULATORY_UPDATE_STATUSES,
+  computeRegulatoryImpact,
+  type RegulatoryControlState,
+  type RegulatoryImpact,
+  type RegulatoryUpdate,
+  type RegulatoryUpdateStatus,
+  type RegulatoryUseCaseInput,
+} from "./regulatory-intel.js";
+
+// ADR-0159 — remediation proposals for monitor alerts (executable kinds run
+// only after a different human approves them on the approvals queue).
+export {
+  EXECUTABLE_REMEDIATION_KINDS,
+  GUIDANCE_REMEDIATION_KINDS,
+  REMEDIATION_KINDS,
+  REMEDIATION_STATUSES,
+  isExecutableRemediation,
+  proposeRemediations,
+  type ExecutableRemediationKind,
+  type RemediationCandidate,
+  type RemediationContext,
+  type RemediationKind,
+  type RemediationRiskInput,
+  type RemediationStatus,
+} from "./remediation.js";
+
+// ADR-0160 — continuous trace evaluation (the shipped detectors re-run over
+// stored trace previews; counts only).
+export {
+  TRACE_EVALUATION_NOTES,
+  TRACE_EVALUATION_OUTCOMES,
+  TRACE_INPUT_DETECTORS,
+  TRACE_OUTPUT_DETECTORS,
+  evaluateTraceContent,
+  summarizeTraceEvaluations,
+  type AgentTraceSummary,
+  type TraceEvaluation,
+  type TraceEvaluationOutcome,
+  type TraceFinding,
+} from "./trace-evaluation.js";
+
+// ADR-0161 — the deploy gate a CI/CD pipeline calls before shipping.
+export {
+  DEPLOY_GATE_REASON_CODES,
+  evaluateDeployGate,
+  type DeployGateAgentInput,
+  type DeployGateDecision,
+  type DeployGateInput,
+  type DeployGateReason,
+  type DeployGateReasonCode,
+} from "./deploy-gate.js";
 
 // ---------------------------------------------------------------------------
 // ADR-0084 — the AI vendor registry (third-party AI risk): the vocabulary,
@@ -3333,10 +3501,90 @@ export {
   type AuthzDecision,
 } from "./audit-advisory.js";
 
+/**
+ * The session origins a callout may assert — a MIRROR of `SESSION_ORIGINS` in
+ * `@regulait/db`, kept in step by `apps/gateway/src/zz-aer036-*.test.ts`.
+ *
+ * Every value here is one the gateway's own `abacPrincipalFromRequest` can
+ * produce, which is the property that makes a policy written against this
+ * vocabulary mean the same thing on both paths.
+ */
+export const AUTHZ_SESSION_ORIGINS = [
+  "password",
+  "api_key",
+  "oidc",
+  "saml",
+  "bootstrap",
+  "unknown",
+] as const;
+export type AuthzSessionOrigin = (typeof AUTHZ_SESSION_ORIGINS)[number];
+
 export const authzCheckRequestSchema = z.object({
   /** the SUBJECT the proxy is asking about — not the caller. See ADR-0127 §3. */
   userId: z.string().uuid(),
   serverId: z.string().uuid(),
   toolName: z.string().min(1),
+
+  // ---- AER-028: THE CONTEXT THAT MAKES THIS THE SAME QUESTION -------------
+  //
+  // Without these the callout asked a DIFFERENT question than the dispatch it
+  // is standing in for, and got a different answer. The kernel fails closed on
+  // a data-scope rule whose argument is absent — correct, and it meant that any
+  // deployment with a data-scope rule got `deny` from the PDP for calls that
+  // would really have been allowed. A PDP that is wrong in the safe direction
+  // is still wrong, and it is wrong in a way that gets it switched off.
+  //
+  // All three are OPTIONAL and all three are BELIEVED, exactly as `userId`
+  // already is. That is not a new trust boundary: in this topology the proxy is
+  // the component that authenticated the user and knows what it is calling, so
+  // it is the only thing that CAN supply them. It is, however, why the
+  // credential holding this is purpose-scoped (AER-027) and why the proxy must
+  // be treated as part of the trusted path.
+
+  /** The real call arguments, so data-scope rules evaluate the actual values.
+   *  Absent means absent — a data-scope rule still fails closed rather than
+   *  being skipped, which is the behaviour that must not change. */
+  args: z.record(z.unknown()).optional(),
+
+  /** Pillar-5 attribution, from which the deploy-mode context is derived, so a
+   *  mode-scoped rule matches the same way it would on the real dispatch. */
+  projectId: z.string().uuid().nullish(),
+
+  /** ADR-0040 session facts for the ABAC principal bag. Absent leaves the
+   *  honest "unknown" defaults, which are the WEAKEST reading — so omitting
+   *  this can only narrow a decision, never widen one. */
+  principal: z
+    .object({
+      /**
+       * AER-036 — a CLOSED vocabulary, and it must be the product's own.
+       *
+       * This was `z.string().min(1).max(64)`, which accepted anything, and the
+       * Kong adapter duly sent `sso` — a value the resolved-session path never
+       * produces. The consequence was worse than a value nobody matched: a
+       * policy written `sessionOrigin == "oidc"` could never fire for that
+       * traffic, while one written `sessionOrigin != "api_key"` was SATISFIED by
+       * it. An authentication-strength rule therefore decided differently at the
+       * callout than at this product's own dispatch boundary, in both directions.
+       *
+       * So an origin outside the vocabulary is now a 400 rather than a silent
+       * accept: a caller sending a value no policy can ever match has a
+       * misconfiguration, and telling it is the whole point of a narrow contract.
+       * `unknown` is IN the list, because it is the honest thing to send when a
+       * caller genuinely cannot tell — the weakest reading, and it is what the
+       * gateway's own derivation returns for exactly that case.
+       *
+       * MIRROR of `SESSION_ORIGINS` in `@regulait/db`. This package cannot
+       * import that one (shared depends on zod and nothing else, and db depends
+       * on shared), so the lists are kept in step by a test in the gateway —
+       * the only package that can see both. Same shape, and same reason, as the
+       * `connectorProviderKindSchema` mirror ADR-0121 had to add after that
+       * drift shipped.
+       */
+      sessionOrigin: z.enum(AUTHZ_SESSION_ORIGINS).nullish(),
+      mfaCompleted: z.boolean().nullish(),
+    })
+    .optional(),
 });
 export type AuthzCheckRequest = z.infer<typeof authzCheckRequestSchema>;
+
+export { REGULATORY_UPDATES } from "./demo-intake/regulatory-updates.js";

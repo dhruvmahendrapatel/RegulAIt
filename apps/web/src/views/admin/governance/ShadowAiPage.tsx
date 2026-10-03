@@ -34,9 +34,10 @@
  *    opt-in and is labelled as such.
  */
 import { useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
-import { ago } from "../../../api/format";
+import { ago, evidenceLabel, providerLabel } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, CodeBlock, EmptyState, Field, Input, Select, SeverityBadge, Table, Textarea } from "../../../ui/kit";
 import {
@@ -193,6 +194,23 @@ interface DiscoveryResult {
   retention: string;
   posture: string;
 }
+interface McpDiscoveryResult {
+  posture: string;
+  observed: number;
+  unregistered: number;
+  registryCount: number;
+  results: Array<{
+    host: string;
+    path: string | null;
+    indicators: string[];
+    confidence: string;
+    occurrences: number;
+    samples: string[];
+    registered: boolean;
+    registeredAs: string | null;
+    verdict: string;
+  }>;
+}
 
 const DISCOVERY_KINDS: Array<{ v: string; l: string }> = [
   { v: "dns_log", l: "DNS query log (generic lines)" },
@@ -266,6 +284,7 @@ export default function ShadowAiPage() {
   const rawAct = useApiAction();
   /** first-party discovery keeps the structured classification the same way */
   const discAct = useApiAction();
+  const mcpAct = useApiAction();
 
   const [evidence, setEvidence] = useState(EXAMPLE);
   const [preview, setPreview] = useState<unknown>(null);
@@ -288,6 +307,8 @@ export default function ShadowAiPage() {
   const [discSubject, setDiscSubject] = useState("");
   const [discContent, setDiscContent] = useState("");
   const [discResult, setDiscResult] = useState<DiscoveryResult | null>(null);
+  const [mcpContent, setMcpContent] = useState("");
+  const [mcpResult, setMcpResult] = useState<McpDiscoveryResult | null>(null);
 
   const refresh = () => {
     void catalogue.refetch();
@@ -364,6 +385,14 @@ export default function ShadowAiPage() {
     if (mode === "apply") refresh();
   };
 
+  const submitMcpDiscovery = async (mode: "preview" | "apply") => {
+    const result = await mcpAct.run<McpDiscoveryResult>(
+      () => api.post<McpDiscoveryResult>("/v1/shadow-ai/mcp-discovery", { content: mcpContent, mode }),
+      mode === "preview" ? "MCP evidence compared with this deployment's registry — nothing was written." : "MCP discovery result recorded in the audit trail.",
+    );
+    if (result) setMcpResult(result);
+  };
+
   const bySeverity = useMemo(() => {
     const out: Record<string, number> = { critical: 0, high: 0, medium: 0, low: 0 };
     for (const f of findings.data?.findings ?? []) out[f.severity] = (out[f.severity] ?? 0) + 1;
@@ -393,9 +422,6 @@ export default function ShadowAiPage() {
       />
 
       <Card title="What this does, and what it cannot do">
-        <p className={v.faint}>
-          regulAIt ships no collector. Everything below analyzes evidence you export and upload.
-        </p>
         <p className={v.dim}>{findings.data?.coverage.statement ?? "Loading coverage…"}</p>
         <p className={v.dim}>{findings.data?.posture}</p>
       </Card>
@@ -417,7 +443,7 @@ export default function ShadowAiPage() {
             rows={findings.data?.coverage.sources ?? []}
             rowKey={(r) => r.kind}
             columns={[
-              { key: "evidence_class", header: "Evidence class", render: (r) => <code>{r.kind}</code> },
+              { key: "evidence_class", header: "Evidence class", render: (r) => evidenceLabel(r.kind) },
               { key: "supplied", header: "Supplied", render: (r) => <Badge tone={r.on ? "ok" : "neutral"}>{r.on ? "on" : "off"}</Badge> },
               { key: "imports", header: "Imports", render: (r) => r.imports },
               { key: "rows", header: "Rows", render: (r) => r.rows },
@@ -741,8 +767,8 @@ export default function ShadowAiPage() {
                       rowKey={(r) => r.value}
                       columns={[
                         { key: "value", header: "Host / package", render: (r) => <code>{r.value}</code> },
-                        { key: "kind", header: "Kind", render: (r) => r.kind },
-                        { key: "provider", header: "Provider", render: (r) => r.provider ?? "—" },
+                        { key: "kind", header: "Kind", render: (r) => evidenceLabel(r.kind) },
+                        { key: "provider", header: "Provider", render: (r) => (r.provider ? providerLabel(r.provider) : "—") },
                         { key: "sig", header: "Signature", render: (r) => <code>{r.entryId ?? "—"}</code> },
                         { key: "n", header: "Occurrences", render: (r) => r.occurrences },
                         { key: "class", header: "Class", render: () => <Badge tone="warn">shadow</Badge> },
@@ -803,6 +829,29 @@ export default function ShadowAiPage() {
         </QueryGate>
       </Card>
 
+      <Card title="MCP server discovery (operator-supplied evidence)">
+        <div className={v.stack}>
+          <p className={v.dim}>Paste logs that contain MCP transport paths, protocol headers, or JSON-RPC methods. regulAIt compares observed hosts with this deployment’s MCP registry; it does not scan, connect to, or crawl your estate.</p>
+          <Field label="MCP log evidence"><Textarea rows={7} value={mcpContent} onChange={(event) => setMcpContent(event.target.value)} spellCheck={false} placeholder={'POST https://tools.example/mcp MCP-Protocol-Version: 2025-06-18 {"method":"tools/list"}'} /></Field>
+          <div className={v.row}>
+            <Button disabled={mcpAct.busy || !mcpContent.trim()} onClick={() => void submitMcpDiscovery("preview")}>Compare with registry (writes nothing)</Button>
+            <Button variant="primary" disabled={mcpAct.busy || !mcpContent.trim() || !mcpResult || mcpResult.unregistered === 0} onClick={() => void submitMcpDiscovery("apply")}>Record unregistered hosts</Button>
+          </div>
+          <OutcomePanel outcome={mcpAct.outcome} />
+          {mcpResult ? <div className={v.stack}>
+            <div className={a.statRow}><Stat value={mcpResult.observed} label="Observed MCP hosts" /><Stat value={mcpResult.unregistered} label="Unregistered" /><Stat value={mcpResult.registryCount} label="Registry entries" /></div>
+            {mcpResult.results.length === 0 ? <EmptyState title="No MCP indicators found" body="No supported MCP transport path, protocol header, or JSON-RPC method appeared in the supplied text." /> : <Table rows={mcpResult.results} rowKey={(row) => row.host} columns={[
+              { key: "host", header: "Host", render: (row) => <><code>{row.host}</code>{row.path ? <span className={v.faint}> {row.path}</span> : null}</> },
+              { key: "confidence", header: "Confidence", render: (row) => <Badge tone={row.confidence === "high" ? "warn" : "info"}>{row.confidence}</Badge> },
+              { key: "registry", header: "Registry", render: (row) => <Badge tone={row.registered ? "ok" : "danger"}>{row.registered ? row.registeredAs ?? "registered" : "unregistered"}</Badge> },
+              { key: "evidence", header: "Evidence", render: (row) => <span className={v.dim}>{row.indicators.join(", ")} · {row.occurrences} line(s)</span> },
+              { key: "verdict", header: "Verdict", render: (row) => <span className={v.dim}>{row.verdict}</span> },
+            ]} />}
+            <p className={v.faint}>{mcpResult.posture}</p>
+          </div> : null}
+        </div>
+      </Card>
+
       <Card title="Import evidence (rows already in regulAIt's shape)">
         <p className={v.faint}>
           An evidence file is untrusted input: size-bounded, schema-checked, and refused outright if it carries a
@@ -837,8 +886,8 @@ export default function ShadowAiPage() {
               columns={[
                 { key: "severity", header: "Severity", render: (r) => <SeverityBadge severity={r.severity} /> },
                 { key: "subject", header: "Subject", render: (r) => <span title={r.subjectKind}>{r.subject}</span> },
-                { key: "provider", header: "Provider", render: (r) => r.provider },
-                { key: "sources", header: "Sources", render: (r) => r.signalSources.join(", ") },
+                { key: "provider", header: "Provider", render: (r) => providerLabel(r.provider) },
+                { key: "sources", header: "Sources", render: (r) => r.signalSources.map(evidenceLabel).join(", ") },
                 { key: "confidence", header: "Confidence", render: (r) => r.confidence },
                 { key: "observations", header: "Observations", render: (r) => r.observationCount },
                 { key: "last_seen", header: "Last seen", render: (r) => ago(r.lastSeenAt) },
@@ -866,7 +915,10 @@ export default function ShadowAiPage() {
                   key: "triage",
                   header: "",
                   render: (r) => (
-                    <Button onClick={() => { setDispositionFor(r.id); setReason(""); }}>Triage</Button>
+                    <div className={v.row}>
+                      <Link to={`/admin/governance/intake?source=shadow-ai&findingId=${encodeURIComponent(r.id)}&title=${encodeURIComponent(`Govern ${r.subject}`)}&description=${encodeURIComponent(`Register and govern the ${providerLabel(r.provider)} usage observed for ${r.subject}. Evidence: ${r.signalSources.map(evidenceLabel).join(", ")}.`)}`}>Register as use case</Link>
+                      <Button onClick={() => { setDispositionFor(r.id); setReason(""); }}>Triage</Button>
+                    </div>
                   ),
                 },
               ]}
@@ -931,14 +983,15 @@ export default function ShadowAiPage() {
               Install / refresh shipped seed
             </Button>
           </div>
+          <AddSignatureForm onAdded={refresh} />
           <Table<Signature>
             rows={catalogue.data?.signatures ?? []}
             rowKey={(r) => r.id}
             columns={[
-              { key: "provider", header: "Provider", render: (r) => r.provider },
-              { key: "kind", header: "Kind", render: (r) => <code>{r.kind}</code> },
+              { key: "provider", header: "Provider", render: (r) => providerLabel(r.provider) },
+              { key: "kind", header: "Kind", render: (r) => evidenceLabel(r.kind) },
               { key: "value", header: "Value", render: (r) => <code>{r.value}</code> },
-              { key: "match", header: "Match", render: (r) => r.matchType + (r.minLength ? ` (≥${r.minLength})` : "") },
+              { key: "match", header: "Match", render: (r) => evidenceLabel(r.matchType) + (r.minLength ? ` (≥${r.minLength})` : "") },
               { key: "provenance", header: "Provenance", render: (r) => r.provenance },
               { key: "updated", header: "Updated", render: (r) => ago(r.lastUpdatedAt) },
               { key: "enabled", header: "Enabled", render: (r) => <Badge tone={r.enabled ? "ok" : "neutral"}>{r.enabled ? "yes" : "no"}</Badge> },
@@ -969,7 +1022,7 @@ export default function ShadowAiPage() {
             rowKey={(r) => r.id}
             columns={[
               { key: "when", header: "When", render: (r) => ago(r.createdAt) },
-              { key: "kind", header: "Kind", render: (r) => <code>{r.kind}</code> },
+              { key: "kind", header: "Kind", render: (r) => evidenceLabel(r.kind) },
               { key: "mode", header: "Mode", render: (r) => r.mode },
               { key: "status", header: "Status", render: (r) => <Badge tone={r.status === "refused" ? "danger" : "ok"}>{r.status}</Badge> },
               { key: "rows", header: "Rows", render: (r) => r.rowCount },
@@ -981,3 +1034,117 @@ export default function ShadowAiPage() {
     </>
   );
 }
+
+/**
+ * ADD A SIGNATURE the shipped seed does not carry.
+ *
+ * The catalogue could be seeded and its rows deleted, and a custom signature
+ * could not be added from anywhere — which is the wrong way round for this
+ * feature in particular. The shipped seed covers the well-known providers;
+ * the ones a specific customer actually needs to detect are, by definition,
+ * the ones nobody shipped. An internal LLM gateway on a private hostname is
+ * exactly the shadow AI a governance team wants found, and it was the one
+ * thing the catalogue could not be told about.
+ *
+ * MATCH TYPE IS DERIVED, NOT ASKED. The gateway refuses any pairing other than
+ * sdk_package↔package and api_key_prefix↔key_prefix, so offering both as free
+ * choices means offering combinations that can only be rejected. Kind is the
+ * real question; for a hostname the remaining choice (exact vs suffix) is a
+ * genuine one and is the only place a match type is asked for.
+ */
+function AddSignatureForm(props: { onAdded: () => void }) {
+  const act = useAction();
+  const [provider, setProvider] = useState("");
+  const [kind, setKind] = useState<"hostname" | "sdk_package" | "api_key_prefix" | "web_app">("hostname");
+  const [value, setValue] = useState("");
+  const [hostMatch, setHostMatch] = useState<"exact_host" | "host_suffix">("host_suffix");
+  const [minLength, setMinLength] = useState("20");
+
+  // the one pairing the gateway will accept for this kind
+  const matchType =
+    kind === "sdk_package" ? "package" : kind === "api_key_prefix" ? "key_prefix" : hostMatch;
+
+  return (
+    <form
+      className={a.formRow}
+      onSubmit={(e) => {
+        e.preventDefault();
+        void act
+          .run(
+            () =>
+              api.post("/v1/shadow-ai/catalogue", {
+                provider,
+                kind,
+                value,
+                matchType,
+                // An api_key_prefix with no length bound matches every string
+                // that happens to start with it, so the gateway requires one.
+                ...(kind === "api_key_prefix" ? { minLength: Number(minLength) } : {}),
+                provenance: "admin",
+              }),
+            "Signature added",
+          )
+          .then((ok) => {
+            if (ok) {
+              setProvider("");
+              setValue("");
+              props.onAdded();
+            }
+          });
+      }}
+    >
+      <Field label="Provider">
+        <Input required value={provider} onChange={(e) => setProvider(e.target.value)} placeholder="e.g. Acme LLM" />
+      </Field>
+      <Field label="Detect by">
+        <Select value={kind} onChange={(e) => setKind(e.target.value as typeof kind)}>
+          <option value="hostname">hostname</option>
+          <option value="web_app">web app</option>
+          <option value="sdk_package">SDK package</option>
+          <option value="api_key_prefix">API key prefix</option>
+        </Select>
+      </Field>
+      <Field label={kind === "sdk_package" ? "Package name" : kind === "api_key_prefix" ? "Key prefix" : "Hostname"}>
+        <Input
+          required
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          placeholder={
+            kind === "sdk_package" ? "acme-llm-sdk" : kind === "api_key_prefix" ? "acme-" : "llm.internal.acme.example"
+          }
+        />
+      </Field>
+      {kind === "hostname" || kind === "web_app" ? (
+        <Field label="Match">
+          <Select value={hostMatch} onChange={(e) => setHostMatch(e.target.value as typeof hostMatch)}>
+            <option value="host_suffix">suffix — this host and anything under it</option>
+            <option value="exact_host">exact — only this host</option>
+          </Select>
+        </Field>
+      ) : null}
+      {kind === "api_key_prefix" ? (
+        <Field label="Min key length">
+          <Input
+            required
+            type="number"
+            min={1}
+            max={512}
+            value={minLength}
+            onChange={(e) => setMinLength(e.target.value)}
+          />
+        </Field>
+      ) : null}
+      <Field label="&nbsp;">
+        <Button type="submit" variant="primary" disabled={act.busy || !provider || !value}>
+          Add signature
+        </Button>
+      </Field>
+      {act.error && (
+        <span className={v.errLine} role="alert">
+          {act.error}
+        </span>
+      )}
+    </form>
+  );
+}
+

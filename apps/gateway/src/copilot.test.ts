@@ -40,6 +40,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import {
   agentGrants,
@@ -528,6 +529,109 @@ describe("ADR-0056 — the audit log is an injection surface", () => {
 });
 
 describe("ADR-0056 — the copilot proposes; it never mutates", () => {
+  /**
+   * B9a — CONSENT IS NEVER ASKED FOR A DIFF THAT CANNOT BE APPLIED.
+   *
+   * Before this, diff validation lived in the APPLIER only. A malformed diff
+   * was recorded and opened an ordinary Approvals-Queue item, so a named human
+   * read the title, consented, and the refusal arrived at apply time — leaving
+   * a real human approval permanently on the record against a change that
+   * could never happen. In a governance product that is the worst place to
+   * discover a validation error.
+   *
+   * The two halves asserted here are what make the gate a gate: the refusal is
+   * by NAME, and NO APPROVAL ROW EXISTS afterwards.
+   */
+  it("refuses a malformed diff BEFORE opening any approval, and opens none", async () => {
+    const ask = await post("/v1/copilot/ask", { question: "which grants are unused?" }, leadAAuth);
+    const queryId = ask.json().query.id as string;
+    const approvalsBefore = await db.select().from(approvals);
+
+    const res = await post(
+      "/v1/copilot/proposals",
+      {
+        queryId,
+        kind: "grant_revocation",
+        title: "Revoke the unused write grants",
+        rationale: "Zero invocations in the queried window.",
+        // the shape the applier cannot read — an invented key, not the
+        // {grantKind, grantId} the removal path names
+        diff: { revoke: [{ toolName: "write_file" }] },
+        approverUserId: leadB,
+      },
+      leadAAuth,
+    );
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error).toBe("proposal_diff_invalid");
+    expect(res.json().detail).toMatch(/grantKind, grantId/);
+
+    // THE HALF THAT MATTERS: no human was asked for anything.
+    const approvalsAfter = await db.select().from(approvals);
+    expect(approvalsAfter.length).toBe(approvalsBefore.length);
+    const proposalRows = await db.select().from(copilotProposals);
+    expect(proposalRows.every((p) => p.title !== "Revoke the unused write grants")).toBe(true);
+  });
+
+  it("refuses a policy_tightening whose patch moves NOTHING", async () => {
+    // an approval recorded against a no-op is consent spent on nothing, so the
+    // empty patch is refused at the same gate rather than applied as a no-op
+    const ask = await post("/v1/copilot/ask", { question: "which grants are unused?" }, leadAAuth);
+    const res = await post(
+      "/v1/copilot/proposals",
+      {
+        queryId: ask.json().query.id,
+        kind: "policy_tightening",
+        title: "tighten nothing",
+        rationale: "because",
+        diff: { ruleKind: "rate-limits", ruleId: randomUUID(), patch: {} },
+        approverUserId: leadB,
+      },
+      leadAAuth,
+    );
+    expect(res.statusCode).toBe(422);
+    expect(res.json().detail).toMatch(/at least one field/);
+  });
+
+  it("refuses a budget_adjustment that moves a NON-budget column", async () => {
+    // the kind is a budget adjustment; a rename wearing its name is refused by
+    // the field list rather than quietly applied through the project PATCH
+    const ask = await post("/v1/copilot/ask", { question: "which grants are unused?" }, leadAAuth);
+    const res = await post(
+      "/v1/copilot/proposals",
+      {
+        queryId: ask.json().query.id,
+        kind: "budget_adjustment",
+        title: "rename by the back door",
+        rationale: "because",
+        diff: { projectId: randomUUID(), patch: { name: "something else" } },
+        approverUserId: leadB,
+      },
+      leadAAuth,
+    );
+    expect(res.statusCode).toBe(422);
+    expect(res.json().detail).toMatch(/is not a budget field/);
+  });
+
+  it("does NOT require the target to exist at proposal time — that is an apply-time fact", async () => {
+    // the diff gate checks SHAPE. A grant can be removed between proposing and
+    // applying, so existence is checked where it can only be answered: at the
+    // write. Enforcing it here would make a proposal expire silently.
+    const ask = await post("/v1/copilot/ask", { question: "which grants are unused?" }, leadAAuth);
+    const res = await post(
+      "/v1/copilot/proposals",
+      {
+        queryId: ask.json().query.id,
+        kind: "grant_revocation",
+        title: "revoke a grant that is already gone",
+        rationale: "because",
+        diff: { grantKind: "tool", grantId: randomUUID() },
+        approverUserId: leadB,
+      },
+      leadAAuth,
+    );
+    expect(res.statusCode, res.body).toBe(201);
+  });
+
   it("a proposal writes a proposal row and ONE approval — and no grant, no role", async () => {
     const ask = await post(
       "/v1/copilot/ask",
@@ -546,12 +650,17 @@ describe("ADR-0056 — the copilot proposes; it never mutates", () => {
         kind: "grant_revocation",
         title: "Revoke three write-tool grants unused for 90 days",
         rationale: "Zero invocations in the queried window.",
-        diff: { revoke: [{ userId: leadA, toolName: "write_file" }] },
+        // B9a — a WELL-FORMED grant_revocation diff. The original draft of this
+        // test used `{ revoke: [...] }`, a shape the applier could never have
+        // read, and it was accepted with a 201: the product opened a real
+        // approval against a diff that could not be applied. It is refused now,
+        // which is why this line changed rather than the assertion below.
+        diff: { grantKind: "tool", grantId: randomUUID() },
         approverUserId: leadB,
       },
       leadAAuth,
     );
-    expect(res.statusCode).toBe(201);
+    expect(res.statusCode, res.body).toBe(201);
     const approvalId = res.json().approvalId as string;
 
     // it opened an ORDINARY approvals row — not a copilot inbox

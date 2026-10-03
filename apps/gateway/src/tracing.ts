@@ -78,7 +78,7 @@ import {
   tracePreview,
   type SpanRecord,
 } from "@regulait/shared";
-import { loadOrgSettings } from "./org-settings.js";
+import { loadOrgSettings, otlpHeadersForExport } from "./org-settings.js";
 import { loadEgressAllowList } from "./custom-providers.js";
 import { checkEgress, createGuardedFetch } from "./egress-guard.js";
 
@@ -509,7 +509,7 @@ const exportSchema = z.object({
 
 export const MAX_SPANS_PER_TRACE = 2000;
 
-export function registerTracingRoutes(app: FastifyInstance, db: Db): void {
+export function registerTracingRoutes(app: FastifyInstance, db: Db, opts: { dataKey?: string } = {}): void {
   /** the bootstrap credential has no user identity; the trail records the nil
    * uuid rather than refusing to write a row (same idiom as cost-import.ts) */
   const NIL_UUID = "00000000-0000-0000-0000-000000000000";
@@ -788,7 +788,11 @@ export function registerTracingRoutes(app: FastifyInstance, db: Db): void {
       };
     }
 
-    const headers = (org.tracingOtlpHeaders ?? {}) as Record<string, string>;
+    // ADR-0167 (SEC-06): the collector headers are decrypted HERE, at the
+    // moment they leave as request headers, and nowhere else.
+    const stored = otlpHeadersForExport(org, opts.dataKey);
+    if (!stored.ok) return reply.status(503).send({ error: "no_data_key", detail: stored.detail });
+    const headers = stored.headers;
     // The SAME guarded fetch every other adjudicated outbound surface uses:
     // re-validates the destination on each request, pins the connection to the
     // validated addresses, refuses redirects.

@@ -633,6 +633,49 @@ describe("(4) entitlement scoping", () => {
     expect(read.statusCode).toBe(403);
     expect(read.json().error).toBe("simulation_scope_denied");
   });
+
+  it("ADR-0167 (AUTHZ-02): the LIST is scoped the same way — a wider run is absent, not merely un-clickable, and no row carries a named radius", async () => {
+    // an admin's org-wide run: the exact row the detail route refuses to alpha's lead
+    const orgWide = await simulateAs(AUTH, { policyVersionId: denyAllVersionId, windowDays: 1 });
+    expect(orgWide.statusCode).toBe(201);
+    const wideId = orgWide.json().simulation.id as string;
+    // the lead's own, team-scoped run: theirs to see
+    const own = await simulateAs(alphaLeadAuth, { policyVersionId: denyAllVersionId, windowDays: 1 });
+    expect(own.statusCode, own.body).toBe(201);
+    const ownId = own.json().simulation.id as string;
+
+    const list = await app.inject({ method: "GET", url: "/v1/policy-simulations?limit=200", headers: alphaLeadAuth });
+    expect(list.statusCode).toBe(200);
+    const rows = list.json().simulations as Array<Record<string, unknown>>;
+    const ids = rows.map((s) => s.id);
+    expect(ids).toContain(ownId);
+    expect(ids).not.toContain(wideId);
+    // SUMMARY rows: the named users/projects/tools and the scope stay behind
+    // the detail route's guard; counts and the headline are what a list needs
+    for (const s of rows) {
+      expect(s).not.toHaveProperty("blastRadius");
+      expect(s).not.toHaveProperty("scopeUserIds");
+      expect(typeof s.affectedUsers).toBe("number");
+      expect(typeof s.headline).toBe("string");
+    }
+
+    // a user in NO team sees neither run — not even the lead's team-scoped one
+    const outsider = await makeUser("ps-gamma-outsider@example.com");
+    const outsiderList = await app.inject({ method: "GET", url: "/v1/policy-simulations?limit=200", headers: outsider.auth });
+    expect(outsiderList.statusCode).toBe(200);
+    const outsiderIds = (outsiderList.json().simulations as Array<{ id: string }>).map((s) => s.id);
+    expect(outsiderIds).not.toContain(wideId);
+    expect(outsiderIds).not.toContain(ownId);
+
+    // the admin still sees both, and the named radius is still readable where it belongs
+    const adminList = await app.inject({ method: "GET", url: "/v1/policy-simulations?limit=200", headers: AUTH });
+    const adminIds = (adminList.json().simulations as Array<{ id: string }>).map((s) => s.id);
+    expect(adminIds).toContain(wideId);
+    expect(adminIds).toContain(ownId);
+    const detail = await app.inject({ method: "GET", url: `/v1/policy-simulations/${wideId}`, headers: AUTH });
+    expect(detail.statusCode).toBe(200);
+    expect(detail.json().simulation).toHaveProperty("blastRadius");
+  });
 });
 
 // ===========================================================================

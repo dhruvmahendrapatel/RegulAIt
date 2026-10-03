@@ -5,7 +5,10 @@
  * Toast lives in ./toast.tsx (it carries a provider).
  */
 import {
+  Children,
+  cloneElement,
   forwardRef,
+  isValidElement,
   useEffect,
   useId,
   useMemo,
@@ -44,9 +47,79 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
 
 // ---- fields ---------------------------------------------------------------
 
+/**
+ * A labelled form control.
+ *
+ * ASSOCIATION IS EXPLICIT (htmlFor/id), NOT BY WRAPPING, and the difference is
+ * not cosmetic. When a `<label>` CONTAINS its control, the control's accessible
+ * name is computed from the label element's text content — which, for a
+ * `<select>`, swallows the options. Every select on the admin surface was
+ * announcing itself as "Detect byhostnameweb appSDK packageAPI key prefix"
+ * instead of "Detect by": the whole option list read out as the field's name,
+ * on every select in the product.
+ *
+ * It surfaced as a test that could not find a control by its own label, which
+ * is the same tell as the two label defects before it — if `getByLabel` cannot
+ * name it, neither can a screen reader.
+ *
+ * The wrapping form is kept as a FALLBACK for the handful of fields whose
+ * children are not a single element (a row of two inputs, a control plus a
+ * hint). Those keep exactly the behaviour they had rather than silently losing
+ * their association.
+ */
+/** `grow` used to be `flex: 1` with a zero basis, so in a wrapping row the
+ * field took whatever was left — 20px beside three selects at phone width
+ * (UIW-05). A real basis makes it wrap to a full line of its own first. */
+const fieldClass = (grow: boolean | undefined) => (grow ? `${s.field} ${s.fieldGrow}` : s.field);
+
 export function Field(props: { label: string; children: ReactNode; error?: string | null; grow?: boolean }) {
+  const auto = useId();
+  // A SPACER IS NOT A LABEL. `<Field label="&nbsp;">` is used to keep a submit
+  // button aligned with the inputs beside it — and rendering that as a real
+  // <label> wrapping the button gave the button the accessible name
+  // "\u00a0Add signature": a non-breaking space glued to the front of every
+  // such control in the product, which is enough to make it unfindable by its
+  // own name. A spacer renders as an aria-hidden span and never as a <label>.
+  const spacer = props.label.trim().replace(/\u00a0/g, "") === "";
+  if (spacer) {
+    return (
+      <div className={fieldClass(props.grow)}>
+        <span className={s.fieldLabel} aria-hidden>
+          {props.label}
+        </span>
+        {props.children}
+        {props.error ? <span className={s.fieldError}>{props.error}</span> : null}
+      </div>
+    );
+  }
+
+  const only = Children.count(props.children) === 1 ? Children.only(props.children) : null;
+  // ONLY controls that actually take a label. A <label htmlFor> pointing at a
+  // <button> does not describe it — it REPLACES its accessible name, so
+  // `<Field label="&nbsp;"><Button>Add signature</Button></Field>` turned the
+  // submit button into one named " ". That regression was introduced by the
+  // first draft of this very fix and caught by a spec that could no longer
+  // find the button, which is the same signal as before: a control a test
+  // cannot name is a control a screen reader cannot name either.
+  const labelable = only !== null && isValidElement(only) &&
+    (only.type === Input || only.type === Select || only.type === Textarea);
+  const single = labelable && isValidElement<{ id?: string }>(only) ? only : null;
+
+  if (single) {
+    const id = single.props.id ?? auto;
+    return (
+      <div className={fieldClass(props.grow)}>
+        <label className={s.fieldLabel} htmlFor={id}>
+          {props.label}
+        </label>
+        {single.props.id ? single : cloneElement(single, { id })}
+        {props.error ? <span className={s.fieldError}>{props.error}</span> : null}
+      </div>
+    );
+  }
+
   return (
-    <label className={s.field} style={props.grow ? { flex: 1 } : undefined}>
+    <label className={fieldClass(props.grow)}>
       <span className={s.fieldLabel}>{props.label}</span>
       {props.children}
       {props.error ? <span className={s.fieldError}>{props.error}</span> : null}
@@ -405,6 +478,14 @@ export function Table<T>(props: {
   rowKey: (row: T) => string;
   loading?: boolean;
   empty?: ReactNode;
+  /**
+   * The failure of the query feeding `rows`, when there is one. A failed
+   * fetch used to fall through to `empty` — "No users yet" on a 500 — which
+   * reads as a fact about the data (UXJ-01). With `error` set and no rows to
+   * show, the table renders the error state (and `onRetry`) instead.
+   */
+  error?: unknown;
+  onRetry?: () => void;
   onRowClick?: (row: T) => void;
   rowLabel?: (row: T) => string;
 }) {
@@ -493,7 +574,38 @@ export function Table<T>(props: {
                   </tr>
                 );
               })}
-          {!props.loading && sorted.length === 0 && (
+          {!props.loading && sorted.length > 0 && props.error != null && (
+            // Rows from the last good fetch stay on screen — losing them for a
+            // transient 500 would be worse — but a failed REFETCH must not be
+            // silent either: the list is stale and the reader has to know.
+            <tr>
+              <td colSpan={props.columns.length} className={s.tableStale} role="alert">
+                <StatusDot tone="danger" />
+                <span>
+                  Couldn't refresh this list — {props.error instanceof Error ? props.error.message : String(props.error)}.
+                  Showing the last loaded rows.
+                </span>
+                {props.onRetry && (
+                  <Button size="sm" onClick={props.onRetry}>
+                    Retry
+                  </Button>
+                )}
+              </td>
+            </tr>
+          )}
+          {!props.loading && sorted.length === 0 && props.error != null && (
+            <tr>
+              <td colSpan={props.columns.length}>
+                <ErrorState
+                  title="Couldn't load this list"
+                  message={props.error instanceof Error ? props.error.message : String(props.error)}
+                  access={(props.error as { status?: number }).status === 403}
+                  onRetry={props.onRetry}
+                />
+              </td>
+            </tr>
+          )}
+          {!props.loading && sorted.length === 0 && props.error == null && (
             <tr>
               <td colSpan={props.columns.length}>{props.empty ?? <EmptyState title="Nothing here yet" />}</td>
             </tr>
@@ -509,6 +621,7 @@ export function Table<T>(props: {
 export function Modal(props: {
   open: boolean;
   title: string;
+  className?: string;
   children?: ReactNode;
   onClose: () => void;
   actions?: ReactNode;
@@ -530,7 +643,7 @@ export function Modal(props: {
   return (
     <div className={s.scrim} onMouseDown={(e) => e.target === e.currentTarget && props.onClose()}>
       <div
-        className={[s.modal, props.wide ? s.modalWide : ""].join(" ")}
+        className={[s.modal, props.wide ? s.modalWide : "", props.className ?? ""].join(" ")}
         role="dialog"
         aria-modal="true"
         aria-label={props.title}
@@ -643,12 +756,18 @@ export function EmptyState(props: { title: string; body?: ReactNode; action?: Re
   );
 }
 
-export function ErrorState(props: { message: string; onRetry?: () => void; access?: boolean }) {
+export function ErrorState(props: {
+  message: string;
+  onRetry?: () => void;
+  access?: boolean;
+  /** what failed, when it is narrower than "this view" (a list inside it) */
+  title?: string;
+}) {
   return (
     <div className={s.empty} role="alert">
       <StatusDot tone="danger" />
       <div className={s.emptyTitle}>
-        {props.access ? "You don't have access to this view" : "Couldn't load this view"}
+        {props.access ? "You don't have access to this view" : (props.title ?? "Couldn't load this view")}
       </div>
       <div className={s.emptyBody}>{props.message}</div>
       {props.onRetry && (
@@ -656,6 +775,55 @@ export function ErrorState(props: { message: string; onRetry?: () => void; acces
           Retry
         </Button>
       )}
+    </div>
+  );
+}
+
+/**
+ * The error for a page that shows ONE record (a run, a workflow, a project).
+ * A 404 — or a malformed id the server refused as validation — is not a load
+ * failure to retry; it is a record that is not there, and the page says so in
+ * words and offers the way back (UIW-08). A 403 is an access refusal, and
+ * anything else keeps the Retry.
+ */
+export function RecordError(props: {
+  /** the record's kind, lower case: "run", "workflow", "project" */
+  noun: string;
+  error: unknown;
+  onRetry?: () => void;
+  /** the way back, usually a Link to the list */
+  action?: ReactNode;
+}) {
+  const err = props.error as { status?: number; message?: string } | null;
+  const status = err?.status;
+  const missing = status === 404 || status === 400;
+  const message = err?.message ?? "Unknown error";
+  const an = /^[aeiou]/i.test(props.noun) ? "an" : "a";
+  return (
+    <div className={s.empty} role="alert">
+      <StatusDot tone={missing ? "neutral" : "danger"} />
+      <div className={s.emptyTitle}>
+        {status === 403
+          ? "You don't have access to this " + props.noun
+          : missing
+            ? `No such ${props.noun}`
+            : `Couldn't load this ${props.noun}`}
+      </div>
+      <div className={s.emptyBody}>
+        {status === 404
+          ? `There is no ${props.noun} with this ID — it may have been removed, or the link may be wrong.`
+          : status === 400
+            ? `This is not ${an} ${props.noun} ID — the link may be incomplete.`
+            : message}
+      </div>
+      <div className={s.emptyActions}>
+        {props.action}
+        {!missing && props.onRetry && (
+          <Button size="sm" onClick={props.onRetry}>
+            Retry
+          </Button>
+        )}
+      </div>
     </div>
   );
 }

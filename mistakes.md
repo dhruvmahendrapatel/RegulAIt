@@ -863,3 +863,530 @@ another file in this suite make this assertion false without touching my rows?"
 wider lever to make an assertion hold is the signal that the fixture is wrong:
 the right move is almost always a value so specific to this run that no sibling
 could collide with it.**
+
+---
+
+## M-043 (2026-09-27) — I shipped a fail-open and an auth bypass, both in code I had exempted from testing in writing
+
+ADR-0127 shipped two proxy adapters. An independent review found both unsafe,
+and neither defect was subtle.
+
+**The Envoy adapter failed open on `deny`.** Envoy's HTTP `ext_authz` decides
+from the **status code** — 2xx allow, anything else denied. `/v1/authz/check`
+answers `200` for all three outcomes and puts the decision in the body, because
+that is what the Kong adapter needed. So a correctly computed, correctly
+audited refusal would have reached Envoy as 200 and been **admitted**, by a
+deployment that believed it was governed, with a ledger row agreeing the call
+was denied. That is worse than shipping no adapter.
+
+**The Kong adapter let the caller choose who they were.** It read
+`x-regulait-subject` from the request and used the authenticated consumer only
+as a **fallback** — so any caller who could reach the route could be authorized
+as anyone. `serverId` and `toolName` came from client headers too, so a caller
+could also choose *which question was asked*: name a tool you hold, invoke a
+different one.
+
+**The rule.** *Two claims about a component I have never executed are worth
+less than one run of it. If I cannot run it, I do not get to say it is safe —
+I say it is unverified, and I do not ship it as an example someone will paste.*
+
+Three things make this worse than an ordinary bug, and they are the reasons to
+keep this entry long.
+
+1. **I wrote the disclosure and then reasoned past it.** ADR-0127's own limits
+   section says *"the adapters are not exercised by CI… the endpoint is tested,
+   the adapters are reviewed. That is a real gap and it is disclosed rather
+   than papered over."* Six paragraphs earlier the same ADR asserts *"both
+   adapters fail closed."* I wrote both sentences in one sitting. Disclosing a
+   gap does not license a confident claim across it — **it forbids one.** An
+   honest limits section is not a payment that buys the right to assert
+   anyway.
+
+2. **The comment stated the safe rule; the line below did the unsafe thing.**
+   Directly above the Kong subject line I wrote *"Kong must map its own
+   authenticated consumer to a RegulAIt user UUID before here; the raw consumer
+   id will not do."* The next line preferred the client's header over the
+   consumer. I read that file more than once and the comment kept answering the
+   question for me. **A comment asserting a property is evidence about
+   intent and none at all about behaviour** — when auditing, read the code with
+   the comments covered.
+
+3. **It is M-041 again, one layer out.** M-041 is *"a procedure is not
+   documentation until it has been executed."* I applied it to a runbook and
+   not to an integration, because config and Lua did not feel like a procedure.
+   They are: an example config is a procedure a customer executes, and this one
+   would have executed a fail-open. The rule was never about runbooks.
+
+**What it cost.** Both adapters went out in a repository that is now public,
+and the Envoy one has been withdrawn rather than patched — a correct version
+needs a contract change at the endpoint (status codes Envoy can act on), which
+Kong's adapter would have to move with. The fix is now a design decision
+instead of a config edit, which is what shipping unverified bought.
+
+**The standing consequence.** Nothing under `integrations/` is described as
+supported again until its **deny path** is exercised end to end against a
+pinned container, asserting **zero upstream invocations** for every refusal
+and every PDP failure. A deny path that has never been run is a deny path that
+does not work.
+
+### M-043 addendum (2026-09-27) — the rule was tested within the hour, and the other adapter failed it too
+
+M-043's standing consequence was *"nothing under `integrations/` is described as
+supported again until its deny path is exercised end to end against a pinned
+container."* I then described the Kong adapter as the one RegulAIt supports, in
+the same commit that set the rule. A review found it could not run at all:
+
+- Kong's `pre-function` executes at priority **1000000**, ahead of every
+  authentication plugin — so taking identity from `kong.client.get_consumer()`,
+  which my fix had just made the ONLY source, refused all authenticated traffic;
+- `require "resty.http"` is blocked in Kong's serverless sandbox by default, so
+  the first executable line could not load;
+- and its "per-route" configuration was `os.getenv`, which is node-wide, so one
+  data plane serving several governed routes would ask the same question for all
+  of them. I wrote a comment calling it per-route while writing the env read.
+
+**Two of the three were introduced by my own fix for the previous finding.**
+Removing the spoofable header made the consumer the sole identity source, which
+is correct and made the ordering bug fatal; replacing header-supplied config with
+env-supplied config swapped a security bug for a correctness one.
+
+**The sharper rule.** *A fix for a finding is new, unverified code and inherits
+the same burden as the code it replaces.* I treated "this removes the reported
+defect" as sufficient, and shipped a claim of support on the strength of it. The
+right output was the fix plus "still unverified" — which is what both adapters
+now say.
+
+### M-043 resolution (2026-09-27) — the rule is met for Kong, and the instrument cost four rounds
+
+The standing consequence — *nothing under `integrations/` is called supported
+until its deny path is exercised end to end against a pinned container,
+asserting zero upstream invocations for every refusal* — is now **met for Kong**
+(3.6, DB-less, `key-auth`, one route) and unmet for everything else. Envoy stays
+withdrawn.
+
+**What the harness proves that a status-code test would not.** A 403 the client
+receives is indistinguishable from a refusal even when the upstream already ran,
+which is exactly how the Envoy defect stayed invisible through review. So the
+assertion is a COUNTING UPSTREAM: one `200` in the whole run, five refusals, and
+the counter at zero for each. The Kong access log corroborated it independently.
+
+**Four rounds to get it green, and all four were faults in the INSTRUMENT, not
+the adapter:**
+
+1. the log capture used `execFileSync(… stdio:"pipe")`, which returns stdout
+   only — and `docker logs` writes the container's stderr to stderr, so a
+   container with plenty to say read as silent;
+2. the wait could not distinguish a dead container from a slow one, so a
+   failure that was knowable in 3 seconds cost 60;
+3. an early-exit written as a `throw` inside a predicate that catches and
+   retries — silently retried until the timeout it was added to avoid;
+4. `mkdtempSync` creates its directory `0700` owned by the invoking user, and
+   Kong runs as `kong` inside the container, so it was handed a config file it
+   had no permission to open.
+
+**The rule this adds.** *A test harness is code that has never been run, and it
+fails the same way the code it tests does.* Budget for it: the first green run
+of a new harness is mostly debugging the harness. That cost is paid ONCE, and
+the reviews it replaces were being paid per finding — two adapters, three
+review cycles, and both defects still reached a public repository.
+
+### M-044 (2026-09-27) — my fix for a permissions error published an admin credential
+
+The Kong harness could not start because `mkdtempSync` creates its directory
+`0700` and Kong runs as another user inside the container. I fixed it with
+`chmod 0755` on the directory and `0644` on the file — and **that file contained
+the plaintext PDP key, which is an unrestricted administrator token.** On a CI
+runner the box is ephemeral; on a developer's machine it is a durable
+control-plane credential sitting world-readable in `/tmp`, found by review as
+AER-033.
+
+**The rule.** *Before widening permissions on anything, read what is inside it.*
+"Make it readable" and "make it readable BY EVERYONE" are the same keystroke and
+different decisions, and the second one is only safe if you know the contents.
+I knew the contents — I had written them forty lines above — and still did not
+connect the two, because I was debugging a startup failure and the file was a
+config file in my head, not a secret.
+
+**Second-order, and the reason this is its own entry rather than a footnote on
+M-043:** this is the THIRD defect introduced by a fix in this ADR's history.
+Removing the spoofable header made the consumer the sole identity source, which
+made a priority-ordering bug fatal; replacing header config with `os.getenv`
+swapped a security bug for a correctness one; and now a permissions fix has
+leaked a credential. M-043's addendum already said a fix inherits the burden of
+the code it replaces. The sharper version: **a fix made under debugging pressure
+is the most dangerous code in the change**, because the goal has narrowed to
+"make the error stop" and the usual questions are not being asked.
+
+The remedy is the pattern this repo already recommends to its own customers and
+was not using itself: the secret never enters the file. Kong resolves
+`{vault://env/regulait-pdp-key}` at read time from an environment variable, so
+the config is readable and carries nothing worth reading. The harness now
+exercises the secret handling we tell operators to use, instead of a shortcut
+no customer should copy.
+
+### M-045 (2026-09-27) — I reported a capability as absent without running the command that provides it
+
+Several times in one session I told the owner that **no license can be installed
+in any environment**, and built an argument on top of it: the e2e suite runs with
+every tier feature closed, therefore a demo keypair is needed, therefore here is
+an ephemeral-licensing path. The premise was false. `demo:setup` had been minting
+a signed license all along. I had read the licensing module and the e2e setup, put
+them together, and reported the conclusion as an observation.
+
+**The rule.** *A claim that something cannot be done is a claim about what you
+ran, not about what you read.* Before reporting an absence, run the one command
+that would produce the thing — especially when the absence is the premise of work
+you are about to propose, because then it is load-bearing and nobody else will
+check it.
+
+This is the same shape as M-041 (a runbook command I had never run) and as the
+D01 write-up in `STATE.md` ("I had read the code instead of running it"), and the
+repetition is the point of logging it a third time: the failure is not
+carelessness about commands, it is that **a negative claim feels cheaper to make
+than a positive one.** Asserting "X works" invites me to demonstrate it. Asserting
+"X does not exist" invites nothing, and so it goes out unverified. Both need the
+same evidence.
+
+The work built on the false premise was still worth having — an ephemeral
+keypair whose private half is never persisted is the right shape for a test
+environment — but it was justified to the owner with a reason that was not true,
+and that is what would have cost them if they had planned around it.
+
+### M-046 (2026-09-27) — I filed a correctness bug under "honest limits" and then repeated it
+
+The copilot applier's B8c amendment (2026-08-22) listed, as honest limit 5, "the
+applier is still not transactional across its audit row". I wrote batch B9a
+against that same code five weeks later, read that sentence, and carried it
+forward unchanged into a new amendment's limits section. An external review then
+found (AER-035) that the applier was **not transactional at all and not
+concurrency-safe**: twenty simultaneous applies of one approved proposal created
+**ten governance rules from one human approval**, measured.
+
+**The rule.** *A limit you wrote down is a claim you have not re-checked. When
+you touch the code it describes, re-derive it — do not copy it forward.* A
+limits section is the most load-bearing prose in an ADR precisely because it is
+where a reader stops looking, and the copy-forward is what turns one session's
+understatement into the next session's assumption.
+
+**Why the original framing was wrong, and why it was comfortable.** "Not
+transactional across its audit row" sounds like a records-keeping nicety — the
+change happened, the note about it lands a moment later. The actual property was
+that the change could happen TWICE. The gap between those two readings is the
+whole finding, and I had written the words that closed it off. A limit phrased as
+a cosmetic shortfall does not invite anyone to test it.
+
+**The second-order failure, which is mine and not B8c's.** B9a *added tests to
+this exact route* — four refusal cases moved from apply time to propose time —
+and I did not once ask what two concurrent callers would do. I was reasoning
+about the ORDER of checks (does the refusal come before consent is spent?) while
+the defect was in their ATOMICITY, and those feel like the same question until
+you write `Promise.all`. The existing tests "proved" idempotency by applying
+twice in sequence, which is a different property, and their passing is what let
+me believe the ground was covered.
+
+**Extractable check, added to the concurrency family:** when a route reads a row,
+decides from it, and then writes based on that decision, the test that matters is
+`Promise.all` over N copies of the request — and the assertion is a count of the
+ARTIFACTS the world now holds, never a count of successful responses. A route can
+return exactly one 200 and have applied the change twice.
+
+### M-047 (2026-09-27) — I typechecked the code and then wrote the test, and vitest never told me
+
+The AER-035 concurrency test named two columns that do not exist:
+`decidedByUserId` (the column is `decided_by`) and `tool`/`timeframe` as columns
+on `copilot_queries`, which has neither. All five tests passed locally and the
+CI **build** failed with two `tsc` errors.
+
+**The rule.** *`vitest run` does not typecheck. A test file is only compiled by
+`tsc -p tsconfig.json`, so a green test run says nothing about whether the file
+builds — run the package's `build`, not just its tests, before pushing a new test
+file.*
+
+**Why it passed for the wrong reason, which is the part worth remembering.**
+Drizzle silently drops keys that are not columns. So `.set({ status: "approved",
+decidedByUserId: … })` really did set the status, which was all those assertions
+needed; the unknown key went nowhere and nothing complained. A test can be
+green, correct about the thing it asserts, and uncompilable at the same time.
+
+**The sequence that produced it.** I ran the gateway typecheck after editing
+`copilot.ts`, confirmed it clean, then wrote the test file and ran only vitest.
+The check I ran was not the check CI runs, and the gap was exactly the file I had
+just added. This is the same family as M-041 (a runbook command I never ran) and
+M-045 (an absence I never verified): **the verification covered the step before
+the one that mattered.**
+
+Cheap mitigation used from here: after adding or editing any `*.test.ts`, run the
+owning package's `build` script — not its `test` script — before commit.
+
+### M-048 (2026-09-28) — a cap I wrote a paragraph defending, over an order that never moved
+
+The active health probe (ADR-0126, commit `b145b1c`) bounded a pass at 50 and
+ordered the rest by `name asc`. An external review (AER-037) pointed out that the
+order is **constant**, so with more than 50 registered servers every five-minute
+pass probes the same lexicographically first cohort and the tail is never actively
+probed at all — retaining exactly the behaviour the feature exists to remove, on a
+deployment whose scheduler page reads green.
+
+The file's own header had a section titled "THE CAP, AND WHY IT DEGRADES TO TODAY"
+arguing the cap was safe: *"servers past the cap are simply discovered passively
+by the first user to call them, which is exactly today's behaviour."* That
+sentence is **true of any one server and false of the estate** — the failure is
+not that some server waits, it is that the SAME servers wait every time. I wrote
+a defence of the cap and never asked which rows it excludes on the second pass.
+
+**The rule.** *A cap over an ordered set is a starvation bug unless the order
+moves. Before defending a `LIMIT`, name the rows it excludes on pass two — if they
+are the same rows as pass one, there is no rotation and the tail is starved, not
+merely late.*
+
+**The second instance in the same file, found while fixing the first.** Rows whose
+breaker was open and still inside its cooldown were selected and then skipped, so
+a bounded pass could spend its entire budget on rows nobody is permitted to probe.
+Same shape: the budget going somewhere it cannot do work. Selection is now
+filtered in SQL to rows a probe is actually possible against.
+
+**And a third, older one the fix's full-suite run exposed.** The same file's two
+egress-refusal tests used loopback with `allowPrivateRanges: false` and passed
+alone while failing in the full run: `mcp-proxy.test.ts` inserts an
+`egress_allow_hosts` row for `127.0.0.1`, so by the time this file ran the
+"blocked" host was allow-listed and the refusal never happened. **This is M-040
+and M-042 for the third time**, in a file written the day after reading the
+paragraph in `g2-upstream-deadlines.test.ts` that documents exactly it. The fix is
+the one that paragraph already prescribes: a literal TEST-NET-3 address (RFC
+5737), randomised per run, which is public and therefore independent of the
+private-range posture and of every other suite's allow-list.
+
+### M-049 (2026-09-28) — I searched for a NAME, found nothing, and wrote down an absence
+
+Verification appendix II — the document whose entire purpose is to stop agents
+acting on unchecked claims of absence — asserted that the ABAC engine does not
+evaluate time-of-day. It does. `hour`, `minute`, `dayOfWeek` and `timezone` are
+in the Cedar context bag (`packages/policy-kernel/src/abac.ts:141-147`), and they
+are computed in the **policy's declared IANA timezone**, never the server's
+locale and never a client clock (`timeInZone`, `:287`) — a more careful
+implementation than the line I wrote claimed was missing entirely.
+
+**How it happened, precisely.** I grepped that file for
+`Context:|ipAddress|networkLocation|devicePosture|timeOfDay|deployMode|Environment`.
+The grep returned three hits, all `deployModes`. I read the `User` shape, saw the
+principal attributes, and concluded the context bag held `deployModes` and
+nothing else. **I never read the context Record itself** — it was twenty lines
+below the last line I looked at. `timeOfDay` is not a token this codebase uses;
+the code says `hour`, `minute`, `dayOfWeek`. So the grep could only ever have
+missed it.
+
+**The rule.** *A grep that returns nothing proves the ABSENCE OF A STRING, never
+the absence of a capability. Before writing "X is not implemented", open the
+structure that would contain X and read it — a type, a schema, a table
+definition, a switch. If you cannot name the file and lines you read, you have
+not checked, and the honest verdict is "not found", not "missing".*
+
+This is the sharper form of M-046 (*a limit you wrote down is a claim you have
+not re-checked*) and the same family as M-045 (*an absence I never verified*).
+The aggravating detail is the venue: I made it while writing the correction
+appendix, in the paragraph immediately after quoting M-046 at the reader. The
+appendix's own "NOT CHECKED" discipline is what should have caught it — the
+honest entry would have been "I checked the principal attributes; I did not read
+the context bag."
+
+Mitigation used from here: when a verification verdict is "missing", the evidence
+cell must cite the file and line range of the structure I READ and found it
+absent from — not the grep that failed to find it.
+
+### M-050 (2026-09-29) - Integration tests inherited a real provider credential
+
+The Codex P0 verification used a fresh disposable PostgreSQL cluster but initially
+inherited GEMINI_API_KEY from the parent shell. A test that explicitly expected
+an unconfigured Google provider chose that provider and failed its budget
+assertion (0.30 instead of 0.60), before dispatch. Database isolation alone did
+not reproduce CI's environment. The run was stopped; provider variables were
+removed only from the new test child process before restarting on a new database.
+No credential value was read or printed, and the user's saved environment was unchanged.
+
+Rule: before offline integration tests, inspect environment variable names and
+remove ambient provider credentials from the child process. A fixture claiming
+"unconfigured" must not depend on the invoking shell. Use `pnpm --filter ... exec
+vitest run <files>` for focused runs: passing `--` through this repo's test script
+caused the initial supposedly focused command to run the entire gateway suite.
+
+### M-051 (2026-09-29) - Admission-boundary changes missed adjacent egress fixtures
+
+The P0 focused set covered breaker and retry behavior but omitted the egress
+suite. Two refusal fixtures posted empty MCP bodies and depended on the old
+preliminary connection to reach the guard. With operation-boundary admission,
+they stopped at protocol validation. One failed assertion also skipped IMDS
+allow-list cleanup, causing two misleading downstream OIDC failures in CI.
+
+Rule: when moving a connection/admission boundary, include adjacent authorization
+and egress suites. Refusal fixtures must submit valid operations that reach the
+boundary under test. Security-posture fixture cleanup belongs in finally so a
+failed assertion cannot silently change later tests' permissions.
+
+### M-052 (2026-09-30) - Parallel suites raced fresh database migrations
+
+Multiple gateway files called `runMigrations` against the same new database
+while Vitest file parallelism was enabled. `CREATE SCHEMA IF NOT EXISTS` is not
+race-free across those workers; setup failed before the feature tests ran.
+The four-file run passed 93/93 after recreating the disposable database and
+using `--no-file-parallelism`.
+
+Rule: gateway integration files sharing one freshly created database must run
+serially, or each worker must receive its own database. A migration collision
+is a harness failure, not a product regression.
+
+### M-053 (2026-10-01) - Shipped a DELETE route without running the affordance census
+
+ADR-0147 added `DELETE /v1/risks/:riskId/controls/:controlRef`. Every vitest
+suite passed locally and in CI, but the job failed afterwards on
+`scripts/preflight-ui-affordances.mjs`: no screen calls the route. The tests
+were green, so the failure only surfaced after an 11-minute CI run.
+
+Rule: any change that adds an `app.delete(...)` route runs
+`node scripts/preflight-ui-affordances.mjs` before push. If the button belongs
+to another agent's surface, add a TEMPORARY `DELIBERATELY_API_ONLY` entry that
+names the owning task, and make deleting it part of that task's acceptance.
+
+### M-054 (2026-10-02) - Typechecked before writing the test, not after
+
+ADR-0156: `tsc --noEmit` ran clean on the gateway, then the integration test
+was written and only run through vitest (which strips types). The test's
+`const [row] = await db.insert(...).returning()` destructures violate
+`noUncheckedIndexedAccess`; the error surfaced only on the next commit's
+typecheck.
+
+Rule: the gateway typecheck runs AFTER the last file of a change is written,
+immediately before commit — never as an intermediate step that later edits
+can invalidate.
+
+### M-055 (2026-10-02) - New prose column shipped without the ADR-0102 scrub registration
+
+Migration 0124 added `governance_alerts.ack_note`; CI failed in
+`prose-scrub.test.ts`, which asks Postgres for every `%reason%`/`%note%`/
+`%rationale%` text column and requires each to be scrubbed or explicitly
+excluded. My targeted runs never included that suite.
+
+Rule: any migration that adds a text column whose name contains reason, note,
+rationale, explanation, justification or comment registers it in
+`packages/db/src/prose-scrub.ts` and the test's COVERED list in the same
+commit — and every migration commit runs `prose-scrub.test.ts`.
+
+### M-056 (2026-10-02) - A new write to a versioned rule table, caught only by the full suite
+
+ADR-0159's `assign_agent_owner` executor wrote `update(agents)`; the ADR-0074
+rule-write guard (`rule-write-guard.test.ts`) requires every writer of the
+four rule tables + `agents` to be enumerated with a reason. My targeted runs
+(feature tests + neighbouring suites) did not include it; the full local run did.
+
+Rule: before pushing any gateway change that writes a table I have not
+written before, grep the `*-guard.test.ts` / inventory tests for that table
+name and run them — and run the FULL gateway suite locally at least once per
+multi-feature batch, before CI does it for me.
+
+### M-057 (2026-10-02) - Hand-typed timestamps ran up to an hour ahead of the clock
+
+Board messages and review statuses were stamped "03:35", "03:50", "04:00"
+while the real UTC time was ~03:00 — guessed from how much work felt done.
+On a coordination board, a future timestamp misleads every agent reading ages.
+
+Rule: never type a time. Use `date -u +"%m-%d %H:%M"` (or `pnpm checkin`,
+which stamps the row itself) for anything written to AgentCoordination.md.
+
+### M-058 (2026-10-02) - Board edits silently skipped by a failed script, twice
+
+Two coordination commits went out while the Python edit before them had
+thrown (an `assert` on a moved anchor; an f-string that tried to evaluate
+`{scenarios: …}` from contract text). `node coordination.mjs lint && git add
+&& git commit` still ran, so a commit claimed board changes it did not contain.
+
+Rule: chain the edit script INTO the commit with `&&` (`python3 … && lint &&
+git add …`), never `;` or separate lines; build board text by concatenation,
+not f-strings, whenever it contains braces; and check `git diff --stat
+AgentCoordination.md` is non-empty before a commit that claims a board change.
+
+### M-059 (2026-10-02) - M-054 repeated: a test edited after the last build broke CI's build
+
+ADR-0164: the shared package was built, THEN its monitor test gained a
+`servedOutsideStack: undefined` case. Vitest passed (it does not typecheck),
+`exactOptionalPropertyTypes` rejected it in `tsc`, and every CI job that runs
+`pnpm -r build` failed on the pushed head. M-054's rule ("typecheck after
+writing tests") was known and still skipped because a build had "already run".
+
+Rule: the LAST command before any commit that touches `.ts` is CI's own
+`pnpm -r build` (NODE_OPTIONS=--max-old-space-size=3072), run after the final
+edit — not a per-package build from earlier in the change. A passing vitest
+run is never evidence that a file typechecks.
+
+### M-060 (2026-10-02) - A shared seeder gained a cross-file side effect; only one caller cleaned up
+
+ADR-0165 made `seedDemoIntake` install an active intake template variant that routes EVERY
+later use-case sign-off to Avery. I retired it in `zz-c11`'s afterAll but not in
+`zz-c6-demo-intake-seed.test.ts`, which also runs the seeder — so on the shared test database
+the full suite failed 12 tests in 5 files wherever c6 ran first. Targeted runs passed because
+they never put c6 before the use-case files.
+
+Rule: when a shared helper gains a side effect that outlives the test (an active template,
+a setting, an allow-list entry), `grep -l <helper> *.test.ts` and give EVERY caller the cleanup —
+then prove it with a two-invocation run on one database (the caller first, the affected files
+second), plus the same run without the cleanup as the positive control.
+
+### M-061 (2026-10-02) - Leftover gateways silently served later verification runs
+
+Verifying the demo, I started gateways with `(cd apps/gateway && PORT=… nohup node dist/main.js &
+echo $! > pid)`. `a && b &` backgrounds the whole list, so `$!` was a subshell's PID, not node's;
+"stopping" the gateway killed the subshell and left node listening. The next run's gateway lost
+the port race, its health check passed against the OLD process, and (a) the approval-review
+spec's own gateway on 3105 tested against my §0 gateway (4 false failures), (b) a "fresh"
+verification journey wrote into the previous run's database. Results were saved only by luck
+(the code under test happened to be the same).
+
+Rule: a script that starts a server records the server's own PID (`(cd dir; exec node …) &`),
+refuses to start when the port already answers (`curl -sf …/health && exit 1`), and stops
+servers by pattern before AND after (`pkill -f "[n]ode dist/main.js"` — the bracket keeps
+pkill from matching its own shell). After any verification, check the target database holds
+exactly the rows the run wrote.
+
+### M-062 (2026-10-02) - A four-hour fix batch kept its work uncommitted until the end
+
+The security batch (16 findings, 54 files) ran as one agent for four hours and planned to commit
+once, after a final full-suite run. The container restarted during that run. The edits survived on
+disk, but the agent, its verification state and its final step were lost, and I had to
+reconstruct what was done from the task list and the ADR it had written.
+
+Rule: a batch commits per closed finding (or per coherent group), locally, as it goes — a commit
+is the checkpoint, the final full suite is the gate before the PUSH, not before the first commit.
+Give every long agent a deliverable it can leave behind early (an ADR or notes file written
+first, then kept current), and never let a single agent own more than ~an hour of uncommitted work.
+
+### M-063 (2026-10-03) - Two CI-only breakages pushed on an "all green" head
+
+The push of 4d288dd went out after the full gateway suite and demo gate passed locally, and CI
+went red twice on things no local gate exercised: (a) the CI-01 MinIO service named an image tag
+(`bitnami/minio:2025`) that was never checked against the registry — and the upstream image the
+compose file defaulted to (`minio/minio`) had already been removed from Docker Hub weeks earlier;
+(b) CFG-07's `.dockerignore` dropped `*.test.ts`, and `packages/git-provider` had only ever found
+`@types/node` through a test file's `vitest` import, so the Docker build lost `Buffer`/`fetch`
+while every local build (tests present) stayed green. The ADR had even disclosed "verified by
+CI's docker build" — true, and CI did the verifying by failing.
+
+Rule: a change to what CI or the image is made of (a service image, a Dockerfile, `.dockerignore`,
+a workflow file) gets its own proof BEFORE push, with no daemon needed: resolve every image tag
+against the registry manifest API (anonymous token + `/v2/<repo>/manifests/<tag>` must answer
+200), and rebuild the image's input set as the Dockerfile sees it (`git ls-files` export, apply
+`.dockerignore` by hand, `pnpm install --frozen-lockfile`, `pnpm -r build`). A package compiles
+against the types it declares, never the types a neighbour happens to drag in: every workspace
+package that touches Node APIs lists `@types/node` itself.
+
+### M-064 (2026-10-03) - The local gate tested the gateway against a stale build of a shared package
+
+The full-gate script ran `pnpm -r test` first and `pnpm -r build` second (M-059's "build last"
+was written for CI's benefit). The gateway imports `@regulait/shared` from `packages/shared/dist`,
+so when a batch changed `packages/shared/src/mcp-discovery.ts` the suite measured the PREVIOUS
+build of it: two AER-020 tests went red for code that was already fixed. The same ordering would
+also pass a suite against a stale dist that hides a breaking shared change — a false green, which
+is the direction that matters.
+
+Rule: in any local gate, build every workspace package BEFORE the suite that consumes it (and
+again after the last edit, per M-059). A test file that imports a workspace package by name is
+testing that package's dist, not its src — say so in the gate's log line, and when a batch
+touches `packages/*/src`, treat a red in the consuming app as "rebuild first, then believe it".
+

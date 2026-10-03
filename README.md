@@ -77,7 +77,7 @@ export ANTHROPIC_API_KEY=sk-ant-...   # (optional ANTHROPIC_BASE_URL) → Claude
 #   OPENAI_API_KEY / OPENAI_BASE_URL, GOOGLE_API_KEY (or GEMINI_API_KEY), XAI_API_KEY
 # A stored per-user or platform credential still takes precedence over the env var.
 pnpm --filter @regulait/gateway seed    # idempotent demo data, prints keys once
-pnpm --filter @regulait/gateway start   # migrations run on boot
+HOST=127.0.0.1 pnpm --filter @regulait/gateway start   # migrations run on boot; HOST unset = every interface
 ```
 
 Tests (`pnpm -r test`) need `DATABASE_URL` pointing at a scratch database.
@@ -228,6 +228,10 @@ file, and a downgrade.
 |---|---|---|
 | `REGULAIT_TRUSTED_PROXIES` | `172.28.0.2` in compose (Caddy); *unset = trust nothing* elsewhere | Which peers may set `X-Forwarded-*`. Comma-separated IPs, CIDRs, or `loopback`/`linklocal`/`uniquelocal`; `none`/`off` for nothing, `all` to trust every peer (discouraged). This decides both the client IP recorded in `auth_sessions.ip` / the audit trail **and** whether the session cookie gets its `Secure` flag. **If you front the gateway with your own proxy you must set this**, or client IPs collapse to the proxy's address and `Secure` turns off. The effective posture is printed at boot. |
 | `REGULAIT_RATE_LIMIT` | `on` | `off` disables HTTP rate limiting entirely. |
+| `HOST` (or `REGULAIT_HOST`) | `0.0.0.0` | The interface the native `pnpm start` binds. Set `127.0.0.1` on a laptop on a shared network — the plaintext gateway and its bootstrap token should not be reachable from the venue Wi-Fi. Compose keeps every interface inside the container and publishes loopback only. The bound address is the first boot line. |
+| `REGULAIT_SHUTDOWN_GRACE_MS` | `15000` | On SIGTERM/SIGINT the gateway stops accepting, lets in-flight requests and the scheduler tick finish, ends the pool and exits 0 — within this budget, past which it exits 1. A second signal exits at once. Compose's `stop_grace_period` for the gateway is 30 s so the drain is never SIGKILLed. |
+| `REGULAIT_OUTBOUND_TIMEOUT_MS` | `60000` | The deadline a guarded outbound fetch gets when its caller supplied none (OTLP export, OIDC discovery/token, connectors). MCP, scorer and model calls carry their own deadlines, which always win. |
+| `REGULAIT_WORKFLOW_CLAIM_TTL_MS` | `900000` | How long a workflow stage's execution claim may go unreleased (a process killed mid-stage) before `/advance` may re-take it. The re-take is audited as `workflow-stage-claim-expired`. |
 | `REGULAIT_RATE_LIMIT_MAX` / `REGULAIT_RATE_LIMIT_WINDOW_MS` | `1200` / `60000` | The general per-client-IP bucket. |
 | `REGULAIT_AUTH_RATE_LIMIT_MAX` / `REGULAIT_AUTH_RATE_LIMIT_WINDOW_MS` | `10` / `300000` | The stricter bucket on `/auth/login`, `/auth/mfa/verify` and `/auth/login-with-key`. |
 | `REGULAIT_API_KEY_RATE_LIMIT_MAX` | `6000` | Per-API-key allowance, so a busy service account is neither throttled by nor able to exhaust its neighbours'. |

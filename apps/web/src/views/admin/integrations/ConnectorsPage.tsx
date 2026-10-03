@@ -11,7 +11,15 @@ import type { Connector, ConnectorCredentialInfo } from "../../../api/adminTypes
 import { ago, fmtUsd } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Input, Select, Table, Textarea } from "../../../ui/kit";
-import { connectorOpts, optionEls, useAction, useConnectors, useUsers, userOpts } from "../adminKit";
+import {
+  RemoveButton,
+  connectorOpts,
+  optionEls,
+  useAction,
+  useConnectors,
+  useUsers,
+  userOpts,
+} from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -51,6 +59,8 @@ export default function ConnectorsPage() {
             rows={connectors.data?.connectors ?? []}
             rowKey={(c) => c.id}
             loading={connectors.isLoading}
+            error={connectors.error}
+            onRetry={() => void connectors.refetch()}
             empty={<EmptyState title="No connectors" body="Create the first connector below." />}
           />
         </Card>
@@ -366,9 +376,53 @@ function EntitlementCard(props: { users: ReturnType<typeof useUsers> }) {
               render: (r) => (Array.isArray(r.allowedObjects) ? r.allowedObjects.join(", ") : "all"),
             },
             {
+              key: "source",
+              header: "Via",
+              render: (r) =>
+                r.source === "role" ? (
+                  <Badge tone="info">
+                    role{Array.isArray(r.roles) && r.roles.length ? `: ${r.roles.join(", ")}` : ""}
+                  </Badge>
+                ) : (
+                  <Badge tone="ok">direct</Badge>
+                ),
+            },
+            {
               key: "revoked",
               header: "",
               render: (r) => (r.revoked ? <Badge tone="danger">revoked</Badge> : null),
+            },
+            {
+              key: "actions",
+              header: "",
+              align: "right",
+              render: (r) => (
+                <RemoveButton
+                  what={`${String(r.name ?? "connector")} from this user`}
+                  disabledReason={
+                    r.source === "role"
+                      ? `granted by role ${Array.isArray(r.roles) ? r.roles.join(", ") : ""} — remove it there, or add a per-user revocation on the Users page`
+                      : undefined
+                  }
+                  consequence={
+                    <p>
+                      The direct grant is deleted, so the next call this user makes through{" "}
+                      <strong>{String(r.name ?? "this connector")}</strong> is refused by
+                      default-deny. Nothing already audited changes, and the removal is itself
+                      audited.
+                    </p>
+                  }
+                  onRemove={() => api.del(`/v1/grants/connectors/${String(r.grantId)}`)}
+                  onDone={() => {
+                    void act.run(async () => {
+                      const again = await api.get<{ connectors: Array<Record<string, unknown>> }>(
+                        `/v1/users/${userId}/connectors`,
+                      );
+                      setRows(again.connectors);
+                    }, null);
+                  }}
+                />
+              ),
             },
           ]}
           rows={rows}

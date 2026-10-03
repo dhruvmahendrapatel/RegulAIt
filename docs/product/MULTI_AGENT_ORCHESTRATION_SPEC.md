@@ -103,7 +103,7 @@ Three tiers, each with a narrower scope than the one above it:
 ```yaml
 task_graph:
   run_id: run-2026-0724-001
-  initiating_user: dhruv.patel@reynoldsbrands.com
+  initiating_user: d.patel@acme.example
   nodes:
     - id: schema-migration
       owner: pm_agent

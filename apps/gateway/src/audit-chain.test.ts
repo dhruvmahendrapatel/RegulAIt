@@ -19,7 +19,7 @@
  * meaningless.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { mkdtemp, readdir } from "node:fs/promises";
+import { chmod, mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -54,6 +54,7 @@ import {
   resolveS3AnchorConfig,
   S3_LOCK_OBSERVATION_TTL_MS,
   S3ObjectLockSink,
+  S3_REQUEST_HANDLER,
   verifyAuditChain,
   type AnchorSink,
   type S3SendClient,
@@ -443,6 +444,44 @@ describe("ADR-0060: anchoring", () => {
     expect(v.anchor.disclosure).toMatch(/not.*tamper-resistant/i);
   });
 
+  it("sets an anchor PAST the chain head aside instead of grading it as a mismatch (UIA-01)", async () => {
+    // Two gateways run from the same directory (a second database on the same
+    // host, say) share one anchor store, and the store's highest seq then
+    // belongs to whichever chain is longer. That anchor used to be compared
+    // against a row this chain never had, and the page showed a red "anchor
+    // mismatch" over a chain that was intact. Now the comparison uses the
+    // latest anchor at or below the head, and the foreign one is reported on
+    // its own — never silently dropped, because the other explanation for an
+    // anchor past the head is that rows after it were removed.
+    const head = Number((await chainRows()).at(-1)!.seq);
+    const planted = head + 1000;
+    await sink.write({
+      seq: planted,
+      rowHash: "f".repeat(64),
+      headAt: new Date().toISOString(),
+      algorithm: "sha256",
+      payloadVersion: "regulait.audit.v1",
+      capturedAt: "2026-01-01T00:00:00.000Z",
+    });
+    try {
+      expect((await sink.readLatest())!.seq).toBe(planted);
+      expect((await sink.readLatest({ maxSeq: head }))!.seq).toBeLessThanOrEqual(head);
+
+      const v = await verify();
+      expect(v.status).toBe("ok");
+      expect(v.anchor.source).toBe("worm_sink");
+      expect(v.anchor.seq).toBeLessThanOrEqual(head);
+      expect(v.anchor.matches).toBe(true);
+      expect(v.anchor.aheadOfHead).toMatchObject({ seq: planted, rowHash: "f".repeat(64), capturedAt: "2026-01-01T00:00:00.000Z" });
+      expect(v.anchor.aheadOfHead.disclosure).toMatch(/different chain|rows after it were removed/);
+    } finally {
+      const file = path.join(wormDir, `anchor-${String(planted).padStart(20, "0")}.json`);
+      await chmod(file, 0o644);
+      await rm(file);
+    }
+    expect(((await verify()) as { anchor: { aheadOfHead: unknown } }).anchor.aheadOfHead).toBeNull();
+  });
+
   it("lists anchors and discloses what the sink is worth", async () => {
     const res = await app!.inject({ method: "GET", headers: AUTH, url: "/v1/audit/anchors" });
     expect(res.statusCode).toBe(200);
@@ -830,6 +869,21 @@ const lockConfig = (mode?: "COMPLIANCE" | "GOVERNANCE") => ({
   ...(mode ? { Rule: { DefaultRetention: { Mode: mode, Days: 365 } } } : {}),
 });
 
+describe("REL-12: the real S3 client is built with deadlines", () => {
+  it("connect and request timeouts are set, and the SDK retries at most once", async () => {
+    const sink = new S3ObjectLockSink(S3_CONFIG);
+    const client = (sink as unknown as { client: S3Client }).client;
+    expect(client).toBeInstanceOf(S3Client);
+    expect(S3_REQUEST_HANDLER).toEqual({ connectionTimeout: 5_000, requestTimeout: 30_000 });
+    // the SDK builds its NodeHttpHandler from the options object and resolves
+    // them lazily (configProvider) on the first request — read the provider
+    const handler = client.config.requestHandler as unknown as { configProvider: Promise<Record<string, unknown>> };
+    await expect(handler.configProvider).resolves.toMatchObject(S3_REQUEST_HANDLER);
+    await expect(client.config.maxAttempts()).resolves.toBe(2);
+    client.destroy();
+  });
+});
+
 describe("ADR-0060: tamperResistant is OBSERVED, never configured", () => {
   it("says true ONLY when the bucket itself reports COMPLIANCE", async () => {
     const sink = new S3ObjectLockSink(S3_CONFIG, new FakeS3({ lock: lockConfig("COMPLIANCE") }));
@@ -909,6 +963,54 @@ describe("ADR-0060: tamperResistant is OBSERVED, never configured", () => {
     // class exists to prevent, so the observation expires.
     expect(S3_LOCK_OBSERVATION_TTL_MS).toBeGreaterThan(0);
     expect(S3_LOCK_OBSERVATION_TTL_MS).toBeLessThanOrEqual(300_000);
+  });
+});
+
+describe("ADR-0060: an anchor past the head on a WORM store withholds the verdict", () => {
+  // The MinIO "proof by attack" below is skipped without a bucket; this is the
+  // same rule against the fake S3, so it runs everywhere. A locked store that
+  // holds an anchor past this chain's head is EITHER another chain sharing the
+  // store OR this chain with its tail removed — and a verifier that cannot
+  // tell them apart must not answer "matches".
+  const keyFor = (seq: number) => `audit-anchors/anchor-${String(seq).padStart(20, "0")}.json`;
+  const bodyFor = (seq: number, rowHash: string) =>
+    JSON.stringify({ seq, rowHash, headAt: "2026-01-01T00:00:00.000Z", algorithm: "sha256", payloadVersion: "regulait.audit.v1", capturedAt: "2026-01-01T00:00:00.000Z" });
+
+  it("grades the genuine anchor but reports `matches: null`, with the disclosure saying so", async () => {
+    const head = (await chainRows()).at(-1)!;
+    const headSeq = Number(head.seq);
+    const fake = new FakeS3({
+      lock: lockConfig("COMPLIANCE"),
+      versions: [
+        { Key: keyFor(headSeq), VersionId: "genuine" },
+        { Key: keyFor(9_000_000), VersionId: "planted" },
+      ],
+      bodies: { genuine: bodyFor(headSeq, head.row_hash), planted: bodyFor(9_000_000, "9".repeat(64)) },
+    });
+    const report = await verifyAuditChain(db, new S3ObjectLockSink(S3_CONFIG, fake));
+    expect(report.anchor.source).toBe("worm_sink");
+    expect(report.anchor.tamperResistant).toBe(true);
+    // the comparison still used THIS chain's anchor — a tampered row would still show
+    expect(report.anchor.seq).toBe(headSeq);
+    expect(report.anchor.actualRowHash).toBe(report.anchor.expectedRowHash);
+    // but the verdict is withheld, never a pass
+    expect(report.anchor.matches).toBeNull();
+    expect(report.anchor.aheadOfHead).toMatchObject({ seq: 9_000_000, rowHash: "9".repeat(64) });
+    expect(report.anchor.aheadOfHead?.disclosure).toMatch(/NOT reported as verified/);
+    expect(report.anchor.aheadOfHead?.disclosure).toMatch(/a break/);
+  });
+
+  it("with no anchor past the head, the same store reads as a plain match", async () => {
+    const head = (await chainRows()).at(-1)!;
+    const headSeq = Number(head.seq);
+    const fake = new FakeS3({
+      lock: lockConfig("COMPLIANCE"),
+      versions: [{ Key: keyFor(headSeq), VersionId: "genuine" }],
+      bodies: { genuine: bodyFor(headSeq, head.row_hash) },
+    });
+    const report = await verifyAuditChain(db, new S3ObjectLockSink(S3_CONFIG, fake));
+    expect(report.anchor.matches).toBe(true);
+    expect(report.anchor.aheadOfHead).toBeNull();
   });
 });
 
@@ -1106,6 +1208,16 @@ const MINIO_SECRET = process.env.REGULAIT_TEST_S3_SECRET_ACCESS_KEY ?? "regulait
 const minioReachable = await fetch(`${MINIO_ENDPOINT}/minio/health/live`, { signal: AbortSignal.timeout(2_000) })
   .then((r) => r.ok)
   .catch(() => false);
+// CI-01: a deliberately named endpoint that is NOT there is a broken setup,
+// never a skip — on CI (which now runs a MinIO service for exactly these nine
+// tests) a silent skip would ship a regression in the tamper-resistance claim
+// green. Unset, the suite still skips on a laptop without MinIO.
+if (process.env.REGULAIT_TEST_S3_ENDPOINT && !minioReachable) {
+  throw new Error(
+    `REGULAIT_TEST_S3_ENDPOINT=${MINIO_ENDPOINT} is set but /minio/health/live did not answer — ` +
+      "the Object-Lock proof-by-attack tests cannot run and will not be skipped silently",
+  );
+}
 
 describe.skipIf(!minioReachable)("ADR-0060: proof by attack against a REAL Object-Lock bucket", () => {
   const suffix = randomUUID().slice(0, 8);
@@ -1273,18 +1385,25 @@ describe.skipIf(!minioReachable)("ADR-0060: proof by attack against a REAL Objec
     // The one thing a writer with the gateway's credential can still do to a
     // compliance bucket is ADD: plant an anchor at a `seq` that never existed.
     // They cannot withdraw it afterwards — the lock cuts both ways. So the
-    // damage is a verification that reports a MISMATCH, which is noisy and
+    // damage is a verification that WITHHOLDS its verdict, which is noisy and
     // wrong in the SAFE direction. The direction that matters — making a
     // tampered chain verify clean — stays closed, because they cannot alter
-    // the anchors already written.
+    // the anchors already written, and an anchor past the head on this store
+    // is also exactly what a truncated tail looks like, so it is never green.
     const sink = new S3ObjectLockSink(configFor(COMPLIANCE_BUCKET, "plant"));
     await captureAnchor(db, sink, null);
     expect((await verifyAuditChain(db, sink)).anchor.matches).toBe(true);
 
     await sink.write(anchorAt(9_000_000, "9".repeat(64)));
     const report = await verifyAuditChain(db, sink);
-    expect(report.anchor.seq).toBe(9_000_000);
-    expect(report.anchor.matches).toBe(false);
-    expect(report.anchor.actualRowHash).toBeNull();
+    // The planted anchor is past the head, so it is reported on its own — the
+    // alarm — and the verdict is withheld: the genuine anchor is still the
+    // one compared (so a tampered row would still show as a mismatch), but a
+    // store that says "there was more chain than this" never reads as a pass.
+    expect(report.anchor.aheadOfHead?.seq).toBe(9_000_000);
+    expect(report.anchor.aheadOfHead?.disclosure).toMatch(/NOT reported as verified/);
+    expect(report.anchor.seq).not.toBe(9_000_000);
+    expect(report.anchor.matches).toBeNull();
+    expect(report.anchor.actualRowHash).toBe(report.anchor.expectedRowHash);
   });
 });

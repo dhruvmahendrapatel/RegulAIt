@@ -277,16 +277,38 @@ describe("complete pipeline: intake to merged through public endpoints only", ()
     });
     expect(bypass.statusCode).toBe(409);
 
-    // the merge approval is in ana's inbox; approving it merges and completes
+    // The approval is durable, but a halt thrown before the external merge
+    // must leave the stage awaiting_execution with no merge result.
     const mergeGate = await pendingFor(anaAuth, instanceId, "merge_gate");
     expect(mergeGate).toBeTruthy();
     expect(mergeGate.approverUserId).toBe(anaId);
-    await app.inject({
-      method: "POST",
-      headers: anaAuth,
-      url: `/v1/approvals/${mergeGate.id}/decide`,
-      payload: { decision: "approved" },
+    const stopped = await app.inject({
+      method: "PUT", headers: AUTH, url: "/v1/execution/mode",
+      payload: { mode: "halted", reason: "test final-call Git merge stop" },
     });
+    expect(stopped.statusCode).toBe(200);
+    try {
+      const approved = await app.inject({
+        method: "POST", headers: anaAuth, url: `/v1/approvals/${mergeGate.id}/decide`,
+        payload: { decision: "approved" },
+      });
+      expect(approved.statusCode).toBe(200);
+      const paused = (await instanceView(piaAuth, instanceId)).json().instance;
+      expect(paused.status).toBe("awaiting_execution");
+      expect(paused.context.mergeSha).toBeUndefined();
+      expect(paused.context.lastError).toContain("execution mode is 'halted'");
+    } finally {
+      const resumed = await app.inject({
+        method: "PUT", headers: AUTH, url: "/v1/execution/mode",
+        payload: { mode: "normal", reason: "test final-call Git merge resume" },
+      });
+      expect(resumed.statusCode).toBe(200);
+    }
+    const retried = await app.inject({
+      method: "POST", headers: piaAuth, url: `/v1/workflows/instances/${instanceId}/advance`,
+      payload: { stageId: "merge" },
+    });
+    expect(retried.statusCode).toBe(200);
 
     view = await instanceView(piaAuth, instanceId);
     expect(view.json().instance.status).toBe("completed");

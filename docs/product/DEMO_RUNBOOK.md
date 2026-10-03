@@ -30,8 +30,9 @@ pnpm --filter @regulait/gateway demo:mcp
 #     the NIST and EU packs, and creates the use case (d) is about.
 pnpm --filter @regulait/gateway demo:setup
 
-# (5) The gateway itself.
-pnpm --filter @regulait/gateway start
+# (5) The gateway itself. HOST=127.0.0.1 binds loopback only — a laptop on a shared
+#     network must not expose the plaintext gateway and its bootstrap token (DEMO-01).
+HOST=127.0.0.1 pnpm --filter @regulait/gateway start
 ```
 
 ### 1.1 Without docker — a native Postgres path

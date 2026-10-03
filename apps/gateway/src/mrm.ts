@@ -329,7 +329,10 @@ export async function applyModelCardApprovalDecision(
   // migration, and nothing an author or admin could edit afterwards.
   const [cardRow] = await tx.select().from(modelCards).where(eq(modelCards.id, updated.cardId));
   const autofillSnapshot = cardRow
-    ? summarizeAutofillForSnapshot(await computeCardAutofill(tx, cardRow, new Date()))
+    ? summarizeAutofillForSnapshot(
+        // `tx` is ONE pg client — the autofill's reads run sequentially on it
+        await computeCardAutofill(tx, cardRow, new Date(), { inTransaction: true }),
+      )
     : null;
 
   if (decision === "approved" && updated.supersedesId) {

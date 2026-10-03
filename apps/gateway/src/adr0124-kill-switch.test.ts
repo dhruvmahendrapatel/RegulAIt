@@ -6,6 +6,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import {
   agents,
+  approvals,
   auditLog,
   createDb,
   eq,
@@ -79,6 +80,18 @@ let connectorId = "";
 let upstreamClose: () => Promise<void>;
 /** every request the upstream really received — criterion 2's instrument */
 let upstreamHits = 0;
+/**
+ * AER-017: TOOL EXECUTIONS, which is a different fact from `upstreamHits`.
+ *
+ * `upstreamHits` counts HTTP requests and is incremented before any protocol
+ * work, deliberately — ADR-0124's claim is "the socket was never reached". But
+ * ONE governed tool call reaches that socket several times (the `initialize`
+ * handshake, a manifest sync, then `tools/call`), so it cannot answer "did the
+ * tool run exactly once". Asserting one consent buys one EXECUTION needs a
+ * counter inside the tool handler, and using the one that happened to be
+ * available would have made a 3-hit pass look like a triple execution.
+ */
+let toolRuns = 0;
 
 const post = (url: string, payload?: unknown, headers = AUTH) =>
   app.inject({ method: "POST", url, headers, ...(payload ? { payload: payload as object } : {}) });
@@ -119,7 +132,10 @@ async function startUpstream(): Promise<{ url: string; close: () => Promise<void
         mcp.registerTool(
           READ_TOOL,
           { description: "read", inputSchema: {}, annotations: { readOnlyHint: true } },
-          async () => ({ content: [{ type: "text", text: "read-ok" }] }),
+          async () => {
+            toolRuns += 1;
+            return { content: [{ type: "text", text: "read-ok" }] };
+          },
         );
         mcp.registerTool(WRITE_TOOL, { description: "write", inputSchema: {} }, async () => ({
           content: [{ type: "text", text: "write-ok" }],
@@ -471,5 +487,162 @@ describe("the gate itself, unit-level", () => {
     );
     expect(out?.effect).toBe("deny");
     expect(out?.ruleId).toBe("execution-subject-halted");
+  });
+});
+
+// ===========================================================================
+// AER-017 — the manual-approval dial was a permanent queue loop that also
+// manufactured entitlement.
+// ===========================================================================
+//
+// Test 4 above asserted the QUEUE and stopped there, and that is precisely how
+// this survived: it never decided the queued approval and retried, and it never
+// used an unentitled caller. Both of the things it did not do were broken.
+//
+//  1. An UNGRANTED caller was invited into the approvals queue, because the
+//     execution gate ran ahead of the grant check. Approval manufactured
+//     entitlement — contradicting the kernel's own docstring, "an ungranted call
+//     is default-denied and nothing can rescue it".
+//  2. The approval could NEVER be consumed. The gate returned before the
+//     consume block, so a retry carrying an approved id got `require_approval`
+//     again. Operators approved work that could not run, indefinitely.
+//
+// The fix moves ONLY the conditional hold to after entitlement; `halted`, a
+// subject halt and `read_only` keep ADR-0124's stop-first ordering because they
+// can only deny. These tests are the end-to-end half — the kernel-level proofs
+// live in `packages/policy-kernel/src/index.test.ts`.
+
+describe("AER-017: manual-approval mode restricts an allowed call and can be satisfied", () => {
+  /** a subject with NO grant on this server — its own user, so nothing else in
+   *  this file can have granted it anything (M-008) */
+  let strangerId: string;
+
+  beforeAll(async () => {
+    const u = await post("/v1/users", {
+      email: `adr0124-stranger-${RUN}@kill.example`,
+      displayName: "AER017 Stranger",
+    });
+    strangerId = u.json().id;
+  });
+
+  const callAs = (uid: string, tool: string, approvedApprovalId?: string) =>
+    executeGovernedToolCall(db, undefined, {
+      userId: uid,
+      serverId,
+      toolName: tool,
+      projectId: null,
+      arguments: {},
+      ...(approvedApprovalId ? { approvedApprovalId } : {}),
+    });
+
+  const pendingFor = async (uid: string) =>
+    (await db.select().from(approvals).where(eq(approvals.userId, uid))).filter(
+      (a) => a.status === "pending",
+    );
+
+  it("(1) an UNGRANTED call is default-denied and opens ZERO approval rows", async () => {
+    await setMode("require_approval", "aer017 — proving the dial cannot manufacture entitlement");
+
+    const before = (await pendingFor(strangerId)).length;
+    const out = await callAs(strangerId, READ_TOOL);
+
+    expect(out.kind).toBe("denied");
+    expect((out as { decision: { ruleId: string } }).decision.ruleId).toBe("default-deny");
+    // THE HALF THAT MATTERED MOST: no queue row. Before the fix this caller was
+    // handed an approval an operator could sign off, for a call they were never
+    // entitled to make.
+    expect((await pendingFor(strangerId)).length, "no queue row for an ungranted caller").toBe(before);
+  });
+
+  it("(2) a GRANTED call queues exactly one row, naming the dial's rule", async () => {
+    const queued = await callAs(userId, READ_TOOL);
+    expect(queued.kind).toBe("approval_required");
+    const id = (queued as { approvalId: string }).approvalId;
+    const [row] = await db.select().from(approvals).where(eq(approvals.id, id));
+    expect(row!.status).toBe("pending");
+    expect((queued as { decision: { ruleId: string } }).decision.ruleId).toBe(
+      "execution-require-approval",
+    );
+  });
+
+  it("(3)+(4) decide it, and ONE retry reaches the upstream exactly once — then queues again", async () => {
+    const queued = await callAs(userId, READ_TOOL);
+    expect(queued.kind).toBe("approval_required");
+    const approvalId = (queued as { approvalId: string }).approvalId;
+
+    // DECIDED AS THE NAMED APPROVER, not as the bootstrap token — the bootstrap
+    // identity is forbidden from deciding (`bootstrap_cannot_decide`), which is
+    // its own control and not part of this finding. The dial names `userId` as
+    // the approver, so this is a self-review: permitted, and the ledger records
+    // it as one with the reason. This test is about the hold being satisfiable,
+    // not about separation of duties.
+    const decided = await post(
+      `/v1/approvals/${approvalId}/decide`,
+      { decision: "approved", reason: "aer017 — the sign-off that used to buy nothing" },
+      userAuth,
+    );
+    expect(decided.statusCode, decided.body).toBe(200);
+
+    // THE LOOP, BROKEN. Before the fix this returned `approval_required` again
+    // and the upstream was never reached however many times it was retried.
+    const runsBefore = toolRuns;
+    const retry = await callAs(userId, READ_TOOL, approvalId);
+    expect(retry.kind, JSON.stringify(retry)).toBe("allowed");
+    expect(toolRuns, "the approved retry EXECUTES the tool exactly once").toBe(runsBefore + 1);
+
+    // and the row is SPENT, not merely read
+    const [after] = await db.select().from(approvals).where(eq(approvals.id, approvalId));
+    expect(after!.status).not.toBe("approved");
+
+    // (4) the NEXT call queues again — one sign-off buys one call, which is what
+    // "nothing runs unattended while this mode is set" has to mean
+    const again = await callAs(userId, READ_TOOL);
+    expect(again.kind).toBe("approval_required");
+    expect((again as { approvalId: string }).approvalId).not.toBe(approvalId);
+  });
+
+  it("(5) CONCURRENT retries on one approval execute at most once", async () => {
+    const queued = await callAs(userId, READ_TOOL);
+    const approvalId = (queued as { approvalId: string }).approvalId;
+    expect(
+      (await post(
+        `/v1/approvals/${approvalId}/decide`,
+        { decision: "approved", reason: "aer017 — one consent, many racers" },
+        userAuth,
+      )).statusCode,
+    ).toBe(200);
+
+    const runsBefore = toolRuns;
+    const results = await Promise.all(
+      Array.from({ length: 8 }, () => callAs(userId, READ_TOOL, approvalId)),
+    );
+    const allowed = results.filter((r) => r.kind === "allowed").length;
+
+    // ONE consent, ONE execution. Asserted on what the world holds (upstream
+    // hits) as well as on the tally, because a route can answer `allowed` twice
+    // and only have run once, or the reverse.
+    expect(allowed, `one approval must yield one allow; got ${JSON.stringify(results.map((r) => r.kind))}`).toBe(1);
+    expect(toolRuns - runsBefore, "exactly one EXECUTION for one consent").toBe(1);
+  });
+
+  it("(6) the dial cannot override a per-tool HALT — a stop still beats a hold", async () => {
+    // The stops keep their ordering, and a stop outranks the hold: a halted tool
+    // in require_approval mode must be refused, never queued for sign-off.
+    const res = await post(`/v1/servers/${serverId}/tools/${WRITE_TOOL}/halt`, {
+      reason: "aer017 — a stop must outrank the manual-approval hold",
+    });
+    expect(res.statusCode).toBe(200);
+    try {
+      const out = await callAs(userId, WRITE_TOOL);
+      expect(out.kind).toBe("denied");
+      expect((out as { decision: { ruleId: string } }).decision.ruleId).toBe(
+        "execution-subject-halted",
+      );
+    } finally {
+      await post(`/v1/servers/${serverId}/tools/${WRITE_TOOL}/unhalt`, {
+        reason: "aer017 — restoring after the ordering check",
+      });
+      await setMode("normal", "aer017 — restoring the shared database to normal");
+    }
   });
 });

@@ -1762,3 +1762,175 @@ describe("ADR-0040 ABAC — the invariants, locked", () => {
     expect(d.approverUserId).toBe("abac-boss");
   });
 });
+
+// ===========================================================================
+// AER-017 — `require_approval` mode manufactured entitlement and could never
+// be satisfied.
+// ===========================================================================
+//
+// ADR-0124 put the execution gate FIRST, "ahead of every grant, rule, limit and
+// scope", and argued for it well: a stop that ran after entitlement resolution
+// would still be a stop, but it would be one more thing to get right in the
+// wrong order later. That argument is correct for `halted`, a subject halt and
+// `read_only` — each can ONLY deny, so running it first is free.
+//
+// It is WRONG for `require_approval`, and the reason is the whole finding:
+// `require_approval` is not a stop. It is a CONDITIONAL ALLOW — the one effect
+// the gate can return that leads to execution. Returning it before entitlement
+// is resolved produces two defects at once:
+//
+//   1. an UNGRANTED caller is invited into the approvals queue, so approval
+//      manufactures entitlement — contradicting the rule this very file states
+//      in `evaluate`'s own docstring: "an ungranted call is default-denied and
+//      nothing can rescue it";
+//   2. the approval can NEVER be consumed. The gate returns before the consume
+//      logic, so a retry carrying an approved id gets `require_approval` again,
+//      forever. Operators approve work that cannot run.
+//
+// ADR-0124's exhaustive "the gate can only ever restrict" unit test passed
+// throughout, because `require_approval` is not technically an `allow` — which
+// is exactly how a conditional allow hid inside a set of stops.
+
+describe("AER-017 — require_approval is a restriction on an allowed call, not a gate before one", () => {
+  const REQ = { mode: "require_approval", approverUserId: "approver-1" } as const;
+  const grant = toolGrant();
+
+  it("does NOT queue an UNGRANTED call — approval can never manufacture entitlement", () => {
+    const d = evaluate({
+      execution: REQ,
+      userId: USER,
+      serverId: SERVER,
+      tool: readTool,
+      toolGrants: [],
+      serverGrants: [],
+    });
+    // default-deny, exactly as in normal mode. The dial restricts; it does not
+    // invite. Before the fix this returned require_approval and the proxy duly
+    // opened a queue row for a caller with no grant at all.
+    expect(d.effect).toBe("deny");
+    expect(d.ruleId).toBe(DEFAULT_DENY_RULE_ID);
+    expect(d.ruleChain.some((t) => t.rule === "execution-require-approval")).toBe(false);
+  });
+
+  it("queues a GRANTED call, naming the dial's approver", () => {
+    const d = evaluate({
+      execution: REQ,
+      userId: USER,
+      serverId: SERVER,
+      tool: readTool,
+      toolGrants: [grant],
+      serverGrants: [],
+    });
+    expect(d.effect).toBe("require_approval");
+    expect(d.ruleId).toBe("execution-require-approval");
+    expect(d.approverUserId).toBe("approver-1");
+    // THE ORDERING UNDER TEST, read off the chain: the grant is resolved and the
+    // denial checks are traversed BEFORE the hold is recorded. That sequence is
+    // the fix — the hold can only restrict a call the rest of the policy already
+    // allowed, and the ledger shows it.
+    expect(d.ruleChain).toEqual([
+      { rule: "tool-allow-list", outcome: "allow", grantId: "tg-1" },
+      { rule: "data-scope", outcome: "no-match" },
+      { rule: "rate-limit", outcome: "no-match" },
+      { rule: "execution-require-approval", outcome: "require-approval" },
+    ]);
+  });
+
+  it("THE PERMANENT LOOP, closed: an approved id satisfies the hold and the call proceeds", () => {
+    const d = evaluate({
+      execution: REQ,
+      userId: USER,
+      serverId: SERVER,
+      tool: readTool,
+      toolGrants: [grant],
+      serverGrants: [],
+      approvedApprovalId: "appr-1",
+    });
+    expect(d.effect).toBe("allow");
+    // the ledger records WHICH approval satisfied it, so the consume is traceable
+    expect(d.ruleChain).toEqual([
+      { rule: "tool-allow-list", outcome: "allow", grantId: "tg-1" },
+      { rule: "data-scope", outcome: "no-match" },
+      { rule: "rate-limit", outcome: "no-match" },
+      { rule: "execution-require-approval", outcome: "satisfied-by-approval", grantId: "appr-1" },
+      // and evaluation CONTINUES past the satisfied hold into the ordinary
+      // approval rules, exactly as the ABAC hold does — the dial does not
+      // short-circuit the rest of the policy on the way to an allow
+      { rule: "approval-required", outcome: "no-match" },
+    ]);
+  });
+
+  it("cannot override a rate limit, a data-scope refusal or an ABAC forbid", () => {
+    // "Approval restricts an allow path" cuts both ways: a call the other rules
+    // deny must stay denied in this mode, and must not be offered a queue.
+    const overLimit = evaluate({
+      execution: REQ,
+      userId: USER,
+      serverId: SERVER,
+      tool: readTool,
+      toolGrants: [grant],
+      serverGrants: [],
+      rateLimits: [
+        { id: "rl-1", scope: "user", userId: USER, serverScope: "server", serverId: SERVER,
+          toolName: null, maxCalls: 1, windowSeconds: 60, currentCount: 1 },
+      ],
+    });
+    expect(overLimit.effect).toBe("deny");
+    expect(overLimit.ruleId).toBe("rl-1");
+
+    const forbidden = evaluate({
+      execution: REQ,
+      userId: USER,
+      serverId: SERVER,
+      tool: readTool,
+      toolGrants: [grant],
+      serverGrants: [],
+      abacDecision: { effect: "forbid", policyId: "pol-1", reason: "off-network" },
+    });
+    expect(forbidden.effect).toBe("deny");
+    expect(forbidden.ruleId).toBe("pol-1");
+  });
+
+  it("a HALT still stops first — the stops keep their ADR-0124 ordering", () => {
+    // Only the conditional hold moved. `halted` must still refuse an ungranted
+    // caller without resolving entitlement, because that is a stop and running
+    // it first costs nothing.
+    const halted = evaluate({
+      execution: { mode: "halted" },
+      userId: USER,
+      serverId: SERVER,
+      tool: readTool,
+      toolGrants: [],
+      serverGrants: [],
+    });
+    expect(halted.effect).toBe("deny");
+    expect(halted.ruleId).toBe("execution-halted");
+    expect(halted.ruleChain).toEqual([{ rule: "execution-halted", outcome: "deny" }]);
+
+    // read-only likewise, and it still lets a read through untouched
+    const roWrite = evaluate({
+      execution: { mode: "read_only" },
+      userId: USER,
+      serverId: SERVER,
+      tool: writeTool,
+      toolGrants: [],
+      serverGrants: [],
+    });
+    expect(roWrite.ruleId).toBe("execution-read-only");
+  });
+
+  it("read_only and require_approval COMPOSE: a write is stopped, not queued", () => {
+    // Belt and braces on the ordering: if a deployment is in require_approval
+    // mode the write path is still subject to every stop, and a stop wins.
+    const d = evaluate({
+      execution: { mode: "read_only" },
+      userId: USER,
+      serverId: SERVER,
+      tool: writeTool,
+      toolGrants: [toolGrant({ id: "tg-w", toolName: "drop_table" })],
+      serverGrants: [],
+    });
+    expect(d.effect).toBe("deny");
+    expect(d.ruleId).toBe("execution-read-only");
+  });
+});

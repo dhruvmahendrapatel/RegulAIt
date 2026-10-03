@@ -229,6 +229,8 @@ export function PmLinksCard(props: { parent: Parent }) {
         rows={links}
         rowKey={(l) => l.id}
         loading={q.isLoading}
+        error={q.error}
+        onRetry={() => void q.refetch()}
         empty={
           <EmptyState
             title="No PM work items linked"
@@ -376,6 +378,8 @@ export function DecisionLedgerCard(props: { parent: Parent }) {
         rows={rows}
         rowKey={(d) => d.id}
         loading={q.isLoading}
+        error={q.error}
+        onRetry={() => void q.refetch()}
         empty={
           <EmptyState
             title="No decisions recorded yet"

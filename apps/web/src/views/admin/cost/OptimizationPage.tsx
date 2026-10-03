@@ -111,6 +111,8 @@ export default function OptimizationPage() {
             rows={totals}
             rowKey={(t) => t.technique}
             loading={cost.isLoading}
+            error={cost.error}
+            onRetry={() => void cost.refetch()}
             empty={
               <EmptyState
                 title="No savings recorded yet"
@@ -151,6 +153,8 @@ export default function OptimizationPage() {
             rows={costRows}
             rowKey={(e) => e.rowKey}
             loading={cost.isLoading}
+            error={cost.error}
+            onRetry={() => void cost.refetch()}
             empty={<EmptyState title="No cost events" />}
           />
         </Card>
@@ -195,6 +199,8 @@ export default function OptimizationPage() {
             rows={usageRows}
             rowKey={(e) => e.rowKey}
             loading={usage.isLoading}
+            error={usage.error}
+            onRetry={() => void usage.refetch()}
             empty={<EmptyState title="No usage events" body="Real dispatches write the measured ledger." />}
           />
         </Card>

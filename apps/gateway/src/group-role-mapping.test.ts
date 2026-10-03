@@ -199,9 +199,14 @@ const oidcLogin = async (
     groups,
     claimName,
   });
+  // ADR-0167 (AUTHZ-04): the callback completes only in the browser that
+  // started the login, so carry /start's binding cookie like a browser would
+  const setCookie = start.headers["set-cookie"];
+  const binding = (Array.isArray(setCookie) ? setCookie : [setCookie ?? ""]).map((c) => String(c).split(";")[0]).join("; ");
   return app.inject({
     method: "GET",
     url: `/auth/oidc/callback?code=${code}&state=${encodeURIComponent(authUrl.searchParams.get("state")!)}`,
+    headers: { cookie: binding },
   });
 };
 

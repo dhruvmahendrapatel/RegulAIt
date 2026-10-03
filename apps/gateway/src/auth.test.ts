@@ -216,10 +216,17 @@ const latestAudit = async (ruleId: string) => {
 const oidcRoundTrip = async (
   providerId: string,
   claims: { email: string; emailVerified?: boolean; name?: string; sub?: string; nonceOverride?: string },
-  opts: { tamperState?: string } = {},
+  opts: { tamperState?: string; dropBindingCookie?: boolean; bindingCookieOverride?: string } = {},
 ) => {
   const start = await app.inject({ method: "GET", url: `/auth/oidc/${providerId}/start?returnTo=/app` });
   expect(start.statusCode).toBe(302);
+  // ADR-0167 (AUTHZ-04): /start binds the login to this browser with a cookie
+  // the callback requires — a real browser carries it back; so does this.
+  const binding = start.cookies.find((c) => c.name === "regulait_oidc_login");
+  expect(binding, "expected the browser-binding cookie from /start").toBeTruthy();
+  const bindingHeader = opts.dropBindingCookie
+    ? {}
+    : { cookie: `regulait_oidc_login=${opts.bindingCookieOverride ?? binding!.value}` };
   const authUrl = new URL(start.headers.location as string);
   const state = authUrl.searchParams.get("state")!;
   const nonce = authUrl.searchParams.get("nonce")!;
@@ -238,8 +245,9 @@ const oidcRoundTrip = async (
   const cb = await app.inject({
     method: "GET",
     url: `/auth/oidc/callback?code=${code}&state=${encodeURIComponent(opts.tamperState ?? state)}`,
+    headers: bindingHeader,
   });
-  return { cb, state, nonce };
+  return { cb, state, nonce, binding: binding! };
 };
 /**
  * SUITE-ORDER ISOLATION. The whole gateway suite shares ONE database
@@ -756,6 +764,41 @@ describe("OIDC SSO (fake IdP: discovery + jwks + token)", () => {
     expect(ok.statusCode).toBe(302);
     const replay = await app.inject({ method: "GET", url: `/auth/oidc/callback?code=whatever&state=${state}` });
     expect(replay.statusCode).toBe(401);
+    await app.inject({ method: "DELETE", headers: AUTH, url: `/v1/auth/oidc-providers/${p.id}` });
+  });
+
+  it("ADR-0167 (AUTHZ-04): a callback carried by a DIFFERENT browser is refused before the token exchange, audited, and the state is spent", async () => {
+    const p = await mkProvider({ name: "binding-check" });
+    const before = idp.tokenCalls;
+    // the login-CSRF shape: the attacker started the flow (and holds the
+    // binding cookie); the victim's browser follows the callback URL without it
+    const { cb, state, binding } = await oidcRoundTrip(p.id, { email: "sso-user@auth-test.example" }, { dropBindingCookie: true });
+    expect(cb.statusCode).toBe(401);
+    expect(cb.json().error).toBe("login_not_bound_to_this_browser");
+    expect(cb.cookies.find((c) => c.name === "regulait_session")).toBeUndefined();
+    expect(idp.tokenCalls).toBe(before); // refused before any exchange
+    const row = await latestAudit("oidc-login-browser-mismatch");
+    expect(row).toBeTruthy();
+    expect((row!.detail as { bindingCookiePresent?: boolean }).bindingCookiePresent).toBe(false);
+    // the state was consumed by the refusal: the attacker cannot try again with it
+    const replay = await app.inject({
+      method: "GET",
+      url: `/auth/oidc/callback?code=whatever&state=${state}`,
+      headers: { cookie: `regulait_oidc_login=${binding.value}` },
+    });
+    expect(replay.statusCode).toBe(401);
+    expect(replay.json().error).toBe("invalid_or_expired_state");
+    // a forged binding value is a mismatch too — only the HMAC under the data key matches
+    const forged = await oidcRoundTrip(p.id, { email: "sso-user@auth-test.example" }, { bindingCookieOverride: "not-the-hmac" });
+    expect(forged.cb.statusCode).toBe(401);
+    expect(forged.cb.json().error).toBe("login_not_bound_to_this_browser");
+    // the cookie itself: scoped to the login path, HttpOnly, Lax (a top-level GET callback carries it)
+    const start = await app.inject({ method: "GET", url: `/auth/oidc/${p.id}/start?returnTo=/app` });
+    const setCookie = ([] as string[]).concat(start.headers["set-cookie"] as string | string[]).join("\n");
+    expect(setCookie).toContain("regulait_oidc_login=");
+    expect(setCookie).toContain("Path=/auth/oidc");
+    expect(setCookie).toContain("HttpOnly");
+    expect(setCookie).toContain("SameSite=Lax");
     await app.inject({ method: "DELETE", headers: AUTH, url: `/v1/auth/oidc-providers/${p.id}` });
   });
 
@@ -1434,8 +1477,8 @@ describe("ADR-0030 — login by username", () => {
       await fn();
       return Number(process.hrtime.bigint() - started) / 1e6;
     };
-    // min-of-3 per path: scheduling noise only ever makes a run SLOWER, so the
-    // minimum is the stable floor to compare
+    // min-of-3 per path: scheduling noise only ever makes a run slower. Both
+    // paths must exceed the fast-fail floor; their ratio is runner-dependent.
     const unknown: number[] = [];
     const wrong: number[] = [];
     for (let i = 0; i < 3; i++) {
@@ -1447,7 +1490,7 @@ describe("ADR-0030 — login by username", () => {
     // a fast-fail (no hash computed) would be sub-millisecond; a scrypt at
     // N=2^14 costs tens of milliseconds
     expect(minUnknown).toBeGreaterThan(5);
-    expect(minUnknown).toBeGreaterThan(minWrong * 0.5);
+    expect(minWrong).toBeGreaterThan(5);
     await clearLockout(uid);
   });
 

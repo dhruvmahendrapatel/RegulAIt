@@ -30,7 +30,7 @@ import {
   Card,
   CodeBlock,
   ConfirmModal,
-  ErrorState,
+  RecordError,
   IdChip,
   Meter,
   Select,
@@ -323,15 +323,15 @@ export default function RunDetailPage() {
     );
   }
   if (q.isError || !q.data) {
-    const err = q.error as { status?: number; message?: string } | null;
     return (
       <>
         <PageHeader title="Run" />
         <Card>
-          <ErrorState
-            message={err?.message ?? "unknown error"}
-            access={err?.status === 403}
+          <RecordError
+            noun="run"
+            error={q.error}
             onRetry={() => void q.refetch()}
+            action={<Link to="/runs">← All runs</Link>}
           />
         </Card>
       </>

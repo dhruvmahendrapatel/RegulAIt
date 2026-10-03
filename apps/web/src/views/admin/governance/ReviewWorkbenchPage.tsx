@@ -24,11 +24,14 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
+import type { Approval } from "../../../api/types";
 import { ago } from "../../../api/format";
 import { useSession } from "../../../session/SessionContext";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, Input, Select, Table, Textarea } from "../../../ui/kit";
 import { QueryGate, optionEls, useAction, useProjects, useTeams, useUsers, projectOpts, teamOpts, userOpts } from "../adminKit";
+import { McpActionReview } from "../../approvals/McpActionReview";
+import { approvalReviewKey, inspectApprovalAction } from "../../approvals/approvalReview";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -65,14 +68,7 @@ interface WorkloadRow {
   dueSoon: number;
   breached: number;
 }
-interface QueueRow {
-  id: string;
-  objectType: string;
-  status: string;
-  approverUserId: string;
-  approverName: string | null;
-  objectLabel: string | null;
-  requestedAt: string;
+interface QueueRow extends Approval {
   assignment?: {
     assigneeKind: string;
     assigneeId: string;
@@ -135,6 +131,7 @@ export default function ReviewWorkbenchPage() {
 
   // bulk
   const [selected, setSelected] = useState<Record<string, boolean>>({});
+  const [reviewed, setReviewed] = useState<Record<string, string>>({});
   const [bulkReason, setBulkReason] = useState("");
   const [bulkResults, setBulkResults] = useState<
     Array<{ approvalId: string; ok: boolean; error?: string; detail?: string }> | null
@@ -145,9 +142,11 @@ export default function ReviewWorkbenchPage() {
   };
 
   const pending = (queue.data?.approvals ?? []).filter((r) => r.status === "pending");
-  const selectedIds = Object.entries(selected)
-    .filter(([, on]) => on)
-    .map(([id]) => id);
+  const selectedRows = pending.filter((row) => selected[row.id]);
+  const selectedIds = selectedRows.map((row) => row.id);
+  const needsActionReview = () => selectedRows.filter((row) => row.objectType === "mcp_tool" &&
+    (inspectApprovalAction(row).blockedReason || reviewed[row.id] !== approvalReviewKey(row)));
+  const unreviewedActions = needsActionReview().length;
 
   return (
     <>
@@ -485,7 +484,16 @@ export default function ReviewWorkbenchPage() {
                         />
                       ),
                     },
-                    { key: "what", header: "What", render: (r) => r.objectLabel ?? r.objectType },
+                    { key: "what", header: "What", render: (r) => r.objectType === "mcp_tool" ? r.toolName ?? "MCP action" : r.objectLabel ?? r.objectType },
+                    {
+                      key: "action", header: "Action", render: (row) => row.objectType === "mcp_tool"
+                        ? <McpActionReview approval={row} controls={(blockedReason, close) => <Button disabled={!!blockedReason} onClick={() => {
+                          if (inspectApprovalAction(row).blockedReason) return;
+                          setReviewed((state) => ({ ...state, [row.id]: approvalReviewKey(row) }));
+                          close();
+                        }}>Mark reviewed</Button>} />
+                        : null,
+                    },
                     { key: "who", header: "Approver", render: (r) => r.approverName ?? "—" },
                     {
                       key: "queue",
@@ -535,6 +543,7 @@ export default function ReviewWorkbenchPage() {
                   style={{ marginTop: "var(--s3)" }}
                   onSubmit={(e) => {
                     e.preventDefault();
+                    if (needsActionReview().length) { act.setError("Selected MCP actions require a current payload review."); return; }
                     void act.run(async () => {
                       const r = await api.post<{
                         decided: number;
@@ -561,7 +570,7 @@ export default function ReviewWorkbenchPage() {
                     />
                   </Field>
                   <div className={a.formRow}>
-                    <Button type="submit" disabled={selectedIds.length === 0 || !bulkReason.trim()}>
+                    <Button type="submit" disabled={selectedIds.length === 0 || !bulkReason.trim() || unreviewedActions > 0 || act.busy}>
                       Bulk approve
                     </Button>
                     <Button
@@ -589,6 +598,7 @@ export default function ReviewWorkbenchPage() {
                       Bulk deny
                     </Button>
                   </div>
+                  {unreviewedActions > 0 && <div role="status">{unreviewedActions} selected MCP action(s) need review.</div>}
                   <div className={v.faint}>
                     A bulk is N individual decisions through the one decide endpoint, each with its own audit
                     row — never one opaque event. It is capped per action, and it is refused item-by-item on

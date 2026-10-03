@@ -117,9 +117,10 @@ summary rather than the stream.
 
 ## Consequences
 
-**What this buys.** No unbounded wait remains on any MCP or model path. A dead upstream is a named,
-audited, fast refusal instead of an opaque 500 and a held socket — and after five failures it stops
-costing anything at all.
+**What this buys.** ~~No unbounded wait remains on any MCP or model path.~~ **That sentence was false
+for one vendor for two days — see the AER-021 amendment at the end of this file.** It is true as of
+2026-09-28. A dead upstream is a named, audited, fast refusal instead of an opaque 500 and a held
+socket — and after five failures it stops costing anything at all.
 
 **What it costs.** One SQL update per upstream failure, and nothing per success on a healthy
 upstream. The breaker read is free.
@@ -139,3 +140,140 @@ upstream. The breaker read is free.
   exists and no route calls it. The posture page and the execution-control screen are the obvious
   homes, and ADR-0124's argument applies verbatim: an operator mid-incident should be able to see
   what is stopped and why.
+
+## Amendment 2026-09-28 — the active probe, and the starved tail it shipped with (AER-037)
+
+**The passive breaker leaves one cost nobody chose: the first user after an outage always pays the
+full connect deadline.** On a quiet deployment that "first user" can be the customer in a demo, and
+the breaker's whole value — an immediate, named refusal — only begins on the *second* one. So
+`mcp-health-probe.ts` adds a scheduler job (`mcp-health-probe-sweep`, every 5 minutes) that makes the
+platform the first caller instead. It is a new way for the breaker to **learn**, not a second
+mechanism and **not a control**: with the scheduler off, which is the shipped default, behaviour is
+byte-identical, because the breaker still learns from traffic.
+
+It reuses `breakerAdmits` rather than reading the state, so the sweep enters the breaker's own
+one-winner election like any other caller and cannot become the thundering herd that election exists
+to prevent. And it counts **our** refusals — egress-blocked, admission-held — in their own bucket
+without touching the breaker: an air-gapped install refuses every outbound host by design, so
+charging those would report every upstream as circuit-broken on a deployment where nothing is wrong.
+
+**AER-037 — the cap starved the tail of the estate, and the header argued it was fine.** The first
+version bounded a pass at 50 and ordered the remainder `name asc`. That order is **constant**, so
+past the cap every pass probed the same lexicographically first cohort and the tail was never
+actively probed at all. `capped: true` reported the truncation honestly and said nothing about
+progress. The file's own header defended this — *"servers past the cap are simply discovered
+passively by the first user to call them, which is exactly today's behaviour"* — which is **true of
+any one server and false of the estate**: the failure is not that some server waits, it is that the
+same servers wait every time.
+
+Migration 0118 adds `mcp_servers.last_health_probe_at`, a per-row rotation cursor, and the order
+becomes: open-breaker cohort first (recovery is the time-critical half), then **least recently
+considered**, then name only as a deterministic tiebreak. Every registered upstream is now reached
+within `ceil(n / limit)` passes regardless of its name.
+
+Three properties of that design are deliberate:
+
+- **The cursor is stamped at SELECTION, not after the probe answers.** A row whose probe fails still
+  moves to the back — its breaker, not this cursor, is what keeps it urgent — two concurrent passes
+  select **disjoint** sets rather than racing over the same head of the queue, and a pass that dies
+  half way leaves its rows late rather than starved.
+- **A column, not a cursor table or a scalar position.** The sweep already reads and writes this row.
+  A single position cursor would also be wrong, because the open-breaker cohort must keep jumping the
+  queue, which a per-row stamp allows and a position does not.
+- **Rows whose cooldown has not elapsed are no longer SELECTED at all**, filtered in SQL rather than
+  selected and then skipped. That was a second way to starve the tail, found while fixing the first:
+  a bounded pass could spend its whole budget on rows nobody is permitted to probe. `eligible` now
+  means "a probe is possible right now" and `inCooldown` counts the rest, so the numbers add up.
+- **`capped` alone was not enough for an operator to diagnose this**, so the result and the scheduler
+  detail now carry `backlog`, `neverProbed` and `oldestProbeAt`. A steady backlog on a rotating
+  estate is fine; a `neverProbed` that does not fall is the AER-037 symptom returning.
+
+**Verification.** The rotation test creates `2 × limit + 1` servers **named so that name order and
+registration order disagree** — if the ordering were still lexicographic the test would pass for the
+wrong reason — and asserts across three bounded passes that every row is selected exactly once, read
+from the cursor the sweep stamps rather than from its own counts. Probe measured: restoring `name
+asc` reddens exactly the two AER-037 tests. The wording in both the function doc and the scheduler
+description changed from "every registered upstream" to "up to N per pass", because that phrasing is
+what made the starved tail invisible.
+
+**Also fixed here, and it is the third instance of one mistake (M-048).** The sweep's two
+egress-refusal tests used loopback with `allowPrivateRanges: false`. They passed alone and failed in
+the full suite, because `mcp-proxy.test.ts` inserts an `egress_allow_hosts` row for `127.0.0.1` — so
+the "blocked" host was allow-listed and the refusal never happened, leaving both tests asserting
+`> 0` against 0. They now use a randomised TEST-NET-3 address (RFC 5737), which is public and
+therefore independent of the private-range posture and of every other suite's allow-list — exactly
+the remedy the paragraph in `g2-upstream-deadlines.test.ts` already prescribes for this.
+
+**Remaining limit, named.** A cap plus a rotation bounds staleness at `interval × ceil(n / limit)` —
+about 4 minutes for 50 servers and about an hour for 500. That is a real bound rather than a starved
+tail, but it is not "every upstream every 5 minutes", and an estate large enough to care should raise
+the limit or shorten the interval. The result's `oldestProbeAt` is what says whether it needs to.
+
+
+## Amendment 2026-09-28 — AER-021: the model deadline omitted Google entirely, and the claim above was false
+
+This ADR bounded model dispatch by handing `modelDispatchTimeout()` to each SDK constructor, and then
+concluded that **"no unbounded wait remains on any MCP or model path."** An automated review found
+that claim false for one supported vendor.
+
+`GoogleProvider` is the only adapter written against raw `fetch` — the other four (Anthropic, OpenAI,
+xAI, custom) are SDK-backed and really were bounded. Google's `dispatch` called `fetchImpl` with no
+`AbortSignal` and then awaited `res.json()` or looped on `reader.read()`, so a hung or hostile Gemini
+endpoint could hold gateway work indefinitely, consume sockets and concurrency, and **silently ignore
+the operator's `REGULAIT_MODEL_TIMEOUT_MS`**. An enterprise operator could not name their effective
+deadline, because one vendor had none.
+
+**The scope claim was measured, not accepted.** Removing the fix reddens exactly the four Google cases
+and leaves anthropic, openai, xai and custom green — so the SDK adapters were already bounded and
+Google was the whole gap, as the finding said.
+
+### The fix is placed where the NEXT adapter cannot omit it
+
+Adding a signal inside `GoogleProvider.dispatch` would have closed this instance and left the next
+raw-fetch adapter free to omit it just as quietly. Instead `deadlineBoundFetch` wraps the fetch in
+`resolveModelProvider` — the single funnel every production dispatch is built through — so an adapter
+added later inherits the bound without its author doing anything. The omission becomes structurally
+impossible rather than something to remember. It is idempotent (a `Symbol.for` marker), so
+double-wrapping is a no-op, and it **composes** a caller's own signal with `AbortSignal.any` rather
+than replacing it.
+
+**Two waits had to close, and the second is the one a narrow fix misses.** Headers arriving is not the
+end of the wait: the old code could hang forever *after* a successful response, in `reader.read()` or
+`res.json()`. `AbortSignal.timeout` is the right primitive precisely because the signal handed to
+`fetch` **also errors the response body stream** — so one deadline covers request and body, there is
+nothing to clear on (a wrapper cannot know when the caller finished reading), and an abort landing
+after a fully-consumed body is a no-op. The stream reader is cancelled in a `finally` regardless, because
+a half-read body is a held socket.
+
+A deadline is now reported as **504 with "exceeded the Nms model deadline"**, distinct from a provider
+failure: "we stopped waiting" and "the vendor refused" send an operator to different places.
+
+### Verification
+
+Nine tests, **table-driven across all five real provider kinds**, injected fetch throughout — no
+network and no key. Each kind is proved to reject near the configured deadline; Google additionally
+proves the body case (headers arrive, the stream never ends) and that **the abort actually reached the
+body stream**, which is what shows the deadline stayed live past the response. A negative control
+constructs `GoogleProvider` directly, bypassing the funnel, and asserts it stays pending — which also
+states precisely where the binding lives. One test flips the configured number between two dispatches
+on the *same* provider instance and asserts the error names each value, so the deadline is read at
+dispatch rather than captured at construction.
+
+**An error in the test itself, worth recording.** The first version of the injected fetch ignored
+`init.signal`, and every case timed out — including the SDK adapters that were already bounded. The
+fake was at fault, not the code: **every timeout mechanism here, ours and both vendor SDKs', is
+implemented by passing an `AbortSignal` to fetch**, so a fake that ignores the signal defeats all of
+them at once and would have made a rigorous-looking suite prove nothing. It now rejects with
+`signal.reason`, which is what real `fetch` does.
+
+### Honest limits
+
+- **`deadlineBoundFetch` only helps if the underlying fetch honours the signal.** Real `undici` fetch
+  does; an injected one must. That is a property of the injection point, not something this wrapper can
+  enforce, and it is exactly what the test error above illustrates.
+- **Direct construction bypasses the binding.** `new GoogleProvider({...})` is unbounded by design — it
+  is what the negative control asserts. Production always goes through `resolveModelProvider`.
+- **The SDK adapters remain bounded by their own `timeout` option** as well as by the wrapper. Two
+  mechanisms, the same number; whichever expires first wins.
+- **No per-call override.** The deadline is process-wide, inherited from `timeouts.ts`, and carries the
+  ADR-0021 configurability debt already recorded there.

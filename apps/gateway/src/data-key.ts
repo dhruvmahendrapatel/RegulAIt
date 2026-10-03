@@ -253,6 +253,10 @@ export const CIPHERTEXT_COLUMNS: ReadonlyArray<{ table: string; column: string; 
   // written under must be detectable, and a column missing from here is a
   // credential the custody probe would silently never look at.
   { table: "training_backend_configs", column: "key_ciphertext", what: "training backend API keys" },
+  // ADR-0167 (SEC-06): the OTLP collector auth headers — a Honeycomb/Grafana/
+  // Datadog API key typed into Tracing settings. Plaintext jsonb until
+  // migration 0128; the same custody rules as every other endpoint credential.
+  { table: "org_settings", column: "tracing_otlp_headers_ciphertext", what: "OTLP collector auth headers" },
 ];
 
 export interface CiphertextProbe {

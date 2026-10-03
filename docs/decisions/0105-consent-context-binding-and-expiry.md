@@ -1,6 +1,6 @@
 # ADR-0105 — A consent is bound to the policy that demanded it, and it does not live forever
 
-- **Status**: Accepted
+- **Status**: Partially superseded by ADR-0130 (2026-09-30)
 - **Date**: 2026-09-07
 - **Relates to**: [ADR-0104](0104-approval-payload-binding.md) (the payload half of the same
   fingerprint — this ADR is its second half and reuses its machinery rather than replacing it),

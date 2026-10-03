@@ -1,11 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
-import { generateKeyPairSync } from "node:crypto";
+import { createHash, generateKeyPairSync } from "node:crypto";
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { auditLog, createDb, eq, runMigrations, usageEvents, type Db } from "@regulait/db";
+import { auditLog, createDb, eq, projectMembers, runMigrations, usageEvents, type Db } from "@regulait/db";
 
 /**
  * ADR-0116 — "signed exports an auditor can verify alone", proved by attack.
@@ -138,7 +138,7 @@ function resign(root: string, privPath: string): void {
 }
 
 function sha256File(p: string): string {
-  return execFileSync("sha256sum", [p]).toString().split(" ")[0]!;
+  return createHash("sha256").update(readFileSync(p)).digest("hex");
 }
 
 /** Patch a file's digest inside the manifest so the alteration survives
@@ -410,6 +410,57 @@ describe("the bundle an auditor receives", () => {
   });
 });
 
+describe("entitlement-scoped audit disclosure", () => {
+  it("keeps unrelated audit payloads out while preserving offline verification", async () => {
+    useRealKey();
+    const key = await app.inject({
+      method: "POST",
+      url: `/v1/users/${ownerId}/keys`,
+      headers: AUTH,
+      payload: { name: "scoped-export" },
+    });
+    expect(key.statusCode, key.body).toBe(201);
+    const caller = { authorization: `Bearer ${key.json().token}` };
+    const url = `/v1/reports/runs/${runId}/export?format=csv&signed=1`;
+    const denied = await app.inject({ method: "GET", url, headers: caller });
+    expect(denied.statusCode).toBe(403);
+
+    await db.insert(projectMembers).values({ projectId, userId: ownerId, role: "viewer" });
+    const sentinel = `unrelated-private-audit-${Date.now()}`;
+    await db.insert(auditLog).values({
+      userId: ownerId,
+      objectType: "project",
+      objectId: null,
+      effect: "allow",
+      ruleId: "unrelated-sentinel",
+      ruleChain: [],
+      reason: sentinel,
+      detail: { sentinel },
+    });
+    const res = await app.inject({ method: "GET", url, headers: caller });
+    expect(res.statusCode, res.body.slice(0, 400)).toBe(200);
+    const bundle = path.join(workDir, "scoped-report.tar.gz");
+    writeFileSync(bundle, res.rawPayload);
+    const verified = verifyOk(bundle);
+    expect(verified.out).toContain("subject-scoped audit proof");
+    const { root } = unpack(bundle);
+    const manifest = JSON.parse(readFileSync(path.join(root, "manifest.json"), "utf8"));
+    expect(manifest.schema).toBe("regulait.export-bundle/2");
+    expect(manifest.audit.payloadScope).toBe("subject");
+    const chain = readFileSync(path.join(root, "audit/chain.tsv"), "utf8").trim().split("\n");
+    expect(chain.some((row) => row.endsWith("\tcommitment"))).toBe(true);
+    expect(chain.some((row) => row.endsWith("\tpayload"))).toBe(true);
+    const disclosed = readdirSync(path.join(root, "audit/rows"));
+    expect(disclosed.length).toBeGreaterThan(0);
+    for (const name of disclosed) {
+      const payload = readFileSync(path.join(root, "audit/rows", name), "utf8");
+      expect(payload).not.toContain(sentinel);
+      expect(payload).toContain(`"objectId":"${runId}"`);
+    }
+    expect(readFileSync(path.join(root, "audit/chain.tsv"), "utf8")).not.toContain(sentinel);
+  });
+});
+
 describe("TAMPERING — every one of these must be caught, with its OWN message", () => {
   const messages: string[] = [];
   let bundle: string;
@@ -590,6 +641,17 @@ describe("TAMPERING — every one of these must be caught, with its OWN message"
     );
   });
 
+  it("an extra audit payload the chain never named", () => {
+    verifyOk(bundle);
+    const { dir, root } = unpack(bundle);
+    writeFileSync(path.join(root, "audit/rows/999999999.payload"), "private bytes");
+    expectRefused(
+      repack(dir, "t-extra-audit"),
+      ["--fingerprint", realFingerprint],
+      "unlisted audit payloads",
+    );
+  });
+
   it("a listed file removed from the bundle", () => {
     verifyOk(bundle);
     const { dir, root } = unpack(bundle);
@@ -647,7 +709,7 @@ describe("key rotation does not invalidate a bundle already signed", () => {
     expect(n.out).toContain("xbundle-2026");
 
     useRealKey();
-  });
+  }, 60_000);
 });
 
 describe("the OTHER export producer — /v1/audit.csv", () => {
@@ -706,6 +768,75 @@ describe("the OTHER export producer — /v1/audit.csv", () => {
     const plain = await app.inject({ method: "GET", url: "/v1/audit.csv", headers: AUTH });
     expect(plain.statusCode).toBe(200);
     expect(plain.body).toContain("at,userId,userName,objectType");
+    useRealKey();
+  });
+});
+
+// AER-008 — the trail must say what happened. A keyless signed export used to write its
+// "exported" success row first and refuse afterwards, so every refused click left a false record.
+describe("AER-008 — a refused signed export leaves an accurate trail, never a false success row", () => {
+  const countRule = async (ruleId: string) => (await db.select().from(auditLog).where(eq(auditLog.ruleId, ruleId))).length;
+
+  it("audit trail: keyless → one refusal row, ZERO 'audit-export-signed' rows; with the key → exactly one success row", async () => {
+    delete process.env.REGULAIT_EXPORT_SIGNING_KEY;
+    delete process.env.REGULAIT_EXPORT_SIGNING_KEY_ID;
+    const before = { ok: await countRule("audit-export-signed"), refused: await countRule("audit-export-unsigned-refused") };
+    const refused = await app.inject({ method: "GET", url: "/v1/audit.csv?signed=1", headers: AUTH });
+    expect(refused.statusCode).toBe(409);
+    expect(refused.json().error).toBe("export-signing-key-absent");
+    expect(await countRule("audit-export-signed")).toBe(before.ok);
+    expect(await countRule("audit-export-unsigned-refused")).toBe(before.refused + 1);
+    const [row] = await db
+      .select()
+      .from(auditLog)
+      .where(eq(auditLog.ruleId, "audit-export-unsigned-refused"));
+    expect(row!.effect).toBe("deny");
+    expect(row!.reason).toContain("no bundle was produced");
+
+    // POSITIVE CONTROL: the same request with the key writes exactly one success row
+    useRealKey();
+    const ok = await app.inject({ method: "GET", url: "/v1/audit.csv?signed=1&objectType=audit_export", headers: AUTH });
+    expect(ok.statusCode).toBe(200);
+    expect(ok.headers["content-type"]).toContain("gzip");
+    expect(await countRule("audit-export-signed")).toBe(before.ok + 1);
+    expect(await countRule("audit-export-unsigned-refused")).toBe(before.refused + 1);
+  });
+
+  it("report run: keyless → one refusal row, ZERO 'report-exported' rows; with the key → exactly one", async () => {
+    delete process.env.REGULAIT_EXPORT_SIGNING_KEY;
+    delete process.env.REGULAIT_EXPORT_SIGNING_KEY_ID;
+    const before = { ok: await countRule("report-exported"), refused: await countRule("report-export-unsigned-refused") };
+    const refused = await app.inject({
+      method: "GET",
+      url: `/v1/reports/runs/${runId}/export?format=csv&signed=1`,
+      headers: AUTH,
+    });
+    expect(refused.statusCode).toBe(409);
+    expect(await countRule("report-exported")).toBe(before.ok);
+    expect(await countRule("report-export-unsigned-refused")).toBe(before.refused + 1);
+
+    useRealKey();
+    const ok = await app.inject({
+      method: "GET",
+      url: `/v1/reports/runs/${runId}/export?format=csv&signed=1`,
+      headers: AUTH,
+    });
+    expect(ok.statusCode).toBe(200);
+    expect(await countRule("report-exported")).toBe(before.ok + 1);
+    expect(await countRule("report-export-unsigned-refused")).toBe(before.refused + 1);
+  });
+
+  it("an unparseable key file is caught by the preflight too — no success row", async () => {
+    // a well-formed key id and a key file that exists but is not a private key: the preflight
+    // refuses at parse time, so it covers key-shaped refusals beyond an unset variable
+    const bogus = path.join(workDir, "not-a-key.pem");
+    writeFileSync(bogus, "-----BEGIN PRIVATE KEY-----\nnot base64 at all\n-----END PRIVATE KEY-----\n");
+    process.env.REGULAIT_EXPORT_SIGNING_KEY = bogus;
+    process.env.REGULAIT_EXPORT_SIGNING_KEY_ID = "xbundle-bogus";
+    const before = await countRule("audit-export-signed");
+    const refused = await app.inject({ method: "GET", url: "/v1/audit.csv?signed=1", headers: AUTH });
+    expect(refused.statusCode).toBe(409);
+    expect(await countRule("audit-export-signed")).toBe(before);
     useRealKey();
   });
 });

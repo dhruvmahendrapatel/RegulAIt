@@ -205,6 +205,9 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await setOrgCategories([]);
+  // restore ADR-0020's shipped posture — the database is shared (M-040), and a
+  // later file asserting "compat ships OFF" must not depend on file order
+  await app.inject({ method: "PUT", url: "/v1/interception/settings", headers: AUTH, payload: { anthropicCompatEnabled: false } });
   app.server.closeAllConnections();
   await app.close();
   await upstreamClose();

@@ -40,7 +40,7 @@ import {
   type OrgSettingsRow,
 } from "@regulait/db";
 import { loadOrgSettings } from "./org-settings.js";
-import { resolveAnchorSink } from "./audit-chain.js";
+import { resolveAnchorSink, type AnchorSink, type AnchorSinkObservation } from "./audit-chain.js";
 import { resolveSchedulerConfig } from "./scheduler.js";
 
 /** `enforcement` changes what the product REFUSES. `optimisation` changes what
@@ -136,21 +136,56 @@ const SETTABLE: ReadonlyArray<{
   },
 ];
 
-/** Controls that live in the process environment. Reported, never claimed. */
-function environmentControls(env: NodeJS.ProcessEnv = process.env): PostureControl[] {
-  // ADR-0060's precedent: ask the medium, do not infer from configuration.
-  const sink = resolveAnchorSink(env);
-  const anchorObserved = sink === null ? "off" : sink.destination;
-  const tamperResistant = sink?.tamperResistant ?? false;
+/** What the posture read needs that is not an org_settings column. */
+export interface PostureSources {
+  /**
+   * The LONG-LIVED anchor sink — the same object `registerAuditChainRoutes`
+   * and `registerPostureRoutes` hold, handed in by `buildApp`. `undefined`
+   * resolves one from `env` ONCE at registration (never per request, so the
+   * S3 sink's bounded observation cache is actually used); `null` is "anchoring
+   * off", which reports as such.
+   */
+  sink?: AnchorSink | null;
+  env?: NodeJS.ProcessEnv;
+}
 
-  const scheduler = resolveSchedulerConfig(env);
+/**
+ * Controls that live in the process environment. Reported, never claimed.
+ *
+ * AER-012 — THE ANCHOR GRADE IS AWAITED, NOT READ. `AnchorSink.tamperResistant`
+ * is a synchronous property; on the S3 sink it is a getter over the LAST
+ * OBSERVATION and reports `false` until `observe()` has run. The first version
+ * of this read built a FRESH sink per request and read that property straight
+ * off it — so it was reading a sink that had never asked its bucket anything,
+ * and a COMPLIANCE-mode bucket graded `false` on every call. That is the
+ * conservative direction, but it is still wrong: a posture page that cannot be
+ * made to say "hardened" by any bucket is not reporting the bucket. So this is
+ * async, it takes the long-lived sink, and it awaits `observe()` when the sink
+ * offers one — exactly what `write`, `readLatest` and the verify report do.
+ */
+async function environmentControls(sources: Required<Pick<PostureSources, "sink">> & { env: NodeJS.ProcessEnv }): Promise<PostureControl[]> {
+  // ADR-0060's precedent: ask the medium, do not infer from configuration.
+  const sink = sources.sink;
+  const anchorObserved = sink === null ? "off" : sink.destination;
+  const observation: AnchorSinkObservation | null = sink?.observe ? await sink.observe() : null;
+  const tamperResistant = observation?.tamperResistant ?? sink?.tamperResistant ?? false;
+  const lockMode = observation?.mode ?? (sink === null ? "off" : "constant");
+
+  const scheduler = resolveSchedulerConfig(sources.env);
 
   return [
     {
       key: "auditAnchorTamperResistant",
       group: "enforcement",
-      // the OBSERVED grade, not the configured intent
-      current: { destination: anchorObserved, tamperResistant },
+      // the OBSERVED grade, not the configured intent — with the medium's own
+      // answer beside it so an operator can tell "nobody can delete this" from
+      // "we could not find out"
+      current: {
+        destination: anchorObserved,
+        tamperResistant,
+        lockMode,
+        ...(observation ? { disclosure: observation.disclosure } : {}),
+      },
       hardened: { destination: "s3_object_lock", tamperResistant: true },
       satisfied: tamperResistant === true,
       settable: false,
@@ -210,10 +245,12 @@ export interface PostureReport {
   };
 }
 
-export function buildPostureReport(
+export async function buildPostureReport(
   settings: OrgSettingsRow,
-  env: NodeJS.ProcessEnv = process.env,
-): PostureReport {
+  sources: PostureSources = {},
+): Promise<PostureReport> {
+  const env = sources.env ?? process.env;
+  const sink = sources.sink === undefined ? resolveAnchorSink(env) : sources.sink;
   const settable: PostureControl[] = SETTABLE.map((c) => {
     const current = settings[c.key];
     return {
@@ -226,7 +263,7 @@ export function buildPostureReport(
       refuses: c.refuses,
     };
   });
-  const controls = [...settable, ...environmentControls(env)];
+  const controls = [...settable, ...(await environmentControls({ sink, env }))];
   const count = (g: PostureGroup) => {
     const inGroup = controls.filter((c) => c.group === g);
     return { satisfied: inGroup.filter((c) => c.satisfied).length, total: inGroup.length };
@@ -272,12 +309,23 @@ export interface HardenOutcome {
   readonly posture: PostureReport;
 }
 
-export function registerPosturePresetRoutes(app: FastifyInstance, db: Db) {
+export function registerPosturePresetRoutes(
+  app: FastifyInstance,
+  db: Db,
+  opts: { sink?: AnchorSink | null } = {},
+) {
+  // AER-012: ONE sink for the life of the app — the same object the audit-chain
+  // and posture routes hold when `buildApp` passes it, else resolved from the
+  // environment ONCE here. Never per request: the S3 sink caches its bucket
+  // observation for a bounded time precisely so a posture read does not become
+  // a GetObjectLockConfiguration call per refresh.
+  const sink: AnchorSink | null = opts.sink === undefined ? resolveAnchorSink() : opts.sink;
+
   /** What is enforcing right now — useful to an operator who never applies the
    * preset, which is why it is a plain read with no side effects. */
   app.get("/v1/org/posture", async () => {
     const settings = await loadOrgSettings(db);
-    return buildPostureReport(settings);
+    return buildPostureReport(settings, { sink });
   });
 
   /**
@@ -293,9 +341,17 @@ export function registerPosturePresetRoutes(app: FastifyInstance, db: Db) {
    */
   app.post("/v1/org/posture/harden", async (req, reply) => {
     const body = (req.body ?? {}) as { groups?: unknown };
+    if (body.groups !== undefined && !Array.isArray(body.groups)) {
+      return reply.status(400).send({
+        error: "invalid_posture_groups",
+        detail: "`groups` must be an array of 'enforcement' and/or 'optimisation'. Nothing was changed.",
+      });
+    }
+    // de-duplicated, so `["enforcement","enforcement"]` is one group applied
+    // once and audited once — not a request that reads as two applications
     const requested: PostureGroup[] =
       Array.isArray(body.groups) && body.groups.length > 0
-        ? (body.groups as PostureGroup[])
+        ? [...new Set(body.groups as PostureGroup[])]
         : ["enforcement"];
     const bad = requested.filter((g) => g !== "enforcement" && g !== "optimisation");
     if (bad.length > 0) {
@@ -304,38 +360,56 @@ export function registerPosturePresetRoutes(app: FastifyInstance, db: Db) {
         detail: `unknown group(s): ${bad.join(", ")} — valid groups are 'enforcement' and 'optimisation'. Nothing was changed.`,
       });
     }
-
-    const before = await loadOrgSettings(db);
     const targets = SETTABLE.filter((c) => requested.includes(c.group));
+    const actor = req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000";
 
-    const applied: Record<string, [unknown, unknown]> = {};
-    const alreadySatisfied: string[] = [];
-    const patch: Record<string, unknown> = {};
-    for (const c of targets) {
-      const current = before[c.key];
-      if (JSON.stringify(current) === JSON.stringify(c.hardened)) {
-        alreadySatisfied.push(c.key);
-        continue;
+    // AER-013 — ONE DURABLE FACT, the ADR-0132 pattern. The first version of
+    // this read the settings, wrote them, and then inserted its audit rows as
+    // three separate statements: two concurrent applications could each read
+    // the shipped defaults and each mint an "applied" row for one change, and
+    // an audit insert that failed left the settings hardened with no record of
+    // it. Now the singleton is initialized (never created inside the lock),
+    // then LOCKED with FOR UPDATE, idempotency is decided against the LOCKED
+    // committed row, and the update (RETURNING the row the report is built
+    // from) and every audit row commit together or not at all. A concurrent
+    // caller waits on the lock, re-reads the committed state and finds nothing
+    // left to apply; a retry after a failure is the same no-op.
+    await loadOrgSettings(db);
+    const { applied, alreadySatisfied, after } = await db.transaction(async (tx) => {
+      const [before] = await tx
+        .select()
+        .from(orgSettings)
+        .where(eq(orgSettings.id, ORG_SETTINGS_ID))
+        .for("update");
+      if (!before) throw new Error("org_settings singleton missing");
+
+      const applied: Record<string, [unknown, unknown]> = {};
+      const alreadySatisfied: string[] = [];
+      const patch: Record<string, unknown> = {};
+      for (const c of targets) {
+        const current = before[c.key];
+        if (JSON.stringify(current) === JSON.stringify(c.hardened)) {
+          alreadySatisfied.push(c.key);
+          continue;
+        }
+        patch[c.key] = c.hardened;
+        applied[c.key] = [current, c.hardened];
       }
-      patch[c.key] = c.hardened;
-      applied[c.key] = [current, c.hardened];
-    }
+      if (Object.keys(patch).length === 0) return { applied, alreadySatisfied, after: before };
 
-    let after = before;
-    if (Object.keys(patch).length > 0) {
-      const [row] = await db
+      const [row] = await tx
         .update(orgSettings)
         .set({ ...patch, updatedBy: req.authCtx.userId, updatedAt: new Date() })
         .where(eq(orgSettings.id, ORG_SETTINGS_ID))
         .returning();
-      after = row ?? before;
+      if (!row) throw new Error("org_settings update returned no row");
 
       // A governance change is audited as one, with what moved and from what.
       // `ruleId` is its own, NOT `org-settings-updated`: an operator reading the
       // trail should be able to tell "an admin edited one dial" from "an admin
       // applied the hardened preset", and a shared rule id would erase that.
-      await db.insert(auditLog).values({
-        userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+      await tx.insert(auditLog).values({
+        userId: actor,
         objectType: "org_settings",
         objectId: null,
         detail: { via: req.authCtx.via, groups: requested, applied },
@@ -357,10 +431,11 @@ export function registerPosturePresetRoutes(app: FastifyInstance, db: Db) {
       // misses a preset-driven enablement, which is precisely the kind of
       // half-recorded governance change this product exists to prevent. So the
       // preset emits BOTH: one row saying the preset was applied, one saying
-      // MRM enforcement came on. They are two different facts about one write.
+      // MRM enforcement came on. They are two different facts about one write,
+      // and they commit WITH the write.
       if (applied.mrmEnforced !== undefined) {
-        await db.insert(auditLog).values({
-          userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+        await tx.insert(auditLog).values({
+          userId: actor,
           objectType: "org_settings",
           objectId: null,
           detail: { phase: "mrm", from: applied.mrmEnforced[0], to: applied.mrmEnforced[1], via: "posture_preset" },
@@ -372,9 +447,10 @@ export function registerPosturePresetRoutes(app: FastifyInstance, db: Db) {
             "unexpired approved card is now REFUSED",
         });
       }
-    }
+      return { applied, alreadySatisfied, after: row };
+    });
 
-    const posture = buildPostureReport(after);
+    const posture = await buildPostureReport(after, { sink });
     // Everything that is still not hardened and cannot be hardened from here.
     // Reported on EVERY call, including the fully-idempotent one, so a caller
     // never reads "nothing to do" as "you are fully hardened".

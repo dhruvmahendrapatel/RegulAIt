@@ -164,16 +164,22 @@ DECLARED_FPR="$(jfield signingKeyFingerprint || true)"
 EXPORTED_AT="$(jfield exportedAt || true)"
 INSTALL_ID="$(jfield installId || true)"
 SUBJECT_KIND="$(jfield kind || true)"
+PAYLOAD_SCOPE="$(jfield payloadScope || true)"
 
-[ "$SCHEMA" = "regulait.export-bundle/1" ] || refuse \
+[ "$SCHEMA" = "regulait.export-bundle/1" ] || [ "$SCHEMA" = "regulait.export-bundle/2" ] || refuse \
   "unknown manifest schema: '${SCHEMA:-<none>}'" \
-  "This verifier understands regulait.export-bundle/1 only."
+  "This verifier understands regulait.export-bundle/1 and /2 only."
+if [ "$SCHEMA" = "regulait.export-bundle/2" ]; then
+  [ "$PAYLOAD_SCOPE" = "subject" ] || refuse "schema /2 requires audit payloadScope=subject"
+else
+  [ -z "$PAYLOAD_SCOPE" ] || [ "$PAYLOAD_SCOPE" = "full" ] || refuse "schema /1 requires full audit payloads"
+fi
 [ "$PRODUCT" = "regulait" ] || refuse "manifest is not a RegulAIt export bundle (product='${PRODUCT:-<none>}')"
 [ -n "$KEY_ID" ] || refuse "manifest declares no signingKeyId"
 printf '%s' "$KEY_ID" | grep -qE '^[A-Za-z0-9._-]+$' || refuse \
   "signingKeyId contains characters that are not permitted in a key id: '$KEY_ID'" \
   "Key ids name a file in a pinned keyring; only [A-Za-z0-9._-] is allowed."
-pass "manifest: regulait export-bundle/1, subject '${SUBJECT_KIND:-?}', signed by key id '$KEY_ID'"
+pass "manifest: $SCHEMA, subject '${SUBJECT_KIND:-?}', signed by key id '$KEY_ID'"
 
 # --- 3. the key, and where it came from ------------------------------------
 # Precedence is deliberate: a --keyring entry is a key the auditor already
@@ -322,6 +328,8 @@ HEAD_ROWHASH="$(grep -m1 -oE '"rowHash"[[:space:]]*:[[:space:]]*"[0-9a-f]{64}"' 
 GENESIS_PREV="$(grep -m1 -oE '"genesisPrevHash"[[:space:]]*:[[:space:]]*"[0-9a-f]{64}"' "$MANIFEST" | grep -oE '[0-9a-f]{64}' || true)"
 SEG_FROM="$(grep -m1 -oE '"segmentFromSeq"[[:space:]]*:[[:space:]]*[0-9]+' "$MANIFEST" | grep -oE '[0-9]+' || true)"
 TRUNCATED="$(grep -m1 -oE '"segmentTruncated"[[:space:]]*:[[:space:]]*(true|false)' "$MANIFEST" | grep -oE '(true|false)' || true)"
+EXPECTED_PAYLOADS="$WORK/expected-payloads.txt"
+: >"$EXPECTED_PAYLOADS"
 
 if [ ! -s "$CHAIN" ]; then
   if [ -n "$HEAD_ROWHASH" ]; then
@@ -334,12 +342,24 @@ if [ ! -s "$CHAIN" ]; then
 else
   ROWS=0; PREV=""; EXPECT_SEQ=""
   LAST_SEQ=""; LAST_ROWHASH=""
-  while IFS=$'\t' read -r seq chash phash rhash; do
+  while IFS=$'\t' read -r seq chash phash rhash disclosure; do
     [ -n "${seq:-}" ] || continue
+    printf '%s' "$seq" | grep -qE '^[0-9]+$' || refuse "invalid audit sequence in chain.tsv"
+    if [ "$SCHEMA" = "regulait.export-bundle/2" ]; then
+      [ "$disclosure" = "payload" ] || [ "$disclosure" = "commitment" ] || refuse "invalid audit disclosure at seq $seq"
+    else
+      [ -z "${disclosure:-}" ] || refuse "unexpected audit disclosure at seq $seq"
+      disclosure="payload"
+    fi
     PFILE="$ROOT/audit/rows/$seq.payload"
-    [ -f "$PFILE" ] || refuse "AUDIT ROW MISSING: audit/rows/$seq.payload" \
-      "chain.tsv claims a row at seq $seq and the bundle does not carry its" \
-      "bytes, so its content_hash cannot be checked against anything."
+    if [ "$disclosure" = "payload" ]; then
+      printf 'audit/rows/%s.payload\n' "$seq" >>"$EXPECTED_PAYLOADS"
+      [ -f "$PFILE" ] || refuse "AUDIT ROW MISSING: audit/rows/$seq.payload" \
+        "chain.tsv marks seq $seq disclosed but its bytes are absent."
+    elif [ -e "$PFILE" ]; then
+      refuse "AUDIT ROW DISCLOSED WITHOUT AUTHORITY at seq $seq" \
+        "chain.tsv marks this row as a commitment only."
+    fi
 
     # The four checks run in ADR-0060's own order — ORDER, LINKAGE, CONTENT,
     # then the linked value — so that the FIRST thing reported is the closest
@@ -363,13 +383,15 @@ else
     fi
 
     # (c) CONTENT. Does the row's own text hash to the content_hash it claims?
-    ACTUAL_C="$(sha256_of "$PFILE")"
-    if [ "$ACTUAL_C" != "$chash" ]; then
-      refuse "AUDIT ROW TAMPERED at seq $seq — content_hash does not cover its bytes" \
-        "recorded content_hash: $chash" \
-        "hash of the row bytes: $ACTUAL_C" \
-        "The audit record in audit/rows/$seq.payload was edited after it was" \
-        "written. Read that file: its text is the record that was changed."
+    if [ "$disclosure" = "payload" ]; then
+      ACTUAL_C="$(sha256_of "$PFILE")"
+      if [ "$ACTUAL_C" != "$chash" ]; then
+        refuse "AUDIT ROW TAMPERED at seq $seq — content_hash does not cover its bytes" \
+          "recorded content_hash: $chash" \
+          "hash of the row bytes: $ACTUAL_C" \
+          "The audit record in audit/rows/$seq.payload was edited after it was" \
+          "written. Read that file: its text is the record that was changed."
+      fi
     fi
 
     # (d) THE LINKED VALUE itself.
@@ -423,7 +445,17 @@ else
     note "the segment starts at seq ${SEG_FROM:-?}, not at the genesis row: this bundle"
     note "alone does not prove the chain is intact before that point."
   fi
+  if [ "$SCHEMA" = "regulait.export-bundle/2" ]; then
+    note "subject-scoped audit proof: undisclosed rows have signed hash commitments only;"
+    note "their source bytes cannot be independently rehashed from this bundle."
+  fi
 fi
+ACTUAL_PAYLOADS="$WORK/actual-payloads.txt"
+(cd "$ROOT" && find audit/rows -type f -print 2>/dev/null || true) | LC_ALL=C sort >"$ACTUAL_PAYLOADS"
+LC_ALL=C sort -o "$EXPECTED_PAYLOADS" "$EXPECTED_PAYLOADS"
+[ -z "$(comm -23 "$ACTUAL_PAYLOADS" "$EXPECTED_PAYLOADS")" ] || refuse \
+  "the bundle contains unlisted audit payloads" \
+  "Every disclosed audit payload must be named by the signed chain."
 
 # --- 8. optional: place the verified bundle --------------------------------
 if [ -n "$EXTRACT_TO" ]; then

@@ -63,7 +63,24 @@ export interface RateLimitVerdict {
 interface LocalBucket {
   hits: number;
   windowStartedAt: number;
+  /** the window this bucket was opened under, so eviction can tell a rolled
+   * window from a live one without being told */
+  windowMs: number;
 }
+
+/**
+ * ADR-0167 (CFG-01): the local pre-filter is BOUNDED. Keys are now IP-derived
+ * or stored-credential ids (rate-limit.ts), so the map grows with distinct
+ * callers rather than with requests — but "distinct callers" over a week of
+ * uptime is still unbounded, and a map that only ever grows is a slow leak
+ * with a per-request cost. Past this many entries a bump first sweeps every
+ * bucket whose window has rolled (dead weight: the next hit would restart it
+ * at 1 anyway), then, if still over, drops the OLDEST-OPENED buckets until the
+ * cap holds. Dropping a live bucket costs correctness nothing: the shared
+ * counter in Postgres is the authority, so a re-created local bucket is at
+ * worst one extra round trip.
+ */
+export const LOCAL_BUCKET_CAP = 10_000;
 
 /**
  * How long a counter row is kept. An hour is far longer than any configured
@@ -97,6 +114,8 @@ export class SharedRateLimitStore {
     /** surfaced so a test can assert the fail-open path was taken rather than
      * inferring it from a number that happens to match */
     private readonly onDbError?: (err: unknown) => void,
+    /** the local pre-filter's size bound; a test lowers it to prove eviction */
+    private readonly localCap: number = LOCAL_BUCKET_CAP,
   ) {}
 
   /**
@@ -139,12 +158,35 @@ export class SharedRateLimitStore {
     const now = Date.now();
     const existing = this.local.get(key);
     if (!existing || now - existing.windowStartedAt >= timeWindowMs) {
-      const fresh = { hits: 1, windowStartedAt: now };
+      // a rolled bucket is re-SET rather than mutated so it moves to the end
+      // of the map's insertion order — eviction below drops from the front
+      if (existing) this.local.delete(key);
+      const fresh = { hits: 1, windowStartedAt: now, windowMs: timeWindowMs };
       this.local.set(key, fresh);
+      if (this.local.size > this.localCap) this.evictLocal(now);
       return fresh;
     }
     existing.hits += 1;
     return existing;
+  }
+
+  /** see LOCAL_BUCKET_CAP. Called only when the cap is exceeded, so the sweep
+   * amortises to well under one pass per cap-many new buckets. */
+  private evictLocal(now: number): void {
+    for (const [key, bucket] of this.local) {
+      if (now - bucket.windowStartedAt >= bucket.windowMs) this.local.delete(key);
+    }
+    if (this.local.size <= this.localCap) return;
+    for (const key of this.local.keys()) {
+      this.local.delete(key);
+      if (this.local.size <= this.localCap) break;
+    }
+  }
+
+  /** how many buckets this process is tracking locally — exposed for the
+   * eviction test, which must prove the map stops growing */
+  localBucketCount(): number {
+    return this.local.size;
   }
 
   incr(

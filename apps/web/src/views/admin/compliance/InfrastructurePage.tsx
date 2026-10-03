@@ -185,6 +185,8 @@ export default function InfrastructurePage() {
             rows={resources.data?.resources ?? []}
             rowKey={(r) => r.id}
             loading={resources.isLoading}
+            error={resources.error}
+            onRetry={() => void resources.refetch()}
             empty={<EmptyState title="No monitored resources" body="Register one above — mock scans deterministically." />}
           />
         </Card>
@@ -277,6 +279,8 @@ export default function InfrastructurePage() {
             rows={findings.data?.findings ?? []}
             rowKey={(f) => f.id}
             loading={findings.isLoading}
+            error={findings.error}
+            onRetry={() => void findings.refetch()}
             empty={<EmptyState title="No findings" body="Run a scan to detect drift, cert expiry, missed backups and CVEs." />}
           />
         </Card>
@@ -316,6 +320,8 @@ export default function InfrastructurePage() {
             rows={certs.data?.certs ?? []}
             rowKey={(c) => c.id}
             loading={certs.isLoading}
+            error={certs.error}
+            onRetry={() => void certs.refetch()}
             empty={<EmptyState title="No certificates tracked" />}
           />
         </Card>
@@ -360,6 +366,8 @@ export default function InfrastructurePage() {
             rows={patches.data?.patches ?? []}
             rowKey={(x) => x.id}
             loading={patches.isLoading}
+            error={patches.error}
+            onRetry={() => void patches.refetch()}
             empty={<EmptyState title="No CVE patches tracked" />}
           />
         </Card>
@@ -398,6 +406,8 @@ export default function InfrastructurePage() {
             rows={backups.data?.backups ?? []}
             rowKey={(b) => b.id}
             loading={backups.isLoading}
+            error={backups.error}
+            onRetry={() => void backups.refetch()}
             empty={<EmptyState title="No backup runs tracked" />}
           />
         </Card>

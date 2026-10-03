@@ -107,7 +107,14 @@ export interface AnchorSink {
    * directory is NOT that — see `LocalWormSink`. */
   readonly tamperResistant: boolean;
   write(record: AnchorRecord): Promise<string>;
-  readLatest(): Promise<AnchorRecord | null>;
+  /**
+   * The highest-seq anchor in the sink — or, with `maxSeq`, the highest one
+   * at or below it. The bound exists because an anchor store can hold anchors
+   * from MORE THAN ONE CHAIN (a second database run from the same directory,
+   * a planted record): verification asks for the latest anchor this chain can
+   * have produced, and reports anything past the chain head separately.
+   */
+  readLatest(opts?: { maxSeq?: number }): Promise<AnchorRecord | null>;
   /**
    * OPTIONAL, and only implemented by a sink whose immutability is a property
    * of a REMOTE medium rather than of this process.
@@ -160,14 +167,17 @@ export class LocalWormSink implements AnchorSink {
     return file;
   }
 
-  async readLatest(): Promise<AnchorRecord | null> {
+  async readLatest(opts?: { maxSeq?: number }): Promise<AnchorRecord | null> {
     let names: string[];
     try {
       names = await readdir(this.dir);
     } catch {
       return null;
     }
-    const anchors = names.filter((n) => n.startsWith("anchor-") && n.endsWith(".json")).sort();
+    const anchors = names
+      .filter((n) => n.startsWith("anchor-") && n.endsWith(".json"))
+      .filter((n) => opts?.maxSeq === undefined || anchorSeqOfName(n) <= opts.maxSeq)
+      .sort();
     const last = anchors.at(-1);
     if (!last) return null;
     try {
@@ -176,6 +186,12 @@ export class LocalWormSink implements AnchorSink {
       return null;
     }
   }
+}
+
+/** `anchor-00000000000000000567.json` (or its S3 key) → 567; NaN for anything else */
+export function anchorSeqOfName(name: string): number {
+  const m = /anchor-(\d+)\.json$/.exec(name);
+  return m ? Number(m[1]) : Number.NaN;
 }
 
 /** where the local anchor buffer lands when nothing overrides it */
@@ -284,6 +300,10 @@ export const S3_LOCK_OBSERVATION_TTL_MS = 60_000;
  * the anchor missing and says so), forgery is silent. This closes the silent
  * one.
  */
+/** REL-12: connect and whole-request deadlines for the anchor sink's S3 calls
+ * (a plain handler-options object — the SDK builds its NodeHttpHandler from it) */
+export const S3_REQUEST_HANDLER = Object.freeze({ connectionTimeout: 5_000, requestTimeout: 30_000 });
+
 export class S3ObjectLockSink implements AnchorSink {
   readonly destination = "s3_object_lock" as const;
   private readonly client: S3SendClient;
@@ -301,6 +321,13 @@ export class S3ObjectLockSink implements AnchorSink {
         ...(config.endpoint ? { endpoint: config.endpoint } : {}),
         forcePathStyle: config.forcePathStyle,
         ...(config.credentials ? { credentials: config.credentials } : {}),
+        // REL-12: the SDK's handler defaults BOTH timeouts to 0 = none, so a
+        // sink that drops packets (a firewall, not a refusal) hung the anchor
+        // capture — and the boot timer stacked a new one on it every 15 min.
+        // Bounded here, and retried once at most: an anchor that fails is
+        // recorded as `failed` with the reason, which is the honest outcome.
+        requestHandler: S3_REQUEST_HANDLER,
+        maxAttempts: 2,
       });
   }
 
@@ -472,7 +499,7 @@ export class S3ObjectLockSink implements AnchorSink {
    * Throwing would turn "the writer cannot read back" into a 500 on the one
    * endpoint that must always be able to say something.
    */
-  async readLatest(): Promise<AnchorRecord | null> {
+  async readLatest(opts?: { maxSeq?: number }): Promise<AnchorRecord | null> {
     try {
       await this.observe();
       const prefix = `${this.config.prefix}/anchor-`;
@@ -493,7 +520,11 @@ export class S3ObjectLockSink implements AnchorSink {
         // Delete markers are deliberately IGNORED: on a locked bucket a delete
         // marker is a claim that an anchor is gone, not the fact of it.
         const versions: Array<{ Key?: string; VersionId?: string }> = page?.Versions ?? [];
-        for (const v of versions) if (v.Key) firstVersionOf.set(v.Key, v.VersionId);
+        for (const v of versions) {
+          if (!v.Key) continue;
+          if (opts?.maxSeq !== undefined && !(anchorSeqOfName(v.Key) <= opts.maxSeq)) continue;
+          firstVersionOf.set(v.Key, v.VersionId);
+        }
         if (!page?.IsTruncated) break;
         keyMarker = page.NextKeyMarker as string | undefined;
         versionIdMarker = page.NextVersionIdMarker as string | undefined;
@@ -796,6 +827,15 @@ export interface VerifyReport {
     matches: boolean | null;
     unanchoredRows: number | null;
     disclosure: string;
+    /**
+     * An anchor in the sink whose seq is PAST this chain's head. A chain never
+     * shrinks, so such an anchor was either captured from a different chain
+     * that shares the store (a second database run from the same anchor
+     * directory) or is evidence that rows were removed after it was taken.
+     * It is reported here, never graded as a hash mismatch — `matches` above
+     * is computed against the latest anchor this chain can have produced.
+     */
+    aheadOfHead: { seq: number; rowHash: string; capturedAt: string; disclosure: string } | null;
   };
   limits: string[];
 }
@@ -955,6 +995,33 @@ async function compareAgainstAnchor(
   // different fact from "this is not tamper-resistant", and the reader needs
   // the specific one.
   let observation: AnchorSinkObservation | null = null;
+  let ahead: AnchorRecord | null = null;
+  // Read at return time, after `tamperResistant` is known: the same fact has
+  // two different weights. On a local buffer an anchor past the head is most
+  // likely another database that ran from the same directory, and the
+  // comparison below was never evidence anyway. On a WORM store it is one of
+  // two things — a shared store, or rows removed after the anchor was taken —
+  // and verification cannot tell which, so the chain is NOT reported as
+  // verified (`matches: null`), never as a clean pass.
+  const aheadOfHead = (): VerifyReport["anchor"]["aheadOfHead"] =>
+    ahead
+      ? {
+          seq: ahead.seq,
+          rowHash: ahead.rowHash,
+          capturedAt: ahead.capturedAt,
+          disclosure: tamperResistant
+            ? `The tamper-resistant anchor store holds an anchor at seq ${ahead.seq}, past this chain's head` +
+              `${ctx.lastSeq !== null ? ` (seq ${ctx.lastSeq})` : ""}. A chain never shrinks: either rows after the head were ` +
+              "removed from this chain — a break — or another chain shares this store. Verification cannot tell which, " +
+              `so this chain is NOT reported as verified. Compare the anchor's capture time (${ahead.capturedAt}) with this ` +
+              "chain's history and the store's other anchors before treating it as either."
+            : `The anchor store also holds an anchor at seq ${ahead.seq}, past this chain's head` +
+              `${ctx.lastSeq !== null ? ` (seq ${ctx.lastSeq})` : ""}. A chain never shrinks, so it was either captured ` +
+              "from a different chain that shares this store (another database run from the same anchor location) " +
+              "or rows after it were removed from this one. Verification cannot tell which; compare its capture time " +
+              `(${ahead.capturedAt}) with this chain's history before treating it as a break.`,
+        }
+      : null;
 
   if (supplied) {
     source = "caller_supplied";
@@ -962,7 +1029,16 @@ async function compareAgainstAnchor(
     tamperResistant = true;
     expected = supplied;
   } else if (sink) {
-    const record = await sink.readLatest();
+    let record = await sink.readLatest();
+    // The highest anchor in the store may not be THIS chain's: a store shared
+    // by two databases holds both chains' anchors, and the higher one used to
+    // be graded against a row this chain never had — a red "mismatch" over a
+    // row that does not exist. It is set aside and reported on its own; the
+    // comparison uses the latest anchor at or below the head.
+    if (record && ctx.lastSeq !== null && record.seq > ctx.lastSeq) {
+      ahead = record;
+      record = await sink.readLatest({ maxSeq: ctx.lastSeq });
+    }
     if (record) {
       source = "worm_sink";
       observation = (await sink.observe?.()) ?? null;
@@ -1007,6 +1083,7 @@ async function compareAgainstAnchor(
       matches: null,
       unanchoredRows: null,
       disclosure: disclosureFor("none", false),
+      aheadOfHead: aheadOfHead(),
     };
   }
 
@@ -1025,8 +1102,11 @@ async function compareAgainstAnchor(
     seq: expected.seq,
     expectedRowHash: expected.rowHash,
     actualRowHash: actual,
-    matches: actual !== null && actual === expected.rowHash,
+    // an anchor past the head on a WORM store withholds the verdict: the
+    // genuine anchor may match, but the rows after it may be gone
+    matches: ahead && tamperResistant ? null : actual !== null && actual === expected.rowHash,
     unanchoredRows: ctx.lastSeq !== null ? Math.max(ctx.lastSeq - expected.seq, 0) : null,
+    aheadOfHead: aheadOfHead(),
     // the medium's own account of what it enforces beats the generic text
     disclosure: observation?.disclosure ?? disclosureFor(source, tamperResistant),
   };

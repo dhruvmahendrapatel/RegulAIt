@@ -360,3 +360,26 @@ control, so the neutralisations are separate (M-035's shape applied to non-vacui
   the exact bytes rather than the parse — but a future manifest shape change must be made with
   that parser in mind, which is why `schema` is checked first and refuses anything but
   `regulait.export-bundle/1`.
+
+## Amendment — 2026-10-02: a refused signed export recorded a success first (AER-008)
+
+Both signed-export routes wrote their success row (`report-exported`, `audit-export-signed`)
+**before** building the bundle — deliberately, so the manifest's chain head is the record of the
+bundle's own creation — and only then discovered there was no signing key. Every refused request
+therefore left an "exported" row in the trail for a bundle that never existed; the audit route
+did not even record the refusal.
+
+The ordering stays (the chain head must include the creation record), with a **preflight**:
+`resolveExportSigningKey()` runs before any success row. A refused key writes one accurate
+`deny` row (`report-export-unsigned-refused` / `audit-export-unsigned-refused`, the key's
+`ruleId` in the chain) and returns the 409; no success row is written. If the build still
+refuses after a passed preflight (the key file changed underneath), the route writes a
+correcting `deny` row beside the success row (`report-export-signed-failed` /
+`audit-export-signed-failed`). Tests: `export-bundle.test.ts` "AER-008" — exact row deltas for
+both routes keyless and keyed, and an unparseable key file caught by the preflight; against the
+pre-fix routes all three fail.
+
+The product still never mints its own key. For the demo, `demo:export-key` is the operator's
+README step made cross-platform: it writes a deployment-held key under `~/.regulait-demo-keys`
+and prints the two variables; `demo:check` gained a "3 Evidence" beat that FAILs with that fix
+when the key is missing, so a keyless rehearsal can no longer reach the audience.

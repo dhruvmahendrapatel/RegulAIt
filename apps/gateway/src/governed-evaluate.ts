@@ -10,6 +10,7 @@ import {
   deployTargets,
   eq,
   gte,
+  governancePolicyEpoch,
   inArray,
   mcpServers,
   or,
@@ -29,7 +30,9 @@ import {
   approvalContextDigest,
   effectiveApprovalScope,
   type ApprovalScope,
+  type ApprovalTargetRef,
   type ConsentRetirementReason,
+  type PreparedPiiApproval,
 } from "@regulait/shared";
 import { loadEntitlements, loadScopeMemberships } from "./entitlements.js";
 import { evaluateAbacForToolCall, loadActiveAbacPolicies, type AbacPrincipalContext } from "./abac.js";
@@ -105,6 +108,8 @@ export interface GovernedEvaluation {
    * that governed the call, and the audit row is owed it either way.
    */
   contextDigest: string;
+  /** DB policy generation read before the evaluation's policy snapshot. */
+  policyEpoch: number;
   /**
    * ADR-0105: approved rows that WOULD have satisfied this call on ADR-0104's
    * payload test but were refused on the new ones — an expired consent, or one
@@ -208,7 +213,21 @@ export async function governedEvaluate(
    * must execute nothing.
    */
   simulate?: { versionId: string },
+  preparedPii?: PreparedPiiApproval,
+  /**
+   * AER-039 — the upstream this call will execute against, from the SAME
+   * server row the caller connects with (the proxy passes it, so the consent
+   * is bound to exactly the destination that receives the bytes). Omitted =
+   * derived from the current server row, for callers that never execute.
+   */
+  target?: ApprovalTargetRef | null,
 ): Promise<GovernedEvaluation> {
+  if (preparedPii && preparedPii.originalArgumentsDigest !== approvalArgumentsDigest({ projectId, arguments: args })) {
+    throw new Error("Prepared PII action does not match the original arguments");
+  }
+  const [policyGeneration] = await db.select({ epoch: governancePolicyEpoch.epoch }).from(governancePolicyEpoch);
+  if (!policyGeneration) throw new Error("governance policy epoch is unavailable");
+  const policyEpoch = policyGeneration.epoch;
   // PILLAR 1 rule scoping: resolve the user's role/team memberships first, then
   // widen every rule load from the exact (userId, serverId) match to every
   // scope this user matches. The kernel receives a pre-filtered set and stays
@@ -306,7 +325,15 @@ export async function governedEvaluate(
       )
       .orderBy(asc(approvals.requestedAt))
       .limit(50),
-    db.select({ name: mcpServers.name }).from(mcpServers).where(eq(mcpServers.id, serverId)),
+    db
+      .select({
+        name: mcpServers.name,
+        url: mcpServers.url,
+        allowPrivateRanges: mcpServers.allowPrivateRanges,
+        admissionManifestDigest: mcpServers.admissionManifestDigest,
+      })
+      .from(mcpServers)
+      .where(eq(mcpServers.id, serverId)),
   ]);
 
   // Display names for the decision's reason prose — the ids in ruleId /
@@ -373,6 +400,7 @@ export async function governedEvaluate(
         requiredApproverUserId: null,
         approvalScope: "action",
       }),
+      policyEpoch,
       retiredApprovals: [],
     };
   }
@@ -440,7 +468,7 @@ export async function governedEvaluate(
   // RAW arguments (pre-scrub) and the pillar-5 attribution. Everything
   // downstream — the queue row, the audit row, this match — uses this exact
   // string, so the writer and the matcher cannot hash different bytes.
-  const argumentsDigest = approvalArgumentsDigest({
+  const argumentsDigest = preparedPii?.argumentsDigest ?? approvalArgumentsDigest({
     projectId: projectId ?? null,
     arguments: args,
   });
@@ -474,7 +502,7 @@ export async function governedEvaluate(
     tool,
     deployContext,
   });
-  const approvalScope = effectiveApprovalScope(matchedARules);
+  const approvalScope = preparedPii ? "action" : effectiveApprovalScope(matchedARules);
 
   // ADR-0040 ABAC. The policy-set load is ONE indexed query, and an install
   // with no active policies stops there: `abacDecision` stays null, the kernel
@@ -527,8 +555,8 @@ export async function governedEvaluate(
      * learn who policy CURRENTLY requires as approver, and once holding the
      * row that satisfied. Defaulted so the shadow pass below is unchanged. */
     heldApprovalId: string | null = null,
-  ) =>
-    evaluate({
+  ) => {
+    const evaluateArguments = (evaluatedArgs: Record<string, unknown> | undefined) => evaluate({
       userId,
       serverId,
       /**
@@ -552,12 +580,21 @@ export async function governedEvaluate(
       })),
       rateLimits: limitRows,
       dataScopeRules: scopes,
-      args,
+      args: evaluatedArgs,
       approvedApprovalId: heldApprovalId,
       ceilingTools: ceilingTools ?? null,
       deployContext,
       abacDecision,
     });
+    const original = evaluateArguments(args);
+    if (!preparedPii) return original;
+    const effective = evaluateArguments(preparedPii.effectiveArguments);
+    const decision = original.effect === "deny" ? original : effective.effect === "deny" ? effective : original;
+    // The kernel's data-scope explanation quotes the rejected raw value.
+    return decision.ruleChain.some((entry) => entry.rule === "data-scope" && entry.outcome === "deny")
+      ? { ...decision, reason: "Original or effective arguments are outside the allowed data scope" }
+      : decision;
+  };
 
   // ---------------------------------------------------------------------
   // ADR-0105 — WHO POLICY CURRENTLY REQUIRES, and the consent-context digest.
@@ -592,8 +629,15 @@ export async function governedEvaluate(
       ruleId: r.id,
       activeVersionId: aResolved.activeVersionByArtifact.get(r.id) ?? null,
     })),
+    abacPolicies: abacPolicies.map((p) => ({
+      policyId: p.id,
+      version: p.version ?? null,
+      source: p.source,
+    })),
     requiredApproverUserId: pendingDecision.approverUserId ?? null,
     approvalScope,
+    // AER-039: the consent names WHERE the bytes go, not only what they are
+    target: target ?? approvalTargetForServer(serverId, serverRows[0]),
   });
 
   // WHICH approved row satisfies this call.
@@ -615,9 +659,7 @@ export async function governedEvaluate(
   //   * a stored `context_digest` that differs from the one just computed means
   //     the governing policy moved after the signature — the consent does not
   //     satisfy;
-  //   * a NULL stored `context_digest` is a legacy row and IS accepted: it
-  //     predates the feature and is still payload-bound under ADR-0104. See
-  //     ADR-0105 for why that call was made rather than fail-closed;
+  //   * a NULL stored context is a legacy row and cannot authorize execution;
   //   * a stored `expires_at` in the past does not satisfy. NULL never expires
   //     — a legacy row, or an org that set the dial to NULL on purpose.
   //
@@ -631,7 +673,7 @@ export async function governedEvaluate(
   const expired = (r: (typeof approvedRows)[number]) =>
     r.expiresAt != null && r.expiresAt.getTime() <= now;
   const contextStale = (r: (typeof approvedRows)[number]) =>
-    r.contextDigest != null && r.contextDigest !== contextDigest;
+    r.contextDigest !== contextDigest;
   const fresh = (r: (typeof approvedRows)[number]) => !expired(r) && !contextStale(r);
 
   const usable = approvedRows.filter((r) => satisfiesPayload(r) && fresh(r));
@@ -777,7 +819,23 @@ export async function governedEvaluate(
     argumentsDigest,
     approvalScope,
     contextDigest,
+    policyEpoch,
     retiredApprovals,
     ...(candidateDecision ? { candidateDecision } : {}),
+  };
+}
+
+/** AER-039 — the execution-relevant identity of an MCP upstream, from its row */
+export function approvalTargetForServer(
+  serverId: string,
+  row: { url: string; allowPrivateRanges: boolean | null; admissionManifestDigest: string | null } | undefined,
+): ApprovalTargetRef | null {
+  if (!row) return null;
+  return {
+    kind: "mcp_server",
+    serverId,
+    url: row.url,
+    allowPrivateRanges: row.allowPrivateRanges ?? null,
+    admissionManifestDigest: row.admissionManifestDigest ?? null,
   };
 }

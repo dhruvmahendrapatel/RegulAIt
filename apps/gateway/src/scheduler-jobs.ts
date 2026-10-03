@@ -44,6 +44,9 @@ import { runCampaignExpirySweep } from "./grant-certification.js";
 import { runCanaryObservationPrune } from "./config-versions.js";
 import { runMcpAdmissionRescan } from "./mcp-admission-rescan.js";
 import { runMcpRegistrySync } from "./mcp-registry.js";
+import { runMcpHealthProbeSweep } from "./mcp-health-probe.js";
+import { runGovernanceMonitor } from "./governance-monitor.js";
+import { runTraceEvaluationSweep } from "./trace-evaluation.js";
 import { toRegistry, type SchedulerJobDefinition, type SchedulerJobRegistry } from "./scheduler.js";
 
 const HOUR = 3600;
@@ -70,6 +73,9 @@ export const SCHEDULER_JOB_NAMES = {
   canaryObservationPrune: "canary-observation-prune-sweep",
   mcpAdmissionRescan: "mcp-admission-rescan-sweep",
   mcpRegistrySync: "mcp-registry-sync-sweep",
+  mcpHealthProbe: "mcp-health-probe-sweep",
+  governanceMonitor: "governance-monitor-sweep",
+  traceEvaluation: "trace-evaluation-sweep",
 } as const;
 
 export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): SchedulerJobDefinition[] {
@@ -414,6 +420,93 @@ export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): Schedu
             reason: out.reason,
           },
         };
+      },
+    },
+    {
+      // ADR-0126's ACTIVE half. The breaker learns from traffic, which means the
+      // FIRST user after an outage always pays the full connect deadline — on a
+      // quiet deployment that user can be the person being demoed to. This makes
+      // the platform the first caller instead.
+      //
+      // NOT a control, like every other sweep here: the breaker consulted on the
+      // request path is the enforcement, and with the scheduler off (the shipped
+      // default) behaviour is identical to before this job existed, because the
+      // breaker still learns passively. This only changes WHEN it learns.
+      //
+      // Our own refusals — an admission hold, an egress block — are counted
+      // separately and never charged to the breaker. An air-gapped install
+      // refuses every outbound host by design, and a probe that called that a
+      // failure would report every upstream as circuit-broken on a deployment
+      // where nothing is wrong.
+      name: SCHEDULER_JOB_NAMES.mcpHealthProbe,
+      description:
+        "Probe up to 50 MCP upstreams per pass — circuit-broken ones first, then the least recently " +
+        "probed — and feed the result to ADR-0126's breaker, so a dead upstream is refused before a " +
+        "user finds it and a recovered one resumes without waiting for someone to try. Coverage of a " +
+        "larger estate comes from the rotation across passes, not from one pass; the result reports " +
+        "the backlog. Makes outbound calls through the same guarded connect the proxy uses. " +
+        "Enforcement does not depend on it: the breaker still learns from traffic with this off. " +
+        "Admission holds and egress blocks are OUR refusals and never open a breaker.",
+      adr: "ADR-0126",
+      defaultIntervalSeconds: 5 * 60,
+      run: async (ctx) => {
+        const out = await runMcpHealthProbeSweep(ctx.db);
+        return {
+          itemsProcessed: out.probed,
+          detail: {
+            eligible: out.eligible,
+            probed: out.probed,
+            healthy: out.healthy,
+            failed: out.failed,
+            skippedCircuitOpen: out.skippedCircuitOpen,
+            skippedOurRefusal: out.skippedOurRefusal,
+            opened: out.opened,
+            recovered: out.recovered,
+            capped: out.capped,
+            // AER-037: `capped` alone says a pass truncated and nothing about
+            // whether the estate is being covered. These three are what an
+            // operator reads to tell a healthy steady backlog from a starved
+            // tail: `neverProbed` must fall to zero and `oldestProbeAt` must
+            // keep moving.
+            backlog: out.backlog,
+            neverProbed: out.neverProbed,
+            oldestProbeAt: out.oldestProbeAt?.toISOString() ?? null,
+          },
+        };
+      },
+    },
+    {
+      // ADR-0157. Re-evaluates the governance monitor's rules over the
+      // dependency graph, trust coverage and risk register; raises, refreshes
+      // and resolves alerts. A monitor, not a control: no dispatch decision
+      // reads the alert rows.
+      name: SCHEDULER_JOB_NAMES.governanceMonitor,
+      description:
+        "Evaluate the governance monitor rules (approved use cases inheriting a high rating, depending on " +
+        "halted/unowned agents, unapproved vendors or agents without an approved model card; live high " +
+        "risks with no control; trust-dimension coverage below floor) and raise, refresh or resolve " +
+        "alerts. Enforcement does not depend on it.",
+      adr: "ADR-0157",
+      defaultIntervalSeconds: HOUR,
+      run: async (ctx) => {
+        const out = await runGovernanceMonitor(ctx.db, { actorUserId: ctx.actorUserId, now: ctx.now });
+        return { itemsProcessed: out.raised + out.resolved, detail: { ...out } };
+      },
+    },
+    {
+      // ADR-0160. Re-runs the shipped heuristic detectors over stored previews
+      // of completed model calls (counts only). Feeds the monitor's
+      // agent_output_leakage rule; changes nothing a dispatch reads.
+      name: SCHEDULER_JOB_NAMES.traceEvaluation,
+      description:
+        "Evaluate up to 500 newly completed model-call spans per pass with the shipped guardrail detectors " +
+        "(output: PII, credential material, toxicity; input: injection/jailbreak attempts). Counts only, no " +
+        "model call. Withheld or uncaptured content is recorded as not evaluated.",
+      adr: "ADR-0160",
+      defaultIntervalSeconds: 15 * 60,
+      run: async (ctx) => {
+        const out = await runTraceEvaluationSweep(ctx.db, { now: ctx.now });
+        return { itemsProcessed: out.scanned, detail: { ...out } };
       },
     },
   ];

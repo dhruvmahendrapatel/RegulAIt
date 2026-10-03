@@ -572,3 +572,40 @@ export function teamsActivityForCard(card: ApprovalCard): TeamsActivityPayload {
     ],
   };
 }
+
+
+// ---------------------------------------------------------------------------
+// ADR-0162 — governance-monitor alert cards. INFORMATION, never a decision:
+// no actions, so no renderer can emit a button. The title is the alert's own
+// (names of use cases / agents / vendors — governance metadata, never prompt
+// or response content); the portal link is where a human acts.
+// ---------------------------------------------------------------------------
+
+export function composeAlertCard(input: {
+  alertId: string;
+  severity: "low" | "medium" | "high";
+  ruleLabel: string;
+  title: string;
+  portalUrl: string;
+}): ApprovalCard {
+  const icon = input.severity === "high" ? "🔴" : input.severity === "medium" ? "🟠" : "⚪";
+  const text = `${icon} *Governance alert* — ${input.severity.toUpperCase()} — ${input.ruleLabel}\n${input.title}`;
+  return {
+    text,
+    blocks: [
+      { type: "section", text: { type: "mrkdwn", text } },
+      { type: "section", text: { type: "mrkdwn", text: `<${input.portalUrl}|Open in RegulAIt>` } },
+    ],
+    redacted: false,
+    portalUrl: input.portalUrl,
+    actions: [],
+    inAppOnlyNote: null,
+  };
+}
+
+/** does a workspace with this threshold receive an alert of this severity? */
+export function alertMeetsThreshold(severity: string, threshold: "medium" | "high" | null): boolean {
+  if (!threshold) return false;
+  const rank: Record<string, number> = { low: 0, medium: 1, high: 2 };
+  return (rank[severity] ?? -1) >= rank[threshold]!;
+}

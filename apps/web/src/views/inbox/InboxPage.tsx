@@ -10,7 +10,8 @@ import { Link } from "react-router-dom";
 import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../api/client";
 import type { Approval, CheckResult, WorkflowDetailResponse } from "../../api/types";
-import { ago, approvalStageLabel } from "../../api/format";
+import { ago, approvalStageLabel, humanize } from "../../api/format";
+import { QuestionnaireView } from "../admin/governance/UseCaseQuestionnaire";
 import { useSession } from "../../session/SessionContext";
 import { PageHeader } from "../../shell/AppShell";
 import {
@@ -25,17 +26,20 @@ import {
   StatusBadge,
 } from "../../ui/kit";
 import { useToast } from "../../ui/toast";
+import { McpActionReview } from "../approvals/McpActionReview";
+import { inspectApprovalAction } from "../approvals/approvalReview";
 import v from "../views.module.css";
 
 const approvalLabel = (a: Approval): string => {
+  if (a.objectType === "mcp_tool") return `MCP action: ${a.toolName ?? "unknown tool"}`;
   const sentinel = approvalStageLabel(a);
   if (sentinel) return sentinel;
   if (a.objectType === "infra_operation")
     return "Infra remediation" + (a.objectLabel ? ` · ${a.objectLabel}` : "");
-  return (
-    (a.objectType === "workflow" ? "Sign-off · " : a.objectType === "run" ? "Run escalation · " : "") +
-    (a.stageId ?? "")
-  );
+  const stage = humanize(a.stageId);
+  if (a.objectType === "workflow") return /sign-off$/i.test(stage) ? stage : `Sign-off · ${stage}`;
+  if (a.objectType === "run") return `Run escalation · ${stage}`;
+  return stage;
 };
 
 const approvalTarget = (a: Approval): string | null => {
@@ -88,6 +92,10 @@ export default function InboxPage() {
   });
 
   const decide = async (a: Approval, decision: "approved" | "denied") => {
+    if (decision === "approved" && a.objectType === "mcp_tool") {
+      const blocked = inspectApprovalAction(a).blockedReason;
+      if (blocked) { setRowErrors((errors) => ({ ...errors, [a.id]: blocked })); return; }
+    }
     const reason = (reasons[a.id] ?? "").trim();
     const named = me === a.approverUserId;
     const delegated = Boolean(a.delegatedFrom);
@@ -162,6 +170,15 @@ export default function InboxPage() {
               const canDecide = named || delegated || Boolean(auth?.isAdmin);
               const target = approvalTarget(a);
               const inst = a.instanceId ? instances[a.instanceId] : undefined;
+              const controls = (blockedReason: string | null) => <div className={v.row} style={{ flexWrap: "wrap" }}>
+                <Input style={{ maxWidth: 260 }}
+                  placeholder={named || delegated ? "reason (optional)" : "reason (required - admin override)"}
+                  aria-label="Decision reason" value={reasons[a.id] ?? ""}
+                  onChange={(e) => setReasons((r) => ({ ...r, [a.id]: e.target.value }))} />
+                <Button size="sm" variant="primary" disabled={deciding === a.id || !!blockedReason} onClick={() => void decide(a, "approved")}>Approve</Button>
+                <Button size="sm" variant="danger" disabled={deciding === a.id} onClick={() => void decide(a, "denied")}>Deny</Button>
+                {rowErrors[a.id] && <div className={v.errLine} role="alert">{rowErrors[a.id]}</div>}
+              </div>;
               return (
                 <div key={a.id} className={v.listRow} style={{ flexDirection: "column", alignItems: "stretch", gap: "var(--s1)" }}>
                   <div className={v.row}>
@@ -202,40 +219,12 @@ export default function InboxPage() {
                   {inst && <MergeGateEvidence inst={inst} />}
                   {a.contextConflict && <ConflictPreview conflict={a.contextConflict} />}
                   {canDecide ? (
-                    <div className={v.row}>
-                      <Input
-                        style={{ maxWidth: 260 }}
-                        placeholder={
-                          named || delegated ? "reason (optional)" : "reason (required — admin override)"
-                        }
-                        aria-label="Decision reason"
-                        value={reasons[a.id] ?? ""}
-                        onChange={(e) => setReasons((r) => ({ ...r, [a.id]: e.target.value }))}
-                      />
-                      <Button
-                        size="sm"
-                        variant="primary"
-                        disabled={deciding === a.id}
-                        onClick={() => void decide(a, "approved")}
-                      >
-                        Approve
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="danger"
-                        disabled={deciding === a.id}
-                        onClick={() => void decide(a, "denied")}
-                      >
-                        Deny
-                      </Button>
-                    </div>
+                    a.objectType === "mcp_tool" ? <McpActionReview approval={a} controls={controls} /> : controls(null)
                   ) : (
-                    <span className={v.faint}>awaiting {a.approverName ?? "the named approver"}</span>
-                  )}
-                  {rowErrors[a.id] && (
-                    <div className={v.errLine} role="alert">
-                      {rowErrors[a.id]}
-                    </div>
+                    <>
+                      {a.objectType === "mcp_tool" && <McpActionReview approval={a} />}
+                      <span className={v.faint}>awaiting {a.approverName ?? "the named approver"}</span>
+                    </>
                   )}
                 </div>
               );
@@ -259,6 +248,7 @@ export default function InboxPage() {
                   </div>
                 </div>
                 <StatusBadge status={a.status} />
+                {a.objectType === "mcp_tool" && <McpActionReview approval={a} />}
               </div>
             ))}
           </Card>
@@ -287,10 +277,14 @@ function MergeGateEvidence(props: { inst: WorkflowDetailResponse }) {
       {Object.values(latest).map((art) => (
         <details key={art.id}>
           <summary className={v.faint} style={{ cursor: "pointer" }}>
-            submitted {art.output} v{art.version}
+            Submitted: {humanize(art.output)} (v{art.version})
           </summary>
           <div style={{ marginTop: "var(--s0)" }}>
-            <CodeBlock maxHeight="200px">{art.content}</CodeBlock>
+            {art.output === "use_case_questionnaire" ? (
+              <QuestionnaireView content={art.content} />
+            ) : (
+              <CodeBlock maxHeight="200px">{art.content}</CodeBlock>
+            )}
           </div>
         </details>
       ))}
@@ -308,8 +302,19 @@ function MergeGateEvidence(props: { inst: WorkflowDetailResponse }) {
       {checkRows.length > 0 && (
         <div className={v.rowTight}>
           {checkRows.map((c, i) => (
-            <Badge key={`${c.check}-${i}`} tone={c.status === "passed" ? "ok" : "danger"} title={c.detail ?? ""}>
+            <Badge
+              key={`${c.check}-${i}`}
+              // ADR-0167 (AUTHZ-06): a pass the initiator reported themselves is
+              // not CI's colour — the approver sees that before signing off
+              tone={c.selfReported ? "warn" : c.status === "passed" ? "ok" : "danger"}
+              title={
+                c.selfReported
+                  ? `Reported by the change's own initiator, not by CI${c.reason ? ` — reason: ${c.reason}` : ""}${c.detail ? ` (${c.detail})` : ""}`
+                  : (c.detail ?? "")
+              }
+            >
               {c.check} · {c.status}
+              {c.selfReported ? " · self-reported" : ""}
             </Badge>
           ))}
         </div>

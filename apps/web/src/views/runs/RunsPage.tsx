@@ -239,9 +239,15 @@ export default function RunsPage() {
     setDraftError(null);
   };
 
+  // a drafted proposal carries its own name; a template run needs one typed
+  const runName = title.trim() || proposal?.proposal.name?.trim() || "";
   const createRun = async () => {
     setCreateError(null);
     const template = RUN_TEMPLATES.find((t) => t.id === templateId) ?? RUN_TEMPLATES[0]!;
+    if (!runName) {
+      setCreateError("Give the run a title before planning it.");
+      return;
+    }
     if (!defaultOwner) {
       setCreateError("No agents are granted to your account — ask an admin to grant you one.");
       return;
@@ -249,7 +255,7 @@ export default function RunsPage() {
     setCreating(true);
     try {
       const graph = {
-        run: title.trim() || proposal?.proposal.name || "untitled run",
+        run: runName,
         escalationApproverUserId: userId,
         // an accepted proposal replaces the template entirely — the human is
         // submitting the plan they just reviewed, not a canned one
@@ -383,7 +389,7 @@ export default function RunsPage() {
                   </Select>
                 </Field>
                 <div style={{ alignSelf: "flex-end" }}>
-                  <Button variant="primary" onClick={() => void createRun()} disabled={creating}>
+                  <Button variant="primary" onClick={() => void createRun()} disabled={creating || !runName}>
                     {creating ? "Planning…" : "Plan run"}
                   </Button>
                 </div>
@@ -455,6 +461,8 @@ export default function RunsPage() {
               rows={runsQ.data?.runs}
               rowKey={(r) => r.id}
               loading={runsQ.isLoading}
+              error={runsQ.error}
+              onRetry={() => void runsQ.refetch()}
               onRowClick={(r) => navigate(`/runs/${r.id}`)}
               rowLabel={(r) => `Open run ${r.name}`}
               empty={

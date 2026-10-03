@@ -133,6 +133,8 @@ export default function ModelCredentialsPage() {
             rows={creds.data?.credentials ?? []}
             rowKey={(c) => c.provider}
             loading={creds.isLoading}
+            error={creds.error}
+            onRetry={() => void creds.refetch()}
             empty={
               <EmptyState
                 title="No platform credentials yet"
@@ -167,6 +169,8 @@ export default function ModelCredentialsPage() {
             rows={envKeys}
             rowKey={(k) => k.provider}
             loading={org.isLoading}
+            error={org.error}
+            onRetry={() => void org.refetch()}
             empty={<EmptyState title="No env vars surfaced" />}
           />
           <p className={v.faint}>

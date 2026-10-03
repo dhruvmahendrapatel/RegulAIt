@@ -31,6 +31,8 @@ import {
   StatusDot,
 } from "../../ui/kit";
 import v from "../views.module.css";
+import { TrustSnapshotCard } from "../admin/governance/TrustDashboardPage";
+import { GovernanceAlertsSnapshot } from "../admin/governance/GovernanceAlertsPage";
 
 export default function HomePage() {
   const { auth } = useSession();
@@ -45,6 +47,8 @@ export default function HomePage() {
         {auth?.isAdmin && <OrientationCard />}
         {auth?.isAdmin && <SuiteLauncher />}
         {auth?.isAdmin && <SetupCard />}
+        {auth?.isAdmin && <TrustSnapshotCard />}
+        {auth?.isAdmin && <GovernanceAlertsSnapshot />}
         <div className={v.grid2}>
           <ApprovalsCard />
           <SpendCard />
@@ -291,7 +295,7 @@ function SetupCard() {
               <Badge tone="ok">done</Badge>
             ) : (
               <Link className={v.faint} to="/admin/setup" title="Complete this step in Getting started">
-                complete
+                Set up →
               </Link>
             )}
           </div>

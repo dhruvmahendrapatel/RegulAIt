@@ -335,6 +335,11 @@ export interface CheckResult {
   status: string;
   severity?: string;
   detail?: string;
+  /** ADR-0167 (AUTHZ-06): true when the change's own initiator posted this
+   * result — the badge every approver should see before trusting the colour */
+  selfReported?: boolean;
+  reportedByUserId?: string | null;
+  reason?: string | null;
 }
 
 export interface WorkflowDetailResponse {
@@ -381,6 +386,18 @@ export interface Approval {
   runId?: string | null;
   projectId?: string | null;
   toolName?: string | null;
+  serverId?: string | null;
+  serverName?: string | null;
+  projectName?: string | null;
+  argumentsDigest?: string | null;
+  argumentsPreview?: unknown;
+  argumentsPreviewKind?: "arguments_v1" | "mcp_redacted_v1" | null;
+  approvalScope?: "action" | "tool" | null;
+  contextDigest?: string | null;
+  expiresAt?: string | null;
+  /** AER-039: the MCP target this consent is bound to, as recorded at queue
+   * time — host only (a URL can carry credentials). null = not recorded. */
+  boundTarget?: ApprovalBoundTarget | null;
   selfReview?: boolean;
   requestedByName?: string | null;
   approverName?: string | null;
@@ -392,6 +409,12 @@ export interface Approval {
     conflicting: ConflictSide;
     current: ConflictSide | null;
   };
+}
+
+export interface ApprovalBoundTarget {
+  host: string | null;
+  allowPrivateRanges: boolean | null;
+  admissionManifestDigest: string | null;
 }
 
 export interface ConflictSide {

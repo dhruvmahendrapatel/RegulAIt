@@ -278,7 +278,7 @@ describe("tiers, dominance, determinism", () => {
 
   it("the disclaimer says screening, not-legal-advice, and self-reported — on the result itself", () => {
     const c = classifyEuAiActTier(baseline);
-    expect(c.disclaimer).toContain("SCREENING");
+    expect(c.disclaimer).toMatch(/screening result/i);
     expect(c.disclaimer).toContain("not legal advice");
     expect(c.disclaimer).toContain("self-reported");
     expect(c.disclaimer).toContain("2024/1689");

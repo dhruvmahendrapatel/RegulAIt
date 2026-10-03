@@ -24,6 +24,7 @@ import {
   serverOpts,
   teamOpts,
   useAction,
+  RemoveButton,
   useNameMaps,
   useRoles,
   useServerTools,
@@ -231,6 +232,12 @@ export default function RulesEnginePage() {
     queryFn: () => api.get<{ rules: RateLimitRule[] }>("/v1/rules/rate-limits"),
   });
 
+  // Every rule table reads one of three queries; a removal from any of them
+  // should leave all three honest, since a rule can be retargeted between kinds.
+  const refetchAll = async () => {
+    await Promise.all([approvals.refetch(), dataScopes.refetch(), rateLimits.refetch()]);
+  };
+
   const uOpts = userOpts(users.data?.users);
   const rOpts = roleOpts(roles.data?.roles);
   const tOpts = teamOpts(teams.data?.teams);
@@ -261,6 +268,34 @@ export default function RulesEnginePage() {
     key: "deployMode",
     header: "Deploy-mode scope" as ReactNode,
     render: (r: T) => <DeployModeCell kind={kind} rule={r} />,
+  });
+
+  /**
+   * Rules could be created here and never deleted — `DELETE /v1/rules/:kind/:id`
+   * was served the whole time and no screen called it. For a rules engine that
+   * is worse than for most objects: a rule you cannot delete is one you have to
+   * work AROUND, and the usual way to work around a rule is another rule.
+   * Precedence then decides an outcome nobody chose.
+   */
+  const removeColumn = <T extends RuleBase>(kind: RuleKind, describe: (r: T) => string) => ({
+    key: "actions",
+    header: "" as ReactNode,
+    align: "right" as const,
+    render: (r: T) => (
+      <RemoveButton
+        what={describe(r)}
+        consequence={
+          <p>
+            The rule is deleted and stops being evaluated on the next governed call. Decisions it
+            already made stay in the audit trail with this rule id on them — removing a rule never
+            rewrites what it did. If another rule also matches these calls, that one now decides:
+            check the Simulation view before and after if the outcome matters.
+          </p>
+        }
+        onRemove={() => api.del(`/v1/rules/${kind}/${r.id}`)}
+        onDone={() => void refetchAll()}
+      />
+    ),
   });
 
   return (
@@ -324,10 +359,13 @@ export default function RulesEnginePage() {
               },
               { key: "created", header: "Created", render: (r) => ago(r.createdAt) },
               modeColumn<ApprovalRule>("approvals"),
+              removeColumn<ApprovalRule>("approvals", (r) => `this approval rule`),
             ]}
             rows={approvals.data?.rules ?? []}
             rowKey={(r) => r.id}
             loading={approvals.isLoading}
+            error={approvals.error}
+            onRetry={() => void approvals.refetch()}
             empty={<EmptyState title="No approval rules" />}
           />
         </Card>
@@ -378,10 +416,13 @@ export default function RulesEnginePage() {
               },
               { key: "created", header: "Created", render: (r) => ago(r.createdAt) },
               modeColumn<DataScopeRule>("data-scopes"),
+              removeColumn<DataScopeRule>("data-scopes", (r) => `the data-scope rule on ${r.argPath}`),
             ]}
             rows={dataScopes.data?.rules ?? []}
             rowKey={(r) => r.id}
             loading={dataScopes.isLoading}
+            error={dataScopes.error}
+            onRetry={() => void dataScopes.refetch()}
             empty={<EmptyState title="No data-scope rules" />}
           />
         </Card>
@@ -428,10 +469,13 @@ export default function RulesEnginePage() {
               { key: "window", header: "Window (s)", align: "right", render: (r) => r.windowSeconds },
               { key: "created", header: "Created", render: (r) => ago(r.createdAt) },
               modeColumn<RateLimitRule>("rate-limits"),
+              removeColumn<RateLimitRule>("rate-limits", (r) => `this rate limit (${r.maxCalls}/${r.windowSeconds}s)`),
             ]}
             rows={rateLimits.data?.rules ?? []}
             rowKey={(r) => r.id}
             loading={rateLimits.isLoading}
+            error={rateLimits.error}
+            onRetry={() => void rateLimits.refetch()}
             empty={<EmptyState title="No rate limits" />}
           />
         </Card>
@@ -667,6 +711,8 @@ function ShadowCanaryCard() {
         rows={rows}
         rowKey={(r) => `${r.artifactType}:${r.artifactId}`}
         loading={canaries.isLoading}
+        error={canaries.error}
+        onRetry={() => void canaries.refetch()}
         empty={
           <EmptyState
             title="No config canaries running"
@@ -745,6 +791,8 @@ function ShadowCanaryCard() {
             rows={divergence.data?.observations ?? []}
             rowKey={(o) => o.id}
             loading={divergence.isLoading}
+            error={divergence.error}
+            onRetry={() => void divergence.refetch()}
             empty={
               <EmptyState
                 title="Nothing sampled yet"

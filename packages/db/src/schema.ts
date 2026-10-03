@@ -1,4 +1,5 @@
 import { sql } from "drizzle-orm";
+import { APPROVAL_OBJECT_TYPES } from "@regulait/shared";
 import {
   bigint,
   check,
@@ -10,6 +11,7 @@ import {
   jsonb,
   numeric,
   pgTable,
+  primaryKey,
   text,
   timestamp,
   unique,
@@ -487,6 +489,17 @@ export const mcpServers = pgTable("mcp_servers", {
   breakerOpenedAt: timestamp("breaker_opened_at", { withTimezone: true }),
   breakerLastFailureAt: timestamp("breaker_last_failure_at", { withTimezone: true }),
   breakerLastError: text("breaker_last_error"),
+  /**
+   * AER-037 (migration 0118) — the health sweep's ROTATION CURSOR: when a pass
+   * last CONSIDERED this row, not when the row last answered.
+   *
+   * A bounded pass without one picks the same head of a constant order forever,
+   * so past the cap the tail of the estate was never actively probed at all.
+   * Ordering by this ascending, nulls first, turns the cap into a fair
+   * round-robin. Written at SELECTION time, which is also what makes two
+   * concurrent passes pick disjoint sets instead of racing over the same head.
+   */
+  lastHealthProbeAt: timestamp("last_health_probe_at", { withTimezone: true }),
   /** ADR-0101 (migration 0105) — FEDERATION PROVENANCE, on the server row
    * itself, because "where did this come from" is asked while looking at the
    * server. `local` is the migration DEFAULT and the only value a pre-0105 row
@@ -610,6 +623,8 @@ export const mcpTools = pgTable(
     haltedReason: text("halted_reason"),
     haltedByUserId: uuid("halted_by_user_id").references(() => users.id, { onDelete: "set null" }),
     description: text("description"),
+    /** ADR-0143: null until a manifest sync; redacted calls fail closed without it. */
+    inputSchema: jsonb("input_schema").$type<Record<string, unknown>>(),
     /** O10 (migration 0045): optional PER-TOOL price override. Resolution is
      * tool-first, server-flat-price fallback (ADR-0019 recorded the flat
      * price as "an additive column when a customer needs it" — this is it).
@@ -1023,6 +1038,15 @@ export const auditLog = pgTable(
         // bundle's manifest commits to a chain head that already contains the
         // record of its own creation. Plain text column — no DDL needed.
         "audit_export",
+        // ADR-0157: a governance-monitor alert raised / resolved /
+        // acknowledged, and the monitor pass itself (objectId null). Plain
+        // text column — no DDL needed.
+        "governance_alert",
+        "governance_monitor",
+        // ADR-0159: a remediation proposed / applied / denied / failed
+        "remediation",
+        // ADR-0161: one CI/CD deploy-gate evaluation (objectId = use case)
+        "deploy_gate",
       ],
     })
       .notNull()
@@ -1234,18 +1258,12 @@ export const approvals = pgTable(
       // does NOT get a second inbox — an arm's-length approver approving the
       // one queue row mints the refused grant inside the decision's own
       // transaction with the overridden rule recorded; denied mints nothing.
-      enum: [
-        "mcp_tool",
-        "workflow",
-        "run",
-        "project",
-        "infra_operation",
-        "model_card",
-        "copilot_proposal",
-        "training_job",
-        "grant_certification",
-        "sod_override",
-      ],
+      // B9b: the list itself now lives in `@regulait/shared`
+      // (`APPROVAL_OBJECT_TYPES`), because the queue's own `objectType` filter
+      // needs the same ten strings and two hand-maintained copies of "what can
+      // be in the one queue" would drift the moment a kind is added — the
+      // column has no DB CHECK, so nothing else would catch it.
+      enum: APPROVAL_OBJECT_TYPES,
     })
       .notNull()
       .default("mcp_tool"),
@@ -1279,18 +1297,22 @@ export const approvals = pgTable(
     /** the SCRUBBED (ADR-0099) rendering of those same arguments — what the
      * approver actually reads. Never the input to the digest. */
     argumentsPreview: jsonb("arguments_preview"),
+    /** ADR-0144: issuance facts, never inferred from caller-controlled preview keys. */
+    argumentsPreviewKind: text("arguments_preview_kind", { enum: ["arguments_v1", "mcp_redacted_v1"] }),
+    approvalScope: text("approval_scope", { enum: ["action", "tool"] }),
     // ADR-0105 (migration 0107) — CONSENT CONTEXT + EXPIRY. Both NULLABLE for
     // the same reason ADR-0104's pair is: a row queued before 0107 has
     // neither, and inventing either would be manufacturing a fact nobody
     // recorded.
     /** the POLICY fingerprint this consent was granted under: sha256 hex over
      * the matched approval rules paired with their ACTIVE `config_versions`
-     * ids (ADR-0073), the required approver and the approval scope. Re-derived
-     * at consumption and compared in the same atomic UPDATE predicate that
-     * spends the row, so a policy activation cannot be raced. NULL = a legacy
-     * row that predates the feature; it is ACCEPTED, because it is still
-     * payload-bound under ADR-0104 — see ADR-0105 for why that call was made
-     * rather than fail-closed. */
+     * ids (ADR-0073), the required approver, the approval scope and — since
+     * v3 (ADR-0166) — the MCP target. Re-derived at evaluation and compared at
+     * consumption, which also re-checks the consent policy epoch (migration
+     * 0119) under the same row lock, so a policy activation cannot be raced
+     * (AER-004). NULL = a legacy row that predates the feature; it is NOT
+     * spendable — the consume predicate requires a matching digest, so a
+     * legacy row is retired and re-queued for a fresh, context-bound review. */
     contextDigest: text("context_digest"),
     /** when this consent stops being spendable, stamped at QUEUE time from
      * `org_settings.approval_ttl_hours`. NULL = never expires: either a legacy
@@ -1300,6 +1322,9 @@ export const approvals = pgTable(
   },
   (t) => [
     index("approvals_status_idx").on(t.status),
+    check("approvals_preview_kind_check", sql`${t.argumentsPreviewKind} IN ('arguments_v1', 'mcp_redacted_v1')`),
+    check("approvals_scope_check", sql`${t.approvalScope} IN ('action', 'tool')`),
+    check("approvals_redacted_scope_check", sql`${t.argumentsPreviewKind} IS DISTINCT FROM 'mcp_redacted_v1' OR ${t.approvalScope} IS NOT DISTINCT FROM 'action'`),
     index("approvals_user_server_tool_idx").on(t.userId, t.serverId, t.toolName),
     // the shape of ADR-0104's matcher lookup
     index("approvals_payload_binding_idx").on(
@@ -3546,7 +3571,15 @@ export const orgSettings = pgTable(
     tracingOtlpEndpoint: text("tracing_otlp_endpoint"),
     /** operator-supplied export headers (e.g. an OTLP collector's auth header).
      * Values are returned REDACTED by the settings read surface. */
+    /** ADR-0167 (SEC-06): since migration 0128 this holds header NAMES only
+     * (every value is the `[redacted]` marker) — the values live enveloped in
+     * the column below. A pre-0128 row still carrying plaintext values is
+     * enveloped by the gateway's boot-time backfill. */
     tracingOtlpHeaders: jsonb("tracing_otlp_headers"),
+    /** ADR-0167 (SEC-06): the collector headers as a REGULAIT_DATA_KEY
+     * envelope over the JSON map — a collector API key is a credential like
+     * every other admin-registered endpoint secret */
+    tracingOtlpHeadersCiphertext: text("tracing_otlp_headers_ciphertext"),
     tracingOtlpServiceName: text("tracing_otlp_service_name").notNull().default("regulait-gateway"),
 
     updatedBy: uuid("updated_by"),
@@ -3621,6 +3654,12 @@ export type OrgSettingsRow = typeof orgSettings.$inferSelect;
 
 /** what a matching ABAC policy does to a call the RBAC layer already allowed */
 export const ABAC_POLICY_MODES = ["forbid", "require_approval"] as const;
+
+/** Shared-lockable policy generation for exact-action approval consumption. */
+export const governancePolicyEpoch = pgTable("governance_policy_epoch", {
+  id: boolean("id").primaryKey().default(true),
+  epoch: bigint("epoch", { mode: "number" }).notNull().default(0),
+});
 
 export const abacPolicies = pgTable(
   "abac_policies",
@@ -3703,6 +3742,9 @@ export interface AbacPolicyTestCase {
     deployModes?: string[];
     environments?: string[];
     rateLimitUsagePct?: number;
+    /** schema v2 — a literal client address to evaluate this case at. Stored
+     *  data, not enforcement input: the simulation surface executes nothing. */
+    clientIp?: string | null;
   };
   /** 'match' = this policy is expected to fire; 'no_match' = it must not */
   expect: "match" | "no_match";
@@ -5491,6 +5533,9 @@ export const chatopsConnections = pgTable("chatops_connections", {
    * not a re-authenticated session, so the most sensitive classes are in-app
    * only until an admin deliberately opts this workspace in. */
   allowFencedDecide: boolean("allow_fenced_decide").notNull().default(false),
+  /** ADR-0162 (migration 0127) — minimum governance-alert severity posted to
+   * this workspace; null = alerts are not posted (opt-in) */
+  notifyAlertMinSeverity: text("notify_alert_min_severity", { enum: ["medium", "high"] }),
   enabled: boolean("enabled").notNull().default(true),
   createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -6919,6 +6964,14 @@ export const virtualKeys = pgTable(
      * matches by provider-native model id OR by agent id — the two things a
      * client can actually name, so a key issued against `GET /v1/models`
      * output and a key issued against an agent id both work. */
+    /** ADR-0127/AER-027 (migration 0117) — WHICH ROUTES THIS KEY MAY REACH.
+     * 'dispatch' is ADR-0066's model surfaces and is the default, so every
+     * pre-0117 row is unchanged. 'pdp' reaches `POST /v1/authz/check` and
+     * NOTHING ELSE: the credential a data-plane proxy holds to ask
+     * authorization questions, which before this could only be an admin API
+     * key — making proxy compromise equivalent to control-plane admin. The
+     * separation runs BOTH ways: a pdp key cannot dispatch either. */
+    purpose: text("purpose").notNull().default("dispatch").$type<"dispatch" | "pdp">(),
     allowedModels: jsonb("allowed_models").$type<string[]>(),
     /** NULL = no per-key budget. When set, spend is enforced BEFORE dispatch
      * against `spent_usd`; the first crossing is allowed (measured cost is only
@@ -7700,6 +7753,9 @@ export const AI_RISK_CATEGORIES = [
    * STATES (platform records); the assessment CONTENT is vendor-attested and
    * the evidence payload says so. */
   "third_party_ai",
+  /** ADR-0147 (migration 0123): the bias and safety trust dimensions */
+  "bias_fairness",
+  "unsafe_output",
 ] as const;
 export type AiRiskCategory = (typeof AI_RISK_CATEGORIES)[number];
 
@@ -7739,6 +7795,10 @@ export const aiRisks = pgTable(
     }),
     acceptedAt: timestamp("accepted_at", { withTimezone: true }),
     acceptanceNote: text("acceptance_note"),
+    /** ADR-0147 (migration 0123): the DECLARED residual position once the
+     * linked controls operate — same three-level scale, both or neither */
+    residualLikelihood: text("residual_likelihood", { enum: AI_RISK_LEVELS }),
+    residualImpact: text("residual_impact", { enum: AI_RISK_LEVELS }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -7757,6 +7817,120 @@ export const aiRisks = pgTable(
 );
 
 export type AiRiskRow = typeof aiRisks.$inferSelect;
+
+/**
+ * ADR-0147 (migration 0123) — a mitigating control linked to a risk, by the
+ * pack control's stable `controlRef`. The gateway validates the ref against
+ * the seeded compliance packs; the link records who claimed the mitigation.
+ */
+export const aiRiskControls = pgTable(
+  "ai_risk_controls",
+  {
+    riskId: uuid("risk_id")
+      .notNull()
+      .references(() => aiRisks.id, { onDelete: "cascade" }),
+    controlRef: text("control_ref").notNull(),
+    linkedByUserId: uuid("linked_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    linkedAt: timestamp("linked_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ name: "ai_risk_controls_pk", columns: [t.riskId, t.controlRef] }),
+    index("ai_risk_controls_ref_idx").on(t.controlRef),
+  ],
+);
+
+// ---------------------------------------------------------------------------
+// ADR-0157 (migration 0124) — governance monitor alerts. One row per
+// (rule, subject) condition EPISODE; the partial unique index allows at most
+// one active (open/acknowledged) episode per condition. A recurrence after
+// resolution is a new row, so the history is never overwritten.
+export const GOVERNANCE_ALERT_SEVERITIES = ["low", "medium", "high"] as const;
+export const GOVERNANCE_ALERT_STATUSES = ["open", "acknowledged", "resolved"] as const;
+export const governanceAlerts = pgTable(
+  "governance_alerts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    ruleId: text("rule_id").notNull(),
+    subjectKey: text("subject_key").notNull(),
+    severity: text("severity", { enum: GOVERNANCE_ALERT_SEVERITIES }).notNull(),
+    title: text("title").notNull(),
+    detail: jsonb("detail").$type<Record<string, unknown>>().notNull().default({}),
+    status: text("status", { enum: GOVERNANCE_ALERT_STATUSES }).notNull().default("open"),
+    firstDetectedAt: timestamp("first_detected_at", { withTimezone: true }).notNull().defaultNow(),
+    lastDetectedAt: timestamp("last_detected_at", { withTimezone: true }).notNull().defaultNow(),
+    acknowledgedByUserId: uuid("acknowledged_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    acknowledgedAt: timestamp("acknowledged_at", { withTimezone: true }),
+    ackNote: text("ack_note"),
+    resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("governance_alerts_active_uq")
+      .on(t.ruleId, t.subjectKey)
+      .where(sql`${t.status} <> 'resolved'`),
+    index("governance_alerts_status_idx").on(t.status, t.lastDetectedAt),
+  ],
+);
+
+// ---------------------------------------------------------------------------
+// ADR-0159 (migration 0125) — executable remediation proposals for monitor
+// alerts, each bound to one approvals row and executed by the decide path.
+export const REMEDIATION_PROPOSAL_KINDS = ["link_control", "assign_agent_owner"] as const;
+export const REMEDIATION_PROPOSAL_STATUSES = ["pending_approval", "applied", "denied", "failed"] as const;
+export const remediationProposals = pgTable(
+  "remediation_proposals",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    alertId: uuid("alert_id").references(() => governanceAlerts.id, { onDelete: "set null" }),
+    kind: text("kind", { enum: REMEDIATION_PROPOSAL_KINDS }).notNull(),
+    params: jsonb("params").$type<Record<string, string>>().notNull(),
+    title: text("title").notNull(),
+    rationale: text("rationale").notNull(),
+    status: text("status", { enum: REMEDIATION_PROPOSAL_STATUSES }).notNull().default("pending_approval"),
+    approvalId: uuid("approval_id").references(() => approvals.id, { onDelete: "set null" }),
+    proposedByUserId: uuid("proposed_by_user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    decidedByUserId: uuid("decided_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    result: jsonb("result").$type<Record<string, unknown>>(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("remediation_proposals_approval_uq")
+      .on(t.approvalId)
+      .where(sql`${t.approvalId} IS NOT NULL`),
+    uniqueIndex("remediation_proposals_pending_action_uq")
+      .on(t.kind, t.params)
+      .where(sql`${t.status} = 'pending_approval'`),
+    index("remediation_proposals_alert_idx").on(t.alertId),
+  ],
+);
+
+// ---------------------------------------------------------------------------
+// ADR-0160 (migration 0126) — continuous trace evaluation results. Counts
+// only; unique span id makes overlapping sweeps idempotent.
+export const TRACE_EVALUATION_OUTCOME_VALUES = ["evaluated", "withheld", "no_content"] as const;
+export const traceEvaluations = pgTable(
+  "trace_evaluations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    spanId: uuid("span_id").notNull(),
+    traceId: uuid("trace_id").notNull(),
+    agentId: uuid("agent_id"),
+    spanStartedAt: timestamp("span_started_at", { withTimezone: true }).notNull(),
+    outcome: text("outcome", { enum: TRACE_EVALUATION_OUTCOME_VALUES }).notNull(),
+    flagged: boolean("flagged").notNull().default(false),
+    findings: jsonb("findings")
+      .$type<Array<{ phase: "input" | "output"; detector: string; category: string; count: number }>>()
+      .notNull()
+      .default([]),
+    evaluatedAt: timestamp("evaluated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("trace_evaluations_span_uq").on(t.spanId),
+    index("trace_evaluations_agent_started_idx").on(t.agentId, t.spanStartedAt),
+  ],
+);
 
 // ---------------------------------------------------------------------------
 // ADR-0090 (migration 0092) — grant certification campaigns (gap L22).

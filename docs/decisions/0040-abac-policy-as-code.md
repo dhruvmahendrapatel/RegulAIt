@@ -338,3 +338,93 @@ move together. `GET /v1/abac/schema` publishes it as readable Cedar for the edit
 6. **Visibility (`visibleTools`) is unchanged.** ABAC affects execution decisions, not which tools a
    user is *offered*. Filtering the manifest by an attribute policy would need the request context
    at list time and is deliberately out of scope here.
+
+## Amendment 2026-09-28 — schema v2: network location, and the version boundary that makes it safe
+
+Verification appendix II found the context bag carried time, deploy mode, environment and rate-limit
+pressure — and no notion of **where a request came from**. (The same appendix first claimed time was
+missing too; that was my error, corrected as M-049. The network gap is real.)
+
+**`context.clientIp` is Cedar's own `ipaddr` extension type**, not a string. A policy author writes
+`context.clientIp.isInRange(ip("10.0.0.0/8"))` and gets real CIDR semantics from the engine. A String
+would have meant either a second CIDR matcher of ours — there is already one in the gateway's
+`net-policy.ts` for session IP allow-listing — or authors doing prefix comparisons on text, which is
+how `10.1.0.0/16` ends up matching `10.10.x`.
+
+**It is NOT derived from `org_settings.session_ip_allowlist`.** That list governs session *creation*.
+Deriving an `inCorporateNetwork` boolean from it would mean an admin who tightened where people may
+log in had silently changed what every ABAC policy sees — two different facts wearing one control,
+the same mistake ADR-0126 refused when it kept the breaker, ADR-0124's halt and `agents.enabled` in
+three separate columns. The raw address goes to the policy; the policy decides. No new org column.
+
+### `required: false` is the load-bearing choice
+
+The client IP is genuinely undeterminable: ADR-0031 trusts no proxy by default, so behind an
+untrusted hop `req.ip` is the hop's address or nothing. Declaring the attribute optional makes
+Cedar's strict validation **refuse** a policy that reads `context.clientIp` without first guarding
+`context has clientIp` — so "we do not know where this came from" is a case the author decides at
+**write** time. A required attribute with a sentinel (`0.0.0.0`) would have let an unknown origin
+quietly test as a real address.
+
+### The version boundary, and the outage it prevents
+
+`isAuthorized` runs with `validateRequest: true`, and this engine turns a validation failure into
+`forbid` — correctly, since an ABAC layer that stops enforcing when it errors is worse than none.
+So **a context attribute the group's schema does not declare fails the request closed**. Emitting
+`clientIp` unconditionally would have fail-closed every call governed by a stored v1 policy: a
+self-inflicted, estate-wide outage. `contextFor` therefore takes the schema version, and v1 groups
+get exactly the v1 bag. `evaluate` already grouped policies by `schemaVersion` and ran one
+authorization per group — this change is what that grouping was for.
+
+Measured probe: removing the version guard reddens exactly the two v1-regression tests and nothing
+else.
+
+### The authoring trap, measured rather than guessed
+
+Writing the tests, I predicted twice and was wrong twice, so this is recorded as an observation.
+A guarded v2-style policy **passes v1 validation** — Cedar's `has` on an undeclared attribute is
+legal and always false, and `&&` short-circuits, so the `isInRange` is never checked. My first guess
+was that it would therefore never fire. It is the opposite:
+
+```
+forbid … unless { context has clientIp && context.clientIp.isInRange(…) }
+```
+
+means "forbid unless the guard holds". Under v1 the guard is false for every request, so **the
+policy denies everything**, including on-network calls. The direction is the safe one — ABAC can only
+forbid, never grant — so this is an outage rather than a bypass, and the same source stored as v2
+permits that same on-network call. What makes the attribute reachable is
+`ABAC_CURRENT_SCHEMA_VERSION` moving to v2 so new policies are stamped v2 on write. A test asserts
+all three facts.
+
+### What deliberately does not get an address
+
+- **The PDP callout (`POST /v1/authz/check`) sends none, and its schema does not accept one.** There
+  `req.ip` is the *proxy's* address and the proxy is asking about a subject somewhere else entirely.
+  Forwarding either value would be AER-036 in a new field: an attribute that reads as the subject's
+  network location and is actually somebody else's. Absent is correct, and the policy's guard decides.
+- **There is no device-posture attribute.** Nothing in this product can observe device posture, and
+  an attribute we cannot populate honestly is the same mistake again — a field that looks like
+  evidence and is an assertion nobody checked. If a posture source ever exists, it arrives with that
+  source, in a v3.
+- **An unparseable address never reaches Cedar.** `ip("garbage")` is an evaluation error and this
+  engine fails closed on one, so a single malformed forwarded header would turn an IP-aware policy
+  into a blanket deny. Values that do not parse are dropped and the attribute is simply absent —
+  the case the policy already guards. Ports, zone ids, CIDR suffixes and brackets are all rejected.
+
+**The one place a caller-supplied address IS legitimate** is the policy **simulation** surface: a test
+case may name one, because previewing "what does this rule do to a call from 203.0.113.7" is the
+point of that surface, and ADR-0120 established that it executes nothing.
+
+### Honest limits
+
+- **Accuracy is exactly ADR-0031's trusted-proxy configuration.** A deployment that trusts no proxy
+  and sits behind one gets the hop's address, which is a truthful answer to "which peer connected"
+  and not the answer a policy author probably wants. The remedy is configuring `trustProxy`, not
+  anything in this file.
+- **No geo-IP.** "Network location" here means the address and what CIDR ranges it falls in. There is
+  no country, ASN or reputation lookup, and adding one means an outbound dependency in the
+  enforcement path — which is precisely what choosing in-process Cedar over an OPA sidecar avoided.
+- **v1 policies do not gain the attribute**, by design. An operator who wants network rules on an
+  existing policy re-authors it; there is no migration, because silently re-stamping a stored
+  policy's schema version would change what it means without anyone deciding to.

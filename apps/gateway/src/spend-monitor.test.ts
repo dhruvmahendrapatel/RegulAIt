@@ -263,7 +263,9 @@ beforeAll(async () => {
 
   // --- team B's own spend, in the CURRENT month, for the leak test ----------
   const now = new Date();
-  const thisMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 6, 0, 0));
+  // Midnight is already observed even during the first six hours of a month.
+  // A fixed 06:00 fixture is FUTURE spend then, which forecasts correctly omit.
+  const thisMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
   await seedUsage([
     { userId: leadBId, projectId: betaId, at: thisMonth, costUsd: 7.25 },
     // deliberately a DIFFERENT team-A project from the anomaly fixture: the
@@ -402,6 +404,21 @@ describe("ADR-0049 — the forecast is real arithmetic on the real ledger", () =
 });
 
 describe("ADR-0049 — insufficient history yields the HONEST SIGNAL, never a number", () => {
+  it("excludes future ledger entries at the UTC month boundary", async () => {
+    await seedUsage([
+      { userId: leadAId, projectId: forecastPid, at: new Date("2026-04-01T00:00:00Z"), costUsd: 2 },
+      { userId: leadAId, projectId: forecastPid, at: new Date("2026-04-01T06:00:00Z"), costUsd: 99 },
+    ]);
+    const forecast = await computeForecast(db, {
+      decision: { allowed: true, ruleId: "test", reason: "test", projectIds: [forecastPid] },
+      request: { scopeKind: "project", scopeId: forecastPid }, period: "current_month", method: "run_rate",
+      now: new Date("2026-04-01T00:30:00Z"),
+    });
+    expect(forecast.spendToDateUsd).toBe(2);
+    expect(forecast.sufficient).toBe(false);
+    expect(forecast.projectedSpendUsd).toBeNull();
+  });
+
   it("a project with one day of spend gets sufficient:false and a null projection, end to end", async () => {
     const res = await app.inject({
       method: "GET",

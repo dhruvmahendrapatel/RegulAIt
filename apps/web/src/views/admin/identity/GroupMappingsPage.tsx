@@ -187,6 +187,8 @@ export default function GroupMappingsPage() {
             rows={mappings.data?.mappings ?? []}
             rowKey={(m) => m.id}
             loading={mappings.isLoading}
+            error={mappings.error}
+            onRetry={() => void mappings.refetch()}
             empty={
               <EmptyState
                 title="No group is mapped to a role"

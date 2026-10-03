@@ -69,6 +69,7 @@ export const COMPLIANCE_PACK_FRAMEWORKS = [
   "eu-ai-act",
   "nist-ai-rmf",
   "iso-42001",
+  "iso-27001",
   "hipaa",
   "pci-dss",
   "finra",
@@ -114,6 +115,11 @@ export const EVIDENCE_COLLECTORS = [
    * retention floor, guardrail floor) — evidence that the §8.3 cascade is
    * configured, not merely available */
   "compliance_profile_cascade",
+  /** ADR-0150: model cards that DOCUMENT a completed bias/fairness assessment
+   * (at least one `assessed` entry). Documentation evidence — the platform
+   * records that an assessment was done and where its result lives; it does
+   * not compute or grade fairness itself. */
+  "model_card_fairness",
   /** NOT AUTO-EVIDENCED. Pairs with attestationRequired. */
   "none",
 ] as const;
@@ -151,7 +157,7 @@ export type PackStatus = (typeof PACK_STATUSES)[number];
  * footer somebody can strip.
  */
 export const COMPLIANCE_PACK_DISCLAIMER =
-  "This is a CONTROL-MAPPING REPORT, not a compliance certification. RegulAIt maps a framework's " +
+  "This is a control-mapping report, not a compliance certification. RegulAIt maps a framework's " +
   "controls onto platform configuration and counts the evidence its own ledgers hold. It does not " +
   "certify compliance, does not substitute for an auditor or for legal counsel, and does not shift " +
   "legal responsibility. Controls marked attestation-required cannot be evidenced by any control " +
@@ -511,7 +517,7 @@ export function buildPackScorecard(input: {
 // ---------------------------------------------------------------------------
 
 /**
- * The six launch packs of ADR-0058, expressed in exactly the shape
+ * The launch packs of ADR-0058, expressed in exactly the shape
  * `POST /v1/compliance/packs` accepts. Nothing in the evaluator reads this
  * constant: `POST /v1/compliance/packs/seed` inserts these as ordinary rows and
  * the evaluator only ever reads rows. Emptying the tables makes the evaluator
@@ -695,6 +701,78 @@ export const DEFAULT_COMPLIANCE_PACKS: CreateCompliancePackInput[] = [
         minEvidenceCount: 1,
         attestationRequired: true,
         ownerNote: "Organisational. Attest with a reference to the policy set and training records.",
+      },
+    ],
+  },
+  {
+    framework: "iso-27001",
+    version: 1,
+    title: "ISO/IEC 27001:2022 — information security controls (partial mapping)",
+    description:
+      "A scoped mapping of selected Annex A control references to platform evidence. " +
+      "This is not a Statement of Applicability, an ISMS assessment, or certification.",
+    provenance: {
+      source: "ISO/IEC 27001:2022 Annex A reference controls and ISO/IEC 27001 Auditing Practices Group guidance",
+      catalogueRevision: "2022 (including awareness of Amendment 1:2024)",
+      reviewedBy: null,
+      reviewedOn: null,
+      note: "Paraphrased control references only; copyrighted control text is not reproduced. " +
+        "Applicability and risk treatment require the customer's own assessment and Statement of Applicability.",
+    },
+    cascadeTag: null,
+    controls: [
+      {
+        controlRef: "iso-27001:A.5.15",
+        title: "Access control",
+        description: "Active ABAC policies show a platform access-control configuration, not coverage of all organizational access.",
+        coverage: "partial",
+        collector: "abac_policies_active",
+        collectorParams: {},
+        minEvidenceCount: 1,
+        attestationRequired: false,
+        ownerNote: "Review identity lifecycle, access reviews, and non-platform systems separately.",
+      },
+      {
+        controlRef: "iso-27001:A.8.15",
+        title: "Logging",
+        description: "Decision audit rows evidence activity mediated by RegulAIt during the selected period.",
+        coverage: "partial",
+        collector: "audit_decisions",
+        collectorParams: {},
+        minEvidenceCount: 1,
+        attestationRequired: false,
+        ownerNote: "This count does not establish log completeness, retention, review, or coverage outside RegulAIt.",
+      },
+      {
+        controlRef: "iso-27001:A.8.12",
+        title: "Data leakage prevention",
+        description: "Configured guardrails provide platform-specific DLP posture evidence.",
+        coverage: "partial",
+        collector: "guardrail_configs",
+        collectorParams: { detector: "semantic_dlp", minMode: "block" },
+        minEvidenceCount: 1,
+        attestationRequired: false,
+        ownerNote: "Configuration is not proof of detection effectiveness or organization-wide DLP.",
+      },
+      {
+        controlRef: "iso-27001:6.1.3",
+        title: "Information security risk treatment and applicability",
+        coverage: "unaddressed",
+        collector: "none",
+        collectorParams: {},
+        minEvidenceCount: 1,
+        attestationRequired: true,
+        ownerNote: "Customer must provide its risk treatment decisions and Statement of Applicability.",
+      },
+      {
+        controlRef: "iso-27001:9.2",
+        title: "Internal audit",
+        coverage: "unaddressed",
+        collector: "none",
+        collectorParams: {},
+        minEvidenceCount: 1,
+        attestationRequired: true,
+        ownerNote: "Customer must evidence its independent internal audit program and results.",
       },
     ],
   },
@@ -1115,3 +1193,76 @@ export const DEFAULT_COMPLIANCE_PACKS: CreateCompliancePackInput[] = [
     ],
   },
 ];
+
+/**
+ * ADR-0150 — SECOND VERSIONS of the EU AI Act and NIST AI RMF packs, adding
+ * the bias and safety controls the trust dashboard's bias and safety axes need
+ * (ADR-0148). New VERSIONS rather than edits: an activated v1 keeps producing
+ * the reports it produced, and activating v2 retires v1 through the normal
+ * activation path with its diff on record (ADR-0087).
+ */
+function nextVersion(
+  framework: string,
+  extra: { titleSuffix: string; note: string; controls: CreateCompliancePackInput["controls"] },
+): CreateCompliancePackInput {
+  const base = DEFAULT_COMPLIANCE_PACKS.find((p) => p.framework === framework && p.version === 1);
+  if (!base) throw new Error(`no v1 '${framework}' pack to extend`);
+  return {
+    ...base,
+    version: 2,
+    title: `${base.title} — ${extra.titleSuffix}`,
+    provenance: { ...base.provenance, note: `${base.provenance.note} v2: ${extra.note}` },
+    controls: [...base.controls, ...extra.controls],
+  };
+}
+
+DEFAULT_COMPLIANCE_PACKS.push(
+  nextVersion("eu-ai-act", {
+    titleSuffix: "v2 adds data-governance bias examination",
+    note: "adds Art. 10(2)(f) examination for possible biases, evidenced by documented model-card fairness assessments.",
+    controls: [
+      {
+        controlRef: "eu-ai-act:art-10-bias-examination",
+        title: "Training, validation and testing data are examined for possible biases",
+        description:
+          "Evidenced by model cards that document a completed bias/fairness assessment (ADR-0063). " +
+          "The platform records that the examination was done and where its result lives; it does " +
+          "not compute disparity metrics itself.",
+        coverage: "evidenced",
+        collector: "model_card_fairness",
+        collectorParams: {},
+        minEvidenceCount: 1,
+        attestationRequired: false,
+        ownerNote: null,
+      },
+    ],
+  }),
+  nextVersion("nist-ai-rmf", {
+    titleSuffix: "v2 adds fairness and safety measurement",
+    note: "adds MEASURE 2.11 (fairness and bias, documented model-card assessments) and MEASURE 2.6 (safety, output-safety guardrails at block).",
+    controls: [
+      {
+        controlRef: "nist-ai-rmf:MEASURE-2.11",
+        title: "Fairness and bias are evaluated and results are documented",
+        coverage: "evidenced",
+        collector: "model_card_fairness",
+        collectorParams: {},
+        minEvidenceCount: 1,
+        attestationRequired: false,
+        ownerNote:
+          "Documentation evidence: counts model cards with a completed fairness assessment, not the " +
+          "assessment's result.",
+      },
+      {
+        controlRef: "nist-ai-rmf:MEASURE-2.6",
+        title: "The AI system is evaluated for safety risks — unsafe output is blocked",
+        coverage: "enforced",
+        collector: "guardrail_configs",
+        collectorParams: { detector: "toxicity", minMode: "block" },
+        minEvidenceCount: 1,
+        attestationRequired: false,
+        ownerNote: "Configuration evidence: a toxicity detector at block somewhere in the guardrail set.",
+      },
+    ],
+  }),
+);

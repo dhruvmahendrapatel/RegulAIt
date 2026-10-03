@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { auditLog, createDb, eq, runMigrations, type Db } from "@regulait/db";
+import { auditLog, createDb, desc, eq, runMigrations, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
 
 /**
@@ -155,3 +155,85 @@ describe("the registry diff — what makes detection an answer", () => {
     expect(r.registered).toBe(true);
   });
 });
+
+/**
+ * AER-020 — THE API NEVER CARRIES A SUPPLIED SECRET BACK OUT.
+ *
+ * The pure scrub is proven in `@regulait/shared`'s own test; this is the
+ * response-level assertion: the SAME corpus goes through the route in both
+ * modes, and the whole serialized body — not just `samples` — is searched for
+ * every value. Then the audit row apply writes and the findings listing are
+ * searched too, because a scrubbed response with a leaking ledger is not a
+ * closed finding.
+ */
+describe("AER-020 — discovery responses are scrubbed of supplied credentials and PII", () => {
+  const SECRETS = {
+    awsKey: "AKIAIOSFODNN7EXAMPLE",
+    vendorKey: "sk-" + "Ab3dEf7gH1jKl9MnOpQrStUvWxYz0123456789",
+    githubToken: "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8",
+    bearer: "9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b2a1f0e",
+    jwt: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4ifQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+    email: "jane.doe@customer-bank.example",
+    card: "4111 1111 1111 1111",
+  } as const;
+  const leakyEvidence = [
+    `2026-09-24T10:00:01Z POST https://${UNKNOWN}/mcp 200 x-amz-key=${SECRETS.awsKey} {"jsonrpc":"2.0","method":"tools/call"}`,
+    `2026-09-24T10:00:02Z GET  https://${UNKNOWN}/sse?api_key=${SECRETS.vendorKey} 200`,
+    `2026-09-24T10:00:03Z POST https://${UNKNOWN}/mcp 200 "Authorization: Bearer ${SECRETS.bearer}" {"jsonrpc":"2.0","method":"initialize"}`,
+    `2026-09-24T10:00:04Z POST https://${KNOWN}/mcp 200 "Authorization: Bearer ${SECRETS.jwt}" {"jsonrpc":"2.0","method":"tools/call","params":{"arguments":{"token":"${SECRETS.githubToken}"}}}`,
+    `2026-09-24T10:00:05Z POST https://${KNOWN}/mcp 200 {"jsonrpc":"2.0","method":"tools/call","params":{"arguments":{"to":"${SECRETS.email}","card":"${SECRETS.card}"}}}`,
+  ].join("\n");
+
+  const assertClean = (text: string) => {
+    for (const [name, value] of Object.entries(SECRETS)) {
+      expect(text, `${name} leaked`).not.toContain(value);
+    }
+  };
+
+  it("preview: the serialized response carries none of the corpus, and still reports the hosts", async () => {
+    const res = await app.inject({
+      method: "POST", url: "/v1/shadow-ai/mcp-discovery", headers: AUTH,
+      payload: { content: leakyEvidence, mode: "preview" },
+    });
+    expect(res.statusCode).toBe(200);
+    assertClean(res.body);
+    // positive control: this was a real run over the leaky lines, with samples
+    const body = res.json();
+    expect(body.observed).toBe(2);
+    const hosts = body.results.map((r: { host: string }) => r.host).sort();
+    expect(hosts).toEqual([KNOWN, UNKNOWN].sort());
+    for (const r of body.results) expect(r.samples.length).toBeGreaterThan(0);
+    expect(res.body).toContain("[redacted:");
+  });
+
+  it("apply: the response, the audit row it writes, and the findings listing carry none of the corpus", async () => {
+    const res = await app.inject({
+      method: "POST", url: "/v1/shadow-ai/mcp-discovery", headers: AUTH,
+      payload: { content: leakyEvidence, mode: "apply" },
+    });
+    expect(res.statusCode).toBe(200);
+    assertClean(res.body);
+
+    const [row] = await db
+      .select()
+      .from(auditLog)
+      .where(eq(auditLog.ruleId, "mcp-discovery-applied"))
+      .orderBy(desc(auditLog.at))
+      .limit(1);
+    expect(row).toBeDefined();
+    assertClean(JSON.stringify(row));
+
+    const findings = await app.inject({ method: "GET", url: "/v1/shadow-ai/findings", headers: AUTH });
+    expect(findings.statusCode).toBe(200);
+    assertClean(findings.body);
+  });
+
+  it("NEGATIVE CONTROL — ordinary evidence comes back verbatim in the samples, so the clean assertions above are not vacuous", async () => {
+    const res = await discover("preview");
+    const body = res.json();
+    const rogue = body.results.find((r: { host: string }) => r.host === UNKNOWN);
+    expect(rogue.samples[0]).toContain(`https://${UNKNOWN}/mcp 200 {"jsonrpc":"2.0","method":"tools/call"}`);
+    expect(res.body).not.toContain("[redacted:");
+  });
+});
+

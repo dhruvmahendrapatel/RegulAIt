@@ -22,9 +22,9 @@
  * still-dead upstream reproduces precisely the thundering herd the breaker was
  * added to prevent — at its worst moment, when a backlog has built up. The
  * election is a conditional UPDATE that moves `breaker_opened_at` forward only
- * if it still holds the value this request read. One statement, atomic, no
- * lock, no transaction: the winner probes, everyone else sees a moved timestamp
- * and keeps fast-failing.
+ * if it still holds the value this request read. One conditional statement
+ * elects the winner: the others see a moved timestamp
+ * and keeps fast-failing. The update and transition audit commit together.
  *
  * ── WHY THE FAST-FAILS ARE NOT EACH AUDITED ────────────────────────────────
  * Every other refusal in this product files a row. This one deliberately files
@@ -53,7 +53,7 @@ const NIL_USER = "00000000-0000-0000-0000-000000000000";
  * direct insert, as `mcp-egress.ts` does. Kept local and tiny so the three
  * transitions below read as one shape. */
 async function fileTransition(
-  db: Db,
+  writer: Pick<Db, "insert">,
   args: {
     serverId: string;
     effect: "allow" | "deny";
@@ -62,7 +62,7 @@ async function fileTransition(
     detail: Record<string, unknown>;
   },
 ): Promise<void> {
-  await db.insert(auditLog).values({
+  await writer.insert(auditLog).values({
     userId: NIL_USER,
     serverId: args.serverId,
     objectType: "mcp_server",
@@ -159,7 +159,7 @@ export function breakerStateOf(
  * The election is the conditional UPDATE. `breaker_opened_at = <what we read>`
  * in the WHERE clause is the whole mechanism: only the first request to arrive
  * after the cooldown matches it, and moving the timestamp forward makes every
- * concurrent sibling miss. No lock, no transaction, one round trip.
+ * concurrent sibling miss. The transition audit is in the same transaction.
  */
 export async function breakerAdmits(
   db: Db,
@@ -181,20 +181,23 @@ export async function breakerAdmits(
   }
 
   // half-open: elect exactly one prober
-  const elected = await db
-    .update(mcpServers)
-    .set({ breakerOpenedAt: new Date() })
-    .where(and(eq(mcpServers.id, row.id), eq(mcpServers.breakerOpenedAt, openedAt)))
-    .returning({ id: mcpServers.id });
-
-  if (elected.length === 1) {
-    await fileTransition(db, {
+  const elected = await db.transaction(async (tx) => {
+    const changed = await tx.update(mcpServers)
+      .set({ breakerOpenedAt: new Date() })
+      .where(and(eq(mcpServers.id, row.id), eq(mcpServers.breakerOpenedAt, openedAt)))
+      .returning({ id: mcpServers.id });
+    if (changed.length !== 1) return false;
+    await fileTransition(tx, {
       serverId: row.id,
       effect: "allow",
       ruleId: BREAKER_RULE_IDS.probing,
       reason: `cooldown elapsed for '${row.name}'; this request was elected to probe the upstream`,
       detail: { consecutiveFailures: row.breakerConsecutiveFailures, cooldownMs: cfg.cooldownMs },
     });
+    return true;
+  });
+
+  if (elected) {
     return null;
   }
 
@@ -222,34 +225,34 @@ export async function recordUpstreamFailure(
   error: string,
   cfg: BreakerConfig = active,
 ): Promise<void> {
-  const [updated] = await db
-    .update(mcpServers)
-    .set({
+  await db.transaction(async (tx) => {
+    const [updated] = await tx.update(mcpServers).set({
       breakerConsecutiveFailures: sql`${mcpServers.breakerConsecutiveFailures} + 1`,
       breakerLastFailureAt: new Date(),
       breakerLastError: error,
-    })
-    .where(eq(mcpServers.id, row.id))
-    .returning({ failures: mcpServers.breakerConsecutiveFailures, openedAt: mcpServers.breakerOpenedAt });
+    }).where(eq(mcpServers.id, row.id))
+      .returning({ failures: mcpServers.breakerConsecutiveFailures, openedAt: mcpServers.breakerOpenedAt });
 
-  if (!updated) return;
-  // already open (this was the elected probe failing) — restart the cooldown
-  // rather than filing a second "opened" transition
-  if (updated.openedAt !== null) {
-    await db.update(mcpServers).set({ breakerOpenedAt: new Date() }).where(eq(mcpServers.id, row.id));
-    return;
-  }
-  if (updated.failures < cfg.failureThreshold) return;
+    if (!updated) return;
+    // An elected probe failing restarts cooldown without a second open fact.
+    if (updated.openedAt !== null) {
+      await tx.update(mcpServers).set({ breakerOpenedAt: new Date() })
+        .where(eq(mcpServers.id, row.id));
+      return;
+    }
+    if (updated.failures < cfg.failureThreshold) return;
 
-  await db.update(mcpServers).set({ breakerOpenedAt: new Date() }).where(eq(mcpServers.id, row.id));
-  await fileTransition(db, {
-    serverId: row.id,
-    effect: "deny",
-    ruleId: BREAKER_RULE_IDS.opened,
-    reason:
-      `circuit opened for upstream '${row.name}' after ${updated.failures} consecutive ` +
-      `failures; calls are refused for ${cfg.cooldownMs}ms. Last error: ${error}`,
-    detail: { consecutiveFailures: updated.failures, cooldownMs: cfg.cooldownMs },
+    await tx.update(mcpServers).set({ breakerOpenedAt: new Date() })
+      .where(eq(mcpServers.id, row.id));
+    await fileTransition(tx, {
+      serverId: row.id,
+      effect: "deny",
+      ruleId: BREAKER_RULE_IDS.opened,
+      reason:
+        `circuit opened for upstream '${row.name}' after ${updated.failures} consecutive ` +
+        `failures; calls are refused for ${cfg.cooldownMs}ms. Last error: ${error}`,
+      detail: { consecutiveFailures: updated.failures, cooldownMs: cfg.cooldownMs },
+    });
   });
 }
 
@@ -258,22 +261,26 @@ export async function recordUpstreamFailure(
  * breaker was actually open — otherwise every healthy call would write a row.
  */
 export async function recordUpstreamSuccess(db: Db, row: BreakerRow): Promise<void> {
-  if (row.breakerConsecutiveFailures === 0 && row.breakerOpenedAt === null) return;
+  await db.transaction(async (tx) => {
+    const [current] = await tx.select({
+      failures: mcpServers.breakerConsecutiveFailures,
+      openedAt: mcpServers.breakerOpenedAt,
+    }).from(mcpServers).where(eq(mcpServers.id, row.id)).for("update");
+    if (!current || (current.failures === 0 && current.openedAt === null)) return;
 
-  await db
-    .update(mcpServers)
-    .set({ breakerConsecutiveFailures: 0, breakerOpenedAt: null, breakerLastError: null })
-    .where(eq(mcpServers.id, row.id));
-
-  if (row.breakerOpenedAt !== null) {
-    await fileTransition(db, {
-      serverId: row.id,
-      effect: "allow",
-      ruleId: BREAKER_RULE_IDS.closed,
-      reason: `upstream '${row.name}' answered a probe; circuit closed and calls resume`,
-      detail: { recoveredAfterFailures: row.breakerConsecutiveFailures },
-    });
-  }
+    await tx.update(mcpServers)
+      .set({ breakerConsecutiveFailures: 0, breakerOpenedAt: null, breakerLastError: null })
+      .where(eq(mcpServers.id, row.id));
+    if (current.openedAt !== null) {
+      await fileTransition(tx, {
+        serverId: row.id,
+        effect: "allow",
+        ruleId: BREAKER_RULE_IDS.closed,
+        reason: `upstream '${row.name}' answered a probe; circuit closed and calls resume`,
+        detail: { recoveredAfterFailures: current.failures },
+      });
+    }
+  });
 }
 
 /** Every upstream currently circuit-broken — for the operator read below. */

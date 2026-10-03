@@ -98,10 +98,28 @@ export default function RedTeamPage() {
   const classes = useQuery({
     queryKey: ["admin", "redteam-classes"],
     queryFn: () =>
-      api.get<{ attackClasses: AttackClassInfo[]; disclosure: string; scheduling: string }>(
+      api.get<{
+        attackClasses: AttackClassInfo[];
+        disclosure: string;
+        /**
+         * ADR-0064 — whether THIS deployment has the sweep driver switched on,
+         * reported rather than assumed.
+         *
+         * THIS WAS TYPED `string` AND IS AN OBJECT. Rendering it as a React
+         * child threw "Objects are not valid as a React child" (minified #31),
+         * which is an uncaught render error — so the ENTIRE Red-teaming page
+         * was blank, not just this line. The SPA mirrors server response shapes
+         * by hand (the convention used throughout this app), and this is the
+         * failure mode that convention has: the mirror drifted and nothing
+         * typechecked the two against each other.
+         */
+        scheduling: { schedulerEnabled: boolean; posture: string; note: string };
+      }>(
         "/v1/redteam/attack-classes",
       ),
   });
+  const [newLibName, setNewLibName] = useState("");
+  const [newLibNote, setNewLibNote] = useState("");
   const libraries = useQuery({
     queryKey: ["admin", "redteam-libraries"],
     queryFn: () => api.get<{ libraries: LibraryRow[]; note: string }>("/v1/redteam/libraries"),
@@ -165,7 +183,17 @@ export default function RedTeamPage() {
         >
           <Card title="What a green run does and does not mean">
             <div style={{ marginBottom: "var(--s2)" }}>{classes.data?.disclosure}</div>
-            <div className={v.faint}>{classes.data?.scheduling}</div>
+            {classes.data?.scheduling && (
+              <>
+                <div className={v.row}>
+                  <Badge tone={classes.data.scheduling.schedulerEnabled ? "ok" : "neutral"}>
+                    continuous sweep: {classes.data.scheduling.schedulerEnabled ? "on" : "off"}
+                  </Badge>
+                  <span className={v.dim}>{classes.data.scheduling.posture}</span>
+                </div>
+                <div className={v.faint}>{classes.data.scheduling.note}</div>
+              </>
+            )}
           </Card>
 
           <Card title="Attack classes, and what each one cannot tell you">
@@ -200,6 +228,57 @@ export default function RedTeamPage() {
                 Install the shipped corpus
               </Button>
             </div>
+            {/* B9c — AN EMPTY LIBRARY, WHICH THE CENSUS CAUGHT AS A MISSING ADD.
+                The seed button installs OUR corpus; `POST /v1/redteam/libraries`
+                starts a customer's OWN, and had no control at all. Those are
+                different acts and the second is the one a customer who has their
+                own attack set needs — offering only the seed said, wrongly, that
+                the libraries here are ours to supply. */}
+            <form
+              className={a.formRow}
+              style={{ marginBottom: "var(--s2)" }}
+              onSubmit={(e) => {
+                e.preventDefault();
+                void act.run(async () => {
+                  const row = await api.post<{ id: string }>("/v1/redteam/libraries", {
+                    name: newLibName.trim(),
+                    ...(newLibNote.trim() ? { note: newLibNote.trim() } : {}),
+                  });
+                  setNewLibName("");
+                  setNewLibNote("");
+                  await libraries.refetch();
+                  // open it immediately: an empty library is useless until it has
+                  // probes, and the probe editor is the next panel down
+                  setSelectedLibrary(row.id);
+                }, "Library created as a DRAFT — add probes, then publish to freeze it");
+              }}
+            >
+              <Field label="Start your own library" grow>
+                <Input
+                  required
+                  maxLength={120}
+                  value={newLibName}
+                  onChange={(e) => setNewLibName(e.target.value)}
+                  placeholder="Acme internal jailbreak set"
+                />
+              </Field>
+              <Field label="What it covers (optional)" grow>
+                <Input
+                  maxLength={4000}
+                  value={newLibNote}
+                  onChange={(e) => setNewLibNote(e.target.value)}
+                  placeholder="probes derived from our own 2026 incident reports"
+                />
+              </Field>
+              <Button type="submit" size="sm" disabled={act.busy || newLibName.trim() === ""}>
+                Create draft
+              </Button>
+            </form>
+            <p className={v.faint}>
+              A new library starts as a <strong>draft</strong>: editable, and not selectable for a run.
+              Publishing freezes it, because a result stamped with a library version is meaningless if
+              the library can move underneath it — after that, editing mints the next version.
+            </p>
             <Table
               rows={libraries.data?.libraries ?? []}
               rowKey={(r) => r.id}

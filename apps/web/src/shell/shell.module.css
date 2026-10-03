@@ -329,11 +329,19 @@
   color: var(--rg-signal-700);
 }
 
+/* title on the left, actions on the right — and the actions wrap under the
+   title at phone width instead of being drawn over it (UIW-06) */
+.pageHeaderRow {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s2);
+  flex-wrap: wrap;
+}
 .pageTitleRow {
   display: flex;
   align-items: flex-start;
   gap: 0;
-  flex: 1;
+  flex: 1 1 14rem;
   min-width: 0;
 }
 /* Centres the 24px info target on the heading's FIRST line box, so a title

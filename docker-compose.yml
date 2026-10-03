@@ -51,6 +51,12 @@ services:
     # far more than a dev-sized shutdown checkpoint needs, so the common case
     # becomes a clean "database system is shut down".
     stop_grace_period: 60s
+    # ADR-0167 (CFG-07): the stack comes back on its own after a host reboot.
+    # This used to live only in the dev box's user-data override, so a
+    # customer install (scripts/install.sh renders no override) stayed down
+    # after its first reboot. `unless-stopped` honours an operator's explicit
+    # `docker compose stop`, which a reboot is not.
+    restart: unless-stopped
     networks: [regulait]
 
   # --- WORM anchor store (ADR-0060) ------------------------------------------
@@ -68,12 +74,19 @@ services:
   # region, credentials and path-style are configuration. See
   # infra/modules/audit-anchor-worm-s3/ for the AWS-side equivalent.
   minio:
-    # Not pinned by default: MinIO publishes timestamped RELEASE tags with no
-    # stable major line to follow, so a pin here rots rather than protecting
-    # anyone. Set REGULAIT_MINIO_IMAGE to a RELEASE tag anywhere reproducibility
-    # matters.
-    image: ${REGULAIT_MINIO_IMAGE:-minio/minio:latest}
-    command: server /data --address :9000 --console-address :9001
+    # PINNED, and to a Bitnami build rather than MinIO's own (2026-10-03):
+    # MinIO archived its community edition in 2026 and removed `minio/minio`
+    # and `minio/mc` from Docker Hub that September; anonymous pulls of the
+    # historical releases from quay.io began failing on 2026-10-02 too. The
+    # `bitnamilegacy` namespace is Bitnami's frozen archive of the last
+    # community release, still served by Docker Hub, and the image bundles
+    # the `mc` client the init job below needs. Nothing newer will ever be
+    # published under this line, so the earlier "a pin rots" argument no
+    # longer applies — the pin is what makes a fresh clone reproducible.
+    # Override with REGULAIT_MINIO_IMAGE for any S3-compatible store whose
+    # entrypoint serves on :9000 and honours MINIO_ROOT_USER/PASSWORD.
+    # Same image and tag as .github/workflows/ci.yml — keep them together.
+    image: ${REGULAIT_MINIO_IMAGE:-bitnamilegacy/minio:2025.7.23-debian-12-r5}
     environment:
       # DEV-GRADE CREDENTIALS, exactly like REGULAIT_DATA_KEY above. They are
       # here so `docker compose up --build` needs no setup; they are not a
@@ -87,15 +100,23 @@ services:
       # authenticate writes `failed` anchor rows nobody reads.
       MINIO_ROOT_USER: ${REGULAIT_AUDIT_ANCHOR_S3_ACCESS_KEY_ID:-regulait}
       MINIO_ROOT_PASSWORD: ${REGULAIT_AUDIT_ANCHOR_S3_SECRET_ACCESS_KEY:-regulait-dev-minio}
+      MINIO_API_PORT_NUMBER: "9000"
+      MINIO_CONSOLE_PORT_NUMBER: "9001"
     healthcheck:
       # `mc ready` is MinIO's own readiness probe and ships in the image; the
       # image has no curl, so the usual /minio/health/live curl does not work.
-      test: ["CMD", "mc", "ready", "local"]
+      # MC_HOST_<alias> configures the alias from the environment, so nothing
+      # has to be written under HOME (which is `/` in this image).
+      test:
+        - CMD-SHELL
+        - MC_CONFIG_DIR=/tmp/.mc MC_HOST_local="http://$${MINIO_ROOT_USER}:$${MINIO_ROOT_PASSWORD}@localhost:9000" mc ready local
       interval: 3s
       timeout: 3s
       retries: 30
     volumes:
-      - minio_data:/data
+      # The Bitnami image serves /bitnami/minio/data (not /data).
+      - minio_data:/bitnami/minio/data
+    restart: unless-stopped
     networks: [regulait]
 
   # One-shot: create the anchor bucket WITH OBJECT LOCK, then exit.
@@ -117,7 +138,11 @@ services:
   # these objects cannot be deleted from inside the container by anyone. To
   # reclaim the space on a dev box, drop the volume — `docker compose down -v`.
   minio-init:
-    image: ${REGULAIT_MC_IMAGE:-minio/mc:latest}
+    # The server image again, not a separate `mc` image: `minio/mc` left
+    # Docker Hub with `minio/minio`, and this image carries the same client
+    # on its PATH. REGULAIT_MC_IMAGE still overrides it — any image with
+    # `mc` on PATH works.
+    image: ${REGULAIT_MC_IMAGE:-bitnamilegacy/minio:2025.7.23-debian-12-r5}
     depends_on:
       minio:
         condition: service_healthy
@@ -137,6 +162,7 @@ services:
     command:
       - |
         set -e
+        export MC_CONFIG_DIR=/tmp/.mc
         mc alias set worm http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"
         mc mb --with-lock --ignore-existing "worm/$$ANCHOR_BUCKET"
         mc retention set --default COMPLIANCE "$${ANCHOR_RETENTION_DAYS}d" "worm/$$ANCHOR_BUCKET"
@@ -254,6 +280,35 @@ services:
       # is the documented local-dev entry point (README) and the on-box
       # SSM verification step (`curl -sf localhost:3000/...`) relies on it.
       - "127.0.0.1:3000:3000"
+    # ADR-0167 (CFG-07): see the note on `db`. The image carries the same
+    # HEALTHCHECK; it is restated here so `depends_on: condition:
+    # service_healthy` works for anything stacked on the gateway, and so a
+    # wedged process shows as `unhealthy` in `docker compose ps`.
+    restart: unless-stopped
+    # REL-02 / OPS-01: the image's CMD `exec`s node, so node is PID 1 — and
+    # Linux delivers no default-action signal to PID 1, so without an init
+    # `docker stop` was IGNORED for the 10 s default grace and then SIGKILLed.
+    # `init: true` puts tini in front so SIGTERM actually arrives; the gateway's
+    # own handler (apps/gateway/src/boot.ts installShutdownHandlers) then drains
+    # in-flight requests, the scheduler tick and the pool within its 15 s
+    # budget, which is why the grace period here sits above it.
+    init: true
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health').then((r)=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 90s
+      retries: 3
+    # ADR-0167 (CFG-02): the gateway now logs every refusal and failure
+    # (structured, credentials redacted — see apps/gateway/src/gateway-logger.ts),
+    # so the container log is bounded rather than left to fill the disk.
+    # `docker compose logs gateway` is the operator's first stop on a 5xx.
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
     networks: [regulait]
 
   # --- TLS terminator (profile: tls) -----------------------------------------

@@ -38,13 +38,29 @@ async function waitFor(url: string, ms: number): Promise<void> {
 
 export default async function globalSetup() {
   // 1. fresh scratch database
-  execFileSync("psql", [`${PG}/postgres`, "-v", "ON_ERROR_STOP=1", "-c",
-    `DROP DATABASE IF EXISTS ${DB_NAME} WITH (FORCE)`]);
-  execFileSync("psql", [`${PG}/postgres`, "-v", "ON_ERROR_STOP=1", "-c",
-    `CREATE DATABASE ${DB_NAME}`]);
+  if (!/^[a-z][a-z0-9_]*$/.test(DB_NAME)) throw new Error("Invalid scratch database identifier");
+  // Windows psql stops parsing options at the first positional argument.
+  execFileSync("psql", ["-v", "ON_ERROR_STOP=1", "-c",
+    `DROP DATABASE IF EXISTS ${DB_NAME} WITH (FORCE)`, `${PG}/postgres`]);
+  execFileSync("psql", ["-v", "ON_ERROR_STOP=1", "-c",
+    `CREATE DATABASE ${DB_NAME}`, `${PG}/postgres`]);
 
+  // The suite licenses itself, with an EPHEMERAL key the seeder mints and
+  // throws away (see seed.ts). Without it, tier-gated features default CLOSED
+  // and two specs fail on a licensing posture that reads exactly like a product
+  // defect — phase1's goal decomposition (`advanced_orchestration`) and
+  // phase5's custom provider registration (`custom_model_providers`).
+  //
+  // The keyring is a scratch directory OUTSIDE the source tree, and the SAME
+  // one must be visible to both the seeder (which installs) and the gateway
+  // (which verifies) — a license signed against a keyring the gateway cannot
+  // read is refused, correctly, and would look like the install silently
+  // failing.
+  const licenseKeyring = path.join(here, ".e2e-license-keys");
   const env = {
     ...process.env,
+    REGULAIT_EPHEMERAL_LICENSE: "1",
+    REGULAIT_LICENSE_KEYRING: licenseKeyring,
     DATABASE_URL,
     REGULAIT_BOOTSTRAP_TOKEN: BOOT,
     REGULAIT_DATA_KEY: DATA_KEY,
@@ -99,6 +115,7 @@ export default async function globalSetup() {
     env,
     stdio: ["ignore", "pipe", "pipe"],
     detached: true,
+    windowsHide: true,
   });
   child.stdout.pipe(log);
   child.stderr.pipe(log);

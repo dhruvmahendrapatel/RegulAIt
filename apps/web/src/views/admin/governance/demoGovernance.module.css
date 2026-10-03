@@ -1,0 +1,585 @@
+.dashboardGrid {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.9fr) minmax(360px, 1.1fr);
+  gap: var(--s2);
+}
+
+.radar {
+  width: 100%;
+  max-width: 420px;
+  margin: 0 auto;
+  overflow: visible;
+}
+
+.radarGrid {
+  fill: none;
+  stroke: var(--border);
+  stroke-width: 1;
+}
+
+.radarAxis {
+  stroke: var(--rg-ink-faint);
+  stroke-width: 1;
+}
+
+.radarGapAxis {
+  stroke-dasharray: 4 5;
+}
+
+.radarLink {
+  stroke: var(--rg-signal);
+  stroke-width: 2.5;
+}
+
+.radarDot {
+  fill: var(--rg-signal);
+  stroke: var(--surface-1);
+  stroke-width: 3;
+}
+
+.radarGap {
+  fill: var(--surface-1);
+  stroke: var(--rg-ink-muted);
+  stroke-width: 2;
+  stroke-dasharray: 3 3;
+}
+
+.radarLabel {
+  fill: var(--text-dim);
+  font: 600 11px var(--font-sans);
+}
+
+.radarGapLabel {
+  fill: var(--text-faint);
+  font: 600 9px var(--font-sans);
+  text-transform: uppercase;
+}
+
+.heatmap {
+  display: grid;
+  grid-template-columns: auto repeat(3, minmax(70px, 1fr));
+  gap: 4px;
+  align-items: stretch;
+}
+
+.heatLabel {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 42px;
+  color: var(--text-faint);
+  font-size: var(--text-xs);
+  text-transform: capitalize;
+}
+
+.heatCell {
+  min-height: 52px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  background: var(--surface-1);
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.heat1 { background: color-mix(in srgb, var(--rg-signal) 10%, var(--surface-1)); }
+.heat2 { background: color-mix(in srgb, var(--rg-signal) 18%, var(--surface-1)); }
+.heat3 { background: color-mix(in srgb, var(--rg-signal) 28%, var(--surface-1)); }
+.heat4 { background: color-mix(in srgb, var(--rg-signal) 40%, var(--surface-1)); }
+
+.heatCell strong {
+  font-size: var(--text-lg);
+}
+
+.heatCell span {
+  color: var(--text-faint);
+  font-size: var(--text-xs);
+}
+
+.dimensionList {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--s1);
+}
+
+.dimensionButton {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--s2);
+  background: var(--surface-1);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.dimensionButton:hover,
+.dimensionButton:focus-visible,
+.dimensionButtonActive {
+  border-color: var(--rg-signal);
+  outline: none;
+}
+
+.dimensionButtonActive {
+  box-shadow: inset 3px 0 0 var(--rg-signal);
+}
+
+.dimensionValue {
+  display: block;
+  margin-top: var(--s1);
+  font-size: var(--text-lg);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.stepper {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: var(--s1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.step {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  min-width: 0;
+  color: var(--text-faint);
+  font-size: var(--text-xs);
+}
+
+.stepNumber {
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-1);
+  font-family: var(--font-mono);
+}
+
+.stepActive,
+.stepDone {
+  color: var(--text);
+}
+
+.stepActive .stepNumber {
+  border-color: var(--rg-signal);
+  background: var(--rg-signal);
+  color: var(--rg-ink-invert);
+}
+
+.stepDone .stepNumber {
+  border-color: var(--rg-positive);
+  background: var(--rg-positive-tint);
+  color: var(--rg-positive-deep);
+}
+
+.suggestion {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--s2);
+  background: var(--surface-1);
+}
+
+.suggestionRejected {
+  opacity: 0.68;
+  background: var(--surface-2);
+}
+
+.suggestionHeader {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s1);
+  flex-wrap: wrap;
+}
+
+.suggestionHeader strong {
+  flex: 1;
+  min-width: 12rem;
+}
+
+.suggestionActions {
+  display: flex;
+  gap: var(--s1);
+  flex-wrap: wrap;
+  margin-top: var(--s1);
+}
+
+.checkboxGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--s1);
+}
+
+.checkbox {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s1);
+  color: var(--text-dim);
+  font-size: var(--text-sm);
+}
+
+.footerActions {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--s1);
+  flex-wrap: wrap;
+}
+
+.callout {
+  border-left: 3px solid var(--rg-signal);
+  padding: var(--s1) var(--s2);
+  background: var(--rg-signal-tint);
+  color: var(--text-dim);
+  font-size: var(--text-sm);
+}
+
+.workspaceHeader {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--s3);
+  align-items: start;
+}
+
+.workspaceMeta {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(130px, 1fr));
+  gap: var(--s2);
+  color: var(--text-dim);
+  font-size: var(--text-sm);
+}
+
+.riskFlow {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) auto minmax(120px, 1fr);
+  align-items: center;
+  gap: var(--s2);
+  padding: var(--s2);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+  text-align: center;
+}
+
+.agentCard,
+.libraryEntry {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--s2);
+  background: var(--surface-1);
+}
+
+.agentCard + .agentCard,
+.libraryEntry + .libraryEntry {
+  margin-top: var(--s1);
+}
+
+.libraryFilters {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--s1);
+  align-items: end;
+}
+
+.libraryList {
+  max-height: 34rem;
+  overflow: auto;
+  padding-right: var(--s1);
+}
+
+.libraryAssessment {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--s1);
+  margin-top: var(--s2);
+  padding: var(--s2);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+}
+
+.libraryAssessment > p,
+.libraryAssessment > div:last-child {
+  grid-column: 1 / -1;
+}
+
+.alertLayout {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.85fr) minmax(380px, 1.15fr);
+  gap: var(--s2);
+  align-items: start;
+}
+
+.alertList {
+  display: grid;
+  gap: var(--s1);
+}
+
+/* The detail column stays in view beside a long list: clicking the lowest
+   alert used to open its panel 900px above the viewport (UXJ-02). */
+.alertDetail {
+  position: sticky;
+  top: calc(52px + var(--s2));
+  scroll-margin-top: calc(52px + var(--s2));
+  max-height: calc(100vh - 52px - var(--s3));
+  overflow-y: auto;
+}
+
+.alertRow {
+  display: grid;
+  gap: var(--s1);
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--s2);
+  background: var(--surface-1);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.alertRow:hover,
+.alertRow:focus-visible,
+.alertRowActive {
+  border-color: var(--rg-signal);
+  outline: none;
+}
+
+.alertRowActive {
+  box-shadow: inset 3px 0 0 var(--rg-signal);
+}
+
+.alertRowHead {
+  display: flex;
+  gap: var(--s1);
+  align-items: center;
+}
+
+.pathList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s1);
+  margin: var(--s1) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.pathList li {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.25rem 0.65rem;
+  color: var(--text-dim);
+  font-size: var(--text-xs);
+}
+
+.pathList li:not(:last-child)::after {
+  content: " →";
+  color: var(--rg-signal);
+}
+
+.timeline {
+  position: relative;
+  display: grid;
+  gap: var(--s2);
+  margin: 0;
+  padding: 0 0 0 var(--s4);
+  list-style: none;
+}
+
+.timeline::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0.65rem;
+  width: 2px;
+  background: var(--border);
+}
+
+.timelineEntry {
+  position: relative;
+}
+
+.timelineDot {
+  position: absolute;
+  top: var(--s3);
+  left: calc(-1 * var(--s4) + 0.25rem);
+  width: 0.85rem;
+  height: 0.85rem;
+  border: 3px solid var(--surface-0);
+  border-radius: 50%;
+  background: var(--rg-signal);
+  box-shadow: 0 0 0 1px var(--border);
+}
+
+.timelineDate {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.controlRow {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.8fr) minmax(220px, 1.2fr) auto;
+  gap: var(--s1);
+  align-items: center;
+  width: 100%;
+  padding: var(--s1) 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.useCaseLinks {
+  display: grid;
+  gap: var(--s1);
+  padding-left: var(--s3);
+}
+
+.useCaseLinks li {
+  display: flex;
+  gap: var(--s1);
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+
+.remediationCandidate {
+  display: grid;
+  gap: var(--s1);
+  padding: var(--s2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+}
+
+.remediationSteps {
+  display: grid;
+  gap: var(--s1);
+  margin: 0;
+  color: var(--text-dim);
+  font-size: var(--text-sm);
+}
+
+.proposalRow {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) auto auto;
+  gap: var(--s1);
+  align-items: center;
+  width: 100%;
+  padding: var(--s1) 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.graphScroller {
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+}
+
+.graph {
+  display: block;
+  width: 100%;
+  min-width: 800px;
+  min-height: 270px;
+}
+
+.graphHeadings text {
+  fill: var(--text-faint);
+  font: 600 11px var(--font-sans);
+  text-anchor: middle;
+  text-transform: uppercase;
+}
+
+.graphEdge,
+.graphEdgeObserved {
+  stroke: var(--rg-ink-faint);
+  stroke-width: 1.5;
+}
+
+.graphEdgeObserved {
+  stroke: var(--rg-signal);
+  stroke-dasharray: 6 5;
+}
+
+.graphEdgeLabel {
+  fill: var(--text-faint);
+  font: 10px var(--font-mono);
+  text-anchor: middle;
+}
+
+.graphNode {
+  cursor: pointer;
+}
+
+.graphNode:focus-visible .graphNodeBox {
+  stroke: var(--rg-signal);
+  stroke-width: 3;
+}
+
+.graphNodeBox {
+  stroke: var(--border);
+  stroke-width: 1.5;
+  fill: var(--surface-1);
+}
+
+.graphBand_none { fill: var(--surface-1); }
+.graphBand_low { fill: var(--rg-low-tint); }
+.graphBand_medium { fill: var(--rg-medium-tint); }
+.graphBand_high { fill: var(--rg-critical-tint); }
+
+.graphInheritedRing {
+  fill: none;
+  stroke: var(--rg-signal);
+  stroke-width: 3;
+}
+
+.graphNodeType {
+  fill: var(--text-faint);
+  font: 600 9px var(--font-mono);
+  text-anchor: middle;
+  text-transform: uppercase;
+}
+
+.graphNodeLabel {
+  fill: var(--text);
+  font: 600 10px var(--font-sans);
+  text-anchor: middle;
+}
+
+@media (max-width: 900px) {
+  .dashboardGrid,
+  .dimensionList,
+  .alertLayout,
+  .workspaceHeader,
+  .libraryFilters {
+    grid-template-columns: 1fr;
+  }
+
+  .alertDetail {
+    position: static;
+    max-height: none;
+  }
+
+  .controlRow {
+    grid-template-columns: 1fr;
+  }
+
+  .proposalRow {
+    grid-template-columns: 1fr;
+  }
+
+  .stepper {
+    grid-template-columns: 1fr;
+  }
+
+  .step:not(.stepActive) span:last-child {
+    display: none;
+  }
+
+  .checkboxGrid {
+    grid-template-columns: 1fr;
+  }
+}

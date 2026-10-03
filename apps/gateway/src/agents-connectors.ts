@@ -7,6 +7,7 @@ import {
   auditLog,
   connectorCredentials,
   connectorGrants,
+  governancePolicyEpoch,
   connectors,
   costEvents,
   and,
@@ -26,6 +27,8 @@ import {
   type Db,
 } from "@regulait/db";
 import { createHash } from "node:crypto";
+import { ConnectorPolicyChangedError, prepareConnectorPiiAction } from "./connector-pii.js";
+import { redactPiiPayload } from "@regulait/shared";
 import { deleteAgentGrantById, deleteConnectorGrantById } from "./grant-revocation.js";
 // ADR-0091 — toxic-combination SoD: the mint-time gate on the two direct
 // agent/connector grant endpoints (the other seven mint paths live in app.ts).
@@ -33,10 +36,14 @@ import { refuseSodMint } from "./sod.js";
 import { evaluateAgent, evaluateConnector } from "@regulait/policy-kernel";
 import { agentHaltOf, loadExecutionMode, postureOf } from "./execution-posture.js";
 import {
+  CREDENTIAL_HOST_CONNECTOR_KINDS,
   ConnectorProviderError,
+  connectorCredentialHosts,
   connectorDefaultBaseUrl,
   isConnectorProviderKind,
+  parseOutlookCredential,
   parseSnowflakeCredential,
+  parseTeamsCredential,
   resolveConnectorProvider,
 } from "@regulait/connector-provider";
 import {
@@ -116,6 +123,7 @@ import {
   type CandidateNote,
 } from "./rule-versions.js";
 import { z } from "zod";
+import { listLimitQuery } from "./list-limit.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import {
   assertProjectAttribution,
@@ -149,10 +157,13 @@ import {
   loadOrgSettings,
 } from "./org-settings.js";
 import {
+  loadNativeCacheConfig,
   lookupSemanticCache,
-  semanticCacheKey,
+  semanticCacheNativeKey,
   storeSemanticCache,
+  type NativeCacheRequest,
   type SemanticCacheKey,
+  type SemanticCacheHit,
 } from "./semantic-cache-shared.js";
 import { loadInterceptionSettings } from "./compat-core.js";
 import { resolveCustomProviderForDispatch } from "./custom-providers.js";
@@ -164,6 +175,7 @@ import { checkCredentialBaseUrl, credentialGuardedFetch } from "./credential-egr
 import {
   ConnectionEgressBlockedError,
   guardConnectionCall,
+  guardCredentialDerivedCall,
   refuseConnectionEgressWrite,
   type ConnectionSurface,
 } from "./connection-egress.js";
@@ -313,53 +325,6 @@ async function enforceProjectInputPii(
   return { status: 403, error: "pii_blocked", detail, pii };
 }
 
-/**
- * The OUTPUT counterpart for the cache-hit path. The input may be clean while
- * the CACHED output carries PII (it was generated under a different, ungated
- * attribution). Serving that cached output on a project whose mode is `block`
- * would leak it, so the cached text is checked before it is served, with the
- * same audit shape as the input gate above.
- */
-export async function enforceProjectCachedOutputPii(
-  db: Db,
-  userId: string,
-  agentObjectId: string,
-  projectId: string | null,
-  outputText: string,
-): Promise<{ status: 403; error: "pii_blocked"; detail: string; pii: DispatchPii } | null> {
-  const piiMode = await projectPiiMode(db, projectId);
-  if (!piiMode) return null;
-  // ADR-0117: the jurisdiction set is the OTHER half of the §8.4 decision and
-  // is resolved on the SAME line of reasoning as the mode — org-wide, shipped
-  // empty, widened only by an explicit admin act.
-  const chk = enforcePII(piiMode, { output: outputText }, await piiInternationalCategories(db));
-  if (chk.action !== "block") return null;
-  const detail = `cached output withheld: contains PII (${piiCategoryList(chk.hits)})`;
-  const pii: DispatchPii = {
-    mode: piiMode,
-    action: "block",
-    inputHits: [],
-    outputHits: chk.hits,
-    withheld: true,
-  };
-  await db.insert(auditLog).values({
-    userId,
-    objectType: "agent",
-    objectId: agentObjectId,
-    detail: {
-      phase: "pii",
-      pii: { mode: piiMode, action: "block", phase: "output", inputHits: [], outputHits: chk.hits },
-      semanticCache: { hit: true },
-      ...(projectId ? { projectId } : {}),
-    },
-    effect: "deny",
-    ruleId: "pii-blocked",
-    ruleChain: [],
-    reason: detail,
-  });
-  return { status: 403, error: "pii_blocked", detail, pii };
-}
-
 export interface DispatchPii {
   mode: PiiMode;
   /** the effective action on this dispatch: 'block' (output withheld here, or
@@ -387,6 +352,8 @@ export type DispatchOutcome =
          * surface can render them; withheld along with the output on a PII
          * output block. Their tokens are already inside usage.outputTokens. */
         thinking?: ModelThinkingBlock[];
+        /** Complete scanned output was released instead of live provider events. */
+        streamBuffered?: boolean;
         usage: { inputTokens: number; outputTokens: number };
         costUsd: number | null;
         measuredCostSavedUsd: number | null;
@@ -482,6 +449,10 @@ export interface GovernedDispatchArgs {
    * already checked the served provider can honour it. */
   thinking?: { budgetTokens: number } | undefined;
   maxTokens?: number | undefined;
+  /** A candidate answer, never authorization to serve it. The shared core
+   * re-runs every provider-independent input gate and current output controls
+   * before returning it, without contacting a provider or writing usage. */
+  cachedResponse?: SemanticCacheHit | undefined;
   /** pillar 5 attribution: the project this call bills to */
   projectId?: string | null | undefined;
   /** streaming delta callback, forwarded to the provider */
@@ -702,7 +673,34 @@ export async function executeGovernedDispatch(
       const refusal = virtualKeyAllowListRefusal(args.virtualKey, hopAgent);
       if (refusal) {
         hops.push({ ...label, outcome: "denied", reason: refusal.detail });
-        await auditHop(label, "deny", refusal.ruleId, refusal.detail);
+        // AUDITED AGAINST THE KEY, NOT THE AGENT — the same rule the three
+        // other call sites follow, and the one this path quietly broke by
+        // reaching for `auditHop`, whose objectType is 'agent' because a hop
+        // is normally an event about an agent. A key's allow-list refusal is
+        // an event about the KEY: burying it under the agent means a reviewer
+        // auditing what a credential was refused cannot find it, and the
+        // gateway-parity suite asserts exactly that ("audited against the KEY,
+        // not buried under the agent"). It escaped because this is the one
+        // refusal site that does not write its own row.
+        await db.insert(auditLog).values({
+          userId: args.userId,
+          objectType: "virtual_key",
+          objectId: args.virtualKey.id,
+          detail: {
+            phase: "fallback",
+            primaryAgentId: primaryAgent.id,
+            primaryAgentName: primaryAgent.name,
+            position: label.position,
+            agentId: hopAgent.id,
+            agentName: hopAgent.name,
+            mode: hopMode,
+            ...(args.projectId ? { projectId: args.projectId } : {}),
+          },
+          effect: "deny",
+          ruleId: refusal.ruleId,
+          ruleChain: [],
+          reason: refusal.detail,
+        });
         await recordSkippedHop(label, refusal.detail, refusal.ruleId);
         continue;
       }
@@ -908,6 +906,7 @@ async function dispatchOnce(
     requestedAgentId: args.requestedAgentId,
     ...(args.projectId ? { projectId: args.projectId } : {}),
     ...(args.virtualKey ? { virtualKeyId: args.virtualKey.id } : {}),
+    ...(args.cachedResponse ? { semanticCache: "hit" } : {}),
     ...(typeof detail["turn"] === "number" ? { turn: detail["turn"] } : {}),
     ...(typeof args.traceSpanKind === "string" && args.traceSpanKind === "fallback_hop"
       ? { fallbackPosition: detail["fallbackPosition"] ?? null }
@@ -937,8 +936,8 @@ async function dispatchOnce(
       usageEventId: sink.usageEventId ?? null,
       provider: sink.provider ?? args.served?.provider ?? null,
       model: r.model,
-      inputTokens: r.usage.inputTokens,
-      outputTokens: r.usage.outputTokens,
+      inputTokens: args.cachedResponse ? 0 : r.usage.inputTokens,
+      outputTokens: args.cachedResponse ? 0 : r.usage.outputTokens,
       costUsd: r.costUsd,
       inputText: args.input,
       // ALREADY-ADJUDICATED text: the withheld marker is already substituted.
@@ -1467,6 +1466,124 @@ async function dispatchAttempt(
     }
   }
 
+  if (args.cachedResponse) {
+    const cached = args.cachedResponse;
+    let outputHits: PiiHit[] = [];
+    if (piiMode) {
+      const check = enforcePII(piiMode, { output: cached.outputText }, piiIntl);
+      outputHits = check.hits;
+      if (check.action === "block") {
+        const detail = `cached output withheld: contains PII (${piiCategoryList(outputHits)})`;
+        const [row] = await db.insert(auditLog).values({
+          userId,
+          objectType: "agent",
+          objectId: served.id,
+          detail: {
+            phase: "pii",
+            pii: { mode: piiMode, action: "block", phase: "output", inputHits, outputHits },
+            semanticCache: { hit: true },
+            ...(args.projectId ? { projectId: args.projectId } : {}),
+          },
+          effect: "deny",
+          ruleId: "pii-blocked",
+          ruleChain: [],
+          reason: detail,
+        }).returning({ id: auditLog.id });
+        sink.auditLogId = row?.id ?? null;
+        return {
+          ok: false,
+          status: 403,
+          error: "pii_blocked",
+          detail,
+          pii: { mode: piiMode, action: "block", inputHits, outputHits, withheld: true },
+        };
+      }
+    }
+
+    const guardrailOutput = guardrails.active
+      ? runGuardrails(guardrails, "output", cached.outputText)
+      : null;
+    if (guardrailOutput) {
+      const outcome = guardrailOutcome(guardrailOutput);
+      if (outcome) {
+        sink.auditLogId = await recordGuardrailDecision(db, {
+          userId,
+          objectType: "agent",
+          objectId: served.id,
+          projectId: args.projectId ?? null,
+          evaluation: guardrailOutput,
+          outcome,
+          detail: { agentId: served.id, model: served.model, semanticCache: { hit: true } },
+        });
+      }
+      if (guardrailOutput.action === "block") {
+        return {
+          ok: false,
+          status: 403,
+          error: "guardrail_blocked",
+          detail: `cached output blocked by guardrail: ${guardrailCategoryList(guardrailOutput.blocking)}`,
+          guardrails: {
+            action: "block",
+            phase: "output",
+            findings: flattenFindings(guardrailOutput.findings),
+            withheld: true,
+          },
+        };
+      }
+    }
+
+    const anyPii = inputHits.length > 0 || outputHits.length > 0;
+    const pii: DispatchPii | null = piiMode && anyPii
+      ? { mode: piiMode, action: piiMode === "warn" ? "warn" : "log", inputHits, outputHits, withheld: false }
+      : null;
+    if (piiMode === "warn" && anyPii) {
+      await db.insert(auditLog).values({
+        userId,
+        objectType: "agent",
+        objectId: served.id,
+        detail: {
+          phase: "pii",
+          pii: { mode: piiMode, action: "warn", inputHits, outputHits },
+          semanticCache: { hit: true },
+          ...(args.projectId ? { projectId: args.projectId } : {}),
+        },
+        effect: "allow",
+        ruleId: "pii-warned",
+        ruleChain: [],
+        reason: `PII detected (${piiCategoryList([...inputHits, ...outputHits])}) — warned, cached answer served`,
+      });
+    }
+    const findings = [...(guardrailInput?.findings ?? []), ...(guardrailOutput?.findings ?? [])];
+    const guardrailAction: DispatchGuardrails["action"] | null = findings.length === 0
+      ? null
+      : findings.some((f) => f.action === "warn") ? "warn" : "log";
+    return {
+      ok: true,
+      result: {
+        servedAgentId: served.id,
+        model: cached.model ?? served.model,
+        outputText: cached.outputText,
+        stopReason: "cached",
+        refusal: false,
+        usage: { inputTokens: cached.inputTokens, outputTokens: cached.outputTokens },
+        costUsd: 0,
+        measuredCostSavedUsd: null,
+        credentialSource: "none",
+        projectBudgetAlerted: false,
+        ...(pii ? { pii } : {}),
+        ...(guardrailAction ? {
+          guardrails: {
+            action: guardrailAction,
+            phase: guardrailInput?.findings.length ? "input" : "output",
+            findings: flattenFindings(findings),
+            withheld: false,
+          },
+        } : {}),
+        ...(useCaseGateWarning ? { useCaseGate: useCaseGateWarning } : {}),
+      },
+    };
+  }
+
   // ADR-0034 — CUSTOM PROVIDER RESOLUTION. Deliberately placed HERE, inside
   // the one governed-dispatch core, after the entitlement/routing decision and
   // after the project budget + PII gates: a custom endpoint gets exactly the
@@ -1814,8 +1931,8 @@ async function dispatchAttempt(
   // streaming caller — the SSE invoke route, both compat shims, and the
   // orchestration worker path — rather than only the one route that knows to
   // ask. When any output-phase detector is at `block`, `onText` is not handed
-  // to the provider at all: deltas are accumulated locally, the completed text
-  // is scanned, and only then is the buffer flushed to the caller — or dropped
+  // to the provider at all: the provider returns its completed result,
+  // all content channels are scanned, and only then is that result flushed — or dropped
   // entirely if the scan blocked. A client can therefore never receive a token
   // of content the buffered path would have withheld.
   //
@@ -1825,13 +1942,12 @@ async function dispatchAttempt(
   // response so this is disclosed rather than silent. With every output
   // detector at `off`/`log`/`warn` (the shipped posture) nothing is buffered and
   // streaming is byte-identical to before.
-  const bufferStream = !!args.onText && guardrails.blocksOutput;
-  const bufferedDeltas: string[] = [];
-  const providerOnText = bufferStream
-    ? (delta: string) => {
-        bufferedDeltas.push(delta);
-      }
-    : args.onText;
+  const bufferStream = !!(args.onText || args.onThinking) && (guardrails.blocksOutput || piiMode === "block");
+  // Release only the complete result that was scanned, never a separate delta
+  // transcript that a faulty provider could make disagree with its result.
+  // Omitting both callbacks also avoids an unbounded duplicate delta buffer.
+  const providerOnText = bufferStream ? undefined : args.onText;
+  const providerOnThinking = bufferStream ? undefined : args.onThinking;
 
   let result;
   try {
@@ -1859,7 +1975,7 @@ async function dispatchAttempt(
       ...(args.thinking ? { thinking: args.thinking } : {}),
       ...(args.maxTokens ? { maxTokens: args.maxTokens } : {}),
       ...(providerOnText ? { onText: providerOnText } : {}),
-      ...(args.onThinking ? { onThinking: args.onThinking } : {}),
+      ...(providerOnThinking ? { onThinking: providerOnThinking } : {}),
     });
   } catch (err) {
     // ADR-0034: an egress refusal raised INSIDE the adapter (the guarded fetch
@@ -1933,8 +2049,15 @@ async function dispatchAttempt(
   let outputHits: PiiHit[] = [];
   let outputText = result.outputText;
   let withheld = false;
+  // Thinking and tool arguments are outputs too, including when the visible
+  // answer is empty. Scan their decoded provider objects before forwarding.
+  const outputForPolicy = [
+    result.outputText,
+    ...(result.thinking ?? []).map((block) => JSON.stringify(block)),
+    ...(result.toolCalls ?? []).map((call) => JSON.stringify(call)),
+  ].join("\n");
   if (piiMode) {
-    const chk = enforcePII(piiMode, { output: result.outputText }, piiIntl);
+    const chk = enforcePII(piiMode, { output: outputForPolicy }, piiIntl);
     outputHits = chk.hits;
     if (chk.action === "block") {
       withheld = true;
@@ -1964,7 +2087,7 @@ async function dispatchAttempt(
   let guardrailOutput: ReturnType<typeof runGuardrails> | null = null;
   let guardrailWithheld = false;
   if (guardrails.active) {
-    guardrailOutput = runGuardrails(guardrails, "output", result.outputText);
+    guardrailOutput = runGuardrails(guardrails, "output", outputForPolicy);
     if (guardrailOutput.action === "block") {
       guardrailWithheld = true;
       // the guardrail marker wins over the PII one when both fired: both are
@@ -1974,8 +2097,14 @@ async function dispatchAttempt(
   }
   // Flush (or drop) the buffered stream. This is the line that makes the
   // streaming guarantee real: on a block the deltas are simply never written.
-  if (bufferStream && args.onText && !guardrailWithheld && !withheld) {
-    for (const delta of bufferedDeltas) args.onText(delta);
+  if (bufferStream && !guardrailWithheld && !withheld) {
+    for (const block of result.thinking ?? []) {
+      if (block.type === "thinking") {
+        args.onThinking?.({ thinking: block.thinking });
+        args.onThinking?.({ signature: block.signature });
+      }
+    }
+    if (outputText) args.onText?.(outputText);
   }
   const guardrailFindings = [
     ...(guardrailInput?.findings ?? []),
@@ -2165,11 +2294,12 @@ async function dispatchAttempt(
       outputText,
       stopReason: result.stopReason,
       refusal: result.refusal,
-      ...(result.toolCalls ? { toolCalls: result.toolCalls } : {}),
+      ...(result.toolCalls && !withheld && !guardrailWithheld ? { toolCalls: result.toolCalls } : {}),
       // thinking blocks ride out with the output — and are withheld WITH the
       // output when a PII or guardrail block replaced it (reasoning can leak
       // the same content the completion was withheld for)
       ...(result.thinking && !withheld && !guardrailWithheld ? { thinking: result.thinking } : {}),
+      ...(bufferStream ? { streamBuffered: true } : {}),
       usage: result.usage,
       costUsd,
       measuredCostSavedUsd,
@@ -2855,7 +2985,11 @@ export function registerAgentConnectorRoutes(
     return { removed: true };
   });
 
-  app.get("/v1/agents", async () => ({ agents: await db.select().from(agents) }));
+  // REL-10: bounded — `limit` (default LIST_DEFAULT_LIMIT, max LIST_MAX_LIMIT)
+  app.get("/v1/agents", async (req) => {
+    const { limit } = listLimitQuery.parse(req.query);
+    return { agents: await db.select().from(agents).orderBy(agents.name).limit(limit) };
+  });
 
   // -------------------------------------------------------------------------
   // ADR-0066 §4 — PROVIDER FALLBACK CHAINS (admin-only via the default gate).
@@ -3512,9 +3646,11 @@ export function registerAgentConnectorRoutes(
         }
       }
       // PILLAR 6 §8/§10 SEMANTIC CACHING (REAL cache) — opt-in per-(user,agent)
-      // EXACT-MATCH response cache. When enabled, an identical (whitespace/
-      // case-normalized) single-turn input already answered for the SAME
-      // user+agent within the TTL is served straight from the cache, skipping
+      // EXACT-MATCH response cache. When enabled, a byte-identical single-turn
+      // request (ADR-0146: input, generation options and project — nothing is
+      // case- or whitespace-normalised) already answered for the SAME
+      // user+agent under the SAME serving configuration within the TTL is
+      // served straight from the cache, skipping
       // the provider call entirely (no usage_events, no spend). "passthrough"
       // is §12's off switch; conversation dispatches are excluded (a single
       // input key can't stand in for multi-turn history). When off, this is
@@ -3547,9 +3683,45 @@ export function registerAgentConnectorRoutes(
       // moved to `semantic-cache-shared.ts` so the compat/IDE path runs THE
       // SAME governance boundary rather than a second copy of it. The behaviour
       // here is unchanged — the helper is the code that used to be inline.
+      //
+      // AER-041 / ADR-0146: the key is a commitment to the exact request AND
+      // the configuration that would serve it, re-read here — see
+      // `semanticCacheNativeKey`. `cacheRequest` is kept so the store side can
+      // re-derive the key against the configuration that is current AFTER the
+      // dispatch and refuse to store if the two disagree.
       let cacheKey: SemanticCacheKey | null = null;
-      if (wantCache && body.input) {
-        cacheKey = semanticCacheKey(body.input);
+      let cacheRequest: NativeCacheRequest | null = null;
+      const cacheConfig =
+        wantCache && body.input ? await loadNativeCacheConfig(db, { agentId: agent.id, userId }) : null;
+      if (wantCache && body.input && cacheConfig) {
+        cacheRequest = {
+          input: body.input,
+          mode: body.mode,
+          system: body.system ?? null,
+          baseline: body.baseline ?? null,
+          referenceContent: body.referenceContent ?? null,
+          attachments: (body.attachments ?? []).map((a) => ({
+            kind: a.kind,
+            name: a.name,
+            mediaType: a.mediaType,
+            dataBase64: a.dataBase64,
+          })),
+          maxTokens: body.maxTokens ?? null,
+          costSensitivity: body.costSensitivity ?? null,
+          projectId: projectId ?? null,
+          // The two pillar-6 techniques below that REWRITE what the model is
+          // sent are functions of these dials, so they are part of the request
+          // the answer was produced for. Prompt caching and routing are not
+          // here: the first changes billing only, and the store side refuses
+          // any answer routing served from a different agent.
+          planner: {
+            filePreprocessing: modeFor(org.filePreprocessingEnabled),
+            minPreprocessTokens: org.minPreprocessTokens,
+            editVsRewrite: modeFor(org.editVsRewriteEnabled),
+            minEditableBaselineTokens: org.minEditableBaselineTokens,
+          },
+        };
+        cacheKey = semanticCacheNativeKey(cacheRequest, cacheConfig);
         const hit = await lookupSemanticCache(db, {
           userId,
           agentId: agent.id,
@@ -3557,20 +3729,28 @@ export function registerAgentConnectorRoutes(
           ttlSeconds: org.semanticCacheTtlSeconds,
         });
         if (hit) {
-          // The input was gated above; the CACHED OUTPUT may still carry PII it
-          // acquired under a different, ungated attribution. Withhold it rather
-          // than serve it on a project whose mode is `block`.
-          const outputBlock = await enforceProjectCachedOutputPii(
-            db,
+          const governed = await executeGovernedDispatch(db, opts.dataKey, {
             userId,
-            agent.id,
+            served: agent,
+            requestedAgentId: agent.id,
+            input: body.input,
             projectId,
-            hit.outputText,
-          );
-          if (outputBlock) {
+            virtualKey: invokeVirtualKey,
+            mode: body.mode,
+            cachedResponse: hit,
+            detail: { surface: "invoke_cache", mode: body.mode },
+          });
+          if (!governed.ok) {
             return reply
-              .status(outputBlock.status)
-              .send({ decision, error: outputBlock.error, detail: outputBlock.detail, pii: outputBlock.pii, ...suppressionFlag });
+              .status(governed.status)
+              .send({
+                decision,
+                error: governed.error,
+                ...(governed.detail ? { detail: governed.detail } : {}),
+                ...(governed.pii ? { pii: governed.pii } : {}),
+                ...(governed.guardrails ? { guardrails: governed.guardrails } : {}),
+                ...suppressionFlag,
+              });
           }
           // HIT: no provider call, no usage_events (no real spend). One
           // semantic_caching cost_events row estimates the WHOLE call saved —
@@ -3605,19 +3785,7 @@ export function registerAgentConnectorRoutes(
             projectId,
             detail: { model: hit.model, cachedAt: hit.createdAt, mode: body.mode },
           });
-          const cachedDispatch = {
-            servedAgentId: agent.id,
-            model: hit.model,
-            outputText: hit.outputText,
-            stopReason: "cached",
-            refusal: false,
-            usage: { inputTokens: hit.inputTokens, outputTokens: hit.outputTokens },
-            costUsd: 0,
-            measuredCostSavedUsd: null,
-            credentialSource: "none" as const,
-            projectBudgetAlerted: false,
-            cached: true as const,
-          };
+          const cachedDispatch = { ...governed.result, cached: true as const };
           await db.insert(auditLog).values({
             userId,
             objectType: "agent",
@@ -3643,7 +3811,7 @@ export function registerAgentConnectorRoutes(
               reply.raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
             // A hit need not simulate token-by-token streaming: emit the cached
             // text as one delta, then the final result event.
-            send("delta", { text: hit.outputText });
+            send("delta", { text: governed.result.outputText });
             send("result", { decision, cached: true, dispatch: cachedDispatch });
             reply.raw.end();
             return reply;
@@ -4195,10 +4363,25 @@ export function registerAgentConnectorRoutes(
       // otherwise a no-op (byte-identical to the pre-caching path). No
       // cost_events on a miss — nothing was saved yet.
       const storeSemanticCacheIf = async (outcome: DispatchOutcome) => {
-        if (!wantCache || !cacheKey || !outcome.ok) return;
+        if (!wantCache || !cacheKey || !cacheRequest || !outcome.ok) return;
         const r = outcome.result;
         // never store a refusal, an empty output, or a PII-withheld marker
         if (r.refusal || !r.outputText || r.pii?.withheld) return;
+        // AER-041 / ADR-0146 — store only an answer the key can honestly
+        // describe. The key commits to the REQUESTED agent's configuration;
+        // an answer routing served from a cheaper agent, or a fallback hop
+        // produced, came from a different one, and a later hit would present
+        // it under the wrong identity (and run the hit's governance against
+        // the wrong agent). Those dispatches simply do not populate the cache.
+        if (r.servedAgentId !== agent.id || r.fallback) return;
+        // And the configuration must not have changed WHILE this dispatch ran:
+        // re-derive the key against what serves now. A model, prompt or
+        // version change mid-flight would otherwise file an old-config answer
+        // under the new configuration's key.
+        const configNow = await loadNativeCacheConfig(db, { agentId: agent.id, userId });
+        if (!configNow || semanticCacheNativeKey(cacheRequest, configNow).norm !== cacheKey.norm) {
+          return;
+        }
         // ADR-0119: shared with the compat/IDE path, so the two cannot drift.
         await storeSemanticCache(db, {
           userId,
@@ -4501,9 +4684,22 @@ export function registerAgentConnectorRoutes(
     // passphrase?}). Validate the shape HERE, at connection-create time, so a
     // malformed credential 400s with an actionable message instead of failing
     // opaquely at first invoke. Single-field kinds are untouched.
-    if (connector.providerKind === "snowflake") {
+    //
+    // ADR-0167 (SEC-01): teams and outlook join snowflake. Their JSON names a
+    // HOST (`loginBaseUrl`, and snowflake's `account` becomes one), and the
+    // tightened schemas refuse a value that could choose more than a host —
+    // credentials, a query, a fragment, a `/` in an account. Which hosts are
+    // REACHABLE is decided at invoke time by the egress guard, exactly as for
+    // a typed baseUrl; this is the shape, not the policy.
+    const shapeParsers: Record<string, (token: string) => unknown> = {
+      snowflake: parseSnowflakeCredential,
+      teams: parseTeamsCredential,
+      outlook: parseOutlookCredential,
+    };
+    const parseShape = connector.providerKind ? shapeParsers[connector.providerKind] : undefined;
+    if (parseShape) {
       try {
-        parseSnowflakeCredential(body.token);
+        parseShape(body.token);
       } catch (err) {
         if (err instanceof ConnectorProviderError) {
           return reply
@@ -4665,6 +4861,16 @@ export function registerAgentConnectorRoutes(
     const userId = req.authCtx.userId;
     if (!userId) return reply.status(403).send({ error: "bootstrap_cannot_invoke" });
 
+    const [admissionGeneration] = await db.select().from(governancePolicyEpoch);
+    const generationCurrent = async () => {
+      const [current] = await db.select().from(governancePolicyEpoch);
+      return !!admissionGeneration && current?.epoch === admissionGeneration.epoch;
+    };
+    let externalRequests = 0;
+    const beforeConnectorSend = async () => {
+      if (!await generationCurrent()) throw new ConnectorPolicyChangedError();
+      externalRequests++;
+    };
     const [connector] = await db.select().from(connectors).where(eq(connectors.id, connectorId));
     if (!connector) return reply.status(404).send({ error: "unknown_connector" });
 
@@ -4695,6 +4901,23 @@ export function registerAgentConnectorRoutes(
     // working must never be scored as a defence failing.
     // ─────────────────────────────────────────────────────────────────────
     const projectId = body.projectId ?? null;
+    const piiMode = await projectPiiMode(db, projectId);
+    const piiIntl = await piiInternationalCategories(db);
+    const originalInvocation = { operation: body.operation, object: body.object ?? null, payload: body.payload ?? null };
+    let effectiveInvocation = originalInvocation;
+    let preparedPii: ReturnType<typeof prepareConnectorPiiAction>["prepared"] | null = null;
+    let preparationFailed = false;
+    if (piiMode === "redact") {
+      try {
+        const prepared = prepareConnectorPiiAction(projectId, originalInvocation, piiIntl);
+        preparedPii = prepared.prepared;
+        effectiveInvocation = prepared.invocation as typeof originalInvocation;
+      } catch { preparationFailed = true; }
+    }
+    let policyChanged = false;
+    const policyChangedBody = () => ({ error: "connector_policy_changed", detail: "Connector policy changed; result withheld. Review external effects before retrying.",
+      externalRequests, mayHaveExecuted: externalRequests > 0, retrySafe: externalRequests === 0,
+      costUsd: sink.costUsd ?? null, withheld: true });
     /** filled at the ONE place the ledger row is written, so the span
      * REFERENCES that row rather than recomputing its figures (rule 1). */
     const sink: { usageEventId?: string | null; costUsd?: number | null } = {};
@@ -4705,6 +4928,13 @@ export function registerAgentConnectorRoutes(
       if (projectId) {
         const attribution = await assertProjectAttribution(db, projectId, userId, req.authCtx.isAdmin);
         if (!attribution.ok) return out.status(attribution.status).send({ error: attribution.error });
+      }
+
+      if (preparationFailed) {
+        await db.insert(auditLog).values({ userId, objectType: "connector", objectId: connectorId,
+          detail: { phase: "input", operation: body.operation, projectId }, effect: "deny",
+          ruleId: "pii-transform-refused", ruleChain: [], reason: "Connector payload or routing identity cannot be safely transformed" });
+        return out.status(403).send({ error: "pii_transform_refused", detail: "Connector payload or routing identity cannot be safely transformed." });
       }
 
       const [grants, roleConnectorGrantsForUser, connectorRevocationsForUser] = await Promise.all([
@@ -4730,30 +4960,73 @@ export function registerAgentConnectorRoutes(
         connectorRevocations: connectorRevocationsForUser,
       });
 
-      // THE ONE AUDIT ROW — unchanged, written for every decision (allow or deny).
-      await db.insert(auditLog).values({
-        userId,
-        objectType: "connector",
-        objectId: connectorId,
-        // ADR-0058 SCOPE, same reason as the MCP tool path: a pack's
-        // `audit_decisions` collector reaches a decision only through
-        // `detail->>'projectId'`. The PII-block rows on this same path already
-        // carried it; the DECISION row did not, so a project-scoped count of
-        // connector refusals was structurally zero. Null when unattributed.
-        detail: {
-          operation: body.operation,
-          ...(body.object ? { object: body.object } : {}),
-          projectId: projectId ?? null,
-        },
-        effect: decision.effect,
-        ruleId: decision.ruleId,
-        ruleChain: decision.ruleChain,
-        reason: decision.reason,
+      // Order evidence containing routing identity against policy activation.
+      const audited = await db.transaction(async (tx) => {
+        const [current] = await tx.select().from(governancePolicyEpoch).for("share");
+        if (!admissionGeneration || current?.epoch !== admissionGeneration.epoch) return false;
+        await tx.insert(auditLog).values({
+          userId,
+          objectType: "connector",
+          objectId: connectorId,
+          // ADR-0058 SCOPE, same reason as the MCP tool path: a pack's
+          // `audit_decisions` collector reaches a decision only through
+          // `detail->>'projectId'`. The PII-block rows on this same path already
+          // carried it; the DECISION row did not, so a project-scoped count of
+          // connector refusals was structurally zero. Null when unattributed.
+          detail: {
+            operation: body.operation,
+            ...(body.object ? { object: body.object } : {}),
+            projectId: projectId ?? null,
+          },
+          effect: decision.effect,
+          ruleId: decision.ruleId,
+          ruleChain: decision.ruleChain,
+          reason: decision.reason,
+        });
+        return true;
       });
+      if (!audited) { policyChanged = true; return out.status(409).send(policyChangedBody()); }
 
       // A DENIED call bills nothing and executes nothing (mirror the model path).
       if (decision.effect !== "allow") {
         return out.status(403).send({ decision });
+      }
+
+      // PILLAR 5 enforcement, connector path (F02 / ADR-0103 amendment
+      // 2026-10-03). An attributed invoke is gated on the project's MEASURED
+      // budget here — after the categorical entitlement decision (no budget
+      // makes a forbidden call permissible), and strictly BEFORE the credential
+      // is read, before PII/guardrail work, before the egress guard, and before
+      // the provider is ever contacted — so a budget-blocked call executes
+      // nothing, consumes nothing and bills nothing. The gate itself is REUSED
+      // from the model and MCP paths, not reimplemented: the compliance
+      // ceiling, sanctioned overage, budgetHardBlockPct, warn_only vs block
+      // with strictest-wins, and the escalation into the one approvals queue
+      // all carry over unchanged. Unattributed calls (projectId null) pass
+      // straight through and meter into the disclosed Unattributed bucket.
+      const projectBudget = await preDispatchProjectGate(db, projectId, userId);
+      if (!projectBudget.ok) {
+        await db.insert(auditLog).values({
+          userId,
+          objectType: "connector",
+          objectId: connectorId,
+          detail: {
+            phase: "project-budget",
+            projectId,
+            operation: body.operation,
+            ...(body.object ? { object: body.object } : {}),
+            pricePerCallUsd: connector.pricePerCallUsd ?? null,
+          },
+          effect: "deny",
+          ruleId: "project-budget-cap",
+          ruleChain: [],
+          reason: `connector '${connector.name}' blocked: ${projectBudget.error} — ${projectBudget.detail ?? "project budget exhausted"}`,
+        });
+        return out.status(projectBudget.status).send({
+          decision,
+          error: projectBudget.error,
+          ...(projectBudget.detail ? { detail: projectBudget.detail } : {}),
+        });
       }
 
       // EXECUTION runs strictly INSIDE the allow branch, after the audit insert.
@@ -4802,11 +5075,8 @@ export function registerAgentConnectorRoutes(
       // `projectId ? … : null` ternary here was exactly the one-keystroke
       // attribution dodge the floor exists to close. The INPUT check runs BEFORE
       // provider.invoke, so a block executes nothing and bills nothing.
-      const piiMode: PiiMode | null = await projectPiiMode(db, projectId ?? null);
-      // ADR-0117: resolved once, shared by the input and output gates below.
-      const piiIntl = await piiInternationalCategories(db);
-      let inputHits: PiiHit[] = [];
-      if (piiMode) {
+      let inputHits: PiiHit[] = [...(preparedPii?.hits ?? [])];
+      if (piiMode && piiMode !== "redact") {
         const chk = enforcePII(
           piiMode,
           { input: JSON.stringify({ object: body.object ?? null, payload: body.payload ?? null }) },
@@ -4880,6 +5150,14 @@ export function registerAgentConnectorRoutes(
             },
           });
         }
+        if (preparedPii) {
+          const effectiveCheck = runGuardrails(connectorGuardrails, "input", JSON.stringify(effectiveInvocation));
+          if (effectiveCheck.action === "block") {
+            await recordGuardrailDecision(db, { userId, objectType: "connector", objectId: connectorId, projectId,
+              evaluation: effectiveCheck, outcome: "blocked", detail: { phase: "effective_input", operation: body.operation } });
+            return out.status(403).send({ decision, error: "guardrail_blocked", detail: "Effective connector input blocked by guardrail." });
+          }
+        }
       }
 
       // ADR-0034 amendment #2 — THE CONNECTOR `baseUrl`, BEHIND THE EGRESS GUARD.
@@ -4911,6 +5189,7 @@ export function registerAgentConnectorRoutes(
         try {
           guarded = await guardConnectionCall(db, {
             surface: "connector",
+            deps: { beforeSend: beforeConnectorSend },
             baseUrl,
             userId,
             objectId: connectorId,
@@ -4936,12 +5215,64 @@ export function registerAgentConnectorRoutes(
           throw err;
         }
         connectorFetch = guarded.fetchImpl;
+      } else if (CREDENTIAL_HOST_CONNECTOR_KINDS.has(connector.providerKind)) {
+        // ADR-0167 (SEC-01) — a destination NAMED BY THE CREDENTIAL. With no
+        // baseUrl these three kinds used to fall into the compiled-default
+        // branch below, which (under the default posture) checks nothing and
+        // hands the adapter the GLOBAL fetch — so an admin-typed `loginBaseUrl`
+        // or snowflake `account` reached the network with no allow-list, no
+        // private-range/IMDS check, no DNS pin, redirects followed and no audit
+        // row, and the upstream body came back to the non-admin invoker. The
+        // typed host is now adjudicated like a typed baseUrl, the vendor's
+        // compiled hosts follow the posture exactly as below, and the adapter
+        // gets the guarded fetch — which re-checks every URL it is handed.
+        let hosts: { typed: string | null; compiled: string[] };
+        try {
+          hosts = connectorCredentialHosts(connector.providerKind, token);
+        } catch (err) {
+          if (err instanceof ConnectorProviderError) {
+            return out
+              .status(400)
+              .send({ decision, error: "invalid_connector_credential", detail: err.message });
+          }
+          throw err;
+        }
+        const guarded = await guardCredentialDerivedCall(db, {
+          surface: "connector",
+          kind: connector.providerKind,
+          typedBaseUrl: hosts.typed,
+          compiledBaseUrls: hosts.compiled,
+          userId,
+          objectId: connectorId,
+          label: `connector '${connector.name}' (${connector.providerKind})`,
+          detail: {
+            connectorKind: connector.providerKind,
+            operation: body.operation,
+            source: "connector_credential",
+            ...(projectId ? { projectId } : {}),
+          },
+          deps: { beforeSend: beforeConnectorSend },
+        });
+        if (!guarded.ok) {
+          const alsoReaches =
+            connector.providerKind === "snowflake"
+              ? ""
+              : " (this kind reaches the Microsoft Entra login host as well as the service host — a typed login host needs an Egress Allow Hosts entry)";
+          // `guarded.reason` already names the connector (the label above)
+          return out.status(403).send({
+            decision,
+            error: "egress_blocked",
+            code: guarded.code,
+            detail: `${guarded.reason}${alsoReaches} (an admin adds permitted destinations under Egress Allow Hosts)`,
+          });
+        }
+        connectorFetch = guarded.fetchImpl;
       } else {
-        // ADR-0062 — the compiled connector endpoint. `snowflake` resolves to
-        // "not statically knowable" (its default is derived from the decrypted
-        // credential) and is therefore REFUSED under a strict posture rather
-        // than assumed safe; every kind that cannot exist without an explicit
-        // baseUrl resolves to "nothing to adjudicate".
+        // ADR-0062 — the compiled connector endpoint. Every kind that cannot
+        // exist without an explicit baseUrl resolves to "nothing to
+        // adjudicate"; a kind whose default this registry cannot name is
+        // REFUSED under a strict posture rather than assumed safe. (The
+        // credential-derived kinds take the branch above, ADR-0167.)
         const { posture, allowList } = await loadCompiledEgressContext(db);
         const compiled = decideCompiledDefault({
           posture,
@@ -4977,16 +5308,21 @@ export function registerAgentConnectorRoutes(
       // surfaces as 502 — the same discipline as a failed model dispatch.
       let result;
       try {
+        if (!await generationCurrent()) throw new ConnectorPolicyChangedError();
+        const admittedFetch: typeof fetch = connectorFetch ?? (async (input, init) => {
+          await beforeConnectorSend();
+          return fetch(input, init);
+        });
         const provider = resolveConnectorProvider(
           { kind: connector.providerKind, baseUrl, token },
-          connectorFetch as unknown as Parameters<typeof resolveConnectorProvider>[1],
+          admittedFetch as unknown as Parameters<typeof resolveConnectorProvider>[1],
         );
-        result = await provider.invoke({
-          operation: body.operation,
-          object: body.object ?? null,
-          payload: body.payload ?? null,
-        });
+        result = await provider.invoke(effectiveInvocation);
       } catch (err) {
+        if (err instanceof ConnectorPolicyChangedError || !await generationCurrent()) {
+          policyChanged = true;
+          return out.status(409).send(policyChangedBody());
+        }
         // ADR-0034 amendment #2 — a refusal raised by the GUARDED FETCH itself
         // (the allow-list withdrawn between the pre-check and the request, or an
         // approved endpoint answering 302 -> IMDS) is a GOVERNANCE decision, not
@@ -4996,6 +5332,8 @@ export function registerAgentConnectorRoutes(
         // wrapped it in, exactly as the model paths do.
         const refusal = egressRefusal(err);
         if (refusal) {
+          const reason = piiMode === "redact" ? "Connector destination refused by egress policy; upstream details withheld"
+            : `connector '${connector.name}': ${refusal}`;
           await db.insert(auditLog).values({
             userId,
             objectType: "connector",
@@ -5010,13 +5348,17 @@ export function registerAgentConnectorRoutes(
             effect: "deny",
             ruleId: "connector-egress-blocked",
             ruleChain: [],
-            reason: `connector '${connector.name}': ${refusal}`,
+            reason,
           });
           return out.status(403).send({
             decision,
             error: "egress_blocked",
-            detail: `connector '${connector.name}': ${refusal}`,
+            detail: reason,
           });
+        }
+        if (piiMode === "redact") {
+          return out.status(502).send({ error: "connector_invoke_failed", detail: "Connector call failed; upstream details withheld.",
+            externalRequests, mayHaveExecuted: externalRequests > 0, retrySafe: externalRequests === 0 });
         }
         if (err instanceof ConnectorProviderError) {
           return out
@@ -5026,140 +5368,169 @@ export function registerAgentConnectorRoutes(
         throw err;
       }
 
-      // §8.4 OUTPUT check: the call ran, so a block is BILL-AND-WITHHOLD — the
-      // usage row records honest spend, but result.body is replaced by the
-      // withheld marker and the response is denial-shaped.
-      let outputHits: PiiHit[] = [];
-      let respBody = result.body;
-      let withheld = false;
-      if (piiMode) {
-        const chk = enforcePII(piiMode, { output: JSON.stringify(result.body ?? null) }, piiIntl);
-        outputHits = chk.hits;
-        if (chk.action === "block") {
+      return db.transaction(async (evidenceDb) => {
+        const [outputGeneration] = await evidenceDb.select().from(governancePolicyEpoch).for("share");
+        // §8.4 OUTPUT check: the call ran, so a block is BILL-AND-WITHHOLD — the
+        // usage row records honest spend, but result.body is replaced by the
+        // withheld marker and the response is denial-shaped.
+        let outputHits: PiiHit[] = [];
+        let respBody = result.body;
+        let withheld = false;
+        let transformRefused = false;
+        policyChanged = !admissionGeneration || outputGeneration?.epoch !== admissionGeneration.epoch;
+        if (policyChanged) {
           withheld = true;
-          respBody = piiWithheldMarker(chk.hits);
+          respBody = "[WITHHELD: connector policy changed]";
+        } else if (piiMode === "redact") {
+          try {
+            const transformed = redactPiiPayload(result.body ?? null, piiIntl);
+            respBody = transformed.value;
+            outputHits = transformed.hits;
+          } catch {
+            transformRefused = withheld = true;
+            respBody = "[WITHHELD: connector output cannot be safely transformed]";
+          }
+        } else if (piiMode) {
+          const chk = enforcePII(piiMode, { output: JSON.stringify(result.body ?? null) }, piiIntl);
+          outputHits = chk.hits;
+          if (chk.action === "block") {
+            withheld = true;
+            respBody = piiWithheldMarker(chk.hits);
+          }
         }
-      }
-      const anyHits = inputHits.length > 0 || outputHits.length > 0;
-      const piiAction: "block" | "warn" | "log" = withheld
-        ? "block"
-        : piiMode === "warn"
-          ? "warn"
-          : "log";
-      const pii =
-        piiMode && anyHits
-          ? { mode: piiMode, action: piiAction, inputHits, outputHits, withheld }
+        const anyHits = inputHits.length > 0 || outputHits.length > 0;
+        const piiAction: "block" | "warn" | "log" | "redact" = withheld
+          ? "block"
+          : piiMode === "redact" ? "redact"
+          : piiMode === "warn"
+            ? "warn"
+            : "log";
+        const pii =
+          piiMode && (anyHits || transformRefused)
+            ? { mode: piiMode, action: piiAction, inputHits, outputHits, withheld }
+            : null;
+
+        // ADR-0042 OUTPUT phase, connector path — bill-and-withhold, same as PII.
+        let cgOutput: ReturnType<typeof runGuardrails> | null = null;
+        let cgWithheld = false;
+        if (!policyChanged && !transformRefused && connectorGuardrails.active) {
+          cgOutput = runGuardrails(connectorGuardrails, "output", JSON.stringify(result.body ?? null));
+          if (piiMode === "redact") {
+            const effectiveCheck = runGuardrails(connectorGuardrails, "output", JSON.stringify(respBody));
+            const rank = { allow: 0, log: 1, warn: 2, block: 3 };
+            if (rank[effectiveCheck.action] > rank[cgOutput.action]) cgOutput = effectiveCheck;
+          }
+          if (cgOutput.action === "block") {
+            cgWithheld = true;
+            respBody = guardrailWithheldMarker(cgOutput.blocking);
+          }
+        }
+        const cgFindings = [...(cgInput?.findings ?? []), ...(cgOutput?.findings ?? [])];
+        const connectorGuardrailView: DispatchGuardrails | null = cgFindings.length
+          ? {
+              action: cgWithheld ? "block" : cgFindings.some((f) => f.action === "warn") ? "warn" : "log",
+              phase: cgWithheld ? "output" : cgInput?.findings.length ? "input" : "output",
+              findings: flattenFindings(cgFindings),
+              withheld: cgWithheld,
+            }
           : null;
 
-      // ADR-0042 OUTPUT phase, connector path — bill-and-withhold, same as PII.
-      let cgOutput: ReturnType<typeof runGuardrails> | null = null;
-      let cgWithheld = false;
-      if (connectorGuardrails.active) {
-        cgOutput = runGuardrails(connectorGuardrails, "output", JSON.stringify(result.body ?? null));
-        if (cgOutput.action === "block") {
-          cgWithheld = true;
-          respBody = guardrailWithheldMarker(cgOutput.blocking);
-        }
-      }
-      const cgFindings = [...(cgInput?.findings ?? []), ...(cgOutput?.findings ?? [])];
-      const connectorGuardrailView: DispatchGuardrails | null = cgFindings.length
-        ? {
-            action: cgWithheld ? "block" : cgFindings.some((f) => f.action === "warn") ? "warn" : "log",
-            phase: cgWithheld ? "output" : cgInput?.findings.length ? "input" : "output",
-            findings: flattenFindings(cgFindings),
-            withheld: cgWithheld,
+        // pillar 5 actuals: an allowed, executed call bills the connector's flat
+        // list price. Unpriced → null, never an invented figure (agents' rule).
+        const costUsd = connector.pricePerCallUsd ?? null;
+        const [connectorUsageRow] = await evidenceDb.insert(usageEvents).values({
+          userId,
+          objectType: "connector",
+          connectorId,
+          operation: body.operation,
+          costUsd,
+          projectId,
+          detail: {
+            status: result.status,
+            ...(!policyChanged && body.object ? { object: body.object } : {}),
+            providerKind: connector.providerKind,
+            ...(policyChanged ? { withheld: true, reason: "policy_changed" } : {}),
+            ...(preparedPii ? { transformation: preparedPii.transformation, argumentsDigest: preparedPii.argumentsDigest,
+              originalArgumentsDigest: preparedPii.originalArgumentsDigest, effectiveArgumentsDigest: preparedPii.effectiveArgumentsDigest } : {}),
+            // §8.4 COUNTS ONLY — never the matched substrings
+            ...(pii ? { pii: { mode: pii.mode, action: pii.action, inputHits, outputHits } } : {}),
+            // ADR-0042 COUNTS ONLY, same contract
+            ...(connectorGuardrailView
+              ? {
+                  guardrails: {
+                    action: connectorGuardrailView.action,
+                    findings: connectorGuardrailView.findings,
+                    withheld: cgWithheld,
+                  },
+                }
+              : {}),
+          },
+        }).returning({ id: usageEvents.id });
+        // ADR-0070 — the span REFERENCES this row and copies its figure from it,
+        // in the same call that inserted it. Never a recomputed price.
+        sink.usageEventId = connectorUsageRow?.id ?? null;
+        sink.costUsd = costUsd;
+        if (cgOutput) {
+          const outcome = guardrailOutcome(cgOutput);
+          if (outcome) {
+            await recordGuardrailDecision(evidenceDb, {
+              userId,
+              objectType: "connector",
+              objectId: connectorId,
+              projectId,
+              evaluation: cgOutput,
+              outcome,
+              detail: { operation: body.operation, connectorKind: connector.providerKind },
+            });
           }
-        : null;
-
-      // pillar 5 actuals: an allowed, executed call bills the connector's flat
-      // list price. Unpriced → null, never an invented figure (agents' rule).
-      const costUsd = connector.pricePerCallUsd ?? null;
-      const [connectorUsageRow] = await db.insert(usageEvents).values({
-        userId,
-        objectType: "connector",
-        connectorId,
-        operation: body.operation,
-        costUsd,
-        projectId,
-        detail: {
-          status: result.status,
-          ...(body.object ? { object: body.object } : {}),
-          providerKind: connector.providerKind,
-          // §8.4 COUNTS ONLY — never the matched substrings
-          ...(pii ? { pii: { mode: pii.mode, action: pii.action, inputHits, outputHits } } : {}),
-          // ADR-0042 COUNTS ONLY, same contract
-          ...(connectorGuardrailView
-            ? {
-                guardrails: {
-                  action: connectorGuardrailView.action,
-                  findings: connectorGuardrailView.findings,
-                  withheld: cgWithheld,
-                },
-              }
-            : {}),
-        },
-      }).returning({ id: usageEvents.id });
-      // ADR-0070 — the span REFERENCES this row and copies its figure from it,
-      // in the same call that inserted it. Never a recomputed price.
-      sink.usageEventId = connectorUsageRow?.id ?? null;
-      sink.costUsd = costUsd;
-      if (cgOutput) {
-        const outcome = guardrailOutcome(cgOutput);
-        if (outcome) {
-          await recordGuardrailDecision(db, {
+        }
+        // §8.4 audit rows for a PII event (never for a clean payload): an OUTPUT
+        // block is a deny; a warn is an allow with 'pii-warned'; log is silent
+        // (counts already recorded in the usage detail above).
+        if (withheld) {
+          await evidenceDb.insert(auditLog).values({
             userId,
             objectType: "connector",
             objectId: connectorId,
-            projectId,
-            evaluation: cgOutput,
-            outcome,
-            detail: { operation: body.operation, connectorKind: connector.providerKind },
+            detail: {
+              phase: "pii",
+              pii: { mode: piiMode, action: "block", phase: "output", inputHits, outputHits },
+              operation: body.operation,
+              ...(projectId ? { projectId } : {}),
+            },
+            effect: "deny",
+            ruleId: policyChanged ? "connector-policy-changed" : transformRefused ? "pii-transform-refused" : "pii-blocked",
+            ruleChain: [],
+            reason: policyChanged ? "Connector policy changed; billed and withheld" : transformRefused
+              ? "Connector output transformation refused; billed and withheld"
+              : `output contains PII: ${piiCategoryList(outputHits)} — billed and withheld`,
+          });
+        } else if (piiMode === "warn" && anyHits) {
+          await evidenceDb.insert(auditLog).values({
+            userId,
+            objectType: "connector",
+            objectId: connectorId,
+            detail: {
+              phase: "pii",
+              pii: { mode: piiMode, action: "warn", inputHits, outputHits },
+              operation: body.operation,
+              ...(projectId ? { projectId } : {}),
+            },
+            effect: "allow",
+            ruleId: "pii-warned",
+            ruleChain: [],
+            reason: `PII detected (${piiCategoryList([...inputHits, ...outputHits])}) — warned, invoke proceeded`,
           });
         }
-      }
-      // §8.4 audit rows for a PII event (never for a clean payload): an OUTPUT
-      // block is a deny; a warn is an allow with 'pii-warned'; log is silent
-      // (counts already recorded in the usage detail above).
-      if (withheld) {
-        await db.insert(auditLog).values({
-          userId,
-          objectType: "connector",
-          objectId: connectorId,
-          detail: {
-            phase: "pii",
-            pii: { mode: piiMode, action: "block", phase: "output", inputHits, outputHits },
-            operation: body.operation,
-            ...(projectId ? { projectId } : {}),
-          },
-          effect: "deny",
-          ruleId: "pii-blocked",
-          ruleChain: [],
-          reason: `output contains PII: ${piiCategoryList(outputHits)} — billed and withheld`,
-        });
-      } else if (piiMode === "warn" && anyHits) {
-        await db.insert(auditLog).values({
-          userId,
-          objectType: "connector",
-          objectId: connectorId,
-          detail: {
-            phase: "pii",
-            pii: { mode: piiMode, action: "warn", inputHits, outputHits },
-            operation: body.operation,
-            ...(projectId ? { projectId } : {}),
-          },
-          effect: "allow",
-          ruleId: "pii-warned",
-          ruleChain: [],
-          reason: `PII detected (${piiCategoryList([...inputHits, ...outputHits])}) — warned, invoke proceeded`,
-        });
-      }
 
-      return out.send({
-        decision,
-        result: { status: result.status, body: respBody },
-        costUsd,
-        ...(pii ? { pii } : {}),
-        ...(connectorGuardrailView ? { guardrails: connectorGuardrailView } : {}),
+        if (policyChanged) return out.status(409).send(policyChangedBody());
+        return out.send({
+          decision,
+          result: { status: result.status, body: respBody },
+          costUsd,
+          ...(pii ? { pii } : {}),
+          ...(connectorGuardrailView ? { guardrails: connectorGuardrailView } : {}),
+        });
       });
     };
 
@@ -5184,59 +5555,76 @@ export function registerAgentConnectorRoutes(
         kind: "connector",
         name: `${connector.name}.${body.operation}`,
         status: "error",
-        statusReason: (err as Error)?.message ?? "connector invoke threw",
+        statusReason: "Connector call failed; details withheld",
         startedAt: spanStartedAt,
         connectorId,
         attributes: { operation: body.operation, ...(projectId ? { projectId } : {}) },
       });
       await finishTrace(db, traceCtx, "error", spanStartedAt);
-      throw err;
+      if (piiMode === "redact") return reply.status(502).send({ error: "connector_invoke_failed", detail: "Connector call failed; details withheld." });
+      throw new Error("Connector call failed; details withheld");
     }
 
-    const errCode =
-      typeof outcome.body["error"] === "string" ? (outcome.body["error"] as string) : null;
-    const outDetail =
-      typeof outcome.body["detail"] === "string" ? (outcome.body["detail"] as string) : null;
-    const outDecision = outcome.body["decision"] as
-      | { reason?: string; ruleId?: string }
-      | undefined;
-    const spanStatus: "ok" | "denied" | "error" =
-      outcome.status < 400 ? "ok" : outcome.status >= 500 ? "error" : "denied";
-    // A refusal ABOUT the input does not store the input — storing the very
-    // payload a block refused would defeat the block (ADR-0070 rule 3).
-    const inputRefused = errCode === "pii_blocked" || errCode === "guardrail_blocked";
-    const resultBody = (outcome.body["result"] as { body?: unknown } | undefined)?.body;
-    const withheld =
-      inputRefused ||
-      !!(outcome.body["pii"] as { withheld?: boolean } | undefined)?.withheld ||
-      !!(outcome.body["guardrails"] as { withheld?: boolean } | undefined)?.withheld;
-    await recordSpan(db, traceCtx, {
-      kind: "connector",
-      name: `${connector.name}.${body.operation}`,
-      status: spanStatus,
-      statusReason: spanStatus === "ok" ? null : (outDetail ?? outDecision?.reason ?? errCode),
-      startedAt: spanStartedAt,
-      connectorId,
-      // THE REFERENCE, and the figure copied from it in the same call.
-      usageEventId: sink.usageEventId ?? null,
-      costUsd: sink.costUsd ?? null,
-      inputText: inputRefused
-        ? outDetail
-        : JSON.stringify({ object: body.object ?? null, payload: body.payload ?? null }),
-      // ALREADY-ADJUDICATED text: the withheld marker is already substituted.
-      outputText: resultBody === undefined ? null : JSON.stringify(resultBody),
-      contentWithheld: withheld,
-      attributes: {
-        operation: body.operation,
-        httpStatus: outcome.status,
-        ...(body.object ? { object: body.object } : {}),
-        ...(connector.providerKind ? { providerKind: connector.providerKind } : {}),
-        ...(projectId ? { projectId } : {}),
-        ...(errCode ? { error: errCode } : {}),
-        ...(outDecision?.ruleId ? { ruleId: outDecision.ruleId } : {}),
-      },
+    await db.transaction(async (tx) => {
+      // No network is inside this lock. Policy activation and content persistence
+      // are ordered so a tightened policy cannot race a stale trace write.
+      const [traceGeneration] = await tx.select().from(governancePolicyEpoch).for("share");
+      if (!admissionGeneration || traceGeneration?.epoch !== admissionGeneration.epoch) {
+        policyChanged = true;
+        outcome = { status: 409, body: policyChangedBody() };
+      }
+      const errCode =
+        typeof outcome.body["error"] === "string" ? (outcome.body["error"] as string) : null;
+      const outDetail =
+        typeof outcome.body["detail"] === "string" ? (outcome.body["detail"] as string) : null;
+      const outDecision = outcome.body["decision"] as
+        | { reason?: string; ruleId?: string }
+        | undefined;
+      const spanStatus: "ok" | "denied" | "error" =
+        outcome.status < 400 ? "ok" : outcome.status >= 500 ? "error" : "denied";
+      // A refusal ABOUT the input does not store the input — storing the very
+      // payload a block refused would defeat the block (ADR-0070 rule 3).
+      const inputRefused = errCode === "pii_blocked" || errCode === "guardrail_blocked" || errCode === "pii_transform_refused";
+      const resultBody = (outcome.body["result"] as { body?: unknown } | undefined)?.body;
+      const withheld =
+        inputRefused || policyChanged ||
+        !!(outcome.body["pii"] as { withheld?: boolean } | undefined)?.withheld ||
+        !!(outcome.body["guardrails"] as { withheld?: boolean } | undefined)?.withheld;
+      await recordSpan(tx, traceCtx, {
+        kind: "connector",
+        name: `${connector.name}.${body.operation}`,
+        status: spanStatus,
+        statusReason: spanStatus === "ok" ? null : (outDetail ?? outDecision?.reason ?? errCode),
+        startedAt: spanStartedAt,
+        connectorId,
+        // THE REFERENCE, and the figure copied from it in the same call.
+        usageEventId: sink.usageEventId ?? null,
+        costUsd: sink.costUsd ?? null,
+        inputText: policyChanged ? null : inputRefused
+          ? outDetail
+          : JSON.stringify({ object: effectiveInvocation.object, payload: effectiveInvocation.payload }),
+        // ALREADY-ADJUDICATED text: the withheld marker is already substituted.
+        outputText: resultBody === undefined ? null : JSON.stringify(resultBody),
+        contentWithheld: withheld,
+        attributes: {
+          operation: body.operation,
+          httpStatus: outcome.status,
+          ...(!policyChanged && !preparationFailed && body.object ? { object: body.object } : {}),
+          ...(connector.providerKind ? { providerKind: connector.providerKind } : {}),
+          ...(projectId ? { projectId } : {}),
+          ...(errCode ? { error: errCode } : {}),
+          ...(outDecision?.ruleId ? { ruleId: outDecision.ruleId } : {}),
+        },
+      });
+      await finishTrace(tx, traceCtx, spanStatus, spanStartedAt);
     });
-    await finishTrace(db, traceCtx, spanStatus, spanStartedAt);
+    if (!await generationCurrent()) {
+      await recordSpan(db, traceCtx, { kind: "connector", name: `${connector.name}.response-policy`,
+        status: "denied", statusReason: "Connector policy changed before response release", startedAt: spanStartedAt,
+        connectorId, contentWithheld: true, attributes: { operation: body.operation, error: "connector_policy_changed" } });
+      await finishTrace(db, traceCtx, "denied", spanStartedAt);
+      return reply.status(409).send(policyChangedBody());
+    }
     return reply.status(outcome.status).send(outcome.body);
   });
 }

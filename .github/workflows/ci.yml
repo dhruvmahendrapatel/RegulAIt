@@ -28,15 +28,19 @@ name: CI
 #  5. TIGHT `timeout-minutes`. The expensive failure mode is not a slow job, it
 #     is a HUNG one billing its full cap; 25 -> 20/12 caps that blast radius.
 #
-# ── Monthly arithmetic (MEASURED 2026-08-01, run 30700151398) ────────────────
+# ── Monthly arithmetic (RE-MEASURED 2026-10-02, runs 37050080219 / 37045578961 /
+#    37042881890; the 2026-08-01 figures below it were 2.5x stale — CI-03) ───
 # Billing rounds each job UP to the whole minute, so bill the rounded figures:
-#     build-and-test  4m23s -> 5 min
-#     docker-build       7s -> 1 min   (self-skipped; a real build is ~5 min)
-#     PR push                = 6 min
-#     Weekly (image built unconditionally)  ~10 min x 4  = ~40 min
-#     => (2,000 - 40) / 6 ~= 325 PR pushes a month before the allowance is gone.
+#     build-and-test  11m31s–14m28s -> 13–15 min  (`pnpm -r test` alone ~11.5 min
+#                                     for 226 files / 3,175 tests; +~30 s for MinIO)
+#     docker-build     1m07s -> 2 min  (self-skipped; a real build is ~5 min)
+#     PR push                 ~ 15–17 min
+#     Weekly (image built unconditionally)  ~20 min x 4  = ~80 min
+#     => (2,000 - 80) / 16 ~= 120 PR pushes a month before the allowance is gone.
+#   (2026-08-01, run 30700151398: build-and-test 4m23s, PR push 6 min, 325 pushes.)
 # Re-measure if the suite grows materially; these are real numbers, not guesses,
-# and they should stay that way.
+# and they should stay that way. The next cheap lever is `vitest --shard=1/2`
+# across two jobs with their own databases (halves wall clock, same billed sum).
 # If that ceiling is ever actually hit, the next lever is narrowing
 # `pull_request` to `types: [ready_for_review]` so draft iterations stop
 # billing — NOT taken now, because this repo's agents open drafts and a draft
@@ -67,8 +71,10 @@ jobs:
   build-and-test:
     runs-on: ubuntu-latest
     # Not a performance target — a blast-radius cap. A hung job bills its full
-    # timeout, so this is the most CI minutes any single run can waste.
-    timeout-minutes: 20
+    # timeout, so this is the most CI minutes any single run can waste. A normal
+    # run is ~13 min (see the arithmetic above); 20 left ~7 min of headroom and
+    # a slow runner day turned green PRs red for timing (CI-03).
+    timeout-minutes: 30
 
     services:
       postgres:
@@ -95,9 +101,45 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      # CI-01 — the ADR-0060 "proof by attack" tests need a REAL Object-Lock
+      # bucket. They are `describe.skipIf(!minioReachable)`, and with no MinIO
+      # here they had skipped on every CI run since they were written: the
+      # tamper-resistance claim shipped green on nine tests that never ran.
+      # The same dev credentials as docker-compose.yml; ~30 s of runner time.
+      #
+      # WHY THIS IMAGE (2026-10-03): MinIO archived its community edition and
+      # then removed `minio/minio` and `minio/mc` from Docker Hub (September
+      # 2026); anonymous pulls of the historical releases from quay.io started
+      # failing on 2026-10-02 as well. `bitnamilegacy/minio` is the frozen
+      # Bitnami build of the last community release, still served by Docker
+      # Hub (manifest verified the day this was written), bundling the `mc`
+      # client. Its entrypoint runs `minio server` by itself, which is what a
+      # GitHub service needs — a service cannot pass a command. Pinned to the
+      # exact tag because the line is unmaintained: nothing newer will ever
+      # appear under it, so a pin cannot rot, only protect.
+      # Same image and tag as docker-compose.yml — keep them together.
+      minio:
+        image: bitnamilegacy/minio:2025.7.23-debian-12-r5
+        env:
+          MINIO_ROOT_USER: regulait
+          MINIO_ROOT_PASSWORD: regulait-dev-minio
+        ports:
+          - 9000:9000
+        # No curl in this image; `mc ready` is MinIO's own readiness probe and
+        # the MC_HOST_<alias> form needs no written config (HOME is / here).
+        options: >-
+          --health-cmd "MC_CONFIG_DIR=/tmp/.mc MC_HOST_local=http://regulait:regulait-dev-minio@localhost:9000 mc ready local"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
 
     env:
       DATABASE_URL: postgres://regulait:regulait@localhost:5432/regulait_test
+      # CI-01: when this is SET and unreachable, audit-chain.test.ts throws
+      # rather than skips — a broken MinIO service fails the job out loud.
+      REGULAIT_TEST_S3_ENDPOINT: http://localhost:9000
+      REGULAIT_TEST_S3_ACCESS_KEY_ID: regulait
+      REGULAIT_TEST_S3_SECRET_ACCESS_KEY: regulait-dev-minio
 
     steps:
       - uses: actions/checkout@v4
@@ -158,6 +200,42 @@ jobs:
       # arithmetic at the top of this file does not move.
       - name: Pre-flight — duplicates that would block a unique constraint (ADR-0109/0110)
         run: node scripts/preflight-unique-constraints.mjs "$DATABASE_URL"
+
+      # B9c — THE AFFORDANCE CENSUS, AS A GATE.
+      #
+      # `scripts/preflight-ui-affordances.mjs` compares the gateway's DELETE
+      # routes against the controls the SPA actually renders, and the POST routes
+      # against the lists it shows. It was written during a UI-completeness sweep
+      # and deliberately NOT wired in, for the one honest reason: it exited 1. A
+      # check that fails on arrival is a check somebody disables.
+      #
+      # It exits 0 as of this commit — 53 of 53 DELETE routes reachable, no
+      # collection the UI lists without a way to add to it — so it becomes a
+      # gate now, which is the only way the property survives. The failure it
+      # prevents is specific and has happened repeatedly in this repo: an
+      # endpoint ships, the list that shows its objects ships, and the control
+      # that removes one does not. Access could be granted from the portal and
+      # only taken back with a database client; saved views existed for a year
+      # with no screen; a training backend announced "will refuse every job" and
+      # offered no way to configure one. Each was found by a human reading the
+      # product, which is not a mechanism.
+      #
+      # It is STATIC — it reads route registrations and TSX sources, needs no
+      # database and no build — so it sits in this job purely to avoid a second
+      # runner startup. Exit 1 means a gap, exit 2 means the script could not
+      # run; both fail the job. An intentional API-only route is declared in
+      # `DELIBERATELY_API_ONLY` inside the script, with a reason, rather than by
+      # loosening this step.
+      - name: Pre-flight — every governed object the UI lists can be added and removed from it (B9c)
+        run: node scripts/preflight-ui-affordances.mjs
+
+      # AgentCoordination.md stays a CURRENT-STATE file: one Live-status row per
+      # agent, one Status line per task, inboxes acked within 12h, a line
+      # budget. History lives in git. `pnpm checkin` is the only writer of a row.
+      - name: Coordination file lint (structure only — never agent staleness)
+        run: |
+          node scripts/coordination.mjs lint
+          pnpm exec vitest run scripts/coordination.test.mjs
 
   docker-build:
     # The quickstart path must never rot: prove the compose image still builds.

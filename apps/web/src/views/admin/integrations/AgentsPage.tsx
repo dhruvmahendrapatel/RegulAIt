@@ -4,8 +4,8 @@
  * agent grants, the per-user agent policy (default, cost ceiling, routing,
  * run budget), and the per-user entitlement view.
  */
-import { useState } from "react";
-import { Link } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { Link, useLocation } from "react-router-dom";
 import { api } from "../../../api/client";
 import type { AdminAgent, CustomModelProvider, UserAgentPolicyView } from "../../../api/adminTypes";
 import { fmtUsd } from "../../../api/format";
@@ -13,6 +13,7 @@ import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, Input, Select, Table, Textarea } from "../../../ui/kit";
 import {
   KV,
+  RemoveButton,
   agentOpts,
   optionEls,
   useAction,
@@ -31,6 +32,16 @@ export default function AgentsPage() {
   const users = useUsers();
   const customProviders = useCustomProviders();
   const act = useAction();
+
+  // `#agent-<id>` deep links (dependency graph, governance alerts): once the
+  // list has loaded, scroll that agent's row into view and mark it, so the
+  // link lands on the agent rather than at the top of the catalog
+  const { hash } = useLocation();
+  const linkedAgentId = hash.startsWith("#agent-") ? hash.slice("#agent-".length) : null;
+  useEffect(() => {
+    if (!linkedAgentId || !agents.data) return;
+    document.getElementById(`agent-${linkedAgentId}`)?.scrollIntoView({ block: "center" });
+  }, [linkedAgentId, agents.data]);
 
   const aOpts = agentOpts(agents.data?.agents);
   const uOpts = userOpts(users.data?.users);
@@ -52,7 +63,12 @@ export default function AgentsPage() {
         <Card flush title="Catalog">
           <Table<AdminAgent>
             columns={[
-              { key: "name", header: "Name", sort: (x) => x.name, render: (x) => x.name },
+              { key: "name", header: "Name", sort: (x) => x.name, render: (x) => (
+                  <span id={`agent-${x.id}`}>
+                    {x.name}
+                    {x.id === linkedAgentId ? <> <Badge tone="info">linked</Badge></> : null}
+                  </span>
+                ) },
               {
                 key: "provider",
                 header: "Provider",
@@ -124,6 +140,8 @@ export default function AgentsPage() {
             rows={agents.data?.agents ?? []}
             rowKey={(x) => x.id}
             loading={agents.isLoading}
+            error={agents.error}
+            onRetry={() => void agents.refetch()}
             empty={<EmptyState title="No agents registered" body="Register the first agent below." />}
           />
         </Card>
@@ -738,9 +756,55 @@ function EntitlementCard(props: { uOpts: Array<{ v: string; l: string }>; agents
               { key: "provider", header: "Provider", render: (x) => x.provider },
               { key: "tier", header: "Tier", align: "right", render: (x) => x.tier },
               {
+                key: "source",
+                header: "Via",
+                render: (x) =>
+                  x.source === "role" ? (
+                    <Badge tone="info" title={(x.roles ?? []).join(", ")}>
+                      role{(x.roles ?? []).length ? `: ${(x.roles ?? []).join(", ")}` : ""}
+                    </Badge>
+                  ) : (
+                    <Badge tone="ok">direct</Badge>
+                  ),
+              },
+              {
                 key: "revoked",
                 header: "",
                 render: (x) => (x.revoked ? <Badge tone="danger">revoked</Badge> : null),
+              },
+              {
+                key: "actions",
+                header: "",
+                align: "right",
+                render: (x) => (
+                  <RemoveButton
+                    what={`${x.name} from this user`}
+                    // A role-granted agent has no direct grant to delete. Saying
+                    // that on the row is the point: an absent button would read
+                    // as a missing feature, and the admin would not learn that
+                    // the lever they want is the role — or a per-user
+                    // revocation, which subtracts without touching the role.
+                    disabledReason={
+                      x.source === "role"
+                        ? `granted by role ${(x.roles ?? []).join(", ")} — remove it there, or add a per-user revocation on the Users page`
+                        : undefined
+                    }
+                    consequence={
+                      <p>
+                        The direct grant is deleted, so the next call this user makes on{" "}
+                        <strong>{x.name}</strong> is refused by default-deny. Nothing already audited
+                        changes — the ledger keeps every call made while the grant existed, and the
+                        removal is itself audited.
+                      </p>
+                    }
+                    onRemove={() => api.del(`/v1/grants/agents/${x.grantId}`)}
+                    onDone={() => {
+                      void act.run(async () => {
+                        setView(await api.get<UserAgentPolicyView>(`/v1/users/${userId}/agents`));
+                      }, null);
+                    }}
+                  />
+                ),
               },
             ]}
             rows={view.agents}

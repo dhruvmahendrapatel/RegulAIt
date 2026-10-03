@@ -370,7 +370,7 @@ describe("what the preset does NOT do", () => {
 
     // and the DISCLOSURE: the control's own sentence names the surfaces that
     // stay open, so a reader of the posture page is not misled by it
-    const report = buildPostureReport(await loadOrgSettings(db), {} as NodeJS.ProcessEnv);
+    const report = await buildPostureReport(await loadOrgSettings(db), { env: {} as NodeJS.ProcessEnv });
     const attribution = report.controls.find((c) => c.key === "dispatchAttributionRequired")!;
     expect(attribution.refuses).toMatch(/require_mcp_attribution/);
     expect(attribution.refuses).toMatch(/require_project_attribution/);
@@ -493,9 +493,9 @@ describe("the report builder, unit-level", () => {
   it("grades the anchor from the OBSERVED sink, not from the fact a bucket was named", async () => {
     const settings = await loadOrgSettings(db);
     // an env that NAMES an S3 bucket but whose lock state cannot be confirmed
-    const report = buildPostureReport(settings, {
-      REGULAIT_AUDIT_ANCHOR_DIR: "/tmp/adr0118-anchor",
-    } as NodeJS.ProcessEnv);
+    const report = await buildPostureReport(settings, {
+      env: { REGULAIT_AUDIT_ANCHOR_DIR: "/tmp/adr0118-anchor" } as NodeJS.ProcessEnv,
+    });
     const anchor = report.controls.find((c) => c.key === "auditAnchorTamperResistant")!;
     expect((anchor.current as { tamperResistant: boolean }).tamperResistant).toBe(false);
     expect(anchor.satisfied).toBe(false);
@@ -503,7 +503,7 @@ describe("the report builder, unit-level", () => {
 
   it("counts enforcement and optimisation separately", async () => {
     const settings = await loadOrgSettings(db);
-    const report = buildPostureReport(settings, {} as NodeJS.ProcessEnv);
+    const report = await buildPostureReport(settings, { env: {} as NodeJS.ProcessEnv });
     expect(report.summary.optimisationTotal).toBe(1);
     expect(report.summary.enforcementTotal).toBeGreaterThan(1);
   });

@@ -15,6 +15,7 @@ import { Badge, Button, Card, EmptyState, Field, Input, Meter, Select, Table } f
 import { useToast } from "../../../ui/toast";
 import {
   BarChart,
+  RemoveButton,
   Stat,
   downloadCsv,
   optionEls,
@@ -108,6 +109,8 @@ export default function CostDashboardPage() {
             rows={projects.data?.projects ?? []}
             rowKey={(p) => p.id}
             loading={projects.isLoading}
+            error={projects.error}
+            onRetry={() => void projects.refetch()}
             onRowClick={(p) => setRollupId(p.id === rollupId ? null : p.id)}
             rowLabel={(p) => `Open cost rollup for ${p.name}`}
             empty={
@@ -619,6 +622,37 @@ function InitiativesCard(props: { initiatives: Initiative[]; loading: boolean })
             header: "Rolled-up spend",
             align: "right",
             render: (i) => <span className={v.num}>{fmtUsd(i.spentUsd)}</span>,
+          },
+          {
+            key: "actions",
+            header: "",
+            align: "right",
+            render: (i) => (
+              <RemoveButton
+                what={i.name}
+                // An initiative with projects under it is a live rollup. Deleting
+                // it would silently change what every report over those projects
+                // sums to, so the projects have to be moved off it first — which
+                // is an edit somebody makes deliberately, on the card above.
+                disabledReason={
+                  (i.projectCount ?? 0) > 0
+                    ? `${i.projectCount} project(s) roll up to this initiative — reassign them first, so no report silently changes what it totals`
+                    : undefined
+                }
+                consequence={
+                  <p>
+                    The initiative is deleted. It is a reporting rollup only, so nothing about
+                    spend, attribution or governance changes — every project keeps its own costs
+                    and its own ledger rows. What goes is the grouping that reports could total by.
+                  </p>
+                }
+                onRemove={() => api.del(`/v1/initiatives/${i.id}`)}
+                // No onDone: RemoveButton's own run() invalidates every
+                // ["admin", …] query, and this table is one of them. The manual
+                // refetches elsewhere exist only where the rows are component
+                // state rather than react-query.
+              />
+            ),
           },
         ]}
         rows={props.initiatives}

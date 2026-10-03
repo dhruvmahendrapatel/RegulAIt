@@ -42,6 +42,7 @@ import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, Input, Table } from "../../../ui/kit";
 import { QueryGate, Stat, useAction, useApiAction } from "../adminKit";
+import { CopilotProposalForm } from "./CopilotProposalForm";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -59,6 +60,11 @@ interface ToolsResponse {
   decisionSupport: string;
 }
 interface AskResponse {
+  /** the recorded query row this answer came from. `POST /v1/copilot/ask` has
+   *  always returned it (with `evidence` stripped); the interface simply never
+   *  declared it, which is why the page could not offer to propose from an
+   *  answer — a proposal must name the query its evidence came from. */
+  query: { id: string; question: string };
   plan: {
     tool: string;
     timeframe: string;
@@ -190,7 +196,7 @@ export default function CopilotPage() {
           <Input value={question} onChange={(e) => setQuestion(e.target.value)} />
         </Field>
         <div className={v.row}>
-          <Button variant="primary" disabled={askAct.busy} onClick={() => void ask()}>
+          <Button variant="primary" disabled={askAct.busy || !question.trim()} onClick={() => void ask()}>
             Ask
           </Button>
         </div>
@@ -370,6 +376,18 @@ export default function CopilotPage() {
         </QueryGate>
       </Card>
 
+      {/* B9a — THE PROPOSE HALF, WHICH HAD NO UI AT ALL. The page listed
+          proposals and applied approved ones, so the product's single most
+          governed write was the one an admin could not reach without curl. */}
+      <CopilotProposalForm
+        queryId={answer?.query.id ?? null}
+        question={answer?.query.question ?? question}
+        onProposed={() => {
+          void proposals.refetch();
+          void approvalList.refetch();
+        }}
+      />
+
       <Card title="Proposals — recorded, approved by a human, then applied">
         <p className={v.faint}>
           A proposal changes nothing by existing. Applying one is gated on the linked approval in the ordinary
@@ -377,6 +395,7 @@ export default function CopilotPage() {
           the applying admin's identity, never the copilot's. A kind with no such endpoint refuses by name rather
           than writing the change directly.
         </p>
+
         <QueryGate loading={proposals.isLoading} error={proposals.error} onRetry={() => void proposals.refetch()}>
           {(proposals.data?.proposals ?? []).length === 0 ? (
             <EmptyState title="No proposals yet" body="Ask a question, then propose a change from its evidence." />

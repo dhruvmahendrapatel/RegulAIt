@@ -436,7 +436,15 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
   // THE IMPORT — the untrusted path
   // =======================================================================
 
-  app.post("/v1/shadow-ai/imports", async (req, reply) => {
+  // ADR-0167 (SEC-03): the route's own byte bound below is measured on the
+  // PARSED body, so it can only fire if Fastify accepted the raw body first.
+  // The global limit is 1 MiB; the advertised bound is EVIDENCE_MAX_BYTES, so
+  // this route raises its raw limit to the advertised bound plus encoding
+  // slack — otherwise every payload between 1 MiB and the bound was a 413 the
+  // error handler reported as a 500, and the honest message never fired.
+  const importBodyLimit = { bodyLimit: EVIDENCE_MAX_BYTES + 64 * 1024 };
+
+  app.post("/v1/shadow-ai/imports", importBodyLimit, async (req, reply) => {
     const raw = req.body;
     const rawJson = JSON.stringify(raw ?? null);
 
@@ -536,10 +544,10 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
     adapters: describeEvidenceAdapters(),
     posture: EVIDENCE_ADAPTER_POSTURE,
     pipeline:
-      "An adapter turns a raw file into the SAME evidence rows POST /v1/shadow-ai/imports already accepts, and hands " +
-      "them to the SAME dry-run/apply pipeline. It is a layer, not a second importer: it cannot reach a code path " +
-      "the row-shaped import cannot, cannot skip the escalation screen or the strict row schemas, and cannot write " +
-      "anything the row-shaped import could not write.",
+      "An adapter turns a raw file into the same evidence rows the standard import accepts, and hands them to the " +
+      "same preview-then-apply pipeline. It is a layer, not a second importer: it cannot reach a code path the " +
+      "standard import cannot, cannot skip the escalation screen or the strict row checks, and cannot write " +
+      "anything the standard import could not write.",
   }));
 
   /**
@@ -559,7 +567,7 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
    *      running them anyway is what makes that a property rather than a claim.
    *   4. THE ONE PIPELINE.
    */
-  app.post("/v1/shadow-ai/imports/raw", async (req, reply) => {
+  app.post("/v1/shadow-ai/imports/raw", importBodyLimit, async (req, reply) => {
     const raw = req.body;
 
     const parsedReq = rawEvidenceImportRequestSchema.safeParse(raw);
@@ -1184,7 +1192,7 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
       })),
       coverage: coverageScorecard([...byKind.values()]),
       posture:
-        "Detection is SIGNAL, NOT PROOF OF MISUSE. An SDK dependency is a capability, not a violation; an endpoint " +
+        "Detection is a signal, not proof of misuse. An SDK dependency is a capability, not a violation; an endpoint " +
         "hit may be a sanctioned integration. Every row is a lead for human triage — hence the disposition states.",
     };
   });

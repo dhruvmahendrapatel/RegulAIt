@@ -343,9 +343,11 @@ export default function ReportsPage() {
             <Card
               title={`${result.report.definitionName} — ${result.report.period.label}`}
               actions={
-                <a href={`/v1/reports/runs/${result.run.id}/export?format=csv`} target="_blank" rel="noreferrer">
-                  Export CSV
-                </a>
+                <div className={v.row}>
+                  <a href={`/v1/reports/runs/${result.run.id}/export?format=csv`} target="_blank" rel="noreferrer">Export CSV</a>
+                  <a href={`/v1/reports/runs/${result.run.id}/export?format=csv&signed=1`} target="_blank" rel="noreferrer">Signed CSV bundle</a>
+                  <a href={`/v1/reports/runs/${result.run.id}/export?format=json&signed=1`} target="_blank" rel="noreferrer">Signed JSON bundle</a>
+                </div>
               }
             >
               <div className={v.stack}>

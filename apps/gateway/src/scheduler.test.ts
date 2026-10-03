@@ -675,12 +675,24 @@ describe("every sweep is registered", () => {
         // this list pins its registration.
         SCHEDULER_JOB_NAMES.costReconciliation,
         SCHEDULER_JOB_NAMES.evalDrift,
+        // ADR-0157: the governance monitor — raises, refreshes and resolves
+        // alerts; decides nothing a dispatch reads. Driven end-to-end in
+        // zz-adr0157-governance-monitor.test.ts; this list pins its registration.
+        SCHEDULER_JOB_NAMES.governanceMonitor,
         // ADR-0100: re-fetches and re-adjudicates MCP tool manifests so a
         // server nobody calls is still caught. Drives the LIVE path
         // (connectUpstream + syncUpstreamTools + recordManifestScan) — there
         // is no second adjudication. Driven end-to-end in
         // mcp-admission-rescan.test.ts; this list pins its registration.
         SCHEDULER_JOB_NAMES.mcpAdmissionRescan,
+        // ADR-0126's ACTIVE half: probes every registered upstream — broken ones
+        // first — and feeds the result to the breaker, so a dead server is
+        // refused before a user finds it and a recovered one resumes without
+        // waiting for someone to try. Charges OUR refusals (admission holds,
+        // egress blocks) to nothing, because an air-gapped install would
+        // otherwise report every upstream as broken. Driven end-to-end in
+        // zz-mcp-health-probe.test.ts; this list pins its registration.
+        SCHEDULER_JOB_NAMES.mcpHealthProbe,
         // ADR-0101: pulls each ENABLED upstream MCP registry and refreshes the
         // federated CATALOGUE — and nothing else. It creates no server row and
         // no grant, because turning a directory entry into a governed object is
@@ -695,6 +707,9 @@ describe("every sweep is registered", () => {
         // ADR-0065: remote training jobs run on somebody else's compute for
         // hours; polling them is a scheduler job, never a setInterval.
         SCHEDULER_JOB_NAMES.trainingPoll,
+        // ADR-0160: continuous trace evaluation (counts only). Driven
+        // end-to-end in zz-adr0160-trace-evaluation.test.ts.
+        SCHEDULER_JOB_NAMES.traceEvaluation,
       ].sort(),
     );
     for (const def of registry.values()) {

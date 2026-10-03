@@ -1,10 +1,10 @@
 ---
-phase: codex-review-hardening-f02-closed-f05-next
-last_updated: 2026-09-07
+phase: p1-security-in-progress
+last_updated: 2026-10-03
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
-last_session: sessions/2026-08-13-session-15.md
+last_session: sessions/2026-10-03-session-01.md
 roadmap: ../docs/product/ROADMAP.md
 ---
 
@@ -21,7 +21,537 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
-**2026-09-26 (latest) — D01 and G1 fixed. ADR-0125, migration 0115. Both write-ups were wrong first.**
+**2026-10-03 (overnight) - Full product review closed out: security, reliability, deps, UI; Codex backlog cut.**
+The owner's full review (150 findings over 9 areas; 111 confirmed, 33 downgraded, 6 refuted,
+`docs/reviews/2026-10-02-full-review.md`) is now actioned. Security 16 fixed (ADR-0167),
+reliability 19, dependency HIGHs 32 → 0, and the UI work landed in two adversarially reviewed
+batches: A (78dab52..7b8baa0: the react-query cache is cleared at every identity boundary, only a
+session-ending 401 routes to /login, a failed list query shows an error with Retry — 43 tables)
+and B (1147f5f..004eaa3: eighteen polish items — refusals read as prose, audit-log paging, the
+intake opens blank with "Fill in an example", questionnaire rendered as a document, phone-width
+layouts, first-run in sentences). Five open Codex findings closed (aa233bd..3dc13d2): the
+connector invoke path is budget-gated before any upstream work (F02), discovery samples are
+scrubbed before truncation and by credential NAME (AER-020), admission and egress are adjudicated
+before the breaker (AER-024), posture awaits the one long-lived anchor sink's observe() (AER-012),
+harden is one locked transaction (AER-013). Each reviewer should-fix was fixed before push
+(7b8baa0, 004eaa3, 3dc13d2); ten low nits are deferred in the review record §3.4.1. CI itself
+broke twice on the first push: MinIO is gone from Docker Hub (and from anonymous Quay since
+10-02) and the image build lost Node types once tests were excluded — both fixed (62c0674,
+M-063), MinIO pinned to the frozen Bitnami archive with an owner item to pick a maintained
+store. M-064: the local gate builds packages before the suite that consumes them. Owner
+decisions added: L1 (check stages pass on silence — demo-affecting), L3 (bodies parsed before
+the credential check), the MinIO stand-in. Gates on the pushed tree: 3279 gateway tests, demo
+prepare 18/18, real/mock/review journeys green, zero deprecation warnings. Codex's remaining
+backlog (AER-003/006/009/010/011/015/018/026/030/033/034/035/037, F01, F08 residuals) and the
+owner decisions (AER-014/016/028/036, F03/F06/F07, AER-040) are unchanged.
+
+**2026-10-02 (evening) - Feedback audit; beat 3E fixed; drawer; today's findings closed.**
+The owner stopped the hourly check-ins. An adversarially verified audit of every Codex finding,
+F01–F08 and Gemini item found one DEMO BLOCKER. §0 set no export signing key, so beat 3E's
+"Download signed bundle" answered 409, and both signed-export routes wrote a success row first
+(AER-008). Fixed in 65581bd: a key preflight, accurate refusal rows, `demo:export-key`
+(cross-platform, deployment-held), a `demo:check` "3 Evidence" beat (now 18 checks), and a real
+journey that downloads and checks the bundle. CI green. The use-cases list drawer is presentable
+(af2535a). Gaps in today's findings are closed with negative controls: AER-039 review shows the
+bound target (297d0b9), AER-042 every wizard value persists and `restricted` creates nothing
+(062d90e), AER-043 race made deterministic (b186915), AER-040 trigger paths plus a fifth journey.
+Codex/Gemini handoff notes are appended to codexInputs.md and geminiInputs.md. Still open as
+backlog (not demo-related): AER-006/009/010/011/012/013/015/018/020/024/026/030/033/034/035/037,
+F01/F02/F08. Owner decisions: AER-014/016/028/036, F03/F06/F07, and whether Codex/Gemini stay
+hourly.
+
+**2026-10-02 (afternoon) - Demo hardening: runbook proven, fallback deck, visual QA.**
+DEMO_SCRIPT §0 was executed verbatim on an empty database (17/17, 23 s); a second
+`demo:prepare` on the same database is safe (settings unchanged, only traffic accrues) and the
+real journey passes twice on one database. `apps/web/e2e/fallback-deck.mjs` builds a
+self-contained offline walkthrough (16 slides: real screenshots, the real deploy-gate output, each
+beat's Say line) — runbook "Fallback" section. A screenshot QA sweep of every demo page found
+internals on screen (stage ids, snake_case, nil-UUID actors, ADR/migration refs, `(s)` plurals,
+clipped graph labels, a contradictory "not tagged" badge, an empty Stack tab for the hero); two
+batches fixed them (cb55473, ee0a328) with display helpers in `apps/web/src/api/format.ts`. The
+trust tiles now partition (`risksUnmitigated`: found = mitigated + accepted + not yet
+mitigated). The hero use case now links claude-opus + Anthropic at the intake stack step. A
+second QA pass confirmed the blockers fixed; batch 3 (30d5af9) fixed what it found (unnamed
+model-card rows, an API path in remediation guidance, UUID rule ids in the audit log, acronym
+casing). Left deliberately (not on the script's path): the use-case LIST drawer still renders the
+raw questionnaire markdown/JSON and developer copy (navigate via "Open the use-case workspace",
+never the list drawer); mixed "RegulAIt"/"regulAIt" brand casing; mock-provider disclaimers in
+Avery's "Recently decided".
+
+**2026-10-02 (security review batch) - sixteen confirmed findings closed (ADR-0167, migration 0128).**
+The owner's "security and reliability first" review returned 16 findings, two-verifier
+confirmed. One rule fixed them: a control is keyed on, checks, or reports the thing the caller
+cannot choose. The edge rate limiter now has an IP-keyed pre-auth tier and a stored-id-keyed
+credential tier (AUTHZ-01/CFG-01 — rotating a junk bearer used to void the per-IP ceiling and
+cost one INSERT per request), plus an `sso:` bucket and a 256 KiB ACS cap (CFG-06/SEC-02, xmldom
+pinned to 0.8.15). Credential-derived connector hosts go through the egress guard (SEC-01); the
+simulation list is scoped (AUTHZ-02); OIDC/SAML logins are browser-bound (AUTHZ-04); published
+dev secrets are named at boot and refuse a deployed box (AUTHZ-05/CFG-03); self-reported check
+passes need a reason, a stamp, an audit row and a badge (AUTHZ-06); parser 413/400/415 are no
+longer 500s (SEC-03); OTLP headers are enveloped (SEC-06, migration 0128); the gateway logs with
+redaction (CFG-02); the pool is bounded and `/health` races a deadline (CFG-08); the image runs
+as `node` with a digest pin, healthcheck and restart policies (CFG-07). Every fix has a negative
+control. Open: the compose `--profile tls` path still boots on the defaults (loudly), the SAML
+binding is TLS-only, the remaining `pnpm audit` HIGHs wait for the upgrade batch (PENDING S4).
+
+**2026-10-02 (Codex review) - MCP consent bound to its target (ADR-0166, AER-039/040).**
+Codex's HIGH finding was real: an admin could repoint an MCP server (`url`,
+`allowPrivateRanges`) under the same id and an approval signed for upstream A was spent
+against B. Approval context v3 now carries the target (server id, url, private-range posture,
+admitted manifest digest); the proxy binds the same row snapshot it connects with, so a change
+by API or SQL leaves the old consent unspent with zero upstream contact, a mid-connect swap
+still lands on A only, and breaker churn keeps the consent
+(`zz-aer039-mcp-target-binding.test.ts`, 7 cases; pre-fix code fails the four target-change
+cases). AER-040: web unit tests run in `pnpm -r test`, and a path-filtered `approval-review`
+CI job runs the ADR-0144 Playwright journeys; a deliberately broken unit assertion and a broken
+journey were both shown to exit non-zero locally. AER-042/043 fixed earlier; older partial
+residuals (AER-008/010/011/014/018/024/035/037) stay backlog — none demo-blocking.
+
+**2026-10-02 (demo-ready) - The AI-intake demo runs end to end on a real database.**
+Under the owner's directive Claude closed the offline agents' items. The real seeded-database
+Playwright journey (`apps/web/e2e/demo-intake.spec.ts`) passes on a fresh `demo:prepare`
+database: register from shadow AI → Avery approves (ADR-0165 routes use-case sign-offs to a
+named approver) → alert → remediation approved by a second person → graph → regulatory → signed
+export; a `Demo journey` CI workflow runs it with the mocked UI suite. Fixed on the way: the
+intake wizard's invalid `dataSensitivity` (every real submission failed, AER-042), raw stage
+sentinels in the Inbox, and concurrent monitor over-reporting (AER-043). `demo:gate` shows the
+deploy gate as a CI step. Demo script/talk track v2, Q&A and leave-behind are current; every
+beat PASSes `demo:check`. Runbook: DEMO_SCRIPT_2026-10-05.md §0.
+
+**2026-10-02 (latest) - Monitor & Respond completed for the demo (ADR-0160..0164).**
+Continuous trace evaluation re-runs the shipped detectors over stored
+response previews every 15 minutes and feeds the monitor (`agent_output_leakage`,
+migration 0126). `POST /v1/gates/deploy` answers a pipeline's "cleared to
+ship?" from existing state (approval, approved stack, halts, MRM decision,
+open alerts). Newly raised alerts post to opted-in Slack/Teams workspaces by
+severity threshold (migration 0127). `demo:prepare` builds the demo from an
+EMPTY database in one command (seed → setup → intake → governed mock traffic
+→ demo:check, 17/17 PASS, ~22s). ADR-0164 turns the ADR-0163 routing finding
+into a detection: `use_case_served_outside_stack` (high) reads the usage
+ledger for approved use-case calls served by an agent outside the approved
+stack; routing itself is unchanged (a routing guard is an owner decision).
+Demo: Monday 2026-10-05 11:00 UTC; M3 freeze Sun 16:00 UTC; M4 dry run Sun
+22:00 UTC.
+
+**2026-10-02 (later) - Regulatory intelligence, remediation, demo:check (ADR-0158, ADR-0159, C11).**
+`GET /v1/regulatory/updates` joins a curated, source-dated feed (G4) to active
+packs, live control status and in-scope use cases. Remediation (migration
+0125): a deterministic planner per monitor alert; control links and agent
+owner assignment execute only after a different human approves on the one
+decide path; everything else is guidance. `demo:check` walks every storyline
+beat (PASS/WARN/FAIL) and runs in CI over the real fixtures; its first run
+found the seeder never installed the shadow-AI catalogue (fixed). Regulatory
+fact for all demo material: Regulation (EU) 2026/1744 (Digital Omnibus on AI,
+in force 2026-07-27) moved EU AI Act high-risk obligations to 2027-12-02
+(Annex III) / 2028-08-02 (Annex I); Colorado SB 26-189 replaced SB 24-205,
+effective 2027-01-01. Coordination: hourly staggered check-ins (Claude :02
+routine, Codex :20, Gemini :40); migrations are Claude-only (Codex
+reservation retired to keep the journal monotonic).
+
+**2026-10-02 - Dependency graph + governance monitor (ADR-0156, ADR-0157).**
+`GET /v1/inventory/graph`: use case → agent → model → vendor (declared) and
+agent → MCP server / connector / agent (observed), every node with its own and
+max-propagated declared risk plus the path to the source. Governance monitor:
+seven rules over graph + trust coverage + risk register, alerts as condition
+episodes (migration 0124), hourly job + on-demand evaluate, acknowledge with
+note, delivered via the audit log. Demo data: G2 scenario library verified;
+G1 fixtures and G3 script returned for changes; the full seed pipeline runs
+clean on a fresh DB (53 objects, 0 failures). New tasks X7/X8 (Codex), G4/G5
+(Gemini). Ground rule 8: typecheck before READY (M-054 and the G1/G2 break).
+
+**2026-10-01 - AI-intake demo backend live (ADR-0147-0150); agents coordinated
+via AgentCoordination.md.** Demo Monday 2026-10-05 06:00 CDT. Claude (master)
+shipped: trust dashboard API (six-dimension evidence coverage, gap not zero),
+bias/safety risk categories + residual + control links (migration 0123),
+v2 EU AI Act / NIST packs with bias and safety controls, suggestion-only
+intake assistant (narrows ADR-0080), use-case 360, agent card, and the
+`demo:intake` seeder. Codex owns the web UI (X1-X5), Gemini the fixtures,
+scenario library and demo script (G1-G3); see AgentCoordination.md for the
+board, ownership, number reservations and contracts.
+
+**2026-10-01 - Native semantic-cache identity (ADR-0146, AER-041).** The
+native invoke cache now keys on a SHA-512 commitment to the exact request and
+the serving configuration (model, prompt and agent_config versions); routed or
+fallback answers are not stored, and the config is re-checked after dispatch.
+New suite 6/6 on a fresh database; exact-head CI 36930442969 green. Also fixed
+a timing-flaky breaker test (now counts connections). Routing's sideways move
+on an exact cost/tier tie makes such calls uncacheable - recorded follow-up.
+
+**2026-09-30 - Internal connector redaction implemented (ADR-0145).** Migration
+0122 invalidates connector admissions on configuration, entitlement and egress
+changes. Frozen effective payloads reach adapters; routing identity is never
+rewritten. Final-send checks refuse stale calls, and mid-call/response-release
+changes withhold results without replay. Evidence contains effective content
+or fixed refusal messages; completed calls retain honest billing. 287 tests
+across 13 files passed, including 23 new connector tests; gateway typecheck/build,
+DB build and whitespace checks passed. Public redaction remains disabled:
+model integration, MCP mid-call output checks and provider resource bounds
+remain open. CI 36794869504 on design commit `96c60b3` failed only two spend
+fixtures that seeded future entries before 06:00 UTC on month start. The fixture
+is corrected with a deterministic regression test; new remote CI is pending.
+Integrations 36794869524 passed. Prior `03aaea7` CI was cancelled by the design
+push; its Integrations 36794551926 passed. P1/P3 and broader parity remain open.
+
+**2026-09-30 - Approver action review implemented (ADR-0144).** Migration
+0121 records preview provenance and consent scope without inventing legacy
+facts. MCP approvals retain project attribution for bulk sensitivity checks.
+One review dialog now serves Inbox, Approvals Queue and Workbench; bulk
+approvals require a current local review, and malformed/legacy/expired rows
+remain deniable but cannot be approved through these screens. 85 focused
+tests and five real browser journeys passed, including UI approval -> real
+MCP effective-payload delivery, stale-binding refusal, and desktop/mobile
+keyboard/layout checks. DB/gateway builds and web typecheck/build passed.
+Prior commit `6d8f940` is confirmed CI and integration green. Current batch
+CI awaits its push. Public redaction remains disabled; next work is prepared
+model/connector integration and final output-policy/resource-bound gates,
+then residual P1 verification and P3 delivery. Broad Credo parity is open.
+
+**2026-09-30 - MCP redacted-action integration (ADR-0143).** Migration 0120
+stores admitted input schemas and extends policy-generation invalidation.
+The real MCP queue/consume/send path now binds original/effective payloads,
+transformation policy and schema identity, forces exact-action consent, checks
+both data scopes and rechecks the generation after connection. Strict schema
+validation rejects incompatible placeholders; traces capture only effective
+input, and unsupported output is withheld while completed calls are metered.
+297 tests passed across 12 gateway files, including 39 new tests; gateway
+typecheck, DB build and pinned frozen/offline lockfile validation passed.
+Retry/breaker fixtures now use real HTTP after fake-socket close errors made
+an earlier assertion-only pass insufficient. A temporary control-removal
+mutation was blocked by the safety reviewer and was not applied. Previous
+commit `57aadb7` was confirmed CI and integration green; `6d8f940` is now
+confirmed green too (runs 36792230546 and 36792230566). Public redaction settings
+remain disabled. ADR-0144 subsequently closed the stored-preview UI gap.
+Model/connector wiring,
+mid-call policy transitions, provider/schema resource bounds, the residual P1
+verification, P3 integrations and full Credo workflow parity remain open.
+
+**2026-09-30 - Structured consent and complete model-output gates
+(ADR-0141/0142).** Added a bounded decoded-JSON redactor and frozen action
+preparation that binds original/effective payloads, category policy and both
+transform versions. Previews contain the effective action, with credentials
+scrubbed; deep/prototype-shaped inputs have explicit safety tests. These are
+primitives, not enabled in-flight redaction. Actual model block-mode gaps were
+also fixed: PII-only and guardrail policies suppress text AND thinking events,
+scan thinking/tool calls, withhold every content channel on a block, and flush
+only inspected final content on success. 1,085 shared tests and 204 gateway
+tests passed; shared build and gateway typecheck passed. A temporary negative
+control failed all four targeted output cases, and was restored before final
+verification. The previous `40eb442` commit is confirmed CI-green. New batch
+CI is pending. Provider collection limits/cancellation, final-policy binding
+and actual redaction integration remain open; the full parity goal is active.
+
+**2026-09-30 - PII redaction foundation (ADR-0140).** Shared validators now
+support in-process offsets; `redactPII` performs deterministic full-region
+replacement across all 14 supported categories. Existing detection counts,
+opt-in defaults and conformance scores are unchanged. All 1,019 shared tests
+passed, including 103 new tests; shared build and gateway typecheck passed.
+No gateway redaction mode is enabled: structured payloads, exact effective
+approval binding, final policy checks and bounded complete-output handling
+remain required by ADR-0137. The active full-Credo-parity goal is tracked in
+[the current checklist](../docs/product/CREDO_PARITY_CHECKLIST_2026-09-30.md),
+using primary vendor pages and the owner's Discover -> Assess -> Govern
+workflow reference. Historical completion labels do not establish current
+feature or workflow parity. No production deployment occurred.
+
+**2026-09-30 - External-write emergency gate (ADR-0139).** Deployment,
+rollback, Git branch/PR/merge, infra remediation and PM mutations now check
+the live execution mode at the final provider call. Halted/read-only/
+require-approval modes refuse writes; halted workflow stages and infra
+approvals remain retryable. A halted auto-remediation is marked deferred and
+retried on the next scan if the policy still permits it. Six focused files
+passed 31 tests and six adjacent files passed 43 tests on disposable databases;
+gateway typecheck passed, and `8507fa3` passed exact-head CI. AER-018 is
+mitigated on the enumerated paths, but paused-call counting-fake coverage for
+every adapter and already-in-flight cancellation remain unverified. Do not claim a complete
+deployment-wide halt from these tests alone.
+
+**2026-09-30 - Cache-hit governance (ADR-0138).** Native and compat cache
+hits now re-enter the shared dispatch core before serving. Live virtual-key,
+MRM, attribution, use-case, project-budget, input PII/guardrail and output
+PII/guardrail denials withhold cached text and record neither a saving nor
+provider usage. Four adjacent cache/interception suites passed 93/93 on a
+disposable database; gateway typecheck passed. AER-010's documented bypass is
+repaired, and commit `b33de7c` passed exact-head CI. An explicit
+negative-control mutation remains unrun. Native cache identity/version
+invalidation remains a separate AER-011
+review. AER-018's non-AI provider paths and PII redaction remain open.
+
+**2026-09-30 - P1/P2/P3 continuation.** AER-035's six focused copilot
+fault/concurrency tests passed after an app rebuild before retry; OS process
+kill/recovery remains unverified. AER-011 compat cache identity now includes
+the complete canonical request rather than lower-cased flattened text;
+the eight-test compat suite and gateway typecheck passed. AER-010 remains
+HIGH because cache hits still return ahead of shared dispatch gates. The
+ISO/IEC 27001:2022 partial evidence seed (ADR-0134) passes 18 shared and
+15 gateway pack tests;
+it is not an SoA or certification and requires customer attestation. P3 now
+has a proposed delivery/detection contract and a 10-case synthetic detector
+baseline (ADR-0135); no SIEM adapter or outbound secret block is live. PII
+redaction is a proposed boundary only (ADR-0137), not enabled: count-only
+detectors cannot yet perform validated in-flight replacement, and current
+cache governance/streaming gaps must be closed before that mode ships.
+
+**2026-09-30 - Breaker transition audit atomicity (ADR-0133).** AER-023
+reproduced in source and fixed: opened/probing/closed state and audit facts
+commit together; recovery reads the locked current row. New fault/concurrency
+tests passed 4/4, and the existing breaker/retry/health suites passed 40/40
+on a fresh database. The health suite also revalidated AER-037 rotation over
+the cap. Full CI for this new batch is pending.
+
+**2026-09-30 - Emergency transition atomicity (ADR-0132).** AER-019's six
+set/lift paths now lock the control row and commit state plus audit together.
+The existing emergency suite passed 15/15; six new tests passed fault injection
+for all directions, app restart/readback, 20-way contention on mode/agent/tool,
+and conflicting mode-history ordering. AER-018's external provider paths are
+still outside this fix; no deployment-wide halt completeness claim follows.
+
+**2026-09-30 - Signed report export isolation (ADR-0131).** AER-007 reproduced:
+non-admin report bundles contained unrelated audit payloads. Version-2 bundles
+now disclose only subject-row payloads, keeping contiguous signed hash
+commitments for other rows. The verifier names the reduced proof and rejects
+extra audit payloads (AER-009). Route-level non-admin denial/entitlement,
+synthetic sentinel isolation, pinned offline verification and the full 28-test
+bundle suite passed on a disposable database. Admin full-payload bundles stay
+version 1. Full CI for the preceding approval commit failed only a flaky
+relative login-timing assertion (30 ms versus 67 ms under runner load); both
+failure paths still exceed the scrypt floor. The ratio check was removed and
+its targeted case passed locally; the next CI run is the full gate. Remaining P1 cache and emergency findings, crash verification,
+P2 and P3 are not closed by this change.
+
+**2026-09-30 - P1 approval binding is being hardened (ADR-0130).** The P0
+follow-up commit f666733 passed full GitHub CI (run 36653593771) and Kong
+integration (run 36653593778). AER-004 source revalidation found the legacy
+null-context and ABAC identity gaps and the policy activation race. Migration
+0119 adds a database policy epoch; consumption holds a shared epoch lock while
+it compares the evaluated generation and spends a matching approval. The
+context digest is v2 and binds active ABAC policies; null contexts re-queue.
+The approval suite passed 14/14 on a fresh disposable database before the
+settings posture response was added. P1 export, cache and emergency controls,
+P2 and P3 remain in the approved sequence.
+
+**2026-09-29 - Owner-approved delivery order; P0 fixes implemented in dd50ab2.**
+
+The owner approved: P0 breaker/retry fixes, P1 security findings and crash/concurrency
+verification, P2 in-flight PII redaction then an ISO 27001 evidence pack, P3 SIEM and
+outbound-secret detection scoping, and design-first treatment of the larger extensions.
+This supersedes the older next-work ordering below. AER-017 and AER-021 are already
+resolved in the latest audit and are not new implementation work.
+
+ADR-0129 records the P0 change: manifest requests elect before connecting; proxy and
+delegated tool calls use one shared admission path; successful initialization never
+clears a breaker; every tool call receives one attempt regardless of readOnlyHint.
+The final focused run passed 45 tests, including both previously failing CI regressions
+and mixed proxy/worker/discovery contention. Workspace build, final gateway build and both
+CI preflights passed. Local tests used a task-owned temporary PostgreSQL cluster, separate
+from the installed service. The full local run was not completed: see the session log for
+the inherited-credential failure and PII measurement timeouts. GitHub checks on the published
+commit are the full Linux gate; do not infer a full-suite pass from the focused results.
+P1 approval/export/cache/emergency-control work follows the P0 CI gate. No production
+designation or deployment was performed.
+
+P0 CI follow-up: run 36652212904 passed the breaker/retry suites but exposed two
+egress fixtures sending empty MCP bodies. They now send valid tools/list requests
+and retain every denial assertion; IMDS allow-list cleanup now runs in finally,
+preventing the two downstream OIDC failures that the skipped cleanup caused.
+The combined egress/breaker/retry run passed all 65 tests on a fresh task database.
+See session-02 for the first CI failure and follow-up evidence; the published
+follow-up commit's checks remain the full-suite gate.
+
+**2026-09-28 (latest) — the three unverified claims closed, two external findings fixed, and
+ABAC schema v2 adds network location. M-048 and M-049 logged.**
+
+The session's build work: ADR-0128's retry policy (a retry is an idempotence claim, so a write
+tool gets exactly one attempt and the budget for a sequence IS the operation's deadline), the
+active health probe, then two findings from an external review — AER-037 (the probe's cap over a
+constant order starved the tail of the estate; migration 0118 adds a rotation cursor) and AER-036
+(the Kong adapter could label API-key traffic as SSO and the PDP believed it; the origin is now
+derived from the credential and a contradiction is refused). Then AER-035 item 3: a fault injected
+in Postgres at the applier's last write, proving the abort undoes the mutation AND the marker.
+
+**Verification before building, twice over.** `geminiInputs.md` appendix II closed pillars 7/8 and
+section 5: the orchestration DAG, Team-Lead ceilings, PM inbound sync and first-class decisions all
+already exist — the real gaps are narrower (wall-clock concurrency; whether PM state may drive the
+run state machine). Guardrail block mode, SAML+SCIM and the SOC-2/HIPAA packs ship. **Then I got one
+wrong in that very appendix** and corrected it: ABAC does evaluate time-of-day. M-049's rule — *a
+grep that returns nothing proves the absence of a string, never the absence of a capability* — is
+the most reusable thing this session produced.
+
+**ABAC schema v2** closes the one gap that survived: `context.clientIp`, Cedar's own `ipaddr` type,
+`required: false` so strict validation forces `context has clientIp` and "we don't know" is decided
+at write time. The version boundary is what makes it safe — emitting it to a stored v1 policy group
+would fail-closed every governed call, so `contextFor` takes the schema version. No device-posture
+attribute, because nothing here can observe posture and an unpopulatable attribute is an assertion
+nobody checked.
+
+Next, in order: in-flight PII redaction (the one confirmed section-5 gap — the verbs are
+block/warn/log with no mask), an ISO 27001 pack, and the five older OPEN HIGH findings
+(AER-017/018/019/021/022). SIEM streaming, SOAR webhooks, tool-result malware scanning and outbound
+secret classifiers were NOT FOUND and need a build decision, not just work.
+
+**2026-09-28 — the two genuine gaps in gateway hardening, closed: ACTIVE upstream health probing
+and a retry policy we own. ADR-0128 added.**
+
+Verification before building paid for itself: of four planned "gateway-hardening" items, three
+already existed, so the work narrowed to two. (1) **Active health probing** —
+`mcp-health-probe-sweep`, registered as a scheduler job under ADR-0126, makes the platform the
+first caller after an outage instead of a user. It reuses `breakerAdmits` so it enters the
+breaker's own one-winner election rather than re-implementing it, probes broken upstreams FIRST
+because recovery is the time-critical half, and counts OUR refusals (egress-blocked,
+admission-held) separately without ever charging them to the breaker — an air-gapped install
+would otherwise report every upstream as circuit-broken on a deployment where nothing is wrong.
+Not a control: with the scheduler off (the shipped default) behaviour is byte-identical, because
+the breaker still learns passively.
+
+(2) **A retry policy we own** (ADR-0128). The honest gap was narrower than "no retries": the model
+SDKs retry twice already, so on the MCP path the gap was total and on the model path it was
+*ownership* — vendor backoff, vendor classifier, invisible to our breaker. The design turns on one
+sentence: **a retry is an assertion that running an operation twice is indistinguishable from
+running it once**, which is true of `connect` and `tools/list` and false of `tools/call`. So
+`attemptsForToolKind` reads §3's stored `mcp_tools.kind` and gives a write — and an unknown kind —
+exactly one attempt. The budget for a whole sequence *is* the operation's configured deadline, so
+retries never extend a bound an operator approved and a timeout is never retried; our own refusals
+exit on the first attempt; one exhausted sequence is ONE failure to the breaker, not three. The
+recovery test carries a permanent twin with the policy set to one attempt, so removing the wiring
+reddens the pair rather than needing a remembered experiment. The file also caught a false green in
+itself: two apps in one process cannot hold different retry policies, because the config is a
+module singleton and the second `buildApp` silently set it for both.
+
+Open on this thread: the model path still retries with the vendor's policy, and pillars 7/8 plus
+the owner's new `geminiInputs.md` section 5 are still unverified.
+
+**2026-09-27 (latest, second entry) — AER-035: one human approval could be spent twice, and did
+create ten governance rules under test. ADR-0056 amended for the fifth time, M-046 logged.**
+
+An external review found the copilot's proposal applier **not transactional and not
+concurrency-safe**. It read the proposal, checked `applied_at`, ran the mutation, wrote the marker
+and appended the audit row as five independent statements with no lock. Two concurrent requests
+could both see `applied_at = NULL` and both spend one human's consent; `rule_to_approval` is the
+material case, because `createApprovalRuleRow` is an unconditional insert with a fresh id. **With
+the lock removed, twenty simultaneous applies produced ten successes and ten live approval rules
+from one approval.** With it: one and one.
+
+The fix is one transaction opened with `SELECT … FOR UPDATE` on the proposal row, with every choke
+point widened to accept a transaction handle through ADR-0074's existing `DbOrTx`/`DbOrTxDeep`
+types (plus a `DbOrTxWrite` for the ones that DELETE) rather than a new mechanism. Refusals are
+audited **after** the rollback on purpose: a deny row written inside the transaction would roll back
+with it and leave the one case an operator most needs to find unrecorded.
+
+**And the process failure is mine, not the reviewer's find.** B8c filed this under honest limits as
+"not transactional across its audit row" — which sounds like a records-keeping nicety when the real
+property was that the change could happen twice — and batch B9a, which *added tests to this exact
+route* five weeks later, copied that sentence forward without re-deriving it. M-046: *a limit you
+wrote down is a claim you have not re-checked; when you touch the code it describes, re-derive it.*
+The existing tests "proved" idempotency by applying twice in sequence, which is a different property,
+and their passing is what let me believe the ground was covered.
+
+**Also in this pass:** the Kong adapter now sends the decision context it can state truthfully —
+`project_id` and `session_origin` as per-route config — and deliberately still sends no `args`,
+because a *wrong* body-to-arguments mapping would evaluate a data-scope rule against the wrong
+values, which is worse than the fail-closed deny that omitting them produces. There is no
+`mfa_completed` field for the same reason: Kong cannot observe a second factor, and a configured
+`true` would be an unchecked assertion in the trusted path. The harness now asserts all of this
+against the PDP's own `contextApplied` ledger — including that `args` is NOT claimed — so the
+README's disclosure is measured rather than promised, and it cleans up after itself (revokes the
+scratch PDP key, removes its temp directory, drops its scratch database), which was AER-033's
+residual hygiene.
+
+**Closed in the same pass — AER-034 and AER-031.** The Kong README's "What is actually asserted"
+listed `approval_required`, a non-200 PDP and an unparseable PDP answer, and the harness asserted
+none of the three. They are asserted now rather than removed: `approval_required` needed a third
+subject (entitled AND caught by an approval rule, because putting a rule on the entitled consumer
+would turn the `allow` control into a different test), and the two answer-shaped failures needed two
+more governed routes whose plugin instances point at stub PDPs — a plugin's config being per route is
+what makes "the same upstream, a broken decision point" expressible at all. **Green in a real
+container on the first run**, and the Kong access log corroborates each branch independently:
+`regulait pdp returned 500` → 503, `/pdp-junk` → 503, and a 403 whose body length differs from the
+policy-deny 403 because it carries `approval_required`. AER-031's last residue is gone too —
+`docs/deployment/README.md`'s index row said "Kong only, no Envoy adapter" and then described "the
+Envoy and Kong adapters" in the same cell.
+
+**One process failure worth the ledger (M-047).** The AER-035 concurrency test passed five tests
+locally and broke the CI build on two nonexistent column names. `vitest run` does not typecheck, and
+drizzle silently drops unknown keys — so the test was green, correct about the thing it asserted, and
+uncompilable, all at once. I had run the gateway typecheck after editing `copilot.ts` and then written
+the test file and run only vitest: the check I ran was not the check CI runs. Same family as M-041 and
+M-045. Mitigation in use from here: after touching a test file, run the owning package's `build`.
+
+**2026-09-27 — the PDP credential stopped being an administrator, the authorization
+callout started asking the same question a dispatch asks, and the copilot's propose half got both
+a gate and a UI. Migration 0117, ADR-0127 and ADR-0056 amended.**
+
+**AER-027 — the most exposed component held the keys to the control plane.**
+`POST /v1/authz/check` is admin-gated, so the only credential a data-plane proxy (Kong, an
+`ext_authz` sidecar) could hold to ask it was an **admin API key** — one that reaches every other
+admin route in the product, to do a job that is one question wide. Virtual keys gained a `purpose`
+(migration 0117, `dispatch` | `pdp`, defaulting to `dispatch` so every existing key keeps exactly
+the routes it had). A `pdp` key reaches that one route and nothing else: it cannot dispatch a model,
+read a ledger, or mint another key, and it is never an administrator whatever its owner is. Minting
+one is itself an admin act, because such a key can ask about **anybody**. The separation is asserted
+in both directions — a `pdp` key is refused `GET /v1/me` (which is on the dispatch allow-list, so
+the refusal is about purpose rather than about a route that happens to be closed), and a `dispatch`
+key cannot ask an authorization question about anyone.
+
+**AER-028 — "fails closed" is not a defence when the closure is indiscriminate.** The callout
+passed `args = undefined, projectId = null, principal = undefined` into the kernel. The consequence
+was not that rules were skipped: the kernel **fails closed on a data-scope rule whose argument is
+absent**, so any deployment with one got `deny` from the PDP for calls that would really have been
+allowed. That is wrong in the safe direction, which is the direction that gets a PDP switched off —
+an operator whose proxy denies everything removes the proxy, and then nothing is governed at all.
+The request now accepts optional `args`, `projectId` and `principal`, all believed exactly as
+`userId` already was (in this topology the proxy is the only component that *can* supply them, which
+is why the credential above is purpose-scoped), and the response carries `contextApplied`: the
+**names** of the dimensions the decision was computed on, never their values, so a proxy that
+believes it is sending arguments and is not can tell its own misconfiguration from a policy refusal.
+The fail-closed behaviour with no args is asserted **unchanged** — the fix is context, not a
+relaxation, and the tests are written to tell those two apart.
+
+**A real product defect fell out of it.** The parity suite caught the fallback-chain virtual-key
+allow-list refusal writing its audit row through `auditHop`, which stamps `objectType: "agent"` —
+so a credential-scope denial was filed against the wrong object type. It now writes
+`objectType: "virtual_key"` against the key's own id.
+
+**And one claim I made repeatedly in this session was false.** I said no license could be installed
+in any environment. `demo:setup` had been minting one all along. The ephemeral-license path added for
+the e2e suite (`REGULAIT_EPHEMERAL_LICENSE=1`, keypair generated at seed time, private half never
+persisted) is still worth having, but it did not close the gap I claimed.
+
+**Batch B9a — consent was being asked for diffs that could not be applied.** The copilot's diff
+validation lived in the **applier only**, and `copilotProposalSchema` types `diff` as
+`z.record(z.unknown())`. So a malformed diff was recorded, an ordinary Approvals-Queue item was
+opened, a named human read a title and a rationale and consented, and only then did the product
+answer `proposal_diff_invalid` — leaving a real human approval permanently on the audit record
+against a change that could never happen. The existing test proposed `diff: { revoke: […] }`, a
+shape no applier branch can read, and asserted **201**; having to change that test is the clearest
+statement of what was wrong. There is now one authority, `validateCopilotProposalDiff`, called from
+both ends, and the applier lost four inline copies of the same parsing. Its call is kept anyway:
+pre-gate rows are still in the table, and defence in depth at a mutation door is not a duplication
+worth trading away — two *different* implementations of one check would have been.
+
+**The propose half also had no UI at all.** The copilot page could list proposals and apply approved
+ones, so the product's single most governed write was the one an admin could not reach without curl.
+The new form covers all four kinds, and its shape follows from the gate: every target is **chosen
+from the real object** rather than typed (a retyped uuid is the likeliest cause of a refused
+proposal, and there is now no box to retype one into), each patch field carries its own inclusion
+toggle beside its current value (absent is not the same as set to what it already is), a
+`rule_to_approval` inherits the source rule's scope rather than asking for it again, and the exact
+diff is rendered before it is sent — the recorded object is what a named human will be asked to
+approve. The e2e compares the previewed JSON byte-for-byte against what the server stored, because a
+preview that drifts from the payload is worse than no preview. The affordance census
+(`scripts/preflight-ui-affordances.mjs`) drops its add-affordance list from two entries to one — `/v1/redteam/libraries`
+remains, and two delete orphans did too (`/v1/approvals/views/:x`,
+`/v1/llm/backend-configs/:x`). **I first wrote that it reported "0 add gaps", in three
+documents. That was wrong**: I read the census output as though closing the copilot entry
+emptied the list, when the remaining entry was printed directly beneath it. All three are
+corrected in place.
+
+Verification: gateway suite green after the one remaining failure was identified and fixed — it was
+`adr0127-advisory-decisions.test.ts`'s CLOSED-SET contract assertion, which `contextApplied`
+legitimately widened; it was widened by exactly one field rather than exempted, and now also asserts
+that `contextApplied` holds only names from a fixed vocabulary (an implementation that put argument
+values there would have satisfied the old key check and leaked the very thing it exists to prevent).
+Playwright **148/148**.
+
+**2026-09-26 — D01 and G1 fixed. ADR-0125, migration 0115. Both write-ups were wrong first.**
 
 **D01, and I had described it wrongly.** I wrote that a malformed `REGULAIT_DATA_KEY` "boots clean".
 It does not — `keyBytes` throws and nothing starts. I had read the code instead of running it; the
@@ -1072,9 +1602,10 @@ required approver changed (an authorization time-of-check/time-of-use hole), and
 unconsumed row lasted forever. The fix needed no new versioning concept: **ADR-0073 already
 resolves every approval rule through `config_versions`**, so the active version id per rule was
 already there to bind against. Consent is now fingerprinted over matched-rule × active-version ×
-required-approver × scope, given a queue-time TTL (72h default dial), and **both are re-derived
-inside the single atomic UPDATE that spends the row** — so nothing can be checked good and spent
-bad. Stale rows are **superseded visibly** and re-queued, not silently ignored. The required
+required-approver × scope, given a queue-time TTL (72h default dial). The 2026-09-08
+implementation compared that earlier policy snapshot with the stored digest during consumption;
+it did not re-derive policy inside the UPDATE, leaving the race later tracked as AER-004 and
+addressed by ADR-0130. Stale rows are **superseded visibly** and re-queued. The required
 approver comes from a no-consent evaluation pass, which asks the kernel rather than re-deriving its
 selection order and breaks the digest↔selection↔decision circularity.
 
@@ -1441,7 +1972,9 @@ migration 0100): the **governance copilot is live through governed dispatch** �
 moved from counts to retrieved object ids, an empty retrieval is a refusal (the live model
 itself refused a nonsense object), proposals gained a consent-gated applier riding the real
 choke points (`applyRuleEdit`, the one grant-revocation function — never a raw write) with
-two kinds honestly named unapplied, and recommendations gained an opt-in `model-judged`
+two kinds honestly named unapplied *(all four kinds apply as of batch B8c, 2026-08-22; and as
+of batch B9a, 2026-09-27, a malformed diff is refused BEFORE an approval is opened — see the
+ADR-0056 amendments)*, and recommendations gained an opt-in `model-judged`
 annotation layer that never touches deterministic evidence. Two live-driven fixes: narration
 was structurally impossible at a 1024-token ceiling on a reasoning model (981 thought tokens,
 39 of JSON, correctly discarded) — ceilings raised and measured. Gateway **2437 passing + 9
@@ -3718,7 +4251,7 @@ first).
 ## Decisions
 See [docs/decisions/README.md](../docs/decisions/README.md) for the full ADR index — that index is
 the authority on how many exist and their status; do not restate a count here (this line claimed
-"all nine ADRs" long after there were eighteen). All ADRs to date are Accepted; superseding a
+"all nine ADRs" long after there were eighteen). Statuses vary; superseding a
 decision means a new ADR plus a status flip on the old one, never an edit in place.
 ADR-0009 (2026-07-24) chose the product stack: TypeScript
 end-to-end — Fastify gateway + official MCP SDK, hand-rolled pure policy kernel (typed
@@ -3739,6 +4272,13 @@ region-allowlist SCP; OQ-002 (budget cap) resolved to $5/month; OQ-003 (GitHub a
 to personal `dhruvmahendrapatel`.
 
 ## Known follow-ups (not urgent, not blocking)
+- ~~**Concurrent reads on one pg client in MRM autofill (pg@9 hazard).**~~ **CLOSED 2026-10-02 by
+  PR #115 (0f5d0b2): card-autofill reads run sequentially on a transaction handle.** `computeCardAutofill` /
+  `computeCardStaleness` (`apps/gateway/src/mrm-autofill.ts`) run reads through `Promise.all`;
+  when handed a transaction they share one client, so pg 8 queues them (correct today) and prints
+  a DeprecationWarning during `demo:prepare` → `demo:setup`; pg 9 will make it an error. Fix: run
+  those reads before the transaction, or sequentially when given a tx (keep `Promise.all` on the
+  pool). Found 2026-10-02 by instrumenting `Client.prototype.query` (~48 concurrent reads).
 - ~~`planning` is a vocabulary item, not a control~~ **CLOSED 2026-08-15 by
   [ADR-0079](../docs/decisions/0079-plan-only-stage-enforcement.md).** The kernel now RESTS at a
   planning stage (`blocked_on_plan`, left by an explicit `/advance`), an invoke may name an

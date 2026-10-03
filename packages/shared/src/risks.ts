@@ -69,6 +69,14 @@ export const AI_RISK_CATEGORIES = [
    * the one approvals queue. The lifecycle is a platform record; the
    * assessment CONTENT is vendor-attested, and the resolver says so. */
   "third_party_ai",
+  /** ADR-0147: outcomes differ unfairly across groups. No ledger here MEASURES
+   * disparity; the evidence is the model cards' documented bias/fairness
+   * assessments (ADR-0063 MRM) — a DOCUMENTATION record, labelled as one */
+  "bias_fairness",
+  /** ADR-0147: the system emits harmful, toxic or jailbreak-induced content —
+   * evidenced by the output-safety guardrail configuration (toxicity /
+   * jailbreak at block) and the guardrail block trail (ADR-0042) */
+  "unsafe_output",
 ] as const;
 export type AiRiskCategory = (typeof AI_RISK_CATEGORIES)[number];
 
@@ -126,6 +134,17 @@ export const RISK_EVIDENCE_RESOLVERS = [
    * Counts the assessment LIFECYCLE our approvals queue actually decided —
    * never the truth of the vendor's own attested answers. */
   "vendor_assessments",
+  /** ADR-0147: `model_cards` that DOCUMENT a bias/fairness assessment, by
+   * entry status, scoped to the risk's agent when it names one. A documented
+   * assessment is an attestation by the card's author — the resolver reports
+   * it as configuration evidence, never as a measured fairness result. */
+  "model_card_fairness",
+  /** ADR-0147: guardrail configs with toxicity or jailbreak detection at
+   * block — configuration evidence for output safety */
+  "output_safety_config",
+  /** ADR-0147: `audit_log` deny rows with rule id `guardrail-blocked` in the
+   * window — the guardrail blocks the gateway actually performed */
+  "guardrail_blocks",
   /** NOT MEASURED BY ANY LEDGER. The register says so outright. */
   "none",
 ] as const;
@@ -149,6 +168,43 @@ export const RISK_CATEGORY_EVIDENCE: Readonly<
   hallucination: ["groundedness_evals"],
   shadow_ai: ["shadow_findings"],
   third_party_ai: ["vendor_assessments"],
+  bias_fairness: ["model_card_fairness"],
+  unsafe_output: ["output_safety_config", "guardrail_blocks"],
+};
+
+/**
+ * ADR-0147 — THE SIX TRUST DIMENSIONS, and which category belongs to which.
+ *
+ * The dashboard's radar axes. Fixed order (it is the axis order). Every risk
+ * category maps to exactly one dimension, so a risk is never counted twice and
+ * never dropped; the test asserts the mapping is total. `budget_overrun` sits
+ * under compliance because an unauthorized spend is a breach of an approved
+ * control, not a security or reliability property.
+ */
+export const TRUST_DIMENSIONS = ["bias", "security", "privacy", "reliability", "safety", "compliance"] as const;
+export type TrustDimension = (typeof TRUST_DIMENSIONS)[number];
+
+export const TRUST_DIMENSION_LABELS: Readonly<Record<TrustDimension, string>> = {
+  bias: "Bias",
+  security: "Security",
+  privacy: "Privacy",
+  reliability: "Reliability",
+  safety: "Safety",
+  compliance: "Compliance",
+};
+
+export const RISK_CATEGORY_DIMENSION: Readonly<Record<AiRiskCategory, TrustDimension>> = {
+  bias_fairness: "bias",
+  tool_misuse: "security",
+  prompt_injection: "security",
+  over_permissioning: "security",
+  data_leakage_pii: "privacy",
+  hallucination: "reliability",
+  scope_drift: "reliability",
+  unsafe_output: "safety",
+  shadow_ai: "compliance",
+  third_party_ai: "compliance",
+  budget_overrun: "compliance",
 };
 
 /**
@@ -212,6 +268,30 @@ export const transitionRiskSchema = z.object({
   reason: z.string().min(1).max(2000),
 });
 export type TransitionRiskInput = z.infer<typeof transitionRiskSchema>;
+
+/**
+ * ADR-0147 — RESIDUAL position after controls. Still DECLARED (the same
+ * three-level scale, never arithmetic): the registrant's judgment of where the
+ * risk sits once the linked controls operate. Both or neither — a half-stated
+ * residual is not a position. `null`/`null` clears it.
+ */
+export const setResidualRiskSchema = z
+  .object({
+    likelihood: riskLevelSchema.nullable(),
+    impact: riskLevelSchema.nullable(),
+  })
+  .refine((v) => (v.likelihood === null) === (v.impact === null), {
+    message: "residual likelihood and impact are set together or cleared together",
+  });
+export type SetResidualRiskInput = z.infer<typeof setResidualRiskSchema>;
+
+/** ADR-0147 — link a mitigating control to a risk, by the pack control's
+ * stable `controlRef` (e.g. `eu-ai-act:art-14-human-oversight`). The gateway
+ * refuses a ref no seeded pack defines. */
+export const linkRiskControlSchema = z.object({
+  controlRef: z.string().min(3).max(200),
+});
+export type LinkRiskControlInput = z.infer<typeof linkRiskControlSchema>;
 
 export const acceptRiskSchema = z.object({
   /** WHY the residual risk is acceptable — the substance of the record */
@@ -421,5 +501,37 @@ export const DEFAULT_RISK_LIBRARY: RiskLibraryEntry[] = [
       "said outright: the platform verifies that assessments HAPPENED and were decided; the " +
       "answers inside them are vendor attestations, never platform-verified facts.",
     evidenceResolvers: ["vendor_assessments"],
+  },
+  {
+    key: "bias-unfair-outcomes-across-groups",
+    title: "Outcomes differ unfairly across protected groups",
+    description:
+      "A model or agent that informs decisions about people (credit, hiring, eligibility, " +
+      "pricing) produces systematically different outcomes for comparable people in different " +
+      "groups. This deployment does not compute disparity metrics itself.",
+    category: "bias_fairness",
+    likelihood: "medium",
+    impact: "high",
+    mitigatingControl:
+      "Model risk management (ADR-0063) requires a model card with a documented bias/fairness " +
+      "assessment before an agent is dispatchable; the evidence below counts those DOCUMENTED " +
+      "assessments by status. The assessment itself — data, method, thresholds — is the card " +
+      "author's attestation, not a measurement this platform performed.",
+    evidenceResolvers: ["model_card_fairness"],
+  },
+  {
+    key: "unsafe-or-toxic-output",
+    title: "The system emits harmful, toxic or jailbreak-induced content",
+    description:
+      "A user or an injected document steers the model into producing abusive, dangerous or " +
+      "policy-violating output that reaches a person or a downstream system.",
+    category: "unsafe_output",
+    likelihood: "medium",
+    impact: "high",
+    mitigatingControl:
+      "ADR-0042 guardrails run toxicity and jailbreak detection on the governed path; at 'block' " +
+      "the output is withheld before release. Evidence: how many guardrail configs hold these " +
+      "detectors at block, and how many blocks the gateway actually performed in the window.",
+    evidenceResolvers: ["output_safety_config", "guardrail_blocks"],
   },
 ];

@@ -21,6 +21,7 @@
     "openai": "^6.49.0"
   },
   "devDependencies": {
+    "@types/node": "26.1.1",
     "vitest": "^3.2.4"
   }
 }

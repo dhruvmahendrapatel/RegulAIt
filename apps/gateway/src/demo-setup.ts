@@ -307,7 +307,7 @@ const LICENSE_KEY_ID = "regulait-demo-ephemeral";
 let licenseNote: string;
 const licenseStatus = await probe("GET", "/v1/licenses/status");
 if (licenseStatus.body?.state === "valid") {
-  licenseNote = `  license already installed and valid (tier '${licenseStatus.body?.license?.tier ?? "?"}')`;
+  licenseNote = `  license already installed and valid (tier '${licenseStatus.body?.tier ?? "unknown"}')`;
 } else {
   mkdirSync(keyringDir, { recursive: true });
   const { publicKey, privateKey } = generateKeyPairSync("ed25519");
@@ -324,7 +324,7 @@ if (licenseStatus.body?.state === "valid") {
   const doc = {
     schema: LICENSE_SCHEMA_ID as "regulait.license/1",
     licenseId: `demo-${Date.now()}`,
-    tenant: "RegulAIt capability demo — NOT A PRODUCTION DEPLOYMENT",
+    tenant: "regulAIt capability demo — NOT A PRODUCTION DEPLOYMENT",
     tier: "enterprise",
     seatCap: 25,
     features: [...LICENSE_FEATURES] as string[],
@@ -360,7 +360,15 @@ const packList: Json[] = (await call("GET", "/v1/compliance/packs")).packs ?? []
 /** the two the demo actually walks through */
 const DEMO_PACKS = ["nist-ai-rmf", "eu-ai-act"];
 let activated = 0;
-for (const pack of packList.filter((p) => DEMO_PACKS.includes(p.framework as string))) {
+// ADR-0150: the LATEST version of each demo framework — v2 carries the bias
+// and safety controls the trust dashboard's radar needs. Activating it
+// retires an older active version through the normal path.
+const latestDemoPacks = DEMO_PACKS.map((fw) =>
+  packList
+    .filter((p) => p.framework === fw)
+    .sort((a, b) => Number(b.version) - Number(a.version))[0],
+).filter((p): p is Json => !!p);
+for (const pack of latestDemoPacks) {
   if (pack.status === "active") {
     note(`  packs   ${pack.framework} v${pack.version} already active`);
     continue;

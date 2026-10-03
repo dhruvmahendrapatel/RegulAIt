@@ -135,11 +135,9 @@ test("intent capture: a proposed use case's intended agents are editable in flig
   // open the detail: the capture card is there and editable pre-decision
   await page.getByRole("cell", { name: "b3e2e-intent-capture", exact: true }).click();
   await expect(page.getByText("Use case: b3e2e-intent-capture")).toBeVisible();
-  await expect(
-    page.getByText("Intended agents (the intent the alignment flags stand on)"),
-  ).toBeVisible();
-  // undecided intent is honestly "not approved", never a guessed alignment
-  await expect(page.getByText("not approved", { exact: true })).toBeVisible();
+  await expect(page.getByText("Intended agents", { exact: true })).toBeVisible();
+  // undecided intent is honestly "Not approved", never a guessed alignment
+  await expect(page.getByText("Not approved", { exact: true })).toBeVisible();
 
   const picker = page.getByLabel("Intended agents (ctrl/cmd-click to select several)");
   await expect(picker).toBeVisible();

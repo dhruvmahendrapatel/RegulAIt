@@ -7,7 +7,7 @@ import { withProseScrub } from "./prose-scrub.js";
 export * from "./schema.js";
 export { schema };
 export { runMigrations } from "./migrate.js";
-export { and, asc, count, desc, eq, gt, gte, inArray, isNotNull, isNull, lt, lte, ne, or, sql } from "drizzle-orm";
+export { and, asc, count, desc, eq, gt, gte, inArray, isNotNull, isNull, lt, lte, ne, notInArray, or, sql } from "drizzle-orm";
 // Types consumers need to build reusable predicates without taking a direct
 // dependency on drizzle-orm (PILLAR 1 rule-scoping SQL pre-filter, etc.).
 export type { SQL } from "drizzle-orm";
@@ -68,7 +68,114 @@ export type Db = ReturnType<typeof createDb>;
  * would work too; this way the two wrappers stay independent and each keeps its
  * own correctness argument.
  */
-export function createDb(connectionString: string) {
-  const pool = new pg.Pool({ connectionString });
+/**
+ * ADR-0167 (CFG-08) — the pool is BOUNDED and its bounds are named.
+ *
+ * `new pg.Pool({ connectionString })` ran on every default: 10 clients, no
+ * connection timeout (a caller waiting for a free client waits FOREVER), no
+ * idle timeout, no TLS option. Ten slow operations — a `/v1/audit.csv` walk,
+ * waiters on the audit-chain advisory lock, a long report — took every slot
+ * and every later request queued indefinitely, including the liveness probe.
+ *
+ * `connectionTimeoutMillis` is the load-bearing one: in node-postgres it
+ * bounds BOTH the TCP connect and the wait for a free client, so an exhausted
+ * pool now fails a request with an error after the deadline instead of
+ * holding it. No statement timeout is set here on purpose — migrations, the
+ * data-key re-encryption walk and backup verification share this pool and run
+ * long DDL/scans by design; a per-request statement bound belongs in the
+ * request path (`SET LOCAL`), not on the pool.
+ */
+export interface DbPoolConfig {
+  /** clients per process (REGULAIT_DB_POOL_MAX, default 20) */
+  max: number;
+  /** connect + wait-for-a-client deadline (REGULAIT_DB_CONNECT_TIMEOUT_MS, default 5000) */
+  connectionTimeoutMillis: number;
+  /** idle client reaped after (REGULAIT_DB_IDLE_TIMEOUT_MS, default 30000) */
+  idleTimeoutMillis: number;
+  /** REGULAIT_DATABASE_SSL: off (default) | require (verify the server cert) |
+   * no-verify (TLS without verification — a self-signed RDS/BYOC box) */
+  ssl: "off" | "require" | "no-verify";
+}
+
+export const DB_POOL_DEFAULTS: Readonly<DbPoolConfig> = Object.freeze({
+  max: 20,
+  connectionTimeoutMillis: 5_000,
+  // pg's own default, restated rather than raised: the test harness drops its
+  // scratch databases after waiting for idle clients to reap, and a longer
+  // reap would turn every teardown into a timeout
+  idleTimeoutMillis: 10_000,
+  ssl: "off",
+});
+
+function envPositiveInt(env: NodeJS.ProcessEnv, name: string, dflt: number): number {
+  const raw = env[name];
+  if (raw === undefined || raw.trim() === "") return dflt;
+  const n = Number(raw);
+  // a malformed knob falls back rather than throwing: this package is loaded
+  // by every script and test, and a typo must not take the pool down
+  return Number.isFinite(n) && n > 0 ? Math.trunc(n) : dflt;
+}
+
+export function resolveDbPoolConfig(env: NodeJS.ProcessEnv = process.env): DbPoolConfig {
+  const rawSsl = (env.REGULAIT_DATABASE_SSL ?? "").trim().toLowerCase();
+  const ssl: DbPoolConfig["ssl"] =
+    rawSsl === "require" || rawSsl === "verify" || rawSsl === "on" || rawSsl === "true"
+      ? "require"
+      : rawSsl === "no-verify"
+        ? "no-verify"
+        : "off";
+  return {
+    max: envPositiveInt(env, "REGULAIT_DB_POOL_MAX", DB_POOL_DEFAULTS.max),
+    connectionTimeoutMillis: envPositiveInt(env, "REGULAIT_DB_CONNECT_TIMEOUT_MS", DB_POOL_DEFAULTS.connectionTimeoutMillis),
+    idleTimeoutMillis: envPositiveInt(env, "REGULAIT_DB_IDLE_TIMEOUT_MS", DB_POOL_DEFAULTS.idleTimeoutMillis),
+    ssl,
+  };
+}
+
+/** one line for the gateway's boot posture block */
+export function describeDbPool(cfg: DbPoolConfig): string {
+  const tls =
+    cfg.ssl === "require"
+      ? "tls required, server certificate verified"
+      : cfg.ssl === "no-verify"
+        ? "tls on, server certificate NOT verified (REGULAIT_DATABASE_SSL=no-verify)"
+        : "tls off (REGULAIT_DATABASE_SSL unset — set `require` when Postgres is across a network)";
+  return `pool max ${cfg.max}, connect/wait deadline ${cfg.connectionTimeoutMillis}ms, idle reap ${cfg.idleTimeoutMillis}ms, ${tls}`;
+}
+
+export function createDb(connectionString: string, override: Partial<DbPoolConfig> = {}) {
+  const cfg = { ...resolveDbPoolConfig(), ...override };
+  const pool = new pg.Pool({
+    connectionString,
+    max: cfg.max,
+    connectionTimeoutMillis: cfg.connectionTimeoutMillis,
+    idleTimeoutMillis: cfg.idleTimeoutMillis,
+    ...(cfg.ssl === "require"
+      ? { ssl: { rejectUnauthorized: true } }
+      : cfg.ssl === "no-verify"
+        ? { ssl: { rejectUnauthorized: false } }
+        : {}),
+  });
+  // REL-01 — an IDLE client's backend error is an EVENT, not a rejection.
+  //
+  // node-postgres emits `'error'` on the Pool when a client that is sitting
+  // idle in it loses its backend (`pg_terminate_backend`, a Postgres restart
+  // or failover, an LB/NAT idle reset, a laptop resuming from sleep). With no
+  // listener Node's EventEmitter THROWS that event, and the whole gateway —
+  // every governed call, the SPA, /health — died with "Unhandled 'error'
+  // event" over one connection the pool was about to discard anyway. Every
+  // CLI script in this repo had bolted its own `.on("error", () => {})` onto
+  // `$client`; the one process that serves traffic was the one without it.
+  //
+  // The pool removes the errored client itself and dials a fresh one on the
+  // next checkout, so the only correct reaction here is to SAY it happened.
+  // Queries in flight on that client still fail through their own awaited
+  // promise, exactly as before — nothing is swallowed, only the crash.
+  pool.on("error", (err: Error & { code?: string }) => {
+    console.error(
+      `[regulait] postgres: an idle pooled connection was dropped (${err.code ?? "no code"}: ${err.message}) — ` +
+        "the pool discards it and reconnects on next use; nothing in flight was affected",
+    );
+  });
   return withProseScrub(withAuditChain(drizzle(pool, { schema })));
 }

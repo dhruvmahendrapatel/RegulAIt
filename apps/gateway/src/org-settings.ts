@@ -17,6 +17,7 @@
  */
 
 import type { FastifyInstance } from "fastify";
+import { decryptSecret, encryptSecret } from "./secrets.js";
 import {
   and,
   auditLog,
@@ -405,17 +406,112 @@ export function envKeyPresence(): Array<{ provider: string; envVar: string; pres
  */
 export function redactSettings(row: OrgSettingsRow): OrgSettingsRow {
   const headers = row.tracingOtlpHeaders as Record<string, string> | null;
-  if (!headers) return row;
+  // the envelope is not a secret, but it is not a setting either — it never
+  // leaves on the read
+  const base = { ...row, tracingOtlpHeadersCiphertext: null };
+  if (!headers) return base;
+  return { ...base, tracingOtlpHeaders: otlpHeaderMarkers(headers) };
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0167 (SEC-06) — the OTLP collector headers are a CREDENTIAL.
+//
+// They were plaintext jsonb: readable from a pg_dump, outside the
+// REGULAIT_DATA_KEY custody story (ADR-0063), untouched by a key rotation.
+// Since migration 0128 the VALUES live in `tracing_otlp_headers_ciphertext`
+// as one envelope over the JSON map, and the jsonb column carries only the
+// header NAMES with every value replaced by the marker below — so the settings
+// screen still lists which headers are set, and the hash-chained audit row an
+// update writes carries the marker map, never a token.
+// ---------------------------------------------------------------------------
+
+/** the value every header carries in the jsonb column and on every read */
+export const OTLP_HEADER_MARKER = "[redacted]";
+
+export function otlpHeaderMarkers(headers: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(Object.keys(headers).map((k) => [k, OTLP_HEADER_MARKER]));
+}
+
+/** the two columns a settings write sets for the submitted `tracingOtlpHeaders` */
+export function otlpHeadersForWrite(
+  headers: Record<string, string> | null | undefined,
+  dataKey: string | undefined,
+):
+  | { ok: true; columns: { tracingOtlpHeaders?: Record<string, string> | null; tracingOtlpHeadersCiphertext?: string | null } }
+  | { ok: false } {
+  if (headers === undefined) return { ok: true, columns: {} };
+  if (headers === null || Object.keys(headers).length === 0) {
+    return { ok: true, columns: { tracingOtlpHeaders: null, tracingOtlpHeadersCiphertext: null } };
+  }
+  if (!dataKey) return { ok: false };
   return {
-    ...row,
-    tracingOtlpHeaders: Object.fromEntries(Object.keys(headers).map((k) => [k, "[redacted]"])),
+    ok: true,
+    columns: {
+      tracingOtlpHeaders: otlpHeaderMarkers(headers),
+      tracingOtlpHeadersCiphertext: encryptSecret(dataKey, JSON.stringify(headers)),
+    },
   };
 }
 
-export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db) {
+/**
+ * The REAL headers, for the one place they are used: the export request.
+ * Decrypts the envelope when there is one; a pre-0128 row that was never
+ * backfilled (no key at boot) still exports its plaintext values, because
+ * refusing would turn an upgrade into an outage with nothing gained.
+ */
+export function otlpHeadersForExport(
+  org: Pick<OrgSettingsRow, "tracingOtlpHeaders" | "tracingOtlpHeadersCiphertext">,
+  dataKey: string | undefined,
+): { ok: true; headers: Record<string, string> } | { ok: false; detail: string } {
+  if (org.tracingOtlpHeadersCiphertext) {
+    if (!dataKey) {
+      return {
+        ok: false,
+        detail:
+          "the OTLP collector headers are stored under REGULAIT_DATA_KEY, which this process does not hold — set it before exporting",
+      };
+    }
+    const parsed = JSON.parse(decryptSecret(dataKey, org.tracingOtlpHeadersCiphertext)) as Record<string, string>;
+    return { ok: true, headers: parsed };
+  }
+  const legacy = (org.tracingOtlpHeaders ?? {}) as Record<string, string>;
+  return {
+    ok: true,
+    headers: Object.fromEntries(Object.entries(legacy).filter(([, v]) => v !== OTLP_HEADER_MARKER)),
+  };
+}
+
+/**
+ * Boot-time backfill: a row whose jsonb still carries real values and whose
+ * envelope is empty is a pre-0128 deployment — envelope it now. Idempotent;
+ * a second call finds nothing to do. Called from boot.ts after the data-key
+ * gate, so the key it uses is the one the deployment has just proved.
+ */
+export async function backfillOtlpHeaderCiphertext(db: Db, dataKey: string): Promise<"enveloped" | "nothing"> {
+  const [row] = await db.select().from(orgSettings).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+  if (!row || row.tracingOtlpHeadersCiphertext) return "nothing";
+  const legacy = row.tracingOtlpHeaders as Record<string, string> | null;
+  if (!legacy) return "nothing";
+  const real = Object.fromEntries(Object.entries(legacy).filter(([, v]) => v !== OTLP_HEADER_MARKER));
+  if (Object.keys(real).length === 0) return "nothing";
+  await db
+    .update(orgSettings)
+    .set({
+      tracingOtlpHeaders: otlpHeaderMarkers(real),
+      tracingOtlpHeadersCiphertext: encryptSecret(dataKey, JSON.stringify(real)),
+    })
+    .where(eq(orgSettings.id, ORG_SETTINGS_ID));
+  return "enveloped";
+}
+
+function approvalTtlPosture(row: OrgSettingsRow): "bounded" | "nonexpiring_high_risk" {
+  return row.approvalTtlHours == null ? "nonexpiring_high_risk" : "bounded";
+}
+
+export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { dataKey?: string } = {}) {
   app.get("/v1/org/settings", async () => {
     const settings = await loadOrgSettings(db);
-    return { settings: redactSettings(settings), envKeys: envKeyPresence() };
+    return { settings: redactSettings(settings), approvalTtlPosture: approvalTtlPosture(settings), envKeys: envKeyPresence() };
   });
 
   app.put("/v1/org/settings", async (req, reply) => {
@@ -530,18 +626,36 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db) {
         });
       }
     }
+    // ADR-0167 (SEC-06): the collector headers are enveloped before they touch
+    // the row; without a data key they are refused rather than stored in the
+    // clear, exactly as a connector credential is.
+    const otlpWrite = otlpHeadersForWrite(body.tracingOtlpHeaders, opts.dataKey);
+    if (!otlpWrite.ok) {
+      return reply.status(503).send({
+        error: "no_data_key",
+        detail:
+          "set REGULAIT_DATA_KEY before storing OTLP collector headers — they are a credential and are stored enveloped, never in the clear. Nothing was saved.",
+      });
+    }
     const [row] = await db
       .update(orgSettings)
       .set({
         ...body,
+        ...otlpWrite.columns,
         updatedBy: req.authCtx.userId,
         updatedAt: new Date(),
       })
       .where(eq(orgSettings.id, ORG_SETTINGS_ID))
       .returning();
     const after = row ?? before;
+    // the audit row is hash-chained and admin-readable: the submitted header
+    // VALUES must not land in it, so the diff carries the marker map
+    const submitted: Record<string, unknown> = {
+      ...body,
+      ...(body.tracingOtlpHeaders ? { tracingOtlpHeaders: otlpHeaderMarkers(body.tracingOtlpHeaders) } : {}),
+    };
     const changed = Object.fromEntries(
-      Object.entries(body).filter(
+      Object.entries(submitted).filter(
         ([k, v]) => JSON.stringify((before as Record<string, unknown>)[k]) !== JSON.stringify(v),
       ),
     );
@@ -551,7 +665,7 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db) {
       userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
       objectType: "org_settings",
       objectId: null,
-      detail: { via: req.authCtx.via, changed, after },
+      detail: { via: req.authCtx.via, changed, after: redactSettings(after), approvalTtlPosture: approvalTtlPosture(after) },
       effect: "allow",
       ruleId: "org-settings-updated",
       ruleChain: [],
@@ -560,7 +674,7 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db) {
           ? `org settings updated: ${Object.keys(changed).join(", ")}`
           : "org settings written with no effective change",
     });
-    return reply.send({ settings: redactSettings(after) });
+    return reply.send({ settings: redactSettings(after), approvalTtlPosture: approvalTtlPosture(after) });
   });
 
   // -------------------------------------------------------------------------

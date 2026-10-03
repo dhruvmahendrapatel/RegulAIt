@@ -143,6 +143,13 @@ export const NON_ADMIN_ROUTES = new Set([
   // and there is no status-writing route at all, because approved/rejected
   // exist only as decisions of the linked intake instance on the one queue.
   "POST /v1/use-cases",
+  // ADR-0149: any proposer may ask for suggestions; nothing is written
+  "POST /v1/use-cases/intake/assist",
+  // C3: owner-or-admin, enforced in the handler like the detail route
+  "GET /v1/use-cases/:useCaseId/overview",
+  // ADR-0161: the deploy gate — owner-or-admin, enforced in the handler (a
+  // pipeline runs as the service account that owns the use case it ships)
+  "POST /v1/gates/deploy",
   "GET /v1/use-cases",
   "GET /v1/use-cases/:useCaseId",
   // ADR-0058 mapping view. Non-admin for the same reason the detail route is:
@@ -165,9 +172,15 @@ export const NON_ADMIN_ROUTES = new Set([
   "POST /v1/risks",
   "GET /v1/risks",
   "GET /v1/risks/library",
+  // G2/X8: the scenario library — same class as the risk library
+  "GET /v1/risks/scenarios",
   "GET /v1/risks/:riskId",
   "PATCH /v1/risks/:riskId",
   "POST /v1/risks/:riskId/transition",
+  // ADR-0147: owner-or-admin, enforced in the handler like PATCH
+  "PUT /v1/risks/:riskId/residual",
+  "POST /v1/risks/:riskId/controls",
+  "DELETE /v1/risks/:riskId/controls/:controlRef",
   // ADR-0084 — the AI vendor registry, the same shape again: proposing a
   // vendor is a front-door act, and list/detail/edit are owner-or-admin
   // INSIDE the handler. Recording a vendor ATTESTATION is owner-or-admin too

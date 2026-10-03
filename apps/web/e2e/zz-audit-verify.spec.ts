@@ -70,6 +70,6 @@ test("admin verifies the audit chain from the UI and reads an honest anchor repo
   // no MinIO in this harness → the local/database anchor must be reported as
   // NOT tamper-resistant. If this ever shows "tamper-resistant (observed)"
   // without a WORM medium present, the observed-grading contract broke.
-  await expect(report.getByText("NOT tamper-resistant")).toBeVisible();
+  await expect(report.getByText("Not tamper-resistant")).toBeVisible();
   await expect(report.getByText(/anchor MISMATCH/)).toHaveCount(0);
 });

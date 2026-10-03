@@ -6,6 +6,7 @@ import {
   desc,
   eq,
   inArray,
+  sql,
   workflowArtifacts,
   workflowAssignmentRules,
   workflowEvents,
@@ -43,6 +44,7 @@ import {
   IMPLEMENTED_GIT_PROVIDERS,
 } from "@regulait/git-provider";
 import { resolveDeployProvider, liveDeployClients, DeployProviderError } from "./deploy.js";
+import { ExternalEffectBlockedError, runExternalWrite } from "./external-effects.js";
 import { validateGraph } from "@regulait/orchestration-kernel";
 import { inTransaction, planRun, type ApprovalPostCommit, type DbOrTx } from "./orchestration.js";
 import {
@@ -73,6 +75,7 @@ import {
   deployOverrideSchema,
   recheckSchema,
   reportChecksSchema,
+  scrubAuditText,
   retireTemplateSchema,
   startInstanceSchema,
   submitArtifactSchema,
@@ -93,6 +96,12 @@ type CheckReport = {
   status: "passed" | "failed";
   severity?: string | null;
   detail?: string | null;
+  /** ADR-0167 (AUTHZ-06) — PROVENANCE: who posted this result, and whether
+   * that person is the change's own initiator. Absent on rows written before
+   * the stamp existed. */
+  reportedByUserId?: string | null;
+  selfReported?: boolean;
+  reason?: string | null;
 };
 /** Defensive read of context[`reported:<stageId>`] — tolerate anything and keep
  * only well-formed pass/fail rows, so a malformed context value can never crash
@@ -607,10 +616,12 @@ async function runGitExecutions(
       const current = rowDef.stages[rowState.currentStageIndex];
       if (!current || current.id !== effect.stageId) return null;
       const ctx = { ...(row.context as Record<string, unknown>) };
-      if (ctx.executing === effect.stageId) return null; // another executor holds it
+      const held = stageClaimState(ctx, effect.stageId);
+      if (held.heldLive) return null; // another executor holds it
       ctx.executing = effect.stageId;
+      ctx.executingSince = new Date().toISOString();
       await tx.update(workflowInstances).set({ context: ctx }).where(eq(workflowInstances.id, row.id));
-      return { instance: { ...row, context: ctx } };
+      return { instance: { ...row, context: ctx }, expiredClaimSince: held.expiredSince };
     });
     if (!claimed) {
       throw new WorkflowStateError(
@@ -621,6 +632,22 @@ async function runGitExecutions(
     const def = instance.definition as WorkflowDefinition;
     const stage = def.stages.find((st) => st.id === effect.stageId)!;
     const context = { ...(instance.context as Record<string, unknown>) };
+    if (claimed.expiredClaimSince !== null) {
+      // REL-06: a claim nobody released — a process killed mid-stage — is
+      // re-taken after its TTL rather than stranding the instance at
+      // awaiting_execution forever, and the re-take is on the record.
+      await db.insert(auditLog).values({
+        userId: actorUserId ?? "00000000-0000-0000-0000-000000000000",
+        objectType: "workflow",
+        objectId: instance.id,
+        detail: { stageId: stage.id, claimedSince: claimed.expiredClaimSince, ttlMs: stageClaimTtlMs() },
+        effect: "allow",
+        ruleId: "workflow-stage-claim-expired",
+        ruleChain: [],
+        reason: `stage '${stage.id}' execution claim from ${claimed.expiredClaimSince} was never released — re-claimed after the ${stageClaimTtlMs()} ms TTL`,
+      });
+    }
+    try {
 
     // §8 nesting: an automated_build stage with a run graph spawns a nested
     // orchestration run instead of a git operation — planned under the
@@ -629,7 +656,7 @@ async function runGitExecutions(
     // run turns terminal. Idempotent: a live or completed run for this stage
     // is never duplicated; only an aborted one is replaced on retry.
     if (stage.type === "automated_build" && stage.run !== undefined) {
-      delete context.executing;
+      releaseStageClaim(context);
       const existingId = context[`runId:${stage.id}`];
       if (typeof existingId === "string") {
         const [existing] = await db
@@ -719,6 +746,12 @@ async function runGitExecutions(
               status: rep.status,
               severity: rep.severity ?? null,
               detail: rep.detail ?? `reported ${rep.status}`,
+              // ADR-0167 (AUTHZ-06): the provenance rides into the evaluated
+              // result, so the rail and the approval view can say "the
+              // initiator reported this green" rather than showing CI's colour
+              ...(rep.selfReported
+                ? { selfReported: true, reportedByUserId: rep.reportedByUserId ?? null, reason: rep.reason ?? null }
+                : {}),
             }
           : { check: name, status: "passed" as const, severity: null, detail: `ran against ${against}` };
       });
@@ -728,7 +761,7 @@ async function runGitExecutions(
           [...evalOutcomes].map(([name, r]) => [name, r.eval]),
         );
       }
-      delete context.executing;
+      releaseStageClaim(context);
       delete context.lastError;
       await db
         .update(workflowInstances)
@@ -778,7 +811,7 @@ async function runGitExecutions(
           ? `condition not met: change ${cond!.field} is '${condValue ?? "unset"}', target requires '${cond!.equals}'`
           : null;
       if (handoff) {
-        delete context.executing;
+        releaseStageClaim(context);
         await db.update(workflowInstances).set({ context }).where(eq(workflowInstances.id, instance.id));
         const r = await applyEvent(
           db,
@@ -794,6 +827,7 @@ async function runGitExecutions(
         continue;
       }
       let deployErr: string | null = null;
+      let executionControlRefused = false;
       try {
         if (context[`deploy:${stage.id}`] === undefined) {
           const provider = resolveDeployProvider({
@@ -817,7 +851,8 @@ async function runGitExecutions(
           // transaction above and is released below after the provider call —
           // awaiting here holds no DB transaction or row lock open, and a
           // rejected promise lands in the same catch → deploy_blocked path.
-          const res = await provider.deploy(target!.name, target!.environment, instance.id);
+          const res = await runExternalWrite(db, "deploy.deploy", () =>
+            provider.deploy(target!.name, target!.environment, instance.id));
           // §3 the control-plane / agent-execution-plane data boundary: in
           // AIR_GAPPED mode NOTHING that could carry execution-plane detail
           // (the deploy URL, the provider detail string) is retained in the
@@ -833,12 +868,16 @@ async function runGitExecutions(
           if (target!.mode !== "air_gapped") context.deployUrl = res.url;
         }
       } catch (err) {
+        executionControlRefused = err instanceof ExternalEffectBlockedError;
         deployErr = err instanceof Error ? err.message : String(err);
       }
-      delete context.executing;
+      releaseStageClaim(context);
       if (deployErr === null) delete context.lastError;
       else context.lastError = `${stage.id}: ${deployErr}`;
       await db.update(workflowInstances).set({ context }).where(eq(workflowInstances.id, instance.id));
+      // A deployment-wide stop is not a manual deploy handoff: leave the
+      // claimed stage awaiting_execution so lifting the stop permits a retry.
+      if (executionControlRefused) break;
       // a provider that isn't integrated yet → manual handoff (not a hard fail)
       if (deployErr !== null) {
         const r = await applyEvent(
@@ -926,7 +965,8 @@ async function runGitExecutions(
           // ASYNC-DEPLOY: awaited outside any transaction (same claim/release
           // semantics as the deploy executor); a rejection lands in this catch
           // and keeps the stage awaiting_execution (retryable), never terminal.
-          const res = await provider.rollback(target.name, priorDeploy?.deployId ?? "unknown");
+          const res = await runExternalWrite(db, "deploy.rollback", () =>
+            provider.rollback(target.name, priorDeploy?.deployId ?? "unknown"));
           // §3 air-gapped boundary: keep only which deploy was reversed, not the
           // provider detail string (which could carry execution-plane info).
           context[`rollback:${stage.id}`] =
@@ -937,7 +977,7 @@ async function runGitExecutions(
       } catch (err) {
         rbErr = err instanceof Error ? err.message : String(err);
       }
-      delete context.executing;
+      releaseStageClaim(context);
       if (rbErr === null) delete context.lastError;
       else context.lastError = `${stage.id}: ${rbErr}`;
       await db.update(workflowInstances).set({ context }).where(eq(workflowInstances.id, instance.id));
@@ -1043,7 +1083,8 @@ async function runGitExecutions(
         // Idempotent replay (§2 re-open): if we already created this branch,
         // re-execution succeeds without a provider call instead of 422ing forever.
         if (context.branch !== branch) {
-          await provider.createBranch(stage.repo!, branch, stage.base ?? "main");
+          await runExternalWrite(db, "git.create_branch", () =>
+            provider.createBranch(stage.repo!, branch, stage.base ?? "main"));
           context.branch = branch;
         }
       } else if (stage.action === "open_pr" && context.prId !== undefined) {
@@ -1056,7 +1097,7 @@ async function runGitExecutions(
           .where(eq(workflowArtifacts.instanceId, instance.id))
           .orderBy(desc(workflowArtifacts.version))
           .limit(1);
-        const pr = await provider.openPullRequest(stage.repo!, {
+        const pr = await runExternalWrite(db, "git.open_pull_request", () => provider.openPullRequest(stage.repo!, {
           head: String(context.branch ?? ""),
           base: stage.base ?? "main",
           title: change.description,
@@ -1069,15 +1110,15 @@ async function runGitExecutions(
 
 ${latestArtifact.content}`
               : "(no artifact)"),
-        });
+        }));
         context.prId = pr.id;
         context.prUrl = pr.url;
       } else if (stage.action === "merge" && context.mergeSha === undefined) {
-        const result = await provider.mergePullRequest(
+        const result = await runExternalWrite(db, "git.merge_pull_request", () => provider.mergePullRequest(
           stage.repo!,
           String(context.prId ?? ""),
           stage.strategy ?? "merge",
-        );
+        ));
         context.mergeSha = result.sha;
       }
     } catch (err) {
@@ -1087,7 +1128,7 @@ ${latestArtifact.content}`
     // Release the claim; record outcome. The kernel event application sits
     // OUTSIDE the provider try so a post-success DB hiccup is never recorded
     // as a failed (and re-runnable) git operation.
-    delete context.executing;
+    releaseStageClaim(context);
     if (executionError === null) delete context.lastError;
     else context.lastError = `${stage.id}: ${executionError}`;
     await db
@@ -1112,8 +1153,62 @@ ${latestArtifact.content}`
     );
     lastEffects = r.effects;
     pending = r.effects.filter((e) => e.kind === "execute_stage");
+    } catch (err) {
+      // REL-06: a throw from anywhere between the claim and its release (a
+      // nested-run lookup, an artifact read, a provider resolution) used to
+      // leave `executing` set with nothing to clear it. Release it here —
+      // only if this executor still holds it — and let the error propagate.
+      await releaseStageClaimIfHeld(db, instance.id, stage.id).catch(() => {});
+      throw err;
+    }
   }
   return lastEffects;
+}
+
+/** REL-06: how long an execution claim may go unreleased before another
+ * executor may take it over (REGULAIT_WORKFLOW_CLAIM_TTL_MS, default 15 min —
+ * the same horizon the ADR-0064 scheduler lease uses). */
+export const DEFAULT_STAGE_CLAIM_TTL_MS = 15 * 60_000;
+
+export function stageClaimTtlMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.REGULAIT_WORKFLOW_CLAIM_TTL_MS;
+  if (raw === undefined || raw.trim() === "") return DEFAULT_STAGE_CLAIM_TTL_MS;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.trunc(n) : DEFAULT_STAGE_CLAIM_TTL_MS;
+}
+
+/**
+ * REL-06: is `stageId`'s execution claim held LIVE in this context? A claim
+ * is live when it names this stage and was taken less than the TTL ago. A
+ * claim with no `executingSince` (written before this field existed) or one
+ * older than the TTL is EXPIRED: `heldLive` is false and `expiredSince`
+ * carries what the record said, so the re-take can be audited.
+ */
+export function stageClaimState(
+  ctx: Record<string, unknown>,
+  stageId: string,
+  now: number = Date.now(),
+  ttlMs: number = stageClaimTtlMs(),
+): { heldLive: boolean; expiredSince: string | null } {
+  if (ctx.executing !== stageId) return { heldLive: false, expiredSince: null };
+  const since = typeof ctx.executingSince === "string" ? Date.parse(ctx.executingSince) : NaN;
+  if (Number.isFinite(since) && now - since < ttlMs) return { heldLive: true, expiredSince: null };
+  return { heldLive: false, expiredSince: typeof ctx.executingSince === "string" ? ctx.executingSince : "unknown" };
+}
+
+/** drop the claim from an in-memory context (the normal release path) */
+function releaseStageClaim(context: Record<string, unknown>): void {
+  delete context.executing;
+  delete context.executingSince;
+}
+
+/** drop the claim from the STORED context, only if it still names `stageId` —
+ * the error path, after an unexpected throw mid-stage */
+async function releaseStageClaimIfHeld(db: Db, instanceId: string, stageId: string): Promise<void> {
+  await db
+    .update(workflowInstances)
+    .set({ context: sql`${workflowInstances.context} - 'executing' - 'executingSince'` })
+    .where(and(eq(workflowInstances.id, instanceId), sql`${workflowInstances.context}->>'executing' = ${stageId}`));
 }
 
 /**
@@ -1731,6 +1826,28 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     const accepted = body.results.filter((r) => declared.has(r.check));
     if (accepted.length === 0) return reply.status(422).send({ error: "no_declared_checks_reported" });
 
+    // ADR-0167 (AUTHZ-06) — PROVENANCE, and the separation-of-duties rule the
+    // deploy-override below already applies. This route admits the INITIATOR
+    // (loadInstanceFor), so the person a check stage exists to gate could
+    // declare `security_scan: passed` and advance their own change, with
+    // nothing in the context or the audit trail distinguishing that from a CI
+    // report. Still permitted — the demo, the seed and a team without CI all
+    // report by hand — but never silent: every stored result carries who
+    // posted it, a self-reported PASS requires a recorded reason, and the
+    // self-report is an audit row of its own. (Reporting your own check as
+    // FAILED needs no reason: that is the honest direction.)
+    const selfReported = req.authCtx.userId === loaded.instance.initiatorUserId;
+    // scrubbed with ADR-0099's own scrubber before it lands in the context
+    // jsonb (ADR-0102 covers reason COLUMNS; this one rides a jsonb value)
+    const reason = scrubAuditText(body.reason?.trim() ?? "");
+    if (selfReported && accepted.some((r) => r.status === "passed") && !reason) {
+      return reply.status(400).send({
+        error: "check_report_reason_required",
+        detail:
+          "you initiated this change, so reporting one of its own checks as passed is a self-attestation; record why it passed (the CI run, the remediation, the ticket) — a real CI reports under its own identity",
+      });
+    }
+
     // locked read-modify-write of context[reported:<stageId>] so a concurrent
     // executor claim serializes with the report instead of racing it
     await db.transaction(async (tx) => {
@@ -1745,11 +1862,39 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
         normalizeCheckReports(ctx[`reported:${body.stageId}`]).map((r) => [r.check, r]),
       );
       for (const r of accepted) {
-        merged.set(r.check, { check: r.check, status: r.status, severity: r.severity ?? null, detail: r.detail ?? null });
+        merged.set(r.check, {
+          check: r.check,
+          status: r.status,
+          severity: r.severity ?? null,
+          detail: r.detail ?? null,
+          reportedByUserId: req.authCtx.userId,
+          selfReported,
+          reason: reason || null,
+        });
       }
       ctx[`reported:${body.stageId}`] = [...merged.values()];
       await tx.update(workflowInstances).set({ context: ctx }).where(eq(workflowInstances.id, row.id));
     });
+    if (selfReported) {
+      const summary = accepted.map((r) => `${r.check}=${r.status}`).join(", ");
+      await db.insert(auditLog).values({
+        userId: req.authCtx.userId,
+        objectType: "workflow",
+        objectId: loaded.instance.id,
+        detail: {
+          stageId: body.stageId,
+          selfReported: true,
+          initiatorUserId: loaded.instance.initiatorUserId,
+          results: accepted.map((r) => ({ check: r.check, status: r.status })),
+        },
+        effect: "allow",
+        ruleId: "workflow:checks-self-reported",
+        ruleChain: [],
+        reason: reason
+          ? `initiator reported their own change's checks (${summary}): ${reason}`
+          : `initiator reported their own change's checks (${summary})`,
+      });
+    }
 
     // evaluate now only if this stage is the one currently executing
     const [afterWrite] = await db

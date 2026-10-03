@@ -195,7 +195,7 @@
       },
       "get": {
         "operationId": "getV1Users",
-        "summary": "List users, with sign-in posture flags (never a hash or a secret).",
+        "summary": "List users, with sign-in posture flags (never a hash or a secret). Bounded: `limit` (default 1000, max 5000).",
         "tags": [
           "users"
         ],
@@ -1542,7 +1542,7 @@
     "/v1/agents": {
       "get": {
         "operationId": "getV1Agents",
-        "summary": "Registered agents/models.",
+        "summary": "Registered agents/models. Bounded: `limit` (default 1000, max 5000).",
         "tags": [
           "agents"
         ],
@@ -2225,7 +2225,7 @@
       },
       "get": {
         "operationId": "getV1Runs",
-        "summary": "Orchestration runs.",
+        "summary": "Orchestration runs, newest first. Bounded: `limit` (default 200, max 1000); `status` narrows.",
         "tags": [
           "runs"
         ],

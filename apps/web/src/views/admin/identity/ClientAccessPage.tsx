@@ -423,6 +423,8 @@ function ScopeRulesCard() {
         rows={rules.data?.rules ?? []}
         rowKey={(r) => r.id}
         loading={rules.isLoading}
+        error={rules.error}
+        onRetry={() => void rules.refetch()}
         empty={<EmptyState title="No scope rules" body="The org singleton applies to everyone." />}
       />
       <ConfirmModal

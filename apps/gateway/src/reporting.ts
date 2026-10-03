@@ -95,7 +95,7 @@ import {
   type SpendLine,
 } from "@regulait/shared";
 import { securityHeaders } from "./security-headers.js";
-import { buildExportBundle } from "./export-bundle.js";
+import { buildExportBundle, resolveExportSigningKey } from "./export-bundle.js";
 import { resolveLicense } from "./licensing.js";
 import { packControlsSection } from "./compliance-packs.js";
 import { resolveSchedulerConfig } from "./scheduler.js";
@@ -907,6 +907,23 @@ export function registerReportingRoutes(app: FastifyInstance, db: Db): void {
       return reply.status(403).send({ error: "report_scope_not_entitled" });
     }
     const payload = run.payload as unknown as ReportPayload;
+    // AER-008: a signed export checks its key BEFORE the export is recorded, so a keyless
+    // deployment writes an accurate refusal and never a "report-exported" row for nothing.
+    if (wantsBundle) {
+      const signingKey = resolveExportSigningKey();
+      if (!signingKey.ok) {
+        await audit(
+          req.authCtx.userId ?? null,
+          id,
+          "report-export-unsigned-refused",
+          "a signed export was requested and REFUSED because the export signing key is not usable — " +
+            "no bundle was produced and an unsigned one is not emitted in its place",
+          { ruleId: signingKey.ruleId, format: q.format },
+          "deny",
+        );
+        return reply.status(409).send({ error: signingKey.ruleId, detail: signingKey.reason });
+      }
+    }
     await audit(
       req.authCtx.userId ?? null,
       id,
@@ -956,14 +973,17 @@ export function registerReportingRoutes(app: FastifyInstance, db: Db): void {
         ],
         actor: { userId: req.authCtx.userId ?? null, via: req.authCtx.via },
         licenseId: license.document?.licenseId ?? null,
+        auditPayloadScope: req.authCtx.isAdmin ? "full" : "subject",
       });
       if (!bundle.ok) {
+        // the key passed the preflight but the build still refused: the "report-exported" row
+        // above is now false, so the trail records the correction beside it
         await audit(
           req.authCtx.userId ?? null,
           id,
-          "report-export-unsigned-refused",
-          "a signed export was requested and REFUSED because no export signing key is configured — " +
-            "an unsigned bundle is not emitted in its place",
+          "report-export-signed-failed",
+          "the signed export recorded just before this row was NOT produced — building the bundle was " +
+            "refused; no archive left the platform",
           { ruleId: bundle.ruleId, format: q.format },
           "deny",
         );

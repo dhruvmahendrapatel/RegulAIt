@@ -364,6 +364,57 @@ export async function evaluateAssignmentSla(
 }
 
 /**
+ * REL-09 — the lazy pass on a queue READ is BOUNDED to the rows it could
+ * actually change, and capped.
+ *
+ * It used to load EVERY pending approval in the deployment and walk them
+ * sequentially, on every read by every reader, once one routing rule was
+ * enabled — O(pending) queries on the hottest approver screen, duplicating
+ * the approval-sla-sweep job. Only three kinds of row can change on a read:
+ *
+ *   - a pending approval with NO assignment yet (it must be materialized, or
+ *     a role/team-routed item never becomes visible to its queue);
+ *   - an assigned one whose `due_at` has passed and is not yet `breached`;
+ *   - an assigned one whose `warn_at` has passed and is still `ok`.
+ *
+ * Everything else — assigned, inside its window — is skipped without a query.
+ * Oldest first, so the rows most likely to be overdue are evaluated first,
+ * and capped at `limit`: past that, the sweep (which still walks everything)
+ * catches up, exactly as it always did for a deployment nobody reads.
+ */
+export const LAZY_MATERIALIZATION_CAP = 200;
+
+export async function pendingApprovalsNeedingAttention(
+  db: Db,
+  now: Date = new Date(),
+  limit: number = LAZY_MATERIALIZATION_CAP,
+): Promise<ApprovalRow[]> {
+  const rows = await db
+    .select({ approval: approvals })
+    .from(approvals)
+    .leftJoin(approvalAssignments, eq(approvalAssignments.approvalId, approvals.id))
+    .where(
+      and(
+        eq(approvals.status, "pending"),
+        or(
+          isNull(approvalAssignments.id),
+          and(
+            sql`${approvalAssignments.dueAt} <= ${now.toISOString()}`,
+            sql`${approvalAssignments.slaState} <> 'breached'`,
+          ),
+          and(
+            sql`${approvalAssignments.warnAt} <= ${now.toISOString()}`,
+            eq(approvalAssignments.slaState, "ok"),
+          ),
+        ),
+      ),
+    )
+    .orderBy(asc(approvals.requestedAt))
+    .limit(limit);
+  return rows.map((r) => r.approval);
+}
+
+/**
  * Materialize + evaluate a batch of approval rows. This is the function the
  * queue read and the decide path both call, and it is the ONLY thing making
  * SLA state advance in a deployment with no cron.

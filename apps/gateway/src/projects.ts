@@ -27,6 +27,7 @@ import {
   type Db,
   type SQL,
 } from "@regulait/db";
+import type { DbOrTx } from "./config-versions.js";
 import {
   csvBatchRows,
   csvMaxRows,
@@ -332,7 +333,7 @@ export async function assertProjectAttribution(
 
 type ComplianceProfileRow = typeof complianceProfiles.$inferSelect;
 
-const PII_STRICTNESS: Record<string, number> = { log: 0, warn: 1, block: 2 };
+const PII_STRICTNESS: Record<string, number> = { log: 0, warn: 1, redact: 2, block: 3 };
 
 /** §8.3: the effective policy of a SET of framework profiles. The spec gives
  * no strictness ordering among frameworks, so profiles compose additively:
@@ -354,7 +355,7 @@ export function effectiveCompliancePolicy(profiles: ComplianceProfileRow[]) {
         p.auditRetentionDays == null ? m : Math.max(m ?? 0, p.auditRetentionDays),
       null,
     ),
-    piiMode: profiles.reduce<"block" | "warn" | "log">(
+    piiMode: profiles.reduce<PiiMode>(
       (m, p) => (PII_STRICTNESS[p.piiMode]! > PII_STRICTNESS[m]! ? (p.piiMode as never) : m),
       "log",
     ),
@@ -438,7 +439,8 @@ async function profilesForTags(db: Db, tags: string[]): Promise<ComplianceProfil
 // The compliance cascade's piiMode dimension, turned from a declared policy
 // into a real enforcement point applied at every project-attributed dispatch.
 
-export type PiiMode = "block" | "warn" | "log";
+// Redact is internal until every dispatch path supports it. Public schemas stay closed.
+export type PiiMode = "block" | "warn" | "log" | "redact";
 
 /** The effective piiMode for a dispatch, resolved through ONE rule: an
  * explicit compliance framework governs where one matches; EVERYWHERE ELSE
@@ -549,6 +551,7 @@ export function enforcePII(
   io: { input?: string | undefined; output?: string | undefined },
   international: readonly InternationalPiiCategory[],
 ): PiiEnforcement {
+  if (mode === "redact") throw new Error("PII redaction requires a prepared dispatch path");
   const phase: "input" | "output" = io.output !== undefined ? "output" : "input";
   const text = phase === "output" ? (io.output ?? "") : (io.input ?? "");
   const hits = detectPII(text, international);
@@ -1011,7 +1014,10 @@ export type ProjectPatchResult =
   | { ok: false; status: 404 | 422; error: string; detail: string };
 
 export async function applyProjectPatch(
-  db: Db,
+  // AER-035: joins the caller's transaction when there is one — the copilot's
+  // proposal applier commits this write, its applied marker and its audit row
+  // together or not at all.
+  db: DbOrTx,
   args: {
     projectId: string;
     patch: z.infer<typeof updateProjectSchema>;
@@ -1321,6 +1327,10 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
         .select()
         .from(projects)
         .where(memberProjectIds ? inArray(projects.id, memberProjectIds) : undefined),
+      // REL-10: a member's read aggregates only the projects it will show,
+      // not every usage_event in the deployment. (An admin read still walks
+      // the table: usage_events has no project_id index yet — a migration,
+      // deliberately not added here — so that remains O(table) per open.)
       db
         .select({
           projectId: usageEvents.projectId,
@@ -1328,6 +1338,7 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
           events: count(),
         })
         .from(usageEvents)
+        .where(memberProjectIds ? inArray(usageEvents.projectId, memberProjectIds) : undefined)
         .groupBy(usageEvents.projectId),
     ]);
     const byProject = new Map(spend.map((s) => [s.projectId, s]));

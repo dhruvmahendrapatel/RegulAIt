@@ -19,6 +19,7 @@ import { fmtUsd } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, IdChip, Input, Select, Table } from "../../../ui/kit";
 import {
+  RemoveButton,
   optionEls,
   serverOpts,
   useAction,
@@ -29,6 +30,17 @@ import {
 } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
+
+/** One row of `GET /v1/users/:userId/servers/:serverId/entitlements`. */
+interface McpEntitlementRow {
+  /** a named tool, or the server-wide read-all grant which names none */
+  kind: "tool" | "server-read-only";
+  toolName: string | null;
+  source: "direct" | "role";
+  role?: string | null;
+  grantId: string;
+  revoked?: boolean;
+}
 
 export default function McpServersPage() {
   const servers = useServers();
@@ -72,6 +84,8 @@ export default function McpServersPage() {
             rows={servers.data?.servers ?? []}
             rowKey={(s) => s.id}
             loading={servers.isLoading}
+            error={servers.error}
+            onRetry={() => void servers.refetch()}
             onRowClick={(s) => setSelectedId(s.id === selectedId ? null : s.id)}
             rowLabel={(s) => `Show tools on ${s.name}`}
             empty={<EmptyState title="No servers registered" body="Register the first MCP server above." />}
@@ -92,8 +106,144 @@ export default function McpServersPage() {
           <hr className={v.divider} />
           <ServerGrantForm users={users} servers={servers.data?.servers ?? []} />
         </Card>
+
+        <McpEntitlementCard users={users} servers={servers.data?.servers ?? []} />
       </div>
     </>
+  );
+}
+
+/**
+ * WHAT IS THIS USER ACTUALLY ALLOWED ON THIS SERVER?
+ *
+ * Per-user, tool-level allow-listing is the product's headline capability, and
+ * until this card there was no screen that answered that question. Tools could
+ * be granted one at a time, from the form above, and the resulting set was
+ * visible nowhere — not to check, not to correct. `GET /v1/users/:userId/
+ * servers/:serverId/entitlements` had existed and served exactly this, with
+ * `source` and `grantId` on every row, and no view had ever called it.
+ *
+ * A grant you cannot enumerate is a grant you cannot audit, and an allow-list
+ * nobody can read is not much of an allow-list.
+ */
+function McpEntitlementCard(props: { users: ReturnType<typeof useUsers>; servers: McpServer[] }) {
+  const act = useAction();
+  const [userId, setUserId] = useState("");
+  const [serverId, setServerId] = useState("");
+  const [rows, setRows] = useState<McpEntitlementRow[] | null>(null);
+
+  const load = () =>
+    act.run(async () => {
+      const r = await api.get<{ entitlements: McpEntitlementRow[] }>(
+        `/v1/users/${userId}/servers/${serverId}/entitlements`,
+      );
+      setRows(r.entitlements);
+    }, null);
+
+  return (
+    <Card title="Per-user entitlement">
+      <form
+        className={a.formRow}
+        onSubmit={(e) => {
+          e.preventDefault();
+          void load();
+        }}
+      >
+        <Field label="User">
+          <Select required value={userId} onChange={(e) => setUserId(e.target.value)}>
+            {optionEls(userOpts(props.users.data?.users), "— select —")}
+          </Select>
+        </Field>
+        <Field label="Server">
+          <Select required value={serverId} onChange={(e) => setServerId(e.target.value)}>
+            {optionEls(serverOpts(props.servers), "— select —")}
+          </Select>
+        </Field>
+        <Button type="submit" size="sm" disabled={act.busy}>
+          View
+        </Button>
+      </form>
+      {act.error && (
+        <div className={v.errLine} role="alert">
+          {act.error}
+        </div>
+      )}
+      {rows && (
+        <Table
+          columns={[
+            {
+              key: "tool",
+              header: "Grants",
+              // A server-read-only grant has no toolName: it is every READ tool
+              // on the server, present and future. Rendering it as "—" would
+              // make the broadest grant on the page look like the emptiest row.
+              render: (r: McpEntitlementRow) =>
+                r.toolName ?? <em>every read tool on this server</em>,
+            },
+            {
+              key: "source",
+              header: "Via",
+              render: (r) =>
+                r.source === "role" ? (
+                  <Badge tone="info">role{r.role ? `: ${r.role}` : ""}</Badge>
+                ) : (
+                  <Badge tone="ok">direct</Badge>
+                ),
+            },
+            {
+              key: "revoked",
+              header: "",
+              render: (r) => (r.revoked ? <Badge tone="danger">revoked</Badge> : null),
+            },
+            {
+              key: "actions",
+              header: "",
+              align: "right",
+              render: (r) => (
+                <RemoveButton
+                  what={`${r.toolName ?? "the server-wide read grant"} from this user`}
+                  disabledReason={
+                    r.source === "role"
+                      ? `granted by role ${r.role ?? ""} — remove it there, or revoke it for this user alone on the Users page`
+                      : undefined
+                  }
+                  consequence={
+                    <p>
+                      The direct grant is deleted. The next call this user makes to{" "}
+                      <strong>{r.toolName ?? "any read tool on this server"}</strong> is refused by
+                      default-deny, and the tool stops appearing in their <code>tools/list</code> —
+                      discovery is entitlement-filtered, so it disappears rather than failing on
+                      use. Nothing already audited changes.
+                    </p>
+                  }
+                  onRemove={() =>
+                    api.del(
+                      r.kind === "server-read-only"
+                        ? `/v1/grants/servers/${r.grantId}`
+                        : `/v1/grants/tools/${r.grantId}`,
+                    )
+                  }
+                  onDone={() => void load()}
+                />
+              ),
+            },
+          ]}
+          rows={rows}
+          rowKey={(r) => r.grantId}
+          empty={
+            <EmptyState
+              title="Nothing granted on this server"
+              body="Default-deny: with no grant, every tool on this server is refused for this user and none of them appear in their tools/list."
+            />
+          }
+        />
+      )}
+      <p className={v.faint}>
+        This is the effective allow-list the MCP proxy enforces, including grants that arrive
+        through a role. A role-granted row cannot be deleted here — it is not this user's grant —
+        so the row says where it comes from instead of offering a control that would fail.
+      </p>
+    </Card>
   );
 }
 
@@ -277,6 +427,8 @@ function ToolsCard(props: { server: McpServer }) {
         rows={tools.data?.tools ?? []}
         rowKey={(t) => t.name}
         loading={tools.isLoading}
+        error={tools.error}
+        onRetry={() => void tools.refetch()}
         empty={
           <EmptyState
             title="No tools registered on this server"

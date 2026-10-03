@@ -138,7 +138,8 @@ describe("automated checks: fail → block → remediate → recheck → advance
     // parks at the first approval gate (trigger auto-completes)
     expect((await instanceView(piaAuth, instanceId)).instance.status).toBe("blocked_on_approval");
 
-    // pre-report a failing check while parked — stored, not yet evaluated
+    // pre-report a failing check while parked — stored, not yet evaluated.
+    // (ADR-0167: pia initiated the change, so her `passed` needs a reason)
     const report = await app.inject({
       method: "POST",
       headers: piaAuth,
@@ -149,6 +150,7 @@ describe("automated checks: fail → block → remediate → recheck → advance
           { check: "unit_tests", status: "passed" },
           { check: "security_scan", status: "failed", severity: "high", detail: "2 criticals" },
         ],
+        reason: "unit suite green in CI run #1",
       },
     });
     expect(report.statusCode).toBe(200);
@@ -195,12 +197,14 @@ describe("automated checks: fail → block → remediate → recheck → advance
     expect(stillBad.json().status).toBe("blocked_on_check");
 
     // remediate: report the failing check as now passing, then recheck → advances
-    await app.inject({
+    // (ADR-0167: the initiator's own green needs a recorded reason)
+    const remediated = await app.inject({
       method: "POST",
       headers: piaAuth,
       url: `/v1/workflows/instances/${instanceId}/checks`,
-      payload: { stageId: "checks", results: [{ check: "security_scan", status: "passed" }] },
+      payload: { stageId: "checks", results: [{ check: "security_scan", status: "passed" }], reason: "patched the two criticals" },
     });
+    expect(remediated.statusCode).toBe(200);
     const good = await app.inject({
       method: "POST",
       headers: piaAuth,
@@ -209,6 +213,88 @@ describe("automated checks: fail → block → remediate → recheck → advance
     });
     // checks cleared → the instance advances to the final approval gate
     expect(good.json().status).toBe("blocked_on_approval");
+  });
+
+  it("ADR-0167 (AUTHZ-06): a self-reported PASS needs a reason, is stamped as self-reported, and is an audit row; an arm's-length reporter is not stamped", async () => {
+    const instanceId = await startInstance();
+    // the initiator declaring her own check green with no reason: refused
+    const bare = await app.inject({
+      method: "POST",
+      headers: piaAuth,
+      url: `/v1/workflows/instances/${instanceId}/checks`,
+      payload: { stageId: "checks", results: [{ check: "security_scan", status: "passed" }] },
+    });
+    expect(bare.statusCode).toBe(400);
+    expect(bare.json().error).toBe("check_report_reason_required");
+    // her own FAILING result needs none — that is the honest direction
+    const ownFailure = await app.inject({
+      method: "POST",
+      headers: piaAuth,
+      url: `/v1/workflows/instances/${instanceId}/checks`,
+      payload: { stageId: "checks", results: [{ check: "lint", status: "failed" }] },
+    });
+    expect(ownFailure.statusCode).toBe(200);
+    // with a reason: accepted, stamped, audited
+    const attested = await app.inject({
+      method: "POST",
+      headers: piaAuth,
+      url: `/v1/workflows/instances/${instanceId}/checks`,
+      payload: {
+        stageId: "checks",
+        results: [{ check: "security_scan", status: "passed" }],
+        reason: "re-ran the scanner after the upgrade; run #77 green",
+      },
+    });
+    expect(attested.statusCode).toBe(200);
+    const stored = attested.json().context["reported:checks"] as Array<Record<string, unknown>>;
+    expect(stored.find((r) => r.check === "security_scan")).toMatchObject({
+      status: "passed",
+      selfReported: true,
+      reportedByUserId: piaId,
+      reason: "re-ran the scanner after the upgrade; run #77 green",
+    });
+    const audit = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.objectType, "workflow"), eq(auditLog.objectId, instanceId)));
+    const selfRow = audit.find((a) => a.ruleId === "workflow:checks-self-reported" && String(a.reason).includes("run #77"));
+    expect(selfRow).toBeTruthy();
+    expect(selfRow!.userId).toBe(piaId);
+
+    // an arm's-length ADMIN reporting the same check: no reason needed, no stamp
+    const ci = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/users",
+      payload: { email: `wc-ci-${instanceId.slice(0, 8)}@example.com`, displayName: "wc ci", isAdmin: true },
+    });
+    expect(ci.statusCode).toBe(201);
+    const ciKey = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: `/v1/users/${ci.json().id}/keys`,
+      payload: { name: "ci" },
+    });
+    const armsLength = await app.inject({
+      method: "POST",
+      headers: { authorization: `Bearer ${ciKey.json().token}` },
+      url: `/v1/workflows/instances/${instanceId}/checks`,
+      payload: { stageId: "checks", results: [{ check: "unit_tests", status: "passed" }] },
+    });
+    expect(armsLength.statusCode).toBe(200);
+    const after = armsLength.json().context["reported:checks"] as Array<Record<string, unknown>>;
+    expect(after.find((r) => r.check === "unit_tests")).toMatchObject({
+      status: "passed",
+      selfReported: false,
+      reportedByUserId: ci.json().id,
+    });
+
+    // and once the stage evaluates, the stamp rides into the result the rail shows
+    await approve(instanceId, "gate");
+    const view = await instanceView(piaAuth, instanceId);
+    const evaluated = view.instance.context["checks:checks"] as Array<Record<string, unknown>>;
+    expect(evaluated.find((r) => r.check === "security_scan")).toMatchObject({ status: "passed", selfReported: true });
+    expect(evaluated.find((r) => r.check === "unit_tests")?.selfReported).toBeUndefined();
   });
 
   it("with NO reported results a check stage auto-passes (byte-identical to before)", async () => {

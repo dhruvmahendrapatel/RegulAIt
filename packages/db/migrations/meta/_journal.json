@@ -813,6 +813,90 @@
       "when": 1785051000000,
       "tag": "0116_upstream_circuit_breaker",
       "breakpoints": true
+    },
+    {
+      "idx": 117,
+      "version": "7",
+      "when": 1785052000000,
+      "tag": "0117_virtual_key_purpose",
+      "breakpoints": true
+    },
+    {
+      "idx": 118,
+      "version": "7",
+      "when": 1785053000000,
+      "tag": "0118_health_probe_rotation",
+      "breakpoints": true
+    },
+    {
+      "idx": 119,
+      "version": "7",
+      "when": 1785054000000,
+      "tag": "0119_approval_policy_epoch",
+      "breakpoints": true
+    },
+    {
+      "idx": 120,
+      "version": "7",
+      "when": 1785055000000,
+      "tag": "0120_mcp_redaction_policy",
+      "breakpoints": true
+    },
+    {
+      "idx": 121,
+      "version": "7",
+      "when": 1785056000000,
+      "tag": "0121_approval_review_metadata",
+      "breakpoints": true
+    },
+    {
+      "idx": 122,
+      "version": "7",
+      "when": 1785057000000,
+      "tag": "0122_connector_policy_epoch",
+      "breakpoints": true
+    },
+    {
+      "idx": 123,
+      "version": "7",
+      "when": 1785058000000,
+      "tag": "0123_risk_dimensions_residual_controls",
+      "breakpoints": true
+    },
+    {
+      "idx": 124,
+      "version": "7",
+      "when": 1785059000000,
+      "tag": "0124_governance_alerts",
+      "breakpoints": true
+    },
+    {
+      "idx": 125,
+      "version": "7",
+      "when": 1785060000000,
+      "tag": "0125_remediation_proposals",
+      "breakpoints": true
+    },
+    {
+      "idx": 126,
+      "version": "7",
+      "when": 1785061000000,
+      "tag": "0126_trace_evaluations",
+      "breakpoints": true
+    },
+    {
+      "idx": 127,
+      "version": "7",
+      "when": 1785062000000,
+      "tag": "0127_chatops_alert_notifications",
+      "breakpoints": true
+    },
+    {
+      "idx": 128,
+      "version": "7",
+      "when": 1785063000000,
+      "tag": "0128_tracing_otlp_headers_ciphertext",
+      "breakpoints": true
     }
   ]
 }
