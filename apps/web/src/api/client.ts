@@ -4,8 +4,10 @@
  *    JS; `credentials: "include"` keeps it riding on every call;
  *  - every state-changing request carries the `x-regulait-csrf: 1` header —
  *    the browser-model-independent CSRF wall the gateway enforces;
- *  - a 401 mid-app means the session died: the registered handler routes the
- *    shell back to /login with a return-to.
+ *  - a 401 that says the SESSION is gone routes the shell back to /login with
+ *    a return-to, via the registered handler. A 401 that says the thing just
+ *    submitted was wrong (a TOTP code, the current password, a login attempt)
+ *    stays with the form that sent it — see isSessionLoss().
  */
 
 export const CSRF_HEADER = "x-regulait-csrf";
@@ -73,6 +75,40 @@ export function setUnauthorizedHandler(fn: (() => void) | null) {
   onUnauthorized = fn;
 }
 
+/**
+ * The 401 reasons the gateway's auth preHandler sends when the CREDENTIAL no
+ * longer authenticates (apps/gateway/src/app.ts preHandler, plus auth.ts's
+ * AUTH_REFUSAL_DETAIL set). Every other 401 is a route's own verdict on the
+ * request body — `invalid_code` from /auth/totp/activate,
+ * `current_password_incorrect` from /auth/change-password, the uniform
+ * `invalid_credentials` from /auth/login — and the session behind it is intact.
+ * Treating those as "session gone" bounced the user to a blank /login for a
+ * typo (UIW-01).
+ */
+const SESSION_LOST_CODES = new Set([
+  "unauthenticated",
+  "user_disabled",
+  "ip_not_allowed",
+  "disabled",
+  "virtual_key_revoked",
+  "virtual_key_expired",
+  "api_key_expired",
+  "api_key_revoked",
+]);
+/** routes whose 401s judge what was typed, never the session that typed it */
+const SESSION_KEPT_PREFIXES = ["/auth/login", "/auth/totp/", "/auth/change-password"];
+
+/** does this 401 mean the session is gone (route to /login), or only that the
+ * request was refused (the form shows it inline)? */
+export function isSessionLoss(path: string, payload: ApiErrorPayload | null): boolean {
+  const route = path.split("?")[0] ?? path;
+  if (SESSION_KEPT_PREFIXES.some((p) => route.startsWith(p))) return false;
+  const code = payload?.error;
+  // no code at all is not something the gateway sends; read it the old way
+  if (typeof code !== "string" || code === "") return true;
+  return SESSION_LOST_CODES.has(code);
+}
+
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(path, {
     method,
@@ -84,8 +120,8 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
   });
   if (res.status === 401) {
-    onUnauthorized?.();
     const payload = await parseBody(res);
+    if (isSessionLoss(path, payload)) onUnauthorized?.();
     throw new ApiError(401, payload ?? { error: "unauthenticated" });
   }
   const json = await parseBody(res);

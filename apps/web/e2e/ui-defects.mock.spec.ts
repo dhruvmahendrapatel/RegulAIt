@@ -77,3 +77,21 @@ test("L4: signing out clears the previous user's cached data before the next sig
   // ...and the server was asked again under B's session
   expect(approvalsRequests).toBe(2);
 });
+
+test("UIW-01: a wrong current password is shown on the form — the session is not treated as lost", async ({ page }) => {
+  await routeApi(page, async (route, p) => {
+    if (p === "/auth/me") return json(route, authMe(USER_A));
+    if (p === "/v1/me") return json(route, { userId: USER_A.id, isAdmin: true, user: USER_A });
+    if (p === "/auth/change-password") return json(route, { error: "current_password_incorrect" }, 401);
+    return json(route, {});
+  });
+  await page.goto("/ui/account?section=password");
+  await expect(page.getByRole("heading", { name: "Account" })).toBeVisible();
+  await page.getByLabel("Current password").fill("not-my-password");
+  await page.getByLabel("New password").fill("a-new-long-passphrase-1");
+  await page.getByLabel("Confirm", { exact: true }).fill("a-new-long-passphrase-1");
+  await page.getByRole("button", { name: "Change password" }).click();
+  await expect(page.getByRole("alert")).toContainText("The current password is incorrect.");
+  await expect(page).toHaveURL(/\/ui\/account/);
+  await expect(page.getByLabel("Current password")).toBeVisible();
+});
