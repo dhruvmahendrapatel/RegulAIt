@@ -138,10 +138,10 @@ jobs:
       - run: pnpm --filter @regulait/web exec playwright install --with-deps chromium
 
       - name: Real seeded-database journey
-        run: pnpm --filter @regulait/web exec playwright test -c playwright.demo-real.config.ts
+        run: pnpm --filter @regulait/web exec playwright test -c playwright.demo-real.config.ts --reporter=list,github
 
       - name: Mocked UI suite
-        run: pnpm --filter @regulait/web exec playwright test -c playwright.demo-mock.config.ts
+        run: pnpm --filter @regulait/web exec playwright test -c playwright.demo-mock.config.ts --reporter=list,github
 
       - name: Keep the evidence when it fails
         if: failure()
@@ -202,7 +202,7 @@ jobs:
       - run: pnpm --filter @regulait/web exec playwright install --with-deps chromium
 
       - name: Approver-review journeys (ADR-0144, all five)
-        run: pnpm --filter @regulait/web exec playwright test e2e/mcp-action-review.spec.ts e2e/zz-zz-zz-zz-zz-zz-zz-zz-approvals-filter.spec.ts
+        run: pnpm --filter @regulait/web exec playwright test e2e/mcp-action-review.spec.ts e2e/zz-zz-zz-zz-zz-zz-zz-zz-approvals-filter.spec.ts --reporter=list,github
 
       - name: Keep the evidence when it fails
         if: failure()

@@ -339,7 +339,7 @@ jobs:
       - run: pnpm --filter @regulait/web exec playwright install --with-deps chromium
 
       - name: SPA journeys — developer (phase1) and admin (phase2) personas
-        run: pnpm --filter @regulait/web exec playwright test e2e/phase1.spec.ts e2e/phase2.spec.ts
+        run: pnpm --filter @regulait/web exec playwright test e2e/phase1.spec.ts e2e/phase2.spec.ts --reporter=list,github
 
       # The mocked UI suite (every *.mock.spec.ts: the intake wizard's retry and
       # start-over journeys, the axe scans of each intake stage in both themes,
@@ -347,7 +347,7 @@ jobs:
       # gateway — Vite plus route mocks — and until now ran only locally, so CI
       # never executed the browser acceptance tests for AER-029 and AER-046.
       - name: Mocked UI suite — intake, registry, record, review, accessibility
-        run: pnpm --filter @regulait/web exec playwright test -c playwright.demo-mock.config.ts
+        run: pnpm --filter @regulait/web exec playwright test -c playwright.demo-mock.config.ts --reporter=list,github
 
       - name: Keep the evidence when it fails
         if: failure()
