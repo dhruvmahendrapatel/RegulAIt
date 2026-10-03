@@ -323,29 +323,37 @@ test("audit log: A4 deploy-mode filter, including the honest unknown / pre-0044 
   await expect(modeFilter).toBeVisible();
   // the control must NAME the un-backfillable bucket rather than hiding it
   await expect(modeFilter.locator("option", { hasText: "None recorded" })).toHaveCount(1);
-  // …and the page must say out loud why unknown is not a mode
-  await expect(page.getByText("un-backfillable", { exact: false })).toBeVisible();
+  // …and the page must say out loud why unknown is not a mode. (cb55473, the
+  // visual-QA batch, rewrote this copy — "never back-filled or guessed"
+  // replaced "un-backfillable" — along with the mode cells and the empty
+  // state below, and carried only the Retention and "None recorded"
+  // assertions along. The rest was found the day this spec got a CI gate, F01.)
+  await expect(page.getByText("never back-filled or guessed", { exact: false })).toBeVisible();
   // (a plain locator, not getByRole: the kit's <th> cells expose as `cell`,
   // and the header text is uppercased by CSS text-transform)
   await expect(page.locator("thead th", { hasText: "Deploy mode" })).toBeVisible();
 
   // the table refetches on every filter change, so settle on a CONSISTENT
   // snapshot (loading renders skeleton rows) before judging it.
-  const modeCells = (mode: string) => page.getByRole("cell", { name: mode, exact: true });
+  // The cells carry the page's LABELS (the same `MODE_OPTS` the filter uses),
+  // not the API values: a null mode renders as a plain "none", and a set mode
+  // as its label. The filter's option VALUES are still the API values.
+  const MODE_LABEL: Record<string, string> = { hosted: "Hosted", byoc: "BYOC", air_gapped: "Air-gapped" };
+  const modeCells = (text: string) => page.getByRole("cell", { name: text, exact: true });
   const emptyMsg = page.getByText("No audit rows match");
   const settled = async () => {
     const [rows, unknown, hosted, byoc, air, empty] = await Promise.all([
       page.locator("tbody tr").count(),
-      modeCells("unknown").count(),
-      modeCells("hosted").count(),
-      modeCells("byoc").count(),
-      modeCells("air_gapped").count(),
+      modeCells("none").count(),
+      modeCells(MODE_LABEL.hosted!).count(),
+      modeCells(MODE_LABEL.byoc!).count(),
+      modeCells(MODE_LABEL.air_gapped!).count(),
       emptyMsg.isVisible(),
     ]);
     return { rows, unknown, empty, byMode: { hosted, byoc, air_gapped: air } as Record<string, number> };
   };
 
-  // unfiltered: rows exist, and the null-mode ones render as a plain "unknown"
+  // unfiltered: rows exist, and the null-mode ones render as a plain "none"
   await expect(page.locator("tbody tr").first()).toBeVisible();
   await expect.poll(async () => (await settled()).unknown).toBeGreaterThan(0);
 
@@ -376,7 +384,7 @@ test("audit log: A4 deploy-mode filter, including the honest unknown / pre-0044 
     // implying the trail is broken
     if ((await settled()).empty) {
       await expect(
-        page.getByText(`No row records a ${mode} deploy mode yet`, { exact: false }),
+        page.getByText(`No row records the ${MODE_LABEL[mode]} deploy mode yet`, { exact: false }),
       ).toBeVisible();
     }
   }

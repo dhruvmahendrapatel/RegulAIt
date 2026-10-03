@@ -38,6 +38,12 @@ name: CI
 #     Weekly (image built unconditionally)  ~20 min x 4  = ~80 min
 #     => (2,000 - 80) / 16 ~= 120 PR pushes a month before the allowance is gone.
 #   (2026-08-01, run 30700151398: build-and-test 4m23s, PR push 6 min, 325 pushes.)
+#   2026-10-03 (F01): the `spa-journeys` job at the bottom adds a third billed
+#   job to every run. NOT YET MEASURED — ~6 min is demo.yml's stated figure for
+#   its approval-review job, which has the same shape (install, `pnpm -r build`,
+#   chromium, one Playwright invocation). On that estimate a PR push is ~21–23
+#   min, weekly ~26 x 4 = ~104, => (2,000 - 104) / 22 ~= 86 PR pushes a month.
+#   Replace this paragraph with the measured figure after its first runs.
 # Re-measure if the suite grows materially; these are real numbers, not guesses,
 # and they should stay that way. The next cheap lever is `vitest --shard=1/2`
 # across two jobs with their own databases (halves wall clock, same billed sum).
@@ -281,3 +287,66 @@ jobs:
 
       - if: steps.scope.outputs.build == 'true'
         run: docker build -t regulait-gateway:ci .
+
+  # F01 — the two SPA journeys that had no gate at all. `phase1.spec.ts` (the
+  # developer persona: sign-in with a one-time password, chat, runs, workflows,
+  # inbox, projects, goal decomposition, PM links, decision ledger, self-scoped
+  # spend, BYO keys) and `phase2.spec.ts` (the admin persona across every
+  # native admin view) ran only when a human remembered to run them. Modelled
+  # on demo.yml's `approval-review` job: the same global-setup creates its own
+  # scratch database from E2E_PG, seeds it through the real API and boots the
+  # built gateway serving the built SPA, so nothing here is mocked. A browser
+  # job in its own runner so a journey failure is attributable on sight and
+  # the unit job's wall clock does not move. Budget: ~6 billed minutes a run
+  # (install + build dominate), on the same `pull_request` paths-ignore as the
+  # rest of this workflow.
+  spa-journeys:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: regulait
+          POSTGRES_PASSWORD: regulait
+          POSTGRES_DB: regulait
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U regulait -d regulait"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      E2E_PG: postgres://regulait:regulait@localhost:5432
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm -r build
+
+      - run: pnpm --filter @regulait/web exec playwright install --with-deps chromium
+
+      - name: SPA journeys — developer (phase1) and admin (phase2) personas
+        run: pnpm --filter @regulait/web exec playwright test e2e/phase1.spec.ts e2e/phase2.spec.ts
+
+      - name: Keep the evidence when it fails
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: spa-journeys-failure
+          path: |
+            apps/web/test-results
+            apps/web/e2e/gateway-e2e.log
+          retention-days: 7
