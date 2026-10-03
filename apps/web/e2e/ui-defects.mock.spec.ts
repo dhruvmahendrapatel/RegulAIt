@@ -252,3 +252,28 @@ test("UIA-02: the audit log says how many rows are shown and loads older pages o
   expect(cursorRequests).toBe(1);
   expect(await paging.getByRole("button", { name: "Load older" }).count()).toBe(0);
 });
+
+test("UIA-04: a long fingerprint wraps inside its stat tile instead of being clipped", async ({ page }) => {
+  await page.setViewportSize({ width: 1366, height: 768 });
+  const fp = "dk1:79a20fde8909002a635b1c4d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f";
+  await routeApi(page, async (route, p) => {
+    if (p === "/auth/me") return json(route, authMe(USER_A));
+    if (p === "/v1/me") return json(route, { userId: USER_A.id, isAdmin: true, user: USER_A });
+    if (p === "/v1/security/data-key") return json(route, { fingerprint: fp, recordedFingerprint: fp, recordedAt: "2026-10-02T12:00:00Z", lastVerifiedAt: null, rotatedFrom: null, rotatedAt: null, matches: true, attested: false, attestationCount: 0, latestAttestation: null, warnings: [], derivation: "sha256" });
+    if (p === "/v1/security/data-key/attestations") return json(route, { attestations: [] });
+    return json(route, {});
+  });
+  await page.goto("/ui/admin/data-key");
+  const codes = page.locator("code", { hasText: fp });
+  await expect(codes).toHaveCount(2);
+  const clipped = await codes.evaluateAll((els) =>
+    els.map((el) => {
+      const tile = el.parentElement!;
+      return { scroll: tile.scrollWidth, client: tile.clientWidth, right: el.getBoundingClientRect().right, tileRight: tile.getBoundingClientRect().right };
+    }),
+  );
+  for (const c of clipped) {
+    expect(c.scroll).toBeLessThanOrEqual(c.client + 1);
+    expect(c.right).toBeLessThanOrEqual(c.tileRight + 1);
+  }
+});
