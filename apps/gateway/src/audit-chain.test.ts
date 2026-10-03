@@ -19,7 +19,7 @@
  * meaningless.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { mkdtemp, readdir } from "node:fs/promises";
+import { chmod, mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -442,6 +442,44 @@ describe("ADR-0060: anchoring", () => {
     // a local directory is NOT Object Lock, and the response says so
     expect(v.anchor.tamperResistant).toBe(false);
     expect(v.anchor.disclosure).toMatch(/not.*tamper-resistant/i);
+  });
+
+  it("sets an anchor PAST the chain head aside instead of grading it as a mismatch (UIA-01)", async () => {
+    // Two gateways run from the same directory (a second database on the same
+    // host, say) share one anchor store, and the store's highest seq then
+    // belongs to whichever chain is longer. That anchor used to be compared
+    // against a row this chain never had, and the page showed a red "anchor
+    // mismatch" over a chain that was intact. Now the comparison uses the
+    // latest anchor at or below the head, and the foreign one is reported on
+    // its own — never silently dropped, because the other explanation for an
+    // anchor past the head is that rows after it were removed.
+    const head = Number((await chainRows()).at(-1)!.seq);
+    const planted = head + 1000;
+    await sink.write({
+      seq: planted,
+      rowHash: "f".repeat(64),
+      headAt: new Date().toISOString(),
+      algorithm: "sha256",
+      payloadVersion: "regulait.audit.v1",
+      capturedAt: "2026-01-01T00:00:00.000Z",
+    });
+    try {
+      expect((await sink.readLatest())!.seq).toBe(planted);
+      expect((await sink.readLatest({ maxSeq: head }))!.seq).toBeLessThanOrEqual(head);
+
+      const v = await verify();
+      expect(v.status).toBe("ok");
+      expect(v.anchor.source).toBe("worm_sink");
+      expect(v.anchor.seq).toBeLessThanOrEqual(head);
+      expect(v.anchor.matches).toBe(true);
+      expect(v.anchor.aheadOfHead).toMatchObject({ seq: planted, rowHash: "f".repeat(64), capturedAt: "2026-01-01T00:00:00.000Z" });
+      expect(v.anchor.aheadOfHead.disclosure).toMatch(/different chain|rows after it were removed/);
+    } finally {
+      const file = path.join(wormDir, `anchor-${String(planted).padStart(20, "0")}.json`);
+      await chmod(file, 0o644);
+      await rm(file);
+    }
+    expect(((await verify()) as { anchor: { aheadOfHead: unknown } }).anchor.aheadOfHead).toBeNull();
   });
 
   it("lists anchors and discloses what the sink is worth", async () => {
@@ -1309,8 +1347,12 @@ describe.skipIf(!minioReachable)("ADR-0060: proof by attack against a REAL Objec
 
     await sink.write(anchorAt(9_000_000, "9".repeat(64)));
     const report = await verifyAuditChain(db, sink);
-    expect(report.anchor.seq).toBe(9_000_000);
-    expect(report.anchor.matches).toBe(false);
-    expect(report.anchor.actualRowHash).toBeNull();
+    // The planted anchor is past the head, so it is reported on its own —
+    // the alarm — while the genuine anchor still verifies the chain. The
+    // attacker still cannot make a tampered chain pass: `matches` is graded
+    // against the anchor the chain really produced.
+    expect(report.anchor.aheadOfHead?.seq).toBe(9_000_000);
+    expect(report.anchor.seq).not.toBe(9_000_000);
+    expect(report.anchor.matches).toBe(true);
   });
 });

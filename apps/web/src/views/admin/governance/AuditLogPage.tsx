@@ -247,11 +247,23 @@ interface VerifyReport {
     source: "caller_supplied" | "worm_sink" | "database" | "none";
     tamperResistant: boolean;
     sinkMode: string | null;
+    seq: number | null;
     matches: boolean | null;
     unanchoredRows: number | null;
     disclosure: string;
+    /** an anchor in the store past this chain's head: another chain sharing
+     * the store, or rows removed after it was taken — reported, never graded
+     * as a hash mismatch (UIA-01) */
+    aheadOfHead: { seq: number; capturedAt: string; disclosure: string } | null;
   };
 }
+
+const ANCHOR_SOURCE_LABEL: Record<VerifyReport["anchor"]["source"], string> = {
+  caller_supplied: "supplied by the caller",
+  worm_sink: "write-once sink",
+  database: "this database",
+  none: "none",
+};
 
 /**
  * Chain integrity (ADR-0060), on demand rather than on load: verification
@@ -321,18 +333,30 @@ function ChainIntegrityCard() {
           {report.firstBreak && <p className={v.errLine}>{report.firstBreak.reason}</p>}
           <div className={v.rowTight}>
             <Badge tone={anchorTone}>
-              anchor: {report.anchor.source}
-              {report.anchor.sinkMode ? ` · ${report.anchor.sinkMode}` : ""}
+              Anchor: {ANCHOR_SOURCE_LABEL[report.anchor.source] ?? humanize(report.anchor.source)}
+              {report.anchor.seq != null ? ` at seq ${report.anchor.seq}` : ""}
+              {report.anchor.sinkMode ? ` · ${humanize(report.anchor.sinkMode)}` : ""}
             </Badge>
             <Badge tone={report.anchor.tamperResistant ? "ok" : "warn"}>
               {report.anchor.tamperResistant ? "Tamper-resistant (observed)" : "Not tamper-resistant"}
             </Badge>
             {report.anchor.matches === false && <Badge tone="danger">Anchor mismatch</Badge>}
+            {report.anchor.matches === true && <Badge tone="ok">Anchor matches</Badge>}
+            {report.anchor.aheadOfHead && (
+              <Badge tone="warn" title={report.anchor.aheadOfHead.disclosure}>
+                Anchor past chain head (seq {report.anchor.aheadOfHead.seq})
+              </Badge>
+            )}
             {report.anchor.unanchoredRows != null && report.anchor.unanchoredRows > 0 && (
               <span className={v.dim}>{plural(report.anchor.unanchoredRows, "row")} newer than the last anchor</span>
             )}
           </div>
           <p className={v.faint}>{report.anchor.disclosure}</p>
+          {report.anchor.aheadOfHead && (
+            <p className={v.faint} data-testid="anchor-ahead">
+              {report.anchor.aheadOfHead.disclosure}
+            </p>
+          )}
           {report.legacy.unchainedRowsBeforeGenesis > 0 && (
             <p className={v.faint}>{report.legacy.disclosure}</p>
           )}

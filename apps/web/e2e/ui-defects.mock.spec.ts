@@ -189,3 +189,38 @@ test("UIB-02: a negative virtual-key budget is refused on the form before any re
   await page.getByTestId("vk-budget").fill("5");
   await expect(page.getByTestId("vk-issue")).toBeEnabled();
 });
+
+test("UIA-01: an anchor past the chain head is reported as such — never as a red mismatch", async ({ page }) => {
+  const verify = {
+    status: "ok", algorithm: "sha256", payloadVersion: "regulait.audit.v1",
+    genesis: { present: true, seq: 1, expectedRowHash: "a", actualRowHash: "a", matches: true },
+    scanned: { fromSeq: 1, toSeq: 406, rows: 406, batches: 1, batchSize: 1000, bounded: false },
+    legacy: { unchainedRowsBeforeGenesis: 0, covered: false, disclosure: "" },
+    firstBreak: null,
+    anchor: {
+      checked: true, source: "worm_sink", tamperResistant: false, sinkMode: null, seq: 400,
+      expectedRowHash: "b", actualRowHash: "b", matches: true, unanchoredRows: 6,
+      disclosure: "The anchor compared against is NOT held on tamper-resistant storage.",
+      aheadOfHead: { seq: 567, rowHash: "c", capturedAt: "2026-10-02T15:50:00.000Z", disclosure: "The anchor store also holds an anchor at seq 567, past this chain's head (seq 406). A chain never shrinks, so it was either captured from a different chain that shares this store or rows after it were removed from this one." },
+    },
+    limits: [],
+  };
+  await routeApi(page, async (route, p) => {
+    if (p === "/auth/me") return json(route, authMe(USER_A));
+    if (p === "/v1/me") return json(route, { userId: USER_A.id, isAdmin: true, user: USER_A });
+    if (p === "/v1/audit/verify") return json(route, verify);
+    if (p === "/v1/audit/retention") return json(route, { retainedDays: null, prunable: 0, floorSource: [] });
+    if (p === "/v1/audit") return json(route, { entries: [], pageSize: 0, hasMore: false, nextCursor: null });
+    if (p === "/v1/users") return json(route, { users: [] });
+    return json(route, {});
+  });
+  await page.goto("/ui/admin/audit");
+  await page.getByRole("button", { name: "Verify chain" }).click();
+  const report = page.getByTestId("chain-report");
+  await expect(report.getByText("chain ok")).toBeVisible();
+  await expect(report.getByText("Anchor matches")).toBeVisible();
+  await expect(report.getByText("Anchor past chain head (seq 567)")).toBeVisible();
+  await expect(report.getByTestId("anchor-ahead")).toContainText("different chain that shares this store");
+  expect(await report.getByText("Anchor mismatch").count()).toBe(0);
+  expect(await report.getByText("worm_sink").count()).toBe(0);
+});
