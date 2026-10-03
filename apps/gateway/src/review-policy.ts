@@ -57,6 +57,8 @@ import { reopenWorkflowInstance } from "./workflows.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 const POLICY_ID = "default";
+/** the audit actor of a scheduler-run recertification (no human actor) */
+export const RECERTIFICATION_SYSTEM_ACTOR = "system:recertification-sweep";
 
 export type StoredReviewPolicy = GovernanceReviewPolicyRow;
 
@@ -349,6 +351,7 @@ export async function runUseCaseRecertificationSweep(
           `recertification: the approval recorded for AI use case '${uc.name}' expired on ` +
           `${uc.approvedUntil.toISOString().slice(0, 10)}`,
         actorUserId: opts.actorUserId ?? null,
+        systemActor: RECERTIFICATION_SYSTEM_ACTOR,
         ...(opts.dataKey ? { dataKey: opts.dataKey } : {}),
       });
       postCommits.push(reopened.postCommit);
@@ -380,6 +383,7 @@ export async function runUseCaseRecertificationSweep(
         objectType: "ai_use_case",
         objectId: uc.id,
         detail: {
+          ...(opts.actorUserId ? {} : { actor: RECERTIFICATION_SYSTEM_ACTOR }),
           phase: "recertification-started",
           from: "approved",
           to: "under_review",

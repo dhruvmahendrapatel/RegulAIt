@@ -801,6 +801,9 @@ describe("AER-049 — a re-open past merge or deploy is a new review round: effe
     expect(v.state.currentStageIndex).toBe(4);
     expect(v.context["deploy:deploy"]).toMatchObject({ target: "wr-staging" });
     expect(stampsOf(v.context)["deploy:deploy"]).toEqual({ round: 1, stageId: "deploy" });
+    // the round is in the deploy seed: round 1's mock deployment has an id of its own
+    expect((dep0 as { deployId: string }).deployId).toBe(`dep_${id.slice(0, 8)}_staging`);
+    expect((v.context["deploy:deploy"] as { deployId: string }).deployId).toBe(`dep_${id.slice(0, 8)}r1_staging`);
     const deploys = (await auditFor(id)).filter((a) => a.ruleId === "external-effect:deploy.deploy");
     expect(deploys).toHaveLength(2);
     expect(deploys.map((a) => (a.detail as { round: number }).round).sort()).toEqual([0, 1]);
@@ -878,15 +881,22 @@ describe("AER-049 — a re-open past merge or deploy is a new review round: effe
     v = await view(id);
     expect(v.state.currentStageIndex).toBe(4);
     expect(stampsOf(v.context)["deploy:deploy"]).toEqual({ round: 1, stageId: "deploy" });
+    // the round is in the deploy seed: round 1's mock deployment has an id of its own
+    expect((dep0 as { deployId: string }).deployId).toBe(`dep_${id.slice(0, 8)}_staging`);
+    expect((v.context["deploy:deploy"] as { deployId: string }).deployId).toBe(`dep_${id.slice(0, 8)}r1_staging`);
     expect((await auditFor(id)).filter((a) => a.ruleId === "external-effect:deploy.deploy")).toHaveLength(2);
 
-    // a stage not yet passed cannot be re-opened
+    // AER-049 review: a re-open always runs review again — never to a stage
+    // past the first PR / merge / deploy stage, and never to a non-review stage
     await expect(reopenWorkflowInstance(db, id, { stageId: "done", reason: "x", actorUserId: adminId })).rejects.toThrow(
-      /not before the current stage/,
+      /comes after 'deploy' \(deployment\)/,
+    );
+    await expect(reopenWorkflowInstance(db, id, { stageId: "deploy", reason: "x", actorUserId: adminId })).rejects.toThrow(
+      /is a deployment stage/,
     );
   });
 
-  it("records of a stage BEFORE the re-open point stay live (it does not run again); only the stages that re-run are archived", async () => {
+  it("the git chain is one unit: a re-open after create_branch archives branch, PR and merge together, and open_pr cuts the round's own branch", async () => {
     await makeTemplate("wr-upstream", "wr-upstream", [
       { id: "intake", type: "trigger" },
       { id: "branch", type: "git_operation", action: "create_branch", connection: "wr-git", repo: "wr/up", branchPrefix: "wrup" },
@@ -908,18 +918,119 @@ describe("AER-049 — a re-open past merge or deploy is a new review round: effe
 
     await submitArtifact(id, "v2 requirements"); // re-open at req (after the branch stage)
     v = await view(id);
-    expect(v.context.branch).toBe(branch0); // upstream: kept, with its round-0 stamp
-    expect(stampsOf(v.context).branch).toEqual({ round: 0, stageId: "branch" });
-    expect(historyOf(v.context)[0]!.keys.sort()).toEqual(["mergeSha", "prId", "prUrl"]);
+    // the create_branch stage does not run again, but its branch belongs to
+    // the chain whose PR round 0 merged: all four records go to history
+    expect(v.context.branch).toBeUndefined();
+    expect(v.context.prId).toBeUndefined();
+    expect(historyOf(v.context)[0]!.keys.sort()).toEqual(["branch", "mergeSha", "prId", "prUrl"]);
+    expect(historyOf(v.context)[0]!.values.branch).toBe(branch0);
 
     expect((await approveGate(id)).statusCode).toBe(200);
     v = await view(id);
     const pr1 = v.context.prId as string;
     expect(pr1).not.toBe(pr0);
+    expect(v.context.branch).toBe(`${branch0}-r1`); // cut by open_pr for round 1
+    expect(stampsOf(v.context).branch).toEqual({ round: 1, stageId: "open_pr" });
     expect(v.context.mergeSha).toBe(`sha-merge-${pr1}`);
     const audit = await auditFor(id);
-    expect(audit.filter((a) => a.ruleId === "external-effect:git.create_branch")).toHaveLength(1);
+    const branches = audit.filter((a) => a.ruleId === "external-effect:git.create_branch");
+    expect(branches.map((a) => (a.detail as any).branch ?? (a.detail as any).result?.branch).sort()).toEqual([branch0, `${branch0}-r1`]);
     expect(audit.filter((a) => a.ruleId === "external-effect:git.open_pull_request")).toHaveLength(2);
     expect(audit.filter((a) => a.ruleId === "external-effect:git.merge_pull_request")).toHaveLength(2);
+    expect(audit.filter((a) => a.ruleId === "workflow:merge-refused-stale-pr")).toHaveLength(0);
+  });
+
+  it("a merge never merges an earlier round's PR: a re-open to merge_gate is refused, and a returned merge_gate re-runs the whole chain", async () => {
+    await makeTemplate("wr-mergegate", "wr-mergegate", [
+      { id: "intake", type: "trigger" },
+      { id: "req", type: "artifact_generation", output: "requirements_file" },
+      { id: "gate", type: "human_approval", approvers: [anaId] },
+      { id: "branch", type: "git_operation", action: "create_branch", connection: "wr-git", repo: "wr/mg", branchPrefix: "wrmg" },
+      { id: "open_pr", type: "git_operation", action: "open_pr", connection: "wr-git", repo: "wr/mg" },
+      { id: "merge_gate", type: "human_approval", approvers: [anaId] },
+      { id: "merge", type: "git_operation", action: "merge", connection: "wr-git", repo: "wr/mg" },
+    ]);
+    const id = await startInstance("wr-mergegate");
+    await submitArtifact(id, "v1 requirements");
+    expect((await approveGate(id)).statusCode).toBe(200);
+    expect((await approveGate(id, "merge_gate")).statusCode).toBe(200);
+    let v = await view(id);
+    expect(v.status).toBe("completed");
+    const pr0 = v.context.prId as string;
+    expect(v.context.mergeSha).toBe(`sha-merge-${pr0}`);
+
+    // the generic re-open cannot land between the PR and its merge
+    await expect(
+      reopenWorkflowInstance(db, id, { stageId: "merge_gate", reason: "x", actorUserId: adminId }),
+    ).rejects.toThrow(/comes after 'open_pr' \(git_operation\)/);
+    expect((await view(id)).status).toBe("completed");
+
+    // a re-open to the review before the chain re-runs all of it
+    const reopened = await reopenWorkflowInstance(db, id, { stageId: "gate", reason: "wr: change", actorUserId: adminId });
+    await reopened.postCommit(db);
+    expect((await approveGate(id)).statusCode).toBe(200);
+    v = await view(id);
+    expect(v.context.branch).toBe(`wrmg/${id.slice(0, 8)}-r1`);
+    const pr1 = v.context.prId as string;
+    expect(pr1).not.toBe(pr0);
+    expect((await approveGate(id, "merge_gate")).statusCode).toBe(200);
+    v = await view(id);
+    expect(v.status).toBe("completed");
+    expect(v.context.mergeSha).toBe(`sha-merge-${pr1}`);
+    expect(historyOf(v.context).find((e) => e.round === 0)!.values).toMatchObject({ prId: pr0, mergeSha: `sha-merge-${pr0}` });
+  });
+
+  it("merge refuses, by name and audited, to merge a PR its round did not open", async () => {
+    // a PR opened BEFORE the artifact stage: a new requirements version re-runs
+    // the merge but not open_pr, so the new round has no PR of its own — the
+    // merge must not reach back for round 0's
+    await makeTemplate("wr-latepr", "wr-latepr", [
+      { id: "intake", type: "trigger" },
+      { id: "branch", type: "git_operation", action: "create_branch", connection: "wr-git", repo: "wr/lp", branchPrefix: "wrlp" },
+      { id: "open_pr", type: "git_operation", action: "open_pr", connection: "wr-git", repo: "wr/lp" },
+      { id: "req", type: "artifact_generation", output: "requirements_file" },
+      { id: "gate", type: "human_approval", approvers: [anaId] },
+      { id: "merge", type: "git_operation", action: "merge", connection: "wr-git", repo: "wr/lp" },
+    ]);
+    const toRoundOne = async () => {
+      const id = await startInstance("wr-latepr");
+      await submitArtifact(id, "v1 requirements");
+      const pr0 = (await view(id)).context.prId as string;
+      expect(pr0).toBeTruthy();
+      await submitArtifact(id, "v2 requirements"); // re-open at req → round 1
+      const v = await view(id);
+      expect(v.round).toBe(1);
+      expect(v.context.prId).toBeUndefined(); // the chain went to history together
+      return { id, pr0 };
+    };
+
+    // (a) the natural case: round 1 has no PR at all
+    const a = await toRoundOne();
+    await approveGate(a.id);
+    let v = await view(a.id);
+    expect(v.status).not.toBe("completed");
+    expect(v.context.mergeSha).toBeUndefined();
+    expect(String(v.context.lastError)).toMatch(/merge refused: round 1 has opened no pull request to merge/);
+
+    // (b) a round-0 PR record that survived in the live context (stamped round 0)
+    const b = await toRoundOne();
+    const [row] = await db.select().from(workflowInstances).where(eq(workflowInstances.id, b.id));
+    const ctx = { ...(row!.context as Record<string, unknown>) };
+    ctx.prId = b.pr0;
+    ctx["effects:stamps"] = { ...((ctx["effects:stamps"] as object) ?? {}), prId: { round: 0, stageId: "open_pr" } };
+    await db.update(workflowInstances).set({ context: ctx }).where(eq(workflowInstances.id, b.id));
+    await approveGate(b.id);
+    v = await view(b.id);
+    expect(v.context.mergeSha).toBeUndefined();
+    expect(String(v.context.lastError)).toMatch(
+      new RegExp(`merge refused: pull request ${b.pr0} was opened in round 0, not this round \\(1\\)`),
+    );
+    for (const id of [a.id, b.id]) {
+      const audit = await auditFor(id);
+      const refused = audit.filter((x) => x.ruleId === "workflow:merge-refused-stale-pr");
+      expect(refused).toHaveLength(1);
+      expect(refused[0]!.effect).toBe("deny");
+      expect(audit.filter((x) => x.ruleId === "external-effect:git.merge_pull_request")).toHaveLength(0);
+    }
   });
 });

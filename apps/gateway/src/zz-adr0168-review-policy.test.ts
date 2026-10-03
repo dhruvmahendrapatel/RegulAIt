@@ -43,6 +43,7 @@ import {
 import { renderEuAiActAnswersBlock, type EuAiActAnswers } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { schedulerJobRegistry, SCHEDULER_JOB_NAMES } from "./scheduler-jobs.js";
+import { RECERTIFICATION_SYSTEM_ACTOR, runUseCaseRecertificationSweep } from "./review-policy.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -611,6 +612,8 @@ describe("recertification sweep", () => {
     // event, one audit row, carrying the recertification reason
     const reopenRows = await auditFor(uc.instanceId, "workflow:reopen");
     expect(reopenRows).toHaveLength(1);
+    expect(reopenRows[0]!.userId).toBe(users.admin.id); // an admin-run sweep names the admin
+    expect((reopenRows[0]!.detail as any).actor).toBeUndefined();
     expect((reopenRows[0]!.detail as any).event).toMatchObject({ kind: "reopen", stageId: "signoff" });
     expect((reopenRows[0]!.detail as any).event.reason).toMatch(/^recertification: .*expired on 2026-02-01$/);
     expect((reopenRows[0]!.detail as any).round).toBe(roundBefore + 1);
@@ -657,7 +660,14 @@ describe("recertification sweep", () => {
     const first = (await pendingRows(uc.instanceId))[0]!;
     expect((await decide(first.id, { decision: "approved", reason: "approved (g2rp)" }, "admin")).statusCode).toBe(200);
     await db.update(aiUseCases).set({ approvedUntil: new Date("2026-02-01T00:00:00Z") }).where(eq(aiUseCases.id, uc.id));
-    expect((await sweep([uc.id])).json()).toMatchObject({ movedToReview: 1 });
+    // the scheduler's path: no human actor — the audit names the system actor
+    expect(await runUseCaseRecertificationSweep(db, { useCaseIds: [uc.id] })).toMatchObject({ movedToReview: 1 });
+    const [reopenRow] = await auditFor(uc.instanceId, "workflow:reopen");
+    expect(reopenRow!.userId).toBe("00000000-0000-0000-0000-000000000000");
+    expect(reopenRow!.userId).not.toBe(users.owner.id);
+    expect((reopenRow!.detail as any).actor).toBe(RECERTIFICATION_SYSTEM_ACTOR);
+    const [startedRow] = await auditFor(uc.id, "use-case-recertification-started");
+    expect((startedRow!.detail as any).actor).toBe(RECERTIFICATION_SYSTEM_ACTOR);
     const again = await pendingRows(uc.instanceId);
     expect(again.map((r) => [r.approverUserId, r.reviewRoleId])).toEqual([[first.approverUserId, null]]);
     expect(await auditFor(uc.instanceId, "workflow:reopen")).toHaveLength(1);

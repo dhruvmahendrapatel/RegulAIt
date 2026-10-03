@@ -44,7 +44,7 @@ import {
   GitProviderError,
   IMPLEMENTED_GIT_PROVIDERS,
 } from "@regulait/git-provider";
-import { resolveDeployProvider, liveDeployClients, DeployProviderError } from "./deploy.js";
+import { resolveDeployProvider, liveDeployClients, DeployProviderError, deploySeed } from "./deploy.js";
 import { ExternalEffectBlockedError, runExternalWrite, type ExternalWriteAudit } from "./external-effects.js";
 import { validateGraph } from "@regulait/orchestration-kernel";
 import { inTransaction, planRun, type ApprovalPostCommit, type DbOrTx } from "./orchestration.js";
@@ -139,7 +139,12 @@ async function applyEvent(
    * transaction and records the `workflow_stage` span itself, AFTER that
    * transaction commits (`recordDeferredSpan`), so a span failure can never
    * roll back a result whose side effects already happened. */
-  opts?: { deferSpan?: boolean },
+  opts?: {
+    deferSpan?: boolean;
+    /** AER-049 review: the system actor an event with no human actor (a
+     * sweep) is audited as — the rows name it instead of the initiator */
+    systemActor?: string;
+  },
 ): Promise<{ state: InstanceState; effects: Effect[]; skipped?: boolean; deferredSpan?: DeferredSpan }> {
   // One transaction with the instance row locked: concurrent decisions,
   // re-opens, and aborts serialize instead of racing read-modify-write. When
@@ -251,11 +256,14 @@ async function applyEvent(
     // ADR-0168: a returned sign-off is not terminal, but the gate did not let
     // the change through — it audits as the refusal it is.
     const isReturn = event.kind === "approval_returned";
+    const systemActor = actorUserId === null && opts?.systemActor ? opts.systemActor : null;
+    const auditUserId = actorUserId ?? (systemActor ? SYSTEM_IDENTITY : instance.initiatorUserId);
     await tx.insert(auditLog).values({
-      userId: actorUserId ?? instance.initiatorUserId,
+      userId: auditUserId,
       objectType: "workflow",
       objectId: instance.id,
       detail: {
+        ...(systemActor ? { actor: systemActor } : {}),
         event,
         ...(staleCheckStages.length > 0 ? { staleCheckResultsCleared: staleCheckStages } : {}),
         ...(staleRunStages.length > 0 ? { staleRunIdsCleared: staleRunStages } : {}),
@@ -274,10 +282,11 @@ async function applyEvent(
     // round shipped stays traceable from the audit alone.
     if (archivedEffects.length > 0) {
       await tx.insert(auditLog).values({
-        userId: actorUserId ?? instance.initiatorUserId,
+        userId: auditUserId,
         objectType: "workflow",
         objectId: instance.id,
         detail: {
+          ...(systemActor ? { actor: systemActor } : {}),
           event: event.kind,
           reopenedFrom: def.stages[reopenedFrom]?.id ?? null,
           closedRound: instance.round,
@@ -330,6 +339,9 @@ async function applyEvent(
   await recordWorkflowStageSpan(db, instanceId, event, applied);
   return applied;
 }
+
+/** the audit identity of a system actor (audit_log.user_id is NOT NULL) */
+const SYSTEM_IDENTITY = "00000000-0000-0000-0000-000000000000";
 
 /** a `workflow_stage` span whose write waits for the caller's commit */
 type DeferredSpan = {
@@ -561,9 +573,30 @@ export async function applyWorkflowApprovalDecision(
 export async function reopenWorkflowInstance(
   dbx: DbOrTx,
   instanceId: string,
-  opts: { stageId: string; reason: string; actorUserId: string | null; dataKey?: string },
+  opts: {
+    stageId: string;
+    reason: string;
+    actorUserId: string | null;
+    dataKey?: string;
+    /** who the audit rows name when `actorUserId` is null (default
+     * `system:reopen`), e.g. `system:recertification-sweep` */
+    systemActor?: string;
+  },
 ): Promise<{ state: InstanceState; round: number; postCommit: ApprovalPostCommit }> {
-  const r = await applyEvent(dbx, instanceId, { kind: "reopen", stageId: opts.stageId, reason: opts.reason }, opts.actorUserId);
+  // AUTHORISATION IS THE CALLER'S. This function checks no entitlement: it is
+  // an internal primitive for code that has already decided the re-open is
+  // allowed (the recertification sweep is admin/scheduler-only). The kernel
+  // refuses a target that is not a sign-off / artifact stage at or before the
+  // first PR / merge / deploy stage, so a re-open always runs review again.
+  const r = await applyEvent(
+    dbx,
+    instanceId,
+    { kind: "reopen", stageId: opts.stageId, reason: opts.reason },
+    opts.actorUserId,
+    undefined,
+    undefined,
+    { systemActor: opts.systemActor ?? "system:reopen" },
+  );
   const [row] = await dbx
     .select({ round: workflowInstances.round })
     .from(workflowInstances)
@@ -1288,7 +1321,9 @@ async function runGitExecutions(
           const res = await runExternalWrite(
             db,
             "deploy.deploy",
-            () => provider.deploy(target!.name, target!.environment, instance.id),
+            // AER-049: the seed carries the round (from round 1 on), so a new
+            // round's mock / dry-run deployment gets an id of its own
+            () => provider.deploy(target!.name, target!.environment, deploySeed(instance.id, instance.round)),
             effectAudit((r) => ({ deployId: r.deployId, target: target!.name, environment: target!.environment, mode: target!.mode, dryRun: r.dryRun })),
           );
           // §3 the control-plane / agent-execution-plane data boundary: in
@@ -1529,6 +1564,24 @@ async function runGitExecutions(
       } else if (stage.action === "open_pr" && context.prId !== undefined) {
         // idempotent replay: PR already open for this instance
       } else if (stage.action === "open_pr") {
+        // AER-049 review: a PR is opened from THIS round's branch. When the
+        // round has none (a re-open archived it, or the create_branch stage
+        // sits before the re-open point and did not run again) — or the one
+        // on record is stamped with an earlier round — cut the round branch
+        // here, named exactly as create_branch would name it.
+        const branchStamp = effectStamps(context).branch;
+        if (context.branch === undefined || (branchStamp !== undefined && branchStamp.round < instance.round)) {
+          const creator = def.stages.find((st) => st.type === "git_operation" && st.action === "create_branch");
+          const baseBranch = `${creator?.branchPrefix ?? stage.branchPrefix ?? "regulait"}/${instance.id.slice(0, 8)}`;
+          const branch = instance.round > 0 ? `${baseBranch}-r${instance.round}` : baseBranch;
+          await runExternalWrite(
+            db,
+            "git.create_branch",
+            () => provider.createBranch(stage.repo!, branch, creator?.base ?? stage.base ?? "main"),
+            effectAudit(() => ({ repo: stage.repo, branch, cutBy: stage.id })),
+          );
+          context.branch = branch;
+        }
         // §2 stage 7: PR description auto-linked to the requirements artifact
         const [latestArtifact] = await db
           .select()
@@ -1572,6 +1625,33 @@ ${latestArtifact.content}`
         context.prId = pr.id;
         context.prUrl = pr.url;
       } else if (stage.action === "merge" && context.mergeSha === undefined) {
+        // AER-049 review: merge only a PR THIS round opened. An earlier
+        // round's PR (already merged, or reviewed against another artifact) is
+        // refused by name and audited — never merged "again".
+        const prStamp = effectStamps(context).prId;
+        if (context.prId === undefined || (prStamp !== undefined && prStamp.round < instance.round)) {
+          const refusal = new StalePullRequestMergeError(
+            instance.round,
+            context.prId === undefined ? null : String(context.prId),
+            prStamp?.round ?? null,
+          );
+          await db.insert(auditLog).values({
+            userId: actorUserId ?? instance.initiatorUserId,
+            objectType: "workflow",
+            objectId: instance.id,
+            detail: {
+              stageId: stage.id,
+              round: instance.round,
+              prId: context.prId ?? null,
+              prRound: prStamp?.round ?? null,
+            },
+            effect: "deny",
+            ruleId: "workflow:merge-refused-stale-pr",
+            ruleChain: [],
+            reason: refusal.message,
+          });
+          throw refusal;
+        }
         const result = await runExternalWrite(
           db,
           "git.merge_pull_request",
@@ -1744,7 +1824,21 @@ function isEffectRecordKey(k: string): boolean {
  * round goes straight to history.
  */
 export const EFFECT_STAMPS_KEY = "effects:stamps";
+/** AER-049 review: archived together whenever any git stage runs again */
+const GIT_CHAIN_KEYS = ["branch", "prId", "prUrl", "mergeSha"] as const;
 export const EFFECT_HISTORY_KEY = "effects:history";
+
+/** AER-049 review: a merge stage found no pull request opened in its round */
+export class StalePullRequestMergeError extends Error {
+  constructor(round: number, prId: string | null, prRound: number | null) {
+    super(
+      prId === null
+        ? `merge refused: round ${round} has opened no pull request to merge`
+        : `merge refused: pull request ${prId} was opened in round ${prRound}, not this round (${round}) — an earlier round's PR is never merged again`,
+    );
+    this.name = "StalePullRequestMergeError";
+  }
+}
 
 /** one live record's stamp */
 export interface EffectStamp {
@@ -1808,10 +1902,16 @@ function archiveEffectRecords(
 ): EffectHistoryEntry[] {
   const stamps = effectStamps(ctx);
   const byRound = new Map<number, Record<string, unknown>>();
+  // AER-049 review: the git chain (branch → PR → merge) is ONE unit. If any
+  // git stage runs again, all four records go together — a live round-n
+  // branch or PR beside a round-n+1 merge would merge what an earlier round
+  // already shipped (the round's open_pr cuts its own branch when needed).
+  const gitChainReruns = def.stages.some((st, i) => i >= fromIndex && st.type === "git_operation");
   for (const k of Object.keys(ctx)) {
     if (!isEffectRecordKey(k)) continue;
     const idx = effectRecordStageIndex(def, k, stamps[k]);
-    if (idx !== null && idx < fromIndex) continue; // upstream: not re-run, stays live
+    const chained = gitChainReruns && (GIT_CHAIN_KEYS as readonly string[]).includes(k);
+    if (!chained && idx !== null && idx < fromIndex) continue; // upstream: not re-run, stays live
     const round = stamps[k]?.round ?? closingRound;
     const values = byRound.get(round) ?? {};
     values[k] = ctx[k];

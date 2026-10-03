@@ -8,6 +8,7 @@ import {
   validateDefinition,
   type AssignmentRule,
   type ChangeDescriptor,
+  type InstanceState,
   type WorkflowDefinition,
 } from "./index.js";
 
@@ -357,6 +358,54 @@ describe("instance state machine", () => {
     r = transition(standard, r.state, { kind: "abort" });
     expect(() => transition(standard, r.state, { kind: "reopen", stageId: "requirements", reason: "x" })).toThrow(
       /cannot be re-opened/,
+    );
+    // denied and rolled_back stay terminal too
+    let d = startedPastPlan();
+    d = transition(standard, d.state, { kind: "artifact_submitted", stageId: "requirements" });
+    d = transition(standard, d.state, { kind: "approval_denied", stageId: "requirements_signoff" });
+    expect(d.state.status).toBe("denied");
+    expect(() => transition(standard, d.state, { kind: "reopen", stageId: "requirements", reason: "x" })).toThrow(
+      /instance is terminal \(denied\) and cannot be re-opened/,
+    );
+    const rolledBack = { ...d.state, status: "rolled_back" as const };
+    expect(() => transition(standard, rolledBack, { kind: "reopen", stageId: "requirements", reason: "x" })).toThrow(
+      /instance is terminal \(rolled_back\) and cannot be re-opened/,
+    );
+  });
+
+  it("AER-049 review: `reopen` targets only a sign-off or artifact stage at or before the first PR / merge / deploy stage", () => {
+    const shipping = validateDefinition({
+      workflow: "ship",
+      stages: [
+        { id: "t", type: "trigger" },
+        { id: "branch", type: "git_operation", action: "create_branch", connection: "c", repo: "o/r" },
+        { id: "req", type: "artifact_generation", output: "requirements_file" },
+        { id: "gate", type: "human_approval", approvers: ["requesting_user"] },
+        { id: "open_pr", type: "git_operation", action: "open_pr", connection: "c", repo: "o/r" },
+        { id: "merge_gate", type: "human_approval", approvers: ["requesting_user"] },
+        { id: "merge", type: "git_operation", action: "merge", connection: "c", repo: "o/r" },
+      ],
+    });
+    // a completed instance (every stage passed)
+    const done: InstanceState = {
+      status: "completed",
+      currentStageIndex: shipping.stages.length,
+      stageStatuses: shipping.stages.map(() => "completed"),
+      artifactVersions: { requirements_file: 1 },
+    };
+    expect(() => transition(shipping, done, { kind: "reopen", stageId: "merge_gate", reason: "x" })).toThrow(
+      /comes after 'open_pr' \(git_operation\)/,
+    );
+    expect(() => transition(shipping, done, { kind: "reopen", stageId: "open_pr", reason: "x" })).toThrow(
+      /is a git_operation stage/,
+    );
+    expect(() => transition(shipping, done, { kind: "reopen", stageId: "t", reason: "x" })).toThrow(/is a trigger stage/);
+    // the positive control: the gate before the first git stage re-opens
+    const back = transition(shipping, done, { kind: "reopen", stageId: "gate", reason: "x" });
+    // (after a create_branch: that ships nothing, and open_pr cuts the round's branch)
+    expect(back.state).toMatchObject({ status: "blocked_on_approval", currentStageIndex: 3 });
+    expect(transition(shipping, done, { kind: "reopen", stageId: "req", reason: "x" }).state.status).toBe(
+      "blocked_on_approval",
     );
   });
 

@@ -516,8 +516,10 @@ export type WorkflowEvent =
   | { kind: "deploy_override"; stageId: string }
   // §2 a rollback stage finished reversing the deployment → terminal rolled_back.
   | { kind: "rolled_back"; stageId: string }
-  // AER-049 — a GENERIC re-open: the instance goes back to `stageId` (any
-  // stage before the current one) and runs forward from there, every stage
+  // AER-049 — a GENERIC re-open: the instance goes back to `stageId` (a
+  // human_approval or artifact_generation stage before the current one and at
+  // or before the first git / deploy stage, so review always runs again
+  // before anything ships) and runs forward from there, every stage
   // from it on marked reopened. Unlike every other event it is accepted on a
   // COMPLETED instance (a recertification re-opens an approved intake to its
   // sign-off); aborted / denied / rolled_back stay terminal. `reason` says why
@@ -701,6 +703,31 @@ export function transition(
     }
     const targetIndex = def.stages.findIndex((st) => st.id === event.stageId);
     if (targetIndex < 0) throw new WorkflowStateError(`no stage '${event.stageId}'`);
+    // AER-049 review: a re-open always runs REVIEW again before anything
+    // ships. The target must be a human sign-off or an artifact stage, and it
+    // must sit at or before the first git (PR / merge) or deploy stage — re-opening between
+    // a PR and its merge (or past a deploy) would re-run the merge or deploy
+    // with no new review, on the PR an earlier round already merged.
+    const target = def.stages[targetIndex]!;
+    if (target.type !== "human_approval" && target.type !== "artifact_generation") {
+      throw new WorkflowStateError(
+        `stage '${event.stageId}' is a ${target.type} stage — a re-open targets a sign-off or an artifact stage, so review runs again`,
+      );
+    }
+    // `create_branch` does not ship anything (and the round's `open_pr` cuts a
+    // fresh round branch itself), so a review AFTER it is still a valid target
+    const firstShipping = def.stages.findIndex(
+      (st) =>
+        (st.type === "git_operation" && st.action !== "create_branch") ||
+        st.type === "deployment" ||
+        st.type === "rollback",
+    );
+    if (firstShipping >= 0 && targetIndex > firstShipping) {
+      throw new WorkflowStateError(
+        `stage '${event.stageId}' comes after '${def.stages[firstShipping]!.id}' (${def.stages[firstShipping]!.type}) — ` +
+          "a re-open must go back to a review at or before the first git / deploy stage",
+      );
+    }
     if (targetIndex >= state.currentStageIndex) {
       throw new WorkflowStateError(
         `stage '${event.stageId}' is not before the current stage — only a stage already passed can be re-opened`,

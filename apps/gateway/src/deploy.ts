@@ -73,8 +73,11 @@ export class DeployProviderError extends Error {
 
 export interface DeployProvider {
   readonly kind: DeployProviderKind;
-  /** deploy the given change to this target; `seed` makes the ids deterministic
-   * (the instance id) so a replay never mints a second deployment.
+  /** deploy the given change to this target; `seed` makes the mock / dry-run
+   * ids deterministic — `deploySeed(instanceId, round)`: the instance id, plus
+   * the round from round 1 on (AER-049). A replay WITHIN a round is made
+   * idempotent by the stage's `deploy:<stage>` record, not by the seed; a new
+   * round deploys afresh and its mock / dry-run id differs from the last.
    * ASYNC-DEPLOY refactor: Promise-returning so a real SDK long-running
    * operation (ARM beginCreateOrUpdate+poll, Infra Manager LRO, k8s rollout
    * watch) can be awaited to a terminal state instead of blocking the event
@@ -85,11 +88,24 @@ export interface DeployProvider {
   rollback(target: string, deployId: string): Promise<RollbackResult>;
 }
 
+
+/** AER-049: the deploy seed — the instance id, and `:r<round>` from round 1 on
+ * (round 0 keeps the bare id, byte-identical to before rounds existed) */
+export function deploySeed(instanceId: string, round: number): string {
+  return round > 0 ? `${instanceId}:r${round}` : instanceId;
+}
+
+/** the short deterministic tag a mock / dry-run id is built from */
+function seedTag(seed: string): string {
+  const at = seed.lastIndexOf(":r");
+  return at > 0 ? `${seed.slice(0, 8)}r${seed.slice(at + 2)}` : seed.slice(0, 8);
+}
+
 class MockDeployProvider implements DeployProvider {
   readonly kind = "mock" as const;
   async deploy(target: string, environment: string | null, seed: string): Promise<DeployResult> {
     const env = environment ?? "default";
-    const deployId = `dep_${seed.slice(0, 8)}_${env}`;
+    const deployId = `dep_${seedTag(seed)}_${env}`;
     return {
       deployId,
       url: `mock://deploy/${target}/${env}/${deployId}`,
@@ -212,7 +228,7 @@ class AwsDeployProvider implements DeployProvider {
       };
     }
     // Dry-run: deterministic session marker, no credentials, no network.
-    const sessionId = `sess_${seed.slice(0, 8)}`;
+    const sessionId = `sess_${seedTag(seed)}`;
     const deployId = `aws_${sessionId}_${env}`;
     const acct = this.roleArn.split(":")[4] ?? "customer";
     return {
@@ -350,7 +366,7 @@ class AzureDeployProvider implements DeployProvider {
     }
     // Dry-run: deterministic, no credentials, no network — byte-identical to
     // the pre-Batch-C shape.
-    const sessionId = `az_${seed.slice(0, 8)}`;
+    const sessionId = `az_${seedTag(seed)}`;
     const deployId = `azure_${sessionId}_${env}`;
     return {
       deployId,
@@ -480,7 +496,7 @@ class GcpDeployProvider implements DeployProvider {
     }
     // Dry-run: deterministic, no credentials, no network — byte-identical to
     // the pre-Batch-C shape.
-    const sessionId = `gc_${seed.slice(0, 8)}`;
+    const sessionId = `gc_${seedTag(seed)}`;
     const deployId = `gcp_${sessionId}_${env}`;
     return {
       deployId,
@@ -615,7 +631,7 @@ class KubernetesDeployProvider implements DeployProvider {
     }
     // Dry-run: deterministic, no credentials used, no network — byte-identical
     // to the pre-Batch-C shape.
-    const sessionId = `k8s_${seed.slice(0, 8)}`;
+    const sessionId = `k8s_${seedTag(seed)}`;
     const deployId = `k8s_${sessionId}_${env}`;
     return {
       deployId,
