@@ -7,8 +7,10 @@
  * refuses the retry. That split rests on four gateway facts, each proved here
  * by replaying the page's exact retry sequence against the real routes:
  *
- *  1. PATCH /v1/use-cases/:id edits description/businessContext while the
- *     use case is under_review (after the first questionnaire submission).
+ *  1. PATCH /v1/use-cases/:id is REFUSED (409 `locked_under_review`, ADR-0170
+ *     §4) once the use case is under_review (after the first questionnaire
+ *     submission) and writes nothing — so the page refuses a retry whose
+ *     use-case fields changed after that point, before sending anything.
  *  2. A second questionnaire submission is a NEW VERSION: it supersedes the
  *     sign-off that was pending on version 1 and raises exactly one fresh
  *     pending sign-off, and the use-case detail serves the new version.
@@ -75,7 +77,7 @@ const pendingSignoffs = async (instanceId: string) =>
     .filter((a) => a.instanceId === instanceId && a.stageId === "signoff");
 
 describe("AER-046: the retry sequence the intake page sends after an edit leaves one coherent, all-new record", () => {
-  it("first attempt (fails after the first risk), then the edited retry: PATCH use case, questionnaire v2, PATCH risk, create the missing risk", async () => {
+  it("first attempt (fails after the first risk), then the edited retry: the use case is locked, questionnaire v2, PATCH risk, create the missing risk", async () => {
     // ---- the first attempt, exactly as the page sends it ----
     const created = await call("POST", "/v1/use-cases", {
       name: "a46 credit assistant",
@@ -108,12 +110,15 @@ describe("AER-046: the retry sequence the intake page sends after an edit leaves
     // (the second risk's POST failed in the browser; nothing was written for it)
     expect((await call("GET", `/v1/use-cases/${useCaseId}`)).json().useCase.status).toBe("under_review");
 
-    // ---- the retry after the proposer edited the description, an answer and both risks ----
+    // ---- under review, the use case's own fields are locked (ADR-0170 §4) ----
     const patched = await call("PATCH", `/v1/use-cases/${useCaseId}`, {
       description: "Edited: a human decides every increase.",
       businessContext: "Edited: a human decides every increase.",
     });
-    expect(patched.statusCode).toBe(200);
+    expect(patched.statusCode).toBe(409);
+    expect(patched.json().error).toBe("locked_under_review");
+
+    // ---- the retry after the proposer edited an answer and both risks ----
     const v2 = await call("POST", `/v1/workflows/instances/${instanceId}/artifacts`, {
       stageId: "questionnaire",
       content: "## 1. Purpose\n\nEdited purpose answer.",
@@ -136,8 +141,8 @@ describe("AER-046: the retry sequence the intake page sends after an edit leaves
     const detail = (await call("GET", `/v1/use-cases/${useCaseId}`)).json();
     expect(detail.useCase).toMatchObject({
       name: "a46 credit assistant",
-      description: "Edited: a human decides every increase.",
-      businessContext: "Edited: a human decides every increase.",
+      description: "Recommends limit increases.",
+      businessContext: "Recommends limit increases.",
       status: "under_review",
     });
     expect(detail.questionnaire).toMatchObject({ version: 2, content: "## 1. Purpose\n\nEdited purpose answer." });

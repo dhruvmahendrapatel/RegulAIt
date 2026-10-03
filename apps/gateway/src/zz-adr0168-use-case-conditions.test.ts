@@ -6,7 +6,8 @@
  *    use-case detail (owner / met-by names, overdue) and list (openConditions);
  *    an open BEFORE-go-live condition makes the deploy gate refuse
  *    (`open_blocking_condition`); once met, the gate allows.
- *  - MARK MET: the condition's owner, the use case's owner or an admin; a
+ *  - MARK MET: the condition's owner, the use case's owner or an admin (a
+ *    before-go-live one: not the proposer, with a note — ADR-0170 §3); a
  *    stranger is refused 403; audited `use-case-condition-met`.
  *  - LIFETIME: approval stamps approved_at/approved_until — +6 months for a high
  *    tier, +12 for minimal; an approval past its valid-until is refused at the
@@ -228,10 +229,13 @@ describe("ADR-0168 approve with conditions", () => {
 
   it("marking met: the condition owner, the use-case owner or an admin — a stranger is refused 403", async () => {
     const uc = await proposeToReview("authz", minimalAnswers);
+    // ADR-0170 §3: "b" is an AFTER-go-live condition, which the use-case owner
+    // may still close; the before-go-live ones ("a", "c") need someone other
+    // than the proposer, with a note
     const r = await decide(await signoffId(uc.instanceId), {
       decision: "approved",
       reason: "approved (g168 authz)",
-      conditions: ["a", "b", "c"].map((t) => ({ text: `condition ${t}`, ownerUserId: users.condOwner.id, dueAt: future, blocking: true })),
+      conditions: ["a", "b", "c"].map((t) => ({ text: `condition ${t}`, ownerUserId: users.condOwner.id, dueAt: future, blocking: t !== "b" })),
     });
     expect(r.statusCode, r.body).toBe(200);
     const rows = await db.select().from(useCaseConditions).where(eq(useCaseConditions.useCaseId, uc.id));
@@ -243,9 +247,12 @@ describe("ADR-0168 approve with conditions", () => {
     const [still] = await db.select().from(useCaseConditions).where(eq(useCaseConditions.id, id("a")));
     expect(still!.status).toBe("open");
 
-    expect((await post(`/v1/use-cases/${uc.id}/conditions/${id("a")}/met`, users.condOwner.auth, {})).statusCode).toBe(200);
+    expect((await post(`/v1/use-cases/${uc.id}/conditions/${id("a")}/met`, users.condOwner.auth, { note: "done" })).statusCode).toBe(200);
     expect((await post(`/v1/use-cases/${uc.id}/conditions/${id("b")}/met`, users.owner.auth, {})).statusCode).toBe(200);
-    expect((await post(`/v1/use-cases/${uc.id}/conditions/${id("c")}/met`, users.admin.auth, {})).statusCode).toBe(200);
+    const proposer = await post(`/v1/use-cases/${uc.id}/conditions/${id("c")}/met`, users.owner.auth, { note: "done" });
+    expect(proposer.statusCode).toBe(403);
+    expect(proposer.json().error).toBe("proposer_cannot_close_blocking_condition");
+    expect((await post(`/v1/use-cases/${uc.id}/conditions/${id("c")}/met`, users.admin.auth, { note: "checked" })).statusCode).toBe(200);
     // a condition id under the wrong use case is not found
     const other = await proposeToReview("authz-other", minimalAnswers);
     expect((await post(`/v1/use-cases/${other.id}/conditions/${id("a")}/met`, users.admin.auth, {})).statusCode).toBe(404);

@@ -851,9 +851,12 @@ export const decideApprovalSchema = z.object({
   acceptRisks: acceptRisksSchema.optional(),
 });
 
-/** ADR-0168 — `POST /v1/use-cases/:id/conditions/:conditionId/met` */
+/** ADR-0168 — `POST /v1/use-cases/:id/conditions/:conditionId/met`. ADR-0170
+ * §3: a before-go-live (blocking) condition REQUIRES the note — a missing or
+ * whitespace-only note is refused 422 `condition_note_required` by the route,
+ * so the schema accepts an empty note and lets the route name the refusal. */
 export const markConditionMetSchema = z
-  .object({ note: z.string().trim().min(1).max(2000).optional() })
+  .object({ note: z.string().trim().max(2000).optional() })
   .strict();
 
 /** ADR-0168 — a condition as `GET /v1/use-cases/:id` returns it. */
@@ -871,6 +874,10 @@ export interface UseCaseConditionView {
   note: string | null;
   /** open, and `dueAt` has passed */
   overdue: boolean;
+  /** ADR-0170 §3: whether the VIEWER may mark this condition met right now
+   * (open, and the server's closing rule allows them). A before-go-live
+   * condition also needs a note. */
+  canMarkMet: boolean;
 }
 
 export const createApiKeySchema = z.object({
