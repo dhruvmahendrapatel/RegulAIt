@@ -11,6 +11,7 @@ import v from "../../views.module.css";
 import s from "./demoGovernance.module.css";
 import rec from "./record.module.css";
 import rr from "./recordRound.module.css";
+import { resubmitPath } from "./registryModel";
 import { DependencyGraphPanel } from "./DependencyGraphPanel";
 import { RiskLibraryPicker } from "./RiskLibraryPicker";
 import {
@@ -46,9 +47,6 @@ interface AgentCardResponse {
   guardrails: { modes: Record<string, string>; blocksInput: boolean; blocksOutput: boolean; provenance: string[] };
   oversight: { modelCards: number; modelCardApproved: boolean; note: string };
 }
-
-/** the registration screen in resubmit mode, for a use case sent back for information */
-export const resubmitPath = (useCaseId: string) => `/admin/governance/intake?resubmit=${encodeURIComponent(useCaseId)}`;
 
 const TABS = ["overview", "frameworks", "risks", "stack", "dependencies", "approvals", "audit"].map((id) => ({ id, label: id[0]!.toUpperCase() + id.slice(1) }));
 

@@ -17,10 +17,11 @@ import { ago, fmtAt, frameworkLabel, humanize, plural, shortId } from "../../../
 import { Badge, Button, Field, Input, Select } from "../../../ui/kit";
 import { useAction, useAgents } from "../adminKit";
 import { QuestionnaireView } from "./UseCaseQuestionnaire";
+import type { UseCaseResubmission } from "../../../api/types";
 import {
   fmtDay,
-  statusLabel,
-  statusTone,
+  resubmitPath,
+  rowStatus,
   tierLabel,
   tierTone,
   validity,
@@ -60,6 +61,8 @@ interface Condition {
 }
 export interface UseCaseDetail {
   useCase: UseCaseRow & { approvedAt?: string | null; approvalExpired?: boolean };
+  /** ADR-0168 amendment: what the registration screen needs to update and resubmit */
+  resubmission?: UseCaseResubmission;
   instance: { id: string; status: string; currentStageId: string | null; stages: Array<{ id: string; type: string }> } | null;
   questionnaire: { version: number; content: string; createdAt: string } | null;
   cascadeConsequences: CascadeCard;
@@ -146,6 +149,8 @@ export function UseCasePreviewDrawer(props: { id: string; row: UseCaseRow | unde
   const conditions = d?.conditions ?? [];
   const openConditions = conditions.filter((c) => c.status === "open");
   const until = validity(u?.approvedUntil ?? props.row?.approvedUntil ?? null, u?.approvalExpired);
+  const shownStatus = status ? rowStatus({ status, recertification: u?.recertification ?? props.row?.recertification }) : null;
+  const resubmission = status === "needs_info" && d?.resubmission?.allowed ? d.resubmission : null;
 
   return (
     <aside className={r.drawer} role="dialog" aria-modal="false" aria-labelledby="uc-preview-title">
@@ -155,9 +160,9 @@ export function UseCasePreviewDrawer(props: { id: string; row: UseCaseRow | unde
           <h2 id="uc-preview-title" ref={heading} tabIndex={-1} className={r.drawerTitle}>
             {name}
           </h2>
-          {status && (
+          {shownStatus && (
             <div className={v.row}>
-              <Badge tone={statusTone(status)}>{statusLabel(status)}</Badge>
+              <Badge tone={shownStatus.tone}>{shownStatus.label}</Badge>
             </div>
           )}
         </div>
@@ -167,10 +172,20 @@ export function UseCasePreviewDrawer(props: { id: string; row: UseCaseRow | unde
       </div>
       <div className={r.drawerBody}>
         <div className={r.drawerActions}>
-          <Link to={`/admin/governance/use-cases/${props.id}`} className={`${k.btnPrimary} ${r.openLink}`}>
+          {resubmission ? (
+            <Link to={resubmitPath(props.id)} className={`${k.btnPrimary} ${r.openLink}`}>
+              Update and resubmit
+            </Link>
+          ) : null}
+          <Link to={`/admin/governance/use-cases/${props.id}`} className={`${resubmission ? k.btn : k.btnPrimary} ${r.openLink}`}>
             Open use case
           </Link>
         </div>
+        {resubmission ? (
+          <p className={v.dim} role="note">
+            Sent back{resubmission.returnedByName ? ` by ${resubmission.returnedByName}` : ""}: {resubmission.returnReason ?? "no reason was recorded."}
+          </p>
+        ) : null}
 
         {detail.isLoading && <p className={v.faint}>Loading…</p>}
         {detail.error ? (

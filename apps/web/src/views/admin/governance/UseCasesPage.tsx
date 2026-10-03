@@ -23,8 +23,7 @@ import {
   fmtDay,
   headline,
   isFiltered,
-  statusLabel,
-  statusTone,
+  rowStatus,
   tierLabel,
   tierTone,
   validity,
@@ -43,6 +42,7 @@ const STATUS_CHIPS: Array<{ value: StatusFilter; label: string }> = [
   { value: "all", label: "All" },
   { value: "in_review", label: "In review" },
   { value: "needs_info", label: "Needs information" },
+  { value: "recertification", label: "Re-review" },
   { value: "approved", label: "Approved" },
   { value: "rejected", label: "Rejected" },
   { value: "retired", label: "Retired" },
@@ -133,7 +133,7 @@ export default function UseCasesPage() {
                 <Table
                   rows={shown}
                   rowKey={(row) => row.id}
-                  rowLabel={(row) => `${row.name}, ${statusLabel(row.status)} — open preview`}
+                  rowLabel={(row) => `${row.name}, ${rowStatus(row).label} — open preview`}
                   onRowClick={(row) => {
                     opener.current = document.activeElement instanceof HTMLElement && document.activeElement.tagName === "TR" ? document.activeElement : null;
                     setOpenId(openId === row.id ? null : row.id);
@@ -154,8 +154,8 @@ export default function UseCasesPage() {
                     {
                       key: "status",
                       header: "Status",
-                      sort: (row) => statusLabel(row.status),
-                      render: (row) => <Badge tone={statusTone(row.status)}>{statusLabel(row.status)}</Badge>,
+                      sort: (row) => rowStatus(row).label,
+                      render: (row) => <Badge tone={rowStatus(row).tone}>{rowStatus(row).label}</Badge>,
                     },
                     {
                       key: "tier",
