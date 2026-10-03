@@ -473,6 +473,14 @@ export function Table<T>(props: {
   rowKey: (row: T) => string;
   loading?: boolean;
   empty?: ReactNode;
+  /**
+   * The failure of the query feeding `rows`, when there is one. A failed
+   * fetch used to fall through to `empty` — "No users yet" on a 500 — which
+   * reads as a fact about the data (UXJ-01). With `error` set and no rows to
+   * show, the table renders the error state (and `onRetry`) instead.
+   */
+  error?: unknown;
+  onRetry?: () => void;
   onRowClick?: (row: T) => void;
   rowLabel?: (row: T) => string;
 }) {
@@ -561,7 +569,19 @@ export function Table<T>(props: {
                   </tr>
                 );
               })}
-          {!props.loading && sorted.length === 0 && (
+          {!props.loading && sorted.length === 0 && props.error != null && (
+            <tr>
+              <td colSpan={props.columns.length}>
+                <ErrorState
+                  title="Couldn't load this list"
+                  message={props.error instanceof Error ? props.error.message : String(props.error)}
+                  access={(props.error as { status?: number }).status === 403}
+                  onRetry={props.onRetry}
+                />
+              </td>
+            </tr>
+          )}
+          {!props.loading && sorted.length === 0 && props.error == null && (
             <tr>
               <td colSpan={props.columns.length}>{props.empty ?? <EmptyState title="Nothing here yet" />}</td>
             </tr>
@@ -712,12 +732,18 @@ export function EmptyState(props: { title: string; body?: ReactNode; action?: Re
   );
 }
 
-export function ErrorState(props: { message: string; onRetry?: () => void; access?: boolean }) {
+export function ErrorState(props: {
+  message: string;
+  onRetry?: () => void;
+  access?: boolean;
+  /** what failed, when it is narrower than "this view" (a list inside it) */
+  title?: string;
+}) {
   return (
     <div className={s.empty} role="alert">
       <StatusDot tone="danger" />
       <div className={s.emptyTitle}>
-        {props.access ? "You don't have access to this view" : "Couldn't load this view"}
+        {props.access ? "You don't have access to this view" : (props.title ?? "Couldn't load this view")}
       </div>
       <div className={s.emptyBody}>{props.message}</div>
       {props.onRetry && (

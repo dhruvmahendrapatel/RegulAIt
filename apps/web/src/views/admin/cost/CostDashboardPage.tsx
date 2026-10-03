@@ -109,6 +109,8 @@ export default function CostDashboardPage() {
             rows={projects.data?.projects ?? []}
             rowKey={(p) => p.id}
             loading={projects.isLoading}
+            error={projects.error}
+            onRetry={() => void projects.refetch()}
             onRowClick={(p) => setRollupId(p.id === rollupId ? null : p.id)}
             rowLabel={(p) => `Open cost rollup for ${p.name}`}
             empty={

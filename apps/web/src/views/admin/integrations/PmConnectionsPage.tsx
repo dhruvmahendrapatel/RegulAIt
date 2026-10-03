@@ -158,6 +158,8 @@ export default function PmConnectionsPage() {
             rows={q.data?.connections ?? []}
             rowKey={(c) => c.name}
             loading={q.isLoading}
+            error={q.error}
+            onRetry={() => void q.refetch()}
             empty={
               <EmptyState
                 title="No PM connections"

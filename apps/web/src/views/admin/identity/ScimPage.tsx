@@ -136,6 +136,8 @@ export default function ScimPage() {
             rows={q.data?.tokens ?? []}
             rowKey={(t) => t.id}
             loading={q.isLoading}
+            error={q.error}
+            onRetry={() => void q.refetch()}
             empty={
               <EmptyState
                 title="No SCIM tokens"

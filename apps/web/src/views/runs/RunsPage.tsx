@@ -455,6 +455,8 @@ export default function RunsPage() {
               rows={runsQ.data?.runs}
               rowKey={(r) => r.id}
               loading={runsQ.isLoading}
+              error={runsQ.error}
+              onRetry={() => void runsQ.refetch()}
               onRowClick={(r) => navigate(`/runs/${r.id}`)}
               rowLabel={(r) => `Open run ${r.name}`}
               empty={

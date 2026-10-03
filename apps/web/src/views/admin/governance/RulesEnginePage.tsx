@@ -364,6 +364,8 @@ export default function RulesEnginePage() {
             rows={approvals.data?.rules ?? []}
             rowKey={(r) => r.id}
             loading={approvals.isLoading}
+            error={approvals.error}
+            onRetry={() => void approvals.refetch()}
             empty={<EmptyState title="No approval rules" />}
           />
         </Card>
@@ -419,6 +421,8 @@ export default function RulesEnginePage() {
             rows={dataScopes.data?.rules ?? []}
             rowKey={(r) => r.id}
             loading={dataScopes.isLoading}
+            error={dataScopes.error}
+            onRetry={() => void dataScopes.refetch()}
             empty={<EmptyState title="No data-scope rules" />}
           />
         </Card>
@@ -470,6 +474,8 @@ export default function RulesEnginePage() {
             rows={rateLimits.data?.rules ?? []}
             rowKey={(r) => r.id}
             loading={rateLimits.isLoading}
+            error={rateLimits.error}
+            onRetry={() => void rateLimits.refetch()}
             empty={<EmptyState title="No rate limits" />}
           />
         </Card>
@@ -705,6 +711,8 @@ function ShadowCanaryCard() {
         rows={rows}
         rowKey={(r) => `${r.artifactType}:${r.artifactId}`}
         loading={canaries.isLoading}
+        error={canaries.error}
+        onRetry={() => void canaries.refetch()}
         empty={
           <EmptyState
             title="No config canaries running"
@@ -783,6 +791,8 @@ function ShadowCanaryCard() {
             rows={divergence.data?.observations ?? []}
             rowKey={(o) => o.id}
             loading={divergence.isLoading}
+            error={divergence.error}
+            onRetry={() => void divergence.refetch()}
             empty={
               <EmptyState
                 title="Nothing sampled yet"

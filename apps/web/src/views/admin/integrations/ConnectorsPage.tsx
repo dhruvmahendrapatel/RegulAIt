@@ -59,6 +59,8 @@ export default function ConnectorsPage() {
             rows={connectors.data?.connectors ?? []}
             rowKey={(c) => c.id}
             loading={connectors.isLoading}
+            error={connectors.error}
+            onRetry={() => void connectors.refetch()}
             empty={<EmptyState title="No connectors" body="Create the first connector below." />}
           />
         </Card>

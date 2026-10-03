@@ -75,6 +75,8 @@ export default function ComplianceProfilesPage() {
             rows={profiles.data?.profiles ?? []}
             rowKey={(p) => p.tag}
             loading={profiles.isLoading}
+            error={profiles.error}
+            onRetry={() => void profiles.refetch()}
             empty={
               <EmptyState
                 title="No compliance profiles"

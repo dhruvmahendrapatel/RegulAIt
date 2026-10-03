@@ -195,6 +195,8 @@ export default function AuditLogPage() {
             rows={rows}
             rowKey={(e) => e.rowKey}
             loading={audit.isLoading}
+            error={audit.error}
+            onRetry={() => void audit.refetch()}
             empty={
               <EmptyState
                 title="No audit rows match"

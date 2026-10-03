@@ -209,6 +209,8 @@ function OidcCard() {
         rows={providers.data?.providers ?? []}
         rowKey={(p) => p.id}
         loading={providers.isLoading}
+        error={providers.error}
+        onRetry={() => void providers.refetch()}
         empty={
           <EmptyState
             title="No OIDC providers"
@@ -485,6 +487,8 @@ function SamlCard() {
         rows={providers.data?.providers ?? []}
         rowKey={(p) => p.id}
         loading={providers.isLoading}
+        error={providers.error}
+        onRetry={() => void providers.refetch()}
         empty={
           <EmptyState
             title="No SAML providers"

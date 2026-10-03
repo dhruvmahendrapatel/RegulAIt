@@ -191,6 +191,8 @@ export default function WorkflowsPage() {
               rows={q.data?.instances}
               rowKey={(i) => i.id}
               loading={q.isLoading}
+              error={q.error}
+              onRetry={() => void q.refetch()}
               onRowClick={(i) => navigate(`/workflows/${i.id}`)}
               rowLabel={(i) => `Open workflow ${i.change?.description ?? i.id}`}
               empty={

@@ -95,3 +95,34 @@ test("UIW-01: a wrong current password is shown on the form — the session is n
   await expect(page).toHaveURL(/\/ui\/account/);
   await expect(page.getByLabel("Current password")).toBeVisible();
 });
+
+// UXJ-01: a failed list query renders an error with Retry, never the empty state.
+// Five representative query-backed tables, each with its list endpoint failing.
+const FAILING_LISTS: Array<{ page: string; endpoint: string; empty: string; recovered: unknown; present: string }> = [
+  { page: "/ui/admin/users", endpoint: "/v1/users", empty: "No users yet", recovered: { users: [{ id: "u2", email: "riley@example.test", displayName: "Riley Reviewer" }] }, present: "Riley Reviewer" },
+  { page: "/ui/admin/agents", endpoint: "/v1/agents", empty: "No agents registered", recovered: { agents: [{ id: "ag", name: "Credit assistant", provider: "mock", model: "mock-balanced", enabled: true, modes: ["chat"] }] }, present: "Credit assistant" },
+  { page: "/ui/admin/roles", endpoint: "/v1/roles", empty: "No roles yet", recovered: { roles: [{ id: "r", name: "Reviewer", description: "", createdAt: "2026-10-02T12:00:00Z" }] }, present: "Reviewer" },
+  { page: "/ui/admin/connectors", endpoint: "/v1/connectors", empty: "No connectors", recovered: { connectors: [{ id: "c", name: "GitHub", kind: "github", enabled: true }] }, present: "GitHub" },
+  { page: "/ui/admin/mcp-servers", endpoint: "/v1/servers", empty: "No servers registered", recovered: { servers: [{ id: "s", name: "tools-mcp", baseUrl: "https://tools.example", enabled: true }] }, present: "tools-mcp" },
+];
+for (const c of FAILING_LISTS) {
+  test(`UXJ-01: ${c.page} shows an error with Retry when ${c.endpoint} fails, not "${c.empty}"`, async ({ page }) => {
+    let failing = true;
+    await routeApi(page, async (route, p) => {
+      if (p === "/auth/me") return json(route, authMe(USER_A));
+      if (p === "/v1/me") return json(route, { userId: USER_A.id, isAdmin: true, user: USER_A });
+      if (p === c.endpoint) return failing ? json(route, { error: "internal", detail: "database unavailable" }, 500) : json(route, c.recovered);
+      return json(route, {});
+    });
+    await page.goto(c.page);
+    const alert = page.getByRole("alert").filter({ hasText: "Couldn't load this list" });
+    await expect(alert).toBeVisible();
+    await expect(alert).toContainText("internal — database unavailable");
+    expect(await page.getByText(c.empty, { exact: true }).count()).toBe(0);
+    // Retry re-asks the server; once it answers, the rows replace the error
+    failing = false;
+    await alert.getByRole("button", { name: "Retry" }).click();
+    await expect(page.getByRole("cell", { name: c.present, exact: true }).first()).toBeVisible();
+    await expect(alert).toHaveCount(0);
+  });
+}

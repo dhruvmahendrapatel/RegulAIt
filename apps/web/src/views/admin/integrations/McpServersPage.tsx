@@ -84,6 +84,8 @@ export default function McpServersPage() {
             rows={servers.data?.servers ?? []}
             rowKey={(s) => s.id}
             loading={servers.isLoading}
+            error={servers.error}
+            onRetry={() => void servers.refetch()}
             onRowClick={(s) => setSelectedId(s.id === selectedId ? null : s.id)}
             rowLabel={(s) => `Show tools on ${s.name}`}
             empty={<EmptyState title="No servers registered" body="Register the first MCP server above." />}
@@ -425,6 +427,8 @@ function ToolsCard(props: { server: McpServer }) {
         rows={tools.data?.tools ?? []}
         rowKey={(t) => t.name}
         loading={tools.isLoading}
+        error={tools.error}
+        onRetry={() => void tools.refetch()}
         empty={
           <EmptyState
             title="No tools registered on this server"

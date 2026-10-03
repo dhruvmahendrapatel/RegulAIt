@@ -242,6 +242,8 @@ export default function ApprovalsAdminPage() {
             rows={rows}
             rowKey={(r) => r.id}
             loading={q.isLoading}
+            error={q.error}
+            onRetry={() => void q.refetch()}
             empty={
               <EmptyState
                 title="Nothing waiting anywhere"
@@ -524,6 +526,8 @@ function DelegationsCard() {
         rows={q.data?.delegations ?? []}
         rowKey={(d) => d.id}
         loading={q.isLoading}
+        error={q.error}
+        onRetry={() => void q.refetch()}
         empty={<EmptyState title="No delegation windows" />}
       />
       <p className={v.faint}>

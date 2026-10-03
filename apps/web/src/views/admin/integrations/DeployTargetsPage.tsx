@@ -185,6 +185,8 @@ export default function DeployTargetsPage() {
             rows={q.data?.targets ?? []}
             rowKey={(t) => t.name}
             loading={q.isLoading}
+            error={q.error}
+            onRetry={() => void q.refetch()}
             empty={
               <EmptyState
                 title="No deploy targets"

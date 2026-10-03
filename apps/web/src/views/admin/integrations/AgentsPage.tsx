@@ -140,6 +140,8 @@ export default function AgentsPage() {
             rows={agents.data?.agents ?? []}
             rowKey={(x) => x.id}
             loading={agents.isLoading}
+            error={agents.error}
+            onRetry={() => void agents.refetch()}
             empty={<EmptyState title="No agents registered" body="Register the first agent below." />}
           />
         </Card>

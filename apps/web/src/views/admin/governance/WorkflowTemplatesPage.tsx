@@ -153,6 +153,8 @@ export default function WorkflowTemplatesPage() {
             rows={rules.data?.rules ?? []}
             rowKey={(r) => r.id}
             loading={rules.isLoading}
+            error={rules.error}
+            onRetry={() => void rules.refetch()}
             empty={<EmptyState title="No assignment rules" />}
           />
           <p className={v.faint}>
