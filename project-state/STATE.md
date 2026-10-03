@@ -21,11 +21,14 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
-**2026-10-03 (evening) - Owner-requested adversarial security review of the governance flow; ADR-0170 decided, fixes in progress.**
+**2026-10-03 (evening) - Owner-requested adversarial security review of the governance flow; ADR-0170 decided and built.**
 Three reviewers (authz, tenant isolation, lifecycle/gates). Tenant isolation N/A by design (ADR-0041). ADR-0170 records the
 separation-of-duties and lifecycle fixes (distinct decider per review, live role membership, maker-checker on before-go-live
 conditions, edit lock under review, no silent screening downgrade, migration 0133 lifetime backfill + runtime expiry, steward
-tightens-only). Build in progress on worktrees; nothing pushed until the full gate is green.
+tightens-only, plus a routing bypass closed: a request for a suspended agent down-routed to an active one is refused).
+Built on three file-disjoint branches, integrated on `wt-sec-int`, full gate green (suite 3426 passed / 9 skipped,
+demo:prepare 18/18, real journeys 2/2, mocked 88/88, phase1+2 39/39, approval-review 4/4), pushed 68c47e6.
+Remaining limits in ADR-0170 (orchestration re-plan lifecycle check, suspension-reason edits, review-record CAS).
 
 **2026-10-03 (afternoon) - ADR-0168 amendment built (review policy, resubmission, recertification, agent stewardship), AER-049 closed, ADR-0169 shaded theme.**
 On the integration branch `wt-g2-int` (from `dhruv/active` d9abbe2; tip f49abb2; full gate green (suite 3401, demo:prepare 18/18, real journeys 2/2, mocked 86/86, phase1+2 39/39); pushed as d005957). The owner moved ADR-0168 items 7-8 before the demo and decided AER-049. Built: a review policy (migration
