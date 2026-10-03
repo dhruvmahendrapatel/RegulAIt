@@ -44,3 +44,29 @@ and a failed detail read can render "approved without conditions" (055).
 - The Monday demo's click path is unchanged; the final review page shows more.
 - Not done here: validating comprehension with representative business users (053's last criterion) —
   that needs people, not code.
+
+## Implementation (2026-10-03, night)
+
+Built on two file-disjoint branches (backend: `use-case-drafts.ts`, `use-cases.ts`, shared screening schemas,
+migration 0134; web: the intake wizard, resubmission, record page and review drawer) against one API contract,
+then a wiring pass and an independent review.
+
+- **Drafts**: one row per (user, scope); a use-case scope needs owner or admin; identity-less tokens are refused;
+  256 KiB cap; drafts untouched for 30 days are pruned. The web guards leaving with `beforeunload` plus an in-app
+  link interceptor — the app uses `<BrowserRouter>`, not a data router, so `useBlocker` is unavailable.
+- **Idempotent create**: the key is claimed first inside the create transaction behind a unique (user, key) index,
+  so a concurrent duplicate waits, conflicts and replays; a refused create releases the claim. The replay window
+  equals the draft lifetime (30 days) — the review found that a 24-hour window let a resumed draft create a second
+  use case after a lost response.
+- **Not sure**: accepted on create and PATCH `screeningAnswers` (all ten yes/no keys) and inside the questionnaire's
+  answers block (its seven EU keys); every listed key must be answered yes (422 `unsure_answer_must_count_as_yes`).
+- **Review findings fixed before merge**: the review-policy demo journey's exact-match expectation, the replay
+  window, a leave dialog that promised a save while the resume offer was pending, and the review drawer silently
+  dropping the owner's notes when its detail read failed.
+- **Robustness found on the way**: the app had no error boundary, so one malformed response blanked the home page;
+  each home card now renders inside `CardBoundary`.
+
+**Limits**: the browser's own Back button inside the app is not intercepted (the draft keeps the work); resume was
+tested across a reload, not across sign-out and sign-in; resubmission keeps its retry-without-second-PATCH logic and
+has no idempotency key; the create transaction now also starts the workflow instance, holding the audit-chain lock a
+little longer (not measured); business-user comprehension of the screening help is untested.

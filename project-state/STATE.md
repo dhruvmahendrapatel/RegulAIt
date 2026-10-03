@@ -21,6 +21,15 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-10-03 (night) - AER-050..055 intake UX built (ADR-0171); CI flakes from the router upgrade fixed.** Server-side drafts
+(one per user/scope, never browser storage), leave guard, Idempotency-Key on use-case create (window = 30-day draft life),
+kept edits on re-draft, framework rationales saved and shown, "Not sure" answers (count as yes, shown to reviewers), Review shows
+the proposal itself, unknown lifecycle detail never read as "no conditions". Migration 0134. Two builders + wiring pass + an
+independent review (4 findings fixed before merge, incl. a real-journey break). Also: CI Playwright annotations (logs unreachable
+here), phase1 workflow-detail wait under React Router 7, and CardBoundary so one malformed response cannot blank the home page.
+Full gate green: suite 3440, prepare 18/18, real 2/2, mocked 109/109, spa 39/39, review 4/4. AER-050..055 marked reported
+implemented pending codex-confirm; demo script gained an optional talking point (Not sure / drafts), click path unchanged.
+
 **2026-10-03 (late evening) - Dependabot advisories cleared; stronger light-mode colour.** react-router-dom 7.18.4, vitest 4.1.11
 (every package now `vitest run --dir src`: v4 stopped excluding dist/), overrides for uuid (Azure SDK) and esbuild (drizzle-kit);
 `pnpm audit` clean. One order-dependent test fixed (rule-write-versioning, red/green with a planted leftover). ADR-0169 amended:

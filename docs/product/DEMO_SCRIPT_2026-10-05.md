@@ -122,7 +122,13 @@ in every profile before the demo if you would rather it did not move while you p
   Reject one (e.g. SOC 2) to show it, then **Accept all remaining**. **Continue** through the
   questionnaire; on **Link the governed stack** choose **claude-opus** and the vendor
   **Anthropic** (what the shadow evidence pointed at). On **Review** point at *Data sensitivity:
-  regulated — derived from the declared data categories*. **Submit for human review**.
+  regulated — derived from the declared data categories*. Review now shows the whole proposal —
+  optionally open **Who receives this** to show the high tier routes to the Privacy and Security
+  reviews. **Submit for human review**.
+- **Optional (if asked "what if I'm not sure?" or "what if I close the tab?"):** every yes/no
+  question has a **Not sure** option that counts as *yes* and is flagged to reviewers, and the
+  wizard saves a draft as you go — reopen it and choose **Resume your draft**. Do not demo this
+  live; it is a talking point.
 - **Say:** "The tier is computed from the structured EU AI Act answers by deterministic rules —
   not from a description, and never from a model. Suggestions are suggestions: each one is
   accepted, edited or rejected by a person. High-risk obligations apply from 2 December 2027

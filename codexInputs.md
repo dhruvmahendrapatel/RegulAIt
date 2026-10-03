@@ -41,7 +41,9 @@ not a new runtime agent. Keep this distinction explicit in onboarding and stack 
 
 ### New findings — implement in this order
 
-#### AER-050 — MEDIUM / OPEN — Draft and recovery state disappear when the page is left
+#### AER-050 — MEDIUM / REPORTED IMPLEMENTED (pending codex-confirm) — Draft and recovery state disappear when the page is left
+
+**Implementer update:** Implemented 2026-10-03 (ADR-0171): one server-side draft per user and scope (`GET/PUT/DELETE /v1/use-cases/draft`, never browser storage), resume/start-fresh offer, leave guard (beforeunload + in-app link interceptor; the app uses `<BrowserRouter>`, so no `useBlocker`), Cancel/Back disabled while submitting, `Idempotency-Key` on create (per caller, race-safe, window = 30-day draft lifetime) reused after a lost response including across reload; copy narrowed to what is true. Not done: browser Back inside the app is not intercepted (the draft makes it recoverable); resume tested across reload, not sign-out/sign-in; resubmission has no idempotency key (keeps its retry-without-second-PATCH logic).
 
 Evidence (source observation): `apps/web/src/views/admin/governance/IntakeWizardPage.tsx:116-172,329-331,429-433,642,657`;
 `intakeCheckpoint.ts:48-53`; `IntakeResubmit.tsx:127-138,167-181`.
@@ -62,7 +64,9 @@ Acceptance: fill all stages, refresh/re-login and resume unchanged; Cancel warns
 drop the create response after server commit, retry/reload, and assert one use case with one coherent risk/control set.
 Apply the dirty-form test to resubmission too.
 
-#### AER-051 — MEDIUM / OPEN — Re-drafting silently replaces questionnaire edits
+#### AER-051 — MEDIUM / REPORTED IMPLEMENTED (pending codex-confirm) — Re-drafting silently replaces questionnaire edits
+
+**Implementer update:** Implemented 2026-10-03: Back + Continue with unchanged answers keeps every edit and decision with no assist call; changed answers list the affected sections and regenerate only on "Regenerate affected sections" (else "Keep my edits").
 
 Evidence: `IntakeWizardPage.tsx:228-234,407-409,433`. The assist success callback replaces the entire questionnaire and resets
 question decisions to accepted. Back-navigation followed by “Draft suggestions” invokes it again.
@@ -74,7 +78,9 @@ Invalidate stale suggestions deliberately without silently replacing user text.
 Acceptance: edit/reject questionnaire sections, return to Classify and continue unchanged: preserve edits and decisions.
 Change classification: show a diff/warning; regenerate only with explicit consent and reconcile framework/risk edits.
 
-#### AER-052 — MEDIUM / OPEN — Framework explanation editing is a dead-end control
+#### AER-052 — MEDIUM / REPORTED IMPLEMENTED (pending codex-confirm) — Framework explanation editing is a dead-end control
+
+**Implementer update:** Implemented 2026-10-03: edited framework explanations persist as `frameworkRationales` (validated against the use case's frameworks) and show on the record and in the review drawer.
 
 Evidence: `IntakeWizardPage.tsx:290-293,563,724-740`. The framework suggestion offers an editable “Why it applies” explanation.
 Submission serializes only its framework identifier in `complianceTags`; unlike risk descriptions, the edited explanation is never consumed.
@@ -84,7 +90,9 @@ Remediation: persist the rationale and show it to the reviewer, or make the expl
 Acceptance: edit a framework rationale, submit, reload and open reviewer evidence: the exact edit survives; alternatively the UI offers no unsupported edit.
 Do not label an edited rationale “saved” if only the framework identifier is retained.
 
-#### AER-053 — MEDIUM / OPEN — Classification assumes expertise and hides the incomplete answer
+#### AER-053 — MEDIUM / REPORTED IMPLEMENTED (pending codex-confirm) — Classification assumes expertise and hides the incomplete answer
+
+**Implementer update:** Implemented 2026-10-03: plain-language help and an example under each yes/no question; "Not sure" counts as yes for classification and is recorded (`screeningUnsure`) and shown to reviewers; a missing-answers summary names each gap and moves focus to the first. Not done: comprehension validation with representative business users (needs people).
 
 Evidence: `intakeFields.tsx:16-59,85-95`; `IntakeWizardPage.tsx:248-255,404-409,487-540`.
 Yes/no controls ask “Has an EU nexus”, “Profiles natural persons”, “Safety component” and “Manipulative techniques” without a definition/example.
@@ -96,7 +104,9 @@ and missing-field summary with focus/link to the first unanswered field. Avoid m
 Acceptance: omit one answer in each group and get its name/location; keyboard users reach the problem; unfamiliar users can find a definition;
 uncertainty cannot silently produce a low-risk classification. Validate comprehension with representative business users.
 
-#### AER-054 — MEDIUM / OPEN — Review does not show the full proposal users are approving for submission
+#### AER-054 — MEDIUM / REPORTED IMPLEMENTED (pending codex-confirm) — Review does not show the full proposal users are approving for submission
+
+**Implementer update:** Implemented 2026-10-03: Review shows the proposal itself in expandable sections (frameworks and risks with text, questionnaire incl. rejected, linked stack, who receives it from the review policy, where to follow it) with "Edit this section" / "Return to review".
 
 Evidence: `IntakeWizardPage.tsx:624-639`. The final page lists counts for frameworks, risks and questionnaire sections, not their accepted text,
 and omits the selected agent/vendor. The progress indicator at `:440-445` is not navigable; correcting a specific earlier answer requires repeated Back.
@@ -107,7 +117,9 @@ Remediation: expandable final proposal showing accepted framework/risk text, que
 Acceptance: final review reflects every changed answer/selection and exclusion; edit one section and return without losing others;
 the user can identify the recipient/next action without knowing the workflow implementation.
 
-#### AER-055 — MEDIUM / OPEN — Failed lifecycle detail can read as approval without conditions
+#### AER-055 — MEDIUM / REPORTED IMPLEMENTED (pending codex-confirm) — Failed lifecycle detail can read as approval without conditions
+
+**Implementer update:** Implemented 2026-10-03: the record shows loading/failed lifecycle detail with Retry and never renders "approved without conditions" or a completed lifecycle from missing detail; the review drawer likewise says when the owner's notes could not load.
 
 Evidence: `UseCaseOverviewPage.tsx:58-80,73-77,126-130,326-332`.
 Only the overview query is passed to QueryGate. A failed detail query falls back to empty conditions/reviews and hides the resubmit action.
@@ -168,6 +180,12 @@ Keep the named residual/owner decision visible. Full fixing commits, tests and h
 | AER-040 | Approver-review tests outside CI gates | —; codex-confirm (+ owner: required check) |
 | AER-042 | Intake UI sent invalid dataSensitivity | —; codex-confirm |
 | AER-043 | Concurrent monitor runs over-report transitions | —; codex-confirm |
+| AER-050 | Intake drafts lost on leave; ambiguous create could duplicate | Browser Back not intercepted; sign-out/sign-in resume untested; resubmission without idempotency key; codex-confirm |
+| AER-051 | Re-drafting replaced questionnaire edits | —; codex-confirm |
+| AER-052 | Framework rationale edit discarded | —; codex-confirm |
+| AER-053 | Classification assumed expertise; no unsure route | Business-user comprehension validation needs people (owner); codex-confirm |
+| AER-054 | Review showed counts, not the proposal | —; codex-confirm |
+| AER-055 | Failed detail read as approved without conditions | —; codex-confirm |
 | F04 | Secret persistence outside audit_log | —; codex-confirm |
 | F05 | Approval scope and payload binding | —; codex-confirm (close with AER-039/040) |
 | F08 | Documentation and capability claims | —; codex-confirm |
