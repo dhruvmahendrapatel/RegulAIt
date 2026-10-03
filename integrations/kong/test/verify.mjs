@@ -34,7 +34,8 @@
  *     read back from the PDP's own audit rows.
  *
  * Requires: docker, a built gateway, and a Postgres. Run by
- * .github/workflows/integrations.yml, which pins the Kong image.
+ * .github/workflows/integrations.yml, which pins the Kong and Postgres images
+ * by DIGEST (AER-034) and logs the digests the job ran against.
  */
 import { execFileSync, execSync, spawn } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
@@ -665,6 +666,26 @@ plugins:
   created.secretDir = secretDir;
   const keyFile = path.join(secretDir, "pdp.env");
   writeFileSync(keyFile, `REGULAIT_PDP_KEY=${pdpKey}\n`, { mode: 0o600 });
+
+  // THE IMAGE, AS THE DAEMON HOLDS IT (AER-034). The job pins Kong by digest;
+  // this prints, in the harness's own output, the digest the container was
+  // really started from — and when the reference carries one, the image
+  // store must agree, or the run stops rather than proceed on an image it
+  // cannot name.
+  const inspectDigests = () =>
+    sh("docker", ["image", "inspect", "--format", '{{join .RepoDigests ","}}', KONG_IMAGE]).trim();
+  let repoDigests;
+  try {
+    repoDigests = inspectDigests();
+  } catch {
+    sh("docker", ["pull", KONG_IMAGE], { stdio: "pipe" });
+    repoDigests = inspectDigests();
+  }
+  console.log(`kong image: ${KONG_IMAGE}\n  repo digests: ${repoDigests || "(none — a locally built image)"}`);
+  const pinned = KONG_IMAGE.match(/@(sha256:[0-9a-f]{64})$/)?.[1] ?? null;
+  if (pinned && !repoDigests.includes(pinned)) {
+    throw new Error(`the image store's digests (${repoDigests}) do not include the pinned ${pinned}`);
+  }
 
   // NO `docker rm -f` FIRST. A container by this name already existing is
   // another run's (or a leftover that is not ours to decide about), and

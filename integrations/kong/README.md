@@ -1,9 +1,11 @@
 # Kong — RegulAIt as an authorization decision point (ADR-0127)
 
-> **VERIFIED against a pinned `kong:3.6`.** The deny path runs end to end with a
-> counting upstream on any change to `integrations/`, to the gateway's source,
-> or to the shared packages — the three places that can alter either side of
-> this contract. See
+> **VERIFIED against a digest-pinned `kong:3.6`** (and a digest-pinned
+> `postgres:16` behind the PDP; the job logs both digests it ran against —
+> AER-034). The deny path runs end to end with a counting upstream on any
+> change to `integrations/`, to the gateway's source, to the shared packages,
+> or to the lockfile — the places that can alter either side of this contract.
+> See
 > [`test/verify.mjs`](test/verify.mjs) and
 > [`.github/workflows/integrations.yml`](../../.github/workflows/integrations.yml).
 > First green run 2026-09-27.
