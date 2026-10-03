@@ -1,4 +1,9 @@
-import Fastify, { type FastifyReply, type FastifyRequest, type FastifyServerOptions } from "fastify";
+import Fastify, {
+  LogController,
+  type FastifyReply,
+  type FastifyRequest,
+  type FastifyServerOptions,
+} from "fastify";
 import {
   and,
   desc,
@@ -567,8 +572,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // ADR-0167 §9: the gateway's own hook writes one line per refusal with the
     // route and the credential KIND. Fastify's per-request lines would print
     // the full URL — the OIDC callback's code and state, every query string —
-    // unredacted at info, so they stay off whatever the level.
-    disableRequestLogging: true,
+    // unredacted at info, so they stay off whatever the level. (The top-level
+    // `disableRequestLogging` is deprecated in fastify 5.12 — FSTDEP023 on
+    // every boot — and goes away in 6; the LogController carries the same
+    // switch.)
+    logController: new LogController({ disableRequestLogging: true }),
     trustProxy,
     requestTimeout: timeoutCfg.requestTimeoutMs,
     bodyLimit: timeoutCfg.bodyLimitBytes,
