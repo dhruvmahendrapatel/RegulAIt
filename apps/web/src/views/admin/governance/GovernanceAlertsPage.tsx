@@ -149,7 +149,7 @@ export default function GovernanceAlertsPage() {
                     <p>{selected.title}</p>
                     <SubjectLinks alert={selected} />
                     <div className={v.row}>
-                      <Button size="sm" disabled={action.busy} onClick={() => void action.run(async () => {
+                      <Button size="sm" variant="ghost" disabled={action.busy} onClick={() => void action.run(async () => {
                         const posted = await api.post<{ posted: true; connection: string; channel: string }>(`/v1/governance/alerts/${selected.id}/post`);
                         setPostResult(`Posted to ${posted.connection} · ${posted.channel}`);
                       }, "Governance alert posted to chat")}>Post to chat</Button>

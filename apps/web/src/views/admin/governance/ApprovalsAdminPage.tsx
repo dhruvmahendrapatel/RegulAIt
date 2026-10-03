@@ -219,10 +219,10 @@ export default function ApprovalsAdminPage() {
                         value={reasons[r.id] ?? ""}
                         onChange={(e) => setReasons((s) => ({ ...s, [r.id]: e.target.value }))}
                       />
-                      <Button size="sm" variant="primary" disabled={act.busy || !!blockedReason} onClick={() => void decide(r, "approved")}>
+                      <Button size="sm" disabled={act.busy || !!blockedReason} onClick={() => void decide(r, "approved")}>
                         approve
                       </Button>
-                      <Button size="sm" variant="danger" disabled={act.busy} onClick={() => void decide(r, "denied")}>
+                      <Button size="sm" variant="ghost" disabled={act.busy} onClick={() => void decide(r, "denied")}>
                         deny
                       </Button>
                       {rowErrors[r.id] && (
