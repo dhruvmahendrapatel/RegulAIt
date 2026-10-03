@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { ApiError, api } from "../../../api/client";
@@ -117,6 +117,18 @@ export default function IntakeWizardPage() {
   const [submittedUseCaseId, setSubmittedUseCaseId] = useState<string | null>(null);
   const checkpoint = useRef<SubmissionCheckpoint>({ riskIds: {}, linkedControls: {} });
   const submitAction = useAction();
+  // A stage change unmounts the button that caused it ("Draft suggestions",
+  // "Continue" on the last-but-one stage), which drops keyboard focus on
+  // <body> and leaves a screen reader silent. Move focus to the new stage's
+  // heading instead, so it is announced and Tab continues from the stage's
+  // top. Not on first render: opening the page must not steal focus (AER-029).
+  const stageHeading = useRef<HTMLHeadingElement>(null);
+  const shownStep = useRef(step);
+  useEffect(() => {
+    if (shownStep.current === step) return;
+    shownStep.current = step;
+    stageHeading.current?.focus();
+  }, [step]);
 
   const agents = useAgents();
   const vendors = useQuery({
@@ -294,7 +306,7 @@ export default function IntakeWizardPage() {
         </Card>
 
         {step === 0 && (
-          <Card title="Describe the proposed AI system">
+          <Card title={<StageHeading headingRef={stageHeading}>Describe the proposed AI system</StageHeading>}>
             <form className={v.stack} onSubmit={(event) => { event.preventDefault(); assist.mutate(); }}>
               {fromShadowAi ? (
                 <div className={s.callout} role="status">
@@ -378,7 +390,7 @@ export default function IntakeWizardPage() {
         )}
 
         {step === 1 && assist.data && (
-          <Card title="Review assistant suggestions">
+          <Card title={<StageHeading headingRef={stageHeading}>Review assistant suggestions</StageHeading>}>
             <div className={v.stack}>
               <div className={s.callout}>
                 Proposed tier: <strong>{assist.data.tier.value}</strong> · ruleset v{assist.data.tier.rulesetVersion}. {assist.data.tier.disclaimer}
@@ -399,11 +411,11 @@ export default function IntakeWizardPage() {
                     : "Accept, edit or reject each suggestion before you continue — nothing is accepted until you decide."}
                 </span>
               </div>
-              <h2 className={v.sectionTitle}>Frameworks</h2>
+              <h3 className={v.sectionTitle}>Frameworks</h3>
               {assist.data.frameworks.map((item) => (
                 <Suggestion key={item.framework} title={item.title} body={suggestionEdits[`framework:${item.framework}`] ?? sentence(item.why)} source={item.source} decision={decisions[`framework:${item.framework}`]} onDecision={(value) => setDecision(`framework:${item.framework}`, value)} onEdit={(value) => setSuggestionEdits((current) => ({ ...current, [`framework:${item.framework}`]: value }))} helpLabel="the framework suggestion explanation" help={<p>This text explains why the framework was suggested so you can make the accept or reject decision. If accepted, the framework identifier—not this explanatory wording—is added to the use case as a compliance tag.</p>} />
               ))}
-              <h2 className={v.sectionTitle}>Risk scenarios</h2>
+              <h3 className={v.sectionTitle}>Risk scenarios</h3>
               {assist.data.risks.map((item) => (
                 <Suggestion key={item.scenarioKey} title={item.title} body={suggestionEdits[`risk:${item.scenarioKey}`] ?? `${item.description} Suggested because ${item.why.replace(/\.$/, "")}.`} source={item.source} decision={decisions[`risk:${item.scenarioKey}`]} onDecision={(value) => setDecision(`risk:${item.scenarioKey}`, value)} onEdit={(value) => setSuggestionEdits((current) => ({ ...current, [`risk:${item.scenarioKey}`]: value }))} meta={`${humanize(item.dimension)} · ${item.likelihood} likelihood · ${item.impact} impact`} helpLabel="the risk description created from this suggestion" help={<p>If you accept this scenario, the edited text becomes the description of a risk linked to the new use case. Review it as durable governance evidence, not as a private note.</p>} />
               ))}
@@ -413,13 +425,13 @@ export default function IntakeWizardPage() {
         )}
 
         {step === 2 && assist.data && (
-          <Card title="Questionnaire — edit the accepted draft">
+          <Card title={<StageHeading headingRef={stageHeading}>Questionnaire — edit the accepted draft</StageHeading>}>
             <div className={v.stack}>
               {assist.data.questionnaire.map((item) => {
                 const rejected = decisions[`question:${item.id}`] === "rejected";
                 return (
                   <section key={item.id} className={`${s.suggestion} ${rejected ? s.suggestionRejected : ""}`}>
-                    <div className={s.suggestionHeader}><strong>{item.heading}</strong><Badge tone="info">{item.source}</Badge></div>
+                    <div className={s.suggestionHeader}><strong>{item.heading}</strong><Badge tone="info">{item.source}</Badge><Badge tone={rejected ? "neutral" : "ok"}>{rejected ? "rejected" : "accepted"}</Badge></div>
                     {!rejected && (
                       <Field
                         label={`${item.heading} answer`}
@@ -430,8 +442,8 @@ export default function IntakeWizardPage() {
                       </Field>
                     )}
                     <div className={s.suggestionActions}>
-                      <Button size="sm" variant={rejected ? "default" : "primary"} onClick={() => setDecision(`question:${item.id}`, "accepted")}>Accept</Button>
-                      <Button size="sm" variant={rejected ? "danger" : "ghost"} onClick={() => setDecision(`question:${item.id}`, "rejected")}>Reject</Button>
+                      <Button size="sm" variant={rejected ? "default" : "primary"} aria-pressed={!rejected} onClick={() => setDecision(`question:${item.id}`, "accepted")}>Accept</Button>
+                      <Button size="sm" variant={rejected ? "danger" : "ghost"} aria-pressed={rejected} onClick={() => setDecision(`question:${item.id}`, "rejected")}>Reject</Button>
                     </div>
                   </section>
                 );
@@ -448,7 +460,7 @@ export default function IntakeWizardPage() {
         )}
 
         {step === 3 && (
-          <Card title="Link the governed stack">
+          <Card title={<StageHeading headingRef={stageHeading}>Link the governed stack</StageHeading>}>
             <div className={v.stack}>
               <p className={v.dim}>The intended agent is recorded on the proposal. A selected vendor is attached to the accepted risk records during submission.</p>
               <div className={v.grid2}>
@@ -471,7 +483,7 @@ export default function IntakeWizardPage() {
         )}
 
         {step === 4 && assist.data && (
-          <Card title="Review before submission">
+          <Card title={<StageHeading headingRef={stageHeading}>Review before submission</StageHeading>}>
             <div className={v.stack}>
               <div className={v.grid3}>
                 <Summary value={assist.data.tier.value} label="Proposed tier" />
@@ -549,7 +561,9 @@ function MultiAnswerField(props: { label: string; values: string[]; options: rea
           <label className={s.checkbox} key={option}>
             <input
               type="checkbox"
-              aria-label={`${props.label}: ${option}`}
+              // the visible words, so a speech-input user can say what they
+              // see (WCAG 2.5.3); the slug is the stored value, not a name
+              aria-label={`${props.label}: ${humanize(option)}`}
               checked={props.values.includes(option)}
               onChange={(event) => toggle(option, event.target.checked)}
             />
@@ -575,12 +589,17 @@ function Suggestion(props: { title: string; body: string; source: Source; decisi
         <p className={v.dim}>{props.body}</p>
       )}
       <div className={s.suggestionActions}>
-        <Button size="sm" variant={accepted ? "default" : "primary"} onClick={() => props.onDecision("accepted")}>Accept</Button>
+        <Button size="sm" variant={accepted ? "default" : "primary"} aria-pressed={accepted} onClick={() => props.onDecision("accepted")}>Accept</Button>
         <Button size="sm" variant="ghost" onClick={() => setEditing((value) => !value)}>{editing ? "Done editing" : "Edit"}</Button>
-        <Button size="sm" variant={rejected ? "danger" : "ghost"} onClick={() => props.onDecision("rejected")}>Reject</Button>
+        <Button size="sm" variant={rejected ? "danger" : "ghost"} aria-pressed={rejected} onClick={() => props.onDecision("rejected")}>Reject</Button>
       </div>
     </section>
   );
+}
+
+/** a wizard stage's title: a real heading, focusable by script only, so a stage change can land focus on it */
+function StageHeading(props: { headingRef: RefObject<HTMLHeadingElement>; children: ReactNode }) {
+  return <h2 ref={props.headingRef} tabIndex={-1} className={s.stageHeading}>{props.children}</h2>;
 }
 
 function Summary({ value, label }: { value: string | number; label: string }) {

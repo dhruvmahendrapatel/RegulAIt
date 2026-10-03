@@ -183,6 +183,20 @@
   color: var(--rg-positive-deep);
 }
 
+/* a wizard stage's title, rendered as an <h2> inside the card's title row:
+   it keeps the card title's type, and takes focus (by script only) when the
+   stage changes so the move is announced (AER-029) */
+.stageHeading {
+  font: inherit;
+  letter-spacing: inherit;
+  margin: 0;
+}
+.stageHeading:focus { outline: none; }
+.stageHeading:focus-visible {
+  outline: 2px solid var(--rg-signal);
+  outline-offset: 2px;
+}
+
 .suggestion {
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
@@ -190,9 +204,11 @@
   background: var(--surface-1);
 }
 
-/* A rejected suggestion is set back, not faded: `opacity` dimmed its source
-   badge and its Reject button below AA contrast (AER-029). The dashed rule and
-   the raised ground carry the state; the "rejected" badge says it in words. */
+/* A rejected suggestion or questionnaire section is set back, not faded:
+   `opacity` dimmed its source badge and its Reject button below AA contrast
+   (AER-029). The dashed rule and the raised ground show the state; the
+   decision badge in the header says it in words, and aria-pressed on the
+   Accept / Reject pair tells a screen reader which one is in effect. */
 .suggestionRejected {
   border-style: dashed;
   background: var(--surface-2);

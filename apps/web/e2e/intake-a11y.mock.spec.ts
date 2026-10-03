@@ -8,11 +8,16 @@
  *   - every interactive control inside <main> must expose an accessible name
  *     (Chromium's own name computation, via the aria snapshot);
  *   - the Describe stage is walked with Tab and must land on each control in
- *     reading order, and Escape must close the page's help disclosure and hand
- *     focus back to its trigger.
+ *     reading order (the order is read from the rendered form, so a control
+ *     added later — a field's help button — is walked too), and Escape must
+ *     close a help disclosure and hand focus back to its trigger;
+ *   - a stage change made from the keyboard lands focus on the new stage's
+ *     heading, never on <body>;
+ *   - the blocking (prohibited) screening and the request-failure states are
+ *     scanned as well as the happy path.
  */
 import { AxeBuilder } from "@axe-core/playwright";
-import { expect, test, type Page, type Route } from "@playwright/test";
+import { expect, test, type Locator, type Page, type Route } from "@playwright/test";
 
 type Persona = { id: string; email: string; displayName: string };
 const USER_A: Persona = { id: "user-a", email: "avery@example.test", displayName: "Avery Admin" };
@@ -60,15 +65,19 @@ const assist = {
   disclaimer: "Suggestions only.",
 };
 
-async function mockIntake(page: Page) {
+async function mockIntake(page: Page, opts: { assist?: unknown; assistStatus?: number; createStatus?: number } = {}) {
   await routeApi(page, async (route, p, method) => {
     if (p === "/auth/me") return json(route, authMe(USER_A));
     if (p === "/v1/me") return json(route, { userId: USER_A.id, isAdmin: true, user: USER_A });
     if (p === "/v1/approvals") return json(route, { approvals: [] });
     if (p === "/v1/agents") return json(route, { agents: [{ id: AGENT, name: "Credit assistant", provider: "mock", model: "mock-balanced", enabled: true, modes: ["chat"] }] });
     if (p === "/v1/vendors") return json(route, { vendors: [{ id: "v", name: "Acme Model Services", category: "model_provider", status: "approved" }] });
-    if (p === "/v1/use-cases/intake/assist" && method === "POST") return json(route, assist);
-    if (p === "/v1/use-cases" && method === "POST") return json(route, { id: USE_CASE, instance: { id: "instance" } }, 201);
+    if (p === "/v1/use-cases/intake/assist" && method === "POST") {
+      return opts.assistStatus ? json(route, { error: "internal", detail: "assistant unavailable" }, opts.assistStatus) : json(route, opts.assist ?? assist);
+    }
+    if (p === "/v1/use-cases" && method === "POST") {
+      return opts.createStatus ? json(route, { error: "internal", detail: "database unavailable" }, opts.createStatus) : json(route, { id: USE_CASE, instance: { id: "instance" } }, 201);
+    }
     if (p === "/v1/risks" && method === "POST") return json(route, { id: RISK }, 201);
     return json(route, {});
   });
@@ -95,9 +104,17 @@ async function reach(page: Page, stage: Stage) {
 }
 
 const THEMES = ["light", "dark"] as const;
+/** flip the theme the way useTheme does, then wait for every colour transition it starts to finish:
+ * axe reading a button mid-transition would judge a colour that is on screen for 120ms, not the theme's */
 async function setTheme(page: Page, theme: (typeof THEMES)[number]) {
-  await page.evaluate((next) => { document.documentElement.dataset.theme = next; localStorage.setItem("regulait.theme", next); }, theme);
+  await page.evaluate(async (next) => {
+    document.documentElement.dataset.theme = next;
+    localStorage.setItem("regulait.theme", next);
+    // getAnimations() flushes style, so the transitions this flip starts are already listed
+    await Promise.all(document.getAnimations().map((a) => a.finished.catch(() => undefined)));
+  }, theme);
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  expect(await page.evaluate(() => document.getAnimations().filter((a) => a.playState === "running").length), "transitions still running").toBe(0);
 }
 
 /** WCAG 2.0/2.1/2.2 A + AA over the whole page, in both themes; a violation is reported with its first node */
@@ -116,14 +133,15 @@ async function expectNoAxeViolations(page: Page, label: string) {
 /** every interactive control under <main>, as the browser names it: `- role "name"` lines of the aria
  * snapshot (a line whose name holds a colon is wrapped in single quotes by the YAML writer) */
 const INTERACTIVE = new Set(["button", "textbox", "combobox", "checkbox", "radio", "link", "switch", "spinbutton", "searchbox", "menuitem", "tab", "slider"]);
-async function controlNames(page: Page): Promise<Array<{ role: string; name: string }>> {
-  const snapshot = await page.getByRole("main").ariaSnapshot();
-  const out: Array<{ role: string; name: string }> = [];
+type Control = { role: string; name: string; disabled: boolean };
+async function controlNames(page: Page, within: Locator = page.getByRole("main")): Promise<Control[]> {
+  const snapshot = await within.ariaSnapshot();
+  const out: Control[] = [];
   for (const line of snapshot.split("\n")) {
     const m = /^\s*-\s+'?([a-z]+)(?:\s+"((?:[^"\\]|\\.)*)")?/.exec(line);
     const role = m?.[1] ?? "";
     if (!INTERACTIVE.has(role)) continue;
-    out.push({ role, name: m?.[2] ?? "" });
+    out.push({ role, name: m?.[2] ?? "", disabled: /\[disabled\]/.test(line) });
   }
   return out;
 }
@@ -147,7 +165,7 @@ test.describe("AER-029: the intake wizard is accessible at every stage, in both 
     for (const expected of [
       "button:Fill in an example", "textbox:Use-case name", "textbox:What will the system do?",
       "combobox:Primary purpose domain", "combobox:People affected", "combobox:Decision autonomy", "combobox:Biometric use",
-      "checkbox:Sectors: financial-services", "checkbox:Data categories: payment-card", "combobox:Deployment audience",
+      "checkbox:Sectors: Financial services", "checkbox:Data categories: Payment card", "combobox:Deployment audience",
       "combobox:Emotion recognition", "combobox:Social scoring", "combobox:Uses an external AI vendor", "button:Draft suggestions",
     ]) expect(names, `"${expected}" is announced on the Describe stage`).toContain(expected);
     // the two multi-select groups are announced as groups, not as a bare pile of boxes
@@ -158,6 +176,21 @@ test.describe("AER-029: the intake wizard is accessible at every stage, in both 
     await expect(page.getByLabel("Use-case name")).toHaveValue("Credit-limit-increase assistant");
     await expectNoAxeViolations(page, "Describe (example loaded)");
     await expectEveryControlNamed(page, "Describe (example loaded)", 30);
+
+    // a field's help panel open — the panel is page content too, in both themes
+    await page.getByRole("button", { name: "What is the inventory identifier created here?" }).click();
+    await expect(page.getByRole("note").filter({ hasText: "primary label for this proposed system" })).toBeVisible();
+    await expectNoAxeViolations(page, "Describe (field help open)");
+  });
+
+  test("Describe — the assistant request fails", async ({ page }) => {
+    await mockIntake(page, { assistStatus: 500 });
+    await reach(page, "Describe");
+    await page.getByRole("button", { name: "Fill in an example" }).click();
+    await page.getByRole("button", { name: "Draft suggestions" }).click();
+    await expect(page.getByRole("main").getByRole("alert")).toBeVisible();
+    await expectNoAxeViolations(page, "Describe (assist failed)");
+    await expectEveryControlNamed(page, "Describe (assist failed)", 30);
   });
 
   test("Describe — prefilled from a shadow-AI finding", async ({ page }) => {
@@ -200,8 +233,16 @@ test.describe("AER-029: the intake wizard is accessible at every stage, in both 
     }
     expect(names).toContain("textbox:9. EU AI Act risk screening (rule-generated)");
 
+    // every section's decision is stated: in words in its header, and as the pressed one of its Accept / Reject pair
+    await expect(page.getByText("accepted", { exact: true })).toHaveCount(8);
     await page.getByRole("button", { name: "Reject" }).nth(2).click();
     await expect(page.getByLabel("3. Data answer")).toHaveCount(0);
+    await expect(page.getByText("rejected", { exact: true })).toHaveCount(1);
+    await expect(page.getByText("accepted", { exact: true })).toHaveCount(7);
+    await expect(page.getByRole("button", { name: "Reject" }).nth(2)).toHaveAttribute("aria-pressed", "true");
+    await expect(page.getByRole("button", { name: "Accept" }).nth(2)).toHaveAttribute("aria-pressed", "false");
+    await expect(page.getByRole("button", { name: "Reject" }).nth(1)).toHaveAttribute("aria-pressed", "false");
+    await expect(page.getByRole("button", { name: "Accept" }).nth(1)).toHaveAttribute("aria-pressed", "true");
     await expectNoAxeViolations(page, "Questionnaire (one rejected)");
     await expectEveryControlNamed(page, "Questionnaire (one rejected)", 25);
   });
@@ -235,46 +276,99 @@ test.describe("AER-029: the intake wizard is accessible at every stage, in both 
     expect(after.map((c) => `${c.role}:${c.name}`)).toContain("link:Open the use-case workspace");
   });
 
-  test("keyboard: Tab walks the Describe stage in reading order and Escape closes the page help", async ({ page }) => {
+  test("Review — submission fails", async ({ page }) => {
+    await mockIntake(page, { createStatus: 500 });
+    await reach(page, "Review");
+    await page.getByRole("button", { name: "Submit for human review" }).click();
+    await expect(page.getByRole("main").getByRole("alert").filter({ hasText: "retry to resume" })).toBeVisible();
+    await expectNoAxeViolations(page, "Review (submission failed)");
+    await expectEveryControlNamed(page, "Review (submission failed)", 3);
+  });
+
+  test("a PROHIBITED screening — the blocking alert on Suggestions and Review", async ({ page }) => {
+    await mockIntake(page, { assist: { ...assist, tier: { ...assist.tier, value: "prohibited" }, blocking: { reason: "Social scoring of natural persons (Art. 5(1)(c))." } } });
+    await reach(page, "Suggestions");
+    const alert = page.getByRole("main").getByRole("alert");
+    await expect(alert).toContainText("Screened PROHIBITED (Art. 5)");
+    await expect(alert).toContainText("Social scoring of natural persons");
+    await expectNoAxeViolations(page, "Suggestions (blocking)");
+    await expectEveryControlNamed(page, "Suggestions (blocking)", 14);
+    await page.getByRole("button", { name: /Accept all remaining/ }).click();
+    for (let i = 0; i < 3; i += 1) await page.getByRole("button", { name: "Continue" }).click();
+    await expect(page.locator(`[aria-current="step"]`)).toContainText("Review");
+    await expect(alert).toContainText("Screened PROHIBITED (Art. 5)");
+    await expectNoAxeViolations(page, "Review (blocking)");
+    await expectEveryControlNamed(page, "Review (blocking)", 3);
+  });
+
+  test("keyboard: a stage change lands focus on the new stage's heading, not on <body>", async ({ page }) => {
+    await reach(page, "Describe");
+    const heading = (name: string) => page.getByRole("heading", { level: 2, name, exact: true });
+    // opening the page does not steal focus
+    await expect(heading("Describe the proposed AI system")).not.toBeFocused();
+    await page.getByRole("button", { name: "Fill in an example" }).click();
+
+    // Enter on "Draft suggestions" unmounts the button it was pressed on
+    await page.getByRole("button", { name: "Draft suggestions" }).focus();
+    await page.keyboard.press("Enter");
+    await expect(heading("Review assistant suggestions")).toBeFocused();
+    // and Tab continues from the top of the new stage, not from the top of the page
+    await page.keyboard.press("Tab");
+    await expect(page.getByRole("button", { name: "Accept all remaining (4)" })).toBeFocused();
+    await page.keyboard.press("Enter");
+
+    for (const [step, name] of [["Questionnaire", "Questionnaire — edit the accepted draft"], ["Link stack", "Link the governed stack"], ["Review", "Review before submission"]] as const) {
+      await page.getByRole("button", { name: "Continue" }).focus();
+      await page.keyboard.press("Enter");
+      await expect(page.locator(`[aria-current="step"]`)).toContainText(step);
+      await expect(heading(name), `focus moves to "${name}"`).toBeFocused();
+    }
+    // Back, too, is a stage change
+    await page.getByRole("button", { name: "Back" }).focus();
+    await page.keyboard.press("Enter");
+    await expect(heading("Link the governed stack")).toBeFocused();
+    expect(await page.evaluate(() => document.activeElement === document.body)).toBe(false);
+  });
+
+  test("keyboard: Tab walks the Describe stage in reading order and Escape closes a help panel", async ({ page }) => {
     await reach(page, "Describe");
     await page.getByRole("button", { name: "Fill in an example" }).click();
-    // the stage's controls in the order a keyboard user meets them
-    const order: Array<["button" | "textbox" | "combobox" | "checkbox", string]> = [
-      ["button", "Fill in an example"],
-      ["textbox", "Use-case name"],
-      ["textbox", "What will the system do?"],
-      ["combobox", "Primary purpose domain"],
-      ["combobox", "People affected"],
-      ["combobox", "Decision autonomy"],
-      ["combobox", "Biometric use"],
-      ...(["financial-services", "securities-broker-dealer", "healthcare", "payments", "public-sector", "general"] as const).map((o) => ["checkbox", `Sectors: ${o}`] as ["checkbox", string]),
-      ...(["personal", "sensitive-personal", "health", "payment-card", "financial", "proprietary", "public"] as const).map((o) => ["checkbox", `Data categories: ${o}`] as ["checkbox", string]),
-      ["combobox", "Deployment audience"],
-      ["combobox", "Emotion recognition"],
-      ["combobox", "Social scoring"],
-      ["combobox", "Manipulative techniques"],
-      ["combobox", "Profiles natural persons"],
-      ["combobox", "Safety component"],
-      ["combobox", "Interacts directly with people"],
-      ["combobox", "Generates synthetic content"],
-      ["combobox", "Has an EU nexus"],
-      ["combobox", "Can take autonomous actions"],
-      ["combobox", "Uses an external AI vendor"],
-      ["button", "Draft suggestions"],
-    ];
-    await page.getByRole("button", { name: "Fill in an example" }).focus();
-    for (const [i, [role, name]] of order.entries()) {
-      if (i > 0) await page.keyboard.press("Tab");
-      await expect(page.getByRole(role, { name, exact: true }), `Tab stop ${i + 1} is "${name}"`).toBeFocused();
+    // The expected order is read from the rendered form — every enabled control in document
+    // (reading) order, as the browser names it — so a control added later (a field's help
+    // button, a new screening question) is walked too instead of silently breaking a fixed list.
+    const form = page.getByRole("main").locator("form");
+    const order = (await controlNames(page, form)).filter((c) => !c.disabled);
+    const names = order.map((c) => `${c.role}:${c.name}`);
+    // the derived order is not vacuous: it opens with the example button, closes with the
+    // submit, and each field's help button sits just before the field it explains
+    expect(order.length, "Tab stops on the Describe stage").toBeGreaterThanOrEqual(34);
+    expect(names[0]).toBe("button:Fill in an example");
+    expect(names.at(-1)).toBe("button:Draft suggestions");
+    expect(names.slice(1, 5)).toEqual([
+      "button:What is the inventory identifier created here?", "textbox:Use-case name",
+      "button:What is the proposed system description recorded here?", "textbox:What will the system do?",
+    ]);
+    for (const expected of ["checkbox:Sectors: Financial services", "checkbox:Data categories: Public", "combobox:Uses an external AI vendor"]) {
+      expect(names).toContain(expected);
     }
 
-    // the page's help is the wizard's one disclosure: Escape closes it and
-    // returns focus to the trigger rather than dropping it on <body>
+    await page.getByRole("button", { name: "Fill in an example" }).focus();
+    for (const [i, { role, name }] of order.entries()) {
+      if (i > 0) await page.keyboard.press("Tab");
+      await expect(page.getByRole(role as Parameters<Page["getByRole"]>[0], { name, exact: true }), `Tab stop ${i + 1} is ${role} "${name}"`).toBeFocused();
+    }
+
+    // Escape closes a help panel and hands focus BACK to its trigger, from wherever it went:
+    // open the page's help, Tab away from the trigger, then Escape
     const help = page.getByRole("button", { name: "What is the AI use-case intake page?" });
     await help.click();
     const note = page.getByRole("note");
     await expect(note).toContainText("The assistant is suggestion-only.");
-    await expect(page.getByRole("button", { name: "Hide help for the AI use-case intake page" })).toHaveAttribute("aria-expanded", "true");
+    const open = page.getByRole("button", { name: "Hide help for the AI use-case intake page" });
+    await expect(open).toHaveAttribute("aria-expanded", "true");
+    await page.keyboard.press("Tab");
+    await expect(open).not.toBeFocused();
+    expect(await page.evaluate(() => document.activeElement === document.body)).toBe(false);
     await page.keyboard.press("Escape");
     await expect(note).toHaveCount(0);
     await expect(help).toBeFocused();

@@ -60,9 +60,9 @@ test("seeded credit-assistant journey: discover, register, assess, approve, moni
     ["Biometric use", "none"],
     ["Deployment audience", "customer-facing"],
   ] as const) await page.getByLabel(label).selectOption(value);
-  await page.getByLabel("Sectors: financial-services").check();
-  await page.getByLabel("Data categories: personal").check();
-  await page.getByLabel("Data categories: financial").check();
+  await page.getByLabel("Sectors: Financial services", { exact: true }).check();
+  await page.getByLabel("Data categories: Personal", { exact: true }).check();
+  await page.getByLabel("Data categories: Financial", { exact: true }).check();
   for (const [label, value] of [
     ["Emotion recognition", "no"],
     ["Social scoring", "no"],

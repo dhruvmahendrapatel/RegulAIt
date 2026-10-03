@@ -289,8 +289,8 @@ test("shadow-AI registration prefills evidence only and requires proposer answer
   await page.getByLabel("People affected").selectOption("employees");
   await page.getByLabel("Decision autonomy").selectOption("narrow-procedural");
   await page.getByLabel("Biometric use").selectOption("verification");
-  await page.getByLabel("Sectors: healthcare").check();
-  await page.getByLabel("Data categories: health").check();
+  await page.getByLabel("Sectors: Healthcare", { exact: true }).check();
+  await page.getByLabel("Data categories: Health", { exact: true }).check();
   await page.getByLabel("Deployment audience").selectOption("internal");
   for (const label of [
     "Emotion recognition", "Social scoring", "Manipulative techniques", "Profiles natural persons",
