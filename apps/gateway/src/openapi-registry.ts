@@ -102,6 +102,9 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   // ADR-0089 — ownership + lifecycle, admin governance writes on the registry.
   "POST /v1/agents/:agentId/lifecycle": "internal",
   "POST /v1/agents/:agentId/owner": "internal",
+  // ADR-0168 amendment item 6 — stewardship (admin or current steward).
+  "PATCH /v1/agents/:agentId/stewardship": "internal",
+  "POST /v1/agents/:agentId/stewardship/review": "internal",
   "POST /v1/agents/:agentId/system-prompt": "internal",
   "GET /v1/api/versioning": "public-stable",
   "GET /v1/approvals": "public-stable",
@@ -806,6 +809,8 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/agents/:agentId/invoke": "agents",
   "POST /v1/agents/:agentId/lifecycle": "agents",
   "POST /v1/agents/:agentId/owner": "agents",
+  "PATCH /v1/agents/:agentId/stewardship": "agents",
+  "POST /v1/agents/:agentId/stewardship/review": "agents",
   "POST /v1/agents/:agentId/system-prompt": "agents",
   "GET /v1/api/versioning": "api",
   "GET /v1/approvals": "approvals",

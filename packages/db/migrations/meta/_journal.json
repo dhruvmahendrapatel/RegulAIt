@@ -911,6 +911,13 @@
       "when": 1785065000000,
       "tag": "0130_workflow_instance_round_tokens",
       "breakpoints": true
+    },
+    {
+      "idx": 132,
+      "version": "7",
+      "when": 1785067000000,
+      "tag": "0132_agent_stewardship",
+      "breakpoints": true
     }
   ]
 }

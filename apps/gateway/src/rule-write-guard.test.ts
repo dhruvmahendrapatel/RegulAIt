@@ -191,9 +191,22 @@ const AUDITED_WRITERS: AuditedWriter[] = [
     expr: "agents",
     why:
       "ADR-0159 `assign_agent_owner`, executed inside the approval decision's transaction — writes ONLY " +
-      "`ownerUserId`, the same accountability column the audited POST /v1/agents/:id/owner route writes. Not an " +
+      "`ownerUserId` (plus clearing `successorUserId` when the successor is the one stepping up — ADR-0168 " +
+      "item 6), the same accountability columns the audited owner/stewardship routes write. Not an " +
       "agent_config versioned field, so no read-model divergence is possible. A remediation kind that wrote " +
       "model or a price column would have to go through applyRuleEdit and raise this count.",
+  },
+  {
+    file: "agent-stewardship.ts",
+    method: "update",
+    expr: "agents",
+    // TWO occurrences — PATCH /stewardship and POST /stewardship/review.
+    count: 2,
+    why:
+      "ADR-0168 amendment item 6 — the audited stewardship routes. They write ONLY `ownerUserId` (the " +
+      "steward), `successorUserId`, the three lifecycle columns and the review dates " +
+      "(`nextReviewAt`/`lastReviewedAt`/`lastReviewedByUserId`) — accountability and lifecycle records, none " +
+      "of them an agent_config versioned field, so no read-model divergence is possible.",
   },
   {
     file: "agents-connectors.ts",

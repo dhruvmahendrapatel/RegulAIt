@@ -1051,10 +1051,39 @@ export const setAgentOwnerSchema = z.object({ ownerUserId: z.string().uuid().nul
  * non-active target (enforced with a named 422 in the gateway so the refusal
  * is self-explaining); retired is terminal — the gateway refuses transitions
  * OUT of it by name. */
+export const AGENT_LIFECYCLE_STATUS_VALUES = [
+  "proposed",
+  "active",
+  "under_review",
+  "suspended",
+  "deprecated",
+  "retired",
+] as const;
 export const setAgentLifecycleSchema = z.object({
-  status: z.enum(["active", "deprecated", "retired"]),
+  status: z.enum(AGENT_LIFECYCLE_STATUS_VALUES),
   reason: z.string().min(1).max(2000).optional(),
 });
+
+/** ADR-0168 amendment item 6: agent STEWARDSHIP — steward (the ADR-0089
+ * accountable owner), successor, lifecycle status and the next review date, in
+ * one audited write. Every field is optional; a field left out keeps its value,
+ * null clears it. The gateway refuses a successor equal to the steward, a
+ * deactivated steward/successor, a non-active status without a reason, a next
+ * review in the past, and any move out of `retired` (terminal). Callable by an
+ * admin or the agent's CURRENT steward. */
+export const setAgentStewardshipSchema = z
+  .object({
+    stewardUserId: z.string().uuid().nullable().optional(),
+    successorUserId: z.string().uuid().nullable().optional(),
+    lifecycleStatus: z.enum(AGENT_LIFECYCLE_STATUS_VALUES).optional(),
+    lifecycleReason: z.string().trim().min(1).max(2000).optional(),
+    nextReviewAt: z.string().datetime({ offset: true }).nullable().optional(),
+  })
+  .strict()
+  .refine((b) => Object.values(b).some((v) => v !== undefined), {
+    message: "name at least one stewardship field to change",
+  });
+export type SetAgentStewardship = z.infer<typeof setAgentStewardshipSchema>;
 
 /** ADR-0023: set/clear an existing agent's admin base system prompt (null
  * clears — an explicit choice, mirroring the agent-policy clear semantics) */
