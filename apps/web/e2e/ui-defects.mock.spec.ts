@@ -224,3 +224,31 @@ test("UIA-01: an anchor past the chain head is reported as such — never as a r
   expect(await report.getByText("Anchor mismatch").count()).toBe(0);
   expect(await report.getByText("worm_sink").count()).toBe(0);
 });
+
+test("UIA-02: the audit log says how many rows are shown and loads older pages on request", async ({ page }) => {
+  const entry = (i: number) => ({ id: `e${i}`, at: new Date(Date.UTC(2026, 9, 2, 12, 0, 0) - i * 60_000).toISOString(), userId: USER_A.id, objectType: "mcp_tool", effect: "allow", ruleId: "grant", reason: `row ${i}`, deployMode: null });
+  const page1 = Array.from({ length: 100 }, (_, i) => entry(i));
+  const page2 = Array.from({ length: 6 }, (_, i) => entry(100 + i));
+  let cursorRequests = 0;
+  await routeApi(page, async (route, p) => {
+    const url = new URL(route.request().url());
+    if (p === "/auth/me") return json(route, authMe(USER_A));
+    if (p === "/v1/me") return json(route, { userId: USER_A.id, isAdmin: true, user: USER_A });
+    if (p === "/v1/audit/retention") return json(route, { retainedDays: null, prunable: 0, floorSource: [] });
+    if (p === "/v1/audit") {
+      if (url.searchParams.get("cursor") === "c1") { cursorRequests += 1; return json(route, { entries: page2, pageSize: 6, hasMore: false, nextCursor: null }); }
+      return json(route, { entries: page1, pageSize: 100, hasMore: true, nextCursor: "c1" });
+    }
+    if (p === "/v1/users") return json(route, { users: [{ id: USER_A.id, email: USER_A.email, displayName: USER_A.displayName }] });
+    return json(route, {});
+  });
+  await page.goto("/ui/admin/audit");
+  const paging = page.getByTestId("audit-paging");
+  await expect(paging).toContainText("Showing the newest 100 rows — older rows exist");
+  expect(await page.getByRole("cell", { name: "row 105" }).count()).toBe(0);
+  await paging.getByRole("button", { name: "Load older" }).click();
+  await expect(paging).toContainText("Showing all 106 rows");
+  await expect(page.getByRole("cell", { name: "row 105" })).toBeVisible();
+  expect(cursorRequests).toBe(1);
+  expect(await paging.getByRole("button", { name: "Load older" }).count()).toBe(0);
+});

@@ -15,7 +15,7 @@
  * different real things and cannot be resolved into a mode retroactively.
  */
 import { useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import type { AuditEntry } from "../../../api/types";
 import { UUID_RE, actorLabel, fmtAt, frameworkLabel, humanize, plural, shortId } from "../../../api/format";
@@ -40,6 +40,14 @@ const MODE_OPTS = [
 ];
 const modeLabel = (mode: string) => MODE_OPTS.find((o) => o.v === mode)?.l ?? mode;
 
+/** one page of GET /v1/audit — the server decides the page size */
+interface AuditPage {
+  entries: AuditEntry[];
+  pageSize: number;
+  hasMore: boolean;
+  nextCursor: string | null;
+}
+
 export default function AuditLogPage() {
   const users = useUsers();
   const { toast } = useToast();
@@ -60,9 +68,16 @@ export default function AuditLogPage() {
     queryKey: ["admin", "audit-retention"],
     queryFn: () => api.get<AuditRetention>("/v1/audit/retention"),
   });
-  const audit = useQuery({
+  // Cursor-paged: the server hands back 100 rows and a cursor for the older
+  // ones. The table used to stop at the first page with no sign that 306
+  // older rows existed (UIA-02); now it says how many are shown and loads
+  // older pages on request.
+  const audit = useInfiniteQuery({
     queryKey: ["admin", "audit", userId, deployMode],
-    queryFn: () => api.get<{ entries: AuditEntry[] }>(`/v1/audit${qs}`),
+    queryFn: ({ pageParam }) =>
+      api.get<AuditPage>(`/v1/audit${qs}${pageParam ? `${qs ? "&" : "?"}cursor=${encodeURIComponent(pageParam)}` : ""}`),
+    initialPageParam: null as string | null,
+    getNextPageParam: (last) => (last.hasMore && last.nextCursor ? last.nextCursor : null),
   });
 
   const nameOf = useMemo(
@@ -70,7 +85,10 @@ export default function AuditLogPage() {
     [users.data],
   );
   const rows = useMemo(
-    () => (audit.data?.entries ?? []).map((e, i) => ({ ...e, rowKey: e.id ?? `${e.at}-${i}` })),
+    () =>
+      (audit.data?.pages ?? [])
+        .flatMap((p) => p.entries ?? [])
+        .map((e, i) => ({ ...e, rowKey: e.id ?? `${e.at}-${i}` })),
     [audit.data],
   );
   const ret = retention.data;
@@ -80,7 +98,7 @@ export default function AuditLogPage() {
       <PageHeader
         title="Audit log"
         sub="Every governed decision, lifecycle action and settings change."
-        info={<p>Every governed decision, lifecycle action and settings change lands here — one trail, all eight pillars. Filter by user and by deploy mode; the table shows the latest 100 rows, and the CSV export carries the full filtered trail.</p>}
+        info={<p>Every governed decision, lifecycle action and settings change lands here — one trail, all eight pillars. Filter by user and by deploy mode; the table loads the newest rows first and older ones on request, and the CSV export carries the full filtered trail.</p>}
       />
       <div className={v.stack}>
         <Card title="Retention">
@@ -129,7 +147,7 @@ export default function AuditLogPage() {
             <span className={v.grow} />
             <Button
               size="sm"
-              title="Download the FULL filtered trail (the table shows the latest 100 rows)"
+              title="Download the FULL filtered trail, not only the rows loaded in the table"
               onClick={() =>
                 void downloadCsv(`/v1/audit.csv${qs}`, "audit-log.csv", (msg) => toast(msg, "error"))
               }
@@ -196,7 +214,7 @@ export default function AuditLogPage() {
             rowKey={(e) => e.rowKey}
             loading={audit.isLoading}
             error={audit.error}
-            onRetry={() => void audit.refetch()}
+            onRetry={() => void (audit.isFetchNextPageError ? audit.fetchNextPage() : audit.refetch())}
             empty={
               <EmptyState
                 title="No audit rows match"
@@ -208,6 +226,20 @@ export default function AuditLogPage() {
               />
             }
           />
+          {rows.length > 0 && (
+            <div className={v.row} data-testid="audit-paging">
+              <span className={v.dim}>
+                {audit.hasNextPage
+                  ? `Showing the newest ${plural(rows.length, "row")} — older rows exist`
+                  : `Showing all ${plural(rows.length, "row")}`}
+              </span>
+              {audit.hasNextPage && (
+                <Button size="sm" disabled={audit.isFetchingNextPage} onClick={() => void audit.fetchNextPage()}>
+                  {audit.isFetchingNextPage ? "Loading…" : "Load older"}
+                </Button>
+              )}
+            </div>
+          )}
         </Card>
       </div>
 
