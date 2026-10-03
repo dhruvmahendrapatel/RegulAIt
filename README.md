@@ -89,11 +89,15 @@ Tests (`pnpm -r test`) need `DATABASE_URL` pointing at a scratch database.
 **One command** (AER-003 / R2):
 
 ```bash
-scripts/verify-clean-checkout.sh                 # stages 0-6 below, then asserts `git status --short` is empty
-scripts/verify-clean-checkout.sh --prove-failure # the control: dirties a tracked file in a temp clone and
-                                                 # requires that assertion to FIRE — a gate nobody has seen fail
-                                                 # is a gate nobody can trust
-scripts/verify-clean-checkout.sh --skip-tests    # stages 0-3 + the assertion, no database (NOT a verification)
+scripts/verify-clean-checkout.sh                 # steps 0-7 below; step 7 asserts
+                                                 # `git status --short --untracked-files=all` is empty
+scripts/verify-clean-checkout.sh --prove-failure # the control, in a temp clone: the assertion must FIRE on a
+                                                 # modified tracked file and on an untracked one, and the script
+                                                 # itself must exit 2 on a pre-dirtied tree and 1 on a tree a
+                                                 # stage dirtied — a gate nobody has seen fail is a gate nobody
+                                                 # can trust
+scripts/verify-clean-checkout.sh --skip-tests    # steps 0-4 (the static pre-flight included) + step 7,
+                                                 # no database (NOT a verification)
 ```
 
 It runs exactly the sequence below, refuses to start on a tree that is already
@@ -109,11 +113,14 @@ Google SDKs build and run without them) and those two are named in
 about any newcomer that starts wanting a build script.
 
 The steps, for reading — run them by hand only if you cannot run the script.
-It is the same sequence CI runs (`.github/workflows/ci.yml`) — build,
-test, then the unique-constraint pre-flight — plus a repo-wide `--noEmit`
-typecheck and an explicitly disposable database, and it is the only sequence
-whose result is meaningful: anything that skips a step below can go green on a
-tree that does not actually build.
+It is the same sequence CI's `build-and-test` job runs (`.github/workflows/ci.yml`)
+— build, test, and both pre-flights (the affordance census and the
+unique-constraint check) — plus a repo-wide `--noEmit` typecheck and an
+explicitly disposable database (the job's remaining step lints
+`AgentCoordination.md`, the agents' bookkeeping file, and is not part of
+verifying a checkout). It is the only sequence whose result is meaningful:
+anything that skips a step below can go green on a tree that does not actually
+build.
 
 ```bash
 # 0. Use the package manager this repo pins. package.json declares
@@ -124,20 +131,27 @@ tree that does not actually build.
 corepack enable
 corepack prepare --activate          # activates the pinned pnpm, no version to retype
 
-# 1. Install EXACTLY the locked tree. --frozen-lockfile fails rather than
+# 1. CI's affordance census (B9c): every DELETE route the gateway serves must
+#    be reachable from a view, or be listed in the script with a reason.
+#    STATIC — it reads route registrations and TSX sources; no install, no
+#    build, no database — so it needs nothing from the steps below. Exit 0
+#    clean, 1 a route no view can reach, 2 could not run.
+node scripts/preflight-ui-affordances.mjs
+
+# 2. Install EXACTLY the locked tree. --frozen-lockfile fails rather than
 #    silently rewriting pnpm-lock.yaml, so a verification run can never be the
 #    thing that changes what it is verifying. (CI installs the same way, via
 #    pnpm/action-setup@v4, which reads the packageManager field above.)
 pnpm install --frozen-lockfile
 
-# 2. Build every workspace. This also typechecks and bundles the React SPA.
+# 3. Build every workspace. This also typechecks and bundles the React SPA.
 pnpm -r build
 
-# 3. Typecheck every workspace against SOURCE, not dist/. Step 2 can pass on a
+# 4. Typecheck every workspace against SOURCE, not dist/. Step 3 can pass on a
 #    stale dist/; this cannot.
 pnpm -r exec tsc --noEmit
 
-# 4. Tests, against a database created for this run and thrown away after.
+# 5. Tests, against a database created for this run and thrown away after.
 #    The suites are NOT re-runnable against a populated database — a run
 #    reporting mass SKIPS is a dirty database, not a pass — so the drop is part
 #    of the procedure, not cleanup.
@@ -148,7 +162,7 @@ export DATABASE_URL="postgres://regulait:regulait@localhost:5432/$PGDATABASE_VER
 export REGULAIT_DATA_KEY=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 pnpm -r test
 
-# 5. Pre-flight the unique constraints, against the database step 4 just
+# 6. Pre-flight the unique constraints, against the database step 5 just
 #    migrated AND populated. It reports, per constraint, how many duplicate
 #    groups would block migration 0108 or 0109 from applying, with example
 #    keys. Exit 0 clean, 1 blocked, 2 could not run.
@@ -162,6 +176,11 @@ pnpm -r test
 node scripts/preflight-unique-constraints.mjs "$DATABASE_URL"
 
 dropdb --if-exists "$PGDATABASE_VERIFY"
+
+# 7. The run must leave the checkout exactly as it found it. Empty output is
+#    the pass; any path is a build or test writing into the tree.
+#    --untracked-files=all because plain --short obeys status.showUntrackedFiles.
+git status --short --untracked-files=all
 ```
 
 **The exit code is the result.** `pnpm -r test` exits non-zero for a failed
