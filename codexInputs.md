@@ -1,6 +1,6 @@
 # Codex review findings and implementation handoff
 
-This file has two parts. **Part 1** is the status ledger: one row per finding (AER-001..047, the
+This file has two parts. **Part 1** is the status ledger: one row per finding (AER-001..048, the
 2026-09-06 F01..F08 recommendations), its current status with evidence, and who acts next. It is the
 authoritative current state; Codex evaluates and confirms closures here. **Part 2** is Codex's
 append region: the latest automated run and the implementer updates it answers. Earlier runs
@@ -9,7 +9,7 @@ in `docs/reviews/codex-runs-archive-2026-09.md`.
 
 ## Status ledger — current state of every finding
 
-Date: 2026-10-03. Branch `dhruv/active`, reviewed HEAD `9a13e26`.
+Date: 2026-10-03. Branch `dhruv/active`, reviewed HEAD `dbbb642`.
 Basis: the adversarially verified audit of every item at HEAD `21b3094` (auditor + verifier; verifier wins on disagreement), plus today's post-audit fixes, each confirmed in `git log`: `65581bd`, `749ee75`, `297d0b9`, `b5418e8`, `8ea024e`, `062d90e`, `154d171`, `b186915`, `1b9d6cb`.
 Status: CLOSED = acceptance met per audit or by a listed fix; PARTIAL = materially improved, a named criterion unmet; OPEN = otherwise; WITHDRAWN = not applicable.
 Next: `claude` (code/doc work) · `codex-confirm` (closure to be acknowledged by Codex) · `owner` (decision needed).
@@ -44,7 +44,7 @@ Next: `claude` (code/doc work) · `codex-confirm` (closure to be acknowledged by
 | AER-026 | HIGH | Sample adapters trusted caller subject header | CLOSED | kong-adapter green: Integrations run 37110038871 at `8c0132b` (2026-10-03), 47/47 assertions, digests logged · 2026-10-03: plugin refuses the five protocol header names (any case/copies/underscores), credential-less and unmapped consumers; PDP refuses unknown_subject and subject_disabled and writes both to the ledger with proxyConsumer (1aae7d3, 5bef1fd, 2312d48); ADR-0127 amended · earlier: 46590d6: `handler.lua:149-162` subject from consumer.custom_id, forgeable headers stripped `:51-61,:142`; `verify.mjs:474-480` three x-regulait-subject spellings | — | codex-confirm |
 | AER-027 | HIGH | PDP secret was unrestricted admin credential | CLOSED | 46f2919 + migration 0117: closed `dispatch\|pdp` key purpose; a PDP key reaches only POST /v1/authz/check; 9 focused tests in CI; Kong harness mints a purpose 'pdp' key | — | codex-confirm (formal DONE) |
 | AER-028 | HIGH | Callout omits args, project, principal | PARTIAL | endpoint accepts args/projectId/principal (46f2919; `app.ts:2147-2195`; `aer028-callout-context.test.ts`); Kong sends static per-route project + derived/asserted origin (4f12c84) | Kong build_question sends no args (`handler.lua:83-89,:119-132`) so data-scope rules always deny; OIDC/SAML origins asserted; callout never binds/consumes approvals; no parity matrix | owner (forward scrubbed args vs narrow Kong to context-free authz) |
-| AER-029 | MEDIUM | Guided intake controls lacked accessible labels | CLOSED | 2026-10-03: @axe-core/playwright scan of every wizard stage in both themes plus blocking/error states, three violations fixed (7ae85b8); review follow-ups — Tab order derived from the form, non-vacuous Escape focus return, focus moves to each stage heading, aria-pressed and a decision badge on questionnaire sections, checkbox names match visible labels (248163a); Fieldset unit test (71630d8); builds on Codex 4474431 · earlier: e3b08ec real labels/ids; `4474431` adds shared `FieldHelp` disclosure buttons to governance free-text fields; isolated Chromium `ui-defects.mock.spec.ts` 1/1 reproduced label-click focus, info disclosure and Escape dismissal; exact-head CI `37094018095` ran `kit.test.tsx` 9/9 | — | codex-confirm |
+| AER-029 | MEDIUM | Guided intake controls lacked accessible labels | PARTIAL | 2026-10-03: `intake-a11y.mock.spec.ts` contains an @axe-core/playwright scan of every wizard stage in both themes plus blocking/error states, with fixes in 7ae85b8/248163a and Fieldset unit coverage in 71630d8. Exact-head CI `37120058343` passed web 12 files / 95 tests and the 39 phase1/phase2 journeys, but its commands did **not** execute `intake-a11y.mock.spec.ts`; the latest executable axe evidence remains repository-reported, not independently reproduced or gated | Add the dedicated accessibility journey to a durable exact-head CI command (or provide a fresh independent run) and retain its deliberate failing control; until then the implementation is present but the closure gate is not evidenced | claude |
 | AER-030 | HIGH | Kong adapter not runnable; one action per route | CLOSED | kong-adapter green: Integrations run 37110038871 at `8c0132b` (2026-10-03), 47/47 assertions, digests logged · 2026-10-03: two routes bound to distinct server/tool pairs, forged binding and decision headers refused, VERSION set (2ecfcb6, 2312d48) · earlier: custom plugin with per-instance server_id/tool_name runs in the CI Kong job (integrations.yml) | Coverage is Kong 3.6 + DB-less + key-auth only (disclosed) | codex-confirm |
 | AER-031 | MEDIUM | Envoy withdrawal not reconciled in claims | CLOSED | b8e9720 (Codex DONE 09-27); docs/deployment/README.md:17 | — | codex-confirm |
 | AER-032 | MEDIUM | Disabled destructive controls hid reason from AT | CLOSED | `adminKit.tsx:213-245` RemoveButton aria-disabled + focusable reason; blocked-reason-a11y spec `:55-85` (Tab, Enter, Escape, focus return). Minor: spec covers 1 of 8 disabledReason sites via the shared component | — | codex-confirm |
@@ -59,10 +59,11 @@ Next: `claude` (code/doc work) · `codex-confirm` (closure to be acknowledged by
 | AER-041 | HIGH | Native cache identity collapsed requests | CLOSED | 3a91a93 (ADR-0146; Codex DONE 10-02); `zz-aer041-native-cache-identity.test.ts` 6/6 (CI 36967387569) | — | codex-confirm |
 | AER-042 | HIGH | Intake UI sent invalid dataSensitivity | CLOSED | 8ea024e: `dataSensitivity.ts` deriveDataSensitivity (strictest wins; empty/unknown fail closed to 'regulated'), `dataSensitivity.test.ts` (4), `IntakeWizardPage.tsx:199`; `demo-governance.mock.spec.ts` 400 on non-enum; `demo-intake.spec.ts:88-91` real-DB persisted 'regulated'; 062d90e `use-case-data-sensitivity.test.ts`: public/confidential/regulated persisted (row, intake instance, audit detail), 'internal' is API-only (no category maps to it), 'restricted' gets 400 with zero use-case/workflow/audit rows | — | codex-confirm |
 | AER-043 | MEDIUM | Concurrent monitor runs over-report transitions | CLOSED | 154d171 `governance-monitor.ts`: raised = raisedIds from onConflictDoNothing().returning, refreshed/resolved from rows actually updated; audit detail (`:288`) and response (`:308`) share the counts; b186915 inert `afterPlan` seam (`:91,:220`) holds pass A after its plan while B commits; `zz-aer043-monitor-concurrency.test.ts` (5) asserts raise 1/0 and resolve 1/0 with one audit row each, fails on the reverted code | — | codex-confirm |
-| AER-044 | HIGH | Empty deploy-agent selection bypasses intended-agent safety gates | CLOSED | 2026-10-03: a selection never narrows the check. ec68ebc `packages/shared/src/deploy-gate.ts` evaluates the approved stack plus any requested extras, so omitted, `[]` and a subset are equivalent for intended agents; an off-stack request still blocks `agent_not_in_approved_stack`. 4f7516b `apps/gateway/src/deploy-gate.ts` loads agents, MRM decisions and alerts for the same union; response gains `agentsRequested`, audit detail `requestedAgents` beside `agents` (the checked set). `deploy-gate.test.ts` 14 (10 new: omitted/empty/subset x halted, MRM-refused, clean, plus off-stack dedup); `zz-aer044-deploy-gate-selection.test.ts` 10 (verdict plus its deploy-gate audit row each). Negative controls: pre-fix evaluator 7/14 fail (every empty/subset case and the dedup case), pre-fix route 10/10 fail. Callers omit `agentIds`, so demo:gate keeps its DENY (zz-c11-demo-check 7, zz-adr0161 4, zz-adr0164 3, openapi 25 green). ADR-0161 amendment | Pre-existing, outside AER-044 (review nit): an approved use case with an EMPTY intended stack checks zero agents and allows; a `no_intended_agents` reason is an optional follow-up | codex-confirm |
-| AER-045 | MEDIUM | Trace evaluation overlap can permanently miss late-completing spans | CLOSED | 2026-10-03: d6571ff `trace-evaluation.ts` drops the `started_at` cursor; the queue is the anti-join itself (eligible spans with no `trace_evaluations` row) above a FIXED floor = min(`trace_evaluations.evaluated_at`) - 7 days that never advances; `ON CONFLICT DO NOTHING ... RETURNING` keeps it exactly once and the sweep counts only rows this pass wrote; ordered (startedAt, id); no migration. e814d31: a span started 11 min before an already-evaluated newer span completes later (plus a completed span 3 h old) - the next sweep evaluates both once, a further sweep scans 0; two overlapping passes write one row and report it once; both fail on the pre-fix source (2/6). e458a3e pins the floor: first evaluation moved back 30 days, a 10-day-old span is evaluated once and a 40-day-old one is not; fails on a sliding now-7d window, a max(evaluated_at) anchor, a dropped floor and the pre-fix source. `zz-adr0160-trace-evaluation.test.ts` 7/7. ADR-0160 amendment | Cost, not correctness: every pass anti-joins all retained eligible spans against all of `trace_evaluations` (a full scan as before, now over the whole history) - a partial index on `trace_spans(started_at)` for the sweep and pruning `trace_evaluations` with trace retention need a migration, not done. demo-traffic's 'nothing was flagged' hint can mislead when a scheduler pass wins the insert race | codex-confirm |
-| AER-046 | MEDIUM | Intake retry can mix old persisted artifacts with edited new inputs | CLOSED | 2026-10-03: d3409d8 `intakeCheckpoint.ts` - each checkpoint entry carries the canonical digest of exactly the inputs its request sent; before a retry sends anything `planSubmission` reuses on a matching digest, else updates through the gateway's own edit paths (PATCH use case for description/businessContext/intended agents; a NEW questionnaire version that supersedes the stale sign-off; PATCH risk), else REFUSES with nothing sent, a link to the existing use case and an explicit 'Start over as a new use case' - never a silent second use case. d38d3e4 `aer046-intake-retry-contract.test.ts` (2) pins those edit paths on the real routes (v2 leaves exactly one pending sign-off; PATCH silently ignores name/dataSensitivity/complianceTags; category is 422). 89061ee: Start over first ABORTS the earlier intake instance (`POST /v1/workflows/instances/:id/abort`, initiator route), so its pending sign-off is superseded and the use case reads rejected (nothing cleared if the abort fails); frameworks compared as a set. Tests: planner 9/9; `intake-retry.mock.spec.ts` all-new (exactly 4 requests, no second POST /v1/use-cases) and all-old (zero requests, state deep-equal, axe clean). Negative controls: both e2e cases fail on the pre-fix page; pre-fix planner logic 4/8 fail; contract test fails with supersede-on-resubmit or the category refusal removed; the tag-set case and the start-over withdrawal fail without 89061ee | A retry's writes are sequential: one that fails partway leaves a temporarily mixed record until retried again. Edits to name, dataSensitivity and complianceTags are refused (letting PATCH edit them while proposed is a later ADR decision, not made); the stale-control and rejected-scenario refusals are deliberate (unlink/close endpoints exist) | codex-confirm |
-| AER-047 | HIGH | Missing automated-check reports are converted into passes | CLOSED | 2026-10-03, owner recommendation (b) (PENDING L1), recorded in the ADR-0167 amendment. f734abd kernel: typed `offlineAutoPass` only on automated_check stages with named checks (refused elsewhere, non-boolean rejected; it was silently stripped before). 6477266: a check with neither eval outcome nor report is `pending`; a reported failure still blocks (`check_failed`); otherwise the instance waits at `awaiting_execution` on the stage, claim released, audit `workflow:checks-awaiting-report` with `missingChecks`; a retried /advance or a human trigger cannot advance on silence. 2542ae2: 'auto-passed - no report' badge on the rail; auto-passed and pending shown as warnings in the Inbox merge-gate view. 6079d47 (review): the opt-in is honoured only when the process declares `REGULAIT_OFFLINE_CHECKS=1` AND shows no deployed signal (REGULAIT_DEPLOY_MODE / REGULAIT_HSTS) - fail closed, audit `refusedBecause`; each honoured auto-pass is labelled and audited `workflow:checks-auto-passed`; a re-open clears downstream check results in the same locked transaction (`staleCheckResultsCleared`); one waiting row per distinct waiting state; evals once per stage entry; an eval-bound check with no outcome fails (ADR-0044). d9b01fc demo docs declare the variable; e137fdf the tests clear it up front. Tests: workflow-checks 13, eval-harness 23, kernel 45, seed 8; 45 workflow-related gateway files 657/657. Negative controls: workflows.ts reverted 13/36 fail; six mutations (declaration requirement, re-open clearing, dedupe, eval reuse, kernel human_trigger guard, seed declaration) each turn a named test red | No wall-clock timeout: a missing report stays pending indefinitely. The seed declares REGULAIT_OFFLINE_CHECKS for its own in-process app, so a bare `docker compose` with SEED_DEMO=1 auto-passes the seeded demo deploy-verify instances (demo fixtures and mock providers only; the serving gateway refuses unless declared). Narrow race, plausible, not reproduced: the check executor writes its whole context back unlocked, so a resubmission during a running eval could restore stale round-1 check keys. A previous-round CI report arriving after a re-open counts for the new round (the report API carries no version). Pre-existing: a re-open does not drop the build stage's runId, so a re-entered build replays v1's nested run | codex-confirm |
+| AER-044 | HIGH | Empty deploy-agent selection bypasses intended-agent safety gates | CLOSED / RESOLVED-DONE | Codex confirmed at `dbbb642`: ec68ebc evaluates the approved stack plus requested extras, so omitted, empty and subset selections cannot remove intended agents; 4f7516b loads route evidence for the same union. Exact-head CI `37120058343` passed shared `deploy-gate.test.ts` 14/14 and gateway `zz-aer044-deploy-gate-selection.test.ts` 10/10, including halted, MRM-refused, clean and off-stack cases | Pre-existing optional follow-up only: an approved use case with an empty intended stack checks zero agents | — |
+| AER-045 | MEDIUM | Trace evaluation overlap can permanently miss late-completing spans | CLOSED / RESOLVED-DONE | Codex confirmed at `dbbb642`: d6571ff replaces the moving started-at cursor with an anti-join of eligible spans lacking evaluation rows above an installation-anchored floor; conflict-do-nothing returning gives exactly-once accounting. Exact-head CI `37120058343` passed `zz-adr0160-trace-evaluation.test.ts` 7/7, including 11-minute/3-hour late completion, overlapping sweeps and fixed-floor controls | Retention/performance boundary remains disclosed: pre-cutover spans older than the fixed floor are excluded, and the full-history anti-join needs indexing/pruning work | — |
+| AER-046 | MEDIUM | Intake retry can mix old persisted artifacts with edited new inputs | PARTIAL | d3409d8 binds each checkpoint to canonical inputs and plans reuse/update/refusal; 89061ee aborts the earlier intake before “start over.” Exact-head CI `37120058343` passed planner 9/9 and real-route contract 2/2. However CI did not execute `intake-retry.mock.spec.ts`, the only acceptance test that drives the fail/back/edit/retry UI and proves all-old/all-new request behavior | Gate the dedicated retry browser journey (including deliberate failing control) or provide a fresh independent run. Sequential partial-write recovery remains a disclosed product limitation, not silent mixing | claude |
+| AER-047 | HIGH | Missing automated-check reports are converted into passes | CLOSED / RESOLVED-DONE | Codex confirmed at `dbbb642`: unreported checks now remain pending by default; typed offline auto-pass requires template opt-in plus an explicitly offline, non-deployed process and is labelled/audited. Exact-head CI `37120058343` passed workflow-checks 13/13, eval-harness 23/23 and workflow-kernel 45/45, covering explicit fail, partial/missing report, reopen clearing and fail-closed opt-in | The newly isolated concurrency/round-binding defect is tracked separately as AER-048 | — |
+| AER-048 | HIGH | Check executor can overwrite concurrent reports or restore stale-round context | OPEN | Direct source observation at `dbbb642` (not yet reproduced): `runGitExecutions` locks only while taking a stage claim (`workflows.ts:680-698`), then may spend time in `runStageEvalChecks` and finally writes its whole stale context without a lock/CAS (`:843,:898-901`). The report route independently locks and writes current context (`:2027-2053`), so a report posted during the eval can be silently lost. A concurrent artifact re-open clears stale check keys under lock (`:139-182`), but the old executor can write its pre-reopen snapshot back afterward. Reports carry no workflow-round token | Introduce a durable stage-entry/round token. Reports must bind to it and stale reports must be rejected/audited; executor completion must lock/CAS the same token and merge only executor-owned keys. Barrier tests: report-during-eval is retained; reopen-during-eval cannot restore or advance old state; previous-round report is rejected; overlapping advances execute once | claude |
 | F01 | prio: first | Stabilize tests, dependable quality gate | PARTIAL | 2026-10-03: S8 diagnosed and fixed test-side — mcp-proxy.test.ts left platform credentials encrypted under its own key, so compat-longtail got a decrypt 500 instead of 409 (aa7a7a0, 1212462); phase1/phase2 SPA journeys gated in CI (spa-journeys job) and two stale phase2 assertions repaired (152a27d); Actions-exhausted claims withdrawn (dbf7bda, 9b5ced5) · earlier: ADR-0106 `mock-socket-contract.ts` setupFile (vitest.config.ts:14) + exit-code proof (0106:252-275); ADR-0107/0108 unordered-read sweeps; README.md:84-147 pinned sequence; ci.yml `pnpm -r test` on Postgres; exact-head CI 37036782298 green at 21b3094 | Repeated clean full-suite runs being recorded by the dispatcher gate (see implementer update) | dispatcher, then codex-confirm |
 | F02 | prio: first batch | Budget enforcement across model/MCP/connector | CLOSED / RESOLVED-DONE | Remote fix `aa233bd` (Codex-confirmed at `9a13e26`): `agents-connectors.ts:5007-5030` calls `preDispatchProjectGate` after entitlement allow and before credentials/PII/egress/provider work, audits `project-budget-cap` and returns without execution. Exact-head CI `37094018095` passed `connector-project-budget.test.ts` 6/6 (exhausted: 409, zero receiver hits and usage; healthy/unattributed/sanctioned/warn-only/profile-override cases) within gateway 239 files / 3,290 tests. `mcp-project-budget.test.ts` also remains green. | F03 first-crossing-allowed semantics remain disclosed: the first invoke to cross runs and bills; blocking starts on the next dispatch | — |
 | F03 | prio: alongside F02 | Spending-cap semantics under concurrency | PARTIAL | ADR-0103 'Honest limits' (measured spend, first crossing allowed); ADR-0125 atomic FOR UPDATE run charges, `shared-budget-charge.test.ts`; disclosed at `VirtualKeysPage.tsx:271`, `OrganizationPage.tsx:511`; ENTERPRISE_READINESS_PLAN.md:266 (N4) | No decision between documented threshold and hard reservation (hold ledger); permitted overshoot undefined per cap (project, run/node, virtual key); no concurrent near-boundary test of preDispatchProjectGate | owner |
@@ -73,45 +74,29 @@ Next: `claude` (code/doc work) · `codex-confirm` (closure to be acknowledged by
 | F08 | prio: alongside fixes | Documentation and capability claims | CLOSED | 2026-10-03: boot banner prints /ui; F04 row, Actions-exhausted and capability claims corrected with dated notes (dbf7bda); ROADMAP CI rows struck (9b5ced5); ADR-0110 note added · earlier: STATE.md last_updated 2026-10-02; PENDING.md:774-777 struck S3-sink/copilot rows; DEMO_SCRIPT 'What is mock vs. live'; `guardrails.ts:10-16` heuristic; `RegulAItLlmPage.tsx:10`; 1b9d6cb cleared the 002/004/005 texts | — | codex-confirm |
 | HANDOFF | — | Per-finding handoff (repro, decision, files, limits) | CLOSED | 2026-10-03: dated addendum to PENDING's F01–F08 table with current status and evidence per finding (00ad93c, 9e78e60) · earlier: Per-ADR records (0103–0108, 0111, 0112, 0115, 0144, 0166) carry reproduction, commands and limits; PENDING.md:695-706 F table pinned to HEAD 2c90396 (09-07) | — | codex-confirm |
 
-Totals (56 rows, recounted 2026-10-03 after AER-044..047 closed): CLOSED 47 (42 AER + F02, F04, F05, F08, HANDOFF) · PARTIAL 6 (AER-028, 036 + F01, F03, F06, F07) · OPEN 2 (AER-014, 016) · WITHDRAWN 1 (AER-025). F02 is independently confirmed RESOLVED/DONE at remote HEAD `9a13e26`; AER-012, 013, 020 and 024 remain implementer-closed pending Codex confirmation.
+Totals (57 rows, recounted 2026-10-03): CLOSED 45 · PARTIAL 8 (AER-028, 029, 036, 046 + F01, F03, F06, F07) · OPEN 3 (AER-014, 016, 048) · WITHDRAWN 1 (AER-025). AER-044, 045 and 047 are independently confirmed RESOLVED/DONE at `dbbb642`; AER-029 and 046 remain partial because their dedicated browser acceptance tests are not executed by the exact-head gates.
 
 ## Open work, grouped
 
 **Claude backlog**
-- AER-003: `scripts/verify-clean-checkout` — one command, clean-tree assertion, deliberately failing control, build-script policy.
-- AER-006: per-layout separator grammar + every-digit negative; fix the 'DEFAULT-ON' comment; correct checklist row 71.
-- AER-009: nonnumeric/alternate-spelling payload negative; isolated 'AUDIT ROW MISSING' case.
-- AER-010: retained negative control for lookup-above-gates.
-- AER-011: paired-miss cases (response_format, thinking, project, prompt/config version) + omission negatives; checklist row 73.
-- AER-015: 'outlook' default base URL; outlook/teams in the UI list; UI + egress parity test.
-- AER-018: per-adapter barrier matrix; structural classification test covering pm.ts and new providers.
-- AER-026 / 030 / 034: Kong harness — two routes with distinct actions, forged/duplicate headers, disabled/unmapped/deleted consumers, consumer identity audited, digest-pinned images, lockfile trigger path.
-- AER-029: @axe-core scan of every wizard stage in both themes.
-- AER-033: unique per-run DB/container/ports; SIGINT/SIGTERM cleanup; refuse to drop a DB the run did not create.
-- AER-035: `pg_terminate_backend` recovery test (unless owner accepts the residual).
-- AER-037: atomic claim (`FOR UPDATE SKIP LOCKED … RETURNING`) + two-sweep test, or drop the disjointness claim.
-- AER-044: reject/fallback empty deploy `agentIds` and cover intended-agent halt/MRM refusal.
-- AER-045: durable trace-evaluation cursor/queue and late-completion regression.
-- AER-046: bind intake retry checkpoints to input identity or invalidate them on edits.
-- F01: strike stale 'Actions exhausted' claims; diagnose or re-scope S8; record N repeated clean runs; gate phase1/phase2.
-- F08: boot banner prints /ui; record guardrail/training claim assessment; strike stale claims.
-- HANDOFF: refresh the PENDING F01–F08 table as a dated addendum.
+- AER-029: put `intake-a11y.mock.spec.ts` in an exact-head CI gate (or provide a fresh independent run) and retain the failing control.
+- AER-046: gate `intake-retry.mock.spec.ts`, especially fail/back/edit/retry and start-over withdrawal.
+- AER-048: bind workflow check reports and executor completion to a durable stage-entry/round token; add the four barrier cases in the row.
+- F01: finish the dispatcher's repeated-clean-run evidence and return it for Codex confirmation.
 
 **Owner decisions**
 - AER-006: build the org-settings international-PII category UI, or rescope the claim to API-only.
 - AER-014: fund the replay-clock fix, or downgrade ADR-0120's 'exactly' claim to an approximation now.
 - AER-016: quick mitigation (lower non-admin cap, per-caller concurrency 1) vs job-model redesign.
 - AER-028: Kong forwards scrubbed, size-limited args, or Kong is formally narrowed to context-free authorization (then publish the parity matrix).
-- AER-035: accept the documented Postgres-guarantee argument for item 4, or require the crash test.
 - AER-036: build OIDC/SAML origin derivation for Kong, or keep the asserted field and narrow the claim.
-- AER-040: make the `approval-review` job a required status check (and whether a throwaway red-CI run is wanted).
-- AER-047: eliminate missing-report auto-pass in production, or authorize a clearly labelled demo-only compatibility mode.
 - F03: documented threshold vs hard reservation; permitted overshoot per cap.
 - F06: capped real-provider credential; plan-only boundary for calls naming no workflow instance.
 - F07: un-park the pilot ops gate; release-key ceremony; a separate box for upgrade and restore drills.
 
 **Codex to confirm**
 - F02 is confirmed RESOLVED/DONE at remote commit `aa233bd`; no further closure action is required. Still to confirm from the 2026-10-03 implementation set: AER-020 (`e09e4cb`), AER-024 (`5a7244c`), AER-012 (`6e3daec`), AER-013 (`40990d6`).
+- AER-044, AER-045 and AER-047 are confirmed RESOLVED/DONE at `dbbb642`. AER-029 and AER-046 remain partial pending executable browser evidence; AER-048 is the new workflow-round concurrency finding.
 - Newly closed, evidence above: AER-001, 002, 005, 008, 027 (formal DONE), 032, 039, 040, 042, 043, F04, F05; AER-025 as withdrawn; AER-004's named doc residual (1b9d6cb).
 - Already DONE by Codex, no action: AER-007, 017, 019, 021, 022, 023, 031, 038, 041.
 
@@ -400,5 +385,64 @@ then the full gate ran on the integrated tree (fresh-database suite, build, demo
   fixed floor), AER-046 (`d3409d8`, `d38d3e4`, `89061ee`: retry checkpoints bound to their inputs; start
   over withdraws the earlier record) and AER-047 (`f734abd`, `6477266`, `2542ae2`, `6079d47`, `d9b01fc`,
   `e137fdf`: an unreported check stays pending; the labelled offline opt-in fails closed).
+
+### Automated enterprise-readiness run — 2026-10-03 07:02:03 CDT (UTC-05:00)
+
+**Target branch, synchronization and reviewed range**
+
+- Exclusive target: `dhruv/active`. The prior isolated worktree directory had been removed while its
+  Git metadata remained. The missing path was verified, stale worktree metadata was pruned, and a new
+  isolated worktree was created from `codex/governance-field-help`; the dirty `main` checkout and its
+  untracked content were not touched.
+- `git pull --ff-only origin dhruv/active` advanced the review checkout from
+  `1b7ebba75e976d3bee82aa488aa7dd41413598d5` to
+  `dbbb64210d36629211e895115dc400b74fff79e3`; local and upstream SHAs agreed.
+- Reviewed range: `1b7ebba..dbbb642`, with direct review of AER-029 and AER-044..047 plus the newly
+  disclosed workflow concurrency boundary. Required suite/repository instructions were read first.
+  No product code, ADR, STATE, PathForward or sibling repository was edited.
+
+**Exact checks and outcomes**
+
+- Read-only GitHub Actions inspection (`gh run list` / `gh run view --log`) found all exact-head runs
+  green: CI `37120058343`, Demo journey `37120058322`, Integrations `37120058356`.
+- CI build-and-test passed gateway 243 files / 3,357 tests, shared 54 / 1,266, web 12 / 95 and workflow
+  kernel 1 / 45. Targeted passes included deploy-gate 14/14, AER-044 route 10/10, trace evaluation 7/7,
+  intake route contract 2/2, intake checkpoint 9/9, workflow checks 13/13 and eval harness 23/23.
+  Docker build executed and passed. The gated SPA job executed only phase1/phase2 (39/39).
+- The exact-head logs contain no execution of `intake-a11y.mock.spec.ts` or
+  `intake-retry.mock.spec.ts`; merely packaging those files into Docker is not test execution. This is
+  a verification-gap result, not a claim that their assertions fail.
+- Targeted numbered source inspection covered `deploy-gate.ts`, `trace-evaluation.ts`,
+  `intakeCheckpoint.ts` and `workflows.ts`. No local database, browser, cloud, provider, deployment,
+  migration, backup or restore test was run.
+
+**Lifecycle decisions**
+
+- **AER-044 — RESOLVED/DONE.** Direct source plus exact-head 14/14 and 10/10 tests prove an explicit
+  empty/subset selection cannot narrow the intended-agent stack.
+- **AER-045 — RESOLVED/DONE.** Direct source plus exact-head 7/7 proves the moving-overlap miss is
+  removed and normal late completion is exactly-once. The fixed pre-cutover floor and scan cost remain
+  disclosed limitations.
+- **AER-047 — RESOLVED/DONE.** Missing reports now wait by default; the explicit demo-only opt-in is
+  typed, environment-bound, labelled and audited. Exact-head workflow/eval/kernel tests cover the
+  original acceptance criteria.
+- **AER-029 — PARTIALLY RESOLVED.** The implementation and dedicated axe journey exist, but that
+  journey is absent from all exact-head CI commands inspected. Closure awaits a fresh executable run
+  or a durable gate.
+- **AER-046 — PARTIALLY RESOLVED.** Planner and real-route contract tests pass, but the only browser
+  test exercising fail/back/edit/retry and start-over is not executed by the exact-head gates.
+- **AER-048 — HIGH / OPEN (new).** The executor snapshots context under a short claim transaction,
+  performs potentially long eval work, then writes the entire stale context without locking or
+  comparing a stage-entry token. A concurrent report or re-open can commit under lock and then be
+  overwritten by that stale executor. This is direct source observation; the race has not yet been
+  reproduced. The ledger row gives the token/CAS remediation and four barrier acceptance tests.
+
+**Remaining uncertainty**
+
+- AER-012, 013, 020 and 024 were not independently closed in this targeted run. AER-014 and AER-016
+  remain open owner decisions. P23 (licence/security policy and repository security features) remains
+  an owner action.
+- No enterprise-readiness, production-readiness, certification or complete parity conclusion is
+  justified by this targeted review.
 
 <!-- codex-enterprise-feedback:end -->
