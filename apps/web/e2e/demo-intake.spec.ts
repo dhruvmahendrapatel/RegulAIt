@@ -39,7 +39,8 @@ async function shotBoth(page: Page, name: string) {
     .waitForFunction(
       () => !Array.from(document.querySelectorAll('[aria-live="polite"]')).some((el) => getComputedStyle(el).position === "fixed" && el.childElementCount > 0),
       null,
-      { timeout: 6_000 },
+      // capped just above a toast's ~3.8s life: 15 shots must stay well inside the 180s test
+      { timeout: 4_000 },
     )
     .catch(() => undefined);
   for (const theme of ["light", "dark"] as const) {
