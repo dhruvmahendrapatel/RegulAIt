@@ -80,15 +80,31 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  background: var(--surface-2);
+  /* count 0: the card's own ground with a hairline edge, so "none" is
+     visibly an empty slot and the first filled step is clearly darker */
+  background: var(--surface-1);
+  box-shadow: inset 0 0 0 1px var(--border);
   color: var(--text);
   font-variant-numeric: tabular-nums;
 }
 
+.heat1, .heat2, .heat3, .heat4 { box-shadow: none; }
 .heat1 { background: color-mix(in srgb, var(--rg-ink-label) 10%, var(--surface-1)); }
 .heat2 { background: color-mix(in srgb, var(--rg-ink-label) 18%, var(--surface-1)); }
 .heat3 { background: color-mix(in srgb, var(--rg-ink-label) 28%, var(--surface-1)); }
 .heat4 { background: color-mix(in srgb, var(--rg-ink-label) 40%, var(--surface-1)); }
+/* Dark: a light ink on a dark ground needs wider steps for density to read
+   (10% vs 0% was ~5 RGB units apart). Both dark selectors, matching tokens.css. */
+@media (prefers-color-scheme: dark) {
+  :global(:root:not([data-theme="light"])) .heat1 { background: color-mix(in srgb, var(--rg-ink-label) 14%, var(--surface-1)); }
+  :global(:root:not([data-theme="light"])) .heat2 { background: color-mix(in srgb, var(--rg-ink-label) 26%, var(--surface-1)); }
+  :global(:root:not([data-theme="light"])) .heat3 { background: color-mix(in srgb, var(--rg-ink-label) 40%, var(--surface-1)); }
+  :global(:root:not([data-theme="light"])) .heat4 { background: color-mix(in srgb, var(--rg-ink-label) 56%, var(--surface-1)); }
+}
+:global(:root[data-theme="dark"]) .heat1 { background: color-mix(in srgb, var(--rg-ink-label) 14%, var(--surface-1)); }
+:global(:root[data-theme="dark"]) .heat2 { background: color-mix(in srgb, var(--rg-ink-label) 26%, var(--surface-1)); }
+:global(:root[data-theme="dark"]) .heat3 { background: color-mix(in srgb, var(--rg-ink-label) 40%, var(--surface-1)); }
+:global(:root[data-theme="dark"]) .heat4 { background: color-mix(in srgb, var(--rg-ink-label) 56%, var(--surface-1)); }
 
 .heatCell strong {
   font-size: var(--text-lg);
