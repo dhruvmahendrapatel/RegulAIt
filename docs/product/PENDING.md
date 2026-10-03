@@ -702,7 +702,7 @@ stale by one day.
 | # | Verdict on recheck | State |
 | --- | --- | --- |
 | **F01** — untrustworthy test gate | **TRUE**, already ours (§5 above) | **OPEN**, and now better understood — see §5's correction |
-| **F02** — budget not enforced on MCP path | **TRUE** | **CLOSED** — [ADR-0103](../decisions/0103-mcp-path-project-budget-gate.md) |
+| **F02** — budget not enforced on MCP path | **TRUE** | ~~**CLOSED** — [ADR-0103](../decisions/0103-mcp-path-project-budget-gate.md)~~ **Correction 2026-10-03**: the 09-07 closure covered the MCP and model paths only; `POST /v1/connectors/:connectorId/invoke` still executed and billed on an exhausted project (Codex F02 recheck). **CLOSED 2026-10-03** — the same `preDispatchProjectGate` now sits on the connector invoke ahead of credential/PII/guardrail/egress/provider work ([ADR-0103 amendment 2026-10-03](../decisions/0103-mcp-path-project-budget-gate.md), `connector-project-budget.test.ts`). F03's first-crossing semantics still apply on all three paths. |
 | **F03** — cap semantics under concurrency | **TRUE**, design question not defect | **OPEN** — named honestly in ADR-0103's limits |
 | **F04** — secrets outside `audit_log` | **STALE** — S5 closed 2026-09-06 by ADR-0102 | Its *extension* is new and open: exports, backups, traces, conversations were never assessed |
 | **F05** — approval not bound to payload | **PARTLY TRUE** | **CLOSED** — [ADR-0104](../decisions/0104-approval-payload-binding.md), migration 0106 |

@@ -4992,6 +4992,43 @@ export function registerAgentConnectorRoutes(
         return out.status(403).send({ decision });
       }
 
+      // PILLAR 5 enforcement, connector path (F02 / ADR-0103 amendment
+      // 2026-10-03). An attributed invoke is gated on the project's MEASURED
+      // budget here — after the categorical entitlement decision (no budget
+      // makes a forbidden call permissible), and strictly BEFORE the credential
+      // is read, before PII/guardrail work, before the egress guard, and before
+      // the provider is ever contacted — so a budget-blocked call executes
+      // nothing, consumes nothing and bills nothing. The gate itself is REUSED
+      // from the model and MCP paths, not reimplemented: the compliance
+      // ceiling, sanctioned overage, budgetHardBlockPct, warn_only vs block
+      // with strictest-wins, and the escalation into the one approvals queue
+      // all carry over unchanged. Unattributed calls (projectId null) pass
+      // straight through and meter into the disclosed Unattributed bucket.
+      const projectBudget = await preDispatchProjectGate(db, projectId, userId);
+      if (!projectBudget.ok) {
+        await db.insert(auditLog).values({
+          userId,
+          objectType: "connector",
+          objectId: connectorId,
+          detail: {
+            phase: "project-budget",
+            projectId,
+            operation: body.operation,
+            ...(body.object ? { object: body.object } : {}),
+            pricePerCallUsd: connector.pricePerCallUsd ?? null,
+          },
+          effect: "deny",
+          ruleId: "project-budget-cap",
+          ruleChain: [],
+          reason: `connector '${connector.name}' blocked: ${projectBudget.error} — ${projectBudget.detail ?? "project budget exhausted"}`,
+        });
+        return out.status(projectBudget.status).send({
+          decision,
+          error: projectBudget.error,
+          ...(projectBudget.detail ? { detail: projectBudget.detail } : {}),
+        });
+      }
+
       // EXECUTION runs strictly INSIDE the allow branch, after the audit insert.
       // A connector with no providerKind keeps TODAY'S behaviour exactly:
       // governance-only, no execution, no cost, no usage row.

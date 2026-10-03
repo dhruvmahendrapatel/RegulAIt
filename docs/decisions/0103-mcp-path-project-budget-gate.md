@@ -22,7 +22,9 @@ the one approvals queue, and returns a 409 `project_budget_exceeded` once the ha
 is reached.
 
 **It had exactly one production call site**: `apps/gateway/src/agents-connectors.ts`, the
-model/connector dispatch path.
+model/connector dispatch path. *(Correction 2026-10-03: that call site is `executeGovernedDispatch`,
+the MODEL dispatch core only. `POST /v1/connectors/:connectorId/invoke` lives in the same file but
+never reached the gate — see the amendment below.)*
 
 The MCP tool-call path never reached it. `executeGovernedToolCallInner`
 (`apps/gateway/src/mcp-proxy.ts`) evaluated entitlement, the ADR-0023 read-only posture, approvals,
@@ -226,3 +228,34 @@ evidence like any other and were checked rather than accepted:
 read-only attributed tooling too. That is the intended "stop all project activity" posture and the
 reason a sanctioned overage (`overageActive`) exists — but an operator who expected a
 paid-calls-only gate would be surprised, which is precisely why the contract is named here.
+
+## Amendment (2026-10-03) — correction: the CONNECTOR invoke path was never gated
+
+The Context above stated the gate's one pre-existing call site as "the model/connector dispatch
+path". That was wrong by half. The call site was `executeGovernedDispatch` — the model dispatch core
+— and `POST /v1/connectors/:connectorId/invoke` (same file, its own handler) had no project-budget
+dimension at all: it evaluated entitlement, PII, guardrails and egress, then executed the provider and
+wrote a priced `usage_events` row carrying `projectId`, so an attributed invoke against an exhausted
+project ran and billed. The Codex review (`codexInputs.md`, F02) found it; PENDING.md's
+"F02 CLOSED" line and this ADR's connector claim were both false until today.
+
+**What changed** (pure code, no migration): the connector handler now calls the SAME
+`preDispatchProjectGate` immediately after the entitlement decision resolves to `allow` and before the
+credential is read, before PII/guardrail work, before the egress guard and before the provider is
+contacted. A block answers the gate's own status/error (`409 project_budget_exceeded`, with the
+entitlement `decision` still reported), writes one `deny` audit row (`ruleId: project-budget-cap`,
+`objectType: connector`, `detail.phase: project-budget`), executes nothing and bills nothing.
+Everything the gate carries — the compliance ceiling, sanctioned overage, `budgetHardBlockPct`,
+warn_only vs block with strictest-wins, the escalation into the one approvals queue — carries over
+unchanged. Unattributed invokes pass straight through into the Unattributed bucket.
+
+**Proof**: `apps/gateway/src/connector-project-budget.test.ts` (counting fake receiver: exhausted
+project → 409, zero upstream requests, zero usage rows, one audit row; healthy, unattributed and
+sanctioned-overage invokes run and bill; warn_only runs, bills and escalates; a profile's
+`budgetEnforcement: block` overrides org warn_only). `mcp-project-budget.test.ts` gained the same
+overage and compliance-block cases for the MCP path, which this ADR had left untested. Negative
+control: with the handler restored to its pre-amendment text, the three gate-dependent cases fail.
+
+**Honest limit, unchanged**: F03's first-crossing-allowed semantics apply here exactly as on the other
+two paths — the first invoke that crosses the budget runs and is billed; the block starts at the next.
+
