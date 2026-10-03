@@ -8,7 +8,7 @@ import { useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../../api/client";
 import type { Project, WorkflowListResponse } from "../../api/types";
-import { ago } from "../../api/format";
+import { ago, humanize } from "../../api/format";
 import { PageHeader } from "../../shell/AppShell";
 import {
   Button,
@@ -57,12 +57,16 @@ export default function WorkflowsPage() {
 
   const start = async () => {
     setError(null);
+    if (!description.trim()) {
+      setError("Describe the change before starting the workflow.");
+      return;
+    }
     setBusy(true);
     try {
       const r = await api.post<{ id: string }>("/v1/workflows/instances", {
         ...(projectId ? { projectId } : {}),
         change: {
-          description: description.trim() || "untitled change",
+          description: description.trim(),
           paths: ["src/"],
           changeType: effectiveType || "feature",
           environment: "staging",
@@ -104,7 +108,7 @@ export default function WorkflowsPage() {
                 <Select value={effectiveType} onChange={(e) => setChangeType(e.target.value)}>
                   {changeTypes.map((t) => (
                     <option key={t} value={t}>
-                      {t}
+                      {humanize(t)}
                     </option>
                   ))}
                 </Select>
@@ -138,7 +142,7 @@ export default function WorkflowsPage() {
             <div style={{ alignSelf: "flex-end" }}>
               <Button
                 variant="primary"
-                disabled={busy || changeTypes.length === 0}
+                disabled={busy || changeTypes.length === 0 || !description.trim()}
                 onClick={() => void start()}
               >
                 {busy ? "Starting…" : "Start workflow"}
@@ -147,7 +151,7 @@ export default function WorkflowsPage() {
           </div>
           <div className={v.faint} style={{ marginTop: "var(--s0)" }} aria-live="polite">
             {resolved.length > 0
-              ? `→ runs the “${resolved.join("” + “")}” workflow${resolved.length > 1 ? "s (merged)" : ""}`
+              ? `→ runs the “${resolved.map(humanize).join("” + “")}” workflow${resolved.length > 1 ? "s (merged)" : ""}`
               : " "}
           </div>
           {error && (
@@ -178,7 +182,7 @@ export default function WorkflowsPage() {
                 {
                   key: "type",
                   header: "Type",
-                  render: (i) => <span className={v.mono}>{i.change?.changeType ?? ""}</span>,
+                  render: (i) => (i.change?.changeType ? humanize(i.change.changeType) : ""),
                   sort: (i) => i.change?.changeType ?? "",
                 },
                 {

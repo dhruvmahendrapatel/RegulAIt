@@ -253,6 +253,29 @@ test("UIA-02: the audit log says how many rows are shown and loads older pages o
   expect(await paging.getByRole("button", { name: "Load older" }).count()).toBe(0);
 });
 
+test("UIW-07: an empty change description cannot be started — nothing is posted as 'untitled change'", async ({ page }) => {
+  let posted = 0;
+  await routeApi(page, async (route, p, method) => {
+    if (p === "/auth/me") return json(route, authMe(USER_A));
+    if (p === "/v1/me") return json(route, { userId: USER_A.id, isAdmin: true, user: USER_A });
+    if (p === "/v1/workflows/instances" && method === "POST") { posted += 1; return json(route, { id: "wf-new" }, 201); }
+    if (p === "/v1/workflows/instances") return json(route, { instances: [], changeTypes: ["feature", "deploy-demo"], routes: [{ changeType: "feature", templates: ["pipeline-demo"] }] });
+    if (p === "/v1/projects") return json(route, { projects: [] });
+    return json(route, {});
+  });
+  await page.goto("/ui/workflows");
+  const start = page.getByRole("button", { name: "Start workflow" });
+  await expect(start).toBeDisabled();
+  // UIW-09: the type select and the routing hint carry names, not identifiers
+  await expect(page.getByLabel("Type")).toContainText("Deploy demo");
+  await expect(page.getByText("→ runs the “Pipeline demo” workflow")).toBeVisible();
+  await page.getByLabel("Describe the change").fill("Tighten the checkout retry budget");
+  await expect(start).toBeEnabled();
+  await start.click();
+  await expect(page).toHaveURL(/\/ui\/workflows\/wf-new/);
+  expect(posted).toBe(1);
+});
+
 test("UXJ-02: selecting the lowest alert brings its detail into the viewport", async ({ page }) => {
   await page.setViewportSize({ width: 1366, height: 768 });
   const alert = (i: number) => ({
