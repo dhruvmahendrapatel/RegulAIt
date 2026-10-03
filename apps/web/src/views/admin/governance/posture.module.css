@@ -3,9 +3,10 @@
  * unresolved on purpose): printing the page hides the app chrome and lets the
  * one-pager flow as a document. Tokens only, like every other admin surface. */
 
+/* Always smaller than the 24px page title: the headline is data, not a heading. */
 .headline {
-  font-size: calc(var(--text-xl) * 1.35);
-  font-weight: 750;
+  font-size: 22px;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
   line-height: 1.1;
 }

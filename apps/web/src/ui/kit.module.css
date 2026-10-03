@@ -131,19 +131,31 @@
   color: var(--danger);
   font-size: var(--text-xs);
 }
+/* `<Field label="&nbsp;"><Button/></Field>` aligns a submit button with the
+   inputs beside it. The field is a column flexbox, so without this the button
+   stretched into a full-width slab. */
+.field > button {
+  align-self: flex-start;
+}
 
-/* ---- Card ---- */
+/* ---- Card ----
+   One edge, not two: a hairline on the white surface against the canvas is the
+   whole separation. Shadows are kept for things that genuinely float (modals,
+   menus, toasts, popovers); a card that sits in the page flow does not float.
+   The 8px radius reads as a tool rather than a marketing tile. */
 .card {
   background: var(--surface-1);
   border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-sm);
+  border-radius: var(--radius-md);
+  box-shadow: none;
   padding: var(--s2);
 }
+/* A card title must outrank the KPI numerals and bold row titles beneath it,
+   so it is the size step that does the work — not tracking or extra weight. */
 .cardTitle {
-  font-size: var(--text-sm);
-  font-weight: 650;
-  letter-spacing: 0.02em;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0;
   margin-bottom: var(--s1);
   display: flex;
   align-items: center;
@@ -195,6 +207,9 @@
 }
 .table tr:last-child td {
   border-bottom: none;
+}
+.table tbody tr:hover td {
+  background: var(--surface-2);
 }
 .rowClickable {
   cursor: pointer;
@@ -663,3 +678,13 @@ a.barLabel {
   font-size: var(--text-sm);
 }
 
+
+/* Long table text: two lines, then an ellipsis. Pair with a `title` attribute
+   carrying the full value so nothing is lost, only folded. */
+.clamp2 {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+}
