@@ -6,7 +6,9 @@
  *
  *   BLOCK  use case not approved · agent outside the approved stack · agent
  *          halted / disabled / not active · the MRM gate refuses the agent ·
- *          an OPEN high-severity monitor alert on the use case or its agents
+ *          an OPEN high-severity monitor alert on the use case or its agents ·
+ *          an OPEN before-go-live approval condition (ADR-0168) · an approval
+ *          past its "valid until" (ADR-0168)
  *   WARN   no approved model card while MRM is not enforced · an
  *          ACKNOWLEDGED high alert (a person has it in hand) · an open
  *          medium alert
@@ -19,6 +21,8 @@
 
 export const DEPLOY_GATE_REASON_CODES = [
   "use_case_not_approved",
+  "approval_expired",
+  "open_blocking_condition",
   "agent_not_in_approved_stack",
   "agent_unavailable",
   "mrm_refused",
@@ -49,7 +53,18 @@ export interface DeployGateAgentInput {
 }
 
 export interface DeployGateInput {
-  useCase: { id: string; name: string; status: string; intendedAgentIds: string[] };
+  useCase: {
+    id: string;
+    name: string;
+    status: string;
+    intendedAgentIds: string[];
+    /** ADR-0168: the approval's "valid until"; absent/null = no recorded lifetime */
+    approvedUntil?: Date | string | null;
+  };
+  /** ADR-0168: the use case's OPEN before-go-live (blocking) conditions */
+  openBlockingConditions?: ReadonlyArray<{ id: string; text: string }>;
+  /** evaluation instant for the expiry test; defaults to now */
+  now?: Date;
   /**
    * Agents the release declares it ships (AER-044). A selection can only ADD to
    * what is checked, never narrow it: the evaluator always checks the use
@@ -78,6 +93,31 @@ export function evaluateDeployGate(input: DeployGateInput): DeployGateDecision {
       code: "use_case_not_approved",
       severity: "block",
       message: `use case "${uc.name}" is ${uc.status.replace(/_/g, " ")}, not approved`,
+      ref: { type: "use_case", id: uc.id },
+    });
+  }
+  // ADR-0168 — an approval has a lifetime. Only an APPROVED use case can be
+  // expired; any other status is already refused above, by its own name.
+  if (uc.status === "approved" && uc.approvedUntil) {
+    const until = new Date(uc.approvedUntil);
+    if (until.getTime() <= (input.now ?? new Date()).getTime()) {
+      reasons.push({
+        code: "approval_expired",
+        severity: "block",
+        message: `"${uc.name}" approval expired on ${until.toISOString().slice(0, 10)}; re-review required`,
+        ref: { type: "use_case", id: uc.id },
+      });
+    }
+  }
+  // ADR-0168 — a before-go-live condition blocks while it is open.
+  const blockingOpen = input.openBlockingConditions ?? [];
+  if (blockingOpen.length > 0) {
+    reasons.push({
+      code: "open_blocking_condition",
+      severity: "block",
+      message:
+        `"${uc.name}" has ${blockingOpen.length} open before-go-live condition(s): ` +
+        blockingOpen.map((c) => c.text).join("; "),
       ref: { type: "use_case", id: uc.id },
     });
   }

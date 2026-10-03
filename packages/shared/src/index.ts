@@ -800,11 +800,72 @@ export const createRateLimitSchema = z
   })
   .superRefine(refineRuleScope);
 
+/** ADR-0168 — a condition's due date: a calendar date (`YYYY-MM-DD`, due at
+ * the END of that day, UTC) or a full ISO-8601 timestamp. */
+const conditionDueAt = z
+  .string()
+  .refine(
+    (v) =>
+      /^\d{4}-\d{2}-\d{2}$/.test(v)
+        ? !Number.isNaN(Date.parse(`${v}T00:00:00Z`)) && new Date(`${v}T00:00:00Z`).toISOString().startsWith(v)
+        : z.string().datetime({ offset: true }).safeParse(v).success,
+    { message: "dueAt must be a date (YYYY-MM-DD) or an ISO-8601 timestamp" },
+  );
+
+/** Resolve a validated `dueAt` to the instant it falls due. */
+export function conditionDueInstant(dueAt: string): Date {
+  return /^\d{4}-\d{2}-\d{2}$/.test(dueAt) ? new Date(`${dueAt}T23:59:59.999Z`) : new Date(dueAt);
+}
+
+export const USE_CASE_CONDITION_TEXT_MAX = 500;
+
+/** ADR-0168 — one condition an intake approval imposes. `blocking: true` =
+ * BEFORE go-live (the deploy gate refuses while it is open); `false` = AFTER
+ * go-live (tracked, shown overdue after `dueAt`, never blocks). */
+export const approvalConditionSchema = z
+  .object({
+    text: z.string().trim().min(1).max(USE_CASE_CONDITION_TEXT_MAX),
+    ownerUserId: z.string().uuid().optional(),
+    dueAt: conditionDueAt,
+    blocking: z.boolean(),
+  })
+  .strict();
+export type ApprovalConditionInput = z.infer<typeof approvalConditionSchema>;
+
 // The decider is the authenticated caller — never a body field.
+// ADR-0168 widens it, never narrows it: `returned` (send back for
+// information; `reason` REQUIRED — refused 422 `return_reason_required`) and
+// `conditions` (only with `approved`, only on an intake sign-off — the
+// decide path refuses everything else BY NAME with a 422). A body of only
+// `decision: approved|denied` + optional `reason` parses exactly as before;
+// an empty `conditions: []` is the same as none.
 export const decideApprovalSchema = z.object({
-  decision: z.enum(["approved", "denied"]),
+  decision: z.enum(["approved", "denied", "returned"]),
   reason: z.string().optional(),
+  conditions: z.array(approvalConditionSchema).max(20).optional(),
 });
+
+/** ADR-0168 — `POST /v1/use-cases/:id/conditions/:conditionId/met` */
+export const markConditionMetSchema = z
+  .object({ note: z.string().trim().min(1).max(2000).optional() })
+  .strict();
+
+/** ADR-0168 — a condition as `GET /v1/use-cases/:id` returns it. */
+export interface UseCaseConditionView {
+  id: string;
+  approvalId: string;
+  text: string;
+  ownerUserId: string | null;
+  ownerName: string | null;
+  dueAt: string;
+  blocking: boolean;
+  status: "open" | "met" | "waived";
+  metAt: string | null;
+  metByName: string | null;
+  note: string | null;
+  /** open, and `dueAt` has passed */
+  overdue: boolean;
+}
 
 export const createApiKeySchema = z.object({
   name: z.string().min(1),

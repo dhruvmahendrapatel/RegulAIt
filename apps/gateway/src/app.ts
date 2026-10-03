@@ -105,6 +105,7 @@ import {
   createUserSchema,
   createDelegationSchema,
   deactivateUserSchema,
+  conditionDueInstant,
   decideApprovalSchema,
   deleteRoleSchema,
   evaluateRequestSchema,
@@ -355,7 +356,13 @@ import { RunStateError } from "@regulait/orchestration-kernel";
 import { applyWorkflowApprovalDecision, registerWorkflowRoutes } from "./workflows.js";
 import { registerTemplateGalleryRoutes } from "./template-gallery.js";
 // ADR-0080 — the AI use-case registry (L1 front-door) and its lifecycle join.
-import { registerUseCaseRoutes, syncUseCaseForInstance } from "./use-cases.js";
+import {
+  imposeUseCaseConditions,
+  markUseCaseReturned,
+  registerUseCaseRoutes,
+  syncUseCaseForInstance,
+  useCaseForIntakeApproval,
+} from "./use-cases.js";
 import { registerVendorRoutes, syncVendorForInstance } from "./vendors.js";
 // ADR-0081 — the AI risk register (gap L2): evidence computed from the real
 // ledgers at read time; acceptance is an audited record.
@@ -2763,7 +2770,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // id sees only the rows they could already see.
     const { status, objectType, approverUserId } = z
       .object({
-        status: z.enum(["pending", "approved", "denied", "consumed", "superseded"]).optional(),
+        status: z.enum(["pending", "approved", "denied", "returned", "consumed", "superseded"]).optional(),
         objectType: z.enum(APPROVAL_OBJECT_TYPES).optional(),
         approverUserId: z.string().uuid().optional(),
       })
@@ -3273,6 +3280,54 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         });
       }
     }
+    // ADR-0168 — the two new outcomes, refused BY NAME before anything is
+    // written. Both exist only on an INTAKE SIGN-OFF (a workflow gate on the
+    // instance that governs an AI use case): "send back for information"
+    // needs a questionnaire to go back to, and a condition needs a use case
+    // to bind to and a deploy gate to enforce it. A body of approved/denied
+    // with no conditions never reaches the lookup — byte-identical to before.
+    const conditionInputs = body.conditions ?? [];
+    const intakeUseCase =
+      body.decision === "returned" || conditionInputs.length > 0
+        ? await useCaseForIntakeApproval(db, row)
+        : null;
+    if (body.decision === "returned") {
+      if (!intakeUseCase) {
+        return fail(422, {
+          error: "returned_only_on_intake_approval",
+          detail: "send back for information applies to an AI use-case intake sign-off only",
+        });
+      }
+      if (!body.reason?.trim()) {
+        return fail(422, {
+          error: "return_reason_required",
+          detail: "sending a use case back for information requires a reason saying what is needed",
+        });
+      }
+    }
+    if (conditionInputs.length > 0) {
+      if (body.decision !== "approved" || !intakeUseCase) {
+        return fail(422, {
+          error: "conditions_only_on_intake_approval",
+          detail: "conditions are imposed only by APPROVING an AI use-case intake sign-off",
+        });
+      }
+      const ownerIds = [
+        ...new Set(conditionInputs.map((c) => c.ownerUserId).filter((x): x is string => !!x)),
+      ];
+      if (ownerIds.length > 0) {
+        const found = await db.select({ id: users.id }).from(users).where(inArray(users.id, ownerIds));
+        if (found.length !== ownerIds.length) {
+          return fail(422, {
+            error: "unknown_condition_owner",
+            detail: "every condition ownerUserId must name an existing user",
+          });
+        }
+      }
+    }
+    // Every kind below the intake sign-off decides approve-or-deny only;
+    // `returned` was refused above for anything that is not an intake gate.
+    const binaryDecision: "approved" | "denied" = body.decision === "approved" ? "approved" : "denied";
     // ADR-0090 — grant certification guards, refused BY NAME before anything
     // is written: `campaign_expired` (a past-due campaign's undecided items
     // stay undecided forever — expiry is a visible posture fact, never a
@@ -3293,7 +3348,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // a second conflict needs its own escalation). Sitting in the one decide
     // path means bulk and ChatOps inherit both.
     if (row.objectType === "sod_override") {
-      const refusal = await precheckSodOverrideDecision(db, row, deciderUserId, body.decision);
+      const refusal = await precheckSodOverrideDecision(db, row, deciderUserId, binaryDecision);
       if (refusal) return fail(refusal.status, refusal.body);
     }
     // ADR-0159 — `cannot_approve_own_remediation`, keyed on the DECIDER so the
@@ -3411,7 +3466,33 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         // rejected) HERE, inside the decision's own transaction — so
         // "approval registers the use case" commits or rolls back with the
         // decision, and inherits every separation-of-duties guard above.
+        // ADR-0168: a RETURNED intake sign-off parks the use case at
+        // needs_info BEFORE the sync (which then leaves it there).
+        if (body.decision === "returned" && intakeUseCase) {
+          await markUseCaseReturned(
+            tx as unknown as Db,
+            intakeUseCase.id,
+            updated.id,
+            body.reason ?? "",
+            deciderUserId,
+          );
+        }
         await syncUseCaseForInstance(tx as unknown as Db, updated.instanceId, deciderUserId);
+        // ADR-0168: conditions commit or roll back WITH the approval.
+        if (body.decision === "approved" && intakeUseCase && conditionInputs.length > 0) {
+          await imposeUseCaseConditions(
+            tx as unknown as Db,
+            intakeUseCase,
+            updated.id,
+            conditionInputs.map((c) => ({
+              text: c.text,
+              ownerUserId: c.ownerUserId,
+              dueAt: conditionDueInstant(c.dueAt),
+              blocking: c.blocking,
+            })),
+            deciderUserId,
+          );
+        }
         // ADR-0084: same discipline for a vendor whose ASSESSMENT this
         // instance governs — the terminal decision flips the vendor inside
         // the decision's own transaction. Approving records a sign-off on
@@ -3420,17 +3501,17 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       }
       // Orchestration escalations (§3): approve = another attempt, deny = abort.
       if (updated.objectType === "run") {
-        postCommit = await applyRunApprovalDecision(tx, updated, body.decision, deciderUserId, opts.dataKey);
+        postCommit = await applyRunApprovalDecision(tx, updated, binaryDecision, deciderUserId, opts.dataKey);
       }
       // Pillar 5 budget escalations + §9 context-conflict resolutions.
       if (updated.objectType === "project") {
-        await applyProjectApprovalDecision(tx as unknown as Db, updated, body.decision, deciderUserId);
+        await applyProjectApprovalDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);
       }
       // Pillar 3 §8.2 governed remediations: approve -> provider.remediate +
       // finding 'remediated'; deny -> 'accepted_risk'. Both audited. SoD guards
       // (named-approver, admin-override-reason, self-review-reason) apply above.
       if (updated.objectType === "infra_operation") {
-        await applyInfraApprovalDecision(tx as unknown as Db, updated, body.decision, deciderUserId);
+        await applyInfraApprovalDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);
       }
       // ADR-0045 MRM sign-offs: the risk acceptance is recorded on the model
       // card chain HERE, inside the one decide path, so it inherits every
@@ -3440,7 +3521,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         await applyModelCardApprovalDecision(
           tx as unknown as Db,
           updated,
-          body.decision,
+          binaryDecision,
           deciderUserId,
         );
       }
@@ -3457,7 +3538,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         postCommit = await applyTrainingJobApprovalDecision(
           tx as unknown as Db,
           updated,
-          body.decision,
+          binaryDecision,
           deciderUserId,
         );
       }
@@ -3470,7 +3551,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         await applyGrantCertificationDecision(
           tx as unknown as Db,
           updated,
-          body.decision,
+          binaryDecision,
           deciderUserId,
         );
       }
@@ -3480,13 +3561,13 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       // approvalId}`); denied = nothing minted, the request records the
       // denial. Never a second mint endpoint.
       if (updated.objectType === "sod_override") {
-        await applySodOverrideDecision(tx as unknown as Db, updated, body.decision, deciderUserId);
+        await applySodOverrideDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);
       }
       // ADR-0159 remediation: approved = the STORED kind+params execute HERE,
       // inside the decision's transaction; the monitor re-evaluates after
       // commit so a cleared condition resolves its alert straight away.
       if (updated.objectType === "remediation") {
-        const applied = await applyRemediationDecision(tx as unknown as Db, updated, body.decision, deciderUserId);
+        const applied = await applyRemediationDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);
         if (applied) {
           postCommit = async (d: Db) => {
             await runGovernanceMonitor(d, { actorUserId: deciderUserId });
@@ -3540,7 +3621,17 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
 
   app.post("/v1/approvals/:approvalId/decide", async (req, reply) => {
     const { approvalId } = z.object({ approvalId: z.string().uuid() }).parse(req.params);
-    const body = decideApprovalSchema.parse(req.body);
+    // ADR-0168: a malformed CONDITION is a 422 naming the field, like the
+    // other condition refusals; every other shape error keeps the generic
+    // 400 it always had (old bodies behave byte-identically).
+    const parsed = decideApprovalSchema.safeParse(req.body);
+    if (!parsed.success) {
+      if (parsed.error.issues.every((i) => i.path[0] === "conditions")) {
+        return reply.status(422).send({ error: "invalid_conditions", issues: parsed.error.issues });
+      }
+      throw parsed.error;
+    }
+    const body = parsed.data;
     const outcome = await decideOneApproval({
       approvalId,
       deciderUserId: req.authCtx.userId,
