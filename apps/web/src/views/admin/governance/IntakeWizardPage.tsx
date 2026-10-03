@@ -10,14 +10,14 @@
  * a retry after a failure resumes, applies edits to what was written, or is
  * refused with nothing sent.
  */
-import { cloneElement, useDeferredValue, useEffect, useId, useMemo, useRef, useState, type ReactElement, type ReactNode, type RefObject } from "react";
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { ApiError, api } from "../../../api/client";
 import { humanize, plural } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { useSession } from "../../../session/SessionContext";
-import { Badge, Button, Card, Field, Fieldset, Input, Select, Textarea } from "../../../ui/kit";
+import { Badge, Button, Card, Fieldset, Input, Select, Textarea } from "../../../ui/kit";
 import { useAction, useAgents } from "../adminKit";
 import v from "../../views.module.css";
 import k from "../../../ui/kit.module.css";
@@ -27,10 +27,22 @@ import { deriveDataSensitivity } from "./dataSensitivity";
 import { canonicalDigest, emptyCheckpoint, planSubmission, type SubmissionCheckpoint, type SubmissionInputs } from "./intakeCheckpoint";
 import { findSimilar, tokens } from "./similarUseCases";
 import { statusLabel, statusTone, type UseCaseRow } from "./registryModel";
+import {
+  AFFECTED_PERSON_OPTIONS,
+  BIOMETRIC_OPTIONS,
+  BooleanAnswerField,
+  DECISION_AUTONOMY_OPTIONS,
+  DEPLOYMENT_OPTIONS,
+  HintField,
+  PURPOSE_DOMAIN_OPTIONS,
+  StageHeading,
+  optionList,
+  type BooleanAnswer,
+} from "./intakeFields";
+import { IntakeResubmit } from "./IntakeResubmit";
 
 type Source = "rules" | "mock" | "model";
 type Decision = "accepted" | "rejected";
-type BooleanAnswer = "" | "yes" | "no";
 
 interface IntakeSuggestion {
   source: Source;
@@ -86,7 +98,17 @@ const DATA_CATEGORY_OPTIONS = ["personal", "sensitive-personal", "health", "paym
 /** a rule's lowercase clause as a sentence: capital first letter, one closing period */
 const sentence = (text: string) => `${text.charAt(0).toUpperCase()}${text.slice(1).replace(/\.$/, "")}.`;
 
+/**
+ * `?resubmit=<id>` opens the same screen in resubmit mode for a use case sent
+ * back for information (ADR-0168 amendment); otherwise it registers a new one.
+ */
 export default function IntakeWizardPage() {
+  const [params] = useSearchParams();
+  const resubmitId = params.get("resubmit");
+  return resubmitId ? <IntakeResubmit key={resubmitId} useCaseId={resubmitId} /> : <RegisterUseCase />;
+}
+
+function RegisterUseCase() {
   const [prefill] = useSearchParams();
   const fromShadowAi = prefill.get("source") === "shadow-ai";
   const [step, setStep] = useState(0);
@@ -458,36 +480,27 @@ export default function IntakeWizardPage() {
                   <div className={rg.grid2}>
                     <HintField label="Primary purpose domain" hint="The area the output is used in.">
                       <Select value={purposeDomain} onChange={(event) => setPurposeDomain(event.target.value)} required>
-                        <option value="">Choose a purpose domain</option>
-                        <option value="essential-services">Essential services</option>
-                        <option value="employment-hr">Employment / HR</option>
-                        <option value="education">Education</option>
-                        <option value="law-enforcement">Law enforcement</option>
-                        <option value="migration-border">Migration / border control</option>
-                        <option value="justice-democracy">Justice / democracy</option>
-                        <option value="critical-infrastructure">Critical infrastructure</option>
-                        <option value="general-business">General business</option>
-                        <option value="internal-productivity">Internal productivity</option>
+                        {optionList("Choose a purpose domain", PURPOSE_DOMAIN_OPTIONS)}
                       </Select>
                     </HintField>
                     <HintField label="People affected" hint="Whose decisions or data it touches.">
                       <Select value={affectedPerson} onChange={(event) => setAffectedPerson(event.target.value)} required>
-                        <option value="">Choose who is affected</option><option value="none">No natural persons</option><option value="employees">Employees</option><option value="customers">Customers</option><option value="general-public">General public</option><option value="vulnerable-groups">Vulnerable groups</option>
+                        {optionList("Choose who is affected", AFFECTED_PERSON_OPTIONS)}
                       </Select>
                     </HintField>
                     <HintField label="Decision autonomy" hint="How much a person decides before anything happens.">
                       <Select value={decisionAutonomy} onChange={(event) => setDecisionAutonomy(event.target.value)} required>
-                        <option value="">Choose decision autonomy</option><option value="narrow-procedural">Narrow procedural task</option><option value="informs-human">Informs a human</option><option value="human-reviews">Human reviews every recommendation</option><option value="fully-automated">Fully automated</option>
+                        {optionList("Choose decision autonomy", DECISION_AUTONOMY_OPTIONS)}
                       </Select>
                     </HintField>
                     <HintField label="Deployment audience" hint="Who uses it directly.">
                       <Select value={deployment} onChange={(event) => setDeployment(event.target.value)} required>
-                        <option value="">Choose deployment audience</option><option value="internal">Internal</option><option value="customer-facing">Customer-facing</option><option value="public">Public</option>
+                        {optionList("Choose deployment audience", DEPLOYMENT_OPTIONS)}
                       </Select>
                     </HintField>
                     <HintField label="Biometric use">
                       <Select value={biometricUse} onChange={(event) => setBiometricUse(event.target.value)} required>
-                        <option value="">Choose biometric use</option><option value="none">None</option><option value="verification">1:1 verification</option><option value="remote-identification">Remote identification</option>
+                        {optionList("Choose biometric use", BIOMETRIC_OPTIONS)}
                       </Select>
                     </HintField>
                   </div>
@@ -699,38 +712,6 @@ function SimilarUseCases(props: { name: string; description: string; excludeIds:
   );
 }
 
-/**
- * A labelled control with a short hint UNDER it (ADR-0168: hints, not popovers).
- * The hint is the control's description (aria-describedby), so a screen reader
- * reads it after the name; the label stays exactly the field's name.
- */
-function HintField(props: { label: string; hint?: ReactNode; optional?: boolean; visuallyHiddenLabel?: boolean; children: ReactElement<{ id?: string; "aria-describedby"?: string }> }) {
-  const id = useId();
-  const hintId = useId();
-  return (
-    <div className={rg.field}>
-      <label className={props.visuallyHiddenLabel ? rg.srOnly : rg.label} htmlFor={id}>
-        {props.label}
-        {props.optional ? <span className={rg.optional} aria-hidden> (optional)</span> : null}
-      </label>
-      {cloneElement(props.children, { id, "aria-describedby": props.hint ? hintId : undefined })}
-      {props.hint ? <p id={hintId} className={rg.hint}>{props.hint}</p> : null}
-    </div>
-  );
-}
-
-function BooleanAnswerField(props: { value: BooleanAnswer; onChange: (value: BooleanAnswer) => void; label: string }) {
-  return (
-    <Field label={props.label}>
-      <Select value={props.value} onChange={(event) => props.onChange(event.target.value as BooleanAnswer)} required>
-        <option value="">Choose yes or no</option>
-        <option value="yes">Yes</option>
-        <option value="no">No</option>
-      </Select>
-    </Field>
-  );
-}
-
 function MultiAnswerField(props: { label: string; values: string[]; options: readonly string[]; onChange: (values: string[]) => void }) {
   const toggle = (option: string, checked: boolean) => props.onChange(checked
     ? [...props.values, option]
@@ -778,11 +759,6 @@ function Suggestion(props: { title: string; body: string; source: Source; decisi
       </div>
     </section>
   );
-}
-
-/** a wizard stage's title: a real heading, focusable by script only, so a stage change can land focus on it */
-function StageHeading(props: { headingRef: RefObject<HTMLHeadingElement>; children: ReactNode }) {
-  return <h2 ref={props.headingRef} tabIndex={-1} className={s.stageHeading}>{props.children}</h2>;
 }
 
 function Summary({ value, label }: { value: string | number; label: string }) {
