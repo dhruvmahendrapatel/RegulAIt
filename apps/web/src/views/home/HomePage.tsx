@@ -295,7 +295,7 @@ function SetupCard() {
               <Badge tone="ok">done</Badge>
             ) : (
               <Link className={v.faint} to="/admin/setup" title="Complete this step in Getting started">
-                complete
+                Set up →
               </Link>
             )}
           </div>

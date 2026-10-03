@@ -292,9 +292,12 @@ export function registerOnboardingRoutes(
         /** what the DEPLOYMENT currently says, read from real objects */
         satisfied: live.satisfied,
         evidence: live.evidence,
-        /** true when the record and the reality disagree — the honest signal a
-         * resumed wizard needs, and the one a green checklist would hide */
-        drift: (row?.status === "done") !== live.satisfied && row?.status !== "skipped",
+        /** true when a step RECORDED done is no longer satisfied by the
+         * deployment — the honest signal a resumed wizard needs, and the one a
+         * green checklist would hide. A pending step the deployment already
+         * satisfies is not drift; it is a step nobody has ticked yet, and
+         * `satisfied` says so on its own. */
+        drift: row?.status === "done" && !live.satisfied,
         blockedBy: blockedBy(def.key, statuses),
       };
     });
