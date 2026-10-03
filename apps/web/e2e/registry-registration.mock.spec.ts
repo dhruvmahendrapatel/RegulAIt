@@ -98,6 +98,7 @@ async function mockApi(page: Page) {
     // (CI 37140831202)
     if (p === "/v1/approvals") return json(route, { approvals: [] });
     if (p === "/v1/usage-events") return json(route, { events: [] });
+    if (p === "/v1/runs") return json(route, { runs: [] });
     if (p === "/v1/setup/status") return json(route, { complete: true, doneCount: 0, totalCount: 0, steps: [] });
     return json(route, {});
   });

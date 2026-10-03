@@ -7,6 +7,7 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
+import { CardBoundary } from "../../ui/CardBoundary";
 import { api } from "../../api/client";
 import type {
   Approval,
@@ -43,22 +44,22 @@ export default function HomePage() {
         title={firstName ? `Welcome back, ${firstName}` : "Welcome back"}
       />
       <div className={v.stack}>
-        {auth?.isAdmin && <OrientationCard />}
-        {auth?.isAdmin && <SuiteLauncher />}
-        {auth?.isAdmin && <SetupCard />}
-        {auth?.isAdmin && <TrustSnapshotCard />}
-        {auth?.isAdmin && <GovernanceAlertsSnapshot />}
+        {auth?.isAdmin && <CardBoundary title="Governance at a glance"><OrientationCard /></CardBoundary>}
+        {auth?.isAdmin && <CardBoundary title="Products"><SuiteLauncher /></CardBoundary>}
+        {auth?.isAdmin && <CardBoundary title="Setup"><SetupCard /></CardBoundary>}
+        {auth?.isAdmin && <CardBoundary title="Trust snapshot"><TrustSnapshotCard /></CardBoundary>}
+        {auth?.isAdmin && <CardBoundary title="Governance alerts"><GovernanceAlertsSnapshot /></CardBoundary>}
         {/* an admin already sees pending decisions and attributed spend in the
             at-a-glance card above; the cards would state them a second time */}
         {!auth?.isAdmin && (
           <div className={v.grid2}>
-            <ApprovalsCard />
-            <SpendCard />
+            <CardBoundary title="Approvals"><ApprovalsCard /></CardBoundary>
+            <CardBoundary title="Spend"><SpendCard /></CardBoundary>
           </div>
         )}
         <div className={v.grid2}>
-          <RecentRunsCard />
-          {auth?.isAdmin ? <AuditCard /> : <WorkflowNudgeCard />}
+          <CardBoundary title="Recent runs"><RecentRunsCard /></CardBoundary>
+          <CardBoundary title={auth?.isAdmin ? "Audit" : "Workflows"}>{auth?.isAdmin ? <AuditCard /> : <WorkflowNudgeCard />}</CardBoundary>
         </div>
       </div>
     </>
@@ -197,7 +198,9 @@ function SuiteLauncher() {
   const stat = (suiteId: string): { value: string; label: string } | null => {
     switch (suiteId) {
       case "workspace":
-        return runs.data ? { value: String(runs.data.runs.length), label: "runs" } : null;
+        // a tile metric is decoration: a malformed or partial response shows no
+        // number rather than taking the whole home page down with it
+        return Array.isArray(runs.data?.runs) ? { value: String(runs.data.runs.length), label: "runs" } : null;
       case "approvals-audit":
         return approvals.data ? { value: String(pending), label: "waiting on a human" } : null;
       case "cost-optimization":
