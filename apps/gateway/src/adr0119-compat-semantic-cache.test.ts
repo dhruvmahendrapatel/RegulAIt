@@ -467,59 +467,163 @@ describe("the governance boundary the shared module exists to protect", () => {
   });
 });
 
+const here = path.dirname(fileURLToPath(import.meta.url));
+/** a gateway source as a TypeScript AST — the structural tests below read the code itself */
+const parse = (file: string) =>
+  ts.createSourceFile(file, readFileSync(path.join(here, file), "utf8"), ts.ScriptTarget.Latest, true);
+
 /**
  * AER-010 — THE RETAINED NEGATIVE CONTROL FOR THE MATRIX ABOVE.
  *
  * The prime-then-tighten matrix proves that a cached answer is re-judged by
  * the live gates. What it cannot prove on its own is that it would NOTICE if
  * the serve crept back above those gates: every one of its cases is a
- * refusal-shaped assertion, and a refactor that returned the hit early would
- * turn six passing tests into six failing ones only if someone ran them. These
- * two tests pin the SHAPE that makes the matrix meaningful, straight from the
- * source, so the ordering is a property of the suite rather than of a commit
- * message:
+ * refusal-shaped assertion, it drives the compat surface only, and a refactor
+ * that returned the hit early would turn its cases red only if someone ran
+ * them. These tests pin the ORDERING that makes the matrix meaningful,
+ * straight from the source — and they pin it by REFERENCE, not by spelling.
  *
- *  1. inside `dispatchAttempt` (the one governed-dispatch core, ADR-0066 §4),
- *     the `if (args.cachedResponse)` serve is a top-level statement that sits
- *     BELOW every gate the matrix tightens — virtual-key budget, MRM,
- *     attribution, use-case approval, project budget, input PII and the input
- *     guardrail phase;
- *  2. at BOTH lookup sites (compat and native invoke) the row that
- *     `lookupSemanticCache` returns is handed to `executeGovernedDispatch` as
- *     `cachedResponse` before any byte of it is read, and only the core's
- *     adjudicated `governed.result.outputText` reaches the wire.
+ * "Reads the candidate" means any way the dispatch args can hand
+ * `cachedResponse` to code: the field under any spelling
+ * (`args.cachedResponse`, `args?.cachedResponse`, `args["cachedResponse"]`,
+ * `{ cachedResponse } = args`, and therefore any alias made from those), or
+ * `args` escaping whole — spread, aliased, rest-destructured, read through
+ * `arguments`, or passed to a function — unless it is passed to a function
+ * declared in the same file that, by this same rule, never reads it.
  *
- * Mutation control (run, not retained): an early
- * `if (args.cachedResponse) return {...}` planted above the virtual-key gate
- * turns test 1 red, and replacing the compat site's governed call with a
- * direct serve turns test 2 red — each together with all six matrix cases.
+ *  1. inside `dispatchAttempt` (the one governed-dispatch core, ADR-0066 §4)
+ *     the first top-level statement that reads the candidate comes AFTER every
+ *     gate the matrix tightens — after each gate's input-phase call AND after
+ *     every `if (…verdict…) return { ok: false … }` refusal on that gate's
+ *     verdict. The gates: virtual-key budget, MRM, attribution, use-case
+ *     approval, project budget, input PII and the input guardrail phase;
+ *  2. the two wrappers above the core (`executeGovernedDispatch`,
+ *     `dispatchOnce`) read nothing of the candidate before they call down a
+ *     layer;
+ *  3. at BOTH lookup sites (compat and native invoke), between the
+ *     `lookupSemanticCache` result and the `executeGovernedDispatch` call that
+ *     carries it, the hit is referenced only by its `if (hit)` test and by the
+ *     `cachedResponse: hit` argument; the very next statement refuses on the
+ *     verdict; and nothing after it reads the hit's text — only the core's
+ *     adjudicated copy reaches the wire.
+ *
+ * Mutation control (run, not retained; commands and counts are in the commit
+ * message): an aliased serve, a compound-guard serve and a helper serve
+ * planted above the virtual-key gate; MRM's refusal moved below the serve with
+ * its call left above it; an early serve in `dispatchOnce`; and a
+ * `hit?.outputText` serve above `if (hit)` at each lookup site. Every one
+ * turns this block red. Every one passed the spelling-based tests this block
+ * replaced. What this block does NOT judge is a serve-on-deny AFTER the core
+ * has ruled — that is not an ordering question, it is the matrix's: planted in
+ * `dispatchOnce` after its `dispatchAttempt` call, it leaves this block green
+ * and turns the six matrix cases red.
  */
 describe("AER-010 — the cached serve cannot move above the shared dispatch gates", () => {
-  const here = path.dirname(fileURLToPath(import.meta.url));
-  const parse = (file: string) =>
-    ts.createSourceFile(file, readFileSync(path.join(here, file), "utf8"), ts.ScriptTarget.Latest, true);
-  /** every identifier called anywhere inside `node` */
-  const callsIn = (node: ts.Node): Set<string> => {
-    const names = new Set<string>();
-    const visit = (n: ts.Node) => {
-      if (ts.isCallExpression(n) && ts.isIdentifier(n.expression)) names.add(n.expression.text);
-      ts.forEachChild(n, visit);
+  const CACHE_FIELD = "cachedResponse";
+
+  /** visit every node under `root` that runs — a type annotation is not a read */
+  const walk = (root: ts.Node, visit: (n: ts.Node) => void) => {
+    const go = (n: ts.Node) => {
+      if (ts.isTypeNode(n)) return;
+      visit(n);
+      ts.forEachChild(n, go);
     };
-    visit(node);
-    return names;
+    go(root);
   };
-  /** every `if (<text>)` statement anywhere in the tree, in source order */
-  const ifsTesting = (root: ts.Node, text: string): ts.IfStatement[] => {
-    const found: ts.IfStatement[] = [];
-    const visit = (n: ts.Node) => {
-      if (ts.isIfStatement(n) && n.expression.getText() === text) found.push(n);
-      ts.forEachChild(n, visit);
-    };
-    visit(root);
+  const where = (n: ts.Node) => {
+    const sf = n.getSourceFile();
+    const line = sf.getLineAndCharacterOfPosition(n.getStart()).line + 1;
+    return `${path.basename(sf.fileName)}:${line} \`${n.getText().replace(/\s+/g, " ").slice(0, 80)}\``;
+  };
+  const topLevelFn = (sf: ts.SourceFile, name: string) =>
+    sf.statements.find((s): s is ts.FunctionDeclaration => ts.isFunctionDeclaration(s) && s.name?.text === name);
+  const fn = (sf: ts.SourceFile, name: string): ts.FunctionDeclaration & { body: ts.Block } => {
+    const f = topLevelFn(sf, name);
+    expect(f?.body, `${path.basename(sf.fileName)} must declare ${name}`).toBeDefined();
+    return f as ts.FunctionDeclaration & { body: ts.Block };
+  };
+  /** whatever the function calls its GovernedDispatchArgs parameter */
+  const argsParam = (f: ts.FunctionDeclaration) => {
+    const p = f.parameters.find((q) => q.type?.getText() === "GovernedDispatchArgs");
+    expect(p !== undefined && ts.isIdentifier(p.name), `${f.name?.text} must take a GovernedDispatchArgs parameter`)
+      .toBe(true);
+    return (p!.name as ts.Identifier).text;
+  };
+  const callsTo = (root: ts.Node, name: string): ts.CallExpression[] => {
+    const out: ts.CallExpression[] = [];
+    walk(root, (n) => {
+      if (ts.isCallExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === name) out.push(n);
+    });
+    return out;
+  };
+  const contains = (outer: ts.Node, inner: ts.Node) => outer.getStart() <= inner.getStart() && inner.end <= outer.end;
+  const mentions = (root: ts.Node, name: string) => {
+    let found = false;
+    walk(root, (n) => {
+      if (ts.isIdentifier(n) && n.text === name) found = true;
+    });
     return found;
   };
+  /** `return …` statements under `root`, not counting nested functions */
+  const returnsUnder = (root: ts.Node): ts.ReturnStatement[] => {
+    const out: ts.ReturnStatement[] = [];
+    const go = (n: ts.Node) => {
+      if (n !== root && ts.isFunctionLike(n)) return;
+      if (ts.isReturnStatement(n)) out.push(n);
+      ts.forEachChild(n, go);
+    };
+    go(root);
+    return out;
+  };
+  const isRefusalReturn = (r: ts.ReturnStatement) =>
+    !!r.expression &&
+    ts.isObjectLiteralExpression(r.expression) &&
+    r.expression.properties.some(
+      (p) => ts.isPropertyAssignment(p) && p.name.getText() === "ok" && p.initializer.kind === ts.SyntaxKind.FalseKeyword,
+    );
 
-  it("in the dispatch core, the cached serve is a top-level statement below every gate the matrix tightens", () => {
+  /** every node under `root` through which `param` hands the candidate to code (see the block comment) */
+  const cacheReads = (
+    sf: ts.SourceFile,
+    root: ts.Node,
+    param: string,
+    memo = new Map<string, boolean>(),
+  ): ts.Node[] => {
+    const reads: ts.Node[] = [];
+    walk(root, (n) => {
+      if ((ts.isIdentifier(n) || ts.isStringLiteralLike(n)) && n.text === CACHE_FIELD) return void reads.push(n);
+      if (ts.isIdentifier(n) && n.text === "arguments") return void reads.push(n);
+      if (!ts.isIdentifier(n) || n.text !== param) return;
+      const parent = n.parent;
+      // the parameter's own declaration is not a use of it
+      if (ts.isParameter(parent) && parent.name === n) return;
+      // `args.x` / `args["x"]`: the field's name is judged on its own above
+      if (ts.isPropertyAccessExpression(parent) && parent.expression === n) return;
+      if (ts.isElementAccessExpression(parent) && parent.expression === n && ts.isStringLiteralLike(parent.argumentExpression)) return;
+      // `const { a, b } = args` names each field it takes; a rest element takes them all
+      if (
+        ts.isVariableDeclaration(parent) && parent.initializer === n && ts.isObjectBindingPattern(parent.name) &&
+        parent.name.elements.every((e) => !e.dotDotDotToken && !(e.propertyName && ts.isComputedPropertyName(e.propertyName)))
+      ) return;
+      // passed whole to a function declared in this file: follow it, by the same rule
+      if (ts.isCallExpression(parent) && ts.isIdentifier(parent.expression) && parent.arguments.some((a) => a === n)) {
+        const callee = topLevelFn(sf, parent.expression.text);
+        const p = callee?.parameters[parent.arguments.findIndex((a) => a === n)];
+        if (callee?.body && p && ts.isIdentifier(p.name)) {
+          const key = `${parent.expression.text}#${p.name.text}`;
+          if (!memo.has(key)) {
+            memo.set(key, false); // a cycle adds nothing new
+            memo.set(key, cacheReads(sf, callee.body, p.name.text, memo).length > 0);
+          }
+          if (!memo.get(key)) return;
+        }
+      }
+      reads.push(n);
+    });
+    return reads;
+  };
+
+  it("in the dispatch core, nothing reads the candidate until every gate the matrix tightens has been called and has had its chance to refuse", () => {
     // gate function -> the refusal the matrix asserts for it
     const GATES: Record<string, string> = {
       virtualKeyBudgetRefusal: "virtual_key_budget_exhausted",
@@ -530,64 +634,170 @@ describe("AER-010 — the cached serve cannot move above the shared dispatch gat
       enforcePII: "pii_blocked (input phase)",
       runGuardrails: "guardrail_blocked (input phase)",
     };
-    const source = parse("agents-connectors.ts");
-    const core = source.statements.find(
-      (s): s is ts.FunctionDeclaration => ts.isFunctionDeclaration(s) && s.name?.text === "dispatchAttempt",
-    );
-    expect(core?.body, "agents-connectors.ts must declare the dispatchAttempt core").toBeDefined();
-    const statements = core!.body!.statements;
-    // the FIRST top-level serve: an early one planted above the gates is the
-    // one this must see
-    const serveIdx = statements.findIndex(
-      (s) => ts.isIfStatement(s) && s.expression.getText() === "args.cachedResponse",
-    );
-    expect(serveIdx, "dispatchAttempt must serve args.cachedResponse in a top-level if").toBeGreaterThanOrEqual(0);
+    const sf = parse("agents-connectors.ts");
+    const core = fn(sf, "dispatchAttempt");
+    const top = core.body.statements;
+    const topIndex = (n: ts.Node) => top.findIndex((s) => contains(s, n));
+    const reads = cacheReads(sf, core.body, argsParam(core));
+    // not vacuous: a core that never read the candidate would have a dead cache
+    expect(reads.length, "dispatchAttempt must read the cached candidate somewhere").toBeGreaterThan(0);
+    const firstRead = Math.min(...reads.map(topIndex));
+    const firstReadAt = where(top[firstRead]!);
+    // `enforcePII` / `runGuardrails` run AGAIN on the cached text (and on a live
+    // answer) in their OUTPUT phase; only the input phase is a gate on the ask
+    const isOutputPhase = (c: ts.CallExpression) =>
+      c.arguments.some(
+        (a) =>
+          (ts.isStringLiteralLike(a) && a.text === "output") ||
+          (ts.isObjectLiteralExpression(a) && a.properties.some((p) => p.name?.getText() === "output")),
+      );
     for (const [gate, refusal] of Object.entries(GATES)) {
-      // `enforcePII` and `runGuardrails` are called AGAIN inside the serve (the
-      // output phase on the cached text), so "first statement that calls it"
-      // is the serve itself whenever the serve has moved above the input gate.
-      const gateIdx = statements.findIndex((s) => callsIn(s).has(gate));
-      expect(gateIdx, `${gate} (${refusal}) must be reachable from a top-level statement of dispatchAttempt`)
-        .toBeGreaterThanOrEqual(0);
-      expect(gateIdx, `${gate} (${refusal}) must run before the cached serve`).toBeLessThan(serveIdx);
+      const calls = callsTo(core.body, gate).filter((c) => !isOutputPhase(c));
+      expect(calls.length, `${gate} (${refusal}) must be called in dispatchAttempt`).toBeGreaterThan(0);
+      for (const call of calls) {
+        expect(topIndex(call), `${gate} at ${where(call)} must run before the candidate is first read, at ${firstReadAt}`)
+          .toBeLessThan(firstRead);
+        // the name the gate's verdict is bound to: `const v = …gate(…)` or `v = gate(…)`
+        let verdict: string | undefined;
+        let stmt: ts.Node = call;
+        for (let n: ts.Node = call.parent; !ts.isBlock(n); n = n.parent) {
+          if (!verdict && ts.isVariableDeclaration(n) && ts.isIdentifier(n.name)) verdict = n.name.text;
+          if (!verdict && ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isIdentifier(n.left)) {
+            verdict = n.left.text;
+          }
+          stmt = n;
+        }
+        expect(verdict, `${where(call)}: ${gate}'s verdict must be bound to a name`).toBeDefined();
+        // every `if (…verdict…) { … return { ok: false … } }` after it, in the block it was bound in
+        const refusals: ts.IfStatement[] = [];
+        walk(stmt.parent, (n) => {
+          if (
+            ts.isIfStatement(n) && n.getStart() >= stmt.end && mentions(n.expression, verdict!) &&
+            returnsUnder(n.thenStatement).some(isRefusalReturn)
+          ) refusals.push(n);
+        });
+        expect(refusals.length, `${gate} (${refusal}): an \`if (…${verdict}…) return { ok: false, … }\` must follow ${where(call)}`)
+          .toBeGreaterThan(0);
+        for (const r of refusals) {
+          expect(topIndex(r), `${gate}'s refusal at ${where(r)} must come before the candidate is first read, at ${firstReadAt}`)
+            .toBeLessThan(firstRead);
+        }
+      }
     }
   });
 
-  it("both lookup sites hand the hit to executeGovernedDispatch before a byte of it is read", () => {
-    for (const file of ["compat-core.ts", "agents-connectors.ts"]) {
-      const serves = ifsTesting(parse(file), "hit");
-      expect(serves.length, `${file}: the lookupSemanticCache site must branch on \`if (hit)\``).toBe(1);
-      const branch = serves[0]!.thenStatement;
-      expect(ts.isBlock(branch), `${file}: the hit branch must be a block`).toBe(true);
-      const [first, second] = (branch as ts.Block).statements;
-      // 1st statement: `const governed = await executeGovernedDispatch(db, …, { …, cachedResponse: hit })`
-      expect(first && ts.isVariableStatement(first), `${file}: the hit branch must open by calling the core`).toBe(true);
-      const decl = (first as ts.VariableStatement).declarationList.declarations[0]!;
-      expect(decl.name.getText(), `${file}: the core's verdict must be what the branch holds`).toBe("governed");
-      const init = decl.initializer;
-      expect(init && ts.isAwaitExpression(init) && ts.isCallExpression(init.expression), `${file}: must await the core`).toBe(true);
-      const call = (init as ts.AwaitExpression).expression as ts.CallExpression;
-      expect(call.expression.getText(), `${file}: the hit must go through executeGovernedDispatch`).toBe("executeGovernedDispatch");
-      const argsLiteral = call.arguments[call.arguments.length - 1];
-      expect(argsLiteral && ts.isObjectLiteralExpression(argsLiteral), `${file}: the core takes an args literal`).toBe(true);
-      const cached = (argsLiteral as ts.ObjectLiteralExpression).properties.find(
-        (p): p is ts.PropertyAssignment => ts.isPropertyAssignment(p) && p.name.getText() === "cachedResponse",
-      );
-      expect(cached?.initializer.getText(), `${file}: the hit must ride in as cachedResponse`).toBe("hit");
-      // 2nd statement: the verdict is honoured before anything else happens
-      expect(second && ts.isIfStatement(second) && second.expression.getText() === "!governed.ok",
-        `${file}: the statement after the core call must be \`if (!governed.ok)\``).toBe(true);
-      // and the cached TEXT is never read at the site — only the core's
-      // adjudicated copy is
-      const reads: string[] = [];
-      const visit = (n: ts.Node) => {
-        if (ts.isPropertyAccessExpression(n) && n.expression.getText() === "hit" && n.name.text === "outputText") {
-          reads.push(n.getText());
-        }
-        ts.forEachChild(n, visit);
+  it("the two wrappers above the core read nothing of the candidate before they call down a layer", () => {
+    const sf = parse("agents-connectors.ts");
+    for (const [outer, inner] of [["executeGovernedDispatch", "dispatchOnce"], ["dispatchOnce", "dispatchAttempt"]] as const) {
+      const f = fn(sf, outer);
+      const calls = callsTo(f.body, inner);
+      expect(calls.length, `${outer} must call ${inner}`).toBeGreaterThan(0);
+      const boundary = Math.min(...calls.map((c) => c.getStart()));
+      // a function declared inside the wrapper is hoisted: it can run before the
+      // boundary wherever it is written
+      const hoisted = (n: ts.Node) => {
+        for (let p = n.parent; p !== f; p = p.parent) if (ts.isFunctionDeclaration(p)) return true;
+        return false;
       };
-      visit(branch);
-      expect(reads, `${file}: the hit branch must not read hit.outputText`).toEqual([]);
+      const early = cacheReads(sf, f.body, argsParam(f)).filter((n) => n.getStart() < boundary || hoisted(n));
+      expect(early.map(where), `${outer} must not read the candidate before it calls ${inner}`).toEqual([]);
+    }
+  });
+
+  it("at both lookup sites the hit reaches the core untouched, and only the core's verdict reaches the wire", () => {
+    for (const file of ["compat-core.ts", "agents-connectors.ts"]) {
+      const sf = parse(file);
+      const lookups = callsTo(sf, "lookupSemanticCache");
+      expect(lookups.length, `${file} must look the cache up`).toBeGreaterThan(0);
+      for (const lookup of lookups) {
+        // `const hit = await lookupSemanticCache(…)`, whatever it is named
+        let d: ts.Node = lookup.parent;
+        while (ts.isAwaitExpression(d) || ts.isParenthesizedExpression(d)) d = d.parent;
+        expect(ts.isVariableDeclaration(d) && ts.isIdentifier(d.name), `${where(lookup)}: the hit must be bound to a name`)
+          .toBe(true);
+        const hitDecl = d as ts.VariableDeclaration;
+        const hit = (hitDecl.name as ts.Identifier).text;
+        // the function that owns the lookup (the compat call / the invoke route handler)
+        let owner: ts.Node = hitDecl;
+        while (!(ts.isFunctionDeclaration(owner) || ts.isFunctionExpression(owner) || ts.isArrowFunction(owner) ||
+          ts.isMethodDeclaration(owner))) owner = owner.parent;
+        // the block the hit is scoped to — a `hit` outside it is another variable
+        let scope: ts.Node = hitDecl;
+        while (!ts.isBlock(scope)) scope = scope.parent;
+        const refs: ts.Identifier[] = [];
+        walk(scope, (n) => {
+          if (!ts.isIdentifier(n) || n.text !== hit || n === hitDecl.name) return;
+          const p = n.parent;
+          // a property NAME that happens to be spelled `hit` is not the variable
+          if ((ts.isPropertyAccessExpression(p) && p.name === n) || (ts.isPropertyAssignment(p) && p.name === n)) return;
+          refs.push(n);
+        });
+
+        // exactly one `if (hit)` in the owning function (not the whole file)
+        const tests: ts.IfStatement[] = [];
+        walk(owner, (n) => {
+          if (ts.isIfStatement(n) && ts.isIdentifier(n.expression) && n.expression.text === hit) tests.push(n);
+        });
+        expect(tests.length, `${where(hitDecl)}: its function must branch on \`if (${hit})\` exactly once`).toBe(1);
+        const branch = tests[0]!;
+
+        // the one core call that carries the hit, inside that branch
+        const handedOver = new Map<ts.CallExpression, ts.Node>();
+        for (const c of callsTo(owner, "executeGovernedDispatch")) {
+          for (const a of c.arguments) {
+            if (!ts.isObjectLiteralExpression(a)) continue;
+            for (const p of a.properties) {
+              if (ts.isPropertyAssignment(p) && p.name.getText() === CACHE_FIELD && ts.isIdentifier(p.initializer) &&
+                p.initializer.text === hit) handedOver.set(c, p.initializer);
+              if (ts.isShorthandPropertyAssignment(p) && p.name.text === CACHE_FIELD && hit === CACHE_FIELD) handedOver.set(c, p.name);
+            }
+          }
+        }
+        expect(handedOver.size, `${where(hitDecl)}: exactly one executeGovernedDispatch call must carry \`${CACHE_FIELD}: ${hit}\``)
+          .toBe(1);
+        const [core, handed] = [...handedOver][0]!;
+        expect(contains(branch.thenStatement, core), `${where(core)} must sit inside \`if (${hit})\``).toBe(true);
+
+        // BEFORE the core has ruled: the test and the hand-over, nothing else
+        const early = refs.filter((r) => r.getStart() < core.end && r !== branch.expression && r !== handed);
+        expect(
+          early.map((r) => where(r.parent)),
+          `${file}: between the lookup and the core call, \`${hit}\` may only be tested by \`if (${hit})\` and handed over as \`${CACHE_FIELD}: ${hit}\``,
+        ).toEqual([]);
+
+        // the very next statement refuses on the core's verdict
+        let v: ts.Node = core.parent;
+        while (ts.isAwaitExpression(v) || ts.isParenthesizedExpression(v)) v = v.parent;
+        expect(ts.isVariableDeclaration(v) && ts.isIdentifier(v.name), `${where(core)}: the core's verdict must be bound to a name`)
+          .toBe(true);
+        const verdict = ((v as ts.VariableDeclaration).name as ts.Identifier).text;
+        const verdictStmt = v.parent.parent as ts.Statement;
+        const siblings = (verdictStmt.parent as ts.Block).statements;
+        const next = siblings[siblings.indexOf(verdictStmt) + 1];
+        const notOk = (e: ts.Expression): boolean => {
+          const isOk = (x: ts.Expression) =>
+            ts.isPropertyAccessExpression(x) && x.name.text === "ok" && ts.isIdentifier(x.expression) && x.expression.text === verdict;
+          if (ts.isParenthesizedExpression(e)) return notOk(e.expression);
+          if (ts.isPrefixUnaryExpression(e) && e.operator === ts.SyntaxKind.ExclamationToken) return isOk(e.operand);
+          return ts.isBinaryExpression(e) && isOk(e.left) && e.right.kind === ts.SyntaxKind.FalseKeyword &&
+            (e.operatorToken.kind === ts.SyntaxKind.EqualsEqualsEqualsToken || e.operatorToken.kind === ts.SyntaxKind.EqualsEqualsToken);
+        };
+        expect(
+          next !== undefined && ts.isIfStatement(next) && notOk(next.expression) && returnsUnder(next.thenStatement).length > 0,
+          `${where(core)}: the statement after the core call must return when \`${verdict}\` is not ok`,
+        ).toBe(true);
+
+        // AFTER the verdict the row's metadata may price the saving, and a plain
+        // helper may take the row whole to do it; its TEXT must not be read
+        for (const r of refs.filter((x) => x.getStart() >= core.end)) {
+          const p = r.parent;
+          const allowed =
+            (ts.isPropertyAccessExpression(p) && p.expression === r && p.name.text !== "outputText") ||
+            (ts.isCallExpression(p) && ts.isIdentifier(p.expression) && p.arguments.some((a) => a === r));
+          expect(allowed, `${where(p)}: after the verdict only the core's adjudicated output may be served — not \`${hit}\`'s text`)
+            .toBe(true);
+        }
+      }
     }
   });
 });
