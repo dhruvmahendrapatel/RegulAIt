@@ -53,7 +53,7 @@ import type { PiiCategory } from "./pii.js";
 
 /** Bump when a vector is added, removed or changed. The measured score is
  * meaningless without saying which set it was measured over. */
-export const PII_VECTOR_SET_VERSION = "2026-09-19.2";
+export const PII_VECTOR_SET_VERSION = "2026-10-03.1";
 
 export type VectorSource = "published" | "constructed" | "reserved";
 
@@ -271,6 +271,33 @@ export const NEGATIVE_VECTORS: readonly PiiVector[] = [
     note: "a comma-grouped currency amount; the commas are not a CPF separator, and the digit run either side is the wrong length." },
   { id: "n.git_sha", category: "nino", text: "sha 1234567890abcdef", source: "constructed",
     note: "a short git object id — hexadecimal, so the letters a-f break the digit-run schemes and the shape is not a NINO." },
+
+  // --- BATCH 3: every-digit separators, one per published layout -----------
+  // Each is a CHECKSUM-VALID identifier (its bare form is a positive above)
+  // written with the layout's own separator after EVERY digit — a print form
+  // no issuing authority uses, and the shape a dotted version, a serial or a
+  // spaced reference carries. The pre-AER-006 grammar let one optional
+  // separator follow every digit and fired on all nine of these. The grammar
+  // is now the issuing authority's grouping and nothing wider, so these must
+  // stay silent; being checksum-valid, they fail for the grammar alone.
+  { id: "n.aadhaar.every_digit_spaced", category: "aadhaar", text: "2 3 4 5 6 7 8 9 0 1 2 4", source: "constructed",
+    note: "p.aadhaar.bare with a space after every digit. Aadhaar's spaced layout is 4-4-4 and nothing else." },
+  { id: "n.aadhaar.every_digit_hyphenated", category: "aadhaar", text: "2-3-4-5-6-7-8-9-0-1-2-4", source: "constructed",
+    note: "p.aadhaar.bare with a hyphen after every digit. Aadhaar's hyphenated layout is 4-4-4 and nothing else." },
+  { id: "n.cpf.every_digit_dotted", category: "cpf", text: "1.1.1.4.4.4.7.7.7.3.5", source: "published",
+    note: "the published CPF example with a dot after every digit. CPF's layout is 000.000.000-00 and nothing else." },
+  { id: "n.bsn.every_digit_dotted", category: "bsn", text: "1.1.1.2.2.2.3.3.3", source: "published",
+    note: "the published BSN example with a dot after every digit. BSN's dotted layout is 3-3-3 and nothing else." },
+  { id: "n.sin.every_digit_spaced", category: "sin", text: "4 3 5 5 6 7 9 8 7", source: "constructed",
+    note: "p.sin.spaced with a space after every digit. SIN's spaced layout is 3-3-3 and nothing else." },
+  { id: "n.sin.every_digit_hyphenated", category: "sin", text: "1-3-5-5-6-7-9-8-0", source: "constructed",
+    note: "p.sin.hyphenated with a hyphen after every digit. SIN's hyphenated layout is 3-3-3 and nothing else." },
+  { id: "n.tfn.every_digit_spaced", category: "tfn", text: "1 2 3 4 5 6 7 8 2", source: "published",
+    note: "the ATO example with a space after every digit. TFN's spaced layout is 3-3-3 and nothing else." },
+  { id: "n.steuerid.every_digit_spaced", category: "steuer_id", text: "8 6 0 9 5 7 4 2 7 1 9", source: "published",
+    note: "the BZSt example with a space after every digit. The IdNr's spaced layout is 2-3-3-3 and nothing else." },
+  { id: "n.nir.every_digit_spaced", category: "nir", text: "1 8 5 0 3 6 9 1 2 3 0 4 5 3 2", source: "constructed",
+    note: "p.nir.bare with a space after every digit. The NIR's spaced layout is 1-2-2-2-3-3-2 and nothing else." },
 ];
 
 /**

@@ -127,12 +127,13 @@ describe(`ADR-0117 PII conformance — vector set ${PII_VECTOR_SET_VERSION}`, ()
       const negSilent = NEGATIVE_VECTORS.filter((v) => measure(v).fired === 0).length;
       const missesStillMissed = DOCUMENTED_MISSES.filter((v) => measure(v).fired === 0).length;
 
-      // Measured 2026-09-19 against vector set 2026-09-19.2.
+      // Measured 2026-10-03 against vector set 2026-10-03.1 (the 2026-09-19.2
+      // set plus the nine every-digit separator negatives of AER-006).
       expect(POSITIVE_VECTORS.length).toBe(36);
-      expect(NEGATIVE_VECTORS.length).toBe(39);
+      expect(NEGATIVE_VECTORS.length).toBe(48);
       expect(DOCUMENTED_MISSES.length).toBe(9);
       expect(posDetected).toBe(36);
-      expect(negSilent).toBe(39);
+      expect(negSilent).toBe(48);
       expect(missesStillMissed).toBe(9);
     });
   });
