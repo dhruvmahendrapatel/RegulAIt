@@ -29,8 +29,9 @@
  *
  * Rows: deploy.deploy, deploy.rollback (workflow deployment + rollback stages);
  * git.create_branch, git.open_pull_request, git.merge_pull_request
- * (git_operation stages); infra.remediate via BOTH the approval-decision site
- * and the scan auto-remediation site; pm.create_work_item, pm.update_fields
+ * (git_operation stages); infra.remediate via ALL THREE sites — the finding
+ * approval-decision, the scan auto-remediation and the cert_rotate operator
+ * action-decision; pm.create_work_item, pm.update_fields
  * (run sync: create, then repair-in-place), pm.transition_state (node status
  * mirror on run events), pm.add_comment (decision mirror).
  */
@@ -416,7 +417,7 @@ describe("AER-018 — the barrier matrix: flip the dial while the route waits on
     expect(inst.context.mergeSha).toBe("sha-merge-1");
   });
 
-  it("infra.remediate — the approval-decision site and the scan auto-remediation site", async () => {
+  it("infra.remediate — the approval-decision site, the scan auto-remediation site and the cert_rotate action-decision site", async () => {
     // (a) a proposed remediation approved by a human, inside the decide transaction
     const cp = await post("/v1/infra/resources", { name: `bm-control-plane-${RUN}`, kind: "control_plane" });
     expect(cp.statusCode, cp.body).toBe(201);
@@ -453,6 +454,45 @@ describe("AER-018 — the barrier matrix: flip the dial while the route waits on
     const resumed = await admitted("infra.remediate", () => post("/v1/infra/scan", { resourceId: rtId }));
     expect(resumed.statusCode, resumed.body).toBe(200);
     expect(resumed.json().autoRemediated).toBe(1);
+
+    // (c) the THIRD site: an operator verb (cert_rotate) approved through the
+    // ADR-0017 action-decision hook inside the decide transaction
+    const certRes = await post("/v1/infra/resources", { name: `bm-cert-${RUN}`, kind: "cert", config: { daysUntilExpiry: 7 } });
+    expect(certRes.statusCode, certRes.body).toBe(201);
+    expect((await post("/v1/infra/scan", { resourceId: certRes.json().id })).statusCode).toBe(200);
+    const certOf = async () =>
+      ((await get("/v1/infra/certs")).json().certs as Array<{ id: string; resourceName: string; status: string; serial: string | null }>)
+        .find((c) => c.resourceName === `bm-cert-${RUN}`)!;
+    const certId = (await certOf()).id;
+    const rotationsOf = async () =>
+      (await get(`/v1/infra/certs/${certId}/rotations`)).json().rotations as Array<{ approvalId: string | null; status: string; reason: string | null }>;
+    const proposeRotation = async () => {
+      const r = await post(`/v1/infra/certs/${certId}/rotate`, { approverUserId: anaId });
+      expect(r.statusCode, r.body).toBe(202);
+      return r.json().approvalId as string;
+    };
+    const originalSerial = (await certOf()).serial;
+    for (const mode of MODES) {
+      const approval = await proposeRotation();
+      const res = await refusedAtBarrier("infra.remediate", mode, () => decide(approval));
+      // UNLIKE (a): the O6 contract keeps a cert_rotate provider throw inside
+      // the decide (a recorded terminal state, not an aborted transaction), so
+      // the barrier's refusal lands as a FAILED attempt — decided, re-proposable,
+      // the refusal named as the reason, and the cert untouched at the provider
+      expect(res.statusCode, res.body).toBe(200);
+      const cert = await certOf();
+      expect(cert.status).toBe("rotation_failed");
+      expect(cert.serial).toBe(originalSerial);
+      const attempt = (await rotationsOf()).find((r) => r.approvalId === approval);
+      expect(attempt?.status).toBe("failed");
+      expect(attempt?.reason).toContain(`refused while execution mode is '${mode}'`);
+    }
+    const rotateApproval = await proposeRotation();
+    const rotated = await admitted("infra.remediate", () => decide(rotateApproval));
+    expect(rotated.statusCode, rotated.body).toBe(200);
+    expect((await certOf()).status).toBe("rotated");
+    expect((await certOf()).serial).not.toBe(originalSerial);
+    expect((await rotationsOf()).find((r) => r.approvalId === rotateApproval)?.status).toBe("rotated");
   });
 
   it("pm.create_work_item, pm.update_fields, pm.transition_state, pm.add_comment (sync, repair, status mirror, decision mirror)", async () => {
