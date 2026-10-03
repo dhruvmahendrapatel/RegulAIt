@@ -595,7 +595,7 @@ export function registerInventoryRoutes(app: FastifyInstance, db: Db): void {
               ? { note: "retired — dispatch refuses with 409 agent_retired; grants and history remain readable" }
               : {}),
             ...(a.lifecycleStatus === "suspended"
-              ? { note: "suspended — dispatch refuses with 409 agent_suspended until the steward returns it to service" }
+              ? { note: "suspended — dispatch refuses with 409 agent_suspended until an admin returns it to service" }
               : {}),
             ...(a.lifecycleStatus === "proposed" || a.lifecycleStatus === "under_review"
               ? { warning: `${a.lifecycleStatus.replace("_", " ")} — dispatch still allowed; a stewardship state, not a control` }
@@ -908,7 +908,7 @@ export function registerInventoryRoutes(app: FastifyInstance, db: Db): void {
             ? { note: "retired — dispatch refuses with 409 agent_retired; grants and history remain readable" }
             : {}),
           ...(agent.lifecycleStatus === "suspended"
-            ? { note: "suspended — dispatch refuses with 409 agent_suspended until the steward returns it to service" }
+            ? { note: "suspended — dispatch refuses with 409 agent_suspended until an admin returns it to service" }
             : {}),
           ...(agent.lifecycleStatus === "proposed" || agent.lifecycleStatus === "under_review"
             ? { warning: `${agent.lifecycleStatus.replace("_", " ")} — dispatch still allowed; a stewardship state, not a control` }
