@@ -190,8 +190,11 @@
   background: var(--surface-1);
 }
 
+/* A rejected suggestion is set back, not faded: `opacity` dimmed its source
+   badge and its Reject button below AA contrast (AER-029). The dashed rule and
+   the raised ground carry the state; the "rejected" badge says it in words. */
 .suggestionRejected {
-  opacity: 0.68;
+  border-style: dashed;
   background: var(--surface-2);
 }
 
@@ -220,10 +223,15 @@
   gap: var(--s1);
 }
 
+/* Each option row is at least 24px tall: a native checkbox is 13px, and the
+   rows stacked at text height left under 24px of clear space around every box
+   (WCAG 2.2 target size, AER-029). The row itself is the click target — the
+   label toggles the box — so spacing, not a bigger box, is the fix. */
 .checkbox {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: var(--s1);
+  min-height: 24px;
   color: var(--text-dim);
   font-size: var(--text-sm);
 }
@@ -241,6 +249,14 @@
   background: var(--rg-signal-tint);
   color: var(--text-dim);
   font-size: var(--text-sm);
+}
+
+/* A link inside a callout sentence is underlined: Signal 700 against the
+   callout's label ink is 1.2:1, so colour alone could not tell "Open the
+   use-case workspace" from the words around it (AER-029). */
+.callout a {
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
 }
 
 .workspaceHeader {

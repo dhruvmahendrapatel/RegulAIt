@@ -143,6 +143,24 @@ export function Field(props: {
   );
 }
 
+/**
+ * A set of related controls (checkboxes, radios) under one caption.
+ *
+ * `<Field>` wrapping a column of checkboxes fell to its label-wrapping
+ * fallback, which is wrong for a group in two ways: a <label> names ONE
+ * control, so clicking the caption toggled the first box (never the group),
+ * and the option rows are labels themselves — a label inside a label, which
+ * is not HTML. A fieldset names the group; each option keeps its own name.
+ */
+export function Fieldset(props: { legend: string; children: ReactNode }) {
+  return (
+    <fieldset className={s.fieldset}>
+      <legend className={s.fieldLabel}>{props.legend}</legend>
+      {props.children}
+    </fieldset>
+  );
+}
+
 export const Input = forwardRef<HTMLInputElement, InputHTMLAttributes<HTMLInputElement>>(
   function Input({ className, ...rest }, ref) {
     return <input ref={ref} className={[s.input, className ?? ""].join(" ")} {...rest} />;

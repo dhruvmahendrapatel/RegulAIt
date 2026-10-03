@@ -4,7 +4,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { ApiError, api } from "../../../api/client";
 import { humanize } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, Field, Input, Select, Textarea } from "../../../ui/kit";
+import { Badge, Button, Card, Field, Fieldset, Input, Select, Textarea } from "../../../ui/kit";
 import { useAction, useAgents } from "../adminKit";
 import v from "../../views.module.css";
 import s from "./demoGovernance.module.css";
@@ -540,8 +540,10 @@ function MultiAnswerField(props: { label: string; values: string[]; options: rea
   const toggle = (option: string, checked: boolean) => props.onChange(checked
     ? [...props.values, option]
     : props.values.filter((value) => value !== option));
+  // a group of boxes is a fieldset, not a Field: the caption names the group
+  // and each option keeps its own name (AER-029)
   return (
-    <Field label={`${props.label} — select all that apply`}>
+    <Fieldset legend={`${props.label} — select all that apply`}>
       <div className={v.stackTight}>
         {props.options.map((option) => (
           <label className={s.checkbox} key={option}>
@@ -555,7 +557,7 @@ function MultiAnswerField(props: { label: string; values: string[]; options: rea
           </label>
         ))}
       </div>
-    </Field>
+    </Fieldset>
   );
 }
 
