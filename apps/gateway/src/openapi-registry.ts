@@ -648,6 +648,10 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   // ADR-0123 — the framework mapping. Internal like its siblings until the
   // use-cases surface as a whole is published.
   "GET /v1/use-cases/:useCaseId/frameworks": "internal",
+  // ADR-0171 — the intake wizard's drafts: a UI convenience, never published
+  "GET /v1/use-cases/draft": "internal",
+  "PUT /v1/use-cases/draft": "internal",
+  "DELETE /v1/use-cases/draft": "internal",
   // ADR-0124
   "GET /v1/execution": "internal",
   "PUT /v1/execution/mode": "internal",
@@ -1284,6 +1288,9 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/use-cases/:useCaseId/overview": "use-cases",
   "GET /v1/use-cases/:useCaseId": "use-cases",
   "GET /v1/use-cases/:useCaseId/frameworks": "use-cases",
+  "GET /v1/use-cases/draft": "use-cases",
+  "PUT /v1/use-cases/draft": "use-cases",
+  "DELETE /v1/use-cases/draft": "use-cases",
   "GET /v1/execution": "org-settings",
   "PUT /v1/execution/mode": "org-settings",
   "POST /v1/agents/:agentId/halt": "agents",

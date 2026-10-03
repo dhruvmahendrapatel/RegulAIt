@@ -169,6 +169,13 @@ export const NON_ADMIN_ROUTES = new Set([
   // looks like lost access. It exposes no secret and no other user's data.
   "GET /v1/execution",
   "PATCH /v1/use-cases/:useCaseId",
+  // ADR-0171 / AER-050: the intake wizard's own drafts. Any signed-in user
+  // keeps their OWN draft (the handler refuses a token with no user identity,
+  // never reads another user's draft, and allows a use-case scope only to
+  // someone who may edit that use case — owner or admin).
+  "GET /v1/use-cases/draft",
+  "PUT /v1/use-cases/draft",
+  "DELETE /v1/use-cases/draft",
   // ADR-0168: a condition's OWNER may mark it met without being an admin or
   // the use case's owner — the handler enforces owner / use-case owner / admin
   "POST /v1/use-cases/:useCaseId/conditions/:conditionId/met",

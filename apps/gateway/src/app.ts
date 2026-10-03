@@ -157,6 +157,7 @@ import { registerReportingRoutes } from "./reporting.js";
 import { registerPostureRoutes } from "./posture.js";
 import { registerTrustDashboardRoutes } from "./trust-dashboard.js";
 import { registerUseCaseOverviewRoutes } from "./use-case-overview.js";
+import { registerUseCaseDraftRoutes } from "./use-case-drafts.js";
 import { registerAgentCardRoutes } from "./agent-card.js";
 import { registerDependencyGraphRoutes } from "./dependency-graph.js";
 import { registerGovernanceMonitorRoutes } from "./governance-monitor.js";
@@ -365,6 +366,7 @@ import {
   precheckRiskAcceptance,
   registerUseCaseRoutes,
   syncUseCaseForInstance,
+  useCaseArtifactRefusal,
   useCaseForIntakeApproval,
 } from "./use-cases.js";
 // ADR-0168 amendment — the review policy (reviewer roles per tier, risk
@@ -4154,10 +4156,15 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       await syncUseCaseForInstance(d, instanceId, actorUserId);
       await syncVendorForInstance(d, instanceId, actorUserId);
     },
+    // ADR-0171 / AER-053: an intake questionnaire with an inconsistent
+    // "Not sure" answer is refused before it is stored
+    validateArtifact: useCaseArtifactRefusal,
   });
   // ADR-0077 — the cascade-annotated template gallery (admin-gated by default)
   registerTemplateGalleryRoutes(app, db);
   registerUseCaseRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0171 / AER-050 — the intake wizard's server-side drafts
+  registerUseCaseDraftRoutes(app, db);
   // ADR-0168 amendment — the review policy and the recertification sweep
   registerReviewPolicyRoutes(app, db);
   // demo task C3 — the use-case 360 read
