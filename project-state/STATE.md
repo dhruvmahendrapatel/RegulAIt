@@ -21,6 +21,13 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-10-03 (late evening) - Dependabot advisories cleared; stronger light-mode colour.** react-router-dom 7.18.4, vitest 4.1.11
+(every package now `vitest run --dir src`: v4 stopped excluding dist/), overrides for uuid (Azure SDK) and esbuild (drizzle-kit);
+`pnpm audit` clean. One order-dependent test fixed (rule-write-versioning, red/green with a planted leftover). ADR-0169 amended:
+pastel edge glows, muted/link inks one notch deeper (worst point 4.99:1). Full gate green on the combined tree (suite 3426,
+prepare 18/18, real 2/2, mocked 88/88, spa 39/39, review 4/4, brand-contract 15/15); pushed dd5a481 (merged the owner's
+feedback-file audit e96b654, which opens AER-050..055 — intake UX, all MEDIUM).
+
 **2026-10-03 (evening) - Owner-requested adversarial security review of the governance flow; ADR-0170 decided and built.**
 Three reviewers (authz, tenant isolation, lifecycle/gates). Tenant isolation N/A by design (ADR-0041). ADR-0170 records the
 separation-of-duties and lifecycle fixes (distinct decider per review, live role membership, maker-checker on before-go-live
