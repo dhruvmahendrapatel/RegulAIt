@@ -666,6 +666,9 @@ export interface UseCaseCondition {
   metAt: string | null;
   metByName: string | null;
   overdue: boolean;
+  /** whether the signed-in viewer may mark it met (the server's rule, computed
+   * for them; absent from an older gateway — treated as "no") */
+  canMarkMet?: boolean;
 }
 
 /** the fields GET /v1/use-cases/:id adds for the approval lifetime and its conditions */

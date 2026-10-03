@@ -80,6 +80,15 @@ async function mockApi(page: Page) {
       return json(route, { id: NEW_ID, instance: { id: "instance-new" } }, 201);
     }
     if (p === `/v1/use-cases/${useCases[1]!.id}`) return json(route, detail);
+    // the use case under review: nothing about it can change under its reviewers
+    if (p === `/v1/use-cases/${USE_CASE}`) {
+      return json(route, {
+        ...detail,
+        useCase: { ...useCases[0], intendedAgentIds: [AGENT], approvedAt: null, approvalExpired: false },
+        instance: { ...detail.instance, status: "blocked_on_approval", currentStageId: "signoff" },
+        conditions: [],
+      });
+    }
     if (p === "/v1/use-cases/intake/assist") return json(route, assist);
     if (p === "/v1/agents") return json(route, { agents: [{ id: AGENT, name: "Service assistant", provider: "mock", model: "mock-balanced" }] });
     if (p === "/v1/vendors") return json(route, { vendors: [] });
@@ -177,6 +186,17 @@ test.describe("ADR-0168: one registry, one way in", () => {
     await page.keyboard.press("Escape");
     await expect(drawer).toHaveCount(0);
     await expect(approved).toBeFocused();
+
+    // a use case under review: its intended agents are shown, locked — no edit is offered
+    await table.getByRole("link", { name: /^Credit-limit-increase assistant,/ }).click();
+    const reviewing = page.getByRole("dialog", { name: "Credit-limit-increase assistant" });
+    await expect(reviewing).toBeVisible();
+    await expect(reviewing.getByText(/1 intended agent recorded\. Locked while the use case is with its reviewers/)).toBeVisible();
+    await expect(reviewing.getByRole("button", { name: "Save intended agents" })).toHaveCount(0);
+    await expect(reviewing.getByLabel("Intended agents (ctrl/cmd-click to select several)")).toHaveCount(0);
+    await checkScreen(page, "Registry (preview of a use case under review)");
+    await page.keyboard.press("Escape");
+    await expect(reviewing).toHaveCount(0);
   });
 
   test("every way in leads to the intake wizard; the split menu also registers an agent", async ({ page }) => {

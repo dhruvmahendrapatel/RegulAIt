@@ -78,6 +78,11 @@ async function mockGateway(page: Page): Promise<Store> {
     if (useCase && method === "PATCH") {
       const row = store.useCases.find((item) => item.id === useCase[1]);
       if (!row) return json(route, { error: "not_found" }, 404);
+      // the gateway's lock: once a questionnaire is stored the use case is
+      // under review and nothing about it may change under the reviewers
+      if (store.artifacts.length > 0) {
+        return json(route, { error: "locked_under_review", detail: "this use case is with its reviewers, so it can't be changed until a reviewer sends it back for more information" }, 409);
+      }
       Object.assign(row, body);
       return json(route, row);
     }
@@ -183,8 +188,9 @@ test.describe("AER-046: an intake retry after edits never mixes old records with
     await failFirstAttempt(page, store);
     const mark = store.sent.length;
 
+    // the questionnaire is stored, so the use case is with its reviewers: the
+    // answers and the risks can still be brought up to date, its own fields not
     await backToDescribe(page);
-    await page.getByLabel("What will the system do?").fill("Edited: recommends credit-limit increases; a human decides every one.");
     await walkToReview(page, {
       risks: { [BIAS_TITLE]: "Edited bias text.", [INJECTION_TITLE]: "Edited injection text." },
       purpose: "Edited purpose answer.",
@@ -198,21 +204,15 @@ test.describe("AER-046: an intake retry after edits never mixes old records with
     expect(retry.filter((item) => item.path.endsWith("/advance"))).toEqual([]);
     expect(retry.filter((item) => item.path.endsWith("/controls"))).toEqual([]);
     expect(retry.map((item) => `${item.method} ${item.path}`)).toEqual([
-      `PATCH /v1/use-cases/${USE_CASE}`,
       `POST /v1/workflows/instances/instance-${USE_CASE}/artifacts`,
       "PATCH /v1/risks/risk-1",
       "POST /v1/risks",
     ]);
-    // the example fills its own business context, so only the purpose changed
-    expect(retry[0]!.body).toEqual({
-      description: "Edited: recommends credit-limit increases; a human decides every one.",
-    });
-    expect(retry[2]!.body).toEqual({ description: "Edited bias text." });
-    expect(retry[3]!.body).toMatchObject({ title: INJECTION_TITLE, description: "Edited injection text.", useCaseId: USE_CASE });
+    expect(retry[1]!.body).toEqual({ description: "Edited bias text." });
+    expect(retry[2]!.body).toMatchObject({ title: INJECTION_TITLE, description: "Edited injection text.", useCaseId: USE_CASE });
 
     // the state the gateway holds is entirely the edited inputs
     expect(store.useCases).toHaveLength(1);
-    expect(store.useCases[0]).toMatchObject({ description: "Edited: recommends credit-limit increases; a human decides every one." });
     expect(store.artifacts).toHaveLength(2); // a NEW questionnaire version over the stale one
     expect(store.artifacts.at(-1)).toContain("Edited purpose answer.");
     expect(store.artifacts.at(-1)).not.toContain("Draft answer 1\n");
@@ -220,6 +220,26 @@ test.describe("AER-046: an intake retry after edits never mixes old records with
       [BIAS_TITLE, "Edited bias text.", USE_CASE],
       [INJECTION_TITLE, "Edited injection text.", USE_CASE],
     ]);
+  });
+
+  test("a use case already with its reviewers is not edited by a retry: the refusal says why, with nothing sent", async ({ page }) => {
+    const store = await mockGateway(page);
+    await failFirstAttempt(page, store);
+    const before = JSON.parse(JSON.stringify({ useCases: store.useCases, artifacts: store.artifacts, risks: store.risks }));
+
+    await backToDescribe(page);
+    await page.getByLabel("What will the system do?").fill("Edited: recommends credit-limit increases; a human decides every one.");
+    await walkToReview(page);
+    const sentBeforeSubmit = store.sent.length;
+    await page.getByRole("button", { name: "Submit for human review" }).click();
+
+    const refusal = page.getByRole("main").getByRole("alert").filter({ hasText: "This retry was not sent" });
+    await expect(refusal).toBeVisible();
+    await expect(refusal).toContainText("the description changed after the use case went to its reviewers");
+    await expect(refusal.getByRole("button", { name: "Start over as a new use case" })).toBeVisible();
+    expect(store.sent.slice(sentBeforeSubmit)).toEqual([]);
+    expect({ useCases: store.useCases, artifacts: store.artifacts, risks: store.risks }).toEqual(before);
+    await expectNoAxeViolations(page, "Review (retry refused, under review)");
   });
 
   test("an edit the gateway cannot apply refuses the retry with nothing sent — all-old — and starting over is explicit", async ({ page }) => {

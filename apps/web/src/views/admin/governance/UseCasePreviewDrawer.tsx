@@ -323,7 +323,16 @@ export function UseCasePreviewDrawer(props: { id: string; row: UseCaseRow | unde
 
             <section className={r.section} aria-labelledby="uc-preview-agents">
               <h3 id="uc-preview-agents" className={r.sectionTitle}>Intended agents</h3>
-              {u.status === "proposed" || u.status === "under_review" || u.status === "needs_info" ? (
+              {u.status === "under_review" ? (
+                // what the reviewers are reading cannot change under them; a
+                // change goes through "send back for more information"
+                <span className={v.faint}>
+                  {u.intendedAgentIds.length === 0
+                    ? "No intended agents recorded. "
+                    : `${plural(u.intendedAgentIds.length, "intended agent")} recorded. `}
+                  Locked while the use case is with its reviewers — ask a reviewer to send it back for more information to change them.
+                </span>
+              ) : u.status === "proposed" || u.status === "needs_info" ? (
                 <div className={v.stack}>
                   <Field label="Intended agents (ctrl/cmd-click to select several)">
                     <Select

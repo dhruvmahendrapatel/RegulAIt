@@ -88,7 +88,10 @@ describe("AER-046 planSubmission — a retry reuses a record only when its input
   });
 
   it("edited inputs update the written records instead of being skipped (the Codex scenario)", () => {
-    const plan = planSubmission(written(), inputs({
+    // the first attempt failed before the questionnaire was stored, so the use
+    // case is still proposed — its own fields are editable
+    const beforeReview: SubmissionCheckpoint = { ...written(), questionnaire: undefined };
+    const plan = planSubmission(beforeReview, inputs({
       useCase: { ...useCase, description: "Edited.", businessContext: "Edited.", intendedAgentIds: [] },
       questionnaire: "## 1. Purpose\n\nEdited answer",
       risks: [{ key: "credit-bias", inputs: { ...bias, description: "Edited risk text.", agentId: undefined, vendorId: "v" }, controls: ["eu-ai-act:art-14-human-oversight"] }],
@@ -96,9 +99,27 @@ describe("AER-046 planSubmission — a retry reuses a record only when its input
     expect(plan).toEqual({
       kind: "proceed",
       useCase: { action: "update", patch: { description: "Edited.", businessContext: "Edited.", intendedAgentIds: [] } },
-      questionnaire: "resubmit",
+      questionnaire: "submit",
       // a cleared agent goes as null, which is how PATCH unlinks it
       risks: [{ key: "credit-bias", step: { action: "update", patch: { description: "Edited risk text.", agentId: null, vendorId: "v" } }, controlsToLink: [] }],
+    });
+  });
+
+  it("once the questionnaire is stored the use case is under review: its own fields are locked, answers and risks still update", () => {
+    for (const change of [{ description: "Edited." }, { businessContext: "Edited." }, { intendedAgentIds: [] }]) {
+      const plan = planSubmission(written(), inputs({ useCase: { ...useCase, ...change } }));
+      expect(plan.kind, JSON.stringify(change)).toBe("refuse");
+      if (plan.kind === "refuse") expect(plan.reasons.join(" ")).toMatch(/can't be edited while it is under review/);
+    }
+    const plan = planSubmission(written(), inputs({
+      questionnaire: "## 1. Purpose\n\nEdited answer",
+      risks: [{ key: "credit-bias", inputs: { ...bias, description: "Edited risk text." }, controls: ["eu-ai-act:art-14-human-oversight"] }],
+    }));
+    expect(plan).toEqual({
+      kind: "proceed",
+      useCase: { action: "reuse" },
+      questionnaire: "resubmit",
+      risks: [{ key: "credit-bias", step: { action: "update", patch: { description: "Edited risk text." } }, controlsToLink: [] }],
     });
   });
 
