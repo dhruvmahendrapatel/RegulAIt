@@ -126,6 +126,18 @@ const CORPUS: readonly { label: string; secret: string; line: (secret: string) =
     line: (s) => `POST https://tools.corp/mcp 200 "Authorization: Bearer ${s}"` },
   { label: "Basic auth header value", secret: "dXNlcjpzdXBlcnNlY3JldHBhc3N3b3Jk",
     line: (s) => `POST https://tools.corp/messages 200 Authorization: Basic ${s}` },
+  { label: "bare 40-hex token in a ?token= query string (no vendor prefix)", secret: "4f1c9a2e7b3d8e6f0a5c2b9d1e8f7a6c3b4d5e6f",
+    line: (s) => `GET https://tools.corp/sse?token=${s} 200` },
+  { label: "bare signature in a &sig= query parameter", secret: "Qm9ndXNTaWduYXR1cmVWYWx1ZTEyMzQ1Njc4OTA",
+    line: (s) => `GET https://tools.corp/messages?session=abc123&sig=${s} 200` },
+  { label: "X-Auth-Token header value", secret: "7d2f9c1b4a8e6f3d0c5b2a9e8d7f6c1b3a4e5d6f",
+    line: (s) => `POST https://tools.corp/mcp 200 X-Auth-Token: ${s}` },
+  { label: "X-Api-Key header value", secret: "regulait-test-key-0123456789abcdef",
+    line: (s) => `POST https://tools.corp/mcp 200 x-api-key: ${s}` },
+  { label: "bare token in a JSON-RPC argument", secret: "c3a1e5f7b9d2468ace0f13579bdf2468ace13579",
+    line: (s) => `POST https://tools.corp/mcp 200 {"jsonrpc":"2.0","method":"tools/call","params":{"arguments":{"token":"${s}"}}}` },
+  { label: "client secret in a JSON body (camelCase)", secret: "S3cr3t-Value-With-Enough-Length-To-Be-Real",
+    line: (s) => `POST https://tools.corp/mcp 200 {"clientSecret":"${s}","grant_type":"client_credentials"}` },
   { label: "this product's own API key", secret: "rgl_" + "0123456789abcdef0123456789abcdef",
     line: (s) => `POST https://tools.corp/mcp 200 "authorization: Bearer ${s}"` },
   { label: "api_key assignment", secret: "Zq8vLm2PxR7tWy4KbN6s",
@@ -187,6 +199,19 @@ describe("AER-020 — evidence samples are scrubbed before truncation", () => {
     expect(out).not.toContain("AKIAIOSFODNN7EXAMPLE");
     expect(out).not.toContain("9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b2a1f0e");
     expect(out).not.toContain("jane.doe");
+  });
+
+  it("a bare credential value is scrubbed by the NAME it travels under, keeping the name", () => {
+    const out = scrubEvidenceSample(`GET https://tools.corp/sse?token=4f1c9a2e7b3d8e6f0a5c2b9d1e8f7a6c3b4d5e6f&q=weather 200 X-Auth-Token: 7d2f9c1b4a8e6f3d0c5b2a9e8d7f6c1b3a4e5d6f`);
+    expect(out).toContain(`?token=${AUDIT_SCRUB_MARKER_PREFIX}credential_value:40:`);
+    // the shared assignment rule may claim the header first — either marker
+    // is fine, the value is what must be gone
+    expect(out).toMatch(new RegExp(`X-Auth-Token: \\${AUDIT_SCRUB_MARKER_PREFIX}(credential_value|assignment):40:`));
+    expect(out).toContain("&q=weather");
+    expect(out).not.toContain("4f1c9a2e7b3d8e6f0a5c2b9d1e8f7a6c3b4d5e6f");
+    expect(out).not.toContain("7d2f9c1b4a8e6f3d0c5b2a9e8d7f6c1b3a4e5d6f");
+    // a short value under the same name is a word, not a secret, and stays
+    expect(scrubEvidenceSample("GET https://tools.corp/sse?key=weather 200")).toContain("key=weather");
   });
 
   it("NEGATIVE CONTROL — an ordinary line is returned unchanged, so the scrub is a scrub and not a shredder", () => {

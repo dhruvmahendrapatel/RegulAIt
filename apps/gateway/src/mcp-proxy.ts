@@ -161,9 +161,13 @@ function toolKind(tool: Tool): "read" | "write" {
  * This preflight runs the SAME two gates `connectUpstream` runs, in the same
  * order (admission first — a held server is refused with no DNS lookup, the
  * standard ADR-0097 holds itself to — then the egress decision), and it is
- * SIDE-EFFECT-FREE TOWARDS THE UPSTREAM: nothing is resolved for a held
- * server, nothing is connected to, and the breaker is neither read nor
- * elected. A refusal is audited the way the connect-time guard audits it
+ * SIDE-EFFECT-FREE TOWARDS THE UPSTREAM in the sense that matters: nothing
+ * is connected to, nothing is sent, and the breaker is neither read nor
+ * elected. It is NOT network-free — for an admitted server the egress check
+ * resolves a hostname URL (one DNS lookup, bounded by the guard's deadline),
+ * and that lookup now happens on every request while the breaker is open,
+ * where the old order answered 503 at once. A held server is refused before
+ * any lookup. A refusal is audited the way the connect-time guard audits it
  * (`mcp-admission-held` / `mcp-server-egress-blocked`, phase `connect`) and
  * thrown as the same error class, so every caller's existing mapping of
  * those two refusals applies unchanged. `connectUpstream` still re-adjudicates

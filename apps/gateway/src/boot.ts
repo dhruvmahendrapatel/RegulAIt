@@ -85,7 +85,10 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   // off under vitest for the same reason the timers below are.
   const underTest = env.VITEST !== undefined || env.NODE_ENV === "test";
   const logger = appOpts.logger ?? (underTest ? false : resolveGatewayLogger(env));
-  const app = buildApp(db, { ...appOpts, logger });
+  // ADR-0060 / AER-012: the sink this process anchors WITH (below) is the sink
+  // the app's readers grade — one instance, one observation cache.
+  const anchorSink = appOpts.auditAnchorSink !== undefined ? appOpts.auditAnchorSink : resolveAnchorSink(env);
+  const app = buildApp(db, { ...appOpts, logger, auditAnchorSink: anchorSink });
 
   // migrations are idempotent — booting always converges the schema
   await runMigrations(db, migrationsFolder);
@@ -179,7 +182,6 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   // `lastError`) and must never take the gateway down: an install on a
   // read-only filesystem still gets the hash chain, which is what catches
   // everything short of a full recompute.
-  const anchorSink = resolveAnchorSink(env);
   const anchorUnderTest = env.VITEST !== undefined || env.NODE_ENV === "test";
   const anchorEveryMs = Math.max(
     60_000,

@@ -213,7 +213,7 @@ import {
   registerLicensingRoutes,
   resolveLicense,
 } from "./licensing.js";
-import { registerAuditChainRoutes, type AnchorSink } from "./audit-chain.js";
+import { registerAuditChainRoutes, resolveAnchorSink, type AnchorSink } from "./audit-chain.js";
 import {
   assignedApprovalIdsFor,
   ensureAssignment,
@@ -3652,7 +3652,13 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // over the real ledgers at request time — no rollup, no snapshot. Admin-only
   // through the default gate, the ADR-0047 position for an org-scoped report.
   // The anchor sink rides in so tamper resistance is OBSERVED, never config.
-  registerPostureRoutes(app, db, ...(opts.auditAnchorSink !== undefined ? [{ sink: opts.auditAnchorSink }] : []));
+  // ADR-0060 / AER-012: ONE anchor sink per app. The three readers below
+  // (posture, chain verification, the posture preset) used to resolve a sink
+  // each — three S3 clients, three observation caches, a bucket flip seen at
+  // three different times. Resolved once here; the boot path passes the same
+  // instance it anchors WITH, so the readers grade the medium the writer uses.
+  const anchorSink: AnchorSink | null = opts.auditAnchorSink !== undefined ? opts.auditAnchorSink : resolveAnchorSink();
+  registerPostureRoutes(app, db, { sink: anchorSink });
   // ADR-0148 — the six-dimension trust dashboard (demo task C1)
   registerTrustDashboardRoutes(app, db);
   // ADR-0082 — the standing agent dependency inventory: per registered agent,
@@ -3757,7 +3763,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // via the DEFAULT gate: `GET /v1/audit/verify` reports the whole trail's
   // shape, and taking an anchor is a governed act that itself lands in the
   // trail.
-  registerAuditChainRoutes(app, db, ...(opts.auditAnchorSink !== undefined ? [{ sink: opts.auditAnchorSink }] : []));
+  registerAuditChainRoutes(app, db, { sink: anchorSink });
 
   registerAgentConnectorRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0034 — admin-registered custom LLM providers + the egress allow-list
@@ -3851,7 +3857,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // GET/PUT routes are admin-only (deliberately NOT in NON_ADMIN_ROUTES); the
   // audit auto-prune scheduler is OFF by default and unref'd, stopped on close.
   registerOrgSettingsRoutes(app, db, { dataKey: opts.dataKey });
-  registerPosturePresetRoutes(app, db, ...(opts.auditAnchorSink !== undefined ? [{ sink: opts.auditAnchorSink }] : []));
+  registerPosturePresetRoutes(app, db, { sink: anchorSink });
   // ADR-0124 — the kill switch and safe modes
   registerExecutionControlRoutes(app, db);
 

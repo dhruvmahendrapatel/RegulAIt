@@ -86,12 +86,35 @@ const SAMPLE_CHARS = 200;
  */
 const AUTHORIZATION_HEADER_VALUE = /\b(bearer|basic)\s+([A-Za-z0-9._~+/=-]{16,})/gi;
 
+/**
+ * And the shapes a credential takes when it is NOT a recognisable vendor
+ * token: a bare opaque value under a name that says what it is. Three forms a
+ * proxy line carries — a query/form parameter (`?token=…`, `&sig=…`), a
+ * header (`X-Auth-Token: …`, `X-Api-Key: …`), and a JSON-RPC argument
+ * (`"token":"…"`). The NAME is the signal; the value only has to be long
+ * enough to be a secret rather than a word. Scrubbed by name because a
+ * 40-hex value with no `sk-`/`ghp_` prefix matches no vendor rule, and
+ * "we scrub the prefixes we know" is a list an attacker's upstream is not
+ * on.
+ */
+const CREDENTIAL_PARAM_NAMES = "token|access_token|refresh_token|id_token|auth|authorization|key|apikey|api_key|api-key|sig|signature|secret|client_secret|password|passwd|pwd|session|sessionid|session_id|sid";
+const CREDENTIAL_QUERY_VALUE = new RegExp(`([?&;]|\\b)(${CREDENTIAL_PARAM_NAMES})=([A-Za-z0-9._~%+/=-]{16,})`, "gi");
+const CREDENTIAL_HEADER_VALUE = new RegExp(`\\b(x-auth(?:-token)?|x-api-key|x-access-token|api-key|x-amz-security-token|proxy-authorization|cookie|set-cookie):\\s*([A-Za-z0-9._~%+/=;-]{16,})`, "gi");
+const CREDENTIAL_JSON_VALUE = new RegExp(`"(${CREDENTIAL_PARAM_NAMES}|apiKey|accessToken|refreshToken|clientSecret)"\\s*:\\s*"([^"]{16,})"`, "gi");
+
+const marker = (kind: string, value: string): string =>
+  `${AUDIT_SCRUB_MARKER_PREFIX}${kind}:${value.length}:${sha256Hex(value).slice(0, AUDIT_SCRUB_FINGERPRINT_HEX)}]`;
+
 export function scrubEvidenceSample(line: string): string {
   let out = scrubAuditText(line);
   AUTHORIZATION_HEADER_VALUE.lastIndex = 0;
-  out = out.replace(AUTHORIZATION_HEADER_VALUE, (_m, scheme: string, value: string) =>
-    `${scheme} ${AUDIT_SCRUB_MARKER_PREFIX}authorization_header:${value.length}:${sha256Hex(value).slice(0, AUDIT_SCRUB_FINGERPRINT_HEX)}]`,
-  );
+  out = out.replace(AUTHORIZATION_HEADER_VALUE, (_m, scheme: string, value: string) => `${scheme} ${marker("authorization_header", value)}`);
+  CREDENTIAL_QUERY_VALUE.lastIndex = 0;
+  out = out.replace(CREDENTIAL_QUERY_VALUE, (_m, lead: string, name: string, value: string) => `${lead}${name}=${marker("credential_value", value)}`);
+  CREDENTIAL_HEADER_VALUE.lastIndex = 0;
+  out = out.replace(CREDENTIAL_HEADER_VALUE, (_m, name: string, value: string) => `${name}: ${marker("credential_value", value)}`);
+  CREDENTIAL_JSON_VALUE.lastIndex = 0;
+  out = out.replace(CREDENTIAL_JSON_VALUE, (_m, name: string, value: string) => `"${name}":"${marker("credential_value", value)}"`);
   return redactPII(out).text;
 }
 
