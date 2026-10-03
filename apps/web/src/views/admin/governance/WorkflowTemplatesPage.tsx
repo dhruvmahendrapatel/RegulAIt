@@ -440,9 +440,11 @@ function AuthorCard(props: { connections: GitConnection[] }) {
         <p className={v.faint}>
           A definition is {"{ workflow, costSensitivity?, stages[] }"}; the first stage must be a trigger.
           Stage types: trigger · planning · artifact_generation {"{output}"} · human_approval{" "}
-          {"{approvers}"} · automated_build {"{scope?, run?}"} · automated_check {"{checks[]}"} ·
+          {"{approvers}"} · automated_build {"{scope?, run?}"} · automated_check {"{checks[], offlineAutoPass?}"} ·
           git_operation {"{action: create_branch | open_pr | merge, connection, repo, …}"}. open_pr needs an
-          earlier create_branch, merge an earlier open_pr. Validation errors from the server appear below,
+          earlier create_branch, merge an earlier open_pr. A named check nobody reports stays pending and holds
+          the stage; offlineAutoPass: true passes it instead, labelled “auto-passed — no report (offline
+          mode)” everywhere, and is ignored on a deployed box. Validation errors from the server appear below,
           field by field.
         </p>
         <div className={v.row}>

@@ -306,17 +306,35 @@ function MergeGateEvidence(props: { inst: WorkflowDetailResponse }) {
               key={`${c.check}-${i}`}
               // ADR-0167 (AUTHZ-06): a pass the initiator reported themselves is
               // not CI's colour — the approver sees that before signing off
-              tone={c.selfReported ? "warn" : c.status === "passed" ? "ok" : "danger"}
+              // AER-047: an auto-passed check was never run — nothing reported
+              // it and the template's offline mode passed it; a pending one is
+              // still waiting. Neither is CI's green.
+              tone={
+                c.selfReported || c.autoPassed || c.status === "pending"
+                  ? "warn"
+                  : c.status === "passed"
+                    ? "ok"
+                    : "danger"
+              }
               title={
-                c.selfReported
-                  ? `Reported by the change's own initiator, not by CI${c.reason ? ` — reason: ${c.reason}` : ""}${c.detail ? ` (${c.detail})` : ""}`
-                  : (c.detail ?? "")
+                c.autoPassed
+                  ? "Auto-passed — no result was reported for this check (offline mode)"
+                  : c.selfReported
+                    ? `Reported by the change's own initiator, not by CI${c.reason ? ` — reason: ${c.reason}` : ""}${c.detail ? ` (${c.detail})` : ""}`
+                    : (c.detail ?? "")
               }
             >
               {c.check} · {c.status}
+              {c.autoPassed ? " · auto-passed (no report)" : ""}
               {c.selfReported ? " · self-reported" : ""}
             </Badge>
           ))}
+        </div>
+      )}
+      {checkRows.some((c) => c.autoPassed) && (
+        <div className={v.faint}>
+          No result was reported for {checkRows.filter((c) => c.autoPassed).length} check(s) — the template's
+          offline mode auto-passed them; nothing ran them.
         </div>
       )}
       {deploys.some((d) => d?.dryRun) && (

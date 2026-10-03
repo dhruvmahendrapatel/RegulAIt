@@ -340,6 +340,10 @@ export interface CheckResult {
   selfReported?: boolean;
   reportedByUserId?: string | null;
   reason?: string | null;
+  /** AER-047: true when NOTHING reported this check and the template's
+   * offlineAutoPass opt-in passed it anyway — never CI's green. A check with no
+   * report and no opt-in has status "pending" and holds the stage. */
+  autoPassed?: boolean;
 }
 
 export interface WorkflowDetailResponse {
