@@ -21,11 +21,18 @@
 #
 #   * no trust root was supplied
 #   * the manifest, its signature, or the payload is missing
+#   * any entry in the bundle is neither a regular file nor a directory — a
+#     symlink, FIFO or device (NON-REGULAR ENTRY IN BUNDLE), checked before
+#     any name is read or any listing is compared
 #   * the manifest schema or product is not one this verifier understands
 #   * the signing key's fingerprint is not the one you pinned
 #   * the manifest declares a fingerprint that is not the key's real one
 #   * the signature does not verify under that key
 #   * a file listed in the signed manifest is missing, altered, or unlisted
+#   * a file under audit/rows is named anything but <seq>.payload, with <seq>
+#     spelled exactly as chain.tsv spells it (AUDIT PAYLOAD NAME MALFORMED)
+#   * an audit payload the signed chain lists is absent, or one is present
+#     that it does not list
 #   * an audit row's bytes do not hash to its recorded content_hash
 #   * the audit chain's linkage, sequence or row_hash does not hold
 #   * the chain segment does not end at the head the manifest signed
@@ -131,10 +138,33 @@ sha256_of() {
   else shasum -a 256 "$1" | awk '{print $1}'; fi
 }
 
+# Every name and listing check below reads the TREE, and a tree can hold
+# entries whose bytes are not their own: a symlink is whatever it points at on
+# the machine doing the verifying, a FIFO or a device has no fixed bytes at all.
+# None of them can be what a manifest or a chain signed, and each slips past a
+# `find -type f` enumeration while `[ -f ]` and sha256sum follow it. So the
+# refusal is categorical, made on the extracted tree before any name is read,
+# and shared by every later check that meets one.
+refuse_nonregular() {
+  refuse "NON-REGULAR ENTRY IN BUNDLE ($1 found): an entry that is neither a regular file nor a directory" \
+    "A symlink, FIFO or device node has no bytes of its own that a signature" \
+    "could cover. A symlink in particular reads as whatever it points at on" \
+    "the machine running this check, and --extract-to would carry the link" \
+    "itself into the 'verified' tree. An export bundle is regular files in" \
+    "directories and nothing else."
+}
+
 # --- 1. extract ------------------------------------------------------------
 tar -xzf "$BUNDLE" -C "$WORK" 2>/dev/null \
   || refuse "the bundle is not a readable gzip tarball" \
             "Truncated download, or not a RegulAIt export bundle."
+
+NONREGULAR=0
+while IFS= read -r -d '' f; do
+  printf '  %s[non-regular]%s %q\n' "$C_RED" "$C_RST" "${f#"$WORK"/}" >&2
+  NONREGULAR=$((NONREGULAR + 1))
+done < <(find "$WORK" -mindepth 1 ! -type f ! -type d -print0)
+[ "$NONREGULAR" = "0" ] || refuse_nonregular "$NONREGULAR"
 
 ROOT="$(find "$WORK" -mindepth 1 -maxdepth 1 -type d | head -1)"
 [ -n "$ROOT" ] || refuse "the bundle has no top-level directory" \
@@ -301,7 +331,7 @@ pass "all $LISTED_COUNT signed files match their SHA-256"
 # section 7 checks every one of them. Listing them twice would let the two
 # lists disagree about the same bytes.
 ACTUAL_LIST="$WORK/actual.txt"
-(cd "$ROOT" && find . -type f -print | sed 's|^\./||') \
+(cd "$ROOT" && find . ! -type d -print | sed 's|^\./||') \
   | grep -v '^manifest\.json$' | grep -v '^manifest\.json\.sig$' \
   | grep -v '^audit/rows/' | LC_ALL=C sort >"$ACTUAL_LIST"
 EXPECTED_LIST="$WORK/expected.txt"
@@ -352,6 +382,10 @@ else
       disclosure="payload"
     fi
     PFILE="$ROOT/audit/rows/$seq.payload"
+    # `[ -f ]`, `[ -e ]` and sha256sum all FOLLOW a symlink, so the link is
+    # tested for first: a listed payload that is a link is refused as one,
+    # never hashed through to whatever it names.
+    [ ! -L "$PFILE" ] || refuse_nonregular 1
     if [ "$disclosure" = "payload" ]; then
       printf 'audit/rows/%s.payload\n' "$seq" >>"$EXPECTED_PAYLOADS"
       [ -f "$PFILE" ] || refuse "AUDIT ROW MISSING: audit/rows/$seq.payload" \
@@ -464,14 +498,14 @@ while IFS= read -r -d '' f; do
     printf '  %s[malformed]%s %q\n' "$C_RED" "$C_RST" "$f" >&2
     MALFORMED=$((MALFORMED + 1))
   fi
-done < <(cd "$ROOT" && find audit/rows -type f -print0 2>/dev/null || true)
+done < <(cd "$ROOT" && find audit/rows ! -type d -print0 2>/dev/null || true)
 [ "$MALFORMED" = "0" ] || refuse \
   "AUDIT PAYLOAD NAME MALFORMED: $MALFORMED file(s) under audit/rows are not named by a sequence number" \
   "A disclosed row is audit/rows/<seq>.payload with <seq> spelled exactly as" \
   "chain.tsv spells it. Any other spelling of the same number is a file the" \
   "chain never named, and nothing in this bundle vouches for its bytes."
 ACTUAL_PAYLOADS="$WORK/actual-payloads.txt"
-(cd "$ROOT" && find audit/rows -type f -print 2>/dev/null || true) | LC_ALL=C sort >"$ACTUAL_PAYLOADS"
+(cd "$ROOT" && find audit/rows ! -type d -print 2>/dev/null || true) | LC_ALL=C sort >"$ACTUAL_PAYLOADS"
 LC_ALL=C sort -o "$EXPECTED_PAYLOADS" "$EXPECTED_PAYLOADS"
 EXTRA_PAYLOADS="$(comm -23 "$ACTUAL_PAYLOADS" "$EXPECTED_PAYLOADS" || true)"
 if [ -n "$EXTRA_PAYLOADS" ]; then
