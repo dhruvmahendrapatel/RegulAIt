@@ -52,16 +52,16 @@ let ciAuth: { authorization: string };
 // AER-047: the env vars the opt-in reads, saved so every test starts from the
 // FAIL-CLOSED default (none of them set) and leaves the process as it found it
 const OPT_IN_ENV = [OFFLINE_CHECKS_ENV, "REGULAIT_DEPLOY_MODE", "REGULAIT_HSTS"] as const;
+// — and cleared up front, because the demo terminal (DEMO_SCRIPT §0) exports
+// REGULAIT_OFFLINE_CHECKS=1 and a suite run from that shell must still see the default
 const savedEnv = Object.fromEntries(OPT_IN_ENV.map((k) => [k, process.env[k]]));
+for (const k of OPT_IN_ENV) delete process.env[k];
 async function withEnv<T>(vars: Partial<Record<(typeof OPT_IN_ENV)[number], string>>, fn: () => Promise<T>): Promise<T> {
   for (const [k, v] of Object.entries(vars)) process.env[k] = v;
   try {
     return await fn();
   } finally {
-    for (const k of Object.keys(vars)) {
-      if (savedEnv[k] === undefined) delete process.env[k];
-      else process.env[k] = savedEnv[k];
-    }
+    for (const k of Object.keys(vars)) delete process.env[k];
   }
 }
 afterAll(() => {
