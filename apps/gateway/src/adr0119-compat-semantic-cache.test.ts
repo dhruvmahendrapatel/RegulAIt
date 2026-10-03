@@ -382,6 +382,29 @@ describe("the governance boundary the shared module exists to protect", () => {
     }
   });
 
+  it("tightening PII over a CLEAN primed question still serves the hit — the gates re-judge content, they do not empty the cache", async () => {
+    // The positive control for the PII case above: the refusal there comes from
+    // the address in the prompt, not from the setting change. TESTING_CHECKLIST
+    // row 73 promises a tester exactly this outcome.
+    const prior = (await app.inject({ method: "GET", url: "/v1/org/settings", headers: AUTH })).json().settings.defaultPiiMode as string;
+    const prompt = `aer010 clean under pii ${RUN}`;
+    try {
+      await putOrg({ defaultPiiMode: "none" });
+      const text = await primeCompat(prompt);
+      await putOrg({ defaultPiiMode: "block" });
+      const usage = await usageCount(userA);
+      const savings = await cacheSavingsCount(userA);
+      const res = await ask(authA, prompt);
+      expect(res.statusCode).toBe(200);
+      expect(res.json().content[0].text).toBe(text);
+      // HIT: no provider call, one saving
+      expect(await usageCount(userA)).toBe(usage);
+      expect(await cacheSavingsCount(userA)).toBe(savings + 1);
+    } finally {
+      await putOrg({ defaultPiiMode: prior });
+    }
+  });
+
   it("rechecks a cached completion against newly blocked output guardrails", async () => {
     const beforeConfig = (await db.select().from(guardrailConfigs).where(eq(guardrailConfigs.scope, "org")))[0] ?? null;
     try {
