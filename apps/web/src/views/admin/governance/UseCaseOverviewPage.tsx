@@ -1,40 +1,32 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../../../api/client";
+import type { DirectoryUser, UseCaseCondition, UseCaseLifecycleDetail } from "../../../api/types";
 import { ago, frameworkLabel, humanize, plural, providerLabel } from "../../../api/format";
-import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, Input, Select, StatusDot, Table, Tabs, type Tone } from "../../../ui/kit";
+import { useSession } from "../../../session/SessionContext";
+import { Badge, Button, Card, EmptyState, Field, Input, Select, Table, Tabs, type Tone } from "../../../ui/kit";
 import { QueryGate, RemoveButton, useAction } from "../adminKit";
 import v from "../../views.module.css";
 import s from "./demoGovernance.module.css";
+import rec from "./record.module.css";
 import { DependencyGraphPanel } from "./DependencyGraphPanel";
 import { RiskLibraryPicker } from "./RiskLibraryPicker";
+import {
+  ACTIVITY_STATUS,
+  PHASES,
+  STATUS_TONE,
+  canMarkMet,
+  conditionState,
+  deriveActivities,
+  phaseFor,
+  shortDate,
+  statusLabel,
+  type Activity,
+  type OverviewResponse,
+  type OverviewRisk,
+} from "./useCaseLifecycle";
 
-interface RiskControl { controlRef: string; title: string; linkedAt: string }
-interface OverviewRisk {
-  id: string;
-  title: string;
-  category: string;
-  dimension: string;
-  status: string;
-  inherent: { likelihood: string; impact: string };
-  residual: { likelihood: string; impact: string } | null;
-  controls: RiskControl[];
-}
-interface OverviewResponse {
-  useCase: { id: string; name: string; description?: string | null; businessContext?: string | null; status: string; euAiActTier?: string | null; ownerName?: string | null; ownerUserId?: string; projectId?: string | null; complianceTags?: string[]; [key: string]: unknown };
-  screening: { tier: string | null; reasons: Array<{ ref?: string; reason?: string }>; rulesetVersion: number | null; screened: boolean };
-  questionnaire: { submitted: boolean; artifactId: string | null; version: number | null; submittedAt: string | null };
-  stack: {
-    agents: Array<{ id: string; name: string; provider: string; model: string | null; lifecycleStatus: string; halted: boolean; modelCards: Array<{ id: string; intendedUse: string; signOff: string }>; modelCardApproved: boolean }>;
-    vendors: Array<{ id: string; name: string; category: string; status: string; linkedVia: string[] }>;
-  };
-  risks: OverviewRisk[];
-  summary: { risks: number; liveRisks: number; liveWithoutControls: number; agentsWithoutApprovedModelCard: number; pendingApprovals: number };
-  approvals: Array<{ id: string; status: string; stageId: string; approverUserId: string | null; requestedAt: string; decidedAt: string | null; decisionReason: string | null }>;
-  audit: Array<{ id: string | number; at: string; userId: string | null; ruleId: string; effect: string; reason: string }>;
-}
 interface FrameworksResponse {
   evidenceScope: { kind: string; projectId: string | null; period: string; periodLabel: string; note: string };
   frameworks: Array<{
@@ -54,101 +46,260 @@ interface AgentCardResponse {
 }
 
 const TABS = ["overview", "frameworks", "risks", "stack", "dependencies", "approvals", "audit"].map((id) => ({ id, label: id[0]!.toUpperCase() + id.slice(1) }));
-const statusTone = (status: string): Tone => status === "approved" ? "ok" : status === "rejected" ? "danger" : status === "under_review" ? "info" : status === "retired" ? "warn" : "neutral";
 
 export default function UseCaseOverviewPage() {
   const { id = "" } = useParams();
   const [params, setParams] = useSearchParams();
   const tab = TABS.some((item) => item.id === params.get("tab")) ? params.get("tab")! : "overview";
   const overview = useQuery({ queryKey: ["governance", "use-case-overview", id], queryFn: () => api.get<OverviewResponse>(`/v1/use-cases/${id}/overview`), enabled: Boolean(id) });
+  // the approval's lifetime and its conditions ride on the use-case detail read
+  const detail = useQuery({ queryKey: ["governance", "use-case-detail", id], queryFn: () => api.get<UseCaseLifecycleDetail>(`/v1/use-cases/${id}`), enabled: Boolean(id) });
   const frameworks = useQuery({ queryKey: ["governance", "use-case-frameworks", id], queryFn: () => api.get<FrameworksResponse>(`/v1/use-cases/${id}/frameworks`), enabled: Boolean(id) && tab === "frameworks" });
-  const refresh = async () => { await overview.refetch(); };
+  const directory = useQuery({ queryKey: ["directory"], queryFn: () => api.get<{ users: DirectoryUser[] }>("/v1/users/directory") });
+  const refresh = async () => { await Promise.all([overview.refetch(), detail.refetch()]); };
   const data = overview.data;
+  const names = new Map((directory.data?.users ?? []).map((u) => [u.id, u.name ?? ""]));
+  const userName = (userId: string | null) => (userId ? names.get(userId) || null : null);
+
+  const lifecycle = detail.data?.useCase;
+  const status = (lifecycle?.status as string | undefined) ?? data?.useCase.status ?? "";
+  const approvedUntil = lifecycle?.approvedUntil ?? data?.useCase.approvedUntil ?? null;
+  const expired = Boolean(lifecycle?.approvalExpired);
+  const conditions = detail.data?.conditions ?? [];
+  const openBlocking = conditions.filter((c) => c.status === "open" && c.blocking).length;
 
   return (
-    <>
-      <PageHeader
-        title={data?.useCase.name ?? "Use-case workspace"}
-        crumbs={["AI Governance", "Use cases"]}
-        sub={data ? data.useCase.description || "No description recorded." : undefined}
-      />
-      <QueryGate loading={overview.isLoading} error={overview.error} onRetry={() => void overview.refetch()}>
-        {data ? (
+    <QueryGate loading={overview.isLoading} error={overview.error} onRetry={() => void overview.refetch()}>
+      {data ? (
+        <>
+          <header className={rec.band}>
+            <div className={rec.bandMain}>
+              <nav aria-label="Breadcrumb">
+                <ol className={rec.crumbs}>
+                  <li><Link to="/admin/use-cases">AI use cases</Link></li>
+                  <li aria-current="page">{data.useCase.name}</li>
+                </ol>
+              </nav>
+              <div className={rec.titleRow}>
+                <span className={rec.typeTag}>AI use case</span>
+                <h1 className={rec.title} tabIndex={-1}>{data.useCase.name}</h1>
+              </div>
+              {data.useCase.description ? <p className={rec.sub}>{data.useCase.description}</p> : null}
+              <ul className={rec.chips} aria-label="Record status">
+                <li className={`${rec.chip} ${rec[`tone-${STATUS_TONE[status] ?? "neutral"}`] ?? ""}`}><span className={rec.chipLabel}>Status</span> {statusLabel(status)}</li>
+                <li className={`${rec.chip} ${data.screening.tier === "prohibited" ? rec["tone-danger"] : data.screening.tier === "high" ? rec["tone-warn"] : ""}`}>
+                  <span className={rec.chipLabel}>EU AI Act</span> {data.screening.screened ? `${humanize(data.screening.tier)} tier` : "Not screened"}
+                </li>
+                {approvedUntil ? (
+                  expired
+                    ? <li className={`${rec.chip} ${rec["tone-danger"]}`}>Approval expired {shortDate(approvedUntil)}</li>
+                    : <li className={`${rec.chip} ${rec["tone-ok"]}`}><span className={rec.chipLabel}>Approval valid until</span> {shortDate(approvedUntil)}</li>
+                ) : null}
+                <li className={rec.chip}><span className={rec.chipLabel}>Owner</span> {data.useCase.ownerName ?? "Unassigned"}</li>
+              </ul>
+            </div>
+            {data.useCase.workflowInstanceId ? (
+              <div className={rec.bandActions}>
+                <Link className={rec.bandAction} to={`/workflows/${data.useCase.workflowInstanceId}`}>Open intake</Link>
+              </div>
+            ) : null}
+          </header>
           <div className={v.stack}>
-            {/* the object's key facts: label over value, hairline-separated, no box.
-                Colour only where something needs attention. */}
-            <dl className={s.facts}>
-              <div className={s.fact}><dt>Status</dt><dd><StatusDot tone={statusTone(data.useCase.status)} />{humanize(data.useCase.status)}</dd></div>
-              <div className={s.fact}>
-                <dt>EU AI Act tier</dt>
-                <dd>{!data.screening.screened
-                  ? <span className={v.dim}>Tier unmeasured</span>
-                  : data.screening.tier === "prohibited" || data.screening.tier === "high"
-                    ? <Badge tone={data.screening.tier === "prohibited" ? "danger" : "warn"}>{humanize(data.screening.tier)}</Badge>
-                    : humanize(data.screening.tier)}</dd>
-              </div>
-              <div className={s.fact}>
-                <dt>Live risks</dt>
-                <dd>{data.summary.liveRisks === 0
-                  ? <span>No live risks recorded</span>
-                  : data.summary.liveWithoutControls > 0
-                    ? <Badge tone="danger">{plural(data.summary.liveWithoutControls, "live risk")} without controls</Badge>
-                    : <span>{data.summary.liveRisks === 1 ? "The live risk has controls" : `All ${data.summary.liveRisks} live risks have controls`}</span>}</dd>
-              </div>
-              {data.summary.agentsWithoutApprovedModelCard > 0 ? (
-                <div className={s.fact}><dt>Model cards</dt><dd><Badge tone="warn">{data.summary.agentsWithoutApprovedModelCard === 1 ? "1 agent lacks an approved model card" : `${data.summary.agentsWithoutApprovedModelCard} agents lack approved model cards`}</Badge></dd></div>
-              ) : null}
-              <div className={s.fact}>
-                <dt>Approval</dt>
-                <dd>{data.summary.pendingApprovals > 0
-                  ? <Link to={{ search: "?tab=approvals" }}>{plural(data.summary.pendingApprovals, "pending approval")}</Link>
-                  : <span className={v.dim}>none pending</span>}</dd>
-              </div>
-              <div className={s.fact}><dt>Owner</dt><dd>{data.useCase.ownerName ?? "Unassigned"}</dd></div>
-              <div className={s.fact}><dt>Questionnaire</dt><dd>{data.questionnaire.submitted ? `v${data.questionnaire.version} submitted` : "not submitted"}</dd></div>
-            </dl>
             <Tabs tabs={TABS} active={tab} onChange={(next) => setParams({ tab: next })} />
-            {tab === "overview" ? <OverviewTab data={data} /> : null}
+            {tab === "overview" ? (
+              <OverviewTab
+                data={data}
+                status={status}
+                expired={expired}
+                approvedUntil={approvedUntil}
+                conditions={conditions}
+                conditionsLoaded={detail.isSuccess}
+                openBlocking={openBlocking}
+                userName={userName}
+                onTab={(next) => setParams({ tab: next })}
+                onRefresh={refresh}
+              />
+            ) : null}
             {tab === "frameworks" ? <FrameworksTab query={frameworks} /> : null}
             {tab === "risks" ? <RisksTab useCaseId={id} risks={data.risks} onRefresh={refresh} /> : null}
             {tab === "stack" ? <StackTab data={data.stack} /> : null}
             {tab === "dependencies" ? <Card title="Dependencies and inherited risk"><DependencyGraphPanel useCaseId={id} /></Card> : null}
-            {tab === "approvals" ? <ApprovalsTab approvals={data.approvals} /> : null}
+            {tab === "approvals" ? <ApprovalsTab approvals={data.approvals} userName={userName} /> : null}
             {tab === "audit" ? <AuditTab rows={data.audit} /> : null}
           </div>
-        ) : null}
-      </QueryGate>
-    </>
+        </>
+      ) : null}
+    </QueryGate>
   );
 }
 
-function OverviewTab({ data }: { data: OverviewResponse }) {
+function OverviewTab(props: {
+  data: OverviewResponse;
+  status: string;
+  expired: boolean;
+  approvedUntil: string | null;
+  conditions: UseCaseCondition[];
+  conditionsLoaded: boolean;
+  openBlocking: number;
+  userName: (userId: string | null) => string | null;
+  onTab: (tab: string) => void;
+  onRefresh: () => Promise<void>;
+}) {
+  const { data } = props;
+  const screeningRef = useRef<HTMLDivElement>(null);
   const [firstReason, ...moreReasons] = data.screening.reasons;
   const reasonText = (reason: { ref?: string; reason?: string }) => reason.reason ?? reason.ref;
+  const screenedAt = data.audit.find((row) => row.ruleId === "use-case-eu-tier")?.at ?? (data.screening.screened ? data.questionnaire.submittedAt : null);
+  const activities = deriveActivities({
+    status: props.status,
+    ownerName: data.useCase.ownerName ?? null,
+    questionnaire: data.questionnaire,
+    screening: data.screening,
+    screenedAt,
+    stack: data.stack,
+    risks: data.risks,
+    approvals: data.approvals,
+    approverName: props.userName,
+  });
+  const phase = phaseFor(props.status, { approvalExpired: props.expired, openBlocking: props.openBlocking });
+  const act = (activity: Activity) => {
+    const { tab } = activity.action;
+    if (tab === "questionnaire") return data.useCase.workflowInstanceId
+      ? <Link className={rec.actionLink} to={`/workflows/${data.useCase.workflowInstanceId}`}>{activity.action.label}</Link>
+      : <span className={v.faint}>—</span>;
+    if (tab === "screening") return <button type="button" className={rec.actionLink} onClick={() => { screeningRef.current?.scrollIntoView({ block: "center" }); screeningRef.current?.focus(); }}>{activity.action.label}</button>;
+    return <button type="button" className={rec.actionLink} onClick={() => props.onTab(tab)}>{activity.action.label}</button>;
+  };
   return (
-    <div className={s.dashboardGrid}>
-      <Card title="Purpose and context">
-        <div className={v.stack}>
-          <p>{data.useCase.businessContext ? String(data.useCase.businessContext) : <span className={v.dim}>No business context recorded.</span>}</p>
-          <div>
-            <strong>Compliance tags</strong>
-            <p className={v.row}>{(data.useCase.complianceTags ?? []).length ? (data.useCase.complianceTags ?? []).map((tag) => <Badge key={tag}>{frameworkLabel(tag)}</Badge>) : <span className={v.dim}>None recorded</span>}</p>
+    <div className={v.stack}>
+      {props.expired && props.approvedUntil ? (
+        <p className={rec.expired} role="note">
+          The approval expired on {shortDate(props.approvedUntil)}. The use case needs a new review before it can be deployed again.
+        </p>
+      ) : null}
+      <Card title="Lifecycle tracker">
+        <ol className={rec.stepper} aria-label="Lifecycle">
+          {PHASES.map((name, index) => {
+            const done = index < phase.current || (index === phase.current && index === PHASES.length - 1 && !phase.flag);
+            const current = index === phase.current;
+            return (
+              <li key={name} className={[rec.step, done ? rec.stepDone : "", current ? rec.stepCurrent : ""].join(" ")} {...(current ? { "aria-current": "step" as const } : {})}>
+                <span className={rec.stepMark} aria-hidden>{done ? "✓" : index + 1}</span>
+                <span className={rec.stepName}>{name}{done ? <span className={rec.srOnly}> (complete)</span> : null}</span>
+              </li>
+            );
+          })}
+        </ol>
+        {phase.flag ? <p className={rec.flag}><Badge tone={phase.flag.tone}>{phase.flag.text}</Badge></p> : null}
+        <p className={rec.trackerNote}>Each activity below comes from the record itself — complete them to move the use case to its next stage.</p>
+        <Table<Activity>
+          rows={activities}
+          rowKey={(row) => row.key}
+          columns={[
+            { key: "status", header: "Status", render: (row) => <Badge tone={ACTIVITY_STATUS[row.status].tone}>{ACTIVITY_STATUS[row.status].label}</Badge> },
+            { key: "activity", header: "Activity", render: (row) => <><span className={rec.activityName}>{row.name}</span><span className={rec.activityDetail}>{row.detail}</span></> },
+            { key: "owner", header: "Assignee", render: (row) => row.owner ?? <span className={v.faint}>—</span> },
+            { key: "updated", header: "Last update", render: (row) => <span className={rec.nowrap}>{row.lastUpdate ? ago(row.lastUpdate) : "—"}</span> },
+            { key: "action", header: "Action", render: (row) => act(row) },
+          ]}
+        />
+      </Card>
+      <ConditionsCard
+        useCaseId={data.useCase.id}
+        ownerUserId={data.useCase.ownerUserId ?? null}
+        status={props.status}
+        conditions={props.conditions}
+        loaded={props.conditionsLoaded}
+        onRefresh={props.onRefresh}
+      />
+      <div className={s.dashboardGrid}>
+        <Card title="Purpose and context">
+          <div className={v.stack}>
+            <p>{data.useCase.businessContext ? String(data.useCase.businessContext) : <span className={v.dim}>No business context recorded.</span>}</p>
+            <div>
+              <strong>Compliance tags</strong>
+              <p className={v.row}>{(data.useCase.complianceTags ?? []).length ? (data.useCase.complianceTags ?? []).map((tag) => <Badge key={tag}>{frameworkLabel(tag)}</Badge>) : <span className={v.dim}>None recorded</span>}</p>
+            </div>
           </div>
+        </Card>
+        <div ref={screeningRef} tabIndex={-1} id="screening" aria-label="EU AI Act screening">
+          <Card title="EU AI Act screening" actions={<span className={v.faint}>{data.screening.rulesetVersion ? `Rule set v${data.screening.rulesetVersion}` : "Not screened"}</span>}>
+            <div className={v.stack}>
+              <p><strong>{data.screening.screened ? `${humanize(data.screening.tier)} tier` : "Not screened yet"}</strong></p>
+              {firstReason ? <p>{reasonText(firstReason)}</p> : <p className={v.dim}>No screening reasons recorded.</p>}
+              {moreReasons.length ? (
+                <details>
+                  <summary>Show {plural(moreReasons.length, "more reason")}</summary>
+                  <ul>{moreReasons.map((reason, index) => <li key={index}>{reasonText(reason)}</li>)}</ul>
+                </details>
+              ) : null}
+            </div>
+          </Card>
         </div>
-      </Card>
-      <Card title="EU AI Act screening" actions={<span className={v.faint}>{data.screening.rulesetVersion ? `Ruleset v${data.screening.rulesetVersion}` : "No ruleset result"}</span>}>
-        <div className={v.stack}>
-          <p><strong>{data.screening.screened ? `${humanize(data.screening.tier)} tier` : "Unmeasured"}</strong></p>
-          {firstReason ? <p>{reasonText(firstReason)}</p> : <p className={v.dim}>No screening reasons recorded.</p>}
-          {moreReasons.length ? (
-            <details>
-              <summary>Show {plural(moreReasons.length, "more reason")}</summary>
-              <ul>{moreReasons.map((reason, index) => <li key={index}>{reasonText(reason)}</li>)}</ul>
-            </details>
-          ) : null}
-        </div>
-      </Card>
+      </div>
     </div>
+  );
+}
+
+function ConditionsCard(props: {
+  useCaseId: string;
+  ownerUserId: string | null;
+  status: string;
+  conditions: UseCaseCondition[];
+  loaded: boolean;
+  onRefresh: () => Promise<void>;
+}) {
+  const { auth } = useSession();
+  const action = useAction();
+  const viewer = { userId: auth?.userId ?? null, isAdmin: Boolean(auth?.isAdmin) };
+  const open = props.conditions.filter((c) => c.status === "open").length;
+  return (
+    <Card title="Conditions of approval" actions={props.conditions.length ? <span className={v.faint}>{open ? `${open} open` : "All met"}</span> : undefined}>
+      {props.conditions.length === 0 ? (
+        <p className={v.dim}>
+          {props.status === "approved"
+            ? "This use case was approved without conditions."
+            : props.loaded ? "No conditions yet. A reviewer can attach conditions when approving." : "Loading conditions…"}
+        </p>
+      ) : (
+        <Table<UseCaseCondition>
+          rows={props.conditions}
+          rowKey={(row) => row.id}
+          columns={[
+            { key: "text", header: "Condition", render: (row) => <span className={rec.condText}>{row.text}</span> },
+            { key: "when", header: "When", render: (row) => <span className={rec.nowrap}>{row.blocking ? "Before go-live" : "After go-live"}</span> },
+            { key: "owner", header: "Owner", render: (row) => row.ownerName ?? <span className={v.faint}>Not assigned</span> },
+            { key: "due", header: "Due", render: (row) => <span className={rec.nowrap}>{shortDate(row.dueAt)}</span> },
+            {
+              key: "status",
+              header: "Status",
+              render: (row) => {
+                const state = conditionState(row);
+                return <span className={rec.nowrap}><Badge tone={state.tone}>{state.label}</Badge>{row.status === "met" && row.metAt ? <span className={v.faint}> {shortDate(row.metAt)}{row.metByName ? ` by ${row.metByName}` : ""}</span> : null}</span>;
+              },
+            },
+            {
+              key: "act",
+              header: "",
+              align: "right",
+              render: (row) => canMarkMet(row, viewer, props.ownerUserId) ? (
+                <Button
+                  size="sm"
+                  disabled={action.busy}
+                  aria-label={`Mark met: ${row.text}`}
+                  onClick={() => void action.run(async () => {
+                    await api.post(`/v1/use-cases/${props.useCaseId}/conditions/${row.id}/met`, {});
+                    await props.onRefresh();
+                  }, "Condition marked met")}
+                >
+                  Mark met
+                </Button>
+              ) : null,
+            },
+          ]}
+        />
+      )}
+    </Card>
   );
 }
 
@@ -161,16 +312,16 @@ const packNote = (title: string) => {
   return m ? m[1]! : "";
 };
 
-/** whether the pack's cascade tag is on the use case — the tag that turns the mapping into enforced workflow consequences */
-function CascadeBadge({ framework }: { framework: FrameworksResponse["frameworks"][number] }) {
-  if (!framework.cascadeTag) return <Badge tone="neutral" title="This pack maps controls only; it has no cascade tag">Mapping only</Badge>;
+/** whether the pack's compliance tag is on the use case — the tag that turns the mapping into workflow requirements */
+function PackAppliedBadge({ framework }: { framework: FrameworksResponse["frameworks"][number] }) {
+  if (!framework.cascadeTag) return <Badge tone="neutral" title="This pack maps controls only; it adds no workflow requirements">Mapping only</Badge>;
   return framework.carriedByUseCase
-    ? <Badge tone="ok" title={`The use case carries ${framework.cascadeTag}, so its workflow consequences apply`}>Cascade applied</Badge>
-    : <Badge tone="warn" title={`Add the ${framework.cascadeTag} tag to apply this pack's workflow consequences${framework.profileExists ? "" : " (no compliance profile exists for it yet)"}`}>Cascade not applied</Badge>;
+    ? <Badge tone="ok" title="The use case carries this pack's compliance tag, so its workflow requirements apply">Applied</Badge>
+    : <Badge tone="warn" title={`Add the ${frameworkLabel(framework.cascadeTag)} tag to apply this pack's workflow requirements${framework.profileExists ? "" : " (no compliance profile exists for it yet)"}`}>Not applied</Badge>;
 }
 
 function FrameworksTab({ query }: { query: ReturnType<typeof useQuery<FrameworksResponse>> }) {
-  return <QueryGate loading={query.isLoading} error={query.error} onRetry={() => void query.refetch()}>{query.data ? <div className={v.stack}><p className={s.callout}>{query.data.evidenceScope.note}</p>{query.data.frameworks.length === 0 ? <EmptyState title="No active framework mappings" /> : query.data.frameworks.map((framework) => <Card key={framework.id} title={`${packTitle(framework.title)} · v${framework.version}`} actions={<CascadeBadge framework={framework} />}><div className={v.stack}><p className={v.faint}>{plural(framework.controls.length, "mapped control")}{packNote(framework.title) ? ` · ${packNote(framework.title)}` : ""}</p><Table rows={framework.controls} rowKey={(control) => control.controlRef} columns={[{ key: "control", header: "Control", render: (control) => <code style={{ whiteSpace: "nowrap" }}>{control.controlRef}</code> }, { key: "title", header: "Title", render: (control) => control.title }, { key: "coverage", header: "Platform coverage", render: (control) => <Badge tone={COVERAGE_TONE[control.coverage] ?? "neutral"}>{humanize(control.coverage)}</Badge> }]} /></div></Card>)}<p className={v.faint}>{query.data.disclaimer}</p></div> : null}</QueryGate>;
+  return <QueryGate loading={query.isLoading} error={query.error} onRetry={() => void query.refetch()}>{query.data ? <div className={v.stack}><p className={s.callout}>{query.data.evidenceScope.note}</p>{query.data.frameworks.length === 0 ? <EmptyState title="No active framework mappings" /> : query.data.frameworks.map((framework) => <Card key={framework.id} title={`${packTitle(framework.title)} · v${framework.version}`} actions={<PackAppliedBadge framework={framework} />}><div className={v.stack}><p className={v.faint}>{plural(framework.controls.length, "mapped control")}{packNote(framework.title) ? ` · ${packNote(framework.title)}` : ""}</p><Table rows={framework.controls} rowKey={(control) => control.controlRef} columns={[{ key: "control", header: "Control", render: (control) => <code style={{ whiteSpace: "nowrap" }}>{control.controlRef}</code> }, { key: "title", header: "Title", render: (control) => control.title }, { key: "coverage", header: "Platform coverage", render: (control) => <Badge tone={COVERAGE_TONE[control.coverage] ?? "neutral"}>{humanize(control.coverage)}</Badge> }]} /></div></Card>)}<p className={v.faint}>{query.data.disclaimer}</p></div> : null}</QueryGate>;
 }
 
 /** open is the state that needs attention; mitigating and accepted are decided workflow states */
@@ -247,8 +398,24 @@ const truncate = (text: string, max: number) => (text.length > max ? `${text.sli
 
 const sentenceCase = (text: string) => (text ? `${text.charAt(0).toUpperCase()}${text.slice(1).replace(/\.$/, "")}.` : text);
 
-function ApprovalsTab({ approvals }: { approvals: OverviewResponse["approvals"] }) {
-  return <Card title="Approval history">{approvals.length === 0 ? <EmptyState title="No approval records yet" body="Approval requests appear after the intake questionnaire is submitted." /> : <Table rows={approvals} rowKey={(row) => row.id} columns={[{ key: "stage", header: "Stage", render: (row) => humanize(row.stageId) }, { key: "status", header: "Status", render: (row) => <Badge tone={row.status === "approved" ? "ok" : row.status === "rejected" ? "danger" : "info"}>{row.status}</Badge> }, { key: "requested", header: "Requested", render: (row) => <span style={{ whiteSpace: "nowrap" }}>{ago(row.requestedAt)}</span> }, { key: "reason", header: "Decision reason", render: (row) => row.decisionReason ?? "—" }]} />}</Card>;
+const OUTCOME: Record<string, { label: string; tone: Tone }> = {
+  pending: { label: "Awaiting decision", tone: "info" },
+  approved: { label: "Approved", tone: "ok" },
+  denied: { label: "Rejected", tone: "danger" },
+  returned: { label: "Sent back", tone: "warn" },
+  superseded: { label: "Superseded", tone: "neutral" },
+  consumed: { label: "Used", tone: "neutral" },
+};
+
+function ApprovalsTab({ approvals, userName }: { approvals: OverviewResponse["approvals"]; userName: (userId: string | null) => string | null }) {
+  return <Card title="Approval history">{approvals.length === 0 ? <EmptyState title="No approval records yet" body="A sign-off is requested when the intake questionnaire is submitted." /> : <Table rows={approvals} rowKey={(row) => row.id} columns={[
+    { key: "stage", header: "Stage", render: (row) => humanize(row.stageId) },
+    { key: "approver", header: "Approver", render: (row) => userName(row.approverUserId) ?? <span className={v.faint}>Not recorded</span> },
+    { key: "outcome", header: "Outcome", render: (row) => { const o = OUTCOME[row.status] ?? { label: humanize(row.status), tone: "neutral" as Tone }; return <Badge tone={o.tone}>{o.label}</Badge>; } },
+    { key: "requested", header: "Requested", render: (row) => <span className={rec.nowrap}>{ago(row.requestedAt)}</span> },
+    { key: "decided", header: "Decided", render: (row) => <span className={rec.nowrap}>{row.decidedAt ? ago(row.decidedAt) : "—"}</span> },
+    { key: "reason", header: "Reason", render: (row) => row.decisionReason ?? "—" },
+  ]} />}</Card>;
 }
 
 function AuditTab({ rows }: { rows: OverviewResponse["audit"] }) {
