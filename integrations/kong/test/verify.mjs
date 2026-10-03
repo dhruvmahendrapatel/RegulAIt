@@ -90,30 +90,35 @@ const RUN_LABEL = "regulait.kong-e2e.run";
 // this harness starts, and a fixed, checked-in value was one anyone on the
 // machine could use for as long as the run lasted.
 const BOOT = `kong-e2e-${randomBytes(16).toString("hex")}`;
-// The ports come from the run id too, then are checked free (and, if not,
-// replaced by one the kernel hands out) — an operator may still pin any of
-// them through the environment.
+// The ports come from the run id too, then are checked free (and, if not, the
+// next free one in the same band is taken) — an operator may still pin any of
+// them through the environment. The band stops BELOW the kernel's ephemeral
+// range (Linux default 32768-60999): a port chosen there can be taken, between
+// the probe and the real bind, by any outbound connection's local port — the
+// seed's own Postgres socket did exactly that in CI (EADDRINUSE on the
+// gateway). The probe binds 0.0.0.0, the address the gateway, the upstream
+// and Kong's published port actually bind, so a loopback-only probe cannot
+// pass a port a wildcard listener already holds.
 let GATEWAY_PORT = 0;
 let UPSTREAM_PORT = 0;
 let KONG_PROXY_PORT = 0;
+const PORT_BAND_LOW = 20000;
+const PORT_BAND_SIZE = 12000; // 20000-31999
 const derivedPort = (salt) =>
-  20000 + (parseInt(createHash("sha256").update(`${RUN_ID}:${salt}`).digest("hex").slice(0, 8), 16) % 20000);
-const freePort = (preferred) =>
-  new Promise((resolve, reject) => {
+  PORT_BAND_LOW + (parseInt(createHash("sha256").update(`${RUN_ID}:${salt}`).digest("hex").slice(0, 8), 16) % PORT_BAND_SIZE);
+const probePort = (port) =>
+  new Promise((resolve) => {
     const probe = createServer();
-    probe.once("error", () => {
-      const fallback = createServer();
-      fallback.once("error", reject);
-      fallback.listen(0, "127.0.0.1", () => {
-        const { port } = fallback.address();
-        fallback.close(() => resolve(port));
-      });
-    });
-    probe.listen(preferred, "127.0.0.1", () => {
-      const { port } = probe.address();
-      probe.close(() => resolve(port));
-    });
+    probe.once("error", () => resolve(false));
+    probe.listen(port, "0.0.0.0", () => probe.close(() => resolve(true)));
   });
+const freePort = async (preferred, taken) => {
+  for (let i = 0; i < 200; i++) {
+    const port = PORT_BAND_LOW + ((preferred - PORT_BAND_LOW + i) % PORT_BAND_SIZE);
+    if (!taken.has(port) && (await probePort(port))) return port;
+  }
+  throw new Error(`no free port in ${PORT_BAND_LOW}-${PORT_BAND_LOW + PORT_BAND_SIZE - 1} near ${preferred}`);
+};
 
 /**
  * What this run has created so far — recorded only AFTER each creation
@@ -322,8 +327,7 @@ async function main() {
   const taken = new Set();
   const pick = async (envName, salt) => {
     if (process.env[envName]) return Number(process.env[envName]);
-    const preferred = derivedPort(salt);
-    const port = await freePort(taken.has(preferred) ? 0 : preferred);
+    const port = await freePort(derivedPort(salt), taken);
     taken.add(port);
     return port;
   };
