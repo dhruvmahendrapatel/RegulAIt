@@ -148,11 +148,37 @@ async function applyEvent(
     }
 
     const def = instance.definition as WorkflowDefinition;
-    const { state, effects } = transition(def, instance.state as InstanceState, event);
+    const prior = instance.state as InstanceState;
+    const { state, effects } = transition(def, prior, event);
+
+    // AER-047 (review): a check result belongs to the ROUND it was reported
+    // in. An artifact resubmitted after its stage completed re-opens the
+    // workflow (kernel §2 stage 4) and every downstream stage runs again on
+    // the NEW artifact — so every check result and report already stored for
+    // a downstream automated_check stage is stale and is cleared here, in the
+    // same locked transaction as the re-open. Without this the re-run check
+    // stage reused the previous round's CI green, unlabelled, and advanced
+    // without anything having run against the new artifact. (A report posted
+    // after the re-open — including one posted ahead of the stage while a
+    // gate is pending — belongs to the new round, exactly as in round one.)
+    const reopenedFrom =
+      event.kind === "artifact_submitted" ? def.stages.findIndex((st) => st.id === event.stageId) : -1;
+    const staleCheckStages: string[] = [];
+    let context: Record<string, unknown> | undefined;
+    if (reopenedFrom >= 0 && reopenedFrom < prior.currentStageIndex) {
+      const ctx = { ...(instance.context as Record<string, unknown>) };
+      def.stages.forEach((st, i) => {
+        if (i <= reopenedFrom || st.type !== "automated_check") return;
+        const keys = [`reported:${st.id}`, `checks:${st.id}`, `evals:${st.id}`, `awaitingReport:${st.id}`];
+        if (keys.some((k) => k in ctx)) staleCheckStages.push(st.id);
+        for (const k of keys) delete ctx[k];
+      });
+      if (staleCheckStages.length > 0) context = ctx;
+    }
 
     await tx
       .update(workflowInstances)
-      .set({ state, status: state.status, updatedAt: new Date() })
+      .set({ state, status: state.status, updatedAt: new Date(), ...(context ? { context } : {}) })
       .where(eq(workflowInstances.id, instance.id));
     await tx.insert(workflowEvents).values({ instanceId: instance.id, event, actorUserId });
 
@@ -161,7 +187,7 @@ async function applyEvent(
       userId: actorUserId ?? instance.initiatorUserId,
       objectType: "workflow",
       objectId: instance.id,
-      detail: { event },
+      detail: { event, ...(staleCheckStages.length > 0 ? { staleCheckResultsCleared: staleCheckStages } : {}) },
       effect: isDenial ? "deny" : "allow",
       ruleId: `workflow:${event.kind}`,
       ruleChain: [],
@@ -456,6 +482,31 @@ export const CHECK_AUTO_PASSED_DETAIL = "auto-passed — no report (offline mode
 /** AER-047: the detail a check with no reported result carries while it waits */
 export const CHECK_PENDING_DETAIL = "pending — no result has been reported for this check";
 
+/** AER-047: the env var a process sets (to exactly `1`) to DECLARE itself an
+ * offline/demo box on which a template's `offlineAutoPass` may be honoured */
+export const OFFLINE_CHECKS_ENV = "REGULAIT_OFFLINE_CHECKS";
+
+/**
+ * AER-047 — why THIS process will not honour a template's `offlineAutoPass`,
+ * or null when it will. FAIL CLOSED: the opt-in needs a POSITIVE declaration
+ * (`REGULAIT_OFFLINE_CHECKS=1`, which the demo seed and the demo's gateway
+ * terminal set), and is refused regardless whenever the process shows a sign
+ * of being deployed (ADR-0167's `networkFacingSignal`). Absence of a deployed
+ * signal is NOT proof of a laptop — a bare `docker compose --profile tls` on a
+ * public host sets neither REGULAIT_DEPLOY_MODE nor REGULAIT_HSTS — so the
+ * heuristic only ever narrows the opt-in, it never grants it.
+ */
+export function offlineAutoPassRefusal(
+  env: NodeJS.ProcessEnv,
+): { reason: string; deployedSignal?: string } | null {
+  const deployedSignal = networkFacingSignal(env);
+  if (deployedSignal !== null) return { reason: `this box is deployed: ${deployedSignal}`, deployedSignal };
+  if ((env[OFFLINE_CHECKS_ENV] ?? "").trim() !== "1") {
+    return { reason: `this process never declared offline mode (${OFFLINE_CHECKS_ENV}=1 is not set)` };
+  }
+  return null;
+}
+
 /** one evaluated check as it lands in context[`checks:<stageId>`] */
 type EvaluatedCheck = {
   check: string;
@@ -748,10 +799,14 @@ async function runGitExecutions(
     // A template may opt back into the offline behaviour ONLY through the typed
     // stage field `offlineAutoPass: true`, and every auto-passed result says so
     // (`autoPassed: true`, "auto-passed — no report (offline mode)") in the
-    // context, the audit trail, the rail and the approval view. On a box that
-    // shows a sign of being deployed the opt-in is IGNORED — production
-    // configuration cannot pass a check nobody ran.
+    // context, the audit trail, the rail and the approval view. The opt-in
+    // FAILS CLOSED: it is honoured only in a process that positively declares
+    // offline mode (REGULAIT_OFFLINE_CHECKS=1 — the demo seed and the demo's
+    // gateway terminal) and never on a box that shows a sign of being deployed,
+    // so a production configuration cannot pass a check nobody ran
+    // (offlineAutoPassRefusal).
     if (stage.type === "automated_check") {
+      const declaredChecks = stage.checks ?? [];
       const reported = normalizeCheckReports(context[`reported:${stage.id}`]);
       const byName = new Map(reported.map((r) => [r.check, r]));
       // ADR-0044: checks bound to an evaluation dataset are decided by RUNNING
@@ -760,12 +815,45 @@ async function runGitExecutions(
       // never by an offline auto-pass. A regression produces status 'failed',
       // which then flows into the SAME check_failed event every other failing
       // check uses; there is no second failure path.
-      const evalOutcomes = await runStageEvalChecks(db, instance, stage, dataKey);
-      const deployedSignal = networkFacingSignal(process.env);
-      const autoPassHonoured = stage.offlineAutoPass === true && deployedSignal === null;
-      const results: EvaluatedCheck[] = (stage.checks ?? []).map((name): EvaluatedCheck => {
+      const evalBound = new Set((stage.evals ?? []).map((e) => e.check));
+      const refusal = stage.offlineAutoPass === true ? offlineAutoPassRefusal(process.env) : null;
+      const autoPassHonoured = stage.offlineAutoPass === true && refusal === null;
+      // The evals run ONCE per stage entry, as they did before AER-047, not
+      // once per re-evaluation. While the stage WAITS on reported checks
+      // (context[awaitingReport:<id>] is set) every partial report and every
+      // retried /advance re-evaluates it; re-running the datasets each time
+      // would spend the initiator's and the project's budget only to wait
+      // again. So within one waiting episode the outcome recorded when the
+      // stage was entered is reused. A failing eval never waits (failures
+      // block at once), a recheck from blocked_on_check is not a waiting
+      // episode and re-runs them, and a re-open clears the episode.
+      const waitKey = `awaitingReport:${stage.id}`;
+      const episodeEvals = new Map<string, CheckOutcome>();
+      if (typeof context[waitKey] === "string" && Array.isArray(context[`checks:${stage.id}`])) {
+        for (const r of context[`checks:${stage.id}`] as EvaluatedCheck[]) {
+          if (r && evalBound.has(r.check) && r.status === "passed" && r.eval) {
+            episodeEvals.set(r.check, { check: r.check, status: "passed", severity: r.severity, detail: r.detail, eval: r.eval });
+          }
+        }
+      }
+      const declaredEvals = declaredChecks.filter((n) => evalBound.has(n));
+      const evalOutcomes =
+        declaredEvals.length > 0 && declaredEvals.every((n) => episodeEvals.has(n))
+          ? episodeEvals
+          : await runStageEvalChecks(db, instance, stage, dataKey);
+      const results: EvaluatedCheck[] = declaredChecks.map((name): EvaluatedCheck => {
         const ev = evalOutcomes.get(name);
         if (ev) return ev;
+        // ADR-0044 property 3: an eval-bound check that produced no outcome
+        // could not run, so it FAILS — never reported, never auto-passed
+        if (evalBound.has(name)) {
+          return {
+            check: name,
+            status: "failed",
+            severity: "high",
+            detail: "the eval produced no outcome — the quality gate could not run, so it does not pass",
+          };
+        }
         const rep = byName.get(name);
         if (rep) {
           return {
@@ -785,45 +873,61 @@ async function runGitExecutions(
           ? { check: name, status: "passed", severity: null, detail: CHECK_AUTO_PASSED_DETAIL, autoPassed: true }
           : { check: name, status: "pending", severity: null, detail: CHECK_PENDING_DETAIL };
       });
+      const failures = results.filter((r) => r.status === "failed").map((r) => r.check);
+      const missing = results.filter((r) => r.status === "pending").map((r) => r.check);
+      const autoPassed = results.filter((r) => r.autoPassed).map((r) => r.check);
+      const waiting = failures.length === 0 && missing.length > 0;
       context[`checks:${stage.id}`] = results;
       if (evalOutcomes.size > 0) {
         context[`evals:${stage.id}`] = Object.fromEntries(
           [...evalOutcomes].map(([name, r]) => [name, r.eval]),
         );
       }
+      // One waiting audit row per DISTINCT waiting state, not per
+      // re-evaluation: an initiator retrying /advance, or a CI posting one
+      // check at a time, writes a row only when the set of missing checks (or
+      // why the opt-in was refused) actually changes.
+      const waitSignature = waiting
+        ? JSON.stringify({ missing, refused: refusal?.reason ?? null })
+        : null;
+      const sameWait = waiting && context[waitKey] === waitSignature;
+      if (waiting) context[waitKey] = waitSignature;
+      else delete context[waitKey];
       releaseStageClaim(context);
       delete context.lastError;
       await db
         .update(workflowInstances)
         .set({ context })
         .where(eq(workflowInstances.id, instance.id));
-      const failures = results.filter((r) => r.status === "failed").map((r) => r.check);
-      const missing = results.filter((r) => r.status === "pending").map((r) => r.check);
-      const autoPassed = results.filter((r) => r.autoPassed).map((r) => r.check);
-      if (failures.length === 0 && missing.length > 0) {
+      if (waiting) {
         // WAIT. No kernel event: the instance stays awaiting_execution on THIS
         // stage, which is exactly the state POST .../checks re-evaluates from,
         // so the next reported result picks it up. Nothing advances on silence.
-        const refusedOptIn = stage.offlineAutoPass === true && deployedSignal !== null;
-        await db.insert(auditLog).values({
-          userId: actorUserId ?? "00000000-0000-0000-0000-000000000000",
-          objectType: "workflow",
-          objectId: instance.id,
-          detail: {
-            stageId: stage.id,
-            missingChecks: missing,
-            ...(refusedOptIn ? { offlineAutoPassRefused: true, deployedSignal } : {}),
-          },
-          effect: "allow",
-          ruleId: "workflow:checks-awaiting-report",
-          ruleChain: [],
-          reason:
-            `stage '${stage.id}' is waiting on ${missing.length} check(s) with no reported result: ${missing.join(", ")} — ` +
-            `a check nobody reported never passes; the stage re-evaluates when a result is posted` +
-            (refusedOptIn
-              ? ` (the template opts into offlineAutoPass, ignored because this box is deployed: ${deployedSignal})`
-              : ""),
-        });
+        if (!sameWait) {
+          await db.insert(auditLog).values({
+            userId: actorUserId ?? "00000000-0000-0000-0000-000000000000",
+            objectType: "workflow",
+            objectId: instance.id,
+            detail: {
+              stageId: stage.id,
+              missingChecks: missing,
+              ...(refusal
+                ? {
+                    offlineAutoPassRefused: true,
+                    refusedBecause: refusal.reason,
+                    ...(refusal.deployedSignal ? { deployedSignal: refusal.deployedSignal } : {}),
+                  }
+                : {}),
+            },
+            effect: "allow",
+            ruleId: "workflow:checks-awaiting-report",
+            ruleChain: [],
+            reason:
+              `stage '${stage.id}' is waiting on ${missing.length} check(s) with no reported result: ${missing.join(", ")} — ` +
+              `a check nobody reported never passes; the stage re-evaluates when a result is posted` +
+              (refusal ? ` (the template opts into offlineAutoPass, ignored because ${refusal.reason})` : ""),
+          });
+        }
         break;
       }
       if (failures.length === 0 && autoPassed.length > 0) {

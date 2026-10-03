@@ -444,7 +444,8 @@ function AuthorCard(props: { connections: GitConnection[] }) {
           git_operation {"{action: create_branch | open_pr | merge, connection, repo, …}"}. open_pr needs an
           earlier create_branch, merge an earlier open_pr. A named check nobody reports stays pending and holds
           the stage; offlineAutoPass: true passes it instead, labelled “auto-passed — no report (offline
-          mode)” everywhere, and is ignored on a deployed box. Validation errors from the server appear below,
+          mode)” everywhere — but only on a gateway started with REGULAIT_OFFLINE_CHECKS=1, and never on a
+          deployed box. Validation errors from the server appear below,
           field by field.
         </p>
         <div className={v.row}>

@@ -60,6 +60,19 @@ const pendingFor = async (
     );
 };
 
+// AER-047: this suite drives check stages whose templates opt in to the
+// labelled offline auto-pass (offlineAutoPass). The opt-in FAILS CLOSED unless
+// the process declares offline mode, so the suite declares it — and restores
+// the environment afterwards.
+const priorOfflineChecks = process.env.REGULAIT_OFFLINE_CHECKS;
+beforeAll(() => {
+  process.env.REGULAIT_OFFLINE_CHECKS = "1";
+});
+afterAll(() => {
+  if (priorOfflineChecks === undefined) delete process.env.REGULAIT_OFFLINE_CHECKS;
+  else process.env.REGULAIT_OFFLINE_CHECKS = priorOfflineChecks;
+});
+
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);

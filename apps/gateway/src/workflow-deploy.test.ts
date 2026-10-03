@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { and, auditLog, createDb, eq, runMigrations, type Db } from "@regulait/db";
@@ -125,6 +125,19 @@ async function start(changeType: string, environment = "wd-env") {
   expect(res.statusCode).toBe(201);
   return res.json().id as string;
 }
+
+// AER-047: this suite drives check stages whose templates opt in to the
+// labelled offline auto-pass (offlineAutoPass). The opt-in FAILS CLOSED unless
+// the process declares offline mode, so the suite declares it — and restores
+// the environment afterwards.
+const priorOfflineChecks = process.env.REGULAIT_OFFLINE_CHECKS;
+beforeAll(() => {
+  process.env.REGULAIT_OFFLINE_CHECKS = "1";
+});
+afterAll(() => {
+  if (priorOfflineChecks === undefined) delete process.env.REGULAIT_OFFLINE_CHECKS;
+  else process.env.REGULAIT_OFFLINE_CHECKS = priorOfflineChecks;
+});
 
 beforeAll(async () => {
   db = createDb(DATABASE_URL);

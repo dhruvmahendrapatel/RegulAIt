@@ -58,6 +58,16 @@ if (DATA_KEY !== undefined && DATA_KEY.trim() !== "") {
   }
 }
 
+// AER-047: the seeded demo drives check stages nobody reports (there is no CI
+// in the demo), and those templates opt in to the labelled offline auto-pass.
+// The opt-in FAILS CLOSED — a process must declare offline mode for it to be
+// honoured — so the seeder declares it for ITS OWN in-process app. It changes
+// nothing else: a box that shows a sign of being deployed still refuses the
+// opt-in (the seeded instances then wait at their check stage), an explicit
+// REGULAIT_OFFLINE_CHECKS=0 is respected, and the gateway the presenter starts
+// afterwards must declare it itself (DEMO_SCRIPT §0 exports it).
+process.env.REGULAIT_OFFLINE_CHECKS ??= "1";
+
 const db = createDb(connectionString);
 // An idle pooled connection killed out from under us (e.g. a scratch database
 // dropped WITH (FORCE) right after seeding finishes) must not crash the
@@ -406,7 +416,8 @@ const sensitiveTpl = await ensureTemplate("sensitive-data", {
 // The complete-pipeline template (§2 end-to-end): intake → plan → requirements
 // artifact → Avery's sign-off → automated build as a NESTED RUN on the mock
 // agents → automated checks (no CI in the demo: the stage opts in to the
-// labelled offline auto-pass, AER-047) →
+// labelled offline auto-pass, AER-047 — honoured only by a gateway started with
+// REGULAIT_OFFLINE_CHECKS=1) →
 // branch → PR → merge gate (Avery) → squash merge. Git stages run against the
 // MOCK git provider — the whole chain is drivable with zero external
 // credentials. The connection token below is an obvious dummy, encrypted at
@@ -1473,8 +1484,10 @@ ${pmWebhookSecret ? `\n    demo-pm webhook secret (shown ONCE)  ${pmWebhookSecre
     1. avery  Inbox → approve the sign-off (reads the artifact inline)
     2. dana   the build stage spawns a nested run — open it from the
               workflow's 'watch the run' link (or Runs) and Auto-advance
-    3. (auto) checks auto-pass, labelled "no report (offline mode)"; branch + PR open on the mock
-              provider — the PR URL appears under Delivery
+    3. (auto) checks auto-pass, labelled "no report (offline mode)" — only on a
+              gateway started with REGULAIT_OFFLINE_CHECKS=1; without it they wait
+              for a report — then branch + PR open on the mock provider, and the
+              PR URL appears under Delivery
     4. avery  Inbox → approve the merge gate → squash-merged, chain complete.
 
   Simulation / Access preview — pick Dana + the repo server from the selects

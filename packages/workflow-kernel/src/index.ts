@@ -67,10 +67,12 @@ const stageSchema = z.object({
    * explicit, per-template opt-in to the old offline behaviour: an unreported
    * check passes, but the result is labelled `autoPassed: true` ("auto-passed —
    * no report (offline mode)") in the instance context, the audit trail, the
-   * stage rail and the approval view. The gateway ignores the opt-in on a box
-   * that shows a sign of being deployed (REGULAIT_DEPLOY_MODE / REGULAIT_HSTS),
-   * so a production configuration cannot pass a check nobody ran. Only valid on
-   * an automated_check stage with named checks — refused loudly elsewhere. */
+   * stage rail and the approval view. The gateway honours the opt-in only in a
+   * process that positively declares offline mode (REGULAIT_OFFLINE_CHECKS=1)
+   * and never on a box that shows a sign of being deployed (REGULAIT_DEPLOY_MODE
+   * / REGULAIT_HSTS) — it FAILS CLOSED, so a production configuration cannot
+   * pass a check nobody ran. Only valid on an automated_check stage with named
+   * checks — refused loudly elsewhere. */
   offlineAutoPass: z.boolean().optional(),
   /** git_operation: which operation this stage performs */
   action: z.enum(GIT_ACTIONS).optional(),
