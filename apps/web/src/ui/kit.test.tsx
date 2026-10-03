@@ -5,7 +5,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { ApiError } from "../api/client";
-import { EmptyState, RecordError, Table } from "./kit";
+import { EmptyState, Field, Input, RecordError, Table } from "./kit";
 
 type Row = { id: string; name: string };
 const columns = [{ key: "name", header: "Name", render: (r: Row) => r.name }];
@@ -84,5 +84,15 @@ describe("RecordError — a missing record is named, not retried (UIW-08)", () =
     expect(h).toContain("Couldn&#x27;t load this run");
     expect(h).toContain("Something went wrong on the server");
     expect(h).toContain(">Retry<");
+  });
+});
+
+describe("Field grow — a real flex basis, so the field wraps before it shrinks to nothing (UIW-05)", () => {
+  it("renders the grow class and no inline flex style", () => {
+    const html = renderToStaticMarkup(<Field label="Title" grow><Input /></Field>);
+    expect(html).toContain("fieldGrow");
+    expect(html).not.toContain("style=\"flex:1\"");
+    const plain = renderToStaticMarkup(<Field label="Title"><Input /></Field>);
+    expect(plain).not.toContain("fieldGrow");
   });
 });

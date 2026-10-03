@@ -305,3 +305,38 @@ test("UIA-04: a long fingerprint wraps inside its stat tile instead of being cli
     expect(c.right).toBeLessThanOrEqual(c.tileRight + 1);
   }
 });
+
+test("UIW-06: at phone width the run page's header actions wrap under the title instead of over it", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const run = {
+    run: {
+      id: "run-1", name: "checkout-refactor", status: "running", createdAt: "2026-10-02T12:00:00Z", initiatingUserId: USER_A.id,
+      graph: { nodes: [{ id: "n1", title: "Plan the refactor", instruction: "Plan it", ownerAgentId: "ag" }] },
+      state: { nodeStatuses: { n1: "in_progress" }, owners: { n1: "ag" } },
+    },
+    events: [],
+    pendingApprovals: [],
+  };
+  await routeApi(page, async (route, p) => {
+    if (p === "/auth/me") return json(route, authMe(USER_A));
+    if (p === "/v1/me") return json(route, { userId: USER_A.id, isAdmin: true, user: USER_A });
+    if (p === "/v1/runs/run-1") return json(route, run);
+    if (p === `/v1/users/${USER_A.id}/agents`) return json(route, { agents: [], defaultAgentId: null });
+    if (p === "/v1/pm/links") return json(route, { links: [] });
+    if (p === "/v1/decisions") return json(route, { decisions: [] });
+    return json(route, {});
+  });
+  await page.goto("/ui/runs/run-1");
+  const h1 = page.getByRole("heading", { level: 1, name: "checkout-refactor" });
+  await expect(h1).toBeVisible();
+  const abort = page.getByRole("button", { name: "Abort run" });
+  await expect(abort).toBeVisible();
+  const title = (await h1.boundingBox())!;
+  for (const name of ["Auto-advance", "Abort run"]) {
+    const b = (await page.getByRole("button", { name }).boundingBox())!;
+    const overlaps = b.x < title.x + title.width && b.x + b.width > title.x && b.y < title.y + title.height && b.y + b.height > title.y;
+    expect(overlaps, `${name} overlaps the title`).toBe(false);
+  }
+  // the title keeps a readable width — it is no longer squeezed beside the buttons
+  expect(title.width).toBeGreaterThan(150);
+});

@@ -67,6 +67,11 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
  * hint). Those keep exactly the behaviour they had rather than silently losing
  * their association.
  */
+/** `grow` used to be `flex: 1` with a zero basis, so in a wrapping row the
+ * field took whatever was left — 20px beside three selects at phone width
+ * (UIW-05). A real basis makes it wrap to a full line of its own first. */
+const fieldClass = (grow: boolean | undefined) => (grow ? `${s.field} ${s.fieldGrow}` : s.field);
+
 export function Field(props: { label: string; children: ReactNode; error?: string | null; grow?: boolean }) {
   const auto = useId();
   // A SPACER IS NOT A LABEL. `<Field label="&nbsp;">` is used to keep a submit
@@ -78,7 +83,7 @@ export function Field(props: { label: string; children: ReactNode; error?: strin
   const spacer = props.label.trim().replace(/\u00a0/g, "") === "";
   if (spacer) {
     return (
-      <div className={s.field} style={props.grow ? { flex: 1 } : undefined}>
+      <div className={fieldClass(props.grow)}>
         <span className={s.fieldLabel} aria-hidden>
           {props.label}
         </span>
@@ -103,7 +108,7 @@ export function Field(props: { label: string; children: ReactNode; error?: strin
   if (single) {
     const id = single.props.id ?? auto;
     return (
-      <div className={s.field} style={props.grow ? { flex: 1 } : undefined}>
+      <div className={fieldClass(props.grow)}>
         <label className={s.fieldLabel} htmlFor={id}>
           {props.label}
         </label>
@@ -114,7 +119,7 @@ export function Field(props: { label: string; children: ReactNode; error?: strin
   }
 
   return (
-    <label className={s.field} style={props.grow ? { flex: 1 } : undefined}>
+    <label className={fieldClass(props.grow)}>
       <span className={s.fieldLabel}>{props.label}</span>
       {props.children}
       {props.error ? <span className={s.fieldError}>{props.error}</span> : null}

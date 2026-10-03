@@ -382,7 +382,7 @@ export function PageHeader(props: {
           </ol>
         </nav>
       )}
-      <div style={{ display: "flex", alignItems: "flex-start", gap: "var(--s2)" }}>
+      <div className={s.pageHeaderRow}>
         {/*
           The info trigger is a SIBLING of the <h1>, never a child of it. Inside
           the heading its label joins the heading's accessible name, so every

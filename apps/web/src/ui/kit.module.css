@@ -68,6 +68,10 @@
   gap: var(--s0);
   min-width: 0;
 }
+.fieldGrow {
+  flex: 1 1 16rem;
+  min-width: min(16rem, 100%);
+}
 .fieldLabel {
   font-size: var(--text-xs);
   font-weight: 600;
