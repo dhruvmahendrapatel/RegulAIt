@@ -120,6 +120,8 @@ async function mock(route: Route) {
 async function shotBoth(page: Page, name: string) {
   for (const theme of ["light", "dark"] as const) {
     await page.evaluate((next) => { document.documentElement.dataset.theme = next; localStorage.setItem("regulait.theme", next); window.scrollTo(0, 0); }, theme);
+    // let colour transitions (button fills, theme switch) settle so a review shot never shows a mid-transition slab
+    await page.waitForTimeout(300);
     await page.screenshot({ path: path.join(SHOTS, `${name}-${theme}.png`), fullPage: true });
   }
 }
