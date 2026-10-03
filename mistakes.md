@@ -1344,3 +1344,15 @@ refuses to start when the port already answers (`curl -sf …/health && exit 1`)
 servers by pattern before AND after (`pkill -f "[n]ode dist/main.js"` — the bracket keeps
 pkill from matching its own shell). After any verification, check the target database holds
 exactly the rows the run wrote.
+
+### M-062 (2026-10-02) - A four-hour fix batch kept its work uncommitted until the end
+
+The security batch (16 findings, 54 files) ran as one agent for four hours and planned to commit
+once, after a final full-suite run. The container restarted during that run. The edits survived on
+disk, but the agent, its verification state and its final step were lost, and I had to
+reconstruct what was done from the task list and the ADR it had written.
+
+Rule: a batch commits per closed finding (or per coherent group), locally, as it goes — a commit
+is the checkpoint, the final full suite is the gate before the PUSH, not before the first commit.
+Give every long agent a deliverable it can leave behind early (an ADR or notes file written
+first, then kept current), and never let a single agent own more than ~an hour of uncommitted work.
