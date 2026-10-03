@@ -90,7 +90,7 @@ export function DependencyGraphPanel({ useCaseId }: { useCaseId?: string }) {
           <span>Include observed runtime edges</span>
         </label>
         <span className={v.grow} />
-        <Button size="sm" onClick={() => void graph.refetch()}>Refresh graph</Button>
+        <Button size="sm" variant="ghost" onClick={() => void graph.refetch()}>Refresh graph</Button>
       </div>
       <QueryGate loading={graph.isLoading} error={graph.error} onRetry={() => void graph.refetch()}>
         {!graph.data || graph.data.nodes.length === 0 ? (

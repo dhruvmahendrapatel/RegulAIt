@@ -118,7 +118,7 @@ export default function AuditLogPage() {
                 </span>
               </span>
               <span className={v.grow} />
-              <Button variant="danger" disabled={!ret.prunable} onClick={() => setConfirmPrune(true)}>
+              <Button disabled={!ret.prunable} onClick={() => setConfirmPrune(true)}>
                 Prune audit log
               </Button>
             </div>

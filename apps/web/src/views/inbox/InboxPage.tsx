@@ -175,8 +175,8 @@ export default function InboxPage() {
                   placeholder={named || delegated ? "reason (optional)" : "reason (required - admin override)"}
                   aria-label="Decision reason" value={reasons[a.id] ?? ""}
                   onChange={(e) => setReasons((r) => ({ ...r, [a.id]: e.target.value }))} />
-                <Button size="sm" variant="primary" disabled={deciding === a.id || !!blockedReason} onClick={() => void decide(a, "approved")}>Approve</Button>
-                <Button size="sm" variant="danger" disabled={deciding === a.id} onClick={() => void decide(a, "denied")}>Deny</Button>
+                <Button size="sm" disabled={deciding === a.id || !!blockedReason} onClick={() => void decide(a, "approved")}>Approve</Button>
+                <Button size="sm" variant="ghost" disabled={deciding === a.id} onClick={() => void decide(a, "denied")}>Deny</Button>
                 {rowErrors[a.id] && <div className={v.errLine} role="alert">{rowErrors[a.id]}</div>}
               </div>;
               return (
