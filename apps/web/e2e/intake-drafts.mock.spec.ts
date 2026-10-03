@@ -62,6 +62,9 @@ function assistFor(body: Json) {
 interface Gateway {
   drafts: Map<string, { scope: string; state: unknown; updatedAt: string }>;
   draftUnavailable: boolean;
+  /** answer every draft save with this status instead (e.g. 413 draft_too_large) */
+  draftPutStatus: number | null;
+  draftPuts: number;
   assistCalls: Json[];
   creates: Array<{ key: string | undefined; body: Json; replay: boolean }>;
   useCases: Array<{ id: string; key: string | undefined; body: Json }>;
@@ -77,7 +80,7 @@ const json = (route: Route, body: unknown, status = 200, headers: Record<string,
   route.fulfill({ status, contentType: "application/json", headers, body: JSON.stringify(body) });
 
 async function mockGateway(page: Page, patch: Partial<Gateway> = {}): Promise<Gateway> {
-  const gw: Gateway = { drafts: new Map(), draftUnavailable: false, assistCalls: [], creates: [], useCases: [], artifacts: [], risks: [], dropNextCreateResponse: false, holdCreate: null, ...patch };
+  const gw: Gateway = { drafts: new Map(), draftUnavailable: false, draftPutStatus: null, draftPuts: 0, assistCalls: [], creates: [], useCases: [], artifacts: [], risks: [], dropNextCreateResponse: false, holdCreate: null, ...patch };
   await page.route("**/*", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
@@ -91,6 +94,8 @@ async function mockGateway(page: Page, patch: Partial<Gateway> = {}): Promise<Ga
     if (p === "/v1/use-cases/draft") {
       if (gw.draftUnavailable) return json(route, { error: "internal" }, 500);
       const scope = url.searchParams.get("scope") ?? "";
+      if (method === "PUT") gw.draftPuts += 1;
+      if (method === "PUT" && gw.draftPutStatus) return json(route, { error: "draft_too_large" }, gw.draftPutStatus);
       if (method === "PUT") gw.drafts.set(scope, { scope, state: body.state, updatedAt: new Date().toISOString() });
       if (method === "DELETE") {
         gw.drafts.delete(scope);
@@ -237,6 +242,19 @@ test.describe("AER-050: the work is a server-side draft, leaving asks first, and
     await expect.poll(() => gw.drafts.has("new")).toBe(false);
     await expect(page.getByLabel("Use-case name")).toHaveValue("");
     await expect(stage(page)).toContainText("Describe");
+  });
+
+  test("a draft the gateway refuses (too large) is said plainly and not retried in a loop; the next change tries again", async ({ page }) => {
+    const gw = await mockGateway(page, { draftPutStatus: 413 });
+    await page.goto("/ui/admin/governance/intake");
+    await page.getByLabel("Use-case name").fill("Something new");
+    await expect(page.getByText("This draft is too large to save: your answers stay on this page until you submit.")).toBeVisible();
+    expect(gw.draftPuts).toBe(1);
+    await page.waitForTimeout(2500);
+    expect(gw.draftPuts, "no save loop while nothing changes").toBe(1);
+    expect(await unloadArmed(page)).toBe(true);
+    await page.getByLabel("Use-case name").fill("Something newer");
+    await expect.poll(() => gw.draftPuts).toBe(2);
   });
 
   test("Cancel and the navigation ask before leaving; Stay keeps the answers; an unsaved form arms the browser's prompt", async ({ page }) => {

@@ -861,7 +861,7 @@ function DraftLine(props: { status: DraftStatus; dirty: boolean; unsaved: boolea
       : status.kind === "error"
         ? status.tooLarge
           ? "This draft is too large to save: your answers stay on this page until you submit."
-          : "Your latest changes could not be saved as a draft yet; they stay on this page and saving is retried."
+          : "Your latest changes could not be saved as a draft. They stay on this page, and saving is tried again after your next change."
         : status.kind === "saved" && !props.unsaved
           ? `Draft saved ${savedAtText(status.at)}. Only you can open it.`
           : "Saving your draft…";

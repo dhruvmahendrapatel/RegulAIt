@@ -52,6 +52,8 @@ export function useIntakeDraft<S>(opts: {
   const timer = useRef<number | null>(null);
   const queue = useRef<Promise<unknown>>(Promise.resolve());
   const stopped = useRef(false);
+  /** the snapshot the last refused save tried to store */
+  const failed = useRef<string | null>(null);
 
   useEffect(() => {
     if (!enabled) return;
@@ -94,6 +96,7 @@ export function useIntakeDraft<S>(opts: {
         // a change made while this save was in flight is still waiting
         setStatus(latest.current === body ? { kind: "saved", at: res?.draft?.updatedAt ?? new Date().toISOString() } : { kind: "pending" });
       } catch (error) {
+        failed.current = body;
         if (stopped.current) return;
         setStatus({ kind: "error", tooLarge: error instanceof ApiError && error.status === 413 });
       }
@@ -106,7 +109,10 @@ export function useIntakeDraft<S>(opts: {
   useEffect(() => {
     const kind = statusRef.current.kind;
     if (stopped.current || kind === "off" || kind === "offer" || kind === "loading" || serialized === null || serialized === saved.current) return;
-    setStatus((s) => (s.kind === "saving" ? s : { kind: "pending" }));
+    // a save in flight re-schedules itself when it lands (status "pending");
+    // a refused save is tried again after the next change, never in a loop
+    if (kind === "saving" || (kind === "error" && serialized === failed.current)) return;
+    setStatus((s) => (s.kind === "pending" ? s : { kind: "pending" }));
     clearTimer();
     timer.current = window.setTimeout(() => void save(), SAVE_DELAY_MS);
   }, [serialized, save, status.kind]);
