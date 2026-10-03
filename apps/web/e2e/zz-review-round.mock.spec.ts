@@ -137,6 +137,8 @@ interface State {
   artifactFailures: number;
   /** the resubmission's server-side draft (ADR-0171) */
   draft: { scope: string; state: unknown; updatedAt: string } | null;
+  /** ADR-0171: the answers the owner was not sure about when they last submitted */
+  resubmitUnsure: string[] | null;
 }
 
 const json = (route: Route, body: unknown, status = 200) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
@@ -170,7 +172,7 @@ function detail(state: State) {
       { id: RISK2, title: "Stale income data", status: "open", acceptedByName: null, acceptedAt: null, acceptanceRationale: null },
     ],
     resubmission: state.resubmission
-      ? { allowed: true, screeningAnswers: FULL, questionnaire: { version: 2, content: QUESTIONNAIRE }, returnReason: REASON, returnedByName: "Avery Approver" }
+      ? { allowed: true, screeningAnswers: state.resubmitUnsure ? { ...FULL, profilesNaturalPersons: true, unsure: state.resubmitUnsure } : FULL, questionnaire: { version: 2, content: QUESTIONNAIRE }, returnReason: REASON, returnedByName: "Avery Approver" }
       : { allowed: false, screeningAnswers: null, questionnaire: null, returnReason: null, returnedByName: null },
   };
 }
@@ -178,7 +180,7 @@ function detail(state: State) {
 async function mockGateway(page: Page, patch: Partial<State> = {}): Promise<State> {
   const state: State = {
     persona: RILEY, status: "under_review", reviews: reviews(), acceptedRisk: false, recertification: false, resubmission: false, policy: savedPolicy(),
-    approvals: [roleApproval()], calls: [], puts: [], putReply: null, decides: [], decideReply: null, patches: [], artifacts: [], artifactFailures: 0, draft: null, ...patch,
+    approvals: [roleApproval()], calls: [], puts: [], putReply: null, decides: [], decideReply: null, patches: [], artifacts: [], artifactFailures: 0, draft: null, resubmitUnsure: null, ...patch,
   };
   await page.route("**/*", async (route) => {
     const p = new URL(route.request().url()).pathname;
@@ -637,6 +639,70 @@ test.describe("update and resubmit", () => {
     expect(state.artifacts).toHaveLength(2);
     // nothing edited: the new version is the old document, byte for byte
     expect(state.artifacts[1]).toEqual({ stageId: "questionnaire", content: QUESTIONNAIRE });
+  });
+
+  test("ADR-0171: edits are kept as a draft for this use case, leaving asks first, and Not sure answers come back and go out as yes", async ({ page }) => {
+    const state = await mockGateway(page, { status: "needs_info", resubmission: true, reviews: [], resubmitUnsure: ["profilesNaturalPersons"] });
+    await page.goto(`/ui/admin/governance/intake?resubmit=${UC}`);
+    await expect(page.getByRole("heading", { level: 1, name: "Update and resubmit" })).toBeVisible();
+    const purpose = "Recommends credit-limit increases; DPIA DP-2026-114 attached.";
+    await page.getByLabel("What will the system do?").fill(purpose);
+    await expect.poll(() => (state.draft?.state as { description?: string } | undefined)?.description).toBe(purpose);
+    expect(state.draft?.scope).toBe(UC);
+
+    // Cancel asks first, and says the edits are kept
+    await page.getByRole("link", { name: "Cancel" }).click();
+    const leave = page.getByRole("dialog", { name: "Leave this resubmission?" });
+    await expect(leave).toContainText("saved as a draft for this use case");
+    await leave.getByRole("button", { name: "Stay on this page" }).click();
+    await expect(leave).toHaveCount(0);
+
+    // a reload offers the draft back
+    await page.reload();
+    await page.getByRole("button", { name: "Resume your draft" }).click();
+    await expect(page.getByLabel("What will the system do?")).toHaveValue(purpose);
+    await page.getByRole("button", { name: "Continue" }).click();
+    // the recorded "not sure" comes back as Not sure, with what it means
+    await expect(page.getByLabel("Profiles natural persons")).toHaveValue("unsure");
+    await expect(page.getByLabel("Profiles natural persons")).toHaveAccessibleDescription(/Not sure counts as yes until a reviewer confirms it/);
+    await page.getByLabel("Social scoring").selectOption("unsure");
+    await checkScreen(page, "resubmit: classify (not sure)");
+    await page.getByRole("button", { name: "Continue" }).click();
+    await page.getByRole("button", { name: "Continue" }).click();
+    await expect(page.getByRole("main")).toContainText("Not sure aboutProfiles natural persons, Social scoring");
+    await page.getByRole("button", { name: "Resubmit for review" }).click();
+    await expect(page).toHaveURL(new RegExp(`/ui/admin/governance/use-cases/${UC}$`));
+
+    expect(state.calls).toEqual([`PATCH /v1/use-cases/${UC}`, `POST /v1/workflows/instances/${INST}/artifacts`]);
+    expect(state.patches).toEqual([{
+      description: purpose,
+      screeningAnswers: { ...FULL, profilesNaturalPersons: true, socialScoring: true, unsure: ["profilesNaturalPersons", "socialScoring"] },
+    }]);
+    const content = String((state.artifacts[0] as { content: string }).content);
+    expect(content).toContain('"unsure": [');
+    expect(content).toContain('"socialScoring": true');
+    // resubmitted: the draft is gone
+    await expect.poll(() => state.draft).toBeNull();
+  });
+
+  test("ADR-0171: Cancel and Back wait while a resubmission is in flight; with no edits, Cancel leaves without asking", async ({ page }) => {
+    await mockGateway(page, { status: "needs_info", resubmission: true, reviews: [] });
+    // nothing edited: Cancel just leaves
+    await page.goto(`/ui/admin/governance/intake?resubmit=${UC}`);
+    await page.getByRole("link", { name: "Cancel" }).click();
+    await expect(page).toHaveURL(new RegExp(`/ui/admin/governance/use-cases/${UC}$`));
+
+    await page.goto(`/ui/admin/governance/intake?resubmit=${UC}`);
+    for (let i = 0; i < 3; i += 1) await page.getByRole("button", { name: "Continue" }).click();
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    await page.route(`**/v1/workflows/instances/${INST}/artifacts`, async (route) => { await held; await route.fallback(); });
+    await page.getByRole("button", { name: "Resubmit for review" }).click();
+    await expect(page.getByRole("button", { name: "Resubmitting…" })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "Cancel" })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "Back" })).toBeDisabled();
+    release();
+    await expect(page).toHaveURL(new RegExp(`/ui/admin/governance/use-cases/${UC}$`));
   });
 
   test("keyboard: Continue from the keyboard lands focus on each stage's heading", async ({ page }) => {

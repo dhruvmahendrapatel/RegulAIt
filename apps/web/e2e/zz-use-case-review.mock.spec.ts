@@ -80,12 +80,16 @@ interface MockState {
   blockingRefused: boolean;
   decides: Array<{ id: string; body: unknown }>;
   metPosts: Array<{ path: string; body: unknown }>;
+  /** AER-055: answers the detail read gives before it succeeds (e.g. a 500, then a 403) */
+  detailFailures: Array<{ status: number; error: string }>;
+  /** ADR-0171: fields the detail read adds (frameworkRationales, screeningUnsure, resubmission) */
+  detailExtra: Record<string, unknown>;
 }
 
 const json = (route: Route, body: unknown, status = 200) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
 
 async function mockGateway(page: Page, patch: Partial<MockState> = {}): Promise<MockState> {
-  const state: MockState = { persona: ADMIN_REVIEWER, status: "under_review", approvals: [intakeApproval("ada", "riley")], conditionMet: false, approvedUntil: null, approvalExpired: false, blockingRefused: false, decides: [], metPosts: [], ...patch };
+  const state: MockState = { persona: ADMIN_REVIEWER, status: "under_review", approvals: [intakeApproval("ada", "riley")], conditionMet: false, approvedUntil: null, approvalExpired: false, blockingRefused: false, decides: [], metPosts: [], detailFailures: [], detailExtra: {}, ...patch };
   await page.route("**/*", async (route) => {
     const url = new URL(route.request().url());
     const p = url.pathname;
@@ -103,7 +107,11 @@ async function mockGateway(page: Page, patch: Partial<MockState> = {}): Promise<
     if (p.startsWith("/v1/workflows/instances/")) return json(route, { error: "not_found" }, 404);
     if (p === "/v1/use-cases") return json(route, me.isAdmin ? { useCases: [{ id: UC, workflowInstanceId: INST }] } : { useCases: [] });
     if (p === `/v1/use-cases/${UC}/overview`) return me.isAdmin ? json(route, overview(state.status)) : json(route, { error: "forbidden" }, 403);
-    if (p === `/v1/use-cases/${UC}`) return json(route, { useCase: { id: UC, status: state.status, approvedAt: state.approvedUntil ? "2026-10-02T11:00:00Z" : null, approvedUntil: state.approvedUntil, approvalExpired: state.approvalExpired }, conditions: state.status === "approved" ? conditions(state.conditionMet, me, state.blockingRefused) : [] });
+    if (p === `/v1/use-cases/${UC}` && state.detailFailures.length > 0) {
+      const failure = state.detailFailures.shift()!;
+      return json(route, { error: failure.error }, failure.status);
+    }
+    if (p === `/v1/use-cases/${UC}`) return json(route, { ...state.detailExtra, useCase: { id: UC, status: state.status, approvedAt: state.approvedUntil ? "2026-10-02T11:00:00Z" : null, approvedUntil: state.approvedUntil, approvalExpired: state.approvalExpired }, conditions: state.status === "approved" ? conditions(state.conditionMet, me, state.blockingRefused) : [] });
     if (p.startsWith(`/v1/use-cases/${UC}/conditions/`) && p.endsWith("/met") && method === "POST") {
       state.metPosts.push({ path: p, body: route.request().postDataJSON() });
       state.conditionMet = true;
@@ -406,5 +414,83 @@ test.describe("the review task", () => {
       await drawer.getByRole("button", { name: "Cancel" }).click();
       await expect(drawer).toBeHidden();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ADR-0171 — AER-055: unknown lifecycle detail is never read as "none";
+// AER-052/053: the reviewer sees the owner's framework explanations and the
+// answers the owner was not sure about.
+// ---------------------------------------------------------------------------
+
+test.describe("ADR-0171: what the record and the review task say", () => {
+  for (const failure of [{ status: 500, error: "internal" }, { status: 403, error: "forbidden" }]) {
+    test(`AER-055: an approved record whose detail read fails (${failure.status}) never says "approved without conditions"; Retry shows the real conditions`, async ({ page }) => {
+      // the query client retries a 500 once and never a 403: enough failures to leave the read failed
+      const state = await mockGateway(page, { status: "approved", approvedUntil: "2027-04-02T11:00:00Z", detailFailures: failure.status === 500 ? [failure, failure] : [failure] });
+      await page.goto(`/ui/admin/governance/use-cases/${UC}`);
+      await expect(page.getByRole("heading", { level: 1, name: "Credit-limit-increase assistant" })).toBeVisible();
+      const tracker = page.locator("section", { has: page.getByText("Lifecycle tracker", { exact: true }) });
+      const conds = page.locator("section", { has: page.getByText("Conditions of approval", { exact: true }) });
+      await expect(tracker.getByRole("alert")).toContainText("The lifecycle details could not be loaded");
+      await expect(conds).toContainText("The conditions could not be loaded");
+      // never a statement of no conditions, never a lifecycle read as complete
+      await expect(page.getByText("This use case was approved without conditions.")).toHaveCount(0);
+      await expect(page.getByRole("list", { name: "Lifecycle" })).toHaveCount(0);
+      await expect(page.getByText(/\(complete\)/)).toHaveCount(0);
+      await expectNoAxeViolations(page, `use-case record (detail ${failure.status})`);
+
+      expect(state.detailFailures).toEqual([]);
+      await tracker.getByRole("button", { name: "Retry loading the lifecycle details" }).click();
+      await expect(conds.getByRole("row").filter({ hasText: "Run the bias test" })).toContainText("Before go-live");
+      await expect(page.getByText("1 before-go-live condition open")).toBeVisible();
+      await expect(page.getByRole("list", { name: "Lifecycle" }).locator('[aria-current="step"]')).toContainText("Approved");
+    });
+  }
+
+  test("AER-055: while the detail is still loading, the record says so instead of showing no conditions", async ({ page }) => {
+    await mockGateway(page, { status: "approved", approvedUntil: "2027-04-02T11:00:00Z" });
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    await page.route(`**/v1/use-cases/${UC}`, async (route) => { await held; await route.fallback(); });
+    await page.goto(`/ui/admin/governance/use-cases/${UC}`);
+    await expect(page.getByRole("heading", { level: 1, name: "Credit-limit-increase assistant" })).toBeVisible();
+    await expect(page.getByText("Loading conditions…")).toBeVisible();
+    await expect(page.getByText("This use case was approved without conditions.")).toHaveCount(0);
+    await expect(page.getByRole("list", { name: "Lifecycle" })).toHaveCount(0);
+    release();
+    await expect(page.getByText("1 before-go-live condition open")).toBeVisible();
+  });
+
+  test("AER-055: a sent-back record's resubmit action appears once the detail loads after a retry", async ({ page }) => {
+    await mockGateway(page, {
+      status: "needs_info",
+      detailFailures: [{ status: 500, error: "internal" }, { status: 500, error: "internal" }],
+      detailExtra: { resubmission: { allowed: true, screeningAnswers: null, questionnaire: null, returnReason: "Add the DPIA reference.", returnedByName: "Avery Approver" } },
+    });
+    await page.goto(`/ui/admin/governance/use-cases/${UC}`);
+    const tracker = page.locator("section", { has: page.getByText("Lifecycle tracker", { exact: true }) });
+    await expect(tracker.getByRole("alert")).toBeVisible();
+    await expect(page.getByRole("link", { name: "Update and resubmit" })).toHaveCount(0);
+    await tracker.getByRole("button", { name: "Retry loading the lifecycle details" }).click();
+    await expect(page.getByRole("link", { name: "Update and resubmit" })).toBeVisible();
+    await expect(page.getByText("Add the DPIA reference.").first()).toBeVisible();
+  });
+
+  test("AER-052/053: the record and the review task show the owner's framework explanations and the answers they were not sure about", async ({ page }) => {
+    const extra = {
+      frameworkRationales: { "eu-ai-act": "Customers in Germany use it, and it decides on access to credit." },
+      screeningUnsure: ["profilesNaturalPersons", "euNexus"],
+    };
+    await mockGateway(page, { detailExtra: extra });
+    await page.goto(`/ui/admin/governance/use-cases/${UC}`);
+    await expect(page.getByText("Customers in Germany use it, and it decides on access to credit.")).toBeVisible();
+    await expect(page.locator("p").filter({ hasText: "Owner unsure about:" })).toContainText("Profiles natural persons, Has an EU nexus");
+    await expectNoAxeViolations(page, "use-case record (rationale and unsure answers)");
+
+    const drawer = await openReview(page);
+    await expect(drawer.getByText(/Customers in Germany use it, and it decides on access to credit\./)).toBeVisible();
+    await expect(drawer.locator("p").filter({ hasText: "Owner unsure about:" })).toContainText("Profiles natural persons, Has an EU nexus");
+    await expectNoAxeViolations(page, "review task (rationale and unsure answers)", '[role="dialog"]');
   });
 });
