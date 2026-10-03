@@ -22,6 +22,16 @@
  *
  * Authorization: an admin, or the agent's CURRENT steward (an active user).
  * Both routes are in NON_ADMIN_ROUTES for that reason and check in-handler.
+ *
+ * ADR-0170 item 7 — a steward may TIGHTEN an agent's lifecycle, never loosen
+ * it. A non-admin steward may move an agent to `under_review` or `suspended`
+ * (STEWARD_LIFECYCLE_MOVES); making it `active` again (which would lift a
+ * suspension an admin imposed), retiring it, or moving it out of `proposed` is
+ * an admin decision (403 admin_required_for_lifecycle). A steward's next review
+ * date is capped at the agent's cadence (422 next_review_beyond_cadence) and
+ * only an admin may clear it. The write is compare-and-swap on the lifecycle
+ * status that was read (409 lifecycle_changed_concurrently), so a concurrent
+ * retirement or suspension is never overwritten by a stale read.
  */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
@@ -37,6 +47,31 @@ const TIER_RANK: Record<string, number> = { minimal: 1, limited: 2, high: 3, pro
 export const REVIEW_CADENCE_MONTHS = { short: 6, standard: 12 } as const;
 
 type AgentRow = typeof agents.$inferSelect;
+
+/**
+ * ADR-0170 item 7: from each lifecycle status, the statuses a NON-ADMIN steward
+ * may move an agent to. Only tightening moves: `under_review` and `suspended`
+ * from a status that still dispatches. Leaving `suspended` (to anything —
+ * `under_review` dispatches again), leaving `proposed`, retiring, and erasing a
+ * `deprecated` marker are absent on purpose: they are an admin's call.
+ */
+export const STEWARD_LIFECYCLE_MOVES: Readonly<Record<string, readonly string[]>> = {
+  active: ["under_review", "suspended"],
+  under_review: ["suspended"],
+  deprecated: ["suspended"],
+};
+
+function refuseAdminRequired(reply: FastifyReply, detail: string) {
+  return reply.status(403).send({ error: "admin_required_for_lifecycle", detail });
+}
+
+/** the compare-and-swap miss on a lifecycle write — another write changed the status first */
+export function refuseLifecycleChangedConcurrently(reply: FastifyReply, readStatus: string) {
+  return reply.status(409).send({
+    error: "lifecycle_changed_concurrently",
+    detail: `the agent's status changed while this change was being made (it was '${readStatus}') — reload the agent and try again`,
+  });
+}
 
 export interface StewardshipView {
   stewardUserId: string | null;
@@ -169,6 +204,7 @@ export function registerAgentStewardshipRoutes(app: FastifyInstance, db: Db): vo
     const [agent] = await db.select().from(agents).where(eq(agents.id, agentId));
     if (!agent) return reply.status(404).send({ error: "unknown_agent" });
     if (!mayActAsSteward(req, agent)) return refuseNotSteward(reply);
+    const isAdmin = !!req.authCtx.isAdmin;
 
     // --- people: must exist and be active -------------------------------------------------
     const named = await loadUsers(db, [body.stewardUserId ?? null, body.successorUserId ?? null]);
@@ -214,6 +250,13 @@ export function registerAgentStewardshipRoutes(app: FastifyInstance, db: Db): vo
           "retirement is terminal for governance purposes — the decommissioning record cannot be flipped back; register a new agent instead",
       });
     }
+    // ADR-0170 item 7: a steward tightens, an admin loosens
+    if (!isAdmin && statusChanges && !(STEWARD_LIFECYCLE_MOVES[agent.lifecycleStatus] ?? []).includes(nextStatus)) {
+      return refuseAdminRequired(
+        reply,
+        `a steward can put an agent under review or suspend it; moving it from '${agent.lifecycleStatus}' to '${nextStatus}' needs an admin`,
+      );
+    }
     let nextReason: string | null;
     if (nextStatus === "active") nextReason = null;
     else if (body.lifecycleReason) nextReason = body.lifecycleReason;
@@ -229,11 +272,31 @@ export function registerAgentStewardshipRoutes(app: FastifyInstance, db: Db): vo
     let nextReviewAt = agent.nextReviewAt;
     if (body.nextReviewAt !== undefined) {
       nextReviewAt = body.nextReviewAt === null ? null : new Date(body.nextReviewAt);
+      // only a CHANGE is judged: a form re-sending the stored date (an admin may
+      // have set it beyond the cadence) is not a steward scheduling it
+      const reviewChanges = (nextReviewAt?.getTime() ?? null) !== (agent.nextReviewAt?.getTime() ?? null);
+      if (!isAdmin && reviewChanges && nextReviewAt === null) {
+        return refuseAdminRequired(reply, "only an admin can clear an agent's next review date");
+      }
       if (nextReviewAt && nextReviewAt.getTime() <= Date.now()) {
         return reply.status(422).send({
           error: "next_review_in_past",
           detail: "the next review must be in the future — to record a review that happened, use Record review",
         });
+      }
+      // ADR-0170 item 7: a steward cannot push the next review past the cadence
+      // the agent's riskiest live use case sets (the same cadence the view shows)
+      if (!isAdmin && reviewChanges && nextReviewAt) {
+        const months = cadenceMonthsFor((await highestTierByAgent(db, [agentId])).get(agentId) ?? null);
+        const latest = addMonths(new Date(), months);
+        if (nextReviewAt.getTime() > latest.getTime()) {
+          return reply.status(422).send({
+            error: "next_review_beyond_cadence",
+            detail: `this agent is reviewed every ${months} months — a steward can schedule its next review no later than ${latest.toISOString().slice(0, 10)}`,
+            cadenceMonths: months,
+            latest: latest.toISOString(),
+          });
+        }
       }
     }
 
@@ -262,8 +325,11 @@ export function registerAgentStewardshipRoutes(app: FastifyInstance, db: Db): vo
         ...(statusChanges ? { lifecycleChangedAt: new Date() } : {}),
         nextReviewAt,
       })
-      .where(eq(agents.id, agentId))
+      // ADR-0170 item 7: compare-and-swap on the status this request read — a
+      // concurrent retirement or suspension is never overwritten by a stale read
+      .where(and(eq(agents.id, agentId), eq(agents.lifecycleStatus, agent.lifecycleStatus)))
       .returning();
+    if (!row) return refuseLifecycleChangedConcurrently(reply, agent.lifecycleStatus);
     const people = await loadUsers(db, [nextSteward, nextSuccessor]);
     const label = (id: string | null) => (id ? (people.get(id)?.name ?? id) : "nobody");
     const parts: string[] = [];

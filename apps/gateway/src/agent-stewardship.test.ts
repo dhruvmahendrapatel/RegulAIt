@@ -18,8 +18,16 @@
  *     no linked use case and with only a REJECTED high-tier one (control), and
  *     +6 months once a live high-tier use case names the agent.
  *  5. A LIFECYCLE THAT IS DECORATIVE. `suspended` refuses dispatch with a named
- *     409 (audited) while the grant still exists, and returning it to active
- *     dispatches again (control). Retired stays terminal on this route too.
+ *     409 (audited) while the grant still exists, and an ADMIN returning it to
+ *     active dispatches again (control). Retired stays terminal on this route too.
+ *  6. (ADR-0170 item 7) A STEWARD WHO CAN UNDO AN ADMIN. A non-admin steward may
+ *     put an agent under review or suspend it, but lifting a suspension,
+ *     retiring, leaving `proposed` and clearing the next review are refused
+ *     (403 admin_required_for_lifecycle); a steward's next review is capped at
+ *     the cadence (422 next_review_beyond_cadence); lifecycle writes are
+ *     compare-and-swap (409 lifecycle_changed_concurrently, proven with a held
+ *     row lock, not a timing race); and a request naming a suspended/retired
+ *     agent is refused even when routing would downroute it to an active one.
  *
  * Shares one DB with the other gateway suites (fileParallelism off); every
  * object here is prefixed st-. Audit counts are deltas (M-008); no singleton is
@@ -365,5 +373,226 @@ describe("lifecycle on the stewardship route — suspended refuses dispatch, ret
     expect((await review(id)).statusCode).toBe(409);
     // stewardship of the record itself can still be named
     expect((await patch(id, { stewardUserId: steward.id })).statusCode).toBe(200);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ADR-0170 item 7 — a steward may TIGHTEN an agent's lifecycle, never loosen it;
+// a steward's next review is capped at the cadence; lifecycle writes are CAS;
+// and the dispatch gate judges the agent the request NAMED, not only the one
+// routing chose to serve.
+// ---------------------------------------------------------------------------
+
+const lifecycle = (agentId: string, payload: Record<string, unknown>, auth: Auth = AUTH) =>
+  app.inject({ method: "POST", headers: auth, url: `/v1/agents/${agentId}/lifecycle`, payload });
+const daysFromNow = (d: number) => new Date(Date.now() + d * 86_400_000).toISOString();
+async function statusOf(agentId: string) {
+  const [row] = await db.select({ s: agents.lifecycleStatus, r: agents.lifecycleReason }).from(agents).where(eq(agents.id, agentId));
+  return row!;
+}
+
+type Injected = Awaited<ReturnType<typeof patch>>;
+
+/**
+ * Deterministic race: a second connection holds an uncommitted UPDATE on the
+ * agent row (as a concurrent request would), the request under test reads the
+ * OLD committed status and then blocks on that row lock; the competing write
+ * commits; the request's UPDATE re-checks its WHERE against the new row. With
+ * compare-and-swap it matches nothing (409); without, it overwrites the
+ * competing write.
+ */
+async function raceAgainst(
+  agentId: string,
+  competing: { status: string; reason: string | null },
+  request: () => PromiseLike<Injected>,
+): Promise<Injected> {
+  const client = await db.$client.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("UPDATE agents SET lifecycle_status = $1, lifecycle_reason = $2 WHERE id = $3", [
+      competing.status,
+      competing.reason,
+      agentId,
+    ]);
+    const pending = Promise.resolve().then(() => request());
+    // wait until the request is parked on the row lock this transaction holds
+    const deadline = Date.now() + 10_000;
+    for (;;) {
+      const { rows } = await db.$client.query<{ n: number }>(
+        `SELECT count(*)::int AS n FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock' AND query ILIKE 'update "agents"%'`,
+      );
+      if (rows[0]!.n > 0) break;
+      if (Date.now() > deadline) throw new Error("the request never reached the agent row lock");
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    await client.query("COMMIT");
+    return await pending;
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+describe("ADR-0170 item 7 — a steward tightens the lifecycle, only an admin loosens it", () => {
+  it("a steward cannot lift a suspension an admin imposed (not even to under review); the admin can", async () => {
+    const id = await mkAgent("st-sod-suspended");
+    const invoker = await makeUser("st-sod-invoker@example.com");
+    expect((await app.inject({ method: "POST", headers: AUTH, url: "/v1/grants/agents", payload: { userId: invoker.id, agentId: id } })).statusCode).toBe(201);
+    expect((await patch(id, { stewardUserId: steward.id })).statusCode).toBe(200);
+    expect((await patch(id, { lifecycleStatus: "suspended", lifecycleReason: "st: admin incident hold" })).statusCode).toBe(200);
+
+    const lift = await patch(id, { lifecycleStatus: "active" }, steward.auth);
+    expect(lift.statusCode, lift.body).toBe(403);
+    expect(lift.json().error).toBe("admin_required_for_lifecycle");
+    // under_review dispatches again, so from suspended it is a loosening too
+    const soften = await patch(id, { lifecycleStatus: "under_review", lifecycleReason: "st: looks fine to me" }, steward.auth);
+    expect(soften.statusCode).toBe(403);
+    expect(soften.json().error).toBe("admin_required_for_lifecycle");
+    expect(await statusOf(id)).toEqual({ s: "suspended", r: "st: admin incident hold" });
+    expect((await invoke(invoker.auth, id)).json().error).toBe("agent_suspended");
+
+    const back = await patch(id, { lifecycleStatus: "active" });
+    expect(back.statusCode, back.body).toBe(200);
+    expect((await invoke(invoker.auth, id)).statusCode).toBe(200);
+  });
+
+  it("a steward may put the agent under review and suspend it, but may not retire it or move a proposed one", async () => {
+    const id = await mkAgent("st-sod-tighten");
+    expect((await patch(id, { stewardUserId: steward.id })).statusCode).toBe(200);
+    const underReview = await patch(id, { lifecycleStatus: "under_review", lifecycleReason: "st: steward check" }, steward.auth);
+    expect(underReview.statusCode, underReview.body).toBe(200);
+    const suspend = await patch(id, { lifecycleStatus: "suspended", lifecycleReason: "st: steward pulls it" }, steward.auth);
+    expect(suspend.statusCode, suspend.body).toBe(200);
+    expect(suspend.json().lifecycleStatus).toBe("suspended");
+
+    const other = await mkAgent("st-sod-retire");
+    expect((await patch(other, { stewardUserId: steward.id })).statusCode).toBe(200);
+    const retire = await patch(other, { lifecycleStatus: "retired", lifecycleReason: "st: steward retires" }, steward.auth);
+    expect(retire.statusCode).toBe(403);
+    expect(retire.json().error).toBe("admin_required_for_lifecycle");
+    expect((await statusOf(other)).s).toBe("active");
+
+    const proposed = await mkAgent("st-sod-proposed");
+    expect((await patch(proposed, { stewardUserId: steward.id })).statusCode).toBe(200);
+    expect((await lifecycle(proposed, { status: "proposed", reason: "st: not yet in service" })).statusCode).toBe(200);
+    for (const target of ["active", "under_review", "suspended"]) {
+      const out = await patch(proposed, { lifecycleStatus: target, lifecycleReason: "st: steward moves it" }, steward.auth);
+      expect(out.statusCode, `${target}: ${out.body}`).toBe(403);
+      expect(out.json().error).toBe("admin_required_for_lifecycle");
+    }
+    expect((await statusOf(proposed)).s).toBe("proposed");
+    // the admin keeps every move
+    expect((await patch(proposed, { lifecycleStatus: "active" })).statusCode).toBe(200);
+  });
+
+  it("a steward's next review is capped at the cadence and cannot be cleared; an admin's is not", async () => {
+    const id = await mkAgent("st-sod-cadence");
+    expect((await patch(id, { stewardUserId: steward.id })).statusCode).toBe(200);
+
+    const far = await patch(id, { nextReviewAt: daysFromNow(400) }, steward.auth);
+    expect(far.statusCode).toBe(422);
+    expect(far.json()).toMatchObject({ error: "next_review_beyond_cadence", cadenceMonths: 12 });
+    const ok = await patch(id, { nextReviewAt: daysFromNow(330) }, steward.auth);
+    expect(ok.statusCode, ok.body).toBe(200);
+
+    // a live high-risk use case shortens the cadence to 6 months
+    await seedUseCase("st-sod-uc-high", "approved", "high", [id]);
+    const sevenMonths = await patch(id, { nextReviewAt: daysFromNow(215) }, steward.auth);
+    expect(sevenMonths.statusCode).toBe(422);
+    expect(sevenMonths.json()).toMatchObject({ error: "next_review_beyond_cadence", cadenceMonths: 6 });
+    expect((await patch(id, { nextReviewAt: daysFromNow(150) }, steward.auth)).statusCode).toBe(200);
+
+    const clear = await patch(id, { nextReviewAt: null }, steward.auth);
+    expect(clear.statusCode).toBe(403);
+    expect(clear.json().error).toBe("admin_required_for_lifecycle");
+    expect((await listed(id)).nextReviewAt).not.toBeNull();
+
+    // the admin may schedule beyond the cadence ...
+    const adminFar = daysFromNow(700);
+    expect((await patch(id, { nextReviewAt: adminFar })).statusCode).toBe(200);
+    // ... a steward re-sending that stored date (a form round-trip) is not refused ...
+    const resend = await patch(id, { nextReviewAt: adminFar, successorUserId: successor.id }, steward.auth);
+    expect(resend.statusCode, resend.body).toBe(200);
+    // ... and the admin may clear it
+    expect((await patch(id, { nextReviewAt: null })).statusCode).toBe(200);
+    expect((await listed(id)).nextReviewAt).toBeNull();
+  });
+});
+
+describe("ADR-0170 item 7 — lifecycle writes are compare-and-swap", () => {
+  it("stewardship PATCH: a concurrent retirement is not overwritten by a set-active that read before it", async () => {
+    const id = await mkAgent("st-cas-patch");
+    expect((await patch(id, { lifecycleStatus: "suspended", lifecycleReason: "st: hold" })).statusCode).toBe(200);
+    const res = await raceAgainst(id, { status: "retired", reason: "st: retired concurrently" }, () => patch(id, { lifecycleStatus: "active" }));
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().error).toBe("lifecycle_changed_concurrently");
+    expect(await statusOf(id)).toEqual({ s: "retired", r: "st: retired concurrently" });
+  });
+
+  it("stewardship PATCH that does not touch the status still cannot write a stale one back", async () => {
+    const id = await mkAgent("st-cas-successor");
+    expect((await patch(id, { stewardUserId: steward.id })).statusCode).toBe(200);
+    const res = await raceAgainst(id, { status: "suspended", reason: "st: suspended concurrently" }, () =>
+      patch(id, { successorUserId: successor.id }, steward.auth),
+    );
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().error).toBe("lifecycle_changed_concurrently");
+    expect(await statusOf(id)).toEqual({ s: "suspended", r: "st: suspended concurrently" });
+  });
+
+  it("POST /v1/agents/:id/lifecycle: a concurrent retirement is not un-retired", async () => {
+    const id = await mkAgent("st-cas-lifecycle");
+    expect((await lifecycle(id, { status: "suspended", reason: "st: hold" })).statusCode).toBe(200);
+    const res = await raceAgainst(id, { status: "retired", reason: "st: retired concurrently" }, () => lifecycle(id, { status: "active" }));
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().error).toBe("lifecycle_changed_concurrently");
+    expect(await statusOf(id)).toEqual({ s: "retired", r: "st: retired concurrently" });
+  });
+});
+
+describe("ADR-0170 item 7 — routing cannot serve a request for an out-of-service agent", () => {
+  it("a request naming a suspended (or retired) agent is refused even when routing would downroute it to an active one", async () => {
+    const mk = async (name: string, tier: number, cin: number, cout: number) => {
+      const r = await app.inject({
+        method: "POST",
+        headers: AUTH,
+        url: "/v1/agents",
+        payload: { name, provider: "mock", tier, model: "mock-balanced", costPerMTokIn: cin, costPerMTokOut: cout },
+      });
+      expect(r.statusCode, r.body).toBe(201);
+      return r.json().id as string;
+    };
+    const requested = await mk("st-route-requested", 2, 10, 40);
+    const cheap = await mk("st-route-cheap", 1, 1, 2);
+    const invoker = await makeUser("st-route-invoker@example.com");
+    for (const agentId of [requested, cheap]) {
+      expect((await app.inject({ method: "POST", headers: AUTH, url: "/v1/grants/agents", payload: { userId: invoker.id, agentId } })).statusCode).toBe(201);
+    }
+    // control: routing really does downroute this request onto the cheaper agent
+    const routed = await invoke(invoker.auth, requested);
+    expect(routed.statusCode, routed.body).toBe(200);
+    expect(routed.json().routing.selectedAgentId).toBe(cheap);
+
+    expect((await lifecycle(requested, { status: "suspended", reason: "st: requested agent pulled" })).statusCode).toBe(200);
+    const before = await auditCount("agent-suspended-dispatch-refused");
+    const refused = await invoke(invoker.auth, requested);
+    expect(refused.statusCode, refused.body).toBe(409);
+    expect(refused.json().error).toBe("agent_suspended");
+    expect(await auditCount("agent-suspended-dispatch-refused")).toBe(before + 1);
+    const [audit] = await db
+      .select({ detail: auditLog.detail })
+      .from(auditLog)
+      .where(and(eq(auditLog.objectId, requested), eq(auditLog.ruleId, "agent-suspended-dispatch-refused")));
+    expect(audit!.detail).toMatchObject({ requestedAgent: true, servedAgentId: cheap });
+
+    expect((await lifecycle(requested, { status: "retired", reason: "st: requested agent retired" })).statusCode).toBe(200);
+    const retired = await invoke(invoker.auth, requested);
+    expect(retired.statusCode, retired.body).toBe(409);
+    expect(retired.json().error).toBe("agent_retired");
+    // the cheaper agent itself still serves when it is the one asked for
+    expect((await invoke(invoker.auth, cheap)).statusCode).toBe(200);
   });
 });
