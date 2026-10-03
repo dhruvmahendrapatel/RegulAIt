@@ -287,10 +287,18 @@ function ReviewDrawer(props: { approval: Approval; onClose: () => void; onDecide
                 <legend>Decision</legend>
                 {OUTCOMES.map((o) => (
                   <label key={o.id} className={r.outcome}>
-                    <input type="radio" name={`${titleId}-outcome`} value={o.id} checked={draft.outcome === o.id} onChange={() => choose(o.id)} />
+                    <input
+                      type="radio"
+                      name={`${titleId}-outcome`}
+                      value={o.id}
+                      checked={draft.outcome === o.id}
+                      onChange={() => choose(o.id)}
+                      aria-labelledby={`${titleId}-${o.id}`}
+                      aria-describedby={`${titleId}-${o.id}-hint`}
+                    />
                     <span>
-                      <strong>{o.label}</strong>
-                      <span>{o.hint}</span>
+                      <strong id={`${titleId}-${o.id}`}>{o.label}</strong>
+                      <span id={`${titleId}-${o.id}-hint`}>{o.hint}</span>
                     </span>
                   </label>
                 ))}

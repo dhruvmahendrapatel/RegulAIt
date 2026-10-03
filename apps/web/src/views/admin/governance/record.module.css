@@ -10,8 +10,11 @@
   gap: var(--s3);
   padding: 20px var(--s3) 22px;
   margin-bottom: var(--s3);
+  border: 1px solid var(--rg-dark-line);
   border-radius: var(--rg-r-card);
-  background: var(--rg-dark-surface);
+  /* the dark stack with a touch of Signal: a deep blue-teal band that stays
+     distinct from the canvas in the dark theme too */
+  background: color-mix(in srgb, var(--rg-signal-400) 10%, var(--rg-dark-surface));
   color: var(--rg-dark-ink);
   box-shadow: var(--rg-shadow-sm);
 }

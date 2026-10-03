@@ -11,20 +11,20 @@ import type { Approval, DecideApprovalBody } from "../../api/types";
 export type ReviewOutcome = "approve" | "approve_conditions" | "return" | "reject";
 
 export const OUTCOMES: Array<{ id: ReviewOutcome; label: string; hint: string; submit: string }> = [
-  { id: "approve", label: "Approve", hint: "The use case can go ahead as submitted.", submit: "Approve" },
+  { id: "approve", label: "Approve", hint: "It goes ahead as submitted.", submit: "Approve" },
   {
     id: "approve_conditions",
     label: "Approve with conditions",
-    hint: "Approve, with conditions that have an owner and a due date. A before-go-live condition holds deployment until it is met.",
+    hint: "It goes ahead with conditions, each with an owner and a due date.",
     submit: "Approve with conditions",
   },
   {
     id: "return",
     label: "Send back for information",
-    hint: "Return it to the proposer with what is missing. They update the questionnaire and it comes back to you.",
+    hint: "The proposer adds what is missing; it comes back to you.",
     submit: "Send back",
   },
-  { id: "reject", label: "Reject", hint: "The use case does not go ahead.", submit: "Reject" },
+  { id: "reject", label: "Reject", hint: "It does not go ahead.", submit: "Reject" },
 ];
 
 export interface ConditionDraft {

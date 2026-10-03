@@ -98,6 +98,7 @@ export interface Activity {
   action: { label: string; tab: ActivityTab };
 }
 
+const SIGNOFF_VERB: Record<string, string> = { approved: "Approved", returned: "Sent back", denied: "Rejected" };
 const plural = (n: number, one: string) => `${n} ${one}${n === 1 ? "" : "s"}`;
 
 export function deriveActivities(input: ActivityInput): Activity[] {
@@ -181,7 +182,7 @@ export function deriveActivities(input: ActivityInput): Activity[] {
       ? "Requested when the questionnaire is submitted"
       : latest.status === "pending"
         ? `Awaiting ${approver ?? "the named reviewer"}${latest.dueAt ? ` · due ${shortDate(latest.dueAt)}` : ""}`
-        : `${ACTIVITY_STATUS[signoffStatus].label}${approver ? ` by ${approver}` : ""}`,
+        : `${SIGNOFF_VERB[latest.status] ?? ACTIVITY_STATUS[signoffStatus].label}${approver ? ` by ${approver}` : ""}`,
     owner: approver,
     lastUpdate: latest ? latest.decidedAt ?? latest.requestedAt : null,
     action: { label: "Open approvals", tab: "approvals" },
@@ -191,12 +192,13 @@ export function deriveActivities(input: ActivityInput): Activity[] {
 
 const cap = (s: string) => (s ? s[0]!.toUpperCase() + s.slice(1) : s);
 
-/** a calendar date the way a record shows it: `3 Oct 2026` */
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+/** a calendar date the way a record shows it: `3 Oct 2026` (local time; a bare YYYY-MM-DD is that day) */
 export function shortDate(iso: string | null | undefined): string {
   if (!iso) return "—";
   const d = new Date(iso.length === 10 ? `${iso}T00:00:00` : iso);
   if (Number.isNaN(d.getTime())) return String(iso);
-  return d.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
+  return `${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`;
 }
 
 /** who may mark a condition met: its owner, the use case's owner, or an admin (the server checks the same) */
