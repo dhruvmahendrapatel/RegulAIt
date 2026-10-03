@@ -450,12 +450,37 @@ else
     note "their source bytes cannot be independently rehashed from this bundle."
   fi
 fi
+# A disclosed payload is named by its decimal sequence number and NOTHING
+# else: audit/rows/<seq>.payload, written exactly as chain.tsv writes <seq> —
+# no leading zero, no sign, no suffix, no subdirectory. The shape is checked
+# by name, NUL-delimited, BEFORE the line-oriented set comparison below, so a
+# name that only LOOKS listed — a leading zero a numeric comparison would fold
+# onto a real row, a stray character, a newline that a line-oriented pass
+# would split and then swallow as a blank line — is refused here, by name.
+PAYLOAD_NAME_RE='^(0|[1-9][0-9]*)\.payload$'
+MALFORMED=0
+while IFS= read -r -d '' f; do
+  if ! [[ "${f#audit/rows/}" =~ $PAYLOAD_NAME_RE ]]; then
+    printf '  %s[malformed]%s %q\n' "$C_RED" "$C_RST" "$f" >&2
+    MALFORMED=$((MALFORMED + 1))
+  fi
+done < <(cd "$ROOT" && find audit/rows -type f -print0 2>/dev/null || true)
+[ "$MALFORMED" = "0" ] || refuse \
+  "AUDIT PAYLOAD NAME MALFORMED: $MALFORMED file(s) under audit/rows are not named by a sequence number" \
+  "A disclosed row is audit/rows/<seq>.payload with <seq> spelled exactly as" \
+  "chain.tsv spells it. Any other spelling of the same number is a file the" \
+  "chain never named, and nothing in this bundle vouches for its bytes."
 ACTUAL_PAYLOADS="$WORK/actual-payloads.txt"
 (cd "$ROOT" && find audit/rows -type f -print 2>/dev/null || true) | LC_ALL=C sort >"$ACTUAL_PAYLOADS"
 LC_ALL=C sort -o "$EXPECTED_PAYLOADS" "$EXPECTED_PAYLOADS"
-[ -z "$(comm -23 "$ACTUAL_PAYLOADS" "$EXPECTED_PAYLOADS")" ] || refuse \
-  "the bundle contains unlisted audit payloads" \
-  "Every disclosed audit payload must be named by the signed chain."
+EXTRA_PAYLOADS="$(comm -23 "$ACTUAL_PAYLOADS" "$EXPECTED_PAYLOADS" || true)"
+if [ -n "$EXTRA_PAYLOADS" ]; then
+  printf '%s\n' "$EXTRA_PAYLOADS" | while IFS= read -r f; do
+    printf '  %s[unlisted]%s %s\n' "$C_RED" "$C_RST" "$f" >&2
+  done
+  refuse "the bundle contains unlisted audit payloads" \
+    "Every disclosed audit payload must be named by the signed chain."
+fi
 
 # --- 8. optional: place the verified bundle --------------------------------
 if [ -n "$EXTRACT_TO" ]; then
