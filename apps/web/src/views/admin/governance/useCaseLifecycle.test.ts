@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canMarkMet, conditionState, deriveActivities, phaseFor, statusLabel, type ActivityInput } from "./useCaseLifecycle";
+import { ACTIVITY_STATUS, canMarkMet, conditionState, deriveActivities, phaseFor, statusLabel, type ActivityInput } from "./useCaseLifecycle";
 
 const base: ActivityInput = {
   status: "under_review",
@@ -94,6 +94,22 @@ describe("review rounds and re-review (ADR-0168 amendment)", () => {
     ]);
     // control: no reviews keeps the single named-approver row
     expect(deriveActivities({ ...base, reviews: [] }).filter((a) => a.key.startsWith("signoff")).map((a) => a.name)).toEqual(["Sign-off"]);
+  });
+
+  it("a review the round closed before it was decided reads closed, never awaiting", () => {
+    const rows = deriveActivities({
+      ...base,
+      reviews: [
+        { roleId: "security", roleName: "Security", status: "superseded", deciderName: null, decidedAt: null },
+        { roleId: "privacy", roleName: "Privacy", status: "returned", deciderName: "Riley Reviewer", decidedAt: "2026-10-02T11:00:00Z" },
+      ],
+    });
+    const signoffs = rows.filter((a) => a.key.startsWith("signoff"));
+    expect(signoffs.map((a) => [a.status, a.owner, a.detail])).toEqual([
+      ["closed", "Security reviewers", "Closed — another review ended the round · review 1 of 2"],
+      ["returned", "Riley Reviewer", "Sent back by Riley Reviewer · review 2 of 2"],
+    ]);
+    expect(ACTIVITY_STATUS.closed).toEqual({ label: "Closed", tone: "neutral" });
   });
 
   it("a recertification reads as a re-review with the expiry date", () => {

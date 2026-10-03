@@ -8,6 +8,27 @@ const useCase = {
   dataSensitivity: "regulated",
   complianceTags: ["eu-ai-act", "nist-ai-rmf"],
   intendedAgentIds: ["agent-1"],
+  screeningAnswers: {
+    purposeDomain: "essential-services",
+    affectedPersons: ["customers"],
+    decisionAutonomy: "human-reviews",
+    biometricUse: "none",
+    emotionRecognition: false,
+    socialScoring: false,
+    manipulativeTechniques: false,
+    profilesNaturalPersons: true,
+    safetyComponent: false,
+    interactsWithHumans: true,
+    generatesSyntheticContent: true,
+    sectors: ["financial-services"],
+    dataCategories: ["personal", "financial"],
+    deployment: "customer-facing",
+    euNexus: true,
+    usesExternalVendor: false,
+    generative: true,
+    autonomousActions: false,
+    toolsUsed: [],
+  },
 };
 const bias: RiskInputs = { title: "Disparate outcomes", description: "Profiling may differ by group.", category: "bias_fairness", likelihood: "medium", impact: "high", agentId: "agent-1" };
 const inputs = (over: Partial<SubmissionInputs> = {}): SubmissionInputs => ({
@@ -95,6 +116,9 @@ describe("AER-046 planSubmission — a retry reuses a record only when its input
       [{ useCase: { ...useCase, name: "Renamed assistant" } }, /use-case name/],
       [{ useCase: { ...useCase, dataSensitivity: "confidential" } }, /data sensitivity/],
       [{ useCase: { ...useCase, complianceTags: ["eu-ai-act"] } }, /accepted frameworks/],
+      // stored at registration; PATCH takes them only after a send-back
+      [{ useCase: { ...useCase, screeningAnswers: { ...useCase.screeningAnswers, decisionAutonomy: "fully-automated" } } }, /classification answers/],
+      [{ useCase: { ...useCase, screeningAnswers: { ...useCase.screeningAnswers, sectors: ["payments"] } } }, /classification answers/],
       [{ risks: [{ key: "credit-bias", inputs: { ...bias, category: "data_leakage_pii" }, controls: ["eu-ai-act:art-14-human-oversight"] }] }, /changed category/],
       [{ risks: [] }, /no longer accepted/],
       [{ risks: [{ key: "credit-bias", inputs: bias, controls: [] }] }, /no longer names/],

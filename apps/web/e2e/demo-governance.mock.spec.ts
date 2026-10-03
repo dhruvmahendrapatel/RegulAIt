@@ -363,7 +363,16 @@ test("prohibited screening remains reviewable and can be submitted for an indepe
   await expect(submit).toBeEnabled();
   const created = page.waitForRequest((request) => new URL(request.url()).pathname === "/v1/use-cases" && request.method() === "POST");
   await submit.click();
-  expect((await created).postDataJSON().dataSensitivity).toBe("regulated"); // personal + financial → strictest
+  const body = (await created).postDataJSON();
+  expect(body.dataSensitivity).toBe("regulated"); // personal + financial → strictest
+  // every Classify answer is stored with the use case, in the gateway's keys
+  expect(Object.keys(body.screeningAnswers).sort()).toEqual([
+    "affectedPersons", "autonomousActions", "biometricUse", "dataCategories", "decisionAutonomy", "deployment",
+    "emotionRecognition", "euNexus", "generatesSyntheticContent", "generative", "interactsWithHumans",
+    "manipulativeTechniques", "profilesNaturalPersons", "purposeDomain", "safetyComponent", "sectors",
+    "socialScoring", "toolsUsed", "usesExternalVendor",
+  ]);
+  expect(body.screeningAnswers).toMatchObject({ socialScoring: true, dataCategories: expect.arrayContaining(["personal", "financial"]) });
   await expect(page.getByText("Submitted for human review.")).toBeVisible();
 });
 

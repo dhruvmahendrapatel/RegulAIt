@@ -68,6 +68,18 @@ const ANSWERS = {
   interactsWithHumans: true,
   generatesSyntheticContent: true,
 };
+/** every Classify answer, as the gateway stores them at registration */
+const FULL = {
+  ...ANSWERS,
+  sectors: ["financial-services"],
+  dataCategories: ["personal", "financial"],
+  deployment: "customer-facing",
+  euNexus: true,
+  usesExternalVendor: false,
+  generative: true,
+  autonomousActions: false,
+  toolsUsed: [],
+};
 const block = (answers: typeof ANSWERS) => "```eu-ai-act-answers\n" + JSON.stringify(answers, null, 2) + "\n```";
 const QUESTIONNAIRE = [
   "## 1. Purpose and business context", "", "Recommends credit-limit increases with human review.", "",
@@ -156,7 +168,7 @@ function detail(state: State) {
       { id: RISK2, title: "Stale income data", status: "open", acceptedByName: null, acceptedAt: null, acceptanceRationale: null },
     ],
     resubmission: state.resubmission
-      ? { allowed: true, screeningAnswers: ANSWERS, questionnaire: { version: 2, content: QUESTIONNAIRE }, returnReason: REASON, returnedByName: "Avery Approver" }
+      ? { allowed: true, screeningAnswers: FULL, questionnaire: { version: 2, content: QUESTIONNAIRE }, returnReason: REASON, returnedByName: "Avery Approver" }
       : { allowed: false, screeningAnswers: null, questionnaire: null, returnReason: null, returnedByName: null },
   };
 }
@@ -392,6 +404,21 @@ test.describe("the review panel in a review round", () => {
     await expect(drawer).toBeHidden();
   });
 
+  test("another review the round closed reads Closed in the other-reviews list", async ({ page }) => {
+    await mockGateway(page, {
+      reviews: [
+        { roleId: "privacy", roleName: "Privacy", status: "pending", deciderName: null, decidedAt: null, approvalId: AP },
+        { roleId: "security", roleName: "Security", status: "superseded", deciderName: null, decidedAt: null, approvalId: AP_SEC },
+        { roleId: "model-risk", roleName: "Model risk", status: "denied", deciderName: "Mo Risk", decidedAt: "2026-10-02T12:00:00Z", approvalId: AP_MR },
+      ],
+    });
+    const drawer = await openReview(page);
+    const others = drawer.getByRole("list", { name: "Other reviews" });
+    await expect(others.getByRole("listitem").filter({ hasText: "Security" })).toContainText("Closed — another review ended the round");
+    await expect(others.getByRole("listitem").filter({ hasText: "Model risk" })).toContainText("Rejected");
+    await checkScreen(page, "review panel with a closed review", undefined, '[role="dialog"]');
+  });
+
   test("a role member who is not a risk acceptor decides without the acceptance (control)", async ({ page }) => {
     const state = await mockGateway(page, { persona: PAT });
     const drawer = await openReview(page);
@@ -483,6 +510,25 @@ test.describe("the use-case record in a review round", () => {
     await expect(page.getByText("Accepted by Riley Reviewer on 3 Oct 2026 · Residual bias is tolerable", { exact: false })).toBeVisible();
   });
 
+  test("a review closed by another role's send-back reads Closed, not awaiting", async ({ page }) => {
+    await mockGateway(page, {
+      status: "needs_info",
+      resubmission: true,
+      reviews: [
+        { roleId: "privacy", roleName: "Privacy", status: "returned", deciderName: "Riley Reviewer", decidedAt: "2026-10-02T13:00:00Z", approvalId: AP },
+        { roleId: "security", roleName: "Security", status: "approved", deciderName: "Sam Security", decidedAt: "2026-10-02T12:00:00Z", approvalId: AP_SEC },
+        { roleId: "model-risk", roleName: "Model risk", status: "superseded", deciderName: null, decidedAt: null, approvalId: AP_MR },
+      ],
+    });
+    await page.goto(`/ui/admin/governance/use-cases/${UC}`);
+    const tracker = page.locator("section", { has: page.getByText("Lifecycle tracker", { exact: true }) });
+    const closed = tracker.getByRole("row").filter({ hasText: "Sign-off: Model risk" });
+    await expect(closed).toContainText("Closed — another review ended the round · review 3 of 3");
+    await expect(closed).not.toContainText("Awaiting");
+    await expect(tracker.getByRole("row").filter({ hasText: "Sign-off: Privacy" })).toContainText("Sent back by Riley Reviewer");
+    await checkScreen(page, "record with a closed review", "record-review-closed");
+  });
+
   test("a recertification reads Re-review with the expiry date on the band and the tracker", async ({ page }) => {
     await mockGateway(page, { recertification: true });
     await page.goto(`/ui/admin/governance/use-cases/${UC}`);
@@ -517,6 +563,7 @@ test.describe("update and resubmit", () => {
     await expect(page.getByRole("heading", { level: 1, name: "Update and resubmit" })).toBeVisible();
     await expect(page.getByRole("note", { name: "Why it was sent back" })).toContainText(`Sent back for information by Avery Approver. ${REASON}`);
     await expect(page.getByLabel("Use-case name")).toHaveValue(NAME);
+    await expect(page.getByLabel("Use-case name")).not.toBeEditable(); // a registered use case keeps its name
     await expect(page.getByLabel("What will the system do?")).toHaveValue(PURPOSE);
     await expect(page.getByLabel("Business context")).toHaveValue(CONTEXT);
     await checkScreen(page, "resubmit: describe", "resubmit-describe");
@@ -528,7 +575,14 @@ test.describe("update and resubmit", () => {
     await expect(page.getByLabel("People affected")).toHaveValue("customers");
     await expect(page.getByLabel("Profiles natural persons")).toHaveValue("yes");
     await expect(page.getByLabel("Social scoring")).toHaveValue("no");
+    // the context answers are prefilled too
+    await expect(page.getByLabel("Deployment audience")).toHaveValue("customer-facing");
+    await expect(page.getByLabel("Has an EU nexus")).toHaveValue("yes");
+    await expect(page.getByLabel("Can take autonomous actions")).toHaveValue("no");
+    await expect(page.getByRole("checkbox", { name: "Data categories: Financial" })).toBeChecked();
+    await expect(page.getByRole("checkbox", { name: "Sectors: Financial services" })).toBeChecked();
     await page.getByLabel("Decision autonomy").selectOption("informs-human");
+    await page.getByRole("checkbox", { name: "Data categories: Financial" }).uncheck();
     await checkScreen(page, "resubmit: classify");
     await page.getByRole("button", { name: "Continue" }).click();
     await expect(page.getByRole("heading", { name: "Update the questionnaire" })).toBeFocused();
@@ -540,6 +594,8 @@ test.describe("update and resubmit", () => {
     await page.getByRole("button", { name: "Continue" }).click();
     await expect(page.getByRole("heading", { name: "Review and resubmit" })).toBeFocused();
     await expect(page.getByText("Changed — the tier is screened again")).toBeVisible();
+    // personal only → confidential (was regulated with financial)
+    await expect(page.getByRole("main")).toContainText("was Regulated; from the data categories");
     await expect(page.getByText("Version 3, 1 section changed")).toBeVisible();
     await checkScreen(page, "resubmit: review", "resubmit-review");
     await page.getByRole("button", { name: "Resubmit for review" }).click();
@@ -547,7 +603,8 @@ test.describe("update and resubmit", () => {
 
     const changed = { ...ANSWERS, decisionAutonomy: "informs-human" };
     expect(state.calls).toEqual([`PATCH /v1/use-cases/${UC}`, `POST /v1/workflows/instances/${INST}/artifacts`]);
-    expect(state.patches).toEqual([{ description: purpose, screeningAnswers: changed }]);
+    // every Classify answer goes on the PATCH; the questionnaire block carries the EU ones only
+    expect(state.patches).toEqual([{ description: purpose, screeningAnswers: { ...FULL, decisionAutonomy: "informs-human", dataCategories: ["personal"] } }]);
     expect(state.artifacts).toEqual([{
       stageId: "questionnaire",
       content: [
@@ -568,7 +625,7 @@ test.describe("update and resubmit", () => {
     await expect(page).toHaveURL(/resubmit=/);
     await page.getByRole("button", { name: "Resubmit for review" }).click();
     await expect(page).toHaveURL(new RegExp(`/ui/admin/governance/use-cases/${UC}$`));
-    expect(state.patches).toEqual([{ screeningAnswers: ANSWERS }]);
+    expect(state.patches).toEqual([{ screeningAnswers: FULL }]);
     expect(state.artifacts).toHaveLength(2);
     // nothing edited: the new version is the old document, byte for byte
     expect(state.artifacts[1]).toEqual({ stageId: "questionnaire", content: QUESTIONNAIRE });

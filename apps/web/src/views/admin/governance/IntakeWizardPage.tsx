@@ -14,10 +14,11 @@ import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { ApiError, api } from "../../../api/client";
+import type { EuAiActScreeningAnswers, IntakeContextAnswers } from "../../../api/types";
 import { humanize, plural } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { useSession } from "../../../session/SessionContext";
-import { Badge, Button, Card, Fieldset, Input, Select, Textarea } from "../../../ui/kit";
+import { Badge, Button, Card, Input, Select, Textarea } from "../../../ui/kit";
 import { useAction, useAgents } from "../adminKit";
 import v from "../../views.module.css";
 import k from "../../../ui/kit.module.css";
@@ -32,9 +33,12 @@ import {
   BIOMETRIC_OPTIONS,
   BooleanAnswerField,
   DECISION_AUTONOMY_OPTIONS,
+  DATA_CATEGORY_OPTIONS,
   DEPLOYMENT_OPTIONS,
   HintField,
+  MultiAnswerField,
   PURPOSE_DOMAIN_OPTIONS,
+  SECTOR_OPTIONS,
   StageHeading,
   optionList,
   type BooleanAnswer,
@@ -92,8 +96,6 @@ const REGISTRY = "/admin/use-cases";
 
 /** who wrote a suggestion, in words — never the internal source key */
 const SOURCE_LABEL: Record<Source, string> = { rules: "Suggested by rules", model: "Suggested by AI", mock: "Sample suggestion" };
-const SECTOR_OPTIONS = ["financial-services", "securities-broker-dealer", "healthcare", "payments", "public-sector", "general"] as const;
-const DATA_CATEGORY_OPTIONS = ["personal", "sensitive-personal", "health", "payment-card", "financial", "proprietary", "public"] as const;
 
 /** a rule's lowercase clause as a sentence: capital first letter, one closing period */
 const sentence = (text: string) => `${text.charAt(0).toUpperCase()}${text.slice(1).replace(/\.$/, "")}.`;
@@ -188,34 +190,38 @@ function RegisterUseCase() {
     queryKey: ["admin", "vendors"],
     queryFn: () => api.get<{ vendors: VendorSummary[] }>("/v1/vendors"),
   });
+  // the Classify step's answers in the gateway's shapes: the EU AI Act set the
+  // tier is screened on, and the context answers beyond it
+  const euAiActAnswers = (): EuAiActScreeningAnswers => ({
+    purposeDomain,
+    affectedPersons: affectedPerson === "none" ? [] : [affectedPerson],
+    decisionAutonomy,
+    biometricUse,
+    emotionRecognition: emotionRecognition === "yes",
+    socialScoring: socialScoring === "yes",
+    manipulativeTechniques: manipulativeTechniques === "yes",
+    profilesNaturalPersons: profilesNaturalPersons === "yes",
+    safetyComponent: safetyComponent === "yes",
+    interactsWithHumans: interactsWithHumans === "yes",
+    generatesSyntheticContent: generative === "yes",
+  });
+  const contextAnswers = (): IntakeContextAnswers => ({
+    sectors,
+    dataCategories,
+    deployment,
+    euNexus: euNexus === "yes",
+    usesExternalVendor: usesExternalVendor === "yes",
+    generative: generative === "yes",
+    autonomousActions: autonomousActions === "yes",
+    toolsUsed: [],
+  });
   const assist = useMutation({
     mutationFn: () =>
       api.post<IntakeAssistResponse>("/v1/use-cases/intake/assist", {
         title: title.trim(),
         description: description.trim(),
-        euAiAct: {
-          purposeDomain,
-          affectedPersons: affectedPerson === "none" ? [] : [affectedPerson],
-          decisionAutonomy,
-          biometricUse,
-          emotionRecognition: emotionRecognition === "yes",
-          socialScoring: socialScoring === "yes",
-          manipulativeTechniques: manipulativeTechniques === "yes",
-          profilesNaturalPersons: profilesNaturalPersons === "yes",
-          safetyComponent: safetyComponent === "yes",
-          interactsWithHumans: interactsWithHumans === "yes",
-          generatesSyntheticContent: generative === "yes",
-        },
-        context: {
-          sectors,
-          dataCategories,
-          deployment,
-          euNexus: euNexus === "yes",
-          usesExternalVendor: usesExternalVendor === "yes",
-          generative: generative === "yes",
-          autonomousActions: autonomousActions === "yes",
-          toolsUsed: [],
-        },
+        euAiAct: euAiActAnswers(),
+        context: contextAnswers(),
         draftNarrative: true,
         ...(agentId ? { agentId } : {}),
       }),
@@ -286,6 +292,9 @@ function RegisterUseCase() {
       dataSensitivity: deriveDataSensitivity(dataCategories),
       complianceTags: acceptedFrameworks.map((item) => item.framework),
       intendedAgentIds: agentId ? [agentId] : [],
+      // every Classify answer, stored with the use case so a send-back can be
+      // resubmitted prefilled (the tier is still screened from the questionnaire)
+      screeningAnswers: { ...euAiActAnswers(), ...contextAnswers() },
     },
     questionnaire: questionnaireMarkdown(),
     risks: acceptedRisks.map((risk) => ({
@@ -709,33 +718,6 @@ function SimilarUseCases(props: { name: string; description: string; excludeIds:
         </ul>
       )}
     </aside>
-  );
-}
-
-function MultiAnswerField(props: { label: string; values: string[]; options: readonly string[]; onChange: (values: string[]) => void }) {
-  const toggle = (option: string, checked: boolean) => props.onChange(checked
-    ? [...props.values, option]
-    : props.values.filter((value) => value !== option));
-  // a group of boxes is a fieldset, not a Field: the caption names the group
-  // and each option keeps its own name (AER-029)
-  return (
-    <Fieldset legend={`${props.label} — select all that apply`}>
-      <div className={v.stackTight}>
-        {props.options.map((option) => (
-          <label className={s.checkbox} key={option}>
-            <input
-              type="checkbox"
-              // the visible words, so a speech-input user can say what they
-              // see (WCAG 2.5.3); the slug is the stored value, not a name
-              aria-label={`${props.label}: ${humanize(option)}`}
-              checked={props.values.includes(option)}
-              onChange={(event) => toggle(option, event.target.checked)}
-            />
-            <span>{humanize(option)}</span>
-          </label>
-        ))}
-      </div>
-    </Fieldset>
   );
 }
 

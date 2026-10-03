@@ -20,7 +20,9 @@
  *   use case     PATCH /v1/use-cases/:id edits description, businessContext
  *                and intendedAgentIds while the intake is in flight. It has no
  *                edit for name, dataSensitivity or complianceTags (the create
- *                contract fixes them), so a change there is REFUSED.
+ *                contract fixes them), and takes the stored Classify answers
+ *                (screeningAnswers) only from a use case sent back for
+ *                information, so a change there is REFUSED.
  *   questionnaire the honest update is a NEW ARTIFACT VERSION: the kernel
  *                re-opens the workflow at the questionnaire stage and
  *                supersedes the pending sign-off, so the approver reviews the
@@ -51,6 +53,8 @@
  * so no collision to reason about.
  */
 
+import type { IntakeScreeningAnswers } from "../../../api/types";
+
 /** Stable serialisation: object keys sorted at every depth, `undefined` members dropped, array order kept. */
 export function canonicalDigest(value: unknown): string {
   return JSON.stringify(canonicalise(value));
@@ -77,6 +81,8 @@ export interface UseCaseInputs {
   dataSensitivity: string;
   complianceTags: string[];
   intendedAgentIds: string[];
+  /** every Classify-step answer (ADR-0168 amendment), stored for resubmission */
+  screeningAnswers?: IntakeScreeningAnswers;
 }
 
 /** what POST /v1/risks is sent, less `useCaseId` (always the checkpoint's own use case) */
@@ -112,6 +118,9 @@ const USE_CASE_FIXED: Array<{ key: keyof UseCaseInputs; label: string }> = [
   { key: "name", label: "the use-case name" },
   { key: "dataSensitivity", label: "the data categories (the derived data sensitivity)" },
   { key: "complianceTags", label: "the accepted frameworks" },
+  // stored with the use case at registration; PATCH takes them only once a
+  // reviewer sends the use case back, so a changed answer cannot be applied
+  { key: "screeningAnswers", label: "the classification answers" },
 ];
 const RISK_PATCHABLE = ["title", "description", "likelihood", "impact", "agentId", "vendorId"] as const;
 

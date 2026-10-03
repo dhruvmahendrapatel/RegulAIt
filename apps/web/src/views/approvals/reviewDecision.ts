@@ -158,7 +158,13 @@ export function decideErrorText(error: unknown): { text: string; aboutRiskAccept
   return { text: error instanceof Error ? error.message : String(error), aboutRiskAcceptance: false };
 }
 
-const REVIEW_STATUS: Record<string, string> = { pending: "Awaiting decision", approved: "Approved", returned: "Sent back", denied: "Rejected" };
+const REVIEW_STATUS: Record<string, string> = {
+  pending: "Awaiting decision",
+  approved: "Approved",
+  returned: "Sent back",
+  denied: "Rejected",
+  superseded: "Closed — another review ended the round",
+};
 export const reviewStatusLabel = (status: string) => REVIEW_STATUS[status] ?? status;
 
 /** "Privacy review · 1 of 3 reviews" — which required review this approval is */

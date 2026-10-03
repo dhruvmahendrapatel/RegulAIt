@@ -266,7 +266,7 @@ function ReviewDrawer(props: { approval: Approval; onClose: () => void; onDecide
                     {otherReviews.map((rv) => (
                       <li key={rv.approvalId}>
                         <span>{rv.roleName}</span>
-                        <Badge tone={rv.status === "approved" ? "ok" : rv.status === "denied" ? "danger" : rv.status === "returned" ? "warn" : "info"}>{reviewStatusLabel(rv.status)}</Badge>
+                        <Badge tone={rv.status === "approved" ? "ok" : rv.status === "denied" ? "danger" : rv.status === "returned" ? "warn" : rv.status === "superseded" ? "neutral" : "info"}>{reviewStatusLabel(rv.status)}</Badge>
                         {rv.deciderName ? <span className={r.muted}>{rv.deciderName}{rv.decidedAt ? `, ${shortDate(rv.decidedAt)}` : ""}</span> : null}
                       </li>
                     ))}

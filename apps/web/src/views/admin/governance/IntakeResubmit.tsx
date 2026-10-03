@@ -2,11 +2,12 @@
  * "Update and resubmit" — the registration screen in resubmit mode for a use
  * case sent back for information (ADR-0168 amendment, afternoon, item 4).
  *
- * Prefilled from the record: its name, purpose and context, the screening
- * answers last submitted and the last questionnaire; the reviewer's reason for
- * sending it back stays at the top. On submit it PATCHes what changed (with
- * the screening answers, which the gateway re-screens) and posts a NEW
- * questionnaire version, which starts a new review round; then it lands on
+ * Prefilled from the record: its name (fixed), purpose and context, every
+ * Classify answer last submitted and the last questionnaire; the reviewer's
+ * reason for sending it back stays at the top. On submit it PATCHes what
+ * changed with the whole Classify answer set (the gateway re-screens the tier
+ * and re-derives the data sensitivity from the data categories) and posts a
+ * NEW questionnaire version, which starts a new review round; then it lands on
  * the record. Risks, frameworks and the stack stay as recorded — they are
  * changed on the record itself.
  */
@@ -15,7 +16,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { humanize } from "../../../api/format";
-import type { EuAiActScreeningAnswers, UseCaseLifecycleDetail } from "../../../api/types";
+import type { IntakeScreeningAnswers, UseCaseLifecycleDetail } from "../../../api/types";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, Input, Select, Textarea } from "../../../ui/kit";
 import { useToast } from "../../../ui/toast";
@@ -28,12 +29,17 @@ import {
   AFFECTED_PERSON_OPTIONS,
   BIOMETRIC_OPTIONS,
   BooleanAnswerField,
+  DATA_CATEGORY_OPTIONS,
   DECISION_AUTONOMY_OPTIONS,
+  DEPLOYMENT_OPTIONS,
   HintField,
+  MultiAnswerField,
   PURPOSE_DOMAIN_OPTIONS,
+  SECTOR_OPTIONS,
   StageHeading,
   optionList,
 } from "./intakeFields";
+import { deriveDataSensitivity } from "./dataSensitivity";
 import {
   answersBlock,
   answersFromForm,
@@ -42,6 +48,7 @@ import {
   rebuildQuestionnaire,
   resubmitPatch,
   sameAnswers,
+  sameEuAnswers,
   splitQuestionnaire,
   type QuestionnaireSection,
   type ScreeningForm,
@@ -58,10 +65,14 @@ type Detail = UseCaseLifecycleDetail & {
   instance?: { id: string } | null;
 };
 
+// the registration screen's questions, in its order
 const BOOLEAN_FIELDS: Array<[keyof ScreeningForm, string]> = [
   ["profilesNaturalPersons", "Profiles natural persons"],
   ["interactsWithHumans", "Interacts directly with people"],
   ["generatesSyntheticContent", "Generates synthetic content"],
+  ["autonomousActions", "Can take autonomous actions"],
+  ["usesExternalVendor", "Uses an external AI vendor"],
+  ["euNexus", "Has an EU nexus"],
   ["safetyComponent", "Safety component"],
   ["emotionRecognition", "Emotion recognition"],
   ["socialScoring", "Social scoring"],
@@ -109,7 +120,6 @@ function ResubmitForm(props: { useCaseId: string; detail: Detail; record: string
   const instanceId = d.useCase.workflowInstanceId ?? d.instance?.id ?? null;
 
   const [step, setStep] = useState(DESCRIBE);
-  const [name, setName] = useState(current.name);
   const [description, setDescription] = useState(current.description);
   // the same rule as registration: blank reuses the purpose
   const [businessContext, setBusinessContext] = useState(current.businessContext === current.description ? "" : current.businessContext);
@@ -132,15 +142,17 @@ function ResubmitForm(props: { useCaseId: string; detail: Detail; record: string
     stageHeading.current?.focus();
   }, [step]);
 
-  const answers: EuAiActScreeningAnswers | null = answersFromForm(form, affected !== "");
-  const describeComplete = Boolean(name.trim() && description.trim());
+  const answers: IntakeScreeningAnswers | null = answersFromForm(form, affected !== "");
+  const describeComplete = Boolean(description.trim());
   const canContinue = step === DESCRIBE ? describeComplete : step === CLASSIFY ? describeComplete && answers !== null : true;
   const goTo = (next: number) => setStep(Math.max(0, Math.min(REVIEW, next)));
-  const setAnswer = (key: keyof ScreeningForm, value: string) => setForm((f) => ({ ...f, [key]: value }));
+  const setAnswer = (key: keyof ScreeningForm, value: string | string[]) => setForm((f) => ({ ...f, [key]: value }));
   const editable = sections.filter((section) => !isScreeningSection(section));
   const answersChanged = !sameAnswers(answers, resubmission.screeningAnswers);
+  const tierAnswersChanged = !sameEuAnswers(answers, resubmission.screeningAnswers);
+  const recordedSensitivity = String(d.useCase.dataSensitivity ?? "");
+  const nextSensitivity = form.dataCategories.length > 0 ? deriveDataSensitivity(form.dataCategories) : null;
   const changedText = [
-    name.trim() !== current.name ? "Name" : null,
     description.trim() !== current.description ? "Purpose" : null,
     (businessContext.trim() || description.trim()) !== current.businessContext ? "Business context" : null,
   ].filter(Boolean);
@@ -156,7 +168,7 @@ function ResubmitForm(props: { useCaseId: string; detail: Detail; record: string
     setBusy(true);
     setError(null);
     try {
-      const body = resubmitPatch(current, { name, description, businessContext }, answers);
+      const body = resubmitPatch(current, { description, businessContext }, answers);
       const digest = JSON.stringify(body);
       if (patched.current !== digest) {
         await api.patch(`/v1/use-cases/${props.useCaseId}`, body);
@@ -216,8 +228,8 @@ function ResubmitForm(props: { useCaseId: string; detail: Detail; record: string
         {step === DESCRIBE && (
           <Card title={<StageHeading headingRef={stageHeading}>Describe the use case</StageHeading>}>
             <form className={rg.form} onSubmit={(event) => { event.preventDefault(); if (canContinue) goTo(CLASSIFY); }}>
-              <HintField label="Use-case name" hint="A name reviewers will recognize.">
-                <Input value={name} onChange={(event) => setName(event.target.value)} required />
+              <HintField label="Use-case name" hint="A registered use case keeps its name.">
+                <Input value={current.name} readOnly />
               </HintField>
               <HintField label="What will the system do?" hint="The task, who it affects, and what the AI produces or changes.">
                 <Textarea rows={4} value={description} onChange={(event) => setDescription(event.target.value)} required />
@@ -258,11 +270,24 @@ function ResubmitForm(props: { useCaseId: string; detail: Detail; record: string
                       {optionList("Choose decision autonomy", DECISION_AUTONOMY_OPTIONS)}
                     </Select>
                   </HintField>
+                  <HintField label="Deployment audience" hint="Who uses it directly.">
+                    <Select value={form.deployment} onChange={(event) => setAnswer("deployment", event.target.value)} required>
+                      {optionList("Choose deployment audience", DEPLOYMENT_OPTIONS)}
+                    </Select>
+                  </HintField>
                   <HintField label="Biometric use">
                     <Select value={form.biometricUse} onChange={(event) => setAnswer("biometricUse", event.target.value)} required>
                       {optionList("Choose biometric use", BIOMETRIC_OPTIONS)}
                     </Select>
                   </HintField>
+                </div>
+              </section>
+              <section className={rg.group} aria-labelledby="resubmit-data">
+                <h3 id="resubmit-data" className={rg.groupTitle}>Data and sector</h3>
+                <p className={rg.groupHint}>The strictest data category sets the data sensitivity.</p>
+                <div className={rg.grid2}>
+                  <MultiAnswerField label="Data categories" values={form.dataCategories} options={DATA_CATEGORY_OPTIONS} onChange={(values) => setAnswer("dataCategories", values)} />
+                  <MultiAnswerField label="Sectors" values={form.sectors} options={SECTOR_OPTIONS} onChange={(values) => setAnswer("sectors", values)} />
                 </div>
               </section>
               <section className={rg.group} aria-labelledby="resubmit-practices">
@@ -303,15 +328,32 @@ function ResubmitForm(props: { useCaseId: string; detail: Detail; record: string
         {step === REVIEW && (
           <Card title={<StageHeading headingRef={stageHeading}>Review and resubmit</StageHeading>}>
             <div className={v.stack}>
-              <div className={v.listRow}><strong>Name</strong><span className={v.grow}>{name.trim()}</span></div>
+              <div className={v.listRow}><strong>Name</strong><span className={v.grow}>{current.name}</span></div>
               <div className={v.listRow}><strong>Changed details</strong><span className={v.grow}>{changedText.length ? changedText.join(", ") : <span className={v.faint}>None</span>}</span></div>
               <div className={v.listRow}>
                 <strong>Screening answers</strong>
                 <span className={v.grow}>
-                  {answersChanged ? <Badge tone="warn">Changed — the tier is screened again</Badge> : <Badge tone="neutral">Unchanged</Badge>}
+                  {tierAnswersChanged ? (
+                    <Badge tone="warn">Changed — the tier is screened again</Badge>
+                  ) : answersChanged ? (
+                    <Badge tone="info">Changed</Badge>
+                  ) : (
+                    <Badge tone="neutral">Unchanged</Badge>
+                  )}
                   {answers ? <span className={v.faint}> {humanize(answers.purposeDomain)} · {humanize(answers.decisionAutonomy)}</span> : null}
                 </span>
               </div>
+              {nextSensitivity ? (
+                <div className={v.listRow}>
+                  <strong>Data sensitivity</strong>
+                  <span className={v.grow}>
+                    <Badge tone="info">{humanize(nextSensitivity)}</Badge>{" "}
+                    <span className={v.faint}>
+                      {recordedSensitivity && recordedSensitivity !== nextSensitivity ? `was ${humanize(recordedSensitivity)}; ` : ""}from the data categories — the strictest wins
+                    </span>
+                  </span>
+                </div>
+              ) : null}
               <div className={v.listRow}>
                 <strong>Questionnaire</strong>
                 <span className={v.grow}>Version {nextVersion}{sectionsChanged ? `, ${sectionsChanged} section${sectionsChanged === 1 ? "" : "s"} changed` : ", wording unchanged"}</span>

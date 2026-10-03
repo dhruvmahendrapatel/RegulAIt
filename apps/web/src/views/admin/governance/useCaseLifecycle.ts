@@ -70,7 +70,7 @@ export function phaseFor(status: UseCaseStatus | string, opts: { approvalExpired
 /** "Re-review: approval expired 3 Oct 2026" — the band and the tracker say the same words */
 export const reReviewText = (dueAt: string | null | undefined) => `Re-review: approval expired${dueAt ? ` ${shortDate(dueAt)}` : ""}`;
 
-export type ActivityStatus = "complete" | "in_progress" | "not_started" | "pending" | "needs_update" | "returned" | "rejected";
+export type ActivityStatus = "complete" | "in_progress" | "not_started" | "pending" | "needs_update" | "returned" | "rejected" | "closed";
 export const ACTIVITY_STATUS: Record<ActivityStatus, { label: string; tone: Tone }> = {
   complete: { label: "Complete", tone: "ok" },
   in_progress: { label: "In progress", tone: "info" },
@@ -79,6 +79,8 @@ export const ACTIVITY_STATUS: Record<ActivityStatus, { label: string; tone: Tone
   needs_update: { label: "Needs update", tone: "warn" },
   returned: { label: "Sent back", tone: "warn" },
   rejected: { label: "Rejected", tone: "danger" },
+  // a review the round closed before it was decided (another role denied or sent it back)
+  closed: { label: "Closed", tone: "neutral" },
 };
 
 export interface ActivityInput {
@@ -106,7 +108,12 @@ export interface Activity {
   action: { label: string; tab: ActivityTab };
 }
 
-const SIGNOFF_VERB: Record<string, string> = { approved: "Approved", returned: "Sent back", denied: "Rejected" };
+const SIGNOFF_VERB: Record<string, string> = {
+  approved: "Approved",
+  returned: "Sent back",
+  denied: "Rejected",
+  superseded: "Closed — another review ended the round",
+};
 const plural = (n: number, one: string) => `${n} ${one}${n === 1 ? "" : "s"}`;
 
 export function deriveActivities(input: ActivityInput): Activity[] {
@@ -219,7 +226,7 @@ export function deriveActivities(input: ActivityInput): Activity[] {
 }
 
 const signoffStatusOf = (status: string): ActivityStatus =>
-  status === "pending" ? "pending" : status === "approved" ? "complete" : status === "returned" ? "returned" : status === "denied" ? "rejected" : "in_progress";
+  status === "pending" ? "pending" : status === "approved" ? "complete" : status === "returned" ? "returned" : status === "denied" ? "rejected" : status === "superseded" ? "closed" : "in_progress";
 
 const cap = (s: string) => (s ? s[0]!.toUpperCase() + s.slice(1) : s);
 

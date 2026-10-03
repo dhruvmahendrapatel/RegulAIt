@@ -748,7 +748,9 @@ export interface ReviewPolicyInput {
   riskAcceptorUserIds: string[];
 }
 
-export type UseCaseReviewStatus = "pending" | "approved" | "returned" | "denied";
+/** `superseded`: the round was closed by another role's denial or send-back
+ * before this review was decided */
+export type UseCaseReviewStatus = "pending" | "approved" | "returned" | "denied" | "superseded";
 
 export interface UseCaseReview {
   roleId: string;
@@ -783,9 +785,28 @@ export interface EuAiActScreeningAnswers {
   generatesSyntheticContent: boolean;
 }
 
+/** the registration Classify step's context answers beyond the EU AI Act set
+ * (the shared intakeContextSchema) */
+export interface IntakeContextAnswers {
+  sectors: string[];
+  dataCategories: string[];
+  deployment: string;
+  euNexus: boolean;
+  usesExternalVendor: boolean;
+  generative: boolean;
+  autonomousActions: boolean;
+  toolsUsed: string[];
+}
+
+/** EVERY Classify-step answer, flat — `screeningAnswers` on POST /v1/use-cases
+ * and on the resubmission PATCH (the shared intakeScreeningAnswersSchema) */
+export type IntakeScreeningAnswers = EuAiActScreeningAnswers & IntakeContextAnswers;
+
 export interface UseCaseResubmission {
   allowed: boolean;
-  screeningAnswers: EuAiActScreeningAnswers | null;
+  /** the stored Classify answers; a use case registered before they were
+   * stored carries the EU answers of its questionnaire only */
+  screeningAnswers: (EuAiActScreeningAnswers & Partial<IntakeContextAnswers>) | null;
   questionnaire: { version: number; content: string } | null;
   returnReason: string | null;
   returnedByName: string | null;

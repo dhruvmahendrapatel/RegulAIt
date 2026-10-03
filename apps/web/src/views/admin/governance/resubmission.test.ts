@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { answersBlock, answersFromForm, formFromAnswers, rebuildQuestionnaire, resubmitPatch, sameAnswers, splitQuestionnaire } from "./resubmission";
+import { answersBlock, answersFromForm, euAnswersOf, formFromAnswers, rebuildQuestionnaire, resubmitPatch, sameAnswers, sameEuAnswers, splitQuestionnaire } from "./resubmission";
 
 const answers = {
   purposeDomain: "essential-services",
@@ -13,6 +13,18 @@ const answers = {
   safetyComponent: false,
   interactsWithHumans: true,
   generatesSyntheticContent: true,
+};
+/** every Classify answer, as registration stores it */
+const full = {
+  ...answers,
+  sectors: ["financial-services"],
+  dataCategories: ["personal", "financial"],
+  deployment: "customer-facing",
+  euNexus: true,
+  usesExternalVendor: false,
+  generative: true,
+  autonomousActions: false,
+  toolsUsed: ["crm-lookup"],
 };
 
 const doc = [
@@ -46,18 +58,40 @@ describe("resubmission model", () => {
     expect(rebuildQuestionnaire(preamble, sections, answers)).toBe(`# Intake\n\n## 1. Purpose\n\nText\n\n## 9. EU AI Act risk screening\n\n${answersBlock(answers)}`);
   });
 
-  it("round-trips answers through the form, and refuses while a question is unanswered", () => {
-    expect(answersFromForm(formFromAnswers(answers), true)).toEqual(answers);
-    expect(sameAnswers(answersFromForm(formFromAnswers(answers), true), answers)).toBe(true);
-    expect(answersFromForm({ ...formFromAnswers(answers), socialScoring: "" }, true)).toBeNull();
-    expect(answersFromForm(formFromAnswers(answers), false)).toBeNull();
+  it("round-trips EVERY Classify answer through the form, and refuses while a question is unanswered", () => {
+    expect(answersFromForm(formFromAnswers(full), true)).toEqual(full);
+    expect(Object.keys(answersFromForm(formFromAnswers(full), true)!).sort()).toEqual([
+      "affectedPersons", "autonomousActions", "biometricUse", "dataCategories", "decisionAutonomy", "deployment",
+      "emotionRecognition", "euNexus", "generatesSyntheticContent", "generative", "interactsWithHumans",
+      "manipulativeTechniques", "profilesNaturalPersons", "purposeDomain", "safetyComponent", "sectors",
+      "socialScoring", "toolsUsed", "usesExternalVendor",
+    ]);
+    expect(sameAnswers(answersFromForm(formFromAnswers(full), true), full)).toBe(true);
+    expect(answersFromForm({ ...formFromAnswers(full), socialScoring: "" }, true)).toBeNull();
+    expect(answersFromForm({ ...formFromAnswers(full), euNexus: "" }, true)).toBeNull();
+    expect(answersFromForm({ ...formFromAnswers(full), dataCategories: [] }, true)).toBeNull();
+    expect(answersFromForm(formFromAnswers(full), false)).toBeNull();
     expect(answersFromForm(formFromAnswers(null), false)).toBeNull();
+    // a record registered before the context answers were stored: the EU
+    // answers prefill, the context questions are asked again
+    expect(answersFromForm(formFromAnswers(answers), true)).toBeNull();
+    // one question answers both the EU and the context "synthetic content" keys
+    const flipped = answersFromForm({ ...formFromAnswers(full), generatesSyntheticContent: "no" }, true)!;
+    expect([flipped.generatesSyntheticContent, flipped.generative]).toEqual([false, false]);
   });
 
-  it("PATCHes only what changed, always with the screening answers; a blank context reuses the purpose", () => {
-    const current = { name: "Credit assistant", description: "Recommends", businessContext: "Recommends" };
-    expect(resubmitPatch(current, { ...current }, answers)).toEqual({ screeningAnswers: answers });
-    expect(resubmitPatch(current, { name: " Credit assistant v2 ", description: "Recommends", businessContext: "" }, answers)).toEqual({ name: "Credit assistant v2", screeningAnswers: answers });
-    expect(resubmitPatch(current, { name: "Credit assistant", description: "Suggests", businessContext: "" }, answers)).toEqual({ description: "Suggests", businessContext: "Suggests", screeningAnswers: answers });
+  it("the questionnaire block carries only the EU answers; a context-only change does not re-screen the tier", () => {
+    expect(answersBlock(full)).toBe(answersBlock(answers));
+    expect(euAnswersOf(full)).toEqual(answers);
+    expect(sameEuAnswers({ ...full, sectors: ["payments"] }, full)).toBe(true);
+    expect(sameAnswers({ ...full, sectors: ["payments"] }, full)).toBe(false);
+    expect(sameEuAnswers({ ...full, socialScoring: true }, full)).toBe(false);
+  });
+
+  it("PATCHes only what changed, always with every Classify answer; a blank context reuses the purpose; never the name", () => {
+    const current = { description: "Recommends", businessContext: "Recommends" };
+    expect(resubmitPatch(current, { ...current }, full)).toEqual({ screeningAnswers: full });
+    expect(resubmitPatch(current, { description: "Recommends", businessContext: "" }, full)).toEqual({ screeningAnswers: full });
+    expect(resubmitPatch(current, { description: "Suggests", businessContext: "" }, full)).toEqual({ description: "Suggests", businessContext: "Suggests", screeningAnswers: full });
   });
 });
