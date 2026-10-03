@@ -177,5 +177,32 @@ export function createDb(connectionString: string, override: Partial<DbPoolConfi
         "the pool discards it and reconnects on next use; nothing in flight was affected",
     );
   });
+  // REL-01, the same crash on a CHECKED-OUT client.
+  //
+  // The `pool.on("error")` above only guards clients sitting IDLE in the pool.
+  // For the whole span a client is checked out — a query, or a transaction —
+  // pg-pool REMOVES its error listener and restores it only on release, so a
+  // backend that dies mid-statement (`pg_terminate_backend`, a failover, an LB
+  // or NAT reset under a live request) emits `'error'` on a listener-less
+  // client and Node THROWS it, killing the serving process — even though the
+  // in-flight query already rejected through its own awaited promise. The idle
+  // handler cannot catch this one: by the time the client is back in the pool
+  // it is already gone.
+  //
+  // So every physical connection gets a durable listener the moment it is
+  // created — `'connect'` fires once per new client, before any query runs on
+  // it, and the listener is never removed — which survives the checkout window
+  // the pool's own listener does not cover. Nothing is swallowed: the query
+  // still fails through its promise exactly as before (the route logs its 500),
+  // and the pool discards the dead client and dials a fresh one on next use.
+  // This only stops the crash, and says it happened.
+  pool.on("connect", (client: { on(ev: "error", cb: (e: Error & { code?: string }) => void): void }) => {
+    client.on("error", (err) => {
+      console.error(
+        `[regulait] postgres: a pooled connection was lost mid-use (${err.code ?? "no code"}: ${err.message}) — ` +
+          "the in-flight query fails and the pool reconnects on next use; the serving process survives",
+      );
+    });
+  });
   return withProseScrub(withAuditChain(drizzle(pool, { schema })));
 }
