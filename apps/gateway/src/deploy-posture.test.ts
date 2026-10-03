@@ -269,6 +269,10 @@ describe("ADR-0062 the compiled-default registries name what the adapters actual
   it("connectors", () => {
     expect(connectorDefaultBaseUrl("slack")).toBe("https://slack.com/api");
     expect(connectorDefaultBaseUrl("github")).toBe("https://api.github.com");
+    // the two Microsoft couriers reach a compiled vendor host with no baseUrl
+    // (AER-015: outlook used to be the `undefined` strict refused as unnameable)
+    expect(connectorDefaultBaseUrl("teams")).toBe("https://smba.trafficmanager.net/teams");
+    expect(connectorDefaultBaseUrl("outlook")).toBe("https://graph.microsoft.com");
     // every kind whose adapter throws without an explicit baseUrl reaches no
     // compiled destination at all
     for (const k of ["http", "generic", "webhook", "jira", "mock"]) {

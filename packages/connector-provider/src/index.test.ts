@@ -13,6 +13,7 @@ import {
   SnowflakeConnectorProvider,
   TEAMS_DEFAULT_BASE_URL,
   TeamsConnectorProvider,
+  OUTLOOK_DEFAULT_GRAPH_BASE_URL,
   OutlookConnectorProvider,
   parseOutlookCredential,
   WebhookConnectorProvider,
@@ -1413,6 +1414,16 @@ const OUTLOOK_CRED = JSON.stringify({
 });
 
 describe("outlook adapter (fake upstream: Entra login + Microsoft Graph)", () => {
+  it("the registry resolves kind=outlook, refuses it with no credential, and NAMES its compiled destination", () => {
+    expect(resolveConnectorProvider({ kind: "outlook", token: OUTLOOK_CRED }).kind).toBe("outlook");
+    expect(() => resolveConnectorProvider({ kind: "outlook" })).toThrow(/credential/);
+    expect(isConnectorProviderKind("outlook")).toBe(true);
+    // AER-015: with no baseUrl the adapter reaches Graph, so ADR-0062's strict
+    // posture must be able to adjudicate that host — an `undefined` here is
+    // "cannot say where it goes", which strict refuses outright
+    expect(connectorDefaultBaseUrl("outlook")).toBe(OUTLOOK_DEFAULT_GRAPH_BASE_URL);
+  });
+
   it("mints an app-only token, THEN sends to the governed recipient", async () => {
     await withUpstream(
       teamsUpstream((_req, res) => reply(res, 202, {})),

@@ -23,7 +23,14 @@ import {
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
-const PROVIDER_KINDS = ["", "http", "webhook", "slack", "github", "jira", "snowflake", "generic", "mock"];
+/**
+ * The execution adapters an admin can pick; "" is governance-only (no adapter).
+ * A hand-maintained mirror of connector-provider's `CONNECTOR_PROVIDER_KINDS`
+ * — the gateway's adr0121 suite pins it against that union AND against the
+ * strict egress posture, so a kind this list offers is always one the egress
+ * guard can name (AER-015: teams and outlook used to be creatable only by API).
+ */
+export const PROVIDER_KINDS = ["", "http", "webhook", "slack", "teams", "outlook", "github", "jira", "snowflake", "generic", "mock"];
 
 export default function ConnectorsPage() {
   const connectors = useConnectors();

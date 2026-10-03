@@ -1,19 +1,32 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import ts from "typescript";
 import {
+  auditLog,
   chatopsConnections,
   connectorCredentials,
   connectors,
   createDb,
+  desc,
   eq,
   inArray,
   runMigrations,
   type Db,
 } from "@regulait/db";
 import { connectorProviderKindSchema } from "@regulait/shared";
-import { CONNECTOR_PROVIDER_KINDS } from "@regulait/connector-provider";
+import {
+  CONNECTOR_PROVIDER_KINDS,
+  CREDENTIAL_HOST_CONNECTOR_KINDS,
+  OUTLOOK_DEFAULT_GRAPH_BASE_URL,
+  connectorCredentialHosts,
+  connectorDefaultBaseUrl,
+} from "@regulait/connector-provider";
 import { buildApp } from "./app.js";
+import { COMPILED_DEFAULT_RULE_ID, decideCompiledDefault } from "./compiled-egress.js";
+import type { EgressAllowEntry } from "./egress-guard.js";
 
 /**
  * ADR-0121 — OUTLOOK IS A SEND-ONLY CHATOPS PROVIDER, AND THE STORAGE AGREES.
@@ -55,6 +68,28 @@ import { buildApp } from "./app.js";
  *     adapter shipped an `outlook` case that nothing could reach, because the
  *     create-connector schema had never heard of it. A comment saying "mirrors
  *     X" is not a guarantee; this assertion is.
+ *
+ * AER-015 — THE PRODUCT COULD NOT CREATE WHAT THE API ACCEPTED, AND STRICT
+ * EGRESS COULD NOT NAME WHERE IT WENT. The admin page's providerKind list
+ * omitted teams and outlook, and `connectorDefaultBaseUrl` had no 'outlook'
+ * case, so a strict posture refused an outlook connector created without a
+ * baseUrl as "cannot say where it goes" (`compiled_default_unknown`).
+ *
+ *  9. UI-vs-EGRESS PARITY: the kinds the Connectors page offers (read from the
+ *     page source — the web package depends on no workspace package, so its
+ *     list is a hand-maintained mirror) are EXACTLY the adapter union, and for
+ *     every one of them the strict egress guard can NAME the destination an
+ *     invoke with no baseUrl reaches (a compiled vendor host, "no host of its
+ *     own", or a credential-named host) — never `compiled_default_unknown`.
+ *     An unknown kind in the same assertion IS refused, so the loop cannot
+ *     pass vacuously.
+ * 10. STRICT EGRESS, NO baseUrl: under the strict posture an outlook connector
+ *     created without a baseUrl is ADMITTED once its named hosts are listed —
+ *     the token exchange reaches a counting fake Entra host (admitted ≠
+ *     delivered: the fake answers 500, the adapter fails AFTER admission).
+ * 11. PAIRED NEGATIVE: with the Graph host NOT listed the same invoke is
+ *     refused BY THE LIST (`compiled_default_not_allowlisted`, naming
+ *     graph.microsoft.com) — not as unnameable — and before any socket opens.
  */
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -76,6 +111,8 @@ let db: Db;
 let app: ReturnType<typeof buildApp>;
 let outlookConnectorId = "";
 let slackConnectorId = "";
+/** criteria 10/11: the no-baseUrl outlook connector invoked under strict */
+let strictConnectorId = "";
 
 const post = (url: string, payload: unknown) =>
   app.inject({ method: "POST", url, headers: AUTH, payload: payload as object });
@@ -127,7 +164,7 @@ afterAll(async () => {
   await db
     .delete(chatopsConnections)
     .where(inArray(chatopsConnections.name, [OUTLOOK_CONNECTION, SLACK_CONNECTION]));
-  const ids = [outlookConnectorId, slackConnectorId].filter(Boolean);
+  const ids = [outlookConnectorId, slackConnectorId, strictConnectorId].filter(Boolean);
   if (ids.length > 0) {
     await db.delete(connectorCredentials).where(inArray(connectorCredentials.connectorId, ids));
     await db.delete(connectors).where(inArray(connectors.id, ids));
@@ -255,5 +292,266 @@ describe("the mirrors that drift silently", () => {
     // a named positive, so a future refactor that empties both lists in step
     // cannot satisfy the equality above
     expect(connectorProviderKindSchema.options).toContain("outlook");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AER-015 — UI-vs-egress parity (criterion 9)
+// ---------------------------------------------------------------------------
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+/** The admin page that offers providerKind, read AS SOURCE the way
+ * external-effects.test.ts reads its executors: the web package depends on no
+ * workspace package, so its list is a hand-maintained mirror and this file is
+ * the assertion behind it. */
+const CONNECTORS_PAGE = path.resolve(here, "../../web/src/views/admin/integrations/ConnectorsPage.tsx");
+
+/** the non-empty entries of the page's PROVIDER_KINDS literal ("" is governance-only) */
+function connectorsPageKinds(): string[] {
+  const source = ts.createSourceFile(
+    CONNECTORS_PAGE,
+    readFileSync(CONNECTORS_PAGE, "utf8"),
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TSX,
+  );
+  const found: string[][] = [];
+  const visit = (node: ts.Node) => {
+    if (
+      ts.isVariableDeclaration(node) &&
+      ts.isIdentifier(node.name) &&
+      node.name.text === "PROVIDER_KINDS" &&
+      node.initializer &&
+      ts.isArrayLiteralExpression(node.initializer)
+    ) {
+      found.push(
+        node.initializer.elements.map((e) => {
+          if (!ts.isStringLiteral(e)) {
+            throw new Error(`ConnectorsPage PROVIDER_KINDS: non-literal entry '${e.getText(source)}'`);
+          }
+          return e.text;
+        }),
+      );
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  if (found.length !== 1) throw new Error(`ConnectorsPage.tsx: expected ONE PROVIDER_KINDS array literal, found ${found.length}`);
+  return found[0]!.filter((k) => k !== "");
+}
+
+/** parseable credentials for the kinds whose destination the CREDENTIAL names */
+const SAMPLE_CREDENTIAL: Record<string, string> = {
+  teams: JSON.stringify({ appId: "app", appPassword: "pw" }),
+  outlook: JSON.stringify({ appId: "app", appPassword: "pw", tenantId: "tenant", senderUpn: "approvals@example.com" }),
+  snowflake: JSON.stringify({ account: "acme-x1", user: "u", privateKey: "-----BEGIN PRIVATE KEY-----\nx\n-----END PRIVATE KEY-----" }),
+};
+const entry = (host: string): EgressAllowEntry => ({ host, allowPrivateRanges: false, allowPlaintextHttp: false });
+const hostOf = (url: string) => new URL(url).hostname;
+
+describe("AER-015 — what the page offers is what strict egress can name", () => {
+  it("9: the page offers exactly the adapter union, and the strict guard names every kind's destination", () => {
+    const uiKinds = connectorsPageKinds();
+    // the named positives — the two the page used to omit
+    expect(uiKinds).toContain("teams");
+    expect(uiKinds).toContain("outlook");
+    // vice versa: nothing the registry (and so the egress guard) knows is
+    // missing from the page, and the page offers nothing the registry has
+    // never heard of
+    expect([...uiKinds].sort()).toEqual([...CONNECTOR_PROVIDER_KINDS].sort());
+
+    for (const kind of uiKinds) {
+      if (CREDENTIAL_HOST_CONNECTOR_KINDS.has(kind)) {
+        // ADR-0167: the invoke path names the typed host plus the vendor's
+        // compiled ones, and strict adjudicates every compiled one BY NAME
+        const hosts = connectorCredentialHosts(kind, SAMPLE_CREDENTIAL[kind]!);
+        expect(hosts.typed !== null || hosts.compiled.length > 0, `${kind}: names no destination`).toBe(true);
+        if (hosts.typed) expect(hostOf(hosts.typed), kind).not.toBe("");
+        for (const url of hosts.compiled) {
+          const d = decideCompiledDefault({
+            posture: "strict",
+            surface: "connector",
+            kind,
+            defaultBaseUrl: url,
+            allowList: [entry(hostOf(url))],
+          });
+          expect(d.ok, `${kind}: ${url}`).toBe(true);
+          expect(d.ok && d.host).toBe(hostOf(url));
+        }
+      } else {
+        // ADR-0062: a compiled vendor host (adjudicated by name) or null ("no
+        // host of its own") — never `undefined`, which strict refuses outright
+        const defaultBaseUrl = connectorDefaultBaseUrl(kind);
+        expect(defaultBaseUrl, `${kind}: strict cannot say where this adapter goes`).not.toBeUndefined();
+        const d = decideCompiledDefault({
+          posture: "strict",
+          surface: "connector",
+          kind,
+          defaultBaseUrl,
+          allowList: defaultBaseUrl ? [entry(hostOf(defaultBaseUrl))] : [],
+        });
+        expect(d.ok, kind).toBe(true);
+      }
+    }
+    // outlook names Graph in BOTH registries the invoke path consults
+    expect(connectorDefaultBaseUrl("outlook")).toBe(OUTLOOK_DEFAULT_GRAPH_BASE_URL);
+    expect(connectorCredentialHosts("outlook", SAMPLE_CREDENTIAL.outlook!).compiled).toContain(
+      OUTLOOK_DEFAULT_GRAPH_BASE_URL,
+    );
+
+    // the control that keeps the loop honest: a kind nobody can name IS refused
+    const unknown = decideCompiledDefault({
+      posture: "strict",
+      surface: "connector",
+      kind: "a-kind-shipped-tomorrow",
+      defaultBaseUrl: connectorDefaultBaseUrl("a-kind-shipped-tomorrow"),
+      allowList: [],
+    });
+    expect(unknown.ok).toBe(false);
+    expect(!unknown.ok && unknown.code).toBe("compiled_default_unknown");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AER-015 — the strict posture with NO baseUrl on the row (criteria 10, 11)
+// ---------------------------------------------------------------------------
+
+/** deliberately neither 127.0.0.1 nor 127.0.0.3: sibling suites allow-list
+ * those, and the whole suite shares one database (M-048) */
+const FAKE_LOGIN_HOST = "127.0.0.4";
+
+describe("AER-015 — strict egress admits an outlook connector created without a baseUrl", () => {
+  let loginServer: http.Server;
+  let loginBase = "";
+  /** every request the fake Entra login host received */
+  const loginHits: string[] = [];
+  let loginAllowId = "";
+  let graphAllowId = "";
+  let requesterAuth: { authorization: string };
+
+  const setPolicy = (egressCompiledDefaultPolicy: "inherit" | "strict") =>
+    app.inject({ method: "PUT", url: "/v1/org/settings", headers: AUTH, payload: { egressCompiledDefaultPolicy } });
+
+  const allow = async (host: string, local: boolean) => {
+    const res = await post("/v1/egress-allow-hosts", {
+      host,
+      allowPrivateRanges: local,
+      allowPlaintextHttp: local,
+      note: `adr0121 ${RUN}: ${local ? "local fake Entra login host" : "the compiled Graph host"}`,
+    });
+    expect(res.statusCode, res.body).toBe(201);
+    return res.json().id as string;
+  };
+
+  const invoke = () =>
+    app.inject({
+      method: "POST",
+      url: `/v1/connectors/${strictConnectorId}/invoke`,
+      headers: requesterAuth,
+      payload: {
+        operation: "write",
+        object: "approver@example.com",
+        payload: { op: "sendMail", subject: "Approval needed", body: { contentType: "Text", content: "hi" } },
+      },
+    });
+
+  beforeAll(async () => {
+    loginServer = http.createServer((req, res) => {
+      req.on("data", () => {});
+      req.on("end", () => {
+        loginHits.push(req.url ?? "");
+        res.writeHead(500, { "content-type": "text/plain" });
+        res.end("INTERNAL-SECRET-PAGE");
+      });
+    });
+    await new Promise<void>((r) => loginServer.listen(0, FAKE_LOGIN_HOST, r));
+    const addr = loginServer.address();
+    if (typeof addr !== "object" || !addr) throw new Error("no address");
+    loginBase = `http://${FAKE_LOGIN_HOST}:${addr.port}`;
+
+    const u = await post("/v1/users", { email: `adr0121-strict-${RUN}@example.com`, displayName: "adr0121 requester" });
+    expect(u.statusCode).toBe(201);
+    const k = await post(`/v1/users/${u.json().id}/keys`, { name: "adr0121" });
+    requesterAuth = { authorization: `Bearer ${k.json().token}` };
+
+    // THE ROW: no baseUrl — the exact shape strict used to refuse as unnameable
+    const c = await post("/v1/connectors", {
+      name: `adr0121-strict-outlook-${RUN}`,
+      kind: "chat",
+      providerKind: "outlook",
+      pricePerCallUsd: 0.01,
+    });
+    expect(c.statusCode, c.body).toBe(201);
+    strictConnectorId = c.json().id;
+    const cred = await post(`/v1/connectors/${strictConnectorId}/credential`, {
+      token: JSON.stringify({
+        appId: `app-${RUN}`,
+        appPassword: "SECRET-APP-PASSWORD",
+        tenantId: `tenant-${RUN}`,
+        senderUpn: "approvals@example.com",
+        loginBaseUrl: loginBase,
+      }),
+    });
+    expect([200, 201]).toContain(cred.statusCode);
+    const g = await post("/v1/grants/connectors", { userId: u.json().id, connectorId: strictConnectorId, mode: "readwrite" });
+    expect(g.statusCode, g.body).toBeLessThan(300);
+
+    // strict, with BOTH hosts this invoke names listed: the typed login host
+    // and the compiled Graph host
+    expect((await setPolicy("strict")).statusCode).toBe(200);
+    loginAllowId = await allow(FAKE_LOGIN_HOST, true);
+    graphAllowId = await allow(hostOf(OUTLOOK_DEFAULT_GRAPH_BASE_URL), false);
+  });
+
+  afterAll(async () => {
+    // RESTORE the shared posture and allow-list: the org singleton and the
+    // table outlive this file
+    await setPolicy("inherit");
+    for (const id of [loginAllowId, graphAllowId].filter(Boolean)) {
+      await app.inject({ method: "DELETE", url: `/v1/egress-allow-hosts/${id}`, headers: AUTH });
+    }
+    await new Promise<void>((r) => loginServer.close(() => r()));
+  });
+
+  it("10: the invoke path is ADMITTED — the token exchange reaches the (fake) Entra host", async () => {
+    const before = loginHits.length;
+    const res = await invoke();
+    // admitted past the egress gate: not an egress refusal of any kind …
+    expect(res.statusCode, res.body).not.toBe(403);
+    expect(res.json().error).not.toBe("egress_blocked");
+    // … and the proof is the token exchange arriving at the fake login host
+    expect(loginHits.length).toBe(before + 1);
+    expect(loginHits[before]).toContain("/oauth2/v2.0/token");
+    // admitted is not delivered: the fake answers 500, so the adapter fails
+    // AFTER admission as a provider failure, and the upstream page stays withheld
+    expect(res.statusCode).toBe(502);
+    expect(res.json().error).toBe("connector_invoke_failed");
+    expect(String(res.json().detail)).not.toContain("INTERNAL-SECRET-PAGE");
+  });
+
+  it("11: with the Graph host NOT listed it is refused BY THE LIST, naming the host — never as unnameable", async () => {
+    const del = await app.inject({ method: "DELETE", url: `/v1/egress-allow-hosts/${graphAllowId}`, headers: AUTH });
+    expect([200, 204]).toContain(del.statusCode);
+    graphAllowId = "";
+    const before = loginHits.length;
+    const res = await invoke();
+    expect(res.statusCode, res.body).toBe(403);
+    expect(res.json().error).toBe("egress_blocked");
+    // the pre-fix refusal was `compiled_default_unknown` (strict could not say
+    // where outlook went); now the host is named and the list decides
+    expect(res.json().code).toBe("compiled_default_not_allowlisted");
+    expect(String(res.json().detail)).toContain(hostOf(OUTLOOK_DEFAULT_GRAPH_BASE_URL));
+    // refused BEFORE any socket opened
+    expect(loginHits.length).toBe(before);
+    // and the refusal is a record naming the connector kind
+    const [row] = await db
+      .select()
+      .from(auditLog)
+      .where(eq(auditLog.ruleId, COMPILED_DEFAULT_RULE_ID))
+      .orderBy(desc(auditLog.at))
+      .limit(1);
+    expect(row).toBeTruthy();
+    expect(row!.objectId).toBe(strictConnectorId);
+    expect((row!.detail as { code?: string }).code).toBe("compiled_default_not_allowlisted");
   });
 });
