@@ -1454,6 +1454,14 @@ export const reportChecksSchema = z.object({
    * initiator and any result is `passed` — reporting your own check green is
    * a self-attestation, and the reason is what the approver reads. */
   reason: z.string().max(2000).optional(),
+  /** AER-048: the workflow ROUND these results were produced for — the
+   * instance's `round` (GET /v1/workflows/instances/:id → instance.round),
+   * which a re-open (artifact resubmitted, sign-off returned) bumps. A report
+   * naming a round that is no longer current is refused with 409
+   * `stale_check_report` and audited. OMITTED = "the current round": the
+   * report is taken for whatever round is current when it is applied (the
+   * pre-AER-048 behaviour, kept for existing CI integrations). */
+  round: z.number().int().min(0).optional(),
 });
 
 /** §2 re-run a check stage that is parked at blocked_on_check, after the failing
