@@ -4,7 +4,7 @@ import { Link, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../../../api/client";
 import { ago, frameworkLabel, humanize, plural, providerLabel } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, Input, Select, Table, Tabs, type Tone } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, Field, Input, Select, StatusDot, Table, Tabs, type Tone } from "../../../ui/kit";
 import { QueryGate, RemoveButton, useAction } from "../adminKit";
 import v from "../../views.module.css";
 import s from "./demoGovernance.module.css";
@@ -67,25 +67,46 @@ export default function UseCaseOverviewPage() {
 
   return (
     <>
-      <PageHeader title={data?.useCase.name ?? "Use-case workspace"} sub="One governed view of purpose, frameworks, risks, stack, approvals, and audit evidence." />
+      <PageHeader
+        title={data?.useCase.name ?? "Use-case workspace"}
+        crumbs={["AI Governance", "Use cases"]}
+        sub={data ? data.useCase.description || "No description recorded." : undefined}
+      />
       <QueryGate loading={overview.isLoading} error={overview.error} onRetry={() => void overview.refetch()}>
         {data ? (
           <div className={v.stack}>
-            <Card>
-              <div className={s.workspaceHeader}>
-                <div><div className={v.row}><Badge tone={statusTone(data.useCase.status)}>{humanize(data.useCase.status)}</Badge><Badge tone={data.screening.tier === "prohibited" ? "danger" : data.screening.tier === "high" ? "warn" : "info"}>{data.screening.screened ? `${humanize(data.screening.tier)} tier` : "Tier unmeasured"}</Badge></div><p className={v.dim}>{data.useCase.description || "No description recorded."}</p></div>
-                <div className={s.workspaceMeta}><span><strong>Owner</strong><br />{data.useCase.ownerName ?? "Unassigned"}</span><span><strong>Questionnaire</strong><br />{data.questionnaire.submitted ? `v${data.questionnaire.version} submitted` : "not submitted"}</span></div>
+            {/* the object's key facts: label over value, hairline-separated, no box.
+                Colour only where something needs attention. */}
+            <dl className={s.facts}>
+              <div className={s.fact}><dt>Status</dt><dd><StatusDot tone={statusTone(data.useCase.status)} />{humanize(data.useCase.status)}</dd></div>
+              <div className={s.fact}>
+                <dt>EU AI Act tier</dt>
+                <dd>{!data.screening.screened
+                  ? <span className={v.dim}>Tier unmeasured</span>
+                  : data.screening.tier === "prohibited" || data.screening.tier === "high"
+                    ? <Badge tone={data.screening.tier === "prohibited" ? "danger" : "warn"}>{humanize(data.screening.tier)}</Badge>
+                    : humanize(data.screening.tier)}</dd>
               </div>
-              <div className={v.row}>
-                {data.summary.liveRisks === 0
-                  ? <Badge tone="neutral">No live risks recorded</Badge>
+              <div className={s.fact}>
+                <dt>Live risks</dt>
+                <dd>{data.summary.liveRisks === 0
+                  ? <span>No live risks recorded</span>
                   : data.summary.liveWithoutControls > 0
                     ? <Badge tone="danger">{plural(data.summary.liveWithoutControls, "live risk")} without controls</Badge>
-                    : <Badge tone="ok">{data.summary.liveRisks === 1 ? "The live risk has controls" : `All ${data.summary.liveRisks} live risks have controls`}</Badge>}
-                {data.summary.agentsWithoutApprovedModelCard > 0 ? <Badge tone="warn">{data.summary.agentsWithoutApprovedModelCard === 1 ? "1 agent lacks an approved model card" : `${data.summary.agentsWithoutApprovedModelCard} agents lack approved model cards`}</Badge> : null}
-                {data.summary.pendingApprovals > 0 ? <Badge tone="info">{plural(data.summary.pendingApprovals, "pending approval")}</Badge> : null}
+                    : <span>{data.summary.liveRisks === 1 ? "The live risk has controls" : `All ${data.summary.liveRisks} live risks have controls`}</span>}</dd>
               </div>
-            </Card>
+              {data.summary.agentsWithoutApprovedModelCard > 0 ? (
+                <div className={s.fact}><dt>Model cards</dt><dd><Badge tone="warn">{data.summary.agentsWithoutApprovedModelCard === 1 ? "1 agent lacks an approved model card" : `${data.summary.agentsWithoutApprovedModelCard} agents lack approved model cards`}</Badge></dd></div>
+              ) : null}
+              <div className={s.fact}>
+                <dt>Approval</dt>
+                <dd>{data.summary.pendingApprovals > 0
+                  ? <Link to={{ search: "?tab=approvals" }}>{plural(data.summary.pendingApprovals, "pending approval")}</Link>
+                  : <span className={v.dim}>none pending</span>}</dd>
+              </div>
+              <div className={s.fact}><dt>Owner</dt><dd>{data.useCase.ownerName ?? "Unassigned"}</dd></div>
+              <div className={s.fact}><dt>Questionnaire</dt><dd>{data.questionnaire.submitted ? `v${data.questionnaire.version} submitted` : "not submitted"}</dd></div>
+            </dl>
             <Tabs tabs={TABS} active={tab} onChange={(next) => setParams({ tab: next })} />
             {tab === "overview" ? <OverviewTab data={data} /> : null}
             {tab === "frameworks" ? <FrameworksTab query={frameworks} /> : null}
@@ -102,11 +123,31 @@ export default function UseCaseOverviewPage() {
 }
 
 function OverviewTab({ data }: { data: OverviewResponse }) {
+  const [firstReason, ...moreReasons] = data.screening.reasons;
+  const reasonText = (reason: { ref?: string; reason?: string }) => reason.reason ?? reason.ref;
   return (
     <div className={s.dashboardGrid}>
-      <Card title="Purpose and context"><div className={v.stack}><p>{String(data.useCase.businessContext || data.useCase.description || "No business context recorded.")}</p><div><strong>Compliance tags</strong><p className={v.row}>{(data.useCase.complianceTags ?? []).length ? (data.useCase.complianceTags ?? []).map((tag) => <Badge key={tag} tone="info">{frameworkLabel(tag)}</Badge>) : <span className={v.dim}>None recorded</span>}</p></div></div></Card>
-      <Card title="EU AI Act screening"><div className={v.stack}><p><strong>{data.screening.screened ? `${humanize(data.screening.tier)} risk` : "Unmeasured"}</strong></p>{data.screening.reasons.length ? <ul>{data.screening.reasons.map((reason, index) => <li key={index}>{reason.reason ?? reason.ref}</li>)}</ul> : <p className={v.dim}>No screening reasons recorded.</p>}<p className={v.faint}>{data.screening.rulesetVersion ? `Ruleset v${data.screening.rulesetVersion}` : "No ruleset result"}</p></div></Card>
-      <Card title="Governance summary"><div className={v.grid3}><Metric label="Risks" value={data.summary.risks} /><Metric label="Live risks" value={data.summary.liveRisks} /><Metric label="Pending approvals" value={data.summary.pendingApprovals} /></div></Card>
+      <Card title="Purpose and context">
+        <div className={v.stack}>
+          <p>{data.useCase.businessContext ? String(data.useCase.businessContext) : <span className={v.dim}>No business context recorded.</span>}</p>
+          <div>
+            <strong>Compliance tags</strong>
+            <p className={v.row}>{(data.useCase.complianceTags ?? []).length ? (data.useCase.complianceTags ?? []).map((tag) => <Badge key={tag}>{frameworkLabel(tag)}</Badge>) : <span className={v.dim}>None recorded</span>}</p>
+          </div>
+        </div>
+      </Card>
+      <Card title="EU AI Act screening" actions={<span className={v.faint}>{data.screening.rulesetVersion ? `Ruleset v${data.screening.rulesetVersion}` : "No ruleset result"}</span>}>
+        <div className={v.stack}>
+          <p><strong>{data.screening.screened ? `${humanize(data.screening.tier)} tier` : "Unmeasured"}</strong></p>
+          {firstReason ? <p>{reasonText(firstReason)}</p> : <p className={v.dim}>No screening reasons recorded.</p>}
+          {moreReasons.length ? (
+            <details>
+              <summary>Show {plural(moreReasons.length, "more reason")}</summary>
+              <ul>{moreReasons.map((reason, index) => <li key={index}>{reasonText(reason)}</li>)}</ul>
+            </details>
+          ) : null}
+        </div>
+      </Card>
     </div>
   );
 }
@@ -211,4 +252,3 @@ function AuditTab({ rows }: { rows: OverviewResponse["audit"] }) {
   return <Card title="Recent use-case audit evidence">{rows.length === 0 ? <EmptyState title="No audit rows returned" /> : <Table rows={rows} rowKey={(row) => String(row.id)} columns={[{ key: "at", header: "When", render: (row) => <span style={{ whiteSpace: "nowrap" }}>{ago(row.at)}</span> }, { key: "rule", header: "Event", render: (row) => <span style={{ whiteSpace: "nowrap" }}>{humanize(row.ruleId)}</span> }, { key: "effect", header: "Effect", render: (row) => <Badge tone={row.effect === "allow" ? "ok" : row.effect === "deny" ? "danger" : "warn"}>{row.effect}</Badge> }, { key: "reason", header: "Reason", render: (row) => row.reason }]} />}<p><Link to="/admin/audit">Open the full audit log</Link></p></Card>;
 }
 
-function Metric({ label, value }: { label: string; value: number }) { return <div className={v.stat}><span className={v.statValue}>{value}</span><span className={v.statLabel}>{label}</span></div>; }
