@@ -274,7 +274,37 @@ caught on read. **The sweeps buy timeliness, never correctness.**
   only); and **`users(lower(email))`** — the most valuable, and the real fix behind the case-folded
   login lookup that ADR-0107 could only make deterministic.
 
-- **S8 — a FOURTH intermittent, order-dependent test failure. OPEN, and NOT diagnosed (2026-09-08).**
+- ~~**S8 — a FOURTH intermittent, order-dependent test failure. OPEN, and NOT diagnosed (2026-09-08).**~~
+  **REPRODUCED, DIAGNOSED AND FIXED TEST-SIDE 2026-10-03 (F01).** Reproduced on a fresh database
+  on the **second of three ordered attempts**, each file in its own `vitest run` so the order is the
+  order written: (1) `compat-longtail` alone — 30/30; (2) `mcp-proxy.test.ts` then
+  `compat-longtail` — **"THE ASYMMETRY, provider side" returns 500, expected 409**, every time;
+  (3) `env-fallback` → `setup-status` → `compat-longtail` — 30/30, `model_credentials` empty. With
+  `DEBUG_ERRORS=1` the 500 is `Error: Unsupported state or unable to authenticate data` thrown by
+  `decryptSecret` (`secrets.ts:109`) from `dispatchAttempt` (`agents-connectors.ts:1748`) — not a
+  `ModelProviderError`, so the dispatch core rethrows and the app-level handler answers `500
+  internal`. **Cause**: `mcp-proxy.test.ts` upserts a PLATFORM credential for `anthropic` (and
+  `openai`, `google`, `xai`), each pointing at a loopback fake it closes on the way out and each
+  encrypted under *its* data key (`"a"×64`), and deleted none of them; `compat-longtail` boots with
+  `"d"×64`, finds a stored anthropic credential, cannot decrypt it, and never reaches the
+  no-credential 409. **Why intermittent**: four files wipe the anthropic slot (`env-fallback`,
+  `setup-status`, `mock-shadowing-rosters`, `routing-mock-honesty`), and whether one of them lands
+  between the pair depends on vitest's sequencer — failed-first, then slowest-first from the local
+  results cache, largest-file-first without one — so the order moves from run to run and box to
+  box. **The 09-09 forensics were right and could not have found it**: `model_credentials` *is*
+  empty at end-state in every run because a later file always wipes it; the leak lives between two
+  files, not in the end state. The 09-20 model-string hypothesis is **eliminated by reading**: only
+  this file registers model `clt-claude`, so the tie-break never selects a foreign agent. **Fix**
+  (test-side only, no product code): `mcp-proxy.test.ts`'s `afterAll` now deletes exactly the four
+  platform slots it wrote, the discipline `env-fallback` already follows. Verified in the failing
+  order on a fresh database: fixed file 30/30 with zero rows left; HEAD file restored → the same
+  single test fails 500≠409; fixed file restored byte-for-byte (`cmp`). **Honest limit**: the
+  property is now held by one file's cleanup, not enforced — a future file that writes a platform
+  credential under its own key and forgets to delete it reopens this exact shape. The full-suite
+  "N repeated clean runs" F01 asks for are not recorded here; this closes the one named intermittent.
+  Original entry retained below.
+
+- **S8 (original entry, superseded above) — a FOURTH intermittent, order-dependent test failure. OPEN, and NOT diagnosed (2026-09-08).**
   `compat-longtail.test.ts` — *"THE ASYMMETRY, provider side"* — asserts that a dispatch to an
   `anthropic`-provider agent with no credential configured returns **409 `no_model_credential`**.
   On one full-suite run it returned **500**. Observed **once in four** post-ADR-0106 runs

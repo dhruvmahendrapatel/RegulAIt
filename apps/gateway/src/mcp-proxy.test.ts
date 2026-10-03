@@ -8,7 +8,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { z } from "zod";
-import { and, connectors, createDb, eq, mcpTools, modelCredentials, projects, runMigrations, usageEvents, type Db } from "@regulait/db";
+import { and, connectors, createDb, eq, inArray, mcpTools, modelCredentials, projects, runMigrations, usageEvents, type Db } from "@regulait/db";
 // ADR-0104 — the consent fingerprint the approvals queue row is bound to.
 import { approvalArgumentsDigest } from "@regulait/shared";
 import { resolveModelProvider, type MockModelProvider } from "@regulait/model-provider";
@@ -184,6 +184,20 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  // SHARED-STATE DISCIPLINE (PENDING S8, diagnosed 2026-10-03). This file
+  // upserts a PLATFORM credential for anthropic, openai, google and xai, each
+  // pointing at a loopback fake it closes on the way out and each encrypted
+  // under THIS file's data key. Left behind, the next file to dispatch on one
+  // of those providers under a different key finds a stored credential it
+  // cannot decrypt — `decryptSecret` throws, nothing maps that to a status —
+  // and gets a 500 where it asserted 409 `no_model_credential`
+  // (compat-longtail.test.ts, "THE ASYMMETRY, provider side"). Whether that
+  // happened depended on whether one of the four files that wipe the slot ran
+  // in between, which is why it was intermittent. Take exactly these slots
+  // back; the file owns them while it runs, the same way env-fallback does.
+  await db
+    .delete(modelCredentials)
+    .where(inArray(modelCredentials.provider, ["anthropic", "openai", "google", "xai"]));
   app.server.closeAllConnections();
   await app.close();
   await upstream.close();
