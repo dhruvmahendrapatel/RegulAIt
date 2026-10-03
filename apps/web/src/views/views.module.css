@@ -91,11 +91,15 @@
   font-weight: 600;
   word-break: break-all;
 }
+/* Sentence case. Many stat labels are authored lower-case ("active seats"),
+   so the first letter is raised by CSS — the DOM text specs read is unchanged. */
 .statLabel {
-  font-size: var(--text-xs);
-  color: var(--text-faint);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-dim);
+}
+.statLabel::first-letter {
   text-transform: uppercase;
-  letter-spacing: 0.06em;
 }
 
 .dim {
@@ -127,7 +131,7 @@
 
 .sectionTitle {
   font-size: var(--text-md);
-  font-weight: 650;
+  font-weight: 600;
   margin: var(--s3) 0 var(--s1);
 }
 
@@ -187,7 +191,7 @@
   color: var(--rg-signal-700);
 }
 .tileName {
-  font-weight: 650;
+  font-weight: 600;
   font-size: var(--text-md);
 }
 .tileDesc {
@@ -207,10 +211,9 @@
   font-variant-numeric: tabular-nums;
 }
 .tileStatLabel {
-  font-size: var(--text-xs);
-  color: var(--text-faint);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-dim);
 }
 
 /* A responsive row of stat tiles. `v.grid` is referenced by a dozen admin

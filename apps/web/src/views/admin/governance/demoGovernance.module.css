@@ -51,8 +51,7 @@
 
 .radarGapLabel {
   fill: var(--text-faint);
-  font: 600 9px var(--font-sans);
-  text-transform: uppercase;
+  font: 600 10.5px var(--font-sans);
 }
 
 .heatmap {
