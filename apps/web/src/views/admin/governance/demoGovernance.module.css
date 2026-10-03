@@ -131,7 +131,7 @@
   display: block;
   margin-top: var(--s1);
   font-size: var(--text-lg);
-  font-weight: 700;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
 

@@ -75,9 +75,11 @@
   gap: var(--s0);
   min-width: 0;
 }
+/* KPI numerals: 20/600 — big enough to scan, never larger or heavier than
+   the card title above them. */
 .statValue {
-  font-size: var(--text-xl);
-  font-weight: 700;
+  font-size: 20px;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
   min-width: 0;
   overflow-wrap: anywhere;
@@ -201,7 +203,7 @@
 }
 .tileStatValue {
   font-size: var(--text-lg);
-  font-weight: 700;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
 .tileStatLabel {
