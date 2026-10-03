@@ -582,6 +582,17 @@ describe("AER-035 — a backend killed mid-transaction, and one re-apply through
       sql`create trigger ${sql.raw(fnName)} before insert on audit_log for each row execute function ${sql.raw(fnName)}()`,
     );
 
+    // WHAT KILLED THE PROCESS BEFORE createDb's per-connection listener: the
+    // terminated backend emits 'error' on a CHECKED-OUT client, which pg-pool
+    // leaves listener-less, and Node throws it. Counted here directly, so this
+    // test fails on its own assertion rather than relying on the runner to
+    // fail the run over an unhandled error (a runner configured to ignore
+    // those, or a harness that swallows them, would otherwise stay green).
+    const uncaught: unknown[] = [];
+    const onUncaught = (e: unknown) => uncaught.push(e);
+    process.on("uncaughtException", onUncaught);
+    process.on("unhandledRejection", onUncaught);
+
     type Waiter = { pid: number; witnessed: boolean };
     let killedPid = 0;
     let apply: Promise<{ statusCode: number; body: string }> | undefined;
@@ -668,7 +679,12 @@ describe("AER-035 — a backend killed mid-transaction, and one re-apply through
         rows: Array<{ pid: number }>;
       };
       expect(live.rows[0]?.pid).not.toBe(killedPid);
+
+      // (3b) AND THE KILL NEVER REACHED THE PROCESS as an uncaught error.
+      expect(uncaught.map(String), "the lost connection did not surface as an uncaught error").toEqual([]);
     } finally {
+      process.off("uncaughtException", onUncaught);
+      process.off("unhandledRejection", onUncaught);
       // the gate is released with the holder's transaction, so a still-parked
       // applier (a failed poll) proceeds and the drops below cannot wait on it
       await apply?.catch(() => undefined);
