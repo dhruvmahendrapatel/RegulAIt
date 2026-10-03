@@ -494,6 +494,11 @@ export type WorkflowEvent =
   | { kind: "artifact_submitted"; stageId: string }
   | { kind: "approval_granted"; stageId: string }
   | { kind: "approval_denied"; stageId: string }
+  // ADR-0168 — "send back for information": the approver neither approves nor
+  // denies; the instance returns to the NEAREST PRECEDING artifact_generation
+  // stage and rests there until a NEW version of that artifact is submitted.
+  // Not terminal (the denial is) — the resubmission re-requests the sign-off.
+  | { kind: "approval_returned"; stageId: string }
   | { kind: "human_trigger"; stageId: string }
   | { kind: "stage_completed"; stageId: string }
   | { kind: "execution_succeeded"; stageId: string }
@@ -756,6 +761,47 @@ export function transition(
     }
     const s = { ...state, status: "denied" as const };
     return { state: s, effects: [{ kind: "instance_denied" }] };
+  }
+
+  if (event.kind === "approval_returned") {
+    if (current?.type !== "human_approval" || current.id !== event.stageId) {
+      throw new WorkflowStateError(
+        `instance is not blocked on approval stage '${event.stageId}'`,
+      );
+    }
+    // ADR-0168: back to the nearest artifact stage BEFORE this gate. It is
+    // NOT re-run forward (the artifact already has a version, so runForward
+    // would auto-complete it straight back into this gate): the instance RESTS
+    // at blocked_on_artifact, and only a new `artifact_submitted` on that
+    // stage moves it on — which runs forward into the sign-off again.
+    let producerIndex = -1;
+    for (let i = state.currentStageIndex - 1; i >= 0; i--) {
+      if (def.stages[i]!.type === "artifact_generation") {
+        producerIndex = i;
+        break;
+      }
+    }
+    if (producerIndex < 0) {
+      throw new WorkflowStateError(
+        `approval stage '${event.stageId}' has no preceding artifact stage to return to`,
+      );
+    }
+    const producer = def.stages[producerIndex]!;
+    const s: InstanceState = {
+      ...state,
+      status: "blocked_on_artifact",
+      stageStatuses: [...state.stageStatuses],
+      artifactVersions: { ...state.artifactVersions },
+    };
+    for (let i = producerIndex; i < s.stageStatuses.length; i++) {
+      if (s.stageStatuses[i] !== "pending") s.stageStatuses[i] = "reopened";
+    }
+    s.stageStatuses[producerIndex] = "active";
+    s.currentStageIndex = producerIndex;
+    return {
+      state: s,
+      effects: [{ kind: "await_artifact", stageId: producer.id, output: producer.output! }],
+    };
   }
 
   if (event.kind === "execution_succeeded" || event.kind === "execution_failed") {

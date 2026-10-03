@@ -278,6 +278,49 @@ describe("instance state machine", () => {
     expect(() => transition(standard, r.state, { kind: "approval_granted", stageId: "requirements_signoff" })).toThrow(/terminal/);
   });
 
+  it("ADR-0168: a returned approval rests at the preceding artifact stage until a NEW version", () => {
+    let r = startedPastPlan();
+    r = transition(standard, r.state, { kind: "artifact_submitted", stageId: "requirements" });
+    expect(r.state.status).toBe("blocked_on_approval");
+    r = transition(standard, r.state, { kind: "approval_returned", stageId: "requirements_signoff" });
+    expect(r.state.status).toBe("blocked_on_artifact");
+    expect(r.state.currentStageIndex).toBe(2);
+    expect(r.state.stageStatuses[2]).toBe("active");
+    expect(r.state.stageStatuses[3]).toBe("reopened");
+    expect(r.effects).toEqual([{ kind: "await_artifact", stageId: "requirements", output: "requirements_file" }]);
+    // no decision on the returned gate is possible any more
+    expect(() =>
+      transition(standard, r.state, { kind: "approval_granted", stageId: "requirements_signoff" }),
+    ).toThrow(/not blocked on approval/);
+    // a new version re-requests the sign-off
+    r = transition(standard, r.state, { kind: "artifact_submitted", stageId: "requirements" });
+    expect(r.state.status).toBe("blocked_on_approval");
+    expect(r.state.artifactVersions.requirements_file).toBe(2);
+    expect(r.effects).toContainEqual({
+      kind: "request_approval",
+      stageId: "requirements_signoff",
+      approvers: ["requesting_user"],
+    });
+  });
+
+  it("ADR-0168: returning is refused off an approval gate, or with no artifact stage before it", () => {
+    let r = startedPastPlan();
+    expect(() =>
+      transition(standard, r.state, { kind: "approval_returned", stageId: "requirements_signoff" }),
+    ).toThrow(/not blocked on approval/);
+    const noArtifact = validateDefinition({
+      workflow: "no-artifact",
+      stages: [
+        { id: "t", type: "trigger" },
+        { id: "s", type: "human_approval", approvers: ["requesting_user"] },
+      ],
+    });
+    r = transition(noArtifact, initialState(noArtifact), { kind: "start" });
+    expect(() => transition(noArtifact, r.state, { kind: "approval_returned", stageId: "s" })).toThrow(
+      /no preceding artifact stage/,
+    );
+  });
+
   it("a human trigger walks build to the check executor; check success completes", () => {
     let r = startedPastPlan();
     r = transition(standard, r.state, { kind: "artifact_submitted", stageId: "requirements" });
