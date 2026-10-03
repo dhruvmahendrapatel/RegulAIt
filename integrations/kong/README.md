@@ -135,6 +135,25 @@ upstream already ran is indistinguishable from a refusal, from the client's
 side. That is exactly the shape of the Envoy bug, which is why the counter
 exists and why "the client got 403" is not the assertion.
 
+### Running it, and what it leaves behind (AER-033)
+
+Every run names what it creates after a **run id** (`KONG_E2E_RUN_ID`, else
+random): the database `regulait_kong_e2e_<id>`, the container
+`regulait-kong-e2e-<id>`, the three ports (derived from the id, then checked
+free; `GATEWAY_PORT` / `UPSTREAM_PORT` / `KONG_PROXY_PORT` pin them) and the
+gateway's bootstrap token. **Nothing is dropped or removed at start**: a
+database or container that already carries the name belongs to another run
+and the harness stops rather than destroying it. Teardown — from the normal
+exit, from a failure, and from `SIGINT`/`SIGTERM` — revokes the scratch PDP
+key, removes the container **by id and only if it carries this run's label**,
+and drops the database **only if it still carries this run's comment**;
+anything else is refused aloud. The PDP key lives in a `0600` file in a
+`0700` directory handed to the container through `--env-file`, and the run
+proves it: a read as a non-runner user (`nobody`) must fail while the runner's
+own read succeeds, and the world-readable declarative config is checked to
+hold the vault reference and never the key. So two runs on one machine, or a
+cancelled job, no longer leave a live key or a stray database behind.
+
 That rule exists because the Envoy adapter shipped **failing open** on deny and
 was reviewed, not run. Review did not catch it. Running it would have — and on
 the first green run the Kong access log independently corroborated the

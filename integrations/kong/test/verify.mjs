@@ -37,9 +37,9 @@
  * .github/workflows/integrations.yml, which pins the Kong image.
  */
 import { execFileSync, execSync, spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { connect } from "node:net";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -48,27 +48,77 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "../../..");
 
 const KONG_IMAGE = process.env.KONG_IMAGE ?? "kong:3.6";
-const GATEWAY_PORT = Number(process.env.GATEWAY_PORT ?? 3210);
-const UPSTREAM_PORT = Number(process.env.UPSTREAM_PORT ?? 8099);
-const KONG_PROXY_PORT = 8000;
-const BOOT = "kong-e2e-bootstrap";
 const DATA_KEY = "a".repeat(64);
-const DB = process.env.KONG_E2E_DB ?? "regulait_kong_e2e";
 const PG = process.env.E2E_PG ?? "postgres://regulait:regulait@localhost:5432";
 
-const failures = [];
 /**
- * AER-033's residual hygiene. The harness left three things behind: its host
- * temp directory, the scratch PDP key and the scratch database. None of them is
- * a plaintext credential any more (the key arrives through a vault reference),
- * but a run that leaves a live key and a fixed-name database behind cannot be
- * run twice concurrently and leaves a credential nobody is watching. These are
- * hoisted so `finally` can clean up whatever a failed run managed to create.
+ * EVERYTHING THIS RUN CREATES IS NAMED AFTER THIS RUN, AND ONLY WHAT THIS RUN
+ * CREATED IS EVER DESTROYED (AER-033).
+ *
+ * The previous version used one database name, one container name and three
+ * fixed ports, and began by `DROP DATABASE … WITH (FORCE)` and `docker rm -f`
+ * on those names. Two runs on one machine — a developer's and a CI job's, or
+ * two pull requests on one runner — therefore destroyed each other's state
+ * mid-flight, and the harness would destroy an unrelated database or container
+ * that merely shared the name. A run id now derives the database, the
+ * container, the ports and the bootstrap token; nothing is removed at start;
+ * and teardown re-checks, through the daemon and through Postgres, that the
+ * thing it is about to remove carries THIS run's mark before it touches it.
  */
-let scratchDir = null;
-let scratchKeyId = null;
-let scratchBase = null;
-let scratchBoot = null;
+const RUN_ID = (process.env.KONG_E2E_RUN_ID ?? randomBytes(4).toString("hex"))
+  .toLowerCase()
+  .replace(/[^a-z0-9]/g, "")
+  .slice(0, 16);
+if (!RUN_ID) throw new Error("KONG_E2E_RUN_ID must contain at least one letter or digit");
+const DB = `regulait_kong_e2e_${RUN_ID}`;
+const DB_MARK = `regulait-kong-e2e run ${RUN_ID}`;
+const CONTAINER = `regulait-kong-e2e-${RUN_ID}`;
+const RUN_LABEL = "regulait.kong-e2e.run";
+// A per-run bootstrap token: it is an administrator credential for the gateway
+// this harness starts, and a fixed, checked-in value was one anyone on the
+// machine could use for as long as the run lasted.
+const BOOT = `kong-e2e-${randomBytes(16).toString("hex")}`;
+// The ports come from the run id too, then are checked free (and, if not,
+// replaced by one the kernel hands out) — an operator may still pin any of
+// them through the environment.
+let GATEWAY_PORT = 0;
+let UPSTREAM_PORT = 0;
+let KONG_PROXY_PORT = 0;
+const derivedPort = (salt) =>
+  20000 + (parseInt(createHash("sha256").update(`${RUN_ID}:${salt}`).digest("hex").slice(0, 8), 16) % 20000);
+const freePort = (preferred) =>
+  new Promise((resolve, reject) => {
+    const probe = createServer();
+    probe.once("error", () => {
+      const fallback = createServer();
+      fallback.once("error", reject);
+      fallback.listen(0, "127.0.0.1", () => {
+        const { port } = fallback.address();
+        fallback.close(() => resolve(port));
+      });
+    });
+    probe.listen(preferred, "127.0.0.1", () => {
+      const { port } = probe.address();
+      probe.close(() => resolve(port));
+    });
+  });
+
+/**
+ * What this run has created so far — recorded only AFTER each creation
+ * succeeded, so teardown (from `finally` or from a signal) removes exactly
+ * those things and nothing that happened to share a name.
+ */
+const created = {
+  db: false,
+  container: null, // the container ID the daemon returned, not the name
+  keyId: null,
+  base: null,
+  boot: null,
+  scratchDir: null,
+  secretDir: null,
+};
+
+const failures = [];
 const check = (name, ok, detail = "") => {
   if (ok) console.log(`  PASS  ${name}`);
   else {
@@ -164,9 +214,51 @@ const rawRequest = (port, pathname, headerLines) =>
     });
   });
 
-let upstream, gateway, kongStarted = false;
+/**
+ * A READ OF THE KEY'S HOST LOCATION AS SOMEBODY ELSE (AER-033). Mode bits are
+ * an intention; this is the test. `nobody` via passwordless sudo is what a CI
+ * runner has; `setpriv` is what a root shell has. A mechanism that cannot
+ * switch identity here (sudo wanting a password, setpriv without privilege)
+ * says so rather than reporting the file unreadable.
+ */
+const readAsNonRunner = (file) => {
+  for (const [cmd, args] of [
+    ["sudo", ["-n", "-u", "nobody", "--", "cat", file]],
+    ["setpriv", ["--reuid=65534", "--regid=65534", "--clear-groups", "--", "cat", file]],
+  ]) {
+    try {
+      const output = execFileSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+      return { mechanism: cmd, readable: true, output };
+    } catch (e) {
+      if (e.code === "ENOENT") continue; // not installed
+      const stderr = String(e.stderr ?? "");
+      if (/permission denied/i.test(stderr)) return { mechanism: cmd, readable: false, output: stderr };
+      // this mechanism could not become another user; try the next
+    }
+  }
+  return { mechanism: null, readable: null, output: "" };
+};
+
+let upstream, gateway;
 
 async function main() {
+  // ---- 0. this run's names and ports (AER-033) ----------------------------
+  const taken = new Set();
+  const pick = async (envName, salt) => {
+    if (process.env[envName]) return Number(process.env[envName]);
+    const preferred = derivedPort(salt);
+    const port = await freePort(taken.has(preferred) ? 0 : preferred);
+    taken.add(port);
+    return port;
+  };
+  GATEWAY_PORT = await pick("GATEWAY_PORT", "gateway");
+  UPSTREAM_PORT = await pick("UPSTREAM_PORT", "upstream");
+  KONG_PROXY_PORT = await pick("KONG_PROXY_PORT", "kong");
+  console.log(
+    `run ${RUN_ID}: database ${DB}, container ${CONTAINER}, ` +
+      `ports gateway=${GATEWAY_PORT} upstream=${UPSTREAM_PORT} kong=${KONG_PROXY_PORT}`,
+  );
+
   // ---- 1. the counting upstream -----------------------------------------
   upstream = spawn("node", [path.join(here, "upstream.mjs")], {
     env: { ...process.env, UPSTREAM_PORT: String(UPSTREAM_PORT) },
@@ -175,10 +267,22 @@ async function main() {
   await waitFor(async () => (await upstreamCount()) === 0, 15_000, "the counting upstream");
 
   // ---- 2. a fresh gateway ------------------------------------------------
+  // CREATE, never drop-then-create. A database by this name already existing
+  // means another run with this id, or a leftover — either way not ours to
+  // destroy, so the run stops here and says so. The comment is the mark
+  // teardown checks before it drops anything.
+  try {
+    execFileSync("psql", [`${PG}/postgres`, "-v", "ON_ERROR_STOP=1", "-c",
+      `CREATE DATABASE ${DB}`], { stdio: "pipe" });
+  } catch (e) {
+    throw new Error(
+      `could not create database ${DB} — if it already exists it belongs to another run and this one will not drop it: ` +
+        String(e.stderr ?? e.message).trim().slice(0, 200),
+    );
+  }
+  created.db = true;
   execFileSync("psql", [`${PG}/postgres`, "-v", "ON_ERROR_STOP=1", "-c",
-    `DROP DATABASE IF EXISTS ${DB} WITH (FORCE)`], { stdio: "pipe" });
-  execFileSync("psql", [`${PG}/postgres`, "-v", "ON_ERROR_STOP=1", "-c",
-    `CREATE DATABASE ${DB}`], { stdio: "pipe" });
+    `COMMENT ON DATABASE ${DB} IS '${DB_MARK}'`], { stdio: "pipe" });
 
   const env = {
     ...process.env,
@@ -233,10 +337,10 @@ async function main() {
   ).json;
   const pdpKey = key.token ?? key.key;
   if (!pdpKey) throw new Error(`could not mint a PDP key: ${JSON.stringify(key).slice(0, 200)}`);
-  // remembered so `finally` can revoke it even when an assertion below throws
-  scratchKeyId = key.id ?? null;
-  scratchBase = base;
-  scratchBoot = boot;
+  // remembered so teardown can revoke it even when an assertion below throws
+  created.keyId = key.id ?? null;
+  created.base = base;
+  created.boot = boot;
 
   // AER-034 — a THIRD subject, entitled to the tool AND caught by an approval
   // rule, so the `approval_required` branch can be asserted end to end. It needs
@@ -332,8 +436,8 @@ async function main() {
   // RegulAIt user UUID that only exists after seeding. A checked-in kong.yml
   // could never express that, which is itself part of why the first adapter
   // reached for an environment variable.
-  const dir = mkdtempSync(path.join(tmpdir(), "kong-e2e-"));
-  scratchDir = dir;
+  const dir = mkdtempSync(path.join(tmpdir(), `kong-e2e-${RUN_ID}-`));
+  created.scratchDir = dir;
   // `mkdtemp` creates the directory 0700 and owned by THIS user; Kong runs as
   // the `kong` user inside the container and cannot traverse it. That is the
   // whole of the first real container failure — "Permission denied" parsing the
@@ -550,23 +654,31 @@ plugins:
   writeFileSync(path.join(dir, "kong.yml"), declarative);
   chmodSync(path.join(dir, "kong.yml"), 0o644);
 
-  // Best-effort: on the FIRST run there is no such container and `docker rm -f`
-  // exits non-zero, which would fail the harness before it started. Found by
-  // running this locally as far as the daemon boundary.
-  try {
-    sh("docker", ["rm", "-f", "regulait-kong-e2e"], { stdio: "pipe" });
-  } catch {
-    /* nothing to remove */
-  }
-  sh("docker", [
-    "run", "-d", "--name", "regulait-kong-e2e",
+  // THE KEY'S HOST LOCATION (AER-033): a 0600 file in its own 0700 directory
+  // — never the declarative directory, which has to be 0755 for the `kong`
+  // user inside the container to traverse. The container receives it through
+  // `--env-file`, read by the docker CLI running as THIS user, so the key is
+  // on no command line and in no file anyone else can open. It remains
+  // visible to `docker inspect` for whoever can already talk to the daemon,
+  // which is root-equivalent on any host; that is the honest floor.
+  const secretDir = mkdtempSync(path.join(tmpdir(), `kong-e2e-secret-${RUN_ID}-`));
+  created.secretDir = secretDir;
+  const keyFile = path.join(secretDir, "pdp.env");
+  writeFileSync(keyFile, `REGULAIT_PDP_KEY=${pdpKey}\n`, { mode: 0o600 });
+
+  // NO `docker rm -f` FIRST. A container by this name already existing is
+  // another run's (or a leftover that is not ours to decide about), and
+  // `docker run` refusing the name is the right outcome: this run stops and
+  // says so. The id the daemon returns, not the name, is what teardown uses,
+  // and the label is what it checks before removing anything.
+  const containerId = sh("docker", [
+    "run", "-d", "--name", CONTAINER,
+    "--label", `${RUN_LABEL}=${RUN_ID}`,
     "--add-host", "host.docker.internal:host-gateway",
     "-v", `${dir}:/kong/declarative`,
     "-v", `${path.join(repoRoot, "integrations/kong/kong")}:/opt/regulait/kong`,
-    // The secret, out of band of the config file. Visible to `docker inspect`
-    // for whoever can already talk to the daemon — strictly better than a
-    // world-readable file, and it is what the vault reference above resolves.
-    "-e", `REGULAIT_PDP_KEY=${pdpKey}`,
+    // The secret, out of band of the config file; see the key file above.
+    "--env-file", keyFile,
     "-e", "KONG_DATABASE=off",
     // WITHOUT THESE, A FATAL STARTUP ERROR IS INVISIBLE. Kong writes its error
     // log to a file inside the container by default, so `docker logs` came back
@@ -582,8 +694,9 @@ plugins:
     "-e", `KONG_PROXY_LISTEN=0.0.0.0:${KONG_PROXY_PORT}`,
     "-p", `${KONG_PROXY_PORT}:${KONG_PROXY_PORT}`,
     KONG_IMAGE,
-  ]);
-  kongStarted = true;
+  ]).trim();
+  if (!/^[0-9a-f]{12,64}$/.test(containerId)) throw new Error(`docker run returned no container id: '${containerId.slice(0, 80)}'`);
+  created.container = containerId;
 
   const proxy = `http://127.0.0.1:${KONG_PROXY_PORT}/governed/anything`;
 
@@ -593,14 +706,14 @@ plugins:
   // exited rather than waiting out the clock on something already dead.
   const state = () => {
     try {
-      return sh("docker", ["inspect", "-f", "{{.State.Status}} {{.State.ExitCode}}", "regulait-kong-e2e"]).trim();
+      return sh("docker", ["inspect", "-f", "{{.State.Status}} {{.State.ExitCode}}", containerId]).trim();
     } catch {
       return "gone 1";
     }
   };
   const dumpKong = (why) => {
-    console.error(`--- kong container (${why}): ${state()} ---`);
-    console.error(shBoth("docker logs regulait-kong-e2e").slice(-8000) || "(container produced no output at all)");
+    console.error(`--- kong container ${CONTAINER} (${why}): ${state()} ---`);
+    console.error(shBoth(`docker logs ${containerId}`).slice(-8000) || "(container produced no output at all)");
     // Kong validates the declarative config at boot; if that is what rejected
     // it, this prints the actual complaint instead of leaving it to inference.
     console.error("--- kong config parse ---");
@@ -642,6 +755,26 @@ plugins:
   }
 
   console.log("\nassertions:");
+
+  // (z) THE KEY'S HOST LOCATION IS NOT READABLE BY ANYONE ELSE (AER-033) —
+  //     tried as a user that is not the runner, not inferred from mode bits.
+  //     The control shows the runner itself CAN read it, so "unreadable" is
+  //     the permission and not a missing file; and the one file that must be
+  //     world-readable (the declarative config, for the kong user) is checked
+  //     to hold the vault reference and not the key.
+  {
+    const canary = readAsNonRunner(keyFile);
+    check("canary: a non-runner user cannot read the PDP key's host location",
+      canary.readable === false && !String(canary.output).includes(pdpKey),
+      canary.mechanism
+        ? `via ${canary.mechanism}: readable=${canary.readable} ${String(canary.output).trim().slice(0, 120)}`
+        : "no non-runner identity available: needs passwordless sudo (CI runners have it) or root with setpriv");
+    check("control: the runner itself can read the key file",
+      readFileSync(keyFile, "utf8").includes(pdpKey));
+    const onDisk = readFileSync(path.join(dir, "kong.yml"), "utf8");
+    check("the world-readable declarative config holds the vault reference and never the key",
+      !onDisk.includes(pdpKey) && onDisk.includes("{vault://env/regulait-pdp-key}"));
+  }
 
   // (a) NO CREDENTIAL -> key-auth refuses, and nothing is proxied.
   await upstreamReset();
@@ -969,49 +1102,107 @@ plugins:
     `status ${r.status}, upstream count ${await upstreamCount()}`);
 }
 
+/**
+ * TEARDOWN — exactly what this run created, each verified as ours first, in
+ * the order that leaves the least behind if a later step fails: the live
+ * credential is revoked before the processes holding it die, and the database
+ * goes last. Idempotent, because it runs from `finally` AND from a signal.
+ */
+let cleaned = false;
+async function cleanup(why) {
+  if (cleaned) return;
+  cleaned = true;
+  console.log(`\n--- teardown (${why}) for run ${RUN_ID} ---`);
+
+  if (created.container) {
+    try {
+      console.log("\n--- kong logs (tail) ---\n" + shBoth(`docker logs --tail 40 ${created.container}`));
+    } catch {
+      /* best effort */
+    }
+    // BY ID, and only if the daemon agrees the container carries this run's
+    // label. A name can be reused; an id with our label cannot be somebody
+    // else's.
+    let label;
+    try {
+      label = sh("docker", ["inspect", "-f", `{{index .Config.Labels "${RUN_LABEL}"}}`, created.container]).trim();
+    } catch {
+      label = null; // already gone
+    }
+    if (label === RUN_ID) {
+      try {
+        sh("docker", ["rm", "-f", created.container], { stdio: "pipe" });
+      } catch (e) {
+        console.error(`could not remove container ${created.container}: ${String(e.stderr ?? e.message).trim().slice(0, 200)}`);
+      }
+    } else if (label !== null) {
+      console.error(`REFUSING to remove container ${created.container}: label ${RUN_LABEL}='${label}' is not this run's '${RUN_ID}'`);
+    }
+  }
+
+  // revoke the scratch credential before anything else dies, so a failure in
+  // the steps after it still leaves no live key behind
+  if (created.keyId && created.base && created.boot) {
+    try {
+      await api("DELETE", `${created.base}/v1/virtual-keys/${created.keyId}`, undefined, created.boot);
+    } catch {
+      /* best effort — the gateway may already be dead from assertion (j) */
+    }
+  }
+  gateway?.kill("SIGKILL");
+  upstream?.kill("SIGKILL");
+  for (const d of [created.scratchDir, created.secretDir]) {
+    if (!d) continue;
+    try {
+      rmSync(d, { recursive: true, force: true });
+    } catch {
+      /* best effort */
+    }
+  }
+
+  // DROP only the database this run created, and only if it still carries
+  // this run's mark. `WITH (FORCE)` is right HERE — the gateway that held
+  // connections was just killed and this is our own database — and wrong at
+  // start, where it used to fall on whatever shared the name.
+  if (created.db) {
+    let mark;
+    try {
+      mark = sh("psql", [`${PG}/postgres`, "-tA", "-c",
+        `select coalesce(shobj_description(oid, 'pg_database'), '') from pg_database where datname = '${DB}'`]).trim();
+    } catch {
+      mark = "(unreadable)";
+    }
+    if (mark === DB_MARK) {
+      try {
+        sh("psql", [`${PG}/postgres`, "-v", "ON_ERROR_STOP=1", "-c", `DROP DATABASE ${DB} WITH (FORCE)`], { stdio: "pipe" });
+      } catch (e) {
+        console.error(`could not drop database ${DB}: ${String(e.stderr ?? e.message).trim().slice(0, 200)}`);
+      }
+    } else {
+      console.error(`REFUSING to drop database ${DB}: its mark is '${mark}', not '${DB_MARK}'`);
+    }
+  }
+}
+
+// A Ctrl-C or a runner cancelling the job used to leave the container, the
+// database and a live PDP key behind. The signal now runs the same teardown
+// `finally` does, then exits with the conventional status for that signal.
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  process.once(signal, () => {
+    console.error(`\n${signal} received — tearing down run ${RUN_ID}`);
+    cleanup(signal)
+      .catch(() => {})
+      .finally(() => process.exit(signal === "SIGINT" ? 130 : 143));
+  });
+}
+
 try {
   await main();
 } catch (e) {
   console.error("\nharness error:", e instanceof Error ? e.message : e);
   failures.push("harness");
 } finally {
-  if (kongStarted) {
-    try {
-      console.log("\n--- kong logs (tail) ---\n" + shBoth("docker logs --tail 40 regulait-kong-e2e"));
-    } catch {
-      /* best effort */
-    }
-    try {
-      sh("docker", ["rm", "-f", "regulait-kong-e2e"], { stdio: "pipe" });
-    } catch {
-      /* best effort */
-    }
-  }
-  // AER-033 residual: revoke the scratch credential before anything else, so a
-  // failure in the steps after it still leaves no live key behind.
-  if (scratchKeyId && scratchBase && scratchBoot) {
-    try {
-      await api("DELETE", `${scratchBase}/v1/virtual-keys/${scratchKeyId}`, undefined, scratchBoot);
-    } catch {
-      /* best effort — the gateway may already be dead from assertion (e) */
-    }
-  }
-  gateway?.kill("SIGKILL");
-  upstream?.kill("SIGKILL");
-  if (scratchDir) {
-    try {
-      rmSync(scratchDir, { recursive: true, force: true });
-    } catch {
-      /* best effort */
-    }
-  }
-  try {
-    sh("psql", [`${PG}/postgres`, "-v", "ON_ERROR_STOP=1", "-c", `DROP DATABASE IF EXISTS ${DB} WITH (FORCE)`], {
-      stdio: "pipe",
-    });
-  } catch {
-    /* best effort — a leftover scratch database is recreated by the next run */
-  }
+  await cleanup("finally");
 }
 
 if (failures.length > 0) {
