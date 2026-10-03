@@ -400,9 +400,14 @@
   --danger: var(--rg-critical-deep);
   --danger-soft: var(--rg-critical-tint);
   --danger-soft-text: var(--rg-critical-deep);
-  --info: var(--rg-low-deep);
-  --info-soft: var(--rg-low-tint);
-  --info-soft-text: var(--rg-low-deep);
+  /* `info` is graphite, not the severity-Low blue it used to alias: workflow
+     states and tags must not read as low-severity findings. Low severity stays
+     blue because SeverityBadge paints `.sevLow` from the `--rg-low-*` tokens
+     directly. `--rg-hover` is rg-100 in light and rg-700 in dark, so the pair
+     holds in both themes (label ink on it measures 7.1:1 and 6.6:1). */
+  --info: var(--rg-ink-label);
+  --info-soft: var(--rg-hover);
+  --info-soft-text: var(--rg-ink-label);
 
   --scrim: var(--rg-scrim);
   --skeleton-a: var(--rg-skeleton-a);

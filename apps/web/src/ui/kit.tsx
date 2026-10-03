@@ -450,17 +450,21 @@ export function statusTone(status: string): Tone {
     // same tone as the other "waiting on a human" statuses.
     case "blocked_on_plan":
     case "awaiting_trigger":
-    case "in_review":
-    case "pending":
     case "blocked_on_deploy":
       return "warn";
+    // Workflow states, not findings: a pending or in-review item is the
+    // expected resting state of a governed change, and a superseded one was
+    // replaced, not refused. Orange and red are kept for risk and refusal.
+    case "in_review":
+    case "pending":
+    case "superseded":
+      return "neutral";
     case "blocked":
     case "blocked_on_check":
     case "failed":
     case "rolled_back":
     case "aborted":
     case "denied":
-    case "superseded":
       return "danger";
     default:
       return "neutral";
