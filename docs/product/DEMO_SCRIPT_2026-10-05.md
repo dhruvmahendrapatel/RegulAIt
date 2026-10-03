@@ -26,6 +26,7 @@ export DATABASE_URL=postgres://regulait:regulait@127.0.0.1:5432/regulait_demo   
 export REGULAIT_BOOTSTRAP_TOKEN=<any long random string>
 export REGULAIT_DATA_KEY=$(openssl rand -hex 32)        # 64 hex chars — keep it for the whole demo
 export REGULAIT_EPHEMERAL_LICENSE=1 REGULAIT_LICENSE_KEYRING=$HOME/.regulait-demo-keys
+export REGULAIT_OFFLINE_CHECKS=1   # no CI in the demo: the seeded check stages auto-pass, labelled (AER-047)
 ```
 
 Windows PowerShell equivalent:
@@ -35,7 +36,13 @@ $env:DATABASE_URL = "postgres://regulait:regulait@127.0.0.1:5432/regulait_demo"
 $env:REGULAIT_BOOTSTRAP_TOKEN = "<any long random string>"
 $env:REGULAIT_DATA_KEY = -join ((1..32) | ForEach-Object { '{0:x2}' -f (Get-Random -Maximum 256) })
 $env:REGULAIT_EPHEMERAL_LICENSE = "1"; $env:REGULAIT_LICENSE_KEYRING = "$HOME\.regulait-demo-keys"
+$env:REGULAIT_OFFLINE_CHECKS = "1"
 ```
+
+`REGULAIT_OFFLINE_CHECKS=1` must be set in the **gateway's** terminal (step 2 below). A workflow
+check nobody reports now waits for a report (AER-047); the seeded demo templates opt in to a labelled
+offline auto-pass ("auto-passed · no report"), which a gateway honours only when this variable is
+set. Without it, the live pipeline chain stops at its checks stage with "waiting on check results".
 
 Then the **export-signing key** for beat 3E (ADR-0116: the deployment, not the product, holds it —
 without it "Download signed bundle" answers 409): run
@@ -46,7 +53,10 @@ stable across rehearsal and demo. (bash shortcut: `eval "$(pnpm -s --filter @reg
 demo:export-key -- --env)"`.)
 
 To start over, recreate the database (`docker rm -f regulait-demo-pg`, re-run the `docker run`)
-— the journey changes it, and `demo:prepare` seeds an empty database only. A full rehearsal of the UI journey, unattended:
+— the journey changes it, and `demo:prepare` seeds an empty database only. **A demo database
+prepared before 2026-10-03 must be recreated** the same way: its seeded pipeline templates predate
+the AER-047 offline opt-in, so their check stages wait for reports even with
+`REGULAIT_OFFLINE_CHECKS=1` set. A full rehearsal of the UI journey, unattended:
 `E2E_BASE_URL=http://127.0.0.1:3105 pnpm --filter @regulait/web exec playwright test -c
 playwright.demo-real.config.ts` (export the gateway's own `REGULAIT_BOOTSTRAP_TOKEN` in that
 terminal; the spec falls back to `e2e-bootstrap-token` only when it is unset).

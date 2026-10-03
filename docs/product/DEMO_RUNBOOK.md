@@ -9,7 +9,11 @@ credential it mints is printed once and dies with the database.
 ## 1. Stand it up (about three minutes)
 
 Four terminals, in this order. Steps 2–4 all need the same `DATABASE_URL`,
-`REGULAIT_BOOTSTRAP_TOKEN` and `REGULAIT_DATA_KEY`.
+`REGULAIT_BOOTSTRAP_TOKEN` and `REGULAIT_DATA_KEY`. The gateway (step 5) also needs
+`REGULAIT_OFFLINE_CHECKS=1`: there is no CI in the demo, and since AER-047 a workflow check nobody
+reports waits for a report unless the gateway declares offline mode — the seeded pipeline templates
+then auto-pass their checks, labelled "auto-passed · no report". A database seeded before
+2026-10-03 predates that opt-in and must be recreated.
 
 **No docker on the demo box?** Skip to §1.1 and come back. Everything from §3 onwards is
 identical — the only thing you lose is the WORM anchor, and §2 says exactly what that costs.
@@ -32,7 +36,7 @@ pnpm --filter @regulait/gateway demo:setup
 
 # (5) The gateway itself. HOST=127.0.0.1 binds loopback only — a laptop on a shared
 #     network must not expose the plaintext gateway and its bootstrap token (DEMO-01).
-HOST=127.0.0.1 pnpm --filter @regulait/gateway start
+HOST=127.0.0.1 REGULAIT_OFFLINE_CHECKS=1 pnpm --filter @regulait/gateway start
 ```
 
 ### 1.1 Without docker — a native Postgres path
@@ -68,6 +72,7 @@ export DATABASE_URL="postgres://regulait:regulait@127.0.0.1:5432/regulait"
 export REGULAIT_BOOTSTRAP_TOKEN="dev-bootstrap"
 export REGULAIT_DATA_KEY="<the value you just minted>"
 export REGULAIT_SCHEDULER=on
+export REGULAIT_OFFLINE_CHECKS=1
 ```
 
 Do **not** put `$(openssl rand -hex 32)` in each terminal's export — that mints a different key
