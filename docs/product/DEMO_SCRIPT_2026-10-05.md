@@ -75,9 +75,16 @@ terminal; the spec falls back to `e2e-bootstrap-token` only when it is unset).
    - **Profile B — Avery** (`avery@regulait.local`): independent approver. Works only in
      `/ui/inbox`. Use-case sign-offs are routed to Avery (ADR-0165), so the proposer is never
      the approver.
+   - Optional **Profile C — Dana** (`dana@regulait.local`), only for the optional beat 2B+ (the
+     second reviewer). Sign her in during setup too, so the beat costs no password changes live.
 4. Optional — a third terminal for the pipeline beat (2C) with the same environment.
 
 Everything runs on the keyless **mock** provider. No live model, no external network.
+
+**The left navigation rail auto-hides (ADR-0169).** It rests as a slim icon strip; hovering it
+(or tabbing into it) opens it — on hover it opens over the page, on keyboard focus the page makes
+room. **Pin navigation** at the bottom of the rail keeps it open, remembered per browser — pin it
+in every profile before the demo if you would rather it did not move while you present.
 
 ---
 
@@ -136,9 +143,13 @@ Everything runs on the keyless **mock** provider. No live model, no external net
   just submitted (nothing typed twice). Tabs: Overview, Frameworks, Risks, Stack, Dependencies,
   Approvals, Audit.
 - **Action:**
-  1. **Stack** — the agent card for **claude-opus**: declared purpose and owner (unassigned); its
+  1. **Stack** — the agent card for **claude-opus**: declared purpose and owner; its
      model card reads **Not signed off** in the **Model cards** list, and the header's facts strip
-     already flags "1 agent lacks an approved model card".
+     already flags "1 agent lacks an approved model card". Under the card, the stewardship line —
+     *Steward: Dana Developer · Successor: Ada Admin* (ADR-0168 item 6: every agent has a named
+     steward and successor; an agent with no live steward is flagged **Orphaned**, and the
+     **Agents** page, `/ui/admin/agents`, shows exactly one — **grok**, seeded with only a
+     successor).
      **Dependencies** shows the chain use case → claude-opus → model → Anthropic.
   2. **Risks** — **Add risk from library**: search, pick an agentic scenario, choose likelihood
      and impact yourself (nothing is pre-rated), **Assess and add**; link a suggested control and
@@ -165,11 +176,46 @@ Everything runs on the keyless **mock** provider. No live model, no external net
   every approval expires: six months for high risk, twelve otherwise, then it comes back for
   re-review."
 
+### 2B+ (optional, if time). Review policy — two reviewers and a send-back — Ada, Dana, Avery
+Skip this beat if the clock is tight: nothing later depends on it, and the Monday journey above
+(one named approver) is unchanged. It is rehearsed by `apps/web/e2e/demo-review-policy.spec.ts`,
+which runs after the Monday journey on the same `demo:prepare` database (that spec puts the policy
+back afterwards; a live run leaves it set — recreate the database before the next rehearsal).
+- **URL:** **AI Governance → Review policy** (`/ui/admin/governance/review-policy`, Profile A).
+- **Action — Ada sets the policy:** **+ Add role** *Security*, add **Avery Approver**; **+ Add role**
+  *Privacy*, add **Dana Developer**; tick both under **Required reviews for the high tier** (it reads
+  *2 required reviews*); optionally set the high tier's approval lifetime (e.g. 12 months); add
+  **Avery Approver** as a **risk acceptor**; **Save policy** (*Last changed … by Ada Admin*).
+- **Action — a second high-tier use case:** **AI intake** → **Fill in an example**, give it a new
+  name (e.g. *Credit-limit assistant*), **Draft suggestions** (*Proposed tier: high*), **Accept all
+  remaining**, Continue to **Submit for human review**.
+- **Action — Dana sends it back** (Profile C, `/ui/inbox` → **Review**): the panel says *Privacy
+  review*, *… of 2 reviews*, and lists Security as *Awaiting decision* under **Other reviews**.
+  Choose **Send back for information**, give the reason (e.g. *"Say whether autonomous actions are
+  in scope and attach the DPIA reference."*), **Send back**. Avery's review closes with the round
+  (the record's tracker reads *Closed — another review ended the round*).
+- **Action — Ada resubmits** (Profile A, the use-case record): **Update and resubmit** — the
+  registration screen, prefilled with every Classify answer, the reason shown under *Why it was
+  sent back*; the name is read-only. Change one answer (e.g. *Can take autonomous actions* → yes),
+  update the questionnaire, **Resubmit for review**. A new round opens with two pending reviews.
+- **Action — both approve:** Avery chooses **Approve**, ticks **Accept residual risk**, picks a
+  risk and writes why the residual risk is acceptable; then Dana **Approve**. The record reads
+  **approved** with one sign-off per review, and the risk reads *accepted* by Avery with the
+  rationale.
+- **Say:** "How many people must sign is policy, not code: each tier names one or more reviews —
+  security, privacy, legal, model risk — and anyone in a role can take that review, never the
+  proposer. One send-back ends the round; the resubmission is a new round with fresh reviews. Risk
+  is accepted by a named person, against named risks, with a reason, and audited. And a change after
+  something has shipped re-runs the review and ships again through a new pull request — the earlier
+  round's merge and deploy stay history, never 'already done'."
+
 ### 2C. CI/CD deploy gate — the pipeline (terminal)
 - **Action:** `pnpm --filter @regulait/gateway demo:gate -- "Real-Time Fraud Detection Engine" production build-4417`
-- **Screen:** `DENY` with two **BLOCK open_high_alert** lines (an inherited HIGH rating, and
-  traffic served outside the approved stack) and a **WARN** for an unowned agent; *pipeline
-  STOPPED*; exit code 1.
+- **Screen:** `DENY` with exactly two **BLOCK open_high_alert** lines — an inherited HIGH rating
+  from *Acme Internal AI Platform*, and *1 call … to premium-mock was served by fast-mock, which is
+  outside its approved stack* — then *pipeline STOPPED*; exit code 1. (Verified on the 2026-10-03
+  integrated build: since agent stewardship, premium-mock has a steward, so the earlier
+  unowned-agent WARN no longer prints.)
 - **Then:** in Profile A, acknowledge those two alerts (3B shows how), re-run the command:
   `ALLOW` with the same items now **WARN acknowledged_high_alert**; exit 0.
 - **Say:** "The pipeline asks the same governance state the runtime enforces — approval, the
@@ -198,7 +244,8 @@ Everything runs on the keyless **mock** provider. No live model, no external net
   - *"N calls for Internal IT Knowledge Base Bot (to balanced-mock) were served by
     fast-mock, which is outside its approved stack"* — the cost optimizer moved approved traffic
     to an agent the approval never covered;
-  - *"… depends on premium-mock, which is unowned"*.
+  - *"… depends on grok, which is unowned"* (since 2026-10-03 grok is the one seeded agent with
+    no steward; Dana is its named successor, so the remediation below promotes her).
 - **Action:**
   1. Open an **unowned-agent** alert → **Acknowledge** with a note.
   2. Under **Remediation**, the executable candidate *"Make Dana Developer the owner of …"*:

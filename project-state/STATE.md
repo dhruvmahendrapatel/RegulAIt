@@ -1,5 +1,5 @@
 ---
-phase: adr0168-governance-flow-shipped-aer048-closed-demo-2026-10-05-next
+phase: adr0168-amendment-review-policy-stewardship-aer049-built-on-wt-g2-int-gate-pending-demo-2026-10-05-next
 last_updated: 2026-10-03
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
@@ -20,6 +20,21 @@ roadmap: ../docs/product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**2026-10-03 (afternoon) - ADR-0168 amendment built (review policy, resubmission, recertification, agent stewardship), AER-049 closed, ADR-0169 shaded theme.**
+On the integration branch `wt-g2-int` (from `dhruv/active` d9abbe2; tip f49abb2; full gate on <sha>: see commit
+message). The owner moved ADR-0168 items 7-8 before the demo and decided AER-049. Built: a review policy (migration
+0131; one or more role reviews per tier, any member decides, the proposer never; risk acceptors; `acceptRisks` on
+approve; resubmission with every Classify answer stored; the `use-case-recertification` sweep + admin endpoint);
+agent stewardship (migration 0132; steward = the owner column, successor, lifecycle incl. `suspended` → 409
+`agent_suspended`, prohibited counts as high for the 6-month cadence; seed leaves grok Orphaned with successor
+Dana); AER-049 (effect records per round, archived to `effects:history`; a new round opens a `-r<round>` branch and
+a NEW PR and ships again; merge refuses an earlier round's PR; the kernel `reopen` targets only a review at or
+before the first PR/merge/deploy stage; two adversarial reviews, should-fixes fixed in a1b679e); ADR-0169 shaded
+theme and auto-hiding rail (worst-point muted contrast 4.81:1 light / 5.47:1 dark). Reported: gateway 3401,
+kernel 50/50, web 156/156, mocked 86/86, new real-gateway `demo-review-policy.spec.ts` green with the Monday
+journey. Docs: ADR-0168/0169 implementation sections, demo script optional beat 2B+, AER-049 CLOSED for Codex
+to confirm (OPEN now AER-014/016). Limits in ADR-0168. Not yet on `dhruv/active`.
 
 **2026-10-03 (day) - Codex batch closed, calm UI pass, ADR-0168 governance flow shipped for the demo, AER-048 fixed.**
 All on `dhruv/active` (local merge tip `7a40d77`; demo Monday 2026-10-05 11:00 UTC). The Codex

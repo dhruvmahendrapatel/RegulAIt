@@ -146,3 +146,110 @@ before Monday") and decided AER-049:
 6. **Agent stewardship (item 8)** — every agent carries a named steward and a successor, a
    lifecycle status and a next-review date; an agent whose steward is deactivated is flagged as
    orphaned.
+
+## Implementation status — afternoon amendment (2026-10-03)
+
+All six amendment items are built and merged on the integration branch `wt-g2-int` (from
+`dhruv/active` `d9abbe2`): worktrees `wt-g2-api` (merge `695cec9`), `wt-g2-agents` (`87f2cbe`),
+`wt-g2-theme` (`516280b`, ADR-0169), `wt-g2-web` (`ebccbd8`) and `wt-g2-aer049` (`90cfb1b`), then
+`f0adbd2`, `a1b679e`, `05f1f38` and `f49abb2` on the branch. Full gate on <sha>: see commit
+message. The Decision and the amendment above are unchanged.
+
+**What was built**
+1. **AER-049 — effect records belong to their round** (`385631d`, `604158b`, `69bb1ad`, review
+   fixes `a1b679e`). Every effect record (`branch`, `prId`/`prUrl`, `mergeSha`, `deploy:<stage>`,
+   `deployUrl`, `rollback:<stage>`, `runId:<stage>`) is stamped with its round and stage in
+   `effects:stamps`; a re-open moves the records of every stage that runs again into the
+   append-only `effects:history` (audited `workflow:effects-archived`), the git chain (branch, PR,
+   merge) as one unit. The new round cuts its own `<prefix>/<id8>-r<round>` branch, opens a NEW PR
+   (body lines `regulait-round:` and `regulait-supersedes:`), merges and deploys again; merge
+   refuses a PR its round did not open (`workflow:merge-refused-stale-pr`); mock and dry-run deploy
+   ids carry the round from round 1 on. The kernel's generic `reopen` event is the one event a
+   completed instance accepts (aborted, denied and rolled-back instances stay terminal), and its
+   target must be a `human_approval` or `artifact_generation` stage already passed that sits at or
+   before the first PR / merge / deploy / rollback stage (`create_branch` ships nothing, so a
+   review after it is still a valid target) — a re-open therefore always runs review again before
+   anything ships. `reopenWorkflowInstance` is an internal primitive (callers own authorisation);
+   with no human actor it audits as a named system actor, never the initiator. Spec:
+   [WORKFLOW_ENGINE_SPEC](../product/WORKFLOW_ENGINE_SPEC.md) stages 8, 10 and 11.
+2. **Review policy — "one or more reviews"** (`b2b2e38`, `8fe866b`; migration 0131). One org row
+   `governance_review_policy`: roles (name, members), per EU AI Act tier (and "unscreened") the
+   roles that must sign plus an optional approval lifetime, and the risk acceptors;
+   `GET`/`PUT /v1/governance/review-policy`, audited `review-policy-updated`. When a tier routes to
+   roles, the intake sign-off becomes one approval row per role (`review_role_id`, a name snapshot,
+   `review_round`; audited `use-case-review-round-opened`). Any member of the role decides its row;
+   the proposer never may (`403 proposer_cannot_review`, also as delegate or admin); the stage
+   advances only when every role row is approved, whatever the org's quorum dial. A send-back or
+   reject on one row ends the round and closes its siblings (`superseded`, shown as *Closed —
+   another review ended the round*). No policy, or a tier with no roles, keeps the single named
+   approver unchanged. Web: the **Review policy** page (`b997130`, nav `ed03b18`), the review panel's
+   *n of m reviews* and other reviews (`b72634f`), one sign-off row per required review on the record
+   (`d8f007b`).
+3. **Risk acceptance on decide** (`b2b2e38`, `b72634f`). `acceptRisks` (risk ids + rationale) on an
+   **approve** of an intake sign-off, refused by name before anything is written: `403
+   not_a_risk_acceptor`, `422 risk_not_on_use_case`, `409 risk_already_accepted` / `risk_terminal`.
+   The risks read *accepted* with who and why; audited `use-case-risk-accepted`.
+4. **Resubmission** (`396a683`, `79ffc7f`, `1aecb8c`, `05f1f38`). Registration stores every Classify
+   answer (`ai_use_cases.intake_answers`, the 19 keys) as `screeningAnswers`; `PATCH` in `needs_info`
+   takes the same set, merges it, and recomputes the tier and data sensitivity. **Update and
+   resubmit** is the registration screen in resubmit mode, prefilled with every answer, the
+   send-back reason shown, the name read-only (PATCH has no name edit); it produces a new
+   questionnaire version and a new review round.
+5. **Expiry sweep** (`b2b2e38`, `f0adbd2`). Scheduler job `use-case-recertification` (hourly) and
+   the admin endpoint `POST /v1/governance/recertification/sweep` move an approved use case whose
+   `approvedUntil` passed back to `under_review` with `recertification = true` and re-open its
+   completed intake instance at the sign-off stage through `reopenWorkflowInstance` (actor
+   `system:recertification-sweep`), with one review per role the policy requires; audited
+   `use-case-recertification-started` (with `workflowRound`). Idempotent; the deploy gate keeps
+   refusing until the new round approves. The registry shows a **Re-review** status and filter.
+6. **Agent stewardship** (`5e6f86b`, migration 0132; web `499d2f5`; seed `0741abd`). Details below.
+
+**Stewardship design choices**
+- The **steward is the existing ADR-0089 owner column** (`owner_user_id`), exposed as
+  `stewardUserId` — no second "owner" to drift. New: `successor_user_id` (CHECK steward ≠ successor),
+  `next_review_at`, `last_reviewed_at`, `last_reviewed_by_user_id`.
+- Lifecycle widened to **proposed / active / under_review / suspended / deprecated / retired**; a
+  non-active status needs a reason; retired is terminal. **Suspended refuses dispatch** with `409
+  agent_suspended` (audited).
+- `PATCH /v1/agents/:id/stewardship` (admin or the current steward; audited
+  `agent-stewardship-updated`) and `POST /v1/agents/:id/stewardship/review` (audited
+  `agent-stewardship-reviewed`). Review cadence: **6 months** when a live linked use case is high
+  — **prohibited counts as high** — otherwise 12.
+- **Orphaned** and **review overdue** are computed at read time: orphaned = no steward, or a
+  deactivated one. A successor who steps up (owner route, PATCH, or the remediation executor)
+  clears the successor slot, so the CHECK can never fail mid-write.
+- The seed gives every agent a steward and successor through the real audited routes and leaves
+  **grok** with only a successor (Dana), so the inventory shows one Orphaned flag and the demo's
+  unowned-agent alert keeps an executable remediation, which now promotes the successor.
+
+**Evidence** (the implementers' runs and the integration gate as reported): gateway full suite
+3401 passed; `zz-adr0168-review-policy.test.ts` 14, `agent-stewardship.test.ts` 13/13 (8
+negative-control probes, each reddening only its target), `workflow-check-round.test.ts` 17;
+workflow-kernel 50/50; web unit 156/156; mocked UI 86/86 (incl. `zz-review-round.mock.spec.ts`,
+`zz-agent-stewardship.mock.spec.ts`); the new real-gateway journey
+`apps/web/e2e/demo-review-policy.spec.ts` (Ada sets high → Security = Avery, Privacy = Dana, 12
+months, Avery risk acceptor; registers; Dana sends back; resubmit; round 2 both approve, Avery
+accepts a risk; `approvedUntil` = `approvedAt` + 12 months) passed together with the Monday
+journey `demo-intake.spec.ts` on one `demo:prepare` database (the policy spec restores the policy
+it changed). AER-049 had two adversarial reviews: "ship" with two should-fixes, both fixed in
+`a1b679e`.
+
+**Earlier limits now closed:** in-UI resubmission (item 4); the expiry sweep (item 5);
+role-routed reviewers can read the use case (a member of a role with a review row on it);
+items 7-8 are built (amendment items 2, 3 and 6).
+
+**Known limits**
+- Seeded personas are only Ada, Dana and Avery, so a demo policy can name at most two reviewer
+  roles with distinct people besides the proposer.
+- A retry after a failed registration refuses changed Classify answers: the AER-046 checkpoint
+  treats `screeningAnswers` as fixed after creation (PATCH takes them only in `needs_info`).
+- A member of a review role can read every use case that ever had a review row for that role,
+  including earlier rounds, not only the round in front of them.
+- ADR-0022 delegation on a role row works only from the row's named approver; a role member cannot
+  delegate their role's review.
+- An earlier round's PR that was never merged stays open on the git provider (the adapter has no
+  close operation).
+- `effects:history` is recorded and audited but not shown in the UI; it is read from the
+  instance context or the audit trail.
+- The all-must-approve quorum limit above (conditions recorded by one approver persist if a later
+  one returns the sign-off) was not re-examined for policy-routed rounds.
