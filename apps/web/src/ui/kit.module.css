@@ -206,7 +206,7 @@
    from the rows, the same way the rows separate from each other. */
 .table th {
   text-align: left;
-  padding: 10px 14px;
+  padding: 12px 16px;
   font-size: var(--text-sm);
   font-weight: 600;
   color: var(--text-dim);
@@ -226,7 +226,7 @@
   font-size: 9px;
 }
 .table td {
-  padding: 10px 14px;
+  padding: 12px 16px;
   border-bottom: 1px solid var(--border);
   vertical-align: middle;
 }

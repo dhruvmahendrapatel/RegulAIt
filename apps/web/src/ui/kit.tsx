@@ -71,6 +71,11 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
  * field took whatever was left — 20px beside three selects at phone width
  * (UIW-05). A real basis makes it wrap to a full line of its own first. */
 const fieldClass = (grow: boolean | undefined) => (grow ? `${s.field} ${s.fieldGrow}` : s.field);
+/** The 16rem basis is a WIDTH basis and only means something in a row. In a
+ * column stack the same basis is a 256px HEIGHT, which drew phantom
+ * whitespace under short fields (about 350px on Shadow-AI). The attribute lets
+ * the column primitives (views .stack / .stackTight) reset it to auto. */
+const growAttr = (grow: boolean | undefined) => (grow ? { "data-rg-grow": "" } : {});
 
 export function Field(props: {
   label: string;
@@ -92,7 +97,7 @@ export function Field(props: {
   const spacer = props.label.trim().replace(/\u00a0/g, "") === "";
   if (spacer) {
     return (
-      <div className={fieldClass(props.grow)}>
+      <div className={fieldClass(props.grow)} {...growAttr(props.grow)}>
         <span className={s.fieldLabel} aria-hidden>
           {props.label}
         </span>
@@ -117,7 +122,7 @@ export function Field(props: {
   if (single) {
     const id = single.props.id ?? auto;
     return (
-      <div className={fieldClass(props.grow)}>
+      <div className={fieldClass(props.grow)} {...growAttr(props.grow)}>
         <div className={s.fieldLabelRow}>
           <label className={s.fieldLabel} htmlFor={id}>
             {props.label}
@@ -135,7 +140,7 @@ export function Field(props: {
   }
 
   return (
-    <label className={fieldClass(props.grow)}>
+    <label className={fieldClass(props.grow)} {...growAttr(props.grow)}>
       <span className={s.fieldLabel}>{props.label}</span>
       {props.children}
       {props.error ? <span className={s.fieldError}>{props.error}</span> : null}
@@ -383,6 +388,9 @@ export function Card(props: {
     <section
       className={[props.flush ? s.cardFlush : s.card, props.className ?? ""].join(" ")}
       style={props.style}
+      // lets layout primitives give cards a 24px gutter (views .stack / grids,
+      // shell .content) without a cross-module class reference
+      data-rg-card=""
     >
       {props.title != null && (
         <div className={s.cardTitle} style={props.flush ? { padding: "var(--s2) var(--s2) 0" } : undefined}>

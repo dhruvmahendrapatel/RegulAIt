@@ -288,6 +288,13 @@
 .content:focus {
   outline: none;
 }
+/* Pages that render cards as bare fragment siblings (no v.stack) used to let
+   them touch. Margins collapse in this block flow, so this is a 24px floor
+   that never doubles an existing margin. */
+.content > * + [data-rg-card],
+.content > [data-rg-card] + * {
+  margin-top: var(--s3);
+}
 
 /* ---- page header: breadcrumb as kicker, then title ----
    The breadcrumb states where you are rather than offering navigation, so only
