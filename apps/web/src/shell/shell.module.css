@@ -116,9 +116,10 @@
   border-bottom: 1px solid var(--rg-rail-line);
   margin-bottom: var(--s0);
 }
+/* identity, not an action: ink, never Signal (Signal means "you can click this") */
 .suiteGlyph {
   display: inline-flex;
-  color: var(--rg-rail-edge);
+  color: var(--rg-rail-ink);
 }
 .suiteGlyph svg {
   width: 18px;
