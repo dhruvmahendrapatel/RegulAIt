@@ -814,7 +814,10 @@ export function registerWorkbenchRoutes(app: FastifyInstance, db: Db, opts: Work
       effect: "allow",
       ruleId: "approval-claimed",
       ruleChain: [],
-      reason: "an eligible member claimed a routed approval; it is now theirs to decide",
+      reason:
+        row.reviewRoleId === null
+          ? "an eligible member claimed a routed approval; it is now theirs to decide"
+          : "an eligible member claimed a routed review; deciding it still takes live membership of the review role",
     });
     return { claimed: true, approverUserId: row.reviewRoleId === null ? me : row.approverUserId };
   });

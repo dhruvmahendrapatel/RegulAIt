@@ -304,7 +304,9 @@ describe("§2 role rows are decided by live role members only", () => {
       const row = await rowFor(uc.instanceId, "solo");
       expect(row.approverUserId).toBe(users.owner.id);
       delegations.push(await delegate("owner", "stranger"));
-      const refused = await decide(row.id, { decision: "approved" }, "stranger");
+      // a reason is given so the self-review guard (the proposer is also the
+      // stored approver) is satisfied — the refusal must come from §2 itself
+      const refused = await decide(row.id, { decision: "approved", reason: "on behalf of (sod170)" }, "stranger");
       expect(refused.statusCode, refused.body).toBe(403);
       expect(refused.json().error).toBe("not_the_named_approver");
       expect((await approvalRow(row.id)).status).toBe("pending");
