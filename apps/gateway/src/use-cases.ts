@@ -84,6 +84,7 @@ import type { InstanceState, WorkflowDefinition } from "@regulait/workflow-kerne
 import {
   classifyEuAiActTier,
   createUseCaseSchema,
+  deriveDataSensitivityFromCategories,
   extractEuAiActAnswers,
   retireUseCaseSchema,
   updateUseCaseSchema,
@@ -720,10 +721,16 @@ async function resubmissionFor(
       returnedByName = ret.decidedBy ? ((await userNames(db, [ret.decidedBy])).get(ret.decidedBy) ?? null) : null;
     }
   }
+  // every Classify-step answer stored with the use case (registration, or a
+  // resubmission PATCH) over the EU answers of the latest questionnaire; a
+  // use case registered without them prefills the EU answers only
   const extracted = questionnaire ? extractEuAiActAnswers(questionnaire.content) : null;
+  const fromQuestionnaire = extracted?.status === "ok" ? extracted.answers : null;
+  const screeningAnswers =
+    fromQuestionnaire || row.intakeAnswers ? { ...(fromQuestionnaire ?? {}), ...(row.intakeAnswers ?? {}) } : null;
   return {
     allowed: row.status === "needs_info" && (auth.isAdmin || (!!auth.userId && auth.userId === row.ownerUserId)),
-    screeningAnswers: extracted?.status === "ok" ? extracted.answers : null,
+    screeningAnswers,
     questionnaire: questionnaire ? { version: questionnaire.version, content: questionnaire.content } : null,
     returnReason,
     returnedByName,
@@ -1215,6 +1222,8 @@ export function registerUseCaseRoutes(
         projectId: body.projectId ?? null,
         workflowInstanceId: started.instance.id,
         status: "proposed",
+        // ADR-0168 amendment: kept for resubmission prefill — nothing else reads it
+        ...(body.screeningAnswers ? { intakeAnswers: body.screeningAnswers } : {}),
       })
       .returning();
     await db.insert(auditLog).values({
@@ -1465,7 +1474,30 @@ export function registerUseCaseRoutes(
         return reply.status(400).send({ error: "invalid_reference", field: "intendedAgentIds" });
       }
     }
-    const screening = body.screeningAnswers ? classifyEuAiActTier(body.screeningAnswers) : null;
+    // the EU keys screen; the whole set is stored (merged over what
+    // registration stored); `dataCategories`, when given, re-derives the
+    // data sensitivity by the wizard's own fail-closed rule
+    let screening: ReturnType<typeof classifyEuAiActTier> | null = null;
+    let intakeAnswers: Record<string, unknown> | null = null;
+    let dataSensitivity: AiUseCaseRow["dataSensitivity"] | null = null;
+    if (body.screeningAnswers) {
+      const a = body.screeningAnswers;
+      screening = classifyEuAiActTier({
+        purposeDomain: a.purposeDomain,
+        affectedPersons: a.affectedPersons,
+        decisionAutonomy: a.decisionAutonomy,
+        biometricUse: a.biometricUse,
+        emotionRecognition: a.emotionRecognition,
+        socialScoring: a.socialScoring,
+        manipulativeTechniques: a.manipulativeTechniques,
+        profilesNaturalPersons: a.profilesNaturalPersons,
+        safetyComponent: a.safetyComponent,
+        interactsWithHumans: a.interactsWithHumans,
+        generatesSyntheticContent: a.generatesSyntheticContent,
+      });
+      intakeAnswers = { ...(row.intakeAnswers ?? {}), ...a };
+      if (a.dataCategories !== undefined) dataSensitivity = deriveDataSensitivityFromCategories(a.dataCategories);
+    }
     const [updated] = await db
       .update(aiUseCases)
       .set({
@@ -1476,6 +1508,8 @@ export function registerUseCaseRoutes(
               euAiActRulesetVersion: screening.rulesetVersion,
             }
           : {}),
+        ...(intakeAnswers ? { intakeAnswers } : {}),
+        ...(dataSensitivity ? { dataSensitivity } : {}),
         ...(body.description !== undefined ? { description: body.description } : {}),
         ...(body.businessContext !== undefined ? { businessContext: body.businessContext } : {}),
         ...(body.intendedAgentIds !== undefined ? { intendedAgentIds: body.intendedAgentIds } : {}),
@@ -1504,6 +1538,7 @@ export function registerUseCaseRoutes(
           source: "resubmission",
           from: row.euAiActTier,
           tier: screening.tier,
+          ...(dataSensitivity ? { dataSensitivityFrom: row.dataSensitivity, dataSensitivity } : {}),
           rulesetVersion: screening.rulesetVersion,
           firedRuleIds: screening.reasons.map((r) => r.ruleId),
         },

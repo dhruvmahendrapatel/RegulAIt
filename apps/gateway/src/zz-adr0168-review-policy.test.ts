@@ -106,8 +106,9 @@ const setPolicy = async (body: unknown = policy()) => {
   return r;
 };
 
-async function propose(label: string, who: Who = "owner") {
+async function propose(label: string, who: Who = "owner", extra: Record<string, unknown> = {}) {
   const p = await post("/v1/use-cases", users[who].auth, {
+    ...extra,
     name: `g2rp ${label} ${RUN}`,
     description: "synthetic review-policy fixture",
     businessContext: "multi-role review",
@@ -120,8 +121,13 @@ async function propose(label: string, who: Who = "owner") {
   expect(adv.statusCode, adv.body).toBe(200);
   return { id, instanceId };
 }
-async function proposeToReview(label: string, answers: EuAiActAnswers, who: Who = "owner") {
-  const uc = await propose(label, who);
+async function proposeToReview(
+  label: string,
+  answers: EuAiActAnswers,
+  who: Who = "owner",
+  extra: Record<string, unknown> = {},
+) {
+  const uc = await propose(label, who, extra);
   const art = await post(`/v1/workflows/instances/${uc.instanceId}/artifacts`, users[who].auth, {
     stageId: "questionnaire",
     content: questionnaire(answers),
@@ -484,7 +490,21 @@ describe("risk acceptance on a sign-off", () => {
 
 describe("resubmission after send-back", () => {
   it("needs_info → PATCH screening answers recomputes the tier → new questionnaire version → a NEW review round", async () => {
-    const uc = await proposeToReview("resubmit", limitedAnswers);
+    // every Classify-step answer, stored at registration for the resubmission prefill
+    const context = {
+      sectors: ["general"],
+      dataCategories: ["personal"],
+      deployment: "customer-facing",
+      euNexus: true,
+      usesExternalVendor: true,
+      generative: true,
+      autonomousActions: false,
+      toolsUsed: ["crm-lookup"],
+    };
+    const registered = { ...limitedAnswers, ...context };
+    const uc = await proposeToReview("resubmit", limitedAnswers, "owner", { screeningAnswers: registered });
+    // storing them changes nothing else at registration
+    expect(await useCaseRow(uc.id)).toMatchObject({ dataSensitivity: "internal", euAiActTier: "limited", intakeAnswers: registered });
     const secRow = await rowFor(uc.instanceId, "security");
     const back = await decide(secRow, { decision: "returned", reason: "say who the users are" }, "sec1");
     expect(back.statusCode, back.body).toBe(200);
@@ -492,7 +512,7 @@ describe("resubmission after send-back", () => {
     expect(d.useCase.status).toBe("needs_info");
     expect(d.resubmission).toEqual({
       allowed: true,
-      screeningAnswers: limitedAnswers,
+      screeningAnswers: registered,
       questionnaire: { version: 1, content: questionnaire(limitedAnswers) },
       returnReason: "say who the users are",
       returnedByName: users.sec1.name,
@@ -507,16 +527,28 @@ describe("resubmission after send-back", () => {
     expect(notReturned.statusCode).toBe(409);
     expect(notReturned.json().error).toBe("screening_answers_only_when_returned");
     expect((await useCaseRow(live.id)).euAiActTier).toBe("limited");
+    // registered without the Classify answers: the prefill is the EU answers only
+    expect((await detail(live.id)).json().resubmission).toMatchObject({ allowed: false, screeningAnswers: limitedAnswers });
     // a smuggled tier is still refused by name
     const tier = await patch(`/v1/use-cases/${uc.id}`, users.owner.auth, { euAiActTier: "minimal" });
     expect(tier.statusCode).toBe(422);
 
     const p = await patch(`/v1/use-cases/${uc.id}`, users.owner.auth, {
       description: "now says who the users are",
-      screeningAnswers: highAnswers,
+      screeningAnswers: { ...highAnswers, dataCategories: ["health"], sectors: ["healthcare"] },
     });
     expect(p.statusCode, p.body).toBe(200);
-    expect(p.json()).toMatchObject({ euAiActTier: "high", description: "now says who the users are", status: "needs_info" });
+    expect(p.json()).toMatchObject({
+      euAiActTier: "high",
+      // derived from the data categories by the wizard's fail-closed rule
+      dataSensitivity: "regulated",
+      description: "now says who the users are",
+      status: "needs_info",
+      // merged: omitted context keys keep what registration stored
+      intakeAnswers: { ...registered, ...highAnswers, dataCategories: ["health"], sectors: ["healthcare"] },
+    });
+    const malformed = await patch(`/v1/use-cases/${uc.id}`, users.owner.auth, { screeningAnswers: { ...highAnswers, tier: "minimal" } });
+    expect(malformed.statusCode).toBe(400);
     const screened = await auditFor(uc.id, "use-case-eu-tier");
     expect(screened.some((a) => (a.detail as any).source === "resubmission" && (a.detail as any).tier === "high")).toBe(true);
 

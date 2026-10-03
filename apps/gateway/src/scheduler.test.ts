@@ -710,6 +710,11 @@ describe("every sweep is registered", () => {
         // ADR-0160: continuous trace evaluation (counts only). Driven
         // end-to-end in zz-adr0160-trace-evaluation.test.ts.
         SCHEDULER_JOB_NAMES.traceEvaluation,
+        // ADR-0168 amendment: moves expired use-case approvals back into
+        // review (recertification). Driven end-to-end, through the admin
+        // endpoint that calls the same function, in
+        // zz-adr0168-review-policy.test.ts; this list pins its registration.
+        SCHEDULER_JOB_NAMES.useCaseRecertification,
       ].sort(),
     );
     for (const def of registry.values()) {

@@ -15,6 +15,12 @@
 -- 3. `ai_use_cases.recertification`: true while an approval that EXPIRED is
 --    back in review (set by the recertification sweep, cleared by the next
 --    decision).
+-- 4. `ai_use_cases.intake_answers`: every answer the registration Classify step
+--    collected (the EU AI Act screening answers plus sectors, data categories,
+--    deployment, EU nexus, external vendor, generative, autonomous actions,
+--    tools), stored so a sent-back use case can be resubmitted prefilled. NULL
+--    for use cases registered without them. The tier is still computed only
+--    from the submitted questionnaire's answers block.
 CREATE TABLE IF NOT EXISTS "governance_review_policy" (
   "id" text PRIMARY KEY DEFAULT 'default' NOT NULL,
   "roles" jsonb DEFAULT '[]'::jsonb NOT NULL,
@@ -38,3 +44,5 @@ CREATE INDEX IF NOT EXISTS "approvals_review_instance_idx" ON "approvals" ("inst
   WHERE "review_role_id" IS NOT NULL;
 --> statement-breakpoint
 ALTER TABLE "ai_use_cases" ADD COLUMN IF NOT EXISTS "recertification" boolean DEFAULT false NOT NULL;
+--> statement-breakpoint
+ALTER TABLE "ai_use_cases" ADD COLUMN IF NOT EXISTS "intake_answers" jsonb;

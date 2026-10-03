@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { acceptRisksSchema } from "./review-policy.js";
-import { euAiActAnswersSchema } from "./eu-ai-act.js";
+import { intakeScreeningAnswersPatchSchema, intakeScreeningAnswersSchema } from "./intake-assist.js";
 // ADR-0068 §5: the attack-class vocabulary is needed IN SCOPE here (not merely
 // re-exported below) so the compliance-profile schema validates a framework's
 // red-team gating classes against the one authoritative list.
@@ -3287,6 +3287,11 @@ export const createUseCaseSchema = z.object({
   /** agent REFERENCES the proposer intends to use — validated server-side */
   intendedAgentIds: z.array(z.string().uuid()).max(20).default([]),
   projectId: z.string().uuid().optional(),
+  /** ADR-0168 amendment — every Classify-step answer (flat), STORED so a
+   * sent-back use case can be resubmitted prefilled. Optional; it changes
+   * nothing else at registration (the tier is still computed from the
+   * submitted questionnaire). */
+  screeningAnswers: intakeScreeningAnswersSchema.optional(),
 });
 
 /** editable while the intake is in flight; `status` is NOT here on purpose —
@@ -3298,10 +3303,12 @@ export const updateUseCaseSchema = z.object({
   intendedAgentIds: z.array(z.string().uuid()).max(20).optional(),
   projectId: z.string().uuid().nullable().optional(),
   /** ADR-0168 amendment — RESUBMISSION: accepted only while the use case is
-   * `needs_info`; the EU AI Act tier is recomputed from these answers (never
-   * accepted as a tier). The resubmitted questionnaire version carries the
-   * same answers block and is screened again on submission. */
-  screeningAnswers: euAiActAnswersSchema.optional(),
+   * `needs_info`. Every Classify-step answer (flat): the EU AI Act tier is
+   * recomputed from the EU keys (never accepted as a tier) and
+   * `dataSensitivity` from `dataCategories` when given. The resubmitted
+   * questionnaire version carries the same answers block and is screened
+   * again on submission. */
+  screeningAnswers: intakeScreeningAnswersPatchSchema.optional(),
 });
 
 export const retireUseCaseSchema = z.object({
@@ -3360,6 +3367,11 @@ export {
   buildIntakeNarrativePrompt,
   composeQuestionnaireDraft,
   intakeAssistRequestSchema,
+  intakeContextSchema,
+  intakeScreeningAnswersSchema,
+  intakeScreeningAnswersPatchSchema,
+  deriveDataSensitivityFromCategories,
+  type IntakeScreeningAnswers,
   parseIntakeNarrative,
   renderQuestionnaireMarkdown,
   suggestIntake,

@@ -7622,6 +7622,10 @@ export const aiUseCases = pgTable(
      * EXPIRED is back in review — set by the recertification sweep, cleared
      * by the next approve/reject decision. */
     recertification: boolean("recertification").notNull().default(false),
+    /** ADR-0168 amendment (migration 0131): every Classify-step answer
+     * (flat: EU AI Act answers + intake context), kept for resubmission
+     * prefill. NULL = registered without them. Never an input to the tier. */
+    intakeAnswers: jsonb("intake_answers").$type<Record<string, unknown>>(),
     retiredReason: text("retired_reason"),
     retiredAt: timestamp("retired_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
