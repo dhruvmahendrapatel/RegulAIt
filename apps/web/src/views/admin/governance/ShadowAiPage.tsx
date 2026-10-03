@@ -452,7 +452,7 @@ export default function ShadowAiPage() {
               rowKey={(r) => r.id}
               columns={[
                 { key: "severity", header: "Severity", render: (r) => <SeverityBadge severity={r.severity} /> },
-                { key: "subject", header: "Subject", // a floor so the nowrap actions column cannot squeeze a name to one word per line
+                { key: "subject", header: "Subject", // a floor so a name never wraps to one word per line (the actions stack below it)
                 render: (r) => <span title={r.subjectKind} style={{ display: "inline-block", minWidth: "14ch" }}>{r.subject}</span> },
                 { key: "provider", header: "Provider", render: (r) => providerLabel(r.provider) },
                 { key: "sources", header: "Sources", render: (r) => r.signalSources.map(evidenceLabel).join(", ") },
@@ -483,7 +483,7 @@ export default function ShadowAiPage() {
                   key: "triage",
                   header: "",
                   render: (r) => (
-                    <div className={v.row} style={{ flexWrap: "nowrap", whiteSpace: "nowrap" }}>
+                    <div className={v.stackTight} style={{ alignItems: "flex-start", whiteSpace: "nowrap" }}>
                       <Link to={`/admin/governance/intake?source=shadow-ai&findingId=${encodeURIComponent(r.id)}&title=${encodeURIComponent(`Govern ${r.subject}`)}&description=${encodeURIComponent(`Register and govern the ${providerLabel(r.provider)} usage observed for ${r.subject}. Evidence: ${r.signalSources.map(evidenceLabel).join(", ")}.`)}`}>Register as use case</Link>
                       <Button variant="ghost" onClick={() => { setDispositionFor(r.id); setReason(""); }}>Triage</Button>
                     </div>
