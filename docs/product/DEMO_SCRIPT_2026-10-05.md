@@ -125,8 +125,9 @@ Everything runs on the keyless **mock** provider. No live model, no external net
 - **Screen:** status **under review**, **high tier**, 7 tabs: Overview, Frameworks, Risks, Stack,
   Dependencies, Approvals, Audit.
 - **Action:**
-  1. **Stack** — the agent card for **claude-opus**: declared purpose, owner (unassigned), and
-     **no approved model card** — the header already flags "1 agent lacks an approved model card".
+  1. **Stack** — the agent card for **claude-opus**: declared purpose and owner (unassigned); its
+     model card reads **Not signed off** in the **Model cards** list, and the header's facts strip
+     already flags "1 agent lacks an approved model card".
      **Dependencies** shows the chain use case → claude-opus → model → Anthropic.
   2. **Risks** — **Add risk from library**: search, pick an agentic scenario, choose likelihood
      and impact yourself (nothing is pre-rated), **Assess and add**; link a suggested control and
@@ -185,7 +186,8 @@ Everything runs on the keyless **mock** provider. No live model, no external net
   3. **Avery** (`/ui/inbox`): *Governance remediation · Make Dana Developer the owner of …* →
      **Approve**.
   4. **Ada:** reload the alert — the approved action ran (the agent now has an owner) and the
-     alert is **resolved**; **Evaluate now** confirms the condition is gone.
+     alert is **resolved**; **Evaluate now** confirms the condition is gone (the result is the
+     status line above the list, not a toast).
   5. Open the leakage or off-stack alert: its remediation is **guidance** only (tighten the output
      guardrail / keep traffic on the approved stack) — a person decides.
 - **Say:** "Nothing changes governed state until a different human approves it. The platform
@@ -240,7 +242,9 @@ rehearsal machine, and keep it open in a browser tab:
 2. Start the gateway and run the real journey (§0, "A full rehearsal of the UI journey").
 3. `node apps/web/e2e/fallback-deck.mjs` → `apps/web/e2e/artifacts/demo/fallback-deck.html`, one
    self-contained file (no network). → / Space next, ← back; each slide shows the beat, the
-   persona, the screenshot (scroll inside it) and the script's **Say** line.
+   persona and the screenshot (scroll inside it). The script's **Say** line is hidden by default
+   so a shared screen shows the product, not the script: press **S** to show or hide it (T
+   switches the screenshot theme on a `--dark` build).
 
 If the projector or laptop fails, the same file opens on any machine. Say plainly that these are
 screenshots of the product taken from a real run, not the live system.
