@@ -195,12 +195,25 @@ afterAll(async () => {
   // happened depended on whether one of the four files that wipe the slot ran
   // in between, which is why it was intermittent. Take exactly these slots
   // back; the file owns them while it runs, the same way env-fallback does.
-  await db
-    .delete(modelCredentials)
-    .where(inArray(modelCredentials.provider, ["anthropic", "openai", "google", "xai"]));
-  app.server.closeAllConnections();
-  await app.close();
-  await upstream.close();
+  //
+  // The take-back runs LAST and in a `finally`: a close that throws (or a
+  // beforeAll that failed before `app`/`upstream` were assigned) must not be
+  // able to skip it, and it must not be able to skip the closes either. The
+  // `db` guard covers a beforeAll that failed before the pool existed.
+  try {
+    try {
+      app?.server.closeAllConnections();
+      await app?.close();
+    } finally {
+      await upstream?.close();
+    }
+  } finally {
+    if (db) {
+      await db
+        .delete(modelCredentials)
+        .where(inArray(modelCredentials.provider, ["anthropic", "openai", "google", "xai"]));
+    }
+  }
 });
 
 describe("MCP proxy path", () => {
