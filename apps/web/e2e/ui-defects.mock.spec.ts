@@ -223,6 +223,34 @@ test("UIA-01: an anchor past the chain head is reported as such — never as a r
   await expect(report.getByTestId("anchor-ahead")).toContainText("different chain that shares this store");
   expect(await report.getByText("Anchor mismatch").count()).toBe(0);
   expect(await report.getByText("worm_sink").count()).toBe(0);
+
+  // On a TAMPER-RESISTANT store the same fact withholds the verdict: a
+  // truncated tail looks exactly like this, so it must never read green.
+  const withheld = {
+    ...verify,
+    anchor: {
+      ...verify.anchor,
+      tamperResistant: true,
+      sinkMode: "compliance",
+      matches: null,
+      disclosure: "The anchor compared against is held outside this database.",
+      aheadOfHead: { ...verify.anchor.aheadOfHead, disclosure: "The tamper-resistant anchor store holds an anchor at seq 567, past this chain's head (seq 406). A chain never shrinks: either rows after the head were removed from this chain — a break — or another chain shares this store. Verification cannot tell which, so this chain is NOT reported as verified." },
+    },
+  };
+  await routeApi(page, async (route, p) => {
+    if (p === "/auth/me") return json(route, authMe(USER_A));
+    if (p === "/v1/me") return json(route, { userId: USER_A.id, isAdmin: true, user: USER_A });
+    if (p === "/v1/audit/verify") return json(route, withheld);
+    if (p === "/v1/audit/retention") return json(route, { retainedDays: null, prunable: 0, floorSource: [] });
+    if (p === "/v1/audit") return json(route, { entries: [], pageSize: 0, hasMore: false, nextCursor: null });
+    if (p === "/v1/users") return json(route, { users: [] });
+    return json(route, {});
+  });
+  await page.getByRole("button", { name: "Re-verify" }).click();
+  await expect(report.getByText("Not verified — anchor past chain head (seq 567)")).toBeVisible();
+  await expect(report.getByTestId("anchor-ahead")).toContainText("NOT reported as verified");
+  expect(await report.getByText("Anchor matches").count()).toBe(0);
+  expect(await report.getByText("Anchor past chain head (seq 567)", { exact: true }).count()).toBe(0);
 });
 
 test("UIA-02: the audit log says how many rows are shown and loads older pages on request", async ({ page }) => {

@@ -374,7 +374,12 @@ function ChainIntegrityCard() {
             </Badge>
             {report.anchor.matches === false && <Badge tone="danger">Anchor mismatch</Badge>}
             {report.anchor.matches === true && <Badge tone="ok">Anchor matches</Badge>}
-            {report.anchor.aheadOfHead && (
+            {report.anchor.matches === null && report.anchor.aheadOfHead && (
+              <Badge tone="danger" title={report.anchor.aheadOfHead.disclosure}>
+                Not verified — anchor past chain head (seq {report.anchor.aheadOfHead.seq})
+              </Badge>
+            )}
+            {report.anchor.matches !== null && report.anchor.aheadOfHead && (
               <Badge tone="warn" title={report.anchor.aheadOfHead.disclosure}>
                 Anchor past chain head (seq {report.anchor.aheadOfHead.seq})
               </Badge>

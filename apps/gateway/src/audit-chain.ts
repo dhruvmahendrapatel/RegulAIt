@@ -996,18 +996,30 @@ async function compareAgainstAnchor(
   // the specific one.
   let observation: AnchorSinkObservation | null = null;
   let ahead: AnchorRecord | null = null;
+  // Read at return time, after `tamperResistant` is known: the same fact has
+  // two different weights. On a local buffer an anchor past the head is most
+  // likely another database that ran from the same directory, and the
+  // comparison below was never evidence anyway. On a WORM store it is one of
+  // two things — a shared store, or rows removed after the anchor was taken —
+  // and verification cannot tell which, so the chain is NOT reported as
+  // verified (`matches: null`), never as a clean pass.
   const aheadOfHead = (): VerifyReport["anchor"]["aheadOfHead"] =>
     ahead
       ? {
           seq: ahead.seq,
           rowHash: ahead.rowHash,
           capturedAt: ahead.capturedAt,
-          disclosure:
-            `The anchor store also holds an anchor at seq ${ahead.seq}, past this chain's head` +
-            `${ctx.lastSeq !== null ? ` (seq ${ctx.lastSeq})` : ""}. A chain never shrinks, so it was either captured ` +
-            "from a different chain that shares this store (another database run from the same anchor location) " +
-            "or rows after it were removed from this one. Verification cannot tell which; compare its capture time " +
-            `(${ahead.capturedAt}) with this chain's history before treating it as a break.`,
+          disclosure: tamperResistant
+            ? `The tamper-resistant anchor store holds an anchor at seq ${ahead.seq}, past this chain's head` +
+              `${ctx.lastSeq !== null ? ` (seq ${ctx.lastSeq})` : ""}. A chain never shrinks: either rows after the head were ` +
+              "removed from this chain — a break — or another chain shares this store. Verification cannot tell which, " +
+              `so this chain is NOT reported as verified. Compare the anchor's capture time (${ahead.capturedAt}) with this ` +
+              "chain's history and the store's other anchors before treating it as either."
+            : `The anchor store also holds an anchor at seq ${ahead.seq}, past this chain's head` +
+              `${ctx.lastSeq !== null ? ` (seq ${ctx.lastSeq})` : ""}. A chain never shrinks, so it was either captured ` +
+              "from a different chain that shares this store (another database run from the same anchor location) " +
+              "or rows after it were removed from this one. Verification cannot tell which; compare its capture time " +
+              `(${ahead.capturedAt}) with this chain's history before treating it as a break.`,
         }
       : null;
 
@@ -1090,7 +1102,9 @@ async function compareAgainstAnchor(
     seq: expected.seq,
     expectedRowHash: expected.rowHash,
     actualRowHash: actual,
-    matches: actual !== null && actual === expected.rowHash,
+    // an anchor past the head on a WORM store withholds the verdict: the
+    // genuine anchor may match, but the rows after it may be gone
+    matches: ahead && tamperResistant ? null : actual !== null && actual === expected.rowHash,
     unanchoredRows: ctx.lastSeq !== null ? Math.max(ctx.lastSeq - expected.seq, 0) : null,
     aheadOfHead: aheadOfHead(),
     // the medium's own account of what it enforces beats the generic text

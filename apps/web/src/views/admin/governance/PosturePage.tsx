@@ -148,9 +148,11 @@ export function fillDailyWindow<T extends { day: string }>(
   zero: (day: string) => T,
   today: Date = new Date(),
 ): T[] {
+  // The window ends TODAY, like the server's query (now − 14 d .. now), not
+  // on the last busy day: ending there would invent zero days from before
+  // the query window and hide the quiet days since the last spend.
   const byDay = new Map(points.map((p) => [p.day, p]));
-  const last = [...byDay.keys()].sort().at(-1) ?? today.toISOString().slice(0, 10);
-  const end = new Date(`${last}T00:00:00Z`);
+  const end = new Date(`${today.toISOString().slice(0, 10)}T00:00:00Z`);
   if (Number.isNaN(end.getTime())) return points;
   const out: T[] = [];
   for (let i = days - 1; i >= 0; i -= 1) {
