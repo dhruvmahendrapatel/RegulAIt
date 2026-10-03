@@ -1,14 +1,23 @@
 -- ADR-0127 / ROADMAP G9 — RegulAIt as Kong's authorization decision point.
 --
 -- ┌─────────────────────────────────────────────────────────────────────────┐
--- │ VERIFIED against a digest-pinned kong:3.6 — deny path exercised end to   │
--- │ end, with a counting upstream, on every change to integrations/.        │
--- │ .github/workflows/integrations.yml · first green run 2026-09-27.        │
+-- │ VERIFIED against kong:3.6 — deny path exercised end to end, with a      │
+-- │ counting upstream, on every change to integrations/.                    │
+-- │ .github/workflows/integrations.yml · first green run 2026-09-27         │
+-- │ (run 36300665525), against an EARLIER version of this plugin, under     │
+-- │ which a forged subject header was IGNORED. 0.3.0 refuses it instead.    │
 -- │                                                                          │
--- │ Covered precisely: Kong 3.6, DB-less, key-auth, two governed routes      │
--- │ bound to distinct server/tool pairs. The PRIORITY ordering below is      │
--- │ version-specific, so a different Kong is unverified until the harness    │
--- │ runs against it.                                                         │
+-- │ PENDING FIRST CI RUN — written but never yet run against a container,   │
+-- │ so NOT verified until a green run id is recorded here: the AER-026       │
+-- │ identity refusals (unmapped, non-uuid, unknown, deactivated, anonymous  │
+-- │ fallback), duplicate and mixed-case protocol headers, the five-name      │
+-- │ refusal with other x-regulait-* headers passed through, the truncated   │
+-- │ header-scan refusal, the AER-030 second route and forged server/tool/   │
+-- │ decision headers, and the AER-034 digest pin.                            │
+-- │                                                                          │
+-- │ Covered precisely: Kong 3.6, DB-less, key-auth. The PRIORITY ordering   │
+-- │ below is version-specific, so a different Kong is unverified until the  │
+-- │ harness runs against it.                                                 │
 -- └─────────────────────────────────────────────────────────────────────────┘
 --
 -- WHY A PLUGIN AND NOT THE `pre-function` THIS REPLACES. The snippet it
@@ -44,12 +53,13 @@ local RegulaitAuthz = {
   -- 0.2.0  `session_origin` became `asserted_session_origin` and a
   --        contradiction became a refusal (AER-036). A breaking config change,
   --        and the number should have moved with it.
-  -- 0.3.0  an inbound protocol header is REFUSED rather than stripped, a
-  --        consumer without a credential is refused, the consumer mapping must
-  --        be a user UUID, and the Kong consumer identity travels with the
-  --        question so the ledger keeps it beside the subject (AER-026,
-  --        AER-030). The "-unverified" suffix the first version carried has no
-  --        place on a plugin the CI job runs against a pinned container.
+  -- 0.3.0  an inbound copy of one of the five protocol headers is REFUSED
+  --        rather than stripped, as is a request too large for the header
+  --        scan; a consumer without a credential is refused; the consumer
+  --        mapping must be a user UUID; and the Kong consumer identity travels
+  --        with the question so the ledger keeps it beside the subject
+  --        (AER-026, AER-030). These cases are PENDING THEIR FIRST CI RUN —
+  --        see the box at the top of this file.
   VERSION = "0.3.0",
   -- Below every common auth plugin and below ACL, so `kong.client.get_consumer()`
   -- is populated by the time access() runs. This number IS the fix for (1).
@@ -59,35 +69,54 @@ local RegulaitAuthz = {
 --[[
 INBOUND PROTOCOL HEADERS ARE A REFUSAL, NOT A STRIP (AER-026 / AER-030).
 
-`x-regulait-decision` and `x-regulait-reason` are headers THIS plugin sets on
-its own refusals; `x-regulait-subject`, `x-regulait-server-id` and
-`x-regulait-tool` were read by the pre-function it replaced. Nothing reads any
-of them from a request any more, and no client has a legitimate reason to send
-one — a request that carries one is either a misconfigured chain or an attempt
-to borrow a decision.
+The protocol is FIVE names. `x-regulait-decision` and `x-regulait-reason` are
+headers THIS plugin sets on its own refusals; `x-regulait-subject`,
+`x-regulait-server-id` and `x-regulait-tool` were read by the pre-function it
+replaced. Nothing reads any of them from a request any more, and a request that
+carries one is either a misconfigured chain or an attempt to borrow a decision.
 
-The previous version cleared them and carried on. That is only as safe as every
-later line of code, it made a forgery attempt invisible to the operator, and
-"ignored" cannot be told from "honoured" in an access log. Refusing is the
+ONLY THOSE FIVE. Other `x-regulait-*` headers are ordinary client traffic and
+pass through untouched: docs/product/IDE_INTEGRATION.md tells clients to send
+`x-regulait-project-id` and `x-regulait-agent-id` (on the MCP transport too),
+and the console sends `x-regulait-csrf`. Refusing the whole prefix refused
+every request that carried project attribution and labelled it a forgery.
+
+The previous version cleared the five and carried on. That is only as safe as
+every later line of code, it made a forgery attempt invisible to the operator,
+and "ignored" cannot be told from "honoured" in an access log. Refusing is the
 posture used for every other misconfiguration here, and it is loud: the
 response names the reason, so an operator is sent to the client rather than to
 a policy screen.
 
-The scan is by PREFIX over every request header (lower-cased by nginx, so one
-check covers every spelling and a duplicated header is one key), and the known
-names are still cleared on the allow path as belt and braces — a request with
-more headers than the scan reads must still never carry a claim upstream.
+HOW THE SCAN READS. nginx lower-cases header names, and a header sent several
+times is ONE key whose value is a list, so one membership test per key covers
+every spelling and every copy. Underscores are folded to hyphens before the
+test, because an upstream that maps both to one name (CGI-style servers do)
+would otherwise read `x_regulait_subject` as the real thing. The scan reads at
+most 1000 headers — Kong's ceiling for `get_headers` — and a request with MORE
+is REFUSED: a protocol header placed after the 1000th would otherwise never be
+looked at, and an unread header is not a header known to be absent. The five
+names are still cleared on the allow path as belt and braces.
 --]]
-local PROTOCOL_HEADER_PREFIX = "^x%-regulait%-"
-local KNOWN_PROTOCOL_HEADERS = {
+local MAX_SCANNED_HEADERS = 1000
+local PROTOCOL_HEADERS = {
   "x-regulait-subject", "x-regulait-server-id", "x-regulait-tool",
   "x-regulait-decision", "x-regulait-reason",
 }
+local IS_PROTOCOL_HEADER = {}
+for _, h in ipairs(PROTOCOL_HEADERS) do IS_PROTOCOL_HEADER[h] = true end
 
+-- Returns the offending header name, or nil plus `true` when the request had
+-- more headers than the scan reads (a refusal of its own), or nil when clean.
 local function first_client_claim()
-  local headers = kong.request.get_headers(1000)
-  for name in pairs(headers) do
-    if type(name) == "string" and name:lower():find(PROTOCOL_HEADER_PREFIX) then
+  local headers, err = kong.request.get_headers(MAX_SCANNED_HEADERS)
+  if err then
+    -- "truncated" is the only error nginx reports here, and it means the scan
+    -- did not see every header. Any error is treated the same way.
+    return nil, true
+  end
+  for name in pairs(headers or {}) do
+    if type(name) == "string" and IS_PROTOCOL_HEADER[(name:lower():gsub("_", "-"))] then
       return name
     end
   end
@@ -95,7 +124,7 @@ local function first_client_claim()
 end
 
 local function strip_client_claims()
-  for _, h in ipairs(KNOWN_PROTOCOL_HEADERS) do
+  for _, h in ipairs(PROTOCOL_HEADERS) do
     kong.service.request.clear_header(h)
   end
 end
@@ -190,7 +219,12 @@ local function refuse(status, decision, reason)
 end
 
 function RegulaitAuthz:access(conf)
-  local claim = first_client_claim()
+  local claim, truncated = first_client_claim()
+  if truncated then
+    kong.log.warn("regulait: refused a request with more than ", MAX_SCANNED_HEADERS,
+      " headers — the protocol-header scan could not read them all")
+    return refuse(403, "deny", "too_many_headers")
+  end
   if claim then
     kong.log.warn("regulait: refused a request carrying protocol header '", claim, "'")
     return refuse(403, "deny", "forged_protocol_header")

@@ -28,8 +28,13 @@
  *     id, one mapped to a UUID nobody has, and one mapped to a DEACTIVATED user
  *     whose grant survives. Plus a subject header on a request with no
  *     credential, on a plain route (key-auth refuses first) and on a route
- *     whose key-auth has an `anonymous` fallback mapped to the entitled user —
- *     the shape in which "no credential" still produces a consumer.
+ *     whose key-auth has an `anonymous` fallback mapped to a REAL, ENTITLED user
+ *     of its own — the shape in which "no credential" still produces a
+ *     consumer, and in which only the credential check can be what refuses.
+ *   - ONLY THE FIVE PROTOCOL HEADERS ARE REFUSED: the documented client
+ *     headers (`x-regulait-project-id`, `x-regulait-agent-id`) reach the
+ *     upstream untouched, and a request with more headers than the plugin's
+ *     scan reads is refused rather than half-read.
  *   - THE LEDGER KEEPS THE KONG CONSUMER beside the resolved subject (AER-026),
  *     read back from the PDP's own audit rows.
  *
@@ -49,6 +54,12 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "../../..");
 
 const KONG_IMAGE = process.env.KONG_IMAGE ?? "kong:3.6";
+// The five names the plugin refuses on a request (handler.lua). Every other
+// `x-regulait-*` header is client traffic and passes through.
+const PROTOCOL_HEADERS = [
+  "x-regulait-subject", "x-regulait-server-id", "x-regulait-tool",
+  "x-regulait-decision", "x-regulait-reason",
+];
 const DATA_KEY = "a".repeat(64);
 const PG = process.env.E2E_PG ?? "postgres://regulait:regulait@localhost:5432";
 
@@ -117,6 +128,18 @@ const created = {
   boot: null,
   scratchDir: null,
   secretDir: null,
+};
+
+/**
+ * ONCE TEARDOWN HAS BEGUN, NOTHING NEW IS CREATED (AER-033). A signal can
+ * arrive while main() is parked on an await; teardown then runs, and main()
+ * may resume during one of teardown's own awaits. Every creation step calls
+ * this first, so a resumed main() throws instead of starting a container or
+ * a database that the teardown already in progress has gone past.
+ */
+let aborting = false;
+const beforeCreating = (what) => {
+  if (aborting) throw new Error(`teardown has begun — not creating ${what}`);
 };
 
 const failures = [];
@@ -240,6 +263,58 @@ const readAsNonRunner = (file) => {
   return { mechanism: null, readable: null, output: "" };
 };
 
+/**
+ * THE VALUES KONG'S DECLARATIVE LOADER REQUIRES TO BE UNIQUE, read back from
+ * the config this file generates: consumer `username`, `id` and `custom_id`;
+ * key-auth `key`; service and route `name`; and one instance of a plugin per
+ * route. A repeat is a config Kong 3.6 refuses to load ("uniqueness
+ * violation"), and from the outside that looks only like a container that
+ * never came up. A line reader is enough because the input is this file's own
+ * template, whose shape is fixed above; it is a pre-flight, not a YAML parser.
+ */
+function declarativeCollisions(text) {
+  const counts = new Map();
+  const note = (field, value) => {
+    const k = `${field} '${value}'`;
+    counts.set(k, (counts.get(k) ?? 0) + 1);
+  };
+  let section = null;
+  let plugin = null;
+  const closePlugin = () => {
+    if (plugin) note("plugin on route", `${plugin.name}@${plugin.route ?? "(global)"}`);
+    plugin = null;
+  };
+  for (const line of text.split("\n")) {
+    if (/^\s*(#|$)/.test(line)) continue;
+    const top = line.match(/^([a-z_]+):/);
+    if (top) {
+      closePlugin();
+      section = top[1];
+      continue;
+    }
+    const kv = line.match(/^( *)(- )?([a-z_]+):\s*(.*)$/);
+    if (!kv) continue;
+    const depth = kv[1].length + (kv[2] ? 2 : 0);
+    const key = kv[3];
+    const value = kv[4].trim().replace(/^"(.*)"$/, "$1");
+    if (section === "consumers") {
+      if (depth === 4 && ["username", "id", "custom_id"].includes(key)) note(`consumers.${key}`, value);
+      if (key === "key") note("keyauth_credentials.key", value);
+    } else if (section === "services" && key === "name") {
+      note(depth === 4 ? "services.name" : "routes.name", value);
+    } else if (section === "plugins") {
+      if (depth === 4 && key === "name") {
+        closePlugin();
+        plugin = { name: value, route: null };
+      } else if (depth === 4 && key === "route" && plugin) {
+        plugin.route = value;
+      }
+    }
+  }
+  closePlugin();
+  return [...counts].filter(([, n]) => n > 1).map(([k, n]) => `${k} x${n}`);
+}
+
 let upstream, gateway;
 
 async function main() {
@@ -261,6 +336,7 @@ async function main() {
   );
 
   // ---- 1. the counting upstream -----------------------------------------
+  beforeCreating("the counting upstream");
   upstream = spawn("node", [path.join(here, "upstream.mjs")], {
     env: { ...process.env, UPSTREAM_PORT: String(UPSTREAM_PORT) },
     stdio: "inherit",
@@ -272,6 +348,7 @@ async function main() {
   // means another run with this id, or a leftover — either way not ours to
   // destroy, so the run stops here and says so. The comment is the mark
   // teardown checks before it drops anything.
+  beforeCreating(`database ${DB}`);
   try {
     execFileSync("psql", [`${PG}/postgres`, "-v", "ON_ERROR_STOP=1", "-c",
       `CREATE DATABASE ${DB}`], { stdio: "pipe" });
@@ -292,9 +369,11 @@ async function main() {
     REGULAIT_DATA_KEY: DATA_KEY,
     PORT: String(GATEWAY_PORT),
   };
+  beforeCreating("the seed");
   execFileSync("node", [path.join(repoRoot, "apps/gateway/dist/seed.js")], {
     env, stdio: "pipe", maxBuffer: 16 * 1024 * 1024,
   });
+  beforeCreating("the gateway");
   gateway = spawn("node", [path.join(repoRoot, "apps/gateway/dist/main.js")], { env, stdio: "inherit" });
   const base = `http://127.0.0.1:${GATEWAY_PORT}`;
   const boot = { authorization: `Bearer ${BOOT}` };
@@ -333,6 +412,7 @@ async function main() {
   // The harness uses it because a verification that exercises a MORE privileged
   // credential than the product recommends is verifying the wrong deployment.
   const admin = users.find((u) => u.email === "admin@regulait.local");
+  beforeCreating("the PDP key");
   const key = (
     await api("POST", `${base}/v1/virtual-keys`, { name: "kong-e2e-pdp", userId: admin.id, purpose: "pdp" }, boot)
   ).json;
@@ -348,6 +428,7 @@ async function main() {
   // its own user because the entitled consumer's `allow` is the control for
   // every other case: putting a rule on THEM would turn assertion (b) into a
   // different test.
+  beforeCreating("the approval-required subject");
   const pending = (
     await api("POST", `${base}/v1/users`, { email: `kong-pending-${Date.now()}@kong.example`, displayName: "Kong pending" }, boot)
   ).json;
@@ -375,6 +456,7 @@ async function main() {
   // has to refuse on the account's state rather than on its entitlements: an
   // offboarded user with a Kong consumer still mapped to them is the realistic
   // shape of this, and "sign-in is blocked" is not "the tools are blocked".
+  beforeCreating("the deactivated subject");
   const disabled = (
     await api("POST", `${base}/v1/users`, { email: `kong-disabled-${Date.now()}@kong.example`, displayName: "Kong disabled" }, boot)
   ).json;
@@ -411,11 +493,36 @@ async function main() {
     }
   }
   if (!toolB) throw new Error(`no read tool on ${serverB.name} refuses the entitled user — the crossed case needs one`);
+  beforeCreating("the second route's subject");
   const other = (
     await api("POST", `${base}/v1/users`, { email: `kong-other-${Date.now()}@kong.example`, displayName: "Kong other" }, boot)
   ).json;
   if (!other?.id) throw new Error(`could not create the second route's subject: ${JSON.stringify(other).slice(0, 200)}`);
   await api("POST", `${base}/v1/grants/tools`, { userId: other.id, serverId: serverB.id, toolName: toolB.name }, boot);
+
+  // AER-026 — THE USER THE ANONYMOUS FALLBACK IS MAPPED TO, entitled to tool A.
+  //
+  // Its own user, because Kong's declarative loader enforces
+  // `consumers.custom_id` as UNIQUE: mapping the anonymous consumer to the
+  // entitled user's id (as the first draft of this case did) is a config Kong
+  // refuses to load, so not one assertion would ever have run. Entitled to the
+  // route's tool, so the PDP WOULD answer `allow` for it — which leaves the
+  // credential check as the only thing that can refuse the anonymous request.
+  beforeCreating("the anonymous fallback's user");
+  const fallback = (
+    await api("POST", `${base}/v1/users`, { email: `kong-fallback-${Date.now()}@kong.example`, displayName: "Kong anonymous fallback" }, boot)
+  ).json;
+  if (!fallback?.id) throw new Error(`could not create the anonymous fallback's user: ${JSON.stringify(fallback).slice(0, 200)}`);
+  await api("POST", `${base}/v1/grants/tools`, { userId: fallback.id, serverId: server.id, toolName: tool.name }, boot);
+  {
+    // NON-VACUITY, asked of the PDP directly: this user IS allowed the tool,
+    // so a refusal on the anonymous route cannot be an entitlement refusal.
+    const probe = await api("POST", `${base}/v1/authz/check`,
+      { userId: fallback.id, serverId: server.id, toolName: tool.name }, boot);
+    if (probe.json.decision !== "allow") {
+      throw new Error(`the anonymous fallback's user is not allowed tool A (${JSON.stringify(probe.json).slice(0, 200)}) — the case would be vacuous`);
+    }
+  }
 
   // Kong's OWN ids for its consumers, declared rather than left to Kong's
   // deterministic generation, so assertion (n) can check the exact identity
@@ -437,6 +544,7 @@ async function main() {
   // RegulAIt user UUID that only exists after seeding. A checked-in kong.yml
   // could never express that, which is itself part of why the first adapter
   // reached for an environment variable.
+  beforeCreating("the declarative directory");
   const dir = mkdtempSync(path.join(tmpdir(), `kong-e2e-${RUN_ID}-`));
   created.scratchDir = dir;
   // `mkdtemp` creates the directory 0700 and owned by THIS user; Kong runs as
@@ -470,8 +578,9 @@ services:
         paths: ["/origin-lie"]
         strip_path: true
       # AER-026 — a route whose key-auth falls back to an ANONYMOUS consumer
-      # when authentication fails, and that consumer is mapped to the entitled
-      # user. This is the shape in which "a subject header with no credential"
+      # when authentication fails, and that consumer is mapped to a real user
+      # entitled to this route's tool. This is the shape in which "a subject
+      # header with no credential"
       # still reaches the plugin with a consumer set: the plugin must notice
       # that nobody presented anything and refuse, never decide as that user.
       - name: anonymous-route
@@ -535,10 +644,12 @@ consumers:
     keyauth_credentials:
       - key: disabled-key
   # The anonymous fallback for anonymous-route: no credentials, and mapped to
-  # the ENTITLED user — the worst configuration an operator could ship.
+  # a real user entitled to tool A — the worst configuration an operator could
+  # ship. Its OWN user: custom_id is unique across consumers, and Kong refuses
+  # to load a config that maps two consumers to one id.
   - username: anonymous
     id: "${kongIds.anonymous}"
-    custom_id: "${entitled.id}"
+    custom_id: "${fallback.id}"
 plugins:
   - name: key-auth
     route: governed-route
@@ -662,6 +773,7 @@ plugins:
   // on no command line and in no file anyone else can open. It remains
   // visible to `docker inspect` for whoever can already talk to the daemon,
   // which is root-equivalent on any host; that is the honest floor.
+  beforeCreating("the key directory");
   const secretDir = mkdtempSync(path.join(tmpdir(), `kong-e2e-secret-${RUN_ID}-`));
   created.secretDir = secretDir;
   const keyFile = path.join(secretDir, "pdp.env");
@@ -687,11 +799,25 @@ plugins:
     throw new Error(`the image store's digests (${repoDigests}) do not include the pinned ${pinned}`);
   }
 
+  // THE CONFIG KONG WILL BE HANDED, CHECKED FOR THE COLLISIONS KONG REFUSES.
+  // Kong's declarative loader enforces uniqueness on several fields; a
+  // collision is a config it will not load, and the only symptom is a
+  // container that never comes up. The first draft of the anonymous-fallback
+  // case mapped two consumers to one custom_id and would have failed exactly
+  // that way. Checking here names the collision before a container exists.
+  {
+    const collisions = declarativeCollisions(declarative);
+    if (collisions.length) {
+      throw new Error(`the generated declarative config repeats values Kong requires to be unique: ${collisions.join("; ")}`);
+    }
+  }
+
   // NO `docker rm -f` FIRST. A container by this name already existing is
   // another run's (or a leftover that is not ours to decide about), and
   // `docker run` refusing the name is the right outcome: this run stops and
   // says so. The id the daemon returns, not the name, is what teardown uses,
   // and the label is what it checks before removing anything.
+  beforeCreating(`container ${CONTAINER}`);
   const containerId = sh("docker", [
     "run", "-d", "--name", CONTAINER,
     "--label", `${RUN_LABEL}=${RUN_ID}`,
@@ -810,17 +936,58 @@ plugins:
     r.status === 401 && (await upstreamCount()) === 0, `status ${r.status}`);
 
   // (b) ALLOW -> the upstream IS reached. The control for every case below.
+  //
+  //     It carries the two client headers docs/product/IDE_INTEGRATION.md
+  //     tells clients to send. They are NOT protocol headers: the plugin must
+  //     let them through untouched, because refusing them refuses every
+  //     request that carries project attribution — which is what the first
+  //     draft of the refusal did by matching the whole `x-regulait-` prefix.
+  const clientHeaders = { "x-regulait-project-id": project.id, "x-regulait-agent-id": `kong-e2e-agent-${RUN_ID}` };
   await upstreamReset();
-  r = await fetch(proxy, { headers: { apikey: "entitled-key" } });
-  check("an entitled consumer reaches the upstream",
-    r.status === 200 && (await upstreamCount()) === 1, `status ${r.status}, count ${await upstreamCount()}`);
-  // and what reached it carried none of our protocol headers — the upstream is
-  // the only place that claim can be checked
+  r = await fetch(proxy, { headers: { apikey: "entitled-key", ...clientHeaders } });
+  check("an entitled consumer, sending the documented x-regulait-* client headers, reaches the upstream",
+    r.status === 200 && (await upstreamCount()) === 1,
+    `status ${r.status}, reason ${r.headers.get("x-regulait-reason")}, count ${await upstreamCount()}`);
+  // and what reached it is checked where only the upstream can check it: the
+  // client headers arrived unchanged, and none of the five protocol names did
   {
     const last = await upstreamLast();
-    const leaked = Object.keys(last?.headers ?? {}).filter((h) => h.startsWith("x-regulait-"));
-    check("the proxied request carries no x-regulait-* header",
+    const got = last?.headers ?? {};
+    const passed = Object.entries(clientHeaders).every(([h, v]) => got[h] === v);
+    check("the documented client headers reach the upstream unchanged",
+      last !== null && passed, `upstream saw ${JSON.stringify(Object.keys(got).filter((h) => h.startsWith("x-regulait-")))}`);
+    const leaked = Object.keys(got).filter((h) => PROTOCOL_HEADERS.includes(h.replace(/_/g, "-")));
+    check("the proxied request carries none of the five protocol headers",
       last !== null && leaked.length === 0, `leaked=${JSON.stringify(leaked)}`);
+  }
+
+  // (b2) A PROTOCOL HEADER PAST THE END OF THE SCAN. The plugin reads at most
+  //      1000 request headers (Kong's ceiling for `get_headers`). A forged
+  //      subject placed after the 1000th was never looked at by the first
+  //      draft, which then relied on clearing five known names on the way out.
+  //      The request must now be refused outright, named, and never proxied —
+  //      and should it ever be proxied, the upstream is asked whether the
+  //      claim arrived. `apikey` goes FIRST: key-auth reads only the first 100
+  //      headers, and this case is about the plugin, not about key-auth.
+  //      Short names keep the whole header block (~11 KB) well inside nginx's
+  //      default client header buffers (4 x 8k), so a refusal here is the
+  //      plugin's and not nginx's.
+  {
+    await upstreamReset();
+    const padding = Array.from({ length: 1000 }, (_, i) => `x-p${i}: 1`);
+    const raw = await rawRequest(KONG_PROXY_PORT, "/governed/anything", [
+      "apikey: entitled-key",
+      ...padding,
+      `x-regulait-subject: ${entitled.id}`,
+    ]);
+    const proxied = await upstreamCount();
+    const last = await upstreamLast();
+    check("a protocol header after the 1000th header is never proxied",
+      raw.status >= 400 && proxied === 0 && !(last?.headers ?? {})["x-regulait-subject"],
+      `status ${raw.status}, upstream count ${proxied}, upstream saw subject=${JSON.stringify((last?.headers ?? {})["x-regulait-subject"] ?? null)}`);
+    check("and the plugin refuses it itself, as too_many_headers",
+      raw.status === 403 && raw.headers["x-regulait-reason"] === "too_many_headers",
+      `status ${raw.status}, reason ${raw.headers["x-regulait-reason"]}`);
   }
 
   // (c) DENY -> 403 AND zero upstream calls. This is the assertion the Envoy
@@ -906,14 +1073,17 @@ plugins:
   }
 
   // (m) A SUBJECT HEADER WITH NO CREDENTIAL, on the route whose key-auth falls
-  //     back to an anonymous consumer mapped to the ENTITLED user. Kong sets a
-  //     consumer here with no credential behind it; the plugin must refuse as
-  //     unauthenticated rather than decide as the user that consumer names.
+  //     back to an anonymous consumer mapped to a real user the PDP ALLOWS on
+  //     this tool (checked when that user was created). Kong sets a consumer
+  //     here with no credential behind it; the plugin must refuse as
+  //     unauthenticated rather than decide as the user that consumer names —
+  //     and since that user's decision would be `allow`, the credential check
+  //     is the only thing that can produce the refusal.
   {
     const anon = `http://127.0.0.1:${KONG_PROXY_PORT}/anonymous/anything`;
     await upstreamReset();
     r = await fetch(anon);
-    check("no credential + an anonymous consumer mapped to a real user is refused as unauthenticated",
+    check("no credential + an anonymous consumer mapped to an entitled user is refused as unauthenticated",
       r.status === 403 && r.headers.get("x-regulait-reason") === "unauthenticated" && (await upstreamCount()) === 0,
       `status ${r.status}, reason ${r.headers.get("x-regulait-reason")}, upstream count ${await upstreamCount()}`);
     r = await fetch(anon, { headers: { "x-regulait-subject": entitled.id } });
@@ -1126,18 +1296,43 @@ plugins:
 /**
  * TEARDOWN — exactly what this run created, each verified as ours first, in
  * the order that leaves the least behind if a later step fails: the live
- * credential is revoked before the processes holding it die, and the database
- * goes last. Idempotent, because it runs from `finally` AND from a signal.
+ * credential is revoked FIRST, while the gateway that can revoke it is still
+ * up, and the database goes last.
+ *
+ * ONE TEARDOWN, HOWEVER MANY CALLERS (AER-033). It runs from `finally` and
+ * from a signal, and both get the SAME promise: the first version returned
+ * immediately to the second caller, so a main() that threw while a signal's
+ * teardown was mid-await went straight on to `process.exit` and cut that
+ * teardown short. `aborting` is set before anything else, so a main() that
+ * resumes during one of the awaits below creates nothing further — and
+ * `created.*` is read again AFTER each await, never from a copy taken before
+ * it, so anything recorded while teardown waited is still removed.
  */
-let cleaned = false;
-async function cleanup(why) {
-  if (cleaned) return;
-  cleaned = true;
-  console.log(`\n--- teardown (${why}) for run ${RUN_ID} ---`);
+let teardownPromise = null;
+function cleanup(why) {
+  aborting = true;
+  teardownPromise ??= teardown(why);
+  return teardownPromise;
+}
 
-  if (created.container) {
+/**
+ * The containers to remove: the id `docker run` returned, plus anything the
+ * daemon holds with THIS run's label. The label lookup covers a `docker run`
+ * whose CLI died (a Ctrl-C reaches the whole process group) after the daemon
+ * had already created the container, so no id was ever recorded.
+ */
+function removeOurContainers() {
+  const ids = new Set(created.container ? [created.container] : []);
+  try {
+    for (const id of sh("docker", ["ps", "-aq", "--no-trunc", "--filter", `label=${RUN_LABEL}=${RUN_ID}`]).split(/\s+/)) {
+      if (id) ids.add(id);
+    }
+  } catch {
+    /* no daemon to ask — only the recorded id is known */
+  }
+  for (const id of ids) {
     try {
-      console.log("\n--- kong logs (tail) ---\n" + shBoth(`docker logs --tail 40 ${created.container}`));
+      console.log("\n--- kong logs (tail) ---\n" + shBoth(`docker logs --tail 40 ${id}`));
     } catch {
       /* best effort */
     }
@@ -1146,32 +1341,49 @@ async function cleanup(why) {
     // else's.
     let label;
     try {
-      label = sh("docker", ["inspect", "-f", `{{index .Config.Labels "${RUN_LABEL}"}}`, created.container]).trim();
+      label = sh("docker", ["inspect", "-f", `{{index .Config.Labels "${RUN_LABEL}"}}`, id]).trim();
     } catch {
       label = null; // already gone
     }
     if (label === RUN_ID) {
       try {
-        sh("docker", ["rm", "-f", created.container], { stdio: "pipe" });
+        sh("docker", ["rm", "-f", id], { stdio: "pipe" });
       } catch (e) {
-        console.error(`could not remove container ${created.container}: ${String(e.stderr ?? e.message).trim().slice(0, 200)}`);
+        console.error(`could not remove container ${id}: ${String(e.stderr ?? e.message).trim().slice(0, 200)}`);
       }
     } else if (label !== null) {
-      console.error(`REFUSING to remove container ${created.container}: label ${RUN_LABEL}='${label}' is not this run's '${RUN_ID}'`);
+      console.error(`REFUSING to remove container ${id}: label ${RUN_LABEL}='${label}' is not this run's '${RUN_ID}'`);
     }
   }
+}
 
-  // revoke the scratch credential before anything else dies, so a failure in
-  // the steps after it still leaves no live key behind
+async function teardown(why) {
+  console.log(`\n--- teardown (${why}) for run ${RUN_ID} ---`);
+
+  // 1. REVOKE the scratch credential while the gateway can still do it, so a
+  //    failure in any step after this leaves no live key behind. Bounded: a
+  //    hung gateway must not hold the rest of the teardown hostage.
   if (created.keyId && created.base && created.boot) {
     try {
-      await api("DELETE", `${created.base}/v1/virtual-keys/${created.keyId}`, undefined, created.boot);
+      await fetch(`${created.base}/v1/virtual-keys/${created.keyId}`, {
+        method: "DELETE",
+        headers: created.boot,
+        signal: AbortSignal.timeout(5_000),
+      });
     } catch {
       /* best effort — the gateway may already be dead from assertion (j) */
     }
   }
+
+  // Everything below is synchronous, so nothing can interleave with it, and
+  // every `created.*` it reads is read now — after the await above — rather
+  // than from before it.
+  // 2. the container(s), by id and label
+  removeOurContainers();
+  // 3. the processes
   gateway?.kill("SIGKILL");
   upstream?.kill("SIGKILL");
+  // 4. the scratch and key directories
   for (const d of [created.scratchDir, created.secretDir]) {
     if (!d) continue;
     try {
@@ -1181,10 +1393,10 @@ async function cleanup(why) {
     }
   }
 
-  // DROP only the database this run created, and only if it still carries
-  // this run's mark. `WITH (FORCE)` is right HERE — the gateway that held
-  // connections was just killed and this is our own database — and wrong at
-  // start, where it used to fall on whatever shared the name.
+  // 5. DROP only the database this run created, and only if it still carries
+  //    this run's mark. `WITH (FORCE)` is right HERE — the gateway that held
+  //    connections was just killed and this is our own database — and wrong at
+  //    start, where it used to fall on whatever shared the name.
   if (created.db) {
     let mark;
     try {
@@ -1207,13 +1419,17 @@ async function cleanup(why) {
 
 // A Ctrl-C or a runner cancelling the job used to leave the container, the
 // database and a live PDP key behind. The signal now runs the same teardown
-// `finally` does, then exits with the conventional status for that signal.
+// `finally` does — the same promise, see cleanup() — then exits with the
+// conventional status for that signal, whichever path reaches the exit first.
+let signalled = null;
+const signalStatus = () => (signalled === "SIGINT" ? 130 : 143);
 for (const signal of ["SIGINT", "SIGTERM"]) {
   process.once(signal, () => {
+    signalled = signal;
     console.error(`\n${signal} received — tearing down run ${RUN_ID}`);
     cleanup(signal)
       .catch(() => {})
-      .finally(() => process.exit(signal === "SIGINT" ? 130 : 143));
+      .finally(() => process.exit(signalStatus()));
   });
 }
 
@@ -1225,6 +1441,7 @@ try {
 } finally {
   await cleanup("finally");
 }
+if (signalled) process.exit(signalStatus());
 
 if (failures.length > 0) {
   console.error(`\n${failures.length} assertion(s) failed: ${failures.join(", ")}`);
