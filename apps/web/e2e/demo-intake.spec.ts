@@ -145,7 +145,7 @@ test("seeded credit-assistant journey: discover, register, assess, approve, moni
   await condition.getByLabel("Applies").selectOption({ label: "Before go-live (holds deployment)" });
   await shotBoth(avery, "real-05a-avery-conditions");
   await review.getByRole("button", { name: "Approve with conditions" }).click();
-  await expect(avery.getByText("Approved", { exact: true }).first()).toBeVisible();
+  await expect(avery.getByText("Approved with conditions", { exact: true }).first()).toBeVisible();
   await expect(avery.getByText("Recently decided")).toBeVisible();
   const afterSignoff = await (await fetch(`${state.baseUrl}/v1/use-cases`, { headers: boot })).json() as { useCases: Array<{ id: string; name: string; status: string; approvedUntil: string | null; openConditions: number }> };
   const approved = afterSignoff.useCases.find((u) => u.name.startsWith("Govern "));
