@@ -642,3 +642,57 @@ describe("automated_build with a nested run (§8)", () => {
     expect(done.state.status).toBe("completed");
   });
 });
+
+describe("AER-047: offlineAutoPass is a typed, check-stage-only opt-in", () => {
+  const base = [{ id: "intake", type: "trigger" }] as const;
+
+  it("is kept (not stripped) on an automated_check stage with named checks", () => {
+    const def = validateDefinition({
+      workflow: "opt-in",
+      stages: [...base, { id: "checks", type: "automated_check", checks: ["unit_tests"], offlineAutoPass: true }],
+    });
+    expect(def.stages[1]!.offlineAutoPass).toBe(true);
+    const absent = validateDefinition({
+      workflow: "default",
+      stages: [...base, { id: "checks", type: "automated_check", checks: ["unit_tests"] }],
+    });
+    // the DEFAULT is no opt-in: an unreported check stays pending at the gateway
+    expect(absent.stages[1]!.offlineAutoPass).toBeUndefined();
+  });
+
+  it("must be a boolean — a stringly 'true' is refused, never coerced", () => {
+    expect(() =>
+      validateDefinition({
+        workflow: "bad",
+        stages: [...base, { id: "checks", type: "automated_check", checks: ["unit_tests"], offlineAutoPass: "true" }],
+      }),
+    ).toThrow();
+  });
+
+  it("is refused on any other stage type, and on a check stage with no named checks", () => {
+    expect(() =>
+      validateDefinition({
+        workflow: "bad",
+        stages: [...base, { id: "build", type: "automated_build", offlineAutoPass: true }],
+      }),
+    ).toThrow(/cannot carry offlineAutoPass/);
+    expect(() =>
+      validateDefinition({
+        workflow: "bad",
+        stages: [...base, { id: "checks", type: "automated_check", offlineAutoPass: true }],
+      }),
+    ).toThrow(/cannot carry offlineAutoPass/);
+  });
+
+  it("changes nothing in the state machine: the stage still awaits the check executor", () => {
+    const def = validateDefinition({
+      workflow: "opt-in",
+      stages: [...base, { id: "checks", type: "automated_check", checks: ["unit_tests"], offlineAutoPass: true }],
+    });
+    const started = transition(def, initialState(def), { kind: "start" });
+    expect(started.state.status).toBe("awaiting_execution");
+    expect(() =>
+      transition(def, started.state, { kind: "human_trigger", stageId: "checks" }),
+    ).toThrow(/cannot be human-triggered/);
+  });
+});

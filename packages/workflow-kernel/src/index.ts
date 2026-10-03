@@ -60,6 +60,18 @@ const stageSchema = z.object({
    * via the gateway's check executor, never via a human trigger; absent = the
    * stage awaits an explicit human trigger (nothing to run). */
   checks: z.array(z.string().min(1)).optional(),
+  /** automated_check (AER-047 / PENDING L1): what a named check with NO
+   * reported result means. Absent/false — the default — it is PENDING: the
+   * instance waits at awaiting_execution until a result is reported (a real
+   * CI posts to POST .../checks), and never advances on silence. `true` is the
+   * explicit, per-template opt-in to the old offline behaviour: an unreported
+   * check passes, but the result is labelled `autoPassed: true` ("auto-passed —
+   * no report (offline mode)") in the instance context, the audit trail, the
+   * stage rail and the approval view. The gateway ignores the opt-in on a box
+   * that shows a sign of being deployed (REGULAIT_DEPLOY_MODE / REGULAIT_HSTS),
+   * so a production configuration cannot pass a check nobody ran. Only valid on
+   * an automated_check stage with named checks — refused loudly elsewhere. */
+  offlineAutoPass: z.boolean().optional(),
   /** git_operation: which operation this stage performs */
   action: z.enum(GIT_ACTIONS).optional(),
   /** git_operation: name of the registered git connection to use */
@@ -164,6 +176,19 @@ export const workflowDefinitionSchema = z
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           message: `stage '${s.id}' (${s.type}) cannot carry a quorum — only a human_approval stage can`,
+        });
+      }
+      // AER-047: the auto-pass opt-in is a check-executor concern only. On any
+      // other stage — or a check stage with nothing for the executor to run —
+      // it would read as a promise the engine never keeps, so it is refused
+      // loudly rather than silently ignored.
+      if (
+        s.offlineAutoPass !== undefined &&
+        (s.type !== "automated_check" || (s.checks?.length ?? 0) === 0)
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `stage '${s.id}' (${s.type}) cannot carry offlineAutoPass — only an automated_check stage with named checks can`,
         });
       }
       if (s.type === "artifact_generation" && !s.output) {
