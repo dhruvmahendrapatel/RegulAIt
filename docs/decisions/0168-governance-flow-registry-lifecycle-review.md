@@ -70,3 +70,56 @@ change-triggered re-review, a portfolio dashboard and a home "My tasks" view fol
   "valid until" date is displayed and enforced at the deploy gate, not swept.
 - Removing two intake entry points deletes code and tests that exercised them; nothing else may
   create a use case outside the wizard's path (the API stays, for integrations).
+
+## Implementation status (2026-10-03)
+
+Items 1-6 shipped to `dhruv/active` for the 2026-10-05 demo, built in three worktrees
+(`wt-gov-review`, `wt-gov-intake`, `wt-gov-api`): the web commits `048f557..c981eab`, then the
+gateway merge `a1d5937` (migration 0129); tip `cbf85a2`, then `40f7f2c` (a phase2 e2e fix).
+The Decision section above is unchanged.
+
+**What shipped**
+- **One entry point (items 1, 3).** The intake wizard is the full-page "Register AI use case" with
+  a similar-use-cases rail (`b7fdabf` duplicate detection, `7c42ee6`); the register's Propose form
+  and questionnaire drawer are deleted, and the real-database specs no longer drive them
+  (`675fe84`).
+- **The AI registry (item 2).** The use-case register is the "AI registry" page, list first, one
+  primary action (`8ee4755`, `1062c0a`).
+- **The use-case record.** Header band, lifecycle tracker and a conditions section (`d6e9fb7`).
+- **The review panel (item 4).** A review task drawer with four outcomes (`048f557`, `ed88596`):
+  *Approve*; *Approve with conditions* — a **before-go-live** condition blocks the deploy gate
+  (`open_blocking_condition`), an **after-go-live** one is tracked (item 5); *Send back for
+  information* — the approval is `returned`, the use case `needs_info`, and the workflow instance
+  goes back to its questionnaire stage through the kernel event `approval_returned` (`5803af3`);
+  *Reject*. Gateway: `d554185` (migration 0129: `use_case_conditions`, approval lifetime,
+  `needs_info`), `bd88929`.
+- **Approval lifetime (item 6).** Approval records `approvedUntil`: 6 months for high, and for
+  unscreened or prohibited screenings; 12 months for minimal and limited. The deploy gate refuses
+  an expired approval as `approval_expired`.
+- **Reviewer access.** The reviewer of a pending or decided intake sign-off, and an active
+  delegate, may read the use case; `GET /v1/approvals` rows carry `useCaseId`, and the review
+  panel uses it when present (`46f121e`, `ed88596`).
+- **Demo path.** The real journey and the demo script follow the new flow (`c981eab`, `cbf85a2`).
+
+**Evidence.** Full suite green on the integrated tree (gateway 3356 tests); `demo:prepare` 18/18;
+the real demo journey green — Avery approves with a before-go-live condition, and the test
+asserts the 6-month validity and one open condition; mocked suite 54/54; approval-review 4/4. CI
+run `37125215948` at `40f7f2c` green, including the new "Mocked UI suite" step (`6da2627`) and
+the phase1/phase2 spa-journeys. Gateway coverage: `zz-adr0168-use-case-conditions.test.ts`,
+`packages/shared/src/deploy-gate.test.ts`, `packages/workflow-kernel/src/index.test.ts`.
+
+**Known limits**
+- No in-UI resubmission path for a `needs_info` use case yet: the drawer links to the generic
+  workflow page.
+- No expiry sweep: `approvedUntil` is displayed and enforced only at the deploy gate (as the
+  Consequences above anticipated).
+- Reviewers routed by role or team cannot yet read the use case — only the named reviewer of the
+  sign-off and an active delegate; the delegate read is untested.
+- With an all-must-approve quorum, conditions recorded by one approver persist if a later approver
+  denies or returns the sign-off.
+- Items 7-8 (board roles and risk acceptance as configuration; agent stewardship) are deferred to
+  after 2026-10-05, with scheduled and change-triggered re-review, the portfolio dashboard and
+  "My tasks".
+- Later the same day (`7a40d77`, ADR-0167 AER-048 amendment) the `approval_returned` re-open also
+  bumps the workflow round, so a returned use case's resubmission runs in a new round and earlier
+  check reports cannot count for it.

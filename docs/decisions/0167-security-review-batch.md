@@ -327,3 +327,72 @@ passes from the demo terminal that exports it.
 - Pre-existing, outside AER-047: a re-open does not drop the build stage's `runId`, so a
   re-entered build replays v1's nested run — the checks are bound to the round, the build they
   gate is not.
+
+## Amendment 2026-10-03 — a check result belongs to the round it was produced in (AER-048)
+
+**Why here.** The AER-047 amendment's honest limits named two holes it did not close: the check
+executor held the instance context in memory across eval calls and wrote it back unlocked (a
+concurrent `POST .../checks` report could be dropped, and a re-open during a running eval could be
+rolled back to round-1 check keys), and a previous-round CI report that arrived after a re-open
+counted for the new round. Codex raised the first as AER-048 (HIGH, direct source observation at
+`dbbb642`). Same rule as the rest of this ADR: the stage commits only what the database says is
+still current, not what the executor remembers. Fixed on `wt-aer48`, merged at `7a40d77`.
+
+**1. Two durable tokens** (`a0f0d85`, migration 0130). `workflow_instances.round` is bumped on every
+re-open (an artifact resubmitted after its stage completed; a sign-off returned via the kernel event
+`approval_returned`, ADR-0168). `workflow_instances.stage_entry` is bumped on every entry into an
+executable stage — including a recheck — and on every re-open. They are columns, not context keys,
+so no context write, stale or otherwise, can roll a token back. Existing instances start at 0.
+
+**2. Executor completion is a locked compare-and-set** (`be1f3d9`). The executor captures the
+stage entry with its claim; completion goes through `commitStageResult`, which re-reads the row
+`FOR UPDATE` and commits only if the stage entry, the stage, `awaiting_execution` and its own claim
+id are all still current, merging only the context keys the executor itself changed. Otherwise the
+result is discarded and audited `workflow:executor-result-discarded`; effect records the discarded
+run produced are salvaged under the same lock and their values are carried in the audit detail
+(`26bfb09`). The stage span is written after the commit. Nested-run completion has the same
+precondition, and a re-open clears `runId:<stage>` for build stages after the re-opened one, so a
+run planned in an old round never satisfies the new one (closing the AER-047 "pre-existing"
+limit). Every workflow external provider write is its own `external-effect:<operation>` audit
+row. The reclassification reapply path takes the same instance row lock (`f54f0a0`).
+
+**3. Reports bind to the round, and fail closed** (`be1f3d9`, `26bfb09`). `POST .../checks` takes
+a `round`. A key-authenticated caller (API key, virtual key, bootstrap — i.e. CI) that omits it is
+refused `422 round_required`, unless the org setting `checkReportsAllowUnbound` is on (default
+false, admin-only, its change audited). A session-authenticated caller (a person in the console)
+may omit it and binds to the round current when the report is applied. A report naming any other
+round is `409 stale_check_report`, audited `workflow:checks-report-stale-round`. A report that
+lands while another executor holds the claim is stored and answered `202
+deferred_to_running_executor`; the claim holder re-evaluates once if reports changed during its
+run and it did not commit. The PR body carries `regulait-instance:` and `regulait-round:` lines
+naming the round the PR was opened in (see the limits: it goes stale after a re-open). *Fail closed was the dispatcher's choice over "omitted means
+current"*: an unbound CI report is exactly the stale-round case this amendment exists to stop.
+
+**Evidence.** `workflow-check-round.test.ts` 10/10: (1) a report posted while the executor is
+mid-eval is retained and decides the verdict; (2) a re-open during the eval can neither restore
+the cleared keys nor advance the instance; (3) a previous-round report is 409 and audited, the
+current round (explicit or, from a session, omitted) is accepted; (3b) a CI report naming no round
+is 422 unless the org opts out; (4) a lapsed executor's late result is discarded — the kernel
+outcome is applied once and the context is not rolled back; a no-race control; (5)/(6) a
+discarded deploy/merge keeps its effect record; (7) an executor that throws after a report arrived
+re-evaluates once; (8) a re-open clears a later build's `runId`. A negative control per fix. Full
+suite 3367 passed on the implementer's run, and the dispatcher's full gate on the merged tree (`7a40d77`) then passed: fresh-database suite 3367 passed / 9 skipped, demo:prepare 18/18, real demo journey 1/1, mocked UI suite 54/54, phase1+phase2 journeys 39/39, approval-review 4/4, fallback deck built. Two independent adversarial reviews: round 1 fix-first (8 findings, fixed in
+`f54f0a0` and `26bfb09`), round 2 ship.
+
+**Honest limits.**
+- Round tokens make the stage's kernel outcome apply once and keep the context from rolling back;
+  they cannot un-perform an external effect a lapsed executor makes after a TTL re-take — that
+  effect may be repeated, visibly, as a second `external-effect:*` row (pre-existing).
+- **AER-049 (owner decision, PENDING):** effect records (`deploy:<stage>`, `mergeSha`, `prId`,
+  `branch`) survive a re-open, so after a re-open past merge or deploy the new round re-runs the
+  build but skips merge and deploy, and the instance can complete as merged/deployed when only v1
+  shipped. Tests (5) and (6) currently assert that skip.
+- The echoed `currentRound` is a plain integer, so a naive CI can resend it and pass the binding;
+  an opaque per-round token would stop that.
+- The PR body's `regulait-round:` goes stale after a re-open; CI should `GET` the instance's
+  `round` at run start rather than trust the PR body.
+- A live old-round nested run is not aborted on re-open (its completion is refused, its work is
+  not stopped).
+- A hard crash after a `202 deferred_to_running_executor` still waits out the claim TTL before the
+  stage is re-taken.
+- An `applyEvent` precondition-write hazard was noted in review; safe with today's callers.

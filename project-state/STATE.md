@@ -1,10 +1,10 @@
 ---
-phase: p1-security-in-progress
+phase: adr0168-governance-flow-shipped-aer048-closed-demo-2026-10-05-next
 last_updated: 2026-10-03
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
-last_session: sessions/2026-10-03-session-01.md
+last_session: sessions/2026-10-03-session-02.md
 roadmap: ../docs/product/ROADMAP.md
 ---
 
@@ -20,6 +20,33 @@ roadmap: ../docs/product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**2026-10-03 (day) - Codex batch closed, calm UI pass, ADR-0168 governance flow shipped for the demo, AER-048 fixed.**
+All on `dhruv/active` (local merge tip `7a40d77`; demo Monday 2026-10-05 11:00 UTC). The Codex
+batch (AER-003/006/009/010/011/015/018/026/029/030/033/034/035/037, F01, F08, HANDOFF) was
+integrated at 5ee205c, Kong rows verified by Integrations run 37110038871 (47/47); AER-044..047
+followed (ec68ebc..89061ee, docs bbbeb61), and Codex's 07:02 run confirmed AER-044, 045 and 047
+RESOLVED/DONE at dbbb642 (AER-029 and 046 stayed PARTIAL: CI never executed their browser
+tests). The calm UI pass (8e1d83f..04a9100: one primary per view, graphite tones, sentence case,
+plain KPI strips) is integrated. ADR-0168 (dbbb642) items 1-6 shipped (048f557..c981eab, gateway
+merge a1d5937 with migration 0129, tip 40f7f2c): one entry point — the full-page "Register AI
+use case" wizard with a similar-use-cases rail, the Propose form and questionnaire drawer
+deleted; the "AI registry"; a use-case record with header band, lifecycle tracker and
+conditions; a review panel with Approve / Approve with conditions (before-go-live blocks the
+deploy gate as `open_blocking_condition`) / Send back (`needs_info`, kernel `approval_returned`) /
+Reject; `approvedUntil` (6 months high/unscreened/prohibited, 12 minimal/limited) refused at the
+deploy gate as `approval_expired`. Gate: gateway 3356, demo:prepare 18/18, real journey (Avery
+approves with a before-go-live condition), mocked 54/54, approval-review 4/4; CI 37125215948 at
+40f7f2c green, now including a "Mocked UI suite" step (6da2627) that executes the AER-029/046
+browser tests. AER-048 (HIGH) is fixed and merged at 7a40d77 (migration 0130: `round` /
+`stage_entry`; locked compare-and-set executor completion; round-bound check reports that fail
+closed for CI; `workflow-check-round` 10/10; two adversarial reviews, the second "ship"; full gate
+on 7a40d77 green: suite 3367, demo:prepare 18/18, real journey, mocked 54/54, phase1+2 39/39,
+approval-review 4/4; ADR-0167 amendment). New owner decision AER-049: effect records survive a re-open, so a re-open past
+merge/deploy can complete on v1's merge/deploy (PENDING; recommendation: scope them per round).
+ADR-0168 limits: no in-UI resubmission for `needs_info`, no expiry sweep, role/team-routed
+reviewers cannot read the use case, items 7-8 deferred. Mistakes M-066, M-067. Still open:
+AER-014/016 and the standing owner items, P23 LICENSE/SECURITY.md.
 
 **2026-10-03 (overnight) - Full product review closed out: security, reliability, deps, UI; Codex backlog cut.**
 **Merged to `main`:** PR #114 (294 commits) merged at b4348d1 on 2026-10-03 after CI went green on
