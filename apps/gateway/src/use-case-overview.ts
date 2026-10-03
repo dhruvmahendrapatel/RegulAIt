@@ -108,6 +108,16 @@ export function registerUseCaseOverviewRoutes(app: FastifyInstance, db: Db): voi
       .where(eq(aiRisks.useCaseId, useCaseId))
       .orderBy(desc(aiRisks.createdAt));
     const controls = await loadRiskControls(db, risks.map((r) => r.id));
+    const acceptorIds = [...new Set(risks.map((r) => r.acceptedByUserId).filter((x): x is string => !!x))];
+    const acceptorName = new Map(
+      (acceptorIds.length
+        ? await db
+            .select({ id: users.id, displayName: users.displayName, email: users.email })
+            .from(users)
+            .where(inArray(users.id, acceptorIds))
+        : []
+      ).map((u) => [u.id, u.displayName || u.email]),
+    );
 
     const providers = [...new Set(agentRows.map((a) => a.provider))];
     const customProviderIds = agentRows.map((a) => a.customProviderId).filter((x): x is string => !!x);
@@ -180,6 +190,10 @@ export function registerUseCaseOverviewRoutes(app: FastifyInstance, db: Db): voi
             ? { likelihood: r.residualLikelihood, impact: r.residualImpact }
             : null,
         controls: controls.get(r.id) ?? [],
+        // ADR-0168 amendment: an acceptance recorded on a sign-off (or the register)
+        acceptedByName: r.acceptedByUserId ? (acceptorName.get(r.acceptedByUserId) ?? null) : null,
+        acceptedAt: r.acceptedAt,
+        acceptanceRationale: r.status === "accepted" ? r.acceptanceNote : null,
       })),
       summary: {
         risks: risks.length,

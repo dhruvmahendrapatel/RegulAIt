@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { acceptRisksSchema } from "./review-policy.js";
+import { intakeScreeningAnswersPatchSchema, intakeScreeningAnswersSchema } from "./intake-assist.js";
 // ADR-0068 §5: the attack-class vocabulary is needed IN SCOPE here (not merely
 // re-exported below) so the compliance-profile schema validates a framework's
 // red-team gating classes against the one authoritative list.
@@ -843,6 +845,10 @@ export const decideApprovalSchema = z.object({
   decision: z.enum(["approved", "denied", "returned"]),
   reason: z.string().optional(),
   conditions: z.array(approvalConditionSchema).max(20).optional(),
+  // ADR-0168 amendment: only with `approved` on an intake review, only by a
+  // risk acceptor the review policy names (else 403 `not_a_risk_acceptor`);
+  // every risk must belong to the use case (else 422 `risk_not_on_use_case`).
+  acceptRisks: acceptRisksSchema.optional(),
 });
 
 /** ADR-0168 — `POST /v1/use-cases/:id/conditions/:conditionId/met` */
@@ -3281,6 +3287,11 @@ export const createUseCaseSchema = z.object({
   /** agent REFERENCES the proposer intends to use — validated server-side */
   intendedAgentIds: z.array(z.string().uuid()).max(20).default([]),
   projectId: z.string().uuid().optional(),
+  /** ADR-0168 amendment — every Classify-step answer (flat), STORED so a
+   * sent-back use case can be resubmitted prefilled. Optional; it changes
+   * nothing else at registration (the tier is still computed from the
+   * submitted questionnaire). */
+  screeningAnswers: intakeScreeningAnswersSchema.optional(),
 });
 
 /** editable while the intake is in flight; `status` is NOT here on purpose —
@@ -3291,6 +3302,13 @@ export const updateUseCaseSchema = z.object({
   businessContext: z.string().min(1).max(4000).optional(),
   intendedAgentIds: z.array(z.string().uuid()).max(20).optional(),
   projectId: z.string().uuid().nullable().optional(),
+  /** ADR-0168 amendment — RESUBMISSION: accepted only while the use case is
+   * `needs_info`. Every Classify-step answer (flat): the EU AI Act tier is
+   * recomputed from the EU keys (never accepted as a tier) and
+   * `dataSensitivity` from `dataCategories` when given. The resubmitted
+   * questionnaire version carries the same answers block and is screened
+   * again on submission. */
+  screeningAnswers: intakeScreeningAnswersPatchSchema.optional(),
 });
 
 export const retireUseCaseSchema = z.object({
@@ -3349,6 +3367,11 @@ export {
   buildIntakeNarrativePrompt,
   composeQuestionnaireDraft,
   intakeAssistRequestSchema,
+  intakeContextSchema,
+  intakeScreeningAnswersSchema,
+  intakeScreeningAnswersPatchSchema,
+  deriveDataSensitivityFromCategories,
+  type IntakeScreeningAnswers,
   parseIntakeNarrative,
   renderQuestionnaireMarkdown,
   suggestIntake,
@@ -3682,3 +3705,22 @@ export const authzCheckRequestSchema = z.object({
 export type AuthzCheckRequest = z.infer<typeof authzCheckRequestSchema>;
 
 export { REGULATORY_UPDATES } from "./demo-intake/regulatory-updates.js";
+
+// ---------------------------------------------------------------------------
+// ADR-0168 amendment — the review policy (reviewer roles per tier, risk
+// acceptors), the risk-acceptance body and the recertification sweep body.
+// ---------------------------------------------------------------------------
+export {
+  acceptRisksSchema,
+  recertificationSweepSchema,
+  reviewPolicyInputSchema,
+  reviewPolicyRoleSchema,
+  reviewPolicyTierSchema,
+  REVIEW_POLICY_TIER_KEYS,
+  REVIEW_ROLE_ID_RE,
+  type AcceptRisksInput,
+  type ReviewPolicyInput,
+  type ReviewPolicyTierKey,
+  type ReviewPolicyView,
+  type UseCaseReviewView,
+} from "./review-policy.js";

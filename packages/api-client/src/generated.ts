@@ -50,6 +50,10 @@ export type PostV1ApprovalsByApprovalIdDecideBody = {
       dueAt: string;
       blocking: boolean;
     }>;
+    acceptRisks?: {
+      riskIds: Array<string>;
+      rationale: string;
+    };
   };
 
 export type PostV1ConnectorsByConnectorIdInvokeBody = {

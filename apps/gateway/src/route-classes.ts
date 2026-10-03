@@ -166,6 +166,10 @@ export const NON_ADMIN_ROUTES = new Set([
   // ADR-0168: a condition's OWNER may mark it met without being an admin or
   // the use case's owner — the handler enforces owner / use-case owner / admin
   "POST /v1/use-cases/:useCaseId/conditions/:conditionId/met",
+  // ADR-0168 amendment: any signed-in user may READ the review policy — a
+  // reviewer needs to know which roles they hold. Editing it (PUT) and the
+  // recertification sweep stay admin through the default gate.
+  "GET /v1/governance/review-policy",
   // ADR-0081 — the AI risk register, the same shape as the use-case routes
   // above: naming a risk is a front-door act, and list/detail/edit/transition
   // are owner-or-admin INSIDE the handler. Conspicuously NOT here: the ACCEPT
