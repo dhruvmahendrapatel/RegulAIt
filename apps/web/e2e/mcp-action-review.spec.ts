@@ -197,6 +197,11 @@ test("workbench requires review again when the recorded binding changes", async 
   await db.update(approvals).set({ contextDigest: "b".repeat(64) }).where(eq(approvals.id, f.id));
   // Refresh the data without remounting the workbench or clearing its review state.
   await page.getByRole("button", { name: "Run SLA sweep" }).click();
+  // "Bulk approve" is ALSO disabled while the sweep is in flight, so the
+  // disabled check below could pass before the refreshed rows arrived and
+  // the review dialog would then open on the stale row (seen on a slow CI
+  // runner). The sweep's own result line appears only after the refresh.
+  await expect(page.getByText(/\d+ evaluated · \d+ newly breached/)).toBeVisible();
   await expect(approve).toBeDisabled();
   dialog = await openReview(page, f.name);
   await dialog.getByRole("button", { name: "Mark reviewed" }).click();

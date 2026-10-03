@@ -286,8 +286,13 @@ export function useAction() {
     setBusy(true);
     setError(null);
     try {
-      await fn();
-      if (okMsg !== null) toast(okMsg ?? "Saved", "success");
+      const out = await fn();
+      // An action that RETURNS a sentence ("3 evaluated · 1 newly breached")
+      // wrote it for the reader; it used to be discarded for "Saved", so the
+      // SLA sweep, the bulk decisions, a prompt rollback and a sign-off sweep
+      // all reported "Saved" and nothing else. An explicit okMsg still wins.
+      const said = typeof out === "string" && out.trim() ? out : "Saved";
+      if (okMsg !== null) toast(okMsg ?? said, "success");
       invalidate();
       return true;
     } catch (e) {
