@@ -94,17 +94,18 @@
 .heat3 { background: color-mix(in srgb, var(--rg-ink-label) 28%, var(--surface-1)); }
 .heat4 { background: color-mix(in srgb, var(--rg-ink-label) 40%, var(--surface-1)); }
 /* Dark: a light ink on a dark ground needs wider steps for density to read
-   (10% vs 0% was ~5 RGB units apart). Both dark selectors, matching tokens.css. */
+   (10% vs 0% was ~5 RGB units apart). The top step stops at 50% so the
+   15px count keeps 4.5:1 against it. Both dark selectors, matching tokens.css. */
 @media (prefers-color-scheme: dark) {
   :global(:root:not([data-theme="light"])) .heat1 { background: color-mix(in srgb, var(--rg-ink-label) 14%, var(--surface-1)); }
   :global(:root:not([data-theme="light"])) .heat2 { background: color-mix(in srgb, var(--rg-ink-label) 26%, var(--surface-1)); }
-  :global(:root:not([data-theme="light"])) .heat3 { background: color-mix(in srgb, var(--rg-ink-label) 40%, var(--surface-1)); }
-  :global(:root:not([data-theme="light"])) .heat4 { background: color-mix(in srgb, var(--rg-ink-label) 56%, var(--surface-1)); }
+  :global(:root:not([data-theme="light"])) .heat3 { background: color-mix(in srgb, var(--rg-ink-label) 38%, var(--surface-1)); }
+  :global(:root:not([data-theme="light"])) .heat4 { background: color-mix(in srgb, var(--rg-ink-label) 50%, var(--surface-1)); }
 }
 :global(:root[data-theme="dark"]) .heat1 { background: color-mix(in srgb, var(--rg-ink-label) 14%, var(--surface-1)); }
 :global(:root[data-theme="dark"]) .heat2 { background: color-mix(in srgb, var(--rg-ink-label) 26%, var(--surface-1)); }
-:global(:root[data-theme="dark"]) .heat3 { background: color-mix(in srgb, var(--rg-ink-label) 40%, var(--surface-1)); }
-:global(:root[data-theme="dark"]) .heat4 { background: color-mix(in srgb, var(--rg-ink-label) 56%, var(--surface-1)); }
+:global(:root[data-theme="dark"]) .heat3 { background: color-mix(in srgb, var(--rg-ink-label) 38%, var(--surface-1)); }
+:global(:root[data-theme="dark"]) .heat4 { background: color-mix(in srgb, var(--rg-ink-label) 50%, var(--surface-1)); }
 
 .heatCell strong {
   font-size: var(--text-lg);
