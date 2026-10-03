@@ -169,7 +169,9 @@
    menus, toasts, popovers); a card that sits in the page flow does not float.
    The 8px radius reads as a tool rather than a marketing tile. */
 .card {
-  background: var(--surface-1);
+  /* ADR-0169: near-opaque over the shaded field — the field tints the card,
+     never enough to move a contrast ratio (inputs inside stay solid) */
+  background: var(--rg-glass);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   box-shadow: none;
@@ -210,7 +212,8 @@
   font-size: var(--text-sm);
   font-weight: 600;
   color: var(--text-dim);
-  background: var(--surface-1);
+  /* transparent, so a head row inside a glass card is not a whiter band */
+  background: transparent;
   border-bottom: 1px solid var(--border-strong);
   white-space: nowrap;
 }

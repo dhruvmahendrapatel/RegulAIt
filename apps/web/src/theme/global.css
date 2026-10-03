@@ -14,6 +14,7 @@ body,
 
 body {
   margin: 0;
+  /* the solid fallback under the field (and what full-page captures extend) */
   background: var(--rg-canvas);
   color: var(--rg-ink-body);
   font-family: var(--rg-font);
@@ -21,6 +22,20 @@ body {
   line-height: 1.55;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+}
+
+/* ADR-0169 — the shaded field. One fixed layer behind everything (rail,
+   canvas, sign-in), so the whole page is one surface. A fixed pseudo-element
+   rather than `background-attachment: fixed` keeps scrolling off the paint
+   path: the layer is composited once and never repainted. It is static — no
+   animation — so reduced-motion has nothing to switch off. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background: var(--rg-field);
 }
 
 /* Gantari carries headings, numbers and buttons at weights 600–800 — and is
