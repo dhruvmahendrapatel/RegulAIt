@@ -40,7 +40,7 @@ import {
   type OrgSettingsRow,
 } from "@regulait/db";
 import { loadOrgSettings } from "./org-settings.js";
-import { resolveAnchorSink } from "./audit-chain.js";
+import { resolveAnchorSink, type AnchorSink, type AnchorSinkObservation } from "./audit-chain.js";
 import { resolveSchedulerConfig } from "./scheduler.js";
 
 /** `enforcement` changes what the product REFUSES. `optimisation` changes what
@@ -136,21 +136,56 @@ const SETTABLE: ReadonlyArray<{
   },
 ];
 
-/** Controls that live in the process environment. Reported, never claimed. */
-function environmentControls(env: NodeJS.ProcessEnv = process.env): PostureControl[] {
-  // ADR-0060's precedent: ask the medium, do not infer from configuration.
-  const sink = resolveAnchorSink(env);
-  const anchorObserved = sink === null ? "off" : sink.destination;
-  const tamperResistant = sink?.tamperResistant ?? false;
+/** What the posture read needs that is not an org_settings column. */
+export interface PostureSources {
+  /**
+   * The LONG-LIVED anchor sink — the same object `registerAuditChainRoutes`
+   * and `registerPostureRoutes` hold, handed in by `buildApp`. `undefined`
+   * resolves one from `env` ONCE at registration (never per request, so the
+   * S3 sink's bounded observation cache is actually used); `null` is "anchoring
+   * off", which reports as such.
+   */
+  sink?: AnchorSink | null;
+  env?: NodeJS.ProcessEnv;
+}
 
-  const scheduler = resolveSchedulerConfig(env);
+/**
+ * Controls that live in the process environment. Reported, never claimed.
+ *
+ * AER-012 — THE ANCHOR GRADE IS AWAITED, NOT READ. `AnchorSink.tamperResistant`
+ * is a synchronous property; on the S3 sink it is a getter over the LAST
+ * OBSERVATION and reports `false` until `observe()` has run. The first version
+ * of this read built a FRESH sink per request and read that property straight
+ * off it — so it was reading a sink that had never asked its bucket anything,
+ * and a COMPLIANCE-mode bucket graded `false` on every call. That is the
+ * conservative direction, but it is still wrong: a posture page that cannot be
+ * made to say "hardened" by any bucket is not reporting the bucket. So this is
+ * async, it takes the long-lived sink, and it awaits `observe()` when the sink
+ * offers one — exactly what `write`, `readLatest` and the verify report do.
+ */
+async function environmentControls(sources: Required<Pick<PostureSources, "sink">> & { env: NodeJS.ProcessEnv }): Promise<PostureControl[]> {
+  // ADR-0060's precedent: ask the medium, do not infer from configuration.
+  const sink = sources.sink;
+  const anchorObserved = sink === null ? "off" : sink.destination;
+  const observation: AnchorSinkObservation | null = sink?.observe ? await sink.observe() : null;
+  const tamperResistant = observation?.tamperResistant ?? sink?.tamperResistant ?? false;
+  const lockMode = observation?.mode ?? (sink === null ? "off" : "constant");
+
+  const scheduler = resolveSchedulerConfig(sources.env);
 
   return [
     {
       key: "auditAnchorTamperResistant",
       group: "enforcement",
-      // the OBSERVED grade, not the configured intent
-      current: { destination: anchorObserved, tamperResistant },
+      // the OBSERVED grade, not the configured intent — with the medium's own
+      // answer beside it so an operator can tell "nobody can delete this" from
+      // "we could not find out"
+      current: {
+        destination: anchorObserved,
+        tamperResistant,
+        lockMode,
+        ...(observation ? { disclosure: observation.disclosure } : {}),
+      },
       hardened: { destination: "s3_object_lock", tamperResistant: true },
       satisfied: tamperResistant === true,
       settable: false,
@@ -210,10 +245,12 @@ export interface PostureReport {
   };
 }
 
-export function buildPostureReport(
+export async function buildPostureReport(
   settings: OrgSettingsRow,
-  env: NodeJS.ProcessEnv = process.env,
-): PostureReport {
+  sources: PostureSources = {},
+): Promise<PostureReport> {
+  const env = sources.env ?? process.env;
+  const sink = sources.sink === undefined ? resolveAnchorSink(env) : sources.sink;
   const settable: PostureControl[] = SETTABLE.map((c) => {
     const current = settings[c.key];
     return {
@@ -226,7 +263,7 @@ export function buildPostureReport(
       refuses: c.refuses,
     };
   });
-  const controls = [...settable, ...environmentControls(env)];
+  const controls = [...settable, ...(await environmentControls({ sink, env }))];
   const count = (g: PostureGroup) => {
     const inGroup = controls.filter((c) => c.group === g);
     return { satisfied: inGroup.filter((c) => c.satisfied).length, total: inGroup.length };
@@ -272,12 +309,23 @@ export interface HardenOutcome {
   readonly posture: PostureReport;
 }
 
-export function registerPosturePresetRoutes(app: FastifyInstance, db: Db) {
+export function registerPosturePresetRoutes(
+  app: FastifyInstance,
+  db: Db,
+  opts: { sink?: AnchorSink | null } = {},
+) {
+  // AER-012: ONE sink for the life of the app — the same object the audit-chain
+  // and posture routes hold when `buildApp` passes it, else resolved from the
+  // environment ONCE here. Never per request: the S3 sink caches its bucket
+  // observation for a bounded time precisely so a posture read does not become
+  // a GetObjectLockConfiguration call per refresh.
+  const sink: AnchorSink | null = opts.sink === undefined ? resolveAnchorSink() : opts.sink;
+
   /** What is enforcing right now — useful to an operator who never applies the
    * preset, which is why it is a plain read with no side effects. */
   app.get("/v1/org/posture", async () => {
     const settings = await loadOrgSettings(db);
-    return buildPostureReport(settings);
+    return buildPostureReport(settings, { sink });
   });
 
   /**
@@ -374,7 +422,7 @@ export function registerPosturePresetRoutes(app: FastifyInstance, db: Db) {
       }
     }
 
-    const posture = buildPostureReport(after);
+    const posture = await buildPostureReport(after, { sink });
     // Everything that is still not hardened and cannot be hardened from here.
     // Reported on EVERY call, including the fully-idempotent one, so a caller
     // never reads "nothing to do" as "you are fully hardened".

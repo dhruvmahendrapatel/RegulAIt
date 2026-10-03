@@ -3851,7 +3851,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // GET/PUT routes are admin-only (deliberately NOT in NON_ADMIN_ROUTES); the
   // audit auto-prune scheduler is OFF by default and unref'd, stopped on close.
   registerOrgSettingsRoutes(app, db, { dataKey: opts.dataKey });
-  registerPosturePresetRoutes(app, db);
+  registerPosturePresetRoutes(app, db, ...(opts.auditAnchorSink !== undefined ? [{ sink: opts.auditAnchorSink }] : []));
   // ADR-0124 — the kill switch and safe modes
   registerExecutionControlRoutes(app, db);
 
