@@ -1,6 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import ts from "typescript";
 import {
   and,
   costEvents,
@@ -164,12 +166,13 @@ beforeAll(async () => {
   authB = b.auth;
 
   // ADR-0020 ships both compat surfaces OFF — turn the Anthropic one on, since
-  // this file is entirely about that surface.
+  // this file is mostly about that surface, and the OpenAI one for the single
+  // identity field (`response_format`) that only its dialect can express.
   const ic = await app.inject({
     method: "PUT",
     url: "/v1/interception/settings",
     headers: AUTH,
-    payload: { anthropicCompatEnabled: true },
+    payload: { anthropicCompatEnabled: true, openaiCompatEnabled: true },
   });
   expect(ic.statusCode).toBe(200);
 
@@ -200,7 +203,10 @@ beforeAll(async () => {
 afterAll(async () => {
   await setPolicy("opt_in");
   // restore ADR-0020's shipped posture (shared database, M-040)
-  await app.inject({ method: "PUT", url: "/v1/interception/settings", headers: AUTH, payload: { anthropicCompatEnabled: false } });
+  await app.inject({
+    method: "PUT", url: "/v1/interception/settings", headers: AUTH,
+    payload: { anthropicCompatEnabled: false, openaiCompatEnabled: false },
+  });
   await app.close();
 });
 
@@ -461,6 +467,131 @@ describe("the governance boundary the shared module exists to protect", () => {
   });
 });
 
+/**
+ * AER-010 — THE RETAINED NEGATIVE CONTROL FOR THE MATRIX ABOVE.
+ *
+ * The prime-then-tighten matrix proves that a cached answer is re-judged by
+ * the live gates. What it cannot prove on its own is that it would NOTICE if
+ * the serve crept back above those gates: every one of its cases is a
+ * refusal-shaped assertion, and a refactor that returned the hit early would
+ * turn six passing tests into six failing ones only if someone ran them. These
+ * two tests pin the SHAPE that makes the matrix meaningful, straight from the
+ * source, so the ordering is a property of the suite rather than of a commit
+ * message:
+ *
+ *  1. inside `dispatchAttempt` (the one governed-dispatch core, ADR-0066 §4),
+ *     the `if (args.cachedResponse)` serve is a top-level statement that sits
+ *     BELOW every gate the matrix tightens — virtual-key budget, MRM,
+ *     attribution, use-case approval, project budget, input PII and the input
+ *     guardrail phase;
+ *  2. at BOTH lookup sites (compat and native invoke) the row that
+ *     `lookupSemanticCache` returns is handed to `executeGovernedDispatch` as
+ *     `cachedResponse` before any byte of it is read, and only the core's
+ *     adjudicated `governed.result.outputText` reaches the wire.
+ *
+ * Mutation control (run, not retained): an early
+ * `if (args.cachedResponse) return {...}` planted above the virtual-key gate
+ * turns test 1 red, and replacing the compat site's governed call with a
+ * direct serve turns test 2 red — each together with all six matrix cases.
+ */
+describe("AER-010 — the cached serve cannot move above the shared dispatch gates", () => {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const parse = (file: string) =>
+    ts.createSourceFile(file, readFileSync(path.join(here, file), "utf8"), ts.ScriptTarget.Latest, true);
+  /** every identifier called anywhere inside `node` */
+  const callsIn = (node: ts.Node): Set<string> => {
+    const names = new Set<string>();
+    const visit = (n: ts.Node) => {
+      if (ts.isCallExpression(n) && ts.isIdentifier(n.expression)) names.add(n.expression.text);
+      ts.forEachChild(n, visit);
+    };
+    visit(node);
+    return names;
+  };
+  /** every `if (<text>)` statement anywhere in the tree, in source order */
+  const ifsTesting = (root: ts.Node, text: string): ts.IfStatement[] => {
+    const found: ts.IfStatement[] = [];
+    const visit = (n: ts.Node) => {
+      if (ts.isIfStatement(n) && n.expression.getText() === text) found.push(n);
+      ts.forEachChild(n, visit);
+    };
+    visit(root);
+    return found;
+  };
+
+  it("in the dispatch core, the cached serve is a top-level statement below every gate the matrix tightens", () => {
+    // gate function -> the refusal the matrix asserts for it
+    const GATES: Record<string, string> = {
+      virtualKeyBudgetRefusal: "virtual_key_budget_exhausted",
+      mrmDispatchGate: "mrm_approval_required",
+      attributionDispatchGate: "attribution_required",
+      useCaseDispatchGate: "use_case_approval_required",
+      preDispatchProjectGate: "project_budget_exceeded",
+      enforcePII: "pii_blocked (input phase)",
+      runGuardrails: "guardrail_blocked (input phase)",
+    };
+    const source = parse("agents-connectors.ts");
+    const core = source.statements.find(
+      (s): s is ts.FunctionDeclaration => ts.isFunctionDeclaration(s) && s.name?.text === "dispatchAttempt",
+    );
+    expect(core?.body, "agents-connectors.ts must declare the dispatchAttempt core").toBeDefined();
+    const statements = core!.body!.statements;
+    // the FIRST top-level serve: an early one planted above the gates is the
+    // one this must see
+    const serveIdx = statements.findIndex(
+      (s) => ts.isIfStatement(s) && s.expression.getText() === "args.cachedResponse",
+    );
+    expect(serveIdx, "dispatchAttempt must serve args.cachedResponse in a top-level if").toBeGreaterThanOrEqual(0);
+    for (const [gate, refusal] of Object.entries(GATES)) {
+      // `enforcePII` and `runGuardrails` are called AGAIN inside the serve (the
+      // output phase on the cached text), so "first statement that calls it"
+      // is the serve itself whenever the serve has moved above the input gate.
+      const gateIdx = statements.findIndex((s) => callsIn(s).has(gate));
+      expect(gateIdx, `${gate} (${refusal}) must be reachable from a top-level statement of dispatchAttempt`)
+        .toBeGreaterThanOrEqual(0);
+      expect(gateIdx, `${gate} (${refusal}) must run before the cached serve`).toBeLessThan(serveIdx);
+    }
+  });
+
+  it("both lookup sites hand the hit to executeGovernedDispatch before a byte of it is read", () => {
+    for (const file of ["compat-core.ts", "agents-connectors.ts"]) {
+      const serves = ifsTesting(parse(file), "hit");
+      expect(serves.length, `${file}: the lookupSemanticCache site must branch on \`if (hit)\``).toBe(1);
+      const branch = serves[0]!.thenStatement;
+      expect(ts.isBlock(branch), `${file}: the hit branch must be a block`).toBe(true);
+      const [first, second] = (branch as ts.Block).statements;
+      // 1st statement: `const governed = await executeGovernedDispatch(db, …, { …, cachedResponse: hit })`
+      expect(first && ts.isVariableStatement(first), `${file}: the hit branch must open by calling the core`).toBe(true);
+      const decl = (first as ts.VariableStatement).declarationList.declarations[0]!;
+      expect(decl.name.getText(), `${file}: the core's verdict must be what the branch holds`).toBe("governed");
+      const init = decl.initializer;
+      expect(init && ts.isAwaitExpression(init) && ts.isCallExpression(init.expression), `${file}: must await the core`).toBe(true);
+      const call = (init as ts.AwaitExpression).expression as ts.CallExpression;
+      expect(call.expression.getText(), `${file}: the hit must go through executeGovernedDispatch`).toBe("executeGovernedDispatch");
+      const argsLiteral = call.arguments[call.arguments.length - 1];
+      expect(argsLiteral && ts.isObjectLiteralExpression(argsLiteral), `${file}: the core takes an args literal`).toBe(true);
+      const cached = (argsLiteral as ts.ObjectLiteralExpression).properties.find(
+        (p): p is ts.PropertyAssignment => ts.isPropertyAssignment(p) && p.name.getText() === "cachedResponse",
+      );
+      expect(cached?.initializer.getText(), `${file}: the hit must ride in as cachedResponse`).toBe("hit");
+      // 2nd statement: the verdict is honoured before anything else happens
+      expect(second && ts.isIfStatement(second) && second.expression.getText() === "!governed.ok",
+        `${file}: the statement after the core call must be \`if (!governed.ok)\``).toBe(true);
+      // and the cached TEXT is never read at the site — only the core's
+      // adjudicated copy is
+      const reads: string[] = [];
+      const visit = (n: ts.Node) => {
+        if (ts.isPropertyAccessExpression(n) && n.expression.getText() === "hit" && n.name.text === "outputText") {
+          reads.push(n.getText());
+        }
+        ts.forEachChild(n, visit);
+      };
+      visit(branch);
+      expect(reads, `${file}: the hit branch must not read hit.outputText`).toEqual([]);
+    }
+  });
+});
+
 describe("what this surface deliberately does NOT do", () => {
   it("`opt_in` cannot engage here — the vendor wire format has no opt-in field", async () => {
     await setPolicy("opt_in");
@@ -510,5 +641,151 @@ describe("what this surface deliberately does NOT do", () => {
     const afterFirst = await usageCount(userA);
     await ask(authA, prompt);
     expect(await usageCount(userA)).toBe(afterFirst + 1);
+  });
+});
+
+/**
+ * AER-011 / ADR-0136 — THE KEY IS THE REQUEST'S IDENTITY, FIELD BY FIELD.
+ *
+ * The cases under "the technique the IDE path was missing" prove that system,
+ * role, message boundary and max_tokens miss. These cover the remaining
+ * identity fields the compat commitment names — the response contract,
+ * extended thinking, the attributed project and the prompt/config version set
+ * — and each is measured THREE ways so it cannot pass vacuously (M-033): the
+ * base request is primed (one usage row, then a hit with none); the variant,
+ * differing in exactly that one field, must MISS against the base row (one
+ * more usage row, no saving); then the variant is asked again and must HIT its
+ * own row — proving the variant is cacheable, so its miss was about identity
+ * and not about a field that is never cached.
+ *
+ * Omission control (run, not retained): dropping any one of `responseFormat`,
+ * `thinking`, `projectId`, `promptVersions` or `agentConfigVersions` from the
+ * commitment in `compat-core.ts` turns exactly that field's case red — the
+ * variant comes back as a false hit.
+ *
+ * This block activates versions on the file's agent, which is why it runs
+ * LAST: every later ask in the file would be served under the new version set.
+ */
+describe("AER-011 — identical requests that differ in one identity field miss", () => {
+  type Call = () => Promise<{ statusCode: number }>;
+
+  /** one OpenAI-shaped call, naming the agent exactly as `ask` does */
+  const askOpenAi = (text: string, extra: Record<string, unknown> = {}) =>
+    app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: { ...authA, [AGENT_HEADER]: agentId },
+      payload: {
+        model: `adr0119-model-${RUN}`,
+        max_tokens: 64,
+        messages: [{ role: "user", content: text }],
+        ...extra,
+      },
+    });
+
+  /** MISS then HIT on `call`: afterwards its row exists, and the counters say so */
+  async function prime(call: Call) {
+    const usage = await usageCount(userA);
+    const savings = await cacheSavingsCount(userA);
+    expect((await call()).statusCode).toBe(200);
+    expect(await usageCount(userA)).toBe(usage + 1);
+    expect((await call()).statusCode).toBe(200);
+    expect(await usageCount(userA)).toBe(usage + 1);
+    expect(await cacheSavingsCount(userA)).toBe(savings + 1);
+  }
+
+  /** `variant` pays once (a MISS against whatever is cached), then hits its own row */
+  async function expectMissThenOwnHit(variant: Call) {
+    const usage = await usageCount(userA);
+    const savings = await cacheSavingsCount(userA);
+    expect((await variant()).statusCode).toBe(200);
+    // MISS: the provider really was called, and nothing was claimed as saved
+    expect(await usageCount(userA)).toBe(usage + 1);
+    expect(await cacheSavingsCount(userA)).toBe(savings);
+    expect((await variant()).statusCode).toBe(200);
+    // HIT on its own row: the variant is cacheable, so the miss above was identity
+    expect(await usageCount(userA)).toBe(usage + 1);
+    expect(await cacheSavingsCount(userA)).toBe(savings + 1);
+  }
+
+  async function pairedMiss(base: Call, variant: Call) {
+    await setPolicy("always");
+    await prime(base);
+    await expectMissThenOwnHit(variant);
+  }
+
+  it("response_format (OpenAI surface): a structured-output contract is a different request", async () => {
+    const prompt = `aer011 response format ${RUN}`;
+    await pairedMiss(
+      () => askOpenAi(prompt),
+      () => askOpenAi(prompt, { response_format: { type: "json_object" } }),
+    );
+  });
+
+  it("thinking: an extended-thinking budget is a different request", async () => {
+    const prompt = `aer011 thinking ${RUN}`;
+    await pairedMiss(
+      () => ask(authA, prompt),
+      () => ask(authA, prompt, { thinking: { type: "enabled", budget_tokens: 32 } }),
+    );
+  });
+
+  it("project: the same words attributed to another project are a different request", async () => {
+    const mkProject = async (tag: string) => {
+      const p = await app.inject({
+        method: "POST", url: "/v1/projects", headers: AUTH,
+        payload: { name: `aer011-${tag}-${RUN}` },
+      });
+      expect(p.statusCode).toBe(201);
+      const id = p.json().id as string;
+      const m = await app.inject({
+        method: "POST", url: `/v1/projects/${id}/members`, headers: AUTH,
+        payload: { userId: userA, role: "contributor" },
+      });
+      expect(m.statusCode).toBe(201);
+      return id;
+    };
+    const p1 = await mkProject("p1");
+    const p2 = await mkProject("p2");
+    const prompt = `aer011 project ${RUN}`;
+    await pairedMiss(() => ask(authA, prompt, {}, p1), () => ask(authA, prompt, {}, p2));
+  });
+
+  it("prompt version: a newly activated system-prompt version invalidates earlier rows, even with the same text", async () => {
+    const activatePrompt = async (systemPrompt: string, label: string) => {
+      const res = await app.inject({
+        method: "POST", url: `/v1/config-versions/agent_system_prompt/${agentId}`, headers: AUTH,
+        payload: { body: { systemPrompt }, label, activate: true },
+      });
+      expect(res.statusCode).toBe(201);
+    };
+    const prompt = `aer011 prompt version ${RUN}`;
+    const call = () => ask(authA, prompt);
+    await setPolicy("always");
+    await prime(call);
+    // the prompt text changed AND the version set changed
+    await activatePrompt("Answer tersely.", "aer011 v2");
+    await expectMissThenOwnHit(call);
+    // ONLY the version set changed — still a different request (ADR-0136:
+    // any promotion conservatively invalidates old entries)
+    await activatePrompt("Answer tersely.", "aer011 v3 — same text, new version");
+    await expectMissThenOwnHit(call);
+  });
+
+  it("config version: an activated agent_config version with the same model and prices is still a different request", async () => {
+    const prompt = `aer011 config version ${RUN}`;
+    const call = () => ask(authA, prompt);
+    await setPolicy("always");
+    await prime(call);
+    const res = await app.inject({
+      method: "POST", url: `/v1/config-versions/agent_config/${agentId}`, headers: AUTH,
+      payload: {
+        body: { model: `adr0119-model-${RUN}`, costPerMTokIn: 3, costPerMTokOut: 15 },
+        label: "aer011 acfg v2",
+        activate: true,
+      },
+    });
+    expect(res.statusCode).toBe(201);
+    await expectMissThenOwnHit(call);
   });
 });
