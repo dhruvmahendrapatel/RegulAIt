@@ -126,12 +126,12 @@ Two IDs (`REL-01`, `REL-02`) were issued independently by rel-backend and rel-te
 | CI-03 | rel-tests | medium | ci.yml budget arithmetic stale by ~2.5x; build-and-test ~13 min against a 20-min cap | .github/workflows/ci.yml:33-71 | fixed — adc7c6c |
 | OPS-01 | rel-tests | medium | No SIGTERM/SIGINT handling: shutdown severs in-flight requests and skips the `app.close()` cleanup | apps/gateway/src/main.ts:22-38 | fixed — adc7c6c |
 
-### 3.3 UI blockers — fixed — pending (UI batch, 2026-10-03)
+### 3.3 UI blockers — fixed (UI batch A, 2026-10-03)
 
 | ID | Sev | Title | Location | Status |
 |---|---|---|---|---|
-| UIW-01 | high | Any 401 from /auth/change-password drops the user to a blank login screen while the server session stays alive | apps/web/src/api/client.ts:86-89 | fixed — pending (UI batch, 2026-10-03) |
-| UXJ-01 | high | 38 query-backed tables render a false "empty" state when the API call fails | apps/web/src/ui/kit.tsx:470-478 | fixed — pending (UI batch, 2026-10-03) |
+| UIW-01 | high | Any 401 from /auth/change-password drops the user to a blank login screen while the server session stays alive | apps/web/src/api/client.ts:86-89 | fixed — c5f1943, 7b8baa0 (isSessionLoss; unit + mock e2e; negative controls) |
+| UXJ-01 | high | 38 query-backed tables render a false "empty" state when the API call fails | apps/web/src/ui/kit.tsx:470-478 | fixed — 2ec3d12, 7b8baa0 (Table error/onRetry on 43 tables; held rows + "couldn't refresh" notice; unit + 5 mock e2e cases) |
 
 ### 3.4 UI polish — fixed — pending (UI batch, 2026-10-03)
 
@@ -326,9 +326,9 @@ Five leads from the list above were run to ground, each against a live gateway o
 | Lead | Verdict | Where it went |
 |---|---|---|
 | L1 — `automated_check` auto-pass on silence | **confirmed, high**: a template with two checks, gate approved before any CI posted, every check evaluated `passed` and the instance advanced; a `failed` report afterwards was refused as late (`workflows.ts` check executor ~720; `workflow-checks.test.ts` pins the behaviour as the contract) | owner decision — PENDING.md "L1" row (disclose vs. fail-on-silence with per-template opt-in) |
-| L2 — wrong TOTP code during enrolment logs the user out | **confirmed, medium**: same 401 handler as UIW-01 | fixed in UI batch A (9f0c389: only a session-ending 401 routes to /login) |
+| L2 — wrong TOTP code during enrolment logs the user out | **confirmed, medium**: same 401 handler as UIW-01 | fixed in UI batch A (c5f1943 + 7b8baa0: only a session-ending 401 routes to /login; a dead session on the forced-change forms still does) |
 | L3 — bodies parsed before the credential check | **confirmed, low–medium**: real, but bounded by the pre-auth IP-keyed limiter of ADR-0167 §1 | owner decision — PENDING.md "L3" row (move the gate to `onRequest` in the post-demo hardening batch, or wait for a measured need) |
-| L4 — react-query cache survives sign-out / 401 | **confirmed, medium–high**: the previous user's inbox and home data rendered for the next user in the same tab | fixed in UI batch A (89c0cfa: cache cleared at every identity boundary) |
+| L4 — react-query cache survives sign-out / 401 | **confirmed, medium–high**: the previous user's inbox and home data rendered for the next user in the same tab | fixed in UI batch A (78dab52: cache cleared at every identity boundary) |
 | L5 — SCIM bucket keyed on the unverified bearer | **closed**: ADR-0167 §1 keys pre-auth traffic by IP and SCIM by `cred:scim:<id>` after verification; re-checked in code | no action |
 
 The remaining leads stand as written: unverified, and listed so the next review starts from them rather than from zero.
