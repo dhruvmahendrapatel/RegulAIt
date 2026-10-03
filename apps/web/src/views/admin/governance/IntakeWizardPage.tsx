@@ -376,7 +376,13 @@ function RegisterUseCase() {
         intendedAgentIds: agentId ? [agentId] : [],
         // every Classify answer, stored with the use case so a send-back can be
         // resubmitted prefilled (the tier is still screened from the questionnaire)
-        screeningAnswers: { ...euAiActAnswers(form), ...contextAnswers(form) },
+        // AER-053: every "Not sure" answer (sent as yes) is recorded with the use
+        // case — the questionnaire block can carry only its EU keys
+        screeningAnswers: {
+          ...euAiActAnswers(form),
+          ...contextAnswers(form),
+          ...(unsureKeys(form).length > 0 ? { unsure: unsureKeys(form) } : {}),
+        },
         ...(Object.keys(rationales).length > 0 ? { frameworkRationales: rationales } : {}),
       },
       questionnaire: questionnaireMarkdown(),

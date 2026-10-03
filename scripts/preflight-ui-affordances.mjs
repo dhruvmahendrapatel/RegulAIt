@@ -36,13 +36,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
  * should have a button now"; adding one is a decision, so it should be a diff
  * somebody reviews.
  */
-const DELIBERATELY_API_ONLY = new Map([
-  // TEMPORARY (M-053): ADR-0171 / AER-050 — the intake wizard's "Start fresh"
-  // and post-submit cleanup call this; that UI is the web agent's half of the
-  // same change (branch aer05x-w). Deleting this entry is part of that
-  // task's wiring pass.
-  ["/v1/use-cases/draft", "AER-050 web half (intake wizard drafts) lands in the wiring pass"],
-]);
+const DELIBERATELY_API_ONLY = new Map([]);
 
 const walk = (dir, out = []) => {
   for (const e of readdirSync(dir)) {
@@ -89,7 +83,8 @@ function main() {
     for (const m of src.matchAll(/api\.(?:del|delete)(?:<[^>]*>)?\(/g)) {
       const window = src.slice(m.index, m.index + 400);
       for (const lit of window.matchAll(/[`"'](\/v1\/[^`"']*)[`"']/g)) {
-        const key = norm(lit[1]);
+        // a query string is not part of the route (the add side strips it too)
+        const key = norm(lit[1].split("?")[0]);
         if (!reached.has(key)) reached.set(key, []);
         reached.get(key).push(path.relative(root, f));
       }
@@ -131,7 +126,8 @@ function main() {
     const out = new Set();
     for (const f of walk(webSrc)) {
       const src = readFileSync(f, "utf8");
-      for (const m of src.matchAll(new RegExp(`api\\.${verb}(?:<[^>]*>)?\\(`, "g"))) {
+      // `postWithHeaders` (idempotent create) is the same verb with headers
+      for (const m of src.matchAll(new RegExp(`api\\.${verb}(?:WithHeaders)?(?:<[^>]*>)?\\(`, "g"))) {
         for (const lit of src.slice(m.index, m.index + 400).matchAll(/[`"'](\/v1\/[^`"']*)[`"']/g)) {
           out.add(norm(lit[1].split("?")[0]));
         }

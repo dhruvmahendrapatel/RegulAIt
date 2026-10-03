@@ -133,7 +133,8 @@ export function useIntakeDraft<S>(opts: {
     saved.current = null;
     setStatus({ kind: "idle" });
     try {
-      await api.del(draftPath(scope));
+      // the literal path keeps this delete visible to the UI-affordance check
+      await api.del(`/v1/use-cases/draft?scope=${encodeURIComponent(scope)}`);
     } catch {
       // the next save replaces it anyway
     }
