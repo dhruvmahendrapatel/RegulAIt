@@ -282,3 +282,23 @@ now says so, the vocabulary is the product's own, and a contradiction with an ob
 refused — but a route fronted by an OIDC plugin and configured `saml` is still accepted, because Kong
 gives this adapter nothing to check it against. Scope such a route to one auth mechanism. Omitting the
 field entirely is always safe: absent reads as `unknown`, the weakest input a policy can get.
+
+## Amendment 2026-10-03 — forged protocol headers are refused, not ignored (AER-026/030)
+
+This supersedes the "ignored" wording in Decision and the "stripped" wording in the Kong section. The Kong
+adapter refuses a request carrying any of its five protocol headers — `x-regulait-subject`,
+`x-regulait-server-id`, `x-regulait-tool`, `x-regulait-decision`, `x-regulait-reason` — in any case, any
+number of copies, or with underscores: `403` with `x-regulait-reason: forged_protocol_header`, before the
+PDP is asked. Other `x-regulait-*` headers (`x-regulait-project-id`, `x-regulait-agent-id`,
+`x-regulait-csrf`) are client traffic and pass through. A request with more headers than Kong's
+`get_headers` ceiling is refused `too_many_headers`, because the scan could not read it whole. A consumer
+with no credential (Kong's anonymous fallback) is refused `unauthenticated`; a consumer whose `custom_id`
+is missing or not a user UUID is refused `consumer_not_mapped`. The PDP refuses a subject nobody has
+(`unknown_subject`) and a deactivated one (`subject_disabled`) and writes both to the ledger with the
+callout provenance, including the Kong consumer (`detail.proxyConsumer`) (`1aae7d3`, `5bef1fd`,
+`2312d48`). The harness gained two routes bound to distinct server/tool pairs, per-run names and ports
+with ownership-checked teardown, and digest-pinned images (`2ecfcb6`, `0a103d8`, `4970d69`).
+
+**These harness cases are pending their first green Integrations run** (no Docker where they were
+written; a first draft declared two consumers with one `custom_id`, which Kong rejects at load — caught in
+review, fixed in `2312d48`). Record the run id here when it exists.

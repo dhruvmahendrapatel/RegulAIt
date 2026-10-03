@@ -330,3 +330,7 @@ pre-flight case pinned ADR-0109's shape — nine enforced checks, `backup_runs` 
 makes that assertion false by design, and it is updated to the stronger claim that replaced it: ten
 enforced, none advisory, and `backup_runs_finding_uq` present among them. Its nine original
 constraint cases and its `users_email_lower_uq` non-vacuity probe are untouched.
+
+**Note 2026-10-03.** The bullet "CI DID NOT EXERCISE THE NEW STEP. GitHub Actions is exhausted for this
+repo" is historical: Actions was re-enabled on 2026-08-01 and CI has run this pre-flight on every pull request
+since (green, for example, at `21b3094`, run 37036782298).

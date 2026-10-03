@@ -1390,3 +1390,17 @@ again after the last edit, per M-059). A test file that imports a workspace pack
 testing that package's dist, not its src — say so in the gate's log line, and when a batch
 touches `packages/*/src`, treat a red in the consuming app as "rebuild first, then believe it".
 
+### M-065 (2026-10-03) - A test harness generated a config its target refuses to load, and nothing caught it before CI
+
+The Kong harness for AER-026 declared the `anonymous` consumer with the same `custom_id` as the entitled
+consumer. Kong's declarative flatten enforces `consumers.custom_id` unique, so the first CI run would
+have ended at "Kong did not come up" and not one of the new assertions would have run — while the
+report said the cases were written and verified statically. The adversarial review caught it by reading
+Kong's source. Separately, after a usage-limit pause the local Postgres service was down and the first
+test run failed with ECONNREFUSED.
+
+Rule: a harness that generates configuration for a target it cannot run locally checks that
+configuration against the target's documented constraints (uniqueness, required fields, limits) as a
+plain unit step before starting the target, and says "pending first CI run", never "verified", until a
+green run id exists. After any pause, check `pg_lsclusters` before the first DB-backed test.
+

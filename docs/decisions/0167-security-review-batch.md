@@ -226,3 +226,13 @@ Docker-shaped rebuild (tracked files only, `.dockerignore` applied by hand, froz
   red before the fix was restored byte-for-byte; the rotated-bearer, credential-derived-host,
   list-scoping, parser-error, envelope, dev-secrets, browser-binding, self-report, pool and
   logging proofs all have one.
+
+**Amendment 2026-10-03 (REL-01 widened, AER-035/037).** REL-01 guarded only IDLE pooled clients; a backend
+dying under a CHECKED-OUT client was still an unhandled `error` that crashed the serving process. `createDb`
+now attaches a per-connection `error` listener on `connect` that speaks only while the client is checked out
+(tracked through the pool's `acquire`/`release`), so an idle drop logs exactly one line, the idle one
+(`e5982a2`, `f3b4211`; process-lifecycle test "a CHECKED-OUT connection dying is logged, not fatal"). The MCP
+health-probe claim is now serialized by `pg_advisory_xact_lock(6_000_000_037)` in a short transaction before
+its `FOR UPDATE SKIP LOCKED … RETURNING` claim — `skip locked` alone let a claim whose snapshot predated
+another claim's commit re-claim its rows (`79b0d3d`). Advisory-lock keys in use: 6_000_000_037 (health-probe
+claim), 6_000_000_060 (audit chain).
