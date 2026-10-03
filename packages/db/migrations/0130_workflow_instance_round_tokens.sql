@@ -1,0 +1,25 @@
+-- AER-048 — durable round tokens on a workflow instance.
+--
+-- The check executor claims a stage under a short lock, may then spend seconds
+-- running eval datasets, and used to write its whole in-memory context back
+-- without a lock — silently dropping a check report posted meanwhile, or
+-- restoring check keys a concurrent re-open had cleared. Two counters make
+-- "is this still the round I started in?" a question the database answers:
+--
+-- 1. `round` — bumped on every RE-OPEN (an artifact resubmitted after its stage
+--    completed; a sign-off RETURNED for more information). A check report binds
+--    to it: POST .../checks with a `round` that is not the current one is a
+--    409 `stale_check_report`, audited. A report with no `round` is taken for
+--    whatever round is current when its lock is acquired.
+-- 2. `stage_entry` — bumped on every entry into an executable stage
+--    (status `awaiting_execution` at a new stage, or again after a recheck) AND
+--    on every re-open. An executor captures it with its claim; its completion
+--    re-reads the row FOR UPDATE and commits only if the entry, the stage and
+--    its own claim are all still current — otherwise the result is discarded
+--    and audited (`workflow:executor-result-discarded`).
+--
+-- Columns, not context keys, so no context write — stale or otherwise — can
+-- ever roll a token back. Existing instances start at 0.
+ALTER TABLE "workflow_instances" ADD COLUMN IF NOT EXISTS "round" integer DEFAULT 0 NOT NULL;
+--> statement-breakpoint
+ALTER TABLE "workflow_instances" ADD COLUMN IF NOT EXISTS "stage_entry" integer DEFAULT 0 NOT NULL;

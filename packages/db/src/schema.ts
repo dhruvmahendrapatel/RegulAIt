@@ -2001,6 +2001,14 @@ export const workflowInstances = pgTable(
     /** outputs of executed stages (branch, prId, prUrl, mergeSha, lastError) */
     context: jsonb("context").$type<Record<string, unknown>>().notNull().default({}),
     status: text("status").notNull(),
+    /** AER-048 (migration 0130): bumped on every RE-OPEN (artifact resubmitted
+     * after its stage completed; sign-off returned). A check report binds to
+     * it — a report for a previous round is refused (409) and audited. */
+    round: integer("round").notNull().default(0),
+    /** AER-048: bumped on every entry into an executable stage and on every
+     * re-open. An executor captures it with its claim and commits its result
+     * only if it is still current. */
+    stageEntry: integer("stage_entry").notNull().default(0),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
