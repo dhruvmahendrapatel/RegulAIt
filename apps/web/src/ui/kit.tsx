@@ -569,6 +569,25 @@ export function Table<T>(props: {
                   </tr>
                 );
               })}
+          {!props.loading && sorted.length > 0 && props.error != null && (
+            // Rows from the last good fetch stay on screen — losing them for a
+            // transient 500 would be worse — but a failed REFETCH must not be
+            // silent either: the list is stale and the reader has to know.
+            <tr>
+              <td colSpan={props.columns.length} className={s.tableStale} role="alert">
+                <StatusDot tone="danger" />
+                <span>
+                  Couldn't refresh this list — {props.error instanceof Error ? props.error.message : String(props.error)}.
+                  Showing the last loaded rows.
+                </span>
+                {props.onRetry && (
+                  <Button size="sm" onClick={props.onRetry}>
+                    Retry
+                  </Button>
+                )}
+              </td>
+            </tr>
+          )}
           {!props.loading && sorted.length === 0 && props.error != null && (
             <tr>
               <td colSpan={props.columns.length}>

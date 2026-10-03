@@ -95,14 +95,25 @@ const SESSION_LOST_CODES = new Set([
   "api_key_expired",
   "api_key_revoked",
 ]);
-/** routes whose 401s judge what was typed, never the session that typed it */
-const SESSION_KEPT_PREFIXES = ["/auth/login", "/auth/totp/", "/auth/change-password"];
+/**
+ * Routes a user hits BEFORE they have a session. A 401 here is the verdict on
+ * the attempt (`invalid_credentials`, `invalid_key`, a wrong MFA code) and
+ * there is no session to lose, so the handler never fires — whatever the code
+ * says. The session-bound self-service routes (/auth/totp/*,
+ * /auth/change-password) are NOT here on purpose: their own verdicts
+ * (`invalid_code`, `current_password_incorrect`) are not in the set above and
+ * stay inline, but the preHandler's `unauthenticated` on the same path means
+ * the session behind the form has died — a forced password change or MFA
+ * enrolment that idled out must still land on /login, not show the raw code
+ * on a dead shell.
+ */
+const PRE_SESSION_PREFIXES = ["/auth/login", "/auth/mfa/verify"];
 
 /** does this 401 mean the session is gone (route to /login), or only that the
  * request was refused (the form shows it inline)? */
 export function isSessionLoss(path: string, payload: ApiErrorPayload | null): boolean {
   const route = path.split("?")[0] ?? path;
-  if (SESSION_KEPT_PREFIXES.some((p) => route.startsWith(p))) return false;
+  if (PRE_SESSION_PREFIXES.some((p) => route.startsWith(p))) return false;
   const code = payload?.error;
   // no code at all is not something the gateway sends; read it the old way
   if (typeof code !== "string" || code === "") return true;

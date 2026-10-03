@@ -42,10 +42,14 @@ describe("Table — error versus empty", () => {
     expect(html).not.toContain("No users yet");
   });
 
-  it("keeps rows it has even when a later refetch failed, and shows neither state while loading", () => {
-    const withRows = render({ rows: [{ id: "1", name: "Avery" }], error: new Error("boom") });
+  it("keeps rows it has when a later refetch failed — and says so — and shows neither state while loading", () => {
+    const withRows = render({ rows: [{ id: "1", name: "Avery" }], error: new Error("boom"), onRetry: () => {} });
     expect(withRows).toContain("Avery");
-    expect(withRows).not.toContain("role=\"alert\"");
+    expect(withRows).toContain("Couldn&#x27;t refresh this list");
+    expect(withRows).toContain("boom");
+    expect(withRows).toContain("Retry");
+    expect(withRows).not.toContain("Couldn&#x27;t load this list");
+    expect(withRows).not.toContain("No users yet");
     const loading = render({ loading: true, error: new Error("boom") });
     expect(loading).not.toContain("role=\"alert\"");
     expect(loading).not.toContain("No users yet");

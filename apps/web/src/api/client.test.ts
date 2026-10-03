@@ -26,10 +26,21 @@ describe("isSessionLoss — which 401s send the shell to /login (UIW-01)", () =>
     expect(isSessionLoss("/auth/mfa/verify", { error: "invalid_or_expired_pending_token" })).toBe(false);
   });
 
-  it("never fires on the self-service auth routes, whatever the code says", () => {
+  it("never fires on the pre-session routes, whatever the code says — there is no session to lose", () => {
     expect(isSessionLoss("/auth/login", { error: "user_disabled" })).toBe(false);
     expect(isSessionLoss("/auth/login", { error: "ip_not_allowed" })).toBe(false);
-    expect(isSessionLoss("/auth/totp/activate", null)).toBe(false);
-    expect(isSessionLoss("/auth/change-password?x=1", { error: "unauthenticated" })).toBe(false);
+    expect(isSessionLoss("/auth/login?next=%2Fui", { error: "unauthenticated" })).toBe(false);
+    expect(isSessionLoss("/auth/mfa/verify", null)).toBe(false);
+  });
+
+  it("still fires on a session-bound self-service route when the SESSION died, not the input", () => {
+    // a forced password change / MFA enrolment that idled out: the preHandler
+    // refuses the credential before the route sees the body
+    expect(isSessionLoss("/auth/change-password", { error: "unauthenticated" })).toBe(true);
+    expect(isSessionLoss("/auth/change-password?x=1", { error: "user_disabled" })).toBe(true);
+    expect(isSessionLoss("/auth/totp/enroll", { error: "unauthenticated" })).toBe(true);
+    expect(isSessionLoss("/auth/totp/activate", { error: "ip_not_allowed" })).toBe(true);
+    // and a code-less 401 on them reads the old way, like everywhere else
+    expect(isSessionLoss("/auth/totp/activate", null)).toBe(true);
   });
 });
