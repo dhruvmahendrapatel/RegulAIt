@@ -34,6 +34,7 @@ import {
   mcpServers,
   mcpTools,
   modelCards,
+  ne,
   or,
   orchestrationRuns,
   projectContextItems,
@@ -3281,7 +3282,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     if (row.objectType === "workflow" && row.status === "pending" && row.reviewRoleId === null && row.instanceId) {
       const policy = await loadReviewPolicy(db);
       if (policy && Object.values(policy.tiers).some((t) => (t?.roleIds.length ?? 0) > 0)) {
-        await syncUseCaseForInstance(db, row.instanceId, deciderUserId);
+        // ADR-0170 §8: this sync runs BEFORE the caller is authorized, so
+        // what it writes is attributed to the system (null), never to a
+        // caller who may yet be refused.
+        await syncUseCaseForInstance(db, row.instanceId, null);
         [row] = await db.select().from(approvals).where(eq(approvals.id, approvalId));
         if (!row) return fail(404, { error: "unknown_approval" });
       }
@@ -3313,22 +3317,43 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // ADR-0168 amendment — A REVIEW ROLE ROW: any member of the role decides
     // it as its named approver (membership read live from the policy), and the
     // PROPOSER never may — not as a member, a delegate or an admin override.
+    //
+    // ADR-0170 §2 — on a review role row, being the row's STORED approver is
+    // not a decision right: routing, claims, SLA reassignment or a member
+    // later removed from the role would otherwise decide without live
+    // membership. Only a live member decides; a delegation is honoured only
+    // from a delegator who is a live member and not the proposer; anyone
+    // else is an admin override (admin + reason) or refused.
     let roleMember = false;
+    let delegation: Awaited<ReturnType<typeof activeDelegationFrom>> = null;
+    let adminOverride: boolean;
     if (row.reviewRoleId !== null) {
       const reviewed = await useCaseForIntakeApproval(db, row);
-      if (deciderUserId === row.userId || (reviewed && deciderUserId === reviewed.ownerUserId)) {
+      const proposerIds = new Set([row.userId, ...(reviewed ? [reviewed.ownerUserId] : [])]);
+      if (proposerIds.has(deciderUserId)) {
         return fail(403, {
           error: "proposer_cannot_review",
           detail: "the proposer of a use case can never decide one of its required reviews",
         });
       }
-      roleMember = isReviewRoleMember(await loadReviewPolicy(db), row.reviewRoleId, deciderUserId);
+      const reviewPolicy = await loadReviewPolicy(db);
+      roleMember = isReviewRoleMember(reviewPolicy, row.reviewRoleId, deciderUserId);
+      if (
+        !roleMember &&
+        row.approverUserId !== deciderUserId &&
+        !proposerIds.has(row.approverUserId) &&
+        isReviewRoleMember(reviewPolicy, row.reviewRoleId, row.approverUserId)
+      ) {
+        delegation = await activeDelegationFrom(db, row.approverUserId, deciderUserId);
+      }
+      adminOverride = !roleMember && !delegation;
+    } else {
+      delegation =
+        row.approverUserId !== deciderUserId
+          ? await activeDelegationFrom(db, row.approverUserId, deciderUserId)
+          : null;
+      adminOverride = row.approverUserId !== deciderUserId && !delegation;
     }
-    const delegation =
-      row.approverUserId !== deciderUserId && !roleMember
-        ? await activeDelegationFrom(db, row.approverUserId, deciderUserId)
-        : null;
-    const adminOverride = row.approverUserId !== deciderUserId && !delegation && !roleMember;
     if (adminOverride) {
       if (!isAdmin) {
         return fail(403, { error: "not_the_named_approver" });
@@ -3361,6 +3386,15 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           detail: "risk is accepted only by APPROVING an AI use-case intake sign-off",
         });
       }
+      // ADR-0170 §8: accepting risk on one's own use case is not an
+      // arm's-length acceptance — the owner and the intake initiator are
+      // refused whatever else they are (acceptor, approver, admin).
+      if (deciderUserId === intakeUseCase.ownerUserId || deciderUserId === row.userId) {
+        return fail(403, {
+          error: "proposer_cannot_accept_risk",
+          detail: "the proposer of a use case cannot accept risks on it; another risk acceptor must",
+        });
+      }
       const refusal = await precheckRiskAcceptance(db, intakeUseCase, deciderUserId, acceptRisks.riskIds);
       if (refusal) return fail(refusal.status, refusal.body);
     }
@@ -3389,11 +3423,24 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         ...new Set(conditionInputs.map((c) => c.ownerUserId).filter((x): x is string => !!x)),
       ];
       if (ownerIds.length > 0) {
-        const found = await db.select({ id: users.id }).from(users).where(inArray(users.id, ownerIds));
+        const found = await db
+          .select({ id: users.id, disabledAt: users.disabledAt })
+          .from(users)
+          .where(inArray(users.id, ownerIds));
         if (found.length !== ownerIds.length) {
           return fail(422, {
             error: "unknown_condition_owner",
             detail: "every condition ownerUserId must name an existing user",
+          });
+        }
+        // ADR-0170 §8: a deactivated user can never close the condition
+        const deactivated = found.filter((u) => u.disabledAt !== null).map((u) => u.id);
+        if (deactivated.length > 0) {
+          return fail(422, {
+            error: "user_deactivated",
+            field: "conditions.ownerUserId",
+            userIds: deactivated,
+            detail: "a condition owner must be an active user; this user has been deactivated",
           });
         }
       }
@@ -3456,6 +3503,43 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // execution (git stages, nested-run completion) and the PM mirror run
     // only after the decision is durable.
     const outcome = await db.transaction(async (tx) => {
+      // ADR-0170 §1 — each required review in a round is decided by a
+      // DIFFERENT person: one person in two roles (or an admin overriding
+      // twice) must not satisfy every review alone. Checked under the
+      // instance lock — the same lock the sibling hold below and the review
+      // round writer take — so two decisions by one person racing on two rows
+      // of the round serialize and the second sees the first. Keyed on the
+      // DECIDER, so it binds members, delegates and admin overrides alike.
+      if (row.reviewRoleId !== null && row.instanceId) {
+        await tx
+          .select({ id: workflowInstances.id })
+          .from(workflowInstances)
+          .where(eq(workflowInstances.id, row.instanceId))
+          .for("update");
+        const [already] = await tx
+          .select({ id: approvals.id, reviewRoleName: approvals.reviewRoleName })
+          .from(approvals)
+          .where(
+            and(
+              eq(approvals.instanceId, row.instanceId),
+              eq(approvals.reviewRound, row.reviewRound ?? 0),
+              ne(approvals.id, row.id),
+              eq(approvals.decidedBy, deciderUserId),
+              inArray(approvals.status, ["approved", "denied", "returned", "consumed"]),
+            ),
+          )
+          .limit(1);
+        if (already) {
+          return {
+            updated: null,
+            postCommit: null,
+            refusal: {
+              error: "reviewer_already_decided_round",
+              detail: `you already decided the ${already.reviewRoleName ?? "other"} review in this round; each required review must be decided by a different person`,
+            },
+          };
+        }
+      }
       const [updated] = await tx
         .update(approvals)
         .set({
@@ -3466,7 +3550,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         })
         .where(and(eq(approvals.id, approvalId), eq(approvals.status, "pending")))
         .returning();
-      if (!updated) return { updated: null, postCommit: null };
+      if (!updated) return { updated: null, postCommit: null, refusal: null };
       if (adminOverride) {
         await tx.insert(auditLog).values({
           userId: deciderUserId,
@@ -3676,8 +3760,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           };
         }
       }
-      return { updated, postCommit };
+      return { updated, postCommit, refusal: null };
     });
+    if (outcome.refusal) return fail(409, outcome.refusal);
     if (!outcome.updated) {
       // raced: re-read so the refusal names what actually happened
       const [current] = await db
