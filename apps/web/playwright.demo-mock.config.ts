@@ -2,7 +2,8 @@ import { defineConfig } from "@playwright/test";
 
 export default defineConfig({
   testDir: "./e2e",
-  testMatch: "demo-governance.mock.spec.ts",
+  // every mocked spec: the governance demo journey plus the defect regressions
+  testMatch: /.*\.mock\.spec\.ts$/,
   timeout: 60_000,
   expect: { timeout: 10_000 },
   workers: 1,
