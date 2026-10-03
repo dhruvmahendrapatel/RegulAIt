@@ -1404,3 +1404,17 @@ configuration against the target's documented constraints (uniqueness, required 
 plain unit step before starting the target, and says "pending first CI run", never "verified", until a
 green run id exists. After any pause, check `pg_lsclusters` before the first DB-backed test.
 
+
+### M-066 (2026-10-03) - The port-cleanup helper was a silent no-op for the whole session, and the abort guard could not see a sick gateway
+
+The local gate's `killports.sh` found listeners with `ss`, which this container does not have; every
+"kill whatever holds 3105/3107" step did nothing and printed nothing. A gateway from the previous gate
+run, still pointed at that run's dropped database, kept :3107. The guard meant to abort the run used
+`curl -sf`, and a gateway answering 503 (database gone) is "not listening" to `-f`, so the run went
+ahead, the new gateway died on EADDRINUSE, and the real demo journey failed against the stale one.
+The suite was green and the cause was harness-only, but it cost a full verification rerun.
+
+Rule: a cleanup helper verifies its own effect — after killing, it re-checks the port and says what
+it killed — and never depends on a binary it has not checked exists. A "something is still running"
+guard tests for ANY response (`curl -s -o /dev/null`), not a healthy one: a sick process holding the
+port is exactly what it exists to catch.
