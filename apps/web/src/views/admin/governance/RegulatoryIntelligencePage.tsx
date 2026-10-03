@@ -100,19 +100,24 @@ export default function RegulatoryIntelligencePage() {
         <QueryGate loading={query.isLoading} error={query.error} onRetry={() => void query.refetch()}>
           {query.data ? (
             <>
-              <div className={v.grid5}>
-                <RegulatoryStat label="Feed entries" value={query.data.summary.total} />
-                <RegulatoryStat label="In force" value={query.data.summary.inForce} tone="ok" />
-                <RegulatoryStat label="Upcoming" value={query.data.summary.upcoming} tone="info" />
-                <RegulatoryStat label="Proposed" value={query.data.summary.proposed} tone="warn" />
-                <RegulatoryStat label="With control gaps" value={query.data.summary.withControlGaps} tone={query.data.summary.withControlGaps ? "danger" : "ok"} />
-              </div>
-              <p className={s.callout}>{query.data.summary.nextEffective
-                ? `Next effective entry: ${query.data.updates.find((update) => update.key === query.data?.summary.nextEffective)?.title ?? query.data.summary.nextEffective}.`
-                : "No upcoming effective date is present in this feed."}</p>
-
+              {/* one strip of plain figures; only a non-zero gap count takes a colour */}
               <Card>
-                <div className={s.libraryFilters}>
+                <div className={v.stack}>
+                  <div className={v.kpiStrip}>
+                    <RegulatoryStat label="Feed entries" value={query.data.summary.total} />
+                    <RegulatoryStat label="In force" value={query.data.summary.inForce} />
+                    <RegulatoryStat label="Upcoming" value={query.data.summary.upcoming} />
+                    <RegulatoryStat label="Proposed" value={query.data.summary.proposed} />
+                    <RegulatoryStat label="With control gaps" value={query.data.summary.withControlGaps} exception={query.data.summary.withControlGaps > 0} />
+                  </div>
+                  <p className={v.dim}>{query.data.summary.nextEffective
+                    ? `Next effective entry: ${query.data.updates.find((update) => update.key === query.data?.summary.nextEffective)?.title ?? query.data.summary.nextEffective}.`
+                    : "No upcoming effective date is present in this feed."}</p>
+                </div>
+              </Card>
+
+              {/* filters sit on the canvas, directly above the list they filter */}
+              <div className={s.libraryFilters}>
                   <Field label="Status">
                     <Select value={status} onChange={(event) => setStatus(event.target.value as "" | UpdateStatus)}>
                       {STATUS_OPTIONS.map((option) => <option key={option.value || "all"} value={option.value}>{option.label}</option>)}
@@ -124,9 +129,8 @@ export default function RegulatoryIntelligencePage() {
                       {frameworks.map((id) => <option key={id} value={id}>{frameworkLabel(id)}</option>)}
                     </Select>
                   </Field>
-                  <div className={v.faint}>Generated {formatDateTime(query.data.generatedAt)} · impact window {query.data.window.days} days</div>
-                </div>
-              </Card>
+                <div className={v.faint}>Generated {formatDateTime(query.data.generatedAt)} · impact window {query.data.window.days} days</div>
+              </div>
 
               {updates.length === 0 ? (
                 <EmptyState title={status || framework ? "No entries match these filters" : "No regulatory entries are available"} body={query.data.notes.feed} />
@@ -160,12 +164,17 @@ function RegulatoryTimelineEntry({ update }: { update: RegulatoryUpdate }) {
         <div className={v.stack}>
           <div className={v.row}>
             <time className={s.timelineDate} dateTime={update.effectiveDate}>{formatDate(update.effectiveDate)}</time>
-            <Badge tone={statusTone(update.status)}>{formatWords(update.status)}</Badge>
-            <Badge tone={update.daysUntilEffective >= 0 ? "info" : "neutral"}>{relativeEffectiveDate(update.daysUntilEffective)}</Badge>
+            {/* status is a lifecycle state, not a rating: neutral */}
+            <Badge tone="neutral">{formatWords(update.status)}</Badge>
+            <span className={v.faint}>{relativeEffectiveDate(update.daysUntilEffective)}</span>
             <span className={v.grow} />
-            <Badge tone={update.impact.controlGaps || update.impact.frameworkGaps ? "danger" : "ok"}>
-              {update.impact.controlGaps + update.impact.frameworkGaps} gap{update.impact.controlGaps + update.impact.frameworkGaps === 1 ? "" : "s"}
-            </Badge>
+            {update.impact.controlGaps || update.impact.frameworkGaps ? (
+              <Badge tone="danger">
+                {update.impact.controlGaps + update.impact.frameworkGaps} gap{update.impact.controlGaps + update.impact.frameworkGaps === 1 ? "" : "s"}
+              </Badge>
+            ) : (
+              <span className={v.faint}>0 gaps</span>
+            )}
           </div>
           <div>
             <strong>{update.title}</strong>
@@ -174,7 +183,7 @@ function RegulatoryTimelineEntry({ update }: { update: RegulatoryUpdate }) {
           <p className={v.dim}>{update.summary}</p>
           <div className={v.row}>
             {update.frameworks.map((item) => (
-              <Badge key={item.framework} tone={item.packActive ? "primary" : "danger"} title={item.packActive ? `Active pack version ${item.activeVersion ?? "unknown"}` : "No active pack: framework gap"}>
+              <Badge key={item.framework} tone={item.packActive ? "neutral" : "danger"} title={item.packActive ? `Active pack version ${item.activeVersion ?? "unknown"}` : "No active pack: framework gap"}>
                 {frameworkLabel(item.framework)}{item.packActive ? ` v${item.activeVersion ?? "?"}` : " · pack not active (gap)"}
               </Badge>
             ))}
@@ -201,7 +210,7 @@ function RegulatoryTimelineEntry({ update }: { update: RegulatoryUpdate }) {
                     {update.impact.useCases.map((useCase) => (
                       <li key={useCase.id}>
                         <Link to={`/admin/governance/use-cases/${useCase.id}`}>{useCase.name}</Link>
-                        <span className={v.faint}>{useCase.status} · EU AI Act tier {useCase.euAiActTier ?? "not screened"}</span>
+                        <span className={v.faint}>{formatWords(useCase.status)} · EU AI Act tier {useCase.euAiActTier ?? "not screened"}</span>
                       </li>
                     ))}
                   </ul>
@@ -219,16 +228,17 @@ function RegulatoryTimelineEntry({ update }: { update: RegulatoryUpdate }) {
   );
 }
 
-function RegulatoryStat({ label, value, tone = "neutral" }: { label: string; value: number; tone?: "neutral" | "ok" | "warn" | "danger" | "info" }) {
-  return <Card><div className={v.stat}><span className={v.statValue}>{value}</span><span className={v.statLabel}><Badge tone={tone}>{label}</Badge></span></div></Card>;
-}
-
-function statusTone(status: UpdateStatus): "ok" | "info" | "warn" {
-  return status === "in_force" ? "ok" : status === "upcoming" ? "info" : "warn";
+function RegulatoryStat({ label, value, exception = false }: { label: string; value: number; exception?: boolean }) {
+  return (
+    <div className={v.stat}>
+      <span className={`${v.statValue} ${exception ? s.gapCount : ""}`}>{value}</span>
+      <span className={v.statLabel}>{label}</span>
+    </div>
+  );
 }
 
 function controlTone(status: ControlStatus): "ok" | "warn" | "danger" | "neutral" {
-  if (status === "satisfied" || status === "attested") return "ok";
+  if (status === "satisfied" || status === "attested") return "neutral";
   if (status === "attestation_required") return "warn";
   if (status === "unsatisfied" || status === "unaddressed" || status === "not_in_active_pack") return "danger";
   return "neutral";
