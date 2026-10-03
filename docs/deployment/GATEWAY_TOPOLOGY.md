@@ -6,29 +6,39 @@ Their proxy keeps the traffic; RegulAIt answers **"may this run?"** on each requ
 
 Adapter: [`integrations/kong/`](../../integrations/kong/) (a Kong plugin).
 
-> ### Kong: supported and VERIFIED. Envoy: withdrawn, do not use.
+> ### Kong: supported and VERIFIED (new cases pending their first CI run). Envoy: withdrawn, do not use.
 >
-> **Kong** is exercised — on any change to `integrations/`, to the gateway's source, or to the
-> shared packages, which are the three places that can alter either side of this contract — by
-> [`.github/workflows/integrations.yml`](../../.github/workflows/integrations.yml), against a
-> **digest-pinned `kong:3.6`** in DB-less mode behind `key-auth`. The assertion is not that the client
-> saw a 403 — a 403 rendered after the upstream already ran looks identical from the client side —
-> it is that **the upstream was never called**, measured by a counting upstream. Verified: an
-> entitled consumer reaches the upstream; a denied one does not; an `approval_required` is refused
-> with `x-regulait-decision: approval_required` rather than as a flat deny; a forged
-> `x-regulait-subject` naming a more-entitled user is refused in all three case spellings, when
-> duplicated, and from the consumer it names; unmapped, mis-mapped, nonexistent and deactivated
-> consumer identities are each refused with their own reason, and the ledger row keeps the Kong
-> consumer beside the subject it resolved to (AER-026); a PDP
-> that is unreachable, that answers non-200, or whose answer cannot be parsed each fail closed; and
-> the decision context the adapter claims to send is read back from the PDP's own `contextApplied`
-> ledger, including that `args` is NOT claimed. First green run 2026-09-27.
+> **Kong** is exercised — on any change to `integrations/`, to the gateway's source, to the
+> shared packages or to the lockfile, which are the places that can alter either side of this
+> contract — by [`.github/workflows/integrations.yml`](../../.github/workflows/integrations.yml),
+> against `kong:3.6` in DB-less mode behind `key-auth`. The assertion is not that the client saw a
+> 403 — a 403 rendered after the upstream already ran looks identical from the client side — it is
+> that **the upstream was never called**, measured by a counting upstream.
 >
-> What that covers precisely: Kong 3.6, DB-less, `key-auth`, two governed routes bound to distinct
-> server/tool pairs with crossed entitlements, and forged server/tool/decision headers refused. Other Kong
-> versions, DB-backed mode and other auth plugins are not covered, and the priority ordering this
-> plugin depends on is version-specific — so treat a different Kong as unverified until the harness
-> runs against it.
+> **Verified** (first green run 2026-09-27, run 36300665525; most recent green run of the
+> previous plugin and harness, unchanged since, run 36930442969 at `3a91a93`): an entitled consumer reaches the upstream; a denied one does not; an
+> `approval_required` is refused with `x-regulait-decision: approval_required` rather than as a
+> flat deny; a forged `x-regulait-subject` naming a more-entitled user did not borrow that user's
+> entitlement in any of three case spellings (that plugin version IGNORED the header; the current
+> one refuses it — see below); a declared session origin that contradicts the credential is refused
+> (AER-036); a PDP that is unreachable, that answers non-200, or whose answer
+> cannot be parsed each fail closed; and the decision context the adapter claims to send is read
+> back from the PDP's own `contextApplied` ledger, including that `args` is NOT claimed.
+>
+> **Pending first CI run — written, never yet run against a container, so NOT verified until a
+> green run id is recorded here** (AER-026, AER-030, AER-034): a forged protocol header is
+> **refused** (`forged_protocol_header`) in every case spelling, when duplicated, and from the
+> consumer it names, while the documented client headers (`x-regulait-project-id`,
+> `x-regulait-agent-id`) pass through to the upstream; a request with more headers than the
+> plugin's scan reads is refused (`too_many_headers`); unmapped, mis-mapped, nonexistent and
+> deactivated consumer identities and an `anonymous`-fallback consumer are each refused with their
+> own reason, and the ledger row keeps the Kong consumer beside the subject it resolved to; two
+> governed routes bound to distinct server/tool pairs with crossed entitlements; forged
+> server/tool/decision headers refused; and the Kong and Postgres images pinned by digest.
+>
+> What that covers precisely: Kong 3.6, DB-less, `key-auth`. Other Kong versions, DB-backed mode
+> and other auth plugins are not covered, and the priority ordering this plugin depends on is
+> version-specific — so treat a different Kong as unverified until the harness runs against it.
 >
 > **Envoy remains withdrawn.** The adapter shipped with ADR-0127 **failed open on `deny`**: its
 > `ext_authz` filter decides from the HTTP status code, and `/v1/authz/check` answers `200` for
@@ -181,8 +191,19 @@ timeout rather than a default. Before you put this in front of production traffi
 | `decision` | HTTP at your gateway | meaning |
 |---|---|---|
 | `allow` | proceed | entitled, within limits, nothing pending |
-| `deny` | 403 | refused: no grant, revoked, rate limited, halted, out of scope |
+| `deny` | 403 | refused: no grant, revoked, rate limited, halted, out of scope — or a subject the adapter will not stand behind (below) |
 | `approval_required` | **403, with `x-regulait-decision: approval_required`** | a human can unblock this |
+
+**A forged or unusable subject is a `deny` with its own reason, never an ignored header.** The
+Kong adapter refuses before anyone is asked when the request carries one of the five protocol
+headers (`x-regulait-subject`, `-server-id`, `-tool`, `-decision`, `-reason`) —
+`forged_protocol_header` — or more headers than its scan reads (`too_many_headers`); when no
+credential stands behind the consumer, including Kong's `anonymous` fallback (`unauthenticated`);
+and when the consumer's `custom_id` is missing or is not a user UUID (`consumer_not_mapped`). The PDP
+refuses a UUID nobody has (`unknown_subject`) and a deactivated user whose grants survive
+(`subject_disabled`), and writes both to the ledger with the Kong consumer that presented them.
+Other `x-regulait-*` headers (`x-regulait-project-id`, `x-regulait-agent-id`) are client traffic and
+pass through. These refusals are pending their first CI run (see the box at the top).
 
 The third is the one to get right. A proxy filter of this shape has two outcomes and no third, so a
 pending approval **must** map to a denial — failing closed, as everywhere else in this product. But

@@ -4,8 +4,9 @@
 -- │ VERIFIED against kong:3.6 — deny path exercised end to end, with a      │
 -- │ counting upstream, on every change to integrations/.                    │
 -- │ .github/workflows/integrations.yml · first green run 2026-09-27         │
--- │ (run 36300665525), against an EARLIER version of this plugin, under     │
--- │ which a forged subject header was IGNORED. 0.3.0 refuses it instead.    │
+-- │ (run 36300665525); the last green run of the code before 0.3.0 (still   │
+-- │ numbered 0.1.0-unverified then) was 36930442969 at 3a91a93. That code   │
+-- │ IGNORED a forged subject header; 0.3.0 refuses it instead.              │
 -- │                                                                          │
 -- │ PENDING FIRST CI RUN — written but never yet run against a container,   │
 -- │ so NOT verified until a green run id is recorded here: the AER-026       │

@@ -1,20 +1,27 @@
 # Kong — RegulAIt as an authorization decision point (ADR-0127)
 
-> **VERIFIED against a digest-pinned `kong:3.6`** (and a digest-pinned
-> `postgres:16` behind the PDP; the job logs both digests it ran against —
-> AER-034). The deny path runs end to end with a counting upstream on any
-> change to `integrations/`, to the gateway's source, to the shared packages,
-> or to the lockfile — the places that can alter either side of this contract.
-> See
-> [`test/verify.mjs`](test/verify.mjs) and
+> **VERIFIED against `kong:3.6`** — the deny path runs end to end with a
+> counting upstream on any change to `integrations/`, to the gateway's source,
+> to the shared packages, or to the lockfile — the places that can alter either
+> side of this contract. See [`test/verify.mjs`](test/verify.mjs) and
 > [`.github/workflows/integrations.yml`](../../.github/workflows/integrations.yml).
-> First green run 2026-09-27.
+> First green run 2026-09-27 (run 36300665525); the last green run of the
+> plugin and harness as they were before the AER-026/030/033/034 changes was
+> run 36930442969 at `3a91a93`.
 >
-> **Covered precisely:** Kong 3.6, DB-less, `key-auth`, two governed routes
-> bound to distinct server/tool pairs with crossed entitlements. Other Kong
-> versions, DB-backed mode and other auth plugins are NOT covered — and the
-> priority ordering this plugin depends on is version-specific, so a different
-> Kong is unverified until the harness runs against it.
+> **PENDING FIRST CI RUN — not verified until a green run id is recorded
+> here.** Everything below marked *(pending)* was written without Docker and
+> has never run against a container: the five-name protocol-header refusal
+> (with other `x-regulait-*` headers passed through), the truncated-scan
+> refusal, the AER-026 identity refusals and ledger identity, the AER-030
+> second route and forged server/tool/decision headers, the AER-033 teardown
+> and key-location canary, and the AER-034 digest pins (Kong and the
+> `postgres:16` behind the PDP, both logged by the job).
+>
+> **Covered precisely:** Kong 3.6, DB-less, `key-auth`. Other Kong versions,
+> DB-backed mode and other auth plugins are NOT covered — and the priority
+> ordering this plugin depends on is version-specific, so a different Kong is
+> unverified until the harness runs against it.
 
 `kong/plugins/regulait-authz/` is a custom Kong plugin: `handler.lua` and
 `schema.lua`.
@@ -75,28 +82,42 @@ identity** (`detail.proxyConsumer`: the consumer's `id` and `username`) beside
 the RegulAIt subject it resolved to, so "which consumer was this?" is
 answerable from the ledger when a mapping turns out to be wrong.
 
-**Inbound `x-regulait-*` headers are refused**, not stripped (`403`,
-`x-regulait-reason: forged_protocol_header`). The plugin sets two of them on
-its own refusals and reads none from a request, so a client has no legitimate
-reason to send one; the previous behaviour of clearing them and carrying on
-made a forgery attempt invisible and was only as safe as every later line of
-code. Duplicates and case variants are one check, by prefix.
+**The five protocol headers are refused on a request**, not stripped (`403`,
+`x-regulait-reason: forged_protocol_header`): `x-regulait-subject`,
+`x-regulait-server-id`, `x-regulait-tool`, `x-regulait-decision` and
+`x-regulait-reason`. The plugin sets the last two on its own refusals and reads
+none of them from a request; the previous behaviour of clearing them and
+carrying on made a forgery attempt invisible and was only as safe as every
+later line of code. Duplicates, case variants and underscore spellings are one
+check. **Only those five:** other `x-regulait-*` headers are client traffic and
+pass through untouched — `docs/product/IDE_INTEGRATION.md` tells clients to
+send `x-regulait-project-id` and `x-regulait-agent-id`, and the console sends
+`x-regulait-csrf`. A request with **more than 1000 headers** (Kong's ceiling
+for the plugin's header scan) is refused as `too_many_headers`, because a
+protocol header past the 1000th would never have been looked at.
 
 ## What is actually asserted
 
 Per `mistakes.md` M-043, nothing in `integrations/` is called supported until
 its **deny path** is exercised end to end against a **pinned Kong container**
 with an **upstream invocation counter**, asserting **zero upstream calls** for
-each refusal. That now runs on every change, and asserts exactly that for:
+each refusal. That now runs on every change, and asserts exactly that for the
+list below. Entries marked *(pending)* have not yet run against a container —
+see the box at the top:
 
 - an unauthenticated request (`key-auth` refuses before this plugin runs);
 - a policy `deny`;
-- **two routes bound to distinct server/tool pairs** with crossed entitlements
+- *(pending)* an allowed request carrying the documented client headers
+  (`x-regulait-project-id`, `x-regulait-agent-id`): it reaches the upstream,
+  those headers arrive unchanged, and none of the five protocol headers does;
+- *(pending)* a forged subject hidden after 1000 padding headers: refused as
+  `too_many_headers`, nothing proxied;
+- *(pending)* **two routes bound to distinct server/tool pairs** with crossed entitlements
   (AER-030): the consumer entitled to tool A is allowed on route A and refused
   on route B, a second consumer the reverse — and the ledger shows each route
   asked about its own binding, which a plugin asking one question for every
   route could not produce;
-- forged `x-regulait-server-id` / `x-regulait-tool` / `x-regulait-decision` /
+- *(pending)* forged `x-regulait-server-id` / `x-regulait-tool` / `x-regulait-decision` /
   `x-regulait-reason` headers, each sent by the consumer the claim would have
   helped, each refused as `forged_protocol_header` with nothing proxied;
 - an **`approval_required`** — refused with a `403` AND carrying
@@ -107,22 +128,27 @@ each refusal. That now runs on every change, and asserts exactly that for:
   route — a different plugin branch from the unreachable case);
 - a PDP whose answer is **unparseable** (a stub returning 200 with a body
   `cjson` cannot decode — the shape most likely to be mistaken for success);
-- a request with a forged `x-regulait-subject` (each case variant, the header
+- *(pending — the green runs asserted the earlier IGNORE behaviour)* a request
+  with a forged `x-regulait-subject` (each case variant, the header
   twice in two spellings on one request, and from the very consumer it names),
   each refused as `forged_protocol_header`;
-- the identities refused **before** anyone is asked (AER-026): a consumer with
+- *(pending)* the identities refused **before** anyone is asked (AER-026): a consumer with
   no `custom_id` and one whose `custom_id` is an email (`consumer_not_mapped`);
   a consumer mapped to a UUID nobody has (`unknown_subject`); a consumer mapped
   to a **deactivated** user with a live grant (`subject_disabled`) — with the
   control that reactivation lets the same consumer through;
-- a subject header on a request with **no credential**, on the governed route
-  (key-auth refuses first) and on a route whose key-auth has an `anonymous`
-  fallback mapped to the entitled user (the plugin refuses `unauthenticated`;
-  the control shows a real credential proxies on that route);
+- *(pending)* a subject header on a request with **no credential**, on the
+  governed route (key-auth refuses first) and on a route whose key-auth has an
+  `anonymous` fallback mapped to a user of its own whom the PDP allows on the
+  tool (Kong requires `custom_id` to be unique across consumers, so it cannot
+  share the entitled user's) — the plugin refuses `unauthenticated`, which can
+  only be the credential check; the control shows a real credential proxies on
+  that route;
 - the **decision context** the plugin claims to send, read back from the PDP's
   own `contextApplied` ledger rather than from the plugin's source — including
-  that `args` is NOT claimed — and the **Kong consumer identity** on the same
-  rows, beside the subject, for the allow and for the deactivated refusal.
+  that `args` is NOT claimed — and *(pending)* the **Kong consumer identity**
+  on the same rows, beside the subject, for the allow and for the deactivated
+  refusal.
 
 **Correction (2026-09-27, AER-034):** the three middle entries above —
 `approval_required`, non-200 and unparseable — were listed here before the
@@ -146,10 +172,19 @@ free; `GATEWAY_PORT` / `UPSTREAM_PORT` / `KONG_PROXY_PORT` pin them) and the
 gateway's bootstrap token. **Nothing is dropped or removed at start**: a
 database or container that already carries the name belongs to another run
 and the harness stops rather than destroying it. Teardown — from the normal
-exit, from a failure, and from `SIGINT`/`SIGTERM` — revokes the scratch PDP
-key, removes the container **by id and only if it carries this run's label**,
+exit, from a failure, and from `SIGINT`/`SIGTERM`, one shared teardown however
+many of those fire — first revokes the scratch PDP key while the gateway can
+still do it, then removes the container **by id and only if it carries this
+run's label** (plus any container carrying that label whose id was never
+recorded because `docker run` was interrupted),
 and drops the database **only if it still carries this run's comment**;
-anything else is refused aloud. The PDP key lives in a `0600` file in a
+anything else is refused aloud. Once teardown has begun, every creation step
+refuses to run, so a run interrupted mid-setup cannot start a container or a
+database after teardown has gone past it. Before Kong starts, the generated
+declarative config is checked for the values Kong requires to be unique
+(consumer `username`/`id`/`custom_id`, key-auth `key`, route names, one plugin
+instance per route), so a config Kong would refuse is named rather than
+surfacing as a container that never came up. The PDP key lives in a `0600` file in a
 `0700` directory handed to the container through `--env-file`, and the run
 proves it: a read as a non-runner user (`nobody`) must fail while the runner's
 own read succeeds, and the world-readable declarative config is checked to
