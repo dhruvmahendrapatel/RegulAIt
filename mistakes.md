@@ -1418,3 +1418,18 @@ Rule: a cleanup helper verifies its own effect — after killing, it re-checks t
 it killed — and never depends on a binary it has not checked exists. A "something is still running"
 guard tests for ANY response (`curl -s -o /dev/null`), not a healthy one: a sick process holding the
 port is exactly what it exists to catch.
+
+### M-067 (2026-10-03) - `git pull --rebase` on a branch that carries merge commits tried to flatten them
+
+After fast-forwarding `dhruv/active` to a tested branch that contained three `--no-ff` merges, the
+standing "pull --rebase before push" step started an interactive rebase of 36 commits onto the remote
+and stopped on a conflict. Nothing reached the remote (the push sent the branch ref, which still
+pointed at the tested commit) and the rebase was aborted, but a slightly different sequence — resolve,
+continue, push — would have pushed an UNTESTED re-linearised history. The same command had already
+silently flattened the merges on the integration worktree earlier, which is what later made one merge
+re-apply duplicated commits and conflict.
+
+Rule: before pushing, `git fetch` and check whether the remote moved (`git rev-list HEAD..origin/<b>`).
+If it did not, push without pulling. If it did and the local branch carries merges, use
+`git pull --no-rebase` (merge) or rebuild the integration on the new base and RE-RUN the gate — never
+`--rebase` a merge-bearing branch, and never push anything but the exact commit the gate ran on.
