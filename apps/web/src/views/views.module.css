@@ -20,6 +20,13 @@
   grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: var(--s2);
 }
+/* cards side by side get the same 24px gutter as cards stacked */
+.grid2:has(> [data-rg-card]),
+.grid3:has(> [data-rg-card]),
+.grid4:has(> [data-rg-card]),
+.grid5:has(> [data-rg-card]) {
+  gap: var(--s3);
+}
 @media (max-width: 1100px) {
   .grid4 {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -45,12 +52,25 @@
   flex-direction: column;
   gap: var(--s2);
 }
+/* Calm comes from gutters between groups and hairlines within them: a stack
+   of cards (page sections) breathes at 24px; a stack of fields inside a card
+   keeps 16px. */
+.stack:has(> [data-rg-card]) {
+  gap: var(--s3);
+}
 /* vertical twin of .rowTight — an inline control plus its own error line */
 .stackTight {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
   gap: var(--s0);
+}
+/* A growing Field's 16rem basis is meant for rows; in a column it would be a
+   256px height. Two-attribute specificity so it wins over kit's .fieldGrow
+   whatever order the two stylesheets load in. */
+.stack > [data-rg-grow][class],
+.stackTight > [data-rg-grow][class] {
+  flex-basis: auto;
 }
 .row {
   display: flex;
@@ -122,7 +142,7 @@
   display: flex;
   align-items: flex-start;
   gap: var(--s2);
-  padding: var(--s1) 0;
+  padding: 12px 0;
   border-bottom: 1px solid var(--border);
 }
 .listRow:last-child {
