@@ -22,6 +22,8 @@ roadmap: ../docs/product/ROADMAP.md
 ## Where we are (read this paragraph first)
 
 **2026-10-03 (overnight) - Full product review closed out: security, reliability, deps, UI; Codex backlog cut.**
+**Merged to `main`:** PR #114 (294 commits) merged at b4348d1 on 2026-10-03 after CI went green on
+2d288fd; `dhruv/active` continues from the merge commit with a fresh draft PR.
 The owner's full review (150 findings over 9 areas; 111 confirmed, 33 downgraded, 6 refuted,
 `docs/reviews/2026-10-02-full-review.md`) is now actioned. Security 16 fixed (ADR-0167),
 reliability 19, dependency HIGHs 32 → 0, and the UI work landed in two adversarially reviewed

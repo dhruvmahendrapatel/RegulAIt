@@ -63,8 +63,9 @@ Rules:
 
 ## 0. Ground rules (non-negotiable)
 
-1. **Branch:** everyone works on `dhruv/active` (PR #114). `git pull --rebase`
-   before every push. **Never force-push.** Push every commit immediately.
+1. **Branch:** everyone works on `dhruv/active`. PR #114 (294 commits, ADRs 0128–0167,
+   migrations 0117–0128) merged to `main` at b4348d1 on 2026-10-03; the branch continues from
+   that merge and a new draft PR tracks it. `git pull --rebase` before every push. **Never force-push.** Push every commit immediately.
 2. **File ownership** (CONTRIBUTING_PARALLEL_SESSIONS.md §1/§3) — edit only
    what you own. Need a change elsewhere? Ask on the Message board.
 
