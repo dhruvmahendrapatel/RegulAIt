@@ -1,7 +1,9 @@
 .dashboardGrid {
   display: grid;
   grid-template-columns: minmax(280px, 0.9fr) minmax(360px, 1.1fr);
-  gap: var(--s2);
+  gap: var(--s3);
+  /* cards keep their content height; a short card no longer stretches to its neighbour */
+  align-items: start;
 }
 
 .radar {
@@ -289,19 +291,41 @@
   margin: 0;
 }
 
-.workspaceHeader {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: var(--s3);
-  align-items: start;
+/* The object's key facts (360 header): label over value, separated by
+   hairlines, on the canvas rather than in another box. */
+.facts {
+  display: flex;
+  flex-wrap: wrap;
+  row-gap: var(--s2);
+  margin: 0;
 }
 
-.workspaceMeta {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(130px, 1fr));
-  gap: var(--s2);
+.fact {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  padding: 0 var(--s3);
+  border-left: 1px solid var(--border);
+}
+
+.fact:first-child {
+  padding-left: 0;
+  border-left: 0;
+}
+
+.fact dt {
   color: var(--text-dim);
   font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.fact dd {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: var(--text-md);
 }
 
 .riskFlow {
@@ -599,7 +623,6 @@
   .dashboardGrid,
   .dimensionList,
   .alertLayout,
-  .workspaceHeader,
   .libraryFilters {
     grid-template-columns: 1fr;
   }
