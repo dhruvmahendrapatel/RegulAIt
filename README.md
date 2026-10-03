@@ -60,8 +60,10 @@ sign-off stage, blocks PII, and floors audit retention — nobody configured any
   env var instead (below).
 
 > **`/ui` is the whole product surface.** The single-file `/app` and `/admin` shells were
-> deleted by [ADR-0033](docs/decisions/0033-delete-legacy-template-literal-uis.md); those paths
-> now 404 rather than redirect, deliberately, so a stale bookmark fails loudly.
+> deleted by [ADR-0033](docs/decisions/0033-delete-legacy-template-literal-uis.md). *Corrected
+> 2026-10-03:* those two paths **302 into `/ui`** (`app.ts`, kept for SSO's `returnTo` whitelist
+> and old bookmarks) — an earlier revision of this note said they 404, which they never did. Only
+> `/legacy/*` is gone outright.
 
 Without Docker:
 

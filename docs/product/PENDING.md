@@ -229,6 +229,12 @@ caught on read. **The sweeps buy timeliness, never correctness.**
   (clean 0 / blocked 1 / unreachable 2). Building it also found a defect in the script itself:
   `console.log` + `process.exit()` means Node's async stdout on a pipe could drop the output, so a
   blocked pre-flight could have failed CI with **no reason printed**. Fixed to `fs.writeSync`.
+  **Correction 2026-10-03 (F01/F08 — a stale claim)**: "GitHub Actions is exhausted for this repo"
+  and "the step has never actually executed" are no longer true and are withdrawn as present-tense
+  statements. The `pull_request` workflow runs again: `.github/workflows/ci.yml`'s budget header was
+  re-measured on 2026-10-02 from runs 37050080219 / 37045578961 / 37042881890, and run 37036782298
+  at exact head `21b3094` executed the whole `build-and-test` job — this pre-flight step included —
+  green (`codexInputs.md` F01). The 09-12 text above stands as the record of that day.
 
 - **S13 — a re-scan re-opened the ledger row but never the FINDING. CLOSED 2026-09-19 by
   [ADR-0114](../decisions/0114-rescan-reopens-a-contradicted-finding.md), no migration.** A re-scan
@@ -704,7 +710,7 @@ stale by one day.
 | **F01** — untrustworthy test gate | **TRUE**, already ours (§5 above) | **OPEN**, and now better understood — see §5's correction |
 | **F02** — budget not enforced on MCP path | **TRUE** | ~~**CLOSED** — [ADR-0103](../decisions/0103-mcp-path-project-budget-gate.md)~~ **Correction 2026-10-03**: the 09-07 closure covered the MCP and model paths only; `POST /v1/connectors/:connectorId/invoke` still executed and billed on an exhausted project (Codex F02 recheck). **CLOSED 2026-10-03** — the same `preDispatchProjectGate` now sits on the connector invoke ahead of credential/PII/guardrail/egress/provider work ([ADR-0103 amendment 2026-10-03](../decisions/0103-mcp-path-project-budget-gate.md), `connector-project-budget.test.ts`). F03's first-crossing semantics still apply on all three paths. |
 | **F03** — cap semantics under concurrency | **TRUE**, design question not defect | **OPEN** — named honestly in ADR-0103's limits |
-| **F04** — secrets outside `audit_log` | **STALE** — S5 closed 2026-09-06 by ADR-0102 | Its *extension* is new and open: exports, backups, traces, conversations were never assessed |
+| **F04** — secrets outside `audit_log` | **STALE** — S5 closed 2026-09-06 by ADR-0102 | ~~Its *extension* is new and open: exports, backups, traces, conversations were never assessed~~ **Correction 2026-10-03: the extension is CLOSED, and has been since 2026-09-17/18** — every named surface was assessed one at a time with a synthetic secret: [ADR-0111](../decisions/0111-trace-preview-credential-scrub.md) (traces leaked *and were exported*: fixed at ADR-0102's chokepoint; exports, backups and anchors proven clean), [ADR-0112](../decisions/0112-conversation-presentation-scrub.md) (conversations: the owner's option (c), redact at the presentation boundary) and [ADR-0115](../decisions/0115-eval-result-credential-surface.md) (`eval_results`, column by column). The Codex ledger carries F04 as CLOSED; this row simply never caught up. Declared residuals stand: S6 content columns (owner), S15, S16. |
 | **F05** — approval not bound to payload | **PARTLY TRUE** | **CLOSED** — [ADR-0104](../decisions/0104-approval-payload-binding.md), migration 0106 |
 | **F06** — prove end-to-end journeys | verification programme, not a finding | **OPEN**, largely owner-gated |
 | **F07** — install/upgrade/recovery | verification programme, not a finding | **OPEN**, largely owner-gated |
@@ -783,10 +789,29 @@ digest binds the arguments, not the state they act on.
 - **CORRECTED, and the correction is mine to own**: I reported that `boot.ts` prints `/app` and
   `/admin` which "now 404". **They do not** — both 302 to `/ui` and resolve 200. The item is real
   but cosmetic: a stale boot banner, not a broken link. I asserted the stronger claim without
-  probing it.
-- **Not assessed**: the marketing-claim items (guardrails as heuristics, training-provider as
+  probing it. **CLOSED 2026-10-03**: the banner now prints the one surface, `UI: <address>/ui`;
+  `/app` and `/admin` stay as 302s into it (`app.ts`, kept for SSO's `returnTo` whitelist and old
+  bookmarks) and are no longer advertised. README's quickstart blockquote, which said those paths
+  "now 404", was wrong the other way and is corrected in the same change.
+- ~~**Not assessed**: the marketing-claim items (guardrails as heuristics, training-provider as
   retrieval + classical classification rather than local transformer training). Both look right on
-  their face and neither is a code defect.
+  their face and neither is a code defect.~~ **ASSESSED 2026-10-03 — both claims hold at the
+  source, and neither overclaims.** (1) *Guardrails are heuristics*: `packages/shared/src/guardrails.ts`
+  says so at the point of implementation (lines 10–36): every shipped detector is a deterministic,
+  local regex/term-list rule set carrying `tier: 'heuristic'`; no model-backed or external tier is
+  registered (the `tier` field exists so one can be, behind the same interface); the file lists
+  what the rules miss (obfuscation, non-English, novel framings) and why the shipped posture is
+  `log`, not `block`. The gateway half (`apps/gateway/src/guardrails.ts`) only resolves modes and
+  writes audit rows — it adds no detection. (2) *Training is retrieval + classical classification,
+  not local transformer training*: `packages/training-provider/src/index.ts` (lines 1–60) is built
+  around exactly that sentence — the `local` backend's methods are `retrieval_index` (a TF-IDF
+  inverted index; no weights updated anywhere) and `text_classifier` (multinomial logistic
+  regression by gradient descent over bag-of-words); the three LLM fine-tuning methods (`lora_sft`,
+  `full_sft`, `dpo`) are reachable only through the four credentialed remote adapters, which refuse
+  with `credential_required` when nothing is configured and are stated in the file to have never
+  spoken to a live service. The admin screen (`RegulAItLlmPage.tsx`) renders each backend's own
+  `limits` string next to the picker, including `local`'s "IT DOES NOT FINE-TUNE A LANGUAGE
+  MODEL". Verdict: accurate capability claims, no code defect, nothing to change.
 
 ---
 
