@@ -383,6 +383,16 @@
   padding: var(--s5) var(--s3);
   color: var(--text-faint);
 }
+.emptyActions {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  flex-wrap: wrap;
+  justify-content: center;
+}
+.emptyActions:empty {
+  display: none;
+}
 .emptyTitle {
   font-size: var(--text-md);
   font-weight: 600;

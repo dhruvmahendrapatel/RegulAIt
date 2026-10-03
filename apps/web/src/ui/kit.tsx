@@ -774,6 +774,55 @@ export function ErrorState(props: {
   );
 }
 
+/**
+ * The error for a page that shows ONE record (a run, a workflow, a project).
+ * A 404 — or a malformed id the server refused as validation — is not a load
+ * failure to retry; it is a record that is not there, and the page says so in
+ * words and offers the way back (UIW-08). A 403 is an access refusal, and
+ * anything else keeps the Retry.
+ */
+export function RecordError(props: {
+  /** the record's kind, lower case: "run", "workflow", "project" */
+  noun: string;
+  error: unknown;
+  onRetry?: () => void;
+  /** the way back, usually a Link to the list */
+  action?: ReactNode;
+}) {
+  const err = props.error as { status?: number; message?: string } | null;
+  const status = err?.status;
+  const missing = status === 404 || status === 400;
+  const message = err?.message ?? "Unknown error";
+  const an = /^[aeiou]/i.test(props.noun) ? "an" : "a";
+  return (
+    <div className={s.empty} role="alert">
+      <StatusDot tone={missing ? "neutral" : "danger"} />
+      <div className={s.emptyTitle}>
+        {status === 403
+          ? "You don't have access to this " + props.noun
+          : missing
+            ? `No such ${props.noun}`
+            : `Couldn't load this ${props.noun}`}
+      </div>
+      <div className={s.emptyBody}>
+        {status === 404
+          ? `There is no ${props.noun} with this ID — it may have been removed, or the link may be wrong.`
+          : status === 400
+            ? `This is not ${an} ${props.noun} ID — the link may be incomplete.`
+            : message}
+      </div>
+      <div className={s.emptyActions}>
+        {props.action}
+        {!missing && props.onRetry && (
+          <Button size="sm" onClick={props.onRetry}>
+            Retry
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ---- CodeBlock ------------------------------------------------------------
 
 export function CodeBlock(props: { children: string; maxHeight?: string }) {

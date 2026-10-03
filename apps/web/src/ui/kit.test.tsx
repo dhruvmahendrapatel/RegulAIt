@@ -5,7 +5,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { ApiError } from "../api/client";
-import { EmptyState, Table } from "./kit";
+import { EmptyState, RecordError, Table } from "./kit";
 
 type Row = { id: string; name: string };
 const columns = [{ key: "name", header: "Name", render: (r: Row) => r.name }];
@@ -54,5 +54,35 @@ describe("Table — error versus empty", () => {
     const loading = render({ loading: true, error: new Error("boom") });
     expect(loading).not.toContain("role=\"alert\"");
     expect(loading).not.toContain("No users yet");
+  });
+});
+
+describe("RecordError — a missing record is named, not retried (UIW-08)", () => {
+  const html = (status: number, payload: Record<string, unknown>) =>
+    renderToStaticMarkup(<RecordError noun="run" error={new ApiError(status, payload)} onRetry={() => {}} action={<a href="/runs">All runs</a>} />);
+
+  it("a 404 says there is no such record, offers the way back, and no Retry", () => {
+    const h = html(404, { error: "unavailable" });
+    expect(h).toContain("No such run");
+    expect(h).toContain("There is no run with this ID");
+    expect(h).toContain("All runs");
+    expect(h).not.toContain(">Retry<");
+    expect(h).not.toContain("unavailable");
+  });
+
+  it("a malformed id is the link's fault, not the server's", () => {
+    const h = html(400, { error: "validation", issues: [{ path: ["runId"], message: "Invalid uuid" }] });
+    expect(h).toContain("No such run");
+    expect(h).toContain("This is not a run ID");
+    expect(h).not.toContain("Invalid uuid");
+    expect(h).not.toContain(">Retry<");
+  });
+
+  it("a 403 is an access refusal; anything else keeps Retry and the sentence", () => {
+    expect(html(403, { error: "unavailable" })).toContain("You don&#x27;t have access to this run");
+    const h = html(500, { error: "internal_error" });
+    expect(h).toContain("Couldn&#x27;t load this run");
+    expect(h).toContain("Something went wrong on the server");
+    expect(h).toContain(">Retry<");
   });
 });

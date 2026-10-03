@@ -16,7 +16,7 @@ import {
   Button,
   Card,
   CodeBlock,
-  ErrorState,
+  RecordError,
   IdChip,
   SkeletonBlock,
   StatusBadge,
@@ -57,15 +57,15 @@ export default function WorkflowDetailPage() {
     );
   }
   if (q.isError || !q.data) {
-    const err = q.error as { status?: number; message?: string } | null;
     return (
       <>
         <PageHeader title="Workflow" />
         <Card>
-          <ErrorState
-            message={err?.message ?? "unknown error"}
-            access={err?.status === 403}
+          <RecordError
+            noun="workflow"
+            error={q.error}
             onRetry={() => void q.refetch()}
+            action={<Link to="/workflows">← All workflows</Link>}
           />
         </Card>
       </>
