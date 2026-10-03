@@ -106,6 +106,7 @@ const BY_ROUTE: Record<string, keyof typeof G> = {
   "/admin/traces": "pulse",
   "/admin/use-cases": "list",
   "/admin/governance/intake": "intake",
+  "/admin/governance/review-policy": "checklist",
   "/admin/governance/graph": "graph",
   "/admin/governance/regulatory": "scales",
   "/admin/model-risk": "cube",
