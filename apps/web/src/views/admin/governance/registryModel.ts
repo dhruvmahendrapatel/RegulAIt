@@ -29,6 +29,9 @@ export interface UseCaseRow {
   approvedUntil?: string | null;
   /** ADR-0168: open approval conditions; absent on an older gateway */
   openConditions?: number;
+  /** ADR-0168 amendment: an expired approval moved back into review by the recertification sweep */
+  recertification?: boolean;
+  recertificationDueAt?: string | null;
 }
 
 const STATUS_LABEL: Record<UseCaseStatus, string> = {
@@ -43,6 +46,13 @@ export const statusLabel = (s: string) => STATUS_LABEL[s as UseCaseStatus] ?? s.
 
 export const statusTone = (s: UseCaseStatus): Tone =>
   s === "approved" ? "ok" : s === "under_review" ? "info" : s === "needs_info" ? "warn" : s === "rejected" ? "danger" : s === "retired" ? "neutral" : "neutral";
+
+/** a use case's status as the registry shows it: a recertification reads "Re-review" */
+export const rowStatus = (row: Pick<UseCaseRow, "status" | "recertification">): { label: string; tone: Tone } =>
+  row.recertification && row.status === "under_review" ? { label: "Re-review", tone: "warn" } : { label: statusLabel(row.status), tone: statusTone(row.status) };
+
+/** the registration screen in resubmit mode, for a use case sent back for information */
+export const resubmitPath = (useCaseId: string) => `/admin/governance/intake?resubmit=${encodeURIComponent(useCaseId)}`;
 
 export const tierTone = (t: EuTier): Tone => (t === "prohibited" ? "danger" : t === "high" ? "warn" : t === "limited" ? "info" : "ok");
 export const tierLabel = (t: EuTier) => (t === "prohibited" ? "Prohibited" : `${t.charAt(0).toUpperCase()}${t.slice(1)}`);
@@ -72,7 +82,7 @@ export function headline(rows: readonly UseCaseRow[]) {
   };
 }
 
-export type StatusFilter = "all" | "in_review" | UseCaseStatus;
+export type StatusFilter = "all" | "in_review" | "recertification" | UseCaseStatus;
 export type TierFilter = "all" | EuTier | "unscreened" | "high_or_prohibited";
 
 export interface RegistryFilters {
@@ -88,7 +98,9 @@ export const isFiltered = (f: RegistryFilters) => f.search.trim() !== "" || f.st
 export function applyFilters(rows: readonly UseCaseRow[], f: RegistryFilters): UseCaseRow[] {
   const q = f.search.trim().toLowerCase();
   return rows.filter((r) => {
-    if (f.status === "in_review" ? !(r.status === "proposed" || r.status === "under_review" || r.status === "needs_info") : f.status !== "all" && r.status !== f.status) return false;
+    if (f.status === "recertification") {
+      if (!(r.recertification && r.status === "under_review")) return false;
+    } else if (f.status === "in_review" ? !(r.status === "proposed" || r.status === "under_review" || r.status === "needs_info") : f.status !== "all" && r.status !== f.status) return false;
     if (f.tier === "unscreened" ? r.euAiActTier !== null : f.tier === "high_or_prohibited" ? !(r.euAiActTier === "high" || r.euAiActTier === "prohibited") : f.tier !== "all" && r.euAiActTier !== f.tier) return false;
     if (f.owner && r.ownerUserId !== f.owner) return false;
     if (q && ![r.name, r.description, r.ownerName ?? ""].some((text) => text.toLowerCase().includes(q))) return false;

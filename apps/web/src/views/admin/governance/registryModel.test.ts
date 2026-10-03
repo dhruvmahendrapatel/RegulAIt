@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { NO_FILTERS, applyFilters, fmtDay, headline, isFiltered, statusLabel, validity, type UseCaseRow } from "./registryModel";
+import { NO_FILTERS, applyFilters, fmtDay, headline, isFiltered, resubmitPath, rowStatus, statusLabel, validity, type UseCaseRow } from "./registryModel";
 
 const row = (over: Partial<UseCaseRow>): UseCaseRow => ({
   id: "x", name: "x", description: "", businessContext: "", ownerUserId: "u1", ownerName: "Avery", intendedAgentIds: [],
@@ -49,5 +49,24 @@ describe("ADR-0168 AI registry model", () => {
     expect(statusLabel("under_review")).toBe("Under review");
     expect(statusLabel("something_new")).toBe("Something new");
     expect(fmtDay("not a date")).toBe("—");
+  });
+});
+
+describe("re-review (ADR-0168 amendment)", () => {
+  const recert = [
+    row({ id: "r", name: "Expired bot", status: "under_review", recertification: true }),
+    row({ id: "u", name: "Fresh review", status: "under_review" }),
+    row({ id: "a", name: "Approved bot", status: "approved", recertification: false }),
+  ];
+  it("the Re-review filter keeps only recertifications; In review still counts them", () => {
+    expect(applyFilters(recert, { ...NO_FILTERS, status: "recertification" }).map((r) => r.id)).toEqual(["r"]);
+    expect(applyFilters(recert, { ...NO_FILTERS, status: "in_review" }).map((r) => r.id)).toEqual(["r", "u"]);
+  });
+  it("a recertification reads Re-review; an ordinary review keeps its status", () => {
+    expect(rowStatus(recert[0]!)).toEqual({ label: "Re-review", tone: "warn" });
+    expect(rowStatus(recert[1]!)).toEqual({ label: "Under review", tone: "info" });
+  });
+  it("links the registration screen in resubmit mode", () => {
+    expect(resubmitPath("abc")).toBe("/admin/governance/intake?resubmit=abc");
   });
 });

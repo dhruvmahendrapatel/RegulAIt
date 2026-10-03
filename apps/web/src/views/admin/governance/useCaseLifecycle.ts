@@ -41,7 +41,10 @@ export interface PhaseState {
  * once none is, the use case is live and in monitoring. An expired approval
  * puts it back under review.
  */
-export function phaseFor(status: UseCaseStatus | string, opts: { approvalExpired?: boolean; openBlocking?: number }): PhaseState {
+export function phaseFor(status: UseCaseStatus | string, opts: { approvalExpired?: boolean; openBlocking?: number; recertification?: { dueAt: string | null } | null }): PhaseState {
+  // the recertification sweep moved an expired approval back into review
+  if (opts.recertification && status === "under_review")
+    return { current: 1, flag: { text: reReviewText(opts.recertification.dueAt), tone: "warn" } };
   if (opts.approvalExpired && (status === "approved" || status === "under_review"))
     return { current: 1, flag: { text: "Approval expired — re-review required", tone: "danger" } };
   switch (status) {
@@ -64,6 +67,9 @@ export function phaseFor(status: UseCaseStatus | string, opts: { approvalExpired
   }
 }
 
+/** "Re-review: approval expired 3 Oct 2026" — the band and the tracker say the same words */
+export const reReviewText = (dueAt: string | null | undefined) => `Re-review: approval expired${dueAt ? ` ${shortDate(dueAt)}` : ""}`;
+
 export type ActivityStatus = "complete" | "in_progress" | "not_started" | "pending" | "needs_update" | "returned" | "rejected";
 export const ACTIVITY_STATUS: Record<ActivityStatus, { label: string; tone: Tone }> = {
   complete: { label: "Complete", tone: "ok" },
@@ -85,6 +91,8 @@ export interface ActivityInput {
   risks: Array<{ residual: unknown | null; controls: unknown[]; status: string }>;
   approvals: Array<{ status: string; approverUserId: string | null; requestedAt: string; decidedAt: string | null; dueAt?: string | null }>;
   approverName: (userId: string | null) => string | null;
+  /** the current round's required reviews under a review policy; empty/absent = one named approver */
+  reviews?: ReadonlyArray<{ roleId: string; roleName: string; status: string; deciderName: string | null; decidedAt: string | null }>;
 }
 
 export type ActivityTab = "questionnaire" | "screening" | "stack" | "risks" | "approvals";
@@ -161,6 +169,26 @@ export function deriveActivities(input: ActivityInput): Activity[] {
     action: { label: "Open risks", tab: "risks" },
   });
 
+  if (input.reviews && input.reviews.length > 0) {
+    const total = input.reviews.length;
+    input.reviews.forEach((review, i) => {
+      const status = signoffStatusOf(review.status);
+      const of = `review ${i + 1} of ${total}`;
+      activities.push({
+        key: `signoff:${review.roleId}`,
+        name: `Sign-off: ${review.roleName}`,
+        status,
+        detail: review.status === "pending"
+          ? `Awaiting a member of ${review.roleName} · ${of}`
+          : `${SIGNOFF_VERB[review.status] ?? ACTIVITY_STATUS[status].label}${review.deciderName ? ` by ${review.deciderName}` : ""} · ${of}`,
+        owner: review.deciderName ?? `${review.roleName} reviewers`,
+        lastUpdate: review.decidedAt,
+        action: { label: "Open approvals", tab: "approvals" },
+      });
+    });
+    return activities;
+  }
+
   const latest = input.approvals[0];
   const signoffStatus: ActivityStatus = !latest
     ? "not_started"
@@ -189,6 +217,9 @@ export function deriveActivities(input: ActivityInput): Activity[] {
   });
   return activities;
 }
+
+const signoffStatusOf = (status: string): ActivityStatus =>
+  status === "pending" ? "pending" : status === "approved" ? "complete" : status === "returned" ? "returned" : status === "denied" ? "rejected" : "in_progress";
 
 const cap = (s: string) => (s ? s[0]!.toUpperCase() + s.slice(1) : s);
 

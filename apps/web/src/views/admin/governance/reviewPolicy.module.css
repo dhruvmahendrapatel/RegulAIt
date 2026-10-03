@@ -1,0 +1,178 @@
+/* The review policy settings page: reviewer roles, reviews required per tier,
+   risk acceptors. Content sits on the kit's cards (ADR-0169: never body text
+   directly on the canvas gradient). */
+
+.lead {
+  margin: 0 0 var(--s2);
+  color: var(--rg-ink-label);
+  font-size: var(--text-md);
+}
+
+.roles {
+  display: grid;
+  gap: var(--s2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.role {
+  display: grid;
+  grid-template-columns: minmax(180px, 260px) 1fr auto;
+  gap: var(--s2);
+  align-items: start;
+  padding: var(--s2);
+  border: 1px solid var(--rg-line);
+  border-radius: var(--rg-r-md);
+  background: var(--rg-surface);
+}
+.roleRemove {
+  align-self: end;
+}
+
+.people {
+  display: grid;
+  gap: var(--s1);
+}
+.peopleLabel {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--rg-ink-label);
+}
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.person {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px 2px 10px;
+  border: 1px solid var(--rg-line-strong);
+  border-radius: var(--rg-r-pill);
+  background: var(--surface-2);
+  color: var(--rg-ink);
+  font-size: var(--text-sm);
+}
+.personRemove {
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  color: var(--rg-ink-muted);
+  font: inherit;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.personRemove:hover {
+  background: var(--rg-line);
+  color: var(--rg-ink);
+}
+.personRemove:focus-visible {
+  outline: 2px solid var(--rg-signal-ring);
+  outline-offset: 1px;
+}
+.none {
+  color: var(--rg-ink-muted);
+  font-size: var(--text-sm);
+}
+.addPerson {
+  max-width: 320px;
+}
+.error {
+  margin: 0;
+  color: var(--danger);
+  font-size: var(--text-sm);
+  font-weight: 550;
+}
+
+.tiers {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.tier {
+  display: grid;
+  grid-template-columns: minmax(160px, 220px) 1fr minmax(150px, 190px);
+  gap: var(--s2);
+  align-items: start;
+  padding: var(--s2) 0;
+  border-top: 1px solid var(--rg-line);
+}
+.tier:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+.tierName {
+  font-weight: 650;
+  color: var(--rg-ink);
+}
+.tierHint {
+  display: block;
+  margin-top: 2px;
+  color: var(--rg-ink-muted);
+  font-size: var(--text-sm);
+  font-weight: 400;
+}
+.tierRoles {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+.tierRoles legend {
+  padding: 0;
+  margin-bottom: 6px;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--rg-ink-label);
+}
+.checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+}
+.check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--rg-ink);
+  font-size: var(--text-md);
+}
+.tierCount {
+  display: block;
+  margin-top: 6px;
+  color: var(--rg-ink-muted);
+  font-size: var(--text-sm);
+}
+
+.footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--s2);
+}
+.footerNote {
+  margin: 0;
+  margin-right: auto;
+  color: var(--rg-ink-label);
+  font-size: var(--text-sm);
+}
+
+@media (max-width: 860px) {
+  .role,
+  .tier {
+    grid-template-columns: 1fr;
+  }
+}

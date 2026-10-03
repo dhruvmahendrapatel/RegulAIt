@@ -75,3 +75,31 @@ describe("conditions", () => {
     expect(conditionState({ ...c, status: "met" }).label).toBe("Met");
   });
 });
+
+describe("review rounds and re-review (ADR-0168 amendment)", () => {
+  it("one sign-off row per required review: role, reviewer, status", () => {
+    const rows = deriveActivities({
+      ...base,
+      reviews: [
+        { roleId: "privacy", roleName: "Privacy", status: "approved", deciderName: "Pat Privacy", decidedAt: "2026-10-02T10:00:00Z" },
+        { roleId: "security", roleName: "Security", status: "pending", deciderName: null, decidedAt: null },
+        { roleId: "model-risk", roleName: "Model risk", status: "returned", deciderName: "Mo Risk", decidedAt: "2026-10-02T11:00:00Z" },
+      ],
+    });
+    const signoffs = rows.filter((a) => a.key.startsWith("signoff"));
+    expect(signoffs.map((a) => [a.name, a.status, a.owner, a.detail])).toEqual([
+      ["Sign-off: Privacy", "complete", "Pat Privacy", "Approved by Pat Privacy · review 1 of 3"],
+      ["Sign-off: Security", "pending", "Security reviewers", "Awaiting a member of Security · review 2 of 3"],
+      ["Sign-off: Model risk", "returned", "Mo Risk", "Sent back by Mo Risk · review 3 of 3"],
+    ]);
+    // control: no reviews keeps the single named-approver row
+    expect(deriveActivities({ ...base, reviews: [] }).filter((a) => a.key.startsWith("signoff")).map((a) => a.name)).toEqual(["Sign-off"]);
+  });
+
+  it("a recertification reads as a re-review with the expiry date", () => {
+    const phase = phaseFor("under_review", { recertification: { dueAt: "2026-09-01T00:00:00" } });
+    expect(phase).toEqual({ current: 1, flag: { text: "Re-review: approval expired 1 Sep 2026", tone: "warn" } });
+    // control: an ordinary review round has no flag
+    expect(phaseFor("under_review", { recertification: null })).toEqual({ current: 1, flag: null });
+  });
+});

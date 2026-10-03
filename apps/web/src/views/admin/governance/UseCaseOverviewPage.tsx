@@ -2,7 +2,7 @@ import { useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../../../api/client";
-import type { DirectoryUser, UseCaseCondition, UseCaseLifecycleDetail } from "../../../api/types";
+import type { DirectoryUser, UseCaseCondition, UseCaseLifecycleDetail, UseCaseResubmission, UseCaseReview, UseCaseRiskAcceptance } from "../../../api/types";
 import { ago, frameworkLabel, humanize, plural, providerLabel } from "../../../api/format";
 import { useSession } from "../../../session/SessionContext";
 import { Badge, Button, Card, EmptyState, Field, Input, Select, Table, Tabs, type Tone } from "../../../ui/kit";
@@ -10,6 +10,8 @@ import { QueryGate, RemoveButton, useAction } from "../adminKit";
 import v from "../../views.module.css";
 import s from "./demoGovernance.module.css";
 import rec from "./record.module.css";
+import rr from "./recordRound.module.css";
+import { resubmitPath } from "./registryModel";
 import { DependencyGraphPanel } from "./DependencyGraphPanel";
 import { RiskLibraryPicker } from "./RiskLibraryPicker";
 import { AgentStewardshipLine } from "../integrations/AgentStewardship";
@@ -22,6 +24,7 @@ import {
   conditionState,
   deriveActivities,
   phaseFor,
+  reReviewText,
   shortDate,
   statusLabel,
   type Activity,
@@ -70,6 +73,9 @@ export default function UseCaseOverviewPage() {
   const expired = Boolean(lifecycle?.approvalExpired);
   const conditions = detail.data?.conditions ?? [];
   const openBlocking = conditions.filter((c) => c.status === "open" && c.blocking).length;
+  const recertification = lifecycle?.recertification ? { dueAt: lifecycle.recertificationDueAt ?? approvedUntil } : null;
+  const resubmission = status === "needs_info" && detail.data?.resubmission?.allowed ? detail.data.resubmission : null;
+  const acceptance = new Map((detail.data?.risks ?? []).filter((risk) => risk.acceptedByName || risk.acceptedAt).map((risk) => [risk.id, risk]));
 
   return (
     <QueryGate loading={overview.isLoading} error={overview.error} onRetry={() => void overview.refetch()}>
@@ -93,7 +99,9 @@ export default function UseCaseOverviewPage() {
                 <li className={`${rec.chip} ${data.screening.tier === "prohibited" ? rec["tone-danger"] : data.screening.tier === "high" ? rec["tone-warn"] : ""}`}>
                   <span className={rec.chipLabel}>EU AI Act</span> {data.screening.screened ? `${humanize(data.screening.tier)} tier` : "Not screened"}
                 </li>
-                {approvedUntil ? (
+                {recertification ? (
+                  <li className={`${rec.chip} ${rec["tone-warn"]}`}>{reReviewText(recertification.dueAt)}</li>
+                ) : approvedUntil ? (
                   expired
                     ? <li className={`${rec.chip} ${rec["tone-danger"]}`}>Approval expired {shortDate(approvedUntil)}</li>
                     : <li className={`${rec.chip} ${rec["tone-ok"]}`}><span className={rec.chipLabel}>Approval valid until</span> {shortDate(approvedUntil)}</li>
@@ -101,9 +109,10 @@ export default function UseCaseOverviewPage() {
                 <li className={rec.chip}><span className={rec.chipLabel}>Owner</span> {data.useCase.ownerName ?? "Unassigned"}</li>
               </ul>
             </div>
-            {data.useCase.workflowInstanceId ? (
+            {resubmission || data.useCase.workflowInstanceId ? (
               <div className={rec.bandActions}>
-                <Link className={rec.bandAction} to={`/workflows/${data.useCase.workflowInstanceId}`}>Open intake</Link>
+                {data.useCase.workflowInstanceId ? <Link className={rec.bandAction} to={`/workflows/${data.useCase.workflowInstanceId}`}>Open intake</Link> : null}
+                {resubmission ? <Link className={rr.bandPrimary} to={resubmitPath(id)}>Update and resubmit</Link> : null}
               </div>
             ) : null}
           </header>
@@ -118,13 +127,17 @@ export default function UseCaseOverviewPage() {
                 conditions={conditions}
                 conditionsLoaded={detail.isSuccess}
                 openBlocking={openBlocking}
+                recertification={recertification}
+                reviews={detail.data?.reviews ?? []}
+                resubmission={resubmission}
+                acceptance={acceptance}
                 userName={userName}
                 onTab={(next) => setParams({ tab: next })}
                 onRefresh={refresh}
               />
             ) : null}
             {tab === "frameworks" ? <FrameworksTab query={frameworks} /> : null}
-            {tab === "risks" ? <RisksTab useCaseId={id} risks={data.risks} onRefresh={refresh} /> : null}
+            {tab === "risks" ? <RisksTab useCaseId={id} risks={data.risks} acceptance={acceptance} onRefresh={refresh} /> : null}
             {tab === "stack" ? <StackTab data={data.stack} /> : null}
             {tab === "dependencies" ? <Card title="Dependencies and inherited risk"><DependencyGraphPanel useCaseId={id} /></Card> : null}
             {tab === "approvals" ? <ApprovalsTab approvals={data.approvals} userName={userName} /> : null}
@@ -144,6 +157,10 @@ function OverviewTab(props: {
   conditions: UseCaseCondition[];
   conditionsLoaded: boolean;
   openBlocking: number;
+  recertification: { dueAt: string | null } | null;
+  reviews: UseCaseReview[];
+  resubmission: UseCaseResubmission | null;
+  acceptance: Map<string, UseCaseRiskAcceptance>;
   userName: (userId: string | null) => string | null;
   onTab: (tab: string) => void;
   onRefresh: () => Promise<void>;
@@ -163,10 +180,13 @@ function OverviewTab(props: {
     risks: data.risks,
     approvals: data.approvals,
     approverName: props.userName,
+    reviews: props.reviews,
   });
-  const phase = phaseFor(props.status, { approvalExpired: props.expired, openBlocking: props.openBlocking });
+  const phase = phaseFor(props.status, { approvalExpired: props.expired, openBlocking: props.openBlocking, recertification: props.recertification });
+  const accepted = data.risks.filter((risk) => props.acceptance.has(risk.id));
   const act = (activity: Activity) => {
     const { tab } = activity.action;
+    if (tab === "questionnaire" && props.resubmission) return <Link className={rec.actionLink} to={resubmitPath(data.useCase.id)}>{activity.action.label}</Link>;
     if (tab === "questionnaire") return data.useCase.workflowInstanceId
       ? <Link className={rec.actionLink} to={`/workflows/${data.useCase.workflowInstanceId}`}>{activity.action.label}</Link>
       : <span className={v.faint}>—</span>;
@@ -175,7 +195,17 @@ function OverviewTab(props: {
   };
   return (
     <div className={v.stack}>
-      {props.expired && props.approvedUntil ? (
+      {props.resubmission ? (
+        <p className={rr.returned} role="note">
+          <strong>Sent back for information{props.resubmission.returnedByName ? ` by ${props.resubmission.returnedByName}` : ""}.</strong>{" "}
+          {props.resubmission.returnReason ?? "No reason was recorded."}
+        </p>
+      ) : null}
+      {props.recertification ? (
+        <p className={rr.returned} role="note">
+          The approval expired{props.recertification.dueAt ? ` on ${shortDate(props.recertification.dueAt)}` : ""}, so the use case is back in review. It cannot be deployed until it is approved again.
+        </p>
+      ) : props.expired && props.approvedUntil ? (
         <p className={rec.expired} role="note">
           The approval expired on {shortDate(props.approvedUntil)}. The use case needs a new review before it can be deployed again.
         </p>
@@ -207,6 +237,23 @@ function OverviewTab(props: {
           ]}
         />
       </Card>
+      {accepted.length > 0 ? (
+        <Card title="Accepted risks">
+          <ul className={rr.accepted}>
+            {accepted.map((risk) => {
+              const a = props.acceptance.get(risk.id)!;
+              return (
+                <li key={risk.id}>
+                  <span className={rr.acceptedTitle}>{risk.title}</span>
+                  <span className={rr.acceptedBy}>
+                    Accepted by {a.acceptedByName ?? "a risk acceptor"}{a.acceptedAt ? ` on ${shortDate(a.acceptedAt)}` : ""}{a.acceptanceRationale ? ` · ${a.acceptanceRationale}` : ""}
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+        </Card>
+      ) : null}
       <ConditionsCard
         useCaseId={data.useCase.id}
         ownerUserId={data.useCase.ownerUserId ?? null}
@@ -330,7 +377,7 @@ function FrameworksTab({ query }: { query: ReturnType<typeof useQuery<Frameworks
 /** open is the state that needs attention; mitigating and accepted are decided workflow states */
 const RISK_STATUS_TONE: Record<string, Tone> = { open: "warn", mitigating: "neutral", accepted: "neutral", closed: "ok" };
 
-function RisksTab({ useCaseId, risks, onRefresh }: { useCaseId: string; risks: OverviewRisk[]; onRefresh: () => Promise<void> }) {
+function RisksTab({ useCaseId, risks, acceptance, onRefresh }: { useCaseId: string; risks: OverviewRisk[]; acceptance: Map<string, UseCaseRiskAcceptance>; onRefresh: () => Promise<void> }) {
   const action = useAction();
   const [controlRefs, setControlRefs] = useState<Record<string, string>>({});
   const [residuals, setResiduals] = useState<Record<string, { likelihood: string; impact: string }>>({});
@@ -339,6 +386,7 @@ function RisksTab({ useCaseId, risks, onRefresh }: { useCaseId: string; risks: O
       {risks.length === 0 ? <EmptyState title="No risks linked to this use case" body="Add a scenario from the library to make the inherent and residual position explicit." /> : risks.map((risk) => {
         const draft = residuals[risk.id] ?? { likelihood: risk.residual?.likelihood ?? "", impact: risk.residual?.impact ?? "" };
         return <Card key={risk.id} title={risk.title} actions={<div className={v.row}><span className={v.faint}>{risk.dimension}</span><Badge tone={RISK_STATUS_TONE[risk.status] ?? "neutral"}>{risk.status}</Badge></div>}><div className={v.stack}>
+          {acceptance.has(risk.id) ? (() => { const a = acceptance.get(risk.id)!; return <p className={rr.acceptedBy}>Accepted by {a.acceptedByName ?? "a risk acceptor"}{a.acceptedAt ? ` on ${shortDate(a.acceptedAt)}` : ""}{a.acceptanceRationale ? ` · ${a.acceptanceRationale}` : ""}</p>; })() : null}
           <p className={s.riskFlow}><span className={v.dim}>Inherent</span> <strong>{risk.inherent.likelihood} × {risk.inherent.impact}</strong> <span aria-hidden>→</span> <span className={v.dim}>Residual</span> <strong>{risk.residual ? `${risk.residual.likelihood} × ${risk.residual.impact}` : "unmeasured"}</strong></p>
           <div><strong>Linked controls</strong>{risk.controls.length === 0 ? <p className={v.dim}>No controls linked.</p> : risk.controls.map((control) => <div key={control.controlRef} className={v.listRow}><span className={v.grow}><code>{control.controlRef}</code><br /><span className={v.faint}>{control.title}</span></span><RemoveButton what={`control ${control.controlRef}`} consequence={<>The control link is removed from this risk. The risk and its audit history remain.</>} onRemove={() => api.del(`/v1/risks/${risk.id}/controls/${encodeURIComponent(control.controlRef)}`)} onDone={() => void onRefresh()} /></div>)}</div>
           <div className={s.libraryFilters}><Field label="Control reference" helpLabel="the mitigation link created here" help={<p>Enter the canonical reference of an existing control. Linking it records that this control mitigates the selected use-case risk; it does not by itself prove the control is implemented or evidenced.</p>}><Input value={controlRefs[risk.id] ?? ""} onChange={(event) => setControlRefs((current) => ({ ...current, [risk.id]: event.target.value }))} placeholder="Control reference" /></Field><Field label=" "><Button disabled={action.busy || !(controlRefs[risk.id] ?? "").trim()} onClick={() => void action.run(async () => { await api.post(`/v1/risks/${risk.id}/controls`, { controlRef: controlRefs[risk.id]!.trim() }); setControlRefs((current) => ({ ...current, [risk.id]: "" })); await onRefresh(); }, "Control linked")}>Link control</Button></Field></div>

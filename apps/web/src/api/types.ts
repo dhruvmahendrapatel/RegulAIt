@@ -415,6 +415,9 @@ export interface Approval {
   /** the AI use case an intake sign-off decides, when the gateway names it (not yet in the ADR-0168
    * contract — the review panel falls back to matching the use-case list by workflow instance) */
   useCaseId?: string | null;
+  /** ADR-0168 amendment: the reviewer role this intake review is for (one review per role the
+   * review policy requires for the tier); absent on the single named-approver path */
+  reviewRole?: { id: string; name: string } | null;
   /** ADR-0046 routing + SLA sidecar — absent when no routing rule is enabled */
   assignment?: {
     assigneeKind?: string;
@@ -673,9 +676,19 @@ export interface UseCaseLifecycleDetail {
     approvedAt?: string | null;
     approvedUntil?: string | null;
     approvalExpired?: boolean;
+    /** an expired approval moved back into review by the recertification sweep */
+    recertification?: boolean;
+    /** the approval's end (= approvedUntil) that started the re-review */
+    recertificationDueAt?: string | null;
     [key: string]: unknown;
   };
   conditions?: UseCaseCondition[];
+  /** one per required review in the current round; [] on the single named-approver path */
+  reviews?: UseCaseReview[];
+  /** risk rows with their acceptance, when a risk acceptor accepted residual risk */
+  risks?: UseCaseRiskAcceptance[];
+  /** what the registration screen needs to update and resubmit a use case sent back for information */
+  resubmission?: UseCaseResubmission;
 }
 
 export interface ApprovalConditionInput {
@@ -690,6 +703,92 @@ export interface DecideApprovalBody {
   decision: "approved" | "denied" | "returned";
   reason?: string;
   conditions?: ApprovalConditionInput[];
+  /** only with `approved`, only from a risk acceptor named in the review policy */
+  acceptRisks?: AcceptRisksInput;
+}
+
+export interface AcceptRisksInput {
+  riskIds: string[];
+  /** 10..2000 characters */
+  rationale: string;
+}
+
+// ---- review policy and the review round (ADR-0168 amendment, afternoon) ----
+
+export type ReviewTier = "minimal" | "limited" | "high" | "prohibited" | "unscreened";
+
+/** a reviewer role: any member may decide that role's review */
+export interface ReviewerRole {
+  /** slug, [a-z0-9-]{2,40} */
+  id: string;
+  name: string;
+  memberUserIds: string[];
+}
+
+export interface ReviewTierPolicy {
+  /** each role listed is ONE required review */
+  roleIds: string[];
+  /** 1..36 — overrides the default approval lifetime for the tier */
+  validityMonths: number;
+}
+
+/** GET /v1/governance/review-policy (any signed-in user) */
+export interface ReviewPolicy {
+  roles: ReviewerRole[];
+  tiers: Partial<Record<ReviewTier, ReviewTierPolicy>>;
+  riskAcceptorUserIds: string[];
+  updatedAt: string | null;
+  updatedByName: string | null;
+}
+
+/** PUT /v1/governance/review-policy (admin) */
+export interface ReviewPolicyInput {
+  roles: ReviewerRole[];
+  tiers: Partial<Record<ReviewTier, ReviewTierPolicy>>;
+  riskAcceptorUserIds: string[];
+}
+
+export type UseCaseReviewStatus = "pending" | "approved" | "returned" | "denied";
+
+export interface UseCaseReview {
+  roleId: string;
+  roleName: string;
+  status: UseCaseReviewStatus;
+  deciderName: string | null;
+  decidedAt: string | null;
+  approvalId: string;
+}
+
+export interface UseCaseRiskAcceptance {
+  id: string;
+  title?: string;
+  status?: string;
+  acceptedByName?: string | null;
+  acceptedAt?: string | null;
+  acceptanceRationale?: string | null;
+}
+
+/** the structured EU AI Act screening answers (the shared euAiActAnswersSchema) */
+export interface EuAiActScreeningAnswers {
+  purposeDomain: string;
+  affectedPersons: string[];
+  decisionAutonomy: string;
+  biometricUse: string;
+  emotionRecognition: boolean;
+  socialScoring: boolean;
+  manipulativeTechniques: boolean;
+  profilesNaturalPersons: boolean;
+  safetyComponent: boolean;
+  interactsWithHumans: boolean;
+  generatesSyntheticContent: boolean;
+}
+
+export interface UseCaseResubmission {
+  allowed: boolean;
+  screeningAnswers: EuAiActScreeningAnswers | null;
+  questionnaire: { version: number; content: string } | null;
+  returnReason: string | null;
+  returnedByName: string | null;
 }
 
 /** GET /v1/users/directory — ids, names and teams only; readable by every signed-in user */
