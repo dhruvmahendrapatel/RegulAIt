@@ -117,7 +117,8 @@ for (const c of FAILING_LISTS) {
     await page.goto(c.page);
     const alert = page.getByRole("alert").filter({ hasText: "Couldn't load this list" });
     await expect(alert).toBeVisible();
-    await expect(alert).toContainText("internal — database unavailable");
+    await expect(alert).toContainText("Something went wrong on the server");
+    await expect(alert).toContainText("— database unavailable");
     expect(await page.getByText(c.empty, { exact: true }).count()).toBe(0);
     // Retry re-asks the server; once it answers, the rows replace the error
     failing = false;
@@ -144,4 +145,47 @@ test("UXJ-06: the intake opens blank — the worked example is loaded only on re
   await expect(page.getByLabel("Use-case name")).toHaveValue("Credit-limit-increase assistant");
   await expect(page.getByLabel("Social scoring")).toHaveValue("no");
   await expect(page.getByRole("button", { name: "Draft suggestions" })).toBeEnabled();
+});
+
+test("UIA-03 / UIB-02: a 400 validation refusal reads as field sentences — no raw zod text, no doubled code", async ({ page }) => {
+  await routeApi(page, async (route, p, method) => {
+    if (p === "/auth/me") return json(route, authMe(USER_A));
+    if (p === "/v1/me") return json(route, { userId: USER_A.id, isAdmin: true, user: USER_A });
+    if (p === "/v1/chatops/connections" && method === "POST")
+      return json(route, { error: "validation", issues: [
+        { path: ["name"], message: "String must contain at least 1 character(s)" },
+        { path: ["connectorId"], message: "Invalid uuid" },
+        { path: ["signingSecret"], message: "String must contain at least 8 character(s)" },
+      ] }, 400);
+    if (p === "/v1/chatops/connections") return json(route, { connections: [], posture: "" });
+    if (p === "/v1/chatops/identity-links") return json(route, { links: [], posture: "" });
+    if (p === "/v1/connectors") return json(route, { connectors: [] });
+    return json(route, {});
+  });
+  await page.goto("/ui/admin/chatops");
+  await page.getByRole("button", { name: "Connect", exact: true }).click();
+  const shown = page.getByText("Name is required; Connector ID is not a valid ID; Signing secret must be at least 8 characters").first();
+  await expect(shown).toBeVisible();
+  expect(await page.getByText(/validation —/).count()).toBe(0);
+  expect(await page.getByText(/character\(s\)|Invalid uuid/).count()).toBe(0);
+});
+
+test("UIB-02: a negative virtual-key budget is refused on the form before any request is sent", async ({ page }) => {
+  let posted = 0;
+  await routeApi(page, async (route, p, method) => {
+    if (p === "/auth/me") return json(route, authMe(USER_A));
+    if (p === "/v1/me") return json(route, { userId: USER_A.id, isAdmin: true, user: USER_A });
+    if (p === "/v1/virtual-keys" && method === "POST") { posted += 1; return json(route, { error: "validation", issues: [] }, 400); }
+    if (p === "/v1/virtual-keys") return json(route, { keys: [] });
+    if (p === "/v1/users") return json(route, { users: [] });
+    return json(route, {});
+  });
+  await page.goto("/ui/admin/virtual-keys");
+  await page.getByTestId("vk-name").fill("ci-runner");
+  await page.getByTestId("vk-budget").fill("-5");
+  await expect(page.getByText("Must be 0 or more")).toBeVisible();
+  await expect(page.getByTestId("vk-issue")).toBeDisabled();
+  expect(posted).toBe(0);
+  await page.getByTestId("vk-budget").fill("5");
+  await expect(page.getByTestId("vk-issue")).toBeEnabled();
 });

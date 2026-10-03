@@ -348,10 +348,10 @@ export function useApiAction() {
       return value;
     } catch (e) {
       if (e instanceof ApiError) {
-        const reason =
-          (typeof e.payload.detail === "string" && e.payload.detail) ||
-          (typeof e.payload.message === "string" && e.payload.message) ||
-          e.message;
+        // e.message is already the readable refusal (code as a sentence, the
+        // field issues as prose); prefixing the code again produced
+        // "validation — validation — …" (UIB-02). The code stays on the badge.
+        const reason = e.message;
         const o: ApiOutcome = {
           ok: false,
           code: typeof e.payload.error === "string" ? e.payload.error : null,
@@ -360,7 +360,7 @@ export function useApiAction() {
           payload: e.payload as Record<string, unknown>,
         };
         setOutcome(o);
-        toast(`${o.code ?? `HTTP ${e.status}`} — ${reason}`, "error");
+        toast(reason, "error");
       } else {
         const msg = e instanceof Error ? e.message : String(e);
         setOutcome({ ok: false, code: null, status: null, reason: msg, payload: null });

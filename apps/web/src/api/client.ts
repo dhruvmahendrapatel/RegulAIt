@@ -10,6 +10,8 @@
  *    stays with the form that sent it — see isSessionLoss().
  */
 
+import { humanize } from "./format";
+
 export const CSRF_HEADER = "x-regulait-csrf";
 
 export interface ApiErrorPayload {
@@ -40,6 +42,49 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * A zod issue as a sentence an operator can act on. Zod's own wording
+ * ("String must contain at least 1 character(s)", "Invalid uuid") names the
+ * type system, not the field; the field key arrives camel-cased. Both reached
+ * the screen verbatim (UIA-03 / UIB-02). Anything this does not recognise is
+ * passed through unchanged — a hand-written refinement message ("first stage
+ * must be a trigger") is already prose.
+ */
+const ISSUE_PHRASES: Array<[RegExp, (m: RegExpMatchArray) => string]> = [
+  [/^Required$/, () => "is required"],
+  [/^String must contain at least (\d+) character\(s\)$/, (m) => (m[1] === "1" ? "is required" : `must be at least ${m[1]} characters`)],
+  [/^String must contain at most (\d+) character\(s\)$/, (m) => `must be at most ${m[1]} characters`],
+  [/^Array must contain at least (\d+) element\(s\)$/, (m) => (m[1] === "1" ? "needs at least one entry" : `needs at least ${m[1]} entries`)],
+  [/^Array must contain at most (\d+) element\(s\)$/, (m) => `can hold at most ${m[1]} entries`],
+  [/^Invalid uuid$/i, () => "is not a valid ID"],
+  [/^Invalid url$/i, () => "is not a valid URL"],
+  [/^Invalid email$/i, () => "is not a valid email address"],
+  [/^Invalid datetime$/i, () => "is not a valid date and time"],
+  [/^Number must be greater than or equal to (.+)$/, (m) => `must be ${m[1]} or more`],
+  [/^Number must be less than or equal to (.+)$/, (m) => `must be ${m[1]} or less`],
+  [/^Number must be greater than (.+)$/, (m) => `must be more than ${m[1]}`],
+  [/^Number must be less than (.+)$/, (m) => `must be less than ${m[1]}`],
+  [/^Expected (\w+), received (?:\w+)$/, (m) => `must be ${/^[aeiou]/i.test(m[1]!) ? "an" : "a"} ${m[1]}`],
+  [/^Invalid enum value\. Expected (.+), received .+$/, (m) => `must be one of ${m[1]!.replace(/'/g, "\u2018").replace(/\s*\|\s*/g, ", ").replace(/\u2018/g, "")}`],
+];
+
+/** `budgetUsd` → "Budget USD", `items.2.connectorId` → "Connector ID"; "" for the body itself */
+function fieldLabel(path: string): string {
+  const last = path.split(".").filter((seg) => seg && !/^\d+$/.test(seg)).pop() ?? "";
+  if (!last) return "";
+  return humanize(last.replace(/([a-z0-9])([A-Z])/g, "$1 $2").toLowerCase());
+}
+
+export function issueText(path: string, message: string): string {
+  const label = fieldLabel(path);
+  for (const [re, phrase] of ISSUE_PHRASES) {
+    const m = message.match(re);
+    if (m) return `${label || "This request"} ${phrase(m)}`;
+  }
+  const prose = message.replace(/^./, (c) => c.toUpperCase());
+  return label ? `${label}: ${message}` : prose;
+}
+
 /** every reason the server volunteered, most specific first (mirrors the
  * legacy UIs' shared errDetails so messages read identically). */
 function errDetails(json: ApiErrorPayload | null): string[] {
@@ -53,7 +98,7 @@ function errDetails(json: ApiErrorPayload | null): string[] {
       // JavaScript error instead of the reason the platform gave. A refusal
       // that cannot be rendered is, in practice, a refusal with no reason.
       const path = Array.isArray(i.path) ? i.path.join(".") : typeof i.path === "string" ? i.path : "";
-      out.push((path || "body") + ": " + i.message);
+      out.push(issueText(path, typeof i.message === "string" ? i.message : String(i.message)));
     }
   }
   if (typeof json.detail === "string") out.push(json.detail);
@@ -63,9 +108,39 @@ function errDetails(json: ApiErrorPayload | null): string[] {
   return out;
 }
 
+/**
+ * The gateway's bare refusal codes as sentences (UXJ-04). The code itself
+ * stays on `payload.error` for the callers that branch on it and for the
+ * outcome badge; this is only what a person reads.
+ */
+const CODE_SENTENCES: Record<string, string> = {
+  unauthenticated: "Your session has ended — sign in again",
+  internal: "Something went wrong on the server — try again, and tell an administrator if it keeps happening",
+  internal_error: "Something went wrong on the server — try again, and tell an administrator if it keeps happening",
+  conflict: "This conflicts with a record that already exists",
+  unavailable: "This record isn't available — it may not exist, or it may belong to someone else",
+  not_found: "No such record",
+  unknown_project: "No project with this ID exists",
+  not_a_project_member: "You're not a member of this project",
+  forbidden: "Your account doesn't have permission for this",
+  admin_only: "Only an administrator can do this",
+  rate_limited: "Too many requests — wait a moment and try again",
+  network: "Couldn't reach the server — check your connection and try again",
+};
+/** codes whose details already say everything; the code adds nothing a reader needs */
+const DETAILS_SUFFICE = new Set(["validation", "not_found"]);
+
+/** a refusal code as words: a known one as its sentence, any other as `humanize(code)` */
+export function codeSentence(code: string): string {
+  if (/^HTTP \d+$/.test(code)) return code;
+  return CODE_SENTENCES[code] ?? humanize(code);
+}
+
 export function errMessage(status: number, json: ApiErrorPayload | null): string {
-  const head = (json && json.error) || "HTTP " + status;
+  const code = json && typeof json.error === "string" && json.error ? json.error : "HTTP " + status;
   const details = errDetails(json);
+  if (details.length && DETAILS_SUFFICE.has(code)) return details.join("; ");
+  const head = codeSentence(code);
   return details.length ? head + " — " + details.join("; ") : head;
 }
 
@@ -121,15 +196,21 @@ export function isSessionLoss(path: string, payload: ApiErrorPayload | null): bo
 }
 
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const res = await fetch(path, {
-    method,
-    credentials: "include",
-    headers: {
-      [CSRF_HEADER]: "1",
-      ...(body !== undefined ? { "content-type": "application/json" } : {}),
-    },
-    ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-  });
+  let res: Response;
+  try {
+    res = await fetch(path, {
+      method,
+      credentials: "include",
+      headers: {
+        [CSRF_HEADER]: "1",
+        ...(body !== undefined ? { "content-type": "application/json" } : {}),
+      },
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+    });
+  } catch (cause) {
+    // the browser's "Failed to fetch" is not a reason anyone can act on
+    throw new Error(CODE_SENTENCES.network, { cause });
+  }
   if (res.status === 401) {
     const payload = await parseBody(res);
     if (isSessionLoss(path, payload)) onUnauthorized?.();

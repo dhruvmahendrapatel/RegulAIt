@@ -196,7 +196,7 @@ export default function CopilotPage() {
           <Input value={question} onChange={(e) => setQuestion(e.target.value)} />
         </Field>
         <div className={v.row}>
-          <Button variant="primary" disabled={askAct.busy} onClick={() => void ask()}>
+          <Button variant="primary" disabled={askAct.busy || !question.trim()} onClick={() => void ask()}>
             Ask
           </Button>
         </div>

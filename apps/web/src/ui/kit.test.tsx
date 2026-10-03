@@ -31,7 +31,8 @@ describe("Table — error versus empty", () => {
     const html = render({ error: new ApiError(500, { error: "internal", detail: "db unavailable" }), onRetry: () => {} });
     expect(html).toContain("role=\"alert\"");
     expect(html).toContain("Couldn&#x27;t load this list");
-    expect(html).toContain("internal — db unavailable");
+    expect(html).toContain("Something went wrong on the server");
+    expect(html).toContain("— db unavailable");
     expect(html).toContain(">Retry<");
     expect(html).not.toContain("No users yet");
   });

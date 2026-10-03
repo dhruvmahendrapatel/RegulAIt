@@ -405,5 +405,5 @@ test("ChatOps workspace alert threshold is editable and the exact post refusal i
   await page.goto("/ui/admin/governance/alerts");
   await page.getByRole("button", { name: /inherits a HIGH rating/ }).click();
   await page.getByRole("button", { name: "Post to chat" }).click();
-  await expect(page.getByRole("alert")).toContainText("post_failed — see the chatops-alert-post-failed audit row");
+  await expect(page.getByRole("alert")).toContainText("Post failed — see the chatops-alert-post-failed audit row");
 });

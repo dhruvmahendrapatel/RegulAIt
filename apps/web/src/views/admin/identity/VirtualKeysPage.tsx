@@ -181,7 +181,10 @@ export default function VirtualKeysPage() {
     setEditExpires(k.expiresAt ? k.expiresAt.slice(0, 16) : "");
   };
 
+  // the native min="0" only colours the input; it never gated the submit (UIB-02)
+  const budgetError = budget.trim() !== "" && !(Number(budget) >= 0) ? "Must be 0 or more" : null;
   const issue = async () => {
+    if (budgetError) return;
     const body: Record<string, unknown> = { name: name.trim() };
     if (ownerId) body.userId = ownerId;
     if (restrict) body.allowedModels = parseAllowList(allowList);
@@ -300,7 +303,7 @@ export default function VirtualKeysPage() {
             </div>
 
             <div className={v.row}>
-              <Field label="Lifetime budget (USD) — blank means no per-key cap">
+              <Field label="Lifetime budget (USD) — blank means no per-key cap" error={budgetError}>
                 <Input
                   type="number"
                   min="0"
@@ -381,7 +384,7 @@ export default function VirtualKeysPage() {
             <div className={v.row}>
               <Button
                 variant="primary"
-                disabled={act.busy || !name.trim()}
+                disabled={act.busy || !name.trim() || budgetError !== null}
                 onClick={() => void issue()}
                 data-testid="vk-issue"
               >
