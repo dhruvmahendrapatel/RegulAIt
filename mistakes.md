@@ -1376,3 +1376,17 @@ against the registry manifest API (anonymous token + `/v2/<repo>/manifests/<tag>
 against the types it declares, never the types a neighbour happens to drag in: every workspace
 package that touches Node APIs lists `@types/node` itself.
 
+### M-064 (2026-10-03) - The local gate tested the gateway against a stale build of a shared package
+
+The full-gate script ran `pnpm -r test` first and `pnpm -r build` second (M-059's "build last"
+was written for CI's benefit). The gateway imports `@regulait/shared` from `packages/shared/dist`,
+so when a batch changed `packages/shared/src/mcp-discovery.ts` the suite measured the PREVIOUS
+build of it: two AER-020 tests went red for code that was already fixed. The same ordering would
+also pass a suite against a stale dist that hides a breaking shared change — a false green, which
+is the direction that matters.
+
+Rule: in any local gate, build every workspace package BEFORE the suite that consumes it (and
+again after the last edit, per M-059). A test file that imports a workspace package by name is
+testing that package's dist, not its src — say so in the gate's log line, and when a batch
+touches `packages/*/src`, treat a red in the consuming app as "rebuild first, then believe it".
+
