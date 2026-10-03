@@ -32,8 +32,20 @@ async function freshUser(page: Page, email: string, password: string) {
 }
 
 async function shotBoth(page: Page, name: string) {
+  // Screenshots only — never an assertion. Let transient toasts leave first so
+  // they do not sit on top of the content a slide is about (they auto-dismiss
+  // after ~4s); if one is still up after the wait, shoot anyway.
+  await page
+    .waitForFunction(
+      () => !Array.from(document.querySelectorAll('[aria-live="polite"]')).some((el) => getComputedStyle(el).position === "fixed" && el.childElementCount > 0),
+      null,
+      { timeout: 6_000 },
+    )
+    .catch(() => undefined);
   for (const theme of ["light", "dark"] as const) {
     await page.evaluate((next) => { document.documentElement.dataset.theme = next; localStorage.setItem("regulait.theme", next); window.scrollTo(0, 0); }, theme);
+    // let colour transitions finish so a shot never catches a half-switched theme
+    await page.waitForTimeout(300);
     await page.screenshot({ path: path.join(SHOTS, `${name}-${theme}.png`), fullPage: true });
   }
 }
