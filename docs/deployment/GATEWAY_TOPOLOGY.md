@@ -16,7 +16,10 @@ Adapter: [`integrations/kong/`](../../integrations/kong/) (a Kong plugin).
 > it is that **the upstream was never called**, measured by a counting upstream. Verified: an
 > entitled consumer reaches the upstream; a denied one does not; an `approval_required` is refused
 > with `x-regulait-decision: approval_required` rather than as a flat deny; a forged
-> `x-regulait-subject` naming a more-entitled user is ignored in all three case spellings; a PDP
+> `x-regulait-subject` naming a more-entitled user is refused in all three case spellings, when
+> duplicated, and from the consumer it names; unmapped, mis-mapped, nonexistent and deactivated
+> consumer identities are each refused with their own reason, and the ledger row keeps the Kong
+> consumer beside the subject it resolved to (AER-026); a PDP
 > that is unreachable, that answers non-200, or whose answer cannot be parsed each fail closed; and
 > the decision context the adapter claims to send is read back from the PDP's own `contextApplied`
 > ledger, including that `args` is NOT claimed. First green run 2026-09-27.

@@ -16,17 +16,30 @@
  *     UNCHANGED. Checking the client's status code is not enough — a 403
  *     rendered after the upstream already ran looks identical from the client
  *     side, and that is precisely the shape of the bug that shipped.
- *   - A FORGED `x-regulait-subject` is ignored. The first version of this
+ *   - A FORGED `x-regulait-subject` is REFUSED. The first version of this
  *     adapter preferred that header over the authenticated consumer, so anyone
  *     who could reach the route could be authorized as anyone. The test sends
- *     a header naming a DIFFERENT, MORE-ENTITLED user and requires the decision
- *     to be the one belonging to the authenticated consumer.
+ *     a header naming a DIFFERENT, MORE-ENTITLED user — once per case spelling,
+ *     twice in one request (AER-026: duplicate headers), and from the entitled
+ *     consumer too — and requires every one to be refused with its own reason
+ *     and zero upstream calls.
+ *   - THE IDENTITIES THE PLUGIN MUST REFUSE BEFORE ASKING (AER-026): a consumer
+ *     with no `custom_id`, one whose `custom_id` is an email rather than a user
+ *     id, one mapped to a UUID nobody has, and one mapped to a DEACTIVATED user
+ *     whose grant survives. Plus a subject header on a request with no
+ *     credential, on a plain route (key-auth refuses first) and on a route
+ *     whose key-auth has an `anonymous` fallback mapped to the entitled user —
+ *     the shape in which "no credential" still produces a consumer.
+ *   - THE LEDGER KEEPS THE KONG CONSUMER beside the resolved subject (AER-026),
+ *     read back from the PDP's own audit rows.
  *
  * Requires: docker, a built gateway, and a Postgres. Run by
  * .github/workflows/integrations.yml, which pins the Kong image.
  */
 import { execFileSync, execSync, spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -114,6 +127,42 @@ const api = async (method, url, body, headers = {}) => {
 
 const upstreamCount = async () =>
   (await api("GET", `http://127.0.0.1:${UPSTREAM_PORT}/__count`)).json.count;
+const upstreamLast = async () =>
+  (await api("GET", `http://127.0.0.1:${UPSTREAM_PORT}/__last`)).json.last;
+const upstreamReset = () => api("GET", `http://127.0.0.1:${UPSTREAM_PORT}/__reset`);
+
+/**
+ * A REQUEST WRITTEN BY HAND, for the cases `fetch` cannot express. The Fetch
+ * spec folds two values of one header into one comma-joined line, and Node's
+ * client normalises header-name case, so neither can send what an attacker
+ * can: the same protocol header twice, in two spellings, on two lines. The
+ * socket can. `Connection: close` so Kong ends the exchange and the whole
+ * response is what arrives before the close.
+ */
+const rawRequest = (port, pathname, headerLines) =>
+  new Promise((resolve, reject) => {
+    const sock = connect(port, "127.0.0.1");
+    let buf = "";
+    sock.on("connect", () => {
+      sock.write(
+        `GET ${pathname} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n` +
+          headerLines.map((l) => `${l}\r\n`).join("") +
+          "\r\n",
+      );
+    });
+    sock.on("data", (d) => (buf += d));
+    sock.on("error", reject);
+    sock.on("close", () => {
+      const head = buf.split("\r\n\r\n")[0] ?? "";
+      const [statusLine, ...lines] = head.split("\r\n");
+      const headers = {};
+      for (const line of lines) {
+        const i = line.indexOf(":");
+        if (i > 0) headers[line.slice(0, i).trim().toLowerCase()] = line.slice(i + 1).trim();
+      }
+      resolve({ status: Number((statusLine ?? "").split(" ")[1]), headers });
+    });
+  });
 
 let upstream, gateway, kongStarted = false;
 
@@ -216,6 +265,34 @@ async function main() {
     throw new Error(`could not create the approval rule: ${rule.status} ${JSON.stringify(rule.json).slice(0, 200)}`);
   }
 
+  // AER-026 — a DEACTIVATED subject whose grant survives. ADR-0022's
+  // deactivate-is-not-delete keeps every grant, which is exactly why the PDP
+  // has to refuse on the account's state rather than on its entitlements: an
+  // offboarded user with a Kong consumer still mapped to them is the realistic
+  // shape of this, and "sign-in is blocked" is not "the tools are blocked".
+  const disabled = (
+    await api("POST", `${base}/v1/users`, { email: `kong-disabled-${Date.now()}@kong.example`, displayName: "Kong disabled" }, boot)
+  ).json;
+  if (!disabled?.id) throw new Error(`could not create the deactivated subject: ${JSON.stringify(disabled).slice(0, 200)}`);
+  await api("POST", `${base}/v1/grants/tools`, { userId: disabled.id, serverId: server.id, toolName: tool.name }, boot);
+  const deactivated = await api("POST", `${base}/v1/users/${disabled.id}/deactivate`, { reason: "kong harness" }, boot);
+  if (deactivated.status !== 200) {
+    throw new Error(`could not deactivate the subject: ${deactivated.status} ${JSON.stringify(deactivated.json).slice(0, 200)}`);
+  }
+
+  // Kong's OWN ids for its consumers, declared rather than left to Kong's
+  // deterministic generation, so assertion (n) can check the exact identity
+  // the ledger recorded rather than only a username.
+  const kongIds = {
+    entitled: randomUUID(),
+    stranger: randomUUID(),
+    pending: randomUUID(),
+    unmapped: randomUUID(),
+    ambiguous: randomUUID(),
+    deleted: randomUUID(),
+    disabled: randomUUID(),
+    anonymous: randomUUID(),
+  };
 
   // ---- 4. Kong, DB-less, with the plugin mounted -------------------------
   // The declarative config is GENERATED because `custom_id` must carry a real
@@ -254,19 +331,63 @@ services:
       - name: origin-lie-route
         paths: ["/origin-lie"]
         strip_path: true
+      # AER-026 — a route whose key-auth falls back to an ANONYMOUS consumer
+      # when authentication fails, and that consumer is mapped to the entitled
+      # user. This is the shape in which "a subject header with no credential"
+      # still reaches the plugin with a consumer set: the plugin must notice
+      # that nobody presented anything and refuse, never decide as that user.
+      - name: anonymous-route
+        paths: ["/anonymous"]
+        strip_path: true
 consumers:
   - username: entitled
+    id: "${kongIds.entitled}"
     custom_id: "${entitled.id}"
     keyauth_credentials:
       - key: entitled-key
   - username: stranger
+    id: "${kongIds.stranger}"
     custom_id: "${stranger.id}"
     keyauth_credentials:
       - key: stranger-key
   - username: pending
+    id: "${kongIds.pending}"
     custom_id: "${pending.id}"
     keyauth_credentials:
       - key: pending-key
+  # AER-026 — the identities the plugin must refuse BEFORE asking anyone.
+  # No custom_id at all: nothing to decide about.
+  - username: unmapped
+    id: "${kongIds.unmapped}"
+    keyauth_credentials:
+      - key: unmapped-key
+  # A custom_id that is a human identity rather than the user's primary key.
+  # It is not a mapping to ONE user, and the PDP would refuse the question as
+  # malformed — which the plugin must report as a mapping error, not an outage.
+  - username: ambiguous
+    id: "${kongIds.ambiguous}"
+    custom_id: "${entitled.email}"
+    keyauth_credentials:
+      - key: ambiguous-key
+  # A well-formed user id that names nobody — the shape of a deleted identity
+  # in a product with no hard delete (ADR-0022): a consumer left pointing at an
+  # account that is gone, or that never existed here.
+  - username: deleted
+    id: "${kongIds.deleted}"
+    custom_id: "${randomUUID()}"
+    keyauth_credentials:
+      - key: deleted-key
+  # A deactivated user, grant intact.
+  - username: disabled
+    id: "${kongIds.disabled}"
+    custom_id: "${disabled.id}"
+    keyauth_credentials:
+      - key: disabled-key
+  # The anonymous fallback for anonymous-route: no credentials, and mapped to
+  # the ENTITLED user — the worst configuration an operator could ship.
+  - username: anonymous
+    id: "${kongIds.anonymous}"
+    custom_id: "${entitled.id}"
 plugins:
   - name: key-auth
     route: governed-route
@@ -350,6 +471,20 @@ plugins:
       # value: the declared one is false, and silently substituting the derived
       # one would override a policy intent nobody revisited.
       asserted_session_origin: "oidc"
+      timeout_ms: 2000
+  - name: key-auth
+    route: anonymous-route
+    config:
+      key_names: ["apikey"]
+      anonymous: "${kongIds.anonymous}"
+  - name: regulait-authz
+    route: anonymous-route
+    config:
+      # A WORKING PDP, so the refusal under test can only be the plugin's own.
+      pdp_url: "http://host.docker.internal:${GATEWAY_PORT}"
+      pdp_key: "{vault://env/regulait-pdp-key}"
+      server_id: "${server.id}"
+      tool_name: "${tool.name}"
       timeout_ms: 2000
 `;
   writeFileSync(path.join(dir, "kong.yml"), declarative);
@@ -449,33 +584,135 @@ plugins:
   console.log("\nassertions:");
 
   // (a) NO CREDENTIAL -> key-auth refuses, and nothing is proxied.
-  await api("GET", `http://127.0.0.1:${UPSTREAM_PORT}/__reset`);
+  await upstreamReset();
   let r = await fetch(proxy);
   check("an unauthenticated request never reaches the upstream",
     r.status === 401 && (await upstreamCount()) === 0, `status ${r.status}`);
+  // AER-026 — and a subject header changes nothing about that: with no
+  // credential there is no consumer, so the plugin never sees this request
+  // and key-auth's refusal stands.
+  r = await fetch(proxy, { headers: { "x-regulait-subject": entitled.id } });
+  check("a subject header on a request with NO credential is still refused by key-auth",
+    r.status === 401 && (await upstreamCount()) === 0, `status ${r.status}`);
 
   // (b) ALLOW -> the upstream IS reached. The control for every case below.
-  await api("GET", `http://127.0.0.1:${UPSTREAM_PORT}/__reset`);
+  await upstreamReset();
   r = await fetch(proxy, { headers: { apikey: "entitled-key" } });
   check("an entitled consumer reaches the upstream",
     r.status === 200 && (await upstreamCount()) === 1, `status ${r.status}, count ${await upstreamCount()}`);
+  // and what reached it carried none of our protocol headers — the upstream is
+  // the only place that claim can be checked
+  {
+    const last = await upstreamLast();
+    const leaked = Object.keys(last?.headers ?? {}).filter((h) => h.startsWith("x-regulait-"));
+    check("the proxied request carries no x-regulait-* header",
+      last !== null && leaked.length === 0, `leaked=${JSON.stringify(leaked)}`);
+  }
 
   // (c) DENY -> 403 AND zero upstream calls. This is the assertion the Envoy
   //     adapter would have failed while looking correct from the client side.
-  await api("GET", `http://127.0.0.1:${UPSTREAM_PORT}/__reset`);
+  await upstreamReset();
   r = await fetch(proxy, { headers: { apikey: "stranger-key" } });
   check("a denied consumer is refused AND the upstream is never called",
     r.status === 403 && (await upstreamCount()) === 0,
     `status ${r.status}, upstream count ${await upstreamCount()}`);
 
-  // (d) FORGED SUBJECT -> the header naming the entitled user must be ignored
-  //     for a request authenticated as the stranger.
-  await api("GET", `http://127.0.0.1:${UPSTREAM_PORT}/__reset`);
+  // (d) FORGED SUBJECT -> a header naming the entitled user is REFUSED, with
+  //     its own reason, whoever sends it. The stranger must not borrow an
+  //     entitlement; the entitled consumer must not get through either,
+  //     because "ignored" cannot be told from "honoured" in an access log and
+  //     a forgery attempt is something an operator should see.
+  await upstreamReset();
   for (const h of ["x-regulait-subject", "X-Regulait-Subject", "X-REGULAIT-SUBJECT"]) {
     r = await fetch(proxy, { headers: { apikey: "stranger-key", [h]: entitled.id } });
     check(`a forged ${h} does not borrow another user's entitlement`,
+      r.status === 403 && r.headers.get("x-regulait-reason") === "forged_protocol_header" &&
+        (await upstreamCount()) === 0,
+      `status ${r.status}, reason ${r.headers.get("x-regulait-reason")}, upstream count ${await upstreamCount()}`);
+  }
+  r = await fetch(proxy, { headers: { apikey: "entitled-key", "x-regulait-subject": entitled.id } });
+  check("a forged subject header is refused even from the consumer it names",
+    r.status === 403 && r.headers.get("x-regulait-reason") === "forged_protocol_header" &&
+      (await upstreamCount()) === 0,
+    `status ${r.status}, reason ${r.headers.get("x-regulait-reason")}, upstream count ${await upstreamCount()}`);
+
+  // (d2) DUPLICATE SUBJECT HEADERS (AER-026) — the same header twice, in two
+  //      spellings, on two lines, which `fetch` cannot send. Whichever line a
+  //      naive reader took, the request must be refused outright.
+  await upstreamReset();
+  for (const key of ["stranger-key", "entitled-key"]) {
+    const raw = await rawRequest(KONG_PROXY_PORT, "/governed/anything", [
+      `apikey: ${key}`,
+      `x-regulait-subject: ${entitled.id}`,
+      `X-Regulait-Subject: ${stranger.id}`,
+    ]);
+    check(`duplicate subject headers from ${key} are refused and never proxied`,
+      raw.status === 403 && raw.headers["x-regulait-reason"] === "forged_protocol_header" &&
+        (await upstreamCount()) === 0,
+      `status ${raw.status}, reason ${raw.headers["x-regulait-reason"]}, upstream count ${await upstreamCount()}`);
+  }
+
+  // (k) THE IDENTITIES REFUSED BEFORE ANYONE IS ASKED (AER-026). Each is a
+  //     consumer key-auth accepts, so the plugin — not the auth plugin — is
+  //     what refuses, and each names its refusal so an operator is sent to the
+  //     consumer mapping rather than to a policy.
+  for (const [key, reason, what] of [
+    ["unmapped-key", "consumer_not_mapped", "a consumer with no custom_id"],
+    ["ambiguous-key", "consumer_not_mapped", "a consumer whose custom_id is an email, not a user id"],
+  ]) {
+    await upstreamReset();
+    r = await fetch(proxy, { headers: { apikey: key } });
+    check(`${what} is refused as '${reason}' and never proxied`,
+      r.status === 403 && r.headers.get("x-regulait-reason") === reason && (await upstreamCount()) === 0,
+      `status ${r.status}, reason ${r.headers.get("x-regulait-reason")}, upstream count ${await upstreamCount()}`);
+  }
+  // the two the PDP has to answer: a well-formed id nobody has, and a
+  // deactivated account whose grant is still in place
+  for (const [key, reason, what] of [
+    ["deleted-key", "unknown_subject", "a consumer mapped to a user id nobody has"],
+    ["disabled-key", "subject_disabled", "a consumer mapped to a DEACTIVATED user with a live grant"],
+  ]) {
+    await upstreamReset();
+    r = await fetch(proxy, { headers: { apikey: key } });
+    check(`${what} is refused as '${reason}' and never proxied`,
+      r.status === 403 && r.headers.get("x-regulait-decision") === "deny" &&
+        r.headers.get("x-regulait-reason") === reason && (await upstreamCount()) === 0,
+      `status ${r.status}, reason ${r.headers.get("x-regulait-reason")}, upstream count ${await upstreamCount()}`);
+  }
+  // NON-VACUITY for the deactivated case: reactivate the account and the
+  // same consumer, key and grant are allowed — so the refusal above was the
+  // deactivation and not a missing entitlement.
+  {
+    const re = await api("POST", `${base}/v1/users/${disabled.id}/reactivate`, {}, boot);
+    await upstreamReset();
+    r = await fetch(proxy, { headers: { apikey: "disabled-key" } });
+    check("control: the same consumer is allowed once the account is reactivated",
+      re.status === 200 && r.status === 200 && (await upstreamCount()) === 1,
+      `reactivate ${re.status}, status ${r.status}, count ${await upstreamCount()}`);
+  }
+
+  // (m) A SUBJECT HEADER WITH NO CREDENTIAL, on the route whose key-auth falls
+  //     back to an anonymous consumer mapped to the ENTITLED user. Kong sets a
+  //     consumer here with no credential behind it; the plugin must refuse as
+  //     unauthenticated rather than decide as the user that consumer names.
+  {
+    const anon = `http://127.0.0.1:${KONG_PROXY_PORT}/anonymous/anything`;
+    await upstreamReset();
+    r = await fetch(anon);
+    check("no credential + an anonymous consumer mapped to a real user is refused as unauthenticated",
+      r.status === 403 && r.headers.get("x-regulait-reason") === "unauthenticated" && (await upstreamCount()) === 0,
+      `status ${r.status}, reason ${r.headers.get("x-regulait-reason")}, upstream count ${await upstreamCount()}`);
+    r = await fetch(anon, { headers: { "x-regulait-subject": entitled.id } });
+    check("and a subject header on that request is refused too, before anything else",
       r.status === 403 && (await upstreamCount()) === 0,
       `status ${r.status}, upstream count ${await upstreamCount()}`);
+    // the route itself works for a real credential, so the two refusals above
+    // are the plugin's and not a broken route
+    await upstreamReset();
+    r = await fetch(anon, { headers: { apikey: "entitled-key" } });
+    check("control: the anonymous-fallback route proxies a REAL credential",
+      r.status === 200 && (await upstreamCount()) === 1,
+      `status ${r.status}, count ${await upstreamCount()}`);
   }
 
   // (f) APPROVAL_REQUIRED — a DENY that is not a policy refusal (AER-034).
@@ -485,7 +722,7 @@ plugins:
   //     distinguishable from "never", because that distinction is the entire
   //     reason the approvals queue exists. Zero upstream calls, like every
   //     other refusal.
-  await api("GET", `http://127.0.0.1:${UPSTREAM_PORT}/__reset`);
+  await upstreamReset();
   r = await fetch(proxy, { headers: { apikey: "pending-key" } });
   check("an approval_required is refused, named in a header, and never proxied",
     r.status === 403 &&
@@ -497,7 +734,7 @@ plugins:
   //     unreachable case below — `res.status ~= 200` rather than `not res` —
   //     and the README claimed both. An answer the adapter will not act on must
   //     fail CLOSED.
-  await api("GET", `http://127.0.0.1:${UPSTREAM_PORT}/__reset`);
+  await upstreamReset();
   r = await fetch(`http://127.0.0.1:${KONG_PROXY_PORT}/pdp-500`, { headers: { apikey: "entitled-key" } });
   check("a PDP that answers non-200 fails CLOSED and proxies nothing",
     r.status >= 400 && (await upstreamCount()) === 0,
@@ -506,7 +743,7 @@ plugins:
   // (h) A PDP THAT ANSWERS UNPARSEABLY. The nastiest of the three: a 200 with a
   //     body the plugin cannot read is the shape most likely to be mistaken for
   //     success by a `if status == 200 then proceed` adapter.
-  await api("GET", `http://127.0.0.1:${UPSTREAM_PORT}/__reset`);
+  await upstreamReset();
   r = await fetch(`http://127.0.0.1:${KONG_PROXY_PORT}/pdp-junk`, { headers: { apikey: "entitled-key" } });
   check("a PDP whose answer cannot be parsed fails CLOSED and proxies nothing",
     r.status >= 400 && (await upstreamCount()) === 0,
@@ -517,13 +754,13 @@ plugins:
   //     each decision was actually computed on, so the ledger is the place to
   //     check it — asserting on the plugin's source would only restate the code.
   {
-    const rows = (await api("GET", `${base}/v1/audit?limit=50`, undefined, boot)).json.entries ?? [];
+    const rows = (await api("GET", `${base}/v1/audit?limit=200`, undefined, boot)).json.entries ?? [];
     const callouts = rows.filter((r) => (r.detail ?? {}).contextApplied !== undefined);
     const detail = callouts.length ? (callouts[0].detail ?? {}) : null;
     const applied = detail ? (detail.contextApplied ?? []) : null;
     check("the adapter sends the decision context it claims to",
       applied !== null && applied.includes("projectId") && applied.includes("principal"),
-      `contextApplied=${JSON.stringify(applied)} over ${callouts.length} callout row(s)`);
+      `contextApplied=${JSON.stringify(applied)} over ${callouts.length} callout row(s) in the newest 200`);
     // and it does NOT claim to send arguments, which it cannot map correctly —
     // an adapter that reported `args` without one would be the worse failure
     check("the adapter does not claim to send tool arguments it cannot map",
@@ -546,6 +783,24 @@ plugins:
     check("the PDP records the origin as an ASSERTION, not as evidence",
       applied !== null && applied.includes("principal.asserted"),
       `contextApplied=${JSON.stringify(applied)}`);
+
+    // (n) AER-026 — THE KONG CONSUMER, BESIDE THE SUBJECT IT RESOLVED TO. The
+    //     row's `userId` is what the mapping produced; `proxyConsumer` is what
+    //     it was produced FROM. The exact Kong id, not only the username,
+    //     because the username is what an operator would re-use by mistake.
+    const entitledRows = rows.filter(
+      (row) => row.userId === entitled.id && (row.detail ?? {}).proxyConsumer !== undefined,
+    );
+    const pc = entitledRows.length ? entitledRows[0].detail.proxyConsumer : null;
+    check("the ledger row carries the Kong consumer identity beside the resolved subject",
+      pc !== null && pc.id === kongIds.entitled && pc.username === "entitled",
+      `proxyConsumer=${JSON.stringify(pc)} on ${entitledRows.length} row(s) for the entitled subject`);
+    // and the DEACTIVATED subject's refusal is on the ledger under ITS consumer
+    const disabledRows = rows.filter((row) => row.userId === disabled.id && row.ruleId === "subject_disabled");
+    const dpc = disabledRows.length ? (disabledRows[0].detail ?? {}).proxyConsumer ?? null : null;
+    check("a deactivated subject's refusal is filed under the consumer that presented it",
+      dpc !== null && dpc.id === kongIds.disabled && dpc.username === "disabled",
+      `proxyConsumer=${JSON.stringify(dpc)} on ${disabledRows.length} subject_disabled row(s)`);
   }
 
   // (i2) AER-036 — A DECLARED ORIGIN THAT CONTRADICTS THE CREDENTIAL IS REFUSED.
@@ -554,7 +809,7 @@ plugins:
   //      the request must be refused — and, as with every other refusal here, the
   //      upstream must not be reached, because a 403 rendered after the upstream
   //      already ran is indistinguishable from a refusal on the client side.
-  await api("GET", `http://127.0.0.1:${UPSTREAM_PORT}/__reset`);
+  await upstreamReset();
   r = await fetch(`http://127.0.0.1:${KONG_PROXY_PORT}/origin-lie`, { headers: { apikey: "entitled-key" } });
   check("a declared session origin that contradicts the credential is REFUSED",
     r.status === 403 && (await upstreamCount()) === 0,
@@ -566,7 +821,7 @@ plugins:
     `reason=${r.headers.get("x-regulait-reason")}`);
   // NON-VACUITY: the entitled subject really is allowed on an equivalent route,
   // so this refusal is the contradiction and not a failed entitlement
-  await api("GET", `http://127.0.0.1:${UPSTREAM_PORT}/__reset`);
+  await upstreamReset();
   r = await fetch(`http://127.0.0.1:${KONG_PROXY_PORT}/governed`, { headers: { apikey: "entitled-key" } });
   check("control: the same subject and credential ARE allowed where nothing is contradicted",
     r.status === 200 && (await upstreamCount()) === 1,
@@ -578,7 +833,7 @@ plugins:
   //     LAST ON PURPOSE, and lettered out of sequence to say so: it KILLS the
   //     gateway, so every assertion that needs a live PDP — including (i), which
   //     reads the PDP's own ledger — has to have run already.
-  await api("GET", `http://127.0.0.1:${UPSTREAM_PORT}/__reset`);
+  await upstreamReset();
   gateway.kill("SIGKILL");
   await new Promise((r2) => setTimeout(r2, 1500));
   r = await fetch(proxy, { headers: { apikey: "entitled-key" } });

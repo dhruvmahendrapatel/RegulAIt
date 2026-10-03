@@ -2285,6 +2285,66 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       });
     }
 
+    // AER-026 — WHO ASKED, AND WHO THE PROXY SAYS THIS IS. Every row this
+    // route writes carries the same provenance, including the refusal below,
+    // so a deactivated subject's attempted access is attributable to the Kong
+    // consumer that presented it. `proxyConsumer` is the identity the proxy
+    // mapped FROM; `userId` on the row is what it mapped TO. Both, always:
+    // "which consumer was this?" is the first question asked when a mapping
+    // turns out to be wrong, and the row is the only place it can be answered.
+    const calloutProvenance = {
+      askedByUserId: req.authCtx.userId ?? null,
+      via: "authz_check",
+      // AER-027: which credential asked. A pdp virtual key is a distinct
+      // audit principal from an administrator doing the same thing by hand,
+      // and the ledger should not blur them.
+      credential: req.authCtx.via,
+      ...(req.authCtx.virtualKeyId ? { virtualKeyId: req.authCtx.virtualKeyId } : {}),
+      ...(body.proxyConsumer
+        ? { proxyConsumer: { id: body.proxyConsumer.id, username: body.proxyConsumer.username ?? null } }
+        : {}),
+    };
+
+    // AER-026 — THE SUBJECT MUST EXIST AND BE ACTIVE.
+    //
+    // The kernel decides from grants, roles and rules; it does not ask whether
+    // the user is still a user. On the dispatch path that question is answered
+    // before the kernel runs, at authentication: a deactivated user gets 401
+    // `user_disabled` and never reaches it. On THIS route the subject arrives
+    // in the body and is believed (ADR-0127 §3), so nothing had asked — and a
+    // deactivated user whose grants survive (ADR-0022: deactivate is not
+    // delete, every grant stays) was still `allow` to a proxy. Offboarding
+    // that stops sign-in but not the gateway in front of the tools is not
+    // offboarding. Same shape for a subject nobody has: an unknown tool is a
+    // deny rather than a 404 so a proxy has an answer it can route on, and an
+    // unknown subject is the same deny for the same reason.
+    const [subject] = await db
+      .select({ id: users.id, disabledAt: users.disabledAt })
+      .from(users)
+      .where(eq(users.id, body.userId));
+    if (!subject) {
+      return reply.status(200).send({
+        decision: "deny" satisfies AuthzDecision,
+        reason: "unknown_subject",
+      });
+    }
+    if (subject.disabledAt) {
+      await db.insert(auditLog).values({
+        userId: body.userId,
+        serverId: body.serverId,
+        toolName: body.toolName,
+        effect: "deny",
+        ruleId: "subject_disabled",
+        ruleChain: [],
+        reason: `subject deactivated at ${subject.disabledAt.toISOString()}: the callout refuses what sign-in refuses`,
+        detail: advisoryDetail({ ...calloutProvenance, contextApplied: [] }),
+      });
+      return reply.status(200).send({
+        decision: "deny" satisfies AuthzDecision,
+        reason: "subject_disabled",
+      });
+    }
+
     // AER-028 — THE SAME QUESTION THE DISPATCH WOULD ASK.
     //
     // These four were `undefined, null, null, undefined`, and the consequence
@@ -2362,13 +2422,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       ruleChain: decision.ruleChain,
       reason: decision.reason,
       detail: advisoryDetail({
-        askedByUserId: req.authCtx.userId ?? null,
-        via: "authz_check",
-        // AER-027: which credential asked. A pdp virtual key is a distinct
-        // audit principal from an administrator doing the same thing by hand,
-        // and the ledger should not blur them.
-        credential: req.authCtx.via,
-        ...(req.authCtx.virtualKeyId ? { virtualKeyId: req.authCtx.virtualKeyId } : {}),
+        ...calloutProvenance,
         contextApplied,
         // AER-036: the VALUE the decision ran on, not just that a field was
         // present. `contextApplied` is what crosses into a data plane and stays

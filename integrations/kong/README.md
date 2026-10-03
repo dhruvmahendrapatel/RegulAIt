@@ -54,7 +54,30 @@ curl -X POST http://localhost:8001/routes/<route>/plugins \
 The route also needs an authentication plugin, and each Kong consumer needs its
 `custom_id` set to the matching **RegulAIt user UUID**. An unmapped consumer is
 refused rather than guessed at: a wrong mapping is an authorization decision
-about the wrong person.
+about the wrong person. So is a consumer whose `custom_id` is anything other
+than a user UUID (an email, a username) — that is not a mapping to *one* user —
+and so is a consumer Kong set **without a credential**, which is what an
+`anonymous` fallback on the auth plugin produces when authentication failed:
+nobody presented anything, so nobody is decided about, whatever that consumer
+is mapped to (AER-026).
+
+Two refusals come from the PDP rather than the plugin, because only it can
+know: a `custom_id` that is a well-formed UUID **nobody has** (`unknown_subject`),
+and a **deactivated** user whose grants survive deactivation by design
+(`subject_disabled`, ADR-0022). Offboarding that stops sign-in but not the
+gateway in front of the tools would not be offboarding.
+
+Every decision row the PDP writes for this plugin carries the **Kong consumer
+identity** (`detail.proxyConsumer`: the consumer's `id` and `username`) beside
+the RegulAIt subject it resolved to, so "which consumer was this?" is
+answerable from the ledger when a mapping turns out to be wrong.
+
+**Inbound `x-regulait-*` headers are refused**, not stripped (`403`,
+`x-regulait-reason: forged_protocol_header`). The plugin sets two of them on
+its own refusals and reads none from a request, so a client has no legitimate
+reason to send one; the previous behaviour of clearing them and carrying on
+made a forgery attempt invisible and was only as safe as every later line of
+code. Duplicates and case variants are one check, by prefix.
 
 ## What is actually asserted
 
@@ -73,11 +96,22 @@ each refusal. That now runs on every change, and asserts exactly that for:
   route — a different plugin branch from the unreachable case);
 - a PDP whose answer is **unparseable** (a stub returning 200 with a body
   `cjson` cannot decode — the shape most likely to be mistaken for success);
-- a request with a forged `x-regulait-subject` (and its case variants), which
-  must be ignored entirely rather than merely overridden;
+- a request with a forged `x-regulait-subject` (each case variant, the header
+  twice in two spellings on one request, and from the very consumer it names),
+  each refused as `forged_protocol_header`;
+- the identities refused **before** anyone is asked (AER-026): a consumer with
+  no `custom_id` and one whose `custom_id` is an email (`consumer_not_mapped`);
+  a consumer mapped to a UUID nobody has (`unknown_subject`); a consumer mapped
+  to a **deactivated** user with a live grant (`subject_disabled`) — with the
+  control that reactivation lets the same consumer through;
+- a subject header on a request with **no credential**, on the governed route
+  (key-auth refuses first) and on a route whose key-auth has an `anonymous`
+  fallback mapped to the entitled user (the plugin refuses `unauthenticated`;
+  the control shows a real credential proxies on that route);
 - the **decision context** the plugin claims to send, read back from the PDP's
   own `contextApplied` ledger rather than from the plugin's source — including
-  that `args` is NOT claimed.
+  that `args` is NOT claimed — and the **Kong consumer identity** on the same
+  rows, beside the subject, for the allow and for the deactivated refusal.
 
 **Correction (2026-09-27, AER-034):** the three middle entries above —
 `approval_required`, non-200 and unparseable — were listed here before the

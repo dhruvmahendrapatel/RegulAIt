@@ -3584,6 +3584,28 @@ export const authzCheckRequestSchema = z.object({
       mfaCompleted: z.boolean().nullish(),
     })
     .optional(),
+
+  /**
+   * AER-026 — THE PROXY'S OWN NAME FOR THE SUBJECT, kept beside the subject.
+   *
+   * `userId` is the RegulAIt user the proxy RESOLVED its authenticated identity
+   * to (for Kong: the consumer's `custom_id`). A ledger that records only the
+   * result of that mapping cannot answer "which Kong consumer was this?" when
+   * a mapping turns out to be wrong — and a wrong mapping is an authorization
+   * decision about the wrong person, which is the first question an auditor
+   * asks. So the proxy also sends the identity it mapped FROM, and the row
+   * keeps both.
+   *
+   * PROVENANCE ONLY. It is never a decision input, never appears in
+   * `contextApplied`, and never crosses back into the response. Bounded so the
+   * ledger cannot be used as a dumping ground by whoever holds the PDP key.
+   */
+  proxyConsumer: z
+    .object({
+      id: z.string().min(1).max(128),
+      username: z.string().min(1).max(256).nullish(),
+    })
+    .optional(),
 });
 export type AuthzCheckRequest = z.infer<typeof authzCheckRequestSchema>;
 
