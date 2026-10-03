@@ -196,8 +196,30 @@ export function createDb(connectionString: string, override: Partial<DbPoolConfi
   // still fails through its promise exactly as before (the route logs its 500),
   // and the pool discards the dead client and dials a fresh one on next use.
   // This only stops the crash, and says it happened.
-  pool.on("connect", (client: { on(ev: "error", cb: (e: Error & { code?: string }) => void): void }) => {
+  //
+  // IT SPEAKS ONLY WHILE THE CLIENT IS CHECKED OUT. Being durable, the listener
+  // is also attached while the client sits idle — and an idle drop is already
+  // reported, once and accurately, by the pool's own `'error'` handler above.
+  // Speaking there too printed "lost mid-use … the in-flight query fails"
+  // beside "nothing in flight was affected" for every idle LB reset or
+  // failover: two contradictory lines about one event, the wrong one telling
+  // the operator a request failed when none did. So checkout is tracked with
+  // the pool's own `'acquire'` / `'release'` events (both emitted
+  // synchronously, around exactly the window in which pg-pool strips its idle
+  // listener), and the mid-use line is printed only inside that window.
+  // Outside it the listener still exists — it is what stops the throw — but it
+  // stays silent and leaves the reporting to the idle handler.
+  type PooledClient = { on(ev: "error", cb: (e: Error & { code?: string }) => void): void };
+  const checkedOut = new WeakSet<PooledClient>();
+  pool.on("acquire", (client: PooledClient) => {
+    checkedOut.add(client);
+  });
+  pool.on("release", (_err: Error | undefined, client: PooledClient) => {
+    checkedOut.delete(client);
+  });
+  pool.on("connect", (client: PooledClient) => {
     client.on("error", (err) => {
+      if (!checkedOut.has(client)) return; // idle: the pool's handler above reports it
       console.error(
         `[regulait] postgres: a pooled connection was lost mid-use (${err.code ?? "no code"}: ${err.message}) — ` +
           "the in-flight query fails and the pool reconnects on next use; the serving process survives",
