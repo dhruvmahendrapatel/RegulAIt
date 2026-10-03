@@ -61,3 +61,31 @@ earlier reviewers never saw, and an agent's steward could lift a suspension an a
   reviewer returns or denies the round; the review panel can show a previous round after a
   resubmission drops to a tier with no roles; at runtime, open before-go-live conditions block the
   deploy gate, not dispatch.
+
+## Implementation (2026-10-03, evening)
+
+Built in three parallel, file-disjoint branches and integrated on `wt-sec-int`:
+
+- **Decide path** (`app.ts`, `workbench.ts`; `governance-sod.test.ts`, 10 cases): items 1, 2 and the decide-side
+  parts of 8. The distinct-decider check runs inside the decide transaction under the instance lock, so one person
+  racing two rows of a round serializes. A non-member deciding a role row without admin override keeps the existing
+  `not_the_named_approver` code. Claiming a review-role row records the claim without moving the approver.
+- **Use-case lifecycle** (`use-cases.ts`, `review-policy.ts`, `use-case-gate.ts`, migration 0133, web record page;
+  `governance-lifecycle-hardening.test.ts`, 8 cases): items 3–6 and the policy/sweep parts of 8. The backfill uses
+  the policy's `validityMonths` for the tier when set, else the runtime lifetime (12 months minimal/limited, 6
+  otherwise — stricter than "6 if high" for prohibited/unscreened, matching `approvalLifetimeMonths`). The use-case
+  detail exposes `canMarkMet` per condition; the record page asks "What was done" before closing a before-go-live
+  condition. The sweep's `skipped` rows keep the existing `{ id, reason }` shape.
+- **Steward lifecycle** (`agent-stewardship.ts`, `agents-connectors.ts`, web stewardship drawer; 7 gateway + 3 web
+  tests): item 7. Two refusals go beyond the text above, deliberately: suspended → under_review (under review still
+  dispatches, so it would lift the suspension) and deprecated → under_review. **One more bypass was found and
+  closed**: a request naming a suspended or retired agent that model routing down-routed to an active agent was
+  served; dispatch now refuses on the REQUESTED agent's lifecycle as well as the served one's.
+
+Every new test was run against the pre-fix sources and fails there.
+
+**Further known limits** (found while building, not fixed): an orchestration budget re-plan can substitute a
+task-graph node's agent at plan time without checking the planned agent's lifecycle (each worker dispatch is still
+gated); a steward can edit the reason text on an admin-imposed suspension without changing its status (audited);
+recording a stewardship review is not compare-and-swap against a concurrent retirement (it never changes the
+lifecycle status).
