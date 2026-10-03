@@ -191,6 +191,46 @@ describe("AER-045 late-completing spans are evaluated exactly once", () => {
     }
   });
 
+  it("the scan floor stays anchored on the first evaluation, so a span older than now-7d is still evaluated", async () => {
+    const DAY = 86_400_000;
+    const now = Date.now();
+    // the first evaluation ever written happened 30 days ago: evaluate a fresh
+    // span, then move its row's evaluated_at back. The floor is that anchor less
+    // the 7-day lookback (37 days ago) — not a sliding now-7d window, and not
+    // the newest evaluation.
+    const first = await insertSpan({ startedAt: new Date(now - 60_000), endedAt: new Date(now), inputPreview: "q", outputPreview: "ok" });
+    await sweepAll();
+    const [firstRow] = await evalRows([first]);
+    expect(firstRow).toBeDefined();
+    const anchorAt = new Date(now - 30 * DAY);
+    await db.update(traceEvaluations).set({ evaluatedAt: anchorAt }).where(eq(traceEvaluations.id, firstRow!.id));
+    try {
+      const [m] = (await db.execute(sql`select min(evaluated_at) as at from trace_evaluations`)).rows as Array<{ at: string | Date }>;
+      expect(new Date(m!.at).getTime(), "another row predates the anchor this test set").toBe(anchorAt.getTime());
+
+      // the scheduler was down / the writer was late: a completed span that
+      // started 10 days ago (older than now-7d, newer than the floor) lands now,
+      // beside one that started 40 days ago (older than the floor)
+      const stale = await insertSpan({ startedAt: new Date(now - 10 * DAY), endedAt: new Date(), inputPreview: "q", outputPreview: "Use AKIAIOSFODNN7EXAMPLE." });
+      const ancient = await insertSpan({ startedAt: new Date(now - 40 * DAY), endedAt: new Date(), inputPreview: "q", outputPreview: "ok" });
+      await sweepAll();
+      const rows = await evalRows([stale, ancient]);
+      expect(rows.map((r) => r.spanId)).toEqual([stale]);
+      expect(rows[0]).toMatchObject({ outcome: "evaluated", flagged: true });
+      expect(rows[0]!.spanStartedAt.getTime()).toBe(now - 10 * DAY);
+
+      // exactly once: a further pass leaves the row as it was
+      await sweepAll();
+      const after = await evalRows([stale, ancient]);
+      expect(after).toHaveLength(1);
+      expect(after[0]!.id).toBe(rows[0]!.id);
+      expect(after[0]!.evaluatedAt.getTime()).toBe(rows[0]!.evaluatedAt.getTime());
+    } finally {
+      // the database is shared: put the floor back where this file found it
+      await db.update(traceEvaluations).set({ evaluatedAt: firstRow!.evaluatedAt }).where(eq(traceEvaluations.id, firstRow!.id));
+    }
+  });
+
   it("two overlapping passes write one row and report the span once between them", async () => {
     const at = new Date();
     const target = await insertSpan({ startedAt: at, endedAt: at, inputPreview: "q", outputPreview: "Use AKIAIOSFODNN7EXAMPLE." });
