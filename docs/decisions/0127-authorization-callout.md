@@ -299,6 +299,6 @@ callout provenance, including the Kong consumer (`detail.proxyConsumer`) (`1aae7
 `2312d48`). The harness gained two routes bound to distinct server/tool pairs, per-run names and ports
 with ownership-checked teardown, and digest-pinned images (`2ecfcb6`, `0a103d8`, `4970d69`).
 
-**These harness cases are pending their first green Integrations run** (no Docker where they were
-written; a first draft declared two consumers with one `custom_id`, which Kong rejects at load — caught in
-review, fixed in `2312d48`). Record the run id here when it exists.
+**These harness cases passed their first green Integrations run: run 37110038871 at `8c0132b`
+(2026-10-03), all 47 assertions.** They were written without Docker; a first draft declared two consumers
+with one `custom_id`, which Kong rejects at load — caught in review, fixed in `2312d48`.

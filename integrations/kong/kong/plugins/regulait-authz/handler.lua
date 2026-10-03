@@ -8,13 +8,12 @@
 -- │ numbered 0.1.0-unverified then) was 36930442969 at 3a91a93. That code   │
 -- │ IGNORED a forged subject header; 0.3.0 refuses it instead.              │
 -- │                                                                          │
--- │ PENDING FIRST CI RUN — written but never yet run against a container,   │
--- │ so NOT verified until a green run id is recorded here: the AER-026       │
--- │ identity refusals (unmapped, non-uuid, unknown, deactivated, anonymous  │
--- │ fallback), duplicate and mixed-case protocol headers, the five-name      │
--- │ refusal with other x-regulait-* headers passed through, the truncated   │
--- │ header-scan refusal, the AER-030 second route and forged server/tool/   │
--- │ decision headers, and the AER-034 digest pin.                            │
+-- │ VERIFIED since run 37110038871 at 8c0132b (2026-10-03), the first green │
+-- │ run of the AER-026 identity refusals (unmapped, non-uuid, unknown,      │
+-- │ deactivated, anonymous fallback), duplicate and mixed-case protocol     │
+-- │ headers, the five-name refusal with other x-regulait-* headers passed   │
+-- │ through, the truncated header-scan refusal, the AER-030 second route and│
+-- │ forged server/tool/decision headers, and the AER-034 digest pin.        │
 -- │                                                                          │
 -- │ Covered precisely: Kong 3.6, DB-less, key-auth. The PRIORITY ordering   │
 -- │ below is version-specific, so a different Kong is unverified until the  │

@@ -9,9 +9,9 @@
 > plugin and harness as they were before the AER-026/030/033/034 changes was
 > run 36930442969 at `3a91a93`.
 >
-> **PENDING FIRST CI RUN — not verified until a green run id is recorded
-> here.** Everything below marked *(pending)* was written without Docker and
-> has never run against a container: the five-name protocol-header refusal
+> **The AER-026/030/033/034 cases are VERIFIED since run 37110038871 at
+> `8c0132b` (2026-10-03), their first green run — all 47 assertions passed:**
+> the five-name protocol-header refusal
 > (with other `x-regulait-*` headers passed through), the truncated-scan
 > refusal, the AER-026 identity refusals and ledger identity, the AER-030
 > second route and forged server/tool/decision headers, the AER-033 teardown
@@ -102,22 +102,21 @@ Per `mistakes.md` M-043, nothing in `integrations/` is called supported until
 its **deny path** is exercised end to end against a **pinned Kong container**
 with an **upstream invocation counter**, asserting **zero upstream calls** for
 each refusal. That now runs on every change, and asserts exactly that for the
-list below. Entries marked *(pending)* have not yet run against a container —
-see the box at the top:
+list below (every entry green since run 37110038871 — see the box at the top):
 
 - an unauthenticated request (`key-auth` refuses before this plugin runs);
 - a policy `deny`;
-- *(pending)* an allowed request carrying the documented client headers
+- an allowed request carrying the documented client headers
   (`x-regulait-project-id`, `x-regulait-agent-id`): it reaches the upstream,
   those headers arrive unchanged, and none of the five protocol headers does;
-- *(pending)* a forged subject hidden after 1000 padding headers: refused as
+- a forged subject hidden after 1000 padding headers: refused as
   `too_many_headers`, nothing proxied;
-- *(pending)* **two routes bound to distinct server/tool pairs** with crossed entitlements
+- **two routes bound to distinct server/tool pairs** with crossed entitlements
   (AER-030): the consumer entitled to tool A is allowed on route A and refused
   on route B, a second consumer the reverse — and the ledger shows each route
   asked about its own binding, which a plugin asking one question for every
   route could not produce;
-- *(pending)* forged `x-regulait-server-id` / `x-regulait-tool` / `x-regulait-decision` /
+- forged `x-regulait-server-id` / `x-regulait-tool` / `x-regulait-decision` /
   `x-regulait-reason` headers, each sent by the consumer the claim would have
   helped, each refused as `forged_protocol_header` with nothing proxied;
 - an **`approval_required`** — refused with a `403` AND carrying
@@ -132,12 +131,12 @@ see the box at the top:
   with a forged `x-regulait-subject` (each case variant, the header
   twice in two spellings on one request, and from the very consumer it names),
   each refused as `forged_protocol_header`;
-- *(pending)* the identities refused **before** anyone is asked (AER-026): a consumer with
+- the identities refused **before** anyone is asked (AER-026): a consumer with
   no `custom_id` and one whose `custom_id` is an email (`consumer_not_mapped`);
   a consumer mapped to a UUID nobody has (`unknown_subject`); a consumer mapped
   to a **deactivated** user with a live grant (`subject_disabled`) — with the
   control that reactivation lets the same consumer through;
-- *(pending)* a subject header on a request with **no credential**, on the
+- a subject header on a request with **no credential**, on the
   governed route (key-auth refuses first) and on a route whose key-auth has an
   `anonymous` fallback mapped to a user of its own whom the PDP allows on the
   tool (Kong requires `custom_id` to be unique across consumers, so it cannot
@@ -146,7 +145,7 @@ see the box at the top:
   that route;
 - the **decision context** the plugin claims to send, read back from the PDP's
   own `contextApplied` ledger rather than from the plugin's source — including
-  that `args` is NOT claimed — and *(pending)* the **Kong consumer identity**
+  that `args` is NOT claimed — and the **Kong consumer identity**
   on the same rows, beside the subject, for the allow and for the deactivated
   refusal.
 

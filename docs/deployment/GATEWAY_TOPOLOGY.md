@@ -6,7 +6,7 @@ Their proxy keeps the traffic; RegulAIt answers **"may this run?"** on each requ
 
 Adapter: [`integrations/kong/`](../../integrations/kong/) (a Kong plugin).
 
-> ### Kong: supported and VERIFIED (new cases pending their first CI run). Envoy: withdrawn, do not use.
+> ### Kong: supported and VERIFIED. Envoy: withdrawn, do not use.
 >
 > **Kong** is exercised — on any change to `integrations/`, to the gateway's source, to the
 > shared packages or to the lockfile, which are the places that can alter either side of this
@@ -25,8 +25,8 @@ Adapter: [`integrations/kong/`](../../integrations/kong/) (a Kong plugin).
 > cannot be parsed each fail closed; and the decision context the adapter claims to send is read
 > back from the PDP's own `contextApplied` ledger, including that `args` is NOT claimed.
 >
-> **Pending first CI run — written, never yet run against a container, so NOT verified until a
-> green run id is recorded here** (AER-026, AER-030, AER-034): a forged protocol header is
+> **Verified since run 37110038871 at `8c0132b`, 2026-10-03** (AER-026, AER-030, AER-033, AER-034 — first green run of these
+> cases; all 47 assertions passed): a forged protocol header is
 > **refused** (`forged_protocol_header`) in every case spelling, when duplicated, and from the
 > consumer it names, while the documented client headers (`x-regulait-project-id`,
 > `x-regulait-agent-id`) pass through to the upstream; a request with more headers than the
