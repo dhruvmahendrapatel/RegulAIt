@@ -1278,7 +1278,9 @@ export const approvals = pgTable(
     stageId: text("stage_id"),
     approverUserId: uuid("approver_user_id").notNull(),
     status: text("status", {
-      enum: ["pending", "approved", "denied", "consumed", "superseded"],
+      // ADR-0168: 'returned' — an intake sign-off sent back for information.
+      // No DB CHECK on this column (migration 0001), so a TS-only widening.
+      enum: ["pending", "approved", "denied", "returned", "consumed", "superseded"],
     })
       .notNull()
       .default("pending"),
@@ -7525,6 +7527,10 @@ export type TraceSpanRow = typeof traceSpans.$inferSelect;
 export const AI_USE_CASE_STATUSES = [
   "proposed",
   "under_review",
+  /** ADR-0168 (migration 0129): a reviewer SENT the intake back for
+   * information — the instance rests at its questionnaire stage until a new
+   * version is submitted, which re-requests the sign-off */
+  "needs_info",
   "approved",
   "rejected",
   "retired",
@@ -7578,6 +7584,12 @@ export const aiUseCases = pgTable(
     >(),
     euAiActRulesetVersion: integer("eu_ai_act_ruleset_version"),
     decidedAt: timestamp("decided_at", { withTimezone: true }),
+    /** ADR-0168 (migration 0129) — AN APPROVAL HAS A LIFETIME. Both set
+     * together by the approving sign-off (`syncUseCaseForInstance`):
+     * high/prohibited/unscreened tier → +6 months, minimal/limited → +12.
+     * Enforced at the deploy gate (`approval_expired`); not swept yet. */
+    approvedAt: timestamp("approved_at", { withTimezone: true }),
+    approvedUntil: timestamp("approved_until", { withTimezone: true }),
     retiredReason: text("retired_reason"),
     retiredAt: timestamp("retired_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -7585,6 +7597,10 @@ export const aiUseCases = pgTable(
   },
   (t) => [
     check("ai_use_cases_name_check", sql`length(btrim(${t.name})) > 0`),
+    check(
+      "ai_use_cases_approval_lifetime_check",
+      sql`(${t.approvedAt} IS NULL) = (${t.approvedUntil} IS NULL)`,
+    ),
     check(
       "ai_use_cases_eu_tier_consistency_check",
       sql`(${t.euAiActTier} IS NULL) = (${t.euAiActRulesetVersion} IS NULL) AND (${t.euAiActTier} IS NULL) = (${t.euAiActReasons} IS NULL)`,
@@ -7608,6 +7624,50 @@ export const aiUseCases = pgTable(
 );
 
 export type AiUseCaseRow = typeof aiUseCases.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0168 (migration 0129) — APPROVAL CONDITIONS ("approve with conditions").
+// Imposed by an intake sign-off, written in the decision's own transaction.
+// `blocking` = before go-live: the deploy gate refuses while it is open.
+// Not blocking = after go-live: tracked, shown overdue after `dueAt`, never
+// blocks. Marked met by the condition's owner, the use case's owner or an
+// admin (audited `use-case-condition-met`).
+// ---------------------------------------------------------------------------
+
+export const USE_CASE_CONDITION_STATUSES = ["open", "met", "waived"] as const;
+export type UseCaseConditionStatus = (typeof USE_CASE_CONDITION_STATUSES)[number];
+
+export const useCaseConditions = pgTable(
+  "use_case_conditions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    useCaseId: uuid("use_case_id")
+      .notNull()
+      .references(() => aiUseCases.id, { onDelete: "cascade" }),
+    /** the decision that imposed it */
+    approvalId: uuid("approval_id")
+      .notNull()
+      .references(() => approvals.id, { onDelete: "cascade" }),
+    text: text("text").notNull(),
+    ownerUserId: uuid("owner_user_id").references(() => users.id, { onDelete: "set null" }),
+    dueAt: timestamp("due_at", { withTimezone: true }).notNull(),
+    blocking: boolean("blocking").notNull(),
+    status: text("status", { enum: USE_CASE_CONDITION_STATUSES }).notNull().default("open"),
+    metAt: timestamp("met_at", { withTimezone: true }),
+    metByUserId: uuid("met_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    note: text("note"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("use_case_conditions_status_check", sql`${t.status} IN ('open', 'met', 'waived')`),
+    check("use_case_conditions_text_check", sql`length(btrim(${t.text})) BETWEEN 1 AND 500`),
+    check("use_case_conditions_met_check", sql`(${t.status} = 'open') = (${t.metAt} IS NULL)`),
+    index("use_case_conditions_use_case_idx").on(t.useCaseId, t.status),
+    index("use_case_conditions_approval_idx").on(t.approvalId),
+  ],
+);
+
+export type UseCaseConditionRow = typeof useCaseConditions.$inferSelect;
 
 // ---------------------------------------------------------------------------
 // ADR-0084 (migration 0088) — the AI vendor registry (third-party AI risk).
