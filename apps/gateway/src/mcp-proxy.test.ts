@@ -2126,10 +2126,16 @@ describe("git executor hardening (review follow-ups)", () => {
     });
     await approveCurrent("signoff");
 
-    // branch + open_pr replayed idempotently — same PR, no 422 wedge
+    // AER-049: the re-open is a new review round — branch + open_pr run again
+    // against a FRESH, round-named branch and a NEW PR (no 422 wedge on the
+    // round-0 branch, which already exists); round 0's branch/PR are history
     view = await app.inject({ method: "GET", headers: umaAuth, url: `/v1/workflows/instances/${instanceId}` });
     expect(view.json().instance.status).toBe("blocked_on_approval");
-    expect(view.json().instance.context.prId).toBe(prIdBefore);
+    expect(view.json().instance.round).toBe(1);
+    expect(view.json().instance.context.branch).toBe(`regulait/${String(instanceId).slice(0, 8)}-r1`);
+    expect(view.json().instance.context.prId).toBeTruthy();
+    expect(view.json().instance.context.prId).not.toBe(prIdBefore);
+    expect(view.json().instance.context["effects:history"][0]).toMatchObject({ round: 0, values: { prId: prIdBefore } });
     expect(view.json().instance.context.lastError).toBeUndefined();
 
     await approveCurrent("merge_gate");

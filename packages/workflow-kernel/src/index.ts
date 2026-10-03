@@ -516,6 +516,13 @@ export type WorkflowEvent =
   | { kind: "deploy_override"; stageId: string }
   // §2 a rollback stage finished reversing the deployment → terminal rolled_back.
   | { kind: "rolled_back"; stageId: string }
+  // AER-049 — a GENERIC re-open: the instance goes back to `stageId` (any
+  // stage before the current one) and runs forward from there, every stage
+  // from it on marked reopened. Unlike every other event it is accepted on a
+  // COMPLETED instance (a recertification re-opens an approved intake to its
+  // sign-off); aborted / denied / rolled_back stay terminal. `reason` says why
+  // (it is stored with the event).
+  | { kind: "reopen"; stageId: string; reason: string }
   | { kind: "abort" };
 
 /** side effects the caller (gateway) must perform after a transition */
@@ -686,6 +693,32 @@ export function transition(
   state: InstanceState,
   event: WorkflowEvent,
 ): TransitionResult {
+  // AER-049: the one event a COMPLETED instance accepts — checked before the
+  // terminal refusal below. Aborted / denied / rolled_back stay terminal.
+  if (event.kind === "reopen") {
+    if (state.status === "aborted" || state.status === "denied" || state.status === "rolled_back") {
+      throw new WorkflowStateError(`instance is terminal (${state.status}) and cannot be re-opened`);
+    }
+    const targetIndex = def.stages.findIndex((st) => st.id === event.stageId);
+    if (targetIndex < 0) throw new WorkflowStateError(`no stage '${event.stageId}'`);
+    if (targetIndex >= state.currentStageIndex) {
+      throw new WorkflowStateError(
+        `stage '${event.stageId}' is not before the current stage — only a stage already passed can be re-opened`,
+      );
+    }
+    const s: InstanceState = {
+      ...state,
+      status: "running",
+      stageStatuses: [...state.stageStatuses],
+      artifactVersions: { ...state.artifactVersions },
+    };
+    for (let i = targetIndex; i < s.stageStatuses.length; i++) {
+      if (s.stageStatuses[i] !== "pending") s.stageStatuses[i] = "reopened";
+    }
+    s.currentStageIndex = targetIndex;
+    return runForward(def, s);
+  }
+
   if (
     state.status === "completed" ||
     state.status === "aborted" ||
