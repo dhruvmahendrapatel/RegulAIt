@@ -63,6 +63,7 @@ import {
   loadCompiledEgressContext,
 } from "./compiled-egress.js";
 import { loadOrgSettings } from "./org-settings.js";
+import { networkFacingSignal } from "./dev-secrets.js";
 import { finishTrace, recordSpan, traceForRoot } from "./tracing.js";
 import { activeDelegatorsFor } from "./delegations.js";
 import {
@@ -450,6 +451,27 @@ export async function handleNestedRunCompletion(
   }
 }
 
+/** AER-047: the detail every auto-passed (opt-in, offline) check carries */
+export const CHECK_AUTO_PASSED_DETAIL = "auto-passed — no report (offline mode)";
+/** AER-047: the detail a check with no reported result carries while it waits */
+export const CHECK_PENDING_DETAIL = "pending — no result has been reported for this check";
+
+/** one evaluated check as it lands in context[`checks:<stageId>`] */
+type EvaluatedCheck = {
+  check: string;
+  /** "pending" (AER-047) = nobody reported it; the stage waits */
+  status: "passed" | "failed" | "pending";
+  severity: string | null;
+  detail: string;
+  /** AER-047: true ONLY when the template's offlineAutoPass opt-in passed a
+   * check nobody reported — every surface labels it */
+  autoPassed?: true;
+  selfReported?: true;
+  reportedByUserId?: string | null;
+  reason?: string | null;
+  eval?: Record<string, unknown>;
+};
+
 /** the shape one named check resolves to inside the check executor */
 interface CheckOutcome {
   check: string;
@@ -709,51 +731,59 @@ async function runGitExecutions(
     }
 
     // §2 stage 8: the check executor. Each named check resolves to a result:
-    // if a result was REPORTED for it (via POST .../checks — a real CI posts
-    // here; the seed/tests post here for the demo) that result wins, PASS or
-    // FAIL; otherwise it falls back to the deterministic offline auto-pass
-    // (byte-identical to the pre-fail-routing contract, so existing templates
-    // still sail through). A required check that FAILED parks the instance at
-    // blocked_on_check instead of advancing — the failure path deploy/rollback
-    // build on. Every result lands in instance.context so the rail and audit
-    // trail show WHAT was checked and how it fared, not just that it advanced.
+    // an eval-bound check (ADR-0044) by RUNNING its dataset; otherwise a result
+    // REPORTED for it (via POST .../checks — a real CI posts here; the seed and
+    // tests post here for the demo) wins, PASS or FAIL. A check NOBODY reported
+    // is PENDING (AER-047 / PENDING L1): it never passes on silence. Before
+    // AER-047 it fell back to a deterministic offline auto-pass, so a gate
+    // approved before CI posted sailed through with every check "passed".
+    //
+    //   - any FAILED check → check_failed (blocked_on_check, or the stage's
+    //     rollback target) — a reported failure blocks even while others wait;
+    //   - otherwise any PENDING check → the instance WAITS at
+    //     awaiting_execution (the claim is released, nothing advances), with an
+    //     audit row naming the missing checks; the next report re-evaluates;
+    //   - otherwise → execution_succeeded.
+    //
+    // A template may opt back into the offline behaviour ONLY through the typed
+    // stage field `offlineAutoPass: true`, and every auto-passed result says so
+    // (`autoPassed: true`, "auto-passed — no report (offline mode)") in the
+    // context, the audit trail, the rail and the approval view. On a box that
+    // shows a sign of being deployed the opt-in is IGNORED — production
+    // configuration cannot pass a check nobody ran.
     if (stage.type === "automated_check") {
-      const artifacts = await db
-        .select()
-        .from(workflowArtifacts)
-        .where(eq(workflowArtifacts.instanceId, instance.id))
-        .orderBy(desc(workflowArtifacts.version));
-      const latestByOutput = new Map<string, (typeof artifacts)[number]>();
-      for (const a of artifacts) if (!latestByOutput.has(a.output)) latestByOutput.set(a.output, a);
-      const subjects = [...latestByOutput.values()].map((a) => `${a.output} v${a.version}`);
-      const against = subjects.length ? subjects.join(", ") : "the built change set";
       const reported = normalizeCheckReports(context[`reported:${stage.id}`]);
       const byName = new Map(reported.map((r) => [r.check, r]));
       // ADR-0044: checks bound to an evaluation dataset are decided by RUNNING
       // it, here, under the instance initiator's entitlements — never by a
       // reported result (POST .../checks refuses to report against them) and
-      // never by the offline auto-pass. A regression produces status 'failed',
+      // never by an offline auto-pass. A regression produces status 'failed',
       // which then flows into the SAME check_failed event every other failing
       // check uses; there is no second failure path.
       const evalOutcomes = await runStageEvalChecks(db, instance, stage, dataKey);
-      const results = (stage.checks ?? []).map((name) => {
+      const deployedSignal = networkFacingSignal(process.env);
+      const autoPassHonoured = stage.offlineAutoPass === true && deployedSignal === null;
+      const results: EvaluatedCheck[] = (stage.checks ?? []).map((name): EvaluatedCheck => {
         const ev = evalOutcomes.get(name);
         if (ev) return ev;
         const rep = byName.get(name);
-        return rep
-          ? {
-              check: name,
-              status: rep.status,
-              severity: rep.severity ?? null,
-              detail: rep.detail ?? `reported ${rep.status}`,
-              // ADR-0167 (AUTHZ-06): the provenance rides into the evaluated
-              // result, so the rail and the approval view can say "the
-              // initiator reported this green" rather than showing CI's colour
-              ...(rep.selfReported
-                ? { selfReported: true, reportedByUserId: rep.reportedByUserId ?? null, reason: rep.reason ?? null }
-                : {}),
-            }
-          : { check: name, status: "passed" as const, severity: null, detail: `ran against ${against}` };
+        if (rep) {
+          return {
+            check: name,
+            status: rep.status,
+            severity: rep.severity ?? null,
+            detail: rep.detail ?? `reported ${rep.status}`,
+            // ADR-0167 (AUTHZ-06): the provenance rides into the evaluated
+            // result, so the rail and the approval view can say "the
+            // initiator reported this green" rather than showing CI's colour
+            ...(rep.selfReported
+              ? { selfReported: true, reportedByUserId: rep.reportedByUserId ?? null, reason: rep.reason ?? null }
+              : {}),
+          };
+        }
+        return autoPassHonoured
+          ? { check: name, status: "passed", severity: null, detail: CHECK_AUTO_PASSED_DETAIL, autoPassed: true }
+          : { check: name, status: "pending", severity: null, detail: CHECK_PENDING_DETAIL };
       });
       context[`checks:${stage.id}`] = results;
       if (evalOutcomes.size > 0) {
@@ -768,6 +798,48 @@ async function runGitExecutions(
         .set({ context })
         .where(eq(workflowInstances.id, instance.id));
       const failures = results.filter((r) => r.status === "failed").map((r) => r.check);
+      const missing = results.filter((r) => r.status === "pending").map((r) => r.check);
+      const autoPassed = results.filter((r) => r.autoPassed).map((r) => r.check);
+      if (failures.length === 0 && missing.length > 0) {
+        // WAIT. No kernel event: the instance stays awaiting_execution on THIS
+        // stage, which is exactly the state POST .../checks re-evaluates from,
+        // so the next reported result picks it up. Nothing advances on silence.
+        const refusedOptIn = stage.offlineAutoPass === true && deployedSignal !== null;
+        await db.insert(auditLog).values({
+          userId: actorUserId ?? "00000000-0000-0000-0000-000000000000",
+          objectType: "workflow",
+          objectId: instance.id,
+          detail: {
+            stageId: stage.id,
+            missingChecks: missing,
+            ...(refusedOptIn ? { offlineAutoPassRefused: true, deployedSignal } : {}),
+          },
+          effect: "allow",
+          ruleId: "workflow:checks-awaiting-report",
+          ruleChain: [],
+          reason:
+            `stage '${stage.id}' is waiting on ${missing.length} check(s) with no reported result: ${missing.join(", ")} — ` +
+            `a check nobody reported never passes; the stage re-evaluates when a result is posted` +
+            (refusedOptIn
+              ? ` (the template opts into offlineAutoPass, ignored because this box is deployed: ${deployedSignal})`
+              : ""),
+        });
+        break;
+      }
+      if (failures.length === 0 && autoPassed.length > 0) {
+        await db.insert(auditLog).values({
+          userId: actorUserId ?? "00000000-0000-0000-0000-000000000000",
+          objectType: "workflow",
+          objectId: instance.id,
+          detail: { stageId: stage.id, autoPassedChecks: autoPassed, offlineAutoPass: true },
+          effect: "allow",
+          ruleId: "workflow:checks-auto-passed",
+          ruleChain: [],
+          reason:
+            `stage '${stage.id}': ${autoPassed.length} check(s) auto-passed — no report (offline mode): ${autoPassed.join(", ")} — ` +
+            `the template opts into offlineAutoPass; nothing ran these checks`,
+        });
+      }
       const r =
         failures.length > 0
           ? await applyEvent(

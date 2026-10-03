@@ -896,6 +896,10 @@ describe("(7) block-on-regression at the workflow automated-check stage", () => 
               id: "checks",
               type: "automated_check",
               checks: ["unit_tests", "agent_quality"],
+              // AER-047: nothing reports unit_tests here, so the stage opts in
+              // to the labelled offline auto-pass. The opt-in never reaches an
+              // eval-bound check — that one is decided by running its dataset.
+              offlineAutoPass: true,
               evals: [
                 {
                   check: "agent_quality",
@@ -954,6 +958,10 @@ describe("(7) block-on-regression at the workflow automated-check stage", () => 
     expect(v.instance.status).toBe("blocked_on_approval"); // advanced to the final gate
     const checks = v.instance.context["checks:checks"] as Array<{ check: string; status: string }>;
     expect(checks.find((c) => c.check === "agent_quality")!.status).toBe("passed");
+    // AER-047: the eval-bound check was RUN, never auto-passed; the unreported
+    // one is labelled as the offline auto-pass it is
+    expect((checks.find((c) => c.check === "agent_quality") as { autoPassed?: boolean }).autoPassed).toBeUndefined();
+    expect((checks.find((c) => c.check === "unit_tests") as { autoPassed?: boolean }).autoPassed).toBe(true);
     const evals = v.instance.context["evals:checks"] as Record<string, { runId: string; regression: boolean }>;
     const quality = evals.agent_quality!;
     expect(quality.regression).toBe(false);
@@ -981,8 +989,9 @@ describe("(7) block-on-regression at the workflow automated-check stage", () => 
     expect(quality.status).toBe("failed");
     expect(quality.severity).toBe("high");
     expect(quality.detail).toMatch(/REGRESSION/);
-    // the unbound check still auto-passes — the eval binding changed nothing else
-    expect(checks.find((c) => c.check === "unit_tests")!.status).toBe("passed");
+    // the unbound check still auto-passes under the template's AER-047 offline
+    // opt-in — the eval binding changed nothing else — and it is labelled
+    expect(checks.find((c) => c.check === "unit_tests")!).toMatchObject({ status: "passed", autoPassed: true });
 
     const evals = v.instance.context["evals:checks"] as Record<
       string,

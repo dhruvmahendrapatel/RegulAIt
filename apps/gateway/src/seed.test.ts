@@ -25,6 +25,7 @@ import {
   sql,
   users,
   workflowInstances,
+  workflowTemplates,
   type Db,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
@@ -156,6 +157,28 @@ describe("seed script", () => {
     const ctx = rolled!.context as Record<string, { reverted?: string; deployId?: string }>;
     expect(ctx["deploy:deploy"]?.deployId).toBeDefined();
     expect(ctx["rollback:undo"]?.reverted).toBe(ctx["deploy:deploy"]!.deployId);
+  });
+
+  it("AER-047: the demo templates' check stages opt in to the labelled offline auto-pass EXPLICITLY, and the auto-passed precheck is labelled", async () => {
+    // The default is now "a check nobody reported is pending". The demo has no
+    // CI, so every check stage it drives through unreported carries the typed
+    // opt-in — nothing relies on a silent pass.
+    const templates = await scratch.select().from(workflowTemplates);
+    for (const name of ["complete-pipeline", "deploy-verify-pipeline"]) {
+      const tpl = templates.find((t) => t.name === name);
+      expect(tpl, `seeded template ${name}`).toBeDefined();
+      const checkStages = (tpl!.definition as { stages: Array<{ id: string; type: string; offlineAutoPass?: boolean }> })
+        .stages.filter((st) => st.type === "automated_check");
+      expect(checkStages.length).toBeGreaterThan(0);
+      for (const st of checkStages) expect(st.offlineAutoPass, `${name}.${st.id}`).toBe(true);
+    }
+    // the instance that sailed past an unreported precheck says so
+    const rows = await scratch.select().from(workflowInstances);
+    const parked = rows.find((r) => r.status === "blocked_on_deploy");
+    const pre = (parked!.context as Record<string, unknown>)["checks:precheck"] as Array<Record<string, unknown>>;
+    expect(pre).toEqual([
+      expect.objectContaining({ check: "preflight", status: "passed", autoPassed: true, detail: "auto-passed — no report (offline mode)" }),
+    ]);
   });
 
   // Item 4 (§8.3 headline): the cascade story must be live out of the box.

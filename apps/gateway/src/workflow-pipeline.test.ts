@@ -146,7 +146,9 @@ describe("complete pipeline: intake to merged through public endpoints only", ()
                 ],
               },
             },
-            { id: "checks", type: "automated_check", checks: ["unit_tests", "lint", "security_scan"] },
+            // AER-047: mirrors the demo seed — no CI reports here, so the stage
+            // opts in to the labelled offline auto-pass explicitly
+            { id: "checks", type: "automated_check", checks: ["unit_tests", "lint", "security_scan"], offlineAutoPass: true },
             { id: "branch", type: "git_operation", action: "create_branch", connection: "pipeline-e2e-git", repo: "pipee2e/app" },
             { id: "open_pr", type: "git_operation", action: "open_pr", connection: "pipeline-e2e-git", repo: "pipee2e/app" },
             { id: "merge_gate", type: "human_approval", approvers: [anaId] },
@@ -242,7 +244,8 @@ describe("complete pipeline: intake to merged through public endpoints only", ()
     expect(auto.json().status).toBe("completed");
 
     // run completion cascades WITHOUT further human triggers: build succeeds,
-    // the check executor records pass results, branch + PR run on the mock
+    // the check executor auto-passes the unreported checks (the template's
+    // AER-047 offline opt-in, labelled as such), branch + PR run on the mock
     // provider, and the instance parks at the merge gate.
     view = await instanceView(piaAuth, instanceId);
     const inst = view.json().instance;
@@ -251,7 +254,8 @@ describe("complete pipeline: intake to merged through public endpoints only", ()
     expect(ctx["checks:checks"]).toHaveLength(3);
     for (const result of ctx["checks:checks"]) {
       expect(result.status).toBe("passed");
-      expect(result.detail).toContain("requirements_file v1");
+      expect(result.autoPassed).toBe(true);
+      expect(result.detail).toBe("auto-passed — no report (offline mode)");
     }
     expect(ctx.branch).toBe(`regulait/${instanceId.slice(0, 8)}`);
     expect(ctx.prId).toBe("1");

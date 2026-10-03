@@ -93,7 +93,9 @@ async function registerTemplate(name: string, changeType: string, deployTarget: 
           { id: "intake", type: "trigger" },
           { id: "gate", type: "human_approval", approvers: [anaId] },
           { id: "deploy", type: "deployment", connection: deployTarget, environment: "production", ...(condition ? { condition } : {}) },
-          { id: "verify", type: "automated_check", checks: ["smoke"], onFailure: "rollback", rollbackStageId: "undo" },
+          // AER-047: tests that leave 'smoke' unreported rely on the labelled
+          // offline auto-pass, so the shape opts in explicitly
+          { id: "verify", type: "automated_check", checks: ["smoke"], onFailure: "rollback", rollbackStageId: "undo", offlineAutoPass: true },
           { id: "undo", type: "rollback", connection: deployTarget },
           { id: "done", type: "human_approval", approvers: [anaId] },
         ],

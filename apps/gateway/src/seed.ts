@@ -405,7 +405,8 @@ const sensitiveTpl = await ensureTemplate("sensitive-data", {
 
 // The complete-pipeline template (§2 end-to-end): intake → plan → requirements
 // artifact → Avery's sign-off → automated build as a NESTED RUN on the mock
-// agents → automated checks (mock check executor, recorded pass results) →
+// agents → automated checks (no CI in the demo: the stage opts in to the
+// labelled offline auto-pass, AER-047) →
 // branch → PR → merge gate (Avery) → squash merge. Git stages run against the
 // MOCK git provider — the whole chain is drivable with zero external
 // credentials. The connection token below is an obvious dummy, encrypted at
@@ -440,7 +441,11 @@ const pipelineTpl = await ensureTemplate("complete-pipeline", {
         ],
       },
     },
-    { id: "checks", type: "automated_check", checks: ["unit_tests", "lint", "security_scan"] },
+    // AER-047: the demo has no CI posting results, so this stage opts in to
+    // the labelled offline auto-pass explicitly — every result reads
+    // "auto-passed — no report (offline mode)" on the rail and in the merge
+    // gate. Without the opt-in an unreported check is pending and waits.
+    { id: "checks", type: "automated_check", checks: ["unit_tests", "lint", "security_scan"], offlineAutoPass: true },
     { id: "branch", type: "git_operation", action: "create_branch", connection: "demo-git", repo: "acme/checkout" },
     { id: "open_pr", type: "git_operation", action: "open_pr", connection: "demo-git", repo: "acme/checkout" },
     { id: "merge_gate", type: "human_approval", approvers: [averyId] },
@@ -980,7 +985,7 @@ if (!danaInstances.some((i: Json) => i.change?.description === DANA_CHANGE)) {
 
 // The complete-pipeline instance, parked at the SIGN-OFF gate so the demo can
 // drive the whole chain live: Avery approves in the Inbox → the nested build
-// run spawns (Dana auto-advances it from Runs) → checks record pass results →
+// run spawns (Dana auto-advances it from Runs) → checks auto-pass (labelled, offline opt-in) →
 // branch + PR open on the mock provider → the merge gate lands back in
 // Avery's Inbox → approve → squash-merged. Deliberately not pre-driven past
 // sign-off — everything after it happens on stage during the demo.
@@ -1109,12 +1114,15 @@ const CASCADE_CHANGE = "Redact and export the oncology cohort (PHI)";
       { id: "gate", type: "human_approval", approvers: [averyId] },
       // a pre-deploy gate check (default onFailure: block) — a failure here rests
       // the instance at blocked_on_check
-      { id: "precheck", type: "automated_check", checks: ["preflight"] },
+      // AER-047: instances 2 and 3 below reach the deploy without reporting
+      // 'preflight', so the demo opts in to the labelled offline auto-pass
+      // here (and on `verify`, which a deploy-override cascades into)
+      { id: "precheck", type: "automated_check", checks: ["preflight"], offlineAutoPass: true },
       // the governed deploy, conditioned on environment==production; a staging
       // change fails the condition and rests at blocked_on_deploy
       { id: "deploy", type: "deployment", connection: "demo-deploy", environment: "production", condition: { field: "environment", equals: "production" } },
       // the post-deploy verify: onFailure rollback routes straight to `undo`
-      { id: "verify", type: "automated_check", checks: ["smoke"], onFailure: "rollback", rollbackStageId: "undo" },
+      { id: "verify", type: "automated_check", checks: ["smoke"], onFailure: "rollback", rollbackStageId: "undo", offlineAutoPass: true },
       { id: "undo", type: "rollback", connection: "demo-deploy" },
       { id: "done", type: "human_approval", approvers: [averyId] },
     ],
@@ -1465,7 +1473,7 @@ ${pmWebhookSecret ? `\n    demo-pm webhook secret (shown ONCE)  ${pmWebhookSecre
     1. avery  Inbox → approve the sign-off (reads the artifact inline)
     2. dana   the build stage spawns a nested run — open it from the
               workflow's 'watch the run' link (or Runs) and Auto-advance
-    3. (auto) checks record pass results; branch + PR open on the mock
+    3. (auto) checks auto-pass, labelled "no report (offline mode)"; branch + PR open on the mock
               provider — the PR URL appears under Delivery
     4. avery  Inbox → approve the merge gate → squash-merged, chain complete.
 

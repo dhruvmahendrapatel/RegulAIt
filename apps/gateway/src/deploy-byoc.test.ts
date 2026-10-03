@@ -52,7 +52,8 @@ async function registerAndStart(name: string, changeType: string, target: string
       { id: "intake", type: "trigger" },
       { id: "gate", type: "human_approval", approvers: [anaId] },
       { id: "deploy", type: "deployment", connection: target, environment: "production" },
-      { id: "verify", type: "automated_check", checks: ["smoke"], onFailure: "rollback", rollbackStageId: "undo" },
+      // AER-047: 'smoke' is never reported here — explicit offline opt-in
+      { id: "verify", type: "automated_check", checks: ["smoke"], onFailure: "rollback", rollbackStageId: "undo", offlineAutoPass: true },
       { id: "undo", type: "rollback", connection: target },
       { id: "done", type: "human_approval", approvers: [anaId] },
     ] } },

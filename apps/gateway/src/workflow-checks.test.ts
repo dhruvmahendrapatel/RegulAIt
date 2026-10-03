@@ -3,15 +3,22 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { and, auditLog, createDb, eq, runMigrations, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { CHECK_AUTO_PASSED_DETAIL, CHECK_PENDING_DETAIL } from "./workflows.js";
 
 /**
  * PILLAR 2 — automated checks that actually FAIL and route. Before this slice
  * every named check auto-passed; now a REPORTED failing result parks the
  * instance at `blocked_on_check` instead of advancing, and a recheck (after the
  * failing checks are remediated and fresh passing results reported) resumes the
- * pipeline. A check with no reported result still auto-passes (back-compat), so
- * existing templates are unchanged. This is the failure path the deploy/rollback
- * stages build on.
+ * pipeline. This is the failure path the deploy/rollback stages build on.
+ *
+ * AER-047 / PENDING L1: a check with NO reported result is PENDING, never
+ * passed — the instance waits at awaiting_execution until a result is posted,
+ * with an audit row naming the missing checks. Only a template that sets the
+ * typed stage field `offlineAutoPass: true` gets the old offline auto-pass,
+ * and every such result is labelled (`autoPassed: true`, "auto-passed — no
+ * report (offline mode)", its own audit row). On a box that shows a sign of
+ * being deployed the opt-in is ignored.
  *
  * Driven through public endpoints only. An approval gate sits before the check
  * so the test can pre-report results while parked, then observe the check
@@ -37,6 +44,7 @@ let piaId: string;
 let anaId: string;
 let anaAuth: { authorization: string };
 let templateId: string;
+let ciAuth: { authorization: string };
 
 async function makeUser(email: string) {
   const user = await app.inject({
@@ -80,6 +88,56 @@ beforeAll(async () => {
   anaId = ana.id;
   anaAuth = ana.auth;
 
+  // an arm's-length ADMIN standing in for a CI system: it reports results
+  // without the ADR-0167 self-report reason the initiator would need
+  const ci = await app.inject({
+    method: "POST",
+    headers: AUTH,
+    url: "/v1/users",
+    payload: { email: "wc-ci-bot@example.com", displayName: "wc ci bot", isAdmin: true },
+  });
+  expect(ci.statusCode).toBe(201);
+  const ciKey = await app.inject({
+    method: "POST",
+    headers: AUTH,
+    url: `/v1/users/${ci.json().id}/keys`,
+    payload: { name: "ci" },
+  });
+  ciAuth = { authorization: `Bearer ${ciKey.json().token}` };
+
+  // the SAME shape with the explicit AER-047 opt-in
+  const offline = await app.inject({
+    method: "POST",
+    headers: AUTH,
+    url: "/v1/workflows/templates",
+    payload: {
+      name: "wc-check-offline",
+      definition: {
+        workflow: "wc-check-offline",
+        stages: [
+          { id: "intake", type: "trigger" },
+          { id: "gate", type: "human_approval", approvers: [anaId] },
+          {
+            id: "checks",
+            type: "automated_check",
+            checks: ["unit_tests", "lint", "security_scan"],
+            offlineAutoPass: true,
+          },
+          { id: "done", type: "human_approval", approvers: [anaId] },
+        ],
+      },
+    },
+  });
+  expect(offline.statusCode).toBe(201);
+  expect(offline.json().definition.stages[2].offlineAutoPass).toBe(true);
+  const offlineRule = await app.inject({
+    method: "POST",
+    headers: AUTH,
+    url: "/v1/workflows/assignment-rules",
+    payload: { templateId: offline.json().id, changeType: "wc-offline" },
+  });
+  expect(offlineRule.statusCode).toBe(201);
+
   const tpl = await app.inject({
     method: "POST",
     headers: AUTH,
@@ -109,12 +167,12 @@ beforeAll(async () => {
   expect(rule.statusCode).toBe(201);
 });
 
-async function startInstance() {
+async function startInstance(changeType = "wc-change") {
   const started = await app.inject({
     method: "POST",
     headers: piaAuth,
     url: "/v1/workflows/instances",
-    payload: { change: { description: "wc change", paths: ["src/x.ts"], changeType: "wc-change", environment: "staging" } },
+    payload: { change: { description: "wc change", paths: ["src/x.ts"], changeType, environment: "staging" } },
   });
   expect(started.statusCode).toBe(201);
   return started.json().id as string;
@@ -166,8 +224,13 @@ describe("automated checks: fail → block → remediate → recheck → advance
       status: "failed",
       severity: "high",
     });
-    // lint had no report → deterministic auto-pass (back-compat)
-    expect(results.find((r: { check: string }) => r.check === "lint")).toMatchObject({ status: "passed" });
+    // AER-047: lint had no report → PENDING, never a silent pass (the reported
+    // failure is what parks the stage; a missing report never offsets it)
+    expect(results.find((r: { check: string }) => r.check === "lint")).toMatchObject({
+      status: "pending",
+      detail: CHECK_PENDING_DETAIL,
+    });
+    expect(results.some((r: { autoPassed?: boolean }) => r.autoPassed)).toBe(false);
     // the failure is in the one audit trail
     const audit = await db
       .select()
@@ -205,12 +268,35 @@ describe("automated checks: fail → block → remediate → recheck → advance
       payload: { stageId: "checks", results: [{ check: "security_scan", status: "passed" }], reason: "patched the two criticals" },
     });
     expect(remediated.statusCode).toBe(200);
-    const good = await app.inject({
+    const partial = await app.inject({
       method: "POST",
       headers: piaAuth,
       url: `/v1/workflows/instances/${instanceId}/recheck`,
       payload: { stageId: "checks" },
     });
+    // AER-047: the failure is cleared, but unit_tests and lint were never
+    // reported — the stage WAITS instead of advancing on their silence
+    expect(partial.json().status).toBe("awaiting_execution");
+    expect(
+      (partial.json().context["checks:checks"] as Array<{ check: string; status: string }>)
+        .filter((r) => r.status === "pending")
+        .map((r) => r.check)
+        .sort(),
+    ).toEqual(["lint", "unit_tests"]);
+    // CI reports the rest → the waiting stage re-evaluates on the report itself
+    const good = await app.inject({
+      method: "POST",
+      headers: ciAuth,
+      url: `/v1/workflows/instances/${instanceId}/checks`,
+      payload: {
+        stageId: "checks",
+        results: [
+          { check: "unit_tests", status: "passed" },
+          { check: "lint", status: "passed" },
+        ],
+      },
+    });
+    expect(good.statusCode).toBe(200);
     // checks cleared → the instance advances to the final approval gate
     expect(good.json().status).toBe("blocked_on_approval");
   });
@@ -297,13 +383,203 @@ describe("automated checks: fail → block → remediate → recheck → advance
     expect(evaluated.find((r) => r.check === "unit_tests")?.selfReported).toBeUndefined();
   });
 
-  it("with NO reported results a check stage auto-passes (byte-identical to before)", async () => {
+  it("AER-047: with NO reported results a check stage stays PENDING — it waits, names the missing checks in an audit row, and never advances", async () => {
     const instanceId = await startInstance();
     await approve(instanceId, "gate");
-    // no report was made → all three checks auto-pass → straight to the final gate
     const view = await instanceView(piaAuth, instanceId);
+    // the instance WAITS on the check stage — it did not reach the final gate
+    expect(view.instance.status).toBe("awaiting_execution");
+    expect(view.instance.state.currentStageIndex).toBe(2);
+    const results = view.instance.context["checks:checks"] as Array<Record<string, unknown>>;
+    expect(results).toHaveLength(3);
+    for (const r of results) {
+      expect(r.status).toBe("pending");
+      expect(r.detail).toBe(CHECK_PENDING_DETAIL);
+      expect(r.autoPassed).toBeUndefined();
+    }
+    // the claim is released, so a later report can evaluate the stage
+    expect(view.instance.context.executing).toBeUndefined();
+    expect(await pendingFor(anaAuth, instanceId, "done")).toBeUndefined();
+    const audit = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.objectType, "workflow"), eq(auditLog.objectId, instanceId)));
+    const waiting = audit.filter((a) => a.ruleId === "workflow:checks-awaiting-report");
+    expect(waiting).toHaveLength(1);
+    expect(waiting[0]!.detail).toMatchObject({
+      stageId: "checks",
+      missingChecks: ["unit_tests", "lint", "security_scan"],
+    });
+    expect(String(waiting[0]!.reason)).toContain("unit_tests, lint, security_scan");
+    // and nothing was recorded as passed or auto-passed
+    expect(audit.some((a) => a.ruleId === "workflow:checks-auto-passed")).toBe(false);
+    expect(audit.some((a) => a.ruleId === "workflow:execution_succeeded")).toBe(false);
+
+    // a retried executor (an operator's /advance after a timeout or a lost CI
+    // callback) re-evaluates and STILL does not advance on silence
+    const retried = await app.inject({
+      method: "POST",
+      headers: piaAuth,
+      url: `/v1/workflows/instances/${instanceId}/advance`,
+      payload: { stageId: "checks" },
+    });
+    expect(retried.statusCode).toBe(200);
+    expect(retried.json().status).toBe("awaiting_execution");
+    expect(retried.json().state.currentStageIndex).toBe(2);
+    // a human trigger can never wave the named checks through either
+    const triggered = await app.inject({
+      method: "POST",
+      headers: piaAuth,
+      url: `/v1/workflows/instances/${instanceId}/advance`,
+      payload: { stageId: "done" },
+    });
+    expect((await instanceView(piaAuth, instanceId)).instance.status).toBe("awaiting_execution");
+    expect(triggered.statusCode).toBeGreaterThanOrEqual(400);
+  });
+
+  it("AER-047: a PARTIAL report never advances — the still-missing check is named; an explicit pass of the last one advances", async () => {
+    const instanceId = await startInstance();
+    await approve(instanceId, "gate");
+    const partial = await app.inject({
+      method: "POST",
+      headers: ciAuth,
+      url: `/v1/workflows/instances/${instanceId}/checks`,
+      payload: {
+        stageId: "checks",
+        results: [
+          { check: "unit_tests", status: "passed" },
+          { check: "lint", status: "passed" },
+        ],
+      },
+    });
+    expect(partial.statusCode).toBe(200);
+    expect(partial.json().status).toBe("awaiting_execution");
+    const after = partial.json().context["checks:checks"] as Array<{ check: string; status: string }>;
+    expect(after.find((r) => r.check === "security_scan")?.status).toBe("pending");
+    const audit = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.objectType, "workflow"), eq(auditLog.objectId, instanceId)));
+    const latest = audit
+      .filter((a) => a.ruleId === "workflow:checks-awaiting-report")
+      .map((a) => (a.detail as { missingChecks: string[] }).missingChecks);
+    expect(latest).toContainEqual(["security_scan"]);
+
+    // EXPLICIT PASS advances
+    const last = await app.inject({
+      method: "POST",
+      headers: ciAuth,
+      url: `/v1/workflows/instances/${instanceId}/checks`,
+      payload: { stageId: "checks", results: [{ check: "security_scan", status: "passed" }] },
+    });
+    expect(last.json().status).toBe("blocked_on_approval");
+    for (const r of last.json().context["checks:checks"]) {
+      expect(r.status).toBe("passed");
+      expect(r.autoPassed).toBeUndefined();
+    }
+    expect(await pendingFor(anaAuth, instanceId, "done")).toBeTruthy();
+  });
+
+  it("AER-047: an EXPLICIT FAIL blocks even while the other checks are still unreported", async () => {
+    const instanceId = await startInstance();
+    await approve(instanceId, "gate");
+    expect((await instanceView(piaAuth, instanceId)).instance.status).toBe("awaiting_execution");
+    const failed = await app.inject({
+      method: "POST",
+      headers: ciAuth,
+      url: `/v1/workflows/instances/${instanceId}/checks`,
+      payload: { stageId: "checks", results: [{ check: "lint", status: "failed", severity: "medium" }] },
+    });
+    expect(failed.json().status).toBe("blocked_on_check");
+    const results = failed.json().context["checks:checks"] as Array<{ check: string; status: string }>;
+    expect(results.find((r) => r.check === "lint")?.status).toBe("failed");
+    expect(results.filter((r) => r.status === "pending").map((r) => r.check).sort()).toEqual([
+      "security_scan",
+      "unit_tests",
+    ]);
+  });
+
+  it("AER-047 opt-in: offlineAutoPass:true passes unreported checks, LABELLED in the result and the audit trail; a reported result is never labelled", async () => {
+    const instanceId = await startInstance("wc-offline");
+    // CI reports ONE check before the gate opens
+    const pre = await app.inject({
+      method: "POST",
+      headers: ciAuth,
+      url: `/v1/workflows/instances/${instanceId}/checks`,
+      payload: { stageId: "checks", results: [{ check: "unit_tests", status: "passed" }] },
+    });
+    expect(pre.statusCode).toBe(200);
+    await approve(instanceId, "gate");
+    const view = await instanceView(piaAuth, instanceId);
+    // the opt-in is the old behaviour: straight through to the final gate
     expect(view.instance.status).toBe("blocked_on_approval");
-    for (const r of view.instance.context["checks:checks"]) expect(r.status).toBe("passed");
+    const results = view.instance.context["checks:checks"] as Array<Record<string, unknown>>;
+    expect(results.find((r) => r.check === "unit_tests")).toMatchObject({ status: "passed" });
+    expect(results.find((r) => r.check === "unit_tests")?.autoPassed).toBeUndefined();
+    for (const name of ["lint", "security_scan"]) {
+      expect(results.find((r) => r.check === name)).toMatchObject({
+        status: "passed",
+        autoPassed: true,
+        detail: CHECK_AUTO_PASSED_DETAIL,
+      });
+    }
+    expect(CHECK_AUTO_PASSED_DETAIL).toBe("auto-passed — no report (offline mode)");
+    const audit = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.objectType, "workflow"), eq(auditLog.objectId, instanceId)));
+    const auto = audit.filter((a) => a.ruleId === "workflow:checks-auto-passed");
+    expect(auto).toHaveLength(1);
+    expect(auto[0]!.detail).toMatchObject({ stageId: "checks", autoPassedChecks: ["lint", "security_scan"] });
+    expect(String(auto[0]!.reason)).toContain("auto-passed — no report (offline mode)");
+    expect(audit.some((a) => a.ruleId === "workflow:checks-awaiting-report")).toBe(false);
+  });
+
+  it("AER-047 opt-in: an explicit FAIL still blocks under offlineAutoPass", async () => {
+    const instanceId = await startInstance("wc-offline");
+    await app.inject({
+      method: "POST",
+      headers: ciAuth,
+      url: `/v1/workflows/instances/${instanceId}/checks`,
+      payload: { stageId: "checks", results: [{ check: "security_scan", status: "failed", severity: "high" }] },
+    });
+    await approve(instanceId, "gate");
+    const view = await instanceView(piaAuth, instanceId);
+    expect(view.instance.status).toBe("blocked_on_check");
+    const audit = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.objectType, "workflow"), eq(auditLog.objectId, instanceId)));
+    // a failing stage is not described as auto-passed, even if others were unreported
+    expect(audit.some((a) => a.ruleId === "workflow:checks-auto-passed")).toBe(false);
+  });
+
+  it("AER-047: on a box that shows a sign of being DEPLOYED the offlineAutoPass opt-in is ignored — the checks stay pending and the audit row says why", async () => {
+    const instanceId = await startInstance("wc-offline");
+    const prior = process.env.REGULAIT_DEPLOY_MODE;
+    process.env.REGULAIT_DEPLOY_MODE = "hosted";
+    try {
+      await approve(instanceId, "gate");
+    } finally {
+      if (prior === undefined) delete process.env.REGULAIT_DEPLOY_MODE;
+      else process.env.REGULAIT_DEPLOY_MODE = prior;
+    }
+    const view = await instanceView(piaAuth, instanceId);
+    expect(view.instance.status).toBe("awaiting_execution");
+    for (const r of view.instance.context["checks:checks"]) {
+      expect(r.status).toBe("pending");
+      expect(r.autoPassed).toBeUndefined();
+    }
+    const audit = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.objectType, "workflow"), eq(auditLog.objectId, instanceId)));
+    const waiting = audit.find((a) => a.ruleId === "workflow:checks-awaiting-report");
+    expect(waiting?.detail).toMatchObject({
+      offlineAutoPassRefused: true,
+      deployedSignal: "REGULAIT_DEPLOY_MODE=hosted",
+    });
+    expect(String(waiting?.reason)).toContain("ignored because this box is deployed");
   });
 
   it("rejects a report to a non-check stage and a report naming no declared check", async () => {

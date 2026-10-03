@@ -1375,7 +1375,9 @@ describe("workflow engine (EPIC-03 slice)", () => {
       { id: "requirements", type: "artifact_generation", output: "requirements_file" },
       { id: "requirements_signoff", type: "human_approval", approvers: ["requesting_user"] },
       { id: "build", type: "automated_build", scope: "requirements_file" },
-      { id: "checks", type: "automated_check", checks: ["ci_tests"] },
+      // AER-047: no CI reports ci_tests in this journey, so the stage opts in
+      // to the labelled offline auto-pass (the default would wait for a report)
+      { id: "checks", type: "automated_check", checks: ["ci_tests"], offlineAutoPass: true },
     ],
   };
 
