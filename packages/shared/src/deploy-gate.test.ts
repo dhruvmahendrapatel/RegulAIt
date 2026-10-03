@@ -52,3 +52,47 @@ describe("ADR-0161 deploy gate", () => {
     expect(evaluateDeployGate(input({ alerts: alerts.slice(1) })).decision).toBe("allow");
   });
 });
+
+describe("AER-044 — a selection never narrows the checked stack", () => {
+  // intended stack: a clean agent "a" and a second intended agent "b"
+  const stack = (b: DeployGateAgentInput): Partial<DeployGateInput> => ({
+    useCase: { id: "u", name: "UC", status: "approved", intendedAgentIds: ["a", "b"] },
+    agents: new Map([["a", agent("a")], ["b", b]]),
+  });
+  const selections: Array<[string, string[] | null]> = [["omitted", null], ["empty", []], ["subset excluding b", ["a"]]];
+
+  for (const [label, requestedAgentIds] of selections) {
+    it(`${label}: a halted intended agent still blocks`, () => {
+      const r = evaluateDeployGate(input({ ...stack(agent("b", { halted: true })), requestedAgentIds }));
+      expect(r.decision).toBe("deny");
+      expect(r.agentsChecked).toEqual(["a", "b"]);
+      expect(r.reasons).toEqual([expect.objectContaining({ code: "agent_unavailable", severity: "block", ref: { type: "agent", id: "b" } })]);
+    });
+
+    it(`${label}: an MRM-refused intended agent still blocks`, () => {
+      const r = evaluateDeployGate(input({ ...stack(agent("b", { mrmRefusal: "no model card", modelCardApproved: false })), requestedAgentIds }));
+      expect(r.decision).toBe("deny");
+      expect(r.agentsChecked).toEqual(["a", "b"]);
+      expect(r.reasons).toEqual([expect.objectContaining({ code: "mrm_refused", severity: "block", ref: { type: "agent", id: "b" } })]);
+    });
+
+    it(`${label}: a clean stack is allowed and every intended agent is checked`, () => {
+      expect(evaluateDeployGate(input({ ...stack(agent("b")), requestedAgentIds }))).toEqual({
+        decision: "allow",
+        reasons: [],
+        agentsChecked: ["a", "b"],
+      });
+    });
+  }
+
+  it("a selection adds an off-stack agent to the check (and blocks on it), deduplicated", () => {
+    const r = evaluateDeployGate(input({
+      ...stack(agent("b")),
+      requestedAgentIds: ["a", "x", "a"],
+      agents: new Map([["a", agent("a")], ["b", agent("b")], ["x", agent("x")]]),
+    }));
+    expect(r.decision).toBe("deny");
+    expect(r.agentsChecked).toEqual(["a", "b", "x"]);
+    expect(r.reasons.map((x) => [x.code, x.ref?.id])).toEqual([["agent_not_in_approved_stack", "x"]]);
+  });
+});

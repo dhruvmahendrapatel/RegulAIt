@@ -50,8 +50,15 @@ export interface DeployGateAgentInput {
 
 export interface DeployGateInput {
   useCase: { id: string; name: string; status: string; intendedAgentIds: string[] };
-  /** agents the release ships; null = the use case's whole approved stack */
-  requestedAgentIds: string[] | null;
+  /**
+   * Agents the release declares it ships (AER-044). A selection can only ADD to
+   * what is checked, never narrow it: the evaluator always checks the use
+   * case's whole approved stack (`intendedAgentIds`), so null, `[]` and a
+   * subset all evaluate every intended agent — a halted, disabled or
+   * MRM-refused intended agent blocks however the request is phrased. Any
+   * requested agent outside the stack blocks as `agent_not_in_approved_stack`.
+   */
+  requestedAgentIds: readonly string[] | null;
   agents: ReadonlyMap<string, DeployGateAgentInput>;
   /** active monitor alerts whose subject is this use case or one of its agents */
   alerts: ReadonlyArray<{ id: string; ruleId: string; severity: string; status: string; title: string }>;
@@ -75,7 +82,10 @@ export function evaluateDeployGate(input: DeployGateInput): DeployGateDecision {
     });
   }
   const approvedStack = new Set(uc.intendedAgentIds);
-  const checked = input.requestedAgentIds ?? uc.intendedAgentIds;
+  // AER-044: the whole approved stack, then any requested extras — never only
+  // the request. An empty or partial selection cannot skip an intended agent,
+  // so it cannot launder a halt or an MRM refusal the use case's stack carries.
+  const checked = [...new Set([...uc.intendedAgentIds, ...(input.requestedAgentIds ?? [])])];
   for (const id of checked) {
     if (!approvedStack.has(id)) {
       reasons.push({
