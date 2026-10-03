@@ -266,6 +266,15 @@ services:
     # service_healthy` works for anything stacked on the gateway, and so a
     # wedged process shows as `unhealthy` in `docker compose ps`.
     restart: unless-stopped
+    # REL-02 / OPS-01: the image's CMD `exec`s node, so node is PID 1 — and
+    # Linux delivers no default-action signal to PID 1, so without an init
+    # `docker stop` was IGNORED for the 10 s default grace and then SIGKILLed.
+    # `init: true` puts tini in front so SIGTERM actually arrives; the gateway's
+    # own handler (apps/gateway/src/boot.ts installShutdownHandlers) then drains
+    # in-flight requests, the scheduler tick and the pool within its 15 s
+    # budget, which is why the grace period here sits above it.
+    init: true
+    stop_grace_period: 30s
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health').then((r)=>process.exit(r.ok?0:1),()=>process.exit(1))"]
       interval: 30s

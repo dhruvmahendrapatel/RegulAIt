@@ -10,6 +10,12 @@ import { defineConfig } from "@playwright/test";
  */
 export default defineConfig({
   testDir: "./e2e",
+  // CI-02: the two demo journeys have their own configs (demo-real: a
+  // gateway YOU started on a demo:prepare database; demo-mock: a Vite server
+  // on :4179) and each selects its spec by testMatch. Collected here they fail
+  // on an unrelated precondition (no shadow-AI findings in the seed, no Vite
+  // server), which made the documented `pnpm e2e` unable to pass.
+  testIgnore: ["**/demo-*.spec.ts"],
   globalSetup: "./e2e/global-setup.ts",
   globalTeardown: "./e2e/global-teardown.ts",
   timeout: 60_000,

@@ -214,10 +214,12 @@ import {
   ensureAssignment,
   evaluateAssignmentSla,
   materializeAndEvaluate,
+  pendingApprovalsNeedingAttention,
   registerWorkbenchRoutes,
   routingActive,
 } from "./workbench.js";
 import { abacPrincipalFromRequest } from "./abac-principal.js";
+import { listLimitQuery } from "./list-limit.js";
 import { evaluateIpEnvelope } from "./net-policy.js";
 import { activeDelegatorsFor, activeDelegationFrom } from "./delegations.js";
 
@@ -1224,7 +1226,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0012: portal-driven API-parity gap fill — the bulk user table needs
   // a list endpoint, not only POST. disabledAt rides along (ADR-0022) so the
   // portal can grey deactivated accounts and offer Reactivate.
-  app.get("/v1/users", async () => ({
+  // REL-10: bounded — `limit` (default LIST_DEFAULT_LIMIT, max LIST_MAX_LIMIT)
+  app.get("/v1/users", async (req) => ({
     users: await db
       .select({
         id: users.id,
@@ -1242,7 +1245,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         hasPassword: sql<boolean>`${users.passwordHash} is not null`,
         mustChangePassword: users.mustChangePassword,
       })
-      .from(users),
+      .from(users)
+      .orderBy(users.createdAt)
+      .limit(listLimitQuery.parse(req.query).limit),
   }));
 
   // --- ADR-0022 identity lifecycle (admin-only via the default gate) --------
@@ -2702,10 +2707,15 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // Guarded by `routingActive`: with no enabled rule — the shipped state —
     // this whole block is one COUNT and the queue behaves exactly as it did
     // before migration 0058, writing nothing.
+    //
+    // REL-09: bounded to the rows a read could change (unassigned, or past a
+    // warn/due mark their state does not yet reflect), oldest first, capped —
+    // never the whole fleet's pending set per reader. See
+    // pendingApprovalsNeedingAttention.
     const workbenchOn = await routingActive(db);
     if (workbenchOn) {
-      const pendingAll = await db.select().from(approvals).where(eq(approvals.status, "pending"));
-      await materializeAndEvaluate(db, pendingAll, me || null);
+      const needing = await pendingApprovalsNeedingAttention(db);
+      await materializeAndEvaluate(db, needing, me || null);
     }
     // ADR-0046 §1: routing decides WHOSE QUEUE a row shows in. A non-admin
     // therefore also sees the rows assigned (or escalated) to a role or team

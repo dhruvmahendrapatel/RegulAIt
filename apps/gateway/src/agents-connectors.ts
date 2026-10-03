@@ -123,6 +123,7 @@ import {
   type CandidateNote,
 } from "./rule-versions.js";
 import { z } from "zod";
+import { listLimitQuery } from "./list-limit.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import {
   assertProjectAttribution,
@@ -2984,7 +2985,11 @@ export function registerAgentConnectorRoutes(
     return { removed: true };
   });
 
-  app.get("/v1/agents", async () => ({ agents: await db.select().from(agents) }));
+  // REL-10: bounded — `limit` (default LIST_DEFAULT_LIMIT, max LIST_MAX_LIMIT)
+  app.get("/v1/agents", async (req) => {
+    const { limit } = listLimitQuery.parse(req.query);
+    return { agents: await db.select().from(agents).orderBy(agents.name).limit(limit) };
+  });
 
   // -------------------------------------------------------------------------
   // ADR-0066 §4 — PROVIDER FALLBACK CHAINS (admin-only via the default gate).

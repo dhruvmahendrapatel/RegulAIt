@@ -761,3 +761,55 @@ describe("saved views", () => {
     expect(res.statusCode).toBe(403);
   });
 });
+
+describe("REL-09: the lazy pass on a queue read is bounded to what a read could change", () => {
+  it("selects unassigned rows and rows past a warn/due mark their state does not reflect — nothing else — oldest first, capped", async () => {
+    const { pendingApprovalsNeedingAttention } = await import("./workbench.js");
+    const now = new Date();
+    const past = new Date(now.getTime() - 60_000);
+    const future = new Date(now.getTime() + 60 * 60_000);
+    const mk = async (ageMinutes: number, over: Partial<typeof approvals.$inferInsert> = {}) =>
+      makeApproval({ objectType: "run", requestedAt: new Date(now.getTime() - ageMinutes * 60_000), ...over });
+    const assign = (approvalId: string, a: { warnAt: Date | null; dueAt: Date | null; slaState: "ok" | "warning" | "breached" }) =>
+      db.insert(approvalAssignments).values({ approvalId, assigneeKind: "user", assigneeId: alexId, ...a });
+
+    const unassigned = await mk(50);
+    const insideWindow = await mk(49);
+    await assign(insideWindow.id, { warnAt: future, dueAt: future, slaState: "ok" });
+    const overdueUnnoticed = await mk(48);
+    await assign(overdueUnnoticed.id, { warnAt: past, dueAt: past, slaState: "ok" });
+    const overdueAlreadyBreached = await mk(47);
+    await assign(overdueAlreadyBreached.id, { warnAt: past, dueAt: past, slaState: "breached" });
+    const warnUnnoticed = await mk(46);
+    await assign(warnUnnoticed.id, { warnAt: past, dueAt: future, slaState: "ok" });
+    const warnAlreadyNoticed = await mk(45);
+    await assign(warnAlreadyNoticed.id, { warnAt: past, dueAt: future, slaState: "warning" });
+    const decided = await mk(44, { status: "approved" });
+
+    const picked = (await pendingApprovalsNeedingAttention(db, now)).map((r) => r.id);
+    const mine = new Set([unassigned.id, insideWindow.id, overdueUnnoticed.id, overdueAlreadyBreached.id, warnUnnoticed.id, warnAlreadyNoticed.id, decided.id]);
+    const pickedMine = picked.filter((id) => mine.has(id));
+    expect(pickedMine).toEqual([unassigned.id, overdueUnnoticed.id, warnUnnoticed.id]); // and in age order
+    expect(picked).not.toContain(insideWindow.id);
+    expect(picked).not.toContain(overdueAlreadyBreached.id);
+    expect(picked).not.toContain(warnAlreadyNoticed.id);
+    expect(picked).not.toContain(decided.id);
+
+    // the cap: a deployment with thousands pending pays for at most `limit` per read
+    const capped = await pendingApprovalsNeedingAttention(db, now, 1);
+    expect(capped).toHaveLength(1);
+    expect(capped[0]!.id).toBe(unassigned.id); // the oldest in the pile — this test's rows are backdated past every other suite's
+  });
+
+  it("a read of the queue leaves an assignment inside its window untouched (no re-materialization)", async () => {
+    const row = await makeApproval({ objectType: "run" });
+    const future = new Date(Date.now() + 60 * 60_000);
+    const [assignment] = await db
+      .insert(approvalAssignments)
+      .values({ approvalId: row.id, assigneeKind: "user", assigneeId: alexId, warnAt: future, dueAt: future, slaState: "ok" })
+      .returning();
+    await inbox(alexAuth);
+    const [after] = await db.select().from(approvalAssignments).where(eq(approvalAssignments.approvalId, row.id));
+    expect(after).toEqual(assignment);
+  });
+});

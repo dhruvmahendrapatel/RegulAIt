@@ -6,6 +6,7 @@ import {
   desc,
   eq,
   inArray,
+  sql,
   workflowArtifacts,
   workflowAssignmentRules,
   workflowEvents,
@@ -615,10 +616,12 @@ async function runGitExecutions(
       const current = rowDef.stages[rowState.currentStageIndex];
       if (!current || current.id !== effect.stageId) return null;
       const ctx = { ...(row.context as Record<string, unknown>) };
-      if (ctx.executing === effect.stageId) return null; // another executor holds it
+      const held = stageClaimState(ctx, effect.stageId);
+      if (held.heldLive) return null; // another executor holds it
       ctx.executing = effect.stageId;
+      ctx.executingSince = new Date().toISOString();
       await tx.update(workflowInstances).set({ context: ctx }).where(eq(workflowInstances.id, row.id));
-      return { instance: { ...row, context: ctx } };
+      return { instance: { ...row, context: ctx }, expiredClaimSince: held.expiredSince };
     });
     if (!claimed) {
       throw new WorkflowStateError(
@@ -629,6 +632,22 @@ async function runGitExecutions(
     const def = instance.definition as WorkflowDefinition;
     const stage = def.stages.find((st) => st.id === effect.stageId)!;
     const context = { ...(instance.context as Record<string, unknown>) };
+    if (claimed.expiredClaimSince !== null) {
+      // REL-06: a claim nobody released — a process killed mid-stage — is
+      // re-taken after its TTL rather than stranding the instance at
+      // awaiting_execution forever, and the re-take is on the record.
+      await db.insert(auditLog).values({
+        userId: actorUserId ?? "00000000-0000-0000-0000-000000000000",
+        objectType: "workflow",
+        objectId: instance.id,
+        detail: { stageId: stage.id, claimedSince: claimed.expiredClaimSince, ttlMs: stageClaimTtlMs() },
+        effect: "allow",
+        ruleId: "workflow-stage-claim-expired",
+        ruleChain: [],
+        reason: `stage '${stage.id}' execution claim from ${claimed.expiredClaimSince} was never released — re-claimed after the ${stageClaimTtlMs()} ms TTL`,
+      });
+    }
+    try {
 
     // §8 nesting: an automated_build stage with a run graph spawns a nested
     // orchestration run instead of a git operation — planned under the
@@ -637,7 +656,7 @@ async function runGitExecutions(
     // run turns terminal. Idempotent: a live or completed run for this stage
     // is never duplicated; only an aborted one is replaced on retry.
     if (stage.type === "automated_build" && stage.run !== undefined) {
-      delete context.executing;
+      releaseStageClaim(context);
       const existingId = context[`runId:${stage.id}`];
       if (typeof existingId === "string") {
         const [existing] = await db
@@ -742,7 +761,7 @@ async function runGitExecutions(
           [...evalOutcomes].map(([name, r]) => [name, r.eval]),
         );
       }
-      delete context.executing;
+      releaseStageClaim(context);
       delete context.lastError;
       await db
         .update(workflowInstances)
@@ -792,7 +811,7 @@ async function runGitExecutions(
           ? `condition not met: change ${cond!.field} is '${condValue ?? "unset"}', target requires '${cond!.equals}'`
           : null;
       if (handoff) {
-        delete context.executing;
+        releaseStageClaim(context);
         await db.update(workflowInstances).set({ context }).where(eq(workflowInstances.id, instance.id));
         const r = await applyEvent(
           db,
@@ -852,7 +871,7 @@ async function runGitExecutions(
         executionControlRefused = err instanceof ExternalEffectBlockedError;
         deployErr = err instanceof Error ? err.message : String(err);
       }
-      delete context.executing;
+      releaseStageClaim(context);
       if (deployErr === null) delete context.lastError;
       else context.lastError = `${stage.id}: ${deployErr}`;
       await db.update(workflowInstances).set({ context }).where(eq(workflowInstances.id, instance.id));
@@ -958,7 +977,7 @@ async function runGitExecutions(
       } catch (err) {
         rbErr = err instanceof Error ? err.message : String(err);
       }
-      delete context.executing;
+      releaseStageClaim(context);
       if (rbErr === null) delete context.lastError;
       else context.lastError = `${stage.id}: ${rbErr}`;
       await db.update(workflowInstances).set({ context }).where(eq(workflowInstances.id, instance.id));
@@ -1109,7 +1128,7 @@ ${latestArtifact.content}`
     // Release the claim; record outcome. The kernel event application sits
     // OUTSIDE the provider try so a post-success DB hiccup is never recorded
     // as a failed (and re-runnable) git operation.
-    delete context.executing;
+    releaseStageClaim(context);
     if (executionError === null) delete context.lastError;
     else context.lastError = `${stage.id}: ${executionError}`;
     await db
@@ -1134,8 +1153,62 @@ ${latestArtifact.content}`
     );
     lastEffects = r.effects;
     pending = r.effects.filter((e) => e.kind === "execute_stage");
+    } catch (err) {
+      // REL-06: a throw from anywhere between the claim and its release (a
+      // nested-run lookup, an artifact read, a provider resolution) used to
+      // leave `executing` set with nothing to clear it. Release it here —
+      // only if this executor still holds it — and let the error propagate.
+      await releaseStageClaimIfHeld(db, instance.id, stage.id).catch(() => {});
+      throw err;
+    }
   }
   return lastEffects;
+}
+
+/** REL-06: how long an execution claim may go unreleased before another
+ * executor may take it over (REGULAIT_WORKFLOW_CLAIM_TTL_MS, default 15 min —
+ * the same horizon the ADR-0064 scheduler lease uses). */
+export const DEFAULT_STAGE_CLAIM_TTL_MS = 15 * 60_000;
+
+export function stageClaimTtlMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.REGULAIT_WORKFLOW_CLAIM_TTL_MS;
+  if (raw === undefined || raw.trim() === "") return DEFAULT_STAGE_CLAIM_TTL_MS;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.trunc(n) : DEFAULT_STAGE_CLAIM_TTL_MS;
+}
+
+/**
+ * REL-06: is `stageId`'s execution claim held LIVE in this context? A claim
+ * is live when it names this stage and was taken less than the TTL ago. A
+ * claim with no `executingSince` (written before this field existed) or one
+ * older than the TTL is EXPIRED: `heldLive` is false and `expiredSince`
+ * carries what the record said, so the re-take can be audited.
+ */
+export function stageClaimState(
+  ctx: Record<string, unknown>,
+  stageId: string,
+  now: number = Date.now(),
+  ttlMs: number = stageClaimTtlMs(),
+): { heldLive: boolean; expiredSince: string | null } {
+  if (ctx.executing !== stageId) return { heldLive: false, expiredSince: null };
+  const since = typeof ctx.executingSince === "string" ? Date.parse(ctx.executingSince) : NaN;
+  if (Number.isFinite(since) && now - since < ttlMs) return { heldLive: true, expiredSince: null };
+  return { heldLive: false, expiredSince: typeof ctx.executingSince === "string" ? ctx.executingSince : "unknown" };
+}
+
+/** drop the claim from an in-memory context (the normal release path) */
+function releaseStageClaim(context: Record<string, unknown>): void {
+  delete context.executing;
+  delete context.executingSince;
+}
+
+/** drop the claim from the STORED context, only if it still names `stageId` —
+ * the error path, after an unexpected throw mid-stage */
+async function releaseStageClaimIfHeld(db: Db, instanceId: string, stageId: string): Promise<void> {
+  await db
+    .update(workflowInstances)
+    .set({ context: sql`${workflowInstances.context} - 'executing' - 'executingSince'` })
+    .where(and(eq(workflowInstances.id, instanceId), sql`${workflowInstances.context}->>'executing' = ${stageId}`));
 }
 
 /**

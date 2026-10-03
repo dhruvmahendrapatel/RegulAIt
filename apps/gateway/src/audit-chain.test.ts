@@ -54,6 +54,7 @@ import {
   resolveS3AnchorConfig,
   S3_LOCK_OBSERVATION_TTL_MS,
   S3ObjectLockSink,
+  S3_REQUEST_HANDLER,
   verifyAuditChain,
   type AnchorSink,
   type S3SendClient,
@@ -830,6 +831,21 @@ const lockConfig = (mode?: "COMPLIANCE" | "GOVERNANCE") => ({
   ...(mode ? { Rule: { DefaultRetention: { Mode: mode, Days: 365 } } } : {}),
 });
 
+describe("REL-12: the real S3 client is built with deadlines", () => {
+  it("connect and request timeouts are set, and the SDK retries at most once", async () => {
+    const sink = new S3ObjectLockSink(S3_CONFIG);
+    const client = (sink as unknown as { client: S3Client }).client;
+    expect(client).toBeInstanceOf(S3Client);
+    expect(S3_REQUEST_HANDLER).toEqual({ connectionTimeout: 5_000, requestTimeout: 30_000 });
+    // the SDK builds its NodeHttpHandler from the options object and resolves
+    // them lazily (configProvider) on the first request — read the provider
+    const handler = client.config.requestHandler as unknown as { configProvider: Promise<Record<string, unknown>> };
+    await expect(handler.configProvider).resolves.toMatchObject(S3_REQUEST_HANDLER);
+    await expect(client.config.maxAttempts()).resolves.toBe(2);
+    client.destroy();
+  });
+});
+
 describe("ADR-0060: tamperResistant is OBSERVED, never configured", () => {
   it("says true ONLY when the bucket itself reports COMPLIANCE", async () => {
     const sink = new S3ObjectLockSink(S3_CONFIG, new FakeS3({ lock: lockConfig("COMPLIANCE") }));
@@ -1106,6 +1122,16 @@ const MINIO_SECRET = process.env.REGULAIT_TEST_S3_SECRET_ACCESS_KEY ?? "regulait
 const minioReachable = await fetch(`${MINIO_ENDPOINT}/minio/health/live`, { signal: AbortSignal.timeout(2_000) })
   .then((r) => r.ok)
   .catch(() => false);
+// CI-01: a deliberately named endpoint that is NOT there is a broken setup,
+// never a skip — on CI (which now runs a MinIO service for exactly these nine
+// tests) a silent skip would ship a regression in the tamper-resistance claim
+// green. Unset, the suite still skips on a laptop without MinIO.
+if (process.env.REGULAIT_TEST_S3_ENDPOINT && !minioReachable) {
+  throw new Error(
+    `REGULAIT_TEST_S3_ENDPOINT=${MINIO_ENDPOINT} is set but /minio/health/live did not answer — ` +
+      "the Object-Lock proof-by-attack tests cannot run and will not be skipped silently",
+  );
+}
 
 describe.skipIf(!minioReachable)("ADR-0060: proof by attack against a REAL Object-Lock bucket", () => {
   const suffix = randomUUID().slice(0, 8);

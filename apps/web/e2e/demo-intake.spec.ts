@@ -9,10 +9,13 @@ const state = existsSync(stateFile)
   ? JSON.parse(readFileSync(stateFile, "utf8")) as { baseUrl: string }
   : { baseUrl: process.env.E2E_BASE_URL ?? "http://127.0.0.1:4174" };
 const SHOTS = path.join(here, "artifacts", "demo");
+// DEMO-01: the live gateway's token never has to be the public one — export
+// REGULAIT_BOOTSTRAP_TOKEN with whatever the gateway was started with.
+const BOOT_TOKEN = process.env.REGULAIT_BOOTSTRAP_TOKEN ?? "e2e-bootstrap-token";
 mkdirSync(SHOTS, { recursive: true });
 
 async function freshUser(page: Page, email: string, password: string) {
-  const headers = { authorization: "Bearer e2e-bootstrap-token", "content-type": "application/json" };
+  const headers = { authorization: `Bearer ${BOOT_TOKEN}`, "content-type": "application/json" };
   const users = await (await fetch(`${state.baseUrl}/v1/users`, { headers })).json() as { users: Array<{ id: string; email: string }> };
   const id = users.users.find((user) => user.email === email)?.id;
   expect(id, `seeded persona ${email} must exist`).toBeTruthy();
@@ -86,7 +89,7 @@ test("seeded credit-assistant journey: discover, register, assess, approve, moni
   const workspace = page.getByRole("link", { name: "Open the use-case workspace" });
   await expect(workspace).toBeVisible();
   // AER-042: the persisted record carries the derived sensitivity (personal + financial → regulated)
-  const boot = { authorization: "Bearer e2e-bootstrap-token" };
+  const boot = { authorization: `Bearer ${BOOT_TOKEN}` };
   const listed = await (await fetch(`${state.baseUrl}/v1/use-cases`, { headers: boot })).json() as { useCases: Array<{ name: string; dataSensitivity: string }> };
   expect(listed.useCases.find((u) => u.name.startsWith("Govern "))?.dataSensitivity).toBe("regulated");
   await workspace.click();

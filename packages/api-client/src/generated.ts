@@ -130,7 +130,7 @@ export class GeneratedRegulAItClient extends BaseClient {
   }
 
   /**
- * Registered agents/models.
+ * Registered agents/models. Bounded: `limit` (default 1000, max 5000).
  * @stability public-stable — auth: admin
    */
   getV1Agents<T = unknown>(options?: RequestOptions): Promise<T> {
@@ -456,7 +456,7 @@ export class GeneratedRegulAItClient extends BaseClient {
   }
 
   /**
- * Orchestration runs.
+ * Orchestration runs, newest first. Bounded: `limit` (default 200, max 1000); `status` narrows.
  * @stability public-beta — auth: user
    */
   getV1Runs<T = unknown>(options?: RequestOptions): Promise<T> {
@@ -522,7 +522,7 @@ export class GeneratedRegulAItClient extends BaseClient {
   }
 
   /**
- * List users, with sign-in posture flags (never a hash or a secret).
+ * List users, with sign-in posture flags (never a hash or a secret). Bounded: `limit` (default 1000, max 5000).
  * @stability public-stable — auth: admin
    */
   getV1Users<T = unknown>(options?: RequestOptions): Promise<T> {

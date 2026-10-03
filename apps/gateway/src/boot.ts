@@ -187,16 +187,20 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
       DEFAULT_ANCHOR_INTERVAL_MS,
   );
   if (anchorSink && !anchorUnderTest) {
-    anchorTimer = setInterval(() => {
-      void (async () => {
+    // REL-12: ONE capture in flight at a time. A black-holed sink (a firewall
+    // that drops rather than refuses) used to leave a capture hanging and the
+    // interval kept starting another one every 15 minutes on top of it.
+    anchorTimer = setInterval(
+      withoutOverlap(async () => {
         try {
           await captureAnchor(db, anchorSink, null);
           await flushPendingAnchors(db, anchorSink);
         } catch (err) {
           app.log.warn({ err }, "audit anchor capture failed — the hash chain is unaffected");
         }
-      })();
-    }, anchorEveryMs);
+      }),
+      anchorEveryMs,
+    );
     anchorTimer.unref();
   }
 
@@ -302,4 +306,136 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   log(`  scheduler: ${schedulerConfig.reason}${schedulerConfig.enabled ? `, ${registry.size} job(s)` : ""}`);
 
   return { app, address, dataKey, scheduler };
+}
+
+/**
+ * REL-12 — wrap an async timer callback so a tick that is still running
+ * SKIPS the next one rather than stacking a second run on top of it. The
+ * returned function is what `setInterval` is given; the skipped tick costs
+ * nothing and the next interval tries again. (Scheduler.safeTick is the same
+ * idea for the ADR-0064 loop; this is the one-liner for plain timers.)
+ */
+export function withoutOverlap(fn: () => Promise<void>): () => void {
+  let inFlight = false;
+  return () => {
+    if (inFlight) return;
+    inFlight = true;
+    void fn().finally(() => {
+      inFlight = false;
+    });
+  };
+}
+
+/** the slice of `process` the shutdown handlers need — injectable so a test
+ * can drive a signal without sending one to vitest */
+export interface ProcessLike {
+  on(event: string, listener: (...args: unknown[]) => void): unknown;
+  exit(code?: number): never | void;
+}
+
+export interface ShutdownHandlerOptions {
+  /** default `process` */
+  proc?: ProcessLike;
+  /** default `console.error` — stderr, so it survives REGULAIT_LOG=off */
+  log?: (line: string) => void;
+  /** the drain budget (REGULAIT_SHUTDOWN_GRACE_MS, default 15 s): past it the
+   * process exits anyway, non-zero, because something was still in flight.
+   * docker-compose.yml's `stop_grace_period` for the gateway is set above
+   * this so the orchestrator never SIGKILLs a drain that was going to finish. */
+  graceMs?: number;
+}
+
+export const DEFAULT_SHUTDOWN_GRACE_MS = 15_000;
+
+export function resolveShutdownGraceMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.REGULAIT_SHUTDOWN_GRACE_MS;
+  if (raw === undefined || raw.trim() === "") return DEFAULT_SHUTDOWN_GRACE_MS;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.trunc(n) : DEFAULT_SHUTDOWN_GRACE_MS;
+}
+
+/**
+ * REL-02 / OPS-01 — a signal drains the gateway instead of severing it.
+ *
+ * There was no handler at all. On the native path Ctrl-C took Node's default
+ * (immediate exit); under compose, Node was PID 1 with no init, so SIGTERM was
+ * IGNORED for the 10 s default grace and the container was then SIGKILLed.
+ * Either way the `onClose` hooks `startGateway` registers — the ADR-0064
+ * scheduler drain that waits for an in-flight sweep, the anchor and prune
+ * timers — never ran outside a test, in-flight approval transactions were
+ * aborted mid-request and the pool was never ended.
+ *
+ * Now, on SIGTERM or SIGINT: `app.close()` (stop accepting, let in-flight
+ * requests finish, run the onClose hooks), then `pool.end()`, then exit 0 —
+ * all under a deadline, past which the process exits 1 rather than hang on a
+ * stream that will not end. A SECOND signal during the drain exits
+ * immediately: an operator hammering Ctrl-C is not asking for patience.
+ *
+ * `unhandledRejection` and `uncaughtException` take the same path with exit
+ * code 1: the trace is logged first (Node's default prints it too, but exits
+ * without draining), then the same bounded drain, so a bug in a background
+ * tick leaves a stack AND a clean pool instead of a severed socket.
+ *
+ * Installed by main.ts ONLY — never by `startGateway`, which ~100 test files
+ * drive under vitest, where a process-level handler would catch the runner's
+ * own signals.
+ */
+export function installShutdownHandlers(
+  started: Pick<StartedGateway, "app">,
+  db: Db,
+  opts: ShutdownHandlerOptions = {},
+): { shutdown: (reason: string, code: number) => Promise<void> } {
+  const proc: ProcessLike = opts.proc ?? process;
+  const log = opts.log ?? ((line: string) => console.error(line));
+  const graceMs = opts.graceMs ?? resolveShutdownGraceMs();
+  let draining: Promise<void> | null = null;
+
+  const shutdown = (reason: string, code: number): Promise<void> => {
+    if (draining) return draining;
+    draining = (async () => {
+      log(`[regulait] ${reason} — draining (in-flight requests, scheduler tick, pool; up to ${graceMs} ms)`);
+      const deadline = setTimeout(() => {
+        log(`[regulait] drain did not finish within ${graceMs} ms — exiting now`);
+        proc.exit(code === 0 ? 1 : code);
+      }, graceMs);
+      deadline.unref();
+      try {
+        await started.app.close();
+      } catch (err) {
+        log(`[regulait] app.close failed during drain: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      try {
+        await (db as unknown as { $client: { end: () => Promise<void> } }).$client.end();
+      } catch (err) {
+        log(`[regulait] pool.end failed during drain: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      clearTimeout(deadline);
+      log(`[regulait] stopped (exit ${code})`);
+      proc.exit(code);
+    })();
+    return draining;
+  };
+
+  for (const sig of ["SIGTERM", "SIGINT"] as const) {
+    proc.on(sig, () => {
+      if (draining) {
+        log(`[regulait] second ${sig} during drain — exiting immediately`);
+        proc.exit(1);
+        return;
+      }
+      void shutdown(`received ${sig}`, 0);
+    });
+  }
+  proc.on("unhandledRejection", (reason: unknown) => {
+    const err = reason instanceof Error ? reason : new Error(String(reason));
+    log(`[regulait] unhandled promise rejection: ${err.stack ?? err.message}`);
+    void shutdown("unhandled promise rejection", 1);
+  });
+  proc.on("uncaughtException", (reason: unknown) => {
+    const err = reason instanceof Error ? reason : new Error(String(reason));
+    log(`[regulait] uncaught exception: ${err.stack ?? err.message}`);
+    void shutdown("uncaught exception", 1);
+  });
+
+  return { shutdown };
 }

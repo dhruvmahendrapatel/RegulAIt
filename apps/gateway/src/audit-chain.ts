@@ -284,6 +284,10 @@ export const S3_LOCK_OBSERVATION_TTL_MS = 60_000;
  * the anchor missing and says so), forgery is silent. This closes the silent
  * one.
  */
+/** REL-12: connect and whole-request deadlines for the anchor sink's S3 calls
+ * (a plain handler-options object — the SDK builds its NodeHttpHandler from it) */
+export const S3_REQUEST_HANDLER = Object.freeze({ connectionTimeout: 5_000, requestTimeout: 30_000 });
+
 export class S3ObjectLockSink implements AnchorSink {
   readonly destination = "s3_object_lock" as const;
   private readonly client: S3SendClient;
@@ -301,6 +305,13 @@ export class S3ObjectLockSink implements AnchorSink {
         ...(config.endpoint ? { endpoint: config.endpoint } : {}),
         forcePathStyle: config.forcePathStyle,
         ...(config.credentials ? { credentials: config.credentials } : {}),
+        // REL-12: the SDK's handler defaults BOTH timeouts to 0 = none, so a
+        // sink that drops packets (a firewall, not a refusal) hung the anchor
+        // capture — and the boot timer stacked a new one on it every 15 min.
+        // Bounded here, and retried once at most: an anchor that fails is
+        // recorded as `failed` with the reason, which is the honest outcome.
+        requestHandler: S3_REQUEST_HANDLER,
+        maxAttempts: 2,
       });
   }
 

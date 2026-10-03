@@ -123,3 +123,37 @@ describe("transitive per-node budget ceiling", () => {
     expect((await event(runId, { kind: "node_started", nodeId: "n1" })).statusCode).toBe(200);
   });
 });
+
+describe("REL-07: the estimated spend is incremented atomically", () => {
+  it("two nodes started CONCURRENTLY both land on budget.spentUsd (no lost update)", async () => {
+    const created = await createRun("nb-rel07-concurrent", [mkNode("a", worker), mkNode("b", worker)]);
+    const runId = created.json().id;
+    expect((await event(runId, { kind: "start" })).statusCode).toBe(200);
+    const [ra, rb] = await Promise.all([
+      event(runId, { kind: "node_started", nodeId: "a" }),
+      event(runId, { kind: "node_started", nodeId: "b" }),
+    ]);
+    expect(ra.statusCode).toBe(200);
+    expect(rb.statusCode).toBe(200);
+    const detail = await app.inject({ method: "GET", headers: benAuth, url: `/v1/runs/${runId}` });
+    const budget = detail.json().run.budget as { spentUsd: number };
+    // each node costs $3.00 under nb-worker; the snapshot write used to keep only one
+    expect(budget.spentUsd).toBeCloseTo(6, 6);
+  });
+
+  it("chargeRunEstimate never rewrites the rest of the envelope: measured spend survives a concurrent estimate charge", async () => {
+    const { chargeRunEstimate, chargeRunBudget } = await import("./orchestration.js");
+    const created = await createRun("nb-rel07-envelope", [mkNode("a", worker)]);
+    const runId = created.json().id;
+    await event(runId, { kind: "start" });
+    await Promise.all([
+      ...Array.from({ length: 25 }, () => chargeRunEstimate(db, runId, 0.01)),
+      chargeRunBudget(db, runId, "a", 1.25),
+    ]);
+    const detail = await app.inject({ method: "GET", headers: benAuth, url: `/v1/runs/${runId}` });
+    const budget = detail.json().run.budget as { spentUsd: number; measuredSpentUsd: number; capUsd: number | null };
+    expect(budget.spentUsd).toBeCloseTo(0.25, 6);
+    expect(budget.measuredSpentUsd).toBeCloseTo(1.25, 6);
+    expect(budget.capUsd).toBe(100);
+  });
+});

@@ -156,5 +156,26 @@ export function createDb(connectionString: string, override: Partial<DbPoolConfi
         ? { ssl: { rejectUnauthorized: false } }
         : {}),
   });
+  // REL-01 — an IDLE client's backend error is an EVENT, not a rejection.
+  //
+  // node-postgres emits `'error'` on the Pool when a client that is sitting
+  // idle in it loses its backend (`pg_terminate_backend`, a Postgres restart
+  // or failover, an LB/NAT idle reset, a laptop resuming from sleep). With no
+  // listener Node's EventEmitter THROWS that event, and the whole gateway —
+  // every governed call, the SPA, /health — died with "Unhandled 'error'
+  // event" over one connection the pool was about to discard anyway. Every
+  // CLI script in this repo had bolted its own `.on("error", () => {})` onto
+  // `$client`; the one process that serves traffic was the one without it.
+  //
+  // The pool removes the errored client itself and dials a fresh one on the
+  // next checkout, so the only correct reaction here is to SAY it happened.
+  // Queries in flight on that client still fail through their own awaited
+  // promise, exactly as before — nothing is swallowed, only the crash.
+  pool.on("error", (err: Error & { code?: string }) => {
+    console.error(
+      `[regulait] postgres: an idle pooled connection was dropped (${err.code ?? "no code"}: ${err.message}) — ` +
+        "the pool discards it and reconnects on next use; nothing in flight was affected",
+    );
+  });
   return withProseScrub(withAuditChain(drizzle(pool, { schema })));
 }

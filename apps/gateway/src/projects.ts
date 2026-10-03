@@ -1327,6 +1327,10 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
         .select()
         .from(projects)
         .where(memberProjectIds ? inArray(projects.id, memberProjectIds) : undefined),
+      // REL-10: a member's read aggregates only the projects it will show,
+      // not every usage_event in the deployment. (An admin read still walks
+      // the table: usage_events has no project_id index yet — a migration,
+      // deliberately not added here — so that remains O(table) per open.)
       db
         .select({
           projectId: usageEvents.projectId,
@@ -1334,6 +1338,7 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
           events: count(),
         })
         .from(usageEvents)
+        .where(memberProjectIds ? inArray(usageEvents.projectId, memberProjectIds) : undefined)
         .groupBy(usageEvents.projectId),
     ]);
     const byProject = new Map(spend.map((s) => [s.projectId, s]));

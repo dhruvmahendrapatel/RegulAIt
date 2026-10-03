@@ -35,6 +35,7 @@
 import { isIP } from "node:net";
 import { lookup as dnsLookup } from "node:dns/promises";
 import { pinnedFetch } from "./pinned-fetch.js";
+import { timeouts } from "./timeouts.js";
 
 // ---------------------------------------------------------------------------
 // types
@@ -778,6 +779,11 @@ export function createGuardedFetch(opts: GuardedFetchOptions): typeof fetch {
     if (!decision.ok) throw new EgressBlockedError(decision);
 
     const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+    // REL-12: a forgotten deadline is still a deadline. The caller's own
+    // signal is used untouched when there is one (MCP, scorers, model
+    // dispatch all bring theirs); only a call that brought none gets the
+    // process-wide outbound default, so nothing can hang a handler forever.
+    const signal = init?.signal ?? AbortSignal.timeout(timeouts().outboundDefaultMs);
 
     // Admission runs after asynchronous DNS/egress validation, before any send.
     if (opts.beforeSend) await opts.beforeSend();
@@ -795,7 +801,7 @@ export function createGuardedFetch(opts: GuardedFetchOptions): typeof fetch {
         target = pinned.toString();
         headers.set("host", decision.port === 80 ? decision.host : `${decision.host}:${decision.port}`);
       }
-      res = await injected(target, { ...init, headers, redirect: "manual" });
+      res = await injected(target, { ...init, headers, signal, redirect: "manual" });
     } else {
       res = await pinnedFetch(
         {
@@ -805,7 +811,7 @@ export function createGuardedFetch(opts: GuardedFetchOptions): typeof fetch {
           port: decision.port,
           addresses: decision.addresses,
         },
-        { ...init, headers, redirect: "manual" },
+        { ...init, headers, signal, redirect: "manual" },
       );
     }
 

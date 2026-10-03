@@ -48,14 +48,17 @@ demo:export-key -- --env)"`.)
 To start over, recreate the database (`docker rm -f regulait-demo-pg`, re-run the `docker run`)
 — the journey changes it, and `demo:prepare` seeds an empty database only. A full rehearsal of the UI journey, unattended:
 `E2E_BASE_URL=http://127.0.0.1:3105 pnpm --filter @regulait/web exec playwright test -c
-playwright.demo-real.config.ts` (needs `REGULAIT_BOOTSTRAP_TOKEN=e2e-bootstrap-token`).
+playwright.demo-real.config.ts` (export the gateway's own `REGULAIT_BOOTSTRAP_TOKEN` in that
+terminal; the spec falls back to `e2e-bootstrap-token` only when it is unset).
 
 1. `pnpm --filter @regulait/gateway demo:prepare` — seed → demo:setup → demo:intake →
    demo:traffic → demo:check in ~25 s. It must end **18 pass, 0 warn, 0 fail** (a FAIL on
    "3 Evidence" means the export key variables are not set in this terminal). The seed step
    prints each persona's **one-time password** — copy them.
-2. `PORT=3105 pnpm --filter @regulait/gateway start` (PowerShell: `$env:PORT = "3105"` first) —
-   the gateway serves the UI at `http://127.0.0.1:3105/ui`.
+2. `HOST=127.0.0.1 PORT=3105 pnpm --filter @regulait/gateway start` (PowerShell: `$env:HOST =
+   "127.0.0.1"; $env:PORT = "3105"` first) — the gateway serves the UI at `http://127.0.0.1:3105/ui`.
+   `HOST=127.0.0.1` keeps the plaintext gateway (and its bootstrap token) off the venue Wi-Fi; the
+   boot line prints the bound address, so check it says `127.0.0.1`.
 3. Two browser profiles, each signs in once with its one-time password and sets a new one:
    - **Profile A — Ada** (`admin@regulait.local`): governance admin. Drives every `/ui/admin/*`
      page and **proposes** remediations.

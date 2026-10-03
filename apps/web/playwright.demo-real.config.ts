@@ -11,8 +11,9 @@ import { defineConfig } from "@playwright/test";
  *   E2E_BASE_URL=http://127.0.0.1:3105 pnpm --filter @regulait/web exec \
  *     playwright test -c playwright.demo-real.config.ts
  *
- * The gateway's REGULAIT_BOOTSTRAP_TOKEN must be `e2e-bootstrap-token` (the
- * spec mints one-time passwords with it).
+ * The spec mints one-time passwords with the gateway's bootstrap token: export
+ * the same REGULAIT_BOOTSTRAP_TOKEN the gateway was started with (it falls back
+ * to `e2e-bootstrap-token`, the CI value, when unset).
  */
 const baseURL = process.env.E2E_BASE_URL ?? "http://127.0.0.1:3105";
 

@@ -13,7 +13,7 @@
  * injected, so this file is a pure unit suite.
  */
 
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 import {
   checkEgress,
   classifyAddress,
@@ -25,6 +25,7 @@ import {
   type EgressAllowEntry,
   type EgressResolver,
 } from "./egress-guard.js";
+import { setTimeoutConfig, timeouts } from "./timeouts.js";
 
 const IMDS = "169.254.169.254";
 
@@ -408,5 +409,49 @@ describe("the guarded fetch: redirects and per-request re-validation", () => {
       fetchImpl: (async () => new Response("{}", { status: 200 })) as unknown as typeof fetch,
     });
     await expect(guarded(`http://${IMDS}/latest/meta-data/`)).rejects.toBeInstanceOf(EgressBlockedError);
+  });
+});
+
+describe("REL-12: a guarded fetch always has a deadline", () => {
+  const original = timeouts();
+  afterAll(() => setTimeoutConfig(original));
+
+  /** an upstream that accepted and will never answer — but honours abort */
+  const blackHole = (async (_url: string, init: RequestInit) =>
+    new Promise<Response>((_, reject) => {
+      init.signal?.addEventListener("abort", () => reject(init.signal!.reason));
+    })) as unknown as typeof fetch;
+
+  it("a caller that supplied no signal is bounded by the outbound default", async () => {
+    setTimeoutConfig({ ...original, outboundDefaultMs: 50 });
+    const guarded = createGuardedFetch({
+      allowList: allow("collector.example.com", { allowPlaintextHttp: false }),
+      resolve: publicResolver,
+      fetchImpl: blackHole,
+    });
+    const started = Date.now();
+    await expect(guarded("https://collector.example.com/v1/traces", { method: "POST", body: "{}" })).rejects.toMatchObject({
+      name: "TimeoutError",
+    });
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  it("a caller's OWN signal is used untouched — the default never shortens a deadline a caller chose", async () => {
+    setTimeoutConfig({ ...original, outboundDefaultMs: 50 });
+    const guarded = createGuardedFetch({
+      allowList: allow("collector.example.com", { allowPlaintextHttp: false }),
+      resolve: publicResolver,
+      fetchImpl: blackHole,
+    });
+    const ac = new AbortController();
+    const pending = guarded("https://collector.example.com/v1/traces", { signal: ac.signal });
+    // well past the 50 ms default: still pending, because the caller's signal governs
+    await new Promise((r) => setTimeout(r, 200));
+    let settled = false;
+    void pending.then(() => (settled = true), () => (settled = true));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(settled).toBe(false);
+    ac.abort(new Error("caller cancelled"));
+    await expect(pending).rejects.toThrow("caller cancelled");
   });
 });
