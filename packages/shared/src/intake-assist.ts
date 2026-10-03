@@ -23,6 +23,8 @@ import {
   classifyEuAiActTier,
   euAiActAnswersSchema,
   renderEuAiActAnswersBlock,
+  unsureListSchema,
+  EU_AI_ACT_BOOLEAN_KEYS,
   type EuAiActAnswers,
 } from "./eu-ai-act.js";
 import {
@@ -77,7 +79,14 @@ export const intakeContextSchema = z.object(intakeContextShape).strict();
  * prefilled; `PATCH` in `needs_info` takes the same set and recomputes the
  * tier (from the EU keys) and `dataSensitivity` (from `dataCategories`).
  */
-export const intakeScreeningAnswersSchema = euAiActAnswersSchema.extend(intakeContextShape).strict();
+export const intakeScreeningAnswersSchema = euAiActAnswersSchema
+  .extend(intakeContextShape)
+  /** ADR-0171 / AER-053 — the yes/no answers the owner marked "Not sure".
+   * Each must be a key of INTAKE_BOOLEAN_QUESTION_KEYS answered `true` (the
+   * conservative reading the tier is computed from); the gateway refuses
+   * anything else with 422 `unsure_answer_must_count_as_yes`. */
+  .extend({ unsure: unsureListSchema.optional() })
+  .strict();
 export type IntakeScreeningAnswers = z.infer<typeof intakeScreeningAnswersSchema>;
 
 /** PATCH form: the EU keys are required (the tier is recomputed from them);
@@ -92,8 +101,22 @@ export const intakeScreeningAnswersPatchSchema = euAiActAnswersSchema
     generative: intakeContextShape.generative.optional(),
     autonomousActions: intakeContextShape.autonomousActions.optional(),
     toolsUsed: intakeContextShape.toolsUsed.removeDefault().optional(),
+    /** ADR-0171: the COMPLETE "Not sure" set for this resubmission —
+     * omitted means none (it replaces the stored set; it is never merged) */
+    unsure: unsureListSchema.optional(),
   })
   .strict();
+
+/** ADR-0171 / AER-053 — every yes/no question of the Classify step, i.e. the
+ * answers that may be marked "Not sure": the EU AI Act flags plus the
+ * context flags. */
+export const INTAKE_BOOLEAN_QUESTION_KEYS: readonly string[] = [
+  ...EU_AI_ACT_BOOLEAN_KEYS,
+  "euNexus",
+  "usesExternalVendor",
+  "generative",
+  "autonomousActions",
+];
 
 /**
  * AER-042 — a use case's `dataSensitivity` from its declared data categories,

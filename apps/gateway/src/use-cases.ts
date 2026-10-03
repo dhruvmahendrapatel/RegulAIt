@@ -67,12 +67,14 @@ import {
   desc,
   eq,
   inArray,
+  lt,
   or,
   projectMembers,
   projects,
   sql,
   users,
   useCaseConditions,
+  useCaseIdempotencyKeys,
   workflowArtifacts,
   workflowInstances,
   workflowTemplates,
@@ -102,6 +104,11 @@ import {
   evaluateReportAccess,
   markConditionMetSchema,
   type UseCaseConditionView,
+  EU_AI_ACT_BOOLEAN_KEYS,
+  INTAKE_BOOLEAN_QUESTION_KEYS,
+  UNSURE_ANSWER_MUST_COUNT_AS_YES,
+  unsureAnswerViolations,
+  unsureViolationDetail,
 } from "@regulait/shared";
 import { z } from "zod";
 import { complianceProfilesForTags, effectiveCompliancePolicy } from "./projects.js";
@@ -239,6 +246,21 @@ async function recomputeEuTierForUseCase(
   // otherwise dropping the block would turn "high" into "unscreened" and route
   // the review to whatever the unscreened tier requires.
   if (extracted.status !== "ok" && useCase.euAiActTier !== null) return;
+
+  // ADR-0171 / AER-053: a block that carries an `unsure` list restates the
+  // EU answers' "Not sure" set; the context answers' entries (stored from the
+  // Classify step) are kept. A block without the key says nothing about it.
+  if (extracted.status === "ok" && extracted.unsure !== undefined) {
+    const euKeys: readonly string[] = EU_AI_ACT_BOOLEAN_KEYS;
+    const stored = useCase.screeningUnsure ?? [];
+    const next = [...stored.filter((k) => !euKeys.includes(k)), ...extracted.unsure];
+    if (JSON.stringify([...next].sort()) !== JSON.stringify([...stored].sort())) {
+      await db
+        .update(aiUseCases)
+        .set({ screeningUnsure: next, updatedAt: new Date() })
+        .where(eq(aiUseCases.id, useCase.id));
+    }
+  }
   let tier: AiUseCaseRow["euAiActTier"] = null;
   let reasons: EuAiActReason[] | null = null;
   let rulesetVersion: number | null = null;
@@ -843,8 +865,11 @@ async function resubmissionFor(
   // use case registered without them prefills the EU answers only
   const extracted = questionnaire ? extractEuAiActAnswers(questionnaire.content) : null;
   const fromQuestionnaire = extracted?.status === "ok" ? extracted.answers : null;
+  // ADR-0171: + the "Not sure" set, so a resubmission starts from it
   const screeningAnswers =
-    fromQuestionnaire || row.intakeAnswers ? { ...(fromQuestionnaire ?? {}), ...(row.intakeAnswers ?? {}) } : null;
+    fromQuestionnaire || row.intakeAnswers
+      ? { ...(fromQuestionnaire ?? {}), ...(row.intakeAnswers ?? {}), unsure: row.screeningUnsure ?? [] }
+      : null;
   return {
     allowed: row.status === "needs_info" && (auth.isAdmin || (!!auth.userId && auth.userId === row.ownerUserId)),
     screeningAnswers,
@@ -1168,6 +1193,88 @@ async function projectSummaryFor(db: Db, useCase: AiUseCaseRow) {
 }
 
 // ---------------------------------------------------------------------------
+// ADR-0171 — framework rationales, "Not sure" answers, idempotent creation
+// ---------------------------------------------------------------------------
+
+/** AER-052: a rationale explains why a framework THIS use case carries
+ * applies — one for a framework it does not carry has nothing to explain */
+function unlistedRationaleRefusal(
+  rationales: Record<string, string> | undefined,
+  complianceTags: readonly string[],
+): Record<string, unknown> | null {
+  if (!rationales) return null;
+  const unlisted = Object.keys(rationales).filter((k) => !complianceTags.includes(k));
+  if (unlisted.length === 0) return null;
+  return {
+    error: "rationale_for_unlisted_framework",
+    frameworks: unlisted,
+    detail:
+      `a framework rationale explains a framework this use case carries; ${unlisted.join(", ")} ` +
+      "is not among its compliance tags",
+  };
+}
+
+/** AER-053: the "Not sure" list split off the flat answers, deduplicated, and
+ * checked against the answers it qualifies (null = consistent) */
+function splitUnsure(answers: Record<string, unknown>): {
+  rest: Record<string, unknown>;
+  unsure: string[];
+  refusal: Record<string, unknown> | null;
+} {
+  const { unsure: raw, ...rest } = answers;
+  const unsure = [...new Set(Array.isArray(raw) ? (raw as string[]) : [])];
+  const bad = unsureAnswerViolations(rest, unsure, INTAKE_BOOLEAN_QUESTION_KEYS);
+  return {
+    rest,
+    unsure,
+    refusal: bad.length
+      ? { error: UNSURE_ANSWER_MUST_COUNT_AS_YES, answers: bad, detail: unsureViolationDetail(bad) }
+      : null,
+  };
+}
+
+/**
+ * AER-053 — the questionnaire artifact route's pre-check (wired through
+ * `WorkflowRouteOptions.validateArtifact`): an intake questionnaire whose
+ * answers block marks an answer "Not sure" without counting it as yes is
+ * refused by name BEFORE it is stored. Every other questionnaire — including
+ * one with no or an otherwise invalid block — is unchanged (stored, then
+ * screened as before).
+ */
+export function useCaseArtifactRefusal(
+  output: string,
+  content: string,
+): { status: number; body: Record<string, unknown> } | null {
+  if (output !== USE_CASE_QUESTIONNAIRE_OUTPUT) return null;
+  const extracted = extractEuAiActAnswers(content);
+  if (extracted.status === "invalid" && extracted.code === UNSURE_ANSWER_MUST_COUNT_AS_YES) {
+    return { status: 422, body: { error: UNSURE_ANSWER_MUST_COUNT_AS_YES, detail: extracted.error } };
+  }
+  return null;
+}
+
+/** AER-050: how long a claimed Idempotency-Key replays its original response */
+export const USE_CASE_IDEMPOTENCY_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/** the stored original body for (caller, key), if claimed inside the window */
+async function idempotentReplayFor(db: Db, userId: string, key: string): Promise<Record<string, unknown> | null> {
+  const [hit] = await db
+    .select({ response: useCaseIdempotencyKeys.response, createdAt: useCaseIdempotencyKeys.createdAt })
+    .from(useCaseIdempotencyKeys)
+    .where(and(eq(useCaseIdempotencyKeys.userId, userId), eq(useCaseIdempotencyKeys.key, key)));
+  if (!hit || !hit.response) return null;
+  if (Date.now() - hit.createdAt.getTime() >= USE_CASE_IDEMPOTENCY_WINDOW_MS) return null;
+  return hit.response;
+}
+
+/** thrown inside the create transaction to roll back the key claim with it */
+class CreateRefused extends Error {
+  constructor(readonly status: number, readonly body: Record<string, unknown>) {
+    super("use-case create refused");
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Routes
 // ---------------------------------------------------------------------------
 
@@ -1291,6 +1398,31 @@ export function registerUseCaseRoutes(
     const userId = req.authCtx.userId;
     if (!userId) return reply.status(403).send({ error: "bootstrap_cannot_propose" });
 
+    // ADR-0171 / AER-050 — IDEMPOTENT CREATION. A retry carrying the same
+    // Idempotency-Key from the same caller within 24h gets the ORIGINAL 201
+    // body back (200 + `Idempotent-Replay: true`) instead of a second use
+    // case. Keys are per caller; no header = unchanged behaviour.
+    const rawKey = req.headers["idempotency-key"];
+    let idemKey: string | null = null;
+    if (rawKey !== undefined) {
+      if (typeof rawKey !== "string" || rawKey.length < 1 || rawKey.length > 200) {
+        return reply.status(400).send({
+          error: "invalid_idempotency_key",
+          detail: "Idempotency-Key must be a single value of 1 to 200 characters",
+        });
+      }
+      idemKey = rawKey;
+      const replay = await idempotentReplayFor(db, userId, idemKey);
+      if (replay) return reply.status(200).header("Idempotent-Replay", "true").send(replay);
+    }
+
+    // ADR-0171 / AER-052 — rationales only for frameworks this use case carries
+    const unlisted = unlistedRationaleRefusal(body.frameworkRationales, body.complianceTags);
+    if (unlisted) return reply.status(422).send(unlisted);
+    // ADR-0171 / AER-053 — a "Not sure" answer counts as yes, never a silent no
+    const split = body.screeningAnswers ? splitUnsure(body.screeningAnswers) : null;
+    if (split?.refusal) return reply.status(422).send(split.refusal);
+
     if (body.projectId) {
       const [project] = await db
         .select({ id: projects.id })
@@ -1311,64 +1443,127 @@ export function registerUseCaseRoutes(
     const template = await resolveIntakeTemplate(db);
     if (!template.ok) return reply.status(template.status).send(template.body);
 
-    // pillar-2 rails: the intake instance. It carries NO projectId — the
-    // proposal governs itself; the named project is a reference the cascade
-    // card reads, not an attribution target (ADR-0080 honest limits).
-    const started = await startWorkflowInstanceWithTemplates(db, opts.dataKey, {
-      templateIds: [template.templateId],
-      initiatorUserId: userId,
-      change: {
-        description: `AI use-case intake: ${body.name}`,
-        paths: [],
-        changeType: "ai-use-case-intake",
-        environment: "governance",
-      },
-    });
-    if (!started.ok) return reply.status(started.status).send(started.body);
+    // ONE transaction: the key claim, the intake instance, the registry row
+    // and its audit row commit together or not at all. The claim is
+    // INSERTED FIRST: a concurrent duplicate's insert waits on this
+    // transaction at the unique (user_id, key) index and, once it commits,
+    // conflicts and replays — two requests can never both create.
+    let outcome: { kind: "created"; body: Record<string, unknown> } | { kind: "replay"; body: Record<string, unknown> | null };
+    try {
+      outcome = await db.transaction(async (rawTx) => {
+        const tx = rawTx as unknown as Db;
+        if (idemKey) {
+          const expired = new Date(Date.now() - USE_CASE_IDEMPOTENCY_WINDOW_MS);
+          await tx
+            .delete(useCaseIdempotencyKeys)
+            .where(
+              and(
+                eq(useCaseIdempotencyKeys.userId, userId),
+                eq(useCaseIdempotencyKeys.key, idemKey),
+                lt(useCaseIdempotencyKeys.createdAt, expired),
+              ),
+            );
+          const claimed = await tx
+            .insert(useCaseIdempotencyKeys)
+            .values({ userId, key: idemKey })
+            .onConflictDoNothing({ target: [useCaseIdempotencyKeys.userId, useCaseIdempotencyKeys.key] })
+            .returning({ id: useCaseIdempotencyKeys.id });
+          if (claimed.length === 0) {
+            const [existing] = await tx
+              .select({ response: useCaseIdempotencyKeys.response })
+              .from(useCaseIdempotencyKeys)
+              .where(and(eq(useCaseIdempotencyKeys.userId, userId), eq(useCaseIdempotencyKeys.key, idemKey)));
+            return { kind: "replay" as const, body: existing?.response ?? null };
+          }
+        }
 
-    const [row] = await db
-      .insert(aiUseCases)
-      .values({
-        name: body.name,
-        description: body.description,
-        ownerUserId: userId,
-        businessContext: body.businessContext,
-        intendedAgentIds: body.intendedAgentIds,
-        dataSensitivity: body.dataSensitivity,
-        complianceTags: body.complianceTags,
-        projectId: body.projectId ?? null,
-        workflowInstanceId: started.instance.id,
-        status: "proposed",
-        // ADR-0168 amendment: kept for resubmission prefill — nothing else reads it
-        ...(body.screeningAnswers ? { intakeAnswers: body.screeningAnswers } : {}),
-      })
-      .returning();
-    await db.insert(auditLog).values({
-      userId,
-      objectType: "ai_use_case",
-      objectId: row!.id,
-      detail: {
-        phase: "proposed",
-        name: body.name,
-        dataSensitivity: body.dataSensitivity,
-        complianceTags: body.complianceTags,
-        projectId: body.projectId ?? null,
-        workflowInstanceId: started.instance.id,
-      },
-      effect: "allow",
-      ruleId: "use-case-proposed",
-      ruleChain: [],
-      reason: `AI use case '${body.name}' proposed — intake workflow started`,
-    });
-    return reply.status(201).send({
-      ...row,
-      instance: started.instance,
-      questionnaireTemplate: USE_CASE_QUESTIONNAIRE_TEMPLATE,
-      note:
-        "fill the questionnaire and submit it as the intake instance's " +
-        `'${USE_CASE_QUESTIONNAIRE_OUTPUT}' artifact; the sign-off decision on the one approvals ` +
-        "queue is what approves this use case",
-    });
+        // pillar-2 rails: the intake instance. It carries NO projectId — the
+        // proposal governs itself; the named project is a reference the cascade
+        // card reads, not an attribution target (ADR-0080 honest limits).
+        const started = await startWorkflowInstanceWithTemplates(tx, opts.dataKey, {
+          templateIds: [template.templateId],
+          initiatorUserId: userId,
+          change: {
+            description: `AI use-case intake: ${body.name}`,
+            paths: [],
+            changeType: "ai-use-case-intake",
+            environment: "governance",
+          },
+        });
+        if (!started.ok) throw new CreateRefused(started.status, started.body);
+
+        const [row] = await tx
+          .insert(aiUseCases)
+          .values({
+            name: body.name,
+            description: body.description,
+            ownerUserId: userId,
+            businessContext: body.businessContext,
+            intendedAgentIds: body.intendedAgentIds,
+            dataSensitivity: body.dataSensitivity,
+            complianceTags: body.complianceTags,
+            projectId: body.projectId ?? null,
+            workflowInstanceId: started.instance.id,
+            status: "proposed",
+            // ADR-0168 amendment: kept for resubmission prefill — nothing else reads it
+            ...(split ? { intakeAnswers: split.rest, screeningUnsure: split.unsure } : {}),
+            ...(body.frameworkRationales ? { frameworkRationales: body.frameworkRationales } : {}),
+          })
+          .returning();
+        await tx.insert(auditLog).values({
+          userId,
+          objectType: "ai_use_case",
+          objectId: row!.id,
+          detail: {
+            phase: "proposed",
+            name: body.name,
+            dataSensitivity: body.dataSensitivity,
+            complianceTags: body.complianceTags,
+            projectId: body.projectId ?? null,
+            workflowInstanceId: started.instance.id,
+            ...(split?.unsure.length ? { screeningUnsure: split.unsure } : {}),
+            ...(body.frameworkRationales ? { rationaleFrameworks: Object.keys(body.frameworkRationales) } : {}),
+            ...(idemKey ? { idempotencyKey: true } : {}),
+          },
+          effect: "allow",
+          ruleId: "use-case-proposed",
+          ruleChain: [],
+          reason: `AI use case '${body.name}' proposed — intake workflow started`,
+        });
+        const created: Record<string, unknown> = {
+          ...row,
+          instance: started.instance,
+          questionnaireTemplate: USE_CASE_QUESTIONNAIRE_TEMPLATE,
+          note:
+            "fill the questionnaire and submit it as the intake instance's " +
+            `'${USE_CASE_QUESTIONNAIRE_OUTPUT}' artifact; the sign-off decision on the one approvals ` +
+            "queue is what approves this use case",
+        };
+        if (idemKey) {
+          // stored as the JSON the caller received, so a replay is byte-for-byte the same shape
+          await tx
+            .update(useCaseIdempotencyKeys)
+            .set({ useCaseId: row!.id, response: JSON.parse(JSON.stringify(created)) as Record<string, unknown> })
+            .where(and(eq(useCaseIdempotencyKeys.userId, userId), eq(useCaseIdempotencyKeys.key, idemKey)));
+        }
+        return { kind: "created" as const, body: created };
+      });
+    } catch (err) {
+      if (err instanceof CreateRefused) return reply.status(err.status).send(err.body);
+      throw err;
+    }
+    if (outcome.kind === "replay") {
+      if (!outcome.body) {
+        // unreachable while the claim and its response commit together; said
+        // plainly rather than creating a second use case
+        return reply.status(409).send({
+          error: "idempotency_key_in_flight",
+          detail: "a request with this Idempotency-Key has not finished — retry shortly",
+        });
+      }
+      return reply.status(200).header("Idempotent-Replay", "true").send(outcome.body);
+    }
+    return reply.status(201).send(outcome.body);
   });
 
   // List: fleet for admins, own proposals for everyone else — the same
@@ -1486,6 +1681,10 @@ export function registerUseCaseRoutes(
     const now = new Date();
     return {
       useCase: { ...row, approvalExpired: approvalExpired(row, now), recertificationDueAt: recertificationDueAt(row) },
+      // ADR-0171: the owner's per-framework "why it applies" (AER-052) and the
+      // answers they were unsure about, counted as yes (AER-053) — for reviewers
+      frameworkRationales: row.frameworkRationales ?? {},
+      screeningUnsure: row.screeningUnsure ?? [],
       // ADR-0168: what the approval imposed — owner/met-by names resolved
       conditions: await conditionViewsFor(db, row, now, req.authCtx),
       // ADR-0168 amendment: the current round's required reviews ([] on the
@@ -1588,6 +1787,8 @@ export function registerUseCaseRoutes(
           `this one is ${row.status} — submit a new questionnaire version instead`,
       });
     }
+    const unlisted = unlistedRationaleRefusal(body.frameworkRationales, row.complianceTags);
+    if (unlisted) return reply.status(422).send(unlisted);
     if (body.projectId) {
       const [project] = await db
         .select({ id: projects.id })
@@ -1610,8 +1811,18 @@ export function registerUseCaseRoutes(
     let screening: ReturnType<typeof classifyEuAiActTier> | null = null;
     let intakeAnswers: Record<string, unknown> | null = null;
     let dataSensitivity: AiUseCaseRow["dataSensitivity"] | null = null;
+    let screeningUnsure: string[] | null = null;
     if (body.screeningAnswers) {
       const a = body.screeningAnswers;
+      // ADR-0171 / AER-053: the "Not sure" set REPLACES the stored one (omitted
+      // = none) and is checked against the answers as they will be stored —
+      // an omitted context answer keeps its stored value
+      const { unsure: _unsure, ...answersOnly } = a;
+      const merged = { ...(row.intakeAnswers ?? {}), ...answersOnly };
+      delete (merged as Record<string, unknown>).unsure;
+      const split = splitUnsure({ ...merged, unsure: a.unsure ?? [] });
+      if (split.refusal) return reply.status(422).send(split.refusal);
+      screeningUnsure = split.unsure;
       screening = classifyEuAiActTier({
         purposeDomain: a.purposeDomain,
         affectedPersons: a.affectedPersons,
@@ -1625,7 +1836,7 @@ export function registerUseCaseRoutes(
         interactsWithHumans: a.interactsWithHumans,
         generatesSyntheticContent: a.generatesSyntheticContent,
       });
-      intakeAnswers = { ...(row.intakeAnswers ?? {}), ...a };
+      intakeAnswers = merged;
       if (a.dataCategories !== undefined) dataSensitivity = deriveDataSensitivityFromCategories(a.dataCategories);
     }
     const [updated] = await db
@@ -1639,6 +1850,8 @@ export function registerUseCaseRoutes(
             }
           : {}),
         ...(intakeAnswers ? { intakeAnswers } : {}),
+        ...(screeningUnsure ? { screeningUnsure } : {}),
+        ...(body.frameworkRationales !== undefined ? { frameworkRationales: body.frameworkRationales } : {}),
         ...(dataSensitivity ? { dataSensitivity } : {}),
         ...(body.description !== undefined ? { description: body.description } : {}),
         ...(body.businessContext !== undefined ? { businessContext: body.businessContext } : {}),

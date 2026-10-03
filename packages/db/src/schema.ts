@@ -7649,6 +7649,14 @@ export const aiUseCases = pgTable(
      * (flat: EU AI Act answers + intake context), kept for resubmission
      * prefill. NULL = registered without them. Never an input to the tier. */
     intakeAnswers: jsonb("intake_answers").$type<Record<string, unknown>>(),
+    /** ADR-0171 / AER-052 (migration 0134): the owner's "why it applies" per
+     * framework, keyed by compliance tag (every key is one of
+     * `complianceTags`). Shown to reviewers; never an input to any decision. */
+    frameworkRationales: jsonb("framework_rationales").$type<Record<string, string>>().notNull().default({}),
+    /** ADR-0171 / AER-053 (migration 0134): the yes/no screening answers the
+     * owner marked "Not sure". Every listed answer is stored (and screened)
+     * as `true`, the conservative reading; reviewers see the list. */
+    screeningUnsure: jsonb("screening_unsure").$type<string[]>().notNull().default([]),
     retiredReason: text("retired_reason"),
     retiredAt: timestamp("retired_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -7683,6 +7691,63 @@ export const aiUseCases = pgTable(
 );
 
 export type AiUseCaseRow = typeof aiUseCases.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0171 / AER-050 (migration 0134) — INTAKE DRAFTS AND IDEMPOTENT CREATION.
+//
+// `use_case_drafts`: the intake wizard's work-in-progress, server-side and per
+// user (questionnaire text can be sensitive, so it never lives in browser
+// storage). One draft per (user, scope): scope `new` is the registration
+// wizard, a use-case id is that use case's resubmission. `state` is the
+// wizard's opaque JSON; the gateway never reads inside it.
+//
+// `use_case_idempotency_keys`: an `Idempotency-Key` on POST /v1/use-cases is
+// CLAIMED here inside the create transaction — the unique (user_id, key)
+// index is what makes two concurrent duplicates unable to both create. The
+// stored `response` is the original 201 body, replayed for 24 hours.
+// ---------------------------------------------------------------------------
+
+export const useCaseDrafts = pgTable(
+  "use_case_drafts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    scope: text("scope").notNull(),
+    state: jsonb("state").$type<Record<string, unknown>>().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("use_case_drafts_user_scope_uq").on(t.userId, t.scope),
+    index("use_case_drafts_updated_idx").on(t.updatedAt),
+  ],
+);
+
+export type UseCaseDraftRow = typeof useCaseDrafts.$inferSelect;
+
+export const useCaseIdempotencyKeys = pgTable(
+  "use_case_idempotency_keys",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    key: text("key").notNull(),
+    useCaseId: uuid("use_case_id").references(() => aiUseCases.id, { onDelete: "cascade" }),
+    /** the original 201 body, replayed verbatim on a retry */
+    response: jsonb("response").$type<Record<string, unknown>>(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("use_case_idempotency_keys_key_check", sql`length(${t.key}) BETWEEN 1 AND 200`),
+    uniqueIndex("use_case_idempotency_keys_user_key_uq").on(t.userId, t.key),
+    index("use_case_idempotency_keys_created_idx").on(t.createdAt),
+  ],
+);
+
+export type UseCaseIdempotencyKeyRow = typeof useCaseIdempotencyKeys.$inferSelect;
 
 // ---------------------------------------------------------------------------
 // ADR-0168 (migration 0129) — APPROVAL CONDITIONS ("approve with conditions").

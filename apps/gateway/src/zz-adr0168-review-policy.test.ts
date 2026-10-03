@@ -513,7 +513,8 @@ describe("resubmission after send-back", () => {
     expect(d.useCase.status).toBe("needs_info");
     expect(d.resubmission).toEqual({
       allowed: true,
-      screeningAnswers: registered,
+      // ADR-0171: the prefill carries the "Not sure" set back ([] = none)
+      screeningAnswers: { ...registered, unsure: [] },
       questionnaire: { version: 1, content: questionnaire(limitedAnswers) },
       returnReason: "say who the users are",
       returnedByName: users.sec1.name,

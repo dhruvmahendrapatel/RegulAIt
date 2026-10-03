@@ -36,7 +36,13 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
  * should have a button now"; adding one is a decision, so it should be a diff
  * somebody reviews.
  */
-const DELIBERATELY_API_ONLY = new Map([]);
+const DELIBERATELY_API_ONLY = new Map([
+  // TEMPORARY (M-053): ADR-0171 / AER-050 — the intake wizard's "Start fresh"
+  // and post-submit cleanup call this; that UI is the web agent's half of the
+  // same change (branch aer05x-w). Deleting this entry is part of that
+  // task's wiring pass.
+  ["/v1/use-cases/draft", "AER-050 web half (intake wizard drafts) lands in the wiring pass"],
+]);
 
 const walk = (dir, out = []) => {
   for (const e of readdirSync(dir)) {

@@ -3313,6 +3313,12 @@ export const AI_USE_CASE_DATA_SENSITIVITIES = [
   "regulated",
 ] as const;
 
+/** ADR-0171 / AER-052 — per-framework rationale, keyed by compliance tag */
+export const frameworkRationalesSchema = z.record(
+  z.string().min(1).max(200),
+  z.string().trim().min(1).max(2000),
+);
+
 export const createUseCaseSchema = z.object({
   name: z.string().min(1).max(200),
   description: z.string().min(1).max(4000),
@@ -3328,6 +3334,10 @@ export const createUseCaseSchema = z.object({
    * nothing else at registration (the tier is still computed from the
    * submitted questionnaire). */
   screeningAnswers: intakeScreeningAnswersSchema.optional(),
+  /** ADR-0171 / AER-052 — the owner's own "why it applies" per framework.
+   * Every key must be one of `complianceTags` (422
+   * `rationale_for_unlisted_framework` otherwise); shown to reviewers. */
+  frameworkRationales: frameworkRationalesSchema.optional(),
 });
 
 /** editable while the intake is in flight; `status` is NOT here on purpose —
@@ -3345,7 +3355,24 @@ export const updateUseCaseSchema = z.object({
    * questionnaire version carries the same answers block and is screened
    * again on submission. */
   screeningAnswers: intakeScreeningAnswersPatchSchema.optional(),
+  /** ADR-0171 / AER-052 — replaces the stored rationales; keys must be among
+   * the use case's complianceTags */
+  frameworkRationales: frameworkRationalesSchema.optional(),
 });
+
+/**
+ * ADR-0171 / AER-050 — the intake wizard's server-side draft. `state` is the
+ * wizard's own opaque JSON object; the gateway stores it for the signed-in
+ * user only and never reads inside it. Size is checked in bytes at the route
+ * (413 `draft_too_large` above USE_CASE_DRAFT_MAX_BYTES).
+ */
+export const USE_CASE_DRAFT_MAX_BYTES = 256 * 1024;
+export const useCaseDraftScopeSchema = z.object({
+  scope: z.union([z.literal("new"), z.string().uuid()]),
+});
+export const putUseCaseDraftSchema = z
+  .object({ state: z.record(z.string(), z.unknown()) })
+  .strict();
 
 export const retireUseCaseSchema = z.object({
   reason: z.string().min(1).max(2000),
@@ -3406,6 +3433,7 @@ export {
   intakeContextSchema,
   intakeScreeningAnswersSchema,
   intakeScreeningAnswersPatchSchema,
+  INTAKE_BOOLEAN_QUESTION_KEYS,
   deriveDataSensitivityFromCategories,
   type IntakeScreeningAnswers,
   parseIntakeNarrative,
@@ -3568,6 +3596,11 @@ export {
   euAiActAnswersSchema,
   extractEuAiActAnswers,
   renderEuAiActAnswersBlock,
+  unsureAnswerViolations,
+  unsureListSchema,
+  unsureViolationDetail,
+  EU_AI_ACT_BOOLEAN_KEYS,
+  UNSURE_ANSWER_MUST_COUNT_AS_YES,
   EU_AI_ACT_ANNEX_III_DOMAINS,
   EU_AI_ACT_ANSWERS_FENCE,
   EU_AI_ACT_AFFECTED_PERSONS,

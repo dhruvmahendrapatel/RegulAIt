@@ -620,6 +620,14 @@ export interface WorkflowRouteOptions {
    * approvals transaction in app.ts; this hook exists because those three
    * routes live here and app.ts composes the modules (no import cycle). */
   onInstanceTransition?: (db: Db, instanceId: string, actorUserId: string | null) => Promise<void>;
+  /** ADR-0171 / AER-053: a pre-check on an artifact submission, run BEFORE
+   * anything is stored or transitioned. A dependent object refuses content it
+   * can name a reason for (the use-case questionnaire's inconsistent "Not
+   * sure" answers); null lets the submission through unchanged. */
+  validateArtifact?: (
+    output: string,
+    content: string,
+  ) => { status: number; body: Record<string, unknown> } | null;
 }
 
 /** §8 nesting: called from the orchestration run-event funnel when a run
@@ -2651,6 +2659,8 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     if (!stage) return reply.status(404).send({ error: "unknown_artifact_stage" });
 
     if (!req.authCtx.userId) return reply.status(403).send({ error: "bootstrap_cannot_drive" });
+    const refusal = opts.validateArtifact?.(stage.output!, body.content);
+    if (refusal) return reply.status(refusal.status).send(refusal.body);
     const { state, effects } = await applyEvent(
       db,
       instance.id,
