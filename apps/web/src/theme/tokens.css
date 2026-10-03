@@ -117,7 +117,7 @@
 
   /* The three page grounds, in ascending elevation. */
   /* ADR-0169: the darkest point of the light field (see --rg-field below) */
-  --rg-canvas: #e3e9f6;
+  --rg-canvas: #d2c7ff;
   --rg-surface: #ffffff;
   --rg-raised: var(--rg-25);
   /* hover/pressed fill — not one of the three grounds, but needed everywhere */
@@ -130,7 +130,7 @@
   /* ADR-0169 DOCUMENTED DEVIATION: one notch darker than Graphite 500 so muted
      copy that sits on the shaded canvas (crumbs, page subtitles) keeps AA at the
      field's worst point, not only on white. */
-  --rg-ink-muted: #5d6064; /* 6.3:1 on surface */
+  --rg-ink-muted: #4f5256; /* 7.9:1 on surface; ~5.0:1 at the pastel field's worst point */
   --rg-ink-faint: var(--rg-400); /* 3.3:1 — decorative only, never body copy */
   --rg-ink-invert: #ffffff;
 
@@ -143,7 +143,7 @@
      primary fills use, because Signal 500 under white text is only 2.3:1. */
   --rg-signal: #00b9d4;
   --rg-signal-400: #00cfef;
-  --rg-signal-700: #006b82; /* 6.1:1 on surface */
+  --rg-signal-700: #005c70; /* 7.6:1 on surface; one notch deeper so links keep AA on the stronger light field */
   --rg-signal-800: #005566; /* pressed */
   --rg-signal-tint: #d6f4f8; /* 16% of Signal over the surface */
   --rg-signal-ring: #006b82;
@@ -213,12 +213,19 @@
      WORST point, which `e2e/theme-shell.mock.spec.ts` measures from pixels.
      `--rg-canvas` is that worst point's colour, so the token contrast checks
      in brand-contract stay honest. */
-  --rg-field-base: linear-gradient(155deg, #eef6fd 0%, #f1f1fd 48%, #edf8f3 100%);
+  /* Light mode carries its colour in PASTELS rather than in translucent deep
+     hues: a pastel holds high chroma at high luminance, so the edges read
+     clearly coloured while the field's worst point stays light enough for the
+     muted and link inks below (owner, 2026-10-03: "stronger colour at the
+     edges"). Aqua, lavender, mint and sky at the four corners; a warm peach
+     glow along the bottom edge. */
+  --rg-field-base: linear-gradient(155deg, #eef6fd 0%, #f3f2fe 48%, #edf8f3 100%);
   --rg-field:
-    radial-gradient(75vw 65vh at 0% 0%, rgba(0, 185, 212, 0.17), transparent 72%),
-    radial-gradient(65vw 75vh at 100% 0%, rgba(118, 104, 240, 0.15), transparent 72%),
-    radial-gradient(60vw 65vh at 100% 100%, rgba(52, 199, 140, 0.14), transparent 72%),
-    radial-gradient(60vw 60vh at 0% 100%, rgba(80, 140, 245, 0.12), transparent 72%),
+    radial-gradient(55vw 55vh at 0% 0%, rgba(120, 225, 245, 0.85), transparent 72%),
+    radial-gradient(48vw 58vh at 100% 0%, rgba(205, 192, 255, 0.85), transparent 72%),
+    radial-gradient(55vw 60vh at 100% 100%, rgba(130, 232, 192, 0.85), transparent 72%),
+    radial-gradient(55vw 55vh at 0% 100%, rgba(165, 205, 255, 0.85), transparent 72%),
+    radial-gradient(45vw 40vh at 50% 108%, rgba(255, 210, 180, 0.6), transparent 72%),
     var(--rg-field-base);
   /* near-opaque content surfaces: the field tints them, it never shows through
      enough to move a contrast ratio */
