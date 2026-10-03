@@ -82,6 +82,12 @@ async function mockGateway(page: Page): Promise<Store> {
       return json(route, row);
     }
     if (/^\/v1\/workflows\/instances\/[^/]+\/advance$/.test(p)) return json(route, { status: "running" });
+    const abort = p.match(/^\/v1\/workflows\/instances\/instance-([^/]+)\/abort$/);
+    if (abort && method === "POST") {
+      const row = store.useCases.find((item) => item.id === abort[1]);
+      if (row) row.status = "rejected";
+      return json(route, { status: "aborted" });
+    }
     if (/^\/v1\/workflows\/instances\/[^/]+\/artifacts$/.test(p)) {
       store.artifacts.push(String(body.content));
       return json(route, { version: store.artifacts.length, status: "blocked_on_approval" }, 201);
@@ -236,8 +242,15 @@ test.describe("AER-046: an intake retry after edits never mixes old records with
     await expectNoAxeViolations(page, "Review (retry refused)");
 
     // starting over is the proposer's explicit choice: a NEW use case from the current inputs
+    const sentBeforeStartOver = store.sent.length;
     await refusal.getByRole("button", { name: "Start over as a new use case" }).click();
     await expect(refusal).toHaveCount(0);
+    // …which WITHDRAWS the earlier record first, so its pending sign-off cannot
+    // be approved with only part of its risk set
+    expect(store.sent.slice(sentBeforeStartOver).map((item) => `${item.method} ${item.path}`)).toEqual([
+      `POST /v1/workflows/instances/instance-${USE_CASE}/abort`,
+    ]);
+    expect(store.useCases.find((u) => u.id === USE_CASE)?.status).toBe("rejected");
     await page.getByRole("button", { name: "Submit for human review" }).click();
     await expect(page.getByRole("status").filter({ hasText: "Submitted for human review." })).toBeVisible();
     expect(store.useCases.map((u) => [u.id, u.name])).toEqual([

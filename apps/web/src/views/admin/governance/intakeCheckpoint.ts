@@ -28,11 +28,15 @@
  *   risk         PATCH /v1/risks/:id edits title, description, likelihood,
  *                impact, agentId and vendorId of an open risk. `category` is
  *                the evidence key and is refused by name on PATCH, so a
- *                changed category is REFUSED; so is a risk already written for
- *                a scenario the proposer has since rejected (the gateway has no
- *                delete, and quietly leaving it attached is the mixed state
- *                this module exists to prevent), and a control already linked
- *                that the current suggestion no longer names.
+ *                changed category is REFUSED. Two more are refused BY CHOICE,
+ *                not for want of an endpoint: a risk already written for a
+ *                scenario the proposer has since rejected (the owner could
+ *                close it) and a control already linked that the current
+ *                suggestion no longer names (it could be unlinked). A retry
+ *                that silently closes risks or unlinks controls is a bigger
+ *                write than the proposer asked for; leaving them attached is
+ *                the mixed state this module exists to prevent; so the page
+ *                stops and says which.
  *
  * The plan is computed for EVERY step before the first request of a retry, so
  * a refusal writes nothing: the persisted state stays exactly what the earlier
@@ -127,6 +131,9 @@ export type SubmissionPlan =
     };
 
 const same = (a: unknown, b: unknown) => canonicalDigest(a) === canonicalDigest(b);
+// the accepted frameworks are a SET: the same tags in another order are not a change
+const sameFixed = (key: keyof UseCaseInputs, a: unknown, b: unknown) =>
+  key === "complianceTags" && Array.isArray(a) && Array.isArray(b) ? same([...a].sort(), [...b].sort()) : same(a, b);
 
 /**
  * Decide, for every step, whether the checkpointed record is reused, created,
@@ -143,13 +150,13 @@ export function planSubmission(checkpoint: SubmissionCheckpoint, inputs: Submiss
       useCase = { action: "reuse" };
     } else {
       for (const { key, label } of USE_CASE_FIXED) {
-        if (!same(before[key], inputs.useCase[key])) reasons.push(`${label} changed — a proposed use case has no edit for it`);
+        if (!sameFixed(key, before[key], inputs.useCase[key])) reasons.push(`${label} changed — a proposed use case has no edit for it`);
       }
       const patch: UseCasePatch = {};
       for (const key of USE_CASE_PATCHABLE) {
         if (!same(before[key], inputs.useCase[key])) (patch as Record<string, unknown>)[key] = inputs.useCase[key];
       }
-      useCase = { action: "update", patch };
+      useCase = Object.keys(patch).length > 0 ? { action: "update", patch } : { action: "reuse" };
     }
   }
 

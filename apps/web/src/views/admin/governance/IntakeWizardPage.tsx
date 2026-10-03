@@ -119,6 +119,7 @@ export default function IntakeWizardPage() {
   const checkpoint = useRef<SubmissionCheckpoint>(emptyCheckpoint());
   const [retryRefused, setRetryRefused] = useState<RetryRefused | null>(null);
   const submitAction = useAction();
+  const startOverAction = useAction();
   // A stage change unmounts the button that caused it ("Draft suggestions",
   // "Continue" on the last-but-one stage), which drops keyboard focus on
   // <body> and leaves a screen reader silent. Move focus to the new stage's
@@ -312,8 +313,16 @@ export default function IntakeWizardPage() {
     setSubmittedUseCaseId(useCase.id);
   };
 
-  /** the proposer's explicit choice to leave the earlier record as it is and submit these answers as a new use case */
-  const startOver = () => {
+  /**
+   * the proposer's explicit choice to submit these answers as a new use case.
+   * The earlier record is WITHDRAWN first (its intake instance aborted: the
+   * pending sign-off is superseded and the use case reads rejected), so an
+   * approver can never sign off a record with only part of its risk set. If the
+   * withdrawal fails nothing is cleared and the refusal stays on screen.
+   */
+  const startOver = async () => {
+    const earlier = checkpoint.current.useCase;
+    if (earlier?.instanceId) await api.post(`/v1/workflows/instances/${earlier.instanceId}/abort`, {});
     checkpoint.current = emptyCheckpoint();
     setRetryRefused(null);
     submitAction.setError(null);
@@ -542,9 +551,12 @@ export default function IntakeWizardPage() {
                   <p>{retryRefused.message}</p>
                   <ul>{retryRefused.reasons.map((reason) => <li key={reason}>{reason}</li>)}</ul>
                   <p>
-                    Undo those changes and submit again to finish that record, <Link to={`/admin/governance/use-cases/${retryRefused.useCaseId}`}>open the existing use case</Link>, or start over: the earlier record stays in the register as a proposal.
+                    Undo those changes and submit again to finish that record, <Link to={`/admin/governance/use-cases/${retryRefused.useCaseId}`}>open the existing use case</Link>, or start over: that withdraws the earlier record (its pending sign-off is cancelled and it reads rejected) and submits these answers as a new use case.
                   </p>
-                  <Button size="sm" onClick={startOver}>Start over as a new use case</Button>
+                  {startOverAction.error ? <p>The earlier record could not be withdrawn, so nothing was started: {startOverAction.error}</p> : null}
+                  <Button size="sm" disabled={startOverAction.busy} onClick={() => void startOverAction.run(startOver, "Earlier record withdrawn")}>
+                    {startOverAction.busy ? "Withdrawing…" : "Start over as a new use case"}
+                  </Button>
                 </div>
               ) : submitAction.error ? <p className={v.errLine} role="alert">{submitAction.error} The completed steps have been retained; retry to resume.</p> : null}
               {submittedUseCaseId ? (

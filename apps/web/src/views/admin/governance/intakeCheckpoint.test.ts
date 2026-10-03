@@ -58,6 +58,14 @@ describe("AER-046 planSubmission — a retry reuses a record only when its input
     });
   });
 
+  it("the accepted frameworks are a set: the same tags reordered are reused, a different set is still refused", () => {
+    const reordered = { ...useCase, complianceTags: ["nist-ai-rmf", "eu-ai-act"] };
+    const plan = planSubmission(written(), inputs({ useCase: reordered }));
+    expect(plan).toMatchObject({ kind: "proceed", useCase: { action: "reuse" } });
+    const changed = planSubmission(written(), inputs({ useCase: { ...useCase, complianceTags: ["eu-ai-act"] } }));
+    expect(changed).toMatchObject({ kind: "refuse", useCaseId: "uc" });
+  });
+
   it("edited inputs update the written records instead of being skipped (the Codex scenario)", () => {
     const plan = planSubmission(written(), inputs({
       useCase: { ...useCase, description: "Edited.", businessContext: "Edited.", intendedAgentIds: [] },
