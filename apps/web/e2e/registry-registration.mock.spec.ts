@@ -26,7 +26,7 @@ const USE_CASE = "11111111-1111-4111-8111-111111111111";
 const NEW_ID = "99999999-1111-4111-8111-111111111111";
 const AGENT = "22222222-2222-4222-8222-222222222222";
 
-const row = (over: Record<string, unknown>) => ({
+const row = <T extends Record<string, unknown>>(over: T) => ({
   description: "", businessContext: "", ownerUserId: "u", ownerName: "Avery Admin", intendedAgentIds: [], dataSensitivity: "internal",
   complianceTags: [], projectId: null, workflowInstanceId: "instance", euAiActTier: null, euAiActReasons: null, euAiActRulesetVersion: null,
   decidedAt: null, retiredReason: null, approvedUntil: null, openConditions: 0, ...over,

@@ -1,17 +1,18 @@
 /**
  * ADR-0085 in the real SPA — the EU AI Act screening driven end to end on
- * the ADR-0080 use-case intake, with the PROHIBITED example:
+ * the use-case registration (ADR-0080; ADR-0168 made the intake wizard the
+ * only way in), with the PROHIBITED example:
  *
- *  - propose a use case, finish planning, tick "Social scoring" in the
- *    structured screening controls, submit the questionnaire — the tier is
- *    computed SERVER-SIDE from the answers block the page serializes;
- *  - the detail then renders the unmissable refusal-shaped banner
- *    (role=alert), the Art. 5 reason, and the screening-not-legal-advice
+ *  - register a use case through "Register AI use case", answering "Social
+ *    scoring" yes on the Classify step — the tier is computed SERVER-SIDE
+ *    from the answers block the wizard submits with the questionnaire;
+ *  - the registry's preview then renders the unmissable refusal-shaped banner
+ *    (role=alert), the Art. 5 reason and the screening-not-legal-advice
  *    disclaimer — while the intake still awaits its HUMAN sign-off, because
  *    a tier auto-blocks nothing (asserted, not just documented).
  *
- * This spec WRITES (a use case + its workflow instance), so it runs LAST
- * (zz- prefix, M-018) and creates only uct-e2e-prefixed objects nothing
+ * This spec WRITES (a use case + its workflow instance + risks), so it runs
+ * LAST (zz- prefix, M-018) and creates only uct-e2e-prefixed objects nothing
  * earlier asserts about. Sign-in is the order-independent helper the other
  * zz- specs use (M-017).
  */
@@ -61,65 +62,66 @@ async function signIn(page: Page, email: string, candidates: string[], settleOn:
 }
 
 /**
- * Drive the guided intake. It is four steps now ("What it is", "Data & risk",
- * "Intended use", "Review") and the submit button only exists on the last one,
- * so a spec that fills the first panel and looks for "Propose use case" waits
- * for a control that is not rendered yet. Only the first panel is filled here:
- * these specs are about what happens AFTER the proposal, and everything on
- * steps 2-3 is optional by design.
+ * Register a use case through the intake wizard (ADR-0168: the only way in).
+ * Every Classify answer is filled; `socialScoring` decides the screening.
  */
-async function proposeUseCase(page: Page, f: { name: string; what: string; why: string }) {
-  await page.getByLabel("Name", { exact: true }).fill(f.name);
-  await page.getByLabel("What it does").fill(f.what);
-  await page.getByLabel("Why the business wants it").fill(f.why);
-  for (let i = 0; i < 3; i++) await page.getByRole("button", { name: "Continue" }).click();
-  await page.getByRole("button", { name: "Propose use case" }).click();
+async function registerUseCase(page: Page, f: { name: string; what: string; socialScoring: "yes" | "no" }) {
+  await page.goto("/ui/admin/use-cases");
+  await expect(page.getByRole("heading", { name: "AI registry", exact: true })).toBeVisible();
+  await page.getByRole("link", { name: "Register AI use case" }).click();
+  await page.getByLabel("Use-case name").fill(f.name);
+  await page.getByLabel("What will the system do?").fill(f.what);
+  await page.getByRole("button", { name: "Continue" }).click();
+  for (const [label, value] of [
+    ["Primary purpose domain", "general-business"], ["People affected", "general-public"], ["Decision autonomy", "fully-automated"],
+    ["Biometric use", "none"], ["Deployment audience", "public"],
+  ] as const) await page.getByLabel(label).selectOption(value);
+  await page.getByLabel("Sectors: Public sector", { exact: true }).check();
+  await page.getByLabel("Data categories: Personal", { exact: true }).check();
+  for (const label of ["Emotion recognition", "Manipulative techniques", "Safety component", "Generates synthetic content", "Can take autonomous actions", "Uses an external AI vendor"]) {
+    await page.getByLabel(label).selectOption("no");
+  }
+  for (const label of ["Profiles natural persons", "Interacts directly with people", "Has an EU nexus"]) await page.getByLabel(label).selectOption("yes");
+  await page.getByLabel("Social scoring").selectOption(f.socialScoring);
+  await page.getByRole("button", { name: "Draft suggestions" }).click();
+  await expect(page.locator('[aria-current="step"]')).toContainText("Suggestions");
+  const acceptAll = page.getByRole("button", { name: /Accept all remaining/ });
+  if (await acceptAll.isEnabled()) await acceptAll.click();
+  for (let i = 0; i < 3; i += 1) await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByRole("button", { name: "Submit for human review" }).click();
+  await expect(page.getByRole("status").filter({ hasText: "Submitted for human review." })).toBeVisible();
 }
 
 test("a social-scoring use case screens PROHIBITED — banner, Art. 5 reason, disclaimer — and still awaits its human sign-off", async ({ page }) => {
   await signIn(page, "admin@regulait.local", [ADMIN_PASSWORD, state.passwords.admin], ADMIN_PASSWORD);
 
-  await page.goto("/ui/admin/use-cases");
-  await expect(page.getByRole("heading", { name: "Use cases", exact: true })).toBeVisible();
-
-  // propose
-  await proposeUseCase(page, {
+  await registerUseCase(page, {
     name: "uct-e2e-citizen-score",
     what: "rank citizens by social behaviour for perks",
-    why: "a partner asked for a loyalty score",
+    socialScoring: "yes",
   });
-  await expect(
-    page.getByText("Use case proposed — its intake workflow is resting at the plan stage"),
-  ).toBeVisible();
+  // the wizard says so before submission, too
+  await expect(page.getByRole("alert").filter({ hasText: "Screened PROHIBITED (Art. 5)" })).toBeVisible();
 
-  // open the detail and drive the intake off the resting plan stage
-  await page.getByRole("cell", { name: "uct-e2e-citizen-score", exact: true }).click();
-  await expect(page.getByText("Use case: uct-e2e-citizen-score")).toBeVisible();
-  // before any questionnaire: honestly not screened, never guessed
-  await expect(page.getByText(/Not screened/)).toBeVisible();
-  await page.getByRole("button", { name: "Finish planning" }).click();
-  await expect(page.getByText("Intake questionnaire — fill and submit")).toBeVisible();
-
-  // the structured screening controls: tick the prohibited practice
-  await expect(page.getByText("EU AI Act screening questions")).toBeVisible();
-  await page.getByLabel("Social scoring", { exact: true }).check();
-  await page.getByRole("button", { name: "Submit questionnaire" }).click();
-  await expect(
-    page.getByText("Questionnaire submitted — the use case is under review"),
-  ).toBeVisible();
+  // open the registry preview of THIS record
+  await page.goto("/ui/admin/use-cases");
+  await page.getByLabel("Search use cases").fill("uct-e2e-citizen-score");
+  const row = page.getByRole("link", { name: /^uct-e2e-citizen-score,/ });
+  // the registry row shows the decided-not-blocked status
+  await expect(row.getByText("Under review")).toBeVisible();
+  await row.click();
+  const preview = page.getByRole("dialog", { name: "uct-e2e-citizen-score" });
+  await expect(preview).toBeVisible();
 
   // the refusal-shaped banner is unmissable (role=alert), with the Art. 5 reason
-  const banner = page.getByRole("alert").filter({ hasText: "PROHIBITED under Art. 5" });
+  const banner = preview.getByRole("alert").filter({ hasText: "PROHIBITED under Art. 5" });
   await expect(banner).toBeVisible();
   await expect(banner.getByText("does not auto-block")).toBeVisible();
-  await expect(page.getByText("Art. 5(1)(c)", { exact: true })).toBeVisible();
-  await expect(page.getByText(/not legal advice/).first()).toBeVisible();
+  await expect(preview.getByText("Art. 5(1)(c)", { exact: true })).toBeVisible();
+  await expect(preview.getByText(/not legal advice/).first()).toBeVisible();
 
   // and NOTHING auto-blocked: the intake still awaits its HUMAN decision on
   // the one approvals queue — the tier informed it, it did not replace it
-  await expect(page.getByText(/Awaiting sign-off/)).toBeVisible();
-  // the registry row (rendered as a link-row) shows the decided-not-blocked status
-  await expect(
-    page.getByRole("link", { name: /uct-e2e-citizen-score/ }).getByText("Under review"),
-  ).toBeVisible();
+  await expect(preview.getByText("Waiting for sign-off")).toBeVisible();
+  await expect(preview.getByRole("link", { name: "Approvals queue" })).toBeVisible();
 });
