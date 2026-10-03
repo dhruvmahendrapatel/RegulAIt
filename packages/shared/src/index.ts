@@ -2777,6 +2777,7 @@ export {
   findMcpEndpoints,
   MCP_DISCOVERY_POSTURE,
   MCP_SDK_PACKAGES,
+  scrubEvidenceSample,
   type McpEndpointObservation,
   type McpEvidenceConfidence,
 } from "./mcp-discovery.js";

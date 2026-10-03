@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { findMcpEndpoints, MCP_DISCOVERY_POSTURE } from "./mcp-discovery.js";
+import { findMcpEndpoints, MCP_DISCOVERY_POSTURE, scrubEvidenceSample } from "./mcp-discovery.js";
+import { AUDIT_SCRUB_MARKER_PREFIX } from "./audit-scrub.js";
 
 /**
  * ADR-0122 — the tests that matter here are the NEGATIVE ones.
@@ -99,3 +100,100 @@ describe("finding MCP endpoints in supplied evidence", () => {
     expect(MCP_DISCOVERY_POSTURE).toMatch(/not a\s+claim to have searched your estate/);
   });
 });
+
+/**
+ * AER-020 — the samples are SCRUBBED, and scrubbed BEFORE they are truncated.
+ *
+ * Every row below is a secret or a formatted identifier a proxy export would
+ * carry verbatim. Each is planted twice: once early on the line, where the
+ * old `line.slice(0, 200)` would have returned it whole, and once BEHIND 190
+ * characters of ordinary log text, where the old slice would have returned
+ * its first few characters — enough for a human to finish. The assertion is
+ * the same both times: no window of the secret survives in the sample.
+ */
+const CORPUS: readonly { label: string; secret: string; line: (secret: string) => string }[] = [
+  { label: "AWS access key id", secret: "AKIAIOSFODNN7EXAMPLE",
+    line: (s) => `POST https://tools.corp/mcp 200 x-amz-key=${s} {"jsonrpc":"2.0","method":"tools/call"}` },
+  { label: "OpenAI-style sk- key in a query string", secret: "sk-" + "Ab3dEf7gH1jKl9MnOpQrStUvWxYz0123456789",
+    line: (s) => `GET https://tools.corp/sse?api_key=${s} 200` },
+  { label: "GitHub personal token", secret: "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8",
+    line: (s) => `POST https://tools.corp/mcp 200 {"jsonrpc":"2.0","method":"tools/call","params":{"token":"${s}"}}` },
+  { label: "Slack bot token", secret: "xoxb-" + "123456789012-1234567890123-AbCdEfGhIjKlMnOpQrStUvWx",
+    line: (s) => `POST https://tools.corp/mcp 200 slack=${s} {"jsonrpc":"2.0","method":"initialize"}` },
+  { label: "JWT", secret: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4ifQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+    line: (s) => `POST https://tools.corp/mcp 200 "Authorization: Bearer ${s}"` },
+  { label: "opaque bearer token in the Authorization header (header shape, space-separated)", secret: "9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b2a1f0e",
+    line: (s) => `POST https://tools.corp/mcp 200 "Authorization: Bearer ${s}"` },
+  { label: "Basic auth header value", secret: "dXNlcjpzdXBlcnNlY3JldHBhc3N3b3Jk",
+    line: (s) => `POST https://tools.corp/messages 200 Authorization: Basic ${s}` },
+  { label: "this product's own API key", secret: "rgl_" + "0123456789abcdef0123456789abcdef",
+    line: (s) => `POST https://tools.corp/mcp 200 "authorization: Bearer ${s}"` },
+  { label: "api_key assignment", secret: "Zq8vLm2PxR7tWy4KbN6s",
+    line: (s) => `POST https://tools.corp/mcp 200 api_key=${s} {"jsonrpc":"2.0","method":"tools/call"}` },
+  { label: "e-mail address", secret: "jane.doe@customer-bank.example",
+    line: (s) => `POST https://tools.corp/mcp 200 {"jsonrpc":"2.0","method":"tools/call","params":{"arguments":{"to":"${s}"}}}` },
+  { label: "credit-card-shaped (Luhn-valid) number", secret: "4111 1111 1111 1111",
+    line: (s) => `POST https://tools.corp/mcp 200 {"jsonrpc":"2.0","method":"tools/call","params":{"arguments":{"card":"${s}"}}}` },
+];
+
+/** Where the secret is made to START: 12 characters before the 200-character
+ * cut, so a truncate-then-scrub order would keep a 12-character fragment —
+ * long enough to be caught by the 8-character windows below. */
+const STRADDLE_START = 188;
+/** Prepend ordinary log text so the secret begins exactly at STRADDLE_START. */
+function straddling(line: string, secret: string): string {
+  const at = line.indexOf(secret);
+  const filler = "GET https://tools.corp/mcp 200 ".padEnd(Math.max(0, STRADDLE_START - at), "-");
+  const out = filler + line;
+  expect(out.indexOf(secret)).toBe(STRADDLE_START);
+  return out;
+}
+
+/** every 8-character window of the secret — a fragment is a leak too */
+function windows(secret: string): string[] {
+  const out: string[] = [];
+  for (let i = 0; i + 8 <= secret.length; i += 1) out.push(secret.slice(i, i + 8));
+  return out;
+}
+
+describe("AER-020 — evidence samples are scrubbed before truncation", () => {
+  it.each(CORPUS)("$label never reaches the sample, early on the line", ({ secret, line }) => {
+    const found = findMcpEndpoints(line(secret));
+    expect(found).toHaveLength(1);
+    const sample = found[0]!.samples[0]!;
+    expect(sample).not.toContain(secret);
+    for (const w of windows(secret)) expect(sample).not.toContain(w);
+    // positive control: the sample is still a sample, the host still reads
+    expect(sample.length).toBeGreaterThan(0);
+    expect(found[0]!.host).toBe("tools.corp");
+  });
+
+  it.each(CORPUS)("$label never reaches the sample when it straddles the 200-character cut", ({ secret, line }) => {
+    // the secret starts at 188 and would have been cut mid-token by a
+    // truncate-then-scrub order — exactly the fragment the old code leaked
+    const found = findMcpEndpoints(straddling(line(secret), secret));
+    expect(found).toHaveLength(1);
+    const sample = found[0]!.samples[0]!;
+    expect(sample.length).toBeLessThanOrEqual(200);
+    expect(sample).not.toContain(secret);
+    for (const w of windows(secret)) expect(sample).not.toContain(w);
+  });
+
+  it("the credential markers keep the KIND and lose the value", () => {
+    const out = scrubEvidenceSample(`x-amz-key=AKIAIOSFODNN7EXAMPLE "Authorization: Bearer 9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b2a1f0e" to=jane.doe@customer-bank.example`);
+    expect(out).toContain(`${AUDIT_SCRUB_MARKER_PREFIX}aws_key:20:`);
+    expect(out).toContain(`${AUDIT_SCRUB_MARKER_PREFIX}authorization_header:40:`);
+    expect(out).toContain("[EMAIL]");
+    expect(out).not.toContain("AKIAIOSFODNN7EXAMPLE");
+    expect(out).not.toContain("9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b2a1f0e");
+    expect(out).not.toContain("jane.doe");
+  });
+
+  it("NEGATIVE CONTROL — an ordinary line is returned unchanged, so the scrub is a scrub and not a shredder", () => {
+    const plain = `2026-09-24T10:00:01Z POST https://tools.internal.corp/mcp 200 {"jsonrpc":"2.0","method":"tools/call","params":{"name":"search","arguments":{"q":"quarterly report 2026"}}}`;
+    expect(scrubEvidenceSample(plain)).toBe(plain);
+    const found = findMcpEndpoints(plain);
+    expect(found[0]!.samples[0]).toBe(plain);
+  });
+});
+

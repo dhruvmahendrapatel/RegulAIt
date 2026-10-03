@@ -28,6 +28,9 @@
  * JSON-RPC method name is a different claim, and the two are reported as
  * different confidences rather than averaged into one number.
  */
+import { AUDIT_SCRUB_FINGERPRINT_HEX, AUDIT_SCRUB_MARKER_PREFIX, scrubAuditText } from "./audit-scrub.js";
+import { sha256Hex } from "./audit-chain.js";
+import { redactPII } from "./pii.js";
 
 /** How sure we are that the thing at this host speaks MCP. */
 export type McpEvidenceConfidence = "low" | "medium" | "high";
@@ -42,12 +45,55 @@ export interface McpEndpointObservation {
   readonly confidence: McpEvidenceConfidence;
   /** how many distinct lines contributed */
   readonly occurrences: number;
-  /** bounded, redacted sample lines so a human can sanity-check the call */
+  /** bounded sample lines so a human can sanity-check the call — scrubbed of
+   * credential material and formatted PII BEFORE truncation (AER-020) */
   readonly samples: readonly string[];
 }
 
 const SAMPLES_MAX = 3;
 const SAMPLE_CHARS = 200;
+
+/**
+ * AER-020 (2026-10-03) — THE SAMPLES ARE SCRUBBED BEFORE THEY ARE TRUNCATED.
+ *
+ * `samples` was documented as "redacted" and was not: a proxy/CASB export line
+ * carries whatever the client sent — an `Authorization` header, an API key in
+ * a query string, a customer e-mail in a JSON-RPC argument — and the first
+ * 200 characters of it went straight into the API response (and, for anyone
+ * who pasted it, into the browser). Scrubbing happens HERE, on the full line,
+ * for two reasons that are each sufficient on their own: the shape rules need
+ * the WHOLE token to recognise it (a key cut at character 200 is a key the
+ * scrubber can no longer see and a human can still finish), and the output
+ * must never hold a fragment of a credential either way.
+ *
+ * Two scrubbers compose, both already shared by the rest of the product so
+ * there is still exactly one definition of each shape:
+ *   1. `scrubAuditText` — ADR-0099's credential scrub over the shared
+ *      `CREDENTIAL_MATERIAL_RULES` (AWS keys, PEM, JWT, `api_key = …`,
+ *      vendor tokens, this product's own `rgl*_` credentials). Its marker
+ *      keeps the kind, length and a fingerprint and loses the value.
+ *   2. `redactPII` — §8.4's validated-span PII redaction (email, bounded US
+ *      SSN, Luhn-validated card runs, separator-bearing phone), applied
+ *      AFTER the credential pass so a digit run inside a token is scrubbed
+ *      as the token it is, not as a phone number.
+ *
+ * Plus ONE log-line shape neither owns: the HTTP `Authorization` header's
+ * value as a proxy writes it — `Bearer <opaque>` / `Basic <base64>` with a
+ * SPACE, not the `bearer = …` assignment form the shared rule matches. A
+ * proxy export is the one place a header value appears verbatim, which is why
+ * the shape lives with the log parser rather than in the DLP detector (where it
+ * would also fire on every model prompt that mentions the word).
+ */
+const AUTHORIZATION_HEADER_VALUE = /\b(bearer|basic)\s+([A-Za-z0-9._~+/=-]{16,})/gi;
+
+export function scrubEvidenceSample(line: string): string {
+  let out = scrubAuditText(line);
+  AUTHORIZATION_HEADER_VALUE.lastIndex = 0;
+  out = out.replace(AUTHORIZATION_HEADER_VALUE, (_m, scheme: string, value: string) =>
+    `${scheme} ${AUDIT_SCRUB_MARKER_PREFIX}authorization_header:${value.length}:${sha256Hex(value).slice(0, AUDIT_SCRUB_FINGERPRINT_HEX)}]`,
+  );
+  return redactPII(out).text;
+}
 
 /**
  * The MCP transport paths worth matching, in the spec's own vocabulary.
@@ -158,7 +204,8 @@ export function findMcpEndpoints(content: string): McpEndpointObservation[] {
       entry.indicators.add(`transport-path:${transport}`);
     }
     for (const c of corroborated) entry.indicators.add(c.id);
-    if (entry.samples.length < SAMPLES_MAX) entry.samples.push(line.slice(0, SAMPLE_CHARS));
+    // scrub the FULL line first, truncate second — see `scrubEvidenceSample`
+    if (entry.samples.length < SAMPLES_MAX) entry.samples.push(scrubEvidenceSample(line).slice(0, SAMPLE_CHARS));
     byHost.set(hit.host, entry);
   }
 
