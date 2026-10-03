@@ -358,12 +358,22 @@ import { applyWorkflowApprovalDecision, registerWorkflowRoutes } from "./workflo
 import { registerTemplateGalleryRoutes } from "./template-gallery.js";
 // ADR-0080 — the AI use-case registry (L1 front-door) and its lifecycle join.
 import {
+  acceptUseCaseRisks,
   imposeUseCaseConditions,
   markUseCaseReturned,
+  precheckRiskAcceptance,
   registerUseCaseRoutes,
   syncUseCaseForInstance,
   useCaseForIntakeApproval,
 } from "./use-cases.js";
+// ADR-0168 amendment — the review policy (reviewer roles per tier, risk
+// acceptors), multi-role review rounds and the recertification sweep.
+import {
+  isReviewRoleMember,
+  loadReviewPolicy,
+  registerReviewPolicyRoutes,
+  reviewRoleIdsFor,
+} from "./review-policy.js";
 import { registerVendorRoutes, syncVendorForInstance } from "./vendors.js";
 // ADR-0081 — the AI risk register (gap L2): evidence computed from the real
 // ledgers at read time; acceptance is an audited record.
@@ -2812,6 +2822,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // they belong to — still not a widening of who may DECIDE, which the decide
     // path re-checks against `approverUserId` independently.
     const assignedIds = workbenchOn && !req.authCtx.isAdmin && me ? await assignedApprovalIdsFor(db, me) : [];
+    // ADR-0168 amendment: a review-role row is in the queue of EVERY member of
+    // the role (any of them may decide it) — never the proposer's — and stays
+    // visible to whoever decided it.
+    const myReviewRoles = !req.authCtx.isAdmin && me ? reviewRoleIdsFor(await loadReviewPolicy(db), me) : [];
     const scopeCondition = req.authCtx.isAdmin
       ? undefined
       : or(
@@ -2821,6 +2835,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
               ? [and(inArray(approvals.approverUserId, delegators), eq(approvals.status, "pending"))]
               : []),
             ...(assignedIds.length ? [inArray(approvals.id, assignedIds)] : []),
+            ...(myReviewRoles.length
+              ? [and(inArray(approvals.reviewRoleId, myReviewRoles), sql`${approvals.userId} <> ${me}`)]
+              : []),
+            ...(me ? [and(sql`${approvals.reviewRoleId} IS NOT NULL`, eq(approvals.decidedBy, me))] : []),
           ],
         );
     const conditions = [
@@ -3152,6 +3170,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         projectName: r.projectId ? projectLabel.get(r.projectId) ?? null : null,
         useCaseId:
           r.objectType === "workflow" && r.instanceId ? (useCaseForInstance.get(r.instanceId) ?? null) : null,
+        // ADR-0168 amendment: the reviewer role this row is the required review of
+        reviewRole: r.reviewRoleId ? { id: r.reviewRoleId, name: r.reviewRoleName } : null,
         // AER-039: host + posture + manifest digest only — never the URL
         ...(r.objectType === "mcp_tool" ? { boundTarget: boundTargetFor.get(r.id) ?? null } : {}),
         // Finding-6 separation-of-duties surface: the person who would sign
@@ -3251,8 +3271,21 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     const { approvalId, isAdmin } = input;
     const body = input.body;
 
-    const [row] = await db.select().from(approvals).where(eq(approvals.id, approvalId));
+    let [row] = await db.select().from(approvals).where(eq(approvals.id, approvalId));
     if (!row) return fail(404, { error: "unknown_approval" });
+    // ADR-0168 amendment: a single-approver row on an intake sign-off whose
+    // tier the review policy routes to roles is replaced by the round's role
+    // rows BEFORE anyone can decide it — this closes the moment between the
+    // kernel writing the template's rows and the use-case sync replacing them.
+    // Without a policy routing any tier, nothing here runs a write.
+    if (row.objectType === "workflow" && row.status === "pending" && row.reviewRoleId === null && row.instanceId) {
+      const policy = await loadReviewPolicy(db);
+      if (policy && Object.values(policy.tiers).some((t) => (t?.roleIds.length ?? 0) > 0)) {
+        await syncUseCaseForInstance(db, row.instanceId, deciderUserId);
+        [row] = await db.select().from(approvals).where(eq(approvals.id, approvalId));
+        if (!row) return fail(404, { error: "unknown_approval" });
+      }
+    }
     // ADR-0046: the OTHER lazy evaluation point. Deciding an approval that came
     // due while nobody was looking must still record the breach — otherwise a
     // queue that is only ever touched by a decision would never register one.
@@ -3277,11 +3310,25 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // decider acting on-behalf-of; (b) an org ADMIN may decide in the
     // approver's place to unblock a stuck queue, but only with a recorded
     // reason, audit-marked as the override it is.
+    // ADR-0168 amendment — A REVIEW ROLE ROW: any member of the role decides
+    // it as its named approver (membership read live from the policy), and the
+    // PROPOSER never may — not as a member, a delegate or an admin override.
+    let roleMember = false;
+    if (row.reviewRoleId !== null) {
+      const reviewed = await useCaseForIntakeApproval(db, row);
+      if (deciderUserId === row.userId || (reviewed && deciderUserId === reviewed.ownerUserId)) {
+        return fail(403, {
+          error: "proposer_cannot_review",
+          detail: "the proposer of a use case can never decide one of its required reviews",
+        });
+      }
+      roleMember = isReviewRoleMember(await loadReviewPolicy(db), row.reviewRoleId, deciderUserId);
+    }
     const delegation =
-      row.approverUserId !== deciderUserId
+      row.approverUserId !== deciderUserId && !roleMember
         ? await activeDelegationFrom(db, row.approverUserId, deciderUserId)
         : null;
-    const adminOverride = row.approverUserId !== deciderUserId && !delegation;
+    const adminOverride = row.approverUserId !== deciderUserId && !delegation && !roleMember;
     if (adminOverride) {
       if (!isAdmin) {
         return fail(403, { error: "not_the_named_approver" });
@@ -3300,10 +3347,23 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // to bind to and a deploy gate to enforce it. A body of approved/denied
     // with no conditions never reaches the lookup — byte-identical to before.
     const conditionInputs = body.conditions ?? [];
+    const acceptRisks = body.acceptRisks ?? null;
     const intakeUseCase =
-      body.decision === "returned" || conditionInputs.length > 0
+      body.decision === "returned" || conditionInputs.length > 0 || acceptRisks
         ? await useCaseForIntakeApproval(db, row)
         : null;
+    // ADR-0168 amendment — risk acceptance rides an APPROVING intake review,
+    // by a risk acceptor, for this use case's own live risks; refused by name.
+    if (acceptRisks) {
+      if (body.decision !== "approved" || !intakeUseCase) {
+        return fail(422, {
+          error: "risk_acceptance_only_on_intake_approval",
+          detail: "risk is accepted only by APPROVING an AI use-case intake sign-off",
+        });
+      }
+      const refusal = await precheckRiskAcceptance(db, intakeUseCase, deciderUserId, acceptRisks.riskIds);
+      if (refusal) return fail(refusal.status, refusal.body);
+    }
     if (body.decision === "returned") {
       if (!intakeUseCase) {
         return fail(422, {
@@ -3473,7 +3533,32 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       let postCommit: ((d: Db) => Promise<void>) | null = null;
       // Workflow sign-offs advance their instance through the same one inbox (§5).
       if (updated.objectType === "workflow") {
-        postCommit = await applyWorkflowApprovalDecision(tx, updated, body.decision, deciderUserId, opts.dataKey);
+        // ADR-0168 amendment: each role of a review round is ONE REQUIRED
+        // review. While a sibling role is still pending the stage holds —
+        // whatever the org's quorum dial says. Checked under the instance
+        // lock so two reviewers approving at once cannot both hold.
+        let holdForSiblings = false;
+        if (updated.reviewRoleId !== null && body.decision === "approved" && updated.instanceId) {
+          await tx
+            .select({ id: workflowInstances.id })
+            .from(workflowInstances)
+            .where(eq(workflowInstances.id, updated.instanceId))
+            .for("update");
+          const siblings = await tx
+            .select({ id: approvals.id })
+            .from(approvals)
+            .where(
+              and(
+                eq(approvals.instanceId, updated.instanceId),
+                eq(approvals.stageId, updated.stageId ?? ""),
+                eq(approvals.status, "pending"),
+              ),
+            );
+          holdForSiblings = siblings.length > 0;
+        }
+        postCommit = holdForSiblings
+          ? null
+          : await applyWorkflowApprovalDecision(tx, updated, body.decision, deciderUserId, opts.dataKey);
         // ADR-0080: if this instance governs an AI use case, its terminal
         // decision flips the use case (completed -> approved, denied ->
         // rejected) HERE, inside the decision's own transaction — so
@@ -3505,6 +3590,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
             })),
             deciderUserId,
           );
+        }
+        // ADR-0168 amendment: accepted risks commit or roll back WITH the approval.
+        if (body.decision === "approved" && intakeUseCase && acceptRisks) {
+          await acceptUseCaseRisks(tx as unknown as Db, intakeUseCase, updated.id, acceptRisks, deciderUserId);
         }
         // ADR-0084: same discipline for a vendor whose ASSESSMENT this
         // instance governs — the terminal decision flips the vendor inside
@@ -3641,6 +3730,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     if (!parsed.success) {
       if (parsed.error.issues.every((i) => i.path[0] === "conditions")) {
         return reply.status(422).send({ error: "invalid_conditions", issues: parsed.error.issues });
+      }
+      // ADR-0168 amendment: a malformed risk acceptance is a 422 by name too
+      if (parsed.error.issues.every((i) => i.path[0] === "acceptRisks")) {
+        return reply.status(422).send({ error: "invalid_risk_acceptance", issues: parsed.error.issues });
       }
       throw parsed.error;
     }
@@ -3980,6 +4073,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0077 — the cascade-annotated template gallery (admin-gated by default)
   registerTemplateGalleryRoutes(app, db);
   registerUseCaseRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0168 amendment — the review policy and the recertification sweep
+  registerReviewPolicyRoutes(app, db);
   // demo task C3 — the use-case 360 read
   registerUseCaseOverviewRoutes(app, db);
   // demo task C5 — the agent card

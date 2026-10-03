@@ -1321,9 +1321,22 @@ export const approvals = pgTable(
      * row queued before 0107, or an org that has deliberately set the dial to
      * NULL. Never rewritten by a later dial change. */
     expiresAt: timestamp("expires_at", { withTimezone: true }),
+    // ADR-0168 amendment (migration 0131) — A REVIEW ROUND. An intake sign-off
+    // routed by the review policy is one row per required reviewer role: any
+    // member of the role may decide it (never the proposer). The name is a
+    // snapshot (a renamed or removed role still reads true on old rounds) and
+    // the round numbers the use case's review rounds. All three NULL on every
+    // other approval, including the single-named-approver intake path.
+    reviewRoleId: text("review_role_id"),
+    reviewRoleName: text("review_role_name"),
+    reviewRound: integer("review_round"),
   },
   (t) => [
     index("approvals_status_idx").on(t.status),
+    check(
+      "approvals_review_role_check",
+      sql`(${t.reviewRoleId} IS NULL) = (${t.reviewRoleName} IS NULL) AND (${t.reviewRoleId} IS NULL) = (${t.reviewRound} IS NULL)`,
+    ),
     check("approvals_preview_kind_check", sql`${t.argumentsPreviewKind} IN ('arguments_v1', 'mcp_redacted_v1')`),
     check("approvals_scope_check", sql`${t.approvalScope} IN ('action', 'tool')`),
     check("approvals_redacted_scope_check", sql`${t.argumentsPreviewKind} IS DISTINCT FROM 'mcp_redacted_v1' OR ${t.approvalScope} IS NOT DISTINCT FROM 'action'`),
@@ -7605,6 +7618,10 @@ export const aiUseCases = pgTable(
      * Enforced at the deploy gate (`approval_expired`); not swept yet. */
     approvedAt: timestamp("approved_at", { withTimezone: true }),
     approvedUntil: timestamp("approved_until", { withTimezone: true }),
+    /** ADR-0168 amendment (migration 0131): true while an approval that
+     * EXPIRED is back in review — set by the recertification sweep, cleared
+     * by the next approve/reject decision. */
+    recertification: boolean("recertification").notNull().default(false),
     retiredReason: text("retired_reason"),
     retiredAt: timestamp("retired_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -7683,6 +7700,39 @@ export const useCaseConditions = pgTable(
 );
 
 export type UseCaseConditionRow = typeof useCaseConditions.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0168 amendment (migration 0131) — THE REVIEW POLICY. One row (id
+// 'default'), admin-edited: reviewer roles with members, per EU AI Act tier
+// the roles that must sign (each role = one required review) and an optional
+// approval lifetime, and who may accept risk. No row, or a tier with no
+// roles, keeps the intake template's single named approver.
+// ---------------------------------------------------------------------------
+
+export interface ReviewPolicyRole {
+  id: string;
+  name: string;
+  memberUserIds: string[];
+}
+export interface ReviewPolicyTier {
+  roleIds: string[];
+  validityMonths?: number;
+}
+
+export const governanceReviewPolicy = pgTable(
+  "governance_review_policy",
+  {
+    id: text("id").primaryKey().default("default"),
+    roles: jsonb("roles").$type<ReviewPolicyRole[]>().notNull().default([]),
+    tiers: jsonb("tiers").$type<Record<string, ReviewPolicyTier>>().notNull().default({}),
+    riskAcceptorUserIds: jsonb("risk_acceptor_user_ids").$type<string[]>().notNull().default([]),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedByUserId: uuid("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
+  },
+  (t) => [check("governance_review_policy_singleton_check", sql`${t.id} = 'default'`)],
+);
+
+export type GovernanceReviewPolicyRow = typeof governanceReviewPolicy.$inferSelect;
 
 // ---------------------------------------------------------------------------
 // ADR-0084 (migration 0088) — the AI vendor registry (third-party AI risk).

@@ -47,6 +47,7 @@ import { runMcpRegistrySync } from "./mcp-registry.js";
 import { runMcpHealthProbeSweep } from "./mcp-health-probe.js";
 import { runGovernanceMonitor } from "./governance-monitor.js";
 import { runTraceEvaluationSweep } from "./trace-evaluation.js";
+import { runUseCaseRecertificationSweep } from "./review-policy.js";
 import { toRegistry, type SchedulerJobDefinition, type SchedulerJobRegistry } from "./scheduler.js";
 
 const HOUR = 3600;
@@ -76,6 +77,7 @@ export const SCHEDULER_JOB_NAMES = {
   mcpHealthProbe: "mcp-health-probe-sweep",
   governanceMonitor: "governance-monitor-sweep",
   traceEvaluation: "trace-evaluation-sweep",
+  useCaseRecertification: "use-case-recertification",
 } as const;
 
 export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): SchedulerJobDefinition[] {
@@ -507,6 +509,26 @@ export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): Schedu
       run: async (ctx) => {
         const out = await runTraceEvaluationSweep(ctx.db, { now: ctx.now });
         return { itemsProcessed: out.scanned, detail: { ...out } };
+      },
+    },
+    {
+      // ADR-0168 amendment. Moves approved use cases whose approval expired
+      // back into review (a new sign-off round per the review policy). Not the
+      // control: the deploy gate refuses an expired approval whether or not
+      // this has run; this makes the registry and the review queue say so.
+      name: SCHEDULER_JOB_NAMES.useCaseRecertification,
+      description:
+        "Move approved AI use cases whose approval has expired back into review for recertification, " +
+        "re-opening the intake sign-off with the reviews the review policy requires. Enforcement does not " +
+        "depend on it: the deploy gate refuses an expired approval on every call.",
+      adr: "ADR-0168",
+      defaultIntervalSeconds: HOUR,
+      run: async (ctx) => {
+        const out = await runUseCaseRecertificationSweep(ctx.db, { now: ctx.now, actorUserId: ctx.actorUserId });
+        return {
+          itemsProcessed: out.movedToReview,
+          detail: { evaluated: out.evaluated, movedToReview: out.movedToReview, skipped: out.skipped.length },
+        };
       },
     },
   ];

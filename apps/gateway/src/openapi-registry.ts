@@ -656,6 +656,10 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "POST /v1/use-cases/:useCaseId/retire": "internal",
   // ADR-0168 — mark an approval condition met (owner/use-case owner/admin)
   "POST /v1/use-cases/:useCaseId/conditions/:conditionId/met": "internal",
+  // ADR-0168 amendment — review policy and recertification sweep
+  "GET /v1/governance/review-policy": "internal",
+  "PUT /v1/governance/review-policy": "internal",
+  "POST /v1/governance/recertification/sweep": "internal",
   // ADR-0084 — the AI vendor registry: new surface, internal until the shape settles
   "GET /v1/vendors": "internal",
   "POST /v1/vendors": "internal",
@@ -1284,6 +1288,9 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "PATCH /v1/use-cases/:useCaseId": "use-cases",
   "POST /v1/use-cases/:useCaseId/retire": "use-cases",
   "POST /v1/use-cases/:useCaseId/conditions/:conditionId/met": "use-cases",
+  "GET /v1/governance/review-policy": "use-cases",
+  "PUT /v1/governance/review-policy": "use-cases",
+  "POST /v1/governance/recertification/sweep": "use-cases",
   "GET /v1/vendors": "vendors",
   "POST /v1/vendors": "vendors",
   "GET /v1/vendors/:vendorId": "vendors",
