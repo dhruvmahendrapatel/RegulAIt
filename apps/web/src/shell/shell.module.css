@@ -1,48 +1,96 @@
+/* ---- ADR-0169: one shaded surface, an auto-hiding rail ----
+   The rail is no longer the one flat near-black panel: it is a translucent
+   veil over the SAME field the canvas sits on (global.css), so the page reads
+   as one surface, and its ink follows the theme.
+
+   It auto-hides to an icon strip. Three modes, set by AppShell on the shell
+   as `data-rail`:
+     collapsed — the strip; content starts after it
+     overlay   — the pointer rested on the strip: the full rail opens OVER the
+                 content, near-opaque, and closes when the pointer leaves
+     open      — keyboard focus is in the rail: the full rail, and content
+                 makes room (a keyboard user never has it drawn over the page)
+     pinned    — the person pinned it: today's full rail, remembered per browser
+   Below 961px none of this applies: the rail is the phone drawer it always was. */
 .shell {
-  display: grid;
-  grid-template-columns: 232px 1fr;
+  --rail-strip: 60px;
+  --rail-full: 232px;
+  --rail-w: var(--rail-full);
+  display: flex;
   min-height: 100vh;
+  padding-left: var(--rail-w);
+}
+.shell[data-rail="collapsed"],
+.shell[data-rail="overlay"] {
+  --rail-w: var(--rail-strip);
+}
+.shell[data-rail="open"] {
+  --rail-w: 248px;
 }
 
-/* ---- sidebar ----
-   "The dark sidebar is the app's only dark surface. Everything else sits on
-   canvas." It therefore reads from the `--rg-dark-*` stack, which holds the same
-   values in both themes — the rail does not invert with the theme toggle.
-
-   Sidebar sections are headings, not nested menus: one level, always visible,
+/* Sidebar sections are headings, not nested menus: one level, always visible,
    no disclosure to hunt through. */
 .side {
-  background: var(--rg-dark-surface);
-  border-right: 1px solid var(--rg-dark-line);
-  color: var(--rg-dark-ink);
+  position: fixed;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  z-index: 35;
+  width: var(--rail-w);
+  background: var(--rg-rail-bg);
+  border-right: 1px solid var(--rg-rail-line);
+  color: var(--rg-rail-ink);
   padding: var(--s2) var(--s1);
   display: flex;
   flex-direction: column;
   gap: var(--s0);
-  position: sticky;
-  top: 0;
-  height: 100vh;
+  overflow-x: hidden;
   overflow-y: auto;
+  white-space: nowrap;
+}
+.shell[data-rail="overlay"] .side {
+  width: 248px;
+  z-index: 45;
+  background: var(--rg-rail-bg-overlay);
+  box-shadow: var(--rg-shadow-lg);
+}
+/* Opening animates; closing is instant, so a closing panel never sits over
+   the thing the pointer is moving to. */
+.side[data-expanded="true"] {
+  transition: width var(--rg-dur-fast) var(--rg-ease);
 }
 
 .brand {
   display: flex;
   align-items: center;
   padding: var(--s0) var(--s1) var(--s2);
+  min-height: 46px;
 }
 
-.navFilter {
+.filterWrap {
+  position: relative;
   margin: 0 var(--s0) var(--s1);
-  padding: 5px 10px;
+}
+.filterIcon {
+  position: absolute;
+  left: 9px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--rg-rail-muted);
+  pointer-events: none;
+}
+.navFilter {
+  display: block;
+  padding: 6px 10px 6px 32px;
   font-size: var(--text-sm);
   border-radius: var(--rg-r-sm);
-  border: 1px solid var(--rg-dark-line);
-  background: var(--rg-dark-raised);
-  color: var(--rg-dark-ink);
-  width: calc(100% - var(--s1));
+  border: 1px solid var(--rg-rail-line);
+  background: var(--rg-rail-input);
+  color: var(--rg-rail-ink);
+  width: 100%;
 }
 .navFilter::placeholder {
-  color: var(--rg-dark-muted);
+  color: var(--rg-rail-muted);
 }
 
 /* Section headings: sentence case, a size step below the items, muted. */
@@ -50,82 +98,129 @@
   font-family: var(--rg-font);
   font-size: 11px;
   font-weight: 600;
-  color: var(--rg-dark-muted);
+  color: var(--rg-rail-muted);
   padding: var(--s2) var(--s1) 6px;
 }
 
 /* ---- ADR-0094: suite scoping ----
    The rail shows ONE suite at a time. The identity header is the scope
-   indicator; the switcher is a native select restyled onto the dark stack —
-   compact, keyboard-accessible, and it works at every width. */
+   indicator (the suite's glyph is what remains of it in the strip); the
+   switcher is a native select — compact, keyboard-accessible, any width. */
 .suiteHead {
-  display: flex;
-  flex-direction: column;
-  gap: var(--s0);
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  column-gap: var(--s1);
+  row-gap: var(--s0);
   padding: var(--s2) var(--s1) var(--s1);
-  border-bottom: 1px solid var(--rg-dark-line);
+  border-bottom: 1px solid var(--rg-rail-line);
   margin-bottom: var(--s0);
+}
+/* identity, not an action: ink, never Signal (Signal means "you can click this") */
+.suiteGlyph {
+  display: inline-flex;
+  color: var(--rg-rail-ink);
+}
+.suiteGlyph svg {
+  width: 18px;
+  height: 18px;
 }
 .suiteName {
   font-family: var(--rg-font-display);
   font-size: var(--text-md);
   font-weight: 700;
   letter-spacing: -0.01em;
-  color: var(--rg-dark-ink);
+  color: var(--rg-rail-ink);
   line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .suiteSwitch {
+  grid-column: 1 / -1;
   width: 100%;
   padding: 4px 8px;
   font-size: var(--text-xs);
   font-family: var(--rg-font);
   border-radius: var(--rg-r-sm);
-  border: 1px solid var(--rg-dark-line);
-  /* same pair as .navFilter — dark ink on the raised step, a measured
-     combination (brand-contract asserts the dark stack's floors) */
-  background: var(--rg-dark-raised);
-  color: var(--rg-dark-ink);
+  border: 1px solid var(--rg-rail-line);
+  background: var(--rg-rail-input);
+  color: var(--rg-rail-ink);
   cursor: pointer;
+}
+/* the open list is drawn by the OS from these, so give it a solid ground */
+.suiteSwitch option {
+  background: var(--rg-surface);
+  color: var(--rg-ink);
 }
 .filterEmpty {
   padding: var(--s2) var(--s1);
   font-size: var(--text-sm);
-  color: var(--rg-dark-muted);
+  color: var(--rg-rail-muted);
 }
 
-/* The rail's active/hover indicator is a Signal left edge, not a filled pill —
+/* The rail's active/hover indicator is a Signal left edge on a faint tint —
    Signal Cyan means interactive, and nothing else in the rail is coloured. */
 .navItem {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: var(--s1);
-  padding: 5px var(--s1);
+  gap: 10px;
+  padding: 6px var(--s1);
   border: none;
   border-left: 2px solid transparent;
+  border-radius: 0 var(--rg-r-sm) var(--rg-r-sm) 0;
   background: none;
-  color: var(--rg-dark-ink);
+  color: var(--rg-rail-ink);
   font-size: 13px;
   font-weight: 400;
   cursor: pointer;
   text-align: left;
   width: 100%;
+  min-height: 32px;
   text-decoration: none;
   transition: background-color var(--rg-dur-fast) var(--rg-ease);
 }
 .navItem:hover {
-  background: var(--rg-dark-raised);
-  border-left-color: var(--rg-signal);
-  color: var(--rg-dark-ink);
+  background: var(--rg-rail-raised);
+  border-left-color: var(--rg-rail-edge);
+  color: var(--rg-rail-ink);
   text-decoration: none;
 }
-/* ONE signal for the active item — the cyan edge on the raised fill. The text
+/* ONE signal for the active item — the cyan edge on the tinted fill. The text
    stays ink (weight marks it), so the rail is not a list in four styles. */
 .navItemActive {
   composes: navItem;
-  background: var(--rg-dark-raised);
-  border-left-color: var(--rg-signal);
-  color: var(--rg-dark-ink);
+  background: var(--rg-rail-raised);
+  border-left-color: var(--rg-rail-edge);
+  color: var(--rg-rail-ink);
   font-weight: 600;
+}
+.navIcon {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  color: var(--rg-rail-muted);
+}
+.navItemActive .navIcon,
+.navItem:hover .navIcon {
+  color: var(--rg-rail-edge);
+}
+/* the monogram fallback for a destination with no drawn glyph */
+span.navIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--rg-font-display);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0;
+  border: 1.4px solid currentColor;
+  border-radius: var(--rg-r-xs);
+}
+.navLabel {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .navCount {
   margin-left: auto;
@@ -142,29 +237,131 @@
 .navExt {
   margin-left: auto;
   font-size: 10px;
-  color: var(--rg-dark-muted);
+  color: var(--rg-rail-muted);
+}
+
+/* the pin, at the foot of the rail */
+.railFoot {
+  margin-top: auto;
+  padding-top: var(--s1);
+  border-top: 1px solid var(--rg-rail-line);
+}
+.pinBtn {
+  composes: navItem;
+  color: var(--rg-rail-muted);
+}
+.pinBtn[aria-pressed="true"] {
+  color: var(--rg-rail-ink);
+}
+.pinBtn[aria-pressed="true"] .navIcon {
+  color: var(--rg-rail-edge);
+}
+
+/* ---- the strip (desktop only) ----
+   Labels leave the screen but NOT the accessibility tree: they are clipped
+   with the same technique as the skip link, so every link keeps its name and
+   a screen reader hears the same rail whether it is open or not. */
+@media (min-width: 961px) {
+  .side[data-expanded="false"] {
+    padding-left: 6px;
+    padding-right: 6px;
+  }
+  .side[data-expanded="false"] .navLabel,
+  .side[data-expanded="false"] .sectionLabel,
+  .side[data-expanded="false"] .suiteName,
+  .side[data-expanded="false"] .suiteSwitch,
+  .side[data-expanded="false"] .brand > span > span {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: 0;
+    border: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  .side[data-expanded="false"] .brand {
+    justify-content: center;
+    padding-left: 0;
+    padding-right: 0;
+  }
+  .side[data-expanded="false"] .filterWrap {
+    margin-left: 0;
+    margin-right: 0;
+  }
+  .side[data-expanded="false"] .filterIcon {
+    left: 50%;
+    transform: translate(-50%, -50%);
+  }
+  .side[data-expanded="false"] .navFilter {
+    padding-left: 0;
+    padding-right: 0;
+    color: transparent;
+    cursor: pointer;
+  }
+  .side[data-expanded="false"] .navFilter::placeholder {
+    color: transparent;
+  }
+  .side[data-expanded="false"] .section {
+    height: 1px;
+    padding: 0;
+    margin: 10px 8px;
+    background: var(--rg-rail-line);
+  }
+  .side[data-expanded="false"] .suiteHead {
+    display: flex;
+    justify-content: center;
+    padding: 10px 0;
+  }
+  .side[data-expanded="false"] .navItem,
+  .side[data-expanded="false"] .navItemActive,
+  .side[data-expanded="false"] .pinBtn {
+    justify-content: center;
+    padding-left: 0;
+    padding-right: 0;
+    min-height: 36px;
+  }
+  .side[data-expanded="false"] .navCount {
+    position: absolute;
+    top: 1px;
+    right: 3px;
+    margin: 0;
+    padding: 0 4px;
+    font-size: 10px;
+    line-height: 1.5;
+  }
 }
 
 /* ---- main column ---- */
 .mainCol {
+  flex: 1;
   display: flex;
   flex-direction: column;
   min-width: 0;
 }
 
-/* The topbar is part of the canvas — no band, no rule — so the light theme has
-   three grounds (rail, canvas, card) instead of four. */
+/* The topbar is part of the canvas — no rule, no flat band. It is frosted
+   (ADR-0169): the field shows through it, and content scrolling beneath is
+   blurred out rather than colliding with the controls. */
 .topbar {
   display: flex;
   align-items: center;
   gap: var(--s2);
   padding: var(--s1) var(--s3);
   border-bottom: 0;
-  background: var(--rg-canvas);
+  background: transparent;
+  transition: background-color var(--rg-dur) var(--rg-ease);
   position: sticky;
   top: 0;
   z-index: 20;
   min-height: 52px;
+}
+.topbar[data-scrolled="true"] {
+  background: var(--rg-topbar-bg);
+  -webkit-backdrop-filter: blur(14px) saturate(140%);
+  backdrop-filter: blur(14px) saturate(140%);
+  box-shadow: 0 1px 0 var(--rg-glass-line);
 }
 .topbarTitle {
   font-size: var(--text-md);
@@ -364,26 +561,30 @@
   display: none;
 }
 
-/* ---- responsive (laptop → narrow) ---- */
+/* ---- responsive (laptop → narrow) ----
+   The phone drawer, unchanged by ADR-0169: full labels, opened by the
+   hamburger, and no pin (there is nothing to pin it beside). */
 @media (max-width: 960px) {
-  .shell {
-    grid-template-columns: 1fr;
+  .shell,
+  .shell[data-rail] {
+    --rail-w: 248px;
+    padding-left: 0;
   }
-  .side {
-    position: fixed;
-    left: 0;
-    top: 0;
-    bottom: 0;
+  .shell[data-rail] .side {
     width: 248px;
     z-index: 40;
     transform: translateX(-100%);
     transition: transform 160ms ease;
+    background: var(--rg-rail-bg-overlay);
     box-shadow: var(--shadow-lg);
   }
-  .sideOpen {
+  .shell[data-rail] .side.sideOpen {
     transform: none;
   }
   .hamburger {
     display: inline-flex;
+  }
+  .railFoot {
+    display: none;
   }
 }
