@@ -133,28 +133,50 @@ Two IDs (`REL-01`, `REL-02`) were issued independently by rel-backend and rel-te
 | UIW-01 | high | Any 401 from /auth/change-password drops the user to a blank login screen while the server session stays alive | apps/web/src/api/client.ts:86-89 | fixed — c5f1943, 7b8baa0 (isSessionLoss; unit + mock e2e; negative controls) |
 | UXJ-01 | high | 38 query-backed tables render a false "empty" state when the API call fails | apps/web/src/ui/kit.tsx:470-478 | fixed — 2ec3d12, 7b8baa0 (Table error/onRetry on 43 tables; held rows + "couldn't refresh" notice; unit + 5 mock e2e cases) |
 
-### 3.4 UI polish — fixed — pending (UI batch, 2026-10-03)
+### 3.4 UI polish — fixed (UI batch B, 2026-10-03)
 
 | ID | Sev | Title | Location | Status |
 |---|---|---|---|---|
-| UIA-01 | medium | Verify chain reports a foreign/stale anchor as a red "Anchor mismatch" on the demo audit page | apps/gateway/src/audit-chain.ts:182 | fixed — pending (UI batch, 2026-10-03) |
-| UIA-02 | medium | Audit log silently shows only the newest 100 of 406 rows; no pagination, no "showing N of M" | apps/web/src/views/admin/governance/AuditLogPage.tsx:63-66 | fixed — pending (UI batch, 2026-10-03) |
-| UIA-03 | medium | Raw zod validation text reaches users; doubled "validation — validation —" prefix | apps/web/src/api/client.ts:42-70 | fixed — pending (UI batch, 2026-10-03) |
-| UIA-04 | medium | Fingerprint stat tiles overflow and are clipped at 1366 px | apps/web/src/views/admin/settings/DataKeyPage.tsx:116-120 | fixed — pending (UI batch, 2026-10-03) |
-| UIB-02 | medium | Server validation errors render raw zod field keys and the doubled prefix | apps/web/src/views/admin/adminKit.tsx:350-363 | fixed — pending (UI batch, 2026-10-03) |
-| UIB-03 | medium | Clicking a use-case row scrolls its title and Approve/Close under the sticky header | apps/web/src/views/admin/governance/UseCasesPage.tsx:291 | fixed — pending (UI batch, 2026-10-03) |
-| UIB-04 | medium | "Daily AI spend — last 14 days" renders as one solid block when only one day has data (same as UXJ-12) | apps/web/src/views/admin/governance/PosturePage.tsx:140-170 | fixed — pending (UI batch, 2026-10-03) |
-| UIW-02 | medium | Approver reads the submitted intake as raw Markdown + fenced JSON | apps/web/src/views/inbox/InboxPage.tsx:279-282 | fixed — pending (UI batch, 2026-10-03) |
-| UIW-03 | medium | Non-admin on /ui/admin/users sees the full admin navigation beside the refusal card | apps/web/src/shell/suites.tsx:460-475; AppShell.tsx:92 | fixed — pending (UI batch, 2026-10-03) |
-| UIW-05 | medium | "Plan a run" / "Start a change" forms collapse at phone width | apps/web/src/ui/kit.tsx:81 | fixed — pending (UI batch, 2026-10-03) |
-| UIW-06 | medium | Run detail header actions overlap the page title at phone width | apps/web/src/shell/AppShell.tsx:385 | fixed — pending (UI batch, 2026-10-03) |
-| UIW-07 | medium | Empty title/description silently creates "untitled run" / "untitled change" (client-side fallback bypasses server min(1)) | apps/web/src/views/runs/RunsPage.tsx:252 | fixed — pending (UI batch, 2026-10-03) |
-| UIW-08 | medium | Missing/malformed record pages show raw server codes; project page renders chrome for a non-existent project | apps/web/src/views/runs/RunDetailPage.tsx:332 | fixed — pending (UI batch, 2026-10-03) |
-| UIW-09 | medium | Workflow pages show template/stage/kind identifiers where names belong | apps/web/src/views/workflows/WorkflowDetailPage.tsx:145-147 | fixed — pending (UI batch, 2026-10-03) |
-| UXJ-02 | medium | Clicking a lower alert opens the detail panel off-screen; no scroll, no URL change | apps/web/src/views/admin/governance/GovernanceAlertsPage.tsx | fixed — pending (UI batch, 2026-10-03) |
-| UXJ-04 | medium | Error messages are raw server codes or browser exceptions ("Failed to fetch", "not_a_project_member") | apps/web/src/api/client.ts:64-68 | fixed — pending (UI batch, 2026-10-03) |
-| UXJ-06 | medium | "AI intake" from the sidebar pre-fills a fictional Acme Bank use case in every field | apps/web/src/views/admin/governance/IntakeWizardPage.tsx:67-88 | fixed — pending (UI batch, 2026-10-03) |
-| UXJ-08 | medium | First-run setup shows raw JSON, snake_case keys and red "drift" on satisfied steps; numbers contradict Getting started | apps/web/src/views/admin/settings/FirstRunPage.tsx | fixed — pending (UI batch, 2026-10-03) |
+| UIA-01 | medium | Verify chain reports a foreign/stale anchor as a red "Anchor mismatch" on the demo audit page | apps/gateway/src/audit-chain.ts:182 | fixed — cbd7ac3 + 004eaa3 |
+| UIA-02 | medium | Audit log silently shows only the newest 100 of 406 rows; no pagination, no "showing N of M" | apps/web/src/views/admin/governance/AuditLogPage.tsx:63-66 | fixed — 279f9c6 |
+| UIA-03 | medium | Raw zod validation text reaches users; doubled "validation — validation —" prefix | apps/web/src/api/client.ts:42-70 | fixed — f9aebbe |
+| UIA-04 | medium | Fingerprint stat tiles overflow and are clipped at 1366 px | apps/web/src/views/admin/settings/DataKeyPage.tsx:116-120 | fixed — dd476c2 |
+| UIB-02 | medium | Server validation errors render raw zod field keys and the doubled prefix | apps/web/src/views/admin/adminKit.tsx:350-363 | fixed — f9aebbe |
+| UIB-03 | medium | Clicking a use-case row scrolls its title and Approve/Close under the sticky header | apps/web/src/views/admin/governance/UseCasesPage.tsx:291 | fixed — 9fb58f5 |
+| UIB-04 | medium | "Daily AI spend — last 14 days" renders as one solid block when only one day has data (same as UXJ-12) | apps/web/src/views/admin/governance/PosturePage.tsx:140-170 | fixed — aceeac1 + 004eaa3 |
+| UIW-02 | medium | Approver reads the submitted intake as raw Markdown + fenced JSON | apps/web/src/views/inbox/InboxPage.tsx:279-282 | fixed — 0dfc0eb |
+| UIW-03 | medium | Non-admin on /ui/admin/users sees the full admin navigation beside the refusal card | apps/web/src/shell/suites.tsx:460-475; AppShell.tsx:92 | fixed — f492bc5 |
+| UIW-05 | medium | "Plan a run" / "Start a change" forms collapse at phone width | apps/web/src/ui/kit.tsx:81 | fixed — 75bd09e |
+| UIW-06 | medium | Run detail header actions overlap the page title at phone width | apps/web/src/shell/AppShell.tsx:385 | fixed — 75bd09e |
+| UIW-07 | medium | Empty title/description silently creates "untitled run" / "untitled change" (client-side fallback bypasses server min(1)) | apps/web/src/views/runs/RunsPage.tsx:252 | fixed — 5335622 |
+| UIW-08 | medium | Missing/malformed record pages show raw server codes; project page renders chrome for a non-existent project | apps/web/src/views/runs/RunDetailPage.tsx:332 | fixed — e0fea1f |
+| UIW-09 | medium | Workflow pages show template/stage/kind identifiers where names belong | apps/web/src/views/workflows/WorkflowDetailPage.tsx:145-147 | fixed — 5335622, 0dfc0eb |
+| UXJ-02 | medium | Clicking a lower alert opens the detail panel off-screen; no scroll, no URL change | apps/web/src/views/admin/governance/GovernanceAlertsPage.tsx | fixed — 9fb58f5 |
+| UXJ-04 | medium | Error messages are raw server codes or browser exceptions ("Failed to fetch", "not_a_project_member") | apps/web/src/api/client.ts:64-68 | fixed — f9aebbe |
+| UXJ-06 | medium | "AI intake" from the sidebar pre-fills a fictional Acme Bank use case in every field | apps/web/src/views/admin/governance/IntakeWizardPage.tsx:67-88 | fixed — 1147f5f |
+| UXJ-08 | medium | First-run setup shows raw JSON, snake_case keys and red "drift" on satisfied steps; numbers contradict Getting started | apps/web/src/views/admin/settings/FirstRunPage.tsx | fixed — 6310fdd |
+
+#### 3.4.1 Reviewer follow-ups on batches A, B and C (2026-10-03)
+
+Each batch was adversarially reviewed before integration. Fixed before push: batch A — a dead
+session on the forced-change forms routed nowhere (7b8baa0), a failed refetch over held rows was
+silent (7b8baa0); batch B — an anchor past the head on a tamper-resistant store read green
+(004eaa3), the spend window ended on the last busy day (004eaa3); batch C — three readers each
+built their own anchor sink, bare credential values under `?token=`/`X-Auth-Token:`/JSON `token`
+survived the discovery scrub, the preflight comment overclaimed (3dc13d2). Deferred, low:
+
+| ID | Sev | Title | Location | Status |
+|---|---|---|---|---|
+| RVA-01 | low | Cross-tab identity switch: tab 1 keeps user A's rows beside user B's until a probe or 401 | apps/web/src/session/SessionContext.tsx (`become()`) | deferred (low) |
+| RVA-02 | low | Two parent-fed tables (CustomProvidersPage, InfrastructurePage PolicyCard) still fall to the empty state on failure | apps/web/src/views/admin/integrations/CustomProvidersPage.tsx; compliance/InfrastructurePage.tsx | deferred (low) |
+| RVB-01 | low | `fieldLabel` drops array indices, so two rows' refusals read identically | apps/web/src/api/client.ts (`fieldLabel`) | deferred (low) |
+| RVB-02 | low | A `validation`/`not_found` with no detail renders as one word | apps/web/src/api/client.ts (`errMessage`) | deferred (low) |
+| RVB-03 | low | RecordError reads any 400 on the project page as "not a project ID" | apps/web/src/ui/kit.tsx (RecordError); ProjectDetailPage.tsx | deferred (low) |
+| RVB-04 | low | Admin rail flashes to Workspace while /auth/me is in flight on /admin/* | apps/web/src/shell/AppShell.tsx:92 | deferred (low) |
+| RVC-01 | low | Under PII redaction the hijacked tools/call preflight error maps to InternalError, not "Denied by policy" (pre-existing shape) | apps/gateway/src/mcp-proxy.ts ~599 | deferred (low) |
+| RVC-02 | low | The model dispatch path writes no `project-budget-cap` deny row (MCP and connector paths do) | apps/gateway/src/agents-connectors.ts ~1367 | deferred (low) |
+| RVC-03 | low | Seed's `call()` swallows a 409, so a tripped demo-project budget would silently empty "Spend by connector" | apps/gateway/src/seed.ts:77-80 | deferred (low) |
+| RVC-04 | low | Several batch C cases pass without the fix (pinning invariants, not discriminating); the discriminators are named in the ledger rows | apps/gateway/src/connector-project-budget.test.ts; aer013-harden-atomicity.test.ts | deferred (low) |
 
 ### 3.5 Deferred — confirmed, low severity, not fixed in this cycle (89)
 
