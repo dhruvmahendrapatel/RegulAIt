@@ -457,10 +457,14 @@ export function suiteHome(suite: Suite): string {
  * so detail routes (/runs/:id, /projects/:id/context) resolve through their
  * list entry. Routes outside every suite (/, /account) fall back to Workspace.
  */
-export function suiteOfPath(pathname: string): Suite {
+export function suiteOfPath(pathname: string, isAdmin = true): Suite {
   const path = pathname.replace(/\/+$/, "") || "/";
   let best: { suite: Suite; len: number } | null = null;
-  for (const suite of SUITES) {
+  // An admin-only suite is not this person's suite, whatever the URL says: a
+  // non-admin who types /admin/users gets the refusal card inside the
+  // Workspace navigation, not the whole Identity & access rail beside a card
+  // saying it is not in their navigation (UIW-03).
+  for (const suite of SUITES.filter((su) => !su.admin || isAdmin)) {
     for (const section of suite.sections) {
       for (const item of section.items) {
         for (const prefix of [item.to, ...(item.also ?? [])]) {

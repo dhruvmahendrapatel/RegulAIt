@@ -89,7 +89,7 @@ export default function AppShell(props: { children: ReactNode }) {
     () => SUITES.filter((su) => !su.admin || auth?.isAdmin),
     [auth?.isAdmin],
   );
-  const activeSuite = useMemo(() => suiteOfPath(pathname), [pathname]);
+  const activeSuite = useMemo(() => suiteOfPath(pathname, Boolean(auth?.isAdmin)), [pathname, auth?.isAdmin]);
   const filterResults = useMemo(() => {
     if (!q) return [];
     return suites

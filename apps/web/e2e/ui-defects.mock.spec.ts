@@ -404,3 +404,17 @@ test("UIW-06: at phone width the run page's header actions wrap under the title 
   // the title keeps a readable width — it is no longer squeezed beside the buttons
   expect(title.width).toBeGreaterThan(150);
 });
+
+test("UIW-03: a non-admin on an admin URL sees the Workspace navigation beside the refusal, not the admin rail", async ({ page }) => {
+  await routeApi(page, async (route, p) => {
+    if (p === "/auth/me") return json(route, { ...authMe(USER_B), isAdmin: false });
+    if (p === "/v1/me") return json(route, { userId: USER_B.id, isAdmin: false, user: USER_B });
+    if (p === "/v1/users") return json(route, { error: "admin_only" }, 403);
+    return json(route, {});
+  });
+  await page.goto("/ui/admin/users");
+  await expect(page.getByText("This is an administrative surface and your account does not hold the administrator role.", { exact: false })).toBeVisible();
+  expect(await page.getByText("Identity & access", { exact: false }).count()).toBe(0);
+  expect(await page.getByRole("link", { name: "Virtual keys" }).count()).toBe(0);
+  await expect(page.getByRole("link", { name: "Inbox", exact: true }).first()).toBeVisible();
+});
