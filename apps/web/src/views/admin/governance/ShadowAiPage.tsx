@@ -425,7 +425,7 @@ export default function ShadowAiPage() {
       {/* what this can and cannot see, stated once, on the face of the page */}
       <p className={v.dim}>
         {findings.data?.coverage.statement ?? "Loading coverage…"}
-        {findings.data?.posture ? <> · {findings.data.posture}</> : null}
+        {findings.data?.posture ? <> {findings.data.posture}</> : null}
       </p>
 
       <Card>
@@ -445,7 +445,7 @@ export default function ShadowAiPage() {
         <p className={v.faint}>Every row is a lead for triage, not a verdict.</p>
         <QueryGate loading={findings.isLoading} error={findings.error} onRetry={refresh}>
           {(findings.data?.findings.length ?? 0) === 0 ? (
-            <EmptyState title="No findings yet" body="Import an egress-log, code-scan, SaaS or self-reported evidence file above." />
+            <EmptyState title="No findings yet" body="Import an egress-log, code-scan, SaaS or self-reported evidence file below." />
           ) : (
             <Table<Finding>
               rows={findings.data?.findings ?? []}
@@ -473,7 +473,7 @@ export default function ShadowAiPage() {
                   header: "Disposition",
                   render: (r) => (
                     <>
-                      <Badge tone={r.disposition === "open" ? "warn" : "neutral"}>{r.disposition}</Badge>
+                      <Badge tone="neutral">{r.disposition}</Badge>
                       {r.dispositionStale ? <Badge tone="danger">seen again since</Badge> : null}
                     </>
                   ),
@@ -549,7 +549,7 @@ export default function ShadowAiPage() {
             rowKey={(r) => r.kind}
             columns={[
               { key: "evidence_class", header: "Evidence class", render: (r) => evidenceLabel(r.kind) },
-              { key: "supplied", header: "Supplied", render: (r) => <Badge tone={r.on ? "ok" : "neutral"}>{r.on ? "on" : "off"}</Badge> },
+              { key: "supplied", header: "Supplied", render: (r) => (r.on ? "on" : "off") },
               { key: "imports", header: "Imports", render: (r) => r.imports },
               { key: "rows", header: "Rows", render: (r) => r.rows },
               { key: "what_it_sees", header: "What it sees", render: (r) => <span className={v.dim}>{r.whatItSees}</span> },
@@ -947,7 +947,7 @@ export default function ShadowAiPage() {
             <div className={v.kpiStrip}><KpiFigure value={mcpResult.observed} label="Observed MCP hosts" /><KpiFigure value={mcpResult.unregistered} label="Unregistered" /><KpiFigure value={mcpResult.registryCount} label="Registry entries" /></div>
             {mcpResult.results.length === 0 ? <EmptyState title="No MCP indicators found" body="No supported MCP transport path, protocol header, or JSON-RPC method appeared in the supplied text." /> : <Table rows={mcpResult.results} rowKey={(row) => row.host} columns={[
               { key: "host", header: "Host", render: (row) => <><code>{row.host}</code>{row.path ? <span className={v.faint}> {row.path}</span> : null}</> },
-              { key: "confidence", header: "Confidence", render: (row) => <Badge tone={row.confidence === "high" ? "warn" : "info"}>{row.confidence}</Badge> },
+              { key: "confidence", header: "Confidence", render: (row) => row.confidence },
               { key: "registry", header: "Registry", render: (row) => <Badge tone={row.registered ? "ok" : "danger"}>{row.registered ? row.registeredAs ?? "registered" : "unregistered"}</Badge> },
               { key: "evidence", header: "Evidence", render: (row) => <span className={v.dim}>{row.indicators.join(", ")} · {row.occurrences} line(s)</span> },
               { key: "verdict", header: "Verdict", render: (row) => <span className={v.dim}>{row.verdict}</span> },
