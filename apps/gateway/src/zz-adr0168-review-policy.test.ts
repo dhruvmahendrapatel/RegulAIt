@@ -379,6 +379,28 @@ describe("multi-role review routing", () => {
     expect(d.useCase.approvedUntil).toBe(plusMonths(d.useCase.approvedAt, 9));
   });
 
+  it("a single-approver row written before the policy routed the tier is replaced before anyone can decide it", async () => {
+    await db.delete(governanceReviewPolicy);
+    let legacy: string;
+    let uc: { id: string; instanceId: string };
+    try {
+      uc = await proposeToReview("late-policy", limitedAnswers);
+      const rows = await pendingRows(uc.instanceId);
+      expect(rows.length).toBeGreaterThan(0);
+      expect(rows.every((r) => r.reviewRoleId === null)).toBe(true);
+      legacy = rows[0]!.id;
+    } finally {
+      await setPolicy();
+    }
+    // the policy now routes `limited` to Security: the old row is dead, and
+    // deciding it (even as an admin with a reason) changes nothing
+    const r = await decide(legacy, { decision: "approved", reason: "approved (g2rp late policy)" }, "admin");
+    expect(r.statusCode, r.body).toBe(409);
+    expect(r.json().error).toBe("approval_superseded");
+    expect((await useCaseRow(uc.id)).status).toBe("under_review");
+    expect((await pendingRows(uc.instanceId)).map((x) => x.reviewRoleId)).toEqual(["security"]);
+  });
+
   it("no policy at all: today's single named approver, unchanged", async () => {
     await db.delete(governanceReviewPolicy);
     try {
