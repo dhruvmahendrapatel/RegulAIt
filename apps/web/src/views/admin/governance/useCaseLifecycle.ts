@@ -239,15 +239,14 @@ export function shortDate(iso: string | null | undefined): string {
   return `${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`;
 }
 
-/** who may mark a condition met: its owner, the use case's owner, or an admin (the server checks the same) */
-export function canMarkMet(
-  condition: Pick<UseCaseCondition, "status" | "ownerUserId">,
-  viewer: { userId: string | null; isAdmin: boolean },
-  useCaseOwnerId: string | null | undefined,
-): boolean {
-  if (condition.status !== "open") return false;
-  if (viewer.isAdmin) return true;
-  return Boolean(viewer.userId) && (viewer.userId === condition.ownerUserId || viewer.userId === useCaseOwnerId);
+/**
+ * whether to offer "Mark met": the SERVER decides who may close a condition
+ * (a before-go-live one needs someone other than the proposer), and says so per
+ * viewer on the detail read. The page never re-derives the rule, so it can
+ * never offer a button the server would refuse.
+ */
+export function canMarkMet(condition: Pick<UseCaseCondition, "status" | "canMarkMet">): boolean {
+  return condition.status === "open" && condition.canMarkMet === true;
 }
 
 export const conditionState = (c: UseCaseCondition): { label: string; tone: Tone } =>

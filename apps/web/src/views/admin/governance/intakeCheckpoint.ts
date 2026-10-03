@@ -114,6 +114,11 @@ export interface SubmissionCheckpoint {
 export const emptyCheckpoint = (): SubmissionCheckpoint => ({ risks: {} });
 
 const USE_CASE_PATCHABLE = ["description", "businessContext", "intendedAgentIds"] as const;
+const USE_CASE_PATCHABLE_LABEL: Record<(typeof USE_CASE_PATCHABLE)[number], string> = {
+  description: "the description",
+  businessContext: "the business context",
+  intendedAgentIds: "the intended agents",
+};
 const USE_CASE_FIXED: Array<{ key: keyof UseCaseInputs; label: string }> = [
   { key: "name", label: "the use-case name" },
   { key: "dataSensitivity", label: "the data categories (the derived data sensitivity)" },
@@ -164,6 +169,14 @@ export function planSubmission(checkpoint: SubmissionCheckpoint, inputs: Submiss
       const patch: UseCasePatch = {};
       for (const key of USE_CASE_PATCHABLE) {
         if (!same(before[key], inputs.useCase[key])) (patch as Record<string, unknown>)[key] = inputs.useCase[key];
+      }
+      // once the questionnaire is stored the use case is WITH ITS REVIEWERS,
+      // and nothing about it may change under them (the gateway refuses the
+      // PATCH): refuse here, before anything is sent
+      if (checkpoint.questionnaire) {
+        for (const key of USE_CASE_PATCHABLE) {
+          if (key in patch) reasons.push(`${USE_CASE_PATCHABLE_LABEL[key]} changed after the use case went to its reviewers — it can't be edited while it is under review`);
+        }
       }
       useCase = Object.keys(patch).length > 0 ? { action: "update", patch } : { action: "reuse" };
     }

@@ -2,6 +2,8 @@
  * ADR-0168 items 3-6, from the browser's side against a mocked gateway:
  *  - the use-case RECORD: header band, lifecycle tracker derived from the
  *    record, conditions of approval with Mark met, the approval's lifetime;
+ *    Mark met is offered only where the server says the viewer may close the
+ *    condition, and a before-go-live one is closed with a note (ADR-0170 §3);
  *  - the REVIEW TASK drawer: every outcome posts exactly the decide contract,
  *    validation refuses before anything is sent, separation of duties holds,
  *    other approval kinds keep approve/deny, and the drawer is keyboard- and
@@ -49,9 +51,12 @@ const overview = (status = "under_review") => ({
   audit: [{ id: 1, at: "2026-10-02T09:00:01Z", userId: "ada", ruleId: "use-case-eu-tier", effect: "allow", reason: "EU AI Act screening: high" }],
 });
 
-const conditions = (firstMet: boolean) => [
-  { id: C1, approvalId: AP, text: "Run the bias test on the holdout set and attach the results", ownerUserId: "ada", ownerName: "Ada Owner", dueAt: "2026-09-30T00:00:00Z", blocking: true, status: firstMet ? "met" : "open", metAt: firstMet ? "2026-10-03T10:00:00Z" : null, metByName: firstMet ? "Riley Reviewer" : null, overdue: !firstMet },
-  { id: C2, approvalId: AP, text: "Quarterly drift review with the credit risk team", ownerUserId: "avery", ownerName: "Avery Approver", dueAt: "2027-01-15T00:00:00Z", blocking: false, status: "open", metAt: null, metByName: null, overdue: false },
+/** `canMarkMet` is the server's per-viewer answer; `blockingRefused` plays a
+ * server that refuses this viewer the before-go-live condition (the proposer's
+ * case: someone else must confirm it) */
+const conditions = (firstMet: boolean, viewer: Persona = ADMIN_REVIEWER, blockingRefused = false) => [
+  { id: C1, approvalId: AP, text: "Run the bias test on the holdout set and attach the results", ownerUserId: "ada", ownerName: "Ada Owner", dueAt: "2026-09-30T00:00:00Z", blocking: true, status: firstMet ? "met" : "open", metAt: firstMet ? "2026-10-03T10:00:00Z" : null, metByName: firstMet ? "Riley Reviewer" : null, note: firstMet ? "Bias test attached to the record." : null, overdue: !firstMet, canMarkMet: !firstMet && viewer.isAdmin && !blockingRefused },
+  { id: C2, approvalId: AP, text: "Quarterly drift review with the credit risk team", ownerUserId: "avery", ownerName: "Avery Approver", dueAt: "2027-01-15T00:00:00Z", blocking: false, status: "open", metAt: null, metByName: null, note: null, overdue: false, canMarkMet: viewer.isAdmin || viewer.id === "ada" || viewer.id === "avery" },
 ];
 
 const intakeApproval = (requester = "ada", approver = "avery") => ({
@@ -72,6 +77,7 @@ interface MockState {
   conditionMet: boolean;
   approvedUntil: string | null;
   approvalExpired: boolean;
+  blockingRefused: boolean;
   decides: Array<{ id: string; body: unknown }>;
   metPosts: Array<{ path: string; body: unknown }>;
 }
@@ -79,7 +85,7 @@ interface MockState {
 const json = (route: Route, body: unknown, status = 200) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
 
 async function mockGateway(page: Page, patch: Partial<MockState> = {}): Promise<MockState> {
-  const state: MockState = { persona: ADMIN_REVIEWER, status: "under_review", approvals: [intakeApproval("ada", "riley")], conditionMet: false, approvedUntil: null, approvalExpired: false, decides: [], metPosts: [], ...patch };
+  const state: MockState = { persona: ADMIN_REVIEWER, status: "under_review", approvals: [intakeApproval("ada", "riley")], conditionMet: false, approvedUntil: null, approvalExpired: false, blockingRefused: false, decides: [], metPosts: [], ...patch };
   await page.route("**/*", async (route) => {
     const url = new URL(route.request().url());
     const p = url.pathname;
@@ -97,11 +103,11 @@ async function mockGateway(page: Page, patch: Partial<MockState> = {}): Promise<
     if (p.startsWith("/v1/workflows/instances/")) return json(route, { error: "not_found" }, 404);
     if (p === "/v1/use-cases") return json(route, me.isAdmin ? { useCases: [{ id: UC, workflowInstanceId: INST }] } : { useCases: [] });
     if (p === `/v1/use-cases/${UC}/overview`) return me.isAdmin ? json(route, overview(state.status)) : json(route, { error: "forbidden" }, 403);
-    if (p === `/v1/use-cases/${UC}`) return json(route, { useCase: { id: UC, status: state.status, approvedAt: state.approvedUntil ? "2026-10-02T11:00:00Z" : null, approvedUntil: state.approvedUntil, approvalExpired: state.approvalExpired }, conditions: state.status === "approved" ? conditions(state.conditionMet) : [] });
+    if (p === `/v1/use-cases/${UC}`) return json(route, { useCase: { id: UC, status: state.status, approvedAt: state.approvedUntil ? "2026-10-02T11:00:00Z" : null, approvedUntil: state.approvedUntil, approvalExpired: state.approvalExpired }, conditions: state.status === "approved" ? conditions(state.conditionMet, me, state.blockingRefused) : [] });
     if (p.startsWith(`/v1/use-cases/${UC}/conditions/`) && p.endsWith("/met") && method === "POST") {
       state.metPosts.push({ path: p, body: route.request().postDataJSON() });
       state.conditionMet = true;
-      return json(route, conditions(true)[0]);
+      return json(route, conditions(true, me)[0]);
     }
     if (p === "/v1/users/directory") return json(route, { users: [{ id: "ada", name: "Ada Owner", teams: [] }, { id: "avery", name: "Avery Approver", teams: [] }, { id: "riley", name: "Riley Reviewer", teams: [] }] });
     if (p === `/v1/agents/${AGENT}/card`) return json(route, { agent: { id: AGENT, name: "Credit assistant", provider: "anthropic", model: "claude-opus-5", tier: "standard", modes: ["chat"], enabled: true, lifecycleStatus: "active", halted: false, haltedReason: null, hasSystemPrompt: true }, owner: { id: "ada", name: "Ada Owner", state: "owned" }, purpose: { intendedUses: ["Credit support"], limitations: [], source: "model card" }, dataSources: { declared: [], note: "" }, guardrails: { modes: {}, blocksInput: true, blocksOutput: true, provenance: [] }, oversight: { modelCards: 1, modelCardApproved: true, note: "" } });
@@ -178,9 +184,27 @@ test.describe("the use-case record", () => {
     await expectNoAxeViolations(page, "use-case record (approved, conditions open)");
     await shots(page, "after-record-overview");
 
+    // a before-go-live condition is closed with a note saying what was done
     await first.getByRole("button", { name: /^Mark met/ }).click();
+    const dialog = page.getByRole("dialog", { name: "Mark condition met" });
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toContainText("Run the bias test");
+    await dialog.getByRole("button", { name: "Mark met" }).click();
+    await expect(dialog.getByText("Say what was done to meet this condition")).toBeVisible();
+    await expect(dialog.getByLabel("What was done")).toHaveAttribute("aria-invalid", "true");
+    expect(state.metPosts).toEqual([]);
+    await expectNoAxeViolations(page, "mark condition met (note required)");
+    // Escape closes without sending; reopening starts clean
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+    expect(state.metPosts).toEqual([]);
+    await first.getByRole("button", { name: /^Mark met/ }).click();
+    await expect(dialog.getByLabel("What was done")).toHaveValue("");
+    await dialog.getByLabel("What was done").fill("  Bias test attached to the record.  ");
+    await dialog.getByRole("button", { name: "Mark met" }).click();
     await expect.poll(() => state.metPosts.length).toBe(1);
-    expect(state.metPosts[0]).toEqual({ path: `/v1/use-cases/${UC}/conditions/${C1}/met`, body: {} });
+    expect(state.metPosts[0]).toEqual({ path: `/v1/use-cases/${UC}/conditions/${C1}/met`, body: { note: "Bias test attached to the record." } });
+    await expect(dialog).toHaveCount(0);
     await expect(first).toContainText("Met");
     await expect(stepper.locator('[aria-current="step"]')).toContainText("Monitoring");
 
@@ -191,6 +215,24 @@ test.describe("the use-case record", () => {
     const history = page.getByRole("row").filter({ hasText: "Avery Approver" });
     await expect(history).toContainText("Sign-off");
     await expect(history).toContainText("Approved");
+  });
+
+  test("Mark met follows the server's answer for this viewer: no button where it would refuse; an after-go-live one closes without a note", async ({ page }) => {
+    // the proposer, here an admin who proposed it: the server says someone else confirms the before-go-live condition
+    const state = await mockGateway(page, { persona: PROPOSER, status: "approved", approvedUntil: "2027-04-02T11:00:00Z", blockingRefused: true, approvals: [] });
+    await page.goto(`/ui/admin/governance/use-cases/${UC}`);
+    await expect(page.getByRole("heading", { level: 1, name: "Credit-limit-increase assistant" })).toBeVisible();
+    const conds = page.locator("section", { has: page.getByText("Conditions of approval", { exact: true }) });
+    const blocking = conds.getByRole("row").filter({ hasText: "Run the bias test" });
+    await expect(blocking).toContainText("Overdue");
+    await expect(blocking.getByRole("button", { name: /^Mark met/ })).toHaveCount(0);
+    await expect(conds.getByText(/confirmed by someone other than the person who proposed the use case/)).toBeVisible();
+    await expectNoAxeViolations(page, "use-case record (proposer view)");
+    const after = conds.getByRole("row").filter({ hasText: "Quarterly drift review" });
+    await after.getByRole("button", { name: /^Mark met/ }).click();
+    await expect.poll(() => state.metPosts.length).toBe(1);
+    expect(state.metPosts[0]).toEqual({ path: `/v1/use-cases/${UC}/conditions/${C2}/met`, body: {} });
+    await expect(page.getByRole("dialog", { name: "Mark condition met" })).toHaveCount(0);
   });
 
   test("a use case sent back reads Needs information; an expired approval asks for re-review", async ({ page }) => {

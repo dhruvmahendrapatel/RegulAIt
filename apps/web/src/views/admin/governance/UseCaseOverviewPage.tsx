@@ -4,8 +4,7 @@ import { Link, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../../../api/client";
 import type { DirectoryUser, UseCaseCondition, UseCaseLifecycleDetail, UseCaseResubmission, UseCaseReview, UseCaseRiskAcceptance } from "../../../api/types";
 import { ago, frameworkLabel, humanize, plural, providerLabel } from "../../../api/format";
-import { useSession } from "../../../session/SessionContext";
-import { Badge, Button, Card, EmptyState, Field, Input, Select, Table, Tabs, type Tone } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, Field, Input, Modal, Select, Table, Tabs, Textarea, type Tone } from "../../../ui/kit";
 import { QueryGate, RemoveButton, useAction } from "../adminKit";
 import v from "../../views.module.css";
 import s from "./demoGovernance.module.css";
@@ -256,7 +255,6 @@ function OverviewTab(props: {
       ) : null}
       <ConditionsCard
         useCaseId={data.useCase.id}
-        ownerUserId={data.useCase.ownerUserId ?? null}
         status={props.status}
         conditions={props.conditions}
         loaded={props.conditionsLoaded}
@@ -291,18 +289,39 @@ function OverviewTab(props: {
   );
 }
 
+/** what a before-go-live condition's closing note may hold (the server's limit) */
+const NOTE_MAX = 2000;
+
 function ConditionsCard(props: {
   useCaseId: string;
-  ownerUserId: string | null;
   status: string;
   conditions: UseCaseCondition[];
   loaded: boolean;
   onRefresh: () => Promise<void>;
 }) {
-  const { auth } = useSession();
   const action = useAction();
-  const viewer = { userId: auth?.userId ?? null, isAdmin: Boolean(auth?.isAdmin) };
+  // a before-go-live condition is confirmed with a note saying what was done
+  const [closing, setClosing] = useState<UseCaseCondition | null>(null);
+  const [note, setNote] = useState("");
+  const [noteError, setNoteError] = useState<string | null>(null);
   const open = props.conditions.filter((c) => c.status === "open").length;
+  const markMet = (row: UseCaseCondition, body: { note?: string }) =>
+    action.run(async () => {
+      await api.post(`/v1/use-cases/${props.useCaseId}/conditions/${row.id}/met`, body);
+      await props.onRefresh();
+    }, "Condition marked met");
+  const closeDialog = () => {
+    setClosing(null);
+    setNote("");
+    setNoteError(null);
+  };
+  const confirmClosing = async () => {
+    if (!closing) return;
+    const text = note.trim();
+    if (!text) return setNoteError("Say what was done to meet this condition");
+    if (text.length > NOTE_MAX) return setNoteError(`Keep the note to ${NOTE_MAX} characters or fewer`);
+    if (await markMet(closing, { note: text })) closeDialog();
+  };
   return (
     <Card title="Conditions of approval" actions={props.conditions.length ? <span className={v.faint}>{open ? `${open} open` : "All met"}</span> : undefined}>
       {props.conditions.length === 0 ? (
@@ -332,15 +351,15 @@ function ConditionsCard(props: {
               key: "act",
               header: "",
               align: "right",
-              render: (row) => canMarkMet(row, viewer, props.ownerUserId) ? (
+              render: (row) => canMarkMet(row) ? (
                 <Button
                   size="sm"
                   disabled={action.busy}
                   aria-label={`Mark met: ${row.text}`}
-                  onClick={() => void action.run(async () => {
-                    await api.post(`/v1/use-cases/${props.useCaseId}/conditions/${row.id}/met`, {});
-                    await props.onRefresh();
-                  }, "Condition marked met")}
+                  onClick={() => {
+                    if (row.blocking) setClosing(row);
+                    else void markMet(row, {});
+                  }}
                 >
                   Mark met
                 </Button>
@@ -349,6 +368,43 @@ function ConditionsCard(props: {
           ]}
         />
       )}
+      {props.conditions.some((c) => c.status === "open" && c.blocking && !canMarkMet(c)) ? (
+        <p className={v.faint}>
+          A before-go-live condition is confirmed by someone other than the person who proposed the use case: the condition's owner, a reviewer who approved it, or an administrator.
+        </p>
+      ) : null}
+      <Modal
+        open={closing !== null}
+        title="Mark condition met"
+        onClose={closeDialog}
+        actions={
+          <>
+            <Button onClick={closeDialog}>Cancel</Button>
+            <Button variant="primary" disabled={action.busy} onClick={() => void confirmClosing()}>
+              {action.busy ? "Saving…" : "Mark met"}
+            </Button>
+          </>
+        }
+      >
+        {closing ? (
+          <div className={v.stack}>
+            <p className={v.dim}>{closing.text}</p>
+            <p className={v.faint}>This condition must be met before go-live. Your note is kept with the record.</p>
+            <Field label="What was done" error={noteError}>
+              <Textarea
+                rows={4}
+                maxLength={NOTE_MAX}
+                value={note}
+                aria-invalid={noteError ? true : undefined}
+                onChange={(event) => {
+                  setNote(event.target.value);
+                  if (noteError) setNoteError(null);
+                }}
+              />
+            </Field>
+          </div>
+        ) : null}
+      </Modal>
     </Card>
   );
 }

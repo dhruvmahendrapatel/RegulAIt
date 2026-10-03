@@ -298,8 +298,16 @@ export interface RecertificationSweepResult {
  */
 export async function runUseCaseRecertificationSweep(
   db: Db,
-  opts: { now?: Date; actorUserId?: string | null; useCaseIds?: string[]; dataKey?: string } = {},
+  opts: {
+    now?: Date;
+    actorUserId?: string | null;
+    useCaseIds?: string[];
+    dataKey?: string;
+    /** where a per-candidate failure is reported (default stderr) */
+    log?: (line: string) => void;
+  } = {},
 ): Promise<RecertificationSweepResult> {
+  const log = opts.log ?? ((line: string) => console.error(line));
   const now = opts.now ?? new Date();
   const candidates = await db
     .select({ id: aiUseCases.id, approvedUntil: aiUseCases.approvedUntil })
@@ -316,95 +324,108 @@ export async function runUseCaseRecertificationSweep(
   const postCommits: ApprovalPostCommit[] = [];
   for (const c of candidates) {
     if (!c.approvedUntil || c.approvedUntil.getTime() > now.getTime()) continue;
-    const moved = await db.transaction(async (tx): Promise<{ ok: true } | { ok: false; reason: string }> => {
-      const [uc] = await tx.select().from(aiUseCases).where(eq(aiUseCases.id, c.id)).for("update");
-      // re-checked under the lock: a concurrent pass (or a decision) got here first
-      if (!uc || uc.status !== "approved" || !uc.approvedUntil || uc.approvedUntil.getTime() > now.getTime()) {
-        return { ok: false, reason: "no_longer_expired" };
-      }
-      if (!uc.workflowInstanceId) return { ok: false, reason: "no_intake_instance" };
-      const [inst] = await tx
-        .select()
-        .from(workflowInstances)
-        .where(eq(workflowInstances.id, uc.workflowInstanceId))
-        .for("update");
-      if (!inst) return { ok: false, reason: "no_intake_instance" };
-      if (inst.status !== "completed") return { ok: false, reason: `intake_instance_${inst.status}` };
-      const def = inst.definition as WorkflowDefinition;
-      let signoff = -1;
-      for (let i = def.stages.length - 1; i >= 0; i--) {
-        if (def.stages[i]!.type === "human_approval") {
-          signoff = i;
-          break;
+    // ADR-0170 §8: ONE failing use case never aborts the sweep. Its
+    // transaction rolls back (nothing of it is written), its queued post-commit
+    // work is dropped with it, and it is reported in `skipped` and logged; the
+    // remaining candidates are still evaluated.
+    let moved: { ok: true } | { ok: false; reason: string };
+    try {
+      moved = await db.transaction(async (tx): Promise<{ ok: true } | { ok: false; reason: string }> => {
+        const [uc] = await tx.select().from(aiUseCases).where(eq(aiUseCases.id, c.id)).for("update");
+        // re-checked under the lock: a concurrent pass (or a decision) got here first
+        if (!uc || uc.status !== "approved" || !uc.approvedUntil || uc.approvedUntil.getTime() > now.getTime()) {
+          return { ok: false, reason: "no_longer_expired" };
         }
-      }
-      if (signoff < 0) return { ok: false, reason: "no_signoff_stage" };
-      const stage = def.stages[signoff]!;
-      // AER-049: the generic kernel re-open — the one path every re-open takes.
-      // It archives the round's effect records into `effects:history`, bumps
-      // round / stage_entry, supersedes any live gate and re-requests the
-      // sign-off from the template's approvers (nested as a savepoint in this
-      // transaction, so the use case and the instance move together).
-      const reopened = await reopenWorkflowInstance(tx, inst.id, {
-        stageId: stage.id,
-        reason:
-          `recertification: the approval recorded for AI use case '${uc.name}' expired on ` +
-          `${uc.approvedUntil.toISOString().slice(0, 10)}`,
-        actorUserId: opts.actorUserId ?? null,
-        systemActor: RECERTIFICATION_SYSTEM_ACTOR,
-        ...(opts.dataKey ? { dataKey: opts.dataKey } : {}),
+        if (!uc.workflowInstanceId) return { ok: false, reason: "no_intake_instance" };
+        const [inst] = await tx
+          .select()
+          .from(workflowInstances)
+          .where(eq(workflowInstances.id, uc.workflowInstanceId))
+          .for("update");
+        if (!inst) return { ok: false, reason: "no_intake_instance" };
+        if (inst.status !== "completed") return { ok: false, reason: `intake_instance_${inst.status}` };
+        const def = inst.definition as WorkflowDefinition;
+        let signoff = -1;
+        for (let i = def.stages.length - 1; i >= 0; i--) {
+          if (def.stages[i]!.type === "human_approval") {
+            signoff = i;
+            break;
+          }
+        }
+        if (signoff < 0) return { ok: false, reason: "no_signoff_stage" };
+        const stage = def.stages[signoff]!;
+        // AER-049: the generic kernel re-open — the one path every re-open takes.
+        // It archives the round's effect records into `effects:history`, bumps
+        // round / stage_entry, supersedes any live gate and re-requests the
+        // sign-off from the template's approvers (nested as a savepoint in this
+        // transaction, so the use case and the instance move together).
+        const reopened = await reopenWorkflowInstance(tx, inst.id, {
+          stageId: stage.id,
+          reason:
+            `recertification: the approval recorded for AI use case '${uc.name}' expired on ` +
+            `${uc.approvedUntil.toISOString().slice(0, 10)}`,
+          actorUserId: opts.actorUserId ?? null,
+          systemActor: RECERTIFICATION_SYSTEM_ACTOR,
+          ...(opts.dataKey ? { dataKey: opts.dataKey } : {}),
+        });
+        postCommits.push(reopened.postCommit);
+        const roles = requiredRolesFor(policy, uc.euAiActTier);
+        let round: number | null = null;
+        let approvalIds: string[];
+        if (roles.length > 0) {
+          // the review policy routes this tier: the template's rows the re-open
+          // just wrote become one row per required role, as on a first round
+          const r = await replaceWithReviewRound(tx, inst, stage.id, roles, [uc.ownerUserId, inst.initiatorUserId]);
+          round = r.round;
+          approvalIds = r.ids;
+        } else {
+          approvalIds = (
+            await tx
+              .select({ id: approvals.id })
+              .from(approvals)
+              .where(
+                and(eq(approvals.instanceId, inst.id), eq(approvals.stageId, stage.id), eq(approvals.status, "pending")),
+              )
+          ).map((a) => a.id);
+        }
+        await tx
+          .update(aiUseCases)
+          .set({ status: "under_review", recertification: true, updatedAt: new Date() })
+          .where(eq(aiUseCases.id, uc.id));
+        await tx.insert(auditLog).values({
+          userId: opts.actorUserId ?? NO_IDENTITY,
+          objectType: "ai_use_case",
+          objectId: uc.id,
+          detail: {
+            ...(opts.actorUserId ? {} : { actor: RECERTIFICATION_SYSTEM_ACTOR }),
+            phase: "recertification-started",
+            from: "approved",
+            to: "under_review",
+            approvedUntil: uc.approvedUntil.toISOString(),
+            workflowInstanceId: inst.id,
+            workflowRound: reopened.round,
+            tier: tierKeyFor(uc.euAiActTier),
+            reviewRound: round,
+            roles: roles.map((r) => ({ id: r.id, name: r.name })),
+            approvalIds,
+          },
+          effect: "deny",
+          ruleId: "use-case-recertification-started",
+          ruleChain: [],
+          reason:
+            `AI use case '${uc.name}' approval expired on ${uc.approvedUntil.toISOString().slice(0, 10)} — ` +
+            `back in review for recertification (${roles.length > 0 ? `${roles.length} required review(s)` : "the named approver"}); ` +
+            "deployment is refused until it is re-approved",
+        });
+        return { ok: true };
       });
-      postCommits.push(reopened.postCommit);
-      const roles = requiredRolesFor(policy, uc.euAiActTier);
-      let round: number | null = null;
-      let approvalIds: string[];
-      if (roles.length > 0) {
-        // the review policy routes this tier: the template's rows the re-open
-        // just wrote become one row per required role, as on a first round
-        const r = await replaceWithReviewRound(tx, inst, stage.id, roles, [uc.ownerUserId, inst.initiatorUserId]);
-        round = r.round;
-        approvalIds = r.ids;
-      } else {
-        approvalIds = (
-          await tx
-            .select({ id: approvals.id })
-            .from(approvals)
-            .where(
-              and(eq(approvals.instanceId, inst.id), eq(approvals.stageId, stage.id), eq(approvals.status, "pending")),
-            )
-        ).map((a) => a.id);
-      }
-      await tx
-        .update(aiUseCases)
-        .set({ status: "under_review", recertification: true, updatedAt: new Date() })
-        .where(eq(aiUseCases.id, uc.id));
-      await tx.insert(auditLog).values({
-        userId: opts.actorUserId ?? NO_IDENTITY,
-        objectType: "ai_use_case",
-        objectId: uc.id,
-        detail: {
-          ...(opts.actorUserId ? {} : { actor: RECERTIFICATION_SYSTEM_ACTOR }),
-          phase: "recertification-started",
-          from: "approved",
-          to: "under_review",
-          approvedUntil: uc.approvedUntil.toISOString(),
-          workflowInstanceId: inst.id,
-          workflowRound: reopened.round,
-          tier: tierKeyFor(uc.euAiActTier),
-          reviewRound: round,
-          roles: roles.map((r) => ({ id: r.id, name: r.name })),
-          approvalIds,
-        },
-        effect: "deny",
-        ruleId: "use-case-recertification-started",
-        ruleChain: [],
-        reason:
-          `AI use case '${uc.name}' approval expired on ${uc.approvedUntil.toISOString().slice(0, 10)} — ` +
-          `back in review for recertification (${roles.length > 0 ? `${roles.length} required review(s)` : "the named approver"}); ` +
-          "deployment is refused until it is re-approved",
-      });
-      return { ok: true };
-    });
+    } catch (err) {
+      postCommits.splice(0);
+      const message = err instanceof Error ? err.message : String(err);
+      log(`recertification sweep: use case ${c.id} skipped — ${message}`);
+      out.skipped.push({ id: c.id, reason: `error: ${message}` });
+      continue;
+    }
     // after the commit, as every re-open's caller does (a sign-off stage
     // requests no git execution, so this is a no-op for an intake re-open)
     for (const pc of postCommits.splice(0)) await pc(db);
@@ -506,15 +527,42 @@ export function registerReviewPolicyRoutes(app: FastifyInstance, db: Db): void {
     }
     const userIds = [...new Set([...body.roles.flatMap((r) => r.memberUserIds), ...body.riskAcceptorUserIds])];
     if (userIds.length > 0) {
-      const found = new Set(
-        (await db.select({ id: users.id }).from(users).where(inArray(users.id, userIds))).map((u) => u.id),
-      );
+      const rows = await db
+        .select({ id: users.id, disabledAt: users.disabledAt })
+        .from(users)
+        .where(inArray(users.id, userIds));
+      const found = new Set(rows.map((u) => u.id));
       const missing = userIds.filter((id) => !found.has(id));
       if (missing.length > 0) {
         return reply.status(422).send({
           error: "unknown_user",
           userIds: missing,
           detail: "every role member and risk acceptor must name an existing user",
+        });
+      }
+      // ADR-0170 §8: a deactivated user can neither review nor accept risk, so
+      // naming one would make a required review undecidable by them (or a
+      // risk acceptance nobody live holds). Refused by name, field first.
+      const deactivated = new Set(rows.filter((u) => u.disabledAt !== null).map((u) => u.id));
+      if (deactivated.size > 0) {
+        for (const role of body.roles) {
+          const ids = role.memberUserIds.filter((m) => deactivated.has(m));
+          if (ids.length > 0) {
+            return reply.status(422).send({
+              error: "user_deactivated",
+              field: `roles.${role.id}.memberUserIds`,
+              roleId: role.id,
+              userIds: ids,
+              detail: `role '${role.name}' names a deactivated user as a member — remove them or reactivate the account`,
+            });
+          }
+        }
+        const ids = body.riskAcceptorUserIds.filter((m) => deactivated.has(m));
+        return reply.status(422).send({
+          error: "user_deactivated",
+          field: "riskAcceptorUserIds",
+          userIds: ids,
+          detail: "the risk acceptors include a deactivated user — remove them or reactivate the account",
         });
       }
     }

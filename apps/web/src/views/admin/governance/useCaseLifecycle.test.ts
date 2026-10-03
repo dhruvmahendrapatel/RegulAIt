@@ -60,13 +60,13 @@ describe("activities are derived from the record", () => {
 });
 
 describe("conditions", () => {
-  const open = { status: "open" as const, ownerUserId: "cond-owner" };
-  it("the condition owner, the use-case owner or an admin may mark it met — nobody else", () => {
-    expect(canMarkMet(open, { userId: "cond-owner", isAdmin: false }, "uc-owner")).toBe(true);
-    expect(canMarkMet(open, { userId: "uc-owner", isAdmin: false }, "uc-owner")).toBe(true);
-    expect(canMarkMet(open, { userId: "someone", isAdmin: true }, "uc-owner")).toBe(true);
-    expect(canMarkMet(open, { userId: "someone", isAdmin: false }, "uc-owner")).toBe(false);
-    expect(canMarkMet({ ...open, status: "met" }, { userId: "cond-owner", isAdmin: true }, "uc-owner")).toBe(false);
+  it("offers Mark met only where the server says this viewer may close it, and only while open", () => {
+    expect(canMarkMet({ status: "open", canMarkMet: true })).toBe(true);
+    expect(canMarkMet({ status: "open", canMarkMet: false })).toBe(false);
+    // an older gateway that does not say: never offered
+    expect(canMarkMet({ status: "open" })).toBe(false);
+    expect(canMarkMet({ status: "met", canMarkMet: true })).toBe(false);
+    expect(canMarkMet({ status: "waived", canMarkMet: true })).toBe(false);
   });
   it("overdue shows over open; met and waived are terminal", () => {
     const c = { id: "c", approvalId: "a", text: "t", ownerUserId: null, ownerName: null, dueAt: "2026-01-01", blocking: true, status: "open" as const, metAt: null, metByName: null, overdue: true };

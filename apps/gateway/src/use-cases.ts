@@ -207,7 +207,8 @@ screened" — the platform never guesses a tier from prose.
  * decide path itself is untouched.
  *
  * The ONLY input is the answers block inside the artifact: no valid block →
- * all three columns null ("not screened" — never a guessed tier), and a
+ * all three columns null ("not screened" — never a guessed tier) unless the
+ * use case was already screened, which keeps its tier (ADR-0170 §5), and a
  * block smuggling a `tier` key is refused by the shared parser. Idempotent;
  * writes (and audits) only when the stored screening actually changes.
  */
@@ -231,6 +232,13 @@ async function recomputeEuTierForUseCase(
   if (!artifact) return; // nothing submitted yet — nothing to screen
 
   const extracted = extractEuAiActAnswers(artifact.content);
+  // ADR-0170 §5 — SCREENING NEVER SILENTLY DOWNGRADES. A later questionnaire
+  // version without an extractable answers block (missing or invalid) says
+  // nothing new about the tier, so a use case that was already screened keeps
+  // its last computed tier, reasons and rule set (no write, no new audit) —
+  // otherwise dropping the block would turn "high" into "unscreened" and route
+  // the review to whatever the unscreened tier requires.
+  if (extracted.status !== "ok" && useCase.euAiActTier !== null) return;
   let tier: AiUseCaseRow["euAiActTier"] = null;
   let reasons: EuAiActReason[] | null = null;
   let rulesetVersion: number | null = null;
@@ -611,15 +619,118 @@ export async function acceptUseCaseRisks(
   }
 }
 
-async function conditionViewsFor(db: Db, useCaseId: string, now: Date): Promise<UseCaseConditionView[]> {
+// ---------------------------------------------------------------------------
+// ADR-0170 §3 — WHO MAY CLOSE A CONDITION (maker–checker for before-go-live)
+// ---------------------------------------------------------------------------
+
+/** the facts the closing rule reads, loaded once per use case */
+export interface ConditionCloseContext {
+  isAdmin: boolean;
+  callerId: string | null;
+  /** the use case's owner and the intake instance's initiator — "the proposer" */
+  proposerIds: Set<string>;
+  /** users who APPROVED a sign-off / review row of the use case's current approval */
+  approverIds: Set<string>;
+}
+
+export async function conditionCloseContext(
+  db: Db,
+  useCase: Pick<AiUseCaseRow, "ownerUserId" | "workflowInstanceId">,
+  auth: { isAdmin: boolean; userId: string | null | undefined },
+): Promise<ConditionCloseContext> {
+  const proposerIds = new Set<string>([useCase.ownerUserId]);
+  const approverIds = new Set<string>();
+  if (useCase.workflowInstanceId) {
+    const [inst] = await db
+      .select({ initiatorUserId: workflowInstances.initiatorUserId })
+      .from(workflowInstances)
+      .where(eq(workflowInstances.id, useCase.workflowInstanceId));
+    if (inst?.initiatorUserId) proposerIds.add(inst.initiatorUserId);
+    const rows = await db
+      .select({ decidedBy: approvals.decidedBy, reviewRound: approvals.reviewRound })
+      .from(approvals)
+      .where(
+        and(
+          eq(approvals.instanceId, useCase.workflowInstanceId),
+          eq(approvals.objectType, "workflow"),
+          inArray(approvals.status, ["approved", "consumed"]),
+        ),
+      );
+    // the CURRENT approval: on a review-policy path, the latest round's role
+    // reviews; on the single named-approver path, its approved sign-offs
+    const roleRounds = rows.map((r) => r.reviewRound).filter((r): r is number => r !== null);
+    const current =
+      roleRounds.length > 0
+        ? rows.filter((r) => r.reviewRound === Math.max(...roleRounds))
+        : rows.filter((r) => r.reviewRound === null);
+    for (const r of current) if (r.decidedBy) approverIds.add(r.decidedBy);
+  }
+  return { isAdmin: auth.isAdmin, callerId: auth.userId ?? null, proposerIds, approverIds };
+}
+
+export type ConditionCloseVerdict =
+  | { allowed: true; noteRequired: boolean }
+  | { allowed: false; error: "proposer_cannot_close_blocking_condition" | "forbidden"; detail: string };
+
+/**
+ * A BEFORE-go-live (blocking) condition is closed by someone other than the
+ * proposer: an admin; the condition's owner when that owner is neither the
+ * use case's owner nor the intake initiator; or a reviewer who approved the
+ * current approval — always with a note. An AFTER-go-live condition keeps the
+ * ADR-0168 rule: its owner, the use case's owner, or an admin.
+ */
+export function conditionCloseVerdict(
+  cond: Pick<UseCaseConditionRow, "blocking" | "ownerUserId">,
+  useCaseOwnerId: string,
+  ctx: ConditionCloseContext,
+): ConditionCloseVerdict {
+  const me = ctx.callerId;
+  if (!cond.blocking) {
+    if (ctx.isAdmin || (!!me && (me === cond.ownerUserId || me === useCaseOwnerId))) {
+      return { allowed: true, noteRequired: false };
+    }
+    return {
+      allowed: false,
+      error: "forbidden",
+      detail: "an after-go-live condition is marked met by its owner, the use case's owner, or an admin",
+    };
+  }
+  if (ctx.isAdmin) return { allowed: true, noteRequired: true };
+  if (me && ctx.proposerIds.has(me)) {
+    return {
+      allowed: false,
+      error: "proposer_cannot_close_blocking_condition",
+      detail:
+        "a before-go-live condition is confirmed by someone other than the person who proposed the use case — " +
+        "the condition's owner, a reviewer who approved it, or an admin",
+    };
+  }
+  if (me && (me === cond.ownerUserId || ctx.approverIds.has(me))) return { allowed: true, noteRequired: true };
+  return {
+    allowed: false,
+    error: "forbidden",
+    detail:
+      "a before-go-live condition is marked met by its owner, a reviewer who approved the use case, or an admin",
+  };
+}
+
+async function conditionViewsFor(
+  db: Db,
+  useCase: Pick<AiUseCaseRow, "id" | "ownerUserId" | "workflowInstanceId">,
+  now: Date,
+  auth: { isAdmin: boolean; userId: string | null | undefined },
+): Promise<UseCaseConditionView[]> {
   const rows = await db
     .select()
     .from(useCaseConditions)
-    .where(eq(useCaseConditions.useCaseId, useCaseId))
+    .where(eq(useCaseConditions.useCaseId, useCase.id))
     .orderBy(useCaseConditions.dueAt, useCaseConditions.createdAt, useCaseConditions.id);
   const ids = [...new Set(rows.flatMap((r) => [r.ownerUserId, r.metByUserId]).filter((x): x is string => !!x))];
   const names = await userNames(db, ids);
-  return rows.map((r) => conditionView(r, names, now));
+  const ctx = rows.some((r) => r.status === "open") ? await conditionCloseContext(db, useCase, auth) : null;
+  return rows.map((r) =>
+    conditionView(r, names, now, !!ctx && r.status === "open" && conditionCloseVerdict(r, useCase.ownerUserId, ctx).allowed),
+  );
 }
 
 async function userNames(db: Db, ids: string[]): Promise<Map<string, string>> {
@@ -631,7 +742,12 @@ async function userNames(db: Db, ids: string[]): Promise<Map<string, string>> {
   return new Map(rows.map((u) => [u.id, u.displayName || u.email]));
 }
 
-function conditionView(r: UseCaseConditionRow, names: Map<string, string>, now: Date): UseCaseConditionView {
+function conditionView(
+  r: UseCaseConditionRow,
+  names: Map<string, string>,
+  now: Date,
+  canMarkMet: boolean,
+): UseCaseConditionView {
   return {
     id: r.id,
     approvalId: r.approvalId,
@@ -645,6 +761,7 @@ function conditionView(r: UseCaseConditionRow, names: Map<string, string>, now: 
     metByName: r.metByUserId ? (names.get(r.metByUserId) ?? null) : null,
     note: r.note,
     overdue: r.status === "open" && r.dueAt.getTime() < now.getTime(),
+    canMarkMet,
   };
 }
 
@@ -1370,7 +1487,7 @@ export function registerUseCaseRoutes(
     return {
       useCase: { ...row, approvalExpired: approvalExpired(row, now), recertificationDueAt: recertificationDueAt(row) },
       // ADR-0168: what the approval imposed — owner/met-by names resolved
-      conditions: await conditionViewsFor(db, row.id, now),
+      conditions: await conditionViewsFor(db, row, now, req.authCtx),
       // ADR-0168 amendment: the current round's required reviews ([] on the
       // single-approver path), the resubmission state, and the use case's
       // risks with any acceptance recorded on a sign-off
@@ -1424,9 +1541,22 @@ export function registerUseCaseRoutes(
         detail: "a use case is editable by its owner and by admins",
       });
     }
+    // ADR-0170 §4 — WHAT IS UNDER REVIEW CANNOT CHANGE UNDER THE REVIEWERS.
+    // Every field is material (the description, context, intended agents and
+    // project are what the reviewers are reading), so no PATCH lands while a
+    // round is open — for the owner or an admin. The honest path is a send-back
+    // for information, which opens a new round on the edited record.
+    if (row.status === "under_review") {
+      return reply.status(409).send({
+        error: "locked_under_review",
+        detail:
+          "this use case is with its reviewers, so it can't be changed until a reviewer sends it back " +
+          "for more information",
+      });
+    }
     // ADR-0168: a use case sent back for information is editable — that is
     // what the reviewer asked for.
-    if (row.status !== "proposed" && row.status !== "under_review" && row.status !== "needs_info") {
+    if (row.status !== "proposed" && row.status !== "needs_info") {
       // ADR-0089 amendment (batch B3) — INTENT IS DECIDED WITH THE USE CASE.
       // The intended-agents list is part of what the sign-off approved (the
       // ADR-0089 alignment comparison stands on it), so a post-decision
@@ -1737,15 +1867,18 @@ export function registerUseCaseRoutes(
     };
   });
 
-  // ADR-0168 — mark an approval condition met. The condition's owner, the
-  // use case's owner, or an admin; anyone else is refused 403. Audited
-  // `use-case-condition-met`. Met is final: a second call is a 409.
+  // ADR-0168 — mark an approval condition met. Met is final: a second call is
+  // a 409. Audited `use-case-condition-met`. ADR-0170 §3: a before-go-live
+  // condition is closed by someone other than the proposer, with a note
+  // (`conditionCloseVerdict`); an after-go-live one by its owner, the use
+  // case's owner, or an admin.
   app.post("/v1/use-cases/:useCaseId/conditions/:conditionId/met", async (req, reply) => {
     const { useCaseId, conditionId } = z
       .object({ useCaseId: z.string().uuid(), conditionId: z.string().uuid() })
       .parse(req.params);
     const body = markConditionMetSchema.parse(req.body ?? {});
-    const callerId = req.authCtx.userId;
+    const note = body.note ? body.note : null; // whitespace-only trims to "" — no note
+    const callerId = req.authCtx.userId ?? null;
     const [cond] = await db
       .select()
       .from(useCaseConditions)
@@ -1753,21 +1886,23 @@ export function registerUseCaseRoutes(
     if (!cond) return reply.status(404).send({ error: "not_found" });
     const [uc] = await db.select().from(aiUseCases).where(eq(aiUseCases.id, useCaseId));
     if (!uc) return reply.status(404).send({ error: "not_found" });
-    const allowed =
-      req.authCtx.isAdmin || (!!callerId && (callerId === cond.ownerUserId || callerId === uc.ownerUserId));
-    if (!allowed) {
-      return reply.status(403).send({
-        error: "forbidden",
-        detail: "a condition is marked met by its owner, the use case's owner, or an admin",
-      });
+    const verdict = conditionCloseVerdict(cond, uc.ownerUserId, await conditionCloseContext(db, uc, req.authCtx));
+    if (!verdict.allowed) {
+      return reply.status(403).send({ error: verdict.error, detail: verdict.detail });
     }
     if (cond.status !== "open") {
       return reply.status(409).send({ error: "condition_not_open", status: cond.status });
     }
+    if (verdict.noteRequired && !note) {
+      return reply.status(422).send({
+        error: "condition_note_required",
+        detail: "say what was done to meet a before-go-live condition (1 to 2000 characters)",
+      });
+    }
     const metAt = new Date();
     const [updated] = await db
       .update(useCaseConditions)
-      .set({ status: "met", metAt, metByUserId: callerId ?? null, note: body.note ?? null })
+      .set({ status: "met", metAt, metByUserId: callerId, note })
       .where(and(eq(useCaseConditions.id, cond.id), eq(useCaseConditions.status, "open")))
       .returning();
     if (!updated) return reply.status(409).send({ error: "condition_not_open" });
@@ -1794,7 +1929,7 @@ export function registerUseCaseRoutes(
       db,
       [updated.ownerUserId, updated.metByUserId].filter((x): x is string => !!x),
     );
-    return conditionView(updated, names, metAt);
+    return conditionView(updated, names, metAt, false);
   });
 
   app.post("/v1/use-cases/:useCaseId/retire", async (req, reply) => {

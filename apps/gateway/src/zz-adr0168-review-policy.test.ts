@@ -524,10 +524,16 @@ describe("resubmission after send-back", () => {
 
     // control: screening answers are refused while a use case is NOT sent back
     const live = await proposeToReview("resubmit-control", limitedAnswers);
+    // (ADR-0170 §4: under review, EVERY edit is refused first — locked)
     const notReturned = await patch(`/v1/use-cases/${live.id}`, users.owner.auth, { screeningAnswers: highAnswers });
     expect(notReturned.statusCode).toBe(409);
-    expect(notReturned.json().error).toBe("screening_answers_only_when_returned");
+    expect(notReturned.json().error).toBe("locked_under_review");
     expect((await useCaseRow(live.id)).euAiActTier).toBe("limited");
+    // a proposed (editable) use case still refuses screening answers by name
+    const draft = await propose("resubmit-control-proposed");
+    const notReturnedDraft = await patch(`/v1/use-cases/${draft.id}`, users.owner.auth, { screeningAnswers: highAnswers });
+    expect(notReturnedDraft.statusCode).toBe(409);
+    expect(notReturnedDraft.json().error).toBe("screening_answers_only_when_returned");
     // registered without the Classify answers: the prefill is the EU answers only
     expect((await detail(live.id)).json().resubmission).toMatchObject({ allowed: false, screeningAnswers: limitedAnswers });
     // a smuggled tier is still refused by name
