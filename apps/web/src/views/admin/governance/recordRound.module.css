@@ -54,3 +54,9 @@
   color: var(--rg-ink-label);
   font-size: var(--text-sm);
 }
+
+/* a link inside a sentence is underlined, never told apart by colour alone */
+.inlineLink {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}

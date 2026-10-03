@@ -30,6 +30,7 @@ import {
   type UseCaseStatus,
 } from "./registryModel";
 import r from "./registry.module.css";
+import rr from "./recordRound.module.css";
 import k from "../../../ui/kit.module.css";
 import v from "../../views.module.css";
 
@@ -300,12 +301,14 @@ export function UseCasePreviewDrawer(props: { id: string; row: UseCaseRow | unde
                 )}
                 {d.instance.status === "blocked_on_artifact" && (
                   <span className={v.dim}>
-                    The questionnaire is submitted from the <Link to={`/workflows/${d.instance.id}`}>intake workflow</Link>.
+                    {resubmission
+                      ? "Waiting for the owner to update and resubmit it."
+                      : <>The questionnaire is submitted from the <Link className={rr.inlineLink} to={`/workflows/${d.instance.id}`}>intake workflow</Link>.</>}
                   </span>
                 )}
                 {d.instance.status === "blocked_on_approval" && (
                   <span className={v.dim}>
-                    Decided in the <Link to="/admin/approvals">Approvals queue</Link>.
+                    Decided in the <Link className={rr.inlineLink} to="/admin/approvals">Approvals queue</Link>.
                   </span>
                 )}
               </section>
