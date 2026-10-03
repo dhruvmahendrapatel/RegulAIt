@@ -18,16 +18,18 @@ import { api } from "../../../api/client";
 import type { AdminAgent, AdminUser } from "../../../api/adminTypes";
 import { Badge, Button, Card, EmptyState, Field, Input, Select, Table, Textarea } from "../../../ui/kit";
 import { useAction } from "../adminKit";
+import { useSession } from "../../../session/SessionContext";
 import {
   LIFECYCLE_EFFECT,
-  LIFECYCLE_STATUSES,
   cadenceSentence,
   draftOf,
   fmtDay,
+  lifecycleChoices,
   lifecycleLabel,
   lifecycleTone,
   matchesFilter,
   reviewCell,
+  stewardReviewLimit,
   stewardshipPatch,
   type AgentStewardship,
   type StewardshipDraft,
@@ -191,6 +193,11 @@ export function StewardshipDrawer(props: { agent: Row; users: AdminUser[]; onClo
   const heading = useRef<HTMLHeadingElement>(null);
   const { onClose } = props;
   const retired = a.lifecycleStatus === "retired";
+  // ADR-0170 item 7: a steward who is not an admin is offered only the moves the
+  // gateway allows them; an admin keeps every choice
+  const { auth } = useSession();
+  const isAdmin = Boolean(auth?.isAdmin);
+  const statusChoices = lifecycleChoices(a.lifecycleStatus ?? "active", isAdmin);
 
   // a different agent (or the saved version of this one) starts from its own record
   const recordKey = `${a.id}|${a.stewardUserId ?? a.ownerUserId}|${a.successorUserId}|${a.lifecycleStatus}|${a.lifecycleReason}|${a.nextReviewAt}`;
@@ -269,7 +276,7 @@ export function StewardshipDrawer(props: { agent: Row; users: AdminUser[]; onClo
           aria-labelledby="stewardship-edit"
           onSubmit={(e) => {
             e.preventDefault();
-            const out = stewardshipPatch(a, draft);
+            const out = stewardshipPatch(a, draft, undefined, { isAdmin });
             if (out.problem) return setProblem(out.problem);
             if (!out.body) return;
             void act.run(() => api.patch(`/v1/agents/${a.id}/stewardship`, out.body), "Stewardship saved");
@@ -299,8 +306,12 @@ export function StewardshipDrawer(props: { agent: Row; users: AdminUser[]; onClo
             </Select>
           </Field>
           <Field label="Status">
-            <Select value={draft.lifecycleStatus} disabled={retired} onChange={(e) => set("lifecycleStatus", e.target.value)}>
-              {LIFECYCLE_STATUSES.map((s) => (
+            <Select
+              value={draft.lifecycleStatus}
+              disabled={retired || statusChoices.length < 2}
+              onChange={(e) => set("lifecycleStatus", e.target.value)}
+            >
+              {statusChoices.map((s) => (
                 <option key={s} value={s}>
                   {lifecycleLabel(s)}
                 </option>
@@ -308,6 +319,12 @@ export function StewardshipDrawer(props: { agent: Row; users: AdminUser[]; onClo
             </Select>
           </Field>
           <p className={st.help}>{LIFECYCLE_EFFECT[draft.lifecycleStatus as keyof typeof LIFECYCLE_EFFECT] ?? ""}</p>
+          {!isAdmin && !retired ? (
+            <p className={st.help}>
+              As steward you can put this agent under review or suspend it. Only an admin can return it to service, retire
+              it or clear its next review.
+            </p>
+          ) : null}
           {needsReason && !retired ? (
             <Field label="Reason for this status">
               <Textarea rows={2} value={draft.lifecycleReason} onChange={(e) => set("lifecycleReason", e.target.value)} />
@@ -318,6 +335,9 @@ export function StewardshipDrawer(props: { agent: Row; users: AdminUser[]; onClo
                 browser block every save of it; a NEW past date is refused in words instead */}
             <Input type="date" value={draft.nextReview} onChange={(e) => set("nextReview", e.target.value)} />
           </Field>
+          {!isAdmin && !retired ? (
+            <p className={st.help}>Choose a date on or before {fmtDay(`${stewardReviewLimit(a)}T12:00:00Z`)}.</p>
+          ) : null}
           <div className={st.actions}>
             <Button type="submit" variant="primary" disabled={act.busy || !dirty}>
               Save changes
