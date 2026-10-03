@@ -79,3 +79,16 @@ lighter, would fail the worst-point check — the shading is gentler in light mo
 reference pages. Contrast is measured at one viewport size; the radial glows are sized in
 `vw`/`vh`, so other sizes shift where the worst point falls and are not measured. Screenshot-based demo assets (the fallback deck) must be regenerated
 from a fresh run before the demo.
+
+## Amendment 2026-10-03 (evening, owner): stronger light-mode colour at the edges
+
+The owner asked for more colour in light mode. Translucent deep hues cannot do that: every step of
+alpha darkens the field's worst point, and the link ink was already the binding constraint (4.59:1).
+Light mode now carries its colour in **pastels at near-full opacity** — aqua, lavender, mint and sky in
+the four corners and a warm peach glow along the bottom edge — because a pastel holds high chroma at
+high luminance. Measured on a 1440×900 render, average edge colourfulness rises by about 60% while
+the worst point stays light. Two inks move one notch to keep the legibility rule with margin:
+`--rg-ink-muted` #5d6064 → #4f5256 (still lighter than the label step) and `--rg-signal-700`
+#006b82 → #005c70 (still lighter than the pressed step). `--rg-canvas` follows the new worst point
+(#d2c7ff). The pixel test in `theme-shell.mock.spec.ts` now measures muted ink at 4.99:1 on the
+light canvas and 5.45:1 on the rail (was 4.81:1); dark mode is unchanged.
