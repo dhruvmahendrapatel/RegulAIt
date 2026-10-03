@@ -152,7 +152,7 @@ function OrientationCard() {
           <span className={v.faint} aria-hidden>
             ·
           </span>
-          <Link to="/admin/use-cases">Propose an AI use case</Link>
+          <Link to="/admin/governance/intake">Register an AI use case</Link>
           <span className={v.faint} aria-hidden>
             ·
           </span>
