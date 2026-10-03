@@ -59,7 +59,9 @@ import { approvalTargetForServer, governedEvaluate, type RetiredApproval } from 
 import { prepareMcpPiiAction, redactMcpResult } from "./mcp-pii.js";
 import { abacPrincipalFromRequest, type AbacPrincipalContext } from "./abac-principal.js";
 import {
+  auditMcpEgressDenied,
   auditMcpUpstreamUnreachable,
+  checkMcpServerUrl,
   guardedMcpConnect,
   McpEgressBlockedError,
 } from "./mcp-egress.js";
@@ -144,6 +146,49 @@ function toolKind(tool: Tool): "read" | "write" {
  * needs an egress_allow_hosts entry. A refusal is audited and throws
  * McpEgressBlockedError with nothing leaving the box; on allow, every HTTP
  * request of the session goes through the pinned guarded fetch. */
+/**
+ * AER-024 — ADMISSION AND EGRESS ARE ADJUDICATED BEFORE THE BREAKER IS ASKED.
+ *
+ * The breaker (ADR-0126) used to be consulted first on both upstream paths,
+ * and an open breaker answered `503 mcp_upstream_circuit_open` before
+ * `connectUpstream` ever ran `assertAdmitted` (ADR-0097) or the egress URL
+ * check (ADR-0043). So a server that was HELD by admission, or that pointed
+ * at a destination this deployment refuses to reach, hid behind "upstream
+ * unavailable" for as long as its circuit stayed open: the caller was told to
+ * retry later, no deny row was filed, and a half-open probe election could be
+ * spent on a request that was never permitted to go out.
+ *
+ * This preflight runs the SAME two gates `connectUpstream` runs, in the same
+ * order (admission first — a held server is refused with no DNS lookup, the
+ * standard ADR-0097 holds itself to — then the egress decision), and it is
+ * SIDE-EFFECT-FREE TOWARDS THE UPSTREAM: nothing is resolved for a held
+ * server, nothing is connected to, and the breaker is neither read nor
+ * elected. A refusal is audited the way the connect-time guard audits it
+ * (`mcp-admission-held` / `mcp-server-egress-blocked`, phase `connect`) and
+ * thrown as the same error class, so every caller's existing mapping of
+ * those two refusals applies unchanged. `connectUpstream` still re-adjudicates
+ * both gates on its own (a retry attempt must never become a bypass); on the
+ * allow path that is one extra read, on the refuse path it is never reached.
+ */
+export async function preflightUpstream(
+  db: Db,
+  serverRow: { id: string; url: string; allowPrivateRanges: boolean | null },
+): Promise<void> {
+  await assertAdmitted(db, serverRow.id);
+  const { decision, posture } = await checkMcpServerUrl(db, serverRow.url, serverRow.allowPrivateRanges);
+  if (!decision.ok) {
+    await auditMcpEgressDenied(db, {
+      serverId: serverRow.id,
+      url: serverRow.url,
+      phase: "connect",
+      decision,
+      reason: `MCP upstream connect refused: ${decision.reason}`,
+      openByDefault: posture.openByDefault,
+    });
+    throw new McpEgressBlockedError(decision);
+  }
+}
+
 export async function connectUpstream(
   db: Db,
   serverRow: { id: string; url: string; allowPrivateRanges: boolean | null },
@@ -544,6 +589,18 @@ async function executeGovernedToolCallInner(
   let breakerElected = false;
   const breakerRefusesUpstream = async (): Promise<GovernedToolCallOutcome | null> => {
     if (!breakerElected) {
+      // AER-024: our own two refusals come BEFORE the breaker is asked, so a
+      // held or egress-refused server is named as such — audited, as a policy
+      // decision — rather than reported as an outage for as long as its
+      // circuit is open. Thrown, not returned: both errors already have their
+      // mapping on every surface, and neither counts as an upstream failure
+      // (`operationFailed` classifies them as our own refusal).
+      try {
+        await preflightUpstream(db, serverRow);
+      } catch (err) {
+        if (redactActive) throw new Error("MCP upstream connection refused under PII redaction");
+        throw err;
+      }
       breakerElected = true;
       breakerVerdict = await breakerAdmits(db, serverRow);
     }
@@ -1402,6 +1459,9 @@ export async function resolveNodeToolContext(
     if (!serverRow) continue;
     let upstream: Client | null = null;
     try {
+      // AER-024: a held or egress-refused server is refused (and audited) here,
+      // before it can spend a breaker probe election it was never allowed to use
+      await preflightUpstream(db, serverRow);
       if (await breakerAdmits(db, serverRow)) continue;
       let upstreamTools;
       try {
@@ -1566,22 +1626,8 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
     // see upstream-retry.ts for why, which is verbatim the breaker's reasoning.
     const connectRetry = newRetryReport();
     const needsManifest = ListToolsRequestSchema.safeParse(req.body).success;
-    if (needsManifest) {
-      const refusal = await breakerAdmits(db, serverRow);
-      if (refusal) {
-        return reply.status(503)
-          .header("retry-after", String(Math.ceil(refusal.refusedUntilMs / 1000)))
-          .send({ error: "mcp_upstream_circuit_open", detail: refusal.reason,
-            retryAfterMs: refusal.refusedUntilMs });
-      }
-    }
-    try {
-      // Tool calls own admission in the shared primitive. Protocol setup is
-      // local; only a manifest request needs a connection at this boundary.
-      if (needsManifest) {
-        upstream = await connectUpstream(db, serverRow, { retry: connectRetry });
-      }
-    } catch (err) {
+    /** The two refusals that are OURS, as the route's plain pre-hijack 403. */
+    const ownRefusal = (err: unknown) => {
       if (err instanceof McpEgressBlockedError) {
         return reply.status(403).send({
           error: "egress_blocked",
@@ -1600,6 +1646,38 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
           findings: err.findings,
         });
       }
+      return null;
+    };
+    if (needsManifest) {
+      // AER-024: admission and egress are adjudicated BEFORE the breaker is
+      // asked. An open circuit used to answer 503 here first, so a held or
+      // egress-refused server was reported as an outage — "retry later" — for
+      // as long as its breaker stayed open, with no deny row. The preflight is
+      // side-effect-free towards the upstream and the breaker alike.
+      try {
+        await preflightUpstream(db, serverRow);
+      } catch (err) {
+        const refused = ownRefusal(err);
+        if (refused) return refused;
+        throw err;
+      }
+      const refusal = await breakerAdmits(db, serverRow);
+      if (refusal) {
+        return reply.status(503)
+          .header("retry-after", String(Math.ceil(refusal.refusedUntilMs / 1000)))
+          .send({ error: "mcp_upstream_circuit_open", detail: refusal.reason,
+            retryAfterMs: refusal.refusedUntilMs });
+      }
+    }
+    try {
+      // Tool calls own admission in the shared primitive. Protocol setup is
+      // local; only a manifest request needs a connection at this boundary.
+      if (needsManifest) {
+        upstream = await connectUpstream(db, serverRow, { retry: connectRetry });
+      }
+    } catch (err) {
+      const refused = ownRefusal(err);
+      if (refused) return refused;
       // ROADMAP G2 — the third refusal shape, and the one the demo runbook had
       // a troubleshooting row for: the server is registered, the egress guard
       // permitted it and admission cleared it, and the upstream did not answer.
@@ -1752,6 +1830,17 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
         // session row, never from a header the caller could set.
         principal: abacPrincipalFromRequest(req),
         trace: toolTrace,
+      }).catch(async (err: unknown) => {
+        // AER-024: the reply is already hijacked, so the primitive's admission
+        // hold / egress refusal cannot be the pre-hijack 403 the manifest path
+        // answers. It is the SAME named policy refusal the manifest handler
+        // raises post-hijack — never a generic internal error, and never the
+        // breaker's "retry later".
+        if (err instanceof McpAdmissionHeldError || err instanceof McpEgressBlockedError) {
+          await finishTrace(db, toolTrace, "denied");
+          throw new McpError(ErrorCode.InvalidRequest, `Denied by policy: ${err.message}`);
+        }
+        throw err;
       });
       await finishTrace(
         db,
