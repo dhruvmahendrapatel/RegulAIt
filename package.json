@@ -22,6 +22,11 @@
     "overrides": {
       "@types/node": "26.1.1",
       "@xmldom/xmldom": "0.8.15"
-    }
+    },
+    "onlyBuiltDependencies": [],
+    "ignoredBuiltDependencies": [
+      "esbuild",
+      "protobufjs"
+    ]
   }
 }

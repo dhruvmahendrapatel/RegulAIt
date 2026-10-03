@@ -86,8 +86,30 @@ Tests (`pnpm -r test`) need `DATABASE_URL` pointing at a scratch database.
 
 ### Verifying a clean checkout
 
-Run this — verbatim — before trusting a fresh clone, a rebase, or a dependency
-change. It is the same sequence CI runs (`.github/workflows/ci.yml`) — build,
+**One command** (AER-003 / R2):
+
+```bash
+scripts/verify-clean-checkout.sh                 # stages 0-6 below, then asserts `git status --short` is empty
+scripts/verify-clean-checkout.sh --prove-failure # the control: dirties a tracked file in a temp clone and
+                                                 # requires that assertion to FIRE — a gate nobody has seen fail
+                                                 # is a gate nobody can trust
+scripts/verify-clean-checkout.sh --skip-tests    # stages 0-3 + the assertion, no database (NOT a verification)
+```
+
+It runs exactly the sequence below, refuses to start on a tree that is already
+dirty, and exits non-zero if any stage fails **or if the run itself changed the
+checkout** — a rewritten lockfile or a regenerated fixture is a failure, not a
+side effect. `VERIFY_PG` / `VERIFY_DB` pick the disposable database. The
+build-script policy it relies on is explicit in `package.json`:
+`pnpm.onlyBuiltDependencies` is empty (every dependency lifecycle script a
+fresh install reported — esbuild's binary check, protobufjs's version-scheme
+warning — was assessed as unnecessary; vite, vitest, drizzle-kit and the
+Google SDKs build and run without them) and those two are named in
+`pnpm.ignoredBuiltDependencies`, so an install is silent about them and loud
+about any newcomer that starts wanting a build script.
+
+The steps, for reading — run them by hand only if you cannot run the script.
+It is the same sequence CI runs (`.github/workflows/ci.yml`) — build,
 test, then the unique-constraint pre-flight — plus a repo-wide `--noEmit`
 typecheck and an explicitly disposable database, and it is the only sequence
 whose result is meaningful: anything that skips a step below can go green on a
