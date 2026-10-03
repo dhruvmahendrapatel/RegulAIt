@@ -405,11 +405,16 @@ function countAadhaar(text: string, onMatch?: PiiMatchVisitor): number {
   return countDigitScheme(text, 12, ["4 4 4", "4-4-4"], aadhaarValid, onMatch);
 }
 function countCpf(text: string, onMatch?: PiiMatchVisitor): number {
-  // 000.000.000-00 — dots then a hyphen before the two check digits.
-  return countDigitScheme(text, 11, ["3.3.3-2"], cpfValid, onMatch);
+  // 000.000.000-00 — dots then a hyphen before the two check digits — and
+  // 000000000-00, the same hyphen with the dots left out, which is how a CPF
+  // is commonly keyed into forms and systems that strip punctuation.
+  return countDigitScheme(text, 11, ["3.3.3-2", "9-2"], cpfValid, onMatch);
 }
 function countBsn(text: string, onMatch?: PiiMatchVisitor): number {
-  return countDigitScheme(text, 9, ["3.3.3"], bsnValid, onMatch);
+  // 111.222.333, and 1234.56.789 — the 4.2.3 dotted form the Belastingdienst
+  // prints as a fiscal number, including at the head of its letter reference
+  // ("Ons kenmerk 1234.56.789.T.XX.jj.nnn" in the SBR taxonomy).
+  return countDigitScheme(text, 9, ["3.3.3", "4.2.3"], bsnValid, onMatch);
 }
 function countSin(text: string, onMatch?: PiiMatchVisitor): number {
   return countDigitScheme(text, 9, ["3 3 3", "3-3-3"], sinValid, onMatch);
@@ -508,7 +513,7 @@ export const INTERNATIONAL_DETECTORS: readonly InternationalDetector[] = [
     jurisdiction: "BR",
     checksum: true,
     falsePositivePct: 1.02,
-    limits: "Two mod-11 check digits over 11 digits, bare or 000.000.000-00 formatted. Repdigits excluded. Does not cover CNPJ (a company, not a person).",
+    limits: "Two mod-11 check digits over 11 digits, bare, 000.000.000-00 or 000000000-00. Repdigits excluded. Does not cover CNPJ (a company, not a person).",
     count: countCpf,
   },
   {
@@ -516,7 +521,7 @@ export const INTERNATIONAL_DETECTORS: readonly InternationalDetector[] = [
     jurisdiction: "NL",
     checksum: true,
     falsePositivePct: 9.03,
-    limits: "11-proef over exactly 9 digits. A BSN written with its leading zero dropped (8 digits) is NOT detected — it is indistinguishable from any 8-digit number.",
+    limits: "11-proef over exactly 9 digits, bare, 111.222.333 or the Belastingdienst's 1234.56.789. A BSN written with its leading zero dropped (8 digits) is NOT detected — it is indistinguishable from any 8-digit number.",
     count: countBsn,
   },
   {

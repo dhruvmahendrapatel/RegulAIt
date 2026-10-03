@@ -53,7 +53,7 @@ import type { PiiCategory } from "./pii.js";
 
 /** Bump when a vector is added, removed or changed. The measured score is
  * meaningless without saying which set it was measured over. */
-export const PII_VECTOR_SET_VERSION = "2026-10-03.1";
+export const PII_VECTOR_SET_VERSION = "2026-10-03.2";
 
 export type VectorSource = "published" | "constructed" | "reserved";
 
@@ -174,6 +174,18 @@ export const POSITIVE_VECTORS: readonly PiiVector[] = [
     note: "the published CPF inside a JSON payload — the shape a connector or MCP tool argument actually carries, where the value is bounded by quotes rather than by whitespace." },
   { id: "p.nir.carte_vitale", category: "nir", text: "1 85 03 69 123 045 32", source: "constructed",
     note: "a constructed NIR in the exact spacing printed on a carte vitale." },
+
+  // --- BATCH 4: two real print forms the AER-006 grammar dropped -----------
+  // Narrowing each scheme to an explicit layout list (AER-006) listed only
+  // 3.3.3 for the BSN and only 3.3.3-2 for the CPF. Both forms below fired
+  // on the grammar before it and went silent after it; the review of that
+  // change found them, and they are restored as layouts of their own.
+  { id: "p.bsn.dotted_4_2_3", category: "bsn", text: "1234.56.782", source: "constructed",
+    note: "p.bsn.constructed in the 4.2.3 dotted form the Belastingdienst prints as a fiscal number." },
+  { id: "p.bsn.ons_kenmerk", category: "bsn", text: "Ons kenmerk 1234.56.782.T.SC.19.001", source: "constructed",
+    note: "the same BSN at the head of a Belastingdienst letter reference, whose published SBR-taxonomy format is 1234.56.789.T.XX.jj.nnn. The dot after the ninth digit is followed by a letter, not a digit, so the run does not continue." },
+  { id: "p.cpf.hyphen_9_2", category: "cpf", text: "111444777-35", source: "published",
+    note: "the published CPF example as 000000000-00: the check-digit hyphen kept and the dots left out, as forms that strip punctuation key it." },
 ];
 
 // ===========================================================================
@@ -285,9 +297,9 @@ export const NEGATIVE_VECTORS: readonly PiiVector[] = [
   { id: "n.aadhaar.every_digit_hyphenated", category: "aadhaar", text: "2-3-4-5-6-7-8-9-0-1-2-4", source: "constructed",
     note: "p.aadhaar.bare with a hyphen after every digit. Aadhaar's hyphenated layout is 4-4-4 and nothing else." },
   { id: "n.cpf.every_digit_dotted", category: "cpf", text: "1.1.1.4.4.4.7.7.7.3.5", source: "published",
-    note: "the published CPF example with a dot after every digit. CPF's layout is 000.000.000-00 and nothing else." },
+    note: "the published CPF example with a dot after every digit. CPF's layouts are 000.000.000-00 and 000000000-00 and nothing else." },
   { id: "n.bsn.every_digit_dotted", category: "bsn", text: "1.1.1.2.2.2.3.3.3", source: "published",
-    note: "the published BSN example with a dot after every digit. BSN's dotted layout is 3-3-3 and nothing else." },
+    note: "the published BSN example with a dot after every digit. BSN's dotted layouts are 3-3-3 and 4-2-3 and nothing else." },
   { id: "n.sin.every_digit_spaced", category: "sin", text: "4 3 5 5 6 7 9 8 7", source: "constructed",
     note: "p.sin.spaced with a space after every digit. SIN's spaced layout is 3-3-3 and nothing else." },
   { id: "n.sin.every_digit_hyphenated", category: "sin", text: "1-3-5-5-6-7-9-8-0", source: "constructed",
@@ -298,6 +310,15 @@ export const NEGATIVE_VECTORS: readonly PiiVector[] = [
     note: "the BZSt example with a space after every digit. The IdNr's spaced layout is 2-3-3-3 and nothing else." },
   { id: "n.nir.every_digit_spaced", category: "nir", text: "1 8 5 0 3 6 9 1 2 3 0 4 5 3 2", source: "constructed",
     note: "p.nir.bare with a space after every digit. The NIR's spaced layout is 1-2-2-2-3-3-2 and nothing else." },
+
+  // --- BATCH 4: every-digit negatives for the two restored layouts ---------
+  // The same construction as batch 3, over the digits of the batch-4
+  // positives, so restoring 4.2.3 and 9-2 cannot have been done by widening
+  // the grammar back to a separator after any digit.
+  { id: "n.bsn.every_digit_dotted_4_2_3", category: "bsn", text: "1.2.3.4.5.6.7.8.2", source: "constructed",
+    note: "p.bsn.dotted_4_2_3 with a dot after every digit. BSN's dotted layouts are 3-3-3 and 4-2-3 and nothing else." },
+  { id: "n.cpf.every_digit_hyphenated", category: "cpf", text: "1-1-1-4-4-4-7-7-7-3-5", source: "published",
+    note: "p.cpf.hyphen_9_2 with a hyphen after every digit. CPF's hyphen stands before the two check digits and nowhere else." },
 ];
 
 /**
@@ -352,7 +373,7 @@ export const DOCUMENTED_MISSES: readonly PiiVector[] = [
   { id: "m.dni.no_letter", category: "dni_nie", text: "12345678", source: "constructed",
     note: "A DNI written without its check letter. NOT detected, deliberately: there is nothing to validate, and guessing would refuse every eight-digit number in the deployment." },
   { id: "m.cpf.space_grouped", category: "cpf", text: "111 444 777 35", source: "published",
-    note: "The published CPF example grouped with SPACES instead of its printed dots and hyphen. NOT detected: the CPF separator set is '.' and '-' only. Predicted as a miss before it was run, and it is one — widening the separator set to include spaces would make every 11-digit space-grouped reference a CPF candidate, which is the wrong trade at a 1.02% base rate." },
+    note: "The published CPF example grouped with SPACES instead of its printed dots and hyphen. NOT detected: CPF's layouts are 000.000.000-00 and 000000000-00 besides the bare run, and neither puts a space anywhere. Predicted as a miss before it was run, and it is one — adding a space-grouped layout would make every 11-digit reference grouped 3-3-3-2 with spaces a CPF candidate, which is the wrong trade at a 1.02% base rate." },
   { id: "m.cpf.cnpj", category: "cpf", text: "11.222.333/0001-81", source: "constructed",
     note: "A CNPJ is a COMPANY registration, not a person, and is NOT detected by the CPF rule. Listed so nobody reads 'Brazil covered' as covering it." },
 ];
