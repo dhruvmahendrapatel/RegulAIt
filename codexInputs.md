@@ -1,6 +1,6 @@
 # Codex review findings and implementation handoff
 
-This file has two parts. **Part 1** is the status ledger: one row per finding (AER-001..043, the
+This file has two parts. **Part 1** is the status ledger: one row per finding (AER-001..047, the
 2026-09-06 F01..F08 recommendations), its current status with evidence, and who acts next. It is the
 authoritative current state; Codex evaluates and confirms closures here. **Part 2** is Codex's
 append region: the latest automated run and the implementer updates it answers. Earlier runs
@@ -9,7 +9,7 @@ in `docs/reviews/codex-runs-archive-2026-09.md`.
 
 ## Status ledger — current state of every finding
 
-Date: 2026-10-02. Branch `dhruv/active`, HEAD `0617ace`.
+Date: 2026-10-03. Branch `dhruv/active`, reviewed HEAD `9a13e26`.
 Basis: the adversarially verified audit of every item at HEAD `21b3094` (auditor + verifier; verifier wins on disagreement), plus today's post-audit fixes, each confirmed in `git log`: `65581bd`, `749ee75`, `297d0b9`, `b5418e8`, `8ea024e`, `062d90e`, `154d171`, `b186915`, `1b9d6cb`.
 Status: CLOSED = acceptance met per audit or by a listed fix; PARTIAL = materially improved, a named criterion unmet; OPEN = otherwise; WITHDRAWN = not applicable.
 Next: `claude` (code/doc work) · `codex-confirm` (closure to be acknowledged by Codex) · `owner` (decision needed).
@@ -44,7 +44,7 @@ Next: `claude` (code/doc work) · `codex-confirm` (closure to be acknowledged by
 | AER-026 | HIGH | Sample adapters trusted caller subject header | PARTIAL | 46590d6: `handler.lua:149-162` subject from consumer.custom_id, forgeable headers stripped `:51-61,:142`; `verify.mjs:474-480` three x-regulait-subject spellings | Untested: unmapped/ambiguous/disabled/deleted identities (consumer_not_mapped branch unreached), duplicate headers, subject header with no credential; audit lacks Kong consumer identity beside the resolved subject | claude |
 | AER-027 | HIGH | PDP secret was unrestricted admin credential | CLOSED | 46f2919 + migration 0117: closed `dispatch\|pdp` key purpose; a PDP key reaches only POST /v1/authz/check; 9 focused tests in CI; Kong harness mints a purpose 'pdp' key | — | codex-confirm (formal DONE) |
 | AER-028 | HIGH | Callout omits args, project, principal | PARTIAL | endpoint accepts args/projectId/principal (46f2919; `app.ts:2147-2195`; `aer028-callout-context.test.ts`); Kong sends static per-route project + derived/asserted origin (4f12c84) | Kong build_question sends no args (`handler.lua:83-89,:119-132`) so data-scope rules always deny; OIDC/SAML origins asserted; callout never binds/consumes approvals; no parity matrix | owner (forward scrubbed args vs narrow Kong to context-free authz) |
-| AER-029 | MEDIUM | Guided intake controls lacked accessible labels | PARTIAL | e3b08ec real labels/ids (uc-compliance-tags, uc-intended-agent, uc-project); Playwright exact getByLabel; `IntakeWizardPage.tsx` wraps controls in Field | No @axe-core scan across every stage and both themes (none in apps/web); screen-reader name / Tab / Escape checks not shown; IntakeWizardPage not re-reviewed | claude (axe scan), else Codex accepts as-is |
+| AER-029 | MEDIUM | Guided intake controls lacked accessible labels | PARTIAL | e3b08ec real labels/ids; `4474431` adds shared `FieldHelp` disclosure buttons to governance free-text fields; isolated Chromium `ui-defects.mock.spec.ts` 1/1 reproduced label-click focus, info disclosure and Escape dismissal; exact-head CI `37094018095` ran `kit.test.tsx` 9/9 | No @axe-core scan across every stage and both themes; the isolated browser check covers one representative field, not every field/stage or a screen-reader run | claude (axe scan + full field matrix) |
 | AER-030 | HIGH | Kong adapter not runnable; one action per route | PARTIAL | custom plugin with per-instance server_id/tool_name runs in the CI Kong job (integrations.yml) | All harness routes bind the same server/tool (`verify.mjs:290-347`): no two-route distinct-action test; forged server/tool/decision headers untested; disabled/unmapped consumers untested; only kong:3.6 + key-auth; `handler.lua:42` VERSION '0.1.0-unverified' | claude |
 | AER-031 | MEDIUM | Envoy withdrawal not reconciled in claims | CLOSED | b8e9720 (Codex DONE 09-27); docs/deployment/README.md:17 | — | codex-confirm |
 | AER-032 | MEDIUM | Disabled destructive controls hid reason from AT | CLOSED | `adminKit.tsx:213-245` RemoveButton aria-disabled + focusable reason; blocked-reason-a11y spec `:55-85` (Tab, Enter, Escape, focus return). Minor: spec covers 1 of 8 disabledReason sites via the shared component | — | codex-confirm |
@@ -59,8 +59,12 @@ Next: `claude` (code/doc work) · `codex-confirm` (closure to be acknowledged by
 | AER-041 | HIGH | Native cache identity collapsed requests | CLOSED | 3a91a93 (ADR-0146; Codex DONE 10-02); `zz-aer041-native-cache-identity.test.ts` 6/6 (CI 36967387569) | — | codex-confirm |
 | AER-042 | HIGH | Intake UI sent invalid dataSensitivity | CLOSED | 8ea024e: `dataSensitivity.ts` deriveDataSensitivity (strictest wins; empty/unknown fail closed to 'regulated'), `dataSensitivity.test.ts` (4), `IntakeWizardPage.tsx:199`; `demo-governance.mock.spec.ts` 400 on non-enum; `demo-intake.spec.ts:88-91` real-DB persisted 'regulated'; 062d90e `use-case-data-sensitivity.test.ts`: public/confidential/regulated persisted (row, intake instance, audit detail), 'internal' is API-only (no category maps to it), 'restricted' gets 400 with zero use-case/workflow/audit rows | — | codex-confirm |
 | AER-043 | MEDIUM | Concurrent monitor runs over-report transitions | CLOSED | 154d171 `governance-monitor.ts`: raised = raisedIds from onConflictDoNothing().returning, refreshed/resolved from rows actually updated; audit detail (`:288`) and response (`:308`) share the counts; b186915 inert `afterPlan` seam (`:91,:220`) holds pass A after its plan while B commits; `zz-aer043-monitor-concurrency.test.ts` (5) asserts raise 1/0 and resolve 1/0 with one audit row each, fails on the reverted code | — | codex-confirm |
+| AER-044 | HIGH | Empty deploy-agent selection bypasses intended-agent safety gates | OPEN | `apps/gateway/src/deploy-gate.ts:135` preserves explicit `agentIds: []`; `packages/shared/src/deploy-gate.ts:78` uses nullish fallback, so an empty array selects zero agents instead of `intendedAgentIds`; prior disposable evaluator reproduction confirmed an empty request can omit a halted/MRM-refused intended agent; these files did not change in `7422152..9a13e26` | Reject an explicit empty list or treat it as omitted; prove a halted/refused intended agent blocks when `agentIds` is absent and empty, while an explicitly non-empty authorized subset follows the documented policy | claude |
+| AER-045 | MEDIUM | Trace evaluation overlap can permanently miss late-completing spans | OPEN | `trace-evaluation.ts:70-85` pages on `startedAt >= cursor`, ordered by `startedAt`; prior disposable reproduction inserted an 11-minute-old completed credential span after a newer clean span and the next sweep scanned/evaluated/flagged 0; source unchanged in `7422152..9a13e26` | Cursor by a monotonic completion/evaluation key or retain a durable unevaluated queue; test a span that completes after the overlap has passed and prove exactly-once evaluation | claude |
+| AER-046 | MEDIUM | Intake retry can mix old persisted artifacts with edited new inputs | OPEN | `IntakeWizardPage.tsx:216-274` checkpoints `useCaseId` and `questionnaireSubmitted`, then reuses them on retry; the UI permits navigation/editing after a later risk failure; prior mocked production-function reproduction observed old use-case/questionnaire state combined with edited risk inputs; checkpoint logic unchanged through `9a13e26` | Bind the checkpoint to a canonical input digest or invalidate dependent artifacts on edits; test fail-after-questionnaire, back/edit, retry and prove a coherent all-old or all-new submission with no orphaned mixed state | claude |
+| AER-047 | HIGH | Missing automated-check reports are converted into passes | OPEN | `workflows.ts:714-756` explicitly falls back to a deterministic offline auto-pass when neither an eval outcome nor report exists; no workflow source change in `7422152..9a13e26` | Missing/timeout/error reports must remain pending or fail closed and be audited honestly; tests must distinguish explicit pass, explicit fail, missing report and timeout, and production configuration must reject auto-pass | owner (remove fallback vs explicitly scope it to a labelled demo-only mode), then claude |
 | F01 | prio: first | Stabilize tests, dependable quality gate | PARTIAL | ADR-0106 `mock-socket-contract.ts` setupFile (vitest.config.ts:14) + exit-code proof (0106:252-275); ADR-0107/0108 unordered-read sweeps; README.md:84-147 pinned sequence; ci.yml `pnpm -r test` on Postgres; exact-head CI 37036782298 green at 21b3094 | S8 compat-longtail 409→500 undiagnosed (PENDING.md:270-315); order-dependence still surfacing (0fba74c, 1515f23 on 10-02), no N repeated clean runs recorded; stale 'Actions exhausted' claims (PENDING.md:225-227, CONTRIBUTING_PARALLEL_SESSIONS.md:137); phase1/phase2 Playwright in no gate | claude |
-| F02 | prio: first batch | Budget enforcement across model/MCP/connector | CLOSED | `4229704` (2026-10-03, `wt-sec2`): the same `preDispatchProjectGate` now sits on POST /v1/connectors/:connectorId/invoke immediately after the entitlement decision resolves to allow and before credential/PII/guardrail/egress/provider work — 409 `project_budget_exceeded` (entitlement `decision` still reported), one `project-budget-cap` deny row (`objectType: connector`, `detail.phase: project-budget`), nothing executed, nothing billed; unattributed invokes unchanged. `connector-project-budget.test.ts` 6/6 (counting fake receiver: exhausted → 409, 0 upstream requests, 0 `usage_events`, audit row; healthy, unattributed and sanctioned-overage run and bill; warn_only runs, bills, escalates; profile `budgetEnforcement: block` overrides org warn_only). `mcp-project-budget.test.ts` 10/10 incl. the previously untested MCP overage + compliance-block cases. PENDING.md:701 and ADR-0103 corrected with dated notes (no rewrite). File-level negative control: 3/6 fail at the previous text. Connector regression: 9 suites / 180 tests green | F03 first-crossing-allowed semantics apply unchanged on all three paths (the first invoke to cross runs and bills; the block starts at the next) | codex |
+| F02 | prio: first batch | Budget enforcement across model/MCP/connector | CLOSED / RESOLVED-DONE | Remote fix `aa233bd` (Codex-confirmed at `9a13e26`): `agents-connectors.ts:5007-5030` calls `preDispatchProjectGate` after entitlement allow and before credentials/PII/egress/provider work, audits `project-budget-cap` and returns without execution. Exact-head CI `37094018095` passed `connector-project-budget.test.ts` 6/6 (exhausted: 409, zero receiver hits and usage; healthy/unattributed/sanctioned/warn-only/profile-override cases) within gateway 239 files / 3,290 tests. `mcp-project-budget.test.ts` also remains green. | F03 first-crossing-allowed semantics remain disclosed: the first invoke to cross runs and bills; blocking starts on the next dispatch | — |
 | F03 | prio: alongside F02 | Spending-cap semantics under concurrency | PARTIAL | ADR-0103 'Honest limits' (measured spend, first crossing allowed); ADR-0125 atomic FOR UPDATE run charges, `shared-budget-charge.test.ts`; disclosed at `VirtualKeysPage.tsx:271`, `OrganizationPage.tsx:511`; ENTERPRISE_READINESS_PLAN.md:266 (N4) | No decision between documented threshold and hard reservation (hold ledger); permitted overshoot undefined per cap (project, run/node, virtual key); no concurrent near-boundary test of preDispatchProjectGate | owner |
 | F04 | prio: first batch | Secret persistence outside audit_log | CLOSED | ADR-0102 `prose-scrub.ts` + `prose-scrub.test.ts` (incl. information_schema guard `:558`); ADR-0111 `f04-trace-payload-scrub.test.ts` (traces/OTLP fixed; exports, backups, anchors clean); ADR-0112 `adr0112-conversation-presentation-scrub.test.ts`; ADR-0115 `adr0115-eval-result-scrub.test.ts`; `audit-scrub.test.ts:265-301` chain over redacted rows. Declared residuals: S6 content columns (owner), app-layer/shape-based only, zod-enum/409 echoes; PENDING.md:703 row stale (doc hygiene) | — | codex-confirm |
 | F05 | prio: targeted (governance hardening) | Approval scope and payload binding | CLOSED | ADR-0104 (migration 0106; `approval-binding.test.ts`; `approval-payload-binding.test.ts`: negative control, exactly-once, concurrent spend `:514`); ADR-0105 `consent-context-expiry.test.ts` (AER-004 DONE); ADR-0144 `approvalReview.test.ts` + `mcp-action-review.spec.ts`, demo.yml approval-review job green (37024251659); ADR-0166 749ee75/297d0b9 (AER-039) | — | codex-confirm (close with AER-039/040) |
@@ -69,7 +73,7 @@ Next: `claude` (code/doc work) · `codex-confirm` (closure to be acknowledged by
 | F08 | prio: alongside fixes | Documentation and capability claims | PARTIAL | STATE.md last_updated 2026-10-02; PENDING.md:774-777 struck S3-sink/copilot rows; DEMO_SCRIPT 'What is mock vs. live'; `guardrails.ts:10-16` heuristic; `RegulAItLlmPage.tsx:10`; 1b9d6cb cleared the 002/004/005 texts | `boot.ts:223-224` prints /app and /admin (302 to /ui; cosmetic); 'Actions exhausted' claims (PENDING:225-227, CONTRIBUTING:137); ~~PENDING:701 'F02 CLOSED' and ADR-0103:24-25 connector claim false~~ (corrected with dated notes 2026-10-03, `4229704`); PENDING:703 F04 extension 'open'; PENDING:778-781 guardrail/training claims 'Not assessed' | claude |
 | HANDOFF | — | Per-finding handoff (repro, decision, files, limits) | PARTIAL | Per-ADR records (0103–0108, 0111, 0112, 0115, 0144, 0166) carry reproduction, commands and limits; PENDING.md:695-706 F table pinned to HEAD 2c90396 (09-07) | No current per-F table: misstates F02 (connector gap) and F04 (extension closed), omits F01 progress (0107/0108, 10-02 order fixes) and F05 extensions (0105/0144/0166) | claude (refresh after F02 and docs land), then codex |
 
-Totals (52 rows): CLOSED 27 (24 AER + F02, F04, F05) · PARTIAL 22 (16 AER + F01, F03, F06, F07, F08 + HANDOFF) · OPEN 2 (AER-014, 016) · WITHDRAWN 1 (AER-025). (2026-10-03: AER-012, 013, 020, 024 and F02 closed on `wt-sec2`, pending Codex confirmation.)
+Totals (56 rows): CLOSED 27 (24 AER + F02, F04, F05) · PARTIAL 22 (16 AER + F01, F03, F06, F07, F08 + HANDOFF) · OPEN 6 (AER-014, 016, 044, 045, 046, 047) · WITHDRAWN 1 (AER-025). F02 is independently confirmed RESOLVED/DONE at remote HEAD `9a13e26`; AER-012, 013, 020 and 024 remain implementer-closed pending Codex confirmation.
 
 ## Open work, grouped
 
@@ -86,6 +90,9 @@ Totals (52 rows): CLOSED 27 (24 AER + F02, F04, F05) · PARTIAL 22 (16 AER + F01
 - AER-033: unique per-run DB/container/ports; SIGINT/SIGTERM cleanup; refuse to drop a DB the run did not create.
 - AER-035: `pg_terminate_backend` recovery test (unless owner accepts the residual).
 - AER-037: atomic claim (`FOR UPDATE SKIP LOCKED … RETURNING`) + two-sweep test, or drop the disjointness claim.
+- AER-044: reject/fallback empty deploy `agentIds` and cover intended-agent halt/MRM refusal.
+- AER-045: durable trace-evaluation cursor/queue and late-completion regression.
+- AER-046: bind intake retry checkpoints to input identity or invalidate them on edits.
 - F01: strike stale 'Actions exhausted' claims; diagnose or re-scope S8; record N repeated clean runs; gate phase1/phase2.
 - F08: boot banner prints /ui; record guardrail/training claim assessment; strike stale claims.
 - HANDOFF: refresh the PENDING F01–F08 table as a dated addendum.
@@ -98,12 +105,13 @@ Totals (52 rows): CLOSED 27 (24 AER + F02, F04, F05) · PARTIAL 22 (16 AER + F01
 - AER-035: accept the documented Postgres-guarantee argument for item 4, or require the crash test.
 - AER-036: build OIDC/SAML origin derivation for Kong, or keep the asserted field and narrow the claim.
 - AER-040: make the `approval-review` job a required status check (and whether a throwaway red-CI run is wanted).
+- AER-047: eliminate missing-report auto-pass in production, or authorize a clearly labelled demo-only compatibility mode.
 - F03: documented threshold vs hard reservation; permitted overshoot per cap.
 - F06: capped real-provider credential; plan-only boundary for calls naming no workflow instance.
 - F07: un-park the pilot ops gate; release-key ceremony; a separate box for upgrade and restore drills.
 
 **Codex to confirm**
-- Closed 2026-10-03 on worktree branch `wt-sec2` (local commits, not yet pushed; evidence in the rows above): F02 (`4229704`), AER-020 (`e09e4cb`), AER-024 (`5a7244c`), AER-012 (`6e3daec`), AER-013 (`40990d6`). Each carries a new test file with a file-level negative control (source restored to the previous text → the test fails; byte-identical restore proven with `cmp`).
+- F02 is confirmed RESOLVED/DONE at remote commit `aa233bd`; no further closure action is required. Still to confirm from the 2026-10-03 implementation set: AER-020 (`e09e4cb`), AER-024 (`5a7244c`), AER-012 (`6e3daec`), AER-013 (`40990d6`).
 - Newly closed, evidence above: AER-001, 002, 005, 008, 027 (formal DONE), 032, 039, 040, 042, 043, F04, F05; AER-025 as withdrawn; AER-004's named doc residual (1b9d6cb).
 - Already DONE by Codex, no action: AER-007, 017, 019, 021, 022, 023, 031, 038, 041.
 
@@ -302,5 +310,67 @@ approval-review and kong-adapter.
 - **Not addressed in this round (still yours to keep open):** AER-006, 009, 010, 011, 012, 013, 015,
   018, 020, 024, 026, 030, 033, 034, 035, 037, F01, F02, F08. Owner decisions: AER-014, 016, 028, 036,
   F03, F06, F07.
+
+### Automated enterprise-readiness run — 2026-10-03 02:01:58 CDT (UTC-05:00)
+
+**Target branch, synchronization and reviewed range**
+
+- Exclusive target: `dhruv/active`. Review used the isolated aligned worktree
+  `RegulAIt-governance-info`; local and `origin/dhruv/active` both resolved to
+  `9a13e2653764dbf579485fd7ac48f1e975b15eb2` before review. The ordinary local
+  `dhruv/active` checkout remains intentionally untouched because it is diverged.
+- Incremental range: `742215252d18bdde15c19ce918b3ac7e537c7db2..9a13e26`, plus
+  prior high-risk findings that were not yet present in the remote ledger. Required suite and
+  repository instructions were read. No product code, ADR, STATE, PathForward or sibling repository
+  was edited.
+
+**Exact checks and outcomes**
+
+- `git status --short --branch`, `git rev-parse HEAD`, and
+  `git rev-parse origin/dhruv/active` — clean review branch; SHAs matched.
+- `git diff --name-only 7422152..HEAD -- <finding paths>` plus targeted `rg` and numbered source
+  reads — deploy-gate, trace-evaluation and workflow auto-pass sources were unchanged; the intake
+  checkpoint path changed only for field-help presentation, not retry identity.
+- Exact-head GitHub Actions CI run `37094018095` — PASS at `9a13e26`: build-and-test passed,
+  gateway 239 files / 3,290 tests, `connector-project-budget.test.ts` 6/6, web
+  `kit.test.tsx` 9/9. Demo-journey run `37094018103` also passed. The CI docker-build job was green
+  while its actual Docker build step was skipped, so no Docker-build pass is claimed.
+- The governance field-help change was additionally verified before publication with TypeScript,
+  build (196 web modules), component tests 9/9 and isolated Chromium Playwright 1/1. No database,
+  cloud, live-provider, deployment, migration, backup or restore test was run in this review.
+
+**Finding lifecycle**
+
+- **F02 — RESOLVED/DONE.** Remote fix `aa233bd` places the connector project gate before credentials,
+  PII, egress and provider execution. Direct source inspection plus the exact-head 6/6 contract suite
+  proves exhausted budgets return 409 with zero upstream work and usage while the documented allowed
+  cases run and bill. Residual first-crossing semantics remain disclosed under F03.
+- **AER-029 — PARTIALLY RESOLVED.** Commit `4474431` adds accessible disclosure buttons and field
+  descriptions across governance free-text fields. The representative keyboard/browser and component
+  checks pass, but the acceptance criterion still requires an axe scan and full field/stage/theme
+  matrix; it is not marked done.
+- **AER-044 — HIGH / OPEN.** Explicit `agentIds: []` remains distinct from omission, allowing the
+  evaluator to inspect zero agents rather than the use case's intended agents. Acceptance: empty and
+  omitted selections must both enforce intended-agent halt/MRM refusal, unless a documented policy
+  explicitly rejects empty input; a non-empty subset needs its own policy-bound positive case.
+- **AER-045 — MEDIUM / OPEN.** The trace cursor remains based on `startedAt` with a finite overlap.
+  A late-completing span older than the overlap can remain unevaluated. Acceptance: durable
+  completion/evaluation cursor or queue, with an exactly-once late-completion regression.
+- **AER-046 — MEDIUM / OPEN.** Intake retries retain persisted use-case/questionnaire checkpoints
+  after editable inputs change. Acceptance: bind checkpoints to a canonical input digest or invalidate
+  dependent artifacts; prove retry produces a coherent all-old or all-new transaction.
+- **AER-047 — HIGH / OPEN.** `workflows.ts:714-756` converts absence of both eval outcome and report
+  into a passed automated check. This is failure-honesty risk: a missing control result can authorize
+  progression. Acceptance: explicit pass advances, explicit fail blocks, missing/timeout remains
+  pending or blocks with an audit row, and production configuration cannot enable auto-pass.
+
+**Remaining uncertainty and owner action**
+
+- AER-012, 013, 020 and 024 carry substantial implementation evidence in the ledger but were not
+  independently closed in this targeted run. Their status remains pending Codex confirmation.
+- Suite finding P23 remains an owner action: `LICENSE`, `LICENSE.md` and `SECURITY.md` are absent at
+  `9a13e26`; repository security-feature enablement is outside this automation's authorized writes.
+- No enterprise-readiness, production-readiness, certification or complete provider/deployment parity
+  conclusion is justified by this targeted review.
 
 <!-- codex-enterprise-feedback:end -->
