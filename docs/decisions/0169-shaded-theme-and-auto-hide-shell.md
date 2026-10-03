@@ -44,7 +44,7 @@ Built on `wt-g2-theme` and merged into the integration branch at `516280b`: `a88
 glass surfaces, auto-hiding rail), `39df218` (the suite glyph in the rail takes ink, not Signal);
 `2c6b92d` adds the review-policy glyph to the collapsed rail. Files: `apps/web/src/theme/tokens.css`,
 `global.css`, `apps/web/src/shell/AppShell.tsx`, `shell.module.css`, `navIcons.tsx`. Full gate
-on <sha>: see commit message. The Decision above is unchanged; three deliberate deviations from the pre-ADR token set:
+— full gate on the integrated tree (wt-g2-int) green: suite 3401 passed / 9 skipped, demo:prepare 18/18, real journeys 2/2 (Monday demo + review-policy), mocked UI 86/86, phase1+phase2 39/39 after one test-locator fix, approval-review 4/4. The Decision above is unchanged; three deliberate deviations from the pre-ADR token set:
 
 - **Light `--rg-ink-muted` is one notch darker** — `#5d6064` (6.3:1 on white) instead of
   Graphite 500, so muted copy that sits on the shaded canvas itself (breadcrumbs, page subtitles)

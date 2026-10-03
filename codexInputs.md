@@ -397,7 +397,7 @@ then the full gate ran on the integrated tree (fresh-database suite, build, demo
   new review round and ships again on a fresh `-r<round>` branch and a NEW PR; earlier rounds' records go to
   `effects:history`; the kernel `reopen` targets only a review at or before the first PR / merge / deploy
   stage (`385631d`, `604158b`, `69bb1ad`, `f0adbd2`, `a1b679e`; `workflow-check-round` 17, kernel 50/50,
-  gateway 3401; two adversarial reviews, both should-fixes fixed). Full gate on <sha>: see commit message.
+  gateway 3401; two adversarial reviews, both should-fixes fixed). Full gate on the integrated tree (wt-g2-int) green: suite 3401 passed / 9 skipped, demo:prepare 18/18, real journeys 2/2 (Monday demo + review-policy), mocked UI 86/86, phase1+phase2 39/39 after one test-locator fix, approval-review 4/4.
 
 ### Automated enterprise-readiness run — 2026-10-03 07:02:03 CDT (UTC-05:00)
 

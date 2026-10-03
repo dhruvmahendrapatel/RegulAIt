@@ -152,8 +152,9 @@ before Monday") and decided AER-049:
 All six amendment items are built and merged on the integration branch `wt-g2-int` (from
 `dhruv/active` `d9abbe2`): worktrees `wt-g2-api` (merge `695cec9`), `wt-g2-agents` (`87f2cbe`),
 `wt-g2-theme` (`516280b`, ADR-0169), `wt-g2-web` (`ebccbd8`) and `wt-g2-aer049` (`90cfb1b`), then
-`f0adbd2`, `a1b679e`, `05f1f38` and `f49abb2` on the branch. Full gate on <sha>: see commit
-message. The Decision and the amendment above are unchanged.
+`f0adbd2`, `a1b679e`, `05f1f38` and `f49abb2` on the branch. Full gate on the integrated tree
+(wt-g2-int) green: suite 3401 passed / 9 skipped, demo:prepare 18/18, real journeys 2/2 (Monday
+demo + review-policy), mocked UI 86/86, phase1+phase2 39/39 after one test-locator fix, approval-review 4/4. The Decision and the amendment above are unchanged.
 
 **What was built**
 1. **AER-049 — effect records belong to their round** (`385631d`, `604158b`, `69bb1ad`, review

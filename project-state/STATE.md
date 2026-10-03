@@ -34,7 +34,7 @@ before the first PR/merge/deploy stage; two adversarial reviews, should-fixes fi
 theme and auto-hiding rail (worst-point muted contrast 4.81:1 light / 5.47:1 dark). Reported: gateway 3401,
 kernel 50/50, web 156/156, mocked 86/86, new real-gateway `demo-review-policy.spec.ts` green with the Monday
 journey. Docs: ADR-0168/0169 implementation sections, demo script optional beat 2B+, AER-049 CLOSED for Codex
-to confirm (OPEN now AER-014/016). Limits in ADR-0168. Not yet on `dhruv/active`.
+to confirm (OPEN now AER-014/016). Limits in ADR-0168. Pushed to `dhruv/active` after the full gate on the integrated tree (wt-g2-int) green: suite 3401 passed / 9 skipped, demo:prepare 18/18, real journeys 2/2 (Monday demo + review-policy), mocked UI 86/86, phase1+phase2 39/39 after one test-locator fix, approval-review 4/4.
 
 **2026-10-03 (day) - Codex batch closed, calm UI pass, ADR-0168 governance flow shipped for the demo, AER-048 fixed.**
 All on `dhruv/active` (local merge tip `7a40d77`; demo Monday 2026-10-05 11:00 UTC). The Codex
