@@ -106,18 +106,29 @@ jobs:
       # here they had skipped on every CI run since they were written: the
       # tamper-resistance claim shipped green on nine tests that never ran.
       # The same dev credentials as docker-compose.yml; ~30 s of runner time.
-      # (The image's own entrypoint is `minio`, which needs the `server`
-      # argument, and a GitHub service cannot pass one — hence the bitnami
-      # image, whose entrypoint runs `minio server /data` on its own.)
+      #
+      # WHY THIS IMAGE (2026-10-03): MinIO archived its community edition and
+      # then removed `minio/minio` and `minio/mc` from Docker Hub (September
+      # 2026); anonymous pulls of the historical releases from quay.io started
+      # failing on 2026-10-02 as well. `bitnamilegacy/minio` is the frozen
+      # Bitnami build of the last community release, still served by Docker
+      # Hub (manifest verified the day this was written), bundling the `mc`
+      # client. Its entrypoint runs `minio server` by itself, which is what a
+      # GitHub service needs — a service cannot pass a command. Pinned to the
+      # exact tag because the line is unmaintained: nothing newer will ever
+      # appear under it, so a pin cannot rot, only protect.
+      # Same image and tag as docker-compose.yml — keep them together.
       minio:
-        image: bitnami/minio:2025
+        image: bitnamilegacy/minio:2025.7.23-debian-12-r5
         env:
           MINIO_ROOT_USER: regulait
           MINIO_ROOT_PASSWORD: regulait-dev-minio
         ports:
           - 9000:9000
+        # No curl in this image; `mc ready` is MinIO's own readiness probe and
+        # the MC_HOST_<alias> form needs no written config (HOME is / here).
         options: >-
-          --health-cmd "curl -sf http://localhost:9000/minio/health/live || exit 1"
+          --health-cmd "MC_CONFIG_DIR=/tmp/.mc MC_HOST_local=http://regulait:regulait-dev-minio@localhost:9000 mc ready local"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20

@@ -74,12 +74,19 @@ services:
   # region, credentials and path-style are configuration. See
   # infra/modules/audit-anchor-worm-s3/ for the AWS-side equivalent.
   minio:
-    # Not pinned by default: MinIO publishes timestamped RELEASE tags with no
-    # stable major line to follow, so a pin here rots rather than protecting
-    # anyone. Set REGULAIT_MINIO_IMAGE to a RELEASE tag anywhere reproducibility
-    # matters.
-    image: ${REGULAIT_MINIO_IMAGE:-minio/minio:latest}
-    command: server /data --address :9000 --console-address :9001
+    # PINNED, and to a Bitnami build rather than MinIO's own (2026-10-03):
+    # MinIO archived its community edition in 2026 and removed `minio/minio`
+    # and `minio/mc` from Docker Hub that September; anonymous pulls of the
+    # historical releases from quay.io began failing on 2026-10-02 too. The
+    # `bitnamilegacy` namespace is Bitnami's frozen archive of the last
+    # community release, still served by Docker Hub, and the image bundles
+    # the `mc` client the init job below needs. Nothing newer will ever be
+    # published under this line, so the earlier "a pin rots" argument no
+    # longer applies — the pin is what makes a fresh clone reproducible.
+    # Override with REGULAIT_MINIO_IMAGE for any S3-compatible store whose
+    # entrypoint serves on :9000 and honours MINIO_ROOT_USER/PASSWORD.
+    # Same image and tag as .github/workflows/ci.yml — keep them together.
+    image: ${REGULAIT_MINIO_IMAGE:-bitnamilegacy/minio:2025.7.23-debian-12-r5}
     environment:
       # DEV-GRADE CREDENTIALS, exactly like REGULAIT_DATA_KEY above. They are
       # here so `docker compose up --build` needs no setup; they are not a
@@ -93,15 +100,22 @@ services:
       # authenticate writes `failed` anchor rows nobody reads.
       MINIO_ROOT_USER: ${REGULAIT_AUDIT_ANCHOR_S3_ACCESS_KEY_ID:-regulait}
       MINIO_ROOT_PASSWORD: ${REGULAIT_AUDIT_ANCHOR_S3_SECRET_ACCESS_KEY:-regulait-dev-minio}
+      MINIO_API_PORT_NUMBER: "9000"
+      MINIO_CONSOLE_PORT_NUMBER: "9001"
     healthcheck:
       # `mc ready` is MinIO's own readiness probe and ships in the image; the
       # image has no curl, so the usual /minio/health/live curl does not work.
-      test: ["CMD", "mc", "ready", "local"]
+      # MC_HOST_<alias> configures the alias from the environment, so nothing
+      # has to be written under HOME (which is `/` in this image).
+      test:
+        - CMD-SHELL
+        - MC_CONFIG_DIR=/tmp/.mc MC_HOST_local="http://$${MINIO_ROOT_USER}:$${MINIO_ROOT_PASSWORD}@localhost:9000" mc ready local
       interval: 3s
       timeout: 3s
       retries: 30
     volumes:
-      - minio_data:/data
+      # The Bitnami image serves /bitnami/minio/data (not /data).
+      - minio_data:/bitnami/minio/data
     restart: unless-stopped
     networks: [regulait]
 
@@ -124,7 +138,11 @@ services:
   # these objects cannot be deleted from inside the container by anyone. To
   # reclaim the space on a dev box, drop the volume — `docker compose down -v`.
   minio-init:
-    image: ${REGULAIT_MC_IMAGE:-minio/mc:latest}
+    # The server image again, not a separate `mc` image: `minio/mc` left
+    # Docker Hub with `minio/minio`, and this image carries the same client
+    # on its PATH. REGULAIT_MC_IMAGE still overrides it — any image with
+    # `mc` on PATH works.
+    image: ${REGULAIT_MC_IMAGE:-bitnamilegacy/minio:2025.7.23-debian-12-r5}
     depends_on:
       minio:
         condition: service_healthy
@@ -144,6 +162,7 @@ services:
     command:
       - |
         set -e
+        export MC_CONFIG_DIR=/tmp/.mc
         mc alias set worm http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"
         mc mb --with-lock --ignore-existing "worm/$$ANCHOR_BUCKET"
         mc retention set --default COMPLIANCE "$${ANCHOR_RETENTION_DAYS}d" "worm/$$ANCHOR_BUCKET"

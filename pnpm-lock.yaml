@@ -139,6 +139,9 @@ importers:
         specifier: 3.25.2
         version: 3.25.2(zod@3.25.76)
     devDependencies:
+      '@types/node':
+        specifier: 26.1.1
+        version: 26.1.1
       vitest:
         specifier: ^3.2.4
         version: 3.2.7(@types/debug@4.1.13)(@types/node@26.1.1)(tsx@4.23.15)
@@ -182,6 +185,9 @@ importers:
 
   packages/api-client:
     devDependencies:
+      '@types/node':
+        specifier: 26.1.1
+        version: 26.1.1
       vitest:
         specifier: ^3.2.4
         version: 3.2.7(@types/debug@4.1.13)(@types/node@26.1.1)(tsx@4.23.15)
@@ -192,6 +198,9 @@ importers:
         specifier: ^3.25.67
         version: 3.25.76
     devDependencies:
+      '@types/node':
+        specifier: 26.1.1
+        version: 26.1.1
       vitest:
         specifier: ^3.2.4
         version: 3.2.7(@types/debug@4.1.13)(@types/node@26.1.1)(tsx@4.23.15)
@@ -208,6 +217,9 @@ importers:
         specifier: ^8.16.3
         version: 8.23.1
     devDependencies:
+      '@types/node':
+        specifier: 26.1.1
+        version: 26.1.1
       '@types/pg':
         specifier: ^8.15.4
         version: 8.23.1
@@ -217,6 +229,9 @@ importers:
 
   packages/git-provider:
     devDependencies:
+      '@types/node':
+        specifier: 26.1.1
+        version: 26.1.1
       vitest:
         specifier: ^3.2.4
         version: 3.2.7(@types/debug@4.1.13)(@types/node@26.1.1)(tsx@4.23.15)
@@ -227,6 +242,9 @@ importers:
         specifier: ^3.25.67
         version: 3.25.76
     devDependencies:
+      '@types/node':
+        specifier: 26.1.1
+        version: 26.1.1
       vitest:
         specifier: ^3.2.4
         version: 3.2.7(@types/debug@4.1.13)(@types/node@26.1.1)(tsx@4.23.15)
@@ -240,12 +258,18 @@ importers:
         specifier: ^6.49.0
         version: 6.49.0(@aws-sdk/credential-provider-node@3.972.84)(@smithy/signature-v4@5.7.4)(ws@8.22.0)(zod@3.25.76)
     devDependencies:
+      '@types/node':
+        specifier: 26.1.1
+        version: 26.1.1
       vitest:
         specifier: ^3.2.4
         version: 3.2.7(@types/debug@4.1.13)(@types/node@26.1.1)(tsx@4.23.15)
 
   packages/optimizer-kernel:
     devDependencies:
+      '@types/node':
+        specifier: 26.1.1
+        version: 26.1.1
       vitest:
         specifier: ^3.2.4
         version: 3.2.7(@types/debug@4.1.13)(@types/node@26.1.1)(tsx@4.23.15)
@@ -256,6 +280,9 @@ importers:
         specifier: ^3.25.67
         version: 3.25.76
     devDependencies:
+      '@types/node':
+        specifier: 26.1.1
+        version: 26.1.1
       vitest:
         specifier: ^3.2.4
         version: 3.2.7(@types/debug@4.1.13)(@types/node@26.1.1)(tsx@4.23.15)
@@ -269,6 +296,9 @@ importers:
         specifier: ^3.25.67
         version: 3.25.76
     devDependencies:
+      '@types/node':
+        specifier: 26.1.1
+        version: 26.1.1
       vitest:
         specifier: ^3.2.4
         version: 3.2.7(@types/debug@4.1.13)(@types/node@26.1.1)(tsx@4.23.15)
@@ -279,6 +309,9 @@ importers:
         specifier: 4.12.0
         version: 4.12.0
     devDependencies:
+      '@types/node':
+        specifier: 26.1.1
+        version: 26.1.1
       vitest:
         specifier: ^3.2.4
         version: 3.2.7(@types/debug@4.1.13)(@types/node@26.1.1)(tsx@4.23.15)
@@ -289,6 +322,9 @@ importers:
         specifier: ^3.25.67
         version: 3.25.76
     devDependencies:
+      '@types/node':
+        specifier: 26.1.1
+        version: 26.1.1
       vitest:
         specifier: ^3.2.4
         version: 3.2.7(@types/debug@4.1.13)(@types/node@26.1.1)(tsx@4.23.15)
@@ -315,6 +351,9 @@ importers:
         specifier: ^3.25.67
         version: 3.25.76
     devDependencies:
+      '@types/node':
+        specifier: 26.1.1
+        version: 26.1.1
       vitest:
         specifier: ^3.2.4
         version: 3.2.7(@types/debug@4.1.13)(@types/node@26.1.1)(tsx@4.23.15)

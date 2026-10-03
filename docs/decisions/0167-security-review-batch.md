@@ -203,6 +203,14 @@ the auth-exempt ACS; measured 7.6 s at 80 k bytes on 0.8.13, 17 ms at 160 k on 0
 ACS body is capped at 256 KiB + slack. The remaining HIGH advisories were each traced to an
 unreachable or dev-only path and are left to a separate upgrade batch (PENDING S4).
 
+**Amendment 2026-10-03.** CI's `docker build` — the verification this ADR named for the image
+change — failed on the first push: dropping `*.test.ts` from the image removed the only path by
+which `packages/git-provider` had resolved `@types/node` (a test file's `vitest` import), so the
+image build lost `Buffer` and `fetch` while every local build, tests present, stayed green. Fixed
+by declaring `@types/node` in every workspace package that compiles Node code, and proven with a
+Docker-shaped rebuild (tracked files only, `.dockerignore` applied by hand, frozen install,
+`pnpm -r build`). The `.dockerignore` stands. Ledger entry: `mistakes.md` M-063.
+
 ## Consequences
 
 - **Behaviour changes an operator can see:** a Snowflake connector with no `baseUrl` needs an

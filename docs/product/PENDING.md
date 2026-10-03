@@ -476,6 +476,7 @@ annotations, live-graded red-team runs. Everything committed still passes keyles
 | **PII floor default** | `defaultPiiMode` ships `none` (behaviour-preserving); one PUT flips deployment-wide. Recommend `block` for any shared install. |
 | **Pillar-6 savings semantics** (two questions, STATE.md Open Questions) | How optimizer savings are counted/attributed in edge cases. |
 | **Session-narrowing issuance scope; mirror-failure persistence** | Recorded in STATE.md open decisions since the review wave. |
+| **Dev/CI object store after MinIO (opened 2026-10-03)** | MinIO archived its community edition and removed its images from Docker Hub (September 2026); anonymous Quay pulls failed from 2026-10-02. CI and the compose quickstart now pin `bitnamilegacy/minio:2025.7.23-debian-12-r5`, a frozen, unmaintained build that will receive no CVE fixes. It is a dev/CI stand-in only — a customer install anchors to AWS S3 or their own Object-Lock store (ADR-0060). Decide whether to move the stand-in to a maintained S3-compatible store with Object Lock (candidates to evaluate: Garage, SeaweedFS, RustFS) before any shared or customer-facing environment runs the compose stack. |
 
 ## Blocked on a live instrument/integration (credentials or a real endpoint)
 | Item | What unblocks |

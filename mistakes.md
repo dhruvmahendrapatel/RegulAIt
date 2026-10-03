@@ -1356,3 +1356,23 @@ Rule: a batch commits per closed finding (or per coherent group), locally, as it
 is the checkpoint, the final full suite is the gate before the PUSH, not before the first commit.
 Give every long agent a deliverable it can leave behind early (an ADR or notes file written
 first, then kept current), and never let a single agent own more than ~an hour of uncommitted work.
+
+### M-063 (2026-10-03) - Two CI-only breakages pushed on an "all green" head
+
+The push of 4d288dd went out after the full gateway suite and demo gate passed locally, and CI
+went red twice on things no local gate exercised: (a) the CI-01 MinIO service named an image tag
+(`bitnami/minio:2025`) that was never checked against the registry — and the upstream image the
+compose file defaulted to (`minio/minio`) had already been removed from Docker Hub weeks earlier;
+(b) CFG-07's `.dockerignore` dropped `*.test.ts`, and `packages/git-provider` had only ever found
+`@types/node` through a test file's `vitest` import, so the Docker build lost `Buffer`/`fetch`
+while every local build (tests present) stayed green. The ADR had even disclosed "verified by
+CI's docker build" — true, and CI did the verifying by failing.
+
+Rule: a change to what CI or the image is made of (a service image, a Dockerfile, `.dockerignore`,
+a workflow file) gets its own proof BEFORE push, with no daemon needed: resolve every image tag
+against the registry manifest API (anonymous token + `/v2/<repo>/manifests/<tag>` must answer
+200), and rebuild the image's input set as the Dockerfile sees it (`git ls-files` export, apply
+`.dockerignore` by hand, `pnpm install --frozen-lockfile`, `pnpm -r build`). A package compiles
+against the types it declares, never the types a neighbour happens to drag in: every workspace
+package that touches Node APIs lists `@types/node` itself.
+
