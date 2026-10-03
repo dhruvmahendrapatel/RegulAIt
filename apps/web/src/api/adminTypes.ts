@@ -224,6 +224,24 @@ export interface AdminAgent {
   /** ADR-0034: set iff provider === 'custom' — the DB enforces the pair as a
    * discriminated union, so these two fields are never independently valid. */
   customProviderId?: string | null;
+  /** ADR-0089 lifecycle, widened by ADR-0168 item 6 */
+  lifecycleStatus?: string;
+  lifecycleReason?: string | null;
+  /** ADR-0168 item 6 — stewardship, computed by GET /v1/agents at read time */
+  ownerUserId?: string | null;
+  stewardUserId?: string | null;
+  stewardName?: string | null;
+  stewardDeactivated?: boolean;
+  successorUserId?: string | null;
+  successorName?: string | null;
+  successorDeactivated?: boolean;
+  orphaned?: boolean;
+  reviewOverdue?: boolean;
+  nextReviewAt?: string | null;
+  lastReviewedAt?: string | null;
+  lastReviewedByName?: string | null;
+  reviewCadenceMonths?: number;
+  highestUseCaseTier?: string | null;
 }
 
 // ---- ADR-0034: custom LLM providers + the egress allow-list ---------------

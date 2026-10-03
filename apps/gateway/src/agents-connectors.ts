@@ -33,6 +33,7 @@ import { deleteAgentGrantById, deleteConnectorGrantById } from "./grant-revocati
 // ADR-0091 — toxic-combination SoD: the mint-time gate on the two direct
 // agent/connector grant endpoints (the other seven mint paths live in app.ts).
 import { refuseSodMint } from "./sod.js";
+import { registerAgentStewardshipRoutes, withStewardship } from "./agent-stewardship.js";
 import { evaluateAgent, evaluateConnector } from "@regulait/policy-kernel";
 import { agentHaltOf, loadExecutionMode, postureOf } from "./execution-posture.js";
 import {
@@ -1204,6 +1205,40 @@ async function dispatchAttempt(
   // which keeps the entitlement history readable and the retirement
   // reversible as a record, never as a dispatch. `deprecated` deliberately
   // does NOT appear here: deprecation only WARNS in the ADR-0082 inventory.
+  //
+  // ADR-0168 amendment item 6: `suspended` refuses through the same gate with
+  // its own name (409 agent_suspended) — out of service like retired, but
+  // reversible by the steward. proposed / under_review warn only.
+  if (served.lifecycleStatus === "suspended") {
+    const [lcRow] = await db
+      .insert(auditLog)
+      .values({
+        userId,
+        objectType: "agent",
+        objectId: served.id,
+        detail: {
+          phase: "dispatch",
+          agentId: served.id,
+          agentName: served.name,
+          model: served.model,
+          lifecycleStatus: "suspended",
+          lifecycleReason: served.lifecycleReason,
+          ...(args.projectId ? { projectId: args.projectId } : {}),
+        },
+        effect: "deny",
+        ruleId: "agent-suspended-dispatch-refused",
+        ruleChain: [],
+        reason: `agent '${served.name}' is suspended${served.lifecycleReason ? ` (${served.lifecycleReason})` : ""} — a suspended agent refuses dispatch until its steward returns it to service`,
+      })
+      .returning({ id: auditLog.id });
+    sink.auditLogId = lcRow?.id ?? null;
+    return {
+      ok: false,
+      status: 409,
+      error: "agent_suspended",
+      detail: `agent '${served.name}' is suspended${served.lifecycleReason ? `: ${served.lifecycleReason}` : ""} — its steward or an admin can return it to service`,
+    };
+  }
   if (served.lifecycleStatus === "retired") {
     const [lcRow] = await db
       .insert(auditLog)
@@ -2544,6 +2579,9 @@ export function registerAgentConnectorRoutes(
   db: Db,
   opts: { dataKey?: string } = {},
 ) {
+  // ADR-0168 amendment item 6 — steward / successor / lifecycle / review.
+  registerAgentStewardshipRoutes(app, db);
+
   /**
    * ADR-0034 amendment — WRITE-TIME EGRESS CHECK for a credential `baseUrl`.
    *
@@ -2988,7 +3026,10 @@ export function registerAgentConnectorRoutes(
   // REL-10: bounded — `limit` (default LIST_DEFAULT_LIMIT, max LIST_MAX_LIMIT)
   app.get("/v1/agents", async (req) => {
     const { limit } = listLimitQuery.parse(req.query);
-    return { agents: await db.select().from(agents).orderBy(agents.name).limit(limit) };
+    // ADR-0168 amendment item 6: each row carries its stewardship view
+    // (stewardName, successorName, orphaned, reviewOverdue, cadence) computed
+    // at read time — no stored flag.
+    return { agents: await withStewardship(db, await db.select().from(agents).orderBy(agents.name).limit(limit)) };
   });
 
   // -------------------------------------------------------------------------
@@ -3176,9 +3217,12 @@ export function registerAgentConnectorRoutes(
       }
       ownerEmail = owner.email;
     }
+    // ADR-0168 item 6: the successor stepping up leaves the successor slot
+    // empty (the DB CHECK keeps steward and successor two different people)
+    const promotesSuccessor = !!body.ownerUserId && body.ownerUserId === agent.successorUserId;
     const [row] = await db
       .update(agents)
-      .set({ ownerUserId: body.ownerUserId })
+      .set({ ownerUserId: body.ownerUserId, ...(promotesSuccessor ? { successorUserId: null } : {}) })
       .where(eq(agents.id, agentId))
       .returning();
     await db.insert(auditLog).values({
@@ -3190,6 +3234,7 @@ export function registerAgentConnectorRoutes(
         from: agent.ownerUserId,
         to: body.ownerUserId,
         ...(ownerEmail ? { ownerEmail } : {}),
+        ...(promotesSuccessor ? { promotedSuccessor: true } : {}),
       },
       effect: "allow",
       ruleId: body.ownerUserId ? "agent-owner-set" : "agent-owner-cleared",
@@ -3255,7 +3300,11 @@ export function registerAgentConnectorRoutes(
           ? `agent '${agent.name}' retired: ${body.reason} — dispatch now refuses with 409 agent_retired; grants and history remain readable`
           : body.status === "deprecated"
             ? `agent '${agent.name}' deprecated: ${body.reason} — a WARNING in the inventory; dispatch is not blocked`
-            : `agent '${agent.name}' returned to active (was ${agent.lifecycleStatus})`,
+            : body.status === "suspended"
+              ? `agent '${agent.name}' suspended: ${body.reason} — dispatch now refuses with 409 agent_suspended until it returns to service`
+              : body.status === "active"
+                ? `agent '${agent.name}' returned to active (was ${agent.lifecycleStatus})`
+                : `agent '${agent.name}' moved to ${body.status}: ${body.reason} — a WARNING in the inventory; dispatch is not blocked`,
     });
     return row;
   });

@@ -12,6 +12,8 @@ import s from "./demoGovernance.module.css";
 import rec from "./record.module.css";
 import { DependencyGraphPanel } from "./DependencyGraphPanel";
 import { RiskLibraryPicker } from "./RiskLibraryPicker";
+import { AgentStewardshipLine } from "../integrations/AgentStewardship";
+import type { AgentStewardship } from "../integrations/agentStewardship";
 import {
   ACTIVITY_STATUS,
   PHASES,
@@ -39,6 +41,7 @@ interface FrameworksResponse {
 interface AgentCardResponse {
   agent: { id: string; name: string; provider: string; model: string | null; tier: string; modes: string[]; enabled: boolean; lifecycleStatus: string; halted: boolean; haltedReason: string | null; hasSystemPrompt: boolean };
   owner: { id: string | null; name: string | null; state: string };
+  stewardship?: AgentStewardship;
   purpose: { intendedUses: string[]; limitations: string[]; source: string };
   dataSources: { declared: Array<{ cardId: string; claims: string[] }>; note: string };
   guardrails: { modes: Record<string, string>; blocksInput: boolean; blocksOutput: boolean; provenance: string[] };
@@ -364,8 +367,9 @@ function AgentCard({ id, fallback }: { id: string; fallback: OverviewResponse["s
       {card.isError ? <p className={v.errLine}>Agent card could not be loaded: {(card.error as Error).message}</p> : card.data ? (
         <div className={v.stack}>
           <p className={v.dim}>
-            {providerLabel(card.data.agent.provider)} · {card.data.agent.model ?? "default model"} · Owner: {card.data.owner.name ?? (card.data.owner.state === "unowned" ? "unassigned" : humanize(card.data.owner.state))}
+            {providerLabel(card.data.agent.provider)} · {card.data.agent.model ?? "default model"}
           </p>
+          <AgentStewardshipLine stewardship={card.data.stewardship} />
           <div>
             <strong>Declared purpose</strong>
             {card.data.purpose.intendedUses.length

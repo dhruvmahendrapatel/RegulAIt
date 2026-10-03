@@ -402,7 +402,8 @@ export async function computePostureReport(
     : [];
   const disabledOwners = new Set(agentOwnerRows.filter((u) => u.disabledAt !== null).map((u) => u.id));
   const ownershipCounts = { owned: 0, unowned: 0, orphaned: 0 };
-  const lifecycleCounts = { active: 0, deprecated: 0, retired: 0 };
+  // ADR-0168 item 6 widened the vocabulary; every status is counted (zeros included)
+  const lifecycleCounts = { proposed: 0, active: 0, under_review: 0, suspended: 0, deprecated: 0, retired: 0 };
   for (const a of agentRows) {
     ownershipCounts[ownershipFlagFor(a.ownerUserId, a.ownerUserId !== null && disabledOwners.has(a.ownerUserId))] += 1;
     lifecycleCounts[a.lifecycleStatus] += 1;
@@ -414,7 +415,8 @@ export async function computePostureReport(
     note:
       "ownership is a governance record, not authentication: 'unowned' agents have no recorded " +
       "owner (a flag, never a default); 'orphaned' agents have an owner whose account is " +
-      "deactivated. Retired agents refuse dispatch; deprecated agents only warn. Orphan " +
+      "deactivated. Retired and suspended agents refuse dispatch; proposed, under-review and " +
+      "deprecated agents only warn. Orphan " +
       "detection sees only this deployment's own user rows.",
   };
 

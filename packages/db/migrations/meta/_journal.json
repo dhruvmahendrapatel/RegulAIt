@@ -917,6 +917,13 @@
       "version": "7",
       "when": 1785066000000,
       "tag": "0131_governance_review_policy",
+        "breakpoints": true
+      },
+      {
+      "idx": 132,
+      "version": "7",
+      "when": 1785067000000,
+      "tag": "0132_agent_stewardship",
       "breakpoints": true
     }
   ]

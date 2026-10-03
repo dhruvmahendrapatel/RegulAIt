@@ -95,6 +95,12 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /v1/users/:userId/servers/:serverId/tools",
   "POST /mcp/:serverId",
   "POST /v1/agents/:agentId/invoke",
+  // ADR-0168 amendment item 6 — agent stewardship. The gate is "an admin OR
+  // this agent's CURRENT steward", checked inside the handler (403
+  // not_agent_steward for anyone else): a steward who is not an admin must be
+  // able to hand the agent over, name a successor and record its review.
+  "PATCH /v1/agents/:agentId/stewardship",
+  "POST /v1/agents/:agentId/stewardship/review",
   // ADR-0065 — creating a training job. Its gate is the caller's OWN
   // entitlement to the base agent the customisation is anchored to, checked
   // inside the handler by the same `evaluateAgent` path an invoke takes: a

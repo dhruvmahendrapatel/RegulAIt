@@ -1,5 +1,6 @@
 /**
- * Agents — the global agent catalog (create with provider/tier/model/pricing,
+ * Agents — stewardship (ADR-0168 item 6: steward, successor, lifecycle,
+ * review), the global agent catalog (create with provider/tier/model/pricing,
  * enable/disable), the ADR-0023 admin-authored BASE system prompt, per-user
  * agent grants, the per-user agent policy (default, cost ceiling, routing,
  * run budget), and the per-user entitlement view.
@@ -22,6 +23,7 @@ import {
   useUsers,
   userOpts,
 } from "../adminKit";
+import { StewardshipCard } from "./AgentStewardship";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -60,6 +62,12 @@ export default function AgentsPage() {
         info={<p>The global catalog is decoupled from entitlement: registering an agent grants nobody anything. Pricing feeds pillar 5's meters; the tier feeds pillar 6's routing.</p>}
       />
       <div className={v.stack}>
+        <StewardshipCard
+          agents={agents.data?.agents}
+          users={users.data?.users}
+          loading={agents.isLoading}
+          failed={!!agents.error && !agents.data}
+        />
         <Card flush title="Catalog">
           <Table<AdminAgent>
             columns={[

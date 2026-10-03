@@ -1597,7 +1597,20 @@ export const revocations = pgTable(
  *                  refuses with a named 409 (`agent_retired`, the ADR-0045
  *                  gate idiom). Grants and history stay readable — rows are
  *                  never deleted; re-registering is a NEW agent. */
-export const AGENT_LIFECYCLE_STATUSES = ["active", "deprecated", "retired"] as const;
+/*
+ * ADR-0168 amendment item 6 (migration 0132) widens the vocabulary for agent
+ * stewardship: `proposed` (registered, not yet in service), `under_review`
+ * (a steward is reviewing it) and `suspended` (temporarily OUT OF SERVICE —
+ * dispatch refuses with a named 409 `agent_suspended`, exactly like retired
+ * but reversible). proposed / under_review warn only, like deprecated. */
+export const AGENT_LIFECYCLE_STATUSES = [
+  "proposed",
+  "active",
+  "under_review",
+  "suspended",
+  "deprecated",
+  "retired",
+] as const;
 export type AgentLifecycleStatus = (typeof AGENT_LIFECYCLE_STATUSES)[number];
 
 export const agents = pgTable("agents", {
@@ -1631,6 +1644,16 @@ export const agents = pgTable("agents", {
     .default("active"),
   lifecycleReason: text("lifecycle_reason"),
   lifecycleChangedAt: timestamp("lifecycle_changed_at", { withTimezone: true }),
+  // ADR-0168 amendment item 6 (migration 0132) — STEWARDSHIP. The steward is
+  // `ownerUserId` above (one accountable-human record, named `stewardUserId`
+  // in the API). The successor takes over when the steward leaves; a DB CHECK
+  // (agents_successor_not_steward_ck) keeps the two different people. FKs ON
+  // DELETE SET NULL in SQL. "Orphaned" and "review overdue" are computed at
+  // read time — no stored flag.
+  successorUserId: uuid("successor_user_id"),
+  nextReviewAt: timestamp("next_review_at", { withTimezone: true }),
+  lastReviewedAt: timestamp("last_reviewed_at", { withTimezone: true }),
+  lastReviewedByUserId: uuid("last_reviewed_by_user_id"),
   // OPTIMIZATION §7/§8: list price per million tokens; null = unpriced, the
   // optimizer will never route toward (or estimate savings against) it.
   costPerMTokIn: doublePrecision("cost_per_mtok_in"),
@@ -8310,7 +8333,7 @@ export const sodRuleSides = pgTable(
     ),
     check(
       "sod_rule_sides_lifecycle_value_check",
-      sql`${t.patternDimension} <> 'lifecycle_status' OR ${t.patternValue} IN ('active', 'deprecated', 'retired')`,
+      sql`${t.patternDimension} <> 'lifecycle_status' OR ${t.patternValue} IN ('proposed', 'active', 'under_review', 'suspended', 'deprecated', 'retired')`,
     ),
     index("sod_rule_sides_rule_idx").on(t.ruleId),
   ],

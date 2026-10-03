@@ -184,6 +184,42 @@ for (const userId of [adminId, danaId, averyId]) {
   }
 }
 
+// --- ADR-0168 item 6: agent stewardship ----------------------------------
+// Every seeded agent gets a named steward, a successor and a staggered next
+// review, through the REAL audited routes — except `grok`, deliberately left
+// with NO steward (only a successor) so the inventory shows one "Orphaned"
+// flag and the demo's unowned-agent alert (an approved use case runs on grok)
+// keeps its executable "assign an owner" remediation. Converges on re-seed:
+// an agent that already carries any stewardship record is left alone, so a
+// human's later decisions are never overwritten.
+{
+  const DAY = 86_400_000;
+  const STEWARDSHIP: Record<string, { steward: string | null; successor: string; reviewInDays: number | "record" }> = {
+    "fast-mock": { steward: adminId, successor: danaId, reviewInDays: 74 },
+    "balanced-mock": { steward: adminId, successor: danaId, reviewInDays: "record" },
+    "premium-mock": { steward: adminId, successor: averyId, reviewInDays: 131 },
+    "claude-opus": { steward: danaId, successor: adminId, reviewInDays: "record" },
+    "gpt-5": { steward: danaId, successor: adminId, reviewInDays: 46 },
+    "gemini-pro": { steward: averyId, successor: adminId, reviewInDays: 158 },
+    grok: { steward: null, successor: danaId, reviewInDays: 102 },
+  };
+  const rows: Json[] = (await call("GET", "/v1/agents")).agents ?? [];
+  const adaAuth = { authorization: `Bearer ${keys.admin}` };
+  for (const [name, plan] of Object.entries(STEWARDSHIP)) {
+    const row = rows.find((a) => a.name === name);
+    if (!row || row.ownerUserId || row.successorUserId || row.nextReviewAt || row.lastReviewedAt) continue;
+    await call("PATCH", `/v1/agents/${row.id}/stewardship`, {
+      ...(plan.steward ? { stewardUserId: plan.steward } : {}),
+      successorUserId: plan.successor,
+      ...(typeof plan.reviewInDays === "number"
+        ? { nextReviewAt: new Date(Date.now() + plan.reviewInDays * DAY).toISOString() }
+        : {}),
+    });
+    // a review recorded today (by Ada) schedules the next one by the cadence
+    if (plan.reviewInDays === "record") await call("POST", `/v1/agents/${row.id}/stewardship/review`, {}, adaAuth);
+  }
+}
+
 // --- per-user agent policy (§4 default + ceiling, §5.2 run budget) -------
 // Upsert, so re-running converges rather than duplicating. The ceilings are
 // real: Avery is capped at tier 1, so the premium/frontier agents are denied

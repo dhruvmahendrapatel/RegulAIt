@@ -22,6 +22,7 @@ import { z } from "zod";
 import { agents, aiUseCases, eq, modelCards, sql, users, type Db } from "@regulait/db";
 import { resolveGuardrailPolicy } from "./guardrails.js";
 import { loadCardsForSubject } from "./mrm.js";
+import { stewardshipViews } from "./agent-stewardship.js";
 
 const params = z.object({ agentId: z.string().uuid() });
 
@@ -46,6 +47,8 @@ export function registerAgentCardRoutes(app: FastifyInstance, db: Db): void {
     );
 
     const guardrails = await resolveGuardrailPolicy(db, { agentId });
+    // ADR-0168 item 6 — steward, successor, orphaned / review-overdue flags
+    const stewardship = (await stewardshipViews(db, [agent], now)).get(agent.id)!;
 
     // use cases that name this agent among their intended agents (jsonb array)
     const useCases = await db
@@ -70,6 +73,7 @@ export function registerAgentCardRoutes(app: FastifyInstance, db: Db): void {
       owner: owner
         ? { id: owner.id, name: owner.displayName || owner.email, state: owner.disabledAt ? "orphaned" : "owned" }
         : { id: null, name: null, state: "unowned" },
+      stewardship,
       purpose: {
         /** DECLARED by model-card authors — not verified by the platform */
         intendedUses: cards.map((c) => c.intendedUse),
