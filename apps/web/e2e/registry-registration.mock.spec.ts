@@ -84,6 +84,12 @@ async function mockApi(page: Page) {
     if (p === "/v1/agents") return json(route, { agents: [{ id: AGENT, name: "Service assistant", provider: "mock", model: "mock-balanced" }] });
     if (p === "/v1/vendors") return json(route, { vendors: [] });
     if (p === "/v1/risks" && method === "POST") return json(route, { id: "risk" }, 201);
+    // the home page's own reads: shaped empties, not `{}` — an array-less body
+    // crashed Home intermittently and hid its "Register an AI use case" link
+    // (CI 37140831202)
+    if (p === "/v1/approvals") return json(route, { approvals: [] });
+    if (p === "/v1/usage-events") return json(route, { events: [] });
+    if (p === "/v1/setup/status") return json(route, { complete: true, doneCount: 0, totalCount: 0, steps: [] });
     return json(route, {});
   });
   return { created };
@@ -198,7 +204,7 @@ test.describe("ADR-0168: one registry, one way in", () => {
     // the home page's shortcut goes to the same place (a first-run dialog may
     // sit over the page under these mocks, so the link is found by its text)
     await page.goto("/ui/");
-    await expect(page.locator("a", { hasText: "Register an AI use case" })).toHaveAttribute("href", "/ui/admin/governance/intake");
+    await expect(page.getByRole("link", { name: "Register an AI use case" })).toHaveAttribute("href", "/ui/admin/governance/intake");
   });
 });
 

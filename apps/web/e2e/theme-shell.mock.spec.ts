@@ -72,8 +72,8 @@ test.describe("ADR-0169: the auto-hiding rail", () => {
     await openRegistry(page);
     const nav = rail(page);
     await expect(nav).toHaveAttribute("data-expanded", "false");
-    expect(await railWidth(page)).toBeLessThanOrEqual(64);
-    expect(await mainX(page)).toBeLessThanOrEqual(64);
+    await expect.poll(() => railWidth(page)).toBeLessThanOrEqual(64);
+    await expect.poll(() => mainX(page)).toBeLessThanOrEqual(64);
     // the names a screen reader (and every nav spec) relies on are still there
     for (const label of ["Home", "Posture", "Trust & evidence", "Use cases", "AI intake", "Risks"]) {
       const link = nav.getByRole("link", { name: label, exact: true });
@@ -98,7 +98,7 @@ test.describe("ADR-0169: the auto-hiding rail", () => {
     await expect(rail(page).getByText("Shadow-AI discovery", { exact: true })).toBeVisible();
     await page.mouse.move(900, 600);
     await expect(rail(page)).toHaveAttribute("data-expanded", "false");
-    expect(await railWidth(page)).toBeLessThanOrEqual(64);
+    await expect.poll(() => railWidth(page)).toBeLessThanOrEqual(64);
   });
 
   test("keyboard focus opens it and the content makes room; Enter navigates and closes; Escape closes", async ({ page }) => {
@@ -120,7 +120,7 @@ test.describe("ADR-0169: the auto-hiding rail", () => {
     await page.keyboard.press("Enter");
     await expect(page).toHaveURL(/\/ui\/admin\/risks$/);
     await expect(rail(page)).toHaveAttribute("data-expanded", "false");
-    expect(await mainX(page)).toBeLessThanOrEqual(64);
+    await expect.poll(() => mainX(page)).toBeLessThanOrEqual(64);
     // back in, then Escape
     await page.keyboard.press("Shift+Tab");
     await expect(rail(page)).toHaveAttribute("data-expanded", "true");
@@ -163,8 +163,8 @@ test.describe("ADR-0169: the auto-hiding rail", () => {
     await expect(pin).toHaveAttribute("aria-pressed", "true");
     await page.mouse.move(900, 600);
     await expect(rail(page)).toHaveAttribute("data-expanded", "true");
-    expect(await railWidth(page)).toBeGreaterThanOrEqual(220);
-    expect(await mainX(page)).toBeGreaterThanOrEqual(220);
+    await expect.poll(() => railWidth(page)).toBeGreaterThanOrEqual(220);
+    await expect.poll(() => mainX(page)).toBeGreaterThanOrEqual(220);
     expect(await page.evaluate(() => localStorage.getItem("regulait.rail.pinned"))).toBe("1");
     await expectAxeClean(page, "registry, rail pinned");
 
@@ -172,7 +172,7 @@ test.describe("ADR-0169: the auto-hiding rail", () => {
     await expect(page.getByRole("heading", { level: 1, name: "AI registry" })).toBeVisible();
     await expect(rail(page)).toHaveAttribute("data-expanded", "true");
     await expect(rail(page).getByRole("button", { name: "Pin navigation" })).toHaveAttribute("aria-pressed", "true");
-    expect(await mainX(page)).toBeGreaterThanOrEqual(220);
+    await expect.poll(() => mainX(page)).toBeGreaterThanOrEqual(220);
 
     // unpin by keyboard: the button is reachable and announces its state
     await rail(page).getByRole("button", { name: "Pin navigation" }).focus();
