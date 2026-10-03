@@ -36,6 +36,30 @@
   background: var(--primary-strong);
   border-color: var(--primary-strong);
 }
+/* Dark theme: the primary is TONAL — a Signal tint fill with Signal text and
+   edge — rather than a solid neon block that outshines the content. The
+   signal-700 on signal-tint pair is one brand-contract already measures
+   (8.5:1). Both dark selectors, matching tokens.css. */
+@media (prefers-color-scheme: dark) {
+  :global(:root:not([data-theme="light"])) .btnPrimary {
+    background: var(--rg-signal-tint);
+    border-color: var(--rg-signal-700);
+    color: var(--rg-signal-700);
+  }
+  :global(:root:not([data-theme="light"])) .btnPrimary:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--rg-signal) 22%, var(--rg-surface));
+    border-color: var(--rg-signal-700);
+  }
+}
+:global(:root[data-theme="dark"]) .btnPrimary {
+  background: var(--rg-signal-tint);
+  border-color: var(--rg-signal-700);
+  color: var(--rg-signal-700);
+}
+:global(:root[data-theme="dark"]) .btnPrimary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--rg-signal) 22%, var(--rg-surface));
+  border-color: var(--rg-signal-700);
+}
 .btnDanger {
   composes: btn;
   color: var(--danger);

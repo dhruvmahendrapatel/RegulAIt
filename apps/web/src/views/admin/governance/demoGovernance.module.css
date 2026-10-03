@@ -258,10 +258,12 @@
   flex-wrap: wrap;
 }
 
+/* Explanation, not action: a neutral rule and fill. Signal Cyan is kept for
+   things you can click. */
 .callout {
-  border-left: 3px solid var(--rg-signal);
+  border-left: 3px solid var(--border-strong);
   padding: var(--s1) var(--s2);
-  background: var(--rg-signal-tint);
+  background: var(--surface-2);
   color: var(--text-dim);
   font-size: var(--text-sm);
 }
