@@ -10,6 +10,11 @@
  * NEW questionnaire version, which starts a new review round; then it lands on
  * the record. Risks, frameworks and the stack stay as recorded — they are
  * changed on the record itself.
+ *
+ * ADR-0171: the edits are kept as the owner's own server-side draft for this
+ * use case (offered back on return), leaving with unsaved edits asks first,
+ * Cancel and Back wait while the resubmission is in flight, and each yes/no
+ * answer has plain-language help and a "Not sure" choice.
  */
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
@@ -21,10 +26,12 @@ import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, Input, Select, Textarea } from "../../../ui/kit";
 import { useToast } from "../../../ui/toast";
 import { QueryGate } from "../adminKit";
+import { useSession } from "../../../session/SessionContext";
 import v from "../../views.module.css";
 import k from "../../../ui/kit.module.css";
 import s from "./demoGovernance.module.css";
 import rg from "./registration.module.css";
+import ix from "./intakeHelp.module.css";
 import {
   AFFECTED_PERSON_OPTIONS,
   BIOMETRIC_OPTIONS,
@@ -33,12 +40,19 @@ import {
   DECISION_AUTONOMY_OPTIONS,
   DEPLOYMENT_OPTIONS,
   HintField,
+  MissingAnswers,
   MultiAnswerField,
   PURPOSE_DOMAIN_OPTIONS,
+  SCREENING_HELP,
   SECTOR_OPTIONS,
   StageHeading,
   optionList,
+  questionId,
 } from "./intakeFields";
+import { canonicalDigest } from "./intakeCheckpoint";
+import { savedAtText, useIntakeDraft, type DraftStatus } from "./intakeDraft";
+import { useLeaveGuard } from "./LeaveGuard";
+import { missingFrom, questionLabel } from "./registrationModel";
 import { deriveDataSensitivity } from "./dataSensitivity";
 import {
   answersBlock,
@@ -50,6 +64,7 @@ import {
   sameAnswers,
   sameEuAnswers,
   splitQuestionnaire,
+  type BooleanAnswer,
   type QuestionnaireSection,
   type ScreeningForm,
 } from "./resubmission";
@@ -64,6 +79,25 @@ type Detail = UseCaseLifecycleDetail & {
   useCase: UseCaseLifecycleDetail["useCase"] & { name?: string; description?: string; businessContext?: string; workflowInstanceId?: string | null };
   instance?: { id: string } | null;
 };
+
+/** what a resubmission keeps in its draft (opaque to the server) */
+interface ResubmitDraft {
+  kind: "resubmission";
+  version: 1;
+  step: number;
+  description: string;
+  businessContext: string;
+  form: ScreeningForm;
+  affected: string;
+  sections: QuestionnaireSection[];
+}
+
+function readResubmitDraft(state: unknown): ResubmitDraft | null {
+  if (!state || typeof state !== "object") return null;
+  const d = state as Partial<ResubmitDraft>;
+  if (d.kind !== "resubmission" || d.version !== 1 || !d.form || !Array.isArray(d.sections) || typeof d.step !== "number") return null;
+  return d as ResubmitDraft;
+}
 
 // the registration screen's questions, in its order
 const BOOLEAN_FIELDS: Array<[keyof ScreeningForm, string]> = [
@@ -110,6 +144,7 @@ function ResubmitForm(props: { useCaseId: string; detail: Detail; record: string
   const { detail: d } = props;
   const resubmission = d.resubmission!;
   const navigate = useNavigate();
+  const { auth } = useSession();
   const queryClient = useQueryClient();
   const { toast } = useToast();
   const current = {
@@ -134,15 +169,58 @@ function ResubmitForm(props: { useCaseId: string; detail: Detail; record: string
   // a retry after a failed questionnaire post does not PATCH the same body twice
   const patched = useRef<string | null>(null);
 
+  // ---- the draft for this use case (AER-050) ------------------------------
+  const initial = useRef(canonicalDigest({ description, businessContext, form, affected, sections }));
+  const edited = canonicalDigest({ description, businessContext, form, affected, sections }) !== initial.current;
+  const [done, setDone] = useState(false);
+  const dirty = edited && !done;
+  const draft = useIntakeDraft<ResubmitDraft>({
+    scope: props.useCaseId,
+    enabled: auth?.via === "session",
+    snapshot: dirty ? { kind: "resubmission", version: 1, step, description, businessContext, form, affected, sections } : null,
+  });
+  const resumeDraft = () => {
+    const record = draft.resume();
+    const saved = record ? readResubmitDraft(record.state) : null;
+    if (!saved) {
+      void draft.startFresh();
+      return;
+    }
+    setDescription(saved.description);
+    setBusinessContext(saved.businessContext);
+    setForm(saved.form);
+    setAffected(saved.affected);
+    setSections(saved.sections);
+    setStep(Math.max(DESCRIBE, Math.min(REVIEW, saved.step)));
+  };
+  const kept = draftKept(draft.status);
+  const leave = useLeaveGuard({
+    when: dirty || busy,
+    unloadWhen: busy || (dirty && draft.unsaved),
+    title: busy ? "Your resubmission is still being sent" : "Leave this resubmission?",
+    body: busy ? (
+      <p>If you leave now, open the use case again to check whether it went back for review before resubmitting.</p>
+    ) : kept && !draft.unsaved ? (
+      <p>Your changes are saved as a draft for this use case. Open Update and resubmit again to pick up where you left off.</p>
+    ) : kept ? (
+      <p>Your latest changes are being saved. Leaving saves them first; open Update and resubmit again to pick up where you left off.</p>
+    ) : (
+      <p>Your changes are not saved anywhere else and will be lost if you leave now.</p>
+    ),
+    beforeLeave: () => (kept ? draft.flush() : undefined),
+  });
+
   const stageHeading = useRef<HTMLHeadingElement>(null);
   const shownStep = useRef(step);
   useEffect(() => {
     if (shownStep.current === step) return;
     shownStep.current = step;
     stageHeading.current?.focus();
+    void draft.flush();
   }, [step]);
 
-  const answers: IntakeScreeningAnswers | null = answersFromForm(form, affected !== "");
+  const answers: (IntakeScreeningAnswers & { unsure?: string[] }) | null = answersFromForm(form, affected !== "");
+  const missing = missingFrom((key) => (key === "affectedPerson" ? affected : form[key as keyof ScreeningForm]));
   const describeComplete = Boolean(description.trim());
   const canContinue = step === DESCRIBE ? describeComplete : step === CLASSIFY ? describeComplete && answers !== null : true;
   const goTo = (next: number) => setStep(Math.max(0, Math.min(REVIEW, next)));
@@ -178,6 +256,9 @@ function ResubmitForm(props: { useCaseId: string; detail: Detail; record: string
         stageId: "questionnaire",
         content: rebuildQuestionnaire(parsed.current.preamble, sections, answers),
       });
+      setDone(true);
+      // resubmitted: the draft has done its job
+      void draft.discard();
       toast("Resubmitted for review", "success");
       void queryClient.invalidateQueries({ queryKey: ["governance"] });
       void queryClient.invalidateQueries({ queryKey: ["admin", "use-cases"] });
@@ -205,13 +286,26 @@ function ResubmitForm(props: { useCaseId: string; detail: Detail; record: string
         info={<p>Resubmitting saves a new questionnaire version and starts a new review round. Risks, frameworks and the linked stack stay as recorded; change them on the use case itself.</p>}
         actions={
           <div className={rg.headerActions}>
-            <Link to={props.record} className={`${k.btnGhost} ${rg.linkBtn}`}>Cancel</Link>
-            {step > DESCRIBE && <Button onClick={() => goTo(step - 1)}>Back</Button>}
+            {busy ? <Button variant="ghost" disabled>Cancel</Button> : <Link to={props.record} className={`${k.btnGhost} ${rg.linkBtn}`}>Cancel</Link>}
+            {step > DESCRIBE && <Button disabled={busy} onClick={() => goTo(step - 1)}>Back</Button>}
             {primary}
           </div>
         }
       />
+      {leave.dialog}
       <div className={v.stack}>
+        {draft.status.kind === "offer" ? (
+          <div className={ix.resume}>
+            <p>
+              You have saved changes for this resubmission from {savedAtText(draft.status.draft.updatedAt)}.
+              {dirty ? " Until you choose, changes on this page are not saved." : ""}
+            </p>
+            <div className={ix.resumeActions}>
+              <Button size="sm" variant="primary" onClick={resumeDraft}>Resume your draft</Button>
+              <Button size="sm" onClick={() => void draft.startFresh()}>Start fresh</Button>
+            </div>
+          </div>
+        ) : null}
         <div className={s.callout} role="note" aria-label="Why it was sent back">
           <strong>Sent back for information{resubmission.returnedByName ? ` by ${resubmission.returnedByName}` : ""}.</strong>{" "}
           {resubmission.returnReason ?? "No reason was recorded."}
@@ -224,6 +318,7 @@ function ResubmitForm(props: { useCaseId: string; detail: Detail; record: string
             </li>
           ))}
         </ol>
+        <ResubmitDraftLine status={draft.status} dirty={dirty} unsaved={draft.unsaved} />
 
         {step === DESCRIBE && (
           <Card title={<StageHeading headingRef={stageHeading}>Describe the use case</StageHeading>}>
@@ -244,16 +339,16 @@ function ResubmitForm(props: { useCaseId: string; detail: Detail; record: string
         {step === CLASSIFY && (
           <Card title={<StageHeading headingRef={stageHeading}>Check the screening answers</StageHeading>}>
             <form className={rg.form} onSubmit={(event) => { event.preventDefault(); if (canContinue) goTo(QUESTIONNAIRE); }}>
-              <p className={v.dim}>These answers set the EU AI Act risk tier. A changed answer is screened again when you resubmit.</p>
+              <p className={v.dim}>These answers set the EU AI Act risk tier. A changed answer is screened again when you resubmit. If you are not sure, choose “Not sure”: it counts as yes until a reviewer confirms it.</p>
               <section className={rg.group} aria-labelledby="resubmit-purpose">
                 <h3 id="resubmit-purpose" className={rg.groupTitle}>Purpose and people</h3>
                 <div className={rg.grid2}>
-                  <HintField label="Primary purpose domain" hint="The area the output is used in.">
+                  <HintField label="Primary purpose domain" id={questionId("resubmit", "purposeDomain")} hint="The area the output is used in.">
                     <Select value={form.purposeDomain} onChange={(event) => setAnswer("purposeDomain", event.target.value)} required>
                       {optionList("Choose a purpose domain", PURPOSE_DOMAIN_OPTIONS)}
                     </Select>
                   </HintField>
-                  <HintField label="People affected" hint="Whose decisions or data it touches.">
+                  <HintField label="People affected" id={questionId("resubmit", "affectedPerson")} hint="Whose decisions or data it touches.">
                     <Select
                       value={affected}
                       onChange={(event) => {
@@ -265,17 +360,17 @@ function ResubmitForm(props: { useCaseId: string; detail: Detail; record: string
                       {optionList("Choose who is affected", AFFECTED_PERSON_OPTIONS)}
                     </Select>
                   </HintField>
-                  <HintField label="Decision autonomy" hint="How much a person decides before anything happens.">
+                  <HintField label="Decision autonomy" id={questionId("resubmit", "decisionAutonomy")} hint="How much a person decides before anything happens.">
                     <Select value={form.decisionAutonomy} onChange={(event) => setAnswer("decisionAutonomy", event.target.value)} required>
                       {optionList("Choose decision autonomy", DECISION_AUTONOMY_OPTIONS)}
                     </Select>
                   </HintField>
-                  <HintField label="Deployment audience" hint="Who uses it directly.">
+                  <HintField label="Deployment audience" id={questionId("resubmit", "deployment")} hint="Who uses it directly.">
                     <Select value={form.deployment} onChange={(event) => setAnswer("deployment", event.target.value)} required>
                       {optionList("Choose deployment audience", DEPLOYMENT_OPTIONS)}
                     </Select>
                   </HintField>
-                  <HintField label="Biometric use">
+                  <HintField label="Biometric use" id={questionId("resubmit", "biometricUse")} hint="Whether it recognises or checks people by their face, voice, fingerprint or other body features.">
                     <Select value={form.biometricUse} onChange={(event) => setAnswer("biometricUse", event.target.value)} required>
                       {optionList("Choose biometric use", BIOMETRIC_OPTIONS)}
                     </Select>
@@ -286,19 +381,19 @@ function ResubmitForm(props: { useCaseId: string; detail: Detail; record: string
                 <h3 id="resubmit-data" className={rg.groupTitle}>Data and sector</h3>
                 <p className={rg.groupHint}>The strictest data category sets the data sensitivity.</p>
                 <div className={rg.grid2}>
-                  <MultiAnswerField label="Data categories" values={form.dataCategories} options={DATA_CATEGORY_OPTIONS} onChange={(values) => setAnswer("dataCategories", values)} />
-                  <MultiAnswerField label="Sectors" values={form.sectors} options={SECTOR_OPTIONS} onChange={(values) => setAnswer("sectors", values)} />
+                  <MultiAnswerField label="Data categories" id={questionId("resubmit", "dataCategories")} values={form.dataCategories} options={DATA_CATEGORY_OPTIONS} onChange={(values) => setAnswer("dataCategories", values)} />
+                  <MultiAnswerField label="Sectors" id={questionId("resubmit", "sectors")} values={form.sectors} options={SECTOR_OPTIONS} onChange={(values) => setAnswer("sectors", values)} />
                 </div>
               </section>
               <section className={rg.group} aria-labelledby="resubmit-practices">
                 <h3 id="resubmit-practices" className={rg.groupTitle}>What it does in practice</h3>
                 <div className={rg.grid3}>
                   {BOOLEAN_FIELDS.map(([key, label]) => (
-                    <BooleanAnswerField key={key} label={label} value={form[key] as "" | "yes" | "no"} onChange={(value) => setAnswer(key, value)} />
+                    <BooleanAnswerField key={key} id={questionId("resubmit", key)} label={label} help={SCREENING_HELP[key]} value={form[key] as BooleanAnswer} onChange={(value) => setAnswer(key, value)} />
                   ))}
                 </div>
               </section>
-              {!answers ? <p className={v.faint}>Answer every question to continue.</p> : null}
+              <MissingAnswers missing={missing} idPrefix="resubmit" action="continue" />
             </form>
           </Card>
         )}
@@ -343,6 +438,12 @@ function ResubmitForm(props: { useCaseId: string; detail: Detail; record: string
                   {answers ? <span className={v.faint}> {humanize(answers.purposeDomain)} · {humanize(answers.decisionAutonomy)}</span> : null}
                 </span>
               </div>
+              {answers?.unsure?.length ? (
+                <div className={v.listRow}>
+                  <strong>Not sure about</strong>
+                  <span className={v.grow}>{answers.unsure.map(questionLabel).join(", ")} <span className={v.faint}>— counted as yes; your reviewers see that you were not sure</span></span>
+                </div>
+              ) : null}
               {nextSensitivity ? (
                 <div className={v.listRow}>
                   <strong>Data sensitivity</strong>
@@ -366,4 +467,19 @@ function ResubmitForm(props: { useCaseId: string; detail: Detail; record: string
       </div>
     </>
   );
+}
+
+/** the draft is being kept on the server */
+const draftKept = (status: DraftStatus) => status.kind !== "off" && status.kind !== "error" && status.kind !== "done";
+
+function ResubmitDraftLine(props: { status: DraftStatus; dirty: boolean; unsaved: boolean }) {
+  const { status } = props;
+  if (!props.dirty || status.kind === "done" || status.kind === "loading" || status.kind === "offer") return null;
+  const text =
+    status.kind === "off" || status.kind === "error"
+      ? "Your changes can't be saved as a draft right now: they stay on this page until you resubmit."
+      : status.kind === "saved" && !props.unsaved
+        ? `Draft saved ${savedAtText(status.at)}. Only you can open it.`
+        : "Saving your draft…";
+  return <p className={ix.draftLine}>{text}</p>;
 }

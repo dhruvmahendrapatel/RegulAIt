@@ -20,13 +20,14 @@ import { Link } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../api/client";
 import type { Approval, DirectoryUser, ReviewPolicy, UseCaseLifecycleDetail, WorkflowDetailResponse } from "../../api/types";
-import { ago, humanize } from "../../api/format";
+import { ago, frameworkLabel, humanize } from "../../api/format";
 import { useSession } from "../../session/SessionContext";
 import { Badge, Button, Field, Input, Select, Textarea } from "../../ui/kit";
 import { useToast } from "../../ui/toast";
 import { QuestionnaireView } from "../admin/governance/UseCaseQuestionnaire";
 import { shortDate, type OverviewResponse } from "../admin/governance/useCaseLifecycle";
 import { REVIEW_POLICY_KEY, policyFacts } from "../admin/governance/reviewPolicy";
+import { detailRationales, detailUnsure, questionLabel } from "../admin/governance/registrationModel";
 import {
   OUTCOMES,
   approves,
@@ -207,6 +208,8 @@ function ReviewDrawer(props: { approval: Approval; onClose: () => void; onDecide
 
   const ov = overview.data;
   const controls = ov ? uniqueControls(ov) : [];
+  const rationales = detailRationales(detail.data);
+  const unsure = detailUnsure(detail.data);
   // the risks a risk acceptor may accept: the evidence list's, else the detail read's
   const riskRows: Array<{ id: string; title: string; status: string; residual: string | null }> = ov
     ? ov.risks.map((risk) => ({ id: risk.id, title: risk.title, status: risk.status, residual: risk.residual ? `${risk.residual.likelihood} × ${risk.residual.impact}` : null }))
@@ -294,7 +297,21 @@ function ReviewDrawer(props: { approval: Approval; onClose: () => void; onDecide
                         ) : null}
                       </>
                     ) : <span className={r.muted}>Not screened yet</span>}
+                    {/* ADR-0171: a "not sure" answer counted as yes — the reviewer confirms it */}
+                    {unsure.length ? <p>Owner unsure about: {unsure.map(questionLabel).join(", ")}. <span className={r.muted}>Each was counted as yes; confirm it with the owner.</span></p> : null}
                   </EvidenceRow>
+                  {(ov.useCase.complianceTags ?? []).length ? (
+                    <EvidenceRow label="Frameworks">
+                      <ul>
+                        {(ov.useCase.complianceTags ?? []).map((tag) => (
+                          <li key={tag}>
+                            {frameworkLabel(tag)}
+                            {rationales[tag] ? <span className={r.muted}> — the owner's explanation: {rationales[tag]}</span> : null}
+                          </li>
+                        ))}
+                      </ul>
+                    </EvidenceRow>
+                  ) : null}
                   <EvidenceRow label="Risks">
                     {ov.risks.length === 0 ? <span className={r.muted}>No risks recorded</span> : (
                       <ul>

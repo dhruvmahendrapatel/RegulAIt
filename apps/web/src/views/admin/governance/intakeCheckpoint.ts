@@ -17,8 +17,9 @@
  * current inputs through the gateway's own edit path, or — where the gateway
  * has no edit for a field — refuses the whole retry before sending anything:
  *
- *   use case     PATCH /v1/use-cases/:id edits description, businessContext
- *                and intendedAgentIds while the intake is in flight. It has no
+ *   use case     PATCH /v1/use-cases/:id edits description, businessContext,
+ *                intendedAgentIds and the framework explanations (ADR-0171)
+ *                while the intake is in flight. It has no
  *                edit for name, dataSensitivity or complianceTags (the create
  *                contract fixes them), and takes the stored Classify answers
  *                (screeningAnswers) only from a use case sent back for
@@ -83,6 +84,8 @@ export interface UseCaseInputs {
   intendedAgentIds: string[];
   /** every Classify-step answer (ADR-0168 amendment), stored for resubmission */
   screeningAnswers?: IntakeScreeningAnswers;
+  /** ADR-0171: the proposer's own explanation of why an accepted framework applies, by framework tag */
+  frameworkRationales?: Record<string, string>;
 }
 
 /** what POST /v1/risks is sent, less `useCaseId` (always the checkpoint's own use case) */
@@ -113,11 +116,12 @@ export interface SubmissionCheckpoint {
 
 export const emptyCheckpoint = (): SubmissionCheckpoint => ({ risks: {} });
 
-const USE_CASE_PATCHABLE = ["description", "businessContext", "intendedAgentIds"] as const;
+const USE_CASE_PATCHABLE = ["description", "businessContext", "intendedAgentIds", "frameworkRationales"] as const;
 const USE_CASE_PATCHABLE_LABEL: Record<(typeof USE_CASE_PATCHABLE)[number], string> = {
   description: "the description",
   businessContext: "the business context",
   intendedAgentIds: "the intended agents",
+  frameworkRationales: "the framework explanations",
 };
 const USE_CASE_FIXED: Array<{ key: keyof UseCaseInputs; label: string }> = [
   { key: "name", label: "the use-case name" },
@@ -168,7 +172,8 @@ export function planSubmission(checkpoint: SubmissionCheckpoint, inputs: Submiss
       }
       const patch: UseCasePatch = {};
       for (const key of USE_CASE_PATCHABLE) {
-        if (!same(before[key], inputs.useCase[key])) (patch as Record<string, unknown>)[key] = inputs.useCase[key];
+        // an emptied set of framework explanations is sent as {}, the PATCH that clears them
+        if (!same(before[key], inputs.useCase[key])) (patch as Record<string, unknown>)[key] = inputs.useCase[key] ?? (key === "frameworkRationales" ? {} : undefined);
       }
       // once the questionnaire is stored the use case is WITH ITS REVIEWERS,
       // and nothing about it may change under them (the gateway refuses the

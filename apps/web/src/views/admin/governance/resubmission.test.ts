@@ -94,4 +94,25 @@ describe("resubmission model", () => {
     expect(resubmitPatch(current, { description: "Recommends", businessContext: "" }, full)).toEqual({ screeningAnswers: full });
     expect(resubmitPatch(current, { description: "Suggests", businessContext: "" }, full)).toEqual({ description: "Suggests", businessContext: "Suggests", screeningAnswers: full });
   });
+
+  it("ADR-0171: a Not sure answer is sent as yes and listed in `unsure`; the block lists only EU questions; none means no `unsure` key", () => {
+    const form = { ...formFromAnswers(full), socialScoring: "unsure" as const, euNexus: "unsure" as const };
+    const sent = answersFromForm(form, true)!;
+    expect(sent).toMatchObject({ socialScoring: true, euNexus: true, unsure: ["euNexus", "socialScoring"] });
+    expect(resubmitPatch({ description: "Recommends", businessContext: "Recommends" }, { description: "Recommends", businessContext: "" }, sent)).toEqual({ screeningAnswers: sent });
+    expect(JSON.parse(answersBlock(sent).replace(/^```eu-ai-act-answers\n|```$/g, ""))).toMatchObject({ socialScoring: true, unsure: ["socialScoring"] });
+    // a not-sure answer does not change what the tier is screened on
+    expect(sameEuAnswers(sent, { ...full, socialScoring: true })).toBe(true);
+    expect("unsure" in answersFromForm(formFromAnswers(full), true)!).toBe(false);
+    expect(answersBlock(full)).not.toContain("unsure");
+  });
+
+  it("ADR-0171: a recorded not-sure answer comes back as Not sure (the generative key names the same question)", () => {
+    const form = formFromAnswers({ ...full, socialScoring: true, unsure: ["socialScoring", "generative"] });
+    expect(form.socialScoring).toBe("unsure");
+    expect(form.generatesSyntheticContent).toBe("unsure");
+    expect(form.profilesNaturalPersons).toBe("yes");
+    // a listed answer recorded as no is not turned into a guess
+    expect(formFromAnswers({ ...full, unsure: ["emotionRecognition"] }).emotionRecognition).toBe("no");
+  });
 });

@@ -692,6 +692,10 @@ export interface UseCaseLifecycleDetail {
   risks?: UseCaseRiskAcceptance[];
   /** what the registration screen needs to update and resubmit a use case sent back for information */
   resubmission?: UseCaseResubmission;
+  /** ADR-0171: the owner's own words for why each accepted framework applies ({} when none) */
+  frameworkRationales?: Record<string, string>;
+  /** ADR-0171: the yes/no screening answers the owner was not sure about (each counted as yes) */
+  screeningUnsure?: string[];
 }
 
 export interface ApprovalConditionInput {
@@ -809,7 +813,7 @@ export interface UseCaseResubmission {
   allowed: boolean;
   /** the stored Classify answers; a use case registered before they were
    * stored carries the EU answers of its questionnaire only */
-  screeningAnswers: (EuAiActScreeningAnswers & Partial<IntakeContextAnswers>) | null;
+  screeningAnswers: (EuAiActScreeningAnswers & Partial<IntakeContextAnswers> & { unsure?: string[] }) | null;
   questionnaire: { version: number; content: string } | null;
   returnReason: string | null;
   returnedByName: string | null;
