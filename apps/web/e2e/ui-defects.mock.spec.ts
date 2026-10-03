@@ -276,6 +276,47 @@ test("UIW-07: an empty change description cannot be started — nothing is poste
   expect(posted).toBe(1);
 });
 
+test("UIW-02 / UIW-09: the workflow page names its stages and renders the questionnaire as a document", async ({ page }) => {
+  const content = [
+    "# AI use-case intake questionnaire", "", "## 1. Purpose and business context", "Recommends credit-limit increases with human review.", "",
+    "## 9. EU AI Act risk screening (structured, ADR-0085)", "```eu-ai-act-answers",
+    JSON.stringify({ purposeDomain: "essential-services", affectedPersons: ["customers"], decisionAutonomy: "human-reviews", biometricUse: "none", emotionRecognition: false, socialScoring: false, manipulativeTechniques: false, profilesNaturalPersons: true, safetyComponent: false, interactsWithHumans: true, generatesSyntheticContent: true }),
+    "```", "",
+  ].join("\n");
+  const detail = {
+    instance: {
+      id: "wf-1", status: "blocked_on_approval", createdAt: "2026-10-02T12:00:00Z", initiatorUserId: USER_A.id,
+      change: { description: "Govern the credit assistant", changeType: "ai-use-case-intake", environment: "staging" },
+      definition: { stages: [{ id: "intake", type: "trigger" }, { id: "plan", type: "planning" }, { id: "questionnaire", type: "artifact_generation", output: "use_case_questionnaire" }, { id: "signoff", type: "human_approval" }] },
+      state: { currentStageIndex: 3, stageStatuses: { 0: "completed", 1: "completed", 2: "completed", 3: "running" } },
+      context: {},
+    },
+    artifacts: [{ id: "a1", output: "use_case_questionnaire", version: 1, content }],
+    pendingApprovals: [],
+  };
+  await routeApi(page, async (route, p) => {
+    if (p === "/auth/me") return json(route, authMe(USER_A));
+    if (p === "/v1/me") return json(route, { userId: USER_A.id, isAdmin: true, user: USER_A });
+    if (p === "/v1/workflows/instances/wf-1") return json(route, detail);
+    if (p === "/v1/approvals") return json(route, { approvals: [] });
+    return json(route, {});
+  });
+  await page.goto("/ui/workflows/wf-1");
+  const chip = page.locator('[title="questionnaire · artifact_generation"]');
+  await expect(chip).toHaveText("QuestionnaireArtifact generation");
+  await expect(page.locator('[title="signoff · human_approval"]')).toHaveText("Sign-offHuman approval");
+  expect(await page.getByText("artifact_generation").count()).toBe(0);
+  expect(await page.getByText("use_case_questionnaire").count()).toBe(0);
+  await page.getByText("Use case questionnaire (v1)").click();
+  await expect(page.locator("p", { hasText: "Recommends credit-limit increases with human review." })).toBeVisible();
+  // the fenced JSON is read as a labelled list; the raw markdown (fence, JSON,
+  // platform aside) stays behind "View source", not on the page
+  await expect(page.getByText("Essential services", { exact: false }).first()).toBeVisible();
+  await expect(page.locator("pre", { hasText: "eu-ai-act-answers" })).toBeHidden();
+  await expect(page.getByText("ADR-0085").locator("visible=true")).toHaveCount(0);
+  await expect(page.getByText("\"purposeDomain\"").locator("visible=true")).toHaveCount(0);
+});
+
 test("UXJ-02: selecting the lowest alert brings its detail into the viewport", async ({ page }) => {
   await page.setViewportSize({ width: 1366, height: 768 });
   const alert = (i: number) => ({

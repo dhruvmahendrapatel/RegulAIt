@@ -11,6 +11,7 @@ import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../api/client";
 import type { Approval, CheckResult, WorkflowDetailResponse } from "../../api/types";
 import { ago, approvalStageLabel, humanize } from "../../api/format";
+import { QuestionnaireView } from "../admin/governance/UseCaseQuestionnaire";
 import { useSession } from "../../session/SessionContext";
 import { PageHeader } from "../../shell/AppShell";
 import {
@@ -279,7 +280,11 @@ function MergeGateEvidence(props: { inst: WorkflowDetailResponse }) {
             Submitted: {humanize(art.output)} (v{art.version})
           </summary>
           <div style={{ marginTop: "var(--s0)" }}>
-            <CodeBlock maxHeight="200px">{art.content}</CodeBlock>
+            {art.output === "use_case_questionnaire" ? (
+              <QuestionnaireView content={art.content} />
+            ) : (
+              <CodeBlock maxHeight="200px">{art.content}</CodeBlock>
+            )}
           </div>
         </details>
       ))}

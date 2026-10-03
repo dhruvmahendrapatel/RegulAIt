@@ -9,7 +9,8 @@ import { Link, useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../api/client";
 import type { CheckResult, WorkflowDetailResponse } from "../../api/types";
-import { ago } from "../../api/format";
+import { ago, humanize } from "../../api/format";
+import { QuestionnaireView } from "../admin/governance/UseCaseQuestionnaire";
 import { PageHeader } from "../../shell/AppShell";
 import {
   Badge,
@@ -145,9 +146,9 @@ export default function WorkflowDetailPage() {
                       ? s.stageFailed
                       : s.stage;
               return (
-                <span key={stage.id} className={cls}>
-                  {stage.id}
-                  <span className={s.stageType}>{stage.type}</span>
+                <span key={stage.id} className={cls} title={`${stage.id} · ${stage.type}`}>
+                  {humanize(stage.id)}
+                  <span className={s.stageType}>{humanize(stage.type)}</span>
                 </span>
               );
             })}
@@ -443,10 +444,14 @@ export default function WorkflowDetailPage() {
             {artifacts!.map((a) => (
               <details key={a.id} style={{ marginBottom: "var(--s1)" }}>
                 <summary className={v.dim} style={{ cursor: "pointer" }}>
-                  {a.output} v{a.version}
+                  {humanize(a.output)} (v{a.version})
                 </summary>
                 <div style={{ marginTop: "var(--s0)" }}>
-                  <CodeBlock maxHeight="260px">{a.content}</CodeBlock>
+                  {a.output === "use_case_questionnaire" ? (
+                    <QuestionnaireView content={a.content} />
+                  ) : (
+                    <CodeBlock maxHeight="260px">{a.content}</CodeBlock>
+                  )}
                 </div>
               </details>
             ))}
