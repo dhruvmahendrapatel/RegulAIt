@@ -424,7 +424,8 @@ test("agents: register an agent and save its base system prompt", async () => {
   await reg.getByLabel("Model id (blank = not dispatchable)").fill("mock-e2e");
   await page.getByRole("button", { name: "Register agent" }).click();
   await expect(page.getByText("Agent registered").first()).toBeVisible();
-  await expect(page.getByRole("cell", { name: "e2e-agent" })).toBeVisible();
+  // the agent now appears in the catalog AND the stewardship table (ADR-0168 item 6)
+  await expect(page.getByRole("cell", { name: "e2e-agent", exact: true }).first()).toBeVisible();
 
   // admin base system prompt (governance artifact)
   const promptCard = page.locator("section", { has: page.getByRole("button", { name: "Save prompt" }) });
