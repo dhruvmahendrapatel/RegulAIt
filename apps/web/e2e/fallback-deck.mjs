@@ -49,8 +49,9 @@ const BEATS = [
     beat: "2B",
     persona: "Avery",
     shots: [
-      ["real-05-avery-signoff", "The sign-off waits for Avery, never the proposer"],
-      ["real-05b-avery-approved", "Approved: one audited decision"],
+      ["real-05-avery-signoff", "Avery reviews the evidence in one task panel — never the proposer"],
+      ["real-05a-avery-conditions", "Approve with conditions: a before-go-live condition holds deployment"],
+      ["real-05b-avery-approved", "Approved for six months (high tier): one audited decision"],
     ],
   },
   { beat: "2C", persona: "Pipeline", gate: "real-gate.txt" },

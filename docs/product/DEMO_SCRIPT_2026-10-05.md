@@ -92,11 +92,18 @@ Everything runs on the keyless **mock** provider. No live model, no external net
   evidence you already have; we bring the system into the governed path instead of just blocking
   it. Detection is a signal, not proof — the coverage panel says exactly which sources we saw."
 
-### 1B. AI intake — Ada
-- **URL:** `/ui/admin/governance/intake?source=shadow-ai…` (opened by 1A)
-- **Screen:** the banner *"Prefilled from a shadow-AI finding — only its name and observed
-  use."* Every screening answer is **blank** — the finding did not establish them.
-- **Action — Ada enters the EU AI Act answers** (credit context):
+### 1B. Register the AI use case — Ada
+- **URL:** `/ui/admin/governance/intake?source=shadow-ai…` (opened by 1A) — the **one** way to
+  register a use case; the **AI registry** (`/ui/admin/use-cases`) opens the same page from
+  **Register AI use case**.
+- **Screen:** **Register AI use case** — a numbered stepper (Describe → Classify → Suggestions →
+  Questionnaire → Link stack → Review) and, on the right, **Similar use cases**: anything already
+  registered that looks like this one, so nobody files a duplicate. The banner *"Prefilled from a
+  shadow-AI finding — only its name and observed use."* Every screening answer is **blank** — the
+  finding did not establish them.
+- **Action — Describe:** the name and purpose are prefilled; point at the similar-use-cases rail,
+  then **Continue**.
+- **Action — Classify: Ada enters the EU AI Act answers** (credit context):
   purpose **Essential services** · people affected **Customers** · decision autonomy **Human
   reviews every recommendation** · biometric **None** · sectors **financial services** · data
   categories **personal + financial** · deployment **Customer-facing** · profiles natural persons
@@ -119,11 +126,15 @@ Everything runs on the keyless **mock** provider. No live model, no external net
 
 ## Phase 2 — Assess & Deploy
 
-### 2A. Use-case 360 and risks — Ada
+### 2A. The use-case record and risks — Ada
 - **URL:** **Open the use-case workspace** (link after submit) → `/ui/admin/governance/use-cases/<id>`
-  (the Use cases list also opens it: click a row, then **Open the use-case workspace** in its drawer)
-- **Screen:** status **under review**, **high tier**, 7 tabs: Overview, Frameworks, Risks, Stack,
-  Dependencies, Approvals, Audit.
+  (the AI registry also opens it: click a row, then **Open use case** in its preview)
+- **Screen:** the record's header band — *AI use case*, the name, status **under review**, **high
+  tier**, owner. Overview leads with the **lifecycle tracker** (Proposed → Under review → Approved →
+  Monitoring) and its activities — business context, EU AI Act screening, data and AI models, risks
+  and safeguards, sign-off — each with its status, owner and last update, all derived from what was
+  just submitted (nothing typed twice). Tabs: Overview, Frameworks, Risks, Stack, Dependencies,
+  Approvals, Audit.
 - **Action:**
   1. **Stack** — the agent card for **claude-opus**: declared purpose and owner (unassigned); its
      model card reads **Not signed off** in the **Model cards** list, and the header's facts strip
@@ -136,14 +147,23 @@ Everything runs on the keyless **mock** provider. No live model, no external net
   registrant declares likelihood and impact, and residual risk is recorded against a named
   control."
 
-### 2B. Independent approval — Avery
+### 2B. Independent review — Avery
 - **URL:** `/ui/inbox` (Profile B)
-- **Screen:** *Sign-off · signoff · AI use-case intake: Govern Credit Team LLM Prototype —
-  requested by Ada Admin*, with the submitted questionnaire.
-- **Action:** **Approve** (optional reason). The row moves to *Recently decided*.
-- **Back in Profile A:** the use case now reads **approved**; the **Audit** tab shows the decision.
-- **Say:** "Separation of duties is structural: the sign-off is routed to an independent
-  approver, so the person who registered it cannot approve it. The decision is one audited row."
+- **Screen:** *AI use case sign-off · Govern Credit Team LLM Prototype — requested by Ada Admin*.
+  Click **Review**: the **review task** opens beside the inbox — what is being decided (tier and
+  why, risks with inherent → residual, controls, the questionnaire, the stack) next to the
+  decision: **Approve · Approve with conditions · Send back for information · Reject**.
+- **Action:** choose **Approve with conditions**; add one condition — *"Approve the claude-opus
+  model card before go-live"*, owner **Ada**, due in two weeks, **Before go-live (holds
+  deployment)** — then **Approve with conditions**. The row moves to *Recently decided*.
+- **Back in Profile A:** the record reads **approved**, *Approval valid until* six months out (high
+  tier), and the tracker flags **1 before-go-live condition open**; **Conditions of approval** lists
+  it with **Mark met**. The **Audit** tab shows the decision.
+- **Say:** "Separation of duties is structural: the sign-off is routed to an independent reviewer,
+  so the person who registered it cannot approve it. Real reviews end in more than yes or no — a
+  condition that must be met before go-live holds the deploy gate until its owner marks it met, and
+  every approval expires: six months for high risk, twelve otherwise, then it comes back for
+  re-review."
 
 ### 2C. CI/CD deploy gate — the pipeline (terminal)
 - **Action:** `pnpm --filter @regulait/gateway demo:gate -- "Real-Time Fraud Detection Engine" production build-4417`

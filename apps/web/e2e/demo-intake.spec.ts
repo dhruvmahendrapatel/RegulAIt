@@ -66,6 +66,8 @@ test("seeded credit-assistant journey: discover, register, assess, approve, moni
   await page.getByRole("link", { name: "Register as use case" }).first().click();
   await expect(page).toHaveURL(/\/ui\/admin\/governance\/intake\?source=shadow-ai/);
   await expect(page.getByText(/Prefilled from a shadow-AI finding/)).toBeVisible();
+  // ADR-0168: Describe (name, purpose — prefilled) and Classify are separate steps
+  await page.getByRole("button", { name: "Continue" }).click();
   for (const [label, value] of [
     ["Primary purpose domain", "essential-services"],
     ["People affected", "customers"],
@@ -125,15 +127,39 @@ test("seeded credit-assistant journey: discover, register, assess, approve, moni
   await expect(avery.getByRole("heading", { name: "Inbox" })).toBeVisible();
   // THIS run's registration — routed to Avery, the independent governance approver
   // (demo:intake installs the intake template naming Avery), never to its proposer
-  const signoff = avery.locator("div").filter({ hasText: /^Sign-off · AI use-case intake: Govern / }).filter({ has: avery.getByRole("button", { name: "Approve" }) }).last();
-  await expect(signoff).toBeVisible();
+  // ADR-0168: the sign-off is a review task — the drawer carries the evidence and the decision
+  await avery.getByRole("button", { name: /^Review sign-off for Govern / }).last().click();
+  const review = avery.getByRole("dialog", { name: "Review use case sign-off" });
+  await expect(review).toBeVisible();
+  await expect(review.getByText(/high/i).first()).toBeVisible();
   await shotBoth(avery, "real-05-avery-signoff");
-  await signoff.getByRole("button", { name: "Approve" }).click();
-  await expect(avery.getByText("Approved", { exact: true })).toBeVisible();
+  // approve with one BEFORE-go-live condition: the deploy gate holds until it is met
+  await review.getByRole("radio", { name: "Approve with conditions" }).check();
+  const condition = review.getByRole("group", { name: "Condition 1" });
+  await condition.getByLabel("Condition", { exact: true }).fill("Approve the claude-opus model card before go-live");
+  const ownerSelect = condition.getByLabel("Owner");
+  const adaOption = await ownerSelect.locator("option").filter({ hasText: /Ada|Admin/ }).first().getAttribute("value");
+  await ownerSelect.selectOption(adaOption ?? "");
+  const due = new Date(Date.now() + 14 * 86_400_000).toISOString().slice(0, 10);
+  await condition.getByLabel("Due date").fill(due);
+  await condition.getByLabel("Applies").selectOption({ label: "Before go-live (holds deployment)" });
+  await shotBoth(avery, "real-05a-avery-conditions");
+  await review.getByRole("button", { name: "Approve with conditions" }).click();
+  await expect(avery.getByText("Approved", { exact: true }).first()).toBeVisible();
   await expect(avery.getByText("Recently decided")).toBeVisible();
-  const afterSignoff = await (await fetch(`${state.baseUrl}/v1/use-cases`, { headers: boot })).json() as { useCases: Array<{ name: string; status: string }> };
-  expect(afterSignoff.useCases.find((u) => u.name.startsWith("Govern "))?.status).toBe("approved");
+  const afterSignoff = await (await fetch(`${state.baseUrl}/v1/use-cases`, { headers: boot })).json() as { useCases: Array<{ id: string; name: string; status: string; approvedUntil: string | null; openConditions: number }> };
+  const approved = afterSignoff.useCases.find((u) => u.name.startsWith("Govern "));
+  expect(approved?.status).toBe("approved");
+  // high tier → the approval is valid for six months, and one before-go-live condition is open
+  expect(approved?.approvedUntil).toBeTruthy();
+  const months = (Date.parse(approved!.approvedUntil!) - Date.now()) / (30 * 86_400_000);
+  expect(months).toBeGreaterThan(5.5);
+  expect(months).toBeLessThan(6.5);
+  expect(approved?.openConditions).toBe(1);
   await shotBoth(avery, "real-05b-avery-approved");
+  // back in Profile A: the record says the approval stands, with a condition holding deployment
+  await page.goto(`/ui/admin/governance/use-cases/${approved!.id}`);
+  await expect(page.getByText(/1 before-go-live condition open/)).toBeVisible();
 
   // 3A — the trust dashboard (evidence coverage), as the presenter shows it before the alerts
   await page.goto("/ui/admin/governance/trust");
