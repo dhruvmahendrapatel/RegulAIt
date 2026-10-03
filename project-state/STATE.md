@@ -1,10 +1,10 @@
 ---
 phase: p1-security-in-progress
-last_updated: 2026-10-02
+last_updated: 2026-10-03
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
-last_session: sessions/2026-10-02-session-01.md
+last_session: sessions/2026-10-03-session-01.md
 roadmap: ../docs/product/ROADMAP.md
 ---
 
@@ -20,6 +20,30 @@ roadmap: ../docs/product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**2026-10-03 (overnight) - Full product review closed out: security, reliability, deps, UI; Codex backlog cut.**
+The owner's full review (150 findings over 9 areas; 111 confirmed, 33 downgraded, 6 refuted,
+`docs/reviews/2026-10-02-full-review.md`) is now actioned. Security 16 fixed (ADR-0167),
+reliability 19, dependency HIGHs 32 → 0, and the UI work landed in two adversarially reviewed
+batches: A (78dab52..7b8baa0: the react-query cache is cleared at every identity boundary, only a
+session-ending 401 routes to /login, a failed list query shows an error with Retry — 43 tables)
+and B (1147f5f..004eaa3: eighteen polish items — refusals read as prose, audit-log paging, the
+intake opens blank with "Fill in an example", questionnaire rendered as a document, phone-width
+layouts, first-run in sentences). Five open Codex findings closed (aa233bd..3dc13d2): the
+connector invoke path is budget-gated before any upstream work (F02), discovery samples are
+scrubbed before truncation and by credential NAME (AER-020), admission and egress are adjudicated
+before the breaker (AER-024), posture awaits the one long-lived anchor sink's observe() (AER-012),
+harden is one locked transaction (AER-013). Each reviewer should-fix was fixed before push
+(7b8baa0, 004eaa3, 3dc13d2); ten low nits are deferred in the review record §3.4.1. CI itself
+broke twice on the first push: MinIO is gone from Docker Hub (and from anonymous Quay since
+10-02) and the image build lost Node types once tests were excluded — both fixed (62c0674,
+M-063), MinIO pinned to the frozen Bitnami archive with an owner item to pick a maintained
+store. M-064: the local gate builds packages before the suite that consumes them. Owner
+decisions added: L1 (check stages pass on silence — demo-affecting), L3 (bodies parsed before
+the credential check), the MinIO stand-in. Gates on the pushed tree: 3279 gateway tests, demo
+prepare 18/18, real/mock/review journeys green, zero deprecation warnings. Codex's remaining
+backlog (AER-003/006/009/010/011/015/018/026/030/033/034/035/037, F01, F08 residuals) and the
+owner decisions (AER-014/016/028/036, F03/F06/F07, AER-040) are unchanged.
 
 **2026-10-02 (evening) - Feedback audit; beat 3E fixed; drawer; today's findings closed.**
 The owner stopped the hourly check-ins. An adversarially verified audit of every Codex finding,
