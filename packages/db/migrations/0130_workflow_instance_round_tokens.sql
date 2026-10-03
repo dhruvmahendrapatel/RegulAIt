@@ -9,8 +9,9 @@
 -- 1. `round` — bumped on every RE-OPEN (an artifact resubmitted after its stage
 --    completed; a sign-off RETURNED for more information). A check report binds
 --    to it: POST .../checks with a `round` that is not the current one is a
---    409 `stale_check_report`, audited. A report with no `round` is taken for
---    whatever round is current when its lock is acquired.
+--    409 `stale_check_report`, audited. A report with no `round` is refused
+--    (422 `round_required`) unless it comes from a console session or the org
+--    opts out — see 3.
 -- 2. `stage_entry` — bumped on every entry into an executable stage
 --    (status `awaiting_execution` at a new stage, or again after a recheck) AND
 --    on every re-open. An executor captures it with its claim; its completion
@@ -23,3 +24,10 @@
 ALTER TABLE "workflow_instances" ADD COLUMN IF NOT EXISTS "round" integer DEFAULT 0 NOT NULL;
 --> statement-breakpoint
 ALTER TABLE "workflow_instances" ADD COLUMN IF NOT EXISTS "stage_entry" integer DEFAULT 0 NOT NULL;
+--> statement-breakpoint
+-- 3. `org_settings.check_reports_allow_unbound` — round binding FAILS CLOSED:
+--    a key-authenticated (CI) report that names no round is refused 422
+--    `round_required` unless an admin turns this on (default off). A person in
+--    the console (session-authenticated) may omit it; theirs binds to the
+--    round current when it is applied.
+ALTER TABLE "org_settings" ADD COLUMN IF NOT EXISTS "check_reports_allow_unbound" boolean DEFAULT false NOT NULL;

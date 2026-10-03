@@ -353,6 +353,9 @@ export interface WorkflowDetailResponse {
     createdAt: string;
     projectId?: string | null;
     initiatorUserId?: string | null;
+    /** AER-048: the workflow round (bumped by every re-open) a check report
+     * binds to */
+    round?: number;
     change?: { description?: string; changeType?: string; environment?: string };
     definition: { stages: WorkflowStage[] };
     state: { currentStageIndex: number; stageStatuses: Record<number, string> };

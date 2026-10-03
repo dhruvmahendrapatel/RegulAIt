@@ -1,7 +1,8 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { and, auditLog, createDb, eq, runMigrations, sql, workflowInstances, type Db } from "@regulait/db";
+import { and, auditLog, createDb, eq, orgSettings, runMigrations, sql, workflowInstances, type Db } from "@regulait/db";
+import { resolveProvider, type MockGitProvider } from "@regulait/git-provider";
 import { buildApp } from "./app.js";
 import { CHECK_PENDING_DETAIL, workflowTestHooks } from "./workflows.js";
 
@@ -43,6 +44,9 @@ let piaAuth: { authorization: string };
 let anaId: string;
 let anaAuth: { authorization: string };
 let ciAuth: { authorization: string };
+let piaId: string;
+let adminId: string;
+const CSRF = { "x-regulait-csrf": "1" };
 
 async function makeUser(email: string, isAdmin = false) {
   const user = await app.inject({
@@ -82,7 +86,10 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "e".repeat(64) });
-  piaAuth = (await makeUser("wr-pia@example.com")).auth;
+  const pia = await makeUser("wr-pia@example.com");
+  piaAuth = pia.auth;
+  piaId = pia.id;
+  adminId = (await makeUser("wr-console-admin@example.com", true)).id;
   const ana = await makeUser("wr-ana@example.com");
   anaId = ana.id;
   anaAuth = ana.auth;
@@ -97,6 +104,63 @@ beforeAll(async () => {
     { id: "checks2", type: "automated_check", checks: ["smoke"] },
     { id: "done", type: "human_approval", approvers: [anaId] },
   ]);
+  // external effects downstream of a re-openable artifact (review item 1)
+  const target = await app.inject({
+    method: "POST",
+    headers: AUTH,
+    url: "/v1/deploy/targets",
+    payload: { name: "wr-staging", provider: "mock", environment: "staging" },
+  });
+  expect(target.statusCode).toBe(201);
+  await makeTemplate("wr-deploy", "wr-deploy", [
+    { id: "intake", type: "trigger" },
+    { id: "req", type: "artifact_generation", output: "requirements_file" },
+    { id: "gate", type: "human_approval", approvers: [anaId] },
+    { id: "deploy", type: "deployment", connection: "wr-staging", environment: "staging" },
+    { id: "done", type: "human_approval", approvers: [anaId] },
+  ]);
+  const conn = await app.inject({
+    method: "POST",
+    headers: AUTH,
+    url: "/v1/git/connections",
+    payload: { name: "wr-git", provider: "mock", token: "not-a-real-token" },
+  });
+  expect(conn.statusCode).toBe(201);
+  await makeTemplate("wr-git", "wr-git", [
+    { id: "intake", type: "trigger" },
+    { id: "req", type: "artifact_generation", output: "requirements_file" },
+    { id: "gate", type: "human_approval", approvers: [anaId] },
+    { id: "branch", type: "git_operation", action: "create_branch", connection: "wr-git", repo: "wr/app" },
+    { id: "open_pr", type: "git_operation", action: "open_pr", connection: "wr-git", repo: "wr/app" },
+    { id: "merge_gate", type: "human_approval", approvers: [anaId] },
+    { id: "merge", type: "git_operation", action: "merge", connection: "wr-git", repo: "wr/app" },
+    { id: "done", type: "human_approval", approvers: [anaId] },
+  ]);
+  // a nested build run downstream of a re-openable artifact (review item 5)
+  const agent = await app.inject({
+    method: "POST",
+    headers: AUTH,
+    url: "/v1/agents",
+    payload: { name: "wr-worker", provider: "mock", tier: 0, modes: ["execute"], costPerMTokIn: 1, costPerMTokOut: 5, model: "mock-wr" },
+  });
+  expect(agent.statusCode).toBe(201);
+  await app.inject({ method: "POST", headers: AUTH, url: "/v1/grants/agents", payload: { userId: piaId, agentId: agent.json().id } });
+  await makeTemplate("wr-build", "wr-build", [
+    { id: "intake", type: "trigger" },
+    { id: "req", type: "artifact_generation", output: "requirements_file" },
+    { id: "gate", type: "human_approval", approvers: [anaId] },
+    {
+      id: "build",
+      type: "automated_build",
+      scope: "requirements_file",
+      run: {
+        run: "wr-build",
+        escalationApproverUserId: anaId,
+        nodes: [{ id: "implement", title: "Implement it", ownerAgentId: agent.json().id, mode: "execute", estimate: { in: 10, out: 20 } }],
+      },
+    },
+    { id: "done", type: "human_approval", approvers: [anaId] },
+  ]);
   // an artifact upstream of the gate, so a resubmission RE-OPENS the flow
   await makeTemplate("wr-reopen", "wr-reopen", [
     { id: "intake", type: "trigger" },
@@ -109,12 +173,31 @@ beforeAll(async () => {
 
 afterEach(() => {
   delete workflowTestHooks.duringStageEval;
+  delete workflowTestHooks.beforeStageCommit;
 });
 
 afterAll(async () => {
   delete workflowTestHooks.duringStageEval;
+  delete workflowTestHooks.beforeStageCommit;
   await app.close();
 });
+
+/** park the FIRST locked completion of (instance, stage) until `release()` —
+ * the executor has already PERFORMED its work (a deploy, a merge) */
+function parkFirstCommit(instanceId: string, stageId: string) {
+  let release!: () => void;
+  let reached!: () => void;
+  const released = new Promise<void>((r) => (release = r));
+  const arrived = new Promise<void>((r) => (reached = r));
+  let used = false;
+  workflowTestHooks.beforeStageCommit = async (at) => {
+    if (used || at.instanceId !== instanceId || at.stageId !== stageId) return;
+    used = true;
+    reached();
+    await released;
+  };
+  return { arrived, release };
+}
 
 /** park the FIRST evaluation of (instance, stage) until `release()`; every
  * later evaluation (another executor) passes straight through */
@@ -172,13 +255,44 @@ async function approveGate(instanceId: string, stageId = "gate") {
   });
 }
 
-function report(instanceId: string, stageId: string, results: Array<{ check: string; status: "passed" | "failed" }>, round?: number) {
+/** a CI report (API key) — `round` is required of a key caller, so pass
+ * `"none"` to send a report that names no round */
+function report(
+  instanceId: string,
+  stageId: string,
+  results: Array<{ check: string; status: "passed" | "failed" }>,
+  round: number | "none" = 0,
+) {
   return app.inject({
     method: "POST",
     headers: ciAuth,
     url: `/v1/workflows/instances/${instanceId}/checks`,
-    payload: { stageId, results, ...(round !== undefined ? { round } : {}) },
+    payload: { stageId, results, ...(round !== "none" ? { round } : {}) },
   });
+}
+
+async function setAllowUnbound(on: boolean) {
+  const res = await app.inject({ method: "PUT", headers: AUTH, url: "/v1/org/settings", payload: { checkReportsAllowUnbound: on } });
+  expect(res.statusCode).toBe(200);
+}
+
+/** a console session for an admin (password onboarding, as auth.test does) */
+async function consoleCookie(userId: string, email: string): Promise<string> {
+  const pw = await app.inject({ method: "POST", headers: AUTH, url: `/v1/users/${userId}/set-initial-password`, payload: {} });
+  expect(pw.statusCode).toBe(200);
+  const oneTime = pw.json().password as string;
+  const first = await app.inject({ method: "POST", url: "/auth/login", headers: CSRF, payload: { email, password: oneTime } });
+  expect(first.statusCode).toBe(200);
+  const cookie = first.cookies.find((c) => c.name === "regulait_session")!.value;
+  const changed = await app.inject({
+    method: "POST",
+    url: "/auth/change-password",
+    headers: CSRF,
+    cookies: { regulait_session: cookie },
+    payload: { currentPassword: oneTime, newPassword: "Wr-console-Passw0rd!x" },
+  });
+  expect(changed.statusCode).toBe(200);
+  return cookie;
 }
 
 async function submitArtifact(instanceId: string, content: string) {
@@ -213,9 +327,11 @@ describe("AER-048 — check executor, reports and re-opens bind to the round / s
     // the executor holds the claim; its snapshot has unit_tests only
     expect((await view(id)).context.executing).toBe("checks");
 
-    // CI posts lint while the executor is parked mid-eval: accepted
+    // CI posts lint while the executor is parked mid-eval: accepted, and the
+    // response says plainly it was NOT evaluated by this request (202)
     const lint = await report(id, "checks", [{ check: "lint", status: "passed" }]);
-    expect(lint.statusCode).toBe(200);
+    expect(lint.statusCode).toBe(202);
+    expect(lint.json().evaluation).toBe("deferred_to_running_executor");
 
     park.release();
     const decided = await decide;
@@ -307,17 +423,49 @@ describe("AER-048 — check executor, reports and re-opens bind to the round / s
     const current = await report(id, "checks", [{ check: "unit_tests", status: "passed" }], 1);
     expect(current.statusCode).toBe(200);
     expect(current.json().round).toBe(1);
-    // no round at all (a pre-AER-048 CI integration): taken for the current round
-    const legacy = await report(id, "checks", [{ check: "lint", status: "passed" }]);
-    expect(legacy.statusCode).toBe(200);
+    const stored = (await view(id)).context["reported:checks"] as Array<{ check: string; round?: number }>;
+    expect(stored.map((r) => [r.check, r.round])).toEqual([["unit_tests", 1]]);
+  });
+
+  it("(3b) FAIL CLOSED: a CI report naming no round is refused 422 unless the org opts out; a console session may omit it", async () => {
+    const id = await startInstance("wr-reopen");
+    await submitArtifact(id, "v1 requirements");
+    // an API-key caller with no round: refused, told the current round
+    const unbound = await report(id, "checks", [{ check: "unit_tests", status: "passed" }], "none");
+    expect(unbound.statusCode).toBe(422);
+    expect(unbound.json()).toMatchObject({ error: "round_required", currentRound: 0 });
+    expect((await view(id)).context["reported:checks"]).toBeUndefined();
+
+    // the org opt-out (default off) restores the bind-to-current behaviour
+    await setAllowUnbound(true);
+    try {
+      const allowed = await report(id, "checks", [{ check: "unit_tests", status: "passed" }], "none");
+      expect(allowed.statusCode).toBe(200);
+      expect(allowed.json()).toMatchObject({ round: 0, evaluation: "stored_for_later" });
+    } finally {
+      await setAllowUnbound(false);
+    }
+    const [org] = await db.select().from(orgSettings);
+    expect(org!.checkReportsAllowUnbound).toBe(false);
+
+    // a person in the console: may omit the round — it binds to the current one
+    const cookie = await consoleCookie(adminId, "wr-console-admin@example.com");
+    const fromConsole = await app.inject({
+      method: "POST",
+      url: `/v1/workflows/instances/${id}/checks`,
+      headers: CSRF,
+      cookies: { regulait_session: cookie },
+      payload: { stageId: "checks", results: [{ check: "lint", status: "passed" }] },
+    });
+    expect(fromConsole.statusCode, fromConsole.body).toBe(200);
     const stored = (await view(id)).context["reported:checks"] as Array<{ check: string; round?: number }>;
     expect(stored.map((r) => [r.check, r.round]).sort()).toEqual([
-      ["lint", 1],
-      ["unit_tests", 1],
+      ["lint", 0],
+      ["unit_tests", 0],
     ]);
   });
 
-  it("(4) overlapping executors on one stage entry apply its outcome ONCE — a lapsed executor's late result is discarded", async () => {
+  it("(4) a lapsed executor's late result is discarded: the stage's KERNEL OUTCOME is applied once and the context is not rolled back (an external effect repeated by a TTL re-take is not prevented — see WORKFLOW_ENGINE_SPEC)", async () => {
     const id = await startInstance("wr-flow");
     expect((await report(id, "checks", [{ check: "unit_tests", status: "passed" }, { check: "lint", status: "passed" }])).statusCode).toBe(200);
 
@@ -388,5 +536,130 @@ describe("AER-048 — check executor, reports and re-opens bind to the round / s
       ["lint", "pending", CHECK_PENDING_DETAIL],
     ]);
     expect((await auditFor(id)).filter((a) => a.ruleId === "workflow:executor-result-discarded")).toHaveLength(0);
+  });
+});
+
+describe("AER-048 review — discarded results keep their external-effect records; a holder that fails re-evaluates", () => {
+  it("(5) a DEPLOY whose result is discarded by a re-open keeps its deploy record — re-entry does not deploy again", async () => {
+    const id = await startInstance("wr-deploy");
+    await submitArtifact(id, "v1 requirements");
+    const park = parkFirstCommit(id, "deploy");
+    const decide = approveGate(id); // the deploy executor deploys, then parks before committing
+    await park.arrived;
+    await submitArtifact(id, "v2 requirements"); // re-open
+    park.release();
+    expect((await decide).statusCode).toBe(200);
+
+    const after = await view(id);
+    expect(after.status).toBe("blocked_on_approval");
+    // the deployment happened, and its record survived the discard
+    expect(after.context["deploy:deploy"]).toMatchObject({ target: "wr-staging", environment: "staging" });
+    const audit = await auditFor(id);
+    const discarded = audit.filter((a) => a.ruleId === "workflow:executor-result-discarded");
+    expect(discarded).toHaveLength(1);
+    const detail = discarded[0]!.detail as { effectRecords: Record<string, { deployId?: string }>; salvagedEffectRecords: string[] };
+    expect(detail.salvagedEffectRecords).toContain("deploy:deploy");
+    // the audit carries the VALUES, so the deploy is traceable/reversible from the trail alone
+    expect(detail.effectRecords["deploy:deploy"]!.deployId).toBe((after.context["deploy:deploy"] as { deployId: string }).deployId);
+    expect(audit.filter((a) => a.ruleId === "external-effect:deploy.deploy")).toHaveLength(1);
+
+    // round 1 is signed off: the deploy stage re-enters and does NOT deploy again
+    expect((await approveGate(id)).statusCode).toBe(200);
+    const done = await view(id);
+    expect(done.status).toBe("blocked_on_approval");
+    expect(done.state.currentStageIndex).toBe(4);
+    expect((await auditFor(id)).filter((a) => a.ruleId === "external-effect:deploy.deploy")).toHaveLength(1);
+  });
+
+  it("(6) a MERGE whose result is discarded keeps mergeSha — re-entry does not merge again; the PR body carries the round", async () => {
+    const id = await startInstance("wr-git");
+    await submitArtifact(id, "v1 requirements");
+    expect((await approveGate(id)).statusCode).toBe(200); // branch + PR, then the merge gate
+    let v = await view(id);
+    expect(v.status).toBe("blocked_on_approval");
+    const prId = v.context.prId as string;
+    // review item 2: CI learns the instance and the round from the PR body
+    const mock = resolveProvider({ provider: "mock", token: "x" }) as MockGitProvider;
+    const body = mock.repos.get("wr/app")!.prs.get(prId)!.body;
+    expect(body).toContain(`regulait-instance: ${id}`);
+    expect(body).toContain("regulait-round: 0");
+
+    const park = parkFirstCommit(id, "merge");
+    const decide = approveGate(id, "merge_gate"); // merges, then parks before committing
+    await park.arrived;
+    await submitArtifact(id, "v2 requirements"); // re-open
+    park.release();
+    expect((await decide).statusCode).toBe(200);
+    v = await view(id);
+    expect(v.context.mergeSha).toBe(`sha-merge-${prId}`);
+    expect(v.round).toBe(1);
+
+    // round 1 runs the whole tail again: branch / PR / merge are all recorded,
+    // so none is performed a second time and the merge does not 405
+    expect((await approveGate(id)).statusCode).toBe(200);
+    const merged = await approveGate(id, "merge_gate");
+    expect(merged.statusCode).toBe(200);
+    expect(merged.json().executionError).toBeUndefined();
+    v = await view(id);
+    expect(v.context.lastError).toBeUndefined();
+    expect(v.state.currentStageIndex).toBe(7); // the final gate
+    const audit = await auditFor(id);
+    expect(audit.filter((a) => a.ruleId === "external-effect:git.merge_pull_request")).toHaveLength(1);
+    expect(audit.filter((a) => a.ruleId === "external-effect:git.open_pull_request")).toHaveLength(1);
+    expect(audit.filter((a) => a.ruleId === "external-effect:git.create_branch")).toHaveLength(1);
+  });
+
+  it("(7) a check executor that THROWS after a report arrived during its claim re-evaluates once — the green report is not stranded", async () => {
+    const id = await startInstance("wr-flow");
+    expect((await report(id, "checks", [{ check: "unit_tests", status: "passed" }])).statusCode).toBe(200);
+    let release!: () => void;
+    let reached!: () => void;
+    const released = new Promise<void>((r) => (release = r));
+    const arrived = new Promise<void>((r) => (reached = r));
+    let used = false;
+    workflowTestHooks.duringStageEval = async (at) => {
+      if (used || at.instanceId !== id || at.stageId !== "checks") return;
+      used = true;
+      reached();
+      await released;
+      throw new Error("wr: the holder crashed mid-eval");
+    };
+    const decide = approveGate(id);
+    await arrived;
+    const lint = await report(id, "checks", [{ check: "lint", status: "passed" }]);
+    expect(lint.statusCode).toBe(202);
+    release();
+    const decided = await decide;
+    // the holder's own failure still surfaces…
+    expect(decided.json().executionError).toContain("the holder crashed");
+    // …but the report that arrived during its claim was evaluated: both green,
+    // the stage passed into checks2
+    const after = await view(id);
+    expect(statusOf(after.context, "checks", "lint")).toBe("passed");
+    expect(after.state.currentStageIndex).toBe(3);
+    expect(after.context.executing).toBeUndefined();
+  });
+
+  it("(8) a re-open clears a build stage's runId: a run planned in the old round does not satisfy the new one", async () => {
+    const id = await startInstance("wr-build");
+    await submitArtifact(id, "v1 requirements");
+    expect((await approveGate(id)).statusCode).toBe(200);
+    const planned = await view(id);
+    expect(planned.status).toBe("awaiting_execution");
+    const oldRun = planned.context["runId:build"] as string;
+    expect(oldRun).toBeTruthy();
+
+    await submitArtifact(id, "v2 requirements"); // re-open
+    const reopened = await view(id);
+    expect(reopened.context["runId:build"]).toBeUndefined();
+    const audit = await auditFor(id);
+    expect(
+      audit.some((a) => a.ruleId === "workflow:artifact_submitted" && (a.detail as { staleRunIdsCleared?: string[] }).staleRunIdsCleared?.includes("build")),
+    ).toBe(true);
+
+    expect((await approveGate(id)).statusCode).toBe(200);
+    const fresh = await view(id);
+    expect(fresh.context["runId:build"]).toBeTruthy();
+    expect(fresh.context["runId:build"]).not.toBe(oldRun);
   });
 });

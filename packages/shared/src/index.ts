@@ -2124,6 +2124,9 @@ export const updateOrgSettingsSchema = z
     budgetHardBlockPct: z.number().int().min(1).max(100).optional(),
     // approvals
     approvalQuorum: approvalQuorumSchema.optional(),
+    /** AER-048 (migration 0130): allow key-authenticated workflow check
+     * reports that name no `round` (false = refused 422 round_required). */
+    checkReportsAllowUnbound: z.boolean().optional(),
     // ADR-0022: approver-delegation master switch + persisted default
     // infra-remediation approver (null clears it)
     approvalDelegationEnabled: z.boolean().optional(),

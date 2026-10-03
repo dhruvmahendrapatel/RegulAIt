@@ -325,7 +325,7 @@ describe("AER-018 — the barrier matrix: flip the dial while the route waits on
     ]);
     const id = await start(`bm-deploy-${RUN}`);
     // a failing smoke check, pre-reported, routes the verify stage into the rollback
-    expect((await post(`/v1/workflows/instances/${id}/checks`, { stageId: "verify", results: [{ check: "smoke", status: "failed", severity: "critical" }] }, piaAuth)).statusCode).toBeLessThan(300);
+    expect((await post(`/v1/workflows/instances/${id}/checks`, { round: 0, stageId: "verify", results: [{ check: "smoke", status: "failed", severity: "critical" }] }, piaAuth)).statusCode).toBeLessThan(300);
     await parkAfterGate(id);
 
     for (const mode of MODES) {

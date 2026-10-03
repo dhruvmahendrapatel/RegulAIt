@@ -3236,6 +3236,13 @@ export const orgSettings = pgTable(
      * approver must approve; 'any' = the first approval advances the stage and
      * supersedes the rest. */
     approvalQuorum: text("approval_quorum", { enum: APPROVAL_QUORUMS }).notNull().default("all"),
+    /** AER-048 (migration 0130): may a KEY-authenticated caller (CI) report
+     * workflow check results WITHOUT naming the round they were produced for?
+     * false (default) = fail closed: such a report is refused 422
+     * `round_required`. true = the pre-AER-048 behaviour — an unbound report
+     * is taken for whatever round is current when it is applied. A person in
+     * the console (session) may always omit it. */
+    checkReportsAllowUnbound: boolean("check_reports_allow_unbound").notNull().default(false),
     /** ADR-0022: master switch for approver delegation. ON (default) = active
      * delegation windows widen the delegate's inbox and let them decide
      * on-behalf-of. OFF = a strict separation-of-duties org: creating

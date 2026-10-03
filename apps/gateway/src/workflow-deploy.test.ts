@@ -218,7 +218,7 @@ describe("deploy → verify → rollback", () => {
       method: "POST",
       headers: piaAuth,
       url: `/v1/workflows/instances/${id}/checks`,
-      payload: { stageId: "verify", results: [{ check: "smoke", status: "failed", severity: "critical" }] },
+      payload: { round: 0, stageId: "verify", results: [{ check: "smoke", status: "failed", severity: "critical" }] },
     });
     await approveGate(id);
     const inst = await view(id);
