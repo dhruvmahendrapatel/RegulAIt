@@ -32,6 +32,8 @@ import { Badge, Button, Card, EmptyState, Field, Input, Select, Table, Textarea 
 import { QueryGate, optionEls, useAction, useProjects, useTeams, useUsers, projectOpts, teamOpts, userOpts } from "../adminKit";
 import { McpActionReview } from "../../approvals/McpActionReview";
 import { approvalReviewKey, inspectApprovalAction } from "../../approvals/approvalReview";
+import { ReviewPanel } from "../../approvals/ReviewPanel";
+import { intakeUseCaseName, isIntakeSignoff } from "../../approvals/reviewDecision";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -484,7 +486,7 @@ export default function ReviewWorkbenchPage() {
                         />
                       ),
                     },
-                    { key: "what", header: "What", render: (r) => r.objectType === "mcp_tool" ? r.toolName ?? "MCP action" : r.objectLabel ?? r.objectType },
+                    { key: "what", header: "What", render: (r) => r.objectType === "mcp_tool" ? r.toolName ?? "MCP action" : isIntakeSignoff(r) ? `AI use case sign-off · ${intakeUseCaseName(r)}` : r.objectLabel ?? r.objectType },
                     {
                       key: "action", header: "Action", render: (row) => row.objectType === "mcp_tool"
                         ? <McpActionReview approval={row} controls={(blockedReason, close) => <Button disabled={!!blockedReason} onClick={() => {
@@ -492,7 +494,7 @@ export default function ReviewWorkbenchPage() {
                           setReviewed((state) => ({ ...state, [row.id]: approvalReviewKey(row) }));
                           close();
                         }}>Mark reviewed</Button>} />
-                        : null,
+                        : isIntakeSignoff(row) ? <ReviewPanel approval={row} onDecided={() => void refreshAll()} /> : null,
                     },
                     { key: "who", header: "Approver", render: (r) => r.approverName ?? "—" },
                     {

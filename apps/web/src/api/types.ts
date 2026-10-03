@@ -378,7 +378,8 @@ export interface WorkflowListResponse {
 
 export interface Approval {
   id: string;
-  status: "pending" | "approved" | "denied" | "consumed" | "superseded";
+  /** `returned` = sent back for information (an intake sign-off only, ADR-0168) */
+  status: "pending" | "approved" | "denied" | "returned" | "consumed" | "superseded";
   objectType: string;
   stageId: string | null;
   requestedAt: string;
@@ -408,6 +409,13 @@ export interface Approval {
   decidedByName?: string | null;
   objectLabel?: string | null;
   delegatedFrom?: string;
+  /** ADR-0046 routing + SLA sidecar — absent when no routing rule is enabled */
+  assignment?: {
+    assigneeKind?: string;
+    slaState?: string | null;
+    dueAt?: string | null;
+    [key: string]: unknown;
+  };
   contextConflict?: {
     key: string;
     conflicting: ConflictSide;
@@ -630,4 +638,57 @@ export interface AuditEntry {
    * as a mode; render it as "unknown". */
   deployMode?: "hosted" | "byoc" | "air_gapped" | null;
   reason?: string | null;
+}
+
+// ---- AI use-case lifecycle (ADR-0168) ------------------------------------
+
+export type UseCaseStatus = "proposed" | "under_review" | "needs_info" | "approved" | "rejected" | "retired";
+
+/** a condition attached to an intake approval — `blocking` = before go-live (the deploy gate refuses while open) */
+export interface UseCaseCondition {
+  id: string;
+  approvalId: string;
+  text: string;
+  ownerUserId: string | null;
+  ownerName: string | null;
+  dueAt: string;
+  blocking: boolean;
+  status: "open" | "met" | "waived";
+  metAt: string | null;
+  metByName: string | null;
+  overdue: boolean;
+}
+
+/** the fields GET /v1/use-cases/:id adds for the approval lifetime and its conditions */
+export interface UseCaseLifecycleDetail {
+  useCase: {
+    id: string;
+    status: UseCaseStatus;
+    approvedAt?: string | null;
+    approvedUntil?: string | null;
+    approvalExpired?: boolean;
+    [key: string]: unknown;
+  };
+  conditions?: UseCaseCondition[];
+}
+
+export interface ApprovalConditionInput {
+  text: string;
+  ownerUserId?: string;
+  dueAt: string;
+  blocking: boolean;
+}
+
+/** POST /v1/approvals/:id/decide — `returned` needs a reason; conditions ride only on an approved intake sign-off */
+export interface DecideApprovalBody {
+  decision: "approved" | "denied" | "returned";
+  reason?: string;
+  conditions?: ApprovalConditionInput[];
+}
+
+/** GET /v1/users/directory — ids, names and teams only; readable by every signed-in user */
+export interface DirectoryUser {
+  id: string;
+  name: string | null;
+  teams?: Array<{ id: string; name: string }>;
 }
