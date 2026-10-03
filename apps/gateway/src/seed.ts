@@ -1176,7 +1176,7 @@ const CASCADE_CHANGE = "Redact and export the oncology cohort (PHI)";
       await call(
         "POST",
         `/v1/workflows/instances/${id}/checks`,
-        { stageId: "precheck", results: [{ check: "preflight", status: "failed", severity: "high" }] },
+        { round: 0 /* a fresh instance is in round 0 (AER-048) */, stageId: "precheck", results: [{ check: "preflight", status: "failed", severity: "high" }] },
         danaAuth,
       );
     },
@@ -1197,7 +1197,7 @@ const CASCADE_CHANGE = "Redact and export the oncology cohort (PHI)";
       await call(
         "POST",
         `/v1/workflows/instances/${id}/checks`,
-        { stageId: "verify", results: [{ check: "smoke", status: "failed", severity: "critical" }] },
+        { round: 0 /* a fresh instance is in round 0 (AER-048) */, stageId: "verify", results: [{ check: "smoke", status: "failed", severity: "critical" }] },
         danaAuth,
       );
     },

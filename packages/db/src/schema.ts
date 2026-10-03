@@ -2001,6 +2001,14 @@ export const workflowInstances = pgTable(
     /** outputs of executed stages (branch, prId, prUrl, mergeSha, lastError) */
     context: jsonb("context").$type<Record<string, unknown>>().notNull().default({}),
     status: text("status").notNull(),
+    /** AER-048 (migration 0130): bumped on every RE-OPEN (artifact resubmitted
+     * after its stage completed; sign-off returned). A check report binds to
+     * it — a report for a previous round is refused (409) and audited. */
+    round: integer("round").notNull().default(0),
+    /** AER-048: bumped on every entry into an executable stage and on every
+     * re-open. An executor captures it with its claim and commits its result
+     * only if it is still current. */
+    stageEntry: integer("stage_entry").notNull().default(0),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -3228,6 +3236,13 @@ export const orgSettings = pgTable(
      * approver must approve; 'any' = the first approval advances the stage and
      * supersedes the rest. */
     approvalQuorum: text("approval_quorum", { enum: APPROVAL_QUORUMS }).notNull().default("all"),
+    /** AER-048 (migration 0130): may a KEY-authenticated caller (CI) report
+     * workflow check results WITHOUT naming the round they were produced for?
+     * false (default) = fail closed: such a report is refused 422
+     * `round_required`. true = the pre-AER-048 behaviour — an unbound report
+     * is taken for whatever round is current when it is applied. A person in
+     * the console (session) may always omit it. */
+    checkReportsAllowUnbound: boolean("check_reports_allow_unbound").notNull().default(false),
     /** ADR-0022: master switch for approver delegation. ON (default) = active
      * delegation windows widen the delegate's inbox and let them decide
      * on-behalf-of. OFF = a strict separation-of-duties org: creating

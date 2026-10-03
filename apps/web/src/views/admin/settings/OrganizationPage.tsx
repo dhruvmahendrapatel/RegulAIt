@@ -173,6 +173,11 @@ function Loaded(props: { settings: Record<string, unknown> }) {
     dispatchAttributionRequired: str(s, "dispatchAttributionRequired") || "false",
   });
 
+  // --- 5b3. Workflow check-report round binding (AER-048) ------------------
+  const checkRounds = useSection({
+    checkReportsAllowUnbound: str(s, "checkReportsAllowUnbound") || "false",
+  });
+
   // --- 5c. Model-judged access recommendations (ADR-0092 amendment, L6c) ---
   const recJudge = useSection({
     recommendationJudgeEnabled: str(s, "recommendationJudgeEnabled") || "false",
@@ -620,6 +625,35 @@ function Loaded(props: { settings: Record<string, unknown> }) {
               <option value="true">
                 required — refuse a dispatch that names no project (409 attribution_required)
               </option>
+            </Select>
+          </Field>
+        </SectionShell>
+      </Card>
+
+      <Card title="5b3 · Workflow check reports (AER-048)">
+        <SectionShell
+          title="Must a CI name the workflow round its check results belong to?"
+          busy={checkRounds.act.busy}
+          error={checkRounds.act.error}
+          submitLabel="Save check-report setting"
+          onSubmit={() =>
+            void checkRounds.act.run(
+              () =>
+                put({
+                  checkReportsAllowUnbound: asBool(checkRounds.f.checkReportsAllowUnbound!),
+                }),
+              "Check-report setting saved (audited)",
+            )
+          }
+          help="Every workflow instance has a round, which moves on whenever the change is re-opened (a new artifact version, a sign-off sent back). A check result belongs to the round it was produced for: a result for an earlier round is always refused (409 stale_check_report), so a CI run against the old artifact can never pass the new one. By default a CI (anything reporting with an API key) must also NAME the round — it is in the PR body as 'regulait-round:' and on the instance — and a report that names none is refused (422 round_required). Allowing unbound reports restores the older behaviour for CI integrations that cannot send it yet: such a report is taken for whatever round is current when it arrives, which is exactly the gap the round closes. People reporting from this console are bound to the round on their screen either way."
+        >
+          <Field label="Check reports without a round">
+            <Select
+              value={checkRounds.f.checkReportsAllowUnbound}
+              onChange={(e) => checkRounds.set("checkReportsAllowUnbound", e.target.value)}
+            >
+              <option value="false">refused (default) — a CI must name the round (422 round_required)</option>
+              <option value="true">allowed — an unbound report binds to the current round</option>
             </Select>
           </Field>
         </SectionShell>

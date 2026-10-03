@@ -44,6 +44,18 @@ describe("stageClaimState — the decision the FOR UPDATE block makes", () => {
     expect(stageClaimState({ executing: "build", executingSince: "garbage" }, "build", T0).heldLive).toBe(false);
   });
 
+  it("AER-048: a claim taken under an EARLIER stage entry is never live — its executor's result will be discarded", () => {
+    const ctx = { executing: "build", executingSince: new Date(T0 - 1_000).toISOString(), executingEntry: 3 };
+    expect(stageClaimState(ctx, "build", T0, DEFAULT_STAGE_CLAIM_TTL_MS, 3).heldLive).toBe(true);
+    expect(stageClaimState(ctx, "build", T0, DEFAULT_STAGE_CLAIM_TTL_MS, 4)).toEqual({
+      heldLive: false,
+      expiredSince: ctx.executingSince,
+    });
+    // a claim written before the entry existed is judged by its TTL alone
+    const legacy = { executing: "build", executingSince: new Date(T0 - 1_000).toISOString() };
+    expect(stageClaimState(legacy, "build", T0, DEFAULT_STAGE_CLAIM_TTL_MS, 4).heldLive).toBe(true);
+  });
+
   it("the TTL is env-tunable and falls back on a malformed value", () => {
     expect(stageClaimTtlMs({} as NodeJS.ProcessEnv)).toBe(DEFAULT_STAGE_CLAIM_TTL_MS);
     expect(stageClaimTtlMs({ REGULAIT_WORKFLOW_CLAIM_TTL_MS: "60000" } as NodeJS.ProcessEnv)).toBe(60_000);

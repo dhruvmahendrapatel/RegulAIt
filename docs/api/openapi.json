@@ -2496,7 +2496,7 @@
             "description": "Rate limited. Retry after the `retry-after` header."
           },
           "2XX": {
-            "description": "Success."
+            "description": "`instance.round` is the workflow round (bumped by every re-open — artifact resubmitted, sign-off returned); a CI binds its check report to it. `instance.stageEntry` moves on every entry into an executable stage (AER-048)."
           }
         }
       }

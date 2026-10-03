@@ -356,6 +356,10 @@ export default function WorkflowDetailPage() {
                               stageId: current.id,
                               results: [{ check: c.check, status: "passed", detail: "remediated" }],
                               ...(checkReason.trim() ? { reason: checkReason.trim() } : {}),
+                              // AER-048: bind the result to the round on screen —
+                              // if the change was re-opened meanwhile, the
+                              // gateway refuses it (409) instead of applying it
+                              ...(typeof inst.round === "number" ? { round: inst.round } : {}),
                             }),
                           `Marked ${c.check} passing — re-run checks to proceed`,
                         )

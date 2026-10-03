@@ -1039,7 +1039,7 @@ describe("(7) block-on-regression at the workflow automated-check stage", () => 
       method: "POST",
       url: `/v1/workflows/instances/${instanceId}/checks`,
       headers: erinAuth,
-      payload: { stageId: "checks", results: [{ check: "agent_quality", status: "passed" }] },
+      payload: { round: 0, stageId: "checks", results: [{ check: "agent_quality", status: "passed" }] },
     });
     expect(res.statusCode).toBe(422);
     expect(res.json().error).toBe("eval_check_cannot_be_reported");
@@ -1182,7 +1182,7 @@ describe("(7) block-on-regression at the workflow automated-check stage", () => 
       method: "POST",
       url: `/v1/workflows/instances/${instanceId}/checks`,
       headers: erinAuth,
-      payload: { stageId: "checks", results: [{ check: "unit_tests", status: "passed" }], reason: "CI run #9 green" },
+      payload: { round: 0, stageId: "checks", results: [{ check: "unit_tests", status: "passed" }], reason: "CI run #9 green" },
     });
     expect(report.statusCode).toBe(200);
     expect(report.json().status).toBe("blocked_on_approval");

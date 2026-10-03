@@ -257,7 +257,7 @@ describe("automated checks: fail → block → remediate → recheck → advance
       method: "POST",
       headers: piaAuth,
       url: `/v1/workflows/instances/${instanceId}/checks`,
-      payload: {
+      payload: { round: 0,
         stageId: "checks",
         results: [
           { check: "unit_tests", status: "passed" },
@@ -300,7 +300,7 @@ describe("automated checks: fail → block → remediate → recheck → advance
       method: "POST",
       headers: piaAuth,
       url: `/v1/workflows/instances/${instanceId}/checks`,
-      payload: { stageId: "checks", results: [{ check: "security_scan", status: "failed" }] },
+      payload: { round: 0, stageId: "checks", results: [{ check: "security_scan", status: "failed" }] },
     });
     await approve(instanceId, "gate");
     expect((await instanceView(piaAuth, instanceId)).instance.status).toBe("blocked_on_check");
@@ -320,7 +320,7 @@ describe("automated checks: fail → block → remediate → recheck → advance
       method: "POST",
       headers: piaAuth,
       url: `/v1/workflows/instances/${instanceId}/checks`,
-      payload: { stageId: "checks", results: [{ check: "security_scan", status: "passed" }], reason: "patched the two criticals" },
+      payload: { round: 0, stageId: "checks", results: [{ check: "security_scan", status: "passed" }], reason: "patched the two criticals" },
     });
     expect(remediated.statusCode).toBe(200);
     const partial = await app.inject({
@@ -343,7 +343,7 @@ describe("automated checks: fail → block → remediate → recheck → advance
       method: "POST",
       headers: ciAuth,
       url: `/v1/workflows/instances/${instanceId}/checks`,
-      payload: {
+      payload: { round: 0,
         stageId: "checks",
         results: [
           { check: "unit_tests", status: "passed" },
@@ -363,7 +363,7 @@ describe("automated checks: fail → block → remediate → recheck → advance
       method: "POST",
       headers: piaAuth,
       url: `/v1/workflows/instances/${instanceId}/checks`,
-      payload: { stageId: "checks", results: [{ check: "security_scan", status: "passed" }] },
+      payload: { round: 0, stageId: "checks", results: [{ check: "security_scan", status: "passed" }] },
     });
     expect(bare.statusCode).toBe(400);
     expect(bare.json().error).toBe("check_report_reason_required");
@@ -372,7 +372,7 @@ describe("automated checks: fail → block → remediate → recheck → advance
       method: "POST",
       headers: piaAuth,
       url: `/v1/workflows/instances/${instanceId}/checks`,
-      payload: { stageId: "checks", results: [{ check: "lint", status: "failed" }] },
+      payload: { round: 0, stageId: "checks", results: [{ check: "lint", status: "failed" }] },
     });
     expect(ownFailure.statusCode).toBe(200);
     // with a reason: accepted, stamped, audited
@@ -380,7 +380,7 @@ describe("automated checks: fail → block → remediate → recheck → advance
       method: "POST",
       headers: piaAuth,
       url: `/v1/workflows/instances/${instanceId}/checks`,
-      payload: {
+      payload: { round: 0,
         stageId: "checks",
         results: [{ check: "security_scan", status: "passed" }],
         reason: "re-ran the scanner after the upgrade; run #77 green",
@@ -420,7 +420,7 @@ describe("automated checks: fail → block → remediate → recheck → advance
       method: "POST",
       headers: { authorization: `Bearer ${ciKey.json().token}` },
       url: `/v1/workflows/instances/${instanceId}/checks`,
-      payload: { stageId: "checks", results: [{ check: "unit_tests", status: "passed" }] },
+      payload: { round: 0, stageId: "checks", results: [{ check: "unit_tests", status: "passed" }] },
     });
     expect(armsLength.statusCode).toBe(200);
     const after = armsLength.json().context["reported:checks"] as Array<Record<string, unknown>>;
@@ -538,7 +538,7 @@ describe("automated checks: fail → block → remediate → recheck → advance
       method: "POST",
       headers: ciAuth,
       url: `/v1/workflows/instances/${instanceId}/checks`,
-      payload: {
+      payload: { round: 0,
         stageId: "checks",
         results: [
           { check: "unit_tests", status: "passed" },
@@ -564,7 +564,7 @@ describe("automated checks: fail → block → remediate → recheck → advance
       method: "POST",
       headers: ciAuth,
       url: `/v1/workflows/instances/${instanceId}/checks`,
-      payload: { stageId: "checks", results: [{ check: "security_scan", status: "passed" }] },
+      payload: { round: 0, stageId: "checks", results: [{ check: "security_scan", status: "passed" }] },
     });
     expect(last.json().status).toBe("blocked_on_approval");
     for (const r of last.json().context["checks:checks"]) {
@@ -582,7 +582,7 @@ describe("automated checks: fail → block → remediate → recheck → advance
       method: "POST",
       headers: ciAuth,
       url: `/v1/workflows/instances/${instanceId}/checks`,
-      payload: { stageId: "checks", results: [{ check: "lint", status: "failed", severity: "medium" }] },
+      payload: { round: 0, stageId: "checks", results: [{ check: "lint", status: "failed", severity: "medium" }] },
     });
     expect(failed.json().status).toBe("blocked_on_check");
     const results = failed.json().context["checks:checks"] as Array<{ check: string; status: string }>;
@@ -601,7 +601,7 @@ describe("automated checks: fail → block → remediate → recheck → advance
       method: "POST",
       headers: ciAuth,
       url: `/v1/workflows/instances/${instanceId}/checks`,
-      payload: { stageId: "checks", results: [{ check: "unit_tests", status: "passed" }] },
+      payload: { round: 0, stageId: "checks", results: [{ check: "unit_tests", status: "passed" }] },
     });
     expect(pre.statusCode).toBe(200);
     await withEnv({ [OFFLINE_CHECKS_ENV]: "1" }, () => approve(instanceId, "gate"));
@@ -636,7 +636,7 @@ describe("automated checks: fail → block → remediate → recheck → advance
       method: "POST",
       headers: ciAuth,
       url: `/v1/workflows/instances/${instanceId}/checks`,
-      payload: { stageId: "checks", results: [{ check: "security_scan", status: "failed", severity: "high" }] },
+      payload: { round: 0, stageId: "checks", results: [{ check: "security_scan", status: "failed", severity: "high" }] },
     });
     await withEnv({ [OFFLINE_CHECKS_ENV]: "1" }, () => approve(instanceId, "gate"));
     const view = await instanceView(piaAuth, instanceId);
@@ -723,7 +723,7 @@ describe("automated checks: fail → block → remediate → recheck → advance
       method: "POST",
       headers: ciAuth,
       url: `/v1/workflows/instances/${instanceId}/checks`,
-      payload: { stageId: "checks", results: [{ check: "unit_tests", status: "passed", detail: "CI run #1 against v1" }] },
+      payload: { round: 0, stageId: "checks", results: [{ check: "unit_tests", status: "passed", detail: "CI run #1 against v1" }] },
     });
     expect(ci1.statusCode).toBe(200);
     await approve(instanceId, "gate");
@@ -769,7 +769,7 @@ describe("automated checks: fail → block → remediate → recheck → advance
       method: "POST",
       headers: ciAuth,
       url: `/v1/workflows/instances/${instanceId}/checks`,
-      payload: { stageId: "checks", results: [{ check: "unit_tests", status: "passed", detail: "CI run #2 against v2" }] },
+      payload: { round: 1, stageId: "checks", results: [{ check: "unit_tests", status: "passed", detail: "CI run #2 against v2" }] },
     });
     expect(ci2.json().status).toBe("blocked_on_approval");
     expect(ci2.json().context["checks:checks"]).toEqual([
@@ -784,14 +784,14 @@ describe("automated checks: fail → block → remediate → recheck → advance
       method: "POST",
       headers: piaAuth,
       url: `/v1/workflows/instances/${instanceId}/checks`,
-      payload: { stageId: "gate", results: [{ check: "unit_tests", status: "passed" }] },
+      payload: { round: 0, stageId: "gate", results: [{ check: "unit_tests", status: "passed" }] },
     });
     expect(wrongStage.statusCode).toBe(422);
     const unknownCheck = await app.inject({
       method: "POST",
       headers: piaAuth,
       url: `/v1/workflows/instances/${instanceId}/checks`,
-      payload: { stageId: "checks", results: [{ check: "not_a_real_check", status: "failed" }] },
+      payload: { round: 0, stageId: "checks", results: [{ check: "not_a_real_check", status: "failed" }] },
     });
     expect(unknownCheck.statusCode).toBe(422);
   });

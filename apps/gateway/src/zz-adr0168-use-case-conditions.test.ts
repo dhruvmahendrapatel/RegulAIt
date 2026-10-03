@@ -304,12 +304,18 @@ describe("ADR-0168 send back for information", () => {
     expect(blank.statusCode).toBe(422);
     expect(blank.json().error).toBe("return_reason_required");
 
+    const [beforeReturn] = await db.select().from(workflowInstances).where(eq(workflowInstances.id, uc.instanceId));
     const r = await decide(approvalId, { decision: "returned", reason: "say which data sources feed the model" }, "condOwner");
     expect(r.statusCode, r.body).toBe(200);
     expect(r.json()).toMatchObject({ id: approvalId, status: "returned" });
 
     const [inst] = await db.select().from(workflowInstances).where(eq(workflowInstances.id, uc.instanceId));
     expect(inst!.status).toBe("blocked_on_artifact");
+    // AER-048: a return RE-OPENS the instance — a new round (check reports for
+    // the old one are refused) and a new stage entry (an executor still
+    // running from before the return cannot commit)
+    expect(inst!.round).toBe(beforeReturn!.round + 1);
+    expect(inst!.stageEntry).toBe(beforeReturn!.stageEntry + 1);
     const d = (await detail(uc.id)).json();
     expect(d.useCase.status).toBe("needs_info");
     expect(d.instance).toMatchObject({ status: "blocked_on_artifact", currentStageId: "questionnaire" });
@@ -338,6 +344,10 @@ describe("ADR-0168 send back for information", () => {
     });
     expect(art.statusCode, art.body).toBe(201);
     expect(art.json()).toMatchObject({ version: 2, status: "blocked_on_approval" });
+    // the resubmission itself is forward progress from the stage the return
+    // parked it at — not a second re-open
+    const [afterResubmit] = await db.select().from(workflowInstances).where(eq(workflowInstances.id, uc.instanceId));
+    expect(afterResubmit!.round).toBe(inst!.round);
     const fresh = await pendingSignoffs(uc.instanceId);
     expect(fresh).toHaveLength(1);
     expect(fresh[0]!.id).not.toBe(approvalId);

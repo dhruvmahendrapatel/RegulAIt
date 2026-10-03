@@ -1454,6 +1454,14 @@ export const reportChecksSchema = z.object({
    * initiator and any result is `passed` — reporting your own check green is
    * a self-attestation, and the reason is what the approver reads. */
   reason: z.string().max(2000).optional(),
+  /** AER-048: the workflow ROUND these results were produced for — the
+   * instance's `round` (GET /v1/workflows/instances/:id → instance.round),
+   * which a re-open (artifact resubmitted, sign-off returned) bumps. A report
+   * naming a round that is no longer current is refused with 409
+   * `stale_check_report` and audited. OMITTED = "the current round": the
+   * report is taken for whatever round is current when it is applied (the
+   * pre-AER-048 behaviour, kept for existing CI integrations). */
+  round: z.number().int().min(0).optional(),
 });
 
 /** §2 re-run a check stage that is parked at blocked_on_check, after the failing
@@ -2116,6 +2124,9 @@ export const updateOrgSettingsSchema = z
     budgetHardBlockPct: z.number().int().min(1).max(100).optional(),
     // approvals
     approvalQuorum: approvalQuorumSchema.optional(),
+    /** AER-048 (migration 0130): allow key-authenticated workflow check
+     * reports that name no `round` (false = refused 422 round_required). */
+    checkReportsAllowUnbound: z.boolean().optional(),
     // ADR-0022: approver-delegation master switch + persisted default
     // infra-remediation approver (null clears it)
     approvalDelegationEnabled: z.boolean().optional(),

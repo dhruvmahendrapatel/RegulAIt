@@ -334,7 +334,7 @@ describe("an eval-bound check stays machine-decided through the recheck path", (
     // instance is already blocked on the machine decision.
     const res = await app.inject({
       method: "POST", headers: runnerAuth, url: `/v1/workflows/instances/${instanceId}/checks`,
-      payload: { stageId: "checks", results: [{ check: "agent_quality", status: "passed" }] },
+      payload: { round: 0, stageId: "checks", results: [{ check: "agent_quality", status: "passed" }] },
     });
     expect(res.statusCode).toBe(422);
     expect(res.json().error).toBe("eval_check_cannot_be_reported");
@@ -345,7 +345,7 @@ describe("an eval-bound check stays machine-decided through the recheck path", (
     const res = await app.inject({
       method: "POST", headers: runnerAuth, url: `/v1/workflows/instances/${instanceId}/checks`,
       // (ADR-0167: the runner initiated this change, so its own green needs a reason)
-      payload: { stageId: "checks", results: [{ check: "unit_tests", status: "passed" }], reason: "suite green" },
+      payload: { round: 0, stageId: "checks", results: [{ check: "unit_tests", status: "passed" }], reason: "suite green" },
     });
     expect(res.statusCode).toBe(200);
   });
