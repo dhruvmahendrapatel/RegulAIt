@@ -93,7 +93,7 @@ export default function UseCasesPage() {
               <EmptyState
                 title="No AI use cases yet"
                 body="Register the first one — the registration checks for duplicates, screens it and sends it for review."
-                action={<Link to={INTAKE} className={k.btnPrimary} style={{ textDecoration: "none" }}>Register AI use case</Link>}
+                action={<Link to={INTAKE} className={k.btn} style={{ textDecoration: "none" }}>Register the first use case</Link>}
               />
             ) : (
               <>

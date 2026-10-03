@@ -85,8 +85,11 @@ async function registerUseCase(page: Page, f: { name: string; what: string; soci
   await page.getByLabel("Social scoring").selectOption(f.socialScoring);
   await page.getByRole("button", { name: "Draft suggestions" }).click();
   await expect(page.locator('[aria-current="step"]')).toContainText("Suggestions");
-  const acceptAll = page.getByRole("button", { name: /Accept all remaining/ });
-  if (await acceptAll.isEnabled()) await acceptAll.click();
+  // every suggestion is REJECTED: this spec is about the screening, and the
+  // e2e seed carries no compliance packs for a suggested risk's controls to link to
+  const reject = page.getByRole("button", { name: "Reject", exact: true });
+  for (let i = 0; i < (await reject.count()); i += 1) await reject.nth(i).click();
+  await expect(page.getByText("Every suggestion has a decision.")).toBeVisible();
   for (let i = 0; i < 3; i += 1) await page.getByRole("button", { name: "Continue" }).click();
   await page.getByRole("button", { name: "Submit for human review" }).click();
   await expect(page.getByRole("status").filter({ hasText: "Submitted for human review." })).toBeVisible();
