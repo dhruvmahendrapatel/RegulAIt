@@ -328,6 +328,9 @@ test("audit log: A4 deploy-mode filter, including the honest unknown / pre-0044 
   // replaced "un-backfillable" — along with the mode cells and the empty
   // state below, and carried only the Retention and "None recorded"
   // assertions along. The rest was found the day this spec got a CI gate, F01.)
+  // (the calm pass moved the method behind the filter's help disclosure — one
+  // fact once, the explanation on demand — so the spec opens it first)
+  await page.getByRole("button", { name: "What is a recorded deploy mode?" }).click();
   await expect(page.getByText("never back-filled or guessed", { exact: false })).toBeVisible();
   // (a plain locator, not getByRole: the kit's <th> cells expose as `cell`,
   // and the header text is uppercased by CSS text-transform)
