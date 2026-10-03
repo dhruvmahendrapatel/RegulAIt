@@ -452,7 +452,8 @@ export default function ShadowAiPage() {
               rowKey={(r) => r.id}
               columns={[
                 { key: "severity", header: "Severity", render: (r) => <SeverityBadge severity={r.severity} /> },
-                { key: "subject", header: "Subject", render: (r) => <span title={r.subjectKind}>{r.subject}</span> },
+                { key: "subject", header: "Subject", // a floor so the nowrap actions column cannot squeeze a name to one word per line
+                render: (r) => <span title={r.subjectKind} style={{ display: "inline-block", minWidth: "14ch" }}>{r.subject}</span> },
                 { key: "provider", header: "Provider", render: (r) => providerLabel(r.provider) },
                 { key: "sources", header: "Sources", render: (r) => r.signalSources.map(evidenceLabel).join(", ") },
                 { key: "confidence", header: "Confidence", render: (r) => r.confidence },
