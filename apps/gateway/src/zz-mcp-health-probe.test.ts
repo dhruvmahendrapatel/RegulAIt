@@ -24,8 +24,8 @@
  * (M-018). Every assertion is scoped to ids this file created (M-008).
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createDb, eq, inArray, mcpServers, notInArray, runMigrations, type Db } from "@regulait/db";
-import { runMcpHealthProbeSweep } from "./mcp-health-probe.js";
+import { createDb, eq, inArray, mcpServers, notInArray, runMigrations, sql, type Db } from "@regulait/db";
+import { runMcpHealthProbeSweep, type McpHealthProbeResult } from "./mcp-health-probe.js";
 import { resolveBreakerConfig, setBreakerConfig, breakerConfig } from "./upstream-breaker.js";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
@@ -355,5 +355,110 @@ describe("AER-037 — a bounded pass rotates, so the tail is late and never star
     await runMcpHealthProbeSweep(db, { limit: LIMIT });
     const after = await cursors();
     for (const id of rotation) expect(after.get(id)).toBe(before.get(id));
+  }, 60_000);
+});
+
+// ===========================================================================
+// AER-037, second pass — two passes AT ONCE claim disjoint sets.
+// ===========================================================================
+//
+// The rotation above is a property of passes in SEQUENCE. The first fix also
+// claimed that "two concurrent passes select disjoint sets" — in a comment
+// between a SELECT and an UPDATE that were two statements, with nothing
+// enforcing it: a second pass arriving in the gap picked the same head,
+// stamped it again and probed it again. The claim is now one statement (`for
+// update skip locked` plus the stamp), and this is the test that can tell the
+// two apart.
+//
+// MAKING THE OVERLAP CERTAIN rather than likely: a trigger on this test's rows
+// sleeps while their cursor is being stamped, so the second pass's claim is
+// guaranteed to arrive while the first pass's claim still holds its row locks.
+// Column- and name-scoped, so the breaker writes the probes make, and every
+// other suite's rows, never touch it; dropped in `finally` whatever happens.
+//
+// WHAT IS READ is the world, then the report: every one of these upstreams is
+// dead and the threshold is 1, so a probe is an opened breaker with ONE
+// recorded failure. Probed twice is two failures; never probed is a closed
+// breaker with none. Each pass's `opened` list names what it took, and the
+// two lists must partition the set.
+
+describe("AER-037 — two concurrent passes claim DISJOINT sets", () => {
+  const LIMIT = 3;
+  const COUNT = 2 * LIMIT;
+  const tag = `zz-pair-${randomUUID().slice(0, 8)}`;
+  const pair: string[] = [];
+  const names: string[] = [];
+
+  beforeAll(async () => {
+    for (let i = 0; i < COUNT; i += 1) {
+      // registration order and name order disagree, as in the rotation block
+      const name = `${tag}-${String(COUNT - i).padStart(2, "0")}`;
+      names.push(name);
+      pair.push(await register(name, DEAD_URL));
+    }
+    // park the rest of the estate — the rotation block says why this is safe
+    await db
+      .update(mcpServers)
+      .set({ lastHealthProbeAt: new Date(), breakerOpenedAt: null, breakerLastError: null })
+      .where(notInArray(mcpServers.id, pair));
+  }, 60_000);
+
+  it("no upstream is probed twice and none is skipped when two passes overlap", async () => {
+    // the tag is this test's own and hex-only, so inlining it in DDL is safe
+    expect(tag).toMatch(/^zz-pair-[0-9a-f]{8}$/);
+    const fnName = `zz_aer037_hold_${tag.slice(-8)}`;
+    await db.execute(
+      sql.raw(`
+      create or replace function ${fnName}() returns trigger as $$
+      begin
+        perform pg_sleep(0.25);
+        return new;
+      end $$ language plpgsql;
+    `),
+    );
+    await db.execute(
+      sql.raw(
+        `create trigger ${fnName} before update of last_health_probe_at on mcp_servers ` +
+          `for each row when (new.name like '${tag}-%') execute function ${fnName}()`,
+      ),
+    );
+    try {
+      const [a, b] = await Promise.all([
+        runMcpHealthProbeSweep(db, { limit: LIMIT }),
+        runMcpHealthProbeSweep(db, { limit: LIMIT }),
+      ]);
+
+      // THE PARTITION, from each pass's own report of what it opened.
+      const ours = (out: McpHealthProbeResult) => out.opened.filter((n) => names.includes(n)).sort();
+      const tookA = ours(a);
+      const tookB = ours(b);
+      expect(tookA, `pass A: ${JSON.stringify(a)}`).toHaveLength(LIMIT);
+      expect(tookB, `pass B: ${JSON.stringify(b)}`).toHaveLength(LIMIT);
+      expect(
+        tookA.filter((n) => tookB.includes(n)),
+        "no upstream was probed by both passes",
+      ).toEqual([]);
+      expect([...tookA, ...tookB].sort(), "no upstream was skipped").toEqual([...names].sort());
+
+      // AND THE WORLD AGREES: exactly one recorded failure on every row. A
+      // report could partition correctly while a row was probed twice
+      // underneath it; the failure count cannot.
+      const rows = await db
+        .select({
+          name: mcpServers.name,
+          failures: mcpServers.breakerConsecutiveFailures,
+          openedAt: mcpServers.breakerOpenedAt,
+        })
+        .from(mcpServers)
+        .where(inArray(mcpServers.id, pair));
+      expect(rows).toHaveLength(COUNT);
+      for (const r of rows) {
+        expect(r.failures, `${r.name} was probed exactly once`).toBe(1);
+        expect(r.openedAt, `${r.name} was probed at all`).not.toBeNull();
+      }
+    } finally {
+      await db.execute(sql.raw(`drop trigger if exists ${fnName} on mcp_servers`));
+      await db.execute(sql.raw(`drop function if exists ${fnName}()`));
+    }
   }, 60_000);
 });

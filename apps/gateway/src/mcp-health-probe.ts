@@ -75,13 +75,16 @@
  * ceil(n / limit) passes regardless of its name, and the recovery cohort still
  * jumps the queue.
  *
- * The cursor is stamped when a row is SELECTED, not after it answers. Three
- * things follow, and all three are wanted: a row whose probe fails still moves
- * to the back (its breaker, not this cursor, is what keeps it urgent); two
- * concurrent passes pick DISJOINT sets rather than racing over the same head;
- * and a pass that dies half way leaves its rows late rather than starved.
+ * The cursor is stamped when a row is SELECTED, not after it answers — in the
+ * same statement that selects it, under `for update skip locked`. Three things
+ * follow, and all three are wanted: a row whose probe fails still moves to the
+ * back (its breaker, not this cursor, is what keeps it urgent); two concurrent
+ * passes claim DISJOINT sets rather than racing over the same head, because
+ * the second skips the rows the first has locked (the test file overlaps two
+ * passes to show it); and a pass that dies half way leaves its rows late
+ * rather than starved.
  */
-import { asc, inArray, mcpServers, sql, type Db } from "@regulait/db";
+import { asc, eq, inArray, mcpServers, sql, type Db } from "@regulait/db";
 import { McpAdmissionHeldError } from "./mcp-admission.js";
 import { McpEgressBlockedError } from "./mcp-egress.js";
 import { connectUpstream } from "./mcp-proxy.js";
@@ -207,7 +210,8 @@ export async function runMcpHealthProbeSweep(
     })
     .from(mcpServers);
 
-  // BROKEN FIRST, THEN LEAST RECENTLY CONSIDERED.
+  // BROKEN FIRST, THEN LEAST RECENTLY CONSIDERED — AND THE SELECTION IS THE
+  // CLAIM, in ONE statement.
   //
   // `(breaker_opened_at is null) asc` puts false (a breaker IS open) ahead of
   // true, so the recovery cohort keeps jumping the queue — recovery is the
@@ -217,38 +221,74 @@ export async function runMcpHealthProbeSweep(
   // neglected. Name remains only as a deterministic tiebreak between rows whose
   // cursors are equal (every row on a fresh install), so a pass over unchanged
   // data is reproducible.
-  const batch = (await db
-    .select({
-      id: mcpServers.id,
-      name: mcpServers.name,
-      url: mcpServers.url,
-      allowPrivateRanges: mcpServers.allowPrivateRanges,
-      breakerOpenedAt: mcpServers.breakerOpenedAt,
-      breakerLastError: mcpServers.breakerLastError,
-      breakerConsecutiveFailures: mcpServers.breakerConsecutiveFailures,
-      lastHealthProbeAt: mcpServers.lastHealthProbeAt,
-    })
-    .from(mcpServers)
-    .where(probable)
-    .orderBy(
-      sql`(${mcpServers.breakerOpenedAt} is null) asc`,
-      sql`${mcpServers.lastHealthProbeAt} asc nulls first`,
-      asc(mcpServers.name),
-    )
-    .limit(limit)) as ProbeRow[];
-
-  // CLAIM THE BATCH BEFORE PROBING IT. One UPDATE, and it is what turns the cap
-  // into a rotation: a row is "considered" the moment it is selected, so a probe
-  // that fails, hangs or is refused by our own gates still moves to the back of
-  // the queue and cannot monopolise every pass. It also means two concurrent
-  // passes select disjoint sets instead of racing over the same head — and a
-  // pass that dies half way leaves its rows late rather than starved.
-  if (batch.length > 0) {
-    await db
+  //
+  // THE CLAIM. The first fix selected the batch and then stamped it with a
+  // second UPDATE, and the comment between them said two concurrent passes
+  // "select disjoint sets". Nothing enforced that: a second pass could run the
+  // same SELECT in the gap before the first pass's stamp landed, pick the same
+  // head, stamp it again and probe it again — the same rows probed twice by
+  // two sweeps, and the rows behind them reached by neither, on an estate
+  // whose scheduler page reported two full passes.
+  //
+  // Now the rows are row-locked AS THEY ARE SELECTED (`for update skip
+  // locked`) and stamped in the same statement, so there is no gap: a pass
+  // that arrives while another is mid-claim skips the rows that pass holds and
+  // takes the next ones in the same order, instead of blocking behind them or
+  // duplicating them. The locks last exactly as long as the statement (this is
+  // autocommit; nothing is held while the probes below run), and the stamp is
+  // visible to the next pass the moment they are released.
+  //
+  // Three parts, one round trip: `picked` selects and locks; `claimed` stamps
+  // the cursor on exactly those rows (a data-modifying CTE runs once whether
+  // or not the outer query reads it); the outer query returns `picked` — the
+  // rows as they were BEFORE the stamp, in probe order, which is what the loop
+  // below wants (`breakerOpenedAt` for the election, the old cursor for the
+  // order).
+  //
+  // The stamp is taken when a row is SELECTED, not after it answers, and the
+  // header says why: a row whose probe fails, hangs or is refused by our own
+  // gates still moves to the back of the queue and cannot monopolise every
+  // pass, and a pass that dies half way leaves its rows late rather than
+  // starved.
+  const picked = db.$with("picked").as(
+    db
+      .select({
+        id: mcpServers.id,
+        name: mcpServers.name,
+        url: mcpServers.url,
+        allowPrivateRanges: mcpServers.allowPrivateRanges,
+        breakerOpenedAt: mcpServers.breakerOpenedAt,
+        breakerLastError: mcpServers.breakerLastError,
+        breakerConsecutiveFailures: mcpServers.breakerConsecutiveFailures,
+        lastHealthProbeAt: mcpServers.lastHealthProbeAt,
+      })
+      .from(mcpServers)
+      .where(probable)
+      .orderBy(
+        sql`(${mcpServers.breakerOpenedAt} is null) asc`,
+        sql`${mcpServers.lastHealthProbeAt} asc nulls first`,
+        asc(mcpServers.name),
+      )
+      .limit(limit)
+      .for("update", { skipLocked: true }),
+  );
+  const claimed = db.$with("claimed").as(
+    db
       .update(mcpServers)
       .set({ lastHealthProbeAt: new Date() })
-      .where(inArray(mcpServers.id, batch.map((r) => r.id)));
-  }
+      .from(picked)
+      .where(eq(mcpServers.id, picked.id))
+      .returning({ id: mcpServers.id }),
+  );
+  const batch = (await db
+    .with(picked, claimed)
+    .select()
+    .from(picked)
+    .orderBy(
+      sql`(${picked.breakerOpenedAt} is null) asc`,
+      sql`${picked.lastHealthProbeAt} asc nulls first`,
+      asc(picked.name),
+    )) as ProbeRow[];
 
   const out: McpHealthProbeResult = {
     eligible,
