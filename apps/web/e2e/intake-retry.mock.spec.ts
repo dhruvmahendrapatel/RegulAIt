@@ -125,6 +125,9 @@ const goTo = async (page: Page, stage: string) => {
 
 /** draft, accept every suggestion, optionally edit each risk's text, edit the purpose answer, reach Review */
 async function walkToReview(page: Page, edits: { risks?: Record<string, string>; purpose?: string } = {}) {
+  // from Describe: Classify is its own step (ADR-0168)
+  await page.getByRole("button", { name: "Continue" }).click();
+  await goTo(page, "Classify");
   await page.getByRole("button", { name: "Draft suggestions" }).click();
   await goTo(page, "Suggestions");
   await page.getByRole("button", { name: /Accept all remaining/ }).click();
@@ -168,7 +171,7 @@ async function expectNoAxeViolations(page: Page, label: string) {
 }
 
 async function backToDescribe(page: Page) {
-  for (const stage of ["Link stack", "Questionnaire", "Suggestions", "Describe"]) {
+  for (const stage of ["Link stack", "Questionnaire", "Suggestions", "Classify", "Describe"]) {
     await page.getByRole("button", { name: "Back" }).click();
     await goTo(page, stage);
   }
@@ -200,9 +203,9 @@ test.describe("AER-046: an intake retry after edits never mixes old records with
       "PATCH /v1/risks/risk-1",
       "POST /v1/risks",
     ]);
+    // the example fills its own business context, so only the purpose changed
     expect(retry[0]!.body).toEqual({
       description: "Edited: recommends credit-limit increases; a human decides every one.",
-      businessContext: "Edited: recommends credit-limit increases; a human decides every one.",
     });
     expect(retry[2]!.body).toEqual({ description: "Edited bias text." });
     expect(retry[3]!.body).toMatchObject({ title: INJECTION_TITLE, description: "Edited injection text.", useCaseId: USE_CASE });

@@ -1,15 +1,32 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
+/**
+ * "Register AI use case" — the ONE way to propose an AI use case (ADR-0168
+ * items 1 and 3). A full-page registration: a short Describe step, the EU AI
+ * Act screening on its own Classify step, the assistant's suggestions to
+ * accept or reject, the questionnaire, the stack, and a review. A right rail
+ * lists existing use cases similar to the one being typed, so a duplicate is
+ * seen before it is created; it never blocks the submission.
+ *
+ * The submission itself is AER-046's checkpointed pipeline (intakeCheckpoint.ts):
+ * a retry after a failure resumes, applies edits to what was written, or is
+ * refused with nothing sent.
+ */
+import { cloneElement, useDeferredValue, useEffect, useId, useMemo, useRef, useState, type ReactElement, type ReactNode, type RefObject } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { ApiError, api } from "../../../api/client";
-import { humanize } from "../../../api/format";
+import { humanize, plural } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
+import { useSession } from "../../../session/SessionContext";
 import { Badge, Button, Card, Field, Fieldset, Input, Select, Textarea } from "../../../ui/kit";
 import { useAction, useAgents } from "../adminKit";
 import v from "../../views.module.css";
+import k from "../../../ui/kit.module.css";
 import s from "./demoGovernance.module.css";
+import rg from "./registration.module.css";
 import { deriveDataSensitivity } from "./dataSensitivity";
 import { canonicalDigest, emptyCheckpoint, planSubmission, type SubmissionCheckpoint, type SubmissionInputs } from "./intakeCheckpoint";
+import { findSimilar, tokens } from "./similarUseCases";
+import { statusLabel, statusTone, type UseCaseRow } from "./registryModel";
 
 type Source = "rules" | "mock" | "model";
 type Decision = "accepted" | "rejected";
@@ -54,7 +71,15 @@ class RetryRefused extends Error {
   }
 }
 
-const STEPS = ["Describe", "Suggestions", "Questionnaire", "Link stack", "Review"];
+const STEPS = ["Describe", "Classify", "Suggestions", "Questionnaire", "Link stack", "Review"];
+const DESCRIBE = 0;
+const CLASSIFY = 1;
+const SUGGESTIONS = 2;
+const REVIEW = STEPS.length - 1;
+const REGISTRY = "/admin/use-cases";
+
+/** who wrote a suggestion, in words — never the internal source key */
+const SOURCE_LABEL: Record<Source, string> = { rules: "Suggested by rules", model: "Suggested by AI", mock: "Sample suggestion" };
 const SECTOR_OPTIONS = ["financial-services", "securities-broker-dealer", "healthcare", "payments", "public-sector", "general"] as const;
 const DATA_CATEGORY_OPTIONS = ["personal", "sensitive-personal", "health", "payment-card", "financial", "proprietary", "public"] as const;
 
@@ -67,6 +92,8 @@ export default function IntakeWizardPage() {
   const [step, setStep] = useState(0);
   const [title, setTitle] = useState(prefill.get("title") ?? "");
   const [description, setDescription] = useState(prefill.get("description") ?? "");
+  // optional: blank reuses the purpose, as the single-field form always did
+  const [businessContext, setBusinessContext] = useState("");
   // Every answer starts BLANK. A new operator opening this page must describe
   // their own system — a pre-selected sample read as a record that already
   // existed (UXJ-06). The worked example is one explicit click away below.
@@ -91,6 +118,7 @@ export default function IntakeWizardPage() {
   const fillExample = () => {
     setTitle("Credit-limit-increase assistant");
     setDescription("Helps Acme Bank customers request a credit-limit increase using profile and financial data, with a human reviewing every recommendation.");
+    setBusinessContext("Faster answers for customers while every lending decision stays with an accountable person.");
     setPurposeDomain("essential-services");
     setAffectedPerson("customers");
     setDecisionAutonomy("human-reviews");
@@ -175,7 +203,7 @@ export default function IntakeWizardPage() {
       // answer by answer on the next step
       setDecisions(Object.fromEntries(data.questionnaire.map((item) => [`question:${item.id}`, "accepted" as const])));
       setQuestionnaire(Object.fromEntries(data.questionnaire.map((item) => [item.id, item.text])));
-      setStep(1);
+      setStep(SUGGESTIONS);
     },
   });
 
@@ -207,12 +235,15 @@ export default function IntakeWizardPage() {
   const undecidedSuggestions = suggestionKeys.filter((key) => !decisions[key]);
   const acceptAllRemaining = () =>
     setDecisions((current) => ({ ...current, ...Object.fromEntries(undecidedSuggestions.map((key) => [key, "accepted" as Decision])) }));
+  const describeComplete = Boolean(title.trim() && description.trim());
   const canContinue =
-    step === 0
-      ? Boolean(title.trim() && description.trim() && intakeAnswersComplete)
-      : step === 1
-        ? Boolean(assist.data) && undecidedSuggestions.length === 0
-        : Boolean(assist.data);
+    step === DESCRIBE
+      ? describeComplete
+      : step === CLASSIFY
+        ? describeComplete && intakeAnswersComplete
+        : step === SUGGESTIONS
+          ? Boolean(assist.data) && undecidedSuggestions.length === 0
+          : Boolean(assist.data);
   const setDecision = (key: string, value: Decision) => setDecisions((current) => ({ ...current, [key]: value }));
 
   const questionnaireMarkdown = () => {
@@ -229,7 +260,7 @@ export default function IntakeWizardPage() {
     useCase: {
       name: title.trim(),
       description: description.trim(),
-      businessContext: description.trim(),
+      businessContext: businessContext.trim() || description.trim(),
       dataSensitivity: deriveDataSensitivity(dataCategories),
       complianceTags: acceptedFrameworks.map((item) => item.framework),
       intendedAgentIds: agentId ? [agentId] : [],
@@ -328,265 +359,363 @@ export default function IntakeWizardPage() {
     submitAction.setError(null);
   };
 
+
+  const { auth } = useSession();
+  const ownerName = auth?.user?.displayName ?? auth?.user?.email ?? "You";
+  const goTo = (next: number) => setStep(Math.max(0, Math.min(REVIEW, next)));
+  const prohibitedAlert = assist.data?.blocking ? (
+    <div className={v.errLine} role="alert">
+      <strong>Screened PROHIBITED (Art. 5) — a reviewer must refuse it at sign-off; it cannot go live.</strong>{" "}
+      {typeof assist.data.blocking === "string" ? assist.data.blocking : assist.data.blocking.reason ?? "See the rule reasons."}
+    </div>
+  ) : null;
+
+  // the step's one primary action, top right beside Cancel (and Back)
+  const primary =
+    step === DESCRIBE ? (
+      <Button variant="primary" type="submit" form="intake-describe" disabled={!canContinue}>Continue</Button>
+    ) : step === CLASSIFY ? (
+      <Button variant="primary" type="submit" form="intake-classify" disabled={!canContinue || assist.isPending}>
+        {assist.isPending ? "Drafting…" : "Draft suggestions"}
+      </Button>
+    ) : step < REVIEW ? (
+      <Button variant="primary" disabled={!canContinue} onClick={() => goTo(step + 1)}>Continue</Button>
+    ) : submittedUseCaseId ? null : (
+      <Button variant="primary" disabled={submitAction.busy} onClick={() => void submitAction.run(submit, "Use case submitted for human review")}>
+        {submitAction.busy ? "Submitting…" : "Submit for human review"}
+      </Button>
+    );
+
   return (
     <>
       <PageHeader
-        title="AI use-case intake"
-        sub="Describe the proposed system, review every suggestion, then submit the human-edited record."
-        info={<p>The assistant is suggestion-only. It writes nothing until the final submission, and every item keeps its rules, mock, or model source label.</p>}
+        title="Register AI use case"
+        sub="Describe it, classify it, check the suggestions, then send it for review."
+        info={<p>The assistant is suggestion-only. Nothing is saved until you submit, and you accept or reject every suggestion.</p>}
+        actions={
+          <div className={rg.headerActions}>
+            {submittedUseCaseId ? (
+              <Link to={REGISTRY} className={`${k.btn} ${rg.linkBtn}`}>Back to the registry</Link>
+            ) : (
+              <Link to={REGISTRY} className={`${k.btnGhost} ${rg.linkBtn}`}>Cancel</Link>
+            )}
+            {step > DESCRIBE && !submittedUseCaseId && <Button onClick={() => goTo(step - 1)}>Back</Button>}
+            {primary}
+          </div>
+        }
       />
-      <div className={v.stack}>
-        <Card>
-          <ol className={s.stepper} aria-label="Intake progress">
+      <div className={rg.layout}>
+        <div className={rg.main}>
+          <ol className={rg.stepper} aria-label="Intake progress">
             {STEPS.map((label, index) => (
-              <li key={label} className={`${s.step} ${index === step ? s.stepActive : index < step ? s.stepDone : ""}`} aria-current={index === step ? "step" : undefined}>
-                <span className={s.stepNumber}>{index < step ? "✓" : index + 1}</span>
-                <span>{label}</span>
+              <li key={label} className={`${rg.step} ${index === step ? rg.stepActive : index < step ? rg.stepDone : ""}`} aria-current={index === step ? "step" : undefined}>
+                <span className={rg.stepNumber} aria-hidden>{index < step ? "✓" : index + 1}</span>
+                <span className={rg.stepLabel}>{label}</span>
               </li>
             ))}
           </ol>
-        </Card>
 
-        {step === 0 && (
-          <Card title={<StageHeading headingRef={stageHeading}>Describe the proposed AI system</StageHeading>}>
-            <form className={v.stack} onSubmit={(event) => { event.preventDefault(); assist.mutate(); }}>
-              {fromShadowAi ? (
-                <div className={s.callout} role="status">
-                  Prefilled from a shadow-AI finding — only its name and observed use. Complete every screening answer below; the finding did not establish them.
+          {step === DESCRIBE && (
+            <Card title={<StageHeading headingRef={stageHeading}>Describe the use case</StageHeading>}>
+              <form id="intake-describe" className={rg.form} onSubmit={(event) => { event.preventDefault(); if (canContinue) goTo(CLASSIFY); }}>
+                {fromShadowAi ? (
+                  <div className={s.callout} role="status">
+                    Prefilled from a shadow-AI finding — its name and observed use only. Answer the classification questions yourself; the finding does not establish them.
+                  </div>
+                ) : (
+                  <div className={rg.exampleRow}>
+                    <span>New here? See what a complete registration looks like.</span>
+                    <Button size="sm" variant="ghost" onClick={fillExample}>Fill in an example</Button>
+                  </div>
+                )}
+                <HintField label="Use-case name" hint="A name reviewers will recognize, such as “Credit-limit-increase assistant”.">
+                  <Input value={title} onChange={(event) => setTitle(event.target.value)} required />
+                </HintField>
+                <HintField label="What will the system do?" hint="The task, who it affects, and what the AI produces or changes.">
+                  <Textarea rows={4} value={description} onChange={(event) => setDescription(event.target.value)} required />
+                </HintField>
+                <HintField label="Business context" optional hint="Why the business wants it and the outcome it should improve. Leave blank to reuse the purpose.">
+                  <Textarea rows={3} value={businessContext} onChange={(event) => setBusinessContext(event.target.value)} />
+                </HintField>
+                <div className={rg.owner}>
+                  <span className={rg.label}>Owner</span>
+                  <span className={rg.ownerValue}>
+                    <span className={rg.avatar} aria-hidden>{initials(ownerName)}</span>
+                    {ownerName} (you)
+                  </span>
+                  <p className={rg.hint}>Whoever registers a use case owns it and completes its assessment.</p>
                 </div>
-              ) : (
+              </form>
+            </Card>
+          )}
+
+          {step === CLASSIFY && (
+            <Card title={<StageHeading headingRef={stageHeading}>Classify the use case</StageHeading>}>
+              <form id="intake-classify" className={rg.form} onSubmit={(event) => { event.preventDefault(); if (canContinue && !assist.isPending) assist.mutate(); }}>
+                <p className={v.dim}>These answers set the EU AI Act risk tier and the suggestions. Blank does not mean “no”.</p>
+                <section className={rg.group} aria-labelledby="classify-purpose">
+                  <h3 id="classify-purpose" className={rg.groupTitle}>Purpose and people</h3>
+                  <div className={rg.grid2}>
+                    <HintField label="Primary purpose domain" hint="The area the output is used in.">
+                      <Select value={purposeDomain} onChange={(event) => setPurposeDomain(event.target.value)} required>
+                        <option value="">Choose a purpose domain</option>
+                        <option value="essential-services">Essential services</option>
+                        <option value="employment-hr">Employment / HR</option>
+                        <option value="education">Education</option>
+                        <option value="law-enforcement">Law enforcement</option>
+                        <option value="migration-border">Migration / border control</option>
+                        <option value="justice-democracy">Justice / democracy</option>
+                        <option value="critical-infrastructure">Critical infrastructure</option>
+                        <option value="general-business">General business</option>
+                        <option value="internal-productivity">Internal productivity</option>
+                      </Select>
+                    </HintField>
+                    <HintField label="People affected" hint="Whose decisions or data it touches.">
+                      <Select value={affectedPerson} onChange={(event) => setAffectedPerson(event.target.value)} required>
+                        <option value="">Choose who is affected</option><option value="none">No natural persons</option><option value="employees">Employees</option><option value="customers">Customers</option><option value="general-public">General public</option><option value="vulnerable-groups">Vulnerable groups</option>
+                      </Select>
+                    </HintField>
+                    <HintField label="Decision autonomy" hint="How much a person decides before anything happens.">
+                      <Select value={decisionAutonomy} onChange={(event) => setDecisionAutonomy(event.target.value)} required>
+                        <option value="">Choose decision autonomy</option><option value="narrow-procedural">Narrow procedural task</option><option value="informs-human">Informs a human</option><option value="human-reviews">Human reviews every recommendation</option><option value="fully-automated">Fully automated</option>
+                      </Select>
+                    </HintField>
+                    <HintField label="Deployment audience" hint="Who uses it directly.">
+                      <Select value={deployment} onChange={(event) => setDeployment(event.target.value)} required>
+                        <option value="">Choose deployment audience</option><option value="internal">Internal</option><option value="customer-facing">Customer-facing</option><option value="public">Public</option>
+                      </Select>
+                    </HintField>
+                    <HintField label="Biometric use">
+                      <Select value={biometricUse} onChange={(event) => setBiometricUse(event.target.value)} required>
+                        <option value="">Choose biometric use</option><option value="none">None</option><option value="verification">1:1 verification</option><option value="remote-identification">Remote identification</option>
+                      </Select>
+                    </HintField>
+                  </div>
+                </section>
+                <section className={rg.group} aria-labelledby="classify-data">
+                  <h3 id="classify-data" className={rg.groupTitle}>Data and sector</h3>
+                  <p className={rg.groupHint}>The strictest data category sets the data sensitivity.</p>
+                  <div className={rg.grid2}>
+                    <MultiAnswerField label="Data categories" values={dataCategories} options={DATA_CATEGORY_OPTIONS} onChange={setDataCategories} />
+                    <MultiAnswerField label="Sectors" values={sectors} options={SECTOR_OPTIONS} onChange={setSectors} />
+                  </div>
+                </section>
+                <section className={rg.group} aria-labelledby="classify-practices">
+                  <h3 id="classify-practices" className={rg.groupTitle}>What it does in practice</h3>
+                  <div className={rg.grid3}>
+                    <BooleanAnswerField label="Profiles natural persons" value={profilesNaturalPersons} onChange={setProfilesNaturalPersons} />
+                    <BooleanAnswerField label="Interacts directly with people" value={interactsWithHumans} onChange={setInteractsWithHumans} />
+                    <BooleanAnswerField label="Generates synthetic content" value={generative} onChange={setGenerative} />
+                    <BooleanAnswerField label="Can take autonomous actions" value={autonomousActions} onChange={setAutonomousActions} />
+                    <BooleanAnswerField label="Uses an external AI vendor" value={usesExternalVendor} onChange={setUsesExternalVendor} />
+                    <BooleanAnswerField label="Has an EU nexus" value={euNexus} onChange={setEuNexus} />
+                    <BooleanAnswerField label="Safety component" value={safetyComponent} onChange={setSafetyComponent} />
+                    <BooleanAnswerField label="Emotion recognition" value={emotionRecognition} onChange={setEmotionRecognition} />
+                    <BooleanAnswerField label="Social scoring" value={socialScoring} onChange={setSocialScoring} />
+                    <BooleanAnswerField label="Manipulative techniques" value={manipulativeTechniques} onChange={setManipulativeTechniques} />
+                  </div>
+                </section>
+                {!intakeAnswersComplete ? <p className={v.faint}>Answer every question to draft suggestions.</p> : null}
+                {assist.isError && <p className={v.errLine} role="alert">{(assist.error as Error).message}</p>}
+              </form>
+            </Card>
+          )}
+
+          {step === SUGGESTIONS && assist.data && (
+            <Card title={<StageHeading headingRef={stageHeading}>Review suggestions</StageHeading>}>
+              <div className={v.stack}>
+                <div className={s.callout}>
+                  Proposed tier: <strong>{assist.data.tier.value} risk</strong>. {assist.data.tier.disclaimer}
+                </div>
+                {prohibitedAlert}
                 <div className={v.row}>
-                  <span className={v.faint}>New here? Load a worked example to see what a complete description looks like, then replace it with your own.</span>
-                  <Button size="sm" variant="ghost" onClick={fillExample}>Fill in an example</Button>
-                </div>
-              )}
-              <Field
-                label="Use-case name"
-                helpLabel="the inventory identifier created here"
-                help={<p>The name becomes the primary label for this proposed system in the AI inventory, approval queue, risk records and audit evidence. Use a specific business-facing name that reviewers will recognize.</p>}
-              >
-                <Input value={title} onChange={(event) => setTitle(event.target.value)} required />
-              </Field>
-              <Field
-                label="What will the system do?"
-                helpLabel="the proposed system description recorded here"
-                help={<p>Describe the business task, the people or decisions affected, and what the AI produces or changes. This description is stored on the use case and is used to draft the questionnaire, risk and framework suggestions.</p>}
-              >
-                <Textarea rows={5} value={description} onChange={(event) => setDescription(event.target.value)} required />
-              </Field>
-              <div className={v.grid2}>
-                <Field label="Primary purpose domain">
-                  <Select value={purposeDomain} onChange={(event) => setPurposeDomain(event.target.value)} required>
-                    <option value="">Choose a purpose domain</option>
-                    <option value="essential-services">Essential services</option>
-                    <option value="employment-hr">Employment / HR</option>
-                    <option value="education">Education</option>
-                    <option value="law-enforcement">Law enforcement</option>
-                    <option value="migration-border">Migration / border control</option>
-                    <option value="justice-democracy">Justice / democracy</option>
-                    <option value="critical-infrastructure">Critical infrastructure</option>
-                    <option value="general-business">General business</option>
-                    <option value="internal-productivity">Internal productivity</option>
-                  </Select>
-                </Field>
-                <Field label="People affected">
-                  <Select value={affectedPerson} onChange={(event) => setAffectedPerson(event.target.value)} required>
-                    <option value="">Choose who is affected</option><option value="none">No natural persons</option><option value="employees">Employees</option><option value="customers">Customers</option><option value="general-public">General public</option><option value="vulnerable-groups">Vulnerable groups</option>
-                  </Select>
-                </Field>
-                <Field label="Decision autonomy">
-                  <Select value={decisionAutonomy} onChange={(event) => setDecisionAutonomy(event.target.value)} required>
-                    <option value="">Choose decision autonomy</option><option value="narrow-procedural">Narrow procedural task</option><option value="informs-human">Informs a human</option><option value="human-reviews">Human reviews every recommendation</option><option value="fully-automated">Fully automated</option>
-                  </Select>
-                </Field>
-                <Field label="Biometric use">
-                  <Select value={biometricUse} onChange={(event) => setBiometricUse(event.target.value)} required>
-                    <option value="">Choose biometric use</option><option value="none">None</option><option value="verification">1:1 verification</option><option value="remote-identification">Remote identification</option>
-                  </Select>
-                </Field>
-                <MultiAnswerField label="Sectors" values={sectors} options={SECTOR_OPTIONS} onChange={setSectors} />
-                <MultiAnswerField label="Data categories" values={dataCategories} options={DATA_CATEGORY_OPTIONS} onChange={setDataCategories} />
-                <Field label="Deployment audience">
-                  <Select value={deployment} onChange={(event) => setDeployment(event.target.value)} required>
-                    <option value="">Choose deployment audience</option><option value="internal">Internal</option><option value="customer-facing">Customer-facing</option><option value="public">Public</option>
-                  </Select>
-                </Field>
-              </div>
-              <div className={v.grid2}>
-                <BooleanAnswerField label="Emotion recognition" value={emotionRecognition} onChange={setEmotionRecognition} />
-                <BooleanAnswerField label="Social scoring" value={socialScoring} onChange={setSocialScoring} />
-                <BooleanAnswerField label="Manipulative techniques" value={manipulativeTechniques} onChange={setManipulativeTechniques} />
-                <BooleanAnswerField label="Profiles natural persons" value={profilesNaturalPersons} onChange={setProfilesNaturalPersons} />
-                <BooleanAnswerField label="Safety component" value={safetyComponent} onChange={setSafetyComponent} />
-                <BooleanAnswerField label="Interacts directly with people" value={interactsWithHumans} onChange={setInteractsWithHumans} />
-                <BooleanAnswerField label="Generates synthetic content" value={generative} onChange={setGenerative} />
-                <BooleanAnswerField label="Has an EU nexus" value={euNexus} onChange={setEuNexus} />
-                <BooleanAnswerField label="Can take autonomous actions" value={autonomousActions} onChange={setAutonomousActions} />
-                <BooleanAnswerField label="Uses an external AI vendor" value={usesExternalVendor} onChange={setUsesExternalVendor} />
-              </div>
-              {!intakeAnswersComplete ? <p className={v.faint}>Complete every screening and context answer before drafting suggestions. Blank does not mean “no.”</p> : null}
-              {assist.isError && <p className={v.errLine} role="alert">{(assist.error as Error).message}</p>}
-              <div><Button variant="primary" type="submit" disabled={!canContinue || assist.isPending}>{assist.isPending ? "Drafting…" : "Draft suggestions"}</Button></div>
-            </form>
-          </Card>
-        )}
-
-        {step === 1 && assist.data && (
-          <Card title={<StageHeading headingRef={stageHeading}>Review assistant suggestions</StageHeading>}>
-            <div className={v.stack}>
-              <div className={s.callout}>
-                Proposed tier: <strong>{assist.data.tier.value}</strong> · ruleset v{assist.data.tier.rulesetVersion}. {assist.data.tier.disclaimer}
-              </div>
-              {assist.data.blocking ? (
-                <div className={v.errLine} role="alert">
-                  <strong>Screened PROHIBITED (Art. 5) — a reviewer must refuse it at sign-off; it cannot go live.</strong>{" "}
-                  {typeof assist.data.blocking === "string" ? assist.data.blocking : assist.data.blocking.reason ?? "See the rule reasons."}
-                </div>
-              ) : null}
-              <div className={v.row}>
-                <Button size="sm" disabled={undecidedSuggestions.length === 0} onClick={acceptAllRemaining}>
-                  Accept all remaining ({undecidedSuggestions.length})
-                </Button>
-                <span className={v.faint}>
-                  {undecidedSuggestions.length === 0
-                    ? "Every suggestion has a decision."
-                    : "Accept, edit or reject each suggestion before you continue — nothing is accepted until you decide."}
-                </span>
-              </div>
-              <h3 className={v.sectionTitle}>Frameworks</h3>
-              {assist.data.frameworks.map((item) => (
-                <Suggestion key={item.framework} title={item.title} body={suggestionEdits[`framework:${item.framework}`] ?? sentence(item.why)} source={item.source} decision={decisions[`framework:${item.framework}`]} onDecision={(value) => setDecision(`framework:${item.framework}`, value)} onEdit={(value) => setSuggestionEdits((current) => ({ ...current, [`framework:${item.framework}`]: value }))} helpLabel="the framework suggestion explanation" help={<p>This text explains why the framework was suggested so you can make the accept or reject decision. If accepted, the framework identifier—not this explanatory wording—is added to the use case as a compliance tag.</p>} />
-              ))}
-              <h3 className={v.sectionTitle}>Risk scenarios</h3>
-              {assist.data.risks.map((item) => (
-                <Suggestion key={item.scenarioKey} title={item.title} body={suggestionEdits[`risk:${item.scenarioKey}`] ?? `${item.description} Suggested because ${item.why.replace(/\.$/, "")}.`} source={item.source} decision={decisions[`risk:${item.scenarioKey}`]} onDecision={(value) => setDecision(`risk:${item.scenarioKey}`, value)} onEdit={(value) => setSuggestionEdits((current) => ({ ...current, [`risk:${item.scenarioKey}`]: value }))} meta={`${humanize(item.dimension)} · ${item.likelihood} likelihood · ${item.impact} impact`} helpLabel="the risk description created from this suggestion" help={<p>If you accept this scenario, the edited text becomes the description of a risk linked to the new use case. Review it as durable governance evidence, not as a private note.</p>} />
-              ))}
-              <p className={v.faint}>{assist.data.disclaimer}</p>
-            </div>
-          </Card>
-        )}
-
-        {step === 2 && assist.data && (
-          <Card title={<StageHeading headingRef={stageHeading}>Questionnaire — edit the accepted draft</StageHeading>}>
-            <div className={v.stack}>
-              {assist.data.questionnaire.map((item) => {
-                const rejected = decisions[`question:${item.id}`] === "rejected";
-                return (
-                  <section key={item.id} className={`${s.suggestion} ${rejected ? s.suggestionRejected : ""}`}>
-                    <div className={s.suggestionHeader}><strong>{item.heading}</strong><Badge tone="info">{item.source}</Badge><Badge tone={rejected ? "neutral" : "ok"}>{rejected ? "rejected" : "accepted"}</Badge></div>
-                    {!rejected && (
-                      <Field
-                        label={`${item.heading} answer`}
-                        helpLabel={`the evidence recorded for ${item.heading.toLowerCase()}`}
-                        help={<p>This answer is saved in the versioned intake questionnaire and shown to the human approver. Replace generic draft language with the proposed system's actual process, ownership and safeguards.</p>}
-                      >
-                        <Textarea rows={4} value={questionnaire[item.id] ?? item.text} onChange={(event) => setQuestionnaire((current) => ({ ...current, [item.id]: event.target.value }))} />
-                      </Field>
-                    )}
-                    <div className={s.suggestionActions}>
-                      <Button size="sm" variant={rejected ? "default" : "primary"} aria-pressed={!rejected} onClick={() => setDecision(`question:${item.id}`, "accepted")}>Accept</Button>
-                      <Button size="sm" variant={rejected ? "danger" : "ghost"} aria-pressed={rejected} onClick={() => setDecision(`question:${item.id}`, "rejected")}>Reject</Button>
-                    </div>
-                  </section>
-                );
-              })}
-              <Field
-                label="9. EU AI Act risk screening (rule-generated)"
-                helpLabel="the reproducible EU AI Act screening record"
-                help={<p>This read-only block records the structured screening answers used to calculate the proposed EU AI Act tier. It is appended to the versioned questionnaire so reviewers can reproduce the rule result; it is not legal advice.</p>}
-              >
-                <Textarea rows={10} value={assist.data.euAiActBlock} readOnly />
-              </Field>
-            </div>
-          </Card>
-        )}
-
-        {step === 3 && (
-          <Card title={<StageHeading headingRef={stageHeading}>Link the governed stack</StageHeading>}>
-            <div className={v.stack}>
-              <p className={v.dim}>The intended agent is recorded on the proposal. A selected vendor is attached to the accepted risk records during submission.</p>
-              <div className={v.grid2}>
-                <Field label="Model / agent">
-                  <Select value={agentId} onChange={(event) => setAgentId(event.target.value)}>
-                    <option value="">No agent selected yet</option>
-                    {(agents.data?.agents ?? []).map((agent) => <option key={agent.id} value={agent.id}>{agent.name} · {agent.provider}/{agent.model ?? "default"}</option>)}
-                  </Select>
-                </Field>
-                <Field label="Vendor">
-                  <Select value={vendorId} onChange={(event) => setVendorId(event.target.value)}>
-                    <option value="">No vendor selected yet</option>
-                    {(vendors.data?.vendors ?? []).map((vendor) => <option key={vendor.id} value={vendor.id}>{vendor.name} · {vendor.status}</option>)}
-                  </Select>
-                </Field>
-              </div>
-              {agents.isError || vendors.isError ? <p className={v.errLine}>Some stack choices could not be loaded. You can continue without linking them.</p> : null}
-            </div>
-          </Card>
-        )}
-
-        {step === 4 && assist.data && (
-          <Card title={<StageHeading headingRef={stageHeading}>Review before submission</StageHeading>}>
-            <div className={v.stack}>
-              <div className={v.grid3}>
-                <Summary value={assist.data.tier.value} label="Proposed tier" />
-                <Summary value={acceptedFrameworks.length} label="Accepted frameworks" />
-                <Summary value={acceptedRisks.length} label="Accepted risks" />
-              </div>
-              <div className={v.listRow}><strong>Name</strong><span className={v.grow}>{title}</span></div>
-              <div className={v.listRow}><strong>Description</strong><span className={v.grow}>{description}</span></div>
-              <div className={v.listRow}><strong>Questionnaire</strong><span className={v.grow}>{acceptedQuestions.length} accepted sections plus the EU AI Act answers block</span></div>
-              <div className={v.listRow}><strong>Data sensitivity</strong><span className={v.grow}><Badge tone="info">{deriveDataSensitivity(dataCategories)}</Badge> <span className={v.faint}>derived from the declared data categories (the strictest one wins)</span></span></div>
-              <div className={v.listRow}><strong>Sources</strong><span className={`${v.grow} ${v.row}`}>{sourceSummary.map((source) => <Badge key={source} tone="info">{source}</Badge>)}</span></div>
-              {assist.data.blocking ? (
-                <div className={v.errLine} role="alert">
-                  <strong>Screened PROHIBITED (Art. 5) — a reviewer must refuse it at sign-off; it cannot go live.</strong>{" "}
-                  {typeof assist.data.blocking === "string" ? assist.data.blocking : assist.data.blocking.reason ?? "See the rule reasons."}
-                </div>
-              ) : null}
-              <div className={s.callout}>
-                Submission creates the use case, advances planning, stores the human-edited questionnaire, creates each accepted risk, and links its suggested controls. If a later step fails, retry resumes from the last successful checkpoint rather than duplicating records; an answer you change before retrying is applied to what was already written (an updated record, a new questionnaire version), or the retry is refused when the gateway cannot edit it. A prohibited screening remains a proposal until the independent reviewer records the required refusal.
-              </div>
-              {retryRefused ? (
-                <div className={`${v.errLine} ${s.refusal}`} role="alert">
-                  <p>{retryRefused.message}</p>
-                  <ul>{retryRefused.reasons.map((reason) => <li key={reason}>{reason}</li>)}</ul>
-                  <p>
-                    Undo those changes and submit again to finish that record, <Link to={`/admin/governance/use-cases/${retryRefused.useCaseId}`}>open the existing use case</Link>, or start over: that withdraws the earlier record (its pending sign-off is cancelled and it reads rejected) and submits these answers as a new use case.
-                  </p>
-                  {startOverAction.error ? <p>The earlier record could not be withdrawn, so nothing was started: {startOverAction.error}</p> : null}
-                  <Button size="sm" disabled={startOverAction.busy} onClick={() => void startOverAction.run(startOver, "Earlier record withdrawn")}>
-                    {startOverAction.busy ? "Withdrawing…" : "Start over as a new use case"}
+                  <Button size="sm" disabled={undecidedSuggestions.length === 0} onClick={acceptAllRemaining}>
+                    Accept all remaining ({undecidedSuggestions.length})
                   </Button>
+                  <span className={v.faint}>
+                    {undecidedSuggestions.length === 0 ? "Every suggestion has a decision." : "Accept, edit or reject each one — nothing counts until you decide."}
+                  </span>
                 </div>
-              ) : submitAction.error ? <p className={v.errLine} role="alert">{submitAction.error} The completed steps have been retained; retry to resume.</p> : null}
-              {submittedUseCaseId ? (
-                <div className={s.callout} role="status">
-                  Submitted for human review. <Link to={`/admin/governance/use-cases/${submittedUseCaseId}`}>Open the use-case workspace</Link>.
-                </div>
-              ) : (
-                <div>
-                  <Button
-                    variant="primary"
-                    disabled={submitAction.busy}
-                    onClick={() => void submitAction.run(submit, "Use case submitted for human review")}
-                  >
-                    {submitAction.busy ? "Submitting…" : "Submit for human review"}
-                  </Button>{" "}
-                  <Link to="/admin/use-cases">Open the classic register</Link>
-                </div>
-              )}
-            </div>
-          </Card>
-        )}
+                <h3 className={v.sectionTitle}>Frameworks</h3>
+                {assist.data.frameworks.map((item) => (
+                  <Suggestion key={item.framework} title={item.title} body={suggestionEdits[`framework:${item.framework}`] ?? sentence(item.why)} source={item.source} decision={decisions[`framework:${item.framework}`]} onDecision={(value) => setDecision(`framework:${item.framework}`, value)} onEdit={(value) => setSuggestionEdits((current) => ({ ...current, [`framework:${item.framework}`]: value }))} hint="Why it applies. Accepting adds the framework to the use case." />
+                ))}
+                <h3 className={v.sectionTitle}>Risk scenarios</h3>
+                {assist.data.risks.map((item) => (
+                  <Suggestion key={item.scenarioKey} title={item.title} body={suggestionEdits[`risk:${item.scenarioKey}`] ?? `${item.description} Suggested because ${item.why.replace(/\.$/, "")}.`} source={item.source} decision={decisions[`risk:${item.scenarioKey}`]} onDecision={(value) => setDecision(`risk:${item.scenarioKey}`, value)} onEdit={(value) => setSuggestionEdits((current) => ({ ...current, [`risk:${item.scenarioKey}`]: value }))} meta={`${humanize(item.dimension)} · ${item.likelihood} likelihood · ${item.impact} impact`} hint="Accepted, this text becomes the description of a risk on the use case." />
+                ))}
+                <p className={v.faint}>{assist.data.disclaimer}</p>
+              </div>
+            </Card>
+          )}
 
-        {step > 0 && (
-          <div className={s.footerActions}>
-            <Button variant="ghost" onClick={() => setStep((current) => Math.max(0, current - 1))}>Back</Button>
-            {step < STEPS.length - 1 && <Button variant="primary" disabled={!canContinue} onClick={() => setStep((current) => Math.min(STEPS.length - 1, current + 1))}>Continue</Button>}
-          </div>
-        )}
+          {step === SUGGESTIONS + 1 && assist.data && (
+            <Card title={<StageHeading headingRef={stageHeading}>Edit the questionnaire</StageHeading>}>
+              <div className={v.stack}>
+                <p className={v.dim}>The reviewer reads these answers. Replace draft wording with how the system really works.</p>
+                {assist.data.questionnaire.map((item) => {
+                  const rejected = decisions[`question:${item.id}`] === "rejected";
+                  return (
+                    <section key={item.id} className={`${s.suggestion} ${rejected ? s.suggestionRejected : ""}`}>
+                      <div className={s.suggestionHeader}><strong>{item.heading}</strong><span className={rg.sourceLabel}>{SOURCE_LABEL[item.source]}</span><Badge tone={rejected ? "neutral" : "ok"}>{rejected ? "rejected" : "accepted"}</Badge></div>
+                      {!rejected && (
+                        <HintField label={`${item.heading} answer`} visuallyHiddenLabel>
+                          <Textarea rows={4} value={questionnaire[item.id] ?? item.text} onChange={(event) => setQuestionnaire((current) => ({ ...current, [item.id]: event.target.value }))} />
+                        </HintField>
+                      )}
+                      <div className={s.suggestionActions}>
+                        <Button size="sm" variant={rejected ? "default" : "primary"} aria-pressed={!rejected} onClick={() => setDecision(`question:${item.id}`, "accepted")}>Accept</Button>
+                        <Button size="sm" variant={rejected ? "danger" : "ghost"} aria-pressed={rejected} onClick={() => setDecision(`question:${item.id}`, "rejected")}>Reject</Button>
+                      </div>
+                    </section>
+                  );
+                })}
+                <HintField label="9. EU AI Act risk screening" hint="Generated from your Classify answers so a reviewer can reproduce the tier. Read-only.">
+                  <Textarea rows={8} value={assist.data.euAiActBlock} readOnly />
+                </HintField>
+              </div>
+            </Card>
+          )}
+
+          {step === REVIEW - 1 && (
+            <Card title={<StageHeading headingRef={stageHeading}>Link the stack</StageHeading>}>
+              <div className={`${v.stack} ${rg.form}`}>
+                <div className={rg.grid2}>
+                  <HintField label="Model / agent" hint="The agent it will run on — recorded as the intended agent.">
+                    <Select value={agentId} onChange={(event) => setAgentId(event.target.value)}>
+                      <option value="">No agent selected yet</option>
+                      {(agents.data?.agents ?? []).map((agent) => <option key={agent.id} value={agent.id}>{agent.name} · {agent.provider}/{agent.model ?? "default"}</option>)}
+                    </Select>
+                  </HintField>
+                  <HintField label="Vendor" hint="Attached to each accepted risk.">
+                    <Select value={vendorId} onChange={(event) => setVendorId(event.target.value)}>
+                      <option value="">No vendor selected yet</option>
+                      {(vendors.data?.vendors ?? []).map((vendor) => <option key={vendor.id} value={vendor.id}>{vendor.name} · {vendor.status}</option>)}
+                    </Select>
+                  </HintField>
+                </div>
+                {agents.isError || vendors.isError ? <p className={v.errLine}>Some choices could not be loaded. You can continue without them.</p> : null}
+              </div>
+            </Card>
+          )}
+
+          {step === REVIEW && assist.data && (
+            <Card title={<StageHeading headingRef={stageHeading}>Review and submit</StageHeading>}>
+              <div className={v.stack}>
+                <div className={v.grid3}>
+                  <Summary value={humanize(assist.data.tier.value)} label="Proposed tier" />
+                  <Summary value={acceptedFrameworks.length} label="Accepted frameworks" />
+                  <Summary value={acceptedRisks.length} label="Accepted risks" />
+                </div>
+                <div className={v.listRow}><strong>Name</strong><span className={v.grow}>{title}</span></div>
+                <div className={v.listRow}><strong>Purpose</strong><span className={v.grow}>{description}</span></div>
+                <div className={v.listRow}><strong>Business context</strong><span className={v.grow}>{businessContext.trim() || <span className={v.faint}>Same as the purpose</span>}</span></div>
+                <div className={v.listRow}><strong>Owner</strong><span className={v.grow}>{ownerName}</span></div>
+                <div className={v.listRow}><strong>Questionnaire</strong><span className={v.grow}>{plural(acceptedQuestions.length, "accepted section")}, plus the EU AI Act answers</span></div>
+                <div className={v.listRow}><strong>Data sensitivity</strong><span className={v.grow}><Badge tone="info">{humanize(deriveDataSensitivity(dataCategories))}</Badge> <span className={v.faint}>from the data categories — the strictest wins</span></span></div>
+                <div className={v.listRow}><strong>Suggested by</strong><span className={`${v.grow} ${v.row}`}>{sourceSummary.map((source) => <span key={source} className={rg.sourceLabel}>{SOURCE_LABEL[source]}</span>)}</span></div>
+                {prohibitedAlert}
+                {!submittedUseCaseId && (
+                  <div className={s.callout}>
+                    Submitting creates the use case with its risks and controls and sends it for review. If a step fails, retry continues where it stopped — nothing is created twice.
+                  </div>
+                )}
+                {retryRefused ? (
+                  <div className={`${v.errLine} ${s.refusal}`} role="alert">
+                    <p>{retryRefused.message}</p>
+                    <ul>{retryRefused.reasons.map((reason) => <li key={reason}>{reason}</li>)}</ul>
+                    <p>
+                      Undo those changes and submit again to finish that record, <Link to={`/admin/governance/use-cases/${retryRefused.useCaseId}`}>open the existing use case</Link>, or start over: that withdraws the earlier record (its pending sign-off is cancelled and it reads rejected) and submits these answers as a new use case.
+                    </p>
+                    {startOverAction.error ? <p>The earlier record could not be withdrawn, so nothing was started: {startOverAction.error}</p> : null}
+                    <Button size="sm" disabled={startOverAction.busy} onClick={() => void startOverAction.run(startOver, "Earlier record withdrawn")}>
+                      {startOverAction.busy ? "Withdrawing…" : "Start over as a new use case"}
+                    </Button>
+                  </div>
+                ) : submitAction.error ? <p className={v.errLine} role="alert">{submitAction.error} The completed steps have been retained; retry to resume.</p> : null}
+                {submittedUseCaseId ? (
+                  <div className={s.callout} role="status">
+                    Submitted for human review. <Link to={`/admin/governance/use-cases/${submittedUseCaseId}`}>Open the use-case workspace</Link>.
+                  </div>
+                ) : null}
+              </div>
+            </Card>
+          )}
+        </div>
+        <SimilarUseCases name={title} description={description} excludeIds={[submittedUseCaseId, checkpoint.current.useCase?.id].filter((id): id is string => Boolean(id))} />
       </div>
     </>
+  );
+}
+
+const initials = (name: string) =>
+  name.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part.charAt(0).toUpperCase()).join("") || "?";
+
+/**
+ * The right rail: existing use cases like the one being typed (ADR-0168 item 3).
+ * Advice only — it links each match and never blocks a submission.
+ */
+function SimilarUseCases(props: { name: string; description: string; excludeIds: string[] }) {
+  const list = useQuery({
+    queryKey: ["admin", "use-cases"],
+    queryFn: () => api.get<{ useCases?: UseCaseRow[] }>("/v1/use-cases"),
+  });
+  const name = useDeferredValue(props.name);
+  const description = useDeferredValue(props.description);
+  const exclude = props.excludeIds.join(",");
+  const matches = useMemo(
+    () => findSimilar({ name, description }, list.data?.useCases ?? [], { excludeIds: exclude ? exclude.split(",") : [] }),
+    [name, description, list.data, exclude],
+  );
+  // the same two-word floor findSimilar applies: below it there is nothing to say yet
+  const comparable = new Set([...tokens(name), ...tokens(description)]).size >= 2;
+  const summary = list.isLoading
+    ? "Checking the registry…"
+    : list.isError
+      ? "The registry could not be checked right now. You can still continue."
+      : matches.length > 0
+        ? <>We found <strong>{plural(matches.length, "similar use case")}</strong> — review {matches.length === 1 ? "it" : "them"} to avoid a duplicate.</>
+        : comparable
+          ? "No similar use cases found."
+          : "Type a name and purpose to check for similar use cases.";
+  return (
+    <aside className={rg.rail} aria-labelledby="similar-use-cases-title">
+      <h2 id="similar-use-cases-title" className={rg.railTitle}>Similar use cases</h2>
+      <p className={rg.railSummary} aria-live="polite">{summary}</p>
+      {matches.length > 0 && (
+        <ul className={rg.railList}>
+          {matches.map(({ useCase }) => (
+            <li key={useCase.id} className={rg.railItem}>
+              <span className={rg.railItemHead}>
+                <Link to={`/admin/governance/use-cases/${useCase.id}`}>{useCase.name}</Link>
+                <Badge tone={statusTone(useCase.status)}>{statusLabel(useCase.status)}</Badge>
+              </span>
+              {useCase.description ? <p className={rg.railDesc}>{useCase.description}</p> : null}
+            </li>
+          ))}
+        </ul>
+      )}
+    </aside>
+  );
+}
+
+/**
+ * A labelled control with a short hint UNDER it (ADR-0168: hints, not popovers).
+ * The hint is the control's description (aria-describedby), so a screen reader
+ * reads it after the name; the label stays exactly the field's name.
+ */
+function HintField(props: { label: string; hint?: ReactNode; optional?: boolean; visuallyHiddenLabel?: boolean; children: ReactElement<{ id?: string; "aria-describedby"?: string }> }) {
+  const id = useId();
+  const hintId = useId();
+  return (
+    <div className={rg.field}>
+      <label className={props.visuallyHiddenLabel ? rg.srOnly : rg.label} htmlFor={id}>
+        {props.label}
+        {props.optional ? <span className={rg.optional} aria-hidden> (optional)</span> : null}
+      </label>
+      {cloneElement(props.children, { id, "aria-describedby": props.hint ? hintId : undefined })}
+      {props.hint ? <p id={hintId} className={rg.hint}>{props.hint}</p> : null}
+    </div>
   );
 }
 
@@ -629,16 +758,16 @@ function MultiAnswerField(props: { label: string; values: string[]; options: rea
   );
 }
 
-function Suggestion(props: { title: string; body: string; source: Source; decision?: Decision; onDecision: (value: Decision) => void; onEdit: (value: string) => void; meta?: string; help: ReactNode; helpLabel: string }) {
+function Suggestion(props: { title: string; body: string; source: Source; decision?: Decision; onDecision: (value: Decision) => void; onEdit: (value: string) => void; meta?: string; hint: string }) {
   const [editing, setEditing] = useState(false);
   const rejected = props.decision === "rejected";
   const accepted = props.decision === "accepted";
   return (
     <section className={`${s.suggestion} ${rejected ? s.suggestionRejected : ""}`}>
-      <div className={s.suggestionHeader}><strong>{props.title}</strong><Badge tone="info">{props.source}</Badge><Badge tone={rejected ? "neutral" : accepted ? "ok" : "warn"}>{rejected ? "rejected" : accepted ? "accepted" : "not reviewed"}</Badge></div>
+      <div className={s.suggestionHeader}><strong>{props.title}</strong><span className={rg.sourceLabel}>{SOURCE_LABEL[props.source]}</span><Badge tone={rejected ? "neutral" : accepted ? "ok" : "warn"}>{rejected ? "rejected" : accepted ? "accepted" : "not reviewed"}</Badge></div>
       {props.meta ? <p className={v.faint}>{props.meta}</p> : null}
       {editing ? (
-        <Field label={`Edit ${props.title}`} helpLabel={props.helpLabel} help={props.help}><Textarea rows={4} value={props.body} onChange={(event) => props.onEdit(event.target.value)} /></Field>
+        <HintField label={`Edit ${props.title}`} hint={props.hint}><Textarea rows={4} value={props.body} onChange={(event) => props.onEdit(event.target.value)} /></HintField>
       ) : (
         <p className={v.dim}>{props.body}</p>
       )}

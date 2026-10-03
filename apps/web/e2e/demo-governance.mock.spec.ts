@@ -132,13 +132,15 @@ test("enterprise governance demo surfaces render and complete their core actions
   await page.goto("/ui/admin/governance/intake");
   // UXJ-06: the page opens blank; the worked example is loaded on request
   await page.getByRole("button", { name: "Fill in an example" }).click();
+  // ADR-0168: Describe and Classify are separate steps
+  await page.getByRole("button", { name: "Continue" }).click();
   const assistRequest = page.waitForRequest((request) => new URL(request.url()).pathname === "/v1/use-cases/intake/assist" && request.method() === "POST");
   await page.getByRole("button", { name: "Draft suggestions" }).click();
   expect((await assistRequest).postDataJSON().context).toMatchObject({
     sectors: ["financial-services"],
     dataCategories: ["personal", "financial"],
   });
-  await expect(page.getByText("Review assistant suggestions", { exact: true })).toBeVisible();
+  await expect(page.getByText("Review suggestions", { exact: true })).toBeVisible();
   await shotBoth(page, "01-intake-suggestions");
   // nothing is accepted until the proposer decides (ADR-0149)
   await expect(page.getByText("not reviewed").first()).toBeVisible();
@@ -277,6 +279,9 @@ test("shadow-AI registration prefills evidence only and requires proposer answer
   await expect(page).toHaveURL(/source=shadow-ai/);
   await expect(page.getByLabel("Use-case name")).toHaveValue("Govern team-17");
   await expect(page.getByLabel("What will the system do?")).toHaveValue(/Evidence: Egress logs/);
+  await shotBoth(page, "08-shadow-ai-intake-prefill");
+  // the finding supplied the name and purpose only; the classification is the proposer's
+  await page.getByRole("button", { name: "Continue" }).click();
   const draft = page.getByRole("button", { name: "Draft suggestions" });
   await expect(draft).toBeDisabled();
   await expect(page.getByLabel("Primary purpose domain")).toHaveValue("");
@@ -285,7 +290,6 @@ test("shadow-AI registration prefills evidence only and requires proposer answer
   ]);
   await expect(page.getByLabel("Decision autonomy")).toHaveValue("");
   await expect(page.getByLabel("Profiles natural persons")).toHaveValue("");
-  await shotBoth(page, "08-shadow-ai-intake-prefill");
 
   await page.getByLabel("Primary purpose domain").selectOption("general-business");
   await page.getByLabel("People affected").selectOption("employees");
@@ -349,6 +353,7 @@ test("prohibited screening remains reviewable and can be submitted for an indepe
   await page.goto("/ui/admin/governance/intake");
   // UXJ-06: the page opens blank; the worked example is loaded on request
   await page.getByRole("button", { name: "Fill in an example" }).click();
+  await page.getByRole("button", { name: "Continue" }).click();
   await page.getByLabel("Social scoring").selectOption("yes");
   await page.getByRole("button", { name: "Draft suggestions" }).click();
   await expect(page.getByRole("alert")).toContainText("Screened PROHIBITED (Art. 5) — a reviewer must refuse it at sign-off; it cannot go live.");
