@@ -409,6 +409,9 @@ export interface Approval {
   decidedByName?: string | null;
   objectLabel?: string | null;
   delegatedFrom?: string;
+  /** the AI use case an intake sign-off decides, when the gateway names it (not yet in the ADR-0168
+   * contract — the review panel falls back to matching the use-case list by workflow instance) */
+  useCaseId?: string | null;
   /** ADR-0046 routing + SLA sidecar — absent when no routing rule is enabled */
   assignment?: {
     assigneeKind?: string;

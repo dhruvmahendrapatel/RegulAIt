@@ -78,9 +78,10 @@ function ReviewDrawer(props: { approval: Approval; onClose: () => void; onDecide
   const useCases = useQuery({
     queryKey: ["admin", "use-cases"],
     queryFn: () => api.get<{ useCases: UseCaseListRow[] }>("/v1/use-cases"),
+    enabled: !a.useCaseId,
     retry: false,
   });
-  const useCaseId = useCases.data?.useCases.find((u) => u.workflowInstanceId && u.workflowInstanceId === a.instanceId)?.id ?? null;
+  const useCaseId = a.useCaseId ?? useCases.data?.useCases.find((u) => u.workflowInstanceId && u.workflowInstanceId === a.instanceId)?.id ?? null;
   const overview = useQuery({
     queryKey: ["governance", "use-case-overview", useCaseId],
     queryFn: () => api.get<OverviewResponse>(`/v1/use-cases/${useCaseId}/overview`),
@@ -270,7 +271,7 @@ function ReviewDrawer(props: { approval: Approval; onClose: () => void; onDecide
                 </EvidenceRow>
               ) : null}
             </div>
-            {!ov && !overview.isLoading && !useCases.isLoading ? (
+            {!ov && !overview.isLoading && !(useCases.isLoading && !a.useCaseId) ? (
               <p className={r.muted}>The tier, risks and stack are on the use case record, which its owner and administrators can open.</p>
             ) : null}
           </section>
