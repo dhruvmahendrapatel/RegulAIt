@@ -204,8 +204,8 @@
 .tile {
   display: flex;
   flex-direction: column;
-  gap: var(--s1);
-  padding: var(--s2);
+  gap: 6px;
+  padding: 12px;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background: var(--surface-1);
@@ -226,13 +226,27 @@
 .tile:hover .tileGlyph {
   color: var(--rg-signal-700);
 }
+/* glyph inline with the name: one header line per tile */
+.tileHead {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  min-width: 0;
+}
 .tileName {
   font-weight: 600;
   font-size: var(--text-md);
 }
+/* the purpose in at most two lines (one line cut most of the suite
+   questions mid-word); the full sentence is the title */
 .tileDesc {
   font-size: var(--text-sm);
   color: var(--text-dim);
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
 }
 .tileStat {
   margin-top: auto;

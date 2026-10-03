@@ -307,14 +307,21 @@ export function GovernanceAlertsSnapshot() {
     queryFn: () => api.get<AlertsResponse>("/v1/governance/alerts?status=active"),
   });
   const active = (alerts.data?.counts.open ?? 0) + (alerts.data?.counts.acknowledged ?? 0);
+  const open = alerts.data?.counts.open ?? 0;
   return (
     <Card title="Governance monitor" actions={<Link to="/admin/governance/alerts">Open alerts</Link>}>
-      {alerts.isLoading ? <p className={v.faint}>Loading active governance conditions…</p> : alerts.isError ? <p className={v.errLine}>Alerts could not be loaded.</p> : (
+      {alerts.isLoading ? <p className={v.faint}>Loading active governance conditions…</p> : alerts.isError ? <p className={v.errLine}>Alerts could not be loaded.</p> : !alerts.data?.lastEvaluatedAt ? (
+        // a monitor that has never run has not found "0 open" — it has found nothing yet
+        <div className={v.row}>
+          <span className={v.dim}>Governance monitor not evaluated</span>
+          <span className={v.faint}>· run Evaluate now on the alerts page before reading this as an all-clear</span>
+        </div>
+      ) : (
         <div className={v.row}>
           <span className={v.statValue}>{active}</span>
           <span className={v.dim}>active alert{active === 1 ? "" : "s"}</span>
-          <Badge tone={(alerts.data?.counts.open ?? 0) > 0 ? "danger" : "ok"}>{alerts.data?.counts.open ?? 0} open</Badge>
-          <Badge tone={(alerts.data?.counts.acknowledged ?? 0) > 0 ? "warn" : "neutral"}>{alerts.data?.counts.acknowledged ?? 0} acknowledged</Badge>
+          {open > 0 ? <Badge tone="danger">{open} open</Badge> : <span className={v.dim}>· 0 open</span>}
+          <span className={v.dim}>· {alerts.data.counts.acknowledged} acknowledged</span>
         </div>
       )}
     </Card>

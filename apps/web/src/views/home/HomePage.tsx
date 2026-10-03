@@ -41,7 +41,6 @@ export default function HomePage() {
     <>
       <PageHeader
         title={firstName ? `Welcome back, ${firstName}` : "Welcome back"}
-        sub="Your governed AI delivery workspace — everything below is live."
       />
       <div className={v.stack}>
         {auth?.isAdmin && <OrientationCard />}
@@ -49,10 +48,14 @@ export default function HomePage() {
         {auth?.isAdmin && <SetupCard />}
         {auth?.isAdmin && <TrustSnapshotCard />}
         {auth?.isAdmin && <GovernanceAlertsSnapshot />}
-        <div className={v.grid2}>
-          <ApprovalsCard />
-          <SpendCard />
-        </div>
+        {/* an admin already sees pending decisions and attributed spend in the
+            at-a-glance card above; the cards would state them a second time */}
+        {!auth?.isAdmin && (
+          <div className={v.grid2}>
+            <ApprovalsCard />
+            <SpendCard />
+          </div>
+        )}
         <div className={v.grid2}>
           <RecentRunsCard />
           {auth?.isAdmin ? <AuditCard /> : <WorkflowNudgeCard />}
@@ -221,11 +224,13 @@ function SuiteLauncher() {
               className={v.tile}
               data-testid={`suite-tile-${su.id}`}
             >
-              <span className={v.tileGlyph}>
-                <SuiteGlyph suiteId={su.id} />
+              <span className={v.tileHead}>
+                <span className={v.tileGlyph}>
+                  <SuiteGlyph suiteId={su.id} />
+                </span>
+                <span className={v.tileName}>{su.name}</span>
               </span>
-              <span className={v.tileName}>{su.name}</span>
-              <span className={v.tileDesc}>{su.purpose}</span>
+              <span className={v.tileDesc} title={su.purpose}>{su.purpose}</span>
               {n && (
                 <span className={v.tileStat}>
                   <span className={v.tileStatValue}>{n.value}</span>
@@ -274,33 +279,17 @@ function SetupCard() {
   }
   return (
     <Card
-      title={
-        <span className={v.row}>
-          Getting started
-          <Badge tone="primary">
-            {d.doneCount}/{d.totalCount} done
-          </Badge>
-        </span>
-      }
+      title="Getting started"
       actions={<Link to="/admin/setup">Open checklist</Link>}
     >
-      <div>
-        {d.steps.map((step) => (
-          <div key={step.key} className={v.listRow}>
-            <StatusDot tone={step.done ? "ok" : "neutral"} title={step.done ? "done" : "pending"} />
-            <span className={v.grow} style={{ fontSize: "var(--text-sm)" }}>
-              {step.title}
-            </span>
-            {step.done ? (
-              <Badge tone="ok">done</Badge>
-            ) : (
-              <Link className={v.faint} to="/admin/setup" title="Complete this step in Getting started">
-                Set up →
-              </Link>
-            )}
-          </div>
-        ))}
-      </div>
+      {/* one progress line; the steps themselves live on the checklist page */}
+      <p className={v.dim}>
+        {d.doneCount} of {d.totalCount} setup steps done
+        {(() => {
+          const next = d.steps.find((step) => !step.done);
+          return next ? <> · next: {next.title}</> : null;
+        })()}
+      </p>
     </Card>
   );
 }
