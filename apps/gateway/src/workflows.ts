@@ -161,8 +161,14 @@ async function applyEvent(
     // without anything having run against the new artifact. (A report posted
     // after the re-open — including one posted ahead of the stage while a
     // gate is pending — belongs to the new round, exactly as in round one.)
+    // ADR-0168: a RETURNED sign-off re-opens from the artifact stage it went
+    // back to (the kernel parked the instance there) — the same staleness.
     const reopenedFrom =
-      event.kind === "artifact_submitted" ? def.stages.findIndex((st) => st.id === event.stageId) : -1;
+      event.kind === "artifact_submitted"
+        ? def.stages.findIndex((st) => st.id === event.stageId)
+        : event.kind === "approval_returned"
+          ? state.currentStageIndex
+          : -1;
     const staleCheckStages: string[] = [];
     let context: Record<string, unknown> | undefined;
     if (reopenedFrom >= 0 && reopenedFrom < prior.currentStageIndex) {
@@ -183,12 +189,15 @@ async function applyEvent(
     await tx.insert(workflowEvents).values({ instanceId: instance.id, event, actorUserId });
 
     const isDenial = event.kind === "approval_denied" || event.kind === "abort";
+    // ADR-0168: a returned sign-off is not terminal, but the gate did not let
+    // the change through — it audits as the refusal it is.
+    const isReturn = event.kind === "approval_returned";
     await tx.insert(auditLog).values({
       userId: actorUserId ?? instance.initiatorUserId,
       objectType: "workflow",
       objectId: instance.id,
       detail: { event, ...(staleCheckStages.length > 0 ? { staleCheckResultsCleared: staleCheckStages } : {}) },
-      effect: isDenial ? "deny" : "allow",
+      effect: isDenial || isReturn ? "deny" : "allow",
       ruleId: `workflow:${event.kind}`,
       ruleChain: [],
       reason: `workflow instance event '${event.kind}' (status → ${state.status})`,
@@ -200,7 +209,7 @@ async function applyEvent(
     // A re-open stales EVERY outstanding gate downstream, and a terminal
     // denial/abort must leave no live rows in the one inbox — supersede all
     // pending rows for the instance in each of these cases.
-    if (event.kind === "artifact_submitted" || isDenial) {
+    if (event.kind === "artifact_submitted" || isDenial || isReturn) {
       await tx
         .update(approvals)
         .set({ status: "superseded" })
@@ -277,6 +286,7 @@ async function recordWorkflowStageSpan(
   const stageId = "stageId" in event ? event.stageId : null;
   const decided: Record<string, string> = {
     approval_denied: "stage approval was DENIED by an approver",
+    approval_returned: "stage approval was RETURNED for more information by an approver",
     abort: "the workflow instance was aborted",
   };
   let status: "ok" | "denied" | "error" = "ok";
@@ -342,7 +352,7 @@ async function recordWorkflowStageSpan(
 export async function applyWorkflowApprovalDecision(
   dbx: DbOrTx,
   approvalRow: { instanceId: string | null; stageId: string | null },
-  decision: "approved" | "denied",
+  decision: "approved" | "denied" | "returned",
   deciderUserId: string,
   dataKey?: string,
 ): Promise<ApprovalPostCommit | null> {
@@ -352,6 +362,14 @@ export async function applyWorkflowApprovalDecision(
 
   if (decision === "denied") {
     await applyEvent(dbx, instanceId, { kind: "approval_denied", stageId }, deciderUserId);
+    return null;
+  }
+  // ADR-0168 — send back for information: ONE approver's return sends the
+  // instance back to its artifact stage whatever the quorum (a return is a
+  // request for a new version, and every other pending gate on the stage is
+  // superseded by applyEvent). The next artifact version re-requests sign-off.
+  if (decision === "returned") {
+    await applyEvent(dbx, instanceId, { kind: "approval_returned", stageId }, deciderUserId);
     return null;
   }
 

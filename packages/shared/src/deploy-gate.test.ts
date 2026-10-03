@@ -36,6 +36,45 @@ describe("ADR-0161 deploy gate", () => {
     expect(warnOnly).toMatchObject({ decision: "allow", reasons: [{ code: "model_card_unapproved", severity: "warn" }] });
   });
 
+  it("ADR-0168: an approval past its valid-until blocks as approval_expired; a future one does not", () => {
+    const now = new Date("2026-10-03T12:00:00Z");
+    const expired = evaluateDeployGate(input({
+      useCase: { id: "u", name: "UC", status: "approved", intendedAgentIds: ["a"], approvedUntil: "2026-10-01T00:00:00Z" },
+      now,
+    }));
+    expect(expired).toMatchObject({
+      decision: "deny",
+      reasons: [{ code: "approval_expired", severity: "block", message: '"UC" approval expired on 2026-10-01; re-review required' }],
+    });
+    const live = evaluateDeployGate(input({
+      useCase: { id: "u", name: "UC", status: "approved", intendedAgentIds: ["a"], approvedUntil: "2027-04-01T00:00:00Z" },
+      now,
+    }));
+    expect(live.decision).toBe("allow");
+    // only an APPROVED use case can be expired — any other status is refused by its own name
+    const notApproved = evaluateDeployGate(input({
+      useCase: { id: "u", name: "UC", status: "under_review", intendedAgentIds: ["a"], approvedUntil: "2026-10-01T00:00:00Z" },
+      now,
+    }));
+    expect(notApproved.reasons.map((x) => x.code)).toEqual(["use_case_not_approved"]);
+  });
+
+  it("ADR-0168: open before-go-live conditions block, named with their text", () => {
+    const r = evaluateDeployGate(input({
+      openBlockingConditions: [{ id: "c1", text: "DPIA signed" }, { id: "c2", text: "bias eval passed" }],
+    }));
+    expect(r).toMatchObject({
+      decision: "deny",
+      reasons: [{
+        code: "open_blocking_condition",
+        severity: "block",
+        message: '"UC" has 2 open before-go-live condition(s): DPIA signed; bias eval passed',
+        ref: { type: "use_case", id: "u" },
+      }],
+    });
+    expect(evaluateDeployGate(input({ openBlockingConditions: [] })).decision).toBe("allow");
+  });
+
   it("an open high alert blocks; acknowledged high and open medium only warn", () => {
     const alerts = [
       { id: "1", ruleId: "r", severity: "high", status: "open", title: "open high" },

@@ -163,6 +163,9 @@ export const NON_ADMIN_ROUTES = new Set([
   // looks like lost access. It exposes no secret and no other user's data.
   "GET /v1/execution",
   "PATCH /v1/use-cases/:useCaseId",
+  // ADR-0168: a condition's OWNER may mark it met without being an admin or
+  // the use case's owner — the handler enforces owner / use-case owner / admin
+  "POST /v1/use-cases/:useCaseId/conditions/:conditionId/met",
   // ADR-0081 — the AI risk register, the same shape as the use-case routes
   // above: naming a risk is a front-door act, and list/detail/edit/transition
   // are owner-or-admin INSIDE the handler. Conspicuously NOT here: the ACCEPT

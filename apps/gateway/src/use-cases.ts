@@ -59,6 +59,7 @@ import {
   agents,
   aiUseCases,
   and,
+  approvals,
   auditLog,
   compliancePackControls,
   compliancePacks,
@@ -70,11 +71,13 @@ import {
   projects,
   sql,
   users,
+  useCaseConditions,
   workflowArtifacts,
   workflowInstances,
   workflowTemplates,
   type AiUseCaseRow,
   type Db,
+  type UseCaseConditionRow,
 } from "@regulait/db";
 import type { InstanceState, WorkflowDefinition } from "@regulait/workflow-kernel";
 import {
@@ -95,9 +98,12 @@ import {
   REPORT_PERIODS,
   resolveReportPeriod,
   evaluateReportAccess,
+  markConditionMetSchema,
+  type UseCaseConditionView,
 } from "@regulait/shared";
 import { z } from "zod";
 import { complianceProfilesForTags, effectiveCompliancePolicy } from "./projects.js";
+import { activeDelegatorsFor } from "./delegations.js";
 // ADR-0058's evaluator, reused rather than reimplemented: a second copy of the
 // collector logic would drift from the one that produces real pack reports.
 import { evaluatePack } from "./compliance-packs.js";
@@ -271,6 +277,9 @@ function statusForInstance(instanceStatus: string): AiUseCaseRow["status"] | nul
       return "rejected";
     case "blocked_on_approval":
       return "under_review";
+    // NOTE (ADR-0168): blocked_on_artifact also follows a RETURNED sign-off;
+    // `syncUseCaseForInstance` keeps a use case at `needs_info` there rather
+    // than rewinding it to `proposed`.
     case "running":
     case "blocked_on_plan":
     case "blocked_on_artifact":
@@ -321,14 +330,31 @@ export async function syncUseCaseForInstance(
   if (!instance) return;
   const next = statusForInstance(instance.status);
   if (next === null || next === useCase.status) return;
+  // ADR-0168: sent back for information — the instance rests at its
+  // questionnaire stage (blocked_on_artifact) and the use case STAYS
+  // needs_info until a new version re-requests the sign-off (→ under_review).
+  if (useCase.status === "needs_info" && next === "proposed") return;
 
   const decided = next === "approved" || next === "rejected";
+  // ADR-0168 — an approval has a lifetime, from the tier as it stands at the
+  // decision (re-read: the screening above may just have recomputed it).
+  let lifetime: { approvedAt: Date; approvedUntil: Date; months: number; tier: string | null } | null = null;
+  if (next === "approved") {
+    const [fresh] = await db
+      .select({ tier: aiUseCases.euAiActTier })
+      .from(aiUseCases)
+      .where(eq(aiUseCases.id, useCase.id));
+    const approvedAt = new Date();
+    const months = approvalLifetimeMonths(fresh?.tier ?? null);
+    lifetime = { approvedAt, approvedUntil: addMonthsUtc(approvedAt, months), months, tier: fresh?.tier ?? null };
+  }
   await db
     .update(aiUseCases)
     .set({
       status: next,
       updatedAt: new Date(),
       ...(decided ? { decidedAt: new Date() } : {}),
+      ...(lifetime ? { approvedAt: lifetime.approvedAt, approvedUntil: lifetime.approvedUntil } : {}),
     })
     .where(eq(aiUseCases.id, useCase.id));
   await db.insert(auditLog).values({
@@ -341,6 +367,14 @@ export async function syncUseCaseForInstance(
       to: next,
       workflowInstanceId: instanceId,
       instanceStatus: instance.status,
+      ...(lifetime
+        ? {
+            approvedAt: lifetime.approvedAt.toISOString(),
+            approvedUntil: lifetime.approvedUntil.toISOString(),
+            lifetimeMonths: lifetime.months,
+            lifetimeTier: lifetime.tier,
+          }
+        : {}),
     },
     effect: next === "rejected" ? "deny" : "allow",
     ruleId: `use-case-${next}`,
@@ -350,6 +384,198 @@ export async function syncUseCaseForInstance(
       : `AI use case '${useCase.name}' moved to ${next.replace(/_/g, " ")} — intake workflow is ` +
         (instance.status === "blocked_on_approval" ? "awaiting sign-off" : instance.status.replace(/_/g, " ")),
   });
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0168 — approval lifetime, conditions, send-back
+// ---------------------------------------------------------------------------
+
+/** 6 months for a high tier — and for prohibited or unscreened, which are no
+ * safer than high — and 12 for minimal and limited. */
+export function approvalLifetimeMonths(tier: AiUseCaseRow["euAiActTier"] | string | null): number {
+  return tier === "minimal" || tier === "limited" ? 12 : 6;
+}
+
+export function addMonthsUtc(from: Date, months: number): Date {
+  const d = new Date(from.getTime());
+  d.setUTCMonth(d.getUTCMonth() + months);
+  return d;
+}
+
+/** An approval is an INTAKE SIGN-OFF when it is a workflow gate on the
+ * instance that governs a use case (ADR-0109: at most one). */
+export async function useCaseForIntakeApproval(
+  db: Db,
+  approval: { objectType: string; instanceId: string | null },
+): Promise<AiUseCaseRow | null> {
+  if (approval.objectType !== "workflow" || !approval.instanceId) return null;
+  const [uc] = await db
+    .select()
+    .from(aiUseCases)
+    .where(eq(aiUseCases.workflowInstanceId, approval.instanceId));
+  return uc ?? null;
+}
+
+/** Inside the decide transaction, after the kernel has parked the instance
+ * back at its questionnaire stage: the use case becomes `needs_info`. */
+export async function markUseCaseReturned(
+  db: Db,
+  useCaseId: string,
+  approvalId: string,
+  reason: string,
+  actorUserId: string,
+): Promise<void> {
+  const [uc] = await db.select().from(aiUseCases).where(eq(aiUseCases.id, useCaseId));
+  if (!uc || uc.status === "approved" || uc.status === "rejected" || uc.status === "retired") return;
+  if (uc.status === "needs_info") return;
+  await db
+    .update(aiUseCases)
+    .set({ status: "needs_info", updatedAt: new Date() })
+    .where(eq(aiUseCases.id, uc.id));
+  await db.insert(auditLog).values({
+    userId: actorUserId,
+    objectType: "ai_use_case",
+    objectId: uc.id,
+    detail: {
+      phase: "lifecycle",
+      from: uc.status,
+      to: "needs_info",
+      approvalId,
+      workflowInstanceId: uc.workflowInstanceId,
+    },
+    effect: "deny",
+    ruleId: "use-case-returned-for-info",
+    ruleChain: [],
+    reason: `AI use case '${uc.name}' sent back for information — a new questionnaire version re-requests sign-off: ${reason}`,
+  });
+}
+
+/** Inside the decide transaction: persist the conditions an approving
+ * intake sign-off imposed, and audit them as one act. */
+export async function imposeUseCaseConditions(
+  db: Db,
+  useCase: { id: string; name: string },
+  approvalId: string,
+  conditions: ReadonlyArray<{ text: string; ownerUserId?: string | undefined; dueAt: Date; blocking: boolean }>,
+  actorUserId: string,
+): Promise<void> {
+  if (conditions.length === 0) return;
+  const rows = await db
+    .insert(useCaseConditions)
+    .values(
+      conditions.map((c) => ({
+        useCaseId: useCase.id,
+        approvalId,
+        text: c.text,
+        ownerUserId: c.ownerUserId ?? null,
+        dueAt: c.dueAt,
+        blocking: c.blocking,
+      })),
+    )
+    .returning({ id: useCaseConditions.id, blocking: useCaseConditions.blocking });
+  const blocking = rows.filter((r) => r.blocking).length;
+  await db.insert(auditLog).values({
+    userId: actorUserId,
+    objectType: "ai_use_case",
+    objectId: useCase.id,
+    detail: {
+      phase: "conditions-imposed",
+      approvalId,
+      conditionIds: rows.map((r) => r.id),
+      blocking,
+      afterGoLive: rows.length - blocking,
+    },
+    effect: "allow",
+    ruleId: "use-case-conditions-imposed",
+    ruleChain: [],
+    reason:
+      `AI use case '${useCase.name}' approved with ${rows.length} condition(s): ` +
+      `${blocking} before go-live (blocking deployment while open), ${rows.length - blocking} after go-live`,
+  });
+}
+
+async function conditionViewsFor(db: Db, useCaseId: string, now: Date): Promise<UseCaseConditionView[]> {
+  const rows = await db
+    .select()
+    .from(useCaseConditions)
+    .where(eq(useCaseConditions.useCaseId, useCaseId))
+    .orderBy(useCaseConditions.dueAt, useCaseConditions.createdAt, useCaseConditions.id);
+  const ids = [...new Set(rows.flatMap((r) => [r.ownerUserId, r.metByUserId]).filter((x): x is string => !!x))];
+  const names = await userNames(db, ids);
+  return rows.map((r) => conditionView(r, names, now));
+}
+
+async function userNames(db: Db, ids: string[]): Promise<Map<string, string>> {
+  if (ids.length === 0) return new Map();
+  const rows = await db
+    .select({ id: users.id, displayName: users.displayName, email: users.email })
+    .from(users)
+    .where(inArray(users.id, ids));
+  return new Map(rows.map((u) => [u.id, u.displayName || u.email]));
+}
+
+function conditionView(r: UseCaseConditionRow, names: Map<string, string>, now: Date): UseCaseConditionView {
+  return {
+    id: r.id,
+    approvalId: r.approvalId,
+    text: r.text,
+    ownerUserId: r.ownerUserId,
+    ownerName: r.ownerUserId ? (names.get(r.ownerUserId) ?? null) : null,
+    dueAt: r.dueAt.toISOString(),
+    blocking: r.blocking,
+    status: r.status,
+    metAt: r.metAt ? r.metAt.toISOString() : null,
+    metByName: r.metByUserId ? (names.get(r.metByUserId) ?? null) : null,
+    note: r.note,
+    overdue: r.status === "open" && r.dueAt.getTime() < now.getTime(),
+  };
+}
+
+/**
+ * ADR-0168 — WHO MAY READ ONE USE CASE: its owner, an admin, and the
+ * reviewer of its intake sign-off — the named approver of a PENDING sign-off
+ * on its intake instance, an active delegate of that approver (ADR-0022), or
+ * whoever DECIDED one. Read-only: every write route keeps its own owner/admin
+ * rule, and the list is not widened.
+ */
+export async function canReadUseCase(
+  db: Db,
+  useCase: Pick<AiUseCaseRow, "ownerUserId" | "workflowInstanceId">,
+  auth: { isAdmin: boolean; userId: string | null | undefined },
+): Promise<boolean> {
+  if (auth.isAdmin) return true;
+  const me = auth.userId;
+  if (!me) return false;
+  if (me === useCase.ownerUserId) return true;
+  return isIntakeReviewer(db, useCase, me);
+}
+
+export async function isIntakeReviewer(
+  db: Db,
+  useCase: Pick<AiUseCaseRow, "workflowInstanceId">,
+  userId: string,
+): Promise<boolean> {
+  if (!useCase.workflowInstanceId) return false;
+  const delegators = await activeDelegatorsFor(db, userId);
+  const named = delegators.length
+    ? or(eq(approvals.approverUserId, userId), inArray(approvals.approverUserId, delegators))
+    : eq(approvals.approverUserId, userId);
+  const [hit] = await db
+    .select({ id: approvals.id })
+    .from(approvals)
+    .where(
+      and(
+        eq(approvals.objectType, "workflow"),
+        eq(approvals.instanceId, useCase.workflowInstanceId),
+        or(and(eq(approvals.status, "pending"), named), eq(approvals.decidedBy, userId)),
+      ),
+    )
+    .limit(1);
+  return !!hit;
+}
+
+function approvalExpired(row: AiUseCaseRow, now: Date): boolean {
+  return row.status === "approved" && !!row.approvedUntil && row.approvedUntil.getTime() <= now.getTime();
 }
 
 // ---------------------------------------------------------------------------
@@ -841,7 +1067,9 @@ export function registerUseCaseRoutes(
   // scoping shape as GET /v1/workflows/instances.
   app.get("/v1/use-cases", async (req, reply) => {
     const { status } = z
-      .object({ status: z.enum(["proposed", "under_review", "approved", "rejected", "retired"]).optional() })
+      .object({
+        status: z.enum(["proposed", "under_review", "needs_info", "approved", "rejected", "retired"]).optional(),
+      })
       .parse(req.query);
     const conditions = [];
     if (status) conditions.push(eq(aiUseCases.status, status));
@@ -863,8 +1091,31 @@ export function registerUseCaseRoutes(
           .where(inArray(users.id, ownerIds))
       : [];
     const ownerName = new Map(ownerRows.map((u) => [u.id, u.displayName || u.email]));
+    // ADR-0168: open conditions per row (before- and after-go-live alike)
+    const openCounts = rows.length
+      ? await db
+          .select({ useCaseId: useCaseConditions.useCaseId, n: sql<number>`count(*)::int` })
+          .from(useCaseConditions)
+          .where(
+            and(
+              inArray(
+                useCaseConditions.useCaseId,
+                rows.map((r) => r.id),
+              ),
+              eq(useCaseConditions.status, "open"),
+            ),
+          )
+          .groupBy(useCaseConditions.useCaseId)
+      : [];
+    const openConditions = new Map(openCounts.map((c) => [c.useCaseId, Number(c.n)]));
+    const now = new Date();
     return {
-      useCases: rows.map((r) => ({ ...r, ownerName: ownerName.get(r.ownerUserId) ?? null })),
+      useCases: rows.map((r) => ({
+        ...r,
+        ownerName: ownerName.get(r.ownerUserId) ?? null,
+        openConditions: openConditions.get(r.id) ?? 0,
+        approvalExpired: approvalExpired(r, now),
+      })),
     };
   });
 
@@ -874,7 +1125,8 @@ export function registerUseCaseRoutes(
     const { useCaseId } = useCaseIdParam.parse(req.params);
     const [row] = await db.select().from(aiUseCases).where(eq(aiUseCases.id, useCaseId));
     if (!row) return reply.status(404).send({ error: "not_found" });
-    if (!req.authCtx.isAdmin && req.authCtx.userId !== row.ownerUserId) {
+    // ADR-0168: + the reviewer of its intake sign-off (read-only)
+    if (!(await canReadUseCase(db, row, req.authCtx))) {
       return reply.status(403).send({
         error: "forbidden",
         detail: "a use case is visible to its owner and to admins",
@@ -921,8 +1173,11 @@ export function registerUseCaseRoutes(
         }
       }
     }
+    const now = new Date();
     return {
-      useCase: row,
+      useCase: { ...row, approvalExpired: approvalExpired(row, now) },
+      // ADR-0168: what the approval imposed — owner/met-by names resolved
+      conditions: await conditionViewsFor(db, row.id, now),
       instance,
       questionnaire,
       questionnaireTemplate: questionnaire ? null : USE_CASE_QUESTIONNAIRE_TEMPLATE,
@@ -970,7 +1225,9 @@ export function registerUseCaseRoutes(
         detail: "a use case is editable by its owner and by admins",
       });
     }
-    if (row.status !== "proposed" && row.status !== "under_review") {
+    // ADR-0168: a use case sent back for information is editable — that is
+    // what the reviewer asked for.
+    if (row.status !== "proposed" && row.status !== "under_review" && row.status !== "needs_info") {
       // ADR-0089 amendment (batch B3) — INTENT IS DECIDED WITH THE USE CASE.
       // The intended-agents list is part of what the sign-off approved (the
       // ADR-0089 alignment comparison stands on it), so a post-decision
@@ -1213,6 +1470,66 @@ export function registerUseCaseRoutes(
       /** the same clause every pack report carries — one sentence, one meaning */
       disclaimer: COMPLIANCE_PACK_DISCLAIMER,
     };
+  });
+
+  // ADR-0168 — mark an approval condition met. The condition's owner, the
+  // use case's owner, or an admin; anyone else is refused 403. Audited
+  // `use-case-condition-met`. Met is final: a second call is a 409.
+  app.post("/v1/use-cases/:useCaseId/conditions/:conditionId/met", async (req, reply) => {
+    const { useCaseId, conditionId } = z
+      .object({ useCaseId: z.string().uuid(), conditionId: z.string().uuid() })
+      .parse(req.params);
+    const body = markConditionMetSchema.parse(req.body ?? {});
+    const callerId = req.authCtx.userId;
+    const [cond] = await db
+      .select()
+      .from(useCaseConditions)
+      .where(and(eq(useCaseConditions.id, conditionId), eq(useCaseConditions.useCaseId, useCaseId)));
+    if (!cond) return reply.status(404).send({ error: "not_found" });
+    const [uc] = await db.select().from(aiUseCases).where(eq(aiUseCases.id, useCaseId));
+    if (!uc) return reply.status(404).send({ error: "not_found" });
+    const allowed =
+      req.authCtx.isAdmin || (!!callerId && (callerId === cond.ownerUserId || callerId === uc.ownerUserId));
+    if (!allowed) {
+      return reply.status(403).send({
+        error: "forbidden",
+        detail: "a condition is marked met by its owner, the use case's owner, or an admin",
+      });
+    }
+    if (cond.status !== "open") {
+      return reply.status(409).send({ error: "condition_not_open", status: cond.status });
+    }
+    const metAt = new Date();
+    const [updated] = await db
+      .update(useCaseConditions)
+      .set({ status: "met", metAt, metByUserId: callerId ?? null, note: body.note ?? null })
+      .where(and(eq(useCaseConditions.id, cond.id), eq(useCaseConditions.status, "open")))
+      .returning();
+    if (!updated) return reply.status(409).send({ error: "condition_not_open" });
+    await db.insert(auditLog).values({
+      userId: callerId ?? NO_IDENTITY,
+      objectType: "ai_use_case",
+      objectId: uc.id,
+      detail: {
+        phase: "condition-met",
+        conditionId: cond.id,
+        approvalId: cond.approvalId,
+        blocking: cond.blocking,
+        dueAt: cond.dueAt.toISOString(),
+        overdue: cond.dueAt.getTime() < metAt.getTime(),
+      },
+      effect: "allow",
+      ruleId: "use-case-condition-met",
+      ruleChain: [],
+      reason:
+        `condition on AI use case '${uc.name}' marked met` +
+        `${cond.blocking ? " (before go-live — no longer blocks deployment)" : " (after go-live)"}: ${cond.text}`,
+    });
+    const names = await userNames(
+      db,
+      [updated.ownerUserId, updated.metByUserId].filter((x): x is string => !!x),
+    );
+    return conditionView(updated, names, metAt);
   });
 
   app.post("/v1/use-cases/:useCaseId/retire", async (req, reply) => {
