@@ -585,6 +585,7 @@ describe("recertification sweep", () => {
     const lapsed = new Date("2026-02-01T00:00:00Z");
     await db.update(aiUseCases).set({ approvedUntil: lapsed }).where(eq(aiUseCases.id, uc.id));
     const roundBefore = (await instanceRow(uc.instanceId)).round;
+    const rowsBefore = new Set((await signoffRows(uc.instanceId)).map((r) => r.id));
 
     expect((await sweep([uc.id, fresh.id], "sec1")).statusCode).toBe(403);
     const s1 = await sweep([uc.id, fresh.id]);
@@ -606,7 +607,28 @@ describe("recertification sweep", () => {
     const listed = (await get("/v1/use-cases", users.owner.auth)).json().useCases.find((u: any) => u.id === uc.id);
     expect(listed).toMatchObject({ recertification: true, recertificationDueAt: lapsed.toISOString() });
     expect(await auditFor(uc.id, "use-case-recertification-started")).toHaveLength(1);
-    expect(await auditFor(uc.instanceId, "workflow:recertification_reopened")).toHaveLength(1);
+    // AER-049: the sweep re-opens through the generic kernel `reopen` — one
+    // event, one audit row, carrying the recertification reason
+    const reopenRows = await auditFor(uc.instanceId, "workflow:reopen");
+    expect(reopenRows).toHaveLength(1);
+    expect((reopenRows[0]!.detail as any).event).toMatchObject({ kind: "reopen", stageId: "signoff" });
+    expect((reopenRows[0]!.detail as any).event.reason).toMatch(/^recertification: .*expired on 2026-02-01$/);
+    expect((reopenRows[0]!.detail as any).round).toBe(roundBefore + 1);
+    const started1 = (await auditFor(uc.id, "use-case-recertification-started"))[0]!;
+    expect((started1.detail as any).workflowRound).toBe(roundBefore + 1);
+    // the kernel re-requested the template's single approver; the policy
+    // replaced that row with the tier's role review — superseded, never live
+    const rows = await signoffRows(uc.instanceId);
+    const live = rows.filter((r) => r.status === "pending");
+    expect(live.map((r) => r.reviewRoleId)).toEqual(["security"]);
+    expect((started1.detail as any).approvalIds).toEqual(live.map((r) => r.id));
+    const reRequested = rows.filter((r) => r.reviewRoleId === null && !rowsBefore.has(r.id));
+    expect(reRequested.length).toBeGreaterThan(0);
+    expect(reRequested.every((r) => r.status === "superseded")).toBe(true);
+    // round 1's approved review is history, untouched
+    expect(rows.filter((r) => r.reviewRoleId === "security" && r.status !== "pending").map((r) => r.status)).toEqual([
+      "approved",
+    ]);
     const held = await gate(uc.id);
     expect(held.json().decision).toBe("deny");
     expect(held.json().reasons.map((x: any) => x.code)).toContain("use_case_not_approved");
@@ -615,6 +637,8 @@ describe("recertification sweep", () => {
     const s2 = await sweep([uc.id, fresh.id]);
     expect(s2.json()).toMatchObject({ evaluated: 1, movedToReview: 0 });
     expect(await auditFor(uc.id, "use-case-recertification-started")).toHaveLength(1);
+    expect(await auditFor(uc.instanceId, "workflow:reopen")).toHaveLength(1);
+    expect((await instanceRow(uc.instanceId)).round).toBe(roundBefore + 1);
     expect((await pendingRows(uc.instanceId)).filter((r) => r.reviewRoleId !== null)).toHaveLength(1);
     expect((await gate(uc.id)).json().decision).toBe("deny");
 
@@ -636,6 +660,9 @@ describe("recertification sweep", () => {
     expect((await sweep([uc.id])).json()).toMatchObject({ movedToReview: 1 });
     const again = await pendingRows(uc.instanceId);
     expect(again.map((r) => [r.approverUserId, r.reviewRoleId])).toEqual([[first.approverUserId, null]]);
+    expect(await auditFor(uc.instanceId, "workflow:reopen")).toHaveLength(1);
+    const started = (await auditFor(uc.id, "use-case-recertification-started"))[0]!;
+    expect((started.detail as any).approvalIds).toEqual(again.map((r) => r.id));
     expect((await detail(uc.id)).json().reviews).toEqual([]);
   });
 

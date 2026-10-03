@@ -36,8 +36,8 @@ import {
   governanceReviewPolicy,
   inArray,
   isNotNull,
+  isNull,
   users,
-  workflowEvents,
   workflowInstances,
   type AiUseCaseRow,
   type Db,
@@ -52,6 +52,8 @@ import {
   type ReviewPolicyView,
   type UseCaseReviewView,
 } from "@regulait/shared";
+import type { ApprovalPostCommit } from "./orchestration.js";
+import { reopenWorkflowInstance } from "./workflows.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 const POLICY_ID = "default";
@@ -141,6 +143,35 @@ async function insertReviewRows(
   return { round, ids };
 }
 
+/** supersede the stage's still-pending single-approver rows and open the next
+ * review round in their place (the caller holds the instance lock) */
+async function replaceWithReviewRound(
+  tx: Tx,
+  instance: { id: string; initiatorUserId: string },
+  stageId: string,
+  roles: Array<{ id: string; name: string; memberUserIds: string[] }>,
+  proposerIds: string[],
+): Promise<{ round: number; ids: string[]; supersededIds: string[] }> {
+  const supersededIds = (
+    await tx
+      .select({ id: approvals.id })
+      .from(approvals)
+      .where(
+        and(
+          eq(approvals.instanceId, instance.id),
+          eq(approvals.stageId, stageId),
+          eq(approvals.status, "pending"),
+          isNull(approvals.reviewRoleId),
+        ),
+      )
+  ).map((a) => a.id);
+  if (supersededIds.length > 0) {
+    await tx.update(approvals).set({ status: "superseded" }).where(inArray(approvals.id, supersededIds));
+  }
+  const { round, ids } = await insertReviewRows(tx, instance, stageId, roles, proposerIds);
+  return { round, ids, supersededIds };
+}
+
 /**
  * If the review policy routes this use case's tier to roles and its intake
  * instance is waiting on a sign-off that still carries the template's
@@ -179,9 +210,7 @@ export async function ensureReviewRound(
         and(eq(approvals.instanceId, inst.id), eq(approvals.stageId, stage.id), eq(approvals.status, "pending")),
       );
     if (pending.length === 0 || pending.some((p) => p.reviewRoleId !== null)) return null;
-    const supersededIds = pending.map((p) => p.id);
-    await tx.update(approvals).set({ status: "superseded" }).where(inArray(approvals.id, supersededIds));
-    const { round, ids } = await insertReviewRows(tx, inst, stage.id, roles, [
+    const { round, ids, supersededIds } = await replaceWithReviewRound(tx, inst, stage.id, roles, [
       useCase.ownerUserId,
       inst.initiatorUserId,
     ]);
@@ -260,10 +289,6 @@ export interface RecertificationSweepResult {
   skipped: Array<{ id: string; reason: string }>;
 }
 
-function resolveApprover(approver: string, initiatorUserId: string): string {
-  return approver === "requesting_user" ? initiatorUserId : approver;
-}
-
 /**
  * Move every approved use case whose approval has expired back into review.
  * The scheduler job (`use-case-recertification`) and the admin endpoint call
@@ -271,7 +296,7 @@ function resolveApprover(approver: string, initiatorUserId: string): string {
  */
 export async function runUseCaseRecertificationSweep(
   db: Db,
-  opts: { now?: Date; actorUserId?: string | null; useCaseIds?: string[] } = {},
+  opts: { now?: Date; actorUserId?: string | null; useCaseIds?: string[]; dataKey?: string } = {},
 ): Promise<RecertificationSweepResult> {
   const now = opts.now ?? new Date();
   const candidates = await db
@@ -286,6 +311,7 @@ export async function runUseCaseRecertificationSweep(
     );
   const out: RecertificationSweepResult = { evaluated: candidates.length, movedToReview: 0, movedIds: [], skipped: [] };
   const policy = await loadReviewPolicy(db);
+  const postCommits: ApprovalPostCommit[] = [];
   for (const c of candidates) {
     if (!c.approvedUntil || c.approvedUntil.getTime() > now.getTime()) continue;
     const moved = await db.transaction(async (tx): Promise<{ ok: true } | { ok: false; reason: string }> => {
@@ -312,62 +338,38 @@ export async function runUseCaseRecertificationSweep(
       }
       if (signoff < 0) return { ok: false, reason: "no_signoff_stage" };
       const stage = def.stages[signoff]!;
-      const prior = inst.state as InstanceState;
-      const state: InstanceState = {
-        ...prior,
-        status: "blocked_on_approval",
-        currentStageIndex: signoff,
-        stageStatuses: prior.stageStatuses.map((st, i) => (i >= signoff && st !== "pending" ? "reopened" : st)),
-        artifactVersions: { ...prior.artifactVersions },
-      };
-      state.stageStatuses[signoff] = "active";
-      // a re-open: the round tokens move exactly as a kernel re-open moves them
-      await tx
-        .update(workflowInstances)
-        .set({
-          state,
-          status: state.status,
-          round: inst.round + 1,
-          stageEntry: inst.stageEntry + 1,
-          updatedAt: new Date(),
-        })
-        .where(eq(workflowInstances.id, inst.id));
-      const event = { kind: "recertification_reopened", stageId: stage.id, useCaseId: uc.id };
-      await tx
-        .insert(workflowEvents)
-        .values({ instanceId: inst.id, event: event as never, actorUserId: opts.actorUserId ?? null });
-      await tx.insert(auditLog).values({
-        userId: opts.actorUserId ?? NO_IDENTITY,
-        objectType: "workflow",
-        objectId: inst.id,
-        detail: { event, round: inst.round + 1, stageEntry: inst.stageEntry + 1 },
-        effect: "allow",
-        ruleId: "workflow:recertification_reopened",
-        ruleChain: [],
-        reason: `workflow instance re-opened at '${stage.id}' — the approval it recorded expired (status → blocked_on_approval)`,
+      // AER-049: the generic kernel re-open — the one path every re-open takes.
+      // It archives the round's effect records into `effects:history`, bumps
+      // round / stage_entry, supersedes any live gate and re-requests the
+      // sign-off from the template's approvers (nested as a savepoint in this
+      // transaction, so the use case and the instance move together).
+      const reopened = await reopenWorkflowInstance(tx, inst.id, {
+        stageId: stage.id,
+        reason:
+          `recertification: the approval recorded for AI use case '${uc.name}' expired on ` +
+          `${uc.approvedUntil.toISOString().slice(0, 10)}`,
+        actorUserId: opts.actorUserId ?? null,
+        ...(opts.dataKey ? { dataKey: opts.dataKey } : {}),
       });
+      postCommits.push(reopened.postCommit);
       const roles = requiredRolesFor(policy, uc.euAiActTier);
       let round: number | null = null;
       let approvalIds: string[];
       if (roles.length > 0) {
-        const r = await insertReviewRows(tx, inst, stage.id, roles, [uc.ownerUserId, inst.initiatorUserId]);
+        // the review policy routes this tier: the template's rows the re-open
+        // just wrote become one row per required role, as on a first round
+        const r = await replaceWithReviewRound(tx, inst, stage.id, roles, [uc.ownerUserId, inst.initiatorUserId]);
         round = r.round;
         approvalIds = r.ids;
       } else {
-        approvalIds = [];
-        for (const approver of stage.approvers ?? []) {
-          const [row] = await tx
-            .insert(approvals)
-            .values({
-              userId: inst.initiatorUserId,
-              objectType: "workflow",
-              instanceId: inst.id,
-              stageId: stage.id,
-              approverUserId: resolveApprover(approver, inst.initiatorUserId),
-            })
-            .returning({ id: approvals.id });
-          approvalIds.push(row!.id);
-        }
+        approvalIds = (
+          await tx
+            .select({ id: approvals.id })
+            .from(approvals)
+            .where(
+              and(eq(approvals.instanceId, inst.id), eq(approvals.stageId, stage.id), eq(approvals.status, "pending")),
+            )
+        ).map((a) => a.id);
       }
       await tx
         .update(aiUseCases)
@@ -383,6 +385,7 @@ export async function runUseCaseRecertificationSweep(
           to: "under_review",
           approvedUntil: uc.approvedUntil.toISOString(),
           workflowInstanceId: inst.id,
+          workflowRound: reopened.round,
           tier: tierKeyFor(uc.euAiActTier),
           reviewRound: round,
           roles: roles.map((r) => ({ id: r.id, name: r.name })),
@@ -398,6 +401,9 @@ export async function runUseCaseRecertificationSweep(
       });
       return { ok: true };
     });
+    // after the commit, as every re-open's caller does (a sign-off stage
+    // requests no git execution, so this is a no-op for an intake re-open)
+    for (const pc of postCommits.splice(0)) await pc(db);
     if (moved.ok) {
       out.movedToReview += 1;
       out.movedIds.push(c.id);
