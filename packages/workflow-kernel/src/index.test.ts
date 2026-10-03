@@ -321,6 +321,45 @@ describe("instance state machine", () => {
     );
   });
 
+  it("AER-049: `reopen` takes a COMPLETED instance back to a stage it passed and runs forward from there", () => {
+    const intake = validateDefinition({
+      workflow: "intake-like",
+      stages: [
+        { id: "t", type: "trigger" },
+        { id: "q", type: "artifact_generation", output: "questionnaire" },
+        { id: "signoff", type: "human_approval", approvers: ["requesting_user"] },
+      ],
+    });
+    let r = transition(intake, initialState(intake), { kind: "start" });
+    r = transition(intake, r.state, { kind: "artifact_submitted", stageId: "q" });
+    r = transition(intake, r.state, { kind: "approval_granted", stageId: "signoff" });
+    expect(r.state.status).toBe("completed");
+    // every other event is still refused on a completed instance
+    expect(() => transition(intake, r.state, { kind: "artifact_submitted", stageId: "q" })).toThrow(/terminal/);
+    const back = transition(intake, r.state, { kind: "reopen", stageId: "signoff", reason: "recertification" });
+    expect(back.state.status).toBe("blocked_on_approval");
+    expect(back.state.currentStageIndex).toBe(2);
+    expect(back.state.stageStatuses[2]).toBe("active");
+    expect(back.state.artifactVersions.questionnaire).toBe(1); // no new artifact version
+    expect(back.effects).toEqual([{ kind: "request_approval", stageId: "signoff", approvers: ["requesting_user"] }]);
+    // re-opening to the artifact stage runs forward through the existing version into the gate
+    const fromQ = transition(intake, r.state, { kind: "reopen", stageId: "q", reason: "change" });
+    expect(fromQ.state.status).toBe("blocked_on_approval");
+    expect(fromQ.state.stageStatuses[1]).toBe("completed");
+  });
+
+  it("AER-049: `reopen` is refused on aborted/denied instances and for a stage not yet passed", () => {
+    let r = startedPastPlan();
+    expect(() => transition(standard, r.state, { kind: "reopen", stageId: "requirements_signoff", reason: "x" })).toThrow(
+      /not before the current stage/,
+    );
+    expect(() => transition(standard, r.state, { kind: "reopen", stageId: "nope", reason: "x" })).toThrow(/no stage/);
+    r = transition(standard, r.state, { kind: "abort" });
+    expect(() => transition(standard, r.state, { kind: "reopen", stageId: "requirements", reason: "x" })).toThrow(
+      /cannot be re-opened/,
+    );
+  });
+
   it("a human trigger walks build to the check executor; check success completes", () => {
     let r = startedPastPlan();
     r = transition(standard, r.state, { kind: "artifact_submitted", stageId: "requirements" });
