@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { blankCondition, decisionBody, hasErrors, intakeUseCaseName, isIntakeSignoff, validateReview, type ReviewDraft } from "./reviewDecision";
+import { ApiError } from "../../api/client";
+import { blankCondition, decideErrorText, decisionBody, hasErrors, intakeUseCaseName, isIntakeSignoff, reviewPosition, validateReview, type ReviewDraft } from "./reviewDecision";
 
 const draft = (patch: Partial<ReviewDraft>): ReviewDraft => ({ outcome: null, reason: "", conditions: [], ...patch });
 const cond = (patch: Partial<ReturnType<typeof blankCondition>>) => ({ ...blankCondition(), ...patch });
@@ -69,5 +70,52 @@ describe("which approvals are an AI use-case sign-off", () => {
     expect(isIntakeSignoff({ objectType: "workflow", instanceId: "i", objectLabel: "Deploy billing" })).toBe(false);
     expect(isIntakeSignoff({ objectType: "mcp_tool", instanceId: null, objectLabel: "AI use-case intake: x" })).toBe(false);
     expect(isIntakeSignoff({ objectType: "workflow", instanceId: null, objectLabel: "AI use-case intake: x" })).toBe(false);
+  });
+});
+
+describe("risk acceptance on an approval (ADR-0168 amendment)", () => {
+  const accept = (patch: Partial<NonNullable<ReviewDraft["acceptRisk"]>> = {}) => ({ on: true, riskIds: ["r1", "r2"], rationale: "  Residual is low after human review.  ", ...patch });
+
+  it("rides on approve and on approve with conditions, rationale trimmed", () => {
+    expect(decisionBody(draft({ outcome: "approve", acceptRisk: accept() }))).toEqual({
+      decision: "approved",
+      acceptRisks: { riskIds: ["r1", "r2"], rationale: "Residual is low after human review." },
+    });
+    const withConditions = decisionBody(draft({
+      outcome: "approve_conditions",
+      conditions: [cond({ text: "Bias test", dueAt: "2026-11-01" })],
+      acceptRisk: accept({ riskIds: ["r2"] }),
+    }));
+    expect(withConditions.acceptRisks).toEqual({ riskIds: ["r2"], rationale: "Residual is low after human review." });
+  });
+
+  it("is never sent when switched off, or with send back or reject", () => {
+    expect(decisionBody(draft({ outcome: "approve", acceptRisk: accept({ on: false }) }))).toEqual({ decision: "approved" });
+    expect(decisionBody(draft({ outcome: "return", reason: "Need the DPIA", acceptRisk: accept() }))).toEqual({ decision: "returned", reason: "Need the DPIA" });
+    expect(decisionBody(draft({ outcome: "reject", acceptRisk: accept() }))).toEqual({ decision: "denied" });
+  });
+
+  it("needs at least one risk and a 10..2000 character rationale", () => {
+    const none = validateReview(draft({ outcome: "approve", acceptRisk: accept({ riskIds: [], rationale: "too short" }) }), null);
+    expect(none.acceptRisks).toBe("Choose at least one risk to accept.");
+    expect(none.acceptRationale).toBe("Say why the residual risk is acceptable — at least 10 characters.");
+    expect(hasErrors(none)).toBe(true);
+    expect(validateReview(draft({ outcome: "approve", acceptRisk: accept({ rationale: "x".repeat(2001) }) }), null).acceptRationale).toBe("Keep the rationale under 2,000 characters.");
+    // controls: a valid acceptance, and an invalid one that is switched off, both pass
+    expect(hasErrors(validateReview(draft({ outcome: "approve", acceptRisk: accept() }), null))).toBe(false);
+    expect(hasErrors(validateReview(draft({ outcome: "approve", acceptRisk: accept({ on: false, riskIds: [] }) }), null))).toBe(false);
+  });
+
+  it("names the two risk-acceptance refusals in words", () => {
+    expect(decideErrorText(new ApiError(403, { error: "not_a_risk_acceptor" })).aboutRiskAcceptance).toBe(true);
+    expect(decideErrorText(new ApiError(422, { error: "risk_not_on_use_case" })).text).toMatch(/no longer on this use case/);
+    expect(decideErrorText(new Error("boom"))).toEqual({ text: "boom", aboutRiskAcceptance: false });
+  });
+
+  it("says which review of the round this is", () => {
+    const reviews = [{ approvalId: "a" }, { approvalId: "b" }, { approvalId: "c" }];
+    expect(reviewPosition(reviews, "b")).toEqual({ index: 2, total: 3 });
+    expect(reviewPosition(reviews, "z")).toBeNull();
+    expect(reviewPosition([], "a")).toBeNull();
   });
 });

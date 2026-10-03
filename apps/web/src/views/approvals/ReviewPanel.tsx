@@ -8,32 +8,43 @@
  *
  * Separation of duties is unchanged: the proposer never decides their own use
  * case, and an admin deciding in the named reviewer's place records a reason.
+ *
+ * With a review policy (ADR-0168 amendment) a use case needs one review per
+ * reviewer role its tier requires: the drawer says which review this is and
+ * where the others stand, any member of the role may decide it, and a named
+ * risk acceptor can accept residual risk on specific risks when approving.
  */
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Link } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../api/client";
-import type { Approval, DirectoryUser, WorkflowDetailResponse } from "../../api/types";
+import type { Approval, DirectoryUser, ReviewPolicy, UseCaseLifecycleDetail, WorkflowDetailResponse } from "../../api/types";
 import { ago, humanize } from "../../api/format";
 import { useSession } from "../../session/SessionContext";
 import { Badge, Button, Field, Input, Select, Textarea } from "../../ui/kit";
 import { useToast } from "../../ui/toast";
 import { QuestionnaireView } from "../admin/governance/UseCaseQuestionnaire";
 import { shortDate, type OverviewResponse } from "../admin/governance/useCaseLifecycle";
+import { REVIEW_POLICY_KEY, policyFacts } from "../admin/governance/reviewPolicy";
 import {
   OUTCOMES,
+  approves,
   blankCondition,
+  decideErrorText,
   decisionBody,
   hasErrors,
   intakeUseCaseName,
   outcomeToast,
+  reviewPosition,
+  reviewStatusLabel,
   validateReview,
   type ReviewDraft,
   type ReviewErrors,
   type ReviewOutcome,
 } from "./reviewDecision";
 import r from "./review.module.css";
+import rr from "./reviewRound.module.css";
 
 interface UseCaseListRow { id: string; workflowInstanceId: string | null }
 
@@ -93,24 +104,47 @@ function ReviewDrawer(props: { approval: Approval; onClose: () => void; onDecide
     queryFn: () => api.get<{ users: DirectoryUser[] }>("/v1/users/directory"),
     retry: false,
   });
+  // the review round (one review per required role) and the risks' acceptance ride on the detail read
+  const detail = useQuery({
+    queryKey: ["governance", "use-case-detail", useCaseId],
+    queryFn: () => api.get<UseCaseLifecycleDetail>(`/v1/use-cases/${useCaseId}`),
+    enabled: Boolean(useCaseId),
+    retry: false,
+  });
+  const policy = useQuery({
+    queryKey: REVIEW_POLICY_KEY,
+    queryFn: () => api.get<ReviewPolicy>("/v1/governance/review-policy"),
+    retry: false,
+  });
   const questionnaire = useMemo(() => {
     const docs = (instance.data?.artifacts ?? []).filter((art) => art.output === "use_case_questionnaire");
     return docs.sort((x, y) => y.version - x.version)[0] ?? null;
   }, [instance.data]);
 
   // --- who may decide ------------------------------------------------------------
-  const named = me !== null && me === a.approverUserId;
+  const facts = policyFacts(policy.data, me);
+  const role = a.reviewRole ?? null;
+  const roleMember = facts.isRoleMember(role?.id);
+  const named = (me !== null && me === a.approverUserId) || roleMember;
   const delegated = Boolean(a.delegatedFrom);
   const canDecide = named || delegated || isAdmin;
   const ownProposal = Boolean(a.selfReview) || (me !== null && me === a.userId);
   const reasonRequiredBecause = !named && !delegated && isAdmin
-    ? "You are not the named reviewer — deciding in their place needs a recorded reason."
+    ? role
+      ? `You are not a member of ${role.name} — deciding this review in their place needs a recorded reason.`
+      : "You are not the named reviewer — deciding in their place needs a recorded reason."
     : null;
+  const awaiting = role ? `a member of ${role.name}` : a.approverName ?? "the named reviewer";
+
+  // --- the review round ------------------------------------------------------------
+  const reviews = detail.data?.reviews ?? [];
+  const position = reviewPosition(reviews, a.id);
+  const otherReviews = reviews.filter((rv) => rv.approvalId !== a.id);
 
   // --- the decision ----------------------------------------------------------------
-  const [draft, setDraft] = useState<ReviewDraft>({ outcome: null, reason: "", conditions: [] });
+  const [draft, setDraft] = useState<ReviewDraft>({ outcome: null, reason: "", conditions: [], acceptRisk: { on: false, riskIds: [], rationale: "" } });
   const [errors, setErrors] = useState<ReviewErrors | null>(null);
-  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [submitError, setSubmitError] = useState<{ text: string; aboutRiskAcceptance: boolean } | null>(null);
   const [busy, setBusy] = useState(false);
   const [showDoc, setShowDoc] = useState(false);
   const chosen = OUTCOMES.find((o) => o.id === draft.outcome) ?? null;
@@ -142,7 +176,7 @@ function ReviewDrawer(props: { approval: Approval; onClose: () => void; onDecide
       props.onDecided?.();
       onClose();
     } catch (e) {
-      setSubmitError(e instanceof Error ? e.message : String(e));
+      setSubmitError(decideErrorText(e));
     } finally {
       setBusy(false);
     }
@@ -173,6 +207,14 @@ function ReviewDrawer(props: { approval: Approval; onClose: () => void; onDecide
 
   const ov = overview.data;
   const controls = ov ? uniqueControls(ov) : [];
+  // the risks a risk acceptor may accept: the evidence list's, else the detail read's
+  const riskRows: Array<{ id: string; title: string; status: string; residual: string | null }> = ov
+    ? ov.risks.map((risk) => ({ id: risk.id, title: risk.title, status: risk.status, residual: risk.residual ? `${risk.residual.likelihood} × ${risk.residual.impact}` : null }))
+    : (detail.data?.risks ?? []).map((risk) => ({ id: risk.id, title: risk.title ?? "Untitled risk", status: risk.status ?? "open", residual: null }));
+  const acceptable = riskRows.filter((risk) => risk.status !== "accepted" && risk.status !== "closed");
+  const offerAcceptance = facts.isRiskAcceptor && approves(draft.outcome) && acceptable.length > 0;
+  const acceptRisk = draft.acceptRisk ?? { on: false, riskIds: [], rationale: "" };
+  const patchAcceptance = (patch: Partial<typeof acceptRisk>) => setDraft((d) => ({ ...d, acceptRisk: { ...acceptRisk, ...d.acceptRisk, ...patch } }));
   const dueAt = a.assignment?.dueAt ?? null;
   const users = directory.data?.users ?? [];
 
@@ -200,8 +242,38 @@ function ReviewDrawer(props: { approval: Approval; onClose: () => void; onDecide
             </dd>
             <dt>Requested by</dt>
             <dd>{a.requestedByName ?? "Unknown"} · {ago(a.requestedAt)}</dd>
-            <dt>Reviewer</dt>
-            <dd>{a.approverName ?? "Not recorded"}{a.delegatedFrom ? ` (delegated to you by ${a.delegatedFrom})` : ""}</dd>
+            {role ? (
+              <>
+                <dt>Review</dt>
+                <dd>
+                  <strong>{role.name} review</strong>
+                  {position ? <span className={r.muted}> · {position.index} of {position.total} reviews</span> : null}
+                </dd>
+                <dt>Reviewers</dt>
+                <dd>Any member of {role.name}{roleMember ? " (you are one)" : ""}{a.delegatedFrom ? ` (delegated to you by ${a.delegatedFrom})` : ""}</dd>
+              </>
+            ) : (
+              <>
+                <dt>Reviewer</dt>
+                <dd>{a.approverName ?? "Not recorded"}{a.delegatedFrom ? ` (delegated to you by ${a.delegatedFrom})` : ""}</dd>
+              </>
+            )}
+            {otherReviews.length > 0 ? (
+              <>
+                <dt>Other reviews</dt>
+                <dd>
+                  <ul className={rr.otherReviews} aria-label="Other reviews">
+                    {otherReviews.map((rv) => (
+                      <li key={rv.approvalId}>
+                        <span>{rv.roleName}</span>
+                        <Badge tone={rv.status === "approved" ? "ok" : rv.status === "denied" ? "danger" : rv.status === "returned" ? "warn" : "info"}>{reviewStatusLabel(rv.status)}</Badge>
+                        {rv.deciderName ? <span className={r.muted}>{rv.deciderName}{rv.decidedAt ? `, ${shortDate(rv.decidedAt)}` : ""}</span> : null}
+                      </li>
+                    ))}
+                  </ul>
+                </dd>
+              </>
+            ) : null}
           </dl>
 
           <p className={r.prompt}>
@@ -278,10 +350,10 @@ function ReviewDrawer(props: { approval: Approval; onClose: () => void; onDecide
 
           {ownProposal ? (
             <p className={r.blocked} role="note">
-              You proposed this use case, so someone independent of it decides. It stays with {a.approverName ?? "the named reviewer"}.
+              You proposed this use case, so someone independent of it decides. It stays with {awaiting}.
             </p>
           ) : !canDecide ? (
-            <p className={r.blocked} role="note">Awaiting {a.approverName ?? "the named reviewer"}.</p>
+            <p className={r.blocked} role="note">Awaiting {awaiting}.</p>
           ) : (
             <form className={r.section} noValidate onSubmit={(e) => { e.preventDefault(); void submit(); }}>
               <fieldset className={r.outcomes}>
@@ -364,7 +436,47 @@ function ReviewDrawer(props: { approval: Approval; onClose: () => void; onDecide
                 </div>
               ) : null}
 
-              {submitError ? <p className={r.error} role="alert">{submitError}</p> : null}
+              {offerAcceptance ? (
+                <div className={rr.acceptance}>
+                  <h3 className={r.sectionTitle}>Residual risk</h3>
+                  <label className={rr.acceptToggle}>
+                    <input type="checkbox" checked={acceptRisk.on} onChange={(e) => { patchAcceptance({ on: e.target.checked }); setSubmitError(null); }} aria-describedby={`${titleId}-accept-hint`} />
+                    <span>Accept residual risk</span>
+                  </label>
+                  <p id={`${titleId}-accept-hint`} className={r.muted}>You are a named risk acceptor. The risks you choose read accepted on the record, with your rationale.</p>
+                  {acceptRisk.on ? (
+                    <>
+                      <fieldset className={rr.riskChoices}>
+                        <legend>Risks to accept</legend>
+                        {acceptable.map((risk) => (
+                          <label key={risk.id} className={rr.riskChoice}>
+                            <input
+                              type="checkbox"
+                              checked={acceptRisk.riskIds.includes(risk.id)}
+                              onChange={(e) => patchAcceptance({ riskIds: e.target.checked ? [...acceptRisk.riskIds, risk.id] : acceptRisk.riskIds.filter((id) => id !== risk.id) })}
+                            />
+                            <span>{risk.title}{risk.residual ? <span className={r.muted}> · residual {risk.residual}</span> : null}</span>
+                          </label>
+                        ))}
+                      </fieldset>
+                      {errors?.acceptRisks ? <p className={r.error} role="alert" tabIndex={-1} data-review-error>{errors.acceptRisks}</p> : null}
+                      <Field label="Why the residual risk is acceptable (required)" error={errors?.acceptRationale ?? null}>
+                        <Textarea
+                          rows={3}
+                          maxLength={2000}
+                          value={acceptRisk.rationale}
+                          aria-invalid={errors?.acceptRationale ? true : undefined}
+                          onChange={(e) => patchAcceptance({ rationale: e.target.value })}
+                          placeholder="The controls in place and why what remains is tolerable"
+                        />
+                      </Field>
+                    </>
+                  ) : null}
+                  {submitError?.aboutRiskAcceptance ? <p className={r.error} role="alert">{submitError.text}</p> : null}
+                </div>
+              ) : null}
+
+              {submitError && !(submitError.aboutRiskAcceptance && offerAcceptance) ? <p className={r.error} role="alert">{submitError.text}</p> : null}
             </form>
           )}
         </div>

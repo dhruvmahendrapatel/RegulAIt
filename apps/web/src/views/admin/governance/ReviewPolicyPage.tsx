@@ -17,6 +17,7 @@ import v from "../../views.module.css";
 import { shortDate } from "./useCaseLifecycle";
 import {
   DEFAULT_VALIDITY,
+  REVIEW_POLICY_KEY,
   TIERS,
   blankRole,
   draftFrom,
@@ -29,8 +30,6 @@ import {
   type RoleDraft,
 } from "./reviewPolicy";
 import p from "./reviewPolicy.module.css";
-
-export const REVIEW_POLICY_KEY = ["governance", "review-policy"] as const;
 
 export default function ReviewPolicyPage() {
   const policy = useQuery({ queryKey: REVIEW_POLICY_KEY, queryFn: () => api.get<ReviewPolicy>("/v1/governance/review-policy") });

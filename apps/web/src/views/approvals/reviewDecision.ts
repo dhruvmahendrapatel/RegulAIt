@@ -6,6 +6,7 @@
  *   approve · approve with conditions · send back for information · reject.
  * Every other approval kind keeps the plain approve / deny pair.
  */
+import { ApiError } from "../../api/client";
 import type { Approval, DecideApprovalBody } from "../../api/types";
 
 export type ReviewOutcome = "approve" | "approve_conditions" | "return" | "reject";
@@ -35,11 +36,23 @@ export interface ConditionDraft {
   blocking: boolean;
 }
 
+/** a risk acceptor accepting residual risk as part of an approval (ADR-0168 amendment) */
+export interface RiskAcceptanceDraft {
+  on: boolean;
+  riskIds: string[];
+  rationale: string;
+}
+
 export interface ReviewDraft {
   outcome: ReviewOutcome | null;
   reason: string;
   conditions: ConditionDraft[];
+  acceptRisk?: RiskAcceptanceDraft;
 }
+
+/** risk acceptance rides only on an approval */
+export const approves = (outcome: ReviewOutcome | null) => outcome === "approve" || outcome === "approve_conditions";
+const accepting = (draft: ReviewDraft) => approves(draft.outcome) && Boolean(draft.acceptRisk?.on);
 
 let seq = 0;
 export const blankCondition = (): ConditionDraft => ({ key: `c${++seq}`, text: "", ownerUserId: "", dueAt: "", blocking: true });
@@ -49,10 +62,12 @@ export interface ReviewErrors {
   reason?: string;
   conditions?: string;
   rows: Record<string, { text?: string; dueAt?: string }>;
+  acceptRisks?: string;
+  acceptRationale?: string;
 }
 
 export const hasErrors = (e: ReviewErrors) =>
-  Boolean(e.outcome || e.reason || e.conditions || Object.values(e.rows).some((r) => r.text || r.dueAt));
+  Boolean(e.outcome || e.reason || e.conditions || e.acceptRisks || e.acceptRationale || Object.values(e.rows).some((r) => r.text || r.dueAt));
 
 /** the AI use-case intake's own sign-off: a workflow approval on an instance the intake started */
 export const INTAKE_LABEL_PREFIX = "AI use-case intake: ";
@@ -84,6 +99,12 @@ export function validateReview(draft: ReviewDraft, reasonRequiredBecause: string
       if (row.text || row.dueAt) errors.rows[c.key] = row;
     }
   }
+  if (accepting(draft)) {
+    const rationale = draft.acceptRisk!.rationale.trim();
+    if (draft.acceptRisk!.riskIds.length === 0) errors.acceptRisks = "Choose at least one risk to accept.";
+    if (rationale.length < 10) errors.acceptRationale = "Say why the residual risk is acceptable — at least 10 characters.";
+    else if (rationale.length > 2000) errors.acceptRationale = "Keep the rationale under 2,000 characters.";
+  }
   return errors;
 }
 
@@ -91,13 +112,17 @@ export function validateReview(draft: ReviewDraft, reasonRequiredBecause: string
 export function decisionBody(draft: ReviewDraft): DecideApprovalBody {
   const reason = draft.reason.trim();
   const withReason = reason ? { reason } : {};
+  const withAcceptance = accepting(draft)
+    ? { acceptRisks: { riskIds: [...draft.acceptRisk!.riskIds], rationale: draft.acceptRisk!.rationale.trim() } }
+    : {};
   switch (draft.outcome) {
     case "approve":
-      return { decision: "approved", ...withReason };
+      return { decision: "approved", ...withReason, ...withAcceptance };
     case "approve_conditions":
       return {
         decision: "approved",
         ...withReason,
+        ...withAcceptance,
         conditions: draft.conditions.map((c) => ({
           text: c.text.trim(),
           ...(c.ownerUserId ? { ownerUserId: c.ownerUserId } : {}),
@@ -120,3 +145,25 @@ export const outcomeToast: Record<ReviewOutcome, string> = {
   return: "Sent back for information",
   reject: "Rejected",
 };
+
+/**
+ * A refused decision in words the reviewer can act on. The two risk-acceptance
+ * refusals name what to change; anything else keeps the gateway's message.
+ */
+export function decideErrorText(error: unknown): { text: string; aboutRiskAcceptance: boolean } {
+  if (error instanceof ApiError && error.payload.error === "not_a_risk_acceptor")
+    return { text: "The decision was refused: you are not named as a risk acceptor in the review policy. Clear “Accept residual risk” to decide without it.", aboutRiskAcceptance: true };
+  if (error instanceof ApiError && error.payload.error === "risk_not_on_use_case")
+    return { text: "The decision was refused: a chosen risk is no longer on this use case. Reload the review and choose again.", aboutRiskAcceptance: true };
+  return { text: error instanceof Error ? error.message : String(error), aboutRiskAcceptance: false };
+}
+
+const REVIEW_STATUS: Record<string, string> = { pending: "Awaiting decision", approved: "Approved", returned: "Sent back", denied: "Rejected" };
+export const reviewStatusLabel = (status: string) => REVIEW_STATUS[status] ?? status;
+
+/** "Privacy review · 1 of 3 reviews" — which required review this approval is */
+export function reviewPosition<T extends { approvalId: string }>(reviews: readonly T[] | undefined, approvalId: string): { index: number; total: number } | null {
+  if (!reviews || reviews.length === 0) return null;
+  const at = reviews.findIndex((r) => r.approvalId === approvalId);
+  return at < 0 ? null : { index: at + 1, total: reviews.length };
+}

@@ -7,6 +7,19 @@
  */
 import type { ReviewPolicy, ReviewPolicyInput, ReviewTier, ReviewTierPolicy } from "../../../api/types";
 
+/** the react-query key every reader of the policy shares (the settings page, the review panel) */
+export const REVIEW_POLICY_KEY = ["governance", "review-policy"] as const;
+
+/** what the review panel needs from the policy, tolerant of a gateway that does not serve it yet */
+export function policyFacts(policy: Partial<ReviewPolicy> | undefined, me: string | null) {
+  const roles = policy?.roles ?? [];
+  return {
+    isRiskAcceptor: me !== null && (policy?.riskAcceptorUserIds ?? []).includes(me),
+    isRoleMember: (roleId: string | null | undefined) =>
+      me !== null && Boolean(roleId) && Boolean(roles.find((r) => r.id === roleId)?.memberUserIds?.includes(me)),
+  };
+}
+
 export const TIERS: ReadonlyArray<{ id: ReviewTier; label: string; hint: string }> = [
   { id: "minimal", label: "Minimal", hint: "No screening rule matched." },
   { id: "limited", label: "Limited", hint: "Transparency duties apply." },
