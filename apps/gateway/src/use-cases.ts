@@ -59,6 +59,7 @@ import {
   agents,
   aiUseCases,
   and,
+  approvals,
   auditLog,
   compliancePackControls,
   compliancePacks,
@@ -102,6 +103,7 @@ import {
 } from "@regulait/shared";
 import { z } from "zod";
 import { complianceProfilesForTags, effectiveCompliancePolicy } from "./projects.js";
+import { activeDelegatorsFor } from "./delegations.js";
 // ADR-0058's evaluator, reused rather than reimplemented: a second copy of the
 // collector logic would drift from the one that produces real pack reports.
 import { evaluatePack } from "./compliance-packs.js";
@@ -527,6 +529,49 @@ function conditionView(r: UseCaseConditionRow, names: Map<string, string>, now: 
     note: r.note,
     overdue: r.status === "open" && r.dueAt.getTime() < now.getTime(),
   };
+}
+
+/**
+ * ADR-0168 — WHO MAY READ ONE USE CASE: its owner, an admin, and the
+ * reviewer of its intake sign-off — the named approver of a PENDING sign-off
+ * on its intake instance, an active delegate of that approver (ADR-0022), or
+ * whoever DECIDED one. Read-only: every write route keeps its own owner/admin
+ * rule, and the list is not widened.
+ */
+export async function canReadUseCase(
+  db: Db,
+  useCase: Pick<AiUseCaseRow, "ownerUserId" | "workflowInstanceId">,
+  auth: { isAdmin: boolean; userId: string | null | undefined },
+): Promise<boolean> {
+  if (auth.isAdmin) return true;
+  const me = auth.userId;
+  if (!me) return false;
+  if (me === useCase.ownerUserId) return true;
+  return isIntakeReviewer(db, useCase, me);
+}
+
+export async function isIntakeReviewer(
+  db: Db,
+  useCase: Pick<AiUseCaseRow, "workflowInstanceId">,
+  userId: string,
+): Promise<boolean> {
+  if (!useCase.workflowInstanceId) return false;
+  const delegators = await activeDelegatorsFor(db, userId);
+  const named = delegators.length
+    ? or(eq(approvals.approverUserId, userId), inArray(approvals.approverUserId, delegators))
+    : eq(approvals.approverUserId, userId);
+  const [hit] = await db
+    .select({ id: approvals.id })
+    .from(approvals)
+    .where(
+      and(
+        eq(approvals.objectType, "workflow"),
+        eq(approvals.instanceId, useCase.workflowInstanceId),
+        or(and(eq(approvals.status, "pending"), named), eq(approvals.decidedBy, userId)),
+      ),
+    )
+    .limit(1);
+  return !!hit;
 }
 
 function approvalExpired(row: AiUseCaseRow, now: Date): boolean {
@@ -1080,7 +1125,8 @@ export function registerUseCaseRoutes(
     const { useCaseId } = useCaseIdParam.parse(req.params);
     const [row] = await db.select().from(aiUseCases).where(eq(aiUseCases.id, useCaseId));
     if (!row) return reply.status(404).send({ error: "not_found" });
-    if (!req.authCtx.isAdmin && req.authCtx.userId !== row.ownerUserId) {
+    // ADR-0168: + the reviewer of its intake sign-off (read-only)
+    if (!(await canReadUseCase(db, row, req.authCtx))) {
       return reply.status(403).send({
         error: "forbidden",
         detail: "a use case is visible to its owner and to admins",

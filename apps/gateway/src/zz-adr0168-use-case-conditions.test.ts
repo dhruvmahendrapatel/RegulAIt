@@ -418,3 +418,52 @@ describe("ADR-0168 validation", () => {
     expect(ed.statusCode, ed.body).toBe(200);
   });
 });
+
+describe("ADR-0168 reviewer access and the queue's use-case link", () => {
+  it("an intake sign-off row carries its useCaseId; other kinds carry null", async () => {
+    const uc = await proposeToReview("queue-link", minimalAnswers);
+    const approvalId = await signoffId(uc.instanceId);
+    const [other] = await db
+      .insert(approvals)
+      .values({ userId: users.owner.id, objectType: "mcp_tool", approverUserId: users.admin.id })
+      .returning({ id: approvals.id });
+    const q = await get("/v1/approvals?status=pending", users.admin.auth);
+    expect(q.statusCode, q.body).toBe(200);
+    const rows = q.json().approvals as any[];
+    expect(rows.find((a) => a.id === approvalId)?.useCaseId).toBe(uc.id);
+    expect(rows.find((a) => a.id === other!.id)).toHaveProperty("useCaseId", null);
+  });
+
+  it("the named reviewer reads the use case and its overview, read-only; an unrelated user cannot", async () => {
+    const uc = await proposeToReview("reviewer-read", minimalAnswers);
+    const approvalId = await signoffId(uc.instanceId);
+    const asReviewer = users.condOwner.auth;
+    // before the gate is theirs, the reviewer is a stranger like any other
+    expect((await get(`/v1/use-cases/${uc.id}`, asReviewer)).statusCode).toBe(403);
+    await db.update(approvals).set({ approverUserId: users.condOwner.id }).where(eq(approvals.id, approvalId));
+
+    const d = await get(`/v1/use-cases/${uc.id}`, asReviewer);
+    expect(d.statusCode, d.body).toBe(200);
+    expect(d.json().useCase.id).toBe(uc.id);
+    const o = await get(`/v1/use-cases/${uc.id}/overview`, asReviewer);
+    expect(o.statusCode, o.body).toBe(200);
+    // read-only: no edit, and the list is not widened
+    const patch = await app.inject({
+      method: "PATCH",
+      url: `/v1/use-cases/${uc.id}`,
+      headers: asReviewer,
+      payload: { businessContext: "reviewer edit" },
+    });
+    expect(patch.statusCode).toBe(403);
+    const list = await get("/v1/use-cases", asReviewer);
+    expect((list.json().useCases as any[]).some((u) => u.id === uc.id)).toBe(false);
+    // an unrelated non-admin keeps the 403 on both reads
+    expect((await get(`/v1/use-cases/${uc.id}`, users.stranger.auth)).statusCode).toBe(403);
+    expect((await get(`/v1/use-cases/${uc.id}/overview`, users.stranger.auth)).statusCode).toBe(403);
+
+    // having decided it, the reviewer can still read it back
+    const r = await decide(approvalId, { decision: "approved", reason: "fine" }, "condOwner");
+    expect(r.statusCode, r.body).toBe(200);
+    expect((await get(`/v1/use-cases/${uc.id}`, asReviewer)).statusCode).toBe(200);
+  });
+});

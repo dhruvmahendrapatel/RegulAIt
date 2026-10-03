@@ -18,7 +18,8 @@
  * /v1/use-cases/:id/frameworks` owns that computation (ADR-0123) and the page
  * calls it — two copies of a compliance mapping would drift.
  *
- * Visibility: the owner and admins, exactly the detail route's rule.
+ * Visibility: the owner, admins and the intake sign-off's reviewer (ADR-0168),
+ * exactly the detail route's rule (`canReadUseCase`).
  */
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
@@ -40,7 +41,7 @@ import {
 import { RISK_CATEGORY_DIMENSION, type AiRiskCategory } from "@regulait/shared";
 import { loadCardsForSubject } from "./mrm.js";
 import { loadRiskControls } from "./risks.js";
-import { USE_CASE_QUESTIONNAIRE_OUTPUT } from "./use-cases.js";
+import { canReadUseCase, USE_CASE_QUESTIONNAIRE_OUTPUT } from "./use-cases.js";
 
 const params = z.object({ useCaseId: z.string().uuid() });
 
@@ -49,7 +50,8 @@ export function registerUseCaseOverviewRoutes(app: FastifyInstance, db: Db): voi
     const { useCaseId } = params.parse(req.params);
     const [useCase] = await db.select().from(aiUseCases).where(eq(aiUseCases.id, useCaseId));
     if (!useCase) return reply.status(404).send({ error: "not_found" });
-    if (!req.authCtx.isAdmin && req.authCtx.userId !== useCase.ownerUserId) {
+    // ADR-0168: + the reviewer of its intake sign-off (read-only)
+    if (!(await canReadUseCase(db, useCase, req.authCtx))) {
       return reply.status(403).send({ error: "forbidden", detail: "a use case is visible to its owner and to admins" });
     }
     const now = new Date();

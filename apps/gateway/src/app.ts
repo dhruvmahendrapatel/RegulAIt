@@ -12,6 +12,7 @@ import {
   lte,
   agentRevocations,
   agents,
+  aiUseCases,
   approvalAssignments,
   apiKeys,
   approvalDelegations,
@@ -2897,6 +2898,16 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     const runIds = ids(rows.map((r) => r.runId));
     const projectIds = ids(rows.map((r) => r.projectId));
     const approvalServerIds = ids(rows.map((r) => r.serverId));
+    // ADR-0168: an intake sign-off row names the use case it decides, so the
+    // reviewer can open the record (null for every other approval kind)
+    const workflowInstanceIds = ids(rows.map((r) => (r.objectType === "workflow" ? r.instanceId : null)));
+    const intakeUseCaseRows = workflowInstanceIds.length
+      ? await db
+          .select({ id: aiUseCases.id, instanceId: aiUseCases.workflowInstanceId })
+          .from(aiUseCases)
+          .where(inArray(aiUseCases.workflowInstanceId, workflowInstanceIds))
+      : [];
+    const useCaseForInstance = new Map(intakeUseCaseRows.map((u) => [u.instanceId, u.id]));
     const [userRows, instanceRows, runRows, projectRows, approvalServerRows, boundTargetFor] = await Promise.all([
       userIds.length
         ? db
@@ -3139,6 +3150,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         ...r,
         serverName: r.serverId ? approvalServerLabel.get(r.serverId) ?? null : null,
         projectName: r.projectId ? projectLabel.get(r.projectId) ?? null : null,
+        useCaseId:
+          r.objectType === "workflow" && r.instanceId ? (useCaseForInstance.get(r.instanceId) ?? null) : null,
         // AER-039: host + posture + manifest digest only — never the URL
         ...(r.objectType === "mcp_tool" ? { boundTarget: boundTargetFor.get(r.id) ?? null } : {}),
         // Finding-6 separation-of-duties surface: the person who would sign
