@@ -139,6 +139,12 @@ test("UXJ-06: the intake opens blank — the worked example is loaded only on re
   await page.goto("/ui/admin/governance/intake");
   await expect(page.getByLabel("Use-case name")).toHaveValue("");
   await expect(page.getByLabel("What will the system do?")).toHaveValue("");
+  await page.getByText("Use-case name", { exact: true }).click();
+  await expect(page.getByLabel("Use-case name")).toBeFocused();
+  await page.getByRole("button", { name: "What is the inventory identifier created here?" }).click();
+  await expect(page.getByRole("note")).toContainText("primary label for this proposed system");
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("note")).toHaveCount(0);
   await expect(page.getByLabel("Social scoring")).toHaveValue("");
   await expect(page.getByRole("button", { name: "Draft suggestions" })).toBeDisabled();
   await page.getByRole("button", { name: "Fill in an example" }).click();

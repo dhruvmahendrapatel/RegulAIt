@@ -79,6 +79,12 @@
   text-transform: uppercase;
   color: var(--text-faint);
 }
+.fieldLabelRow {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  min-height: 24px;
+}
 .input,
 .select,
 .textarea {

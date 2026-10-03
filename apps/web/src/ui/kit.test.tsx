@@ -96,3 +96,18 @@ describe("Field grow — a real flex basis, so the field wraps before it shrinks
     expect(plain).not.toContain("fieldGrow");
   });
 });
+
+describe("Field help — explanatory controls keep the input label intact", () => {
+  it("renders a labelled information button beside, never inside, the label", () => {
+    const html = renderToStaticMarkup(
+      <Field label="Use-case name" helpLabel="the inventory identifier created here" help={<p>This becomes the inventory name.</p>}>
+        <Input />
+      </Field>,
+    );
+
+    expect(html).toContain("What is the inventory identifier created here?");
+    expect(html).toContain("for=\"");
+    expect(html).toContain("id=\"");
+    expect(html).not.toMatch(/<label[^>]*>[^<]*<button/);
+  });
+});

@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState, type ReactNode } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { ApiError, api } from "../../../api/client";
@@ -306,8 +306,20 @@ export default function IntakeWizardPage() {
                   <Button size="sm" variant="ghost" onClick={fillExample}>Fill in an example</Button>
                 </div>
               )}
-              <Field label="Use-case name"><Input value={title} onChange={(event) => setTitle(event.target.value)} required /></Field>
-              <Field label="What will the system do?"><Textarea rows={5} value={description} onChange={(event) => setDescription(event.target.value)} required /></Field>
+              <Field
+                label="Use-case name"
+                helpLabel="the inventory identifier created here"
+                help={<p>The name becomes the primary label for this proposed system in the AI inventory, approval queue, risk records and audit evidence. Use a specific business-facing name that reviewers will recognize.</p>}
+              >
+                <Input value={title} onChange={(event) => setTitle(event.target.value)} required />
+              </Field>
+              <Field
+                label="What will the system do?"
+                helpLabel="the proposed system description recorded here"
+                help={<p>Describe the business task, the people or decisions affected, and what the AI produces or changes. This description is stored on the use case and is used to draft the questionnaire, risk and framework suggestions.</p>}
+              >
+                <Textarea rows={5} value={description} onChange={(event) => setDescription(event.target.value)} required />
+              </Field>
               <div className={v.grid2}>
                 <Field label="Primary purpose domain">
                   <Select value={purposeDomain} onChange={(event) => setPurposeDomain(event.target.value)} required>
@@ -389,11 +401,11 @@ export default function IntakeWizardPage() {
               </div>
               <h2 className={v.sectionTitle}>Frameworks</h2>
               {assist.data.frameworks.map((item) => (
-                <Suggestion key={item.framework} title={item.title} body={suggestionEdits[`framework:${item.framework}`] ?? sentence(item.why)} source={item.source} decision={decisions[`framework:${item.framework}`]} onDecision={(value) => setDecision(`framework:${item.framework}`, value)} onEdit={(value) => setSuggestionEdits((current) => ({ ...current, [`framework:${item.framework}`]: value }))} />
+                <Suggestion key={item.framework} title={item.title} body={suggestionEdits[`framework:${item.framework}`] ?? sentence(item.why)} source={item.source} decision={decisions[`framework:${item.framework}`]} onDecision={(value) => setDecision(`framework:${item.framework}`, value)} onEdit={(value) => setSuggestionEdits((current) => ({ ...current, [`framework:${item.framework}`]: value }))} helpLabel="the framework suggestion explanation" help={<p>This text explains why the framework was suggested so you can make the accept or reject decision. If accepted, the framework identifier—not this explanatory wording—is added to the use case as a compliance tag.</p>} />
               ))}
               <h2 className={v.sectionTitle}>Risk scenarios</h2>
               {assist.data.risks.map((item) => (
-                <Suggestion key={item.scenarioKey} title={item.title} body={suggestionEdits[`risk:${item.scenarioKey}`] ?? `${item.description} Suggested because ${item.why.replace(/\.$/, "")}.`} source={item.source} decision={decisions[`risk:${item.scenarioKey}`]} onDecision={(value) => setDecision(`risk:${item.scenarioKey}`, value)} onEdit={(value) => setSuggestionEdits((current) => ({ ...current, [`risk:${item.scenarioKey}`]: value }))} meta={`${humanize(item.dimension)} · ${item.likelihood} likelihood · ${item.impact} impact`} />
+                <Suggestion key={item.scenarioKey} title={item.title} body={suggestionEdits[`risk:${item.scenarioKey}`] ?? `${item.description} Suggested because ${item.why.replace(/\.$/, "")}.`} source={item.source} decision={decisions[`risk:${item.scenarioKey}`]} onDecision={(value) => setDecision(`risk:${item.scenarioKey}`, value)} onEdit={(value) => setSuggestionEdits((current) => ({ ...current, [`risk:${item.scenarioKey}`]: value }))} meta={`${humanize(item.dimension)} · ${item.likelihood} likelihood · ${item.impact} impact`} helpLabel="the risk description created from this suggestion" help={<p>If you accept this scenario, the edited text becomes the description of a risk linked to the new use case. Review it as durable governance evidence, not as a private note.</p>} />
               ))}
               <p className={v.faint}>{assist.data.disclaimer}</p>
             </div>
@@ -408,7 +420,15 @@ export default function IntakeWizardPage() {
                 return (
                   <section key={item.id} className={`${s.suggestion} ${rejected ? s.suggestionRejected : ""}`}>
                     <div className={s.suggestionHeader}><strong>{item.heading}</strong><Badge tone="info">{item.source}</Badge></div>
-                    {!rejected && <Field label={`${item.heading} answer`}><Textarea rows={4} value={questionnaire[item.id] ?? item.text} onChange={(event) => setQuestionnaire((current) => ({ ...current, [item.id]: event.target.value }))} /></Field>}
+                    {!rejected && (
+                      <Field
+                        label={`${item.heading} answer`}
+                        helpLabel={`the evidence recorded for ${item.heading.toLowerCase()}`}
+                        help={<p>This answer is saved in the versioned intake questionnaire and shown to the human approver. Replace generic draft language with the proposed system's actual process, ownership and safeguards.</p>}
+                      >
+                        <Textarea rows={4} value={questionnaire[item.id] ?? item.text} onChange={(event) => setQuestionnaire((current) => ({ ...current, [item.id]: event.target.value }))} />
+                      </Field>
+                    )}
                     <div className={s.suggestionActions}>
                       <Button size="sm" variant={rejected ? "default" : "primary"} onClick={() => setDecision(`question:${item.id}`, "accepted")}>Accept</Button>
                       <Button size="sm" variant={rejected ? "danger" : "ghost"} onClick={() => setDecision(`question:${item.id}`, "rejected")}>Reject</Button>
@@ -416,7 +436,13 @@ export default function IntakeWizardPage() {
                   </section>
                 );
               })}
-              <Field label="9. EU AI Act risk screening (rule-generated)"><Textarea rows={10} value={assist.data.euAiActBlock} readOnly /></Field>
+              <Field
+                label="9. EU AI Act risk screening (rule-generated)"
+                helpLabel="the reproducible EU AI Act screening record"
+                help={<p>This read-only block records the structured screening answers used to calculate the proposed EU AI Act tier. It is appended to the versioned questionnaire so reviewers can reproduce the rule result; it is not legal advice.</p>}
+              >
+                <Textarea rows={10} value={assist.data.euAiActBlock} readOnly />
+              </Field>
             </div>
           </Card>
         )}
@@ -533,7 +559,7 @@ function MultiAnswerField(props: { label: string; values: string[]; options: rea
   );
 }
 
-function Suggestion(props: { title: string; body: string; source: Source; decision?: Decision; onDecision: (value: Decision) => void; onEdit: (value: string) => void; meta?: string }) {
+function Suggestion(props: { title: string; body: string; source: Source; decision?: Decision; onDecision: (value: Decision) => void; onEdit: (value: string) => void; meta?: string; help: ReactNode; helpLabel: string }) {
   const [editing, setEditing] = useState(false);
   const rejected = props.decision === "rejected";
   const accepted = props.decision === "accepted";
@@ -542,7 +568,7 @@ function Suggestion(props: { title: string; body: string; source: Source; decisi
       <div className={s.suggestionHeader}><strong>{props.title}</strong><Badge tone="info">{props.source}</Badge><Badge tone={rejected ? "neutral" : accepted ? "ok" : "warn"}>{rejected ? "rejected" : accepted ? "accepted" : "not reviewed"}</Badge></div>
       {props.meta ? <p className={v.faint}>{props.meta}</p> : null}
       {editing ? (
-        <Field label={`Edit ${props.title}`}><Textarea rows={4} value={props.body} onChange={(event) => props.onEdit(event.target.value)} /></Field>
+        <Field label={`Edit ${props.title}`} helpLabel={props.helpLabel} help={props.help}><Textarea rows={4} value={props.body} onChange={(event) => props.onEdit(event.target.value)} /></Field>
       ) : (
         <p className={v.dim}>{props.body}</p>
       )}

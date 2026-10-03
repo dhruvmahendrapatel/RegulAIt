@@ -72,7 +72,16 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
  * (UIW-05). A real basis makes it wrap to a full line of its own first. */
 const fieldClass = (grow: boolean | undefined) => (grow ? `${s.field} ${s.fieldGrow}` : s.field);
 
-export function Field(props: { label: string; children: ReactNode; error?: string | null; grow?: boolean }) {
+export function Field(props: {
+  label: string;
+  children: ReactNode;
+  error?: string | null;
+  grow?: boolean;
+  /** Persistent, keyboard/touch-accessible help displayed beside the label. */
+  help?: ReactNode;
+  /** Accessible name for the help trigger; defaults to the field label. */
+  helpLabel?: string;
+}) {
   const auto = useId();
   // A SPACER IS NOT A LABEL. `<Field label="&nbsp;">` is used to keep a submit
   // button aligned with the inputs beside it — and rendering that as a real
@@ -109,9 +118,16 @@ export function Field(props: { label: string; children: ReactNode; error?: strin
     const id = single.props.id ?? auto;
     return (
       <div className={fieldClass(props.grow)}>
-        <label className={s.fieldLabel} htmlFor={id}>
-          {props.label}
-        </label>
+        <div className={s.fieldLabelRow}>
+          <label className={s.fieldLabel} htmlFor={id}>
+            {props.label}
+          </label>
+          {props.help ? (
+            <InfoButton label={props.helpLabel ?? `${props.label} field`}>
+              {props.help}
+            </InfoButton>
+          ) : null}
+        </div>
         {single.props.id ? single : cloneElement(single, { id })}
         {props.error ? <span className={s.fieldError}>{props.error}</span> : null}
       </div>

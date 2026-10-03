@@ -362,7 +362,12 @@ export default function UseCasesPage() {
           >
             {step === 0 && (
               <>
-                <Field label="Name" grow>
+                <Field
+                  label="Name"
+                  grow
+                  helpLabel="the governed use-case identity created here"
+                  help={<p>This becomes the use case's primary name in the AI inventory, intake workflow, approvals and audit trail. Use a business-facing name that distinguishes this system from a model or vendor name.</p>}
+                >
                   <Input
                     value={name}
                     onChange={(e) => setName(e.target.value)}
@@ -371,10 +376,18 @@ export default function UseCasesPage() {
                     autoFocus
                   />
                 </Field>
-                <Field label="What it does">
+                <Field
+                  label="What it does"
+                  helpLabel="the governed system description recorded here"
+                  help={<p>State the AI-enabled task, its inputs and outputs, and what action or recommendation follows. This description becomes part of the governed use-case record reviewers inspect.</p>}
+                >
                   <Textarea rows={3} value={desc} onChange={(e) => setDesc(e.target.value)} required />
                 </Field>
-                <Field label="Why the business wants it">
+                <Field
+                  label="Why the business wants it"
+                  helpLabel="the business rationale recorded here"
+                  help={<p>Record the intended business outcome and accountable rationale. This is stored as business context so reviewers can judge whether the benefits justify the declared risks and controls.</p>}
+                >
                   <Textarea rows={3} value={context} onChange={(e) => setContext(e.target.value)} required />
                 </Field>
               </>
@@ -738,11 +751,17 @@ export default function UseCasesPage() {
                           Answer each section in your own words — nothing here is pre-filled by a model. Submitting
                           saves it as a versioned record and sends the use case to review.
                         </div>
-                        <Textarea
-                          rows={14}
-                          value={answers || d.questionnaireTemplate || ""}
-                          onChange={(e) => setAnswers(e.target.value)}
-                        />
+                        <Field
+                          label="Questionnaire answers"
+                          helpLabel="the versioned intake evidence submitted here"
+                          help={<p>These answers are saved as a versioned intake artifact and sent to the approval queue. Describe the real purpose, ownership, data, safeguards and operating boundaries; this record becomes evidence for later reviews.</p>}
+                        >
+                          <Textarea
+                            rows={14}
+                            value={answers || d.questionnaireTemplate || ""}
+                            onChange={(e) => setAnswers(e.target.value)}
+                          />
+                        </Field>
                         <Card title="EU AI Act screening questions">
                           <div className={v.stack}>
                             <div className={v.faint}>
@@ -994,7 +1013,12 @@ export default function UseCasesPage() {
                   {/* retire (admin) */}
                   {d.useCase.status !== "retired" && (
                     <div className={a.formRow}>
-                      <Field label="Retire this use case — a reason is required and recorded in the audit log" grow>
+                      <Field
+                        label="Retire this use case — a reason is required and recorded in the audit log"
+                        grow
+                        helpLabel="the permanent retirement audit reason"
+                        help={<p>This reason becomes permanent audit evidence explaining why the governed use case left active inventory. Include the replacement, closure or policy decision an auditor should be able to trace.</p>}
+                      >
                         <Input
                           value={retireReason}
                           onChange={(e) => setRetireReason(e.target.value)}
