@@ -12,7 +12,7 @@
   background: var(--surface-1);
   color: var(--text);
   font-size: var(--text-sm);
-  font-weight: 550;
+  font-weight: 600;
   line-height: 1.5;
   cursor: pointer;
   transition: background 120ms ease, border-color 120ms ease;
@@ -87,12 +87,13 @@
   padding: 0;
   margin-bottom: var(--s0);
 }
+/* Labels are sentence case at normal tracking. Uppercase letter-spaced micro
+   labels were the busy texture on every form; size and position now carry the
+   hierarchy instead. Only the CSS changed — the label TEXT is untouched. */
 .fieldLabel {
-  font-size: var(--text-xs);
+  font-size: var(--text-sm);
   font-weight: 600;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  color: var(--text-faint);
+  color: var(--text-dim);
 }
 .fieldLabelRow {
   display: flex;
@@ -177,16 +178,16 @@
   border-collapse: collapse;
   font-size: var(--text-sm);
 }
+/* The header is a heavier hairline, not a tinted band: one rule separates it
+   from the rows, the same way the rows separate from each other. */
 .table th {
   text-align: left;
   padding: 10px 14px;
-  font-size: var(--text-xs);
+  font-size: var(--text-sm);
   font-weight: 600;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  color: var(--text-faint);
-  background: var(--surface-2);
-  border-bottom: 1px solid var(--border);
+  color: var(--text-dim);
+  background: var(--surface-1);
+  border-bottom: 1px solid var(--border-strong);
   white-space: nowrap;
 }
 .thSortable {
@@ -194,7 +195,7 @@
   user-select: none;
 }
 .thSortable:hover {
-  color: var(--text-dim);
+  color: var(--text);
 }
 .sortArrow {
   margin-left: 4px;
@@ -360,7 +361,7 @@
 }
 .modalTitle {
   font-size: var(--text-lg);
-  font-weight: 650;
+  font-weight: 600;
   margin-bottom: var(--s1);
 }
 .modalBody {
@@ -386,7 +387,7 @@
   background: none;
   color: var(--text-dim);
   font-size: var(--text-sm);
-  font-weight: 550;
+  font-weight: 600;
   cursor: pointer;
   border-bottom: 2px solid transparent;
   margin-bottom: -1px;

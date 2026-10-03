@@ -16,7 +16,7 @@
 
 .nodeTitle {
   font-size: var(--text-sm);
-  font-weight: 550;
+  font-weight: 600;
 }
 
 /* the blocked-node owner picker: the kit select is full-width by default,
