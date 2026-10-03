@@ -544,7 +544,8 @@ export default function UseCasesPage() {
         </QueryGate>
 
         {/* ---------------- detail ---------------- */}
-        <div ref={detailRef} />
+        {/* scroll-margin keeps the panel's title row clear of the sticky top bar (UIB-03) */}
+        <div ref={detailRef} style={{ scrollMarginTop: "calc(52px + var(--s2))" }} />
         {openId && (
           <QueryGate loading={detail.isLoading} error={detail.error} onRetry={() => void detail.refetch()}>
             {d && (

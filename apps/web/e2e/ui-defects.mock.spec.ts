@@ -253,6 +253,34 @@ test("UIA-02: the audit log says how many rows are shown and loads older pages o
   expect(await paging.getByRole("button", { name: "Load older" }).count()).toBe(0);
 });
 
+test("UXJ-02: selecting the lowest alert brings its detail into the viewport", async ({ page }) => {
+  await page.setViewportSize({ width: 1366, height: 768 });
+  const alert = (i: number) => ({
+    id: `al-${i}`, ruleId: "use_case_inherited_high_risk", ruleLabel: "Approved use case carries a high rating", severity: "high", status: "open",
+    subject: { key: `use_case:${i}`, type: "use_case", id: `uc-${i}`, label: `Use case ${i}`, context: null },
+    title: i === 11 ? "Model in production without an approved model card" : `Use case ${i} inherits a HIGH rating`,
+    detail: { pathLabels: [] }, firstDetectedAt: "2026-10-02T10:00:00Z", lastDetectedAt: "2026-10-02T12:00:00Z", acknowledgedAt: null, acknowledgedBy: null, ackNote: null, resolvedAt: null,
+  });
+  const alerts = Array.from({ length: 12 }, (_, i) => alert(i));
+  await routeApi(page, async (route, p) => {
+    if (p === "/auth/me") return json(route, authMe(USER_A));
+    if (p === "/v1/me") return json(route, { userId: USER_A.id, isAdmin: true, user: USER_A });
+    if (p === "/v1/governance/alerts") return json(route, { alerts, counts: { open: 12, acknowledged: 0, resolved: 0 }, lastEvaluatedAt: "2026-10-02T12:00:00Z", rules: [] });
+    if (p.startsWith("/v1/governance/alerts/") && p.endsWith("/remediation")) return json(route, { alert: alerts[11], candidates: [], proposals: [], note: "" });
+    return json(route, {});
+  });
+  await page.goto("/ui/admin/governance/alerts");
+  const last = page.getByRole("button", { name: /without an approved model card/ });
+  await last.scrollIntoViewIfNeeded();
+  await last.click();
+  const detail = page.getByTestId("alert-detail");
+  await expect(detail.getByText("Use case 11", { exact: true })).toBeVisible();
+  const box = await detail.boundingBox();
+  expect(box).not.toBeNull();
+  expect(box!.y).toBeGreaterThanOrEqual(0);
+  expect(box!.y).toBeLessThan(768);
+});
+
 test("UIA-04: a long fingerprint wraps inside its stat tile instead of being clipped", async ({ page }) => {
   await page.setViewportSize({ width: 1366, height: 768 });
   const fp = "dk1:79a20fde8909002a635b1c4d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f";

@@ -322,6 +322,16 @@
   gap: var(--s1);
 }
 
+/* The detail column stays in view beside a long list: clicking the lowest
+   alert used to open its panel 900px above the viewport (UXJ-02). */
+.alertDetail {
+  position: sticky;
+  top: calc(52px + var(--s2));
+  scroll-margin-top: calc(52px + var(--s2));
+  max-height: calc(100vh - 52px - var(--s3));
+  overflow-y: auto;
+}
+
 .alertRow {
   display: grid;
   gap: var(--s1);
@@ -546,6 +556,11 @@
   .workspaceHeader,
   .libraryFilters {
     grid-template-columns: 1fr;
+  }
+
+  .alertDetail {
+    position: static;
+    max-height: none;
   }
 
   .controlRow {

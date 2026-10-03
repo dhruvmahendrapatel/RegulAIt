@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { api } from "../../../api/client";
@@ -81,6 +81,12 @@ export default function GovernanceAlertsPage() {
   });
   const selected = alerts.data?.alerts.find((alert) => alert.id === selectedId) ?? null;
   const refresh = async () => { await alerts.refetch(); };
+  // the detail column is sticky at desktop width; at phone width it sits
+  // below the list, so selecting an alert brings it into view (UXJ-02)
+  const detailRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (selectedId) detailRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }, [selectedId]);
 
   return (
     <>
@@ -135,6 +141,7 @@ export default function GovernanceAlertsPage() {
                   </button>
                 ))}
               </div>
+              <div className={s.alertDetail} ref={detailRef} data-testid="alert-detail">
               {selected ? (
                 <Card title={selected.subject.label}>
                   <div className={v.stack}>
@@ -172,6 +179,7 @@ export default function GovernanceAlertsPage() {
                   </div>
                 </Card>
               ) : <Card><p className={v.dim}>Select an alert to inspect its condition, subject, and response history.</p></Card>}
+              </div>
             </div>
           )}
         </QueryGate>
