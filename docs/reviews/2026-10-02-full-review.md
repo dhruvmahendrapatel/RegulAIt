@@ -319,6 +319,20 @@ UI / UX
 - Evidence corrections: UIW-07's fix is client-only (server already enforces min(1)); UIW-03's line is
   `AppShell.tsx:92`; SEC-07's cited `app.ts:777` is the interception hook — the auth gate is the preHandler at `:837`.
 
+### 5.1 Lead verification (2026-10-03)
+
+Five leads from the list above were run to ground, each against a live gateway or the browser, not by reading:
+
+| Lead | Verdict | Where it went |
+|---|---|---|
+| L1 — `automated_check` auto-pass on silence | **confirmed, high**: a template with two checks, gate approved before any CI posted, every check evaluated `passed` and the instance advanced; a `failed` report afterwards was refused as late (`workflows.ts` check executor ~720; `workflow-checks.test.ts` pins the behaviour as the contract) | owner decision — PENDING.md "L1" row (disclose vs. fail-on-silence with per-template opt-in) |
+| L2 — wrong TOTP code during enrolment logs the user out | **confirmed, medium**: same 401 handler as UIW-01 | fixed in UI batch A (9f0c389: only a session-ending 401 routes to /login) |
+| L3 — bodies parsed before the credential check | **confirmed, low–medium**: real, but bounded by the pre-auth IP-keyed limiter of ADR-0167 §1 | owner decision — PENDING.md "L3" row (move the gate to `onRequest` in the post-demo hardening batch, or wait for a measured need) |
+| L4 — react-query cache survives sign-out / 401 | **confirmed, medium–high**: the previous user's inbox and home data rendered for the next user in the same tab | fixed in UI batch A (89c0cfa: cache cleared at every identity boundary) |
+| L5 — SCIM bucket keyed on the unverified bearer | **closed**: ADR-0167 §1 keys pre-auth traffic by IP and SCIM by `cred:scim:<id>` after verification; re-checked in code | no action |
+
+The remaining leads stand as written: unverified, and listed so the next review starts from them rather than from zero.
+
 ## 6. Coverage — what was not reviewed
 
 - **No finder ran the gateway vitest suite** (rel-tests used the provided shuffled-run log); security and reliability
