@@ -3744,8 +3744,12 @@ orchestration depth, pillar 3 infra-ops.
 `blocked_on_check` state (kernel: `check_failed`/`recheck` events + surfacing effect, guarded)
 instead of advancing; a remediate-then-recheck loop resumes it. The gateway check executor resolves
 each named check from reported results (`POST .../checks` — a real CI posts them, seed/tests too),
-falling back to the deterministic auto-pass when none are reported (existing templates byte-
-identical); a failure is audited `workflow:check_failed`. `POST .../recheck` re-runs a parked stage.
+~~falling back to the deterministic auto-pass when none are reported (existing templates byte-
+identical)~~ **[corrected 2026-10-03, AER-047: no longer true — an unreported check is now
+`pending` and the instance waits at `awaiting_execution`; auto-pass survives only as the typed,
+labelled `offlineAutoPass` stage opt-in, honoured only with `REGULAIT_OFFLINE_CHECKS=1` declared
+on a box with no deployed signal; see the ADR-0167 amendment (AER-047)]**; a failure is audited
+`workflow:check_failed`. `POST .../recheck` re-runs a parked stage.
 The /app workflow detail surfaces the block, per-check severity, "mark passing", and "Re-run checks".
 No migration (free-text status; results in JSONB context). Gateway 318 → 322, kernel 26 → 29. This
 is the failure primitive the conditional deploy + post-deploy rollback stages (next slice) build on.

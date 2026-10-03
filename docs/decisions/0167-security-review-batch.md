@@ -236,3 +236,94 @@ health-probe claim is now serialized by `pg_advisory_xact_lock(6_000_000_037)` i
 its `FOR UPDATE SKIP LOCKED … RETURNING` claim — `skip locked` alone let a claim whose snapshot predated
 another claim's commit re-claim its rows (`79b0d3d`). Advisory-lock keys in use: 6_000_000_037 (health-probe
 claim), 6_000_000_060 (audit chain).
+
+## Amendment 2026-10-03 — a check nobody reported is pending, never passed (AER-047, PENDING L1)
+
+**Why here.** §6 (AUTHZ-06) made a *self-reported* check result stamped, reasoned, audited and
+badged. It said nothing about *absence*, and absence was the bigger hole: the check executor
+(`apps/gateway/src/workflows.ts`) fell back to a deterministic offline auto-pass whenever a named
+check had neither an eval outcome nor a reported result, and `workflow-checks.test.ts` pinned that
+as the contract. A merge gate approved before CI posted advanced with every check "passed"; a
+`failed` security scan posted afterwards was refused as late. Same rule as the rest of this ADR —
+the stage now reports the thing the caller cannot choose: what was actually reported. Codex raised
+it as AER-047 (HIGH); the owner's recorded recommendation (b) in PENDING L1 is what shipped. This
+supersedes the 2026-07-28 "workflow depth" behaviour recorded in `STATE.md` ("falling back to the
+deterministic auto-pass when none are reported").
+
+**1. The default is pending** (`6477266`). A named check with no eval outcome and no report is
+`pending`. A reported failure still blocks at once (`check_failed` → `blocked_on_check`) even while
+other checks are missing. Otherwise any pending check leaves the instance at
+**`awaiting_execution` on that check stage**, claim released, and writes a
+`workflow:checks-awaiting-report` audit row naming `missingChecks`. A retried `/advance` (the
+lost-callback or timeout case) re-evaluates and waits again; the kernel refuses a `human_trigger`
+on a stage with named checks ("runs named checks and cannot be human-triggered").
+*Why `awaiting_execution` and not `blocked_on_check`:* `POST .../checks` already re-evaluates a
+stage that is `awaiting_execution`, so CI's next report picks it up with no human step;
+`blocked_on_check` means a check *failed* and needs a manual recheck, which would both misdescribe
+silence and add a click to the normal CI path.
+
+**2. The only way back to auto-pass is a typed, fail-closed opt-in.**
+- `offlineAutoPass: boolean` on an `automated_check` stage (`f734abd`, `packages/workflow-kernel`),
+  refused on any other stage type and on a check stage with no named checks; a non-boolean is
+  rejected, not coerced. (The stage schema used to strip the key silently.) No migration —
+  templates are stored JSON.
+- It is honoured only when the process **positively declares** `REGULAIT_OFFLINE_CHECKS=1`
+  (exactly `1`) **and** shows no deployed signal — §5's `networkFacingSignal`,
+  `REGULAIT_DEPLOY_MODE` or `REGULAIT_HSTS` set (`offlineAutoPassRefusal`, `6079d47`). The first
+  cut honoured it whenever no deployed signal was present; review showed that fails open, because a
+  bare `docker compose --profile tls up` on a public host sets neither signal (§5 says the same).
+  Absence of a signal never grants the opt-in; it only narrows it. A refused opt-in leaves the
+  checks pending and the `checks-awaiting-report` row carries `offlineAutoPassRefused`,
+  `refusedBecause` and, when that is the reason, `deployedSignal`.
+- The demo declares it explicitly: the seeded `complete-pipeline` and `deploy-verify-pipeline`
+  check stages set `offlineAutoPass: true`; `seed.ts` sets `REGULAIT_OFFLINE_CHECKS ??= "1"` for
+  its own in-process app only (an explicit `0` is respected); the presenter's gateway exports it
+  per DEMO_SCRIPT §0 and DEMO_RUNBOOK §1 (`d9b01fc`). Gallery and admin-starter templates get the
+  pending default.
+
+**3. Labelled and audited wherever surfaced.** Each auto-passed result carries `autoPassed: true`
+and the detail "auto-passed — no report (offline mode)", and gets a `workflow:checks-auto-passed`
+audit row. The workflow rail shows an "auto-passed · no report" badge; the Inbox merge-gate view
+colours auto-passed and pending checks as warnings, never CI's green, and says how many checks had
+no reported result; a stage waiting at `awaiting_execution` names the missing checks instead of
+claiming a run is in flight (`2542ae2`).
+
+**4. Results belong to their round** (`6079d47`). When a resubmitted artifact re-opens the flow,
+the `reported:`, `checks:`, `evals:` and `awaitingReport:` context keys of every downstream
+`automated_check` stage are cleared in the same locked transaction, and the
+`workflow:artifact_submitted` row lists `staleCheckResultsCleared` — a re-run check stage never
+reuses the previous round's green. Reports posted before the stage runs are still accepted within
+a round (the seed and suites rely on it).
+
+**5. Evals.** Eval-bound checks run once per stage entry and the outcome is reused while the stage
+waits; a recheck from `blocked_on_check` and a re-open re-run them; a failing eval still blocks at
+once. An eval-bound check that produces no outcome is `failed` — a gate that could not run does not
+pass (ADR-0044) — and is never auto-passed, even under the opt-in. One `checks-awaiting-report`
+row is written per distinct waiting state (missing set plus refusal reason), not per
+re-evaluation.
+
+**Evidence.** `workflow-checks.test.ts` 13 (no-report wait with one row after two retries, partial
+report, explicit pass, explicit fail under and without the opt-in, never-declared, `DEPLOY_MODE`
+and `HSTS` refusals, re-open), `eval-harness.test.ts` 23 (incl. eval reuse while waiting), kernel
+45 (4 new), `seed.test.ts` 8; 45 workflow-related gateway files 657/657 on a fresh database.
+Negative controls: `workflows.ts` reverted fails 13 of 36 across workflow-checks and eval-harness;
+removing the declaration requirement, the re-open clearing, the waiting-row dedupe, the eval
+reuse, the kernel `human_trigger` guard or the seed's declaration each turns a named test red.
+`e137fdf` makes the opt-in tests clear `REGULAIT_OFFLINE_CHECKS` up front, so the suite also
+passes from the demo terminal that exports it.
+
+**Honest limits.**
+- No wall-clock timeout: a missing report stays pending indefinitely.
+- The seed declares `REGULAIT_OFFLINE_CHECKS` for its own in-process app, and the container runs
+  `seed.js` first when `SEED_DEMO=1` (the compose default). On a bare `docker compose` deploy the
+  seeded demo `deploy-verify` instances are therefore auto-passed, labelled — demo fixtures and
+  mock providers only; the serving gateway still refuses every template's opt-in unless declared.
+- Narrow race, plausible, not reproduced: the check executor holds the context in memory across
+  eval calls and writes it back unlocked, so a resubmission that re-opens the flow during a
+  running eval could restore stale round-1 check keys (the same lost-update shape can drop a
+  concurrent `POST .../checks` report).
+- A previous-round CI report that arrives after a re-open counts for the new round; the report
+  API carries no artifact version.
+- Pre-existing, outside AER-047: a re-open does not drop the build stage's `runId`, so a
+  re-entered build replays v1's nested run — the checks are bound to the round, the build they
+  gate is not.
