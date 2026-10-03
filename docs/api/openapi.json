@@ -1179,6 +1179,30 @@
                       "additionalProperties": false
                     },
                     "maxItems": 20
+                  },
+                  "acceptRisks": {
+                    "type": "object",
+                    "properties": {
+                      "riskIds": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "format": "uuid"
+                        },
+                        "minItems": 1,
+                        "maxItems": 50
+                      },
+                      "rationale": {
+                        "type": "string",
+                        "minLength": 10,
+                        "maxLength": 2000
+                      }
+                    },
+                    "required": [
+                      "riskIds",
+                      "rationale"
+                    ],
+                    "additionalProperties": false
                   }
                 },
                 "required": [
