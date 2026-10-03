@@ -10,7 +10,9 @@ import v from "../../views.module.css";
 import s from "./demoGovernance.module.css";
 import rec from "./record.module.css";
 import rr from "./recordRound.module.css";
+import ix from "./intakeHelp.module.css";
 import { resubmitPath } from "./registryModel";
+import { detailRationales, detailUnsure, questionLabel } from "./registrationModel";
 import { DependencyGraphPanel } from "./DependencyGraphPanel";
 import { RiskLibraryPicker } from "./RiskLibraryPicker";
 import { AgentStewardshipLine } from "../integrations/AgentStewardship";
@@ -75,6 +77,10 @@ export default function UseCaseOverviewPage() {
   const recertification = lifecycle?.recertification ? { dueAt: lifecycle.recertificationDueAt ?? approvedUntil } : null;
   const resubmission = status === "needs_info" && detail.data?.resubmission?.allowed ? detail.data.resubmission : null;
   const acceptance = new Map((detail.data?.risks ?? []).filter((risk) => risk.acceptedByName || risk.acceptedAt).map((risk) => [risk.id, risk]));
+  // AER-055: unknown is not none — conditions, reviews and the lifecycle are read from the detail,
+  // so while it is loading or failed they are said to be unknown, never empty
+  const detailState: DetailState = detail.isSuccess ? "ok" : detail.isError ? "error" : "loading";
+  const retryDetail = () => void detail.refetch();
 
   return (
     <QueryGate loading={overview.isLoading} error={overview.error} onRetry={() => void overview.refetch()}>
@@ -124,7 +130,10 @@ export default function UseCaseOverviewPage() {
                 expired={expired}
                 approvedUntil={approvedUntil}
                 conditions={conditions}
-                conditionsLoaded={detail.isSuccess}
+                detailState={detailState}
+                onRetryDetail={retryDetail}
+                rationales={detailRationales(detail.data)}
+                unsure={detailUnsure(detail.data)}
                 openBlocking={openBlocking}
                 recertification={recertification}
                 reviews={detail.data?.reviews ?? []}
@@ -148,13 +157,29 @@ export default function UseCaseOverviewPage() {
   );
 }
 
+type DetailState = "ok" | "loading" | "error";
+
+/** AER-055: what the record says while its lifecycle detail is not (yet) known */
+function DetailUnknown(props: { state: Exclude<DetailState, "ok">; what: string; onRetry: () => void; alert?: boolean }) {
+  if (props.state === "loading") return <p className={v.dim}>Loading {props.what}…</p>;
+  return (
+    <div className={ix.detailState} {...(props.alert ? { role: "alert" } : {})}>
+      <span>The {props.what} could not be loaded, so they are not shown. Nothing here means they are empty.</span>
+      <Button size="sm" aria-label={`Retry loading the ${props.what}`} onClick={props.onRetry}>Retry</Button>
+    </div>
+  );
+}
+
 function OverviewTab(props: {
   data: OverviewResponse;
   status: string;
   expired: boolean;
   approvedUntil: string | null;
   conditions: UseCaseCondition[];
-  conditionsLoaded: boolean;
+  detailState: DetailState;
+  onRetryDetail: () => void;
+  rationales: Record<string, string>;
+  unsure: string[];
   openBlocking: number;
   recertification: { dueAt: string | null } | null;
   reviews: UseCaseReview[];
@@ -210,6 +235,9 @@ function OverviewTab(props: {
         </p>
       ) : null}
       <Card title="Lifecycle tracker">
+        {props.detailState !== "ok" ? (
+          <DetailUnknown state={props.detailState} what="lifecycle details" onRetry={props.onRetryDetail} alert />
+        ) : <>
         <ol className={rec.stepper} aria-label="Lifecycle">
           {PHASES.map((name, index) => {
             const done = index < phase.current || (index === phase.current && index === PHASES.length - 1 && !phase.flag);
@@ -235,6 +263,7 @@ function OverviewTab(props: {
             { key: "action", header: "Action", render: (row) => act(row) },
           ]}
         />
+        </>}
       </Card>
       {accepted.length > 0 ? (
         <Card title="Accepted risks">
@@ -257,7 +286,8 @@ function OverviewTab(props: {
         useCaseId={data.useCase.id}
         status={props.status}
         conditions={props.conditions}
-        loaded={props.conditionsLoaded}
+        detailState={props.detailState}
+        onRetryDetail={props.onRetryDetail}
         onRefresh={props.onRefresh}
       />
       <div className={s.dashboardGrid}>
@@ -268,6 +298,16 @@ function OverviewTab(props: {
               <strong>Compliance tags</strong>
               <p className={v.row}>{(data.useCase.complianceTags ?? []).length ? (data.useCase.complianceTags ?? []).map((tag) => <Badge key={tag}>{frameworkLabel(tag)}</Badge>) : <span className={v.dim}>None recorded</span>}</p>
             </div>
+            {Object.keys(props.rationales).length ? (
+              <div>
+                <strong>Why the frameworks apply, in the owner's words</strong>
+                <ul>
+                  {Object.entries(props.rationales).map(([tag, text]) => (
+                    <li key={tag}>{frameworkLabel(tag)}<span className={ix.rationale}>{text}</span></li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
           </div>
         </Card>
         <div ref={screeningRef} tabIndex={-1} id="screening" aria-label="EU AI Act screening">
@@ -275,6 +315,9 @@ function OverviewTab(props: {
             <div className={v.stack}>
               <p><strong>{data.screening.screened ? `${humanize(data.screening.tier)} tier` : "Not screened yet"}</strong></p>
               {firstReason ? <p>{reasonText(firstReason)}</p> : <p className={v.dim}>No screening reasons recorded.</p>}
+              {props.unsure.length ? (
+                <p><strong>Owner unsure about:</strong> {props.unsure.map(questionLabel).join(", ")}. <span className={v.dim}>Each was counted as yes; a reviewer should confirm it.</span></p>
+              ) : null}
               {moreReasons.length ? (
                 <details>
                   <summary>Show {plural(moreReasons.length, "more reason")}</summary>
@@ -296,7 +339,8 @@ function ConditionsCard(props: {
   useCaseId: string;
   status: string;
   conditions: UseCaseCondition[];
-  loaded: boolean;
+  detailState: DetailState;
+  onRetryDetail: () => void;
   onRefresh: () => Promise<void>;
 }) {
   const action = useAction();
@@ -323,12 +367,14 @@ function ConditionsCard(props: {
     if (await markMet(closing, { note: text })) closeDialog();
   };
   return (
-    <Card title="Conditions of approval" actions={props.conditions.length ? <span className={v.faint}>{open ? `${open} open` : "All met"}</span> : undefined}>
-      {props.conditions.length === 0 ? (
+    <Card title="Conditions of approval" actions={props.detailState === "ok" && props.conditions.length ? <span className={v.faint}>{open ? `${open} open` : "All met"}</span> : undefined}>
+      {props.detailState !== "ok" ? (
+        <DetailUnknown state={props.detailState} what="conditions" onRetry={props.onRetryDetail} />
+      ) : props.conditions.length === 0 ? (
         <p className={v.dim}>
           {props.status === "approved"
             ? "This use case was approved without conditions."
-            : props.loaded ? "No conditions yet. A reviewer can attach conditions when approving." : "Loading conditions…"}
+            : "No conditions yet. A reviewer can attach conditions when approving."}
         </p>
       ) : (
         <Table<UseCaseCondition>

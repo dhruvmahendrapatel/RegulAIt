@@ -289,6 +289,10 @@ test.describe("ADR-0168: registration shows similar use cases and never blocks o
     await page.goto("/ui/admin/governance/intake");
     await page.getByLabel("Use-case name").fill("Something new");
     await page.getByRole("link", { name: "Cancel" }).click();
+    // ADR-0171: a form with answers in it asks before it is left
+    const leave = page.getByRole("dialog", { name: "Leave this registration?" });
+    await expect(leave).toBeVisible();
+    await leave.getByRole("button", { name: "Leave", exact: true }).click();
     await expect(page).toHaveURL(/\/ui\/admin\/use-cases$/);
     expect(store.created).toEqual([]);
   });

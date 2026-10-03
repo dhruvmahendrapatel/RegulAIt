@@ -48,13 +48,15 @@ interface Store {
   artifacts: string[];
   risks: Array<Json & { id: string; controls: string[] }>;
   sent: Sent[];
+  /** the wizard's server-side draft (ADR-0171) */
+  draft: { scope: string; state: unknown; updatedAt: string } | null;
 }
 
 const json = (route: Route, body: unknown, status = 200) =>
   route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
 
 async function mockGateway(page: Page): Promise<Store> {
-  const store: Store = { useCases: [], artifacts: [], risks: [], sent: [] };
+  const store: Store = { useCases: [], artifacts: [], risks: [], sent: [], draft: null };
   let injectionFailed = false;
   await page.route("**/*", async (route) => {
     const request = route.request();
@@ -62,6 +64,12 @@ async function mockGateway(page: Page): Promise<Store> {
     if (request.resourceType() === "document" || (!p.startsWith("/v1") && !p.startsWith("/auth"))) return route.continue();
     const method = request.method();
     const body = (method === "GET" ? {} : request.postDataJSON() ?? {}) as Json;
+    // ADR-0171: the wizard's own draft is kept beside the records, not among them
+    if (p === "/v1/use-cases/draft") {
+      if (method === "PUT") store.draft = { scope: "new", state: body.state, updatedAt: "2026-10-03T12:00:00Z" };
+      if (method === "DELETE") store.draft = null;
+      return method === "DELETE" ? route.fulfill({ status: 204 }) : json(route, { draft: store.draft });
+    }
     if (method !== "GET") store.sent.push({ method, path: p, body });
 
     if (p === "/auth/me") return json(route, { userId: "u", isAdmin: true, via: "session", user: { id: "u", email: "avery@example.test", displayName: "Avery Admin" }, mustChangePassword: false, totpEnabled: true, passwordSet: true, mfaSetupRequired: false });
@@ -135,7 +143,9 @@ async function walkToReview(page: Page, edits: { risks?: Record<string, string>;
   await goTo(page, "Classify");
   await page.getByRole("button", { name: "Draft suggestions" }).click();
   await goTo(page, "Suggestions");
-  await page.getByRole("button", { name: /Accept all remaining/ }).click();
+  // a second walk finds every decision still made (AER-051: going back never resets them)
+  const acceptAll = page.getByRole("button", { name: /Accept all remaining/ });
+  if (await acceptAll.isEnabled()) await acceptAll.click();
   for (const [riskTitle, text] of Object.entries(edits.risks ?? {})) {
     const card = page.locator("section").filter({ has: page.getByText(riskTitle, { exact: true }) }).last();
     await card.getByRole("button", { name: "Edit" }).click();
@@ -258,9 +268,10 @@ test.describe("AER-046: an intake retry after edits never mixes old records with
     await expect(refusal).toBeVisible();
     await expect(refusal).toContainText("the use-case name changed");
     await expect(refusal.getByRole("link", { name: "open the existing use case" })).toHaveAttribute("href", `/ui/admin/governance/use-cases/${USE_CASE}`);
-    // nothing at all left the page for this retry, and the written records are untouched
+    // nothing at all left the page for this retry, and the written records are untouched;
+    // the classification did not change, so the suggestions were not drafted again (AER-051)
     expect(store.sent.slice(sentBeforeSubmit)).toEqual([]);
-    expect(store.sent.slice(mark).map((item) => item.path)).toEqual(["/v1/use-cases/intake/assist"]);
+    expect(store.sent.slice(mark).map((item) => item.path)).toEqual([]);
     expect({ useCases: store.useCases, artifacts: store.artifacts, risks: store.risks }).toEqual(before);
     await expectNoAxeViolations(page, "Review (retry refused)");
 

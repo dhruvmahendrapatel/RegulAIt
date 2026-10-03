@@ -11,7 +11,10 @@
  */
 import type { EuAiActScreeningAnswers, IntakeContextAnswers, IntakeScreeningAnswers } from "../../../api/types";
 
-export type BooleanAnswer = "" | "yes" | "no";
+/** "unsure" counts as yes and is recorded in `unsure` (ADR-0171 item 5) */
+export type BooleanAnswer = "" | "yes" | "no" | "unsure";
+/** the answers with the yes/no questions the owner was not sure about */
+export type UnsureAware<T> = T & { unsure?: string[] };
 
 export interface QuestionnaireSection {
   heading: string;
@@ -45,11 +48,11 @@ export function splitQuestionnaire(markdown: string): { preamble: string; sectio
 export const isScreeningSection = (section: QuestionnaireSection) =>
   /EU AI Act risk screening/i.test(section.heading) || section.body.includes("```" + ANSWERS_FENCE);
 
-/** the canonical answers block — the same shape the gateway renders */
-export const answersBlock = (answers: EuAiActScreeningAnswers) => "```" + ANSWERS_FENCE + "\n" + JSON.stringify(euAnswersOf(answers), null, 2) + "\n```";
+/** the canonical answers block — the same shape the gateway renders, plus the EU keys the owner was unsure about */
+export const answersBlock = (answers: UnsureAware<EuAiActScreeningAnswers>) => "```" + ANSWERS_FENCE + "\n" + JSON.stringify(euAnswersOf(answers, { withUnsure: true }), null, 2) + "\n```";
 
 /** the new questionnaire version: the edited sections, then the screening section rebuilt from the current answers */
-export function rebuildQuestionnaire(preamble: string, sections: QuestionnaireSection[], answers: EuAiActScreeningAnswers): string {
+export function rebuildQuestionnaire(preamble: string, sections: QuestionnaireSection[], answers: UnsureAware<EuAiActScreeningAnswers>): string {
   const screening = sections.find(isScreeningSection);
   const parts = [
     ...(preamble.trim() ? [preamble.trim()] : []),
@@ -98,9 +101,22 @@ export const BOOLEAN_KEYS = [
 
 const yn = (value: boolean | undefined): BooleanAnswer => (value === undefined ? "" : value ? "yes" : "no");
 
-type RecordedAnswers = EuAiActScreeningAnswers & Partial<IntakeContextAnswers>;
+type RecordedAnswers = UnsureAware<EuAiActScreeningAnswers & Partial<IntakeContextAnswers>>;
+
+/** the EU AI Act keys among the yes/no questions — the ones the questionnaire's answers block carries */
+const EU_BOOLEAN_KEYS = new Set<string>(["emotionRecognition", "socialScoring", "manipulativeTechniques", "profilesNaturalPersons", "safetyComponent", "interactsWithHumans", "generatesSyntheticContent"]);
 
 export function formFromAnswers(answers: RecordedAnswers | null | undefined): ScreeningForm {
+  const form = formFromRecorded(answers);
+  // a recorded "not sure" (always stored as true) comes back as "Not sure"
+  for (const key of answers?.unsure ?? []) {
+    const k = key === "generative" ? "generatesSyntheticContent" : key;
+    if ((BOOLEAN_KEYS as readonly string[]).includes(k) && form[k as (typeof BOOLEAN_KEYS)[number]] === "yes") form[k as (typeof BOOLEAN_KEYS)[number]] = "unsure";
+  }
+  return form;
+}
+
+function formFromRecorded(answers: RecordedAnswers | null | undefined): ScreeningForm {
   return {
     purposeDomain: answers?.purposeDomain ?? "",
     affectedPersons: answers ? [...(answers.affectedPersons ?? [])] : [],
@@ -124,36 +140,49 @@ export function formFromAnswers(answers: RecordedAnswers | null | undefined): Sc
   };
 }
 
-/** every Classify answer in the gateway schema's key order, or null while any question is unanswered */
-export function answersFromForm(form: ScreeningForm, affectedAnswered: boolean): IntakeScreeningAnswers | null {
+/**
+ * every Classify answer in the gateway schema's key order, or null while any
+ * question is unanswered. A "not sure" answer is sent as TRUE (the
+ * conservative reading the tier is screened on) and listed in `unsure`; with
+ * none, the answers carry no `unsure` key at all.
+ */
+export function answersFromForm(form: ScreeningForm, affectedAnswered: boolean): UnsureAware<IntakeScreeningAnswers> | null {
   if (!form.purposeDomain || !form.decisionAutonomy || !form.biometricUse || !affectedAnswered) return null;
   if (!form.deployment || form.sectors.length === 0 || form.dataCategories.length === 0) return null;
   if (BOOLEAN_KEYS.some((key) => !form[key])) return null;
+  const yes = (answer: BooleanAnswer) => answer === "yes" || answer === "unsure";
+  const unsure = BOOLEAN_KEYS.filter((key) => form[key] === "unsure");
   return {
     purposeDomain: form.purposeDomain,
     affectedPersons: form.affectedPersons,
     decisionAutonomy: form.decisionAutonomy,
     biometricUse: form.biometricUse,
-    emotionRecognition: form.emotionRecognition === "yes",
-    socialScoring: form.socialScoring === "yes",
-    manipulativeTechniques: form.manipulativeTechniques === "yes",
-    profilesNaturalPersons: form.profilesNaturalPersons === "yes",
-    safetyComponent: form.safetyComponent === "yes",
-    interactsWithHumans: form.interactsWithHumans === "yes",
-    generatesSyntheticContent: form.generatesSyntheticContent === "yes",
+    emotionRecognition: yes(form.emotionRecognition),
+    socialScoring: yes(form.socialScoring),
+    manipulativeTechniques: yes(form.manipulativeTechniques),
+    profilesNaturalPersons: yes(form.profilesNaturalPersons),
+    safetyComponent: yes(form.safetyComponent),
+    interactsWithHumans: yes(form.interactsWithHumans),
+    generatesSyntheticContent: yes(form.generatesSyntheticContent),
     sectors: form.sectors,
     dataCategories: form.dataCategories,
     deployment: form.deployment,
-    euNexus: form.euNexus === "yes",
-    usesExternalVendor: form.usesExternalVendor === "yes",
-    generative: form.generatesSyntheticContent === "yes",
-    autonomousActions: form.autonomousActions === "yes",
+    euNexus: yes(form.euNexus),
+    usesExternalVendor: yes(form.usesExternalVendor),
+    generative: yes(form.generatesSyntheticContent),
+    autonomousActions: yes(form.autonomousActions),
     toolsUsed: form.toolsUsed,
+    ...(unsure.length > 0 ? { unsure } : {}),
   };
 }
 
-/** the EU AI Act subset — what the questionnaire's answers block carries and the tier is screened on */
-export function euAnswersOf(answers: EuAiActScreeningAnswers): EuAiActScreeningAnswers {
+/**
+ * the EU AI Act subset — what the questionnaire's answers block carries and
+ * the tier is screened on; `withUnsure` adds the EU questions the owner was
+ * not sure about (the block records them; the tier does not depend on them)
+ */
+export function euAnswersOf(answers: UnsureAware<EuAiActScreeningAnswers>, opts: { withUnsure?: boolean } = {}): UnsureAware<EuAiActScreeningAnswers> {
+  const unsure = opts.withUnsure ? (answers.unsure ?? []).filter((key) => EU_BOOLEAN_KEYS.has(key)) : [];
   return {
     purposeDomain: answers.purposeDomain,
     affectedPersons: answers.affectedPersons,
@@ -166,6 +195,7 @@ export function euAnswersOf(answers: EuAiActScreeningAnswers): EuAiActScreeningA
     safetyComponent: answers.safetyComponent,
     interactsWithHumans: answers.interactsWithHumans,
     generatesSyntheticContent: answers.generatesSyntheticContent,
+    ...(unsure.length > 0 ? { unsure } : {}),
   };
 }
 
@@ -189,7 +219,7 @@ export interface DescribeFields {
  * reuses the purpose, as registration does. The name is not sent: a
  * registered use case's name has no edit.
  */
-export function resubmitPatch(current: DescribeFields, edited: DescribeFields, answers: IntakeScreeningAnswers): Record<string, unknown> {
+export function resubmitPatch(current: DescribeFields, edited: DescribeFields, answers: UnsureAware<IntakeScreeningAnswers>): Record<string, unknown> {
   const next = {
     description: edited.description.trim(),
     businessContext: edited.businessContext.trim() || edited.description.trim(),

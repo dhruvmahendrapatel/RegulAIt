@@ -135,6 +135,8 @@ interface State {
   patches: unknown[];
   artifacts: unknown[];
   artifactFailures: number;
+  /** the resubmission's server-side draft (ADR-0171) */
+  draft: { scope: string; state: unknown; updatedAt: string } | null;
 }
 
 const json = (route: Route, body: unknown, status = 200) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
@@ -176,13 +178,19 @@ function detail(state: State) {
 async function mockGateway(page: Page, patch: Partial<State> = {}): Promise<State> {
   const state: State = {
     persona: RILEY, status: "under_review", reviews: reviews(), acceptedRisk: false, recertification: false, resubmission: false, policy: savedPolicy(),
-    approvals: [roleApproval()], calls: [], puts: [], putReply: null, decides: [], decideReply: null, patches: [], artifacts: [], artifactFailures: 0, ...patch,
+    approvals: [roleApproval()], calls: [], puts: [], putReply: null, decides: [], decideReply: null, patches: [], artifacts: [], artifactFailures: 0, draft: null, ...patch,
   };
   await page.route("**/*", async (route) => {
     const p = new URL(route.request().url()).pathname;
     if (route.request().resourceType() === "document" || (!p.startsWith("/v1") && !p.startsWith("/auth"))) return route.continue();
     const method = route.request().method();
     const me = state.persona;
+    // ADR-0171: the resubmission's own draft is kept beside the record, not among its calls
+    if (p === "/v1/use-cases/draft") {
+      if (method === "PUT") state.draft = { scope: UC, state: route.request().postDataJSON().state, updatedAt: "2026-10-03T12:00:00Z" };
+      if (method === "DELETE") state.draft = null;
+      return method === "DELETE" ? route.fulfill({ status: 204 }) : json(route, { draft: state.draft });
+    }
     if (method !== "GET") state.calls.push(`${method} ${p}`);
     if (p === "/auth/me") return json(route, { userId: me.id, isAdmin: me.isAdmin, via: "session", user: { id: me.id, email: `${me.id}@example.test`, displayName: me.displayName }, mustChangePassword: false, totpEnabled: true, passwordSet: true, mfaSetupRequired: false });
     if (p === "/v1/me") return json(route, { userId: me.id, isAdmin: me.isAdmin, user: { id: me.id, email: `${me.id}@example.test`, displayName: me.displayName } });
