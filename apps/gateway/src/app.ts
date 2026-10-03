@@ -2323,6 +2323,21 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       .from(users)
       .where(eq(users.id, body.userId));
     if (!subject) {
+      // ON THE LEDGER, like the deactivated case below. A consumer left
+      // pointing at a UUID nobody has is a mapping error the operator has to
+      // find, and the row is the only place that names the Kong consumer
+      // which presented it. `user_id` carries no foreign key, so the row
+      // records the subject exactly as it was asserted.
+      await db.insert(auditLog).values({
+        userId: body.userId,
+        serverId: body.serverId,
+        toolName: body.toolName,
+        effect: "deny",
+        ruleId: "unknown_subject",
+        ruleChain: [],
+        reason: "no user has this id: the callout refuses a subject it cannot name",
+        detail: advisoryDetail({ ...calloutProvenance, contextApplied: [] }),
+      });
       return reply.status(200).send({
         decision: "deny" satisfies AuthzDecision,
         reason: "unknown_subject",

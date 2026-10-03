@@ -199,11 +199,38 @@ describe("AER-026 — a subject that is not a user is refused, grants or no gran
     // ADR-0022 has no hard delete, so the shape of a deleted identity is a
     // mapping whose UUID names nobody: a consumer pointed at an account that
     // never existed here, or one removed outside the product.
-    const res = await ask({ userId: randomUUID(), serverId, toolName: TOOL });
+    const nobody = randomUUID();
+    const kongConsumerId = randomUUID();
+    const res = await ask({
+      userId: nobody,
+      serverId,
+      toolName: TOOL,
+      proxyConsumer: { id: kongConsumerId, username: "deleted" },
+    });
     expect(res.statusCode, res.body).toBe(200);
     const body = JSON.parse(res.body);
     expect(body.decision).toBe("deny");
     expect(body.reason).toBe("unknown_subject");
+
+    // ON THE LEDGER, under the consumer that presented it. A consumer left
+    // pointing at a UUID nobody has is a mapping error, and a refusal with no
+    // trace is one the operator can never find — the row is the only place
+    // that names which Kong consumer carries the bad mapping.
+    const row = await latestRowFor(nobody);
+    expect(row, "an unknown subject's refusal writes a row").not.toBeNull();
+    expect(row!.effect).toBe("deny");
+    expect(row!.ruleId).toBe("unknown_subject");
+    expect(row!.serverId).toBe(serverId);
+    const detail = row!.detail as {
+      proxyConsumer?: unknown;
+      via?: string;
+      credential?: string;
+      contextApplied?: string[];
+    };
+    expect(detail.via).toBe("authz_check");
+    expect(detail.credential).toBeDefined();
+    expect(detail.proxyConsumer).toEqual({ id: kongConsumerId, username: "deleted" });
+    expect(detail.contextApplied).toEqual([]);
   });
 
   it("an unknown tool is still answered before the subject is looked at", async () => {
