@@ -1,0 +1,291 @@
+{
+  "realm": "regulait",
+  "displayName": "regulAIt",
+  "enabled": true,
+  "sslRequired": "${REGULAIT_KC_SSL_REQUIRED:external}",
+  "registrationAllowed": false,
+  "registrationEmailAsUsername": true,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "verifyEmail": true,
+  "resetPasswordAllowed": true,
+  "editUsernameAllowed": false,
+  "rememberMe": false,
+  "bruteForceProtected": true,
+  "permanentLockout": false,
+  "failureFactor": 5,
+  "waitIncrementSeconds": 60,
+  "maxFailureWaitSeconds": 900,
+  "maxDeltaTimeSeconds": 43200,
+  "minimumQuickLoginWaitSeconds": 60,
+  "quickLoginCheckMilliSeconds": 1000,
+  "passwordPolicy": "length(12) and notUsername and notEmail and passwordHistory(5)",
+  "ssoSessionIdleTimeout": 7200,
+  "ssoSessionMaxLifespan": 36000,
+  "accessTokenLifespan": 300,
+  "otpPolicyType": "totp",
+  "otpPolicyAlgorithm": "HmacSHA1",
+  "otpPolicyDigits": 6,
+  "otpPolicyPeriod": 30,
+  "otpPolicyLookAheadWindow": 1,
+  "otpPolicyCodeReusable": false,
+  "webAuthnPolicyRpEntityName": "regulAIt",
+  "webAuthnPolicyUserVerificationRequirement": "preferred",
+  "webAuthnPolicyPasswordlessRpEntityName": "regulAIt",
+  "webAuthnPolicyPasswordlessUserVerificationRequirement": "required",
+  "webAuthnPolicyPasswordlessResidentKey": "required",
+  "smtpServer": {
+    "host": "${REGULAIT_KC_SMTP_HOST:}",
+    "port": "${REGULAIT_KC_SMTP_PORT:587}",
+    "from": "${REGULAIT_KC_SMTP_FROM:no-reply@regulait.invalid}",
+    "fromDisplayName": "regulAIt sign-in",
+    "starttls": "true",
+    "auth": "true",
+    "user": "${REGULAIT_KC_SMTP_USER:}",
+    "password": "${REGULAIT_KC_SMTP_PASSWORD:}"
+  },
+  "browserFlow": "regulait browser",
+  "requiredActions": [
+    {
+      "alias": "CONFIGURE_TOTP",
+      "name": "Configure OTP",
+      "providerId": "CONFIGURE_TOTP",
+      "enabled": true,
+      "defaultAction": true,
+      "priority": 10,
+      "config": {}
+    },
+    {
+      "alias": "webauthn-register",
+      "name": "Webauthn Register",
+      "providerId": "webauthn-register",
+      "enabled": true,
+      "defaultAction": false,
+      "priority": 20,
+      "config": {}
+    },
+    {
+      "alias": "webauthn-register-passwordless",
+      "name": "Webauthn Register Passwordless",
+      "providerId": "webauthn-register-passwordless",
+      "enabled": true,
+      "defaultAction": false,
+      "priority": 30,
+      "config": {}
+    },
+    {
+      "alias": "VERIFY_EMAIL",
+      "name": "Verify Email",
+      "providerId": "VERIFY_EMAIL",
+      "enabled": true,
+      "defaultAction": false,
+      "priority": 40,
+      "config": {}
+    },
+    {
+      "alias": "UPDATE_PASSWORD",
+      "name": "Update Password",
+      "providerId": "UPDATE_PASSWORD",
+      "enabled": true,
+      "defaultAction": false,
+      "priority": 50,
+      "config": {}
+    },
+    {
+      "alias": "UPDATE_PROFILE",
+      "name": "Update Profile",
+      "providerId": "UPDATE_PROFILE",
+      "enabled": true,
+      "defaultAction": false,
+      "priority": 60,
+      "config": {}
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "regulait-gateway",
+      "name": "regulAIt gateway",
+      "description": "The regulAIt gateway, an OIDC relying party (authorization code + PKCE S256, confidential).",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "${REGULAIT_KC_GATEWAY_CLIENT_SECRET}",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "frontchannelLogout": false,
+      "consentRequired": false,
+      "fullScopeAllowed": false,
+      "rootUrl": "${REGULAIT_PUBLIC_URL:http://localhost:3000}",
+      "baseUrl": "/ui",
+      "redirectUris": ["${REGULAIT_PUBLIC_URL:http://localhost:3000}/auth/oidc/callback"],
+      "webOrigins": ["${REGULAIT_PUBLIC_URL:http://localhost:3000}"],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "${REGULAIT_PUBLIC_URL:http://localhost:3000}/ui/login",
+        "oauth2.device.authorization.grant.enabled": "false",
+        "backchannel.logout.session.required": "true"
+      },
+      "protocolMappers": [
+        {
+          "name": "amr",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-amr-mapper",
+          "consentRequired": false,
+          "config": {
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ],
+      "defaultClientScopes": ["web-origins", "acr", "basic", "profile", "email"],
+      "optionalClientScopes": []
+    }
+  ],
+  "identityProviders": [
+    {
+      "alias": "microsoft",
+      "displayName": "Microsoft",
+      "providerId": "microsoft",
+      "enabled": true,
+      "trustEmail": false,
+      "storeToken": false,
+      "addReadTokenRoleOnCreate": false,
+      "linkOnly": false,
+      "hideOnLogin": false,
+      "firstBrokerLoginFlowAlias": "first broker login",
+      "postBrokerLoginFlowAlias": "regulait post broker mfa",
+      "config": {
+        "clientId": "${REGULAIT_KC_MICROSOFT_CLIENT_ID:unset}",
+        "clientSecret": "${REGULAIT_KC_MICROSOFT_CLIENT_SECRET:unset}",
+        "tenantId": "${REGULAIT_KC_MICROSOFT_TENANT:organizations}",
+        "defaultScope": "openid profile email",
+        "syncMode": "IMPORT",
+        "guiOrder": "1"
+      }
+    },
+    {
+      "alias": "google",
+      "displayName": "Google",
+      "providerId": "google",
+      "enabled": true,
+      "trustEmail": true,
+      "storeToken": false,
+      "addReadTokenRoleOnCreate": false,
+      "linkOnly": false,
+      "hideOnLogin": false,
+      "firstBrokerLoginFlowAlias": "first broker login",
+      "postBrokerLoginFlowAlias": "regulait post broker mfa",
+      "config": {
+        "clientId": "${REGULAIT_KC_GOOGLE_CLIENT_ID:unset}",
+        "clientSecret": "${REGULAIT_KC_GOOGLE_CLIENT_SECRET:unset}",
+        "hostedDomain": "${REGULAIT_KC_GOOGLE_HOSTED_DOMAIN:}",
+        "defaultScope": "openid profile email",
+        "syncMode": "IMPORT",
+        "guiOrder": "2"
+      }
+    },
+    {
+      "alias": "github",
+      "displayName": "GitHub",
+      "providerId": "github",
+      "enabled": true,
+      "trustEmail": false,
+      "storeToken": false,
+      "addReadTokenRoleOnCreate": false,
+      "linkOnly": false,
+      "hideOnLogin": false,
+      "firstBrokerLoginFlowAlias": "first broker login",
+      "postBrokerLoginFlowAlias": "regulait post broker mfa",
+      "config": {
+        "clientId": "${REGULAIT_KC_GITHUB_CLIENT_ID:unset}",
+        "clientSecret": "${REGULAIT_KC_GITHUB_CLIENT_SECRET:unset}",
+        "defaultScope": "user:email",
+        "syncMode": "IMPORT",
+        "guiOrder": "3"
+      }
+    }
+  ],
+  "authenticatorConfig": [
+    {
+      "alias": "amr-otp",
+      "config": { "default.reference.value": "otp", "default.reference.maxAge": "36000" }
+    },
+    {
+      "alias": "amr-hwk",
+      "config": { "default.reference.value": "hwk", "default.reference.maxAge": "36000" }
+    },
+    {
+      "alias": "amr-otp-broker",
+      "config": { "default.reference.value": "otp", "default.reference.maxAge": "36000" }
+    },
+    {
+      "alias": "amr-hwk-broker",
+      "config": { "default.reference.value": "hwk", "default.reference.maxAge": "36000" }
+    },
+    {
+      "alias": "amr-pwd",
+      "config": { "default.reference.value": "pwd", "default.reference.maxAge": "36000" }
+    }
+  ],
+  "authenticationFlows": [
+    {
+      "alias": "regulait browser",
+      "description": "Browser flow with MFA required: SSO cookie, IdP hint redirect (kc_idp_hint), or password followed by a code or passkey.",
+      "providerId": "basic-flow",
+      "topLevel": true,
+      "builtIn": false,
+      "authenticationExecutions": [
+        { "authenticator": "auth-cookie", "authenticatorFlow": false, "requirement": "ALTERNATIVE", "priority": 10, "userSetupAllowed": false },
+        { "authenticator": "identity-provider-redirector", "authenticatorFlow": false, "requirement": "ALTERNATIVE", "priority": 20, "userSetupAllowed": false },
+        { "flowAlias": "regulait browser forms", "authenticatorFlow": true, "requirement": "ALTERNATIVE", "priority": 30, "userSetupAllowed": false }
+      ]
+    },
+    {
+      "alias": "regulait browser forms",
+      "description": "Username and password, then MFA.",
+      "providerId": "basic-flow",
+      "topLevel": false,
+      "builtIn": false,
+      "authenticationExecutions": [
+        { "authenticator": "auth-username-password-form", "authenticatorConfig": "amr-pwd", "authenticatorFlow": false, "requirement": "REQUIRED", "priority": 10, "userSetupAllowed": false },
+        { "flowAlias": "regulait mfa", "authenticatorFlow": true, "requirement": "REQUIRED", "priority": 20, "userSetupAllowed": false }
+      ]
+    },
+    {
+      "alias": "regulait mfa",
+      "description": "A one-time code or a passkey — one of them is always required.",
+      "providerId": "basic-flow",
+      "topLevel": false,
+      "builtIn": false,
+      "authenticationExecutions": [
+        { "authenticator": "webauthn-authenticator", "authenticatorConfig": "amr-hwk", "authenticatorFlow": false, "requirement": "ALTERNATIVE", "priority": 10, "userSetupAllowed": false },
+        { "authenticator": "auth-otp-form", "authenticatorConfig": "amr-otp", "authenticatorFlow": false, "requirement": "ALTERNATIVE", "priority": 20, "userSetupAllowed": false }
+      ]
+    },
+    {
+      "alias": "regulait post broker mfa",
+      "description": "Runs after every Microsoft / Google / GitHub login: MFA at the broker, whatever the upstream did.",
+      "providerId": "basic-flow",
+      "topLevel": true,
+      "builtIn": false,
+      "authenticationExecutions": [
+        { "flowAlias": "regulait post broker mfa options", "authenticatorFlow": true, "requirement": "REQUIRED", "priority": 10, "userSetupAllowed": false }
+      ]
+    },
+    {
+      "alias": "regulait post broker mfa options",
+      "description": "A one-time code or a passkey.",
+      "providerId": "basic-flow",
+      "topLevel": false,
+      "builtIn": false,
+      "authenticationExecutions": [
+        { "authenticator": "webauthn-authenticator", "authenticatorConfig": "amr-hwk-broker", "authenticatorFlow": false, "requirement": "ALTERNATIVE", "priority": 10, "userSetupAllowed": false },
+        { "authenticator": "auth-otp-form", "authenticatorConfig": "amr-otp-broker", "authenticatorFlow": false, "requirement": "ALTERNATIVE", "priority": 20, "userSetupAllowed": false }
+      ]
+    }
+  ]
+}
