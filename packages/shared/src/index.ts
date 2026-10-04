@@ -543,6 +543,8 @@ export {
   admissionFindingSummary,
   mcpAdmissionRuleIds,
   strictestSeverity,
+  normalizeForScan,
+  foldConfusables,
   type McpAdmissionSeverity,
   type McpAdmissionMode,
   type McpAdmissionState,
@@ -561,6 +563,8 @@ export {
   SKILL_ADMISSION_HOLD_AT,
   SKILL_SKIPPED_MCP_RULES,
   scanSkill,
+  skillPromptSection,
+  skillNameProblem,
   nextSkillState,
   skillStateUsable,
   skillFindingCounts,
@@ -1057,7 +1061,16 @@ export const createAgentSchema = z.object({
    * discriminated union, so provider 'custom' demands an id and any other
    * provider forbids one. Validated here too so the 400 says WHY. */
   customProviderId: z.string().uuid().nullable().optional(),
+  /** ADR-0175 review fix: the model id the provider is EXPECTED to report
+   * serving, when it differs from `model` (an endpoint whose configured id is
+   * a deployment name). The served-model drift rule compares with it. */
+  expectedServedModel: z.string().trim().min(1).max(200).nullable().optional(),
 });
+
+/** `PUT /v1/agents/:agentId/expected-served-model` — admin, audited; null clears */
+export const setExpectedServedModelSchema = z
+  .object({ expectedServedModel: z.string().trim().min(1).max(200).nullable() })
+  .strict();
 
 /** the discriminated-union rule shared by agent create and agent update */
 export function agentCustomProviderPairValid(v: {
@@ -3608,6 +3621,7 @@ export {
   servedModelMatches,
   servedModelMatchesPin,
   splitModelVersion,
+  pinnedVersionProblem,
   type ActiveAlertRef,
   type MonitorAgentInput,
   type MonitorServedModelInput,

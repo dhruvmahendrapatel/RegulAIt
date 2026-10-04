@@ -68,13 +68,24 @@ export const releaseOverrideSchema = z
   .object({
     kind: z.enum(RELEASE_AGE_KINDS),
     id: z.string().uuid(),
+    /** the release the admin was SHOWN (the queue's digest, or `registration`
+     * for a never-synced server): the override applies only while it is still
+     * the item's current release, else 409 `release_changed` */
+    digest: z.string().trim().min(1).max(200),
     reason: z.string().trim().min(1).max(2000),
   })
   .strict();
 export type ReleaseOverride = z.infer<typeof releaseOverrideSchema>;
 
 /** `POST /v1/admission/skills/:id/admit` and the visibility decision */
-export const admitSkillSchema = z.object({ reason: z.string().trim().min(1).max(2000) }).strict();
+export const admitSkillSchema = z
+  .object({
+    /** the content digest the admin reviewed: the admission applies only while
+     * it is still the skill's digest, else 409 `skill_changed` */
+    digest: z.string().trim().min(1).max(200),
+    reason: z.string().trim().min(1).max(2000),
+  })
+  .strict();
 export const skillVisibilityDecisionSchema = z
   .object({ decision: z.enum(["approve", "deny"]), reason: z.string().trim().max(2000).optional() })
   .strict();

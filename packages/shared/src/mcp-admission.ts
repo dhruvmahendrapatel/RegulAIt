@@ -143,7 +143,7 @@ export type McpAdmissionState = (typeof MCP_ADMISSION_STATES)[number];
  * this server cleared under the ruleset we ship today?" without guessing, and
  * what a future re-scan-everything migration would key on.
  */
-export const MCP_ADMISSION_SCANNER_VERSION = "mcp-admission/1";
+export const MCP_ADMISSION_SCANNER_VERSION = "mcp-admission/2";
 
 // ---------------------------------------------------------------------------
 // Findings
@@ -421,6 +421,65 @@ function fnv1a64(input: string): string {
 // The scan
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// ADR-0175 review fix — what the phrase detectors READ
+// ---------------------------------------------------------------------------
+//
+// The phrase rules (here and in the ADR-0042 injection detector) stop at a
+// newline (`[^.\n]`), and match literal Latin letters. Read raw, that lets a
+// single line break ("ignore all previous\ninstructions"), a full-width
+// spelling, or a Cyrillic/Greek look-alike letter carry the same instruction
+// past them. So each unit is read three ways and a rule's count is the largest
+// of the three:
+//
+//   1. RAW — exactly as written (the role-header rule needs its line starts,
+//      and the hidden-Unicode and credential rules read only this copy);
+//   2. NORMALISED — NFKC (full-width and other compatibility forms become
+//      their plain letters), zero-width / bidi / tag characters removed, and
+//      every run of whitespace collapsed to one space;
+//   3. FOLDED — the normalised copy with the look-alike letters in
+//      `CONFUSABLE_SKELETON` replaced by the Latin letter they imitate.
+//
+// The skeleton map is deliberately SMALL: the Cyrillic and Greek letters that
+// render the same as a Latin letter in common fonts (Unicode TR39 lists far
+// more; these are the ones seen in practice). A letter it does not list still
+// trips the skill scanner's mixed-script detector, at `medium`.
+const CONFUSABLE_SKELETON: Readonly<Record<string, string>> = {
+  // Cyrillic lower case
+  "\u0430": "a", "\u0435": "e", "\u043E": "o", "\u0440": "p", "\u0441": "c", "\u0443": "y", "\u0445": "x",
+  "\u0456": "i", "\u0458": "j", "\u0455": "s", "\u0501": "d", "\u04BB": "h", "\u051B": "q", "\u051D": "w",
+  "\u04CF": "l", "\u0432": "b",
+  // Cyrillic upper case
+  "\u0410": "A", "\u0412": "B", "\u0415": "E", "\u041A": "K", "\u041C": "M", "\u041D": "H", "\u041E": "O",
+  "\u0420": "P", "\u0421": "C", "\u0422": "T", "\u0425": "X", "\u0423": "Y", "\u0406": "I", "\u0408": "J",
+  "\u0405": "S",
+  // Greek lower case
+  "\u03B1": "a", "\u03BF": "o", "\u03C1": "p", "\u03BD": "v", "\u03B9": "i", "\u03BA": "k", "\u03C5": "u",
+  "\u03C7": "x", "\u03B5": "e", "\u03C4": "t",
+  // Greek upper case
+  "\u0391": "A", "\u0392": "B", "\u0395": "E", "\u0396": "Z", "\u0397": "H", "\u0399": "I", "\u039A": "K",
+  "\u039C": "M", "\u039D": "N", "\u039F": "O", "\u03A1": "P", "\u03A4": "T", "\u03A5": "Y", "\u03A7": "X",
+};
+const CONFUSABLE_RE = new RegExp(`[${Object.keys(CONFUSABLE_SKELETON).join("")}]`, "gu");
+const INVISIBLE_RE = /[\u00AD\u180E\u200B-\u200F\u2060-\u2064\uFEFF\u202A-\u202E\u2066-\u2069\u{E0000}-\u{E007F}]/gu;
+
+/** NFKC, invisible characters removed, whitespace collapsed (copy 2 above) */
+export function normalizeForScan(text: string): string {
+  return text.normalize("NFKC").replace(INVISIBLE_RE, "").replace(/\s+/gu, " ").trim();
+}
+
+/** the look-alike letters replaced by the Latin letter they imitate (copy 3) */
+export function foldConfusables(text: string): string {
+  return text.replace(CONFUSABLE_RE, (ch) => CONFUSABLE_SKELETON[ch] ?? ch);
+}
+
+/** the three readings of one unit, de-duplicated */
+function phraseReadings(text: string): string[] {
+  const normalized = normalizeForScan(text);
+  const folded = foldConfusables(normalized);
+  return [...new Set([text, normalized, folded])].filter((t) => t.length > 0);
+}
+
 function countMatches(text: string, re: RegExp): number {
   re.lastIndex = 0;
   let n = 0;
@@ -483,28 +542,45 @@ export function scanAdmissionUnits(
   const skip = new Set(opts.skipRules ?? []);
   for (const unit of units) {
     if (!unit.text) continue;
+    // the phrase rules read the raw, normalised and folded copies (see
+    // `phraseReadings`); a rule's count is its largest over the three
+    const readings = phraseReadings(unit.text);
     // 1. the MCP-specific phrase rules
     for (const rule of MCP_RULES) {
       if (skip.has(rule.id)) continue;
-      const count = countMatches(unit.text, rule.re);
+      const count = Math.max(...readings.map((t) => countMatches(t, rule.re)));
       if (count > 0) findings.push({ rule: rule.id, severity: rule.severity, tool: subject, where: unit.where, count });
     }
-    // 2. hidden / invisible Unicode
+    // 2. hidden / invisible Unicode — the RAW text only (normalising removes them)
     for (const rule of HIDDEN_UNICODE_RULES) {
       const count = countMatches(unit.text, rule.re);
       if (count > 0) findings.push({ rule: rule.id, severity: rule.severity, tool: subject, where: unit.where, count });
     }
-    // 3. the ADR-0042 detectors, REUSED rather than re-implemented
-    for (const detector of [promptInjectionDetector, semanticDlpDetector]) {
-      for (const hit of detector.detect(unit.text)) {
-        findings.push({
-          rule: `guardrail.${detector.id}.${hit.category}`,
-          severity: GUARDRAIL_CATEGORY_SEVERITY[hit.category] ?? "medium",
-          tool: subject,
-          where: unit.where,
-          count: hit.count,
-        });
+    // 3. the ADR-0042 detectors, REUSED rather than re-implemented: the
+    //    injection detector over every reading, the credential detector raw
+    const byCategory = new Map<string, number>();
+    for (const t of readings) {
+      for (const hit of promptInjectionDetector.detect(t)) {
+        byCategory.set(hit.category, Math.max(byCategory.get(hit.category) ?? 0, hit.count));
       }
+    }
+    for (const [category, count] of byCategory) {
+      findings.push({
+        rule: `guardrail.${promptInjectionDetector.id}.${category}`,
+        severity: GUARDRAIL_CATEGORY_SEVERITY[category] ?? "medium",
+        tool: subject,
+        where: unit.where,
+        count,
+      });
+    }
+    for (const hit of semanticDlpDetector.detect(unit.text)) {
+      findings.push({
+        rule: `guardrail.${semanticDlpDetector.id}.${hit.category}`,
+        severity: GUARDRAIL_CATEGORY_SEVERITY[hit.category] ?? "medium",
+        tool: subject,
+        where: unit.where,
+        count: hit.count,
+      });
     }
   }
   return findings;

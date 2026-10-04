@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import {
   MONITOR_RULES,
   evaluateMonitorRules,
+  pinnedVersionProblem,
   servedModelMatches,
   servedModelMatchesPin,
   splitModelVersion,
@@ -173,9 +174,32 @@ describe("A9 unregistered_ai_traffic", () => {
     expect(f.find((x) => x.subjectKey === "virtual_key:vk1")!.title).toBe(
       "Virtual key ci-runner: 4 model calls in 7 days, attributed to no project",
     );
-    expect(f.find((x) => x.subjectKey === "caller:u2")!.title).toBe(
-      "Bo: 1 MCP tool call in 7 days, attributed to no project and on no virtual key",
+    // ADR-0175 review fix: a caller's name never goes in a title (titles reach
+    // ChatOps channels); it stays in the admin-only detail
+    const caller = f.find((x) => x.subjectKey === "caller:u2")!;
+    expect(caller.title).toBe("A user (id u2): 1 MCP tool call in 7 days, attributed to no project and on no virtual key");
+    expect(caller.title).not.toContain("Bo");
+    expect(caller.detail).toMatchObject({ subjectLabel: "Bo", callers: [{ id: "u2", name: "Bo", calls: 1 }] });
+  });
+
+  it("a caller title carries a short id, never a display name or email; the platform actor reads as such", () => {
+    const id = "6f1c2d3e-0000-4000-8000-000000000001";
+    const nil = "00000000-0000-0000-0000-000000000000";
+    const f = evaluateMonitorRules(
+      base({
+        traffic: {
+          windowDays: 7,
+          rows: [row({ userId: id, calls: 2 }), row({ userId: nil, calls: 1 })],
+          coveredProjectIds: new Set(),
+          userNames: new Map([[id, "ada@example.com"], [nil, "Platform (no user identity)"]]),
+        },
+      }),
     );
+    const person = f.find((x) => x.subjectKey === `caller:${id}`)!;
+    expect(person.title).toBe("A user (id 6f1c2d3e): 2 model calls in 7 days, attributed to no project and on no virtual key");
+    expect(person.title).not.toContain("example.com");
+    expect(person.detail).toMatchObject({ subjectLabel: "ada@example.com" });
+    expect(f.find((x) => x.subjectKey === `caller:${nil}`)!.title).toMatch(/^Platform traffic \(no user identity\): /);
   });
 
   it("not evaluated when no traffic input is given", () => {
@@ -215,5 +239,37 @@ describe("ADR-0175 remediation guidance", () => {
     });
     expect(c).toMatchObject({ kind: "review_served_model", executable: false, params: { agentId: "a1" } });
     expect(c!.title).toBe("Confirm why Support bot was served mock-fast-2");
+  });
+});
+
+describe("ADR-0175 review fix — pins and the expected served model", () => {
+  it("a pin must be an exact version of the binding's model: floating aliases and other models are refused", () => {
+    expect(pinnedVersionProblem("name-20250101", "name")).toBeNull();
+    expect(pinnedVersionProblem("name-20250101", "name-20250101")).toBeNull();
+    expect(pinnedVersionProblem("latest", "name")).toMatch(/floating alias/);
+    expect(pinnedVersionProblem("name-latest", "name")).toMatch(/floating alias/);
+    expect(pinnedVersionProblem("name@latest", "name")).toMatch(/floating alias/);
+    expect(pinnedVersionProblem("other-20250101", "name")).toMatch(/not a version of the binding's model 'name'/);
+    expect(pinnedVersionProblem("name-20250301", "name-20250101")).toMatch(/not a version/);
+    expect(pinnedVersionProblem("  ", "name")).toMatch(/empty/);
+    // no configured model to compare with: only the alias rule applies
+    expect(pinnedVersionProblem("anything-20250101", null)).toBeNull();
+  });
+
+  it("served ids are compared with the binding's expected served model when it has one", () => {
+    const observations = [obs("my-deployment", "real-model-20250101", 3)];
+    expect(evaluateMonitorRules(base({ servedModels: [sm({ observations })] }))).toHaveLength(1);
+    expect(evaluateMonitorRules(base({ servedModels: [sm({ expectedServedModel: "real-model", observations })] }))).toEqual([]);
+    const other = evaluateMonitorRules(
+      base({ servedModels: [sm({ expectedServedModel: "real-model", observations: [obs("my-deployment", "smaller-model", 1)] })] }),
+    );
+    expect(other).toHaveLength(1);
+    expect(other[0]!.title).toBe("Support bot was served smaller-model instead of its expected real-model on 1 call");
+    expect(other[0]!.detail).toMatchObject({ expectedServedModel: "real-model" });
+  });
+
+  it("the rule description says a pinned-version drift is high and holds the deploy gate", () => {
+    expect(MONITOR_RULES.served_model_drift.description).toMatch(/high severity/);
+    expect(MONITOR_RULES.served_model_drift.description).toMatch(/blocks the deploy gate/);
   });
 });

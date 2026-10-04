@@ -96,7 +96,10 @@ export const MONITOR_RULES = {
       "In the window, the model id a provider reported serving (usage ledger, ADR-0175 A4) differs from the agent's " +
       "configured model id, after version-suffix matching: an alias resolving to a dated snapshot of the same model " +
       "does not fire, a different model does. Where an approved model card pins an exact version, any other served id " +
-      "fires at high severity. Rows where the provider reported no model are never counted — nothing is guessed.",
+      "fires at high severity, and an open high alert on an agent blocks the deploy gate (ADR-0161) of every use " +
+      "case that depends on it until it is acknowledged or resolved: pin only the version you mean to run. A binding may name an expected served model (for an endpoint whose " +
+      "configured id is a deployment name); served ids are then compared with it. Rows where the provider reported " +
+      "no model are never counted — nothing is guessed.",
   },
   unregistered_ai_traffic: {
     label: "AI traffic no approved use case covers",
@@ -237,10 +240,38 @@ export function servedModelMatchesPin(pinned: string, served: string): boolean {
   return pinned.trim().toLowerCase() === served.trim().toLowerCase();
 }
 
+/**
+ * ADR-0175 review fix — may this exact version be pinned on a model card for a
+ * binding whose base is `base` (the binding's expected served model when one
+ * is set, else its configured model id)? null = yes, else why not (the 422
+ * detail). A pin is an EXACT version, so a floating alias (`latest`, or an id
+ * ending in a `latest` segment) is refused, and so is a pin of a different
+ * model than the binding is configured for: under `served_model_drift` such a
+ * pin would fire at high severity on every call and hold the deploy gate.
+ */
+export function pinnedVersionProblem(pin: string, base: string | null): string | null {
+  const p = pin.trim();
+  if (!p) return "a pinned version may not be empty";
+  if (/(?:^|[-@:_./])latest$/i.test(p)) {
+    return `'${p}' is a floating alias, not a version; pin the exact version the provider reports serving`;
+  }
+  if (base !== null && base.trim() !== "" && !servedModelMatches(base, p)) {
+    return (
+      `'${p}' is not a version of the binding's model '${base}' (version-suffix matching); a pin must name the ` +
+      `same model the binding is configured for (or its expected served model)`
+    );
+  }
+  return null;
+}
+
 /** ADR-0175 A4 — what the ledger says the providers served for one agent */
 export interface MonitorServedModelInput {
   agentId: string;
   agentName: string;
+  /** ADR-0175 review fix: the binding's optional EXPECTED served model (e.g.
+   * the model behind a custom or deployment-named endpoint). When set, served
+   * ids are compared with it instead of the configured id. */
+  expectedServedModel?: string | null;
   /** the exact versions pinned by the agent's APPROVED, unexpired model
    * cards (two intended uses can be two cards); empty = no pin */
   pinnedModelVersions: string[];
@@ -266,7 +297,7 @@ export interface MonitorTrafficInput {
   /** projects at least one APPROVED use case links (the use case's project) */
   coveredProjectIds: ReadonlySet<string>;
   /** use cases that link a project but are not approved — context on the finding */
-  linkedNotApproved?: ReadonlyMap<string, Array<{ id: string; name: string; status: string }>>;
+  linkedNotApproved?: ReadonlyMap<string, Array<{ id: string; name: string; status: string; approvalExpired?: true }>>;
   projectNames?: ReadonlyMap<string, string>;
   virtualKeyNames?: ReadonlyMap<string, string>;
   userNames?: ReadonlyMap<string, string>;
@@ -404,7 +435,7 @@ export function evaluateMonitorRules(input: MonitorInput): MonitorFinding[] {
       .map((o) => ({
         ...o,
         pinMismatch: pins.length > 0 && !pins.some((p) => servedModelMatchesPin(p, o.servedModel)),
-        configMismatch: !servedModelMatches(o.configuredModel, o.servedModel),
+        configMismatch: !servedModelMatches(sm.expectedServedModel?.trim() || o.configuredModel, o.servedModel),
       }))
       .filter((o) => o.pinMismatch || o.configMismatch)
       .sort((a, b) => b.calls - a.calls || a.servedModel.localeCompare(b.servedModel));
@@ -419,11 +450,16 @@ export function evaluateMonitorRules(input: MonitorInput): MonitorFinding[] {
       severity: pinned ? "high" : sev("served_model_drift"),
       title:
         `${sm.agentName} was served ${servedIds.join(", ")} ` +
-        (pinned ? `instead of its model card's pinned ${pins.join(", ")}` : `instead of its configured ${configuredIds.join(", ")}`) +
+        (pinned
+          ? `instead of its model card's pinned ${pins.join(", ")}`
+          : sm.expectedServedModel?.trim()
+            ? `instead of its expected ${sm.expectedServedModel.trim()}`
+            : `instead of its configured ${configuredIds.join(", ")}`) +
         ` on ${calls} ${calls === 1 ? "call" : "calls"}`,
       detail: {
         agentId: sm.agentId,
         pinnedModelVersions: pins,
+        expectedServedModel: sm.expectedServedModel?.trim() || null,
         calls,
         windowDays: sm.windowDays,
         lastServedAt: drifted.reduce((m, o) => (o.lastServedAt > m ? o.lastServedAt : m), drifted[0]!.lastServedAt),
@@ -483,6 +519,9 @@ export function evaluateMonitorRules(input: MonitorInput): MonitorFinding[] {
  * id: it does not record WHICH of a caller's API keys was used) that spent
  * with neither. A project finding lists the virtual keys and callers behind it.
  */
+/** the ledger's null actor (the scheduler and other identity-less jobs) */
+const NO_USER_IDENTITY = "00000000-0000-0000-0000-000000000000";
+
 function unregisteredTrafficFindings(t: MonitorTrafficInput): MonitorFinding[] {
   type Kind = "project" | "virtual_key" | "caller";
   interface Acc {
@@ -532,7 +571,17 @@ function unregisteredTrafficFindings(t: MonitorTrafficInput): MonitorFinding[] {
         : g.kind === "virtual_key"
           ? nameIn(t.virtualKeyNames, g.id)
           : nameIn(t.userNames, g.id);
-    const lead = g.kind === "project" ? `Project ${subjectLabel}` : g.kind === "virtual_key" ? `Virtual key ${subjectLabel}` : subjectLabel;
+    // a caller's display name or email never goes in the TITLE: titles reach
+    // ChatOps channels. The title says "a user (id ...)"; the name stays in
+    // the admin-only detail (`subjectLabel`, `callers`).
+    const lead =
+      g.kind === "project"
+        ? `Project ${subjectLabel}`
+        : g.kind === "virtual_key"
+          ? `Virtual key ${subjectLabel}`
+          : g.id === NO_USER_IDENTITY
+            ? "Platform traffic (no user identity)"
+            : `A user (id ${g.id.slice(0, 8)})`;
     const volume = [
       ...(g.modelCalls ? [`${g.modelCalls} model ${g.modelCalls === 1 ? "call" : "calls"}`] : []),
       ...(g.mcpCalls ? [`${g.mcpCalls} MCP tool ${g.mcpCalls === 1 ? "call" : "calls"}`] : []),

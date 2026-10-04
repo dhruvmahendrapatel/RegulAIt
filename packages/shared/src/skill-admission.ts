@@ -26,8 +26,13 @@
  *   - `low` or nothing → CLEAN.
  *
  * These are heuristic DETECTORS, with every limit ADR-0042 and ADR-0097 state:
- * literal English, no obfuscation handling, false positives on a skill that
- * legitimately discusses these topics. That is why `medium` holds for a human
+ * literal English, false positives on a skill that legitimately discusses
+ * these topics. Since the D2 review the phrase rules also read a normalised
+ * and a look-alike-folded copy (see `normalizeForScan` / `foldConfusables` in
+ * mcp-admission.ts), and the scan covers the skill AS THE PROMPT SHOWS IT
+ * (`skillPromptSection`), so a newline, a full-width or Cyrillic/Greek
+ * spelling, or a phrase split between the name and the body no longer slips
+ * past them. Encodings and paraphrase still do. That is why `medium` holds for a human
  * rather than refusing, and why admitting is a reason-required admin act.
  *
  * COUNTS AND LOCATIONS ONLY. A finding names the rule, the severity and where
@@ -44,7 +49,7 @@ import {
 
 /** The scanner + ruleset version stamped on a scanned skill. Bump it when a
  * skill rule changes (the ADR-0097 rules carry their own version). */
-export const SKILL_ADMISSION_SCANNER_VERSION = "skill-admission/1";
+export const SKILL_ADMISSION_SCANNER_VERSION = "skill-admission/2";
 
 /**
  * The persisted verdict on `builder_skills.admission_state` (and on each
@@ -138,6 +143,29 @@ const SKILL_RULES: readonly SkillRule[] = [
   },
 ];
 
+/**
+ * The exact text a skill contributes to an agent's system prompt. ONE
+ * definition, used by the prompt builder, the scanner (a phrase split between
+ * the name and the body is read whole) and the digest (the digest of a pinned
+ * skill is the digest of the bytes the model is sent).
+ */
+export function skillPromptSection(name: string, body: string): string {
+  return `## Skill: ${name}\n\n${body.trim()}`;
+}
+
+/** control (Cc: newline, tab, ...), format (Cf: zero-width, bidi) and line /
+ * paragraph separator characters: none belongs in a skill NAME, which is
+ * pasted into a heading of the prompt */
+const SKILL_NAME_FORBIDDEN = /[\p{Cc}\p{Cf}\u2028\u2029]/u;
+
+/** null when the name may be stored, else why not (the 422 detail) */
+export function skillNameProblem(name: string): string | null {
+  if (SKILL_NAME_FORBIDDEN.test(name)) {
+    return "a skill name may not contain line breaks, tabs, or other control or invisible formatting characters";
+  }
+  return null;
+}
+
 export interface SkillScanInput {
   name: string;
   description?: string | null;
@@ -161,6 +189,16 @@ export function scanSkill(input: SkillScanInput): SkillAdmissionScan {
     { where: "body", text: input.body ?? "" },
   ].filter((u) => u.text.length > 0);
   const findings = scanAdmissionUnits(subject, units, { skipRules: SKILL_SKIPPED_MCP_RULES });
+  // the skill as the prompt shows it (heading + body), so a phrase split
+  // across the name and the body is read whole. Only rules the separate units
+  // did not already report are added, under `where: "prompt"`.
+  const seen = new Set(findings.map((f) => f.rule));
+  const composed = scanAdmissionUnits(
+    subject,
+    [{ where: "prompt", text: skillPromptSection(input.name ?? "", input.body ?? "") }],
+    { skipRules: SKILL_SKIPPED_MCP_RULES },
+  );
+  for (const f of composed) if (!seen.has(f.rule)) findings.push(f);
   for (const unit of units) {
     for (const rule of SKILL_RULES) {
       const count = rule.count(unit.text);
@@ -185,9 +223,14 @@ export function scanSkill(input: SkillScanInput): SkillAdmissionScan {
 export function nextSkillState(args: {
   scan: SkillAdmissionScan;
   digest: string;
-  admittedDigest: string | null;
+  /** every digest an admin admitted for this subject (the library row's, and
+   * a pinned copy's own when it was admitted at that digest) */
+  admittedDigest: string | null | ReadonlyArray<string | null>;
 }): SkillAdmissionState {
-  if (args.scan.verdict === "held" && args.admittedDigest !== null && args.admittedDigest === args.digest) {
+  const admitted: ReadonlyArray<string | null> = Array.isArray(args.admittedDigest)
+    ? (args.admittedDigest as ReadonlyArray<string | null>)
+    : [args.admittedDigest as string | null];
+  if (args.scan.verdict === "held" && admitted.some((d) => !!d && d === args.digest)) {
     return "admitted";
   }
   return args.scan.verdict;
