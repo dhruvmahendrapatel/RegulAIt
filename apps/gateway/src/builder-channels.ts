@@ -66,6 +66,7 @@ import {
   builderThreads,
   chatIdentityLinks,
   chatopsConnections,
+  desc,
   eq,
   inArray,
   isNull,
@@ -77,8 +78,9 @@ import {
   type Db,
 } from "@regulait/db";
 import { chatContentFenced, type InboundChatMessage } from "@regulait/shared";
+import { scheduleBackgroundWork } from "./background-work.js";
 import { loadVisibleAgent } from "./builder-access.js";
-import { runBuilderTurn, type TurnOutcome } from "./builder-runtime.js";
+import { onBuilderTurnResumed, runBuilderTurn, type TurnOutcome } from "./builder-runtime.js";
 import { projectPiiMode } from "./projects.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
@@ -92,6 +94,7 @@ export const BUILDER_CHANNEL_RULE_IDS = {
   refusedAmbiguous: "builder-channel-refused-ambiguous-route",
   replyPosted: "builder-channel-reply-posted",
   replyFailed: "builder-channel-reply-failed",
+  replyUndeliverable: "builder-channel-reply-undeliverable",
   turnFailed: "builder-channel-turn-failed",
   routeChanged: "builder-channel-route-changed",
 } as const;
@@ -126,44 +129,28 @@ export interface InboundResult {
 // the after-the-ack work tracker
 // ---------------------------------------------------------------------------
 
-const inflight = new WeakMap<object, Set<Promise<void>>>();
-
-/** run `fn` after the response, tracked per database handle so a closing app
- * (and a test) can wait for every turn still being answered */
-export function scheduleChannelWork(db: Db, fn: () => Promise<void>, log?: FastifyBaseLogger): void {
-  let set = inflight.get(db as object);
-  if (!set) {
-    set = new Set();
-    inflight.set(db as object, set);
-  }
-  const tracked = set;
-  const p: Promise<void> = new Promise<void>((resolve) => setImmediate(resolve))
-    .then(fn)
-    .catch((err: unknown) => {
-      log?.error({ err }, "builder channel work failed");
-    })
-    .finally(() => tracked.delete(p));
-  tracked.add(p);
-}
-
-/** wait until no channel turn is in flight for this database handle */
-export async function drainChannelWork(db: Db): Promise<void> {
-  const set = inflight.get(db as object);
-  while (set && set.size > 0) await Promise.allSettled([...set]);
-}
-
-/** how many channel turns are in flight (an ack that returned while this is
- * non-zero is the proof the turn runs after the response) */
-export function channelWorkInFlight(db: Db): number {
-  return inflight.get(db as object)?.size ?? 0;
-}
+// one tracker for all after-the-response work (background-work.ts), so a
+// closing app and a test drain channel turns and resumed turns alike
+export {
+  scheduleBackgroundWork as scheduleChannelWork,
+  drainBackgroundWork as drainChannelWork,
+  backgroundWorkInFlight as channelWorkInFlight,
+} from "./background-work.js";
 
 // ---------------------------------------------------------------------------
 // the words that go back
 // ---------------------------------------------------------------------------
 
-/** where the person continues in RegulAIt (the SPA's builder inbox) */
-export const threadLink = (threadId: string) => `/builder/inbox?tab=all&thread=${threadId}`;
+/**
+ * Where the person continues in RegulAIt: the SPA's builder inbox, under its
+ * `/ui` base. ABSOLUTE when the gateway's public origin is known — taken from
+ * the inbound request itself (scheme + Host, the same derivation the SAML/OIDC
+ * redirect URIs use, `baseUrlFor`), since there is no configured public URL —
+ * and stored with the conversation so a reply posted later (a resumed turn)
+ * links the same way. Relative (`/ui/…`) only when no origin was ever seen.
+ */
+export const threadLink = (threadId: string, origin?: string | null) =>
+  `${origin ? origin.replace(/\/+$/, "") : ""}/ui/builder/inbox?tab=all&thread=${threadId}`;
 
 export type TurnPause = "confirmation" | "approval" | null;
 
@@ -222,6 +209,14 @@ export function composeChannelReply(input: {
 /** a refused turn: the code and a link, never the refusal's detail (which
  * names governance internals a third-party workspace has no business holding) */
 export function composeChannelRefusal(error: string, link: string | null): string {
+  if (error === "thread_waiting_on_tool_step") {
+    // the one refusal the person can clear themselves — say how (a Slack DM is
+    // ONE conversation, so a pause blocks the whole DM until it is answered)
+    return (
+      "This conversation is waiting on a tool step, so I can't take a new message yet. " +
+      (link ? `Open it in RegulAIt: ${link} — then confirm or cancel the step there, and write again.` : "Open the conversation in RegulAIt, confirm or cancel the step there, and write again.")
+    );
+  }
   return link
     ? `RegulAIt refused this request (${error}). The details are in RegulAIt: ${link}`
     : `RegulAIt refused this request (${error}).`;
@@ -307,6 +302,8 @@ export async function acceptInboundMessage(
   conn: ChatOpsConnectionRow,
   msg: InboundChatMessage,
   retryNum: number | null,
+  /** the gateway's public origin as this request reached it (links in replies) */
+  origin: string | null = null,
 ): Promise<InboundResult> {
   const isTeams = msg.provider === "teams";
   // Teams outgoing webhooks post the RESPONSE BODY as the reply, so a refusal
@@ -444,6 +441,13 @@ export async function acceptInboundMessage(
       throw err;
     }
     const builderThreadId = outcome.ok ? outcome.thread.id : (outcome.threadId ?? null);
+    // where a LATER reply (a resumed turn) goes: the platform thread of the
+    // newest message, and the origin its links are built on
+    const replyTo = {
+      replyTarget: msg.replyTarget,
+      replyThreadRef: msg.replyThreadRef,
+      linkOrigin: origin ?? mapped?.linkOrigin ?? null,
+    };
     if (builderThreadId && builderThreadId !== mapped?.builderThreadId) {
       await db
         .insert(builderChannelThreads)
@@ -454,6 +458,7 @@ export async function acceptInboundMessage(
           userId: person.id,
           agentId: visible.id,
           builderThreadId,
+          ...replyTo,
         })
         .onConflictDoUpdate({
           target: [
@@ -462,12 +467,12 @@ export async function acceptInboundMessage(
             builderChannelThreads.externalThreadId,
             builderChannelThreads.userId,
           ],
-          set: { builderThreadId, agentId: visible.id, updatedAt: new Date() },
+          set: { builderThreadId, agentId: visible.id, updatedAt: new Date(), ...replyTo },
         });
     } else if (mapped) {
-      await db.update(builderChannelThreads).set({ updatedAt: new Date() }).where(eq(builderChannelThreads.id, mapped.id));
+      await db.update(builderChannelThreads).set({ updatedAt: new Date(), ...replyTo }).where(eq(builderChannelThreads.id, mapped.id));
     }
-    const link = builderThreadId ? threadLink(builderThreadId) : null;
+    const link = builderThreadId ? threadLink(builderThreadId, replyTo.linkOrigin) : null;
     let text: string;
     if (!outcome.ok) {
       text = composeChannelRefusal(outcome.error, link);
@@ -502,9 +507,32 @@ async function postReply(
   label: string,
   detail: Record<string, unknown> = {},
 ): Promise<void> {
+  await postTo(
+    db,
+    deps,
+    conn,
+    { target: msg.replyTarget, threadRef: msg.replyThreadRef, externalChannelId: msg.channelId, eventId: msg.eventId },
+    text,
+    actorUserId,
+    label,
+    detail,
+  );
+}
+
+/** post into a platform thread through the courier, and audit the outcome */
+async function postTo(
+  db: Db,
+  deps: ChannelDeps,
+  conn: ChatOpsConnectionRow,
+  where: { target: string; threadRef: string | null; externalChannelId: string; eventId: string | null },
+  text: string,
+  actorUserId: string | null,
+  label: string,
+  detail: Record<string, unknown> = {},
+): Promise<void> {
   let res: Awaited<ReturnType<ChannelPoster>>;
   try {
-    res = await deps.post(conn, { target: msg.replyTarget, threadRef: msg.replyThreadRef, text }, actorUserId, label);
+    res = await deps.post(conn, { target: where.target, threadRef: where.threadRef, text }, actorUserId, label);
   } catch (err) {
     res = { ok: false, status: 502, body: { error: err instanceof Error ? err.message : String(err) } };
   }
@@ -516,9 +544,80 @@ async function postReply(
     res.ok ? BUILDER_CHANNEL_RULE_IDS.replyPosted : BUILDER_CHANNEL_RULE_IDS.replyFailed,
     res.ok ? "allow" : "deny",
     res.ok
-      ? `${label} posted to ${conn.provider} channel ${msg.channelId}`
+      ? `${label} posted to ${conn.provider} channel ${where.externalChannelId}`
       : `${label} NOT posted to '${conn.name}': ${String(res.body.error ?? res.status)}`,
-    { ...detail, label, externalChannelId: msg.channelId, eventId: msg.eventId, ...(res.ok ? {} : { status: res.status }) },
+    {
+      ...detail,
+      label,
+      externalChannelId: where.externalChannelId,
+      ...(where.eventId ? { eventId: where.eventId } : {}),
+      ...(res.ok ? {} : { status: res.status }),
+    },
+  );
+}
+
+// ---------------------------------------------------------------------------
+// a paused turn that finished LATER (confirmed in the web app, or resumed by
+// an approval decision, or cancelled): its outcome goes back to the platform
+// thread the conversation came from
+// ---------------------------------------------------------------------------
+
+/**
+ * Post a resumed channel turn's outcome — the text the agent added after the
+ * pause, the next pause notice, or the refusal — to the platform thread the
+ * conversation lives in, through the same courier, PII fence and audit as the
+ * first reply. Teams: the courier posts through the Bot Framework connector
+ * (as it does for the first reply), so a later reply is deliverable whenever
+ * the first one was; when there is no conversation to post to (the mapping or
+ * the connection is gone or disabled) that is audited as undeliverable.
+ */
+export async function postResumedChannelTurn(
+  db: Db,
+  deps: ChannelDeps,
+  event: { threadId: string; outcome: TurnOutcome },
+): Promise<void> {
+  const [thread] = await db.select().from(builderThreads).where(eq(builderThreads.id, event.threadId));
+  if (!thread || thread.source !== "channel") return;
+  const [mapped] = await db
+    .select()
+    .from(builderChannelThreads)
+    .where(and(eq(builderChannelThreads.builderThreadId, thread.id), eq(builderChannelThreads.userId, thread.userId)))
+    .orderBy(desc(builderChannelThreads.updatedAt))
+    .limit(1);
+  const [conn] = mapped ? await db.select().from(chatopsConnections).where(eq(chatopsConnections.id, mapped.connectionId)) : [];
+  if (!mapped || !conn || !conn.enabled || !mapped.replyTarget) {
+    await audit(db, thread.userId, "builder_agent", thread.agentId, BUILDER_CHANNEL_RULE_IDS.replyUndeliverable, "deny",
+      `the resumed turn of builder thread ${thread.id} could not be posted back: ${
+        !mapped ? "no platform conversation is mapped to it" : !conn ? "its ChatOps connection was deleted" : !conn.enabled ? "its ChatOps connection is disabled" : "no reply target was recorded for it"
+      }`,
+      { builderThreadId: thread.id, connectionId: mapped?.connectionId ?? null });
+    return;
+  }
+  const link = threadLink(thread.id, mapped.linkOrigin);
+  const outcome = event.outcome;
+  let text: string;
+  if (!outcome.ok) {
+    text = composeChannelRefusal(outcome.error, link);
+  } else {
+    const [agent] = await db.select({ projectId: builderAgents.projectId }).from(builderAgents).where(eq(builderAgents.id, thread.agentId));
+    const fenced = chatContentFenced(await projectPiiMode(db, agent?.projectId ?? null));
+    // what the agent ADDED after the pause; with nothing added (a cancel, a
+    // denial it could not continue from), the note saying what happened
+    const added =
+      outcome.resumedText !== undefined ? outcome.resumedText : ([...outcome.messages].reverse().find((m) => m.role === "agent")?.content ?? "");
+    const note = [...outcome.messages].reverse().find((m) => m.role === "system")?.content ?? null;
+    const replyText = added.trim() ? added : note;
+    text = composeChannelReply({ replyText, fenced, pause: pauseOf(outcome), link });
+  }
+  await postTo(
+    db,
+    deps,
+    conn,
+    { target: mapped.replyTarget, threadRef: mapped.replyThreadRef, externalChannelId: mapped.externalChannelId, eventId: null },
+    text,
+    thread.userId,
+    "builder-channel-resumed-reply",
+    { agentId: thread.agentId, builderThreadId: thread.id, turn: outcome.ok ? "ok" : outcome.error, resumed: true },
   );
 }
 
@@ -538,7 +637,21 @@ const routeBodySchema = z
  * agent answers a channel is a workspace decision, like binding the
  * connection itself (ADR-0172 review rule).
  */
-export function registerBuilderChannelRoutes(app: FastifyInstance, db: Db): void {
+export function registerBuilderChannelRoutes(app: FastifyInstance, db: Db, deps?: ChannelDeps): void {
+  // ONE subscriber per app instance: a channel thread's paused turn that
+  // finishes later (confirmed in the web app, an approval decided, cancelled)
+  // is posted back into its platform thread — after the response that
+  // finished it, as tracked background work. Only this app's own turns (its
+  // database handle); unsubscribed when the app closes.
+  if (deps) {
+    const off = onBuilderTurnResumed((e) => {
+      if (e.db !== db || e.source !== "channel") return;
+      scheduleBackgroundWork(db, () => postResumedChannelTurn(db, deps, e), deps.log);
+    });
+    app.addHook("onClose", async () => {
+      off();
+    });
+  }
   app.get("/v1/chatops/builder-routes", async () => {
     const rows = await db
       .select({

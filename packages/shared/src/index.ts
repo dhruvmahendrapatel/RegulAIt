@@ -3026,6 +3026,7 @@ export {
   parseSlackEvent,
   parseTeamsMessage,
   stripSlackMentions,
+  escapeSlackText,
   teamsActivityFreshness,
   teamsPlainText,
   type ActivityFreshness,

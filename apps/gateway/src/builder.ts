@@ -108,7 +108,9 @@ import {
   monthStartUtc,
   pinnedSkillsForRun,
   promptTooLarge,
+  cancelBuilderStep,
   resumeBuilderStep,
+  settleLapsedApprovalPause,
   runBuilderScheduleSweep,
   runBuilderTurn,
   stepView,
@@ -1428,6 +1430,11 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     if (!viewer) return;
     const t = await ownThread(req, reply, viewer);
     if (!t) return;
+    // a pause on an approval that lapsed (expired, superseded) ends on read
+    if (await settleLapsedApprovalPause(db, t)) {
+      const [fresh] = await db.select().from(builderThreads).where(eq(builderThreads.id, t.id));
+      return threadDetail(fresh ?? t);
+    }
     return threadDetail(t);
   });
 
@@ -1491,6 +1498,27 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
         error: out.error,
         ...(out.detail ? { detail: out.detail } : {}),
         ...(fresh ? await threadDetail(fresh) : {}),
+      });
+    }
+    return threadDetail(fresh ?? out.thread);
+  });
+
+  // ADR-0173 review — the way out of a pause nobody will answer: the thread's
+  // person (or an admin) cancels the pending step. Nothing runs; the paused
+  // turn is cleared, a note is written, a pending approval it waited on is
+  // superseded, and the act is audited.
+  app.post("/v1/builder/threads/:id/steps/:stepId/cancel", async (req, reply) => {
+    const viewer = viewerOf(req, reply);
+    if (!viewer) return;
+    const { id, stepId } = stepParam.parse(req.params);
+    const out = await cancelBuilderStep(db, { threadId: id, stepId, actorUserId: viewer.userId, actorIsAdmin: viewer.isAdmin });
+    const [fresh] = await db.select().from(builderThreads).where(eq(builderThreads.id, id));
+    if (!out.ok) {
+      return reply.status(out.status).send({
+        error: out.error,
+        ...(out.detail ? { detail: out.detail } : {}),
+        // someone else's thread reads as unknown: nothing of it is returned
+        ...(fresh && out.status !== 404 && (fresh.userId === viewer.userId || viewer.isAdmin) ? await threadDetail(fresh) : {}),
       });
     }
     return threadDetail(fresh ?? out.thread);

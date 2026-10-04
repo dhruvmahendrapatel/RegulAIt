@@ -724,6 +724,18 @@ export function parseSlackEvent(rawBody: string): SlackEventParse | null {
   };
 }
 
+/**
+ * Make text INERT for Slack's `text` field (Slack's formatting rules: `&`, `<`
+ * and `>` are the control characters and must be sent as `&amp;`, `&lt;`,
+ * `&gt;`). Model output passed through this cannot produce a `<!channel>` /
+ * `<!here>` broadcast, a `<@U…>` mention, or a `<https://evil|looks-safe>`
+ * link whose label disguises its target — it is shown literally. Bare URLs
+ * stay clickable (Slack auto-links them, showing the real address).
+ */
+export function escapeSlackText(text: string): string {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
 /** Teams sends HTML: drop the `<at>bot</at>` addressing and every tag */
 export function teamsPlainText(html: string): string {
   return html
