@@ -238,10 +238,18 @@ jobs:
       # AgentCoordination.md stays a CURRENT-STATE file: one Live-status row per
       # agent, one Status line per task, inboxes acked within 12h, a line
       # budget. History lives in git. `pnpm checkin` is the only writer of a row.
-      - name: Coordination file lint (structure only — never agent staleness)
+      #
+      # The same step runs every `scripts/*.test.mjs` — `--dir scripts` scopes
+      # discovery to this directory, so an untracked nested checkout on a
+      # developer machine is never swept in. That includes the G10-G15-VERIFY
+      # guard (`basename-collisions.test.mjs`): no two tracked files in one
+      # directory may differ only by case or extension, because an
+      # extensionless import of either one breaks the build on a Windows
+      # (case-insensitive) checkout while every Linux gate stays green.
+      - name: Coordination file lint (structure only — never agent staleness) + repo filename guard
         run: |
           node scripts/coordination.mjs lint
-          pnpm exec vitest run scripts/coordination.test.mjs
+          pnpm exec vitest run --dir scripts
 
   docker-build:
     # The quickstart path must never rot: prove the compose image still builds.

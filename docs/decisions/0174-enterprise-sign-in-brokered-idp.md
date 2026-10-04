@@ -83,3 +83,32 @@ Rules as built (migration 0139 edited in place before first push):
 9. **Ops.** The unauthenticated `/auth/oidc/:id/login` is in the per-IP auth rate-limit tier and writes no audit row
    for an unknown provider. Keycloak uses its own `keycloak` database role (password `REGULAIT_KC_DB_PASSWORD`, no
    default) that owns only the `keycloak` database.
+
+## Amendment — concurrency (2026-10-04, AER-056)
+
+Rule 3's refusals were each a count taken before a separate write, so two concurrent writers could both pass and
+leave no usable break-glass admin or no enabled SSO provider. Rules as built:
+
+- **One lock.** Every writer that can reduce either door (OIDC and SAML provider disable/delete, admin-API demote and
+  deactivate, SCIM deactivation by PUT/PATCH `active:false` or DELETE) and every `PUT /v1/org/settings` (which
+  re-checks `localSignIn` / `breakGlassUserIds` / `ssoOnly` there) runs inside one transaction that first takes
+  `pg_advisory_xact_lock(6_000_000_174)` (`SIGN_IN_INVARIANT_LOCK_KEY`, `withSignInInvariant` in `break-glass.ts`).
+  An advisory lock was chosen over `SELECT … FOR UPDATE` on the org_settings row so that other org_settings writers
+  (execution control, for example) do not queue behind it, and so that no row has to exist first. Enabling a provider,
+  promoting a user and reactivating a user cannot reduce either door, so they do not take the lock.
+- **Re-read, check, write, audit — together.** Under the lock the writer re-reads org_settings and the target row,
+  re-runs the existing checks, writes, and inserts its audit row in the same transaction. The refusals keep their
+  names (`break_glass_last_admin`, `break_glass_last_sso_provider`, `break_glass_needs_sso_provider`,
+  `break_glass_needs_admin`, `invalid_break_glass_user`, `sso_only_needs_a_provider`, `last_active_admin`). The
+  ADR-0036 `sso_only` guard and the ADR-0022 last-active-admin guard share the lock. A failed audit insert rolls back
+  the mutation. The lock is released at commit or rollback.
+- **Lock order.** This lock is taken first. The audit-chain lock (6_000_000_060) is taken later, by the audit insert,
+  and never the other way round.
+- **Behaviour change.** In `PUT /v1/org/settings` the sign-in 422s are now checked after the CIDR, IP-lockout,
+  API-key-TTL, OTLP-egress and data-key checks, not before. A request that is invalid in more than one way may get a
+  different first error. Nothing is saved either way.
+- **Tests.** `zz-aer056-sign-in-invariant-race.test.ts` runs two apps on two connection pools. A barrier inside the
+  writers lets each race go ahead only when both checks have run, or when Postgres shows the second writer waiting on
+  the lock. The races covered: demote/deactivate of the two break-glass admins, OIDC and SAML disable/delete mixed,
+  SCIM against the admin API, and engaging the mode while the last provider is removed. Injected-failure cases check
+  that the audit row and the state stay consistent.

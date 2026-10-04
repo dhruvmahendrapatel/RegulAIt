@@ -362,7 +362,7 @@ export async function touchFederatedLink(db: Db, anchor: FederatedAnchor): Promi
 /** finding 6: a provider whose issuer (OIDC) or entity id (SAML) changed is a
  * different identity provider — every link and open link request made under
  * the old one goes. The caller audits the counts. */
-export async function dropProviderLinks(db: Db, ref: ProviderRef): Promise<{ identities: number; requests: number }> {
+export async function dropProviderLinks(db: Pick<Db, "delete">, ref: ProviderRef): Promise<{ identities: number; requests: number }> {
   const identities = await db
     .delete(federatedIdentities)
     .where(providerPredicate(ref, federatedIdentities))

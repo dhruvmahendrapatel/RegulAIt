@@ -1,6 +1,6 @@
 /** ADR-0173 §4 — the command palette's data rules. */
 import { describe, expect, it } from "vitest";
-import { pageItems, pushRecent, readRecent, searchPalette, type PaletteItem } from "./commandPalette";
+import { pageItems, pushRecent, readRecent, searchPalette, type PaletteItem } from "./commandPaletteModel";
 import { SUITES } from "./suites";
 
 describe("pages", () => {

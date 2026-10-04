@@ -391,7 +391,13 @@ import {
   registerOrgSettingsRoutes,
   startAuditPruneScheduler,
 } from "./org-settings.js";
-import { breakGlassLockoutRefusal, dropBreakGlassUser } from "./break-glass.js";
+import {
+  breakGlassLockoutRefusal,
+  dropBreakGlassUser,
+  signInInvariantChecked,
+  signInInvariantWritten,
+  withSignInInvariant,
+} from "./break-glass.js";
 import { registerSetupStatusRoutes } from "./setup-status.js";
 import { registerSchedulerRoutes } from "./scheduler-api.js";
 import { schedulerJobRegistry } from "./scheduler-jobs.js";
@@ -1297,13 +1303,13 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // hard-delete route.
 
   const userIdParam = z.object({ userId: z.string().uuid() });
-  const loadUser = async (userId: string) => {
-    const [row] = await db.select().from(users).where(eq(users.id, userId));
+  const loadUser = async (userId: string, x: Pick<Db, "select"> = db) => {
+    const [row] = await x.select().from(users).where(eq(users.id, userId));
     return row ?? null;
   };
   /** lockout guard: true when the org would be left with NO active admin */
-  const wouldOrphanAdmins = async (exceptUserId: string): Promise<boolean> => {
-    const admins = await db
+  const wouldOrphanAdmins = async (exceptUserId: string, x: Pick<Db, "select"> = db): Promise<boolean> => {
+    const admins = await x
       .select({ id: users.id })
       .from(users)
       .where(and(eq(users.isAdmin, true), isNull(users.disabledAt)));
@@ -1315,8 +1321,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     ruleId: string,
     reason: string,
     detail: Record<string, unknown>,
+    x: Pick<Db, "insert"> = db,
   ) =>
-    db.insert(auditLog).values({
+    x.insert(auditLog).values({
       userId: actorId ?? "00000000-0000-0000-0000-000000000000",
       objectType: "user",
       objectId: targetId,
@@ -1341,31 +1348,46 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         detail: "deactivating your own account would lock you out — another admin must do it",
       });
     }
-    if (target.isAdmin && (await wouldOrphanAdmins(userId))) {
-      return reply.status(409).send({
-        error: "last_active_admin",
-        detail: "this is the last active admin — promote another admin before deactivating them",
-      });
-    }
-    // ADR-0174 (finding 5): nor the last usable break-glass admin while email
-    // sign-in is break-glass only
-    {
-      const glass = await breakGlassLockoutRefusal(db, await loadOrgSettings(db), { kind: "user", userId });
-      if (glass) return reply.status(409).send(glass);
-    }
-    const [row] = await db
-      .update(users)
-      .set({ disabledAt: new Date() })
-      .where(eq(users.id, userId))
-      .returning({ id: users.id, disabledAt: users.disabledAt });
-    await auditUserAct(
-      req.authCtx.userId,
-      userId,
-      "user-deactivated",
-      `user '${target.email}' deactivated${body.reason ? `: ${body.reason}` : ""}`,
-      { phase: "deactivate", email: target.email, ...(body.reason ? { reason: body.reason } : {}) },
-    );
-    return row;
+    // AER-056: the two lockout guards re-read the user and count what remains
+    // under the sign-in invariant lock, and the write and its audit row commit
+    // in the same transaction — two concurrent deactivations cannot both pass
+    // a count that only one of them can afford.
+    const out = await withSignInInvariant(db, async (tx, org) => {
+      const current = await loadUser(userId, tx);
+      if (!current) return { status: 404, body: { error: "unknown_user" } } as const;
+      if (current.disabledAt) return { status: 409, body: { error: "already_disabled" } } as const;
+      if (current.isAdmin && (await wouldOrphanAdmins(userId, tx))) {
+        return {
+          status: 409,
+          body: {
+            error: "last_active_admin",
+            detail: "this is the last active admin — promote another admin before deactivating them",
+          },
+        } as const;
+      }
+      // ADR-0174 (finding 5): nor the last usable break-glass admin while email
+      // sign-in is break-glass only
+      const glass = await breakGlassLockoutRefusal(tx, org, { kind: "user", userId });
+      if (glass) return { status: 409, body: glass } as const;
+      await signInInvariantChecked("user-deactivate");
+      const [row] = await tx
+        .update(users)
+        .set({ disabledAt: new Date() })
+        .where(eq(users.id, userId))
+        .returning({ id: users.id, disabledAt: users.disabledAt });
+      await signInInvariantWritten("user-deactivate");
+      await auditUserAct(
+        req.authCtx.userId,
+        userId,
+        "user-deactivated",
+        `user '${current.email}' deactivated${body.reason ? `: ${body.reason}` : ""}`,
+        { phase: "deactivate", email: current.email, ...(body.reason ? { reason: body.reason } : {}) },
+        tx,
+      );
+      return { row: row! };
+    });
+    if (out.status !== undefined) return reply.status(out.status).send(out.body);
+    return out.row;
   });
 
   app.post("/v1/users/:userId/reactivate", async (req, reply) => {
@@ -1414,33 +1436,51 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     const target = await loadUser(userId);
     if (!target) return reply.status(404).send({ error: "unknown_user" });
     if (target.isAdmin === body.isAdmin) return reply.status(409).send({ error: "no_change" });
-    if (!body.isAdmin && target.isAdmin && !target.disabledAt && (await wouldOrphanAdmins(userId))) {
-      return reply.status(409).send({
-        error: "last_active_admin",
-        detail: "this is the last active admin — promote another admin before demoting them",
-      });
-    }
-    // ADR-0174 (finding 5): nor the last usable break-glass admin while email
-    // sign-in is break-glass only
-    if (!body.isAdmin) {
-      const glass = await breakGlassLockoutRefusal(db, await loadOrgSettings(db), { kind: "user", userId });
-      if (glass) return reply.status(409).send(glass);
-    }
-    const [row] = await db
-      .update(users)
-      .set({ isAdmin: body.isAdmin })
-      .where(eq(users.id, userId))
-      .returning({ id: users.id, isAdmin: users.isAdmin });
-    // a demoted user is no longer a break-glass admin: drop them from the list
-    const droppedFromBreakGlass = !body.isAdmin && (await dropBreakGlassUser(db, userId));
-    await auditUserAct(
-      req.authCtx.userId,
-      userId,
-      body.isAdmin ? "user-promoted-admin" : "user-demoted-admin",
-      `user '${target.email}' ${body.isAdmin ? "promoted to" : "demoted from"} admin${body.reason ? `: ${body.reason}` : ""}`,
-      { phase: "admin-flag", isAdmin: body.isAdmin, ...(body.reason ? { reason: body.reason } : {}), ...(droppedFromBreakGlass ? { droppedFromBreakGlass: true } : {}) },
-    );
-    return row;
+    /** the flag write, the break-glass list clean-up and the audit row */
+    const apply = async (x: Pick<Db, "update" | "insert">, email: string) => {
+      const [row] = await x
+        .update(users)
+        .set({ isAdmin: body.isAdmin })
+        .where(eq(users.id, userId))
+        .returning({ id: users.id, isAdmin: users.isAdmin });
+      // a demoted user is no longer a break-glass admin: drop them from the list
+      const droppedFromBreakGlass = !body.isAdmin && (await dropBreakGlassUser(x, userId));
+      if (!body.isAdmin) await signInInvariantWritten("user-demote");
+      await auditUserAct(
+        req.authCtx.userId,
+        userId,
+        body.isAdmin ? "user-promoted-admin" : "user-demoted-admin",
+        `user '${email}' ${body.isAdmin ? "promoted to" : "demoted from"} admin${body.reason ? `: ${body.reason}` : ""}`,
+        { phase: "admin-flag", isAdmin: body.isAdmin, ...(body.reason ? { reason: body.reason } : {}), ...(droppedFromBreakGlass ? { droppedFromBreakGlass: true } : {}) },
+        x,
+      );
+      return row!;
+    };
+    if (body.isAdmin) return apply(db, target.email);
+    // AER-056: a demotion re-reads the user and both counts under the sign-in
+    // invariant lock, and writes and audits in the same transaction
+    const out = await withSignInInvariant(db, async (tx, org) => {
+      const current = await loadUser(userId, tx);
+      if (!current) return { status: 404, body: { error: "unknown_user" } } as const;
+      if (!current.isAdmin) return { status: 409, body: { error: "no_change" } } as const;
+      if (!current.disabledAt && (await wouldOrphanAdmins(userId, tx))) {
+        return {
+          status: 409,
+          body: {
+            error: "last_active_admin",
+            detail: "this is the last active admin — promote another admin before demoting them",
+          },
+        } as const;
+      }
+      // ADR-0174 (finding 5): nor the last usable break-glass admin while email
+      // sign-in is break-glass only
+      const glass = await breakGlassLockoutRefusal(tx, org, { kind: "user", userId });
+      if (glass) return { status: 409, body: glass } as const;
+      await signInInvariantChecked("user-demote");
+      return { row: await apply(tx, current.email) };
+    });
+    if (out.status !== undefined) return reply.status(out.status).send(out.body);
+    return out.row;
   });
 
   // Names-only directory for the /app pickers (add a project member, name an

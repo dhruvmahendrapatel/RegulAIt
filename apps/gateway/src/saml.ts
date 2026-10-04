@@ -78,7 +78,6 @@ import {
 import { refuseIfFeatureNotLicensed } from "./licensing.js";
 import { loadOrgSettings } from "./org-settings.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
-import { countEnabledSsoProviders, SSO_ONLY_LAST_PROVIDER } from "./sso-providers.js";
 import { normalizeAssertedGroups, reconcileGroupRoles } from "./group-roles.js";
 import {
   dropProviderLinks,
@@ -93,7 +92,13 @@ import {
   touchFederatedLink,
   type ProviderRef,
 } from "./federated-identity.js";
-import { breakGlassLockoutRefusal } from "./break-glass.js";
+import {
+  providerRemovalRefusal,
+  signInInvariantChecked,
+  signInInvariantWritten,
+  withSignInInvariant,
+  type SignInInvariantSite,
+} from "./break-glass.js";
 
 export interface SamlRouteOptions {
   dataKey?: string;
@@ -980,72 +985,82 @@ export function registerSamlRoutes(app: FastifyInstance, db: Db, opts: SamlRoute
         });
       }
     }
-    // ADR-0036: the lockout guard counts OIDC + SAML together
-    if (body.enabled === false && existing.enabled) {
-      const org = await loadOrgSettings(db);
-      if (org.ssoOnly) {
-        const remaining = await countEnabledSsoProviders(db, { samlId: providerId });
-        if (remaining.total === 0) return reply.status(409).send(SSO_ONLY_LAST_PROVIDER);
-      }
-      // ADR-0174 (finding 5): nor while email sign-in is break-glass only
-      const glass = await breakGlassLockoutRefusal(db, org, { kind: "saml_provider", providerId });
-      if (glass) return reply.status(409).send(glass);
-    }
     const { spPrivateKey, ...rest } = body;
-    const [row] = await db
-      .update(samlProviders)
-      .set({
-        ...rest,
-        ...(spPrivateKey
-          ? { spPrivateKeyCiphertext: encryptSecret(opts.dataKey!, spPrivateKey) }
-          : {}),
-        updatedAt: new Date(),
-      })
-      .where(eq(samlProviders.id, providerId))
-      .returning();
-    await auditAuth(db, req.authCtx.userId, null, "saml-provider-updated", "allow",
-      `SAML provider '${existing.name}' updated: ${Object.keys(body).join(", ")}`,
-      {
-        phase: "provider-updated",
-        name: existing.name,
-        changed: Object.keys(body),
-        privateKeyRotated: Boolean(spPrivateKey),
-      },
-      "saml_provider");
-    // ADR-0174 (finding 6): a new entity id is a different identity provider —
-    // the NameIDs linked under the old one mean nothing under the new one
-    if (body.entityId !== undefined && body.entityId !== existing.entityId) {
-      const dropped = await dropProviderLinks(db, { kind: "saml", id: providerId, name: existing.name });
-      await auditAuth(db, req.authCtx.userId, providerId, "federated-identities-reset", "allow",
-        `SAML provider '${existing.name}' entity id changed: ${dropped.identities} linked identit${dropped.identities === 1 ? "y" : "ies"} and ${dropped.requests} pending link request(s) removed — each person links again on their next sign-in`,
-        { phase: "provider-updated", name: existing.name, fromEntityId: existing.entityId, toEntityId: body.entityId, ...dropped },
+    /** the write and its audit rows, on whichever handle the caller holds */
+    const apply = async (x: Pick<Db, "update" | "insert" | "delete">, site?: SignInInvariantSite) => {
+      const [row] = await x
+        .update(samlProviders)
+        .set({
+          ...rest,
+          ...(spPrivateKey
+            ? { spPrivateKeyCiphertext: encryptSecret(opts.dataKey!, spPrivateKey) }
+            : {}),
+          updatedAt: new Date(),
+        })
+        .where(eq(samlProviders.id, providerId))
+        .returning();
+      if (site) await signInInvariantWritten(site);
+      await auditAuth(x, req.authCtx.userId, null, "saml-provider-updated", "allow",
+        `SAML provider '${existing.name}' updated: ${Object.keys(body).join(", ")}`,
+        {
+          phase: "provider-updated",
+          name: existing.name,
+          changed: Object.keys(body),
+          privateKeyRotated: Boolean(spPrivateKey),
+        },
         "saml_provider");
-    }
-    return publicProvider(row!);
+      // ADR-0174 (finding 6): a new entity id is a different identity provider —
+      // the NameIDs linked under the old one mean nothing under the new one
+      if (body.entityId !== undefined && body.entityId !== existing.entityId) {
+        const dropped = await dropProviderLinks(x, { kind: "saml", id: providerId, name: existing.name });
+        await auditAuth(x, req.authCtx.userId, providerId, "federated-identities-reset", "allow",
+          `SAML provider '${existing.name}' entity id changed: ${dropped.identities} linked identit${dropped.identities === 1 ? "y" : "ies"} and ${dropped.requests} pending link request(s) removed — each person links again on their next sign-in`,
+          { phase: "provider-updated", name: existing.name, fromEntityId: existing.entityId, toEntityId: body.entityId, ...dropped },
+          "saml_provider");
+      }
+      return row!;
+    };
+    if (body.enabled !== false) return publicProvider(await apply(db));
+    // ADR-0036: the lockout guard counts OIDC + SAML together; ADR-0174
+    // (finding 5): nor while email sign-in is break-glass only. AER-056: the
+    // re-read, both guards, the write and its audit are one locked transaction.
+    const out = await withSignInInvariant(db, async (tx, org) => {
+      const [current] = await tx.select({ enabled: samlProviders.enabled }).from(samlProviders).where(eq(samlProviders.id, providerId));
+      if (!current) return { status: 404, body: { error: "unknown_provider" } } as const;
+      if (current.enabled) {
+        const refusal = await providerRemovalRefusal(tx, org, { kind: "saml_provider", providerId });
+        if (refusal) return { status: 409, body: refusal } as const;
+        await signInInvariantChecked("saml-provider-disable");
+      }
+      return { row: await apply(tx, "saml-provider-disable") };
+    });
+    if (out.status !== undefined) return reply.status(out.status).send(out.body);
+    return publicProvider(out.row);
   });
 
   app.delete("/v1/auth/saml-providers/:providerId", async (req, reply) => {
     const { providerId } = providerParam.parse(req.params);
-    const [existing] = await db
-      .select()
-      .from(samlProviders)
-      .where(eq(samlProviders.id, providerId));
-    if (!existing) return reply.status(404).send({ error: "unknown_provider" });
-    if (existing.enabled) {
-      const org = await loadOrgSettings(db);
-      if (org.ssoOnly) {
-        const remaining = await countEnabledSsoProviders(db, { samlId: providerId });
-        if (remaining.total === 0) return reply.status(409).send(SSO_ONLY_LAST_PROVIDER);
+    // AER-056: lookup, both lockout guards, delete and audit under one lock
+    const out = await withSignInInvariant(db, async (tx, org) => {
+      const [existing] = await tx
+        .select()
+        .from(samlProviders)
+        .where(eq(samlProviders.id, providerId));
+      if (!existing) return { status: 404, body: { error: "unknown_provider" } } as const;
+      if (existing.enabled) {
+        const refusal = await providerRemovalRefusal(tx, org, { kind: "saml_provider", providerId });
+        if (refusal) return { status: 409, body: refusal } as const;
+        await signInInvariantChecked("saml-provider-delete");
       }
-      // ADR-0174 (finding 5): nor while email sign-in is break-glass only
-      const glass = await breakGlassLockoutRefusal(db, org, { kind: "saml_provider", providerId });
-      if (glass) return reply.status(409).send(glass);
-    }
-    await db.delete(samlProviders).where(eq(samlProviders.id, providerId));
-    await auditAuth(db, req.authCtx.userId, null, "saml-provider-deleted", "allow",
-      `SAML provider '${existing.name}' deleted`,
-      { phase: "provider-deleted", name: existing.name },
-      "saml_provider");
+      await tx.delete(samlProviders).where(eq(samlProviders.id, providerId));
+      await signInInvariantWritten("saml-provider-delete");
+      await auditAuth(tx, req.authCtx.userId, null, "saml-provider-deleted", "allow",
+        `SAML provider '${existing.name}' deleted`,
+        { phase: "provider-deleted", name: existing.name },
+        "saml_provider");
+      return { removed: true } as const;
+    });
+    if (out.status !== undefined) return reply.status(out.status).send(out.body);
     return { removed: true };
   });
 }

@@ -75,8 +75,13 @@ import { z } from "zod";
 import { hashToken } from "./auth.js";
 import { refuseIfFeatureNotLicensed } from "./licensing.js";
 import { reconcileGroupRoles, scimAssertedGroupsFor } from "./group-roles.js";
-import { breakGlassLockoutRefusal } from "./break-glass.js";
-import { loadOrgSettings } from "./org-settings.js";
+import {
+  breakGlassLockoutRefusal,
+  signInInvariantChecked,
+  signInInvariantWritten,
+  withSignInInvariant,
+  type SignInTx,
+} from "./break-glass.js";
 
 // ---------------------------------------------------------------------------
 // the token credential
@@ -372,8 +377,9 @@ export function registerScimRoutes(app: FastifyInstance, db: Db) {
     reason: string,
     detail: Record<string, unknown>,
     effect: "allow" | "deny" = "allow",
+    x: Pick<Db, "insert"> = db,
   ) =>
-    db.insert(auditLog).values({
+    x.insert(auditLog).values({
       userId: NIL_UUID,
       objectType,
       objectId,
@@ -384,8 +390,8 @@ export function registerScimRoutes(app: FastifyInstance, db: Db) {
       reason,
     });
 
-  const loadUser = async (id: string): Promise<UserRow | null> => {
-    const [row] = await db.select().from(users).where(eq(users.id, id));
+  const loadUser = async (id: string, x: Pick<Db, "select"> = db): Promise<UserRow | null> => {
+    const [row] = await x.select().from(users).where(eq(users.id, id));
     return row ?? null;
   };
   const loadUserByEmail = async (email: string): Promise<UserRow | null> => {
@@ -415,31 +421,51 @@ export function registerScimRoutes(app: FastifyInstance, db: Db) {
    *
    * Idempotent: an already-disabled user is a no-op that still answers 200.
    */
-  /** ADR-0174 (finding 5): a connector may not deactivate the last usable
+  /**
+   * ADR-0174 (finding 5): a connector may not deactivate the last usable
    * break-glass admin while email sign-in is break-glass only — answered as a
-   * SCIM 409 before anything about the user is changed */
-  const breakGlassRefusal = async (user: UserRow): Promise<string | null> => {
-    if (user.disabledAt) return null;
-    const glass = await breakGlassLockoutRefusal(db, await loadOrgSettings(db), { kind: "user", userId: user.id });
-    return glass ? `${glass.error}: ${glass.detail}` : null;
-  };
+   * SCIM 409 before anything about the user is changed.
+   *
+   * AER-056: a SCIM deactivation runs ALL of its writes (attributes, the
+   * lifecycle event, sessions) and their audit rows inside the sign-in
+   * invariant lock, after re-reading the user and re-counting the break-glass
+   * admins — so a connector and the admin API (or two connectors) cannot both
+   * pass a count that only one of them can afford. `write` receives the
+   * transaction and the re-read user.
+   */
+  const deactivateUnderInvariant = async (
+    userId: string,
+    write: (tx: SignInTx, current: UserRow) => Promise<UserRow>,
+  ): Promise<{ refused: string } | { notFound: true } | { user: UserRow }> =>
+    withSignInInvariant(db, async (tx, org) => {
+      const current = await loadUser(userId, tx);
+      if (!current) return { notFound: true as const };
+      if (!current.disabledAt) {
+        const glass = await breakGlassLockoutRefusal(tx, org, { kind: "user", userId });
+        if (glass) return { refused: `${glass.error}: ${glass.detail}` };
+        await signInInvariantChecked("scim-deactivate");
+      }
+      return { user: await write(tx, current) };
+    });
 
   const deactivate = async (
     token: ScimTokenRow,
     user: UserRow,
     via: "patch" | "put" | "delete",
+    x: Pick<Db, "update" | "insert"> = db,
   ): Promise<UserRow> => {
     if (user.disabledAt) return user;
-    const [row] = await db
+    const [row] = await x
       .update(users)
       .set({ disabledAt: new Date() })
       .where(eq(users.id, user.id))
       .returning();
-    const revoked = await db
+    const revoked = await x
       .update(authSessions)
       .set({ revokedAt: new Date() })
       .where(and(eq(authSessions.userId, user.id), isNull(authSessions.revokedAt)))
       .returning({ id: authSessions.id });
+    await signInInvariantWritten("scim-deactivate");
     await audit(token, "user", user.id, "scim-user-deactivated",
       `SCIM token '${token.name}' deactivated user '${user.email}' (${via === "delete" ? "DELETE /Users" : "active:false"}) — ${revoked.length} live session(s) revoked; the account is disabled, not deleted`,
       {
@@ -448,13 +474,13 @@ export function registerScimRoutes(app: FastifyInstance, db: Db) {
         before: { active: true, disabledAt: null },
         after: { active: false, disabledAt: row!.disabledAt },
         sessionsRevoked: revoked.length,
-      });
+      }, "allow", x);
     return row!;
   };
 
-  const reactivate = async (token: ScimTokenRow, user: UserRow): Promise<UserRow> => {
+  const reactivate = async (token: ScimTokenRow, user: UserRow, x: Pick<Db, "update" | "insert"> = db): Promise<UserRow> => {
     if (!user.disabledAt) return user;
-    const [row] = await db
+    const [row] = await x
       .update(users)
       .set({ disabledAt: null })
       .where(eq(users.id, user.id))
@@ -465,7 +491,7 @@ export function registerScimRoutes(app: FastifyInstance, db: Db) {
         email: user.email,
         before: { active: false, disabledAt: user.disabledAt },
         after: { active: true, disabledAt: null },
-      });
+      }, "allow", x);
     return row!;
   };
 
@@ -477,6 +503,7 @@ export function registerScimRoutes(app: FastifyInstance, db: Db) {
     token: ScimTokenRow,
     user: UserRow,
     next: { email?: string; displayName?: string; externalId?: string | null },
+    x: Pick<Db, "update" | "insert"> = db,
   ): Promise<UserRow> => {
     const patch: Partial<typeof users.$inferInsert> = {};
     if (next.email && next.email !== user.email) patch.email = next.email;
@@ -485,7 +512,7 @@ export function registerScimRoutes(app: FastifyInstance, db: Db) {
       patch.scimExternalId = next.externalId;
     }
     if (Object.keys(patch).length === 0) return user;
-    const [row] = await db.update(users).set(patch).where(eq(users.id, user.id)).returning();
+    const [row] = await x.update(users).set(patch).where(eq(users.id, user.id)).returning();
     await audit(token, "user", user.id, "scim-user-updated",
       `SCIM token '${token.name}' updated user '${user.email}': ${Object.keys(patch).join(", ")}`,
       {
@@ -493,7 +520,7 @@ export function registerScimRoutes(app: FastifyInstance, db: Db) {
         changed: Object.keys(patch),
         before: { email: user.email, displayName: user.displayName, externalId: user.scimExternalId },
         after: { email: row!.email, displayName: row!.displayName, externalId: row!.scimExternalId },
-      });
+      }, "allow", x);
     return row!;
   };
 
@@ -825,19 +852,26 @@ export function registerScimRoutes(app: FastifyInstance, db: Db) {
           return scimError(reply, 409, `a user with userName '${email}' already exists`, "uniqueness");
         }
       }
+      const write = async (x: Pick<Db, "update" | "insert">, current: UserRow) => {
+        let u = await applyAttributes(token, current, {
+          email,
+          displayName: resolveScimDisplayName(body, email),
+          ...(body.externalId !== undefined ? { externalId: body.externalId } : {}),
+        }, x);
+        // `active` last, so the audit trail reads create/update then the
+        // lifecycle event rather than the other way round
+        if (body.active === false) u = await deactivate(token, u, "put", x);
+        if (body.active === true) u = await reactivate(token, u, x);
+        return u;
+      };
       if (body.active === false) {
-        const glass = await breakGlassRefusal(user);
-        if (glass) return scimError(reply, 409, glass);
+        const out = await deactivateUnderInvariant(user.id, write);
+        if ("notFound" in out) return scimError(reply, 404, "no such user");
+        if ("refused" in out) return scimError(reply, 409, out.refused);
+        user = out.user;
+      } else {
+        user = await write(db, user);
       }
-      user = await applyAttributes(token, user, {
-        email,
-        displayName: resolveScimDisplayName(body, email),
-        ...(body.externalId !== undefined ? { externalId: body.externalId } : {}),
-      });
-      // `active` last, so the audit trail reads create/update then the
-      // lifecycle event rather than the other way round
-      if (body.active === false) user = await deactivate(token, user, "put");
-      if (body.active === true) user = await reactivate(token, user);
       return scimSend(reply, 200, scimUser(user));
     });
 
@@ -949,17 +983,24 @@ export function registerScimRoutes(app: FastifyInstance, db: Db) {
           return scimError(reply, 409, `a user with userName '${attrs.email}' already exists`, "uniqueness");
         }
       }
+      const write = async (x: Pick<Db, "update" | "insert">, current: UserRow) => {
+        let u = await applyAttributes(token, current, attrs, x);
+        // `active:false` on an ALREADY-disabled user is a 200 no-op — `deactivate`
+        // returns the row untouched and writes no second audit event. Connectors
+        // retry aggressively; a second 409 or a duplicated deactivation event
+        // would be noise at best and a stuck sync at worst.
+        if (activeTarget === false) u = await deactivate(token, u, "patch", x);
+        if (activeTarget === true) u = await reactivate(token, u, x);
+        return u;
+      };
       if (activeTarget === false) {
-        const glass = await breakGlassRefusal(user);
-        if (glass) return scimError(reply, 409, glass);
+        const out = await deactivateUnderInvariant(user.id, write);
+        if ("notFound" in out) return scimError(reply, 404, "no such user");
+        if ("refused" in out) return scimError(reply, 409, out.refused);
+        user = out.user;
+      } else {
+        user = await write(db, user);
       }
-      user = await applyAttributes(token, user, attrs);
-      // `active:false` on an ALREADY-disabled user is a 200 no-op — `deactivate`
-      // returns the row untouched and writes no second audit event. Connectors
-      // retry aggressively; a second 409 or a duplicated deactivation event
-      // would be noise at best and a stuck sync at worst.
-      if (activeTarget === false) user = await deactivate(token, user, "patch");
-      if (activeTarget === true) user = await reactivate(token, user);
       return scimSend(reply, 200, scimUser(user));
     });
 
@@ -983,11 +1024,9 @@ export function registerScimRoutes(app: FastifyInstance, db: Db) {
       const token = tokenOf(req);
       const p = idParam.safeParse(req.params);
       if (!p.success) return scimError(reply, 404, "no such user");
-      const user = await loadUser(p.data.id);
-      if (!user) return scimError(reply, 404, "no such user");
-      const glass = await breakGlassRefusal(user);
-      if (glass) return scimError(reply, 409, glass);
-      await deactivate(token, user, "delete");
+      const out = await deactivateUnderInvariant(p.data.id, (tx, current) => deactivate(token, current, "delete", tx));
+      if ("notFound" in out) return scimError(reply, 404, "no such user");
+      if ("refused" in out) return scimError(reply, 409, out.refused);
       return reply.status(204).header("content-type", SCIM_CONTENT_TYPE).send();
     });
 
