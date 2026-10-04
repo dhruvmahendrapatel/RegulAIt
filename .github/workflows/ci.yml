@@ -338,11 +338,11 @@ jobs:
 
       - run: pnpm --filter @regulait/web exec playwright install --with-deps chromium
 
-      # phase6-agent-builder (ADR-0172): a non-admin builds an agent from a
+      # phase6-agent-builder (ADR-0172) and phase6-builder-tools (ADR-0173 §1, governed tool use against a real MCP server): a non-admin builds an agent from a
       # template, chats with it through the governed core, hits its spend
       # limit; an admin reads Agent usage; the /models portal runs a model.
       - name: SPA journeys — developer (phase1), admin (phase2) and agent builder (phase6) personas
-        run: pnpm --filter @regulait/web exec playwright test e2e/phase1.spec.ts e2e/phase2.spec.ts e2e/phase6-agent-builder.spec.ts --reporter=list,github
+        run: pnpm --filter @regulait/web exec playwright test e2e/phase1.spec.ts e2e/phase2.spec.ts e2e/phase6-agent-builder.spec.ts e2e/phase6-builder-tools.spec.ts --reporter=list,github
 
       # The mocked UI suite (every *.mock.spec.ts: the intake wizard's retry and
       # start-over journeys, the axe scans of each intake stage in both themes,

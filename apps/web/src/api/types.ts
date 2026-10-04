@@ -934,7 +934,62 @@ export interface BuilderThreadSummary {
   status: BuilderThreadStatus;
   source: "chat" | "schedule" | "channel";
   lastMessagePreview: string;
+  /** ADR-0173: the tool step the thread is paused on, if any */
+  pendingStep?: { id: string; status: BuilderToolStepStatus; displayName: string } | null;
   updatedAt: string;
+}
+
+/** ADR-0173 — a tool step's lifecycle. "pending_confirmation" is the agent's
+ * own "Ask first" (the person in the thread decides); "pending_approval" is an
+ * organisation approval in the approvals queue. */
+export type BuilderToolStepStatus =
+  | "pending_confirmation"
+  | "pending_approval"
+  | "running"
+  | "done"
+  | "denied"
+  | "refused"
+  | "error";
+
+/** one governed tool call a turn made — arguments are a REDACTED preview */
+export interface BuilderToolStep {
+  id: string;
+  messageId: string;
+  turn: number;
+  seq: number;
+  kind: "mcp_tool" | "connector" | "unknown";
+  refId: string | null;
+  name: string;
+  displayName: string;
+  provider: string | null;
+  arguments: unknown;
+  argumentsDigest: string;
+  requiresConfirmation: boolean;
+  status: BuilderToolStepStatus;
+  approvalId: string | null;
+  /** null when withheld by PII / guardrail policy (see resultWithheld) */
+  resultPreview: string | null;
+  resultWithheld: boolean;
+  outcomeCode: string | null;
+  outcomeDetail: string | null;
+  costUsd: number | null;
+  latencyMs: number | null;
+  auditLogId: string | null;
+  traceId: string | null;
+  createdAt: string;
+  finishedAt: string | null;
+}
+
+/** the pause a turn stopped on */
+export interface BuilderPendingStep {
+  stepId: string;
+  status: "pending_confirmation" | "pending_approval";
+  toolName: string;
+  displayName: string;
+  approvalId: string | null;
+  approverName: string | null;
+  /** present on the thread detail: the step itself (with its arguments) */
+  step?: BuilderToolStep;
 }
 
 export interface BuilderMessage {
@@ -945,6 +1000,8 @@ export interface BuilderMessage {
   costUsd: number | null;
   latencyMs: number | null;
   createdAt: string;
+  /** ADR-0173: the tool calls this (agent) message made, in order */
+  steps?: BuilderToolStep[];
 }
 
 export interface BuilderSkillSummary {

@@ -3,7 +3,7 @@
  * against the mocked Builder API.
  */
 import { expect, test } from "@playwright/test";
-import { expectAxeClean, installBuilderMock, sent } from "./builder-fixtures";
+import { expectAxeClean, installBuilderMock, PROJECT, sent } from "./builder-fixtures";
 
 test.describe("ADR-0172: templates", () => {
   test("cards by RegulAIt → detail explains the agent → Create agent seeds it from the template", async ({ page }) => {
@@ -34,7 +34,9 @@ test.describe("ADR-0172: templates", () => {
     await expect(dialog.getByLabel("Name your agent")).toHaveValue("AI intake reviewer");
     await dialog.getByRole("button", { name: "Create agent" }).click();
     await expect(page).toHaveURL(/\/ui\/builder\/agents\/aaaaaaaa-.*setup=1/);
-    expect(sent(st, "POST", "/v1/builder/agents")).toEqual([{ name: "AI intake reviewer", connectionFormat: "shared", computerUse: false, templateId: "ai-intake-reviewer" }]);
+    expect(sent(st, "POST", "/v1/builder/agents")).toEqual([
+      { name: "AI intake reviewer", connectionFormat: "shared", computerUse: false, projectId: PROJECT, templateId: "ai-intake-reviewer" },
+    ]);
     await expect(page.getByRole("group", { name: "Agent setup" }).getByText("Assess an AI use case")).toBeVisible();
 
     // the template's schedule arrives OFF (nothing spends until the owner turns it on)

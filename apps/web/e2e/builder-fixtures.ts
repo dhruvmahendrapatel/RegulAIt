@@ -39,12 +39,48 @@ export interface MockOptions {
   /** the caller is no longer entitled to the agent's model: chat refuses AFTER
    * recording the thread (403 agent_denied + threadId), like the gateway */
   denyModel?: boolean;
-  /** the org's attribution mandate is on: an agent with no project is refused
-   * (409 attribution_required, with the gateway's pointer to Advanced) */
-  attributionRequired?: boolean;
+  /** the projects GET /v1/projects lists (default: one, "Governance programme");
+   * owner rule: every agent bills to one */
+  projects?: Array<{ id: string; name: string }>;
+  /** ADR-0173: the agent calls a tool on every chat turn — "plain" runs it,
+   * "ask_first" pauses for the person (pending_confirmation), "approval"
+   * pauses in the approvals queue (pending_approval, approver Riley Reviewer) */
+  toolMode?: "plain" | "ask_first" | "approval";
+}
+
+/** ADR-0173 — a tool step as the gateway's stepView sends it */
+export function toolStep(over: Partial<Json> = {}): Json {
+  return {
+    id: uid("step"),
+    messageId: "",
+    turn: 1,
+    seq: 1,
+    kind: "mcp_tool",
+    refId: TOOL_SEARCH,
+    name: "policy-docs__search_policies",
+    displayName: "policy-docs / search_policies",
+    provider: "policy-docs",
+    arguments: { query: "vendor risk", limit: 5, apiKey: "[REDACTED]" },
+    argumentsDigest: "a".repeat(64),
+    requiresConfirmation: false,
+    status: "done",
+    approvalId: null,
+    resultPreview: "3 policies matched: Vendor risk, Data retention, AI use",
+    resultWithheld: false,
+    outcomeCode: null,
+    outcomeDetail: null,
+    costUsd: 0.01,
+    latencyMs: 240,
+    auditLogId: null,
+    traceId: null,
+    createdAt: new Date().toISOString(),
+    finishedAt: new Date().toISOString(),
+    ...over,
+  };
 }
 
 export const PROJECT = "66666666-0000-4000-8000-000000000001";
+export const PROJECT_2 = "66666666-0000-4000-8000-000000000002";
 
 export interface Recorded {
   method: string;
@@ -70,7 +106,8 @@ function agent(over: Partial<Json>): Json {
     instructions: "",
     connectionFormat: "shared",
     computerUse: false,
-    project: null,
+    // owner rule (2026-10-04): every agent bills to a project
+    project: { id: PROJECT, name: "Governance programme" },
     sharedUserIds: [],
     sharedUsers: [],
     tools: [],
@@ -215,6 +252,8 @@ export function seedState(opts: MockOptions = {}) {
     skills,
     templates,
     integrations,
+    /** ADR-0173: the pause each thread waits on (thread id -> BuilderPendingStep) */
+    pending: {} as Record<string, Json>,
     calls: [] as Recorded[],
   };
 }
@@ -267,8 +306,9 @@ export async function installBuilderMock(page: Page, opts: MockOptions = {}): Pr
       return json(route, { users: [{ id: ME, name: "Avery Admin" }, { id: DREW, name: "Drew Reviewer" }, { id: CORA, name: "Cora Analyst" }] });
     if (p === "/v1/model-providers/status") return json(route, { providers: { anthropic: { configured: true }, openai: { configured: true } } });
     if (p === `/v1/users/${ME}/model-credentials`) return json(route, { credentials: [] });
-    if (p === "/v1/projects") return json(route, { projects: [{ id: PROJECT, name: "Governance programme" }] });
+    if (p === "/v1/projects") return json(route, { projects: st.opts.projects ?? [{ id: PROJECT, name: "Governance programme" }] });
 
+    if (p === "/v1/model-policy") return json(route, { scope: "you", updatedAt: null, rules: [] });
     if (!p.startsWith("/v1/builder")) return json(route, {});
     const b = p.slice("/v1/builder".length);
     if (st.opts.fail?.some((f) => b === f || b.startsWith(f + "/") || b.startsWith(f + "?")) && method === "GET")
@@ -280,6 +320,8 @@ export async function installBuilderMock(page: Page, opts: MockOptions = {}): Pr
     if (b === "/agents" && method === "POST") {
       const tpl = body.templateId ? st.templates.find((t: Json) => t.id === body.templateId) : null;
       if (body.templateId && !tpl) return json(route, { error: "unknown_template" }, 404);
+      if (!body.projectId) return json(route, { error: "project_required", detail: "every agent bills its spend to a project; choose one you are a member of" }, 422);
+      const project = { id: body.projectId, name: (st.opts.projects ?? [{ id: PROJECT, name: "Governance programme" }]).find((x) => x.id === body.projectId)?.name ?? "Project" };
       // a template's sub-agents become private child agents on the same model
       const children = (tpl?.subagents ?? []).map((sub: Json) => agent({ name: sub.name, description: sub.description, instructions: `# ${sub.name}\n\n${sub.description}` }));
       st.agents.push(...children);
@@ -296,11 +338,13 @@ export async function installBuilderMock(page: Page, opts: MockOptions = {}): Pr
         // seeded schedules start OFF: nothing spends until the owner turns one on
         schedules: tpl ? tpl.schedules.map((x: Json) => ({ id: uid("scheeeee"), ...x, enabled: false, awaitingOwner: false, lastEditedByName: "Avery Admin", nextRunAt: null, lastRunAt: null })) : [],
         ...(body.modelAgentId === MODEL_B ? { modelAgent: { id: MODEL_B, name: "gpt-review", provider: "openai", model: "gpt-4.1" } } : {}),
+        project,
       });
       st.agents.unshift(a);
       return json(route, { agent: detailOf(a) }, 201);
     }
     if (b === "/agents/import" && method === "POST") {
+      if (!body.projectId) return json(route, { error: "project_required", detail: "every agent bills its spend to a project; choose one you are a member of" }, 422);
       const a = agent({ name: body.bundle.agent.name, description: body.bundle.agent.description ?? "" });
       st.agents.unshift(a);
       return json(route, { agent: detailOf(a), dropped: [{ kind: "connector", name: "Payroll export", reason: "not_entitled" }] }, 201);
@@ -317,6 +361,8 @@ export async function installBuilderMock(page: Page, opts: MockOptions = {}): Pr
         if (!a.canEdit) return json(route, { error: "not_agent_editor", detail: "only the agent's owner or an admin can change it" }, 403);
         if ("connectionFormat" in body)
           return json(route, { error: "connection_format_locked", detail: "the connection format is fixed when an agent is created; create a new agent to change it" }, 409);
+        if ("projectId" in body && !body.projectId)
+          return json(route, { error: "project_required", detail: "every agent bills its spend to a project; choose one you are a member of" }, 422);
         if (body.color !== undefined && !PALETTE.includes(String(body.color).toLowerCase()))
           return json(route, { error: "validation", issues: [{ path: "color", message: `color must be one of ${PALETTE.join(", ")}` }] }, 400);
         Object.assign(a, body, body.color ? { color: String(body.color).toLowerCase() } : {});
@@ -452,16 +498,8 @@ export async function installBuilderMock(page: Page, opts: MockOptions = {}): Pr
             402,
           );
         if (!a.modelAgent) return json(route, { error: "builder_agent_has_no_model", detail: "choose a model for this agent first" }, 409);
-        if (st.opts.attributionRequired && !a.project)
-          return json(
-            route,
-            {
-              error: "attribution_required",
-              detail: "dispatch attribution is required: name a project — choose a project for this agent in Configure → Advanced",
-              threadId: body.threadId ?? undefined,
-            },
-            409,
-          );
+        // owner rule: a legacy agent with no project is refused before anything runs
+        if (!a.project) return json(route, { error: "builder_agent_needs_project", detail: "choose a project in Configure → Advanced" }, 409);
         if (!th) {
           th = { id: uid("th"), agentId: a.id, agentName: a.name, agentColor: a.color, title: body.message.replace(/\s+/g, " ").trim().slice(0, 80), status: "active", source: "chat", lastMessagePreview: "", updatedAt: "" };
           st.threads.unshift(th);
@@ -478,16 +516,44 @@ export async function installBuilderMock(page: Page, opts: MockOptions = {}): Pr
           Object.assign(th, { status: "needs_attention", lastMessagePreview: note, updatedAt: now });
           return json(route, { error: "agent_denied", detail: reason, threadId: th.id }, 403);
         }
-        const reply = `Here is what I found about: ${body.message}`;
+        if (st.pending[th.id]) {
+          return json(route, { error: "thread_waiting_on_tool_step", detail: "this conversation is waiting on a tool call; confirm or deny it (or wait for its approver) first", threadId: th.id }, 409);
+        }
+        const mode = st.opts.toolMode;
+        const reply = mode === "plain" ? "Three policies cover vendor risk." : mode ? "" : `Here is what I found about: ${body.message}`;
+        const agentMsgId = uid("msg");
+        const step =
+          mode === "plain"
+            ? toolStep({ messageId: agentMsgId })
+            : mode === "ask_first"
+              ? toolStep({ messageId: agentMsgId, status: "pending_confirmation", requiresConfirmation: true, resultPreview: null, costUsd: null, latencyMs: null, finishedAt: null })
+              : mode === "approval"
+                ? toolStep({ messageId: agentMsgId, status: "pending_approval", approvalId: "77777777-0000-4000-8000-000000000001", resultPreview: null, costUsd: null, latencyMs: null, finishedAt: null, outcomeCode: "approval_required" })
+                : null;
         const msgs = [
-          { id: uid("msg"), role: "user", content: body.message, model: null, costUsd: null, latencyMs: null, createdAt: now },
-          { id: uid("msg"), role: "agent", content: reply, model: a.modelAgent?.model ?? null, costUsd: 0.0042, latencyMs: 1800, createdAt: now },
+          { id: uid("msg"), role: "user", content: body.message, model: null, costUsd: null, latencyMs: null, createdAt: now, steps: [] },
+          { id: agentMsgId, role: "agent", content: reply, model: a.modelAgent?.model ?? null, costUsd: 0.0042, latencyMs: 1800, createdAt: now, steps: step ? [step] : [] },
         ];
         st.messages[th.id]!.push(...msgs);
         th.lastMessagePreview = reply.slice(0, 160);
         th.updatedAt = now;
         a.spentThisMonthUsd = Number((a.spentThisMonthUsd + 0.0042).toFixed(6));
-        return json(route, { thread: th, messages: msgs });
+        let pending: Json = null;
+        if (step && step.status !== "done") {
+          pending = {
+            stepId: step.id,
+            status: step.status,
+            toolName: step.name,
+            displayName: step.displayName,
+            approvalId: step.approvalId,
+            approverName: step.status === "pending_approval" ? "Riley Reviewer" : null,
+            step,
+          };
+          st.pending[th.id] = pending;
+          th.status = "needs_attention";
+          th.pendingStep = { id: step.id, status: step.status, displayName: step.displayName };
+        }
+        return json(route, { thread: th, messages: msgs, pending });
       }
     }
     // ---- threads
@@ -503,7 +569,50 @@ export async function installBuilderMock(page: Page, opts: MockOptions = {}): Pr
       // someone else's thread reads as unknown (404), like the gateway
       if (!th || th.foreign) return json(route, { error: "unknown_thread" }, 404);
       if (method === "PATCH") th.status = body.status;
-      return json(route, method === "PATCH" ? { thread: th } : { thread: th, messages: st.messages[th.id] ?? [] });
+      return json(route, method === "PATCH" ? { thread: th } : { thread: th, messages: st.messages[th.id] ?? [], pending: st.pending[th.id] ?? null });
+    }
+    // ADR-0173 — the thread owner answers an "Ask first" pause
+    if ((m = /^\/threads\/([^/]+)\/steps\/([^/]+)\/confirm$/.exec(b)) && method === "POST") {
+      const th = st.threads.find((t) => t.id === m![1]);
+      if (!th || th.foreign) return json(route, { error: "unknown_thread" }, 404);
+      const waiting = st.pending[th.id];
+      if (!waiting || waiting.stepId !== m[2] || waiting.status !== "pending_confirmation")
+        return json(route, { error: "step_not_pending", detail: "this step is not waiting for you", thread: th, messages: st.messages[th.id] ?? [], pending: waiting ?? null }, 409);
+      const msg = (st.messages[th.id] ?? []).find((x: Json) => (x.steps ?? []).some((s: Json) => s.id === waiting.stepId));
+      const step = msg.steps.find((s: Json) => s.id === waiting.stepId);
+      const now = new Date().toISOString();
+      if (body.decision === "approve") {
+        Object.assign(step, { status: "done", resultPreview: "3 policies matched: Vendor risk, Data retention, AI use", costUsd: 0.01, latencyMs: 240, finishedAt: now });
+        msg.content = "The tool found three policies: Vendor risk, Data retention and AI use.";
+      } else {
+        Object.assign(step, { status: "denied", outcomeCode: "declined_by_user", outcomeDetail: "the person declined this call", finishedAt: now });
+        msg.content = "Understood — I won't search the policies.";
+      }
+      delete st.pending[th.id];
+      th.pendingStep = null;
+      th.status = "active";
+      th.lastMessagePreview = msg.content;
+      return json(route, { thread: th, messages: st.messages[th.id] ?? [], pending: null });
+    }
+    // ADR-0173 review — the thread owner cancels a pause (a confirmation, or an
+    // approval nobody decides): nothing runs, a system note says so
+    if ((m = /^\/threads\/([^/]+)\/steps\/([^/]+)\/cancel$/.exec(b)) && method === "POST") {
+      const th = st.threads.find((t) => t.id === m![1]);
+      if (!th || th.foreign) return json(route, { error: "unknown_thread" }, 404);
+      const waiting = st.pending[th.id];
+      if (!waiting || waiting.stepId !== m[2])
+        return json(route, { error: "step_not_pending", detail: "this step is not waiting", thread: th, messages: st.messages[th.id] ?? [], pending: waiting ?? null }, 409);
+      const msg = (st.messages[th.id] ?? []).find((x: Json) => (x.steps ?? []).some((s: Json) => s.id === waiting.stepId));
+      const step = msg.steps.find((s: Json) => s.id === waiting.stepId);
+      const now = new Date().toISOString();
+      Object.assign(step, { status: "refused", outcomeCode: "cancelled_by_user", outcomeDetail: "cancelled by the person in the thread; the tool did not run", finishedAt: now });
+      const note = `Cancelled by you: '${step.displayName}' did not run. Send a message to continue.`;
+      st.messages[th.id]!.push({ id: uid("msg"), role: "system", content: note, model: null, costUsd: null, latencyMs: null, createdAt: now, steps: [] });
+      delete st.pending[th.id];
+      th.pendingStep = null;
+      th.status = "needs_attention";
+      th.lastMessagePreview = note;
+      return json(route, { thread: th, messages: st.messages[th.id] ?? [], pending: null });
     }
     // ---- skills
     if (b === "/skills" && method === "GET") return json(route, { skills: st.skills.map(({ body: _b, ...k }: Json) => k) });

@@ -172,6 +172,10 @@ export const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // point: what is in the payload vs. where the call may go vs. who may
       // make it under which attributes.
       { label: "Guardrails", to: "/admin/guardrails" },
+      // ADR-0173 §3 — the same question asked of the MODEL: which bindings each
+      // feature (chat, builder, copilot, …) may call, with a default per feature.
+      // It only subtracts from a person's grants, like ABAC beside it.
+      { label: "Model policy", to: "/admin/model-policy" },
       // ADR-0048 — the CHANGE-CONTROL layer under the gates. The gates decide
       // whether a call may proceed; this decides which VERSION of the
       // governing artifact it proceeds under, with a canary and a one-click

@@ -3020,6 +3020,19 @@ export {
   teamsActivityForCard,
   teamsSignature,
   verifyChatSignature,
+  // ADR-0173 §2 — inbound conversations to builder agents
+  CHANNEL_MESSAGE_MAX_CHARS,
+  SLACK_RETRY_NUM_HEADER,
+  parseSlackEvent,
+  parseTeamsMessage,
+  stripSlackMentions,
+  escapeSlackText,
+  teamsActivityFreshness,
+  teamsPlainText,
+  type ActivityFreshness,
+  type InboundChatMessage,
+  type SlackEventParse,
+  type TeamsMessageParse,
   type ApprovalCard,
   type ApprovalCardAction,
   type ApprovalCardInput,
@@ -3804,6 +3817,27 @@ export {
   type UseCaseReviewView,
 } from "./review-policy.js";
 
+// ADR-0173 §3 — the model allow-list matrix (feature × binding, per data class)
+export {
+  MODEL_NOT_ALLOWED_FOR_FEATURE,
+  MODEL_POLICY_DATA_CLASSES,
+  MODEL_POLICY_FEATURE_LABELS,
+  MODEL_POLICY_FEATURES,
+  MODEL_POLICY_LIMITS,
+  modelPolicyDefault,
+  modelPolicyPutSchema,
+  modelPolicyRuleFor,
+  modelPolicyRuleSchema,
+  modelPolicyVerdict,
+  type ModelPolicy,
+  type ModelPolicyBinding,
+  type ModelPolicyDataClass,
+  type ModelPolicyFeature,
+  type ModelPolicyPut,
+  type ModelPolicyRule,
+  type ModelPolicyVerdict,
+} from "./model-policy.js";
+
 // ---------------------------------------------------------------------------
 // ADR-0172 — the agent builder's request vocabulary, bundle format, SKILL.md
 // parser and schedule cadence arithmetic.
@@ -3843,4 +3877,12 @@ export {
   type BuilderCadenceValue,
   type BuilderCreateAgent,
   type BuilderUpdateAgent,
+} from "./builder.js";
+// ADR-0173 — governed tool use in builder agents: the tool-step lifecycle and
+// the thread owner's answer to an "Ask first" pause.
+export {
+  BUILDER_TOOL_STEP_STATUS_VALUES,
+  builderConfirmStepSchema,
+  type BuilderConfirmStep,
+  type BuilderToolStepStatusValue,
 } from "./builder.js";

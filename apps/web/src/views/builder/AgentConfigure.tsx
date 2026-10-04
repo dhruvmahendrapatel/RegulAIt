@@ -25,8 +25,8 @@ import s from "./builder.module.css";
 export const CHANNELS: Array<{ provider: BuilderChannelProvider; name: string; logo: string | null; sub: string }> = [
   { provider: "slack", name: "Slack", logo: "slack", sub: "Chat with the agent in Slack" },
   { provider: "teams", name: "Microsoft Teams", logo: "teams", sub: "Chat with the agent in Teams" },
-  { provider: "outlook", name: "Outlook", logo: "microsoft", sub: "Start the agent when an email arrives" },
-  { provider: "email", name: "Email", logo: null, sub: "Start the agent from a forwarding address" },
+  { provider: "outlook", name: "Outlook", logo: "microsoft", sub: "Send-only: an incoming email can't prove who sent it, so it never starts the agent" },
+  { provider: "email", name: "Email", logo: null, sub: "Send-only: an incoming email can't prove who sent it, so it never starts the agent" },
 ];
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -337,7 +337,7 @@ export function ConfigurePanel(props: { agent: BuilderAgentDetail; onOpenSkills:
 
       <Section title="Channels" icon={Icon.chat()} count={agent.channels.length || undefined}>
         <p className={s.small} style={{ margin: 0 }}>
-          Choose where people can reach this agent. A channel uses one of the workspace's chat connections; conversations arriving over channels come in a later release.
+          Choose where people can reach this agent. A channel uses one of the workspace's chat connections. In Slack and Teams, people whose chat account an admin has linked can mention the agent and get a reply in the thread; it runs with their own access, and anything needing a confirmation is finished here in RegulAIt. Email is send-only.
         </p>
         <ChannelRows agent={agent} disabled={ro} />
       </Section>
@@ -469,7 +469,9 @@ export function ConfigurePanel(props: { agent: BuilderAgentDetail; onOpenSkills:
           {Icon.plus(14)} Add connection
         </button>
         <p className={s.small} style={{ margin: 0 }}>
-          Today the agent is told about these tools and can describe how it would use them; calling them on its own comes in a later release.
+          The agent calls these tools on its own during a conversation. Every call runs as the person chatting, with their own access and your
+          organisation's policies; a connection marked Ask first waits for that person to approve the exact call, and organisation approval rules
+          still apply.
         </p>
       </Section>
 
@@ -653,19 +655,25 @@ export function ConfigurePanel(props: { agent: BuilderAgentDetail; onOpenSkills:
           placeholder="Your default model"
           {...(ro ? { disabledReason: "Only the owner or an admin can change the model." } : {})}
           testId="agent-model"
+          feature="builder"
         />
         <Field label="Bill spend to project">
           <Select
             value={agent.project?.id ?? ""}
             disabled={ro || patch.isPending}
             onChange={(e) => {
-              const next = e.target.value || null;
-              if (next === (agent.project?.id ?? null)) return;
+              const next = e.target.value;
+              // owner rule: a project can be changed, never cleared
+              if (!next || next === agent.project?.id) return;
               const label = projectOptions.find((p) => p.id === next)?.name;
-              patch.mutate({ body: { projectId: next }, msg: next ? `Spend now bills to ${label ?? "the project"}` : "Spend no longer bills to a project" });
+              patch.mutate({ body: { projectId: next }, msg: `Spend now bills to ${label ?? "the project"}` });
             }}
           >
-            <option value="">No project</option>
+            {!agent.project && (
+              <option value="" disabled>
+                Choose a project
+              </option>
+            )}
             {projectOptions.map((p) => (
               <option key={p.id} value={p.id}>
                 {p.name}
@@ -674,7 +682,7 @@ export function ConfigurePanel(props: { agent: BuilderAgentDetail; onOpenSkills:
           </Select>
         </Field>
         <p className={s.small} style={{ margin: 0 }}>
-          The agent&apos;s replies count toward this project&apos;s spend and budget. You can choose projects you&apos;re a member of; people who chat with it must be members too.
+          Every agent bills to a project: its replies and tool calls count toward that project&apos;s spend and budget. You can choose projects you&apos;re a member of; people who chat with it must be members too.
         </p>
         <Field label="Monthly spend limit (USD)" error={limitErr}>
           <Input inputMode="decimal" value={limit} onChange={(e) => setLimit(e.target.value)} placeholder="No limit" disabled={ro} />

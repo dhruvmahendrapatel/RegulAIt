@@ -68,3 +68,27 @@ a command palette).
   on their own work; policy surfaces stay admin.
 - An autonomous loop multiplies spend and side effects, so every step is bounded and every side effect
   is governed exactly as if the person had made the call themselves — the builder adds no new authority.
+
+## Amendment — batch 2a built and reviewed (2026-10-04)
+
+Migrations 0136 (tool steps, encrypted paused turn), 0137 (inbound channel threads) and 0138 (model policy).
+
+- **Tool loop.** The toolbox is re-checked for the person each turn runs as, and every call goes through the governed MCP
+  path or `executeGovernedConnectorCall` (extracted unchanged from the connector route). Model steps are capped by the
+  org's worker-turn settings and tool calls at 12 per turn. The entitlement (kill switch included) and the monthly limit
+  are re-checked before every step and tool call, and tool costs count toward the agent's spend. Connector writes whose
+  execution posture is "require approval" are still refused; there is no connector approval path yet.
+- **Pauses.** "Ask first" goes to the thread's person; organisation approvals go to the queue. Each queued call is pinned
+  to its tool's kind and id, so a resume never runs a different tool (`tool_changed_since_requested`,
+  `tool_no_longer_available`), and clashing tool names carry a hash of their identity. A deny always goes through. A
+  gate refusal on resume, an exception, or an expired or superseded approval ends the step and clears the pause. The
+  thread owner or an admin can cancel a pending step. Pause state and step status are written in one transaction. An
+  approval decision resumes the turn as tracked background work, not inside the approver's request.
+- **Channels.** Slack events and Teams messages reach agent threads as the linked person. A turn resumed in the web app
+  is posted back to its Slack/Teams thread. Links are absolute under `/ui`, and replies are escaped for Slack and sent as
+  plain text to Teams.
+- **Model policy.** Enforced in `agentDecision` and the dispatch core for chat, compat, copilot, intake, builder (turn
+  and default model), evaluations (including red-team sequence probes), orchestration and decomposition. A refusal is
+  `model_not_allowed_for_feature`. Builder model pickers show what the policy allows there.
+- **Disclosure.** The agent's system prompt gives only a count of the toolbox tools the person may not use, never their
+  names.

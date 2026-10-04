@@ -33,6 +33,9 @@ export const BUILDER_LIMITS = {
   systemPromptBytes: 48 * 1024,
   /** schedule runs per agent owner in one sweep pass (the rest stay due) */
   sweepRunsPerOwner: 10,
+  /** ADR-0173: governed tool calls one turn may make (model steps are bounded
+   * separately by the org's worker-turn settings) */
+  toolCallsPerTurn: 12,
 } as const;
 
 /**
@@ -69,6 +72,10 @@ export const builderCreateAgentSchema = z
     connectionFormat: z.enum(BUILDER_CONNECTION_FORMAT_VALUES),
     computerUse: z.boolean(),
     templateId: z.string().min(1).max(80).optional(),
+    /** owner rule (2026-10-04): every builder agent bills to a project. Optional
+     * in the parser only so the route can refuse a missing one by name
+     * (422 project_required). */
+    projectId: z.string().uuid().optional(),
   })
   .strict();
 export type BuilderCreateAgent = z.infer<typeof builderCreateAgentSchema>;
@@ -84,8 +91,10 @@ export const builderUpdateAgentSchema = z
     sharedUserIds: z.array(z.string().uuid()).max(200).optional(),
     monthlyLimitUsd: z.number().min(0.01).max(100_000).nullable().optional(),
     computerUse: z.boolean().optional(),
-    /** the project this agent's spend bills to (null clears it) */
-    projectId: z.string().uuid().nullable().optional(),
+    /** the project this agent's spend bills to. It cannot be cleared (owner
+     * rule): null or "" are parsed only so the route can refuse them by name
+     * (422 project_required). */
+    projectId: z.union([z.string().uuid(), z.literal(""), z.null()]).optional(),
     /** accepted by the parser only so the route can refuse it with a named 409 */
     connectionFormat: z.enum(BUILDER_CONNECTION_FORMAT_VALUES).optional(),
   })
@@ -152,6 +161,28 @@ export const builderThreadListQuerySchema = z.object({
 });
 
 export const builderUpdateThreadSchema = z.object({ status: z.enum(BUILDER_THREAD_STATUS_VALUES) }).strict();
+
+/**
+ * ADR-0173 §1 — a tool step's lifecycle. `pending_confirmation` is the agent's
+ * own "Ask first" pause (the person in the thread decides); `pending_approval`
+ * is an organisation approval rule (the approvals queue decides). They are
+ * never the same thing.
+ */
+export const BUILDER_TOOL_STEP_STATUS_VALUES = [
+  "pending_confirmation",
+  "pending_approval",
+  "running",
+  "done",
+  "denied",
+  "refused",
+  "error",
+] as const;
+export type BuilderToolStepStatusValue = (typeof BUILDER_TOOL_STEP_STATUS_VALUES)[number];
+
+/** `POST /v1/builder/threads/:id/steps/:stepId/confirm` — the thread owner
+ * answers an "Ask first" pause with the exact call in front of them */
+export const builderConfirmStepSchema = z.object({ decision: z.enum(["approve", "deny"]) }).strict();
+export type BuilderConfirmStep = z.infer<typeof builderConfirmStepSchema>;
 
 export const builderCreateSkillSchema = z
   .object({
@@ -227,7 +258,10 @@ export const builderBundleSchema = z
   })
   .strict();
 export type BuilderBundle = z.infer<typeof builderBundleSchema>;
-export const builderImportAgentSchema = z.object({ bundle: builderBundleSchema }).strict();
+/** the project comes from the REQUEST (the importer's choice), never the bundle */
+export const builderImportAgentSchema = z
+  .object({ bundle: builderBundleSchema, projectId: z.string().uuid().optional() })
+  .strict();
 
 /**
  * Parse a SKILL.md: YAML-ish frontmatter between `---` fences carrying `name`

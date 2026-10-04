@@ -7,11 +7,10 @@ import { useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ago } from "../../api/format";
-import type { BuilderMessage } from "../../api/types";
 import { PageHeader } from "../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, ErrorState, Input, SkeletonBlock, Tabs } from "../../ui/kit";
 import { useToast } from "../../ui/toast";
-import { bk, builderApi, chatRefusal } from "./builderApi";
+import { bk, builderApi, chatRefusal, mergeTurn, type ChatResponse } from "./builderApi";
 import { filterThreads, SOURCE_LABEL } from "./builderLogic";
 import { AgentAvatar, Composer, Icon, MessageList } from "./BuilderUi";
 import s from "./builder.module.css";
@@ -55,10 +54,7 @@ export default function BuilderInboxPage() {
     mutationFn: (message: string) => builderApi.chat(t!.agentId, message, t!.id),
     onMutate: (m) => setPending(m),
     onSuccess: (res) => {
-      queryClient.setQueryData(bk.thread(res.thread.id), (prev: { thread: unknown; messages: BuilderMessage[] } | undefined) => ({
-        thread: res.thread,
-        messages: [...(prev?.messages ?? []), ...res.messages],
-      }));
+      queryClient.setQueryData(bk.thread(res.thread.id), (prev: ChatResponse | undefined) => mergeTurn(prev, res));
       void queryClient.invalidateQueries({ queryKey: ["builder", "threads"] });
     },
     onError: (e) => {
@@ -116,7 +112,11 @@ export default function BuilderInboxPage() {
                     </span>
                     <span className={s.threadMeta}>
                       <span>{ago(th.updatedAt)}</span>
-                      <Badge tone={th.source === "schedule" ? "primary" : "neutral"}>{SOURCE_LABEL[th.source]}</Badge>
+                      {th.pendingStep ? (
+                        <Badge tone="warn">{th.pendingStep.status === "pending_confirmation" ? "Needs your OK" : "Awaiting approval"}</Badge>
+                      ) : (
+                        <Badge tone={th.source === "schedule" ? "primary" : "neutral"}>{SOURCE_LABEL[th.source]}</Badge>
+                      )}
                     </span>
                   </button>
                 </li>
@@ -160,9 +160,22 @@ export default function BuilderInboxPage() {
                   </Button>
                 )}
               </div>
-              <MessageList messages={detail.data?.messages ?? []} agentName={t.agentName} agentColor={t.agentColor} pending={pending} />
+              <MessageList
+                messages={detail.data?.messages ?? []}
+                agentName={t.agentName}
+                agentColor={t.agentColor}
+                pending={pending}
+                waiting={detail.data?.pending ?? null}
+                threadId={t.id}
+              />
               <div className={s.convoFoot}>
-                <Composer label="Reply" placeholder={`Reply to ${t.agentName}…`} busy={reply.isPending} onSend={(m) => reply.mutate(m)} />
+                <Composer
+                  label="Reply"
+                  placeholder={detail.data?.pending ? "Answer the tool request above first" : `Reply to ${t.agentName}…`}
+                  busy={reply.isPending}
+                  disabled={!!detail.data?.pending}
+                  onSend={(m) => reply.mutate(m)}
+                />
               </div>
             </div>
           ) : null}

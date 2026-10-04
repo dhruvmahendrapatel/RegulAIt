@@ -333,6 +333,7 @@ import { registerAnthropicCompat } from "./compat-anthropic.js";
 import { registerOpenAiCompat } from "./compat-openai.js";
 import { registerModelsDiscovery } from "./compat-models.js";
 import { registerVirtualKeyRoutes, routesForPurpose } from "./virtual-keys.js";
+import { registerModelPolicyRoutes } from "./model-policy.js";
 // ADR-0097 — the tool-poisoning admission gate (part A) and the RFC 9728
 // protected-resource metadata + WWW-Authenticate challenge (part B).
 import {
@@ -409,6 +410,8 @@ import { registerTracingRoutes } from "./tracing.js";
 import { registerCompliancePackRoutes } from "./compliance-packs.js";
 import { registerCopilotRoutes } from "./copilot.js";
 import { registerBuilderRoutes } from "./builder.js";
+import { builderStepsAwaitingApproval, resumeBuilderAfterApproval } from "./builder-runtime.js";
+import { drainBackgroundWork, scheduleBackgroundWork } from "./background-work.js";
 import type { CopilotNarrator, RecommendationJudge } from "@regulait/shared";
 import { registerChatOpsRoutes } from "./chatops.js";
 import path from "node:path";
@@ -3692,6 +3695,44 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       if (updated.objectType === "run") {
         postCommit = await applyRunApprovalDecision(tx, updated, binaryDecision, deciderUserId, opts.dataKey);
       }
+      // ADR-0173 §1: an MCP tool approval a builder agent's turn is paused on.
+      // Nothing is decided here — the decision is the approval row above. The
+      // turn RESUMES after commit (approved -> the identical call, which the
+      // governed path matches to this approval by its argument digest; denied
+      // -> the model is told who denied it and why), as the thread's person —
+      // and AFTER THE RESPONSE (review): the approver's request never carries
+      // the resumed turn (model steps, tool calls), so the decide answers at
+      // once. Tracked background work: a closing app and a test drain it. A
+      // failure is audited (the resume records its own outcome on the step).
+      if (updated.objectType === "mcp_tool" && !postCommit) {
+        const waiting = await builderStepsAwaitingApproval(tx as unknown as Db, updated.id);
+        if (waiting.length) {
+          postCommit = async (d: Db) => {
+            scheduleBackgroundWork(d, async () => {
+              try {
+                await resumeBuilderAfterApproval(d, opts.dataKey, updated, binaryDecision, deciderUserId);
+              } catch (err) {
+                await d.insert(auditLog).values({
+                  userId: deciderUserId,
+                  objectType: "mcp_tool",
+                  objectId: null,
+                  serverId: updated.serverId,
+                  toolName: updated.toolName,
+                  detail: { approvalId: updated.id, phase: "builder-resume" },
+                  effect: "deny",
+                  ruleId: "builder-tool-step-resume-failed",
+                  ruleChain: [],
+                  reason: `the builder turn waiting on approval ${updated.id} could not resume: ${
+                    err instanceof Error ? (err.cause instanceof Error ? err.cause.message : err.message) : String(err)
+                  }`
+                    .replace(/\s+/g, " ")
+                    .slice(0, 1000),
+                });
+              }
+            }, app.log);
+          };
+        }
+      }
       // Pillar 5 budget escalations + §9 context-conflict resolutions.
       if (updated.objectType === "project") {
         await applyProjectApprovalDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);
@@ -4318,6 +4359,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerSchedulerRoutes(app, db, { registry: schedulerJobRegistry({ dataKey: opts.dataKey }) });
   const stopAuditPruneScheduler = startAuditPruneScheduler(db);
   app.addHook("onClose", async () => stopAuditPruneScheduler());
+  // after-the-response work (a resumed builder turn, a channel reply) finishes first
+  app.addHook("onClose", async () => drainBackgroundWork(db));
   registerAnthropicCompat(app, db, { dataKey: opts.dataKey });
   registerOpenAiCompat(app, db, { dataKey: opts.dataKey });
   // ADR-0066 §1 — `GET /v1/models`. Gated by the same onRequest hook as the two
@@ -4329,6 +4372,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // (a strict narrowing of their own entitlements); the handlers enforce
   // owner-or-admin per row, and the admin-only fields refuse in-handler.
   registerVirtualKeyRoutes(app, db);
+  // ADR-0173 §3 — the model allow-list matrix. GET is any signed-in person's
+  // read of the policy as it applies to them (NON_ADMIN_ROUTES); PUT is admin.
+  // Enforcement is NOT here: it is the shared model-access decision's.
+  registerModelPolicyRoutes(app, db);
 
   // ADR-0031 item 2: the audit read surface used to be hard-capped at 100 rows
   // with a userId filter (plus PR #79's deployMode) and nothing else — for a

@@ -19,6 +19,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import {
   agents,
+  approvals,
   and,
   asc,
   auditLog,
@@ -33,6 +34,7 @@ import {
   builderMessages,
   builderSkills,
   builderThreads,
+  builderToolSteps,
   chatopsConnections,
   connectors,
   count,
@@ -52,6 +54,7 @@ import {
   type BuilderScheduleRow,
   type BuilderSkillRow,
   type BuilderThreadRow,
+  type BuilderToolStepRow,
   type Db,
 } from "@regulait/db";
 import {
@@ -60,6 +63,7 @@ import {
   builderAddMemorySchema,
   builderChatSchema,
   builderColorFor,
+  builderConfirmStepSchema,
   builderCreateAgentSchema,
   builderCreateChannelSchema,
   builderCreateScheduleSchema,
@@ -104,8 +108,14 @@ import {
   monthStartUtc,
   pinnedSkillsForRun,
   promptTooLarge,
+  cancelBuilderStep,
+  resumeBuilderStep,
+  settleLapsedApprovalPause,
   runBuilderScheduleSweep,
   runBuilderTurn,
+  stepView,
+  threadSteps,
+  type TurnPending,
 } from "./builder-runtime.js";
 import { loadVirtualKeyContext } from "./virtual-keys.js";
 
@@ -119,11 +129,44 @@ const scheduleParam = z.object({ id: z.string().uuid(), scheduleId: z.string().u
 const channelParam = z.object({ id: z.string().uuid(), channelId: z.string().uuid() });
 const skillParam = z.object({ id: z.string().uuid(), skillId: z.string().uuid() });
 const templateParam = z.object({ id: z.string().min(1).max(80) });
+const stepParam = z.object({ id: z.string().uuid(), stepId: z.string().uuid() });
 
 /** palette colours only (shared BUILDER_AGENT_COLORS): white initials keep AA */
 function colorFor(name: string): string {
   return builderColorFor(name);
 }
+/** owner rule (2026-10-04): the named refusal for an agent with no project */
+const PROJECT_REQUIRED = {
+  error: "project_required",
+  detail: "every agent bills its spend to a project; choose one you are a member of",
+} as const;
+
+/**
+ * May `viewer` bill an agent's spend to `projectId`? Attribution is a member's
+ * act: the project must exist and the viewer must belong to it (or be an
+ * admin). null when allowed, else the status and body to send.
+ */
+async function projectRefusal(
+  db: Db,
+  viewer: Viewer,
+  projectId: string | null | undefined,
+): Promise<{ status: number; body: Record<string, unknown> } | null> {
+  if (!projectId) return { status: 422, body: { ...PROJECT_REQUIRED } };
+  const [project] = await db.select({ id: projects.id }).from(projects).where(eq(projects.id, projectId));
+  if (!project) return { status: 404, body: { error: "unknown_project" } };
+  if (viewer.isAdmin) return null;
+  const [member] = await db
+    .select({ userId: projectMembers.userId })
+    .from(projectMembers)
+    .where(and(eq(projectMembers.projectId, projectId), eq(projectMembers.userId, viewer.userId)));
+  return member
+    ? null
+    : {
+        status: 403,
+        body: { error: "not_a_project_member", detail: "you can only bill an agent's spend to a project you are a member of" },
+      };
+}
+
 /** a bundle may carry any #rrggbb from elsewhere; off-palette falls back */
 function paletteOr(color: string | undefined, name: string): string {
   const c = color?.toLowerCase();
@@ -174,7 +217,7 @@ async function summaries(db: Db, rows: BuilderAgentRow[], viewer: Viewer) {
   const ids = rows.map((r) => r.id);
   const since = monthStartUtc();
   const modelIds = [...new Set(rows.map((r) => r.modelAgentId).filter((x): x is string => !!x))];
-  const [models, names, spend, toolCounts, skillCounts, scheduleCounts] = await Promise.all([
+  const [models, names, spend, toolSpend, toolCounts, skillCounts, scheduleCounts] = await Promise.all([
     modelIds.length
       ? db
           .select({ id: agents.id, name: agents.name, provider: agents.provider, model: agents.model })
@@ -187,6 +230,12 @@ async function summaries(db: Db, rows: BuilderAgentRow[], viewer: Viewer) {
       .from(builderMessages)
       .where(and(inArray(builderMessages.agentId, ids), gte(builderMessages.createdAt, since)))
       .groupBy(builderMessages.agentId),
+    // ADR-0173: governed tool calls count toward the agent's spend too
+    db
+      .select({ agentId: builderToolSteps.agentId, total: sql<number>`coalesce(sum(${builderToolSteps.costUsd}), 0)::float8` })
+      .from(builderToolSteps)
+      .where(and(inArray(builderToolSteps.agentId, ids), gte(builderToolSteps.createdAt, since)))
+      .groupBy(builderToolSteps.agentId),
     db
       .select({ agentId: builderAgentTools.agentId, n: count() })
       .from(builderAgentTools)
@@ -207,6 +256,7 @@ async function summaries(db: Db, rows: BuilderAgentRow[], viewer: Viewer) {
   const modelById = new Map(models.map((m) => [m.id, m]));
   const by = <T extends { agentId: string }>(list: T[]) => new Map(list.map((x) => [x.agentId, x]));
   const spendBy = by(spend);
+  const toolSpendBy = by(toolSpend);
   const toolsBy = by(toolCounts);
   const skillsBy = by(skillCounts);
   const schedBy = by(scheduleCounts);
@@ -221,7 +271,7 @@ async function summaries(db: Db, rows: BuilderAgentRow[], viewer: Viewer) {
     modelAgent: r.modelAgentId ? (modelById.get(r.modelAgentId) ?? null) : null,
     templateId: r.templateId,
     monthlyLimitUsd: r.monthlyLimitUsd,
-    spentThisMonthUsd: Number(Number(spendBy.get(r.id)?.total ?? 0).toFixed(6)),
+    spentThisMonthUsd: Number((Number(spendBy.get(r.id)?.total ?? 0) + Number(toolSpendBy.get(r.id)?.total ?? 0)).toFixed(6)),
     toolCount: Number(toolsBy.get(r.id)?.n ?? 0),
     skillCount: Number(skillsBy.get(r.id)?.n ?? 0),
     scheduleCount: Number(schedBy.get(r.id)?.n ?? 0),
@@ -408,7 +458,7 @@ async function threadSummaries(db: Db, threads: BuilderThreadRow[]) {
   if (!threads.length) return [];
   const ids = threads.map((t) => t.id);
   const agentIds = [...new Set(threads.map((t) => t.agentId))];
-  const [agentRows, last] = await Promise.all([
+  const [agentRows, last, pendingSteps] = await Promise.all([
     db
       .select({ id: builderAgents.id, name: builderAgents.name, color: builderAgents.color })
       .from(builderAgents)
@@ -418,8 +468,14 @@ async function threadSummaries(db: Db, threads: BuilderThreadRow[]) {
       .from(builderMessages)
       .where(inArray(builderMessages.threadId, ids))
       .orderBy(builderMessages.threadId, desc(builderMessages.createdAt)),
+    // ADR-0173: a thread paused on a tool step says which pause it is
+    db
+      .select({ threadId: builderToolSteps.threadId, id: builderToolSteps.id, status: builderToolSteps.status, displayName: builderToolSteps.displayName })
+      .from(builderToolSteps)
+      .where(and(inArray(builderToolSteps.threadId, ids), inArray(builderToolSteps.status, ["pending_confirmation", "pending_approval"]))),
   ]);
   const agentBy = new Map(agentRows.map((a) => [a.id, a]));
+  const pendingBy = new Map(pendingSteps.map((p) => [p.threadId, p]));
   const lastBy = new Map(last.map((l) => [l.threadId, l.content]));
   return threads.map((t) => ({
     id: t.id,
@@ -431,6 +487,9 @@ async function threadSummaries(db: Db, threads: BuilderThreadRow[]) {
     status: t.status,
     source: t.source,
     lastMessagePreview: (lastBy.get(t.id) ?? "").replace(/\s+/g, " ").slice(0, 160),
+    pendingStep: pendingBy.has(t.id)
+      ? { id: pendingBy.get(t.id)!.id, status: pendingBy.get(t.id)!.status, displayName: pendingBy.get(t.id)!.displayName }
+      : null,
     updatedAt: t.updatedAt.toISOString(),
   }));
 }
@@ -506,6 +565,8 @@ async function applySeed(db: Db, agent: BuilderAgentRow, seed: Seed) {
         instructions: `# ${sub.name}\n\n${sub.description}`,
         connectionFormat: agent.connectionFormat,
         computerUse: false,
+        // owner rule: a seeded sub-agent bills where its parent does
+        projectId: agent.projectId,
       })
       .returning();
     await db.insert(builderAgentSubagents).values({
@@ -592,6 +653,8 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     const body = builderCreateAgentSchema.parse(req.body ?? {});
     const template = body.templateId ? findTemplate(body.templateId) : undefined;
     if (body.templateId && !template) return reply.status(404).send({ error: "unknown_template" });
+    const noProject = await projectRefusal(db, viewer, body.projectId);
+    if (noProject) return reply.status(noProject.status).send(noProject.body);
 
     let model: AgentRow | null = null;
     if (body.modelAgentId) {
@@ -618,12 +681,14 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
         instructions: template?.instructions ?? "",
         connectionFormat: body.connectionFormat,
         computerUse: body.computerUse,
+        projectId: body.projectId!,
       })
       .returning();
     if (template) await applySeed(db, agent!, template);
     await audit(db, viewer.userId, "builder_agent", agent!.id, "builder-agent-created", `builder agent '${agent!.name}' created`, {
       templateId: template?.id ?? null,
       modelAgentId: model?.id ?? null,
+      projectId: body.projectId,
       connectionFormat: body.connectionFormat,
       computerUse: body.computerUse,
     });
@@ -661,23 +726,11 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
       const found = await db.select({ id: users.id }).from(users).where(inArray(users.id, body.sharedUserIds));
       if (found.length !== new Set(body.sharedUserIds).size) return reply.status(422).send({ error: "unknown_user" });
     }
-    if (body.projectId) {
-      // attribution is a member's act: the editor must belong to the project
-      // (or be an admin) to bill an agent's spend to it
-      const [project] = await db.select({ id: projects.id }).from(projects).where(eq(projects.id, body.projectId));
-      if (!project) return reply.status(404).send({ error: "unknown_project" });
-      if (!viewer.isAdmin) {
-        const [member] = await db
-          .select({ userId: projectMembers.userId })
-          .from(projectMembers)
-          .where(and(eq(projectMembers.projectId, body.projectId), eq(projectMembers.userId, viewer.userId)));
-        if (!member) {
-          return reply.status(403).send({
-            error: "not_a_project_member",
-            detail: "you can only bill an agent's spend to a project you are a member of",
-          });
-        }
-      }
+    // owner rule: a project can be changed (by a member of the new one) but
+    // never cleared
+    if (body.projectId !== undefined && body.projectId !== agent.projectId) {
+      const refused = await projectRefusal(db, viewer, body.projectId);
+      if (refused) return reply.status(refused.status).send(refused.body);
     }
     if (body.instructions !== undefined) {
       const tooLarge = promptTooLarge(
@@ -709,7 +762,7 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     }
     if (body.projectId !== undefined && body.projectId !== agent.projectId) {
       await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-project-changed",
-        `spend of '${agent.name}' now bills to ${body.projectId ? `project ${body.projectId}` : "no project"}`,
+        `spend of '${agent.name}' now bills to project ${body.projectId}`,
         { from: agent.projectId, to: body.projectId });
     }
     const rest = changed.filter((k) => !["sharing", "sharedUserIds", "monthlyLimitUsd", "projectId"].includes(k));
@@ -1215,8 +1268,10 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
   app.post("/v1/builder/agents/import", async (req, reply) => {
     const viewer = viewerOf(req, reply);
     if (!viewer) return;
-    const { bundle } = builderImportAgentSchema.parse(req.body ?? {});
+    const { bundle, projectId } = builderImportAgentSchema.parse(req.body ?? {});
     const a = bundle.agent;
+    const noProject = await projectRefusal(db, viewer, projectId);
+    if (noProject) return reply.status(noProject.status).send(noProject.body);
     if (a.subagents.length > BUILDER_LIMITS.importSubagents) {
       return reply.status(422).send({
         error: "import_too_many_subagents",
@@ -1278,6 +1333,7 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
         connectionFormat: a.connectionFormat,
         computerUse: a.computerUse,
         monthlyLimitUsd: a.monthlyLimitUsd,
+        projectId: projectId!,
       })
       .returning();
     const uniqKeep = [...new Map(keep.map((k) => [`${k.kind}:${k.refId}`, k])).values()];
@@ -1319,8 +1375,28 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
       });
     }
     const [thread] = await threadSummaries(db, [out.thread]);
-    return { thread, messages: out.messages.map(messageView) };
+    const steps = out.steps ?? [];
+    return {
+      thread,
+      messages: out.messages.map((m) => messageView(m, steps)),
+      pending: out.pending ? pendingView(out.pending, steps) : null,
+    };
   });
+
+  /** the pause a turn stopped on, as the thread shows it — with the step
+   * itself, so the confirmation shows the exact (redacted) arguments */
+  const pendingView = (p: TurnPending, steps: BuilderToolStepRow[]) => {
+    const step = steps.find((s) => s.id === p.stepId);
+    return {
+      stepId: p.stepId,
+      status: p.status,
+      toolName: p.toolName,
+      displayName: p.displayName,
+      approvalId: p.approvalId,
+      approverName: p.approverName,
+      ...(step ? { step: stepView(step) } : {}),
+    };
+  };
 
   app.get("/v1/builder/threads", async (req, reply) => {
     const viewer = viewerOf(req, reply);
@@ -1354,13 +1430,98 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     if (!viewer) return;
     const t = await ownThread(req, reply, viewer);
     if (!t) return;
-    const msgs = await db
-      .select()
-      .from(builderMessages)
-      .where(eq(builderMessages.threadId, t.id))
-      .orderBy(asc(builderMessages.createdAt));
+    // a pause on an approval that lapsed (expired, superseded) ends on read
+    if (await settleLapsedApprovalPause(db, t)) {
+      const [fresh] = await db.select().from(builderThreads).where(eq(builderThreads.id, t.id));
+      return threadDetail(fresh ?? t);
+    }
+    return threadDetail(t);
+  });
+
+  /** a thread with every message, each carrying its tool steps, and the
+   * pending step (if the turn is paused) with who it waits on */
+  const threadDetail = async (t: BuilderThreadRow) => {
+    const [msgs, steps] = await Promise.all([
+      db.select().from(builderMessages).where(eq(builderMessages.threadId, t.id)).orderBy(asc(builderMessages.createdAt)),
+      threadSteps(db, t.id),
+    ]);
     const [thread] = await threadSummaries(db, [t]);
-    return { thread, messages: msgs.map(messageView) };
+    const waiting = steps.find((s) => s.status === "pending_confirmation" || s.status === "pending_approval") ?? null;
+    let approverName: string | null = null;
+    if (waiting?.approvalId) {
+      const [row] = await db
+        .select({ name: users.displayName, email: users.email })
+        .from(approvals)
+        .innerJoin(users, eq(approvals.approverUserId, users.id))
+        .where(eq(approvals.id, waiting.approvalId));
+      approverName = row ? row.name || row.email : null;
+    }
+    return {
+      thread,
+      messages: msgs.map((m) => messageView(m, steps)),
+      pending: waiting
+        ? {
+            stepId: waiting.id,
+            status: waiting.status as TurnPending["status"],
+            toolName: waiting.name,
+            displayName: waiting.displayName,
+            approvalId: waiting.approvalId,
+            approverName,
+            step: stepView(waiting),
+          }
+        : null,
+    };
+  };
+
+  // ADR-0173 §1 — the thread owner answers an "Ask first" pause. A
+  // CONFIRMATION, not an approval: only the person the turn runs as decides,
+  // with the exact (redacted) arguments in front of them; the call then runs
+  // through the governed path like any other (which may still require an
+  // organisation approval).
+  app.post("/v1/builder/threads/:id/steps/:stepId/confirm", async (req, reply) => {
+    const viewer = viewerOf(req, reply);
+    if (!viewer) return;
+    const { stepId } = stepParam.parse(req.params);
+    const body = builderConfirmStepSchema.parse(req.body ?? {});
+    const t = await ownThread(req, reply, viewer);
+    if (!t) return;
+    const out = await resumeBuilderStep(db, opts.dataKey, {
+      threadId: t.id,
+      stepId,
+      via: "confirmation",
+      decision: body.decision,
+      deciderUserId: viewer.userId,
+    });
+    const [fresh] = await db.select().from(builderThreads).where(eq(builderThreads.id, t.id));
+    if (!out.ok) {
+      return reply.status(out.status).send({
+        error: out.error,
+        ...(out.detail ? { detail: out.detail } : {}),
+        ...(fresh ? await threadDetail(fresh) : {}),
+      });
+    }
+    return threadDetail(fresh ?? out.thread);
+  });
+
+  // ADR-0173 review — the way out of a pause nobody will answer: the thread's
+  // person (or an admin) cancels the pending step. Nothing runs; the paused
+  // turn is cleared, a note is written, a pending approval it waited on is
+  // superseded, and the act is audited.
+  app.post("/v1/builder/threads/:id/steps/:stepId/cancel", async (req, reply) => {
+    const viewer = viewerOf(req, reply);
+    if (!viewer) return;
+    const { id, stepId } = stepParam.parse(req.params);
+    const out = await cancelBuilderStep(db, { threadId: id, stepId, actorUserId: viewer.userId, actorIsAdmin: viewer.isAdmin });
+    const [fresh] = await db.select().from(builderThreads).where(eq(builderThreads.id, id));
+    if (!out.ok) {
+      return reply.status(out.status).send({
+        error: out.error,
+        ...(out.detail ? { detail: out.detail } : {}),
+        // someone else's thread reads as unknown: nothing of it is returned
+        ...(fresh && out.status !== 404 && (fresh.userId === viewer.userId || viewer.isAdmin) ? await threadDetail(fresh) : {}),
+      });
+    }
+    return threadDetail(fresh ?? out.thread);
   });
 
   app.patch("/v1/builder/threads/:id", async (req, reply) => {
@@ -1579,6 +1740,8 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     const now = new Date();
     const since = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - (days - 1)));
     const scope = [gte(builderMessages.createdAt, since), eq(builderMessages.role, "agent")];
+    // ADR-0173: governed tool calls are spend too, under the same scope
+    const toolScope = [gte(builderToolSteps.createdAt, since)];
     if (!viewer.isAdmin) {
       const owned = await db
         .select({ id: builderAgents.id })
@@ -1590,8 +1753,25 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
           ? or(eq(builderMessages.userId, viewer.userId), inArray(builderMessages.agentId, ownedIds))!
           : eq(builderMessages.userId, viewer.userId),
       );
+      toolScope.push(
+        ownedIds.length
+          ? or(eq(builderToolSteps.userId, viewer.userId), inArray(builderToolSteps.agentId, ownedIds))!
+          : eq(builderToolSteps.userId, viewer.userId),
+      );
     }
     const where = and(...scope);
+    const toolWhere = and(...toolScope);
+    const toolSpend = sql<number>`coalesce(sum(${builderToolSteps.costUsd}), 0)::float8`;
+    const toolDay = sql<string>`to_char(${builderToolSteps.createdAt} at time zone 'UTC', 'YYYY-MM-DD')`;
+    const [toolTotals, toolByAgent, toolByUser, toolDaily] = await Promise.all([
+      db.select({ spendUsd: toolSpend }).from(builderToolSteps).where(toolWhere),
+      db.select({ agentId: builderToolSteps.agentId, spendUsd: toolSpend }).from(builderToolSteps).where(toolWhere).groupBy(builderToolSteps.agentId),
+      db.select({ userId: builderToolSteps.userId, spendUsd: toolSpend }).from(builderToolSteps).where(toolWhere).groupBy(builderToolSteps.userId),
+      db.select({ date: toolDay, spendUsd: toolSpend }).from(builderToolSteps).where(toolWhere).groupBy(toolDay),
+    ]);
+    const toolAgentBy = new Map(toolByAgent.map((x) => [x.agentId, Number(x.spendUsd)]));
+    const toolUserBy = new Map(toolByUser.map((x) => [x.userId, Number(x.spendUsd)]));
+    const toolDayBy = new Map(toolDaily.map((x) => [x.date, Number(x.spendUsd)]));
     const spend = sql<number>`coalesce(sum(${builderMessages.costUsd}), 0)::float8`;
     const day = sql<string>`to_char(${builderMessages.createdAt} at time zone 'UTC', 'YYYY-MM-DD')`;
     const [totals, byAgent, byUser, byModel, daily] = await Promise.all([
@@ -1638,12 +1818,13 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     const series = Array.from({ length: days }, (_, i) => {
       const d = new Date(since.getTime() + i * 86_400_000).toISOString().slice(0, 10);
       const row = dailyBy.get(d);
-      return { date: d, spendUsd: round(row?.spendUsd), messages: Number(row?.messages ?? 0) };
+      return { date: d, spendUsd: round(Number(row?.spendUsd ?? 0) + (toolDayBy.get(d) ?? 0)), messages: Number(row?.messages ?? 0) };
     });
     const bySpend = <T extends { spendUsd: number }>(a: T, b: T) => b.spendUsd - a.spendUsd;
     return {
       totals: {
-        spendUsd: round(totals[0]?.spendUsd),
+        spendUsd: round(Number(totals[0]?.spendUsd ?? 0) + Number(toolTotals[0]?.spendUsd ?? 0)),
+        toolSpendUsd: round(toolTotals[0]?.spendUsd),
         messages: Number(totals[0]?.messages ?? 0),
         agents: Number(totals[0]?.agents ?? 0),
         activeUsers: Number(totals[0]?.activeUsers ?? 0),
@@ -1652,13 +1833,13 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
         .map((a) => ({
           agentId: a.agentId,
           name: agentBy.get(a.agentId)?.name ?? "Agent",
-          spendUsd: round(a.spendUsd),
+          spendUsd: round(Number(a.spendUsd) + (toolAgentBy.get(a.agentId) ?? 0)),
           messages: Number(a.messages),
           limitUsd: agentBy.get(a.agentId)?.limitUsd ?? null,
         }))
         .sort(bySpend),
       byUser: byUser
-        .map((u) => ({ userId: u.userId, name: names.get(u.userId) ?? "Unknown person", spendUsd: round(u.spendUsd), messages: Number(u.messages) }))
+        .map((u) => ({ userId: u.userId, name: names.get(u.userId) ?? "Unknown person", spendUsd: round(Number(u.spendUsd) + (toolUserBy.get(u.userId) ?? 0)), messages: Number(u.messages) }))
         .sort(bySpend),
       byModel: byModel
         .map((m) => ({ provider: m.provider ?? "unknown", model: m.model ?? "unknown", spendUsd: round(m.spendUsd), messages: Number(m.messages) }))

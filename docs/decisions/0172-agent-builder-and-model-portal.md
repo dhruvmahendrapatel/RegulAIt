@@ -89,3 +89,10 @@ and the code; all are closed in migration 0135 (still unpushed, edited in place)
   otherwise); the integrations page names only MCP servers the caller holds a grant on.
 - **Model portal**: only a governance refusal (a 403 carrying its rule) is labelled "Refused"; any other
   failure is a neutral "Couldn't run" with its code.
+
+## Amendment — every builder agent bills to a project (owner, 2026-10-04)
+
+The owner chose "require a project". Create, create-from-template and import need a project the person belongs to (an
+admin may choose any): `422 project_required`, `403 not_a_project_member`. PATCH cannot clear it. Seeded sub-agents bill
+to their parent's project. A legacy agent with no project is refused before dispatch (`409 builder_agent_needs_project`)
+until its owner picks one, and the schedule sweep skips such agents before applying its per-pass limit.

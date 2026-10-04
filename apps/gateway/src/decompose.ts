@@ -42,6 +42,8 @@ import {
 import { refuseIfFeatureNotLicensed } from "./licensing.js";
 import { loadAgentRevocations, loadEntitlements, loadRoleAgentGrants } from "./entitlements.js";
 import { assertProjectAttribution } from "./projects.js";
+import { loadModelPolicy, withModelPolicy } from "./model-policy.js";
+import { ORCHESTRATION_FEATURE } from "./orchestration.js";
 import { z } from "zod";
 
 /** A server the caller may draw worker tools from, with the tool names they
@@ -328,19 +330,27 @@ export function registerDecomposeRoutes(
       ceilingTier = registry.find((a) => a.id === policy.ceilingAgentId)?.tier ?? null;
     }
     const decomposeExecutionMode = await loadExecutionMode(db);
+    // ADR-0173 §3 — the lead and the worker roster obey the org's model
+    // allow-list for orchestration, through the shared helper
+    const decomposeModelPolicy = await loadModelPolicy(db);
     const evalFor = (a: AgentRow, mode: string): AgentDecision =>
-      evaluateAgent({
-        userId,
-        // ADR-0124 — decomposition dispatches a lead agent to draft the graph,
-        // so it is execution and is gated.
-        execution: postureOf(decomposeExecutionMode, agentHaltOf(a)),
-        agent: { id: a.id, name: a.name, tier: a.tier, enabled: a.enabled, modes: a.modes ?? null },
-        mode,
-        agentGrants: grants,
-        roleAgentGrants: roleAgentGrantsForUser,
-        agentRevocations: agentRevocationsForUser,
-        ceilingTier,
-      });
+      withModelPolicy(
+        evaluateAgent({
+          userId,
+          // ADR-0124 — decomposition dispatches a lead agent to draft the graph,
+          // so it is execution and is gated.
+          execution: postureOf(decomposeExecutionMode, agentHaltOf(a)),
+          agent: { id: a.id, name: a.name, tier: a.tier, enabled: a.enabled, modes: a.modes ?? null },
+          mode,
+          agentGrants: grants,
+          roleAgentGrants: roleAgentGrantsForUser,
+          agentRevocations: agentRevocationsForUser,
+          ceilingTier,
+        }),
+        decomposeModelPolicy,
+        ORCHESTRATION_FEATURE,
+        a,
+      );
 
     // §5.1: the roster the lead may assign from is exactly the set of agents
     // the CALLER could own worker nodes with — suggestions are grounded in the
@@ -451,6 +461,7 @@ export function registerDecomposeRoutes(
           : system,
         maxTokens: 2048,
         projectId: body.projectId ?? null,
+        modelFeature: ORCHESTRATION_FEATURE,
         detail: { purpose: "decompose", ...(retryErrors ? { retry: true } : {}) },
       });
     const absorb = (r: { costUsd: number | null; usage: { inputTokens: number; outputTokens: number } }) => {

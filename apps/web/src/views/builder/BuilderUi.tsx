@@ -15,15 +15,15 @@ import {
 } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import type { BuilderMessage, BuilderTool, BuilderTemplate } from "../../api/types";
+import type { BuilderMessage, BuilderPendingStep, BuilderTemplate, BuilderTool, BuilderToolStep, BuilderToolStepStatus } from "../../api/types";
 import { fmtUsd, fmtDur } from "../../api/format";
 import { useSession } from "../../session/SessionContext";
-import { Button, Field, Input, Modal, Tabs, Textarea } from "../../ui/kit";
+import { Badge, Button, Field, Input, Modal, Select, Tabs, Textarea } from "../../ui/kit";
 import { ModelPicker } from "../../ui/ModelPicker";
 import { Logo, hasLogo } from "../../ui/logos/Logo";
 import { providerLogoKey } from "../../ui/logos/providerLogo";
 import { useToast } from "../../ui/toast";
-import { bk, builderApi, useMyModelTiles } from "./builderApi";
+import { bk, builderApi, chatRefusal, useMyModelTiles, useMyProjects, type ChatResponse } from "./builderApi";
 import { agentInitials, importMessage, parseBundleText, safeAgentColor } from "./builderLogic";
 import s from "./builder.module.css";
 
@@ -342,7 +342,204 @@ export function CodeTabs(props: { snippets: Array<{ id: string; label: string; c
 
 // ---- conversation -----------------------------------------------------------
 
-export function MessageList(props: { messages: BuilderMessage[]; agentName: string; agentColor: string | null | undefined; pending?: string | null }) {
+// ---- ADR-0173: tool steps and the two pauses ---------------------------------
+
+const STEP_STATUS: Record<BuilderToolStepStatus, { label: string; tone: "neutral" | "ok" | "warn" | "danger" | "primary" }> = {
+  pending_confirmation: { label: "Needs your OK", tone: "warn" },
+  pending_approval: { label: "Waiting for approval", tone: "warn" },
+  running: { label: "Running", tone: "primary" },
+  done: { label: "Done", tone: "ok" },
+  denied: { label: "Denied", tone: "danger" },
+  refused: { label: "Refused", tone: "danger" },
+  error: { label: "Failed", tone: "danger" },
+};
+
+/** a redacted argument preview, readable */
+export function argumentsText(args: unknown): string {
+  if (args == null) return "Not shown — the arguments themselves were refused by policy.";
+  if (typeof args === "object" && !Array.isArray(args) && Object.keys(args as object).length === 0) return "{} (no arguments)";
+  try {
+    return JSON.stringify(args, null, 2);
+  } catch {
+    return String(args);
+  }
+}
+
+function StepLogo(props: { step: BuilderToolStep }) {
+  const { step } = props;
+  if (step.kind === "unknown") return <McpGlyph label="Unknown tool" size={16} />;
+  return <ToolLogo tool={{ kind: step.kind, provider: step.provider, name: step.displayName }} size={16} />;
+}
+
+/** one tool call as a collapsible row: logo, name, status, cost; open for the
+ * (redacted) arguments, the result preview and why it ended the way it did */
+export function ToolStepRow(props: { step: BuilderToolStep }) {
+  const { step } = props;
+  const [open, setOpen] = useState(false);
+  const id = useId();
+  const st = STEP_STATUS[step.status];
+  return (
+    <li className={s.step}>
+      <button type="button" className={s.stepHead} aria-expanded={open} aria-controls={id} onClick={() => setOpen((o) => !o)}>
+        <span className={open ? s.chevOpen : s.chev}>{Icon.chevron(12)}</span>
+        <StepLogo step={step} />
+        <span className={s.stepName}>{step.displayName}</span>
+        <Badge tone={st.tone}>{st.label}</Badge>
+        {step.costUsd != null && <span className={s.stepCost}>{fmtUsd(step.costUsd)}</span>}
+      </button>
+      {open && (
+        <div id={id} className={s.stepBody}>
+          <p className={s.stepLabel}>Arguments</p>
+          <pre className={s.stepPre}>{argumentsText(step.arguments)}</pre>
+          {step.status === "done" || step.resultWithheld || step.resultPreview ? (
+            <>
+              <p className={s.stepLabel}>Result</p>
+              {step.resultWithheld ? (
+                <p className={s.small} style={{ margin: 0 }}>Withheld by your organisation's data policy — the agent was given the policy's marker, not the content.</p>
+              ) : (
+                <pre className={s.stepPre}>{step.resultPreview ?? "(empty)"}</pre>
+              )}
+            </>
+          ) : null}
+          {step.outcomeDetail && (
+            <p className={s.small} style={{ margin: 0 }}>
+              {step.outcomeDetail}
+            </p>
+          )}
+          <span className={s.small}>
+            {step.kind === "connector" ? "Connector" : step.kind === "mcp_tool" ? "MCP tool" : "Not in this agent's toolbox"}
+            {step.latencyMs != null ? ` · ${fmtDur(step.latencyMs)}` : ""}
+            {step.requiresConfirmation ? " · asks first" : ""}
+          </span>
+        </div>
+      )}
+    </li>
+  );
+}
+
+export function ToolSteps(props: { steps: BuilderToolStep[] }) {
+  if (!props.steps.length) return null;
+  return (
+    <ul className={s.steps} aria-label="Tool calls">
+      {props.steps.map((st) => (
+        <ToolStepRow key={st.id} step={st} />
+      ))}
+    </ul>
+  );
+}
+
+/** the thread owner answers an "Ask first" pause; the response is the whole thread */
+export function useConfirmStep(threadId: string | null | undefined) {
+  const queryClient = useQueryClient();
+  const { toast } = useToast();
+  return useMutation({
+    mutationFn: (v: { stepId: string; decision: "approve" | "deny" }) => builderApi.confirmStep(threadId!, v.stepId, v.decision),
+    onSuccess: (res: ChatResponse) => {
+      queryClient.setQueryData(bk.thread(res.thread.id), res);
+      void queryClient.invalidateQueries({ queryKey: ["builder", "threads"] });
+    },
+    onError: (e) => {
+      toast(chatRefusal(e).message, "error");
+      if (threadId) void queryClient.invalidateQueries({ queryKey: bk.thread(threadId) });
+      void queryClient.invalidateQueries({ queryKey: ["builder", "threads"] });
+    },
+  });
+}
+
+/** the thread owner cancels a pause: nothing runs, the conversation is free again */
+export function useCancelStep(threadId: string | null | undefined) {
+  const queryClient = useQueryClient();
+  const { toast } = useToast();
+  return useMutation({
+    mutationFn: (stepId: string) => builderApi.cancelStep(threadId!, stepId),
+    onSuccess: (res: ChatResponse) => {
+      queryClient.setQueryData(bk.thread(res.thread.id), res);
+      void queryClient.invalidateQueries({ queryKey: ["builder", "threads"] });
+    },
+    onError: (e) => {
+      toast(chatRefusal(e).message, "error");
+      if (threadId) void queryClient.invalidateQueries({ queryKey: bk.thread(threadId) });
+      void queryClient.invalidateQueries({ queryKey: ["builder", "threads"] });
+    },
+  });
+}
+
+/**
+ * The two pauses, never conflated. "Ask first" is a CONFIRMATION: the person
+ * the agent runs as sees the exact (redacted) call and approves or denies it.
+ * An organisation approval waits in the approvals queue for a named approver;
+ * the conversation continues by itself once they decide. Either can be
+ * CANCELLED by the person (an approval nobody decides must not hold the
+ * conversation forever): the tool does not run and the composer is free again.
+ */
+export function PauseCard(props: { waiting: BuilderPendingStep; threadId: string; agentName: string }) {
+  const { waiting } = props;
+  const confirm = useConfirmStep(props.threadId);
+  const cancel = useCancelStep(props.threadId);
+  const titleId = useId();
+  const busy = confirm.isPending || cancel.isPending;
+  const cancelButton = (
+    <Button disabled={busy} onClick={() => cancel.mutate(waiting.stepId)} title="Stop waiting: the tool will not run">
+      Cancel
+    </Button>
+  );
+  if (waiting.status === "pending_approval") {
+    return (
+      <div className={s.pauseCard} role="status" aria-labelledby={titleId}>
+        <p id={titleId} className={s.pauseTitle}>
+          Waiting for approval by {waiting.approverName ?? "an approver"}
+        </p>
+        <span>
+          {props.agentName} asked to use <strong>{waiting.displayName}</strong>, and your organisation requires an approval for this call. The conversation continues on its own
+          once it is decided. Cancel to stop waiting — the tool will not run.
+        </span>
+        <div className={s.pauseActions}>
+          {cancelButton}
+          {cancel.isPending && (
+            <span role="status" className={s.small} style={{ alignSelf: "center" }}>
+              Working…
+            </span>
+          )}
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className={s.pauseCard} role="group" aria-labelledby={titleId}>
+      <p id={titleId} className={s.pauseTitle}>
+        Allow {waiting.displayName}?
+      </p>
+      <span>
+        {props.agentName} asks before using this tool. It will run as you, with exactly these arguments:
+      </span>
+      <pre className={s.stepPre}>{argumentsText(waiting.step?.arguments ?? {})}</pre>
+      <div className={s.pauseActions}>
+        <Button variant="primary" disabled={busy} onClick={() => confirm.mutate({ stepId: waiting.stepId, decision: "approve" })}>
+          Approve
+        </Button>
+        <Button disabled={busy} onClick={() => confirm.mutate({ stepId: waiting.stepId, decision: "deny" })}>
+          Deny
+        </Button>
+        {cancelButton}
+        {busy && (
+          <span role="status" className={s.small} style={{ alignSelf: "center" }}>
+            Working…
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export function MessageList(props: {
+  messages: BuilderMessage[];
+  agentName: string;
+  agentColor: string | null | undefined;
+  pending?: string | null;
+  /** ADR-0173: the tool step the thread waits on, and the thread it belongs to */
+  waiting?: BuilderPendingStep | null;
+  threadId?: string | null;
+}) {
   return (
     <div className={s.messages} aria-live="polite">
       {props.messages.map((m) =>
@@ -358,11 +555,16 @@ export function MessageList(props: { messages: BuilderMessage[]; agentName: stri
         ) : (
           <div key={m.id} className={s.msgAgent}>
             <AgentAvatar name={props.agentName} color={props.agentColor} size={28} />
-            <div>
-              <div className={s.msgAgentBody}>
-                <span className={s.srOnly}>{props.agentName}: </span>
-                {m.content}
-              </div>
+            <div style={{ minWidth: 0, flex: 1 }}>
+              {m.content ? (
+                <div className={s.msgAgentBody}>
+                  <span className={s.srOnly}>{props.agentName}: </span>
+                  {m.content}
+                </div>
+              ) : (
+                <span className={s.srOnly}>{props.agentName} used tools:</span>
+              )}
+              <ToolSteps steps={m.steps ?? []} />
               {(m.model || m.costUsd != null || m.latencyMs != null) && (
                 <div className={s.msgMeta}>
                   {m.model && <span>{m.model}</span>}
@@ -373,6 +575,17 @@ export function MessageList(props: { messages: BuilderMessage[]; agentName: stri
             </div>
           </div>
         ),
+      )}
+      {props.waiting && props.threadId && (
+        <PauseCard
+          waiting={{
+            ...props.waiting,
+            // the step (with its exact arguments) from the response, else from the thread
+            step: props.waiting.step ?? props.messages.flatMap((m) => m.steps ?? []).find((st) => st.id === props.waiting!.stepId),
+          }}
+          threadId={props.threadId}
+          agentName={props.agentName}
+        />
       )}
       {props.pending && (
         <>
@@ -510,6 +723,45 @@ export function HeroArt(props: { template: Pick<BuilderTemplate, "id" | "categor
   );
 }
 
+// ---- the project an agent bills to (owner rule: required) ----------------------
+
+/**
+ * "Bill to project": every agent bills its spend to a project the creator is a
+ * member of. Preselects the only project when there is just one; with none,
+ * says how to get one instead of offering an empty list.
+ */
+export function ProjectSelect(props: { value: string; onChange: (id: string) => void; disabled?: boolean }) {
+  const projects = useMyProjects();
+  const list = projects.data?.projects ?? [];
+  const { value, onChange } = props;
+  useEffect(() => {
+    if (!value && list.length === 1) onChange(list[0]!.id);
+  }, [value, list, onChange]);
+  if (projects.isSuccess && list.length === 0) {
+    return (
+      <div className={s.note} role="note">
+        <span>
+          <strong>No project to bill to.</strong> Every agent bills its spend to a project you&apos;re a member of. Ask a project owner or an admin to add you to one.
+        </span>
+      </div>
+    );
+  }
+  return (
+    <Field label="Bill to project">
+      <Select value={value} onChange={(e) => onChange(e.target.value)} disabled={props.disabled || projects.isLoading} required>
+        <option value="" disabled>
+          {projects.isLoading ? "Loading projects…" : "Choose a project"}
+        </option>
+        {list.map((p) => (
+          <option key={p.id} value={p.id}>
+            {p.name}
+          </option>
+        ))}
+      </Select>
+    </Field>
+  );
+}
+
 // ---- new agent ------------------------------------------------------------------
 
 /**
@@ -528,6 +780,7 @@ export function NewAgentDialog(props: { open: boolean; onClose: () => void; temp
   const [format, setFormat] = useState<"shared" | "per_user">("shared");
   const [computer, setComputer] = useState<"yes" | "no">("no");
   const [modelId, setModelId] = useState("");
+  const [projectId, setProjectId] = useState("");
   const [error, setError] = useState<string | null>(null);
   const advId = useId();
 
@@ -539,6 +792,7 @@ export function NewAgentDialog(props: { open: boolean; onClose: () => void; temp
       setFormat("shared");
       setComputer("no");
       setModelId("");
+      setProjectId("");
       setError(null);
     }
   }, [props.open, props.templateName]);
@@ -551,6 +805,7 @@ export function NewAgentDialog(props: { open: boolean; onClose: () => void; temp
         ...(modelId ? { modelAgentId: modelId } : {}),
         connectionFormat: format,
         computerUse: computer === "yes",
+        projectId,
         ...(props.templateId ? { templateId: props.templateId } : {}),
       }),
     onSuccess: (res) => {
@@ -567,7 +822,7 @@ export function NewAgentDialog(props: { open: boolean; onClose: () => void; temp
     if (!create.isPending) onClose();
   }, [create.isPending, onClose]);
   const nameErr = name.length > 80 ? "Use 80 characters or fewer" : null;
-  const canCreate = name.trim().length > 0 && !nameErr && description.length <= 500 && !create.isPending;
+  const canCreate = name.trim().length > 0 && !nameErr && description.length <= 500 && !!projectId && !create.isPending;
 
   return (
     <Modal
@@ -603,6 +858,7 @@ export function NewAgentDialog(props: { open: boolean; onClose: () => void; temp
             rows={3}
           />
         </Field>
+        <ProjectSelect value={projectId} onChange={setProjectId} disabled={create.isPending} />
         <div>
           <Disclosure label="Advanced" open={advanced} onToggle={() => setAdvanced((a) => !a)} controls={advId} />
         </div>
@@ -635,6 +891,7 @@ export function NewAgentDialog(props: { open: boolean; onClose: () => void; temp
               onChange={setModelId}
               placeholder="Your default model"
               testId="new-agent-model"
+              feature="builder"
             />
           </div>
         )}
@@ -657,6 +914,8 @@ export function useImportBundle() {
   const queryClient = useQueryClient();
   const { toast } = useToast();
   const [busy, setBusy] = useState(false);
+  const [pending, setPending] = useState<{ bundle: Parameters<typeof builderApi.importAgent>[0]; name: string } | null>(null);
+  const [projectId, setProjectId] = useState("");
   const onFile = async (file: File | undefined) => {
     if (!file) return;
     const parsed = parseBundleText(await file.text());
@@ -665,9 +924,16 @@ export function useImportBundle() {
       toast(parsed.error, "error");
       return;
     }
+    // owner rule: the importer chooses the project (never the bundle)
+    setProjectId("");
+    setPending({ bundle: parsed.bundle, name: parsed.bundle.agent.name });
+  };
+  const send = async () => {
+    if (!pending || !projectId) return;
     setBusy(true);
     try {
-      const res = await builderApi.importAgent(parsed.bundle);
+      const res = await builderApi.importAgent(pending.bundle, projectId);
+      setPending(null);
       void queryClient.invalidateQueries({ queryKey: bk.agents });
       toast(importMessage(res.agent.name, res.dropped ?? []),
         res.dropped?.length ? "info" : "success",
@@ -690,5 +956,29 @@ export function useImportBundle() {
       onChange={(e) => void onFile(e.target.files?.[0])}
     />
   );
-  return { input, open: () => inputRef.current?.click(), busy };
+  const dialog = (
+    <Modal
+      open={!!pending}
+      title={`Import ${pending?.name ?? "agent"}`}
+      onClose={() => !busy && setPending(null)}
+      actions={
+        <>
+          <Button onClick={() => setPending(null)} disabled={busy}>
+            Cancel
+          </Button>
+          <Button variant="primary" disabled={!projectId || busy} onClick={() => void send()}>
+            {busy ? "Importing…" : "Import"}
+          </Button>
+        </>
+      }
+    >
+      <div style={{ display: "flex", flexDirection: "column", gap: 12, color: "var(--rg-ink)" }}>
+        <p className={s.small} style={{ margin: 0 }}>
+          Tools and models are checked again for you; anything you can&apos;t use is left out.
+        </p>
+        <ProjectSelect value={projectId} onChange={setProjectId} disabled={busy} />
+      </div>
+    </Modal>
+  );
+  return { input, dialog, open: () => inputRef.current?.click(), busy };
 }

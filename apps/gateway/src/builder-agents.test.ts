@@ -38,6 +38,7 @@ const newAgent = async (who: Person, extra: Record<string, unknown> = {}) => {
     name: `Agent ${Math.random().toString(36).slice(2, 7)}`,
     connectionFormat: "shared",
     computerUse: false,
+    projectId: who.projectId,
     ...extra,
   });
   expect(r.statusCode, r.body).toBe(201);
@@ -61,7 +62,19 @@ beforeAll(async () => {
   await k.grantModel(admin.id, modelA);
 }, 120_000);
 
-afterAll(async () => k.close());
+/** ChatOps connections this file inserts. They are org-visible (an enabled
+ * one older than another suite's becomes that suite's default destination —
+ * chatops.test's un-named post picked this file's outlook connection and got
+ * 501), so they are removed even when a test fails. */
+const chatopsRows: Array<{ connectionId: string; connectorId: string }> = [];
+
+afterAll(async () => {
+  for (const r of chatopsRows) {
+    await k.db.delete(chatopsConnections).where(eq(chatopsConnections.id, r.connectionId));
+    await k.db.delete(connectors).where(eq(connectors.id, r.connectorId));
+  }
+  await k.close();
+});
 
 describe("identity", () => {
   it("refuses an identity-less token on every builder route family", async () => {
@@ -98,7 +111,7 @@ describe("create, read, update, delete", () => {
 
   it("refuses a model the caller may not use (model_not_entitled), accepts one they may", async () => {
     const r = await k.req("POST", "/v1/builder/agents", owner.auth, {
-      name: "Nope", connectionFormat: "shared", computerUse: false, modelAgentId: modelB,
+      name: "Nope", connectionFormat: "shared", computerUse: false, modelAgentId: modelB, projectId: owner.projectId,
     });
     expect(r.statusCode).toBe(403);
     expect(r.json().error).toBe("model_not_entitled");
@@ -357,7 +370,7 @@ describe("toolbox", () => {
 
     // the colleague holds neither tool: both are dropped, the rest imports
     bundle.agent.tools.push({ kind: "connector", name: "no-such-connector", server: null, requiresApproval: false });
-    const im = await k.req("POST", "/v1/builder/agents/import", colleague.auth, { bundle });
+    const im = await k.req("POST", "/v1/builder/agents/import", colleague.auth, { bundle, projectId: colleague.projectId });
     expect(im.statusCode, im.body).toBe(201);
     expect(im.json().agent.ownerUserId).toBe(colleague.id);
     expect(im.json().agent.tools).toEqual([]);
@@ -373,7 +386,7 @@ describe("toolbox", () => {
       { kind: "connector", name: "no-such-connector", reason: "not_found" },
     ]);
     // the owner re-importing keeps both
-    const mine = await k.req("POST", "/v1/builder/agents/import", owner.auth, { bundle });
+    const mine = await k.req("POST", "/v1/builder/agents/import", owner.auth, { bundle, projectId: owner.projectId });
     expect(mine.json().agent.tools).toHaveLength(2);
     expect(mine.json().agent.modelAgent.id).toBe(modelA);
     expect(await auditRows(im.json().agent.id, "builder-agent-imported")).toHaveLength(1);
@@ -432,7 +445,7 @@ describe("templates", () => {
     // the creator's own copy of the first template skill, word for word: reused
     const pre = await k.req("POST", "/v1/builder/skills", owner.auth, { name: tpl.skills[0]!.name, description: "mine", body: tpl.skills[0]!.body, visibility: "private" });
     const r = await k.req("POST", "/v1/builder/agents", owner.auth, {
-      name: "Intake", connectionFormat: "shared", computerUse: false, templateId: tpl.id,
+      name: "Intake", connectionFormat: "shared", computerUse: false, templateId: tpl.id, projectId: owner.projectId,
     });
     expect(r.statusCode, r.body).toBe(201);
     const a = r.json().agent;
@@ -504,7 +517,8 @@ describe("memory, schedules, channels", () => {
       .insert(chatopsConnections)
       .values({ name: `outlook-${k.RUN}`, provider: "outlook", connectorId: conn!.id, defaultChannel: "governance@example.com" })
       .returning();
-    const email = await k.req("POST", `/v1/builder/agents/${a.id}/channels`, admin.auth, { provider: "email", chatopsConnectionId: chat!.id });
+    chatopsRows.push({ connectionId: chat!.id, connectorId: conn!.id });
+    const email =await k.req("POST", `/v1/builder/agents/${a.id}/channels`, admin.auth, { provider: "email", chatopsConnectionId: chat!.id });
     expect(email.json()).toMatchObject({ provider: "email", status: "connected", connectionName: `outlook-${k.RUN}` });
     const wrong = await k.req("POST", `/v1/builder/agents/${a.id}/channels`, admin.auth, { provider: "teams", chatopsConnectionId: chat!.id });
     expect(wrong.statusCode).toBe(422);

@@ -577,6 +577,12 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "DELETE /v1/chatops/identity-links/:linkId": "internal",
   "POST /v1/chatops/approvals/:approvalId/post": "internal",
   "POST /v1/chatops/:connectionName/interactions": "internal",
+  // ADR-0173 §2 — inbound conversations to builder agents. Internal for the
+  // same reason: provider-shaped callbacks whose contract is Slack's / Teams'.
+  "POST /v1/chatops/:connectionName/events": "internal",
+  "POST /v1/chatops/:connectionName/messages": "internal",
+  "GET /v1/chatops/builder-routes": "internal",
+  "PUT /v1/chatops/builder-routes/:channelId": "internal",
   // ADR-0056 — the governance copilot. Internal: the tool vocabulary, the
   // query plan and the evidence envelope will move as more ledgers become
   // readable, and an answer shape is not a contract we want to freeze while no
@@ -614,6 +620,8 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/builder/threads": "internal",
   "GET /v1/builder/threads/:id": "internal",
   "PATCH /v1/builder/threads/:id": "internal",
+  "POST /v1/builder/threads/:id/steps/:stepId/confirm": "internal",
+  "POST /v1/builder/threads/:id/steps/:stepId/cancel": "internal",
   "GET /v1/builder/skills": "internal",
   "POST /v1/builder/skills": "internal",
   "POST /v1/builder/skills/import": "internal",
@@ -690,6 +698,9 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "DELETE /v1/use-cases/draft": "internal",
   // ADR-0124
   "GET /v1/execution": "internal",
+  // ADR-0173 §3 — the model allow-list matrix
+  "GET /v1/model-policy": "internal",
+  "PUT /v1/model-policy": "internal",
   "PUT /v1/execution/mode": "internal",
   "POST /v1/agents/:agentId/halt": "internal",
   "POST /v1/agents/:agentId/unhalt": "internal",
@@ -1270,6 +1281,10 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "DELETE /v1/chatops/identity-links/:linkId": "chatops",
   "POST /v1/chatops/approvals/:approvalId/post": "chatops",
   "POST /v1/chatops/:connectionName/interactions": "chatops",
+  "POST /v1/chatops/:connectionName/events": "chatops",
+  "POST /v1/chatops/:connectionName/messages": "chatops",
+  "GET /v1/chatops/builder-routes": "chatops",
+  "PUT /v1/chatops/builder-routes/:channelId": "chatops",
   "GET /v1/builder/agents": "builder",
   "POST /v1/builder/agents": "builder",
   "POST /v1/builder/agents/import": "builder",
@@ -1293,6 +1308,8 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/builder/threads": "builder",
   "GET /v1/builder/threads/:id": "builder",
   "PATCH /v1/builder/threads/:id": "builder",
+  "POST /v1/builder/threads/:id/steps/:stepId/confirm": "builder",
+  "POST /v1/builder/threads/:id/steps/:stepId/cancel": "builder",
   "GET /v1/builder/skills": "builder",
   "POST /v1/builder/skills": "builder",
   "POST /v1/builder/skills/import": "builder",
@@ -1362,6 +1379,8 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "PUT /v1/use-cases/draft": "use-cases",
   "DELETE /v1/use-cases/draft": "use-cases",
   "GET /v1/execution": "org-settings",
+  "GET /v1/model-policy": "agents",
+  "PUT /v1/model-policy": "agents",
   "PUT /v1/execution/mode": "org-settings",
   "POST /v1/agents/:agentId/halt": "agents",
   "POST /v1/agents/:agentId/unhalt": "agents",

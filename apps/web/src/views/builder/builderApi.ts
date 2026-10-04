@@ -19,6 +19,7 @@ import type {
   BuilderIntegrationsResponse,
   BuilderMemoryItem,
   BuilderMessage,
+  BuilderPendingStep,
   BuilderSchedule,
   BuilderSharing,
   BuilderSkillDetail,
@@ -55,6 +56,8 @@ export interface CreateAgentBody {
   connectionFormat: BuilderConnectionFormat;
   computerUse: boolean;
   templateId?: string;
+  /** owner rule: every agent bills its spend to a project */
+  projectId: string;
 }
 export interface PatchAgentBody {
   name?: string;
@@ -66,7 +69,8 @@ export interface PatchAgentBody {
   sharedUserIds?: string[];
   monthlyLimitUsd?: number | null;
   computerUse?: boolean;
-  projectId?: string | null;
+  /** can be changed, never cleared (owner rule) */
+  projectId?: string;
 }
 export interface ScheduleBody {
   name: string;
@@ -78,6 +82,20 @@ export interface ScheduleBody {
 export interface ChatResponse {
   thread: BuilderThreadSummary;
   messages: BuilderMessage[];
+  /** ADR-0173: set while the turn waits on a tool step */
+  pending?: BuilderPendingStep | null;
+}
+
+/**
+ * ADR-0173 — fold one chat turn's response into the cached thread: messages
+ * replace by id (a resumed turn updates the agent message it already showed),
+ * and the pause (if any) is the response's, never a stale one.
+ */
+export function mergeTurn(prev: ChatResponse | undefined, res: ChatResponse): ChatResponse {
+  const byId = new Map((prev?.messages ?? []).map((m) => [m.id, m]));
+  for (const m of res.messages) byId.set(m.id, m);
+  const messages = [...byId.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  return { thread: res.thread, messages, pending: res.pending ?? null };
 }
 
 export const builderApi = {
@@ -102,8 +120,8 @@ export const builderApi = {
   addChannel: (id: string, provider: BuilderChannelProvider) => api.post<BuilderChannel>(`/v1/builder/agents/${id}/channels`, { provider }),
   deleteChannel: (id: string, channelId: string) => api.del<unknown>(`/v1/builder/agents/${id}/channels/${channelId}`),
   exportAgent: (id: string) => api.get<{ bundle: BuilderBundle }>(`/v1/builder/agents/${id}/export`),
-  importAgent: (bundle: BuilderBundle) =>
-    api.post<{ agent: BuilderAgentDetail; dropped: BuilderImportDropped[] }>(`/v1/builder/agents/import`, { bundle }),
+  importAgent: (bundle: BuilderBundle, projectId: string) =>
+    api.post<{ agent: BuilderAgentDetail; dropped: BuilderImportDropped[] }>(`/v1/builder/agents/import`, { bundle, projectId }),
 
   chat: (agentId: string, message: string, threadId?: string) =>
     api.post<ChatResponse>(`/v1/builder/agents/${agentId}/chat`, threadId ? { threadId, message } : { message }),
@@ -113,6 +131,11 @@ export const builderApi = {
     ),
   getThread: (id: string) => api.get<ChatResponse>(`/v1/builder/threads/${id}`),
   patchThread: (id: string, status: BuilderThreadStatus) => api.patch<{ thread: BuilderThreadSummary }>(`/v1/builder/threads/${id}`, { status }),
+  /** ADR-0173: the thread owner answers an "Ask first" pause; returns the whole thread */
+  confirmStep: (threadId: string, stepId: string, decision: "approve" | "deny") =>
+    api.post<ChatResponse>(`/v1/builder/threads/${threadId}/steps/${stepId}/confirm`, { decision }),
+  /** ADR-0173 review: the thread owner cancels a pause (confirmation or approval); nothing runs */
+  cancelStep: (threadId: string, stepId: string) => api.post<ChatResponse>(`/v1/builder/threads/${threadId}/steps/${stepId}/cancel`, {}),
 
   listSkills: () => api.get<{ skills: BuilderSkillSummary[] }>(`/v1/builder/skills`),
   getSkill: (id: string) => api.get<{ skill: BuilderSkillDetail }>(`/v1/builder/skills/${id}`),

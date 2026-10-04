@@ -12,6 +12,9 @@ import { buildApp } from "../app.js";
 export interface Person {
   id: string;
   auth: { authorization: string };
+  /** a project this person is a member of — every builder agent must bill to
+   * one (owner rule, 2026-10-04) */
+  projectId: string;
 }
 
 export interface BuilderKit {
@@ -53,7 +56,12 @@ export async function builderKit(prefix: string): Promise<BuilderKit> {
       if (a.statusCode >= 300) throw new Error(`admin promote failed: ${a.body}`);
     }
     const k = await req("POST", `/v1/users/${id}/keys`, BOOT, { name: "k" });
-    return { id, auth: { authorization: `Bearer ${k.json().token}` } };
+    const p = await req("POST", "/v1/projects", BOOT, { name: `${prefix}-${label}-${RUN}` });
+    if (p.statusCode >= 300) throw new Error(`project create failed: ${p.body}`);
+    const projectId = p.json().id as string;
+    const m = await req("POST", `/v1/projects/${projectId}/members`, BOOT, { userId: id, role: "contributor" });
+    if (m.statusCode >= 300) throw new Error(`project member add failed: ${m.body}`);
+    return { id, auth: { authorization: `Bearer ${k.json().token}` }, projectId };
   };
 
   const model = async (label: string, opts: { model?: string | null; price?: number } = {}) => {

@@ -449,6 +449,11 @@ export async function executeGovernedToolCall(
     /** the model's own tool_use id, when the call came out of a worker loop —
      * stamped onto the span as OTel's `gen_ai.tool.call.id` */
     toolCallId?: string | undefined;
+    /** ADR-0173 — correlation ids (e.g. the builder thread / tool step that
+     * made this call) merged into the DECISION audit row's detail, so the
+     * governed call is findable from the caller's own record. Never decides
+     * anything; absent = byte-identical. */
+    detail?: Record<string, unknown> | undefined;
   },
 ): Promise<GovernedToolCallOutcome> {
   // ADR-0070 — the tool span. Wrapped exactly like the dispatch core's: the
@@ -762,7 +767,14 @@ async function executeGovernedToolCallInner(
       // unattributed refusal is not evidence about any project.
       // AER-039: WHERE the call was bound to go — host and manifest identity
       // only (a URL can carry credentials; the digest above binds the rest)
-      detail: { argumentsDigest, approvalScope, contextDigest, projectId, target: auditTarget(serverRow) },
+      detail: {
+        ...(args.detail ?? {}),
+        argumentsDigest,
+        approvalScope,
+        contextDigest,
+        projectId,
+        target: auditTarget(serverRow),
+      },
       effect: decision.effect,
       ruleId: decision.ruleId,
       ruleChain: decision.ruleChain,

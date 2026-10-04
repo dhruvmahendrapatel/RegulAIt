@@ -108,6 +108,7 @@ import {
   type AgentRow,
 } from "./agents-connectors.js";
 import { loadAgentRevocations, loadRoleAgentGrants } from "./entitlements.js";
+import { loadModelPolicy, withModelPolicy, type ModelPolicyGate } from "./model-policy.js";
 import { beginTrace, childContext, closeSpan, finishTrace, openSpan } from "./tracing.js";
 import { assertProjectAttribution } from "./projects.js";
 import { installPresentationScrub } from "./conversation-presentation.js";
@@ -192,6 +193,7 @@ export class ModelBackedJudge implements EvalJudge {
       input: prompt,
       maxTokens: 1024,
       projectId: this.ctx.projectId,
+      modelFeature: EVALS_FEATURE,
       detail: {
         purpose: "eval-judge",
         evalRunId: this.ctx.evalRunId,
@@ -314,8 +316,13 @@ async function agentDecider(db: Db, userId: string) {
     ceilingTier = ceiling?.tier ?? null;
   }
   const evalExecutionMode = await loadExecutionMode(db);
+  // ADR-0173 §3 — and the org's model allow-list for the "evals" feature (the
+  // agent under test AND the judge), through the shared helper
+  const evalModelPolicy = await loadModelPolicy(db);
   return (agent: AgentRow, mode: string): AgentDecision =>
-    evaluateAgent({
+    withModelPolicy(kernelEvalDecision(agent, mode), evalModelPolicy, EVALS_FEATURE, agent);
+  function kernelEvalDecision(agent: AgentRow, mode: string): AgentDecision {
+    return evaluateAgent({
       userId,
       // ADR-0124 — an eval run really dispatches to the agent under test, so a
       // halt stops it. A halted deployment that kept grading models would be
@@ -334,7 +341,11 @@ async function agentDecider(db: Db, userId: string) {
       agentRevocations: revocations,
       ceilingTier,
     });
+  }
 }
+
+/** ADR-0173 §3 — eval and red-team runs (agent under test and judge) are the "evals" feature */
+const EVALS_FEATURE: ModelPolicyGate = { feature: "evals" };
 
 /**
  * ADR-0044 §4: "Baseline = the last passing run on the same dataset version for
@@ -854,6 +865,7 @@ export async function runEvalSuite(
       projectId: opts.projectId ?? null,
       // the dispatch's own span nests UNDER this case (null when tracing is off)
       trace: caseTrace,
+      modelFeature: EVALS_FEATURE,
       detail: {
         purpose,
         ...originDetail,

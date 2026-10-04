@@ -78,6 +78,7 @@ import {
 } from "./tracing.js";
 import { executeGovernedToolCall, resolveNodeToolContext } from "./mcp-proxy.js";
 import { loadAgentRevocations, loadRoleAgentGrants } from "./entitlements.js";
+import { loadModelPolicy, withModelPolicy, type ModelPolicyGate } from "./model-policy.js";
 import { assertProjectAttribution, projectPiiMode } from "./projects.js";
 // ADR-0079: the plan-only gate, shared verbatim with the invoke path.
 import { guardInstanceAttributedCall, isPlanSafeMode } from "./plan-only.js";
@@ -871,6 +872,7 @@ async function dispatchRunNodeInner(
       maxTokens: args.maxTokens,
       ...(args.onDelta ? { onText: args.onDelta } : {}),
       projectId: run.projectId ?? null,
+      modelFeature: ORCHESTRATION_FEATURE,
       detail: {
         runId: run.id,
         nodeId,
@@ -1465,25 +1467,33 @@ async function evaluateNodeOwner(
       .where(eq(agents.id, policy.ceilingAgentId));
     ceilingTier = ceiling?.tier ?? null;
   }
+  const kernelDecision = evaluateAgent({
+    userId,
+    // ADR-0124 — a pillar-7 worker is a real dispatch under the initiating
+    // user's entitlements. It inherits the halt for the same reason it
+    // inherits every other ceiling: a delegated run must never be able to do
+    // what a direct caller cannot.
+    execution: postureOf(await loadExecutionMode(db), agentHaltOf(agent)),
+    agent: { id: agent.id, tier: agent.tier, enabled: agent.enabled, modes: agent.modes ?? null },
+    mode,
+    agentGrants: grants,
+    roleAgentGrants: roleAgentGrantsForUser,
+    agentRevocations: agentRevocationsForUser,
+    ceilingTier,
+    ceilingAgentIds,
+  });
   return {
-    decision: evaluateAgent({
-      userId,
-      // ADR-0124 — a pillar-7 worker is a real dispatch under the initiating
-      // user's entitlements. It inherits the halt for the same reason it
-      // inherits every other ceiling: a delegated run must never be able to do
-      // what a direct caller cannot.
-      execution: postureOf(await loadExecutionMode(db), agentHaltOf(agent)),
-      agent: { id: agent.id, tier: agent.tier, enabled: agent.enabled, modes: agent.modes ?? null },
-      mode,
-      agentGrants: grants,
-      roleAgentGrants: roleAgentGrantsForUser,
-      agentRevocations: agentRevocationsForUser,
-      ceilingTier,
-      ceilingAgentIds,
-    }),
+    // ADR-0173 §3 — and the org's model allow-list for orchestration workers
+    decision:
+      kernelDecision.effect === "allow"
+        ? withModelPolicy(kernelDecision, await loadModelPolicy(db), ORCHESTRATION_FEATURE, agent)
+        : kernelDecision,
     unknownAgent: false,
   };
 }
+
+/** ADR-0173 §3 — orchestration workers, plan envelopes and decomposition are the "orchestration" feature */
+export const ORCHESTRATION_FEATURE: ModelPolicyGate = { feature: "orchestration" };
 
 /**
  * REL-07 — the ESTIMATED spend (`budget.spentUsd`, the number the §5.2 cap is
@@ -1876,6 +1886,8 @@ export async function planRun(
       ceilingTier = agentById.get(policy.ceilingAgentId)?.tier ?? null;
     }
     const ownerExecutionMode = await loadExecutionMode(db);
+    // ADR-0173 §3: a plan-time envelope must refuse what dispatch would refuse
+    const ownerModelPolicy = await loadModelPolicy(db);
     const evalOwner = (
       agentId: string,
       mode: string,
@@ -1883,18 +1895,23 @@ export async function planRun(
     ): AgentDecision | null => {
       const agent = agentById.get(agentId);
       if (!agent) return null;
-      return evaluateAgent({
-        userId,
-        // ADR-0124 — same rule as every other worker dispatch.
-        execution: postureOf(ownerExecutionMode, agentHaltOf(agent)),
-        agent: { id: agent.id, tier: agent.tier, enabled: agent.enabled, modes: agent.modes ?? null },
-        mode,
-        agentGrants: grants,
-        roleAgentGrants: roleAgentGrantsForUser,
-        agentRevocations: agentRevocationsForUser,
-        ceilingTier,
-        ceilingAgentIds,
-      });
+      return withModelPolicy(
+        evaluateAgent({
+          userId,
+          // ADR-0124 — same rule as every other worker dispatch.
+          execution: postureOf(ownerExecutionMode, agentHaltOf(agent)),
+          agent: { id: agent.id, tier: agent.tier, enabled: agent.enabled, modes: agent.modes ?? null },
+          mode,
+          agentGrants: grants,
+          roleAgentGrants: roleAgentGrantsForUser,
+          agentRevocations: agentRevocationsForUser,
+          ceilingTier,
+          ceilingAgentIds,
+        }),
+        ownerModelPolicy,
+        ORCHESTRATION_FEATURE,
+        agent,
+      );
     };
 
     // §5.1 per-node envelope check under the initiating user's entitlements AND

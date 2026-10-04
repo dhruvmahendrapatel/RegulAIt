@@ -117,7 +117,7 @@ import { activeDelegatorsFor } from "./delegations.js";
 // collector logic would drift from the one that produces real pack reports.
 import { evaluatePack } from "./compliance-packs.js";
 import { executeGovernedDispatch } from "./agents-connectors.js";
-import { agentDecision } from "./copilot.js";
+import { agentDecision, featureDefaultModel } from "./copilot.js";
 import { callerProjectIds, callerTeamIds, resolveScopeProjectIds } from "./reporting.js";
 // ADR-0089 (gap L21): the ONE granted computation and its never-blend note —
 // imported from the inventory, never reimplemented.
@@ -1319,12 +1319,34 @@ export function registerUseCaseRoutes(
     let narrative: Narrative = { status: "not_requested" };
     let questionnaire = suggestions.questionnaire;
     if (body.draftNarrative) {
-      const [agent] = body.agentId ? await db.select().from(agents).where(eq(agents.id, body.agentId)) : [];
+      // ADR-0173 §3 — the intake assistant is a feature of the model
+      // allow-list, and it KNOWS the data class of what it sends: the class the
+      // proposer's own data categories derive (the same derivation the use case
+      // is stored with), so a data-class rule applies here.
+      const intakeGate = {
+        feature: "intake_assist" as const,
+        dataClass: deriveDataSensitivityFromCategories(body.context.dataCategories),
+      };
+      const [named] = body.agentId ? await db.select().from(agents).where(eq(agents.id, body.agentId)) : [];
+      // no agent named: the policy's default for the intake assistant, when
+      // this person may use it (a default is a preference, never a grant)
+      const agent = named ?? (body.agentId ? undefined : await featureDefaultModel(db, userId, intakeGate));
       if (!agent) {
         narrative = { status: "skipped", reason: body.agentId ? "unknown agent" : "no agentId supplied" };
       } else {
-        const decision = await agentDecision(db, userId, agent);
+        const decision = await agentDecision(db, userId, agent, intakeGate);
         if (decision.effect !== "allow") {
+          // audited like every other governance refusal of a model use
+          await db.insert(auditLog).values({
+            userId,
+            objectType: "agent",
+            objectId: agent.id,
+            detail: { surface: "intake_assist", agentName: agent.name, dataClass: intakeGate.dataClass },
+            effect: "deny",
+            ruleId: decision.ruleId,
+            ruleChain: decision.ruleChain,
+            reason: decision.reason,
+          });
           narrative = { status: "refused", reason: decision.reason };
         } else {
           const outcome = await executeGovernedDispatch(db, opts.dataKey, {
@@ -1335,6 +1357,7 @@ export function registerUseCaseRoutes(
             input: buildIntakeNarrativePrompt(body, suggestions.questionnaire),
             maxTokens: 4096,
             projectId: null,
+            modelFeature: intakeGate,
             detail: { purpose: "intake-assist" },
           });
           if (!outcome.ok) {
