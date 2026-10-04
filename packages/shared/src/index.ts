@@ -3794,6 +3794,27 @@ export {
   type UseCaseReviewView,
 } from "./review-policy.js";
 
+// ADR-0173 §3 — the model allow-list matrix (feature × binding, per data class)
+export {
+  MODEL_NOT_ALLOWED_FOR_FEATURE,
+  MODEL_POLICY_DATA_CLASSES,
+  MODEL_POLICY_FEATURE_LABELS,
+  MODEL_POLICY_FEATURES,
+  MODEL_POLICY_LIMITS,
+  modelPolicyDefault,
+  modelPolicyPutSchema,
+  modelPolicyRuleFor,
+  modelPolicyRuleSchema,
+  modelPolicyVerdict,
+  type ModelPolicy,
+  type ModelPolicyBinding,
+  type ModelPolicyDataClass,
+  type ModelPolicyFeature,
+  type ModelPolicyPut,
+  type ModelPolicyRule,
+  type ModelPolicyVerdict,
+} from "./model-policy.js";
+
 // ---------------------------------------------------------------------------
 // ADR-0172 — the agent builder's request vocabulary, bundle format, SKILL.md
 // parser and schedule cadence arithmetic.

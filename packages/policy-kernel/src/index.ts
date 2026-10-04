@@ -1243,6 +1243,10 @@ export type AgentRuleName =
   | "agent-mode"
   | "agent-ceiling"
   | "agent-lead-ceiling"
+  /** ADR-0173 §3 — the org's model allow-list matrix, applied AFTER this
+   * kernel allowed (by the gateway's shared model-access decision); it can
+   * only turn an allow into a deny */
+  | "model-feature-policy"
   | "default-deny";
 
 export interface AgentRuleTrace {

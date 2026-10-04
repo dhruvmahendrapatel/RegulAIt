@@ -208,6 +208,10 @@ export const NON_ADMIN_ROUTES = new Set([
   // deployment is halted" is a far better answer than a silent denial that
   // looks like lost access. It exposes no secret and no other user's data.
   "GET /v1/execution",
+  // ADR-0173 §3 — the model allow-list as it applies to the caller: the model
+  // picker shows "Not allowed here" from it. Non-admins see binding ids only
+  // for bindings they hold a grant on. The PUT stays admin-only.
+  "GET /v1/model-policy",
   "PATCH /v1/use-cases/:useCaseId",
   // ADR-0171 / AER-050: the intake wizard's own drafts. Any signed-in user
   // keeps their OWN draft (the handler refuses a token with no user identity,

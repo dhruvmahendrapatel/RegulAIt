@@ -1047,6 +1047,9 @@ export const auditLog = pgTable(
         "remediation",
         // ADR-0161: one CI/CD deploy-gate evaluation (objectId = use case)
         "deploy_gate",
+        // ADR-0173 §3: an admin replacing the model allow-list matrix
+        // (objectId null — the policy is org-wide). Plain text column — no DDL.
+        "model_policy",
         // ADR-0172: a builder agent created / changed / shared / run on a
         // schedule / refused at its spend limit, and a builder skill change
         // (objectId = the builder agent or skill). Plain text column — no DDL.
@@ -3687,6 +3690,43 @@ export const orgSettings = pgTable(
 );
 
 export type OrgSettingsRow = typeof orgSettings.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0173 §3 (migration 0138) — the model allow-list matrix
+// ---------------------------------------------------------------------------
+//
+// One row per (feature, data class). No rows = every entitled binding is
+// allowed everywhere. Enforced in the shared model-access decision
+// (copilot.ts `agentDecision` and the helper it calls, model-policy.ts).
+export const MODEL_POLICY_FEATURE_VALUES = [
+  "chat",
+  "builder",
+  "copilot",
+  "intake_assist",
+  "evals",
+  "orchestration",
+  "compat",
+] as const;
+export const MODEL_POLICY_DATA_CLASS_VALUES = ["public", "internal", "confidential", "regulated"] as const;
+
+export const modelPolicyRules = pgTable(
+  "model_policy_rules",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    feature: text("feature", { enum: MODEL_POLICY_FEATURE_VALUES }).notNull(),
+    /** NULL = the feature's base rule */
+    dataClass: text("data_class", { enum: MODEL_POLICY_DATA_CLASS_VALUES }),
+    /** false = the row only carries a default; every entitled binding is allowed */
+    restricted: boolean("restricted").notNull().default(true),
+    allowedAgentIds: jsonb("allowed_agent_ids").$type<string[]>().notNull().default([]),
+    allowedProviders: jsonb("allowed_providers").$type<string[]>().notNull().default([]),
+    defaultAgentId: uuid("default_agent_id").references(() => agents.id, { onDelete: "set null" }),
+    updatedBy: uuid("updated_by").references(() => users.id, { onDelete: "set null" }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("model_policy_rules_feature_class_uq").on(t.feature, sql`COALESCE(${t.dataClass}, '')`)],
+);
+export type ModelPolicyRuleRow = typeof modelPolicyRules.$inferSelect;
 
 // ---------------------------------------------------------------------------
 // ADR-0040 (migration 0054) — ABAC / policy-as-code

@@ -104,6 +104,7 @@ import {
   type GuardrailPolicy,
 } from "./guardrails.js";
 import { mrmDispatchGate } from "./mrm.js";
+import { loadModelPolicy, modelPolicyDispatchRefusal, withModelPolicy, type ModelPolicyGate } from "./model-policy.js";
 // ADR-0080 amendment (batch B3): the use-case dispatch gate — org opt-in,
 // default off (byte-identical), the ADR-0045 gate shape beside the MRM rung.
 import {
@@ -466,6 +467,13 @@ export interface GovernedDispatchArgs {
    * them; absent/null on every ordinary path, where every check below is a
    * no-op and the behaviour is byte-identical to pre-0066. */
   virtualKey?: VirtualKeyContext | null | undefined;
+  /** ADR-0173 §3 — the product feature this dispatch serves (and the data
+   * class, where the caller knows it). When set, the org's model allow-list is
+   * applied to the SERVED binding inside the core and to every fallback hop, so
+   * neither a routing choice nor a fallback reaches a model the matrix forbids
+   * for that feature. Absent = no matrix check here (the caller's own decision
+   * already applied it, or the call is not a feature use). */
+  modelFeature?: ModelPolicyGate | undefined;
   /** ADR-0066 §4 — the mode a FALLBACK HOP is re-evaluated under. Only the
    * chain driver reads it; a hop must be entitlement-checked in the same mode
    * the primary was, or a `plan`-only grant could serve an `execute` call. */
@@ -639,9 +647,11 @@ export async function executeGovernedDispatch(
       await recordSkippedHop(label, reason, "fallback-hop-unavailable");
       continue;
     }
-    // RULE 2 — re-evaluate, never inherit.
+    // RULE 2 — re-evaluate, never inherit. ADR-0173 §3: including the org's
+    // model allow-list for the caller's feature, when the caller named one.
     const hopExecutionMode = await loadExecutionMode(db);
-    const decision = evaluateAgent({
+    const hopPolicy = args.modelFeature ? await loadModelPolicy(db) : null;
+    const kernelDecision = evaluateAgent({
       userId: args.userId,
       // ADR-0124 — a fallback hop is a real dispatch, so it is gated like one.
       // The hop agent's OWN halt matters most here: halting an agent must also
@@ -660,6 +670,7 @@ export async function executeGovernedDispatch(
       agentRevocations: revocationRows,
       ceilingTier,
     });
+    const decision = hopPolicy ? withModelPolicy(kernelDecision, hopPolicy, args.modelFeature, hopAgent) : kernelDecision;
     if (decision.effect !== "allow") {
       hops.push({ ...label, outcome: "denied", reason: decision.reason });
       await auditHop(label, "deny", "fallback-hop-denied", decision.reason, {
@@ -1314,6 +1325,41 @@ async function dispatchAttempt(
         reason: refusal.detail,
       }).returning({ id: auditLog.id });
       sink.auditLogId = vkRow?.id ?? null;
+      return { ok: false, status: refusal.status, error: refusal.error, detail: refusal.detail };
+    }
+  }
+
+  // ADR-0173 §3 — THE MODEL ALLOW-LIST, on the SERVED binding. Same placement
+  // and the same "can only subtract" shape as the key ceiling above: the
+  // caller's decision named the REQUESTED binding; this is what stops a
+  // routing choice or a fallback hop from serving one the org's matrix forbids
+  // for the caller's feature. One small read, only when a feature is named.
+  if (args.modelFeature) {
+    const refusal = modelPolicyDispatchRefusal(await loadModelPolicy(db), args.modelFeature, served);
+    if (refusal) {
+      const [mpRow] = await db
+        .insert(auditLog)
+        .values({
+          userId,
+          objectType: "agent",
+          objectId: served.id,
+          detail: {
+            phase: "dispatch",
+            agentId: served.id,
+            agentName: served.name,
+            model: served.model,
+            feature: args.modelFeature.feature,
+            ...(args.modelFeature.dataClass ? { dataClass: args.modelFeature.dataClass } : {}),
+            ...(served.id !== requestedAgentId ? { requestedAgentId } : {}),
+            ...(args.projectId ? { projectId: args.projectId } : {}),
+          },
+          effect: "deny",
+          ruleId: refusal.ruleId,
+          ruleChain: [],
+          reason: refusal.detail,
+        })
+        .returning({ id: auditLog.id });
+      sink.auditLogId = mpRow?.id ?? null;
       return { ok: false, status: refusal.status, error: refusal.error, detail: refusal.detail };
     }
   }
@@ -2415,9 +2461,16 @@ async function performDispatch(
     // was entitled under — a `plan`-only grant must not serve an `execute` call
     // just because it appears in a chain.
     mode: body.mode,
+    // ADR-0173 §3: the native invoke path is the "chat" feature; the core
+    // re-applies the matrix to routing's choice and to every fallback hop
+    modelFeature: CHAT_FEATURE,
     detail: { mode: body.mode, ...(body.conversationId ? { conversationId: body.conversationId } : {}) },
   });
 }
+
+/** ADR-0173 §3 — the native invoke path (the console's chat, the Try-it panel,
+ * SDK callers of /v1/agents/:id/invoke) is the "chat" feature of the matrix */
+const CHAT_FEATURE: ModelPolicyGate = { feature: "chat" };
 
 /**
  * Platform credential via environment. A self-hosted / single-tenant deploy can
@@ -3664,7 +3717,10 @@ export function registerAgentConnectorRoutes(
       ceilingTier = ceiling?.tier ?? null;
     }
 
-    const decision = evaluateAgent({
+    // ADR-0173 §3 — the org's model allow-list for the "chat" feature, applied
+    // to the kernel's allow below and to every routing candidate.
+    const invokeModelPolicy = await loadModelPolicy(db);
+    const kernelDecision = evaluateAgent({
       userId,
       // ADR-0124 — the kill switch on the native dispatch path.
       execution: postureOf(await loadExecutionMode(db), agentHaltOf(agent)),
@@ -3683,6 +3739,7 @@ export function registerAgentConnectorRoutes(
       agentRevocations: agentRevocationsForUser,
       ceilingTier,
     });
+    const decision = withModelPolicy(kernelDecision, invokeModelPolicy, CHAT_FEATURE, agent);
 
     // OPTIMIZATION §8: routing runs strictly after — and inside — governance.
     // The candidate set starts as exactly the agents evaluateAgent would allow
@@ -3800,6 +3857,7 @@ export function registerAgentConnectorRoutes(
             virtualKey: invokeVirtualKey,
             mode: body.mode,
             cachedResponse: hit,
+            modelFeature: CHAT_FEATURE,
             detail: { surface: "invoke_cache", mode: body.mode },
           });
           if (!governed.ok) {
@@ -3913,19 +3971,25 @@ export function registerAgentConnectorRoutes(
       const routingExecutionMode = await loadExecutionMode(db);
       const entitled = registry.filter(
         (a) =>
-          evaluateAgent({
-            userId,
-            execution: postureOf(routingExecutionMode, agentHaltOf(a)),
-            agent: { id: a.id, name: a.name, tier: a.tier, enabled: a.enabled, modes: a.modes ?? null },
-            mode: body.mode,
-            agentGrants: grants,
-            roleAgentGrants: roleAgentGrantsForUser,
-            // ADR-0019: the routing roster is exactly what evaluateAgent would
-            // allow, so a revoked agent must not be a routing candidate either
-            // — otherwise the optimizer could serve an agent governance denies.
-            agentRevocations: agentRevocationsForUser,
-            ceilingTier,
-          }).effect === "allow",
+          withModelPolicy(
+            evaluateAgent({
+              userId,
+              execution: postureOf(routingExecutionMode, agentHaltOf(a)),
+              agent: { id: a.id, name: a.name, tier: a.tier, enabled: a.enabled, modes: a.modes ?? null },
+              mode: body.mode,
+              agentGrants: grants,
+              roleAgentGrants: roleAgentGrantsForUser,
+              // ADR-0019: the routing roster is exactly what evaluateAgent would
+              // allow, so a revoked agent must not be a routing candidate either
+              // — otherwise the optimizer could serve an agent governance denies.
+              agentRevocations: agentRevocationsForUser,
+              ceilingTier,
+            }),
+            // ADR-0173 §3: nor one the org's model allow-list forbids for chat
+            invokeModelPolicy,
+            CHAT_FEATURE,
+            a,
+          ).effect === "allow",
       );
 
       // A request that will really execute may only be routed onto an agent

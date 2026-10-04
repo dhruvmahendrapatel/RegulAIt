@@ -333,6 +333,7 @@ import { registerAnthropicCompat } from "./compat-anthropic.js";
 import { registerOpenAiCompat } from "./compat-openai.js";
 import { registerModelsDiscovery } from "./compat-models.js";
 import { registerVirtualKeyRoutes, routesForPurpose } from "./virtual-keys.js";
+import { registerModelPolicyRoutes } from "./model-policy.js";
 // ADR-0097 — the tool-poisoning admission gate (part A) and the RFC 9728
 // protected-resource metadata + WWW-Authenticate challenge (part B).
 import {
@@ -4329,6 +4330,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // (a strict narrowing of their own entitlements); the handlers enforce
   // owner-or-admin per row, and the admin-only fields refuse in-handler.
   registerVirtualKeyRoutes(app, db);
+  // ADR-0173 §3 — the model allow-list matrix. GET is any signed-in person's
+  // read of the policy as it applies to them (NON_ADMIN_ROUTES); PUT is admin.
+  // Enforcement is NOT here: it is the shared model-access decision's.
+  registerModelPolicyRoutes(app, db);
 
   // ADR-0031 item 2: the audit read surface used to be hard-capped at 100 rows
   // with a userId filter (plus PR #79's deployMode) and nothing else — for a

@@ -38,7 +38,8 @@ import {
   loadAgentRevocations,
   loadRoleAgentGrants,
 } from "./entitlements.js";
-import { COMPAT_MODE } from "./compat-core.js";
+import { COMPAT_FEATURE, COMPAT_MODE } from "./compat-core.js";
+import { loadModelPolicy, withModelPolicy } from "./model-policy.js";
 import {
   loadVirtualKeyContext,
   virtualKeyAdmits,
@@ -101,12 +102,14 @@ export async function listEntitledModels(
     ceilingTier = ceiling?.tier ?? null;
   }
 
+  // ADR-0173 §3: and the org's "compat" model allow-list, through the same helper
+  const modelPolicy = await loadModelPolicy(db);
   const byModel = new Map<string, EntitledModel>();
   for (const a of registry) {
     if (!a.model) continue;
     // THE FILTER. Identical inputs to the dispatch path's own check, so what a
     // client sees listed and what it may call cannot drift.
-    const decision = evaluateAgent({
+    const kernelDecision = evaluateAgent({
       userId,
       /**
        * ADR-0124 — VISIBILITY, not execution. This is the `/v1/models` listing
@@ -123,6 +126,7 @@ export async function listEntitledModels(
       agentRevocations: revocations,
       ceilingTier,
     });
+    const decision = withModelPolicy(kernelDecision, modelPolicy, COMPAT_FEATURE, a);
     if (decision.effect !== "allow") continue;
     // §2's intersection, applied to discovery as well as to dispatch: a key
     // must not advertise a model it would refuse.

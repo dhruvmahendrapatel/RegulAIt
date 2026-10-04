@@ -140,7 +140,10 @@ import {
   type CopilotQueryPlan,
   type CopilotTimeframe,
   type CopilotTool,
+  MODEL_NOT_ALLOWED_FOR_FEATURE,
+  modelPolicyDefault,
 } from "@regulait/shared";
+import { loadModelPolicy, withModelPolicy, type ModelPolicyGate } from "./model-policy.js";
 import {
   evaluateAgent,
   evaluateConnector,
@@ -1451,6 +1454,8 @@ export class ModelBackedNarrator implements CopilotNarrator {
       // its ~200-token reply and bills for that.
       maxTokens: 4096,
       projectId: this.ctx.projectId,
+      // ADR-0173 §3: a fallback hop must obey the copilot's model allow-list too
+      modelFeature: { feature: "copilot" },
       detail: { purpose: "copilot-narration", tool: req.plan.tool },
     });
     if (!outcome.ok) {
@@ -1465,8 +1470,26 @@ export class ModelBackedNarrator implements CopilotNarrator {
 }
 
 /** the entitlement inputs, the SAME `evaluateAgent` path an ordinary invoke
- * takes — the copilot's narrator is not exempt from anything */
-export async function agentDecision(db: Db, userId: string, agent: AgentRow): Promise<AgentDecision> {
+ * takes — the copilot's narrator is not exempt from anything.
+ *
+ * ADR-0173 §3 — THE SHARED MODEL-ACCESS DECISION. A caller that represents a
+ * product feature passes it (`{ feature }`, plus `dataClass` where it knows the
+ * class of the data it sends), and the org's model allow-list matrix is applied
+ * to the kernel's allow (`withModelPolicy`): a binding the matrix forbids for
+ * that feature is refused `model_not_allowed_for_feature`. Callers by feature:
+ *   copilot narration          → "copilot"        (copilot.ts, ask route)
+ *   intake assistant draft     → "intake_assist"  (use-cases.ts, with the
+ *                                 data class derived from the answers)
+ *   builder model choice       → "builder"        (builder-access.ts helpers)
+ *   builder turn               → "builder"        (builder-runtime.ts — passes
+ *                                 it once its owner wires the option)
+ *   copilot entity resolution  → none: a visibility lookup, not a model use */
+export async function agentDecision(
+  db: Db,
+  userId: string,
+  agent: AgentRow,
+  opts: ModelPolicyGate | undefined = undefined,
+): Promise<AgentDecision> {
   const [grants, roleGrants, revocations, [policy]] = await Promise.all([
     db.select().from(agentGrants).where(eq(agentGrants.userId, userId)),
     loadRoleAgentGrants(db, userId),
@@ -1481,7 +1504,7 @@ export async function agentDecision(db: Db, userId: string, agent: AgentRow): Pr
       .where(eq(agents.id, policy.ceilingAgentId));
     ceilingTier = ceiling?.tier ?? null;
   }
-  return evaluateAgent({
+  const decision = evaluateAgent({
     userId,
     // ADR-0124 — the copilot's narrator really dispatches, and its own comment
     // says it "is not exempt from anything". A halt is no exception.
@@ -1499,6 +1522,21 @@ export async function agentDecision(db: Db, userId: string, agent: AgentRow): Pr
     agentRevocations: revocations,
     ceilingTier,
   });
+  if (!opts || decision.effect !== "allow") return decision;
+  return withModelPolicy(decision, await loadModelPolicy(db), opts, agent);
+}
+
+/**
+ * ADR-0173 §3 — the feature's policy DEFAULT binding, only when this person may
+ * use it here (the full shared decision, so a default is never a grant); null
+ * when the policy names none or it is not usable for them.
+ */
+export async function featureDefaultModel(db: Db, userId: string, gate: ModelPolicyGate): Promise<AgentRow | null> {
+  const id = modelPolicyDefault(await loadModelPolicy(db), gate.feature, gate.dataClass ?? null);
+  if (!id) return null;
+  const [row] = await db.select().from(agents).where(eq(agents.id, id));
+  if (!row || !row.model) return null;
+  return (await agentDecision(db, userId, row as AgentRow, gate)).effect === "allow" ? (row as AgentRow) : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1735,19 +1773,23 @@ export function registerCopilotRoutes(app: FastifyInstance, db: Db, opts: Copilo
       if (!agent) return reply.status(404).send({ error: "unknown_narrator_agent" });
       // THE SAME ENTITLEMENT CHECK AN ORDINARY INVOKE TAKES. The copilot is a
       // tenant: a user who may not call this agent may not narrate with it.
-      const decision = await agentDecision(db, userId, agent as AgentRow);
+      // ADR-0173 §3: and the org's model allow-list for the copilot feature.
+      const decision = await agentDecision(db, userId, agent as AgentRow, { feature: "copilot" });
       if (decision.effect !== "allow") {
+        const policyRefusal = decision.ruleId === MODEL_NOT_ALLOWED_FOR_FEATURE;
         await audit(
           userId,
           "copilot_query",
           null,
-          COPILOT_RULE_IDS.narratorNotEntitled,
+          policyRefusal ? MODEL_NOT_ALLOWED_FOR_FEATURE : COPILOT_RULE_IDS.narratorNotEntitled,
           `refused a copilot narration: ${decision.reason}. The copilot is a governed tenant, not a ` +
             `privileged system component — it inherits this user's entitlements and never exceeds them`,
           { narratorAgentId: agent.id, accessRuleId: decision.ruleId },
           "deny",
         );
-        return reply.status(403).send({ error: "narrator_not_entitled", detail: decision.reason });
+        return reply
+          .status(403)
+          .send({ error: policyRefusal ? MODEL_NOT_ALLOWED_FOR_FEATURE : "narrator_not_entitled", detail: decision.reason, ruleId: decision.ruleId });
       }
       const narrator =
         opts.narrator ??
