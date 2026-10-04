@@ -57,3 +57,35 @@ per-key budgets) but no builder layer, and every model choice is a plain dropdow
 - Migration 0135 adds the builder tables. New routes live under `/v1/builder/*`, all non-admin with
   owner/sharing checks.
 - The suite list grows by one; the "/" nav filter and suite switcher pick it up automatically.
+
+## Amendment — review fixes (2026-10-04, before first push)
+
+An adversarial review of the phase-1 build found gaps between the "governed by construction" claim
+and the code; all are closed in migration 0135 (still unpushed, edited in place) and the routes:
+
+- **Monthly limit**: a limited agent's check → dispatch → record runs under a per-agent lease
+  (`builder_agents.limit_lease_*`, a compare-and-swap that holds no DB connection while waiting), so
+  concurrent chats or a chat and a sweep cannot both pass the check; a limited agent whose model (or
+  any binding in its fallback chain) has no list price is refused `409 agent_limit_needs_priced_model`
+  instead of counting $0.
+- **Skills are pinned**: `builder_agent_skills.body_snapshot` / `skill_updated_at` hold the body and
+  version at attach time; the editor shows "update available" and the owner re-attaches
+  (`POST …/skills/:skillId/reattach`, audited). At run time only skills the agent's owner can still see
+  reach the prompt. Instructions + pinned skills are capped at 48 KB (`422 system_prompt_too_large`).
+  Template seeding and import never link someone else's skill: only the creator's own skill with the
+  same name and identical body is reused, otherwise a private copy is made.
+- **Export** is an editor act and leaves out skills the exporter cannot see.
+- **Project attribution**: `builder_agents.project_id` (set by a project member or an admin) is passed to
+  the governed dispatch, so spend reaches project dashboards and budgets; it is re-checked for the
+  person chatting.
+- **Channels**: only an admin binds (or auto-picks) a ChatOps connection; anyone else's channel is
+  recorded as needing setup.
+- **Schedules** record who created, edited and enabled them; one written or edited by someone other than
+  the owner is saved off and only the owner can turn it on (`403 owner_must_enable_schedule`); the sweep
+  runs only owner-enabled schedules, at most 10 per owner per pass (the rest stay due).
+- **Caps**: 20 schedules, 4 channels and 500 memory items per agent, 10 sub-agents per import — each a
+  named 422; sub-agent cycle checks walk only reachable edges.
+- **Disclosure**: sub-agent names are shown only to people who may see the child ("A private agent"
+  otherwise); the integrations page names only MCP servers the caller holds a grant on.
+- **Model portal**: only a governance refusal (a 403 carrying its rule) is labelled "Refused"; any other
+  failure is a neutral "Couldn't run" with its code.

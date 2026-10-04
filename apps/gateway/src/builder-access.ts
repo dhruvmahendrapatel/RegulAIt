@@ -11,6 +11,11 @@
 import {
   agentGrants,
   agents,
+  roleAssignments,
+  roleServerGrants,
+  roleToolGrants,
+  serverGrants,
+  toolGrants,
   and,
   asc,
   builderAgentShares,
@@ -25,6 +30,7 @@ import {
   or,
   userAgentPolicies,
   type BuilderAgentRow,
+  type BuilderSkillRow,
   type Db,
 } from "@regulait/db";
 import { visibleTools, type ToolRef } from "@regulait/policy-kernel";
@@ -51,6 +57,12 @@ export function canSeeAgent(agent: BuilderAgentRow, viewer: Viewer, sharedWithVi
   if (agent.ownerUserId === viewer.userId) return true;
   if (agent.sharing === "workspace") return true;
   return agent.sharing === "people" && sharedWithViewer;
+}
+
+/** a skill is visible to its owner, to admins, and to everyone when shared
+ * with the workspace — never once archived */
+export function skillVisible(s: BuilderSkillRow, viewer: Viewer): boolean {
+  return !s.archivedAt && (viewer.isAdmin || s.ownerUserId === viewer.userId || s.visibility === "workspace");
 }
 
 export function canEditAgent(agent: BuilderAgentRow, viewer: Viewer): boolean {
@@ -177,6 +189,24 @@ export async function entitledMcpToolIds(db: Db, userId: string, tools: McpToolI
     for (const t of list) if (visible.has(t.name)) out.add(t.id);
   }
   return out;
+}
+
+/** MCP server ids the user holds ANY grant on (a server or tool grant,
+ * directly or through a role) — what the integrations page may name to them */
+export async function grantedMcpServerIds(db: Db, userId: string): Promise<Set<string>> {
+  const [tg, sg, assignments] = await Promise.all([
+    db.select({ serverId: toolGrants.serverId }).from(toolGrants).where(eq(toolGrants.userId, userId)),
+    db.select({ serverId: serverGrants.serverId }).from(serverGrants).where(eq(serverGrants.userId, userId)),
+    db.select({ roleId: roleAssignments.roleId }).from(roleAssignments).where(eq(roleAssignments.userId, userId)),
+  ]);
+  const roleIds = [...new Set(assignments.map((a) => a.roleId))];
+  const [rtg, rsg] = roleIds.length
+    ? await Promise.all([
+        db.select({ serverId: roleToolGrants.serverId }).from(roleToolGrants).where(inArray(roleToolGrants.roleId, roleIds)),
+        db.select({ serverId: roleServerGrants.serverId }).from(roleServerGrants).where(inArray(roleServerGrants.roleId, roleIds)),
+      ])
+    : [[], []];
+  return new Set([...tg, ...sg, ...rtg, ...rsg].map((g) => g.serverId));
 }
 
 export async function loadConnectorsById(db: Db, ids: string[]) {

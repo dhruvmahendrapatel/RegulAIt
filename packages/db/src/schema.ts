@@ -8544,6 +8544,14 @@ export const builderAgents = pgTable(
     connectionFormat: text("connection_format", { enum: BUILDER_CONNECTION_FORMATS }).notNull(),
     computerUse: boolean("computer_use").notNull().default(false),
     monthlyLimitUsd: doublePrecision("monthly_limit_usd"),
+    /** pillar 5 attribution: the project this agent's dispatches bill to
+     * (null = unattributed); ON DELETE SET NULL */
+    projectId: uuid("project_id").references(() => projects.id, { onDelete: "set null" }),
+    /** the monthly-limit LEASE: a limited agent runs one turn at a time, so a
+     * check -> dispatch -> record cannot interleave with another (expires so a
+     * crashed holder never wedges the agent) */
+    limitLeaseToken: uuid("limit_lease_token"),
+    limitLeaseUntil: timestamp("limit_lease_until", { withTimezone: true }),
     /** soft delete: archived agents are hidden from every list and refuse chat */
     archivedAt: timestamp("archived_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -8638,6 +8646,11 @@ export const builderAgentSkills = pgTable(
     skillId: uuid("skill_id")
       .notNull()
       .references(() => builderSkills.id, { onDelete: "cascade" }),
+    /** the skill body PINNED at attach time — what the agent runs, so an edit
+     * by the skill's owner never silently changes someone else's agent */
+    bodySnapshot: text("body_snapshot").notNull().default(""),
+    /** the skill's updated_at when pinned; newer = "update available" */
+    skillUpdatedAt: timestamp("skill_updated_at", { withTimezone: true }).notNull().defaultNow(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [primaryKey({ columns: [t.agentId, t.skillId] }), index("builder_agent_skills_skill_idx").on(t.skillId)],
@@ -8674,6 +8687,11 @@ export const builderAgentSchedules = pgTable(
      * concurrent sweeps run a due schedule once */
     nextRunAt: timestamp("next_run_at", { withTimezone: true }),
     lastRunAt: timestamp("last_run_at", { withTimezone: true }),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    updatedByUserId: uuid("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    /** who turned it on; the sweep runs a schedule only when this is the
+     * agent's OWNER (it runs as them) */
+    enabledByUserId: uuid("enabled_by_user_id").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

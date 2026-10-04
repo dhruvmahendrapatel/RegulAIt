@@ -17,6 +17,25 @@ export const BUILDER_THREAD_STATUS_VALUES = ["active", "needs_attention", "compl
 export type BuilderCadenceValue = (typeof BUILDER_CADENCE_VALUES)[number];
 
 /**
+ * The builder's resource ceilings, shared so the web can say them in copy.
+ * Each is enforced by the gateway with a named 422 (never a silent drop).
+ */
+export const BUILDER_LIMITS = {
+  /** schedules on one agent */
+  schedulesPerAgent: 20,
+  /** channel bindings on one agent */
+  channelsPerAgent: 4,
+  /** memory items on one agent (append-only; the owner removes old ones) */
+  memoryPerAgent: 500,
+  /** sub-agents one import may create */
+  importSubagents: 10,
+  /** the configured system prompt (instructions + pinned skills), UTF-8 bytes */
+  systemPromptBytes: 48 * 1024,
+  /** schedule runs per agent owner in one sweep pass (the rest stay due) */
+  sweepRunsPerOwner: 10,
+} as const;
+
+/**
  * The avatar palette. Every fill carries WHITE initials at WCAG AA (>= 4.5:1),
  * which is why an agent's colour is one of these and nothing else. The web
  * mirrors this list as `AGENT_COLORS` (apps/web/src/views/builder/builderLogic.ts);
@@ -65,6 +84,8 @@ export const builderUpdateAgentSchema = z
     sharedUserIds: z.array(z.string().uuid()).max(200).optional(),
     monthlyLimitUsd: z.number().min(0.01).max(100_000).nullable().optional(),
     computerUse: z.boolean().optional(),
+    /** the project this agent's spend bills to (null clears it) */
+    projectId: z.string().uuid().nullable().optional(),
     /** accepted by the parser only so the route can refuse it with a named 409 */
     connectionFormat: z.enum(BUILDER_CONNECTION_FORMAT_VALUES).optional(),
   })

@@ -44,6 +44,8 @@ import {
   mcpServers,
   mcpTools,
   or,
+  projectMembers,
+  projects,
   sql,
   users,
   type BuilderAgentRow,
@@ -54,6 +56,7 @@ import {
 } from "@regulait/db";
 import {
   BUILDER_AGENT_COLORS,
+  BUILDER_LIMITS,
   builderAddMemorySchema,
   builderChatSchema,
   builderColorFor,
@@ -80,21 +83,27 @@ import {
 import type { AgentRow } from "./agents-connectors.js";
 import {
   canEditAgent,
+  canSeeAgent,
   defaultModelFor,
   entitledConnectorIds,
   entitledMcpToolIds,
+  grantedMcpServerIds,
   listVisibleAgents,
   loadConnectorsById,
   loadMcpTools,
   loadVisibleAgent,
   modelAllowed,
+  skillVisible,
   toolboxOptionsFor,
   type Viewer,
 } from "./builder-access.js";
 import { BUILDER_INTEGRATION_GROUPS, BUILDER_TEMPLATES, CONNECT_HREF, findTemplate } from "./builder-catalog.js";
 import {
+  configuredPrompt,
   messageView,
   monthStartUtc,
+  pinnedSkillsForRun,
+  promptTooLarge,
   runBuilderScheduleSweep,
   runBuilderTurn,
 } from "./builder-runtime.js";
@@ -108,6 +117,7 @@ const idParam = z.object({ id: z.string().uuid() });
 const memoryParam = z.object({ id: z.string().uuid(), memoryId: z.string().uuid() });
 const scheduleParam = z.object({ id: z.string().uuid(), scheduleId: z.string().uuid() });
 const channelParam = z.object({ id: z.string().uuid(), channelId: z.string().uuid() });
+const skillParam = z.object({ id: z.string().uuid(), skillId: z.string().uuid() });
 const templateParam = z.object({ id: z.string().min(1).max(80) });
 
 /** palette colours only (shared BUILDER_AGENT_COLORS): white initials keep AA */
@@ -220,7 +230,8 @@ async function summaries(db: Db, rows: BuilderAgentRow[], viewer: Viewer) {
   }));
 }
 
-function scheduleView(s: BuilderScheduleRow) {
+function scheduleView(s: BuilderScheduleRow, ownerUserId: string, names: Map<string, string> = new Map()) {
+  const lastEditor = s.updatedByUserId ?? s.createdByUserId;
   return {
     id: s.id,
     name: s.name,
@@ -228,6 +239,10 @@ function scheduleView(s: BuilderScheduleRow) {
     timeUtc: s.timeUtc,
     prompt: s.prompt,
     enabled: s.enabled,
+    /** someone other than the owner wrote or changed it: it stays off until
+     * the OWNER turns it on (it would run, and spend, as them) */
+    awaitingOwner: !s.enabled && !!lastEditor && lastEditor !== ownerUserId,
+    lastEditedByName: lastEditor ? (names.get(lastEditor) ?? null) : null,
     nextRunAt: s.nextRunAt ? s.nextRunAt.toISOString() : null,
     lastRunAt: s.lastRunAt ? s.lastRunAt.toISOString() : null,
   };
@@ -274,7 +289,7 @@ async function toolViews(db: Db, agentId: string, viewer: Viewer) {
 
 async function agentDetail(db: Db, agent: BuilderAgentRow, viewer: Viewer) {
   const [summary] = await summaries(db, [agent], viewer);
-  const [shares, tools, subs, skills, memory, schedules, channels] = await Promise.all([
+  const [shares, tools, subs, skills, memory, schedules, channels, project, owner] = await Promise.all([
     db.select({ userId: builderAgentShares.userId }).from(builderAgentShares).where(eq(builderAgentShares.agentId, agent.id)),
     toolViews(db, agent.id, viewer),
     db
@@ -282,14 +297,14 @@ async function agentDetail(db: Db, agent: BuilderAgentRow, viewer: Viewer) {
         childId: builderAgentSubagents.childId,
         name: builderAgentSubagents.name,
         description: builderAgentSubagents.description,
-        childName: builderAgents.name,
+        child: builderAgents,
       })
       .from(builderAgentSubagents)
       .innerJoin(builderAgents, eq(builderAgentSubagents.childId, builderAgents.id))
       .where(and(eq(builderAgentSubagents.parentId, agent.id), isNull(builderAgents.archivedAt)))
       .orderBy(asc(builderAgentSubagents.position)),
     db
-      .select({ id: builderSkills.id, name: builderSkills.name, description: builderSkills.description })
+      .select({ skill: builderSkills, skillUpdatedAt: builderAgentSkills.skillUpdatedAt })
       .from(builderAgentSkills)
       .innerJoin(builderSkills, eq(builderAgentSkills.skillId, builderSkills.id))
       .where(and(eq(builderAgentSkills.agentId, agent.id), isNull(builderSkills.archivedAt)))
@@ -318,25 +333,61 @@ async function agentDetail(db: Db, agent: BuilderAgentRow, viewer: Viewer) {
       .leftJoin(chatopsConnections, eq(builderAgentChannels.chatopsConnectionId, chatopsConnections.id))
       .where(eq(builderAgentChannels.agentId, agent.id))
       .orderBy(asc(builderAgentChannels.createdAt)),
+    agent.projectId
+      ? db.select({ id: projects.id, name: projects.name }).from(projects).where(eq(projects.id, agent.projectId))
+      : Promise.resolve([]),
+    db.select({ isAdmin: users.isAdmin }).from(users).where(eq(users.id, agent.ownerUserId)),
   ]);
-  const names = await userNames(db, [...shares.map((s) => s.userId), ...memory.map((m) => m.createdByUserId)]);
+  // a sub-agent's NAME is shown only to someone who may see that agent
+  const childIds = subs.map((x) => x.childId);
+  const sharedChildren = childIds.length
+    ? new Set(
+        (
+          await db
+            .select({ agentId: builderAgentShares.agentId })
+            .from(builderAgentShares)
+            .where(and(inArray(builderAgentShares.agentId, childIds), eq(builderAgentShares.userId, viewer.userId)))
+        ).map((r) => r.agentId),
+      )
+    : new Set<string>();
+  const ownerViewer: Viewer = { userId: agent.ownerUserId, isAdmin: !!owner[0]?.isAdmin };
+  const names = await userNames(db, [
+    ...shares.map((s) => s.userId),
+    ...memory.map((m) => m.createdByUserId),
+    ...schedules.map((x) => x.updatedByUserId ?? x.createdByUserId),
+  ]);
   return {
     ...summary!,
     instructions: agent.instructions,
     connectionFormat: agent.connectionFormat,
     computerUse: agent.computerUse,
+    project: project[0] ?? null,
     sharedUserIds: shares.map((s) => s.userId),
     sharedUsers: shares.map((s) => ({ id: s.userId, name: names.get(s.userId) ?? null })),
     tools,
-    subagents: subs,
-    skills,
+    subagents: subs.map((x) => ({
+      childId: x.childId,
+      name: x.name,
+      description: x.description,
+      childName: canSeeAgent(x.child, viewer, sharedChildren.has(x.childId)) ? x.child.name : PRIVATE_AGENT_NAME,
+    })),
+    skills: skills.map((k) => ({
+      id: k.skill.id,
+      name: k.skill.name,
+      description: k.skill.description,
+      /** the library copy changed since this agent pinned it: re-attach to take it */
+      updateAvailable: k.skill.updatedAt.getTime() > k.skillUpdatedAt.getTime(),
+      /** the owner can no longer see it (made private by its author): it is
+       * left out of the agent's prompt */
+      unavailable: !skillVisible(k.skill, ownerViewer),
+    })),
     memory: memory.map((m) => ({
       id: m.id,
       content: m.content,
       createdByName: m.createdByUserId ? (names.get(m.createdByUserId) ?? null) : null,
       createdAt: m.createdAt.toISOString(),
     })),
-    schedules: schedules.map(scheduleView),
+    schedules: schedules.map((x) => scheduleView(x, agent.ownerUserId, names)),
     channels: channels.map((c) => {
       const connected =
         !!c.connectionId && !!c.connectionEnabled && c.connectionProvider === chatopsProviderFor(c.provider);
@@ -350,9 +401,8 @@ async function agentDetail(db: Db, agent: BuilderAgentRow, viewer: Viewer) {
   };
 }
 
-function skillVisible(s: BuilderSkillRow, viewer: Viewer): boolean {
-  return !s.archivedAt && (viewer.isAdmin || s.ownerUserId === viewer.userId || s.visibility === "workspace");
-}
+/** what a viewer who may not see a sub-agent is shown in its place */
+const PRIVATE_AGENT_NAME = "A private agent";
 
 async function threadSummaries(db: Db, threads: BuilderThreadRow[]) {
   if (!threads.length) return [];
@@ -389,7 +439,14 @@ async function threadSummaries(db: Db, threads: BuilderThreadRow[]) {
 // writers shared by create / template / import
 // ---------------------------------------------------------------------------
 
-/** find a skill with this name the user can see, else create it (private) */
+/**
+ * The skill a template or an imported bundle attaches. NEVER someone else's:
+ * a library skill is only reused when it is the caller's OWN skill with the
+ * same name AND the identical body; otherwise a private copy of the template's
+ * (or bundle's) body is created. Matching by name alone would let anyone squat
+ * a template skill's name with a workspace skill of their own wording and have
+ * it silently attached to every agent made from that template.
+ */
 async function ensureSkill(db: Db, ownerUserId: string, s: { name: string; description: string; body: string }) {
   const [existing] = await db
     .select()
@@ -397,8 +454,9 @@ async function ensureSkill(db: Db, ownerUserId: string, s: { name: string; descr
     .where(
       and(
         eq(builderSkills.name, s.name),
+        eq(builderSkills.ownerUserId, ownerUserId),
+        eq(builderSkills.body, s.body),
         isNull(builderSkills.archivedAt),
-        or(eq(builderSkills.ownerUserId, ownerUserId), eq(builderSkills.visibility, "workspace")),
       ),
     )
     .orderBy(asc(builderSkills.createdAt))
@@ -410,6 +468,14 @@ async function ensureSkill(db: Db, ownerUserId: string, s: { name: string; descr
     .returning();
   return row!;
 }
+
+/** the pinned attachment row for a skill (its body and version now) */
+const pinned = (agentId: string, skill: BuilderSkillRow) => ({
+  agentId,
+  skillId: skill.id,
+  bodySnapshot: skill.body,
+  skillUpdatedAt: skill.updatedAt,
+});
 
 interface Seed {
   instructions: string;
@@ -424,7 +490,7 @@ interface Seed {
 async function applySeed(db: Db, agent: BuilderAgentRow, seed: Seed) {
   for (const s of seed.skills) {
     const skill = await ensureSkill(db, agent.ownerUserId, s);
-    await db.insert(builderAgentSkills).values({ agentId: agent.id, skillId: skill.id }).onConflictDoNothing();
+    await db.insert(builderAgentSkills).values(pinned(agent.id, skill)).onConflictDoNothing();
   }
   let position = 0;
   for (const sub of seed.subagents) {
@@ -459,30 +525,30 @@ async function applySeed(db: Db, agent: BuilderAgentRow, seed: Seed) {
       prompt: s.prompt,
       enabled: false,
       nextRunAt: null,
+      createdByUserId: agent.ownerUserId,
     });
   }
 }
 
-/** would making `children` sub-agents of `parentId` close a cycle? */
+/**
+ * Would making `children` sub-agents of `parentId` close a cycle? Walks only
+ * the edges REACHABLE from those children (a recursive CTE), never the whole
+ * table, and ignores `parentId`'s own current edges (this write replaces them).
+ */
 async function closesCycle(db: Db, parentId: string, children: string[]): Promise<boolean> {
-  const edges = await db
-    .select({ parentId: builderAgentSubagents.parentId, childId: builderAgentSubagents.childId })
-    .from(builderAgentSubagents);
-  const adj = new Map<string, string[]>();
-  for (const e of edges) {
-    if (e.parentId === parentId) continue; // replaced by this write
-    adj.set(e.parentId, [...(adj.get(e.parentId) ?? []), e.childId]);
-  }
-  const stack = [...children];
-  const seen = new Set<string>();
-  while (stack.length) {
-    const n = stack.pop()!;
-    if (n === parentId) return true;
-    if (seen.has(n)) continue;
-    seen.add(n);
-    stack.push(...(adj.get(n) ?? []));
-  }
-  return false;
+  if (!children.length) return false;
+  if (children.includes(parentId)) return true;
+  const res = await db.execute<{ hit: boolean }>(sql`
+    WITH RECURSIVE reach(id) AS (
+      SELECT unnest(${sql`ARRAY[${sql.join(children.map((c) => sql`${c}::uuid`), sql`, `)}]`})
+      UNION
+      SELECT e.child_id FROM builder_agent_subagents e
+        JOIN reach r ON e.parent_id = r.id
+       WHERE e.parent_id <> ${parentId}::uuid
+    )
+    SELECT EXISTS (SELECT 1 FROM reach WHERE id = ${parentId}::uuid) AS hit
+  `);
+  return !!res.rows[0]?.hit;
 }
 
 // ---------------------------------------------------------------------------
@@ -595,8 +661,32 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
       const found = await db.select({ id: users.id }).from(users).where(inArray(users.id, body.sharedUserIds));
       if (found.length !== new Set(body.sharedUserIds).size) return reply.status(422).send({ error: "unknown_user" });
     }
+    if (body.projectId) {
+      // attribution is a member's act: the editor must belong to the project
+      // (or be an admin) to bill an agent's spend to it
+      const [project] = await db.select({ id: projects.id }).from(projects).where(eq(projects.id, body.projectId));
+      if (!project) return reply.status(404).send({ error: "unknown_project" });
+      if (!viewer.isAdmin) {
+        const [member] = await db
+          .select({ userId: projectMembers.userId })
+          .from(projectMembers)
+          .where(and(eq(projectMembers.projectId, body.projectId), eq(projectMembers.userId, viewer.userId)));
+        if (!member) {
+          return reply.status(403).send({
+            error: "not_a_project_member",
+            detail: "you can only bill an agent's spend to a project you are a member of",
+          });
+        }
+      }
+    }
+    if (body.instructions !== undefined) {
+      const tooLarge = promptTooLarge(
+        configuredPrompt({ ...agent, instructions: body.instructions, name: body.name ?? agent.name }, await pinnedSkillsForRun(db, agent)),
+      );
+      if (tooLarge) return reply.status(422).send(tooLarge);
+    }
     const set: Partial<typeof builderAgents.$inferInsert> = { updatedAt: new Date() };
-    for (const k of ["name", "description", "color", "instructions", "modelAgentId", "sharing", "computerUse"] as const) {
+    for (const k of ["name", "description", "color", "instructions", "modelAgentId", "sharing", "computerUse", "projectId"] as const) {
       if (body[k] !== undefined) (set as Record<string, unknown>)[k] = body[k];
     }
     if (body.monthlyLimitUsd !== undefined) set.monthlyLimitUsd = body.monthlyLimitUsd;
@@ -617,7 +707,12 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
         `monthly limit of '${agent.name}' set to ${body.monthlyLimitUsd === null ? "none" : `$${body.monthlyLimitUsd}`}`,
         { from: agent.monthlyLimitUsd, to: body.monthlyLimitUsd });
     }
-    const rest = changed.filter((k) => !["sharing", "sharedUserIds", "monthlyLimitUsd"].includes(k));
+    if (body.projectId !== undefined && body.projectId !== agent.projectId) {
+      await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-project-changed",
+        `spend of '${agent.name}' now bills to ${body.projectId ? `project ${body.projectId}` : "no project"}`,
+        { from: agent.projectId, to: body.projectId });
+    }
+    const rest = changed.filter((k) => !["sharing", "sharedUserIds", "monthlyLimitUsd", "projectId"].includes(k));
     if (rest.length) {
       await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-updated",
         `builder agent '${updated!.name}' updated (${rest.join(", ")})`,
@@ -752,13 +847,52 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
       const s = rows.find((r) => r.id === id);
       if (!s || !skillVisible(s, viewer)) return reply.status(404).send({ error: "unknown_skill", skillId: id });
     }
+    // a skill already attached KEEPS its pinned body; a newly attached one is
+    // pinned at its current version (taking a newer version is a re-attach)
+    const current = await db.select().from(builderAgentSkills).where(eq(builderAgentSkills.agentId, agent.id));
+    const kept = new Map(current.map((c) => [c.skillId, c]));
+    const next = ids.map((id) => {
+      const k = kept.get(id);
+      return k ? { agentId: agent.id, skillId: id, bodySnapshot: k.bodySnapshot, skillUpdatedAt: k.skillUpdatedAt } : pinned(agent.id, rows.find((r) => r.id === id)!);
+    });
+    const tooLarge = promptTooLarge(
+      configuredPrompt(agent, next.map((n) => ({ name: rows.find((r) => r.id === n.skillId)!.name, body: n.bodySnapshot }))),
+    );
+    if (tooLarge) return reply.status(422).send(tooLarge);
     await db.transaction(async (tx) => {
       await tx.delete(builderAgentSkills).where(eq(builderAgentSkills.agentId, agent.id));
-      if (ids.length) await tx.insert(builderAgentSkills).values(ids.map((skillId) => ({ agentId: agent.id, skillId })));
+      if (next.length) await tx.insert(builderAgentSkills).values(next);
     });
     await touch(agent.id);
     await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-skills-changed",
       `skills of '${agent.name}' set to ${ids.length}`, { skillIds: ids });
+    return { agent: await agentDetail(db, (await loadVisibleAgent(db, agent.id, viewer))!, viewer) };
+  });
+
+  // re-attach: take the library's current version of an attached skill
+  app.post("/v1/builder/agents/:id/skills/:skillId/reattach", async (req, reply) => {
+    const viewer = viewerOf(req, reply);
+    if (!viewer) return;
+    const { skillId } = skillParam.parse(req.params);
+    const agent = await editable(req, reply, viewer);
+    if (!agent) return;
+    const [link] = await db
+      .select()
+      .from(builderAgentSkills)
+      .where(and(eq(builderAgentSkills.agentId, agent.id), eq(builderAgentSkills.skillId, skillId)));
+    const [skill] = link ? await db.select().from(builderSkills).where(eq(builderSkills.id, skillId)) : [];
+    if (!link || !skill || !skillVisible(skill, viewer)) return reply.status(404).send({ error: "unknown_skill", skillId });
+    const others = (await pinnedSkillsForRun(db, agent)).filter((x) => x.skillId !== skillId);
+    const tooLarge = promptTooLarge(configuredPrompt(agent, [...others, { name: skill.name, body: skill.body }]));
+    if (tooLarge) return reply.status(422).send(tooLarge);
+    await db
+      .update(builderAgentSkills)
+      .set({ bodySnapshot: skill.body, skillUpdatedAt: skill.updatedAt })
+      .where(and(eq(builderAgentSkills.agentId, agent.id), eq(builderAgentSkills.skillId, skillId)));
+    await touch(agent.id);
+    await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-skill-reattached",
+      `skill '${skill.name}' on '${agent.name}' updated to the library's current version`,
+      { skillId, from: link.skillUpdatedAt.toISOString(), to: skill.updatedAt.toISOString() });
     return { agent: await agentDetail(db, (await loadVisibleAgent(db, agent.id, viewer))!, viewer) };
   });
 
@@ -770,6 +904,16 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     const body = builderAddMemorySchema.parse(req.body ?? {});
     const agent = await editable(req, reply, viewer);
     if (!agent) return;
+    // a ceiling, refused by name: memory is append-only, so nothing is ever
+    // pruned behind the owner's back — they choose what to remove
+    const [held] = await db.select({ n: count() }).from(builderAgentMemory).where(eq(builderAgentMemory.agentId, agent.id));
+    if (Number(held?.n ?? 0) >= BUILDER_LIMITS.memoryPerAgent) {
+      return reply.status(422).send({
+        error: "memory_limit_reached",
+        detail: `an agent keeps at most ${BUILDER_LIMITS.memoryPerAgent} memory items; remove some before adding more`,
+        limit: BUILDER_LIMITS.memoryPerAgent,
+      });
+    }
     const [row] = await db
       .insert(builderAgentMemory)
       .values({ agentId: agent.id, content: body.content, createdByUserId: viewer.userId })
@@ -801,12 +945,31 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
 
   // --- schedules -----------------------------------------------------------------
 
+  /** a schedule spends as the agent's OWNER; anyone else (an admin) may write
+   * one, but it is saved OFF and only the owner can turn it on */
+  const ownerMustEnable = (agent: BuilderAgentRow) =>
+    ({
+      error: "owner_must_enable_schedule",
+      detail: `a schedule runs as the agent's owner, so only the owner can turn it on`,
+      ownerUserId: agent.ownerUserId,
+    }) as const;
+
   app.post("/v1/builder/agents/:id/schedules", async (req, reply) => {
     const viewer = viewerOf(req, reply);
     if (!viewer) return;
     const body = builderCreateScheduleSchema.parse(req.body ?? {});
     const agent = await editable(req, reply, viewer);
     if (!agent) return;
+    const [held] = await db.select({ n: count() }).from(builderAgentSchedules).where(eq(builderAgentSchedules.agentId, agent.id));
+    if (Number(held?.n ?? 0) >= BUILDER_LIMITS.schedulesPerAgent) {
+      return reply.status(422).send({
+        error: "schedule_limit_reached",
+        detail: `an agent has at most ${BUILDER_LIMITS.schedulesPerAgent} schedules`,
+        limit: BUILDER_LIMITS.schedulesPerAgent,
+      });
+    }
+    const isOwner = viewer.userId === agent.ownerUserId;
+    const enabled = body.enabled && isOwner;
     const now = new Date();
     const [row] = await db
       .insert(builderAgentSchedules)
@@ -816,16 +979,21 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
         cadence: body.cadence,
         timeUtc: body.timeUtc,
         prompt: body.prompt,
-        enabled: body.enabled,
-        nextRunAt: body.enabled ? nextScheduleRun(body.cadence, body.timeUtc, now, now) : null,
+        enabled,
+        nextRunAt: enabled ? nextScheduleRun(body.cadence, body.timeUtc, now, now) : null,
+        createdByUserId: viewer.userId,
+        updatedByUserId: viewer.userId,
+        enabledByUserId: enabled ? viewer.userId : null,
         createdAt: now,
       })
       .returning();
     await touch(agent.id);
     await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-schedule-created",
-      `schedule '${body.name}' (${body.cadence} ${body.timeUtc} UTC) added to '${agent.name}'`,
-      { scheduleId: row!.id, cadence: body.cadence, timeUtc: body.timeUtc, enabled: body.enabled });
-    return reply.status(201).send(scheduleView(row!));
+      `schedule '${body.name}' (${body.cadence} ${body.timeUtc} UTC) added to '${agent.name}'` +
+        (isOwner ? "" : " by someone other than the owner: saved off until the owner turns it on"),
+      { scheduleId: row!.id, cadence: body.cadence, timeUtc: body.timeUtc, enabled, awaitingOwner: !isOwner });
+    const names = await userNames(db, [viewer.userId]);
+    return reply.status(201).send(scheduleView(row!, agent.ownerUserId, names));
   });
 
   app.patch("/v1/builder/agents/:id/schedules/:scheduleId", async (req, reply) => {
@@ -840,7 +1008,18 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
       .from(builderAgentSchedules)
       .where(and(eq(builderAgentSchedules.id, scheduleId), eq(builderAgentSchedules.agentId, agent.id)));
     if (!s) return reply.status(404).send({ error: "unknown_schedule" });
+    const isOwner = viewer.userId === agent.ownerUserId;
+    if (!isOwner && body.enabled === true) {
+      await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-schedule-owner-must-enable",
+        `refused turning on schedule '${s.name}' of '${agent.name}': only the owner can`, { scheduleId: s.id }, "deny");
+      return reply.status(403).send(ownerMustEnable(agent));
+    }
+    const contentChanged = (["name", "cadence", "timeUtc", "prompt"] as const).some(
+      (k) => body[k] !== undefined && body[k] !== s[k],
+    );
     const merged = { ...s, ...Object.fromEntries(Object.entries(body).filter(([, v]) => v !== undefined)) } as BuilderScheduleRow;
+    // anyone else's edit to what it does or when switches it OFF for the owner to review
+    if (!isOwner && contentChanged) merged.enabled = false;
     const now = new Date();
     const timingChanged = body.cadence !== undefined || body.timeUtc !== undefined || body.enabled !== undefined;
     const nextRunAt = !merged.enabled
@@ -848,6 +1027,7 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
       : timingChanged || !s.nextRunAt
         ? nextScheduleRun(merged.cadence as BuilderCadenceValue, merged.timeUtc, now, s.createdAt)
         : s.nextRunAt;
+    const turnedOn = merged.enabled && !s.enabled;
     const [row] = await db
       .update(builderAgentSchedules)
       .set({
@@ -857,14 +1037,18 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
         prompt: merged.prompt,
         enabled: merged.enabled,
         nextRunAt,
+        enabledByUserId: !merged.enabled ? null : turnedOn ? viewer.userId : s.enabledByUserId,
+        ...(contentChanged || turnedOn ? { updatedByUserId: viewer.userId } : {}),
         updatedAt: now,
       })
       .where(eq(builderAgentSchedules.id, s.id))
       .returning();
     await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-schedule-updated",
-      `schedule '${merged.name}' of '${agent.name}' updated (${Object.keys(body).join(", ")})`,
-      { scheduleId: s.id, fields: Object.keys(body) });
-    return scheduleView(row!);
+      `schedule '${merged.name}' of '${agent.name}' updated (${Object.keys(body).join(", ")})` +
+        (!isOwner && contentChanged ? " by someone other than the owner: switched off until the owner turns it on" : ""),
+      { scheduleId: s.id, fields: Object.keys(body), enabled: merged.enabled, awaitingOwner: !isOwner && contentChanged });
+    const names = await userNames(db, [row!.updatedByUserId ?? row!.createdByUserId]);
+    return scheduleView(row!, agent.ownerUserId, names);
   });
 
   app.delete("/v1/builder/agents/:id/schedules/:scheduleId", async (req, reply) => {
@@ -897,6 +1081,26 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     const body = builderCreateChannelSchema.parse(req.body ?? {});
     const agent = await editable(req, reply, viewer);
     if (!agent) return;
+    const [held] = await db.select({ n: count() }).from(builderAgentChannels).where(eq(builderAgentChannels.agentId, agent.id));
+    if (Number(held?.n ?? 0) >= BUILDER_LIMITS.channelsPerAgent) {
+      return reply.status(422).send({
+        error: "channel_limit_reached",
+        detail: `an agent has at most ${BUILDER_LIMITS.channelsPerAgent} channels`,
+        limit: BUILDER_LIMITS.channelsPerAgent,
+      });
+    }
+    // Binding a workspace ChatOps connection (an org-owned bot identity) is an
+    // ADMIN act — choosing one, or having one picked. Anyone else's channel is
+    // recorded as needing setup, and no connection is named back to them.
+    if (body.chatopsConnectionId && !viewer.isAdmin) {
+      await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-channel-binding-refused",
+        `refused binding a ChatOps connection to '${agent.name}': only an admin can bind one`,
+        { provider: body.provider }, "deny");
+      return reply.status(403).send({
+        error: "channel_binding_requires_admin",
+        detail: "only an admin can connect an agent to one of the workspace's chat connections; add the channel and ask an admin to finish setting it up",
+      });
+    }
     const wanted = chatopsProviderFor(body.provider) as "slack" | "teams" | "outlook";
     let connectionId: string | null = null;
     if (body.chatopsConnectionId) {
@@ -909,7 +1113,7 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
         });
       }
       connectionId = c.id;
-    } else {
+    } else if (viewer.isAdmin) {
       const [c] = await db
         .select()
         .from(chatopsConnections)
@@ -924,7 +1128,7 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
       .returning();
     await touch(agent.id);
     await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-channel-added",
-      `${body.provider} channel added to '${agent.name}'${connectionId ? "" : " (needs setup: no matching ChatOps connection)"}`,
+      `${body.provider} channel added to '${agent.name}'${connectionId ? "" : viewer.isAdmin ? " (needs setup: no matching ChatOps connection)" : " (needs setup: an admin binds the connection)"}`,
       { channelId: row!.id, provider: body.provider, chatopsConnectionId: connectionId });
     const detail = await agentDetail(db, agent, viewer);
     return reply.status(201).send(detail.channels.find((c) => c.id === row!.id));
@@ -948,10 +1152,13 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
 
   // --- export / import ---------------------------------------------------------
 
+  // export is an EDITOR act (owner or admin): a bundle carries the agent's
+  // instructions and skill bodies, which a person it is merely shared with
+  // can use but not take away
   app.get("/v1/builder/agents/:id/export", async (req, reply) => {
     const viewer = viewerOf(req, reply);
     if (!viewer) return;
-    const agent = await visible(req, reply, viewer);
+    const agent = await editable(req, reply, viewer);
     if (!agent) return;
     const [model] = agent.modelAgentId
       ? await db.select().from(agents).where(eq(agents.id, agent.modelAgentId))
@@ -960,9 +1167,18 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     const connectorRows = await loadConnectorsById(db, tools.filter((t) => t.kind === "connector").map((t) => t.refId));
     const mcpRows = await loadMcpTools(db, tools.filter((t) => t.kind === "mcp_tool").map((t) => t.refId));
     const detail = await agentDetail(db, agent, viewer);
-    const skillRows = detail.skills.length
-      ? await db.select().from(builderSkills).where(inArray(builderSkills.id, detail.skills.map((s) => s.id)))
-      : [];
+    // the PINNED bodies the agent runs — and only skills the exporter can see
+    // (a colleague's skill made private since stays out of the bundle)
+    const skillRows = (
+      await db
+        .select({ skill: builderSkills, body: builderAgentSkills.bodySnapshot })
+        .from(builderAgentSkills)
+        .innerJoin(builderSkills, eq(builderAgentSkills.skillId, builderSkills.id))
+        .where(eq(builderAgentSkills.agentId, agent.id))
+        .orderBy(asc(builderSkills.name))
+    )
+      .filter((r) => skillVisible(r.skill, viewer))
+      .map((r) => ({ name: r.skill.name, description: r.skill.description, body: r.body }));
     const bundle: BuilderBundle = {
       version: 1,
       agent: {
@@ -991,7 +1207,7 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
           prompt: s.prompt,
         })),
       },
-      skills: skillRows.map((s) => ({ name: s.name, description: s.description, body: s.body })),
+      skills: skillRows,
     };
     return { bundle };
   });
@@ -1001,6 +1217,17 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     if (!viewer) return;
     const { bundle } = builderImportAgentSchema.parse(req.body ?? {});
     const a = bundle.agent;
+    if (a.subagents.length > BUILDER_LIMITS.importSubagents) {
+      return reply.status(422).send({
+        error: "import_too_many_subagents",
+        detail: `an import creates at most ${BUILDER_LIMITS.importSubagents} sub-agents; this bundle has ${a.subagents.length}`,
+        limit: BUILDER_LIMITS.importSubagents,
+      });
+    }
+    const skillsByName = new Map(bundle.skills.map((s) => [s.name, s]));
+    const importedSkills = a.skills.map((n) => skillsByName.get(n) ?? { name: n, description: "", body: "" });
+    const tooLarge = promptTooLarge(configuredPrompt({ instructions: a.instructions, name: a.name, description: a.description }, importedSkills));
+    if (tooLarge) return reply.status(422).send(tooLarge);
     // the model: the bundle's binding by name if the importer may use it
     let model: AgentRow | null = null;
     if (a.model) {
@@ -1055,10 +1282,9 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
       .returning();
     const uniqKeep = [...new Map(keep.map((k) => [`${k.kind}:${k.refId}`, k])).values()];
     if (uniqKeep.length) await db.insert(builderAgentTools).values(uniqKeep.map((k) => ({ ...k, agentId: agent!.id })));
-    const skillsByName = new Map(bundle.skills.map((s) => [s.name, s]));
     await applySeed(db, agent!, {
       instructions: a.instructions,
-      skills: a.skills.map((n) => skillsByName.get(n) ?? { name: n, description: "", body: "" }),
+      skills: importedSkills,
       subagents: a.subagents,
       schedules: a.schedules,
     });
@@ -1079,6 +1305,7 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     const out = await runBuilderTurn(db, opts.dataKey, {
       agent,
       userId: viewer.userId,
+      isAdmin: viewer.isAdmin,
       message: body.message,
       threadId: body.threadId,
       source: "chat",
@@ -1305,13 +1532,17 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
   });
 
   app.get("/v1/builder/integrations", async (req, reply) => {
-    if (!viewerOf(req, reply)) return;
-    const [connectorRows, serverRows, chatops, toolCounts] = await Promise.all([
+    const viewer = viewerOf(req, reply);
+    if (!viewer) return;
+    const [connectorRows, allServers, chatops, toolCounts, granted] = await Promise.all([
       db.select({ name: connectors.name, kind: connectors.kind, providerKind: connectors.providerKind }).from(connectors),
       db.select({ id: mcpServers.id, name: mcpServers.name }).from(mcpServers).orderBy(asc(mcpServers.name)),
       db.select({ provider: chatopsConnections.provider }).from(chatopsConnections).where(eq(chatopsConnections.enabled, true)),
       db.select({ serverId: mcpTools.serverId, n: count() }).from(mcpTools).groupBy(mcpTools.serverId),
+      viewer.isAdmin ? Promise.resolve(null) : grantedMcpServerIds(db, viewer.userId),
     ]);
+    // MCP servers are named only to someone holding a grant on them (admins: all)
+    const serverRows = granted ? allServers.filter((sv) => granted.has(sv.id)) : allServers;
     const chatopsProviders = new Set(chatops.map((c) => c.provider as string));
     const connected = (kind: string, match: string[]) => {
       if (kind === "chatops") return match.some((m) => chatopsProviders.has(m));

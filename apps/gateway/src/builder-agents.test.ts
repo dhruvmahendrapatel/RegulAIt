@@ -427,10 +427,10 @@ describe("templates", () => {
     expect((await k.req("GET", "/v1/builder/templates/nope", owner.auth)).statusCode).toBe(404);
   });
 
-  it("instantiates instructions, skills (reusing a library skill by name), sub-agents and disabled schedules", async () => {
+  it("instantiates instructions, skills (reusing only the creator's OWN identical skill), sub-agents and disabled schedules", async () => {
     const tpl = BUILDER_TEMPLATES.find((t) => t.id === "ai-intake-reviewer")!;
-    // a skill with the first template skill's name already in the library
-    const pre = await k.req("POST", "/v1/builder/skills", owner.auth, { name: tpl.skills[0]!.name, description: "mine", body: "# mine", visibility: "private" });
+    // the creator's own copy of the first template skill, word for word: reused
+    const pre = await k.req("POST", "/v1/builder/skills", owner.auth, { name: tpl.skills[0]!.name, description: "mine", body: tpl.skills[0]!.body, visibility: "private" });
     const r = await k.req("POST", "/v1/builder/agents", owner.auth, {
       name: "Intake", connectionFormat: "shared", computerUse: false, templateId: tpl.id,
     });
@@ -492,20 +492,21 @@ describe("memory, schedules, channels", () => {
     }
   });
 
-  it("channels: connected only with a matching ChatOps connection, else needs setup", async () => {
+  it("channels: connected only with a matching ChatOps connection (bound by an admin), else needs setup", async () => {
     const a = await newAgent(owner);
     const slack = await k.req("POST", `/v1/builder/agents/${a.id}/channels`, owner.auth, { provider: "slack" });
     expect(slack.statusCode, slack.body).toBe(201);
     expect(slack.json()).toMatchObject({ provider: "slack", status: "needs_setup", connectionName: null });
+    // binding a specific workspace connection is an admin act
 
     const [conn] = await k.db.insert(connectors).values({ name: `mail-${k.RUN}`, kind: "email", providerKind: "outlook" }).returning();
     const [chat] = await k.db
       .insert(chatopsConnections)
       .values({ name: `outlook-${k.RUN}`, provider: "outlook", connectorId: conn!.id, defaultChannel: "governance@example.com" })
       .returning();
-    const email = await k.req("POST", `/v1/builder/agents/${a.id}/channels`, owner.auth, { provider: "email", chatopsConnectionId: chat!.id });
+    const email = await k.req("POST", `/v1/builder/agents/${a.id}/channels`, admin.auth, { provider: "email", chatopsConnectionId: chat!.id });
     expect(email.json()).toMatchObject({ provider: "email", status: "connected", connectionName: `outlook-${k.RUN}` });
-    const wrong = await k.req("POST", `/v1/builder/agents/${a.id}/channels`, owner.auth, { provider: "teams", chatopsConnectionId: chat!.id });
+    const wrong = await k.req("POST", `/v1/builder/agents/${a.id}/channels`, admin.auth, { provider: "teams", chatopsConnectionId: chat!.id });
     expect(wrong.statusCode).toBe(422);
 
     const chans = (await k.req("GET", `/v1/builder/agents/${a.id}`, owner.auth)).json().agent.channels;

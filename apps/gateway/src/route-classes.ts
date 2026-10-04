@@ -117,6 +117,7 @@ export const NON_ADMIN_ROUTES = new Set([
   "PUT /v1/builder/agents/:id/tools",
   "PUT /v1/builder/agents/:id/subagents",
   "PUT /v1/builder/agents/:id/skills",
+  "POST /v1/builder/agents/:id/skills/:skillId/reattach",
   "POST /v1/builder/agents/:id/memory",
   "DELETE /v1/builder/agents/:id/memory/:memoryId",
   "POST /v1/builder/agents/:id/schedules",

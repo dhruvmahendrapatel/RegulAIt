@@ -3800,6 +3800,7 @@ export {
 // ---------------------------------------------------------------------------
 export {
   BUILDER_AGENT_COLORS,
+  BUILDER_LIMITS,
   BUILDER_CADENCE_VALUES,
   BUILDER_CHANNEL_PROVIDER_VALUES,
   BUILDER_CONNECTION_FORMAT_VALUES,

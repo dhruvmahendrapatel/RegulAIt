@@ -89,7 +89,9 @@ describe("skills library", () => {
     expect((await k.req("PUT", `/v1/builder/agents/${agent.id}/skills`, owner.auth, { skillIds: [theirs.id] })).statusCode).toBe(404);
     const put = await k.req("PUT", `/v1/builder/agents/${agent.id}/skills`, owner.auth, { skillIds: [s.id] });
     expect(put.statusCode, put.body).toBe(200);
-    expect(put.json().agent.skills).toEqual([{ id: s.id, name: `Cite sources ${k.RUN}`, description: "" }]);
+    expect(put.json().agent.skills).toEqual([
+      { id: s.id, name: `Cite sources ${k.RUN}`, description: "", updateAvailable: false, unavailable: false },
+    ]);
     expect(put.json().agent.skillCount).toBe(1);
     expect((await k.req("GET", `/v1/builder/skills/${s.id}`, owner.auth)).json().skill.usedBy).toBe(1);
 

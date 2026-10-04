@@ -7,14 +7,19 @@
 -- governed core AS THE PERSON USING IT (a schedule runs as the agent's owner),
 -- so nothing stored here can widen what a human may reach.
 --
---   builder_agents            the agent (soft-deleted via archived_at)
+--   builder_agents            the agent (soft-deleted via archived_at); project_id
+--                             attributes its spend; limit_lease_* serialises the
+--                             monthly-limit check -> dispatch -> record of a
+--                             LIMITED agent (one in-flight turn at a time)
 --   builder_agent_shares      named people an agent is shared with
 --   builder_agent_tools       toolbox entries (connector id | mcp_tools id)
 --   builder_agent_subagents   parent -> child edges (cycles refused in the API)
 --   builder_skills            the shared SKILL.md library
---   builder_agent_skills      which skills an agent carries
+--   builder_agent_skills      which skills an agent carries, PINNED: the body
+--                             and skill version at attach time (re-attach to update)
 --   builder_agent_memory      append-only memory items
---   builder_agent_schedules   cadence + prompt; next_run_at is the CAS claim
+--   builder_agent_schedules   cadence + prompt; next_run_at is the CAS claim; the
+--                             sweep runs only schedules the agent OWNER enabled
 --   builder_agent_channels    binding to an existing ChatOps connection
 --   builder_threads           conversations (chat / schedule / channel)
 --   builder_messages          messages; agent rows carry the cost the governed
@@ -32,6 +37,9 @@ CREATE TABLE IF NOT EXISTS "builder_agents" (
   "connection_format" text NOT NULL,
   "computer_use" boolean DEFAULT false NOT NULL,
   "monthly_limit_usd" double precision,
+  "project_id" uuid REFERENCES "projects"("id") ON DELETE SET NULL,
+  "limit_lease_token" uuid,
+  "limit_lease_until" timestamp with time zone,
   "archived_at" timestamp with time zone,
   "created_at" timestamp with time zone DEFAULT now() NOT NULL,
   "updated_at" timestamp with time zone DEFAULT now() NOT NULL,
@@ -97,6 +105,8 @@ CREATE INDEX IF NOT EXISTS "builder_skills_owner_idx" ON "builder_skills" ("owne
 CREATE TABLE IF NOT EXISTS "builder_agent_skills" (
   "agent_id" uuid NOT NULL REFERENCES "builder_agents"("id") ON DELETE CASCADE,
   "skill_id" uuid NOT NULL REFERENCES "builder_skills"("id") ON DELETE CASCADE,
+  "body_snapshot" text DEFAULT '' NOT NULL,
+  "skill_updated_at" timestamp with time zone DEFAULT now() NOT NULL,
   "created_at" timestamp with time zone DEFAULT now() NOT NULL,
   CONSTRAINT "builder_agent_skills_agent_id_skill_id_pk" PRIMARY KEY ("agent_id", "skill_id")
 );
@@ -123,6 +133,9 @@ CREATE TABLE IF NOT EXISTS "builder_agent_schedules" (
   "enabled" boolean DEFAULT true NOT NULL,
   "next_run_at" timestamp with time zone,
   "last_run_at" timestamp with time zone,
+  "created_by_user_id" uuid REFERENCES "users"("id") ON DELETE SET NULL,
+  "updated_by_user_id" uuid REFERENCES "users"("id") ON DELETE SET NULL,
+  "enabled_by_user_id" uuid REFERENCES "users"("id") ON DELETE SET NULL,
   "created_at" timestamp with time zone DEFAULT now() NOT NULL,
   "updated_at" timestamp with time zone DEFAULT now() NOT NULL,
   CONSTRAINT "builder_agent_schedules_cadence_ck" CHECK ("cadence" IN ('hourly', 'daily', 'weekdays', 'weekly')),
