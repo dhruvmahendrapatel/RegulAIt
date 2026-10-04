@@ -80,47 +80,52 @@ Transparent MCP expansion must remain explicitly governed; the old proposal for 
 GEM-D9's network-location half is implemented; device posture remains a separate decision.
 SOAR, live collectors, model-backed detectors and live-provider assurance are not closed by removing old prose.
 
-## Gemini delivery review — 2026-10-04 UTC (owner-requested)
+## Reassigned research delivery — 2026-10-04 01:57 UTC
 
-Reviewed delivery `50f004c` on target `dhruv/active`, at local/upstream snapshot
-`63bd838c5e2109a450e7e28464df51dfaa52b53e` after incorporating concurrent
-Gemini delivery `86b9a59`. Publication uses a clean detached worktree based on that
-upstream commit and targets only `dhruv/active`; prior local drafts remain preserved.
-All six research files were inspected structurally; primary-source spot checks below
-disprove readiness. This is not exhaustive verification of every provider or legal fact,
-nor a finding that these research-only defects are executing in the product.
+Owner reassigned G10–G15 to Codex. Corrected six-file delivery is published on
+`dhruv/active` at `e9bf0f95c43eb66837da0a5d513e837c58452e07`.
+[Historical defects and acceptance criteria](https://github.com/dhruvmahendrapatel/RegulAIt/blob/cf2df769b177c7e1f6c4ba3d081dd6ece5a696e3/geminiInputs.md)
+remain in Git rather than being carried forward as current unsupported claims.
+The narrow document defects below are addressed; this is NOT Claude's independent
+VERIFIED decision, a completed legal crosswalk, an installed integration, or production approval.
 
-| Task | Review status / priority | Direct evidence and impact | Required correction / acceptance |
+| Task | Correction lifecycle | Delivery evidence | Remaining limitation / acceptance owner |
 |---|---|---|---|
-| G8 | RESOLVED/DONE (document corrections only) | `86b9a59` changes checklist lines 24,44–53: requested Partial statuses, preview caveat and named vendor-portal roadmap item are present; ROADMAP.md:824 contains that portal item. | Four original correction requests are addressed by direct document comparison. No new claim of full parity, test rerun or live vendor validation. Historical concern preserved in Git. |
-| G10 | CHANGES-REQUESTED / OPEN, high | `R1-evaluator-control-catalog.md:3,29` misnumber disclosure and excessive-agency checks under the claimed OWASP 2025 namespace. Sources are names, not URLs; ISO subcontrol/title pairs are unsupported by the suite identifier register. Incorrect mappings could become false compliance evidence. | Verify every mapping against the correct framework edition and exact source, recording checked date. Correct 2025 IDs, distinguish proposed relevance from compliance proof, and mark inaccessible/unverified mappings UNVERIFIED. Pass: every populated identifier resolves to its claimed title/version and every mapping has rationale plus primary citation. Do not invent ISO subcontrols from memory. |
-| G11 | CHANGES-REQUESTED / OPEN, high | `R2-model-provider-facts.md:4` lists retired Sonnet 3.5 June-2024 as GA. Rows give one context/price pair for two models and mix no-training with zero retention. A pricing homepage does not substantiate retention/residency. | Recheck each exact API ID and lifecycle on its actual host; pair price/context with each model and pricing tier. Separate training, retention, eligibility, regional availability and endpoint compatibility with primary links and checked dates, or UNVERIFIED. Pass: no retired model represented as current and each commercial/security claim is individually attributable. |
-| G12 | CHANGES-REQUESTED / OPEN, medium | `R3-integration-catalog.md:18` says no official Notion MCP found, contradicted by Notion's own hosted-server documentation. Rows such as line 32 place an upstream reference-server URL in the official-vendor column without verifying vendor ownership. | Recheck MCP availability and maintenance; distinguish vendor official, reference, community and unverified. Cite direct server/auth documentation and checked date; qualify unsuccessful searches. Pass: Notion corrected, each claimed official server has vendor provenance, and proposed reach is not represented as shipped RegulAIt integration support. |
-| G13 | CHANGES-REQUESTED / OPEN, medium | `R4-agent-template-ideas.md:45,60` provide no skills; other templates often have one, rather than required 2–3 with descriptions. Line 185 names Google Slides absent from G12. Twelve concepts exist but deliverable contract is incomplete. | Supply 2–3 named, described skills per template and ensure integrations resolve to G12 (or label a proposed catalog addition). Document approval/authorized scope before external writes. Pass: all 12 templates satisfy steps, word limit, skills, subagents, schedule, catalog integration and approval requirements; label recipes proposed rather than implemented. |
-| G14 | CHANGES-REQUESTED / OPEN, high | `R5-ai-regulation-calendar.md:12` asserts a UK instrument/date with only gov.uk homepage; this review could not substantiate that exact claim. Line 18 classifies a voluntary standard as a law-like in-force milestone. No explicit G4 feed comparison is delivered. | Cite exact official instrument and commencement/amendment provision per row, with checked date distinct from milestone. Mark unsubstantiated claims UNVERIFIED rather than guessing. Separate standard publication/certification from statutory obligation. Pass: every required jurisdiction covered and every relevant existing feed item classified match, contradiction or unverified with evidence. No legal-validity certification is implied. |
-| G15 | CHANGES-REQUESTED / OPEN, medium | `R6-skill-starters.md:1–17` and subsequent entries fence only YAML metadata, leaving the body outside and lacking actual frontmatter delimiters. Line 141 suggests an unspecified `opt_out=true` API flag. Ten outlines exist, not ten conformant starter blocks. | Fence each complete starter with YAML frontmatter and all required headings; validate each can be extracted unchanged. Cite factual/legal/API claims with checked dates or label illustrative/UNVERIFIED. Never convert a generic example flag or automated risk classification into an authoritative setting/legal determination. Pass: ten complete parseable blocks, unique kebab-case names, descriptions, required sections and explicit unknown/human-review handling. |
+| G8 | RESOLVED/DONE, unchanged | Checklist correction at `86b9a59`; prior direct comparison retained in history. | No product-parity certification. |
+| G10 | RESOLVED/DONE — unsupported-claim correction | R1: 35 proposed checks, primary links/dates, corrected 2025 risk IDs; no invented normative ISO/NIST subcontrols. | Exact crosswalks explicitly UNVERIFIED; suite-owner registration and normative review before use. |
+| G11 | RESOLVED/DONE — unsupported-claim correction | R2: 17 provider/host rows; retired examples removed; per-model price/context where verified; training, retention and residency separated. | Unknown model selections, contractual terms, region and compatibility remain UNVERIFIED, not approved. |
+| G12 | RESOLVED/DONE — provenance correction | R3: 46 apps, 28 vendor-documentation MCP entries; Notion corrected; upstream reference servers no longer mislabelled official. | Unverified availability/auth is not absence; no runtime interoperability tested. |
+| G13 | RESOLVED/DONE — document contract | R4: 12 templates, 5 steps each, 2 described skills each, instructions under 150 words, 0 subagents, schedules and scoped approvals; all integrations resolve to R3. | Original proposed workflows, not shipped automations. |
+| G14 | RESOLVED/DONE — unsupported-claim correction and reconciliation | R5: 22 rows, all 13 feed keys classified; exact UK SI shows duty to prepare code, not finished-code commencement; standards separated from laws. | Formal EU amended-text review and flagged unknowns remain; source-backed feed corrections require Claude-owned data work. |
+| G15 | RESOLVED/DONE — document contract | R6: ten complete fenced Markdown blocks with YAML frontmatter, unique kebab-case names and all required sections; invented API flag removed. | Proposed starters; no installation or model execution claimed. |
 
-Paths in the table are under `docs/research/` except G8's existing checklist.
-Task IDs are reused rather than opening duplicate product findings. G8 is closed in its narrow document-correction scope.
+### Verification and formal board gate
 
-### Primary-source checks (accessed 2026-10-04 UTC)
+Baseline local/upstream: `2e89cdcea0cb98e18a2716b02b282c2077a6e99d`;
+research commit: `e9bf0f95c43eb66837da0a5d513e837c58452e07`.
+Read-only primary-source browsing and scoped file inspection; no cloud/model calls,
+database tests, product source edits, or sibling-repository edits.
 
-- [OWASP's 2025 list](https://genai.owasp.org/llm-top-10/) places sensitive-information disclosure at LLM02 and excessive agency at LLM06, contradicting the R1 examples. Other mappings still require row-by-row validation.
-- [Anthropic retirement history](https://platform.claude.com/docs/en/about-claude/model-deprecations) records Sonnet 3.5 retirement on 2025-10-28. A historical model should not occupy a current GA flagship field.
-- [Notion MCP documentation](https://developers.notion.com/guides/mcp/overview) documents a Notion-hosted remote server and OAuth authorization. This directly refutes the R3 negative, not every other row.
-- [European Commission implementation announcement](https://digital-strategy.ec.europa.eu/en/news/ai-omnibus-enters-force) supports the calendar's later high-risk phase dates. Do not blanket-revert those dates merely because older suite guidance differs. Formal amended-text retrieval was incomplete in this pass; G14 still needs provision-level evidence and feed reconciliation.
-- Suite `docs/contracts/control-identifiers.md` is the repository-required identifier gate; it does not substantiate R1's asserted ISO subcontrol/title pairs. This is an unsupported-mapping observation, not a licensed-text verification of every ISO control.
+- Inline Node `assert` validator, executed with a PowerShell here-string piped to `node`: PASS. Checked table column counts/nonempty cells/source dates, 35/17/46/22 row counts, descriptions ≤90 chars, 12 template contracts, skill/catalog referential integrity, ten complete frontmatter blocks, and all 13 actual feed keys. Initial validator attempts failed on its CRLF handling and single-quote-only key regex; both validator assumptions were corrected before the passing rerun. These were not product test failures.
+- `git diff --check`: PASS. `node scripts/coordination.mjs lint`: PASS.
+- `pnpm install --offline --frozen-lockfile --ignore-scripts`: failed, cache lacked the locked Vitest package. `pnpm install --frozen-lockfile --ignore-scripts`: PASS; lockfile unchanged, lifecycle scripts disabled.
+- `pnpm --filter @regulait/shared build`: PASS after dependency installation.
+- `pnpm --filter @regulait/web exec tsc --noEmit` and `pnpm --filter @regulait/web build`: FAIL, exit 2 after dependencies. Existing `UseCaseOverviewPage.tsx:18-19` and `AgentsPage.tsx:26` imports resolve ambiguously between `AgentStewardship.tsx` and `agentStewardship.ts` on this Windows checkout (TS1261/TS1149 plus missing component exports). No product code changed by this task.
+- `pnpm exec vitest run scripts/coordination.test.mjs`: FAIL before tests, `SyntaxError: Invalid or unexpected token`; zero tests executed. `node --check scripts/coordination.test.mjs`: PASS. Runner/transform cause remains UNVERIFIED; do not label this an assertion failure.
+- Initial pre-install builds also failed for missing dependencies; those diagnostics are superseded by the post-install results above.
 
-### Review execution and next handoff
+All six research corrections are delivered, but the board deliberately retains BLOCKED
+for the formal Codex web-build/review gate. Claude may accept the research-only shared-build
+gate or request a separately scoped Windows import fix; no gate is silently waived.
+Claude alone marks the board VERIFIED. No remaining correction is assigned back to Gemini.
 
-Source inspection used `Get-Content` on the board, six research files, G8 checklist,
-feedback and suite identifier contract; `rg -n` located the cited claims.
-No cloud calls, provider invocations, database tests or product mutations were used.
-The board's prior X11 backend blocker was stale: gateway `chatops.ts:247` returns
-`notifyAlertMinSeverity`; X11's existing verified closure remains intact.
-Codex's assigned review is complete; Gemini should repair G10/G11/G14 first, then
-G12, then G13/G15, before Claude's acceptance review. The separate AER-050
-remaining recovery/navigation work is not closed by this board cleanup.
+### Next actionable work
+
+1. Claude: correct the regulatory feed using R5, especially withdrawn CFPB guidance,
+   NYC effective vs enforcement dates, and voluntary-standard status; add filter/count tests.
+2. Resolve/review the Windows web gate and coordination runner issue independently of research content.
+3. Review UNVERIFIED catalog cells before promotion to code. AER-050 remains a separate
+   intake-recovery priority and is not closed by this delivery.
 
 
 ### Concurrent UX scan validation and execution limits

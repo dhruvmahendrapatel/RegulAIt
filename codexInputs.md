@@ -3,6 +3,14 @@
 Updated: 2026-10-03 19:18 CDT (UTC-05:00). Review target: `dhruv/active`.
 Reviewed local and upstream SHA: `b5e1da5524a3705d1a69094f13cf10db60311298`.
 
+## Research takeover handoff — 2026-10-04 01:57 UTC
+
+G10–G15 were reassigned by the owner and corrected by Codex in `e9bf0f95c43eb66837da0a5d513e837c58452e07` on `dhruv/active` (baseline `2e89cdc`). See `geminiInputs.md` for per-ID document closures, remaining UNVERIFIED facts and exact checks. Product findings below retain their prior status; this research pass does not close AER-050 or certify runtime behavior.
+
+**G14-FEED — OPEN / HIGH claim-accuracy follow-up, Claude-owned data:** `packages/shared/src/demo-intake/regulatory-updates.ts:291` presents CFPB Circular 2022-03 as current, whereas the [CFPB withdrawal register](https://www.consumerfinance.gov/compliance/guidance/withdrawn-guidance/) lists its 2025-05-12 withdrawal (checked 2026-10-04). At line 243 the NYC entry conflates enforcement start with effective date. R5 reconciles all 13 keys, also separating voluntary NIST/ISO publication from statutory force. Source observation, not runtime reproduction. Impact: users can receive stale or misleading regulatory guidance. Acceptance: correct dates/instrument status, preserve supported EU amendment dates, test feed filters/counts and withdrawn/voluntary presentation; obtain applicability review. No feed code/data changed in this task.
+
+**G10-G15-VERIFY — OPEN / MEDIUM local verification limitation:** research structure validator and shared build passed; Windows web tsc/build failed on existing case-sensitive-basename imports (`UseCaseOverviewPage.tsx:18-19`, `AgentsPage.tsx:26`, `AgentStewardship.tsx`/`agentStewardship.ts`). Coordination Vitest stopped before tests with a syntax error; standalone syntax check and board lint passed. Exact commands/results in `geminiInputs.md`; no green overall gate claimed. Acceptance: disambiguate imports and pass Windows typecheck/build; investigate runner and execute its assertions. This is a separate follow-up, not additional Gemini research work.
+
 ## How to use this file
 
 Active work is below. Implementers should answer by stable ID with the fixing commit and acceptance-test evidence.
