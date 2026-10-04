@@ -7,7 +7,8 @@ Do not interpret an unverified roadmap possibility as a proven defect or as auth
 
 [Complete original sweep, both verification appendices, status and fixing evidence](https://github.com/dhruvmahendrapatel/RegulAIt/blob/64f0943f7fcc5d62332df29d42f0dbbea944beb0/geminiInputs.md)
 is preserved in Git. Superseded claims and repeated closed-item prose no longer live in the active file.
-For the current end-to-end Agent / AI use-case Intake UX scan, see `codexInputs.md`, AER-050..055.
+For the Agent / AI use-case Intake UX scan, see `codexInputs.md`. Rechecked 2026-10-03 at `b5e1da5`:
+AER-051..055 are RESOLVED/DONE; AER-050 is PARTIALLY RESOLVED (remaining recovery/navigation tests and fixes).
 That targeted scan does not close GEM-nc-1's broader UI coverage gap.
 
 ## Active gaps and decisions

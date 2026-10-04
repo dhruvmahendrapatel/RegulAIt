@@ -1,7 +1,7 @@
 # Codex feedback — active work and verified closures
 
-Updated: 2026-10-03 15:39 CDT (UTC-05:00). Review target: `dhruv/active`.
-Reviewed local and upstream SHA: `64f0943f7fcc5d62332df29d42f0dbbea944beb0`.
+Updated: 2026-10-03 19:18 CDT (UTC-05:00). Review target: `dhruv/active`.
+Reviewed local and upstream SHA: `b5e1da5524a3705d1a69094f13cf10db60311298`.
 
 ## How to use this file
 
@@ -17,7 +17,8 @@ Only this file and `geminiInputs.md` changed; no product behavior was changed.
 
 ## Agent / AI use-case intake — end-to-end assessment
 
-**Verdict: a coherent guided happy path, but not yet seamless for a first-time business user.**
+**Recheck verdict: AER-051..055 are RESOLVED/DONE; AER-050 is PARTIALLY RESOLVED.**
+The main clarity and edit-preservation defects are fixed. Durable recovery still has failure-path gaps; first-time-user comprehension remains unmeasured.
 The six-stage flow, worked example, duplicate suggestions, explicit framework/risk decisions, human-review disclaimer,
 registry filters, reviewer task, send-back reason, prefilled resubmission, approval conditions and agent-stewardship handoff are useful.
 Axe/keyboard checks are valuable but do not establish that non-specialists understand the questions.
@@ -30,106 +31,76 @@ not a new runtime agent. Keep this distinction explicit in onboarding and stack 
 | Journey point | Assessment / next action |
 |---|---|
 | Find and start | Clear registry CTA, worked example and duplicate rail. Preserve these. |
-| Describe/classify | Too much assumed regulatory vocabulary; no focused missing-answer recovery (AER-053). |
-| Suggestions/questionnaire | Explicit decisions are good; edits can disappear or never be saved (AER-051/052). |
+| Describe/classify | Plain-language explanations, named/focusable missing answers and explicit Not sure handling now ship (AER-053 DONE). |
+| Suggestions/questionnaire | Explicit keep/regenerate choice preserves edits; framework rationales reach the record/reviewer (AER-051/052 DONE). |
 | Link stack | Optional agent/vendor selection is disclosed, including load failure. Add clear “link later / ask an administrator” guidance, not an obligatory technical setup detour. |
-| Review/submit | Counts are not a review of the actual submission; recovery promise exceeds page-memory durability (AER-050/054). |
+| Review/submit | Full proposal and section edit/return controls now ship (AER-054 DONE); draft failure/navigation gaps remain (AER-050 PARTIAL). |
 | Human review | Shared review drawer, role-aware decisions, reason validation and self-review refusal are meaningful improvements. |
-| Sent back/resubmit | Prefilled answers, visible return reason, new questionnaire version and review round are implemented. Leaving still loses unsaved edits (AER-050). |
-| Approved/conditions/expiry | Lifecycle and next activities exist, but a failed detail read can misstate approval conditions (AER-055). |
+| Sent back/resubmit | Prefilled answers, visible return reason, new questionnaire version and review round are implemented. Server drafts and guarded Cancel now exist; browser Back/session recovery remain under AER-050. |
+| Approved/conditions/expiry | Unknown lifecycle detail now has loading/error/retry states instead of unconditional approval (AER-055 DONE). |
 | Stewardship | Linked-agent card leads to inventory; stewardship has named owner/successor and review dates. This is distinct from approval of the use case. |
 
-### New findings — implement in this order
+### Intake recheck — 2026-10-03
 
-#### AER-050 — MEDIUM / REPORTED IMPLEMENTED (pending codex-confirm) — Draft and recovery state disappear when the page is left
+[Original acceptance criteria and implementer replies](https://github.com/dhruvmahendrapatel/RegulAIt/blob/b5e1da5524a3705d1a69094f13cf10db60311298/codexInputs.md)
+are preserved in Git. Closed issue narratives have been removed from this active file. No acceptance criterion was closed from a commit message alone.
 
-**Implementer update:** Implemented 2026-10-03 (ADR-0171): one server-side draft per user and scope (`GET/PUT/DELETE /v1/use-cases/draft`, never browser storage), resume/start-fresh offer, leave guard (beforeunload + in-app link interceptor; the app uses `<BrowserRouter>`, so no `useBlocker`), Cancel/Back disabled while submitting, `Idempotency-Key` on create (per caller, race-safe, window = 30-day draft lifetime) reused after a lost response including across reload; copy narrowed to what is true. Not done: browser Back inside the app is not intercepted (the draft makes it recoverable); resume tested across reload, not sign-out/sign-in; resubmission has no idempotency key (keeps its retry-without-second-PATCH logic).
+#### AER-050 — MEDIUM / PARTIALLY RESOLVED — Finish durable recovery under failed saves and navigation
 
-Evidence (source observation): `apps/web/src/views/admin/governance/IntakeWizardPage.tsx:116-172,329-331,429-433,642,657`;
-`intakeCheckpoint.ts:48-53`; `IntakeResubmit.tsx:127-138,167-181`.
-Answers and completed-write checkpoint live only in React state/refs. No draft persistence or leave guard was found in
-`apps/web/src` (`beforeunload|useBlocker`). Cancel/Back remain available during submission.
-The first create response must arrive before its ID enters the checkpoint. The page nevertheless promises “nothing is created twice”
-and “completed steps … retained” without limiting that promise to the current mount.
+**Verified improvements:** server-side per-user/per-scope drafts, a resume/start-fresh offer, no questionnaire in browser storage,
+guarded Cancel/link navigation, disabled Cancel/Back while submitting, and per-caller idempotent use-case creation.
+The attempt key/body is included in the draft before the create request. Exact-head CI passed reload/resume and lost-create-response
+cases, plus backend authorization, size limit, expiry, duplicate and concurrent-create tests.
 
-Impact: refresh, session-loss redirect, Cancel or a lost success response can lose substantial work and the ability to resume partial writes.
-Duplicate creation after an ambiguous response is a **risk requiring transport-fault reproduction**, not a browser-reproduced result in this pass.
-This is outside AER-046's verified same-mount input-binding fix; do not reopen AER-046.
+Fixes: `77325c2`, `085118f`, `5df8c65`, integrated/wired in `6b0a5fb`, reviewed corrections `c964dda`.
+Source: `apps/gateway/src/use-case-drafts.ts:51-127`, `use-cases.ts:1408-1563`;
+`apps/web/src/views/admin/governance/IntakeWizardPage.tsx:406-456`, `intakeDraft.ts:78-120`, `LeaveGuard.tsx:1-106`.
 
-Remediation: authenticated server-side drafts/resume identifiers and durable idempotency for submission; confirm leaving a dirty form;
-settle or explicitly track in-flight submission before navigation. Until durable recovery exists, disclose its scope honestly.
-Do not indiscriminately persist sensitive questionnaire text in browser localStorage.
+**Remaining criteria (pick this up next):**
 
-Acceptance: fill all stages, refresh/re-login and resume unchanged; Cancel warns; leave during submission has a recoverable outcome;
-drop the create response after server commit, retry/reload, and assert one use case with one coherent risk/control set.
-Apply the dirty-form test to resubmission too.
+1. **A failed recovery-checkpoint save still permits creation.** `intakeDraft.ts:98-104` catches the PUT failure, sets error state and resolves.
+   `IntakeWizardPage.tsx:430-438` awaits that resolved save then sends the create request.
+   The key may therefore exist only in page memory when creation succeeds. Lost create response plus reload then lacks a durably saved key.
+   **Isolated reproduction:** executed the actual queued-save body with a rejecting PUT; it resolved, status was error, saved checkpoint remained null.
+   The whole duplicate-after-reload sequence is a source-derived risk, not a newly browser-reproduced result.
+   Return a save outcome and refuse/defer recovery-dependent submission until its key is durable, or provide another server-owned durable attempt handle.
+2. **Browser Back can drop the last edit.** `LeaveGuard.tsx:13-15` explicitly does not intercept same-app browser Back.
+   `intakeDraft.ts:33,116-120` debounces for 1 second and clears the pending timer on unmount.
+   Therefore “the draft makes it recoverable” does not cover an edit followed immediately by Back or an unavailable save service.
+   Implement navigation blocking that covers history transitions, or an equally safe durable mechanism.
+3. **Session-loss recovery is not exercised.** Existing tests resume after reload, not sign-out/sign-in or a session-expiry redirect while saving.
+   Test the real authentication path, including user A logging out and user B logging in, without exposing/resuming A's draft to B.
+4. **Recovery is not end-to-end idempotency.** Risk creation and questionnaire writes remain multi-request checkpoints:
+   `IntakeWizardPage.tsx:467-486` records IDs only after their responses; resubmission has no idempotency key.
+   The new lost-response tests cover the initial use-case create, not a committed risk/artifact with a lost response.
+   Extend the fault matrix before promising one coherent set for every interrupted submission.
 
-#### AER-051 — MEDIUM / REPORTED IMPLEMENTED (pending codex-confirm) — Re-drafting silently replaces questionnaire edits
+**Acceptance to close:** reject/timeout the attempt-draft PUT and prove no untracked create occurs; edit then immediately browser Back/Forward and
+recover exactly; expire/re-authenticate with pending edits; lose each create/artifact/risk response after commit, then reload/retry.
+Assert one use case, one intended risk/control set and no unintended questionnaire/review round. Include resubmission and another-user isolation.
+Keep the current successful reload/idempotency cases as regression controls. Do not reopen AER-046's separate verified input-binding fix.
 
-**Implementer update:** Implemented 2026-10-03: Back + Continue with unchanged answers keeps every edit and decision with no assist call; changed answers list the affected sections and regenerate only on "Regenerate affected sections" (else "Keep my edits").
+### Verified closures — AER-051 through AER-055
 
-Evidence: `IntakeWizardPage.tsx:228-234,407-409,433`. The assist success callback replaces the entire questionnaire and resets
-question decisions to accepted. Back-navigation followed by “Draft suggestions” invokes it again.
-**Reproduced in isolation using the actual callback:** a manual answer becomes the generated draft and is accepted.
-Old `suggestionEdits` are not cleared/reconciled at the same time, creating inconsistent preservation across sections.
+All five are confirmed at `b5e1da5`; common fix chain `77325c2,085118f,9db3fb1,6b0a5fb,c964dda`.
+These are implementation/acceptance closures, not a usability certification.
 
-Remediation: preserve keyed edits for unchanged answers; when classification changes, show affected sections and an explicit regenerate/keep choice.
-Invalidate stale suggestions deliberately without silently replacing user text.
-Acceptance: edit/reject questionnaire sections, return to Classify and continue unchanged: preserve edits and decisions.
-Change classification: show a diff/warning; regenerate only with explicit consent and reconcile framework/risk edits.
+| ID | Status | Direct source and executed acceptance evidence |
+|---|---|---|
+| AER-051 | RESOLVED/DONE | `IntakeWizardPage.tsx:275-301` and `registrationModel.ts:278-374`: unchanged fingerprint skips re-draft; changed proposals have explicit keep/regenerate and keyed reconciliation. `intake-drafts.mock.spec.ts:349,367,401` passed; model units 10/10. |
+| AER-052 | RESOLVED/DONE | Wizard `:345-386` serializes edited accepted framework rationales; gateway `use-cases.ts:1513,1689` persists/returns them; record and ReviewPanel render them. Backend rationale tests `aer050-intake-drafts.test.ts:300,321`, submission test `intake-drafts.mock.spec.ts:424`, and record/reviewer test `zz-use-case-review.mock.spec.ts:481` passed. |
+| AER-053 | RESOLVED/DONE | `intakeFields.tsx:78-166` explains questions, offers Not sure and named/focused missing answers; `registrationModel.ts:118-150` preserves uncertainty, never silently No; gateway validates it. Browser `intake-drafts.mock.spec.ts:433,464`, record/reviewer visibility and backend `aer050-intake-drafts.test.ts:340,362,395` passed. Human comprehension validation remains the separately stated pilot gate, not a claim established by these tests. |
+| AER-054 | RESOLVED/DONE | `IntakeWizardPage.tsx:917-1035` renders reviewer routing, full proposal, excluded items, stack and section edit actions; return-to-review preserves the rest. Browser `intake-drafts.mock.spec.ts:490` passed. |
+| AER-055 | RESOLVED/DONE | `UseCaseOverviewPage.tsx:80-83,160-173,238-266,370-381` treats unknown detail as unknown and gates tracker/conditions. `zz-use-case-review.mock.spec.ts:428-480` passed both 500/403, loading and retry-restores-resubmit paths. |
 
-#### AER-052 — MEDIUM / REPORTED IMPLEMENTED (pending codex-confirm) — Framework explanation editing is a dead-end control
+### Recommended next work
 
-**Implementer update:** Implemented 2026-10-03: edited framework explanations persist as `frameworkRationales` (validated against the use case's frameworks) and show on the record and in the review drawer.
-
-Evidence: `IntakeWizardPage.tsx:290-293,563,724-740`. The framework suggestion offers an editable “Why it applies” explanation.
-Submission serializes only its framework identifier in `complianceTags`; unlike risk descriptions, the edited explanation is never consumed.
-**Reproduced in isolation using the actual submissionInputs expression:** a unique edited rationale is absent from the serialized payload.
-
-Remediation: persist the rationale and show it to the reviewer, or make the explanation read-only and remove the edit affordance for frameworks.
-Acceptance: edit a framework rationale, submit, reload and open reviewer evidence: the exact edit survives; alternatively the UI offers no unsupported edit.
-Do not label an edited rationale “saved” if only the framework identifier is retained.
-
-#### AER-053 — MEDIUM / REPORTED IMPLEMENTED (pending codex-confirm) — Classification assumes expertise and hides the incomplete answer
-
-**Implementer update:** Implemented 2026-10-03: plain-language help and an example under each yes/no question; "Not sure" counts as yes for classification and is recorded (`screeningUnsure`) and shown to reviewers; a missing-answers summary names each gap and moves focus to the first. Not done: comprehension validation with representative business users (needs people).
-
-Evidence: `intakeFields.tsx:16-59,85-95`; `IntakeWizardPage.tsx:248-255,404-409,487-540`.
-Yes/no controls ask “Has an EU nexus”, “Profiles natural persons”, “Safety component” and “Manipulative techniques” without a definition/example.
-All answers are mandatory; the only incomplete-state guidance is “Answer every question”, with a disabled primary action.
-The existing labels/keyboard accessibility are not reopened (AER-029 remains DONE).
-
-Remediation: short plain-language help/examples next to these labels, a clearly governed “I need help / unsure” route that never defaults to No,
-and missing-field summary with focus/link to the first unanswered field. Avoid making a business user guess to get past a disabled button.
-Acceptance: omit one answer in each group and get its name/location; keyboard users reach the problem; unfamiliar users can find a definition;
-uncertainty cannot silently produce a low-risk classification. Validate comprehension with representative business users.
-
-#### AER-054 — MEDIUM / REPORTED IMPLEMENTED (pending codex-confirm) — Review does not show the full proposal users are approving for submission
-
-**Implementer update:** Implemented 2026-10-03: Review shows the proposal itself in expandable sections (frameworks and risks with text, questionnaire incl. rejected, linked stack, who receives it from the review policy, where to follow it) with "Edit this section" / "Return to review".
-
-Evidence: `IntakeWizardPage.tsx:624-639`. The final page lists counts for frameworks, risks and questionnaire sections, not their accepted text,
-and omits the selected agent/vendor. The progress indicator at `:440-445` is not navigable; correcting a specific earlier answer requires repeated Back.
-Questionnaire drafts begin accepted automatically (`:232`), increasing the importance of a meaningful final review.
-
-Remediation: expandable final proposal showing accepted framework/risk text, questionnaire, rejected/omitted sections and linked stack;
-“Edit this section” actions returning safely to Review. State who receives the submission and where the owner follows its progress.
-Acceptance: final review reflects every changed answer/selection and exclusion; edit one section and return without losing others;
-the user can identify the recipient/next action without knowing the workflow implementation.
-
-#### AER-055 — MEDIUM / REPORTED IMPLEMENTED (pending codex-confirm) — Failed lifecycle detail can read as approval without conditions
-
-**Implementer update:** Implemented 2026-10-03: the record shows loading/failed lifecycle detail with Retry and never renders "approved without conditions" or a completed lifecycle from missing detail; the review drawer likewise says when the owner's notes could not load.
-
-Evidence: `UseCaseOverviewPage.tsx:58-80,73-77,126-130,326-332`.
-Only the overview query is passed to QueryGate. A failed detail query falls back to empty conditions/reviews and hides the resubmit action.
-For an approved overview, the empty-conditions branch renders “This use case was approved without conditions” even when `loaded` is false.
-This is a source-proven misleading disclosure; no backend approval/deploy bypass is claimed.
-
-Remediation: render an explicit lifecycle-details error/loading state with retry; never translate unknown conditions into none.
-Do not render lifecycle readiness from missing required detail.
-Acceptance: overview succeeds while detail returns 500/403: no unconditional-approval statement or misleading completed lifecycle;
-display retry; after retry the real conditions, reviews and resubmit action appear.
+1. **Close AER-050's remaining recovery paths**, starting with failed checkpoint save before create and immediate browser Back.
+2. **Run a short first-time-user pilot** after that: proposer → reviewer → sent-back owner → approved-with-conditions.
+   Include keyboard, narrow viewport and session expiry; observe 3–5 business users without coaching. Record completion, confusion and help requests.
+3. **Next security/claim backlog: AER-014, then AER-016.** Fix or explicitly qualify historical rate-limit simulation before claiming exact replay;
+   then bound preview query/concurrency cost. Those are existing active findings below, not newly re-audited defects in this pass.
+   Prefer those correctness/reliability items over adding unrelated features.
 
 ## Prior active findings — unchanged unless noted
 
@@ -180,12 +151,6 @@ Keep the named residual/owner decision visible. Full fixing commits, tests and h
 | AER-040 | Approver-review tests outside CI gates | —; codex-confirm (+ owner: required check) |
 | AER-042 | Intake UI sent invalid dataSensitivity | —; codex-confirm |
 | AER-043 | Concurrent monitor runs over-report transitions | —; codex-confirm |
-| AER-050 | Intake drafts lost on leave; ambiguous create could duplicate | Browser Back not intercepted; sign-out/sign-in resume untested; resubmission without idempotency key; codex-confirm |
-| AER-051 | Re-drafting replaced questionnaire edits | —; codex-confirm |
-| AER-052 | Framework rationale edit discarded | —; codex-confirm |
-| AER-053 | Classification assumed expertise; no unsure route | Business-user comprehension validation needs people (owner); codex-confirm |
-| AER-054 | Review showed counts, not the proposal | —; codex-confirm |
-| AER-055 | Failed detail read as approved without conditions | —; codex-confirm |
 | F04 | Secret persistence outside audit_log | —; codex-confirm |
 | F05 | Approval scope and payload binding | —; codex-confirm (close with AER-039/040) |
 | F08 | Documentation and capability claims | —; codex-confirm |
@@ -216,41 +181,34 @@ Keep the named residual/owner decision visible. Full fixing commits, tests and h
 | AER-025 | WITHDRAWN | Envoy adapter removed; do not rebuild it from the old finding. |
 
 Existing Codex closures retain their original verification dates/commits in the linked history.
-**New confirmation: AER-049 RESOLVED/DONE at 64f0943.** Fix chain `604158b,385631d,69bb1ad,f0adbd2,a1b679e` (integrated `90cfb1b`):
+**Prior confirmation: AER-049 RESOLVED/DONE at 64f0943.** Fix chain `604158b,385631d,69bb1ad,f0adbd2,a1b679e` (integrated `90cfb1b`):
 `apps/gateway/src/workflows.ts:218-229,283-301,1593-1649,1813-1829,2022-2107` archives/stamps round-owned effect records,
 creates the new-round PR and refuses stale-round merge. Directly inspected tests at `workflow-check-round.test.ts:709-873`
-assert fresh branch/PR/merge/deploy with prior history retained. Exact-head CI below executed all **17/17** round tests and **50/50**
+assert fresh branch/PR/merge/deploy with prior history retained. Historical exact-head CI `37146780822` executed all **17/17** round tests and **50/50**
 workflow-kernel tests. Old unmerged provider PRs remain open; effect history is not yet visualized (disclosed limitations, not failed acceptance).
 
 <!-- codex-enterprise-feedback:start -->
-## Latest verification — 2026-10-03 15:39 CDT (UTC-05:00)
+## Latest verification — 2026-10-03 19:18 CDT (UTC-05:00)
 
-- Local isolated review branch: `codex/governance-field-help`; reviewed content is exactly GitHub `dhruv/active`,
-  not the unrelated main checkout. Clean ff-only synchronization `8570aad..64f0943`; final pre-edit fetch still `64f0943`.
-- Commands: `git status --short`, `git rev-parse HEAD`, `git remote get-url origin`,
-  `git fetch origin dhruv/active`, `git pull --ff-only origin dhruv/active`, `git rev-parse origin/dhruv/active`.
-- Source inspection: the wizard, shared intake fields/checkpoints, resubmission, registry, record/lifecycle/conditions,
-  review drawer, agent stewardship, route/navigation wiring and relevant test cases. Web Interface Guidelines informed
-  the checks for dirty-form protection, labels, focused validation and honest error states.
-- `gh run view 37146780822 --log` and `gh run view 37146780822 --job 111272519942 --log`:
-  [exact-head CI](https://github.com/dhruvmahendrapatel/RegulAIt/actions/runs/37146780822) passed web **160 tests / 20 files**,
-  gateway **3,435 / 249**, **39** phase journeys and **88** mocked UI journeys, including intake accessibility and retry/resubmit cases.
-  These are independently read **executed CI logs**, not tests newly run locally.
-- `gh run view 37146780856 --json jobs`: the separate Demo workflow's demo-journey and approval-review jobs were **skipped** at this head.
-  Its green aggregate is NOT evidence that `demo-review-policy.spec.ts` or `demo-intake.spec.ts` executed in that workflow.
-- Local `node -e $reviewScript` read-only assertions: evaluated the extracted `submissionInputs` expression with a sentinel framework edit
-  (absent from payload), evaluated the extracted assist `onSuccess` callback with a manually edited answer (replaced/reaccepted),
-  and asserted the page-memory checkpoint/no wizard persistence guards. **3 checks confirmed, exit 0**.
-  Extraction: from `const submissionInputs =` to its closing `});`, evaluate the arrow expression with stubbed pure dependencies;
-  from `onSuccess: (data) => {` to its closing `},`, remove TypeScript `as const`, run with setter spies.
-  These isolated checks reproduce transformations, not a mounted-browser/end-to-end test.
-- Search `rg -n 'beforeunload|useBlocker' apps/web/src`: no matches. One Windows wildcard search of intake test paths failed;
-  rerun correctly with `rg -n 'test\\(' apps/web/e2e -g '*intake*' -g '*review-policy*' -g '*resubmit*'`.
-- No local database, cloud, provider call, deployment or production data was used. No new installed dependencies or product edits.
+Target `dhruv/active`; clean isolated review worktree `codex/governance-field-help` fast-forwarded `e96b654..b5e1da5`.
+Local/upstream reviewed SHA `b5e1da5524a3705d1a69094f13cf10db60311298`. Other worktrees were untouched.
 
-**Limits / next gate:** this was a full-path source and automated-evidence scan, not a fresh manual browser session or user study.
-Mobile layout, screen-reader speech and first-time-user completion rates remain unmeasured. After AER-050..055, run a browser matrix:
-new proposer, reviewer, sent-back owner; clean/partial/failed submission; refresh/session expiry; keyboard and narrow viewport.
-Then observe 3–5 non-technical users completing registration without coaching. Record completion, help requests and misunderstood answers.
-No enterprise-readiness or certification claim follows from this review.
+- Sync/read commands: `git status --short`, `git branch --show-current`, `git remote get-url origin`,
+  `git fetch origin dhruv/active`, `git pull --ff-only origin dhruv/active`, `git rev-parse HEAD origin/dhruv/active`.
+- `gh run view 37160884001 --log`: [exact-head CI](https://github.com/dhruvmahendrapatel/RegulAIt/actions/runs/37160884001)
+  executed **109/109 mocked UI cases**, **39/39 phase journeys**, **14/14 aer050-intake-drafts gateway tests**,
+  and **10/10 registrationModel units**. The logs directly name the closure cases above.
+- `gh run view 37160883981 --json jobs` and `--log`: [Demo journey](https://github.com/dhruvmahendrapatel/RegulAIt/actions/runs/37160883981)
+  actually executed both real seeded-database journeys: `demo-intake.spec.ts` and `demo-review-policy.spec.ts` (**2/2**).
+  Approval-review **5/5** and mocked UI **109/109** also passed. No inference from a green-but-skipped job.
+- Local `node -e $reviewScript`: extracted the actual queued save callback from `intakeDraft.ts`,
+  removed its TypeScript-only annotations, injected a rejecting `api.put`, and asserted final error state,
+  null saved checkpoint and resolved promise. **Passed, exit 0**; supports AER-050's remaining failed-save path.
+- Targeted source inspection covered draft authorization, serial saves, cleanup/leave guard, stable attempt capture,
+  proposal regeneration, payload rationales and display, uncertainty, full review and lifecycle-detail failure handling.
+  React review guidance informed the state/effect cleanup checks.
+- Only feedback documentation is changed. No local DB, new browser run, live provider, deployment or production resource was used.
+  CI is executed evidence read independently, not a claim that tests were run locally.
+
+No enterprise-readiness or usability certification is implied. Remaining mobile/screen-reader/comprehension assurance belongs to the pilot gate.
 <!-- codex-enterprise-feedback:end -->
