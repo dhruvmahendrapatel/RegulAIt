@@ -1,7 +1,8 @@
 # Codex feedback — active work and verified closures
 
-Updated: 2026-10-03 19:18 CDT (UTC-05:00). Review target: `dhruv/active`.
-Reviewed local and upstream SHA: `b5e1da5524a3705d1a69094f13cf10db60311298`.
+Updated: 2026-10-04 15:40 CDT (UTC-05:00). Review target: `dhruv/active`.
+Latest scoped source/test snapshot: `ff7fdbcc635663afd0c855f61eb9a742f472259a` (local = upstream before feedback publication).
+Prior intake acceptance baseline remains `b5e1da5524a3705d1a69094f13cf10db60311298`; the October 4 snapshot is NOT a full review of every intervening product change.
 
 ## Research takeover handoff — 2026-10-04 01:57 UTC
 
@@ -196,6 +197,97 @@ assert fresh branch/PR/merge/deploy with prior history retained. Historical exac
 workflow-kernel tests. Old unmerged provider PRs remain open; effect history is not yet visualized (disclosed limitations, not failed acceptance).
 
 <!-- codex-enterprise-feedback:start -->
+## Automated enterprise-readiness review — 2026-10-04 15:40 CDT / 20:40 UTC
+
+**Target and synchronization.** The primary checkout is on `dhruv/active`. Initial local SHA
+`63bd838c5e2109a450e7e28464df51dfaa52b53e`; fetched upstream and fast-forwarded local SHA
+`ff7fdbcc635663afd0c855f61eb9a742f472259a`. `git status --short --branch`, `git remote -v`,
+`git worktree list`, `git branch -vv`, `git fetch origin dhruv/active`, `git rev-parse HEAD origin/dhruv/active`,
+`git diff --name-status HEAD origin/dhruv/active`, and `git pull --ff-only origin dhruv/active` succeeded.
+Tracked files were clean before synchronization; the existing untracked `RegulAIt/` directory remains untouched.
+The independent feedback worktree and other branch were not switched or modified.
+
+**Coverage.** Scoped review of ADR-0174 break-glass checks, ADR-0175 skill/model-policy/monitor/NIST guard units,
+and existing high-risk/residual findings. Research handoff baseline was `587806a`; the new product delta is large
+(204 files changed since the primary checkout's previous head). Builder tool-loop, paused-turn, federation linking,
+release-age, served-model and migration behavior are NOT independently cleared by this run. Repository-reported
+full gates in STATE/ADRs are not reproduced here. Carry these unreviewed surfaces into the next review rather than
+interpreting the snapshot SHA as a completed enterprise gate.
+
+### AER-056 — OPEN / MEDIUM — Concurrent administrative writes can remove the last recovery path
+
+**Source observation.** `break-glass.ts:71-85` checks a count and returns a decision, without locking a shared
+invariant. OIDC disable/delete then writes separately (`auth.ts:2539-2560,2581-2592`); SAML does likewise
+(`saml.ts:991,1041`). User demotion/deactivation checks precede separate writes (`app.ts:1344-1361,1417-1435`),
+and SCIM has the same split (`scim.ts:421-441`). Engaging/changing the mode separately validates current rows
+(`org-settings.ts:558-608`). No shared transaction/serialization across these writers was found on these paths.
+The new helper entered in fixing commit `79040cf35b5395ce9f745df726750f69ba85d28c`.
+
+**Isolated reproduced decision schedule, not a DB/HTTP reproduction.** Transpiled the actual `break-glass.ts`
+module with TypeScript into an in-memory VM; supplied a two-provider in-memory count store with the same exclusion
+semantics. `Promise.all` of the two removal checks returned `[null,null]` before either write; applying both
+removals left zero providers. The existing finding-5 test (`adr0174-enterprise-sign-in.test.ts:593-630`)
+checks sequential last-member refusals, not this interleaving. The user/admin variant remains source-derived.
+
+**Impact.** Authorized concurrent operations can violate the promised spare-key/SSO availability invariant.
+Loss of all SSO doors does not immediately prevent a remaining break-glass admin from signing in; loss of the
+last usable break-glass account removes outage recovery. Do not describe this as unauthorized privilege escalation.
+
+**Remediation / acceptance.** Serialize all provider, user, SCIM and mode/list changes on one shared invariant
+lock inside a transaction; reread, validate, mutate and audit together. Add barrier-controlled concurrent tests:
+two usable break-glass admins demoted/deactivated, mixed OIDC+SAML disable/delete, SCIM/API conflict, and mode
+enable racing last-provider removal. Assert at least one usable recovery account and one required SSO provider
+remain, a named refusal loses the race, and audit/state agree after injected failure. No live DB test was run here.
+
+### G10-G15-VERIFY — OPEN / MEDIUM — Reproduced, with two additional Windows manifestations
+
+The earlier stewardship import collision persists. New `CommandPalette.tsx` / `commandPalette.ts` extensionless
+imports collide too (`AppShell.tsx:19`, `commandPalette.test.ts:3`); `tsc --noEmit` exits 2 with TS1261/TS1149 and
+missing exports. Disambiguate basenames rather than disabling consistent-casing checks. No Windows build pass.
+
+The new NIST reference guard also fails on Windows: `nist-ai-rmf-refs.test.ts:65` retains platform separators,
+but `:120-129,144,209` compare against slash-separated strings. Three of 11 cases fail: non-vacuity,
+frozen-pack exclusion and gateway-evidence lookup. The latter receives no gateway files, so its “missing
+risk-registered” failure does NOT establish missing product evidence. Normalize relative paths once before
+comparison; retain all discriminating assertions and prove the guard on Windows and Linux. This is an executed
+test/harness failure, not a new claim that the NIST v3 mappings themselves are incorrect.
+
+### Prior finding lifecycle checked this run
+
+- **G14-FEED: OPEN / HIGH, unchanged.** Delta only corrects NIST refs; CFPB still has `status: "in_force"`
+  at `regulatory-updates.ts:302`, and NYC date/status concerns remain. No acceptance filters/presentation proof.
+  The prior dated primary-source evidence is retained above; no new legal applicability conclusion.
+- **AER-014: OPEN / HIGH, unchanged.** Simulation still calls `governedEvaluate` without a replay clock
+  (`policy-simulation.ts:358`); rate window still derives from `Date.now()` (`governed-evaluate.ts:437`).
+- **AER-028 and AER-036: PARTIALLY RESOLVED, unchanged.** Adapter files unchanged since handoff; no new
+  context/identity derivation or acceptance matrix verified. No Docker/adapter execution in this run.
+- **AER-050: PARTIALLY RESOLVED, unchanged.** Draft save still catches PUT failure without rejecting
+  (`intakeDraft.ts:98-105`); draft/leave-guard files unchanged. Previous criteria remain unmet.
+- **AER-051..055: RESOLVED/DONE, unchanged.** No contradictory evidence found; prior closure evidence retained.
+  Remaining reported-implemented rows have NOT been silently closed.
+
+### Exact local verification and limitations
+
+- `pnpm --filter @regulait/shared exec vitest run src/skill-admission.test.ts src/model-policy.test.ts src/governance-monitor-adr0175.test.ts src/nist-ai-rmf-refs.test.ts`
+  ran the checkout's older installed Vitest 3.2.7: **69 passed / 3 failed** across 4 files (exit 1).
+  Skill admission **21/21**, model policy **6/6**, monitor **34/34**, NIST **8/11**. Source units, no DB/provider calls.
+- Repeated exactly with the already-installed locked runner:
+  `& 'C:\Users\dhruv\Documents\Projects\RegulAIt-Governed\RegulAIt-feedback-20261004\node_modules\.bin\vitest.cmd' run --root 'C:\Users\dhruv\Documents\Projects\RegulAIt-Governed\RegulAIt\packages\shared' src/skill-admission.test.ts src/model-policy.test.ts src/governance-monitor-adr0175.test.ts src/nist-ai-rmf-refs.test.ts`
+  Vitest **4.1.11**, same **69 passed / 3 failed**, exit 1. Does not establish a fresh dependency-install or full-suite gate.
+- `pnpm --filter @regulait/web exec tsc --noEmit`: **FAIL, exit 2**, stewardship and command-palette collisions.
+- `node --check scripts/coordination.test.mjs`: **PASS**. `node scripts/coordination.mjs lint`: **PASS**.
+- `pnpm exec vitest run scripts/coordination.test.mjs`: **FAIL before assertions**, import SyntaxError; its broad
+  discovery also found the preserved nested directory's test. Repeated without that directory using
+  `& 'C:\Users\dhruv\Documents\Projects\RegulAIt-Governed\RegulAIt-feedback-20261004\node_modules\.bin\vitest.cmd' run --root 'C:\Users\dhruv\Documents\Projects\RegulAIt-Governed\RegulAIt\scripts' coordination.test.mjs`:
+  **FAIL, exit 1, zero assertions**, Vitest 4.1.11. Direct lint passing does not close the runner failure.
+- `node -e $probe`: **PASS** isolated actual-helper schedule described in AER-056; fake count store only,
+  no database, HTTP, real provider or mutation of product source. `git diff --check`: **PASS** before feedback edit.
+
+No full DB suite, cloud resource, live provider, deployment, production designation, secret rotation or product
+edit occurred. Next priorities: fix Windows verification portability; make recovery-path invariants atomic;
+correct G14-FEED; then continue independent review of the unreviewed new authentication and builder boundaries.
+No enterprise-readiness, certification, parity or passing overall gate is asserted.
+
 ## Latest verification — 2026-10-03 19:18 CDT (UTC-05:00)
 
 Target `dhruv/active`; clean isolated review worktree `codex/governance-field-help` fast-forwarded `e96b654..b5e1da5`.
