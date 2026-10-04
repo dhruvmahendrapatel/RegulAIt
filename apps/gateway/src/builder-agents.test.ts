@@ -6,6 +6,9 @@
  * succeeds, the disallowed one is refused by name), so a test cannot pass
  * because a route simply refuses everything.
  */
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   and,
@@ -17,6 +20,7 @@ import {
   mcpServers,
   mcpTools,
 } from "@regulait/db";
+import { BUILDER_AGENT_COLORS } from "@regulait/shared";
 import { builderKit, type BuilderKit, type Person } from "./testing/builder-fixture.js";
 import { BUILDER_TEMPLATES } from "./builder-catalog.js";
 
@@ -116,11 +120,12 @@ describe("create, read, update, delete", () => {
   it("updates fields, audits a limit change separately, and locks the connection format (409)", async () => {
     const a = await newAgent(owner, { connectionFormat: "per_user" });
     const r = await k.req("PATCH", `/v1/builder/agents/${a.id}`, owner.auth, {
-      name: "Renamed", instructions: "# Do things", color: "#112233", monthlyLimitUsd: 12.5, computerUse: true,
+      name: "Renamed", instructions: "# Do things", color: "#7C3AED", monthlyLimitUsd: 12.5, computerUse: true,
     });
     expect(r.statusCode, r.body).toBe(200);
     const b = r.json().agent;
     expect(b.name).toBe("Renamed");
+    expect(b.color).toBe("#7c3aed"); // stored lower case
     expect(b.instructions).toBe("# Do things");
     expect(b.monthlyLimitUsd).toBe(12.5);
     expect(b.computerUse).toBe(true);
@@ -131,6 +136,24 @@ describe("create, read, update, delete", () => {
     expect(lock.statusCode).toBe(409);
     expect(lock.json().error).toBe("connection_format_locked");
     expect((await k.req("GET", `/v1/builder/agents/${a.id}`, owner.auth)).json().agent.connectionFormat).toBe("per_user");
+  });
+
+  it("colours come from the shared palette only (white initials keep AA), and the web mirrors it", async () => {
+    const a = await newAgent(owner);
+    expect(BUILDER_AGENT_COLORS as readonly string[]).toContain(a.color);
+    const off = await k.req("PATCH", `/v1/builder/agents/${a.id}`, owner.auth, { color: "#5b6cff" });
+    expect(off.statusCode).toBe(400);
+    const on = await k.req("PATCH", `/v1/builder/agents/${a.id}`, owner.auth, { color: BUILDER_AGENT_COLORS[3] });
+    expect(on.statusCode, on.body).toBe(200);
+    expect(on.json().agent.color).toBe(BUILDER_AGENT_COLORS[3]);
+    // the SPA's AGENT_COLORS must be this exact list, in order (drift guard)
+    const webLogic = readFileSync(
+      path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../web/src/views/builder/builderLogic.ts"),
+      "utf8",
+    );
+    const m = /export const AGENT_COLORS = \[([^\]]*)\]/.exec(webLogic);
+    expect(m, "AGENT_COLORS not found in builderLogic.ts").not.toBeNull();
+    expect([...m![1]!.matchAll(/"(#[0-9a-f]{6})"/g)].map((x) => x[1])).toEqual([...BUILDER_AGENT_COLORS]);
   });
 
   it("delete archives: 204, then hidden from list and detail", async () => {
@@ -267,6 +290,36 @@ describe("toolbox", () => {
     });
     expect(byAdmin.statusCode).toBe(403);
     expect(byAdmin.json().error).toBe("tool_not_entitled");
+  });
+
+  it("toolbox-options lists exactly what the caller may add, with the ids PUT accepts", async () => {
+    const r = await k.req("GET", "/v1/builder/toolbox-options", owner.auth);
+    expect(r.statusCode, r.body).toBe(200);
+    const options = r.json().options as Array<Record<string, unknown>>;
+    const mine = options.filter((o) => o.refId === grantedConnector || o.refId === grantedTool || o.refId === ungrantedConnector || o.refId === ungrantedTool);
+    expect(mine).toEqual([
+      { kind: "connector", refId: grantedConnector, name: `crm-${k.RUN}`, provider: "salesforce" },
+      { kind: "mcp_tool", refId: grantedTool, name: "search", provider: `docs-mcp-${k.RUN}`, access: "read" },
+    ]);
+    // every listed option is accepted by the PUT check (the two cannot disagree)
+    const a = await newAgent(owner);
+    const put = await k.req("PUT", `/v1/builder/agents/${a.id}/tools`, owner.auth, {
+      tools: options.map((o) => ({ kind: o.kind, refId: o.refId, requiresApproval: false })),
+    });
+    expect(put.statusCode, put.body).toBe(200);
+    // someone with no grants sees none of these; an identity-less token is refused
+    const none = (await k.req("GET", "/v1/builder/toolbox-options", outsider.auth)).json().options as Array<{ refId: string }>;
+    expect(none.map((o) => o.refId)).not.toContain(grantedConnector);
+    expect(none.map((o) => o.refId)).not.toContain(grantedTool);
+    expect((await k.req("GET", "/v1/builder/toolbox-options", k.BOOT)).json().error).toBe("builder_requires_identity");
+  });
+
+  it("an MCP tool refId must be the tool's own id (not server:name)", async () => {
+    const a = await newAgent(owner);
+    const r = await k.req("PUT", `/v1/builder/agents/${a.id}/tools`, owner.auth, {
+      tools: [{ kind: "mcp_tool", refId: `${grantedTool}:search`, requiresApproval: false }],
+    });
+    expect(r.statusCode).toBe(400);
   });
 
   it("unknown tool ids are a 404", async () => {

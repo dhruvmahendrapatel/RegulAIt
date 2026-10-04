@@ -186,3 +186,57 @@ export async function loadConnectorsById(db: Db, ids: string[]) {
     .from(connectors)
     .where(inArray(connectors.id, ids));
 }
+
+/** one thing the caller may put in a toolbox (`GET /v1/builder/toolbox-options`) */
+export interface ToolboxOption {
+  kind: "connector" | "mcp_tool";
+  /** the id `PUT …/tools` takes: the connector id, or the MCP tool's own id */
+  refId: string;
+  name: string;
+  /** connector provider kind, or MCP server name (for a logo) */
+  provider: string | null;
+  description?: string;
+  /** MCP tools only: whether the tool can make changes */
+  access?: "read" | "write";
+}
+
+/**
+ * Everything the user may add to a toolbox, decided by the SAME helpers the
+ * `PUT /v1/builder/agents/:id/tools` check uses — so the list and the check
+ * cannot disagree: connectors from `entitledConnectorIds`, MCP tools from
+ * `entitledMcpToolIds` (kernel `visibleTools` + the admission hold).
+ */
+export async function toolboxOptionsFor(db: Db, userId: string): Promise<ToolboxOption[]> {
+  const connectorIds = [...(await entitledConnectorIds(db, userId))];
+  const [connectorRows, toolRows] = await Promise.all([
+    loadConnectorsById(db, connectorIds),
+    db
+      .select({
+        id: mcpTools.id,
+        name: mcpTools.name,
+        serverId: mcpTools.serverId,
+        serverName: mcpServers.name,
+        kind: mcpTools.kind,
+        description: mcpTools.description,
+      })
+      .from(mcpTools)
+      .innerJoin(mcpServers, eq(mcpTools.serverId, mcpServers.id))
+      .orderBy(asc(mcpServers.name), asc(mcpTools.name)),
+  ]);
+  const okTools = await entitledMcpToolIds(db, userId, toolRows);
+  const out: ToolboxOption[] = connectorRows
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((c) => ({ kind: "connector" as const, refId: c.id, name: c.name, provider: c.providerKind ?? c.kind }));
+  for (const t of toolRows) {
+    if (!okTools.has(t.id)) continue;
+    out.push({
+      kind: "mcp_tool",
+      refId: t.id,
+      name: t.name,
+      provider: t.serverName,
+      access: t.kind,
+      ...(t.description ? { description: t.description } : {}),
+    });
+  }
+  return out;
+}

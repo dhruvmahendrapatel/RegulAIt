@@ -622,6 +622,7 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/builder/templates": "internal",
   "GET /v1/builder/templates/:id": "internal",
   "GET /v1/builder/integrations": "internal",
+  "GET /v1/builder/toolbox-options": "internal",
   "GET /v1/builder/usage": "internal",
   // ADR-0058 — compliance packs. Internal: the pack schema and the collector
   // vocabulary will move as frameworks are revised and new ledgers become
@@ -1299,6 +1300,7 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/builder/templates": "builder",
   "GET /v1/builder/templates/:id": "builder",
   "GET /v1/builder/integrations": "builder",
+  "GET /v1/builder/toolbox-options": "builder",
   "GET /v1/builder/usage": "builder",
   "GET /v1/copilot/tools": "copilot",
   "POST /v1/copilot/ask": "copilot",

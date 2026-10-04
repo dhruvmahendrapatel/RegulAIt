@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS "builder_agents" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
   "name" text NOT NULL,
   "description" text DEFAULT '' NOT NULL,
-  "color" text DEFAULT '#5b6cff' NOT NULL,
+  "color" text DEFAULT '#2563eb' NOT NULL,
   "owner_user_id" uuid NOT NULL REFERENCES "users"("id") ON DELETE RESTRICT,
   "sharing" text DEFAULT 'private' NOT NULL,
   "model_agent_id" uuid REFERENCES "agents"("id") ON DELETE SET NULL,

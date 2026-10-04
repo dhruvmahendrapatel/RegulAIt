@@ -53,8 +53,10 @@ import {
   type Db,
 } from "@regulait/db";
 import {
+  BUILDER_AGENT_COLORS,
   builderAddMemorySchema,
   builderChatSchema,
+  builderColorFor,
   builderCreateAgentSchema,
   builderCreateChannelSchema,
   builderCreateScheduleSchema,
@@ -86,6 +88,7 @@ import {
   loadMcpTools,
   loadVisibleAgent,
   modelAllowed,
+  toolboxOptionsFor,
   type Viewer,
 } from "./builder-access.js";
 import { BUILDER_INTEGRATION_GROUPS, BUILDER_TEMPLATES, CONNECT_HREF, findTemplate } from "./builder-catalog.js";
@@ -107,11 +110,14 @@ const scheduleParam = z.object({ id: z.string().uuid(), scheduleId: z.string().u
 const channelParam = z.object({ id: z.string().uuid(), channelId: z.string().uuid() });
 const templateParam = z.object({ id: z.string().min(1).max(80) });
 
-const PALETTE = ["#5b6cff", "#0ea5e9", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#ec4899", "#14b8a6"];
+/** palette colours only (shared BUILDER_AGENT_COLORS): white initials keep AA */
 function colorFor(name: string): string {
-  let h = 0;
-  for (const ch of name) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
-  return PALETTE[h % PALETTE.length]!;
+  return builderColorFor(name);
+}
+/** a bundle may carry any #rrggbb from elsewhere; off-palette falls back */
+function paletteOr(color: string | undefined, name: string): string {
+  const c = color?.toLowerCase();
+  return c && (BUILDER_AGENT_COLORS as readonly string[]).includes(c) ? c : builderColorFor(name);
 }
 
 /** the identity gate shared by every builder route */
@@ -368,8 +374,9 @@ async function threadSummaries(db: Db, threads: BuilderThreadRow[]) {
   return threads.map((t) => ({
     id: t.id,
     agentId: t.agentId,
-    agentName: agentBy.get(t.agentId)?.name ?? null,
-    agentColor: agentBy.get(t.agentId)?.color ?? null,
+    // the FK guarantees the row; the fallbacks keep the type non-null
+    agentName: agentBy.get(t.agentId)?.name ?? "Agent",
+    agentColor: agentBy.get(t.agentId)?.color ?? builderColorFor(t.agentId),
     title: t.title,
     status: t.status,
     source: t.source,
@@ -1036,7 +1043,7 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
       .values({
         name: a.name,
         description: a.description,
-        color: a.color ?? colorFor(a.name),
+        color: paletteOr(a.color, a.name),
         ownerUserId: viewer.userId,
         sharing: "private",
         modelAgentId: model?.id ?? null,
@@ -1288,6 +1295,15 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     return { template };
   });
 
+  // the connectors and MCP tools the CALLER may add to a toolbox — the same
+  // entitlement helpers the PUT …/tools check uses, so the Add connection
+  // dialog never offers something the save would refuse
+  app.get("/v1/builder/toolbox-options", async (req, reply) => {
+    const viewer = viewerOf(req, reply);
+    if (!viewer) return;
+    return { options: await toolboxOptionsFor(db, viewer.userId) };
+  });
+
   app.get("/v1/builder/integrations", async (req, reply) => {
     if (!viewerOf(req, reply)) return;
     const [connectorRows, serverRows, chatops, toolCounts] = await Promise.all([
@@ -1404,17 +1420,17 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
       byAgent: byAgent
         .map((a) => ({
           agentId: a.agentId,
-          name: agentBy.get(a.agentId)?.name ?? null,
+          name: agentBy.get(a.agentId)?.name ?? "Agent",
           spendUsd: round(a.spendUsd),
           messages: Number(a.messages),
           limitUsd: agentBy.get(a.agentId)?.limitUsd ?? null,
         }))
         .sort(bySpend),
       byUser: byUser
-        .map((u) => ({ userId: u.userId, name: names.get(u.userId) ?? null, spendUsd: round(u.spendUsd), messages: Number(u.messages) }))
+        .map((u) => ({ userId: u.userId, name: names.get(u.userId) ?? "Unknown person", spendUsd: round(u.spendUsd), messages: Number(u.messages) }))
         .sort(bySpend),
       byModel: byModel
-        .map((m) => ({ provider: m.provider, model: m.model, spendUsd: round(m.spendUsd), messages: Number(m.messages) }))
+        .map((m) => ({ provider: m.provider ?? "unknown", model: m.model ?? "unknown", spendUsd: round(m.spendUsd), messages: Number(m.messages) }))
         .sort(bySpend),
       daily: series,
     };

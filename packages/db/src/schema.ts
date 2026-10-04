@@ -8530,7 +8530,7 @@ export const builderAgents = pgTable(
     id: uuid("id").primaryKey().defaultRandom(),
     name: text("name").notNull(),
     description: text("description").notNull().default(""),
-    color: text("color").notNull().default("#5b6cff"),
+    color: text("color").notNull().default("#2563eb"),
     ownerUserId: uuid("owner_user_id")
       .notNull()
       .references(() => users.id, { onDelete: "restrict" }),

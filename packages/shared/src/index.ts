@@ -3799,6 +3799,7 @@ export {
 // parser and schedule cadence arithmetic.
 // ---------------------------------------------------------------------------
 export {
+  BUILDER_AGENT_COLORS,
   BUILDER_CADENCE_VALUES,
   BUILDER_CHANNEL_PROVIDER_VALUES,
   BUILDER_CONNECTION_FORMAT_VALUES,
@@ -3807,6 +3808,7 @@ export {
   builderAddMemorySchema,
   builderBundleSchema,
   builderChatSchema,
+  builderColorFor,
   builderCreateAgentSchema,
   builderCreateChannelSchema,
   builderCreateScheduleSchema,
@@ -3825,6 +3827,7 @@ export {
   builderUsageQuerySchema,
   nextScheduleRun,
   parseSkillMarkdown,
+  type BuilderAgentColor,
   type BuilderBundle,
   type BuilderCadenceValue,
   type BuilderCreateAgent,

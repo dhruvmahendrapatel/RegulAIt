@@ -16,6 +16,29 @@ export const BUILDER_THREAD_STATUS_VALUES = ["active", "needs_attention", "compl
 
 export type BuilderCadenceValue = (typeof BUILDER_CADENCE_VALUES)[number];
 
+/**
+ * The avatar palette. Every fill carries WHITE initials at WCAG AA (>= 4.5:1),
+ * which is why an agent's colour is one of these and nothing else. The web
+ * mirrors this list as `AGENT_COLORS` (apps/web/src/views/builder/builderLogic.ts);
+ * `builder-agents.test.ts` fails when the two drift.
+ */
+export const BUILDER_AGENT_COLORS = ["#2563eb", "#7c3aed", "#0e7490", "#047857", "#b45309", "#be185d", "#4338ca", "#0f766e"] as const;
+export type BuilderAgentColor = (typeof BUILDER_AGENT_COLORS)[number];
+
+/** a stable palette colour for a name (the default for new and seeded agents) */
+export function builderColorFor(name: string): BuilderAgentColor {
+  let h = 0;
+  for (const ch of name) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return BUILDER_AGENT_COLORS[h % BUILDER_AGENT_COLORS.length]!;
+}
+
+/** accepts any case, stores lower case, and only palette colours */
+const paletteColor = z
+  .string()
+  .transform((c) => c.toLowerCase())
+  .refine((c): c is BuilderAgentColor => (BUILDER_AGENT_COLORS as readonly string[]).includes(c), {
+    message: `color must be one of ${BUILDER_AGENT_COLORS.join(", ")}`,
+  });
 const hexColor = z.string().regex(/^#[0-9a-fA-F]{6}$/, "color must be #rrggbb");
 const timeUtc = z.string().regex(/^([01][0-9]|2[0-3]):[0-5][0-9]$/, "timeUtc must be HH:MM (UTC)");
 
@@ -35,7 +58,7 @@ export const builderUpdateAgentSchema = z
   .object({
     name: z.string().trim().min(1).max(80).optional(),
     description: z.string().max(500).optional(),
-    color: hexColor.optional(),
+    color: paletteColor.optional(),
     instructions: z.string().max(20_000).optional(),
     modelAgentId: z.string().uuid().optional(),
     sharing: z.enum(BUILDER_SHARING_VALUES).optional(),

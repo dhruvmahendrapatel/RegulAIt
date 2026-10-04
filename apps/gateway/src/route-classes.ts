@@ -138,6 +138,7 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /v1/builder/templates",
   "GET /v1/builder/templates/:id",
   "GET /v1/builder/integrations",
+  "GET /v1/builder/toolbox-options",
   "GET /v1/builder/usage",
   // ADR-0065 — creating a training job. Its gate is the caller's OWN
   // entitlement to the base agent the customisation is anchored to, checked
