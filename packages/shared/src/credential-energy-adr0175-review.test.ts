@@ -3,10 +3,12 @@
  *
  *  1. A credential's name is free text: it never reaches an alert title, and
  *     every alert title is made inert for the chat channel that shows it.
+ *  3. A demo energy factor applies to calls the mock provider served, only.
  */
 import { describe, expect, it } from "vitest";
 import { composeAlertCard, teamsActivityForCard } from "./chatops.js";
 import { evaluateMonitorRules, type MonitorInput } from "./governance-monitor.js";
+import { estimateEnergy } from "./energy-estimate.js";
 
 const EVIL = "<!channel> <https://evil|portal>";
 const KEY_ID = "api_key:3f2b9c1e-0d4a-4c55-9a77-1b2c3d4e5f60";
@@ -58,5 +60,34 @@ describe("review fix 1 — injection into ChatOps alert cards", () => {
     expect(block).toContain("\\[click\\]\\(https://evil\\)");
     expect(block).toContain("\\<!channel\\>");
     expect(teams.text).toBe(block);
+  });
+});
+
+describe("review fix 3 — a demo factor applies to mock-served calls only", () => {
+  it("estimates the mock provider's calls of a demo-factored model, and leaves a real provider's calls of it unknown", () => {
+    const e = estimateEnergy({
+      windowDays: 7,
+      usage: [
+        { model: "mock-fast", calls: 2, callsWithTokens: 2, inputTokens: 2000, outputTokens: 0, servedByMock: true },
+        { model: "MOCK-FAST", calls: 3, callsWithTokens: 3, inputTokens: 9000, outputTokens: 9000, servedByMock: false },
+      ],
+      factors: [{ subject: "mock-fast", whPer1kInput: 1, whPer1kOutput: 1, sourceNote: "demo", version: "demo", demo: true }],
+      grid: null,
+    });
+    expect(e).toMatchObject({ callsTotal: 5, callsEstimated: 2, energyWh: 2, coverage: "2 of 5 calls estimated", usesDemoFactors: true });
+    expect(e.byModel.find((m) => m.servedBy === "not_mock")).toMatchObject({ status: "no_factor", energyWh: null, calls: 3 });
+    expect(e.byModel.find((m) => m.servedBy === "mock")).toMatchObject({ status: "estimated", energyWh: 2 });
+    // a real (non-demo) factor still covers every caller, unsplit
+    const real = estimateEnergy({
+      windowDays: 7,
+      usage: [
+        { model: "m", calls: 1, callsWithTokens: 1, inputTokens: 1000, outputTokens: 0, servedByMock: true },
+        { model: "m", calls: 1, callsWithTokens: 1, inputTokens: 1000, outputTokens: 0, servedByMock: false },
+      ],
+      factors: [{ subject: "m", whPer1kInput: 1, whPer1kOutput: 1, sourceNote: "s", version: "v", demo: false }],
+      grid: null,
+    });
+    expect(real).toMatchObject({ callsEstimated: 2, energyWh: 2 });
+    expect(real.byModel).toHaveLength(1);
   });
 });

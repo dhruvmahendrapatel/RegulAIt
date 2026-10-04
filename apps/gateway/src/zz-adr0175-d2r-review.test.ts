@@ -4,6 +4,8 @@
  *
  *  2. every inventory ledger read is windowed and matched to its credentials
  *     in SQL, on an index; the route pages; observe-only computes nothing.
+ *  3. a demo energy factor is refused for a model any non-mock agent names,
+ *     and the estimate applies one to mock-served calls only.
  *
  * Shared database (M-008, M-068): every row this file inserts is deleted in
  * afterAll, and the org settings it touches are restored.
@@ -17,9 +19,11 @@ import {
   connectors,
   createDb,
   customModelProviders,
+  energyFactors,
   eq,
   inArray,
   orgSettings,
+  projects,
   runMigrations,
   sql,
   usageEvents,
@@ -46,7 +50,20 @@ const VK_AGENT = "7d1c0a5e-2b4f-4e8a-9c3d-5f6a7b8c9d0e";
 
 let db: Db;
 let app: ReturnType<typeof buildApp>;
-const ids = { admin: "", connector: "", connectorCred: "", custom: "", customAgent: "", vk: "", otherVk: "" };
+const ids = { admin: "", connector: "", connectorCred: "", custom: "", customAgent: "", vk: "", otherVk: "", project: "" };
+/** every agent row this file inserts directly */
+const agentIds: string[] = [];
+const DEMO_MODEL = `g175r-demo-${RUN}`;
+const SHARED_MODEL = `g175r-shared-${RUN}`;
+const mkAgent = async (provider: string, model: string) => {
+  const [a] = await db
+    .insert(agents)
+    .values({ name: `g175r-${provider}-${model}-${agentIds.length}`, provider, tier: 1, model, enabled: false })
+    .returning({ id: agents.id });
+  agentIds.push(a!.id);
+  return a!.id;
+};
+const putFactor = (body: Record<string, unknown>) => call("PUT", "/v1/energy/factors", adminAuth, body);
 const adminAuth = { authorization: "" };
 let orgBefore: { alerts: boolean; unusedDays: number } | null = null;
 
@@ -151,6 +168,9 @@ afterAll(async () => {
   await db.delete(agents).where(eq(agents.id, ids.customAgent));
   await db.delete(customModelProviders).where(eq(customModelProviders.id, ids.custom));
   await db.delete(virtualKeys).where(inArray(virtualKeys.id, [ids.vk, ids.otherVk]));
+  await db.delete(energyFactors).where(sql`${energyFactors.subject} ILIKE ${`g175r-%-${RUN}`}`);
+  if (agentIds.length) await db.delete(agents).where(inArray(agents.id, agentIds));
+  if (ids.project) await db.delete(projects).where(eq(projects.id, ids.project));
   await call("POST", "/v1/governance/monitor/evaluate", AUTH);
   app.server.closeAllConnections();
   await app.close();
@@ -225,5 +245,45 @@ describe("review fix 2 — the inventory reads the ledger in a window, on an ind
     } finally {
       await (counting as unknown as { $client: { end: () => Promise<void> } }).$client.end();
     }
+  });
+});
+
+describe("review fix 3 — a demo energy factor describes the mock provider, and nothing else", () => {
+  it("is refused for a model id that any non-mock agent also uses", async () => {
+    await mkAgent("mock", SHARED_MODEL);
+    await mkAgent("openai", SHARED_MODEL.toUpperCase());
+    const r = await putFactor({ kind: "model", subject: SHARED_MODEL, whPer1kInput: 1, whPer1kOutput: 1, sourceNote: "demo", version: "demo", demo: true });
+    expect(r.statusCode, r.body).toBe(422);
+    expect(r.json()).toMatchObject({ error: "demo_factor_not_mock" });
+    expect(r.json().detail).toMatch(/another provider/);
+    expect(await db.select().from(energyFactors).where(sql`lower(${energyFactors.subject}) = lower(${SHARED_MODEL})`)).toEqual([]);
+  });
+
+  it("is applied only to calls a mock agent served, even when a real agent takes the model id later", async () => {
+    const p = await call("POST", "/v1/projects", AUTH, { name: `g175r-project-${RUN}` });
+    expect(p.statusCode, p.body).toBe(201);
+    ids.project = p.json().id;
+    const mock = await mkAgent("mock", DEMO_MODEL);
+    const set = await putFactor({ kind: "model", subject: DEMO_MODEL, whPer1kInput: 1, whPer1kOutput: 1, sourceNote: "demo value", version: "demo", demo: true });
+    expect(set.statusCode, set.body).toBe(201);
+    // the bypass: a real provider's agent named after the demo model AFTER the factor was set
+    const real = await mkAgent("openai", DEMO_MODEL);
+    const row = (agentId: string, provider: string) => ({
+      userId: ids.admin,
+      objectType: "agent",
+      agentId,
+      provider,
+      model: DEMO_MODEL,
+      inputTokens: 1000,
+      outputTokens: 0,
+      projectId: ids.project,
+    });
+    await db.insert(usageEvents).values([row(mock, "mock"), row(mock, "mock"), row(real, "openai"), row(real, "openai"), row(real, "openai")]);
+    const r = await call("GET", `/v1/energy/estimate?projectId=${ids.project}`, adminAuth);
+    expect(r.statusCode, r.body).toBe(200);
+    const e = r.json().estimate;
+    expect(e).toMatchObject({ callsTotal: 5, callsEstimated: 2, energyWh: 2, coverage: "2 of 5 calls estimated", usesDemoFactors: true });
+    expect(e.unknownModels).toEqual([DEMO_MODEL]);
+    expect(e.byModel.find((m: any) => m.servedBy === "not_mock")).toMatchObject({ calls: 3, status: "no_factor", energyWh: null });
   });
 });

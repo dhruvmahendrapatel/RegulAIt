@@ -15,6 +15,9 @@
  *     even when its model has a factor.
  *  3. With no estimated call at all, the totals are null ("unknown"), not 0.
  *     With no grid intensity, energy may be known while emissions are null.
+ *  4. (review fix) A DEMO factor describes the mock provider only. It applies
+ *     to calls the mock provider served (`servedByMock`), and to nothing else:
+ *     a real provider's calls of a model with only a demo factor are unknown.
  */
 
 export const ENERGY_ESTIMATE_LABEL =
@@ -28,6 +31,9 @@ export interface EnergyUsageRow {
   callsWithTokens: number;
   inputTokens: number;
   outputTokens: number;
+  /** true when the agent that served these calls is a mock-provider agent;
+   * only such calls may be estimated with a demo factor */
+  servedByMock?: boolean;
 }
 
 export interface EnergyFactorInput {
@@ -70,6 +76,10 @@ export interface EnergyEstimate {
     energyWh: number | null;
     factor: Omit<EnergyFactorInput, "subject"> | null;
     status: "estimated" | "no_factor" | "no_tokens";
+    /** set only where a model's calls are split by who served them, because
+     * its factor is a demo value that applies to the mock provider alone */
+    servedBy?: "mock" | "not_mock";
+    note?: string;
   }>;
   unknownModels: string[];
   /** true when any factor used is a demo value */
@@ -85,15 +95,20 @@ export function estimateEnergy(input: {
   grid: (EnergyGridInput & { region: string | null }) | null;
 }): EnergyEstimate {
   const factorOf = new Map(input.factors.map((f) => [f.subject.trim().toLowerCase(), f]));
-  const merged = new Map<string, EnergyUsageRow>();
+  // merged per model; a model whose factor is a DEMO value is split by
+  // whether the mock provider served the calls, since only those may use it
+  const merged = new Map<string, EnergyUsageRow & { lower: string; servedBy?: "mock" | "not_mock" }>();
   for (const r of input.usage) {
-    const key = (r.model ?? "(no model recorded)").trim();
-    const m = merged.get(key.toLowerCase()) ?? { model: key, calls: 0, callsWithTokens: 0, inputTokens: 0, outputTokens: 0 };
+    const name = (r.model ?? "(no model recorded)").trim();
+    const lower = name.toLowerCase();
+    const servedBy = factorOf.get(lower)?.demo ? (r.servedByMock ? "mock" : "not_mock") : undefined;
+    const key = servedBy ? `${lower}\u0000${servedBy}` : lower;
+    const m = merged.get(key) ?? { model: name, lower, calls: 0, callsWithTokens: 0, inputTokens: 0, outputTokens: 0, ...(servedBy ? { servedBy } : {}) };
     m.calls += r.calls;
     m.callsWithTokens += r.callsWithTokens;
     m.inputTokens += r.inputTokens;
     m.outputTokens += r.outputTokens;
-    merged.set(key.toLowerCase(), m);
+    merged.set(key, m);
   }
   let callsTotal = 0;
   let callsEstimated = 0;
@@ -103,7 +118,25 @@ export function estimateEnergy(input: {
   const unknown: string[] = [];
   for (const [key, r] of [...merged.entries()].sort((a, b) => b[1].calls - a[1].calls || a[0].localeCompare(b[0]))) {
     callsTotal += r.calls;
-    const f = r.model && key !== "(no model recorded)" ? factorOf.get(key) : undefined;
+    const split = r.servedBy ? { servedBy: r.servedBy } : {};
+    if (r.servedBy === "not_mock") {
+      // the only factor is a demo value, and these calls were not the mock's
+      unknown.push(r.model!);
+      byModel.push({
+        model: r.model!,
+        calls: r.calls,
+        callsEstimated: 0,
+        inputTokens: r.inputTokens,
+        outputTokens: r.outputTokens,
+        energyWh: null,
+        factor: null,
+        status: "no_factor",
+        ...split,
+        note: "Its only factor is a demo value, which applies to the mock provider's calls alone.",
+      });
+      continue;
+    }
+    const f = r.model && key !== "(no model recorded)" ? factorOf.get(r.lower) : undefined;
     if (!f) {
       unknown.push(r.model!);
       byModel.push({ model: r.model!, calls: r.calls, callsEstimated: 0, inputTokens: r.inputTokens, outputTokens: r.outputTokens, energyWh: null, factor: null, status: "no_factor" });
@@ -111,7 +144,7 @@ export function estimateEnergy(input: {
     }
     const factor = { whPer1kInput: f.whPer1kInput, whPer1kOutput: f.whPer1kOutput, sourceNote: f.sourceNote, version: f.version, demo: f.demo };
     if (r.callsWithTokens === 0) {
-      byModel.push({ model: r.model!, calls: r.calls, callsEstimated: 0, inputTokens: 0, outputTokens: 0, energyWh: null, factor, status: "no_tokens" });
+      byModel.push({ model: r.model!, calls: r.calls, callsEstimated: 0, inputTokens: 0, outputTokens: 0, energyWh: null, factor, status: "no_tokens", ...split });
       continue;
     }
     const wh = (r.inputTokens / 1000) * f.whPer1kInput + (r.outputTokens / 1000) * f.whPer1kOutput;
@@ -127,6 +160,7 @@ export function estimateEnergy(input: {
       energyWh: round(wh),
       factor,
       status: "estimated",
+      ...split,
     });
   }
   const energyWh = callsEstimated > 0 ? round(energy) : null;

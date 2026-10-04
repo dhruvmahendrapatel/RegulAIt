@@ -74,15 +74,20 @@ export async function computeEnergyEstimate(
   const now = opts.now ?? new Date();
   const since = new Date(now.getTime() - opts.windowDays * 86_400_000);
   const withTokens = sql`${usageEvents.inputTokens} IS NOT NULL AND ${usageEvents.outputTokens} IS NOT NULL`;
+  // review fix: who SERVED each call, from the agent row — a demo factor
+  // applies only to calls a mock-provider agent served
+  const servedByMock = sql<boolean>`coalesce(${agents.provider} = 'mock', false)`;
   const usage = await db
     .select({
       model: usageEvents.model,
+      servedByMock,
       calls: sql<number>`count(*)::int`,
       callsWithTokens: sql<number>`(count(*) FILTER (WHERE ${withTokens}))::int`,
       inputTokens: sql<number>`coalesce(sum(${usageEvents.inputTokens}) FILTER (WHERE ${withTokens}), 0)::bigint`,
       outputTokens: sql<number>`coalesce(sum(${usageEvents.outputTokens}) FILTER (WHERE ${withTokens}), 0)::bigint`,
     })
     .from(usageEvents)
+    .leftJoin(agents, eq(agents.id, usageEvents.agentId))
     .where(
       and(
         eq(usageEvents.objectType, "agent"),
@@ -90,13 +95,14 @@ export async function computeEnergyEstimate(
         opts.projectId === null ? undefined : eq(usageEvents.projectId, opts.projectId),
       ),
     )
-    .groupBy(usageEvents.model);
+    .groupBy(usageEvents.model, servedByMock);
   const rows = await loadEnergyFactors(db);
   const org = await loadOrgSettings(db);
   return estimateEnergy({
     windowDays: opts.windowDays,
     usage: usage.map((u) => ({
       model: u.model,
+      servedByMock: u.servedByMock === true,
       calls: Number(u.calls),
       callsWithTokens: Number(u.callsWithTokens),
       inputTokens: Number(u.inputTokens),
@@ -182,16 +188,26 @@ export function registerEnergyRoutes(app: FastifyInstance, db: Db): void {
     const demo = body.kind === "model" ? body.demo === true : false;
     if (demo) {
       // a demo value may only describe a model the MOCK provider serves —
-      // never a real model, whatever it is called
-      const [mock] = await db
-        .select({ id: agents.id })
+      // never a real model, whatever it is called. Review fix: a mock agent
+      // naming the model is not enough; NO other agent may name it either,
+      // or a real model could borrow the demo value by sharing its id. (The
+      // estimate also applies a demo factor to mock-served calls only.)
+      const named = await db
+        .select({ provider: agents.provider })
         .from(agents)
-        .where(and(eq(agents.provider, "mock"), sql`lower(${agents.model}) = lower(${body.subject})`))
-        .limit(1);
-      if (!mock) {
+        .where(sql`lower(${agents.model}) = lower(${body.subject})`);
+      if (!named.some((a) => a.provider === "mock")) {
         return reply.status(422).send({
           error: "demo_factor_not_mock",
           detail: "a demo factor may only be set for a model served by the mock provider. Nothing was saved.",
+        });
+      }
+      if (named.some((a) => a.provider !== "mock")) {
+        return reply.status(422).send({
+          error: "demo_factor_not_mock",
+          detail:
+            "a demo factor may only be set for a model no real provider serves: an agent of another provider uses " +
+            "this model id. Nothing was saved.",
         });
       }
     }

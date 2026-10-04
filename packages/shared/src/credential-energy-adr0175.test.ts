@@ -215,7 +215,7 @@ describe("A15 energy estimate", () => {
   it("says when a demo factor was used", () => {
     const e = estimateEnergy({
       windowDays: 7,
-      usage: [{ model: "mock-fast", calls: 1, callsWithTokens: 1, inputTokens: 1000, outputTokens: 0 }],
+      usage: [{ model: "mock-fast", calls: 1, callsWithTokens: 1, inputTokens: 1000, outputTokens: 0, servedByMock: true }],
       factors: [factor("mock-fast", 1, 1, true)],
       grid: null,
     });
