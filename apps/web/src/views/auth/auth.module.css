@@ -10,7 +10,7 @@
 
 .panel {
   width: 100%;
-  max-width: 400px;
+  max-width: 420px;
   background: var(--surface-1);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
@@ -23,9 +23,9 @@
 
 .brand {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: var(--s1);
-  margin-bottom: var(--s0);
+  margin-bottom: var(--s1);
 }
 .brandWord {
   font-size: var(--text-2xl);
@@ -155,4 +155,121 @@
 .identity strong {
   font-weight: 600;
   word-break: break-all;
+}
+
+/* ---- ADR-0174 sign-in page ------------------------------------------------ */
+
+.title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-xl);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+
+.title + .sub {
+  margin-top: 2px;
+}
+
+.providers {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+}
+
+/* a calm, full-width identity-provider button: logo on the left, label
+ * centred — used for links (navigation) and for the SSO disclosure button */
+.providerBtn {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s1);
+  width: 100%;
+  min-height: 44px;
+  padding: 10px 44px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
+}
+.providerBtn:hover {
+  background: var(--surface-2);
+}
+.providerBtn:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.providerLogo,
+.providerGlyph {
+  position: absolute;
+  left: 14px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  color: var(--text-dim);
+}
+.providerText {
+  text-align: center;
+}
+.chevron {
+  position: absolute;
+  right: 14px;
+  color: var(--text-faint);
+  font-size: var(--text-xs);
+}
+
+.ssoList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+  padding: var(--s1) 0 0 var(--s2);
+  border-left: 2px solid var(--border);
+}
+.ssoList[hidden] {
+  display: none;
+}
+
+.hint {
+  font-size: var(--text-xs);
+  color: var(--text-dim);
+  margin: 0;
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+}
+.sectionTitle {
+  margin: 0;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-dim);
+}
+
+.footer {
+  display: flex;
+  justify-content: center;
+  padding-top: var(--s1);
+  color: var(--text-faint);
+}
+
+@media (max-width: 480px) {
+  .panel {
+    padding: var(--s3);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .providerBtn {
+    transition: none;
+  }
 }

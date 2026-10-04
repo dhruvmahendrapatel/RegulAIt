@@ -58,6 +58,13 @@ export const AUTH_EXEMPT_ROUTES = new Set([
   "/auth/oidc/providers",
   "/auth/oidc/:providerId/start",
   "/auth/oidc/callback",
+  // ADR-0174 — the sign-in page's options (no configuration, no secrets), the
+  // broker-hinted start, and the link proof (authenticated in-route by the
+  // browser-bound proof cookie plus the account's own password/TOTP).
+  "/auth/sign-in-options",
+  "/auth/oidc/:providerId/login",
+  "/auth/link/pending",
+  "/auth/link/confirm",
   // ADR-0036 — the SAML twin. The provider list and /start are pre-credential
   // by definition; the ACS is called by the IdP (or by the user's browser
   // carrying the IdP's POST), which likewise holds no RegulAIt credential —
@@ -458,6 +465,11 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /auth/oidc/providers",
   "GET /auth/oidc/:providerId/start",
   "GET /auth/oidc/callback",
+  // ADR-0174 — pre-credential by definition, like the three above
+  "GET /auth/sign-in-options",
+  "GET /auth/oidc/:providerId/login",
+  "GET /auth/link/pending",
+  "POST /auth/link/confirm",
   // ADR-0036 — the SAML twin of the three above. Auth-exempt AND non-admin:
   // a browser at the login screen has no credential, and the IdP posting an
   // assertion to the ACS has no RegulAIt identity at all — the assertion is

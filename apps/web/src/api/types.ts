@@ -70,6 +70,26 @@ export interface SamlProvidersResponse {
   providers: Array<{ id: string; name: string }>;
 }
 
+/** ADR-0174 — what the sign-in page offers (`GET /auth/sign-in-options`).
+ * Public and configuration-free: ids, display names and switches only. */
+export type BrokerIdp = "microsoft" | "google" | "github";
+export interface SignInOptionsResponse {
+  broker: { providerId: string; name: string; idps: BrokerIdp[] } | null;
+  enterprise: Array<{ id: string; name: string; protocol: "oidc" | "saml" }>;
+  local: { mode: "enabled" | "break_glass_only" | "sso_only"; emailForm: boolean };
+  apiKeyExchange: boolean;
+}
+
+/** ADR-0174 §5 — a federated identity waiting for the person to prove the
+ * existing account it matched (`GET /auth/link/pending`). */
+export interface LinkPendingResponse {
+  pending: true;
+  provider: string;
+  protocol: "oidc" | "saml";
+  email: string;
+  expiresAt: string;
+}
+
 // ---- agents / chat -------------------------------------------------------
 
 export interface GrantedAgent {

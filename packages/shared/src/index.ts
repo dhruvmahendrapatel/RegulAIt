@@ -2064,6 +2064,13 @@ export const orgPiiModeSchema = z.enum(["none", "log", "warn", "block"]);
 export const budgetEnforcementSchema = z.enum(["block", "warn_only"]);
 export const approvalQuorumSchema = z.enum(["all", "any"]);
 export const mfaRequirementSchema = z.enum(["off", "admins", "all"]);
+/** ADR-0174: may people sign in with a local account? 'break_glass_only' keeps
+ * the door open only for the designated break-glass admins. */
+export const localSignInSchema = z.enum(["enabled", "break_glass_only"]);
+/** ADR-0174: the upstream identity providers the bundled broker can be hinted
+ * to — the allow-list `GET /auth/oidc/:id/login?idp=` is validated against. */
+export const BROKER_IDP_VALUES = ["microsoft", "google", "github"] as const;
+export const brokerIdpSchema = z.enum(BROKER_IDP_VALUES);
 /** ADR-0039: the shared level set of both IP-policy knobs. */
 export const ipPolicySchema = z.enum(["off", "enforce_at_login", "enforce_continuous"]);
 /** ADR-0062: tighten-only. See `egressCompiledDefaultPolicy` below. */
@@ -2233,6 +2240,11 @@ export const updateOrgSettingsSchema = z
     sessionIdleMinutes: z.number().int().min(5).max(24 * 60).optional(),
     mfaRequired: mfaRequirementSchema.optional(),
     ssoOnly: z.boolean().optional(),
+    /** ADR-0174: 'break_glass_only' refuses password sign-in for everyone but
+     * the break-glass admins below. Needs an enabled SSO provider and at least
+     * one break-glass admin (active, admin, password set). */
+    localSignIn: localSignInSchema.optional(),
+    breakGlassUserIds: z.array(z.string().uuid()).max(10).nullable().optional(),
     loginLockoutThreshold: z.number().int().min(3).max(100).optional(),
     loginLockoutWindowMinutes: z.number().int().min(1).max(24 * 60).optional(),
     loginLockoutMinutes: z.number().int().min(1).max(24 * 60).optional(),
@@ -2403,7 +2415,9 @@ export type SetUsernameRequest = z.infer<typeof setUsernameSchema>;
 /** step 2 of a TOTP-enabled login: the pending token from step 1 + a code */
 export const mfaVerifySchema = z
   .object({
-    pendingToken: z.string().min(1).max(512),
+    /** ADR-0174: optional — a SAML login that stepped up to TOTP carries its
+     * pending token in an HttpOnly cookie instead of the body */
+    pendingToken: z.string().min(1).max(512).optional(),
     code: z.string().regex(/^\d{6}$/, "a TOTP code is 6 digits"),
   })
   .strict();
@@ -2485,6 +2499,14 @@ export const createOidcProviderSchema = z
      * reconciles group-derived roles. Naming it grants nothing on its own — an
      * asserted group confers nothing until an admin maps it to a role. */
     groupsClaim: groupsClaimSchema.optional(),
+    /** ADR-0174: the upstream IdPs a BROKER (Keycloak) offers through this
+     * client. null/absent = an ordinary enterprise IdP. */
+    brokerIdps: z.array(brokerIdpSchema).min(1).max(3).nullable().optional(),
+    /** ADR-0174: `acr` values that count as multi-factor, besides RFC 8176 amr */
+    mfaAcrValues: z.array(z.string().trim().min(1).max(256)).min(1).max(10).nullable().optional(),
+    /** ADR-0174 (security review): this provider is a broker that itself
+     * enforces a second factor, so one otp/hwk/swk amr counts as MFA */
+    brokerEnforcesMfa: z.boolean().optional(),
   })
   .strict();
 export type CreateOidcProvider = z.infer<typeof createOidcProviderSchema>;
@@ -2501,9 +2523,30 @@ export const updateOidcProviderSchema = z
     defaultRoleId: z.string().uuid().nullable().optional(),
     jitProvisioning: z.boolean().optional(),
     groupsClaim: groupsClaimSchema.optional(),
+    /** ADR-0174: the upstream IdPs a BROKER (Keycloak) offers through this
+     * client. null/absent = an ordinary enterprise IdP. */
+    brokerIdps: z.array(brokerIdpSchema).min(1).max(3).nullable().optional(),
+    /** ADR-0174: `acr` values that count as multi-factor, besides RFC 8176 amr */
+    mfaAcrValues: z.array(z.string().trim().min(1).max(256)).min(1).max(10).nullable().optional(),
+    /** ADR-0174 (security review): this provider is a broker that itself
+     * enforces a second factor, so one otp/hwk/swk amr counts as MFA */
+    brokerEnforcesMfa: z.boolean().optional(),
   })
   .strict();
 export type UpdateOidcProvider = z.infer<typeof updateOidcProviderSchema>;
+
+/** ADR-0174 §5: prove the existing local account to link a federated identity.
+ * The link request itself rides the browser-bound cookie, never the body. */
+export const linkConfirmSchema = z
+  .object({
+    password: z.string().min(1).max(512),
+    code: z.string().regex(/^[0-9]{6}$/).optional(),
+  })
+  .strict();
+/** ADR-0174 §5: an admin's decision on a link request */
+export const linkDecisionSchema = z
+  .object({ reason: z.string().trim().min(1).max(500).optional() })
+  .strict();
 
 // --- ADR-0036: SAML 2.0 providers (the OIDC twin) ---------------------------
 
@@ -2542,6 +2585,9 @@ const samlProviderFields = {
   /** ADR-0038: the SAML attribute carrying group membership (`groups`,
    * `memberOf`, …). null = no group signal from this provider. */
   groupsAttribute: groupsClaimSchema,
+  /** ADR-0174 (security review): AuthnContextClassRef values that count as
+   * multi-factor for this IdP (the twin of OIDC `mfaAcrValues`) */
+  mfaAuthnContexts: z.array(z.string().trim().min(1).max(512)).min(1).max(10).nullable(),
   /** OPTIONAL SP private key (PEM) for request signing / encrypted assertions.
    * WRITE-ONLY: stored AES-256-GCM under REGULAIT_DATA_KEY and never returned. */
   spPrivateKey: z.string().min(1).max(16384),
@@ -2584,6 +2630,7 @@ export const createSamlProviderSchema = z
     allowIdpInitiated: samlProviderFields.allowIdpInitiated.optional(),
     emailAttribute: samlProviderFields.emailAttribute.optional(),
     groupsAttribute: samlProviderFields.groupsAttribute.optional(),
+    mfaAuthnContexts: samlProviderFields.mfaAuthnContexts.optional(),
     spPrivateKey: samlProviderFields.spPrivateKey.optional(),
     spCertificate: samlProviderFields.spCertificate.optional(),
   })
@@ -2607,6 +2654,7 @@ export const updateSamlProviderSchema = z
     allowIdpInitiated: samlProviderFields.allowIdpInitiated.optional(),
     emailAttribute: samlProviderFields.emailAttribute.optional(),
     groupsAttribute: samlProviderFields.groupsAttribute.optional(),
+    mfaAuthnContexts: samlProviderFields.mfaAuthnContexts.optional(),
     spPrivateKey: samlProviderFields.spPrivateKey.optional(),
     spCertificate: samlProviderFields.spCertificate.optional(),
   })

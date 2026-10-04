@@ -391,6 +391,7 @@ import {
   registerOrgSettingsRoutes,
   startAuditPruneScheduler,
 } from "./org-settings.js";
+import { breakGlassLockoutRefusal, dropBreakGlassUser } from "./break-glass.js";
 import { registerSetupStatusRoutes } from "./setup-status.js";
 import { registerSchedulerRoutes } from "./scheduler-api.js";
 import { schedulerJobRegistry } from "./scheduler-jobs.js";
@@ -1076,7 +1077,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
             });
           }
           // gate 2: org-mandated MFA enrollment (off|admins|all)
-          if (!session.totpEnabled && !AUTH_SELF_SERVICE_ROUTES.has(route) && session.ctx.userId) {
+          // ADR-0174: a federated session whose identity provider ASSERTED
+          // MFA (amr/acr, checked at the callback) already satisfies the dial.
+          if (!session.totpEnabled && !session.idpMfa && !AUTH_SELF_SERVICE_ROUTES.has(route) && session.ctx.userId) {
             const mustEnroll =
               org.mfaRequired === "all" || (org.mfaRequired === "admins" && session.ctx.isAdmin);
             if (mustEnroll) {
@@ -1344,6 +1347,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         detail: "this is the last active admin — promote another admin before deactivating them",
       });
     }
+    // ADR-0174 (finding 5): nor the last usable break-glass admin while email
+    // sign-in is break-glass only
+    {
+      const glass = await breakGlassLockoutRefusal(db, await loadOrgSettings(db), { kind: "user", userId });
+      if (glass) return reply.status(409).send(glass);
+    }
     const [row] = await db
       .update(users)
       .set({ disabledAt: new Date() })
@@ -1411,17 +1420,25 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         detail: "this is the last active admin — promote another admin before demoting them",
       });
     }
+    // ADR-0174 (finding 5): nor the last usable break-glass admin while email
+    // sign-in is break-glass only
+    if (!body.isAdmin) {
+      const glass = await breakGlassLockoutRefusal(db, await loadOrgSettings(db), { kind: "user", userId });
+      if (glass) return reply.status(409).send(glass);
+    }
     const [row] = await db
       .update(users)
       .set({ isAdmin: body.isAdmin })
       .where(eq(users.id, userId))
       .returning({ id: users.id, isAdmin: users.isAdmin });
+    // a demoted user is no longer a break-glass admin: drop them from the list
+    const droppedFromBreakGlass = !body.isAdmin && (await dropBreakGlassUser(db, userId));
     await auditUserAct(
       req.authCtx.userId,
       userId,
       body.isAdmin ? "user-promoted-admin" : "user-demoted-admin",
       `user '${target.email}' ${body.isAdmin ? "promoted to" : "demoted from"} admin${body.reason ? `: ${body.reason}` : ""}`,
-      { phase: "admin-flag", isAdmin: body.isAdmin, ...(body.reason ? { reason: body.reason } : {}) },
+      { phase: "admin-flag", isAdmin: body.isAdmin, ...(body.reason ? { reason: body.reason } : {}), ...(droppedFromBreakGlass ? { droppedFromBreakGlass: true } : {}) },
     );
     return row;
   });

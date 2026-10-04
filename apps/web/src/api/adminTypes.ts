@@ -66,7 +66,35 @@ export interface OidcProvider {
   /** ADR-0038: which id_token claim carries group membership. null = this
    * provider emits no group signal, so its logins never reconcile roles. */
   groupsClaim: string | null;
+  /** ADR-0174: non-null = a broker (Keycloak); each entry is a sign-in button */
+  brokerIdps?: Array<"microsoft" | "google" | "github"> | null;
+  /** ADR-0174: acr values that count as multi-factor for this provider */
+  mfaAcrValues?: string[] | null;
+  /** ADR-0174 (security review): a broker that enforces a second factor itself,
+   * so one otp/hwk/swk amr from it counts as MFA */
+  brokerEnforcesMfa?: boolean;
   enabled: boolean;
+}
+
+/** ADR-0174 §5 — a federated identity waiting to be linked to an account */
+export interface LinkRequest {
+  id: string;
+  userId: string;
+  userEmail: string;
+  userDisplayName: string;
+  provider: string;
+  protocol: "oidc" | "saml";
+  subject: string;
+  email: string;
+  idpMfa: boolean;
+  status: "pending" | "linked" | "approved" | "denied";
+  /** ADR-0174 (security review): approvals so far / needed (2 for an admin) */
+  approvals?: number;
+  requiredApprovals?: number;
+  expired: boolean;
+  createdAt: string;
+  expiresAt: string;
+  decidedAt: string | null;
 }
 
 /** ADR-0036 — the SAML twin. Note what is NOT here: the SP private key is
@@ -89,6 +117,9 @@ export interface SamlProvider {
   /** ADR-0038: which SAML attribute carries group membership. null = this
    * provider emits no group signal. */
   groupsAttribute: string | null;
+  /** ADR-0174 (security review): AuthnContextClassRef values that count as
+   * multi-factor for this IdP */
+  mfaAuthnContexts?: string[] | null;
   spPrivateKeySet: boolean;
   spCertificate: string | null;
   enabled: boolean;

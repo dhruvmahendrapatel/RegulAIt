@@ -75,6 +75,8 @@ import { z } from "zod";
 import { hashToken } from "./auth.js";
 import { refuseIfFeatureNotLicensed } from "./licensing.js";
 import { reconcileGroupRoles, scimAssertedGroupsFor } from "./group-roles.js";
+import { breakGlassLockoutRefusal } from "./break-glass.js";
+import { loadOrgSettings } from "./org-settings.js";
 
 // ---------------------------------------------------------------------------
 // the token credential
@@ -413,6 +415,15 @@ export function registerScimRoutes(app: FastifyInstance, db: Db) {
    *
    * Idempotent: an already-disabled user is a no-op that still answers 200.
    */
+  /** ADR-0174 (finding 5): a connector may not deactivate the last usable
+   * break-glass admin while email sign-in is break-glass only — answered as a
+   * SCIM 409 before anything about the user is changed */
+  const breakGlassRefusal = async (user: UserRow): Promise<string | null> => {
+    if (user.disabledAt) return null;
+    const glass = await breakGlassLockoutRefusal(db, await loadOrgSettings(db), { kind: "user", userId: user.id });
+    return glass ? `${glass.error}: ${glass.detail}` : null;
+  };
+
   const deactivate = async (
     token: ScimTokenRow,
     user: UserRow,
@@ -814,6 +825,10 @@ export function registerScimRoutes(app: FastifyInstance, db: Db) {
           return scimError(reply, 409, `a user with userName '${email}' already exists`, "uniqueness");
         }
       }
+      if (body.active === false) {
+        const glass = await breakGlassRefusal(user);
+        if (glass) return scimError(reply, 409, glass);
+      }
       user = await applyAttributes(token, user, {
         email,
         displayName: resolveScimDisplayName(body, email),
@@ -934,6 +949,10 @@ export function registerScimRoutes(app: FastifyInstance, db: Db) {
           return scimError(reply, 409, `a user with userName '${attrs.email}' already exists`, "uniqueness");
         }
       }
+      if (activeTarget === false) {
+        const glass = await breakGlassRefusal(user);
+        if (glass) return scimError(reply, 409, glass);
+      }
       user = await applyAttributes(token, user, attrs);
       // `active:false` on an ALREADY-disabled user is a 200 no-op — `deactivate`
       // returns the row untouched and writes no second audit event. Connectors
@@ -966,6 +985,8 @@ export function registerScimRoutes(app: FastifyInstance, db: Db) {
       if (!p.success) return scimError(reply, 404, "no such user");
       const user = await loadUser(p.data.id);
       if (!user) return scimError(reply, 404, "no such user");
+      const glass = await breakGlassRefusal(user);
+      if (glass) return scimError(reply, 409, glass);
       await deactivate(token, user, "delete");
       return reply.status(204).header("content-type", SCIM_CONTENT_TYPE).send();
     });

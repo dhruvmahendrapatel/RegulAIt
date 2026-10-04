@@ -63,8 +63,10 @@ import { z } from "zod";
 import {
   SAML_BINDING_COOKIE,
   auditAuth,
+  beginSamlTotpStepUp,
   createSession,
-  loadUserByEmail,
+  linkCookie,
+  mfaPendingCookie,
   readCookie,
   refuseIpBlockedLogin,
   requestIsSecure,
@@ -78,6 +80,20 @@ import { loadOrgSettings } from "./org-settings.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { countEnabledSsoProviders, SSO_ONLY_LAST_PROVIDER } from "./sso-providers.js";
 import { normalizeAssertedGroups, reconcileGroupRoles } from "./group-roles.js";
+import {
+  dropProviderLinks,
+  LINK_PROOF_MINUTES,
+  normalizeClaimEmail,
+  orgRequiresMfa,
+  raiseLinkRequest,
+  recordFederatedLink,
+  resolveFederatedLogin,
+  samlAnchor,
+  samlAuthnContextMfa,
+  touchFederatedLink,
+  type ProviderRef,
+} from "./federated-identity.js";
+import { breakGlassLockoutRefusal } from "./break-glass.js";
 
 export interface SamlRouteOptions {
   dataKey?: string;
@@ -280,6 +296,28 @@ export function assertionIssuer(assertion: Xml | null): string | null {
   return null;
 }
 
+/** ADR-0174 (finding 1): every `AuthnStatement/AuthnContext/AuthnContextClassRef`
+ * of the VERIFIED assertion — the SAML statement of how the person
+ * authenticated. Never read from the raw POST body. */
+export function assertionAuthnContexts(assertion: Xml | null): string[] {
+  const statements = assertion?.AuthnStatement;
+  if (!Array.isArray(statements)) return [];
+  const out: string[] = [];
+  for (const st of statements) {
+    const contexts = st?.AuthnContext;
+    if (!Array.isArray(contexts)) continue;
+    for (const c of contexts) {
+      const refs = c?.AuthnContextClassRef;
+      if (!Array.isArray(refs)) continue;
+      for (const r of refs) {
+        const v = typeof r === "string" ? r : r && typeof r._ === "string" ? r._ : null;
+        if (v) out.push(v.trim());
+      }
+    }
+  }
+  return out;
+}
+
 const EMAIL_NAMEID_FORMATS = new Set([
   "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress",
   "urn:oasis:names:tc:SAML:2.0:nameid-format:emailAddress",
@@ -300,22 +338,32 @@ export function resolveSamlEmail(
   profile: Profile,
   emailAttribute: string | null,
 ): { email: string | null; source: string } {
+  const { raw, source } = resolveSamlEmailRaw(profile, emailAttribute);
+  return { email: raw === null ? null : (normalizeClaimEmail(raw)?.email ?? null), source };
+}
+
+/** the email carrier exactly as asserted (trimmed): the ACS normalises it and
+ * decides linkability from what the IdP SENT (ADR-0174, finding 7) */
+function resolveSamlEmailRaw(
+  profile: Profile,
+  emailAttribute: string | null,
+): { raw: string | null; source: string } {
   const take = (v: unknown): string | null =>
-    typeof v === "string" && v.includes("@") ? v.trim().toLowerCase() : null;
+    typeof v === "string" && normalizeClaimEmail(v) !== null ? v.trim() : null;
 
   if (profile.nameIDFormat && EMAIL_NAMEID_FORMATS.has(profile.nameIDFormat)) {
     const v = take(profile.nameID);
-    if (v) return { email: v, source: "nameid" };
+    if (v) return { raw: v, source: "nameid" };
   }
   if (emailAttribute) {
     const v = take((profile as Record<string, unknown>)[emailAttribute]);
-    if (v) return { email: v, source: `attribute:${emailAttribute}` };
+    if (v) return { raw: v, source: `attribute:${emailAttribute}` };
   }
   for (const key of ["email", "mail", "urn:oid:0.9.2342.19200300.100.1.3"] as const) {
     const v = take((profile as Record<string, unknown>)[key]);
-    if (v) return { email: v, source: `attribute:${key}` };
+    if (v) return { raw: v, source: `attribute:${key}` };
   }
-  return { email: null, source: "none" };
+  return { raw: null, source: "none" };
 }
 
 /**
@@ -382,6 +430,7 @@ const publicProvider = (p: SamlProviderRow) => ({
   /** ADR-0038: null = this provider emits no group signal, so its logins never
    * reconcile group-derived roles. */
   groupsAttribute: p.groupsAttribute,
+  mfaAuthnContexts: p.mfaAuthnContexts,
   /** the operator needs to know whether SP signing material EXISTS without
    * ever being able to read it back */
   spPrivateKeySet: p.spPrivateKeyCiphertext !== null,
@@ -673,8 +722,10 @@ export function registerSamlRoutes(app: FastifyInstance, db: Db, opts: SamlRoute
       }
 
       // ---- identity: the asserted EMAIL, never users.username -------------
-      const { email, source } = resolveSamlEmail(profile, provider.emailAttribute);
-      if (!email) {
+      const { raw: rawEmail, source } = resolveSamlEmailRaw(profile, provider.emailAttribute);
+      const normalized = rawEmail === null ? null : normalizeClaimEmail(rawEmail);
+      const email = normalized?.email ?? null;
+      if (!normalized || !email) {
         return refuse(403, "saml_no_email", "saml-login-failed",
           `SAML login refused: no email could be resolved from the assertion (provider '${provider.name}')`,
           { nameIDFormat: profile.nameIDFormat ?? null, emailAttribute: provider.emailAttribute });
@@ -686,7 +737,22 @@ export function registerSamlRoutes(app: FastifyInstance, db: Db, opts: SamlRoute
           { email, domain });
       }
 
-      let user = await loadUserByEmail(db, email);
+      // ADR-0174 §5: the linked (provider, entity id, NameID format, NameID)
+      // first, then the asserted email — the SAME linking rule the OIDC
+      // callback answers to. A transient (or absent) NameID is never an
+      // anchor: the assertion is anchored on its verified email instead.
+      const ref: ProviderRef = { kind: "saml", id: provider.id, name: provider.name };
+      const anchor = samlAnchor(ref, provider.entityId, profile.nameID, profile.nameIDFormat, email);
+      const subject = anchor.subject;
+      // ADR-0174 (finding 1): MFA is read from the VERIFIED assertion only
+      const mfa = samlAuthnContextMfa(assertionAuthnContexts(assertion), provider.mfaAuthnContexts ?? null);
+      const resolution = await resolveFederatedLogin(db, anchor, normalized);
+      if (resolution.kind === "not_linkable") {
+        return refuse(403, "email_not_linkable", "saml-login-failed",
+          `SAML login refused: provider '${provider.name}' asserted an email outside plain ASCII, which is never matched to an account`,
+          { why: "email_not_linkable", emailSource: source });
+      }
+      let user = resolution.kind === "none" ? null : resolution.user;
       if (user?.disabledAt) {
         await auditAuth(db, null, user.id, "saml-login-failed", "deny",
           `SAML login refused: account '${email}' is deactivated`,
@@ -695,6 +761,24 @@ export function registerSamlRoutes(app: FastifyInstance, db: Db, opts: SamlRoute
           error: "user_disabled",
           detail: "this account has been deactivated — an admin can reactivate it",
         });
+      }
+      if (resolution.kind === "proof") {
+        const link = await raiseLinkRequest(db, anchor, email, resolution.user.id, mfa.asserted);
+        await auditAuth(db, null, resolution.user.id, "federated-link-required", "deny",
+          `SAML identity from provider '${provider.name}' matched the existing account '${resolution.user.email}', which is already in use — link pending proof or admin approval, no session minted`,
+          { phase: "saml-acs", provider: provider.name, providerId: provider.id, providerKind: "saml", email, sub: subject, nameIDFormat: anchor.subjectFormat, why: resolution.why, linkRequestId: link.requestId, refreshed: link.refreshed });
+        void reply.header("set-cookie", linkCookie(link.proofToken, requestIsSecure(req), LINK_PROOF_MINUTES * 60));
+        return reply.redirect("/ui/login?link=pending", 302);
+      }
+      if (resolution.kind === "link") {
+        await recordFederatedLink(db, anchor, resolution.user.id, resolution.via);
+        await auditAuth(db, null, resolution.user.id, "federated-identity-linked", "allow",
+          resolution.via === "prior_sso"
+            ? `SAML identity from provider '${provider.name}' linked to '${resolution.user.email}', who signed in through this provider before migration 0139 (backfill)`
+            : `SAML identity from provider '${provider.name}' linked to the pre-provisioned account '${resolution.user.email}' (never signed in, no local credential)`,
+          { phase: "saml-acs", provider: provider.name, providerId: provider.id, providerKind: "saml", email, sub: subject, nameIDFormat: anchor.subjectFormat, linkedVia: resolution.via });
+      } else if (resolution.kind === "linked") {
+        await touchFederatedLink(db, anchor);
       }
       if (!user) {
         // DEFAULT-DENY, identical to OIDC: an unknown subject is refused
@@ -723,6 +807,7 @@ export function registerSamlRoutes(app: FastifyInstance, db: Db, opts: SamlRoute
         await auditAuth(db, null, user.id, "saml-user-provisioned", "allow",
           `user '${email}' JIT-provisioned via SAML provider '${provider.name}'${provider.defaultRoleId ? " with the provider's default role" : ""} (never admin)`,
           { phase: "saml-jit", provider: provider.name, email, defaultRoleId: provider.defaultRoleId });
+        await recordFederatedLink(db, anchor, user.id, "jit");
       }
 
       // ADR-0038 — group → role reconciliation from the assertion's group
@@ -765,14 +850,29 @@ export function registerSamlRoutes(app: FastifyInstance, db: Db, opts: SamlRoute
       ) {
         return reply;
       }
+      // ADR-0174 (finding 1): when the org requires MFA for this person and
+      // the verified assertion names no multi-factor AuthnContextClassRef
+      // configured for this IdP, NO session exists yet. An account with TOTP
+      // steps up to it (POST /auth/mfa/verify mints the `saml` session); an
+      // account without one gets its session and the ordinary MFA gate sends
+      // it to enrolment, exactly as before.
+      if (orgRequiresMfa(org, user.isAdmin) && !mfa.asserted && user.totpEnabled) {
+        const pending = await beginSamlTotpStepUp(db, user.id, provider.id);
+        void reply.header("set-cookie", mfaPendingCookie(pending.token, requestIsSecure(req), pending.maxAgeSeconds));
+        await auditAuth(db, null, user.id, "saml-mfa-step-up", "deny",
+          `SAML login for '${email}' via provider '${provider.name}' held at the TOTP step: the organization requires MFA and the assertion named no multi-factor authentication context`,
+          { phase: "saml-acs", provider: provider.name, providerId: provider.id, email, authnContexts: mfa.contexts, mfaRequired: org.mfaRequired });
+        return reply.redirect("/ui/login?mfa=pending", 302);
+      }
       // ADR-0028: the SAME createSession every other path uses, with the new
       // `saml` origin. Like `oidc`, it NEVER receives the current-password
       // bypass — that is api_key-only and fails closed for every other origin.
-      const { token, maxAgeSeconds } = await createSession(db, user.id, org, req, "saml");
+      const { token, maxAgeSeconds } = await createSession(db, user.id, org, req, "saml", { idpMfa: mfa.asserted });
       void reply.header("set-cookie", sessionCookie(token, requestIsSecure(req), maxAgeSeconds));
       await auditAuth(db, user.id, user.id, "login-succeeded", "allow",
         `user '${email}' signed in via SAML provider '${provider.name}'`,
-        { phase: "login", email, method: "saml", provider: provider.name, emailSource: source });
+        // providerId marks this as a post-0139 row: never backfill evidence
+        { phase: "login", email, method: "saml", provider: provider.name, providerId: provider.id, emailSource: source, idpMfa: mfa.asserted, authnContexts: mfa.contexts });
       return reply.redirect(state?.returnTo ?? "/app", 302);
     });
   });
@@ -824,6 +924,8 @@ export function registerSamlRoutes(app: FastifyInstance, db: Db, opts: SamlRoute
         // nothing by itself — an asserted group confers nothing until an admin
         // maps it (`group_role_mappings`), and no mapping reaches isAdmin.
         groupsAttribute: body.groupsAttribute ?? null,
+        // ADR-0174: the AuthnContextClassRef values meaning multi-factor
+        mfaAuthnContexts: body.mfaAuthnContexts ?? null,
         ...(body.spPrivateKey
           ? { spPrivateKeyCiphertext: encryptSecret(opts.dataKey!, body.spPrivateKey) }
           : {}),
@@ -885,6 +987,9 @@ export function registerSamlRoutes(app: FastifyInstance, db: Db, opts: SamlRoute
         const remaining = await countEnabledSsoProviders(db, { samlId: providerId });
         if (remaining.total === 0) return reply.status(409).send(SSO_ONLY_LAST_PROVIDER);
       }
+      // ADR-0174 (finding 5): nor while email sign-in is break-glass only
+      const glass = await breakGlassLockoutRefusal(db, org, { kind: "saml_provider", providerId });
+      if (glass) return reply.status(409).send(glass);
     }
     const { spPrivateKey, ...rest } = body;
     const [row] = await db
@@ -907,6 +1012,15 @@ export function registerSamlRoutes(app: FastifyInstance, db: Db, opts: SamlRoute
         privateKeyRotated: Boolean(spPrivateKey),
       },
       "saml_provider");
+    // ADR-0174 (finding 6): a new entity id is a different identity provider —
+    // the NameIDs linked under the old one mean nothing under the new one
+    if (body.entityId !== undefined && body.entityId !== existing.entityId) {
+      const dropped = await dropProviderLinks(db, { kind: "saml", id: providerId, name: existing.name });
+      await auditAuth(db, req.authCtx.userId, providerId, "federated-identities-reset", "allow",
+        `SAML provider '${existing.name}' entity id changed: ${dropped.identities} linked identit${dropped.identities === 1 ? "y" : "ies"} and ${dropped.requests} pending link request(s) removed — each person links again on their next sign-in`,
+        { phase: "provider-updated", name: existing.name, fromEntityId: existing.entityId, toEntityId: body.entityId, ...dropped },
+        "saml_provider");
+    }
     return publicProvider(row!);
   });
 
@@ -923,6 +1037,9 @@ export function registerSamlRoutes(app: FastifyInstance, db: Db, opts: SamlRoute
         const remaining = await countEnabledSsoProviders(db, { samlId: providerId });
         if (remaining.total === 0) return reply.status(409).send(SSO_ONLY_LAST_PROVIDER);
       }
+      // ADR-0174 (finding 5): nor while email sign-in is break-glass only
+      const glass = await breakGlassLockoutRefusal(db, org, { kind: "saml_provider", providerId });
+      if (glass) return reply.status(409).send(glass);
     }
     await db.delete(samlProviders).where(eq(samlProviders.id, providerId));
     await auditAuth(db, req.authCtx.userId, null, "saml-provider-deleted", "allow",

@@ -10,7 +10,7 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
-import type { OidcProvider, OrgSettingsResponse, SamlProvider } from "../../../api/adminTypes";
+import type { LinkRequest, OidcProvider, OrgSettingsResponse, SamlProvider } from "../../../api/adminTypes";
 import { PageHeader } from "../../../shell/AppShell";
 import {
   Badge,
@@ -26,7 +26,7 @@ import {
   Table,
   Textarea,
 } from "../../../ui/kit";
-import { QueryGate, optionEls, roleOpts, useAction, useRoles } from "../adminKit";
+import { QueryGate, optionEls, roleOpts, useAction, useRoles, useUsers } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -41,6 +41,7 @@ export default function SsoPage() {
       <div className={v.stack}>
         <OidcCard />
         <SamlCard />
+        <LinkRequestsCard />
         <SessionsPolicyCard />
       </div>
     </>
@@ -63,7 +64,11 @@ function OidcCard() {
   const [defaultRoleId, setDefaultRoleId] = useState("");
   const [jit, setJit] = useState("false");
   const [groupsClaim, setGroupsClaim] = useState("");
+  const [brokerIdps, setBrokerIdps] = useState("");
+  const [acrValues, setAcrValues] = useState("");
+  const [brokerMfa, setBrokerMfa] = useState("false");
   const [deleteProvider, setDeleteProvider] = useState<OidcProvider | null>(null);
+  const csv = (v: string) => v.split(",").map((x) => x.trim()).filter(Boolean);
 
   return (
     <Card title="Single sign-on — OIDC providers">
@@ -85,6 +90,9 @@ function OidcCard() {
                     : {}),
                   ...(defaultRoleId ? { defaultRoleId } : {}),
                   ...(groupsClaim ? { groupsClaim } : {}),
+                  ...(brokerIdps ? { brokerIdps: csv(brokerIdps).map((x) => x.toLowerCase()) } : {}),
+                  ...(acrValues ? { mfaAcrValues: csv(acrValues) } : {}),
+                  ...(brokerMfa === "true" ? { brokerEnforcesMfa: true } : {}),
                 }),
               "Provider added",
             )
@@ -98,6 +106,9 @@ function OidcCard() {
                 setDefaultRoleId("");
                 setJit("false");
                 setGroupsClaim("");
+                setBrokerIdps("");
+                setAcrValues("");
+                setBrokerMfa("false");
               }
             });
         }}
@@ -134,6 +145,22 @@ function OidcCard() {
             placeholder="groups"
           />
         </Field>
+        <Field label="Broker sign-in buttons (Keycloak: microsoft, google, github — blank = enterprise IdP)">
+          <Input
+            value={brokerIdps}
+            onChange={(e) => setBrokerIdps(e.target.value)}
+            placeholder="microsoft, google, github"
+          />
+        </Field>
+        <Field label="MFA acr values (comma; blank = RFC 8176 amr only)">
+          <Input value={acrValues} onChange={(e) => setAcrValues(e.target.value)} placeholder="mfa" />
+        </Field>
+        <Field label="Broker enforces MFA">
+          <Select value={brokerMfa} onChange={(e) => setBrokerMfa(e.target.value)}>
+            <option value="false">no — amr must say mfa or name two factors (default)</option>
+            <option value="true">yes — one code/passkey amr counts (the bundled Keycloak)</option>
+          </Select>
+        </Field>
         <Field label="JIT default role">
           <Select value={defaultRoleId} onChange={(e) => setDefaultRoleId(e.target.value)}>
             {optionEls(roleOpts(roles.data?.roles), "— none —")}
@@ -165,6 +192,16 @@ function OidcCard() {
             render: (p) => (p.allowedEmailDomains ?? []).join(", ") || "any",
           },
           { key: "jit", header: "JIT", render: (p) => (p.jitProvisioning ? "on" : "off") },
+          {
+            key: "broker",
+            header: "Sign-in buttons",
+            render: (p) =>
+              p.brokerIdps && p.brokerIdps.length > 0 ? (
+                <span title="a broker: each upstream IdP is a 'Continue with …' button">{p.brokerIdps.join(", ")}</span>
+              ) : (
+                <span className={v.faint}>single sign-on</span>
+              ),
+          },
           {
             key: "groups",
             header: "Groups",
@@ -221,8 +258,12 @@ function OidcCard() {
       <p className={v.faint}>
         Authorization-code + PKCE; state and nonce are validated server-side and the client secret is
         stored encrypted, write-only — it is never returned by any endpoint. Sign-in maps the VERIFIED
-        email claim to an existing user; with JIT off (the default-deny default) an unknown identity is
-        refused and audited. JIT-provisioned users are never admins and get at most the default role picked
+        email claim to an existing user only when that account has never been used; any account already in
+        use (signed in before, or linked to another provider) is linked only after the person proves it
+        (password + code) or an admin approves below — never silently. With JIT off (the
+        default-deny default) an unknown identity is refused and audited. A provider with broker sign-in
+        buttons (the bundled Keycloak) shows “Continue with Microsoft / Google / GitHub” on the sign-in page;
+        see docs/deployment/SSO_KEYCLOAK.md. JIT-provisioned users are never admins and get at most the default role picked
         here. The “SSO only” switch below refuses to engage while no SSO provider — OIDC{" "}
         <em>or</em> SAML — is enabled anywhere on this page.
       </p>
@@ -272,6 +313,7 @@ function SamlCard() {
   const [domains, setDomains] = useState("");
   const [emailAttribute, setEmailAttribute] = useState("");
   const [groupsAttribute, setGroupsAttribute] = useState("");
+  const [mfaContexts, setMfaContexts] = useState("");
   const [defaultRoleId, setDefaultRoleId] = useState("");
   const [jit, setJit] = useState("false");
   const [idpInitiated, setIdpInitiated] = useState("false");
@@ -304,6 +346,9 @@ function SamlCard() {
                   allowIdpInitiated: idpInitiated === "true",
                   ...(emailAttribute ? { emailAttribute } : {}),
                   ...(groupsAttribute ? { groupsAttribute } : {}),
+                  ...(mfaContexts
+                    ? { mfaAuthnContexts: mfaContexts.split(",").map((x) => x.trim()).filter(Boolean) }
+                    : {}),
                   ...(domains
                     ? { allowedEmailDomains: domains.split(",").map((x) => x.trim()).filter(Boolean) }
                     : {}),
@@ -320,6 +365,7 @@ function SamlCard() {
                 setDomains("");
                 setEmailAttribute("");
                 setGroupsAttribute("");
+                setMfaContexts("");
                 setDefaultRoleId("");
                 setJit("false");
                 setIdpInitiated("false");
@@ -370,6 +416,13 @@ function SamlCard() {
             value={groupsAttribute}
             onChange={(e) => setGroupsAttribute(e.target.value)}
             placeholder="memberOf"
+          />
+        </Field>
+        <Field label="MFA authentication contexts (comma; blank = none — MFA then steps up to TOTP)">
+          <Input
+            value={mfaContexts}
+            onChange={(e) => setMfaContexts(e.target.value)}
+            placeholder="https://refeds.org/profile/mfa"
           />
         </Field>
         <Field label="JIT default role">
@@ -552,6 +605,7 @@ const AUTH_KEYS = [
   "loginLockoutThreshold",
   "loginLockoutWindowMinutes",
   "loginLockoutMinutes",
+  "localSignIn",
 ] as const;
 
 function SessionsPolicyCard() {
@@ -571,8 +625,13 @@ function SessionsPolicyForm(props: { settings: Record<string, unknown> }) {
   const init = Object.fromEntries(
     AUTH_KEYS.map((k) => [k, props.settings[k] != null ? String(props.settings[k]) : ""]),
   ) as Record<(typeof AUTH_KEYS)[number], string>;
-  const [f, setF] = useState(init);
+  const [f, setF] = useState({ ...init, localSignIn: init.localSignIn || "enabled" });
   const set = (k: (typeof AUTH_KEYS)[number], val: string) => setF((s) => ({ ...s, [k]: val }));
+  const users = useUsers();
+  const admins = (users.data?.users ?? []).filter((u) => u.isAdmin && !u.disabledAt);
+  const [breakGlass, setBreakGlass] = useState<string[]>(
+    Array.isArray(props.settings.breakGlassUserIds) ? (props.settings.breakGlassUserIds as string[]) : [],
+  );
   const num = (label: string, k: (typeof AUTH_KEYS)[number]) => (
     <Field label={label}>
       <Input type="number" required value={f[k]} onChange={(e) => set(k, e.target.value)} />
@@ -596,6 +655,8 @@ function SessionsPolicyForm(props: { settings: Record<string, unknown> }) {
                 loginLockoutThreshold: Number(f.loginLockoutThreshold),
                 loginLockoutWindowMinutes: Number(f.loginLockoutWindowMinutes),
                 loginLockoutMinutes: Number(f.loginLockoutMinutes),
+                localSignIn: f.localSignIn,
+                breakGlassUserIds: breakGlass,
               }),
             "Sign-in policy saved (audited)",
           );
@@ -622,7 +683,34 @@ function SessionsPolicyForm(props: { settings: Record<string, unknown> }) {
           {num("Lock after N failed logins", "loginLockoutThreshold")}
           {num("Failure window (minutes)", "loginLockoutWindowMinutes")}
           {num("Lockout duration (minutes)", "loginLockoutMinutes")}
+          <Field label="Email sign-in">
+            <Select value={f.localSignIn} onChange={(e) => set("localSignIn", e.target.value)}>
+              <option value="enabled">everyone with a password (default)</option>
+              <option value="break_glass_only">break-glass admins only — everyone else uses SSO</option>
+            </Select>
+          </Field>
         </div>
+        <fieldset className={v.stack}>
+          <legend className={v.faint}>Break-glass admins (may always use email sign-in)</legend>
+          {admins.length === 0 ? (
+            <span className={v.faint}>No active administrators.</span>
+          ) : (
+            admins.map((u) => (
+              <label key={u.id} className={v.row}>
+                <input
+                  type="checkbox"
+                  checked={breakGlass.includes(u.id)}
+                  onChange={(e) =>
+                    setBreakGlass((cur) => (e.target.checked ? [...cur, u.id] : cur.filter((x) => x !== u.id)))
+                  }
+                />
+                <span>
+                  {u.displayName} <span className={v.faint}>({u.email}{u.hasPassword ? "" : " — no password yet"})</span>
+                </span>
+              </label>
+            ))
+          )}
+        </fieldset>
         <div className={v.row}>
           <Button type="submit" variant="primary" disabled={act.busy}>
             Save sign-in policy
@@ -639,9 +727,107 @@ function SessionsPolicyForm(props: { settings: Record<string, unknown> }) {
           account for 15 minutes — audited, and the login answer stays the same uniform 401 so lockout
           leaks nothing. “SSO only” will not engage while zero enabled SSO providers exist — OIDC and
           SAML are counted together, and the last enabled provider of either family cannot be disabled
-          or deleted while it is on. No self-lockouts.
+          or deleted while it is on. No self-lockouts. “Break-glass admins only” keeps email sign-in for the
+          administrators ticked above and sends everyone else to single sign-on; it needs an enabled SSO
+          provider and at least one ticked administrator who has a password.
         </p>
       </form>
+    </Card>
+  );
+}
+
+// ---- ADR-0174 §5: account-link requests ------------------------------------
+
+/**
+ * A federated identity that matched an account holding its own password never
+ * links silently: the person proves the account at sign-in, or an admin
+ * approves here. Approving re-points nothing that belongs to somebody else
+ * (the gateway refuses), and nobody can approve a link to their own account.
+ */
+function LinkRequestsCard() {
+  const act = useAction();
+  const q = useQuery({
+    queryKey: ["admin", "link-requests"],
+    queryFn: () => api.get<{ requests: LinkRequest[] }>("/v1/auth/link-requests"),
+  });
+  const rows = q.data?.requests ?? [];
+  return (
+    <Card title="Account-link requests">
+      {act.error && (
+        <div className={v.errLine} role="alert">
+          {act.error}
+        </div>
+      )}
+      <Table<LinkRequest>
+        columns={[
+          {
+            key: "account",
+            header: "Existing account",
+            render: (r) => (
+              <span>
+                {r.userDisplayName} <span className={v.faint}>{r.userEmail}</span>
+              </span>
+            ),
+          },
+          { key: "provider", header: "Identity provider", render: (r) => `${r.provider} (${r.protocol.toUpperCase()})` },
+          { key: "email", header: "Asserted email", render: (r) => <span className={v.mono}>{r.email}</span> },
+          { key: "mfa", header: "MFA", render: (r) => (r.idpMfa ? <Badge tone="ok">asserted</Badge> : <Badge>not asserted</Badge>) },
+          { key: "when", header: "Requested", render: (r) => new Date(r.createdAt).toLocaleString() },
+          {
+            key: "approvals",
+            header: "Approvals",
+            render: (r) => `${r.approvals ?? 0} of ${r.requiredApprovals ?? 1}`,
+          },
+          {
+            key: "actions",
+            header: "",
+            align: "right",
+            render: (r) =>
+              r.expired ? (
+                <Badge tone="warn">expired</Badge>
+              ) : (
+                <span className={v.rowTight}>
+                  <Button
+                    size="sm"
+                    onClick={() =>
+                      void act.run(async () => {
+                        const res = await api.post<{ status: string; approvals?: number; requiredApprovals?: number }>(
+                          `/v1/auth/link-requests/${r.id}/approve`,
+                          {},
+                        );
+                        return res.status === "pending"
+                          ? `Approval ${res.approvals ?? 1} of ${res.requiredApprovals ?? 2} recorded — another administrator must also approve (audited)`
+                          : "Link approved (audited)";
+                      })
+                    }
+                  >
+                    approve
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="danger"
+                    onClick={() =>
+                      void act.run(() => api.post(`/v1/auth/link-requests/${r.id}/deny`, {}), "Link denied (audited)")
+                    }
+                  >
+                    deny
+                  </Button>
+                </span>
+              ),
+          },
+        ]}
+        rows={rows}
+        rowKey={(r) => r.id}
+        loading={q.isLoading}
+        error={q.error}
+        onRetry={() => void q.refetch()}
+        empty={
+          <EmptyState
+            title="No pending link requests"
+            body="When someone signs in with an identity provider whose email matches an account that has its own password, the link waits here (or for them to prove the account) — it is never made silently."
+          />
+        }
+      />
     </Card>
   );
 }

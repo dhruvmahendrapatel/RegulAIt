@@ -41,6 +41,28 @@ Then open **http://localhost:3000/ui** and sign in with a username (not an email
 plus the one-time password from that log. Each persona is forced to set a real
 password on first sign-in.
 
+**Demo personas with a password you choose** (ADR-0174 §6). For a demo you
+would rather not start with the one-time-password dance, set one password for
+Ada, Dana and Avery (`admin@` / `dana@` / `avery@regulait.local`) from the
+environment or a secret file — never from the command line or the repository:
+
+```bash
+# read it without echoing, or point REGULAIT_DEMO_USER_PASSWORD_FILE at a 0600 file
+read -rs REGULAIT_DEMO_USER_PASSWORD && export REGULAIT_DEMO_USER_PASSWORD
+pnpm --filter @regulait/gateway demo:set-passwords      # (docker: docker compose exec -e REGULAIT_DEMO_USER_PASSWORD gateway node apps/gateway/dist/demo-set-passwords.js)
+unset REGULAIT_DEMO_USER_PASSWORD
+```
+
+It checks the password against the org password policy, clears the personas'
+one-time-password flag, revokes their live sessions, writes one audit row per
+persona (`demo-password-set`, naming the source — never the password), and
+never prints the password. It runs **only on a demo-licensed deployment**: run it
+after `demo:setup` (or `demo:prepare`, which runs it), which installs the ephemeral
+demo licence it requires — with no licence, an expired one, or a customer licence it
+refuses and changes nothing.
+Enterprise sign-in (Microsoft / Google / GitHub through the optional Keycloak
+broker, with MFA) is in [docs/deployment/SSO_KEYCLOAK.md](docs/deployment/SSO_KEYCLOAK.md).
+
 The headline is the **compliance cascade** (§8.3): one `hipaa` tag on a project forces a
 sign-off stage, blocks PII, and floors audit retention — nobody configured any of it per-change.
 
