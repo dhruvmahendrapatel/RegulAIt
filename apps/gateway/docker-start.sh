@@ -14,7 +14,12 @@
 # exactly the behaviour before this switch existed. It is honoured only
 # together with SEED_DEMO=1 (the seed is what mints) and never on an installed
 # byoc / air_gapped deployment (scripts/install.sh also pins it off).
-if [ "${REGULAIT_DEMO_LICENSE:-}" = "1" ]; then
+# A .env written on Windows (PowerShell Add-Content, Notepad) ends its lines with CRLF; strip ONE trailing
+# carriage return so "1\r" counts as "1". Nothing else is normalised: " 1", "1 ", "true" still change nothing.
+demo_license="${REGULAIT_DEMO_LICENSE:-}"
+cr="$(printf '\r')"
+case "$demo_license" in *"$cr") demo_license="${demo_license%?}" ;; esac
+if [ "$demo_license" = "1" ]; then
   if [ "${SEED_DEMO:-}" != "1" ]; then
     echo "REGULAIT_DEMO_LICENSE=1 ignored: the demo licence is minted by the demo seed, and SEED_DEMO is not 1" >&2
   elif [ -n "${REGULAIT_DEPLOY_MODE:-}" ] && [ "${REGULAIT_DEPLOY_MODE}" != "hosted" ]; then

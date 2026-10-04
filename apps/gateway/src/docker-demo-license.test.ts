@@ -75,7 +75,11 @@ describe("docker-start.sh: the switch", () => {
     expect(runStart({ SEED_DEMO: "0" }).calls).toEqual([`apps/gateway/dist/main.js ${UNSET}`]);
   });
 
-  it.each(["", "0", "true", "yes", " 1", "1 ", "01"])("any value but exactly '1' (%j) changes nothing", (v) => {
+  it("a Windows CRLF .env value ('1\\r') counts as '1'", () => {
+    const r = runStart({ SEED_DEMO: "1", REGULAIT_DEMO_LICENSE: "1\r" });
+    expect(r.calls).toEqual([`apps/gateway/dist/seed.js ${DEMO}`, `apps/gateway/dist/main.js ${DEMO}`]);
+  });
+  it.each(["", "0", "true", "yes", " 1", "1 ", "01", "\r1", "1\r\r"])("any value but exactly '1' (%j) changes nothing", (v) => {
     const r = runStart({ SEED_DEMO: "1", REGULAIT_DEMO_LICENSE: v });
     expect(r.calls).toEqual([`apps/gateway/dist/seed.js ${UNSET}`, `apps/gateway/dist/main.js ${UNSET}`]);
   });
