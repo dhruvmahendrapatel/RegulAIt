@@ -257,6 +257,10 @@ export const CIPHERTEXT_COLUMNS: ReadonlyArray<{ table: string; column: string; 
   // Datadog API key typed into Tracing settings. Plaintext jsonb until
   // migration 0128; the same custody rules as every other endpoint credential.
   { table: "org_settings", column: "tracing_otlp_headers_ciphertext", what: "OTLP collector auth headers" },
+  // ADR-0173: a builder turn paused on a tool step — its model conversation,
+  // including the RAW arguments a resume replays so the approval digest binds.
+  // Short-lived (cleared when the turn finishes) but still data-key custody.
+  { table: "builder_threads", column: "pending_turn_ciphertext", what: "paused builder turns" },
 ];
 
 export interface CiphertextProbe {

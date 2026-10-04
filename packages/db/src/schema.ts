@@ -8734,6 +8734,11 @@ export const builderThreads = pgTable(
     status: text("status", { enum: BUILDER_THREAD_STATUSES }).notNull().default("active"),
     source: text("source", { enum: BUILDER_THREAD_SOURCES }).notNull().default("chat"),
     scheduleId: uuid("schedule_id").references(() => builderAgentSchedules.id, { onDelete: "set null" }),
+    /** ADR-0173 (migration 0136): a turn PAUSED on a tool step — its model
+     * conversation, encrypted with the data key (it carries the raw arguments
+     * a resume replays identically). Cleared when the turn finishes; never
+     * returned by the API. */
+    pendingTurnCiphertext: text("pending_turn_ciphertext"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -8771,7 +8776,80 @@ export const builderMessages = pgTable(
   ],
 );
 
+export const BUILDER_TOOL_STEP_KINDS = ["mcp_tool", "connector", "unknown"] as const;
+export const BUILDER_TOOL_STEP_STATUSES = [
+  "pending_confirmation",
+  "pending_approval",
+  "running",
+  "done",
+  "denied",
+  "refused",
+  "error",
+] as const;
+export type BuilderToolStepStatus = (typeof BUILDER_TOOL_STEP_STATUSES)[number];
+
+/**
+ * ADR-0173 §1 (migration 0136) — one tool call a builder turn made, attached to
+ * the turn's agent message. The governed call keeps its own audit row and
+ * trace span; this row links them and holds what the thread shows (a REDACTED
+ * argument preview + the approval-binding digest, the outcome, a truncated
+ * result preview that is withheld when PII/guardrails withheld the result, the
+ * cost — which counts toward the agent's monthly limit — and the latency).
+ */
+export const builderToolSteps = pgTable(
+  "builder_tool_steps",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    threadId: uuid("thread_id")
+      .notNull()
+      .references(() => builderThreads.id, { onDelete: "cascade" }),
+    messageId: uuid("message_id")
+      .notNull()
+      .references(() => builderMessages.id, { onDelete: "cascade" }),
+    /** denormalised so the monthly-limit sum needs no join */
+    agentId: uuid("agent_id").notNull(),
+    /** the person the call ran as */
+    userId: uuid("user_id").notNull(),
+    /** the model step (1-based) within the turn that asked for this call */
+    turn: integer("turn").notNull(),
+    seq: integer("seq").notNull(),
+    kind: text("kind", { enum: BUILDER_TOOL_STEP_KINDS }).notNull(),
+    /** mcp_tools.id or connectors.id; null for a tool not in the toolbox */
+    refId: uuid("ref_id"),
+    /** the model-facing (namespaced) tool name */
+    name: text("name").notNull(),
+    displayName: text("display_name").notNull(),
+    toolCallId: text("tool_call_id"),
+    /** REDACTED preview — never the raw payload */
+    arguments: jsonb("arguments"),
+    argumentsDigest: text("arguments_digest").notNull(),
+    requiresConfirmation: boolean("requires_confirmation").notNull().default(false),
+    status: text("status", { enum: BUILDER_TOOL_STEP_STATUSES }).notNull(),
+    approvalId: uuid("approval_id").references(() => approvals.id, { onDelete: "set null" }),
+    resultPreview: text("result_preview"),
+    resultWithheld: boolean("result_withheld").notNull().default(false),
+    outcomeCode: text("outcome_code"),
+    outcomeDetail: text("outcome_detail"),
+    costUsd: doublePrecision("cost_usd"),
+    latencyMs: integer("latency_ms"),
+    auditLogId: uuid("audit_log_id"),
+    traceId: uuid("trace_id"),
+    parentSpanId: uuid("parent_span_id"),
+    decidedByUserId: uuid("decided_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("builder_tool_steps_message_seq_uq").on(t.messageId, t.seq),
+    index("builder_tool_steps_thread_idx").on(t.threadId, t.createdAt),
+    index("builder_tool_steps_agent_idx").on(t.agentId, t.createdAt),
+    index("builder_tool_steps_approval_idx").on(t.approvalId).where(sql`${t.approvalId} IS NOT NULL`),
+  ],
+);
+
 export type BuilderAgentRow = typeof builderAgents.$inferSelect;
+export type BuilderToolStepRow = typeof builderToolSteps.$inferSelect;
 export type BuilderSkillRow = typeof builderSkills.$inferSelect;
 export type BuilderScheduleRow = typeof builderAgentSchedules.$inferSelect;
 export type BuilderThreadRow = typeof builderThreads.$inferSelect;

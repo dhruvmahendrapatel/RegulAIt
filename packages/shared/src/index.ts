@@ -3834,3 +3834,11 @@ export {
   type BuilderCreateAgent,
   type BuilderUpdateAgent,
 } from "./builder.js";
+// ADR-0173 — governed tool use in builder agents: the tool-step lifecycle and
+// the thread owner's answer to an "Ask first" pause.
+export {
+  BUILDER_TOOL_STEP_STATUS_VALUES,
+  builderConfirmStepSchema,
+  type BuilderConfirmStep,
+  type BuilderToolStepStatusValue,
+} from "./builder.js";

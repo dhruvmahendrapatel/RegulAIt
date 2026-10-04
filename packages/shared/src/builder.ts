@@ -33,6 +33,9 @@ export const BUILDER_LIMITS = {
   systemPromptBytes: 48 * 1024,
   /** schedule runs per agent owner in one sweep pass (the rest stay due) */
   sweepRunsPerOwner: 10,
+  /** ADR-0173: governed tool calls one turn may make (model steps are bounded
+   * separately by the org's worker-turn settings) */
+  toolCallsPerTurn: 12,
 } as const;
 
 /**
@@ -152,6 +155,28 @@ export const builderThreadListQuerySchema = z.object({
 });
 
 export const builderUpdateThreadSchema = z.object({ status: z.enum(BUILDER_THREAD_STATUS_VALUES) }).strict();
+
+/**
+ * ADR-0173 §1 — a tool step's lifecycle. `pending_confirmation` is the agent's
+ * own "Ask first" pause (the person in the thread decides); `pending_approval`
+ * is an organisation approval rule (the approvals queue decides). They are
+ * never the same thing.
+ */
+export const BUILDER_TOOL_STEP_STATUS_VALUES = [
+  "pending_confirmation",
+  "pending_approval",
+  "running",
+  "done",
+  "denied",
+  "refused",
+  "error",
+] as const;
+export type BuilderToolStepStatusValue = (typeof BUILDER_TOOL_STEP_STATUS_VALUES)[number];
+
+/** `POST /v1/builder/threads/:id/steps/:stepId/confirm` — the thread owner
+ * answers an "Ask first" pause with the exact call in front of them */
+export const builderConfirmStepSchema = z.object({ decision: z.enum(["approve", "deny"]) }).strict();
+export type BuilderConfirmStep = z.infer<typeof builderConfirmStepSchema>;
 
 export const builderCreateSkillSchema = z
   .object({
