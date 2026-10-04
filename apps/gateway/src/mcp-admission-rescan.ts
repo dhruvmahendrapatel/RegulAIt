@@ -129,6 +129,7 @@ import {
 import type { McpAdmissionMode, McpAdmissionState } from "@regulait/shared";
 import { loadAdmissionMode, McpAdmissionHeldError } from "./mcp-admission.js";
 import { connectUpstream, syncUpstreamTools } from "./mcp-proxy.js";
+import { runSkillAdmissionRescan, type SkillRescanResult } from "./skill-admission.js";
 
 /** the scheduler's own null actor — this sweep mints no identity and acts as
  * the deployment, exactly like the other reconcile-only jobs (ADR-0064 §8) */
@@ -179,6 +180,10 @@ export interface McpAdmissionRescanResult {
   unreachable: number;
   heldServerIds: string[];
   unreachableServerIds: string[];
+  /** ADR-0175 A6: the builder-skill part of the pass (library bodies and pinned
+   * attachment bodies). Local and model-free, so it runs whatever
+   * `mcp_admission_mode` says — that knob governs MCP manifests only. */
+  skills: SkillRescanResult;
 }
 
 interface EligibleRow {
@@ -202,6 +207,8 @@ export async function runMcpAdmissionRescan(
   const now = opts.now ?? new Date();
   const limit = Math.max(1, opts.limit ?? MCP_RESCAN_MAX_PER_PASS);
   const mode = await loadAdmissionMode(db);
+  // ADR-0175 A6 — skills first: no outbound call, no posture knob
+  const skills = await runSkillAdmissionRescan(db);
 
   const empty = {
     eligible: 0,
@@ -230,6 +237,7 @@ export async function runMcpAdmissionRescan(
         "scanned and no admission column or audit row was written. Set the mode to 'log' or " +
         "'enforce' to give this sweep something to do.",
       ...empty,
+      skills,
     };
   }
 
@@ -353,6 +361,7 @@ export async function runMcpAdmissionRescan(
       heldServerIds: out.heldServerIds,
       unreachableServerIds: out.unreachableServerIds,
       eligibleStates: [...MCP_RESCAN_ELIGIBLE_STATES],
+      skills,
     },
     effect: "allow",
     ruleId: "mcp-admission-rescan-swept",
@@ -360,5 +369,5 @@ export async function runMcpAdmissionRescan(
     reason,
   });
 
-  return { mode, skipped: false, reason, ...out };
+  return { mode, skipped: false, reason, ...out, skills };
 }

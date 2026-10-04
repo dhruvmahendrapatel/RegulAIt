@@ -59,6 +59,11 @@ const newAgent = async (who: Person, extra: Record<string, unknown> = {}) => {
 };
 const skill = async (who: Person, body: Record<string, unknown>) => {
   const r = await k.req("POST", "/v1/builder/skills", who.auth, { description: "", body: "# x", visibility: "private", ...body });
+  // ADR-0175: a non-admin's widening waits for an admin — approve it here
+  if (r.statusCode === 201 && r.json().skill.requestedVisibility === "workspace") {
+    const ok = await k.req("POST", `/v1/admission/skills/${r.json().skill.id}/visibility`, admin.auth, { decision: "approve" });
+    expect(ok.statusCode, ok.body).toBe(200);
+  }
   expect(r.statusCode, r.body).toBe(201);
   return r.json().skill as Record<string, any>;
 };

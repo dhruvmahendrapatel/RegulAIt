@@ -125,6 +125,25 @@ import {
 } from "./egress-guard.js";
 import { loadOrgSettings } from "./org-settings.js";
 import { REGISTRATION_ADMISSION_STATE } from "./mcp-admission.js";
+import { recordSighting } from "./release-age.js";
+import { createHash } from "node:crypto";
+
+/**
+ * ADR-0175 A5 — the identity of ONE registry entry release: which registry,
+ * which upstream name, which version, at which endpoint. The cooldown ages an
+ * import from the first time the sweep saw exactly this — never from the
+ * publish date the registry reports, which is the publisher's to set.
+ */
+export function registryEntryDigest(e: {
+  registryId: string;
+  upstreamName: string;
+  upstreamVersion: string;
+  remoteUrl: string | null;
+}): string {
+  return createHash("sha256")
+    .update([e.registryId, e.upstreamName, e.upstreamVersion, e.remoteUrl ?? ""].join("\n"), "utf8")
+    .digest("hex");
+}
 
 /** the deployment's own null actor, for a pass no human initiated */
 const NIL_USER = "00000000-0000-0000-0000-000000000000";
@@ -548,6 +567,8 @@ async function upsertEntry(
     );
 
   const conflict = await detectConflict(db, entry, existing?.serverId ?? null);
+  // ADR-0175 A5: our own first sighting of this exact entry release
+  await recordSighting(db, "registry_entry", registryEntryDigest({ registryId, ...entry }), now);
 
   const common = {
     upstreamVersion: entry.upstreamVersion,
@@ -809,9 +830,24 @@ export async function importRegistryEntry(
     return { ok: false, refusal: { status: 400, body: { error: "egress_blocked", code: denied.code, detail } } };
   }
 
+  // ADR-0175 A5 — the release-age cooldown ages an import from the first time
+  // the registry sweep saw this exact entry release (recorded now if the sweep
+  // never did), not from the moment somebody clicked import.
+  const releaseSeenAt = await recordSighting(
+    db,
+    "registry_entry",
+    registryEntryDigest({
+      registryId: entry.registryId,
+      upstreamName: entry.upstreamName,
+      upstreamVersion: entry.upstreamVersion,
+      remoteUrl: entry.remoteUrl,
+    }),
+    now,
+  );
   const [row] = await db
     .insert(mcpServers)
     .values({
+      releaseSeenAt,
       name: localServerNameFor(entry.upstreamName),
       url: entry.remoteUrl,
       // ADR-0043's tri-state, inherited from the registry that vouched for it.

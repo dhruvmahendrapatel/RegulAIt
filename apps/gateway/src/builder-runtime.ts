@@ -82,6 +82,8 @@ import { BUILDER_LIMITS, nextScheduleRun, type BuilderCadenceValue } from "@regu
 import { executeGovernedDispatch, type AgentRow } from "./agents-connectors.js";
 import { agentDecision } from "./copilot.js";
 import { BUILDER_MODEL_FEATURE, loadVisibleAgent, skillVisible } from "./builder-access.js";
+import { pinnedBodyWithheld } from "./skill-admission.js";
+import { minReleaseAgeDays } from "./release-age.js";
 import { MODEL_NOT_ALLOWED_FOR_FEATURE } from "./model-policy.js";
 import {
   argumentsDigestFor,
@@ -179,13 +181,41 @@ export async function threadSteps(db: Db, threadId: string): Promise<BuilderTool
  * skills the agent's OWNER can still see — a shared skill its author has since
  * made private, or archived, drops out instead of travelling on in a snapshot.
  */
-export async function pinnedSkillsForRun(
+export interface RunSkill {
+  skillId: string;
+  name: string;
+  body: string;
+  /** ADR-0175 A6: the pinned body's version and sha256 digest — recorded on
+   * every builder turn that carried it */
+  version: number;
+  digest: string;
+}
+
+export async function pinnedSkillsForRun(db: Db, agent: BuilderAgentRow): Promise<RunSkill[]> {
+  return (await skillsForRun(db, agent)).skills;
+}
+
+/**
+ * The run-time skill set, plus what was WITHHELD and why. ADR-0175: a pinned
+ * body whose scan is held or refused (at attach, or later by the ADR-0100
+ * re-scan sweep), or that is still inside the release-age cooldown, is
+ * detached from the prompt at run time — re-checked on every model step, never
+ * cached.
+ */
+export async function skillsForRun(
   db: Db,
   agent: BuilderAgentRow,
-): Promise<Array<{ skillId: string; name: string; body: string }>> {
+): Promise<{ skills: RunSkill[]; withheld: Array<{ skillId: string; reason: string; digest: string }> }> {
   const [rows, [owner]] = await Promise.all([
     db
-      .select({ skill: builderSkills, body: builderAgentSkills.bodySnapshot })
+      .select({
+        skill: builderSkills,
+        body: builderAgentSkills.bodySnapshot,
+        skillId: builderAgentSkills.skillId,
+        snapshotDigest: builderAgentSkills.snapshotDigest,
+        snapshotVersion: builderAgentSkills.snapshotVersion,
+        snapshotAdmissionState: builderAgentSkills.snapshotAdmissionState,
+      })
       .from(builderAgentSkills)
       .innerJoin(builderSkills, eq(builderAgentSkills.skillId, builderSkills.id))
       .where(eq(builderAgentSkills.agentId, agent.id))
@@ -193,7 +223,16 @@ export async function pinnedSkillsForRun(
     db.select({ isAdmin: users.isAdmin }).from(users).where(eq(users.id, agent.ownerUserId)),
   ]);
   const ownerViewer = { userId: agent.ownerUserId, isAdmin: !!owner?.isAdmin };
-  return rows.filter((r) => skillVisible(r.skill, ownerViewer)).map((r) => ({ skillId: r.skill.id, name: r.skill.name, body: r.body }));
+  const visible = rows.filter((r) => skillVisible(r.skill, ownerViewer));
+  const minDays = visible.length ? await minReleaseAgeDays(db) : 0;
+  const skills: RunSkill[] = [];
+  const withheld: Array<{ skillId: string; reason: string; digest: string }> = [];
+  for (const r of visible) {
+    const why = await pinnedBodyWithheld(db, r, minDays);
+    if (why) withheld.push({ skillId: r.skill.id, reason: why, digest: r.snapshotDigest });
+    else skills.push({ skillId: r.skill.id, name: r.skill.name, body: r.body, version: r.snapshotVersion, digest: r.snapshotDigest });
+  }
+  return { skills, withheld };
 }
 
 /** the configured part of the system prompt — instructions + pinned skills */
@@ -221,8 +260,19 @@ export function promptTooLarge(prompt: string): { error: string; detail: string;
 /** the system prompt: instructions + pinned skills + memory + the toolbox as
  * the person may use it (callable tools named, unavailable ones flagged) */
 export async function buildSystemPrompt(db: Db, agent: BuilderAgentRow, userId: string, box?: Toolbox): Promise<string> {
-  const [skills, memory, toolbox] = await Promise.all([
-    pinnedSkillsForRun(db, agent),
+  return (await buildSystemPromptWithSkills(db, agent, userId, box)).prompt;
+}
+
+/** the system prompt and the skill set that went into it (ADR-0175: the turn
+ * records each skill's digest) */
+export async function buildSystemPromptWithSkills(
+  db: Db,
+  agent: BuilderAgentRow,
+  userId: string,
+  box?: Toolbox,
+): Promise<{ prompt: string; skills: RunSkill[]; withheld: Array<{ skillId: string; reason: string; digest: string }> }> {
+  const [{ skills, withheld }, memory, toolbox] = await Promise.all([
+    skillsForRun(db, agent),
     db
       .select({ content: builderAgentMemory.content })
       .from(builderAgentMemory)
@@ -235,7 +285,7 @@ export async function buildSystemPrompt(db: Db, agent: BuilderAgentRow, userId: 
   if (memory.length) parts.push(`## Memory (newest first)\n${memory.map((m) => `- ${m.content}`).join("\n")}`);
   const tools = toolboxPrompt(toolbox);
   if (tools) parts.push(tools);
-  return parts.join("\n\n");
+  return { prompt: parts.join("\n\n"), skills, withheld };
 }
 
 /** a turn that stopped on a tool step and is waiting for someone */
@@ -810,7 +860,14 @@ async function runLoop(seg: Segment, state: LoopState): Promise<TurnOutcome> {
 
     // 4. one governed model step, with the toolbox as the person may use it
     box = await resolveToolbox(db, seg.agent, seg.userId);
-    const system = await buildSystemPrompt(db, seg.agent, seg.userId, box);
+    const built = await buildSystemPromptWithSkills(db, seg.agent, seg.userId, box);
+    const system = built.prompt;
+    // ADR-0175 A6: the digests of the skill bodies this step carried (and of
+    // any withheld) ride on the dispatch's trace detail and its audit row
+    const skillTrace = {
+      skills: built.skills.map((k) => ({ skillId: k.skillId, version: k.version, digest: k.digest })),
+      ...(built.withheld.length ? { skillsWithheld: built.withheld } : {}),
+    };
     const toolsOff = state.toolCalls >= BUILDER_LIMITS.toolCallsPerTurn;
     const defs = box.entries.map((e) => e.def);
     const step = state.modelSteps + 1;
@@ -832,7 +889,7 @@ async function runLoop(seg: Segment, state: LoopState): Promise<TurnOutcome> {
       mode: "chat",
       trace: seg.trace,
       traceSpanName: `step ${step}: ${seg.model.name}`,
-      detail: { ...seg.baseDetail, step },
+      detail: { ...seg.baseDetail, step, ...skillTrace },
     });
     const latencyMs = Date.now() - started;
 
@@ -845,6 +902,7 @@ async function runLoop(seg: Segment, state: LoopState): Promise<TurnOutcome> {
         ...seg.baseDetail,
         mode: "chat",
         step,
+        ...skillTrace,
         dispatch: outcome.ok
           ? { model: outcome.result.model, stopReason: outcome.result.stopReason, refusal: outcome.result.refusal, toolCalls: outcome.result.toolCalls?.length ?? 0 }
           : { error: outcome.error },
