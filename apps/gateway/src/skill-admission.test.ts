@@ -211,6 +211,9 @@ describe("the ADR-0100 re-scan sweep", () => {
     // a held row is never re-examined (nothing auto-clears)
     const again = await runSkillAdmissionRescan(k.db);
     expect(again.heldSkillIds).not.toContain(s.id);
+    // an admin's admission covers the pinned body with the same digest: it runs again
+    expect((await k.req("POST", `/v1/admission/skills/${s.id}/admit`, admin.auth, { reason: "reviewed after the sweep" })).statusCode).toBe(200);
+    expect(await buildSystemPrompt(k.db, await agentRow(a.id), owner.id)).toContain("SWEEP-CLEAN");
   });
 
   it("scans an unscanned PINNED body even when its library row is clean", async () => {

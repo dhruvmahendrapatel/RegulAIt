@@ -71,6 +71,7 @@ import {
 import { z } from "zod";
 import { loadOrgSettings } from "./org-settings.js";
 import {
+  carryRegistrationOverride,
   quarantineDetail,
   recordSighting,
   registerReleaseAgeRoutes,
@@ -187,6 +188,9 @@ async function observeRelease(
     await recordSighting(db, "mcp_manifest", digest);
     await db.update(mcpServers).set({ releaseDigest: digest }).where(eq(mcpServers.id, serverId));
     next = { ...row, releaseDigest: digest };
+    // an admin's override of the registered release covers its first manifest
+    // (the same release, now with a digest); a later change is not covered
+    await carryRegistrationOverride(db, serverId, digest);
   } else if (row.releaseDigest !== digest) {
     const seen = await recordSighting(db, "mcp_manifest", digest);
     await db.update(mcpServers).set({ releaseDigest: digest, releaseSeenAt: seen }).where(eq(mcpServers.id, serverId));

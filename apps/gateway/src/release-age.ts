@@ -77,6 +77,26 @@ export async function hasReleaseOverride(db: Db, kind: ReleaseAgeKind, subjectId
   return !!row;
 }
 
+/** a server's first manifest IS the release that was registered: an override
+ * granted for the registration carries over to that manifest's digest */
+export async function carryRegistrationOverride(db: Db, serverId: string, digest: string): Promise<void> {
+  const [reg] = await db
+    .select()
+    .from(releaseOverrides)
+    .where(
+      and(
+        eq(releaseOverrides.kind, "mcp_server"),
+        eq(releaseOverrides.subjectId, serverId),
+        eq(releaseOverrides.digest, REGISTRATION_RELEASE),
+      ),
+    );
+  if (!reg) return;
+  await db
+    .insert(releaseOverrides)
+    .values({ kind: "mcp_server", subjectId: serverId, digest, overriddenBy: reg.overriddenBy, reason: reg.reason })
+    .onConflictDoNothing();
+}
+
 /** a skill version's cooldown status (first sighting of its exact body digest) */
 export async function skillReleaseStatus(
   db: Db,
