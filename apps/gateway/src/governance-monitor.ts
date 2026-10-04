@@ -55,6 +55,7 @@ import {
   reconcileAlerts,
   type MonitorAgentInput,
   type MonitorCredentialInput,
+  type MonitorRuleId,
   type MonitorServedModelInput,
   type MonitorTrafficInput,
   type MonitorVendorInput,
@@ -75,6 +76,8 @@ export const MONITOR_AUDIT_RULE_IDS = {
   resolved: "governance-alert-resolved",
   acknowledged: "governance-alert-acknowledged",
   evaluated: "governance-monitor-evaluated",
+  /** review fix: an optional rule input failed; that rule was not evaluated */
+  inputFailed: "governance-monitor-input-failed",
 } as const;
 
 export interface MonitorRunResult {
@@ -85,7 +88,23 @@ export interface MonitorRunResult {
   refreshed: number;
   resolved: number;
   active: number;
+  /** rules whose optional input failed this pass: not evaluated, so their
+   * open episodes were left as they were (review fix) */
+  notEvaluated: string[];
 }
+
+/** the optional rule inputs: each feeds exactly one rule, and a failure to
+ * load it skips that rule for the pass instead of failing every rule */
+export interface MonitorOptionalInputs {
+  servedModels: (db: Db, now: Date) => Promise<MonitorServedModelInput[]>;
+  traffic: (db: Db, now: Date) => Promise<MonitorTrafficInput>;
+  credentials: (db: Db, now: Date) => Promise<MonitorCredentialInput>;
+}
+const OPTIONAL_INPUT_RULE: Record<keyof MonitorOptionalInputs, MonitorRuleId> = {
+  servedModels: "served_model_drift",
+  traffic: "unregistered_ai_traffic",
+  credentials: "stale_credentials",
+};
 
 export async function runGovernanceMonitor(
   db: Db,
@@ -96,10 +115,34 @@ export async function runGovernanceMonitor(
      *  before any write — lets a test hold this pass while a concurrent one
      *  commits. Absent in production (never passed). */
     afterPlan?: (plan: ReturnType<typeof reconcileAlerts>) => Promise<void>;
+    /** TEST SEAM: replace an optional input's loader (e.g. one that throws).
+     *  Absent in production. */
+    optionalInputs?: Partial<MonitorOptionalInputs>;
   } = {},
 ): Promise<MonitorRunResult> {
   const now = opts.now ?? new Date();
   const actor = opts.actorUserId ?? NO_IDENTITY;
+
+  // Review fix: an OPTIONAL input (one rule's own ledger read) that fails
+  // leaves that rule unevaluated for this pass — its open episodes are neither
+  // refreshed nor resolved — and is audited; every other rule still runs.
+  const loaders: MonitorOptionalInputs = {
+    servedModels: servedModelsByAgent,
+    traffic: unregisteredTrafficInput,
+    credentials: (d, n) => staleCredentialsInput(d, n),
+    ...opts.optionalInputs,
+  };
+  const failedInputs: Array<{ input: keyof MonitorOptionalInputs; ruleId: MonitorRuleId; error: string }> = [];
+  const optional = async <K extends keyof MonitorOptionalInputs>(
+    input: K,
+  ): Promise<Awaited<ReturnType<MonitorOptionalInputs[K]>> | undefined> => {
+    try {
+      return (await loaders[input](db, now)) as Awaited<ReturnType<MonitorOptionalInputs[K]>>;
+    } catch (err) {
+      failedInputs.push({ input, ruleId: OPTIONAL_INPUT_RULE[input], error: (err instanceof Error ? err.message : String(err)).slice(0, 500) });
+      return undefined;
+    }
+  };
 
   // -- inputs ----------------------------------------------------------------
   const graph = await computeDependencyGraph(db, { includeObserved: true, now });
@@ -217,19 +260,32 @@ export async function runGovernanceMonitor(
     dimensions: trust.dimensions,
     labels,
     // ADR-0175 A4 / A9 — read from the usage ledger; both observe only
-    servedModels: await servedModelsByAgent(db, now),
-    traffic: await unregisteredTrafficInput(db, now),
-    // ADR-0175 A7 — always evaluated, so turning alerting off resolves the
-    // open episodes instead of stranding them
-    credentials: await staleCredentialsInput(db, now),
+    servedModels: await optional("servedModels"),
+    traffic: await optional("traffic"),
+    // ADR-0175 A7 — always evaluated (an explicit "not alerting" input when
+    // the org has it off), so turning alerting off resolves the open episodes
+    credentials: await optional("credentials"),
   });
+  const notEvaluated = new Set<string>(failedInputs.map((f) => f.ruleId));
+  for (const f of failedInputs) {
+    await db.insert(auditLog).values({
+      userId: actor,
+      objectType: "governance_monitor",
+      objectId: null,
+      detail: { ruleId: f.ruleId, input: f.input, error: f.error },
+      effect: "deny",
+      ruleId: MONITOR_AUDIT_RULE_IDS.inputFailed,
+      ruleChain: [],
+      reason: `governance monitor: rule ${f.ruleId} NOT evaluated this pass — its input (${f.input}) failed: ${f.error}`,
+    });
+  }
 
   // -- reconcile -------------------------------------------------------------
   const active = await db
     .select({ id: governanceAlerts.id, ruleId: governanceAlerts.ruleId, subjectKey: governanceAlerts.subjectKey, title: governanceAlerts.title })
     .from(governanceAlerts)
     .where(ne(governanceAlerts.status, "resolved"));
-  const plan = reconcileAlerts(active, findings, new Set(MONITOR_RULE_IDS));
+  const plan = reconcileAlerts(active, findings, new Set(MONITOR_RULE_IDS.filter((r) => !notEvaluated.has(r))));
   if (opts.afterPlan) await opts.afterPlan(plan);
 
   const raisedIds: string[] = [];
@@ -306,7 +362,7 @@ export async function runGovernanceMonitor(
     userId: actor,
     objectType: "governance_monitor",
     objectId: null,
-    detail: { raised: raisedIds.length, refreshed: refreshedCount, resolved: resolvedCount, active: n },
+    detail: { raised: raisedIds.length, refreshed: refreshedCount, resolved: resolvedCount, active: n, notEvaluated: [...notEvaluated] },
     effect: "allow",
     ruleId: MONITOR_AUDIT_RULE_IDS.evaluated,
     ruleChain: [],
@@ -330,6 +386,7 @@ export async function runGovernanceMonitor(
     refreshed: refreshedCount,
     resolved: resolvedCount,
     active: n,
+    notEvaluated: [...notEvaluated],
   };
 }
 

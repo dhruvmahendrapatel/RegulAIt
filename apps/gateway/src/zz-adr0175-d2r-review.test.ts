@@ -11,6 +11,8 @@
  *     keeps it; one without a stamp is stamped now.
  *  7. concurrent PUTs of one energy factor never 500, and each is audited
  *     with the row it replaced.
+ *  8. a failing optional monitor input skips its one rule (open episodes
+ *     untouched, audited) and every other rule still runs.
  *
  * Shared database (M-008, M-068): every row this file inserts is deleted in
  * afterAll, and the org settings it touches are restored.
@@ -20,8 +22,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   agents,
+  aiRisks,
   and,
   auditLog,
+  governanceAlerts,
+  gte,
   connectorCredentials,
   connectors,
   createDb,
@@ -42,7 +47,7 @@ import { buildApp } from "./app.js";
 import { encryptSecret } from "./secrets.js";
 import { hashToken } from "./token-hash.js";
 import { connectorLastUseQuery, virtualKeyLinkQuery } from "./credential-inventory.js";
-import { staleCredentialsInput } from "./governance-monitor.js";
+import { runGovernanceMonitor, staleCredentialsInput } from "./governance-monitor.js";
 import { runCollector } from "./compliance-packs.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -77,6 +82,7 @@ const mkAgent = async (provider: string, model: string) => {
   return a!.id;
 };
 const putFactor = (body: Record<string, unknown>) => call("PUT", "/v1/energy/factors", adminAuth, body);
+let riskId = "";
 const adminAuth = { authorization: "" };
 let orgBefore: { alerts: boolean; unusedDays: number } | null = null;
 
@@ -188,6 +194,7 @@ afterAll(async () => {
   if (agentIds.length) await db.delete(agents).where(inArray(agents.id, agentIds));
   if (ids.project) await db.delete(projects).where(eq(projects.id, ids.project));
   if (ids.project4) await db.delete(projects).where(eq(projects.id, ids.project4));
+  if (riskId) await db.delete(aiRisks).where(eq(aiRisks.id, riskId));
   await call("POST", "/v1/governance/monitor/evaluate", AUTH);
   app.server.closeAllConnections();
   await app.close();
@@ -403,5 +410,57 @@ describe("review fix 7 — PUT /v1/energy/factors is an upsert", () => {
       }
     }
     expect(results.filter((r) => r.statusCode === 201)).toHaveLength(subjects.length);
+  });
+});
+
+describe("review fix 8 — one failing optional monitor input does not stop the other rules", () => {
+  it("leaves stale_credentials unevaluated (open episodes untouched), audits it, and still raises another rule's alert", async () => {
+    await db.update(orgSettings).set({ staleCredentialAlerts: true });
+    await runGovernanceMonitor(db, { actorUserId: ids.admin });
+    const staleOpen = async () =>
+      db
+        .select({ id: governanceAlerts.id, last: governanceAlerts.lastDetectedAt, status: governanceAlerts.status })
+        .from(governanceAlerts)
+        .where(and(eq(governanceAlerts.ruleId, "stale_credentials"), sql`${governanceAlerts.status} <> 'resolved'`));
+    const before = await staleOpen();
+    expect(before.length).toBeGreaterThan(0);
+    // a condition another rule raises, created after the last pass
+    const [risk] = await db
+      .insert(aiRisks)
+      .values({ title: `g175r risk ${RUN}`, description: "s", category: "prompt_injection", ownerUserId: ids.admin, likelihood: "high", impact: "high" })
+      .returning({ id: aiRisks.id });
+    riskId = risk!.id;
+    const since = new Date();
+    const r = await runGovernanceMonitor(db, {
+      actorUserId: ids.admin,
+      now: new Date(Date.now() + 1000),
+      optionalInputs: {
+        credentials: async () => {
+          throw new Error("injected inventory failure");
+        },
+      },
+    });
+    expect(r.notEvaluated).toEqual(["stale_credentials"]);
+    // the stale-credential episodes were neither resolved nor refreshed
+    const after = await staleOpen();
+    expect(after.map((a) => [a.id, a.last.getTime()]).sort()).toEqual(before.map((a) => [a.id, a.last.getTime()]).sort());
+    // another rule ran: the new high risk raised its alert in this same pass
+    const riskAlert = await db
+      .select({ status: governanceAlerts.status })
+      .from(governanceAlerts)
+      .where(and(eq(governanceAlerts.ruleId, "high_risk_without_control"), eq(governanceAlerts.subjectKey, `risk:${riskId}`)));
+    expect(riskAlert.map((a) => a.status)).toEqual(["open"]);
+    const audits = await db
+      .select({ ruleId: auditLog.ruleId, detail: auditLog.detail, effect: auditLog.effect })
+      .from(auditLog)
+      .where(and(eq(auditLog.userId, ids.admin), eq(auditLog.objectType, "governance_monitor"), gte(auditLog.at, since)));
+    expect(audits.find((a) => a.ruleId === "governance-monitor-input-failed")).toMatchObject({
+      effect: "deny",
+      detail: { ruleId: "stale_credentials", input: "credentials", error: "injected inventory failure" },
+    });
+    expect(audits.find((a) => a.ruleId === "governance-monitor-evaluated")?.detail).toMatchObject({ notEvaluated: ["stale_credentials"] });
+    // the next healthy pass evaluates it again
+    await db.update(orgSettings).set({ staleCredentialAlerts: orgBefore!.alerts });
+    expect((await runGovernanceMonitor(db, { actorUserId: ids.admin, now: new Date(Date.now() + 2000) })).notEvaluated).toEqual([]);
   });
 });
