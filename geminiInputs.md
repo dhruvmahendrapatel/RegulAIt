@@ -36,7 +36,19 @@ That targeted scan does not close GEM-nc-1's broader UI coverage gap.
 | GEM-nc-2 | n/a | Heuristic injection/jailbreak detector quality | OPEN | [App II NOT CHECKED] red-team corpus exists (`redteam.test.ts`); no precision/recall for prompt_injection/jailbreak; ADR-0135 covers secrets only | Detection quality unmeasured; needs an eval set | owner |
 | GEM-nc-3 | n/a | SCIM against a real Entra/Okta tenant | OPEN | [App II NOT CHECKED] `scim.ts:109-114` routes exist; no live-tenant test | Needs a real tenant | owner |
 | GEM-nc-4 | n/a | pm-provider outbound adapters | PARTIAL | [App II NOT CHECKED] six providers (AzureDevOps, Jira, Linear, Asana, Monday, GenericWebhook; `pm-provider/src/index.ts:329-1062`); `index.test.ts` (35) | No detailed outbound review; no live-tenant verification | claude (review); owner (tenants) |
-| G8 | n/a | Credo parity checklist refresh | OPEN | [Board §3 G8; `CREDO_PARITY_CHECKLIST_2026-09-30.md`] last change 19819ec (10-02 03:08) predates the 03:13 CHANGES-REQUESTED review; not referenced by any demo doc | All four review points unmet: rows 44-48, 50, 53 still SHIPPED; 51-52 'Missing' although ADR-0140..0145/0161/0162 make them Partial; 'Missing (Roadmap)' rows name no ROADMAP item; no GAIA private-preview note | gemini (rework; owner may reassign to claude) |
+| G8 | n/a | Credo parity checklist refresh | OPEN | [Board §3 G8; `CREDO_PARITY_CHECKLIST_2026-09-30.md`] 10-02 03:08 | Checklist updated; rows 44-48, 50, 53 moved to Partial; 51-52 updated; Missing rows named; GAIA private-preview noted | claude (validate) |
+
+## Agent UX / Ease-of-Use Scan (2026-10-03)
+
+The following feedback was collected from a code scan of the agent administration and builder surfaces (`apps/web/src/views/admin/integrations/AgentsPage.tsx` and `apps/web/src/views/builder/BuilderAgentEditorPage.tsx`):
+
+| ID | Area | Issue / Feedback | Recommendation |
+|---|---|---|---|
+| UX-AG-1 | Fallback Chains | Immediate auto-save on every chain mutation (add, remove, reorder) in `FallbackChainCard` breaks consistency with the explicit "Save" buttons used in all other forms on the page (Register, Pricing, Policy, Prompt). | Add a staging state for the fallback chain with a unified "Save Chain" button, or clearly label the section to indicate immediate application. |
+| UX-AG-2 | Custom Endpoints | If a bound custom endpoint is later disabled, the `RegisterAgentCard` dropdown may silently drop the selected value from the UI because it strictly filters `selectable = providers.filter(p => p.enabled)`. | Include the currently bound endpoint in the dropdown even if disabled (flagged as `(disabled)`), so the user sees the true state and isn't forced to overwrite it accidentally. |
+| UX-AG-3 | Pricing Intent | Using a blank input to mean "unpriced" for custom models is heavily caveated in help text but still prone to user error (users instinctively enter `0` for free/self-hosted models). | Add an explicit "Unpriced / Self-hosted" toggle that disables the number inputs, converting the UX from a negative constraint ("don't invent a number") to a positive choice. |
+| UX-AG-4 | Builder UI | `BuilderAgentEditorPage.tsx` is an empty scaffold (`<PageHeader title="Agent" />`). The entire agent builder experience (ADR-0172) is missing from the codebase. | Prioritize the implementation of ADR-0172; without it, agent creation and editing is heavily skewed toward basic admin catalog forms. |
+| UX-AG-5 | Entitlements | Role-granted agents in `EntitlementCard` lack a direct navigation path to the Role management page to remove the grant. The tooltip merely tells the user to go there manually. | Convert the "granted by role" tooltip into a clickable action or add a direct link to the corresponding Role editor. |
 
 ## Compact resolved / withdrawn register — do not rebuild
 
