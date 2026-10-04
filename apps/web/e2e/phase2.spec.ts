@@ -419,7 +419,8 @@ test("agents: register an agent and save its base system prompt", async () => {
   await nav("Agents", "Agents");
   const reg = page.locator("form", { has: page.getByRole("button", { name: "Register agent" }) });
   await reg.getByLabel("Name").fill("e2e-agent");
-  await reg.getByLabel("Provider").selectOption("mock");
+  // ADR-0172: the provider is a group of logo tiles (native radios) now, not a select
+  await reg.getByRole("group", { name: "Provider" }).getByRole("radio", { name: "Mock" }).check();
   await reg.getByLabel("Tier (0 = cheapest)").fill("0");
   await reg.getByLabel("Model id (blank = not dispatchable)").fill("mock-e2e");
   await page.getByRole("button", { name: "Register agent" }).click();

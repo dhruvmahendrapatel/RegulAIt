@@ -331,7 +331,7 @@ test.describe("ADR-0034 custom LLM providers — the admin surface", () => {
     await page.getByLabel("Filter navigation").fill("Agents");
     await page.getByRole("link", { name: "Agents", exact: true }).click();
     await expect(page.getByRole("heading", { name: "Agents", exact: true })).toBeVisible();
-    await page.getByTestId("agent-provider").selectOption("custom");
+    await page.getByTestId("agent-provider").getByRole("radio", { name: "Custom endpoint" }).check(); // ADR-0172 provider tiles
     const endpoints = page.getByTestId("agent-custom-endpoint");
     await expect(endpoints).toBeVisible();
     await expect(endpoints.locator("option")).toHaveCount(1); // the placeholder only
@@ -369,7 +369,7 @@ test.describe("ADR-0034 custom LLM providers — the admin surface", () => {
     // now — and only now — it can be bound to an agent
     await page.getByLabel("Filter navigation").fill("Agents");
     await page.getByRole("link", { name: "Agents", exact: true }).click();
-    await page.getByTestId("agent-provider").selectOption("custom");
+    await page.getByTestId("agent-provider").getByRole("radio", { name: "Custom endpoint" }).check(); // ADR-0172 provider tiles
     const endpoints = page.getByTestId("agent-custom-endpoint");
     await expect(endpoints.locator("option")).toHaveCount(2);
     await expect(endpoints.locator("option").nth(1)).toContainText(PROVIDER);

@@ -15,7 +15,8 @@ const mono = new Set<string>(monoList as string[]);
 
 export const hasLogo = (key: string | null | undefined): boolean => !!key && byKey.has(key);
 
-const TINTS = ["#2563eb", "#7c3aed", "#0891b2", "#059669", "#d97706", "#db2777", "#4f46e5", "#0d9488"];
+// 700-step tints: white monogram letters hold WCAG AA (4.5:1) on every one
+const TINTS = ["#1d4ed8", "#6d28d9", "#0e7490", "#047857", "#b45309", "#be185d", "#4338ca", "#0f766e"];
 
 export function Logo(props: { name: string | null | undefined; label: string; size?: number; className?: string }) {
   const size = props.size ?? 24;
