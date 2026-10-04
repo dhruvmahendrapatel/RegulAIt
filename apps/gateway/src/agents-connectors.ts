@@ -89,6 +89,7 @@ import {
   setAgentPolicySchema,
   setAgentSystemPromptSchema,
   updateAgentConfigSchema,
+  setExpectedServedModelSchema,
 } from "@regulait/shared";
 import type { PiiHit } from "@regulait/shared";
 import { guardrailWithheldMarker, guardrailCategoryList } from "@regulait/shared";
@@ -2730,9 +2731,44 @@ export function registerAgentConnectorRoutes(
         model: body.model ?? null,
         systemPrompt: body.systemPrompt ?? null,
         customProviderId: body.customProviderId ?? null,
+        expectedServedModel: body.expectedServedModel ?? null,
       })
       .returning();
     return reply.status(201).send(row);
+  });
+
+  // ADR-0175 review fix — the binding's EXPECTED served model. An endpoint
+  // whose configured id is a deployment name reports the model behind it, so
+  // without this every call would read as served-model drift. Not dispatch
+  // config (nothing about the call changes), so not a versioned agent_config
+  // field: its own admin-only route (the global gate), audited with both values.
+  app.put("/v1/agents/:agentId/expected-served-model", async (req, reply) => {
+    const { agentId } = agentIdParam.parse(req.params);
+    const body = setExpectedServedModelSchema.parse(req.body ?? {});
+    const [existing] = await db
+      .select({ id: agents.id, name: agents.name, expected: agents.expectedServedModel })
+      .from(agents)
+      .where(eq(agents.id, agentId));
+    if (!existing) return reply.status(404).send({ error: "unknown_agent" });
+    const [row] = await db
+      .update(agents)
+      .set({ expectedServedModel: body.expectedServedModel })
+      .where(eq(agents.id, agentId))
+      .returning();
+    await db.insert(auditLog).values({
+      userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+      objectType: "agent",
+      objectId: agentId,
+      detail: { phase: "expected-served-model", from: existing.expected, to: body.expectedServedModel },
+      effect: "allow",
+      ruleId: "agent-expected-served-model-set",
+      ruleChain: [],
+      reason:
+        body.expectedServedModel === null
+          ? `expected served model of agent '${existing.name}' cleared — drift is measured against its configured model`
+          : `expected served model of agent '${existing.name}' set to '${body.expectedServedModel}'`,
+    });
+    return reply.send(row);
   });
 
   // B1.5 F2 (LIVE_VERIFICATION_2026-08) — edit an agent's DISPATCH-EXECUTION

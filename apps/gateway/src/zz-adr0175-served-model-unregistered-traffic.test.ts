@@ -37,6 +37,7 @@ import {
   type Db,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { unregisteredTrafficQuery } from "./governance-monitor.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -50,10 +51,10 @@ const DAY = 86_400_000;
 let db: Db;
 let app: ReturnType<typeof buildApp>;
 const admin = { id: "", auth: { authorization: "" } };
-const ids = { swapped: "", aliased: "", pinned: "", silent: "", project: "", useCase: "", vk: randomUUID() };
+const ids = { swapped: "", aliased: "", pinned: "", silent: "", deploy: "", project: "", useCase: "", vk: randomUUID() };
 const usageIds: string[] = [];
 
-const call = (method: "GET" | "POST" | "PATCH", url: string, headers: Record<string, string>, payload?: unknown) =>
+const call = (method: "GET" | "POST" | "PATCH" | "PUT", url: string, headers: Record<string, string>, payload?: unknown) =>
   app.inject({ method, url, headers, ...(payload !== undefined ? { payload: payload as object } : {}) });
 const evaluate = async () => {
   const r = await call("POST", "/v1/governance/monitor/evaluate", admin.auth);
@@ -90,6 +91,8 @@ beforeAll(async () => {
   ids.aliased = await mk("aliased", `g175m-alias-${RUN}`);
   ids.pinned = await mk("pinned", `g175m-pin-${RUN}`);
   ids.silent = await mk("silent", `g175m-silent-${RUN}`);
+  // an endpoint whose configured id is a deployment name, not a model id
+  ids.deploy = await mk("deploy", `g175m-deployment-${RUN}`);
   const p = await call("POST", "/v1/projects", AUTH, { name: `g175m-project-${RUN}` });
   expect(p.statusCode, p.body).toBe(201);
   ids.project = p.json().id;
@@ -100,7 +103,7 @@ afterAll(async () => {
   const own = await db
     .select({ id: usageEvents.id })
     .from(usageEvents)
-    .where(inArray(usageEvents.agentId, [ids.swapped, ids.aliased, ids.pinned, ids.silent]));
+    .where(inArray(usageEvents.agentId, [ids.swapped, ids.aliased, ids.pinned, ids.silent, ids.deploy]));
   const all = [...new Set([...usageIds, ...own.map((r) => r.id)])];
   if (all.length) await db.delete(usageEvents).where(inArray(usageEvents.id, all));
   await db.delete(usageEvents).where(eq(usageEvents.projectId, ids.project));
@@ -293,7 +296,97 @@ describe("ADR-0175 A9 — unregistered_ai_traffic", () => {
 
     // the caller's own projectless calls (from the dispatches above) are one caller subject
     const [caller] = await activeFor("unregistered_ai_traffic", `caller:${admin.id}`);
-    expect(caller!.title).toContain(`Monitor admin ${RUN}:`);
+    // ADR-0175 review fix: a title reaches ChatOps — no display name or email
+    // in it; the name stays in the admin-only detail
+    expect(caller!.title).toContain(`A user (id ${admin.id.slice(0, 8)}):`);
+    expect(caller!.title).not.toContain(`Monitor admin ${RUN}`);
+    expect(caller!.title).not.toContain(`g175m-${RUN}@example.com`);
+    expect(caller!.detail).toMatchObject({ subjectLabel: `Monitor admin ${RUN}` });
     expect(caller!.title).toContain("attributed to no project and on no virtual key");
+  });
+});
+
+describe("ADR-0175 D2 review fixes", () => {
+  it("finding 6: a use case whose approval has lapsed does not cover its project", async () => {
+    // the approved use case from the A9 tests covers the project …
+    await evaluate();
+    expect(await activeFor("unregistered_ai_traffic", `project:${ids.project}`)).toEqual([]);
+    // … until its approval runs out (the use-case gate's rule)
+    await db.update(aiUseCases).set({ approvedAt: new Date(Date.now() - 400 * DAY), approvedUntil: new Date(Date.now() - DAY) }).where(eq(aiUseCases.id, ids.useCase));
+    await evaluate();
+    const [lapsed] = await activeFor("unregistered_ai_traffic", `project:${ids.project}`);
+    expect(lapsed, "a lapsed approval is not coverage").toBeDefined();
+    expect(lapsed!.detail).toMatchObject({
+      linkedUseCasesNotApproved: [{ id: ids.useCase, status: "approved", approvalExpired: true }],
+    });
+    // renewed: covered again
+    await db.update(aiUseCases).set({ approvedAt: new Date(), approvedUntil: new Date(Date.now() + 30 * DAY) }).where(eq(aiUseCases.id, ids.useCase));
+    await evaluate();
+    expect(await activeFor("unregistered_ai_traffic", `project:${ids.project}`)).toEqual([]);
+  });
+
+  it("finding 9: a card pin must be an exact version of the binding's model (422 otherwise)", async () => {
+    const base = { agentId: ids.pinned, intendedUse: `g175m pin rules ${RUN}` };
+    for (const pin of ["latest", `g175m-pin-${RUN}-latest`, `g175m-other-${RUN}-20250101`]) {
+      const r = await call("POST", "/v1/mrm/cards", admin.auth, { ...base, pinnedModelVersion: pin });
+      expect(r.statusCode, `${pin}: ${r.body}`).toBe(422);
+      expect(r.json().error).toBe("pinned_version_invalid");
+    }
+    // positive control: an exact version of the configured model is accepted …
+    const ok = await call("POST", "/v1/mrm/cards", admin.auth, { ...base, pinnedModelVersion: `g175m-pin-${RUN}-20250101` });
+    expect(ok.statusCode, ok.body).toBe(201);
+    // … and an edit to a floating alias is refused too
+    const patched = await call("PATCH", `/v1/mrm/cards/${ok.json().card.id}`, admin.auth, { pinnedModelVersion: "latest" });
+    expect(patched.statusCode, patched.body).toBe(422);
+    await db.delete(modelCards).where(eq(modelCards.id, ok.json().card.id));
+  });
+
+  it("finding 9: a binding's expected served model stops a deployment-named endpoint drifting on every call", async () => {
+    await ledger({ agentId: ids.deploy, requestedAgentId: ids.deploy, model: `g175m-deployment-${RUN}`, servedModel: `g175m-real-${RUN}-20250101` });
+    await evaluate();
+    expect(await activeFor("served_model_drift", `agent:${ids.deploy}`)).toHaveLength(1);
+    const set = await call("PUT", `/v1/agents/${ids.deploy}/expected-served-model`, admin.auth, { expectedServedModel: `g175m-real-${RUN}` });
+    expect(set.statusCode, set.body).toBe(200);
+    expect(set.json().expectedServedModel).toBe(`g175m-real-${RUN}`);
+    await evaluate();
+    expect(await activeFor("served_model_drift", `agent:${ids.deploy}`)).toEqual([]);
+    // a pin is now checked against the expected model, not the deployment name
+    const card = await call("POST", "/v1/mrm/cards", admin.auth, {
+      agentId: ids.deploy,
+      intendedUse: `g175m deploy pin ${RUN}`,
+      pinnedModelVersion: `g175m-real-${RUN}-20250101`,
+    });
+    expect(card.statusCode, card.body).toBe(201);
+    await db.delete(modelCards).where(eq(modelCards.id, card.json().card.id));
+    // the expected model still catches a different model behind the deployment
+    await ledger({ agentId: ids.deploy, requestedAgentId: ids.deploy, model: `g175m-deployment-${RUN}`, servedModel: `g175m-other-${RUN}` });
+    await evaluate();
+    const [alert] = await activeFor("served_model_drift", `agent:${ids.deploy}`);
+    expect(alert!.title).toContain(`instead of its expected g175m-real-${RUN}`);
+    await call("PUT", `/v1/agents/${ids.deploy}/expected-served-model`, admin.auth, { expectedServedModel: null });
+  });
+
+  it("finding 12: the A9 window scan is served by usage_events (object_type, at)", async () => {
+    const q = unregisteredTrafficQuery(db, new Date(Date.now() - 7 * DAY)).toSQL();
+    const client = await db.$client.connect();
+    try {
+      await client.query("begin");
+      // a ledger shaped like a real one (most rows are other kinds of usage:
+      // connector calls, training, cache hits), analysed — all rolled back
+      await client.query(
+        `insert into usage_events (user_id, object_type, at)
+           select $1::uuid, case when g % 50 = 0 then 'agent' else 'connector' end, now() - (g || ' minutes')::interval
+           from generate_series(1, 5000) g`,
+        [admin.id],
+      );
+      await client.query("analyze usage_events");
+      // and with sequential scans priced out, which index the planner reaches for
+      await client.query("set local enable_seqscan = off");
+      const plan = (await client.query(`explain ${q.sql}`, q.params as unknown[])).rows.map((r: Record<string, string>) => r["QUERY PLAN"]).join("\n");
+      expect(plan).toContain("usage_events_object_type_at_idx");
+    } finally {
+      await client.query("rollback");
+      client.release();
+    }
   });
 });

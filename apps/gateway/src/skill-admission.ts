@@ -11,15 +11,25 @@
  *      `skill_admission_refused`, counts-only findings); `held` is stored but
  *      cannot be attached or run until an admin admits it.
  *   2. `skillAttachRefusal` — what attach and re-attach consult: the skill's
- *      verdict and (ADR-0175 A5) its release-age cooldown.
+ *      verdict and (ADR-0175 A5) its release-age cooldown. A row that predates
+ *      the scanner (`unscanned`) is scanned there first (`ensureSkillScanned`),
+ *      and a pinned copy is scanned when a turn first loads it
+ *      (`ensureSnapshotScanned`) — cheap, local and idempotent.
  *   3. `runSkillAdmissionRescan` — the skills part of the ADR-0100 re-scan
  *      sweep. Re-scans every library body AND every pinned attachment body
- *      (the pinned body is what runs). A verdict that becomes held or refused
- *      detaches that body from prompts at run time. Like the MCP sweep it
- *      never re-examines a held row (nothing auto-clears) and never re-holds an
- *      admitted body whose digest has not moved.
+ *      (the pinned body is what runs), least-recently-scanned first so a capped
+ *      pass rotates. A verdict that becomes held or refused detaches that body
+ *      from prompts at run time. Like the MCP sweep it never re-examines a held
+ *      row (nothing auto-clears) and never re-holds an admitted body whose
+ *      digest has not moved — an admission is tied to its digest, so a pinned
+ *      copy admitted at an older digest keeps its admission.
  *   4. The admin review routes: the queue (held, refused, waiting for a
  *      visibility decision), admit-with-reason, and the visibility decision.
+ *
+ * THE DIGEST is sha256 of `skillPromptSection(name, body)` — the exact text
+ * the skill contributes to a prompt — so a rename is a content change (new
+ * digest, new version, re-scanned) and a turn's trace records the digest of the
+ * bytes the model was actually sent.
  *
  * WIDENING VISIBILITY. A non-admin who asks for `workspace` gets a PENDING
  * request (`requested_visibility`) and the skill stays private until an admin
@@ -58,6 +68,7 @@ import {
   nextSkillState,
   scanSkill,
   skillAdmissionRuleIds,
+  skillPromptSection,
   skillFindingCounts,
   skillStateUsable,
   skillVisibilityDecisionSchema,
@@ -72,8 +83,9 @@ import { minReleaseAgeDays, quarantineDetail, recordSighting, skillReleaseStatus
 
 const NIL_USER = "00000000-0000-0000-0000-000000000000";
 
-export function skillDigest(body: string): string {
-  return createHash("sha256").update(body, "utf8").digest("hex");
+/** sha256 of the text the skill puts in a prompt (heading + trimmed body) */
+export function skillDigest(name: string, body: string): string {
+  return createHash("sha256").update(skillPromptSection(name, body), "utf8").digest("hex");
 }
 
 export interface SkillAdmission {
@@ -86,10 +98,10 @@ export interface SkillAdmission {
  * an unchanged held body */
 export function admitSkillText(
   input: { name: string; description: string; body: string },
-  admittedDigest: string | null = null,
+  admittedDigest: string | null | ReadonlyArray<string | null> = null,
 ): SkillAdmission {
   const scan = scanSkill(input);
-  const digest = skillDigest(input.body);
+  const digest = skillDigest(input.name, input.body);
   return { scan, digest, state: nextSkillState({ scan, digest, admittedDigest }) };
 }
 
@@ -156,9 +168,89 @@ export async function auditSkillAdmission(
   });
 }
 
-/** a new body is a new release: record our first sighting of its digest */
-export async function sightSkill(db: Db, digest: string): Promise<void> {
-  await recordSighting(db, "skill", digest);
+/** a new version is a new release: record our first sighting of THIS skill
+ * at this digest (the clock is per skill, never shared across skills) */
+export async function sightSkill(db: Db, skillId: string, digest: string): Promise<void> {
+  await recordSighting(db, "skill", digest, new Date(), skillId);
+}
+
+/**
+ * ADR-0175 review fix — the lazy scan. A library row that predates the scanner
+ * (`unscanned`), or whose stored digest is not the digest of its own text (a
+ * row written straight into the table), is scanned now and the verdict stored.
+ * Conditional on the row being unchanged since it was read, so two callers
+ * racing write one verdict for one text. Returns the row as it now stands.
+ */
+export async function ensureSkillScanned(db: Db, s: BuilderSkillRow): Promise<BuilderSkillRow> {
+  const digest = skillDigest(s.name, s.body);
+  if (s.admissionState !== "unscanned" && s.contentDigest === digest) return s;
+  const a = admitSkillText(s, s.admittedDigest);
+  const [row] = await db
+    .update(builderSkills)
+    .set(admissionColumns(a))
+    .where(and(eq(builderSkills.id, s.id), eq(builderSkills.contentDigest, s.contentDigest), eq(builderSkills.admissionState, s.admissionState)))
+    .returning();
+  if (row) {
+    await auditSkillAdmission(db, { userId: null, skillId: s.id, name: s.name, admission: a, trigger: "rescan", previousState: s.admissionState });
+    return row;
+  }
+  const [now] = await db.select().from(builderSkills).where(eq(builderSkills.id, s.id));
+  return now ?? s;
+}
+
+/**
+ * ADR-0175 review fix — the pinned copy's lazy scan, for the turn that loads
+ * it. The digest is recomputed from the pinned name and body (the bytes that
+ * will be sent); a copy that is `unscanned`, or whose stored digest is not
+ * that, is scanned and stored. An admission carries over only for the digest
+ * it was given (the library row's admitted digest, or the copy's own when it
+ * was admitted at exactly this digest).
+ */
+export async function ensureSnapshotScanned(
+  db: Db,
+  att: {
+    agentId: string;
+    skillId: string;
+    snapshotName: string;
+    bodySnapshot: string;
+    snapshotDigest: string;
+    snapshotAdmissionState: string;
+  },
+  skill: { description: string; admittedDigest: string | null },
+): Promise<{ digest: string; state: SkillAdmissionState }> {
+  const digest = skillDigest(att.snapshotName, att.bodySnapshot);
+  if (att.snapshotAdmissionState !== "unscanned" && att.snapshotDigest === digest) {
+    return { digest, state: att.snapshotAdmissionState as SkillAdmissionState };
+  }
+  const a = admitSkillText(
+    { name: att.snapshotName, description: skill.description, body: att.bodySnapshot },
+    [skill.admittedDigest, att.snapshotAdmissionState === "admitted" ? att.snapshotDigest : null],
+  );
+  await db
+    .update(builderAgentSkills)
+    .set({ snapshotAdmissionState: a.state, snapshotDigest: a.digest, snapshotScannedAt: new Date() })
+    .where(
+      and(
+        eq(builderAgentSkills.agentId, att.agentId),
+        eq(builderAgentSkills.skillId, att.skillId),
+        eq(builderAgentSkills.snapshotDigest, att.snapshotDigest),
+      ),
+    );
+  if (a.state === "held" || a.state === "refused") {
+    await db.insert(auditLog).values({
+      userId: NIL_USER,
+      objectType: "builder_agent",
+      objectId: att.agentId,
+      detail: { phase: "skill-admission", trigger: "load", skillId: att.skillId, admissionState: a.state, digest: a.digest, findings: skillFindingCounts(a.scan.findings) },
+      effect: "deny",
+      ruleId: "builder-agent-skill-withheld",
+      ruleChain: [],
+      reason:
+        `the pinned copy of skill '${att.snapshotName}' on this agent had not been scanned; it scans ${a.state} ` +
+        `(${admissionFindingSummary(a.scan.findings)}) and is kept out of the agent's prompt until admitted or replaced.`,
+    });
+  }
+  return { digest: a.digest, state: a.state };
 }
 
 /**
@@ -167,7 +259,9 @@ export async function sightSkill(db: Db, digest: string): Promise<void> {
  * `…/reattach`. A held or refused verdict blocks; so does the release-age
  * cooldown on the body that would be pinned.
  */
-export async function skillAttachRefusal(db: Db, s: BuilderSkillRow): Promise<Record<string, unknown> | null> {
+export async function skillAttachRefusal(db: Db, row: BuilderSkillRow): Promise<Record<string, unknown> | null> {
+  // a row that predates the scanner is scanned now, before it is pinned
+  const s = await ensureSkillScanned(db, row);
   if (!skillStateUsable(s.admissionState)) {
     return {
       error: s.admissionState === "refused" ? "skill_refused" : "skill_held",
@@ -193,16 +287,21 @@ export async function skillAttachRefusal(db: Db, s: BuilderSkillRow): Promise<Re
   return null;
 }
 
-/** an attachment row's pinned fields, taken from the skill as it is now */
+/** an attachment row's pinned fields, taken from the skill as it is now: its
+ * NAME and body (the prompt section), that text's digest, version and verdict */
 export function pinnedFrom(agentId: string, s: BuilderSkillRow) {
+  const digest = skillDigest(s.name, s.body);
   return {
     agentId,
     skillId: s.id,
+    snapshotName: s.name,
     bodySnapshot: s.body,
     skillUpdatedAt: s.updatedAt,
-    snapshotDigest: s.contentDigest || skillDigest(s.body),
+    snapshotDigest: digest,
     snapshotVersion: s.version,
-    snapshotAdmissionState: s.admissionState,
+    // a stored verdict for other text never travels: the copy is scanned on load
+    snapshotAdmissionState: s.contentDigest === digest ? s.admissionState : ("unscanned" as const),
+    snapshotScannedAt: s.contentDigest === digest ? s.admissionScannedAt : null,
   };
 }
 
@@ -255,7 +354,11 @@ export async function runSkillAdmissionRescan(db: Db, opts: { limit?: number } =
   for (const s of rows) {
     out.examined++;
     const a = admitSkillText(s, s.admittedDigest);
-    await db.update(builderSkills).set(admissionColumns(a)).where(eq(builderSkills.id, s.id));
+    // conditional on the text this verdict is for (a concurrent edit wins)
+    await db
+      .update(builderSkills)
+      .set(admissionColumns(a))
+      .where(and(eq(builderSkills.id, s.id), eq(builderSkills.name, s.name), eq(builderSkills.body, s.body)));
     if (a.state === "held" || a.state === "refused") {
       if (a.state === "held") out.held++;
       else out.refused++;
@@ -266,12 +369,17 @@ export async function runSkillAdmissionRescan(db: Db, opts: { limit?: number } =
     }
   }
 
-  // the PINNED bodies: what agents actually run
+  // the PINNED copies: what agents actually run. Least-recently-scanned
+  // first, and every examined copy is stamped, so a pass capped at
+  // `limit * 4` rotates through the whole table instead of re-reading the
+  // same rows every time.
   const atts = await db
     .select({
       agentId: builderAgentSkills.agentId,
       skillId: builderAgentSkills.skillId,
       body: builderAgentSkills.bodySnapshot,
+      snapshotName: builderAgentSkills.snapshotName,
+      snapshotDigest: builderAgentSkills.snapshotDigest,
       state: builderAgentSkills.snapshotAdmissionState,
       name: builderSkills.name,
       description: builderSkills.description,
@@ -280,16 +388,31 @@ export async function runSkillAdmissionRescan(db: Db, opts: { limit?: number } =
     .from(builderAgentSkills)
     .innerJoin(builderSkills, eq(builderAgentSkills.skillId, builderSkills.id))
     .where(inArray(builderAgentSkills.snapshotAdmissionState, RESCAN_ELIGIBLE))
+    .orderBy(
+      sql`${builderAgentSkills.snapshotScannedAt} asc nulls first`,
+      asc(builderAgentSkills.agentId),
+      asc(builderAgentSkills.skillId),
+    )
     .limit(limit * 4);
   for (const att of atts) {
     out.snapshotsExamined++;
-    const a = admitSkillText({ name: att.name, description: att.description, body: att.body }, att.admittedDigest);
-    if (a.state !== att.state || att.state === "unscanned") {
-      await db
-        .update(builderAgentSkills)
-        .set({ snapshotAdmissionState: a.state, snapshotDigest: a.digest })
-        .where(and(eq(builderAgentSkills.agentId, att.agentId), eq(builderAgentSkills.skillId, att.skillId)));
-    }
+    const pinnedName = att.snapshotName || att.name;
+    // an admission is tied to its digest: the library row's admitted digest,
+    // or this copy's own when it was admitted at exactly the digest it holds
+    const a = admitSkillText(
+      { name: pinnedName, description: att.description, body: att.body },
+      [att.admittedDigest, att.state === "admitted" ? att.snapshotDigest : null],
+    );
+    await db
+      .update(builderAgentSkills)
+      .set({ snapshotAdmissionState: a.state, snapshotDigest: a.digest, snapshotScannedAt: new Date() })
+      .where(
+        and(
+          eq(builderAgentSkills.agentId, att.agentId),
+          eq(builderAgentSkills.skillId, att.skillId),
+          eq(builderAgentSkills.bodySnapshot, att.body),
+        ),
+      );
     if (a.state === "held" || a.state === "refused") {
       out.snapshotsWithheld++;
       await db.insert(auditLog).values({
@@ -308,7 +431,7 @@ export async function runSkillAdmissionRescan(db: Db, opts: { limit?: number } =
         ruleId: "builder-agent-skill-withheld",
         ruleChain: [],
         reason:
-          `the pinned body of skill '${att.name}' on this agent now scans ${a.state} ` +
+          `the pinned copy of skill '${pinnedName}' on this agent now scans ${a.state} ` +
           `(${admissionFindingSummary(a.scan.findings)}); it is detached from the agent's prompt until admitted or replaced.`,
       });
     }
@@ -357,12 +480,20 @@ export function registerSkillAdmissionRoutes(app: FastifyInstance, db: Db) {
     };
   });
 
-  /** ADMIT a held skill: reason required, audited, pinned to the digest admitted */
+  /** ADMIT a held skill: reason required, audited, pinned to the digest the
+   * admin was SHOWN (sent back in the body; a skill that changed since is 409) */
   app.post("/v1/admission/skills/:id/admit", async (req, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
     const body = admitSkillSchema.parse(req.body ?? {});
     const [s] = await db.select().from(builderSkills).where(eq(builderSkills.id, id));
     if (!s || s.archivedAt) return reply.status(404).send({ error: "unknown_skill" });
+    const changed = {
+      error: "skill_changed",
+      detail:
+        `skill '${s.name}' is no longer the content you reviewed (digest ${body.digest.slice(0, 16)}; it is now ` +
+        `${s.contentDigest.slice(0, 16)}, v${s.version}). Reload the queue and review the current content.`,
+    };
+    if (s.contentDigest !== body.digest) return reply.status(409).send(changed);
     if (s.admissionState !== "held") {
       return reply.status(409).send({
         error: "not_held",
@@ -378,11 +509,14 @@ export function registerSkillAdmissionRoutes(app: FastifyInstance, db: Db) {
         admittedBy: req.authCtx.userId ?? null,
         admittedAt: new Date(),
         admitReason: body.reason,
-        admittedDigest: s.contentDigest,
+        admittedDigest: body.digest,
       })
-      .where(and(eq(builderSkills.id, id), eq(builderSkills.admissionState, "held")))
+      .where(and(eq(builderSkills.id, id), eq(builderSkills.admissionState, "held"), eq(builderSkills.contentDigest, body.digest)))
       .returning();
-    if (!row) return reply.status(409).send({ error: "not_held" });
+    if (!row) {
+      const [now] = await db.select({ d: builderSkills.contentDigest }).from(builderSkills).where(eq(builderSkills.id, id));
+      return reply.status(409).send(now && now.d !== body.digest ? changed : { error: "not_held" });
+    }
     // attachments pinned to this exact body are admitted with it
     await db
       .update(builderAgentSkills)

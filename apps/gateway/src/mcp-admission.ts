@@ -72,6 +72,7 @@ import { z } from "zod";
 import { loadOrgSettings } from "./org-settings.js";
 import {
   carryRegistrationOverride,
+  firstSighting,
   quarantineDetail,
   recordSighting,
   registerReleaseAgeRoutes,
@@ -160,8 +161,14 @@ async function assertReleaseAged(db: Db, serverId: string, minDays: number): Pro
  * cooldown is on, so `0` stays byte-identical.
  *
  *  - same digest as recorded: nothing changes;
- *  - FIRST manifest of a server: it is the release that was registered, so it
- *    keeps the registration's age (otherwise every new server would wait twice);
+ *  - FIRST manifest of a server: its age is the LATER of the registration's
+ *    (or, for a registry import, the entry's) and that manifest's own first
+ *    sighting. A manifest nobody had seen before counts as seen when the
+ *    server was registered: the registration and its first manifest are one
+ *    sighting, so an ordinary new server waits once, not twice. What this
+ *    closes is the import of a registry entry the sweep saw long ago whose
+ *    upstream now serves a manifest we have never seen — that manifest is new
+ *    and waits from the import;
  *  - a CHANGED manifest: a new release, aged from the first time this
  *    deployment saw that exact digest (anywhere), and audited.
  */
@@ -179,15 +186,20 @@ async function observeRelease(
       admissionState: mcpServers.admissionState,
       releaseDigest: mcpServers.releaseDigest,
       releaseSeenAt: mcpServers.releaseSeenAt,
+      createdAt: mcpServers.createdAt,
     })
     .from(mcpServers)
     .where(eq(mcpServers.id, serverId));
   if (!row) return null;
   let next = row;
   if (row.releaseDigest === null) {
+    const before = await firstSighting(db, "mcp_manifest", digest);
     await recordSighting(db, "mcp_manifest", digest);
-    await db.update(mcpServers).set({ releaseDigest: digest }).where(eq(mcpServers.id, serverId));
-    next = { ...row, releaseDigest: digest };
+    // a never-seen manifest is one sighting with the registration
+    const manifestSeen = before ?? row.createdAt;
+    const releaseSeenAt = manifestSeen.getTime() > row.releaseSeenAt.getTime() ? manifestSeen : row.releaseSeenAt;
+    await db.update(mcpServers).set({ releaseDigest: digest, releaseSeenAt }).where(eq(mcpServers.id, serverId));
+    next = { ...row, releaseDigest: digest, releaseSeenAt };
     // an admin's override of the registered release covers its first manifest
     // (the same release, now with a digest); a later change is not covered
     await carryRegistrationOverride(db, serverId, digest);

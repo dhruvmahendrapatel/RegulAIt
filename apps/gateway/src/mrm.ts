@@ -81,6 +81,34 @@ import {
 } from "@regulait/shared";
 import { loadOrgSettings } from "./org-settings.js";
 import { summarizeGroundedness } from "./evals.js";
+import { pinnedVersionProblem } from "@regulait/shared";
+
+/**
+ * ADR-0175 review fix — a card's pinned version must be an exact version of
+ * the model its agent binding is configured for (the binding's expected
+ * served model when one is set), never a floating alias: a pin decides what
+ * `served_model_drift` reports at HIGH severity, and an open high alert holds
+ * the deploy gate. null = acceptable, else the 422 body.
+ */
+async function pinRefusal(
+  db: Db,
+  agentId: string | null,
+  pin: string | null | undefined,
+): Promise<{ error: string; detail: string } | null> {
+  if (pin === undefined || pin === null) return null;
+  if (!agentId) {
+    return {
+      error: "pinned_version_needs_agent",
+      detail: "a pinned model version applies to a card on an agent binding; this card has none to compare it with",
+    };
+  }
+  const [a] = await db
+    .select({ model: agents.model, expected: agents.expectedServedModel })
+    .from(agents)
+    .where(eq(agents.id, agentId));
+  const problem = pinnedVersionProblem(pin, a?.expected ?? a?.model ?? null);
+  return problem ? { error: "pinned_version_invalid", detail: problem } : null;
+}
 import { installPresentationScrub } from "./conversation-presentation.js";
 import {
   computeCardAutofill,
@@ -643,6 +671,8 @@ export function registerMrmRoutes(app: FastifyInstance, db: Db) {
           .where(eq(customModelProviders.id, body.customProviderId));
         if (!p) return reply.status(404).send({ error: "unknown_custom_provider" });
       }
+      const badPin = await pinRefusal(db, body.agentId ?? null, body.pinnedModelVersion);
+      if (badPin) return reply.status(422).send(badPin);
       const [existing] = await db
         .select({ id: modelCards.id })
         .from(modelCards)
@@ -701,6 +731,8 @@ export function registerMrmRoutes(app: FastifyInstance, db: Db) {
       const body = updateModelCardSchema.parse(req.body);
       const [row] = await db.select().from(modelCards).where(eq(modelCards.id, id));
       if (!row) return reply.status(404).send({ error: "unknown_model_card" });
+      const badPin = await pinRefusal(db, row.agentId, body.pinnedModelVersion);
+      if (badPin) return reply.status(422).send(badPin);
       const [updated] = await db
         .update(modelCards)
         .set({

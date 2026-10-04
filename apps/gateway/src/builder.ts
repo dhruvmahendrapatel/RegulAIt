@@ -127,14 +127,23 @@ import {
   admissionColumns,
   admitSkillText,
   auditSkillAdmission,
+  ensureSkillScanned,
   pinnedBodyWithheld,
   pinnedFrom,
   sightSkill,
   skillAttachRefusal,
+  skillDigest,
   skillRefusalBody,
 } from "./skill-admission.js";
 import { minReleaseAgeDays, skillReleaseStatus } from "./release-age.js";
-import type { McpAdmissionFinding } from "@regulait/shared";
+import { skillNameProblem, type McpAdmissionFinding } from "@regulait/shared";
+
+/** ADR-0175 review fix: a skill name is a prompt heading — no line breaks,
+ * control or invisible formatting characters (422 `skill_name_invalid`) */
+function skillNameRefusal(name: string): { error: string; detail: string } | null {
+  const problem = skillNameProblem(name);
+  return problem ? { error: "skill_name_invalid", detail: problem } : null;
+}
 
 export interface BuilderRouteOptions {
   dataKey?: string | undefined;
@@ -375,6 +384,7 @@ async function agentDetail(db: Db, agent: BuilderAgentRow, viewer: Viewer) {
         skill: builderSkills,
         skillUpdatedAt: builderAgentSkills.skillUpdatedAt,
         skillId: builderAgentSkills.skillId,
+        snapshotName: builderAgentSkills.snapshotName,
         snapshotDigest: builderAgentSkills.snapshotDigest,
         snapshotVersion: builderAgentSkills.snapshotVersion,
         snapshotAdmissionState: builderAgentSkills.snapshotAdmissionState,
@@ -452,9 +462,22 @@ async function agentDetail(db: Db, agent: BuilderAgentRow, viewer: Viewer) {
     skills: skills.map((k, i) => ({
       id: k.skill.id,
       name: k.skill.name,
+      /** the name the agent runs with (pinned with the body; a rename is a new
+       * version taken by re-attach) */
+      pinnedName: k.snapshotName || k.skill.name,
       description: k.skill.description,
-      /** the library copy changed since this agent pinned it: re-attach to take it */
-      updateAvailable: k.skill.updatedAt.getTime() > k.skillUpdatedAt.getTime(),
+      /** the library copy's prompt text (name or body) changed since this agent
+       * pinned it: re-attach to take it */
+      updateAvailable: k.snapshotDigest
+        ? k.skill.contentDigest !== "" && k.skill.contentDigest !== k.snapshotDigest
+        : k.skill.updatedAt.getTime() > k.skillUpdatedAt.getTime(),
+      /** ADR-0175 review fix: a skill private to its owner on an agent shared
+       * beyond its owner — it runs only in its owner's (and admins') turns;
+       * everyone else's turns run without it until it is approved for the
+       * workspace */
+      ...(k.skill.visibility === "private" && agent.sharing !== "private"
+        ? { withheldFromOthers: true, visibilityRequested: k.skill.requestedVisibility === "workspace" }
+        : {}),
       /** the owner can no longer see it (made private by its author), or its
        * pinned body is withheld: it is left out of the agent's prompt */
       unavailable: !skillVisible(k.skill, ownerViewer) || withheld[i] !== null,
@@ -570,7 +593,7 @@ async function ensureSkill(
     .insert(builderSkills)
     .values({ name: s.name, description: s.description, body: s.body, visibility: "private", ownerUserId, ...admissionColumns(admission) })
     .returning();
-  await sightSkill(db, admission.digest);
+  await sightSkill(db, row!.id, admission.digest);
   await auditSkillAdmission(db, { userId: ownerUserId, skillId: row!.id, name: s.name, admission, trigger });
   return row!;
 }
@@ -956,7 +979,10 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     // ADR-0175: a NEWLY attached skill must be admitted and past the cooldown
     for (const id of ids) {
       if (kept.has(id)) continue;
-      const refusal = await skillAttachRefusal(db, rows.find((r) => r.id === id)!);
+      // a row that predates the scanner is scanned before it can be pinned
+      const i = rows.findIndex((r) => r.id === id);
+      rows[i] = await ensureSkillScanned(db, rows[i]!);
+      const refusal = await skillAttachRefusal(db, rows[i]!);
       if (refusal) {
         await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-skill-attach-refused",
           `skill not attached to '${agent.name}': ${String(refusal.detail)}`, { skillId: id, error: refusal.error }, "deny");
@@ -968,7 +994,7 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
       return k ? { ...k, agentId: agent.id, skillId: id } : pinned(agent.id, rows.find((r) => r.id === id)!);
     });
     const tooLarge = promptTooLarge(
-      configuredPrompt(agent, next.map((n) => ({ name: rows.find((r) => r.id === n.skillId)!.name, body: n.bodySnapshot }))),
+      configuredPrompt(agent, next.map((n) => ({ name: n.snapshotName || rows.find((r) => r.id === n.skillId)!.name, body: n.bodySnapshot }))),
     );
     if (tooLarge) return reply.status(422).send(tooLarge);
     await db.transaction(async (tx) => {
@@ -992,8 +1018,10 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
       .select()
       .from(builderAgentSkills)
       .where(and(eq(builderAgentSkills.agentId, agent.id), eq(builderAgentSkills.skillId, skillId)));
-    const [skill] = link ? await db.select().from(builderSkills).where(eq(builderSkills.id, skillId)) : [];
-    if (!link || !skill || !skillVisible(skill, viewer)) return reply.status(404).send({ error: "unknown_skill", skillId });
+    const [found] = link ? await db.select().from(builderSkills).where(eq(builderSkills.id, skillId)) : [];
+    if (!link || !found || !skillVisible(found, viewer)) return reply.status(404).send({ error: "unknown_skill", skillId });
+    // a row that predates the scanner is scanned before it can be pinned
+    const skill = await ensureSkillScanned(db, found);
     // ADR-0175: a held source skill (or a version still in cooldown) is not
     // taken; the agent keeps running the body it already pinned
     const refusal = await skillAttachRefusal(db, skill);
@@ -1018,8 +1046,10 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
         to: skill.updatedAt.toISOString(),
         fromVersion: link.snapshotVersion,
         toVersion: skill.version,
+        fromName: link.snapshotName,
+        toName: skill.name,
         fromDigest: link.snapshotDigest,
-        toDigest: skill.contentDigest,
+        toDigest: skillDigest(skill.name, skill.body),
       });
     return { agent: await agentDetail(db, (await loadVisibleAgent(db, agent.id, viewer))!, viewer) };
   });
@@ -1359,6 +1389,8 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     // ADR-0175 A6: a bundle's skill bodies are scanned before anything is
     // created; one refused body refuses the whole import
     for (const sk of importedSkills) {
+      const badName = skillNameRefusal(sk.name);
+      if (badName) return reply.status(422).send(badName);
       const admission = admitSkillText(sk);
       if (admission.state === "refused") {
         await auditSkillAdmission(db, { userId: viewer.userId, skillId: null, name: sk.name, admission, trigger: "bundle" });
@@ -1712,6 +1744,8 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     ruleId: string,
     trigger: "create" | "import",
   ): Promise<{ ok: true; skill: Record<string, unknown> } | { ok: false; status: number; body: Record<string, unknown> }> => {
+    const badName = skillNameRefusal(s.name);
+    if (badName) return { ok: false, status: 422, body: badName };
     // ADR-0175 A6 — scan before anything is stored
     const admission = admitSkillText(s);
     if (admission.state === "refused") {
@@ -1723,7 +1757,7 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
       .insert(builderSkills)
       .values({ ...s, ...vis, ownerUserId: viewer.userId, version: 1, ...admissionColumns(admission) })
       .returning();
-    await sightSkill(db, admission.digest);
+    await sightSkill(db, row!.id, admission.digest);
     await audit(db, viewer.userId, "builder_skill", row!.id, ruleId, `skill '${row!.name}' added to the library (${row!.visibility})`, {
       visibility: row!.visibility,
       requestedVisibility: row!.requestedVisibility,
@@ -1781,24 +1815,33 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     const body = builderUpdateSkillSchema.parse(req.body ?? {});
     const s = await visibleSkill(req, reply, viewer, true);
     if (!s) return;
+    if (body.name !== undefined) {
+      const badName = skillNameRefusal(body.name);
+      if (badName) return reply.status(422).send(badName);
+    }
     const set: Partial<typeof builderSkills.$inferInsert> = { updatedAt: new Date() };
     for (const k of ["name", "description", "body"] as const) {
       if (body[k] !== undefined) (set as Record<string, unknown>)[k] = body[k];
     }
-    // ADR-0175 A6 — any change to scanned text is re-scanned; a body change is
-    // a new version with a new digest (and, under A5, a new release)
-    const bodyChanged = body.body !== undefined && body.body !== s.body;
-    const textChanged = bodyChanged || (body.name !== undefined && body.name !== s.name) || (body.description !== undefined && body.description !== s.description);
+    // ADR-0175 A6 — any change to scanned text is re-scanned. The NAME and the
+    // body are the prompt text (`skillPromptSection`): a change to either is a
+    // new version with a new digest (and, under A5, a new release), and the
+    // agents that pinned the old text see "update available". A description
+    // is scanned text too, but not prompt text: no new version.
+    const next = { name: body.name ?? s.name, description: body.description ?? s.description, body: body.body ?? s.body };
+    const promptChanged = next.name !== s.name || next.body !== s.body;
+    const textChanged = promptChanged || next.description !== s.description;
     let admission: ReturnType<typeof admitSkillText> | null = null;
-    if (textChanged || s.admissionState === "unscanned") {
-      const next = { name: body.name ?? s.name, description: body.description ?? s.description, body: body.body ?? s.body };
+    if (textChanged) {
       admission = admitSkillText(next, s.admittedDigest);
       if (admission.state === "refused") {
         await auditSkillAdmission(db, { userId: viewer.userId, skillId: s.id, name: next.name, admission, trigger: "update", previousState: s.admissionState });
         return reply.status(422).send(skillRefusalBody(next.name, admission.scan));
       }
+      // the digest is of exactly the name and body this update stores (the
+      // update below is conditional on nothing else having changed them)
       Object.assign(set, admissionColumns(admission));
-      if (bodyChanged) set.version = s.version + 1;
+      if (promptChanged) set.version = s.version + 1;
     }
     // ADR-0175 — visibility: narrowing applies (and withdraws any request);
     // a non-admin's widening becomes a request for an admin
@@ -1811,20 +1854,42 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
         requested = vis.requestedVisibility !== null;
       }
     }
-    const [row] = await db.update(builderSkills).set(set).where(eq(builderSkills.id, s.id)).returning();
-    if (admission && bodyChanged) await sightSkill(db, admission.digest);
-    await audit(db, viewer.userId, "builder_skill", s.id, "builder-skill-updated",
-      `skill '${row!.name}' updated (${Object.keys(body).join(", ")})`, {
-        fields: Object.keys(body),
-        version: row!.version,
-        digest: row!.contentDigest,
-        ...(bodyChanged ? { fromVersion: s.version, fromDigest: s.contentDigest } : {}),
-        admissionState: row!.admissionState,
+    // ADR-0175 review fix — OPTIMISTIC CONCURRENCY. The verdict and digest
+    // above are for the row as it was read; the write lands only if the row
+    // still has that digest and that updated_at (to the millisecond a JS Date
+    // carries). Otherwise a concurrent save has moved it and this one would
+    // store a verdict for text it never scanned: 409, nothing written.
+    const [row] = await db
+      .update(builderSkills)
+      .set(set)
+      .where(
+        and(
+          eq(builderSkills.id, s.id),
+          eq(builderSkills.contentDigest, s.contentDigest),
+          sql`abs(extract(epoch from (${builderSkills.updatedAt} - ${s.updatedAt.toISOString()}::timestamptz))) < 0.001`,
+        ),
+      )
+      .returning();
+    if (!row) {
+      return reply.status(409).send({
+        error: "skill_changed_concurrently",
+        detail: `skill '${s.name}' was changed by another save while this one was being checked; reload it and try again`,
       });
-    if (admission) await auditSkillAdmission(db, { userId: viewer.userId, skillId: s.id, name: row!.name, admission, trigger: "update", previousState: s.admissionState });
+    }
+    if (admission && promptChanged) await sightSkill(db, s.id, admission.digest);
+    await audit(db, viewer.userId, "builder_skill", s.id, "builder-skill-updated",
+      `skill '${row.name}' updated (${Object.keys(body).join(", ")})`, {
+        fields: Object.keys(body),
+        version: row.version,
+        digest: row.contentDigest,
+        ...(promptChanged ? { fromVersion: s.version, fromDigest: s.contentDigest } : {}),
+        ...(next.name !== s.name ? { renamedFrom: s.name } : {}),
+        admissionState: row.admissionState,
+      });
+    if (admission) await auditSkillAdmission(db, { userId: viewer.userId, skillId: s.id, name: row.name, admission, trigger: "update", previousState: s.admissionState });
     if (requested) {
       await audit(db, viewer.userId, "builder_skill", s.id, "builder-skill-visibility-requested",
-        `widening skill '${row!.name}' to workspace is waiting for an admin`, { requested: "workspace" });
+        `widening skill '${row.name}' to workspace is waiting for an admin`, { requested: "workspace" });
     }
     const [view] = await skillView([row!], viewer);
     return { skill: { ...view!, body: row!.body } };

@@ -78,11 +78,11 @@ import {
   type Db,
 } from "@regulait/db";
 import type { ModelChatMessage, ModelContentBlock } from "@regulait/model-provider";
-import { BUILDER_LIMITS, nextScheduleRun, type BuilderCadenceValue } from "@regulait/shared";
+import { BUILDER_LIMITS, nextScheduleRun, skillPromptSection, type BuilderCadenceValue } from "@regulait/shared";
 import { executeGovernedDispatch, type AgentRow } from "./agents-connectors.js";
 import { agentDecision } from "./copilot.js";
 import { BUILDER_MODEL_FEATURE, loadVisibleAgent, skillVisible } from "./builder-access.js";
-import { pinnedBodyWithheld } from "./skill-admission.js";
+import { ensureSkillScanned, ensureSnapshotScanned, pinnedBodyWithheld } from "./skill-admission.js";
 import { minReleaseAgeDays } from "./release-age.js";
 import { MODEL_NOT_ALLOWED_FOR_FEATURE } from "./model-policy.js";
 import {
@@ -176,42 +176,62 @@ export async function threadSteps(db: Db, threadId: string): Promise<BuilderTool
 }
 
 /**
- * The skills an agent carries AT RUN TIME: the body PINNED when it was attached
- * (so an edit by the skill's owner never silently changes this agent), and only
- * skills the agent's OWNER can still see — a shared skill its author has since
- * made private, or archived, drops out instead of travelling on in a snapshot.
+ * The skills an agent carries AT RUN TIME: the NAME and body PINNED when it was
+ * attached (so an edit or rename by the skill's owner never silently changes
+ * this agent), and only skills the agent's OWNER can still see — a shared
+ * skill its author has since made private, or archived, drops out instead of
+ * travelling on in a snapshot.
  */
 export interface RunSkill {
   skillId: string;
   name: string;
   body: string;
-  /** ADR-0175 A6: the pinned body's version and sha256 digest — recorded on
-   * every builder turn that carried it */
+  /** ADR-0175 A6: the pinned copy's version and the sha256 digest of the
+   * exact section sent to the model — recorded on every builder turn */
   version: number;
   digest: string;
 }
 
+/** why a pinned skill is kept out of a turn */
+export type SkillWithheldReason = "held" | "refused" | "quarantined" | "private_skill";
+export interface WithheldSkill {
+  skillId: string;
+  reason: SkillWithheldReason;
+  digest: string;
+}
+
+/** the owner's view of the pinned set (size checks on the edit routes) */
 export async function pinnedSkillsForRun(db: Db, agent: BuilderAgentRow): Promise<RunSkill[]> {
   return (await skillsForRun(db, agent)).skills;
 }
 
 /**
- * The run-time skill set, plus what was WITHHELD and why. ADR-0175: a pinned
- * body whose scan is held or refused (at attach, or later by the ADR-0100
- * re-scan sweep), or that is still inside the release-age cooldown, is
- * detached from the prompt at run time — re-checked on every model step, never
- * cached.
+ * The run-time skill set, plus what was WITHHELD and why. Re-checked on every
+ * model step, never cached:
+ *  - ADR-0175: a pinned copy whose scan is held or refused (at attach, on the
+ *    first load of a copy that predates the scanner, or later by the ADR-0100
+ *    re-scan sweep), or that is still inside the release-age cooldown;
+ *  - ADR-0175 review fix: a skill that is PRIVATE to its owner reaches only
+ *    turns run by someone who may open it (its owner, or an admin). Sharing an
+ *    agent never widens a private skill's audience: the agent still runs for
+ *    the people it is shared with, without that skill, until the skill is
+ *    approved for the workspace (an admin approves a non-admin's request).
+ *    `runUserId` omitted = the owner's own view.
  */
 export async function skillsForRun(
   db: Db,
   agent: BuilderAgentRow,
-): Promise<{ skills: RunSkill[]; withheld: Array<{ skillId: string; reason: string; digest: string }> }> {
-  const [rows, [owner]] = await Promise.all([
+  runUserId: string = agent.ownerUserId,
+): Promise<{ skills: RunSkill[]; withheld: WithheldSkill[] }> {
+  const people = [...new Set([agent.ownerUserId, runUserId])];
+  const [rows, admins] = await Promise.all([
     db
       .select({
         skill: builderSkills,
         body: builderAgentSkills.bodySnapshot,
+        agentId: builderAgentSkills.agentId,
         skillId: builderAgentSkills.skillId,
+        snapshotName: builderAgentSkills.snapshotName,
         snapshotDigest: builderAgentSkills.snapshotDigest,
         snapshotVersion: builderAgentSkills.snapshotVersion,
         snapshotAdmissionState: builderAgentSkills.snapshotAdmissionState,
@@ -220,17 +240,33 @@ export async function skillsForRun(
       .innerJoin(builderSkills, eq(builderAgentSkills.skillId, builderSkills.id))
       .where(eq(builderAgentSkills.agentId, agent.id))
       .orderBy(asc(builderSkills.name)),
-    db.select({ isAdmin: users.isAdmin }).from(users).where(eq(users.id, agent.ownerUserId)),
+    db.select({ id: users.id, isAdmin: users.isAdmin }).from(users).where(inArray(users.id, people)),
   ]);
-  const ownerViewer = { userId: agent.ownerUserId, isAdmin: !!owner?.isAdmin };
+  const isAdmin = (id: string) => !!admins.find((u) => u.id === id)?.isAdmin;
+  const ownerViewer = { userId: agent.ownerUserId, isAdmin: isAdmin(agent.ownerUserId) };
+  const runViewer = { userId: runUserId, isAdmin: isAdmin(runUserId) };
   const visible = rows.filter((r) => skillVisible(r.skill, ownerViewer));
   const minDays = visible.length ? await minReleaseAgeDays(db) : 0;
   const skills: RunSkill[] = [];
-  const withheld: Array<{ skillId: string; reason: string; digest: string }> = [];
+  const withheld: WithheldSkill[] = [];
   for (const r of visible) {
-    const why = await pinnedBodyWithheld(db, r, minDays);
-    if (why) withheld.push({ skillId: r.skill.id, reason: why, digest: r.snapshotDigest });
-    else skills.push({ skillId: r.skill.id, name: r.skill.name, body: r.body, version: r.snapshotVersion, digest: r.snapshotDigest });
+    // the pinned NAME is the prompt heading (a pre-0140 copy falls back to the
+    // library name it was backfilled from)
+    const name = r.snapshotName || r.skill.name;
+    // lazy scan (ADR-0175 review fix): a library row or pinned copy that
+    // predates the scanner is scanned now and the verdict stored
+    if (r.skill.admissionState === "unscanned") await ensureSkillScanned(db, r.skill);
+    const scanned = await ensureSnapshotScanned(
+      db,
+      { ...r, snapshotName: name, bodySnapshot: r.body },
+      { description: r.skill.description, admittedDigest: r.skill.admittedDigest },
+    );
+    const att = { skillId: r.skillId, snapshotDigest: scanned.digest, snapshotAdmissionState: scanned.state };
+    const why: SkillWithheldReason | null = !skillVisible(r.skill, runViewer)
+      ? "private_skill"
+      : await pinnedBodyWithheld(db, att, minDays);
+    if (why) withheld.push({ skillId: r.skill.id, reason: why, digest: scanned.digest });
+    else skills.push({ skillId: r.skill.id, name, body: r.body, version: r.snapshotVersion, digest: scanned.digest });
   }
   return { skills, withheld };
 }
@@ -238,7 +274,7 @@ export async function skillsForRun(
 /** the configured part of the system prompt — instructions + pinned skills */
 export function configuredPrompt(agent: Pick<BuilderAgentRow, "instructions" | "name" | "description">, skills: Array<{ name: string; body: string }>): string {
   const parts: string[] = [agent.instructions.trim() || `You are ${agent.name}. ${agent.description}`.trim()];
-  for (const sk of skills) parts.push(`## Skill: ${sk.name}\n\n${sk.body.trim()}`);
+  for (const sk of skills) parts.push(skillPromptSection(sk.name, sk.body));
   return parts.join("\n\n");
 }
 
@@ -270,9 +306,10 @@ export async function buildSystemPromptWithSkills(
   agent: BuilderAgentRow,
   userId: string,
   box?: Toolbox,
-): Promise<{ prompt: string; skills: RunSkill[]; withheld: Array<{ skillId: string; reason: string; digest: string }> }> {
+): Promise<{ prompt: string; skills: RunSkill[]; withheld: WithheldSkill[] }> {
   const [{ skills, withheld }, memory, toolbox] = await Promise.all([
-    skillsForRun(db, agent),
+    // the person running the turn decides which private skills it may carry
+    skillsForRun(db, agent, userId),
     db
       .select({ content: builderAgentMemory.content })
       .from(builderAgentMemory)

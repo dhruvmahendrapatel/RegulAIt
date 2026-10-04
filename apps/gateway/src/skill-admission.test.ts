@@ -70,7 +70,7 @@ describe("scan at create, import and update", () => {
     expect((await k.db.select().from(builderSkills).where(eq(builderSkills.name, name))).length).toBe(0);
     // positive control: a clean body with the same name saves, clean, v1, digest
     const ok = await skill(owner, { name, body: "# Cite the section" });
-    expect(ok).toMatchObject({ admissionState: "clean", version: 1, contentDigest: skillDigest("# Cite the section") });
+    expect(ok).toMatchObject({ admissionState: "clean", version: 1, contentDigest: skillDigest(name, "# Cite the section") });
   });
 
   it("holds a medium-severity body: stored as held", async () => {
@@ -90,14 +90,15 @@ describe("scan at create, import and update", () => {
   });
 
   it("an update re-scans: a refused edit is 422 and leaves the row unchanged; a body change bumps version and digest", async () => {
-    const s = await skill(owner, { name: `Versioned ${k.RUN}`, body: "v-one" });
+    const vname = `Versioned ${k.RUN}`;
+    const s = await skill(owner, { name: vname, body: "v-one" });
     const bad = await k.req("PATCH", `/v1/builder/skills/${s.id}`, owner.auth, { body: REFUSED_BODY });
     expect(bad.statusCode).toBe(422);
     expect(bad.json().error).toBe("skill_admission_refused");
-    expect(await skillRow(s.id)).toMatchObject({ body: "v-one", version: 1, contentDigest: skillDigest("v-one") });
+    expect(await skillRow(s.id)).toMatchObject({ body: "v-one", version: 1, contentDigest: skillDigest(vname, "v-one") });
     const ok = await k.req("PATCH", `/v1/builder/skills/${s.id}`, owner.auth, { body: "v-two" });
     expect(ok.statusCode).toBe(200);
-    expect(ok.json().skill).toMatchObject({ version: 2, contentDigest: skillDigest("v-two"), admissionState: "clean" });
+    expect(ok.json().skill).toMatchObject({ version: 2, contentDigest: skillDigest(vname, "v-two"), admissionState: "clean" });
     // a description-only edit is re-scanned but is not a new version
     const desc = await k.req("PATCH", `/v1/builder/skills/${s.id}`, owner.auth, { description: "described" });
     expect(desc.json().skill.version).toBe(2);
@@ -129,9 +130,12 @@ describe("a held skill cannot be attached or run until an admin admits it", () =
     // the queue shows it; only an admin may admit, and a reason is required
     const queue = await k.req("GET", "/v1/admission/skills", admin.auth);
     expect(queue.json().skills.map((x: { id: string }) => x.id)).toContain(s.id);
-    expect((await k.req("POST", `/v1/admission/skills/${s.id}/admit`, owner.auth, { reason: "mine" })).statusCode).toBe(403);
-    expect((await k.req("POST", `/v1/admission/skills/${s.id}/admit`, admin.auth, {})).statusCode).toBe(400);
-    const admit = await k.req("POST", `/v1/admission/skills/${s.id}/admit`, admin.auth, { reason: "reviewed: the brand name is spelled in Cyrillic on purpose" });
+    expect((await k.req("POST", `/v1/admission/skills/${s.id}/admit`, owner.auth, { digest: s.contentDigest, reason: "mine" })).statusCode).toBe(403);
+    expect((await k.req("POST", `/v1/admission/skills/${s.id}/admit`, admin.auth, { digest: s.contentDigest })).statusCode).toBe(400);
+    const admit = await k.req("POST", `/v1/admission/skills/${s.id}/admit`, admin.auth, {
+      digest: s.contentDigest,
+      reason: "reviewed: the brand name is spelled in Cyrillic on purpose",
+    });
     expect(admit.statusCode, admit.body).toBe(200);
     expect(admit.json().skill.admissionState).toBe("admitted");
     expect(await auditRows(s.id, "builder-skill-admitted")).toHaveLength(1);
@@ -186,16 +190,17 @@ describe("widening visibility needs an admin", () => {
 describe("the ADR-0100 re-scan sweep", () => {
   it("re-scans library bodies and PINNED bodies; one that turns held is detached from the prompt at run time", async () => {
     const a = await newAgent(owner);
-    const s = await skill(owner, { name: `Sweep ${k.RUN}`, body: "SWEEP-CLEAN" });
+    const sname = `Sweep ${k.RUN}`;
+    const s = await skill(owner, { name: sname, body: "SWEEP-CLEAN" });
     expect((await k.req("PUT", `/v1/builder/agents/${a.id}/skills`, owner.auth, { skillIds: [s.id] })).statusCode).toBe(200);
     expect(await buildSystemPrompt(k.db, await agentRow(a.id), owner.id)).toContain("SWEEP-CLEAN");
     // simulate a body that predates the rules that would now catch it: written
     // straight into the table (library row and pinned snapshot), marked clean
     const dirty = `SWEEP-CLEAN ${HELD_BODY}`;
-    await k.db.update(builderSkills).set({ body: dirty, admissionState: "clean", contentDigest: skillDigest(dirty) }).where(eq(builderSkills.id, s.id));
+    await k.db.update(builderSkills).set({ body: dirty, admissionState: "clean", contentDigest: skillDigest(sname, dirty) }).where(eq(builderSkills.id, s.id));
     await k.db
       .update(builderAgentSkills)
-      .set({ bodySnapshot: dirty, snapshotDigest: skillDigest(dirty), snapshotAdmissionState: "clean" })
+      .set({ bodySnapshot: dirty, snapshotDigest: skillDigest(sname, dirty), snapshotAdmissionState: "clean" })
       .where(and(eq(builderAgentSkills.agentId, a.id), eq(builderAgentSkills.skillId, s.id)));
     expect(await buildSystemPrompt(k.db, await agentRow(a.id), owner.id)).toContain("SWEEP-CLEAN");
     // the sweep runs the skills part whatever the MCP admission mode is (off here)
@@ -212,13 +217,16 @@ describe("the ADR-0100 re-scan sweep", () => {
     const again = await runSkillAdmissionRescan(k.db);
     expect(again.heldSkillIds).not.toContain(s.id);
     // an admin's admission covers the pinned body with the same digest: it runs again
-    expect((await k.req("POST", `/v1/admission/skills/${s.id}/admit`, admin.auth, { reason: "reviewed after the sweep" })).statusCode).toBe(200);
+    expect(
+      (await k.req("POST", `/v1/admission/skills/${s.id}/admit`, admin.auth, { digest: skillDigest(sname, dirty), reason: "reviewed after the sweep" })).statusCode,
+    ).toBe(200);
     expect(await buildSystemPrompt(k.db, await agentRow(a.id), owner.id)).toContain("SWEEP-CLEAN");
   });
 
   it("scans an unscanned PINNED body even when its library row is clean", async () => {
     const a = await newAgent(owner);
-    const s = await skill(owner, { name: `Snapshot ${k.RUN}`, body: "SNAP-CLEAN" });
+    const nname = `Snapshot ${k.RUN}`;
+    const s = await skill(owner, { name: nname, body: "SNAP-CLEAN" });
     await k.req("PUT", `/v1/builder/agents/${a.id}/skills`, owner.auth, { skillIds: [s.id] });
     const dirty = `SNAP-CLEAN ${HELD_BODY}`;
     // a pre-0140 attachment: snapshot never scanned
@@ -228,7 +236,7 @@ describe("the ADR-0100 re-scan sweep", () => {
       .where(and(eq(builderAgentSkills.agentId, a.id), eq(builderAgentSkills.skillId, s.id)));
     await runSkillAdmissionRescan(k.db);
     const [att] = await k.db.select().from(builderAgentSkills).where(and(eq(builderAgentSkills.agentId, a.id), eq(builderAgentSkills.skillId, s.id)));
-    expect(att).toMatchObject({ snapshotAdmissionState: "held", snapshotDigest: skillDigest(dirty) });
+    expect(att).toMatchObject({ snapshotAdmissionState: "held", snapshotDigest: skillDigest(nname, dirty) });
     expect((await skillRow(s.id)).admissionState).toBe("clean");
     expect(await buildSystemPrompt(k.db, await agentRow(a.id), owner.id)).not.toContain("SNAP-CLEAN");
   });
@@ -237,7 +245,8 @@ describe("the ADR-0100 re-scan sweep", () => {
 describe("each builder turn records the digests of the skills it used", () => {
   it("the step's audit row carries skillId, version and digest for every skill in the prompt", async () => {
     const a = await newAgent(owner, { modelAgentId: model });
-    const s = await skill(owner, { name: `Traced ${k.RUN}`, body: "TRACED-BODY" });
+    const tname = `Traced ${k.RUN}`;
+    const s = await skill(owner, { name: tname, body: "TRACED-BODY" });
     await k.req("PUT", `/v1/builder/agents/${a.id}/skills`, owner.auth, { skillIds: [s.id] });
     const r = await k.req("POST", `/v1/builder/agents/${a.id}/chat`, owner.auth, { message: "hello" });
     expect(r.statusCode, r.body).toBe(200);
@@ -245,6 +254,6 @@ describe("each builder turn records the digests of the skills it used", () => {
     const rows = await k.db.select().from(auditLog).where(and(eq(auditLog.userId, owner.id), eq(auditLog.objectId, model)));
     const step = rows.find((x) => (x.detail as Record<string, unknown>)?.["builderThreadId"] === threadId);
     expect(step, "the step's decision row").toBeDefined();
-    expect((step!.detail as Record<string, unknown>)["skills"]).toEqual([{ skillId: s.id, version: 1, digest: skillDigest("TRACED-BODY") }]);
+    expect((step!.detail as Record<string, unknown>)["skills"]).toEqual([{ skillId: s.id, version: 1, digest: skillDigest(tname, "TRACED-BODY") }]);
   });
 });

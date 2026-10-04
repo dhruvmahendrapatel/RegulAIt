@@ -22,6 +22,7 @@ import {
   eq,
   isNull,
   mcpServers,
+  NIL_SIGHTING_SUBJECT,
   releaseOverrides,
   releaseSightings,
   sql,
@@ -50,22 +51,31 @@ export async function minReleaseAgeDays(db: Db): Promise<number> {
 /**
  * Record that we have seen `digest` (first writer wins) and return when it was
  * FIRST seen. `at` backdates nothing: it only ever applies to a new row.
+ * `subjectId` keys a skill's sightings by the skill (one skill's history never
+ * ages another); manifests and registry entries use the nil subject.
  */
-export async function recordSighting(db: Db, kind: SightingKind, digest: string, at: Date = new Date()): Promise<Date> {
-  await db.insert(releaseSightings).values({ kind, digest, firstSeenAt: at }).onConflictDoNothing();
-  const [row] = await db
-    .select({ firstSeenAt: releaseSightings.firstSeenAt })
-    .from(releaseSightings)
-    .where(and(eq(releaseSightings.kind, kind), eq(releaseSightings.digest, digest)));
-  return row?.firstSeenAt ?? at;
+export async function recordSighting(
+  db: Db,
+  kind: SightingKind,
+  digest: string,
+  at: Date = new Date(),
+  subjectId: string = NIL_SIGHTING_SUBJECT,
+): Promise<Date> {
+  await db.insert(releaseSightings).values({ kind, subjectId, digest, firstSeenAt: at }).onConflictDoNothing();
+  return (await firstSighting(db, kind, digest, subjectId)) ?? at;
 }
 
-/** when `digest` was first seen; null if never */
-export async function firstSighting(db: Db, kind: SightingKind, digest: string): Promise<Date | null> {
+/** when `digest` was first seen (for `subjectId`); null if never */
+export async function firstSighting(
+  db: Db,
+  kind: SightingKind,
+  digest: string,
+  subjectId: string = NIL_SIGHTING_SUBJECT,
+): Promise<Date | null> {
   const [row] = await db
     .select({ firstSeenAt: releaseSightings.firstSeenAt })
     .from(releaseSightings)
-    .where(and(eq(releaseSightings.kind, kind), eq(releaseSightings.digest, digest)));
+    .where(and(eq(releaseSightings.kind, kind), eq(releaseSightings.subjectId, subjectId), eq(releaseSightings.digest, digest)));
   return row?.firstSeenAt ?? null;
 }
 
@@ -97,7 +107,8 @@ export async function carryRegistrationOverride(db: Db, serverId: string, digest
     .onConflictDoNothing();
 }
 
-/** a skill version's cooldown status (first sighting of its exact body digest) */
+/** a skill version's cooldown status (this skill's first sighting of that
+ * exact digest — never another skill's) */
 export async function skillReleaseStatus(
   db: Db,
   skillId: string,
@@ -108,7 +119,7 @@ export async function skillReleaseStatus(
   if (minDays <= 0) return releaseAgeStatus({ minDays, firstSeenAt: now, now, overridden: false });
   const [seen, overridden] = await Promise.all([
     // a digest nobody recorded (written straight into the table) is new now
-    firstSighting(db, "skill", digest).then((d) => d ?? recordSighting(db, "skill", digest, now)),
+    firstSighting(db, "skill", digest, skillId).then((d) => d ?? recordSighting(db, "skill", digest, now, skillId)),
     hasReleaseOverride(db, "skill", skillId, digest),
   ]);
   return releaseAgeStatus({ minDays, firstSeenAt: seen, now, overridden });
@@ -191,7 +202,11 @@ export function registerReleaseAgeRoutes(app: FastifyInstance, db: Db) {
       .from(builderSkills)
       .innerJoin(
         releaseSightings,
-        and(eq(releaseSightings.kind, "skill"), eq(releaseSightings.digest, builderSkills.contentDigest)),
+        and(
+          eq(releaseSightings.kind, "skill"),
+          eq(releaseSightings.subjectId, builderSkills.id),
+          eq(releaseSightings.digest, builderSkills.contentDigest),
+        ),
       )
       .where(and(isNull(builderSkills.archivedAt), sql`${releaseSightings.firstSeenAt} > ${cutoff}`));
     const skills = [];
@@ -212,8 +227,10 @@ export function registerReleaseAgeRoutes(app: FastifyInstance, db: Db) {
   });
 
   /**
-   * THE OVERRIDE. One item, at the release it is on now, reason required,
-   * audited. A later change of that item is a new release with its own clock.
+   * THE OVERRIDE. One item, at the release the admin was SHOWN (`digest` in
+   * the body), reason required, audited. If the item has moved to another
+   * release since, nothing is written: 409 `release_changed`. A later change
+   * of that item is a new release with its own clock.
    */
   app.post("/v1/release-quarantine/override", async (req, reply) => {
     const body = releaseOverrideSchema.parse(req.body ?? {});
@@ -236,12 +253,41 @@ export function registerReleaseAgeRoutes(app: FastifyInstance, db: Db) {
       digest = row.contentDigest;
       label = `skill '${row.name}' v${row.version}`;
     }
-    const [created] = await db
-      .insert(releaseOverrides)
-      .values({ kind: body.kind, subjectId: body.id, digest, overriddenBy: req.authCtx.userId ?? null, reason: body.reason })
-      .onConflictDoNothing()
-      .returning();
-    if (!created) return reply.status(409).send({ error: "already_overridden", detail: `${label} is already overridden at this release` });
+    const changed = () =>
+      reply.status(409).send({
+        error: "release_changed",
+        detail:
+          `${label} is no longer on the release you reviewed (${body.digest.slice(0, 16)}); it is now on ` +
+          `${digest.slice(0, 16)}. Reload the queue and review the current release.`,
+      });
+    if (digest !== body.digest) return changed();
+    // conditional on the item still being on that release when the row is
+    // written: the subject row is locked, re-checked, then the override goes in
+    const created = await db.transaction(async (tx) => {
+      const still =
+        body.kind === "mcp_server"
+          ? await tx
+              .select({ id: mcpServers.id })
+              .from(mcpServers)
+              .where(and(eq(mcpServers.id, body.id), sql`coalesce(${mcpServers.releaseDigest}, ${REGISTRATION_RELEASE}) = ${body.digest}`))
+              .for("update")
+          : await tx
+              .select({ id: builderSkills.id })
+              .from(builderSkills)
+              .where(and(eq(builderSkills.id, body.id), eq(builderSkills.contentDigest, body.digest)))
+              .for("update");
+      if (still.length === 0) return "changed" as const;
+      const [row] = await tx
+        .insert(releaseOverrides)
+        .values({ kind: body.kind, subjectId: body.id, digest: body.digest, overriddenBy: req.authCtx.userId ?? null, reason: body.reason })
+        .onConflictDoNothing()
+        .returning();
+      return row ?? ("exists" as const);
+    });
+    if (created === "changed") return changed();
+    if (created === "exists") {
+      return reply.status(409).send({ error: "already_overridden", detail: `${label} is already overridden at this release` });
+    }
     await db.insert(auditLog).values({
       userId: req.authCtx.userId ?? NIL_USER,
       objectType: body.kind === "mcp_server" ? "mcp_server" : "builder_skill",

@@ -429,9 +429,12 @@ export async function servedModelsByAgent(db: Db, now: Date): Promise<MonitorSer
     .groupBy(usageEvents.agentId, usageEvents.model, usageEvents.servedModel);
   if (rows.length === 0) return [];
   const agentIds = [...new Set(rows.map((r) => r.agentId!))];
-  const names = new Map(
-    (await db.select({ id: agents.id, name: agents.name }).from(agents).where(inArray(agents.id, agentIds))).map((a) => [a.id, a.name]),
-  );
+  const agentRows = await db
+    .select({ id: agents.id, name: agents.name, expected: agents.expectedServedModel })
+    .from(agents)
+    .where(inArray(agents.id, agentIds));
+  const names = new Map(agentRows.map((a) => [a.id, a.name]));
+  const expected = new Map(agentRows.map((a) => [a.id, a.expected]));
   const pins = new Map<string, string[]>();
   for (const p of await db
     .selectDistinct({ agentId: modelCards.agentId, pin: modelCards.pinnedModelVersion })
@@ -453,6 +456,7 @@ export async function servedModelsByAgent(db: Db, now: Date): Promise<MonitorSer
     const entry = byAgent.get(id) ?? {
       agentId: id,
       agentName: names.get(id) ?? id,
+      expectedServedModel: expected.get(id) ?? null,
       pinnedModelVersions: pins.get(id) ?? [],
       windowDays: TRACE_EVAL_WINDOW_DAYS,
       observations: [],
@@ -477,10 +481,16 @@ export async function servedModelsByAgent(db: Db, now: Date): Promise<MonitorSer
  * The ledger records the calling user and the virtual key, not which of a
  * user's API keys was used, so key-less projectless traffic is grouped by
  * caller. Observe-only: nothing here, or downstream of the alert, blocks.
+ *
+ * COVERAGE matches the use-case gate (use-case-gate.ts): a use case covers its
+ * project only while it is `approved` AND its approval has not run out
+ * (`approved_until` NULL or in the future). The window scan is served by
+ * `usage_events_object_type_at_idx` (object_type, at).
  */
-export async function unregisteredTrafficInput(db: Db, now: Date): Promise<MonitorTrafficInput> {
-  const since = new Date(now.getTime() - TRACE_EVAL_WINDOW_DAYS * 86_400_000);
-  const grouped = await db
+/** the A9 window scan over model and MCP ledger rows (exported so a test can
+ * EXPLAIN exactly this query against `usage_events_object_type_at_idx`) */
+export function unregisteredTrafficQuery(db: Db, since: Date) {
+  return db
     .select({
       projectId: usageEvents.projectId,
       virtualKeyId: usageEvents.virtualKeyId,
@@ -493,15 +503,33 @@ export async function unregisteredTrafficInput(db: Db, now: Date): Promise<Monit
     .from(usageEvents)
     .where(and(inArray(usageEvents.objectType, ["agent", "mcp_tool"]), gte(usageEvents.at, since)))
     .groupBy(usageEvents.projectId, usageEvents.virtualKeyId, usageEvents.userId, usageEvents.objectType);
+}
+
+export async function unregisteredTrafficInput(db: Db, now: Date): Promise<MonitorTrafficInput> {
+  const since = new Date(now.getTime() - TRACE_EVAL_WINDOW_DAYS * 86_400_000);
+  const grouped = await unregisteredTrafficQuery(db, since);
   const linked = await db
-    .select({ id: aiUseCases.id, name: aiUseCases.name, status: aiUseCases.status, projectId: aiUseCases.projectId })
+    .select({
+      id: aiUseCases.id,
+      name: aiUseCases.name,
+      status: aiUseCases.status,
+      projectId: aiUseCases.projectId,
+      approvedUntil: aiUseCases.approvedUntil,
+    })
     .from(aiUseCases)
     .where(isNotNull(aiUseCases.projectId));
-  const covered = new Set(linked.filter((u) => u.status === "approved").map((u) => u.projectId!));
-  const linkedNotApproved = new Map<string, Array<{ id: string; name: string; status: string }>>();
+  // the gate's rule: approved and not past its approval's lifetime
+  const lapsed = (u: (typeof linked)[number]) =>
+    u.status === "approved" && u.approvedUntil !== null && u.approvedUntil.getTime() <= now.getTime();
+  const covering = (u: (typeof linked)[number]) => u.status === "approved" && !lapsed(u);
+  const covered = new Set(linked.filter(covering).map((u) => u.projectId!));
+  const linkedNotApproved = new Map<string, Array<{ id: string; name: string; status: string; approvalExpired?: true }>>();
   for (const u of linked) {
-    if (u.status === "approved") continue;
-    linkedNotApproved.set(u.projectId!, [...(linkedNotApproved.get(u.projectId!) ?? []), { id: u.id, name: u.name, status: u.status }]);
+    if (covering(u)) continue;
+    linkedNotApproved.set(u.projectId!, [
+      ...(linkedNotApproved.get(u.projectId!) ?? []),
+      { id: u.id, name: u.name, status: u.status, ...(lapsed(u) ? { approvalExpired: true as const } : {}) },
+    ]);
   }
   const rows = grouped.map((r) => ({
     projectId: r.projectId,

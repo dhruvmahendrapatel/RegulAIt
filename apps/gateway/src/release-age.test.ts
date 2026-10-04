@@ -23,8 +23,10 @@ import {
 import { builderKit, type BuilderKit, type Person } from "./testing/builder-fixture.js";
 import { buildSystemPrompt } from "./builder-runtime.js";
 import { admissionHidesTools, assertAdmitted, McpAdmissionHeldError, McpReleaseQuarantinedError, recordManifestScan } from "./mcp-admission.js";
-import { importRegistryEntry } from "./mcp-registry.js";
+import { importRegistryEntry, registryEntryDigest } from "./mcp-registry.js";
+import { recordSighting } from "./release-age.js";
 import { skillDigest } from "./skill-admission.js";
+import { manifestDigest } from "@regulait/shared";
 
 let k: BuilderKit;
 let owner: Person;
@@ -123,9 +125,14 @@ describe("on (7 days)", () => {
   it("an admin may override one server with a reason (audited); the override covers that release only", async () => {
     const id = await registerServer(`rel-ovr-${k.RUN}`);
     expect(await gate(id)).toBe("quarantined");
-    expect((await k.req("POST", "/v1/release-quarantine/override", owner.auth, { kind: "mcp_server", id, reason: "x" })).statusCode).toBe(403);
-    expect((await k.req("POST", "/v1/release-quarantine/override", admin.auth, { kind: "mcp_server", id })).statusCode).toBe(400);
-    const o = await k.req("POST", "/v1/release-quarantine/override", admin.auth, { kind: "mcp_server", id, reason: "vendor-signed internal server" });
+    expect((await k.req("POST", "/v1/release-quarantine/override", owner.auth, { kind: "mcp_server", id, digest: "registration", reason: "x" })).statusCode).toBe(403);
+    expect((await k.req("POST", "/v1/release-quarantine/override", admin.auth, { kind: "mcp_server", id, digest: "registration" })).statusCode).toBe(400);
+    const o = await k.req("POST", "/v1/release-quarantine/override", admin.auth, {
+      kind: "mcp_server",
+      id,
+      digest: "registration",
+      reason: "vendor-signed internal server",
+    });
     expect(o.statusCode, o.body).toBe(201);
     expect(await gate(id)).toBe("admitted");
     const audited = await k.db.select().from(auditLog).where(and(eq(auditLog.objectId, id), eq(auditLog.ruleId, "release-age-overridden")));
@@ -140,8 +147,8 @@ describe("on (7 days)", () => {
 
   it("a changed admitted manifest is aged from the first time THIS deployment saw that exact digest", async () => {
     const id = await registerServer(`rel-drift-${k.RUN}`);
-    await k.db.update(mcpServers).set({ releaseSeenAt: new Date(Date.now() - 30 * DAY) }).where(eq(mcpServers.id, id));
-    await recordManifestScan(k.db, id, tools("Gets the weather."));
+    await k.db.update(mcpServers).set({ releaseSeenAt: new Date(Date.now() - 30 * DAY), createdAt: new Date(Date.now() - 30 * DAY) }).where(eq(mcpServers.id, id));
+    await recordManifestScan(k.db, id, tools(`Gets the weather ${k.RUN}.`));
     expect(await gate(id)).toBe("admitted");
     const changed = tools(`Gets the weather for a city ${k.RUN}.`);
     await expect(recordManifestScan(k.db, id, changed)).rejects.toBeInstanceOf(McpReleaseQuarantinedError);
@@ -154,10 +161,17 @@ describe("on (7 days)", () => {
       .update(releaseSightings)
       .set({ firstSeenAt: new Date(Date.now() - 9 * DAY) })
       .where(and(eq(releaseSightings.kind, "mcp_manifest"), eq(releaseSightings.digest, row!.releaseDigest!)));
-    // a second server that later serves the SAME manifest is not new: it inherits that age
+    // a second server that later serves the SAME manifests is not new: it
+    // inherits their ages (the first manifest's sighting backdated too — under
+    // the first-manifest rule a server's first manifest is never older than
+    // the deployment's own first sighting of it)
+    await k.db
+      .update(releaseSightings)
+      .set({ firstSeenAt: new Date(Date.now() - 30 * DAY) })
+      .where(and(eq(releaseSightings.kind, "mcp_manifest"), eq(releaseSightings.digest, manifestDigest(tools(`Gets the weather ${k.RUN}.`)))));
     const twin = await registerServer(`rel-twin-${k.RUN}`);
-    await k.db.update(mcpServers).set({ releaseSeenAt: new Date(Date.now() - 30 * DAY) }).where(eq(mcpServers.id, twin));
-    await recordManifestScan(k.db, twin, tools("Gets the weather."));
+    await k.db.update(mcpServers).set({ releaseSeenAt: new Date(Date.now() - 30 * DAY), createdAt: new Date(Date.now() - 30 * DAY) }).where(eq(mcpServers.id, twin));
+    await recordManifestScan(k.db, twin, tools(`Gets the weather ${k.RUN}.`));
     await recordManifestScan(k.db, twin, changed);
     expect(await gate(twin)).toBe("admitted");
   });
@@ -189,14 +203,20 @@ describe("on (7 days)", () => {
 
   it("a new skill version stays in quarantine (attach and re-attach refused) until aged or overridden", async () => {
     const a = await newAgent(owner);
-    const s = await skill(owner, { name: `Cool skill ${k.RUN}`, body: `COOL-ONE ${k.RUN}` });
+    const cname = `Cool skill ${k.RUN}`;
+    const s = await skill(owner, { name: cname, body: `COOL-ONE ${k.RUN}` });
     expect(s.release).toMatchObject({ quarantined: true });
     const r = await k.req("PUT", `/v1/builder/agents/${a.id}/skills`, owner.auth, { skillIds: [s.id] });
     expect(r.statusCode, r.body).toBe(409);
     expect(r.json().error).toBe("skill_release_quarantined");
     expect((await k.req("GET", "/v1/release-quarantine", admin.auth)).json().skills.map((x: { id: string }) => x.id)).toContain(s.id);
     // override this version, with a reason
-    const o = await k.req("POST", "/v1/release-quarantine/override", admin.auth, { kind: "skill", id: s.id, reason: "written in-house today" });
+    const o = await k.req("POST", "/v1/release-quarantine/override", admin.auth, {
+      kind: "skill",
+      id: s.id,
+      digest: s.contentDigest,
+      reason: "written in-house today",
+    });
     expect(o.statusCode, o.body).toBe(201);
     expect((await k.req("PUT", `/v1/builder/agents/${a.id}/skills`, owner.auth, { skillIds: [s.id] })).statusCode).toBe(200);
     expect(await buildSystemPrompt(k.db, await agentRow(a.id), owner.id)).toContain("COOL-ONE");
@@ -207,7 +227,7 @@ describe("on (7 days)", () => {
     expect(re.statusCode, re.body).toBe(409);
     expect(re.json().error).toBe("skill_release_quarantined");
     // age is the first sighting of that exact digest
-    await ageSkillDigest(skillDigest(v2), 8);
+    await ageSkillDigest(skillDigest(cname, v2), 8);
     expect((await k.req("POST", `/v1/builder/agents/${a.id}/skills/${s.id}/reattach`, owner.auth)).statusCode).toBe(200);
   });
 
@@ -215,14 +235,90 @@ describe("on (7 days)", () => {
     const a = await newAgent(owner);
     const body = `SEEDED-${k.RUN}`;
     await setDays(0);
-    const s = await skill(owner, { name: `Run time ${k.RUN}`, body });
+    const rname = `Run time ${k.RUN}`;
+    const s = await skill(owner, { name: rname, body });
     await k.req("PUT", `/v1/builder/agents/${a.id}/skills`, owner.auth, { skillIds: [s.id] });
     await setDays(7);
     const row = await agentRow(a.id);
     expect(await buildSystemPrompt(k.db, row, owner.id)).not.toContain(body);
     const detail = (await k.req("GET", `/v1/builder/agents/${a.id}`, owner.auth)).json().agent;
     expect(detail.skills[0]).toMatchObject({ unavailable: true, withheld: "quarantined" });
-    await ageSkillDigest(skillDigest(body), 8);
+    await ageSkillDigest(skillDigest(rname, body), 8);
     expect(await buildSystemPrompt(k.db, row, owner.id)).toContain(body);
+  });
+
+  // ADR-0175 D2 review fixes ------------------------------------------------
+
+  it("finding 7: an import of an entry seen long ago still waits for a first manifest nobody has seen", async () => {
+    const [reg] = await k.db.insert(mcpRegistries).values({ name: `rel-swap-${k.RUN}`, url: "http://10.9.9.9/", enabled: false, allowPrivateRanges: true }).returning();
+    const values = {
+      registryId: reg!.id,
+      upstreamName: `io.example.test/swap-${k.RUN}`,
+      upstreamVersion: "2.0.0",
+      kind: "remote" as const,
+      remoteUrl: `http://swap-${k.RUN}.internal.test/mcp`,
+      remoteTransport: "streamable-http" as const,
+    };
+    const [entry] = await k.db.insert(mcpRegistryEntries).values(values).returning();
+    // the registry sweep saw this exact entry version 30 days ago
+    await recordSighting(k.db, "registry_entry", registryEntryDigest(values), new Date(Date.now() - 30 * DAY));
+    const out = await importRegistryEntry(k.db, entry!.id, { deps: { resolve: async () => [{ address: "10.9.9.10", family: 4 }] } });
+    expect(out.ok, JSON.stringify(out)).toBe(true);
+    const serverId = (out as { ok: true; result: { serverId: string } }).result.serverId;
+    // the entry is old enough, so the gate lets the first sync happen …
+    expect(await gate(serverId)).toBe("admitted");
+    // … but the upstream now serves a manifest this deployment has never seen: it waits from now
+    await expect(recordManifestScan(k.db, serverId, tools(`Swapped upstream ${k.RUN}.`))).rejects.toBeInstanceOf(McpReleaseQuarantinedError);
+    expect(await gate(serverId)).toBe("quarantined");
+  });
+
+  it("finding 7 control: an ordinary registration waits once — its first manifest counts as seen at registration", async () => {
+    const id = await registerServer(`rel-once-${k.RUN}`);
+    expect(await gate(id)).toBe("quarantined");
+    // the registration's cooldown runs out (eight days on, by our own clock) …
+    const past = new Date(Date.now() - 8 * DAY);
+    await k.db.update(mcpServers).set({ releaseSeenAt: past, createdAt: past }).where(eq(mcpServers.id, id));
+    expect(await gate(id)).toBe("admitted");
+    // … and its first manifest, never seen before, is not a second wait
+    await recordManifestScan(k.db, id, tools(`First manifest ${k.RUN}.`));
+    expect(await gate(id)).toBe("admitted");
+  });
+
+  it("finding 5: an override applies only to the release the admin was shown (409 release_changed otherwise)", async () => {
+    const id = await registerServer(`rel-shown-${k.RUN}`);
+    expect(await gate(id)).toBe("quarantined");
+    // the queue showed the registration; a manifest arrives before the admin clicks
+    await k.db.update(mcpServers).set({ releaseDigest: "a".repeat(16) }).where(eq(mcpServers.id, id));
+    const stale = await k.req("POST", "/v1/release-quarantine/override", admin.auth, { kind: "mcp_server", id, digest: "registration", reason: "looked fine" });
+    expect(stale.statusCode, stale.body).toBe(409);
+    expect(stale.json().error).toBe("release_changed");
+    expect(await gate(id)).toBe("quarantined");
+    // positive control: overriding the release that is there now
+    const ok = await k.req("POST", "/v1/release-quarantine/override", admin.auth, { kind: "mcp_server", id, digest: "a".repeat(16), reason: "reviewed this manifest" });
+    expect(ok.statusCode, ok.body).toBe(201);
+    expect(await gate(id)).toBe("admitted");
+    // a skill: the digest shown, not whatever the skill holds when the click lands
+    const s = await skill(owner, { name: `Shown skill ${k.RUN}`, body: "SHOWN-ONE" });
+    await k.req("PATCH", `/v1/builder/skills/${s.id}`, owner.auth, { body: "SHOWN-TWO" });
+    const staleSkill = await k.req("POST", "/v1/release-quarantine/override", admin.auth, { kind: "skill", id: s.id, digest: s.contentDigest, reason: "x" });
+    expect(staleSkill.statusCode, staleSkill.body).toBe(409);
+    expect(staleSkill.json().error).toBe("release_changed");
+  });
+
+  it("finding 10: a skill's cooldown clock is its own — another skill with the same text is new", async () => {
+    const name = `Same text ${k.RUN}`;
+    const first = await skill(owner, { name, body: "SAME-BODY" });
+    await ageSkillDigest(skillDigest(name, "SAME-BODY"), 8);
+    const a = await newAgent(owner);
+    expect((await k.req("PUT", `/v1/builder/agents/${a.id}/skills`, owner.auth, { skillIds: [first.id] })).statusCode).toBe(200);
+    // a different skill (another author) with byte-identical text: its own first sighting is now
+    const colleague = await k.person(`same-${Math.random().toString(36).slice(2, 6)}`);
+    const second = await skill(colleague, { name, body: "SAME-BODY" });
+    expect(second.contentDigest).toBe(first.contentDigest);
+    expect(second.release).toMatchObject({ quarantined: true });
+    const b = await newAgent(colleague);
+    const r = await k.req("PUT", `/v1/builder/agents/${b.id}/skills`, colleague.auth, { skillIds: [second.id] });
+    expect(r.statusCode, r.body).toBe(409);
+    expect(r.json().error).toBe("skill_release_quarantined");
   });
 });

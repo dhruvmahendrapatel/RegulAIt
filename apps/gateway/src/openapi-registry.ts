@@ -110,6 +110,8 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "PATCH /v1/agents/:agentId/stewardship": "internal",
   "POST /v1/agents/:agentId/stewardship/review": "internal",
   "POST /v1/agents/:agentId/system-prompt": "internal",
+  // ADR-0175 review fix — the binding expected served model (admin console)
+  "PUT /v1/agents/:agentId/expected-served-model": "internal",
   "GET /v1/api/versioning": "public-stable",
   "GET /v1/approvals": "public-stable",
   "POST /v1/approvals/:approvalId/claim": "internal",
@@ -885,6 +887,7 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "PATCH /v1/agents/:agentId/stewardship": "agents",
   "POST /v1/agents/:agentId/stewardship/review": "agents",
   "POST /v1/agents/:agentId/system-prompt": "agents",
+  "PUT /v1/agents/:agentId/expected-served-model": "agents",
   "GET /v1/api/versioning": "api",
   "GET /v1/approvals": "approvals",
   "POST /v1/approvals/:approvalId/claim": "approvals",
