@@ -196,6 +196,15 @@ services:
       REGULAIT_DATA_KEY: ${REGULAIT_DATA_KEY:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
       REGULAIT_BOOTSTRAP_TOKEN: ${REGULAIT_BOOTSTRAP_TOKEN:-dev-bootstrap}
       SEED_DEMO: ${SEED_DEMO:-1}
+      # ADR-0174 amendment — DEMO ONLY, OFF by default, never for an install.
+      # `REGULAIT_DEMO_LICENSE=1` in the .env next to this file lets the demo
+      # seed mint its EPHEMERAL demo licence (30 days, says "NOT A PRODUCTION
+      # DEPLOYMENT") so `demo:set-passwords` can give Ada, Dana and Avery one
+      # password you chose — see README "Demo with your own password (Docker)".
+      # Only the exact value "1" does anything (apps/gateway/docker-start.sh);
+      # unset, the gateway reads its default keyring and no licence is minted,
+      # exactly as before. scripts/install.sh pins it to "0".
+      REGULAIT_DEMO_LICENSE: ${REGULAIT_DEMO_LICENSE:-}
       # ADR-0031 (narrowing ADR-0029): which peers may speak for the client via
       # X-Forwarded-*. `req.ip` is recorded on every auth_sessions row and is
       # the attribution pillar 1 sells, so this must name the proxy rather than
@@ -280,6 +289,13 @@ services:
       # is the documented local-dev entry point (README) and the on-box
       # SSM verification step (`curl -sf localhost:3000/...`) relies on it.
       - "127.0.0.1:3000:3000"
+    volumes:
+      # The DEMO licence keyring (public keys only; the private half is never
+      # written). Read only when REGULAIT_DEMO_LICENSE=1; otherwise it stays
+      # empty and unused. Named, so the demo licence still verifies after
+      # `docker compose restart gateway` and `down` / `up`; `down -v` drops it
+      # together with the database that holds the licence.
+      - demo_license_keys:/app/demo-license-keys
     # ADR-0167 (CFG-07): see the note on `db`. The image carries the same
     # HEALTHCHECK; it is restated here so `depends_on: condition:
     # service_healthy` works for anything stacked on the gateway, and so a
@@ -500,5 +516,7 @@ volumes:
   # That is a different attack and a LOUD one — verification then reports the
   # anchor missing rather than matching.
   minio_data:
+  # ADR-0174 amendment: the demo licence keyring (see the gateway's volumes).
+  demo_license_keys:
   caddy_data:
   caddy_config:
