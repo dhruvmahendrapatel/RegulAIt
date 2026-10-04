@@ -391,8 +391,11 @@ test.describe("ADR-0034 custom LLM providers — the admin surface", () => {
     expect(body.costPerMTokIn).toBeUndefined();
     expect(body.costPerMTokOut).toBeUndefined();
 
-    await expect(page.getByRole("row", { name: /e2e-local-agent/ })).toContainText(`custom · ${PROVIDER}`);
-    await expect(page.getByRole("row", { name: /e2e-local-agent/ })).toContainText("unpriced");
+    // scoped to the Catalog card: the stewardship table above lists the same agent
+    const catalog = page.locator("section[data-rg-card]").filter({ has: page.getByText("Catalog", { exact: true }) });
+    const row = catalog.getByRole("row", { name: /e2e-local-agent/ });
+    await expect(row).toContainText(`custom · ${PROVIDER}`);
+    await expect(row).toContainText("unpriced");
     await shot(page, "phase5-10-agent-bound-to-custom-endpoint");
 
     track.assertClean("test, enable, bind");
