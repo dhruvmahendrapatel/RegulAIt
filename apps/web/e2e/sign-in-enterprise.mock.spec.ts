@@ -11,6 +11,10 @@
  *  - break-glass mode tucks the form behind an administrator disclosure;
  *  - an unreadable options answer degrades to the email form;
  *  - the account-link step (?link=pending) proves the account;
+ *  - security review: a SAML sign-in held at the TOTP step (?mfa=pending)
+ *    asks for the code and posts it WITHOUT a token (the gateway reads its
+ *    HttpOnly cookie); in break-glass mode with the API-key exchange closed,
+ *    the key form lives only inside the administrator disclosure;
  *  - axe (WCAG 2.x A/AA) in light and dark.
  */
 import { AxeBuilder } from "@axe-core/playwright";
@@ -34,10 +38,11 @@ interface Mock {
   options: unknown;
   loginBodies: unknown[];
   linkBodies: unknown[];
+  mfaBodies: unknown[];
 }
 
 async function mockApi(page: Page, options: unknown): Promise<Mock> {
-  const m: Mock = { options, loginBodies: [], linkBodies: [] };
+  const m: Mock = { options, loginBodies: [], linkBodies: [], mfaBodies: [] };
   await page.route("**/*", async (route) => {
     const req = route.request();
     const p = new URL(req.url()).pathname;
@@ -54,6 +59,10 @@ async function mockApi(page: Page, options: unknown): Promise<Mock> {
     }
     if (p === "/auth/link/pending") {
       return json(route, { pending: true, provider: "keycloak", protocol: "oidc", email: "ada@example.test", expiresAt: "2026-10-04T12:00:00Z" });
+    }
+    if (p === "/auth/mfa/verify") {
+      m.mfaBodies.push(req.postDataJSON());
+      return json(route, { error: "invalid_code" }, 401);
     }
     if (p === "/auth/link/confirm") {
       m.linkBodies.push(req.postDataJSON());
@@ -153,6 +162,30 @@ test.describe("ADR-0174: the sign-in page", () => {
     await page.getByText("Administrator sign-in (break-glass)").click();
     await expect(page.getByLabel("Email or username")).toBeVisible();
     await expectAxeClean(page, "sign-in, break-glass open");
+  });
+
+  test("break-glass with the API-key exchange closed: the key form is only inside the administrator disclosure", async ({ page }) => {
+    await mockApi(page, { ...FULL, local: { mode: "break_glass_only", emailForm: false }, apiKeyExchange: false });
+    await page.goto("/ui/login");
+    await expect(page.getByText("Sign in with an API key instead")).toHaveCount(0);
+    await page.getByText("Administrator sign-in (break-glass)").click();
+    await page.getByText("Break-glass administrator API key").click();
+    await expect(page.getByLabel("API key")).toBeVisible();
+    await expectAxeClean(page, "sign-in, break-glass key");
+  });
+
+  test("a SAML sign-in held at the TOTP step asks for the code and posts it without a token", async ({ page }) => {
+    const m = await mockApi(page, FULL);
+    await page.goto("/ui/login?mfa=pending");
+    await expect(page.getByRole("heading", { level: 1, name: "Two-step verification" })).toBeVisible();
+    await expect(page.getByText("Your organization requires a second factor.", { exact: false })).toBeVisible();
+    await expectAxeClean(page, "saml totp step-up");
+    await page.getByLabel("Authenticator code").fill("123456");
+    await page.getByRole("button", { name: "Verify" }).click();
+    await expect(page.getByRole("alert")).toContainText("That code wasn't accepted");
+    expect(m.mfaBodies).toEqual([{ code: "123456" }]);
+    await page.getByRole("button", { name: "Back to sign-in" }).click();
+    await expect(page.getByRole("heading", { level: 1, name: "Sign in" })).toBeVisible();
   });
 
   test("sso_only: no email form at all, the federated buttons remain", async ({ page }) => {

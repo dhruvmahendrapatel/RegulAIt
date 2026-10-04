@@ -111,6 +111,12 @@ export default function LoginPage() {
   const location = useLocation();
   const returnTo = (location.state as { from?: string } | null)?.from ?? "/";
   const linkMode = new URLSearchParams(location.search).get("link") === "pending";
+  // ADR-0174 (security review): a SAML sign-in the organisation's MFA policy
+  // holds at the TOTP step. Its pending token is an HttpOnly cookie the
+  // gateway set — the page never sees it, it just asks for the code.
+  const [samlStepUp, setSamlStepUp] = useState(
+    () => new URLSearchParams(location.search).get("mfa") === "pending",
+  );
 
   // ADR-0030: one field, either namespace — an email address or a username
   const [identifier, setIdentifier] = useState("");
@@ -187,7 +193,7 @@ export default function LoginPage() {
     setError(null);
     setBusy(true);
     try {
-      await api.post<LoginResponse>("/auth/mfa/verify", { pendingToken, code });
+      await api.post<LoginResponse>("/auth/mfa/verify", pendingToken ? { pendingToken, code } : { code });
       await finish();
     } catch (err) {
       if (err instanceof ApiError && err.payload.error === "invalid_code") {
@@ -195,6 +201,7 @@ export default function LoginPage() {
       } else if (err instanceof ApiError && err.status === 401) {
         setError("The sign-in window expired — start again.");
         setPendingToken(null);
+        setSamlStepUp(false);
         setCode("");
       } else {
         setError(err instanceof Error ? err.message : String(err));
@@ -228,13 +235,17 @@ export default function LoginPage() {
 
   if (linkMode) return <LinkAccount onDone={finish} />;
 
-  if (pendingToken) {
+  if (pendingToken || samlStepUp) {
     return (
       <div className={s.gate}>
         <main className={s.panel} aria-labelledby={titleId}>
           <Brand />
           <h1 id={titleId} className={s.title}>Two-step verification</h1>
-          <p className={s.sub}>Enter the 6-digit code from your authenticator app.</p>
+          <p className={s.sub}>
+            {samlStepUp && !pendingToken
+              ? "Your organization requires a second factor. Enter the 6-digit code from your authenticator app to finish signing in."
+              : "Enter the 6-digit code from your authenticator app."}
+          </p>
           {/* which identity this challenge belongs to — matters when several
            * accounts share an authenticator app */}
           {identifier && (
@@ -263,6 +274,7 @@ export default function LoginPage() {
               variant="ghost"
               onClick={() => {
                 setPendingToken(null);
+                setSamlStepUp(false);
                 setCode("");
                 setError(null);
               }}
@@ -280,6 +292,26 @@ export default function LoginPage() {
   const hasFederated = Boolean(broker) || enterprise.length > 0;
   const showEmailForm = !ssoOnly && options.local.mode === "enabled";
   const breakGlass = !ssoOnly && options.local.mode === "break_glass_only";
+
+  const keyForm = (
+    <form className={`${s.detailsBody} ${s.form}`} onSubmit={submitKey}>
+      <p className={s.sub}>
+        Exchanges your regulAIt API key for a browser session — the key never lives in web storage.
+      </p>
+      <Field label="API key">
+        <Input
+          type="password"
+          autoComplete="off"
+          value={apiKey}
+          onChange={(e) => setApiKey(e.target.value)}
+          placeholder="rgl_…"
+        />
+      </Field>
+      <Button type="submit" disabled={busy || !apiKey.trim()}>
+        Exchange key for a session
+      </Button>
+    </form>
+  );
 
   const emailForm = (
     <form className={s.form} onSubmit={submitPassword}>
@@ -388,6 +420,15 @@ export default function LoginPage() {
                 with single sign-on above.
               </p>
               {emailForm}
+              {/* the API-key exchange is closed to everyone but the break-glass
+               * admins (and the operator's bootstrap token) in this mode, so it
+               * lives here rather than as a general option */}
+              {!options.apiKeyExchange && (
+                <details className={s.details}>
+                  <summary>Break-glass administrator API key</summary>
+                  {keyForm}
+                </details>
+              )}
             </div>
           </details>
         )}
@@ -395,23 +436,7 @@ export default function LoginPage() {
         {options.apiKeyExchange && (
           <details className={s.details}>
             <summary>Sign in with an API key instead</summary>
-            <form className={`${s.detailsBody} ${s.form}`} onSubmit={submitKey}>
-              <p className={s.sub}>
-                Exchanges your regulAIt API key for a browser session — the key never lives in web storage.
-              </p>
-              <Field label="API key">
-                <Input
-                  type="password"
-                  autoComplete="off"
-                  value={apiKey}
-                  onChange={(e) => setApiKey(e.target.value)}
-                  placeholder="rgl_…"
-                />
-              </Field>
-              <Button type="submit" disabled={busy || !apiKey.trim()}>
-                Exchange key for a session
-              </Button>
-            </form>
+            {keyForm}
           </details>
         )}
         <footer className={s.footer}>

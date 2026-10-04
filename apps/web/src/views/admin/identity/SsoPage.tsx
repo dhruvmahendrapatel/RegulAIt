@@ -66,6 +66,7 @@ function OidcCard() {
   const [groupsClaim, setGroupsClaim] = useState("");
   const [brokerIdps, setBrokerIdps] = useState("");
   const [acrValues, setAcrValues] = useState("");
+  const [brokerMfa, setBrokerMfa] = useState("false");
   const [deleteProvider, setDeleteProvider] = useState<OidcProvider | null>(null);
   const csv = (v: string) => v.split(",").map((x) => x.trim()).filter(Boolean);
 
@@ -91,6 +92,7 @@ function OidcCard() {
                   ...(groupsClaim ? { groupsClaim } : {}),
                   ...(brokerIdps ? { brokerIdps: csv(brokerIdps).map((x) => x.toLowerCase()) } : {}),
                   ...(acrValues ? { mfaAcrValues: csv(acrValues) } : {}),
+                  ...(brokerMfa === "true" ? { brokerEnforcesMfa: true } : {}),
                 }),
               "Provider added",
             )
@@ -106,6 +108,7 @@ function OidcCard() {
                 setGroupsClaim("");
                 setBrokerIdps("");
                 setAcrValues("");
+                setBrokerMfa("false");
               }
             });
         }}
@@ -151,6 +154,12 @@ function OidcCard() {
         </Field>
         <Field label="MFA acr values (comma; blank = RFC 8176 amr only)">
           <Input value={acrValues} onChange={(e) => setAcrValues(e.target.value)} placeholder="mfa" />
+        </Field>
+        <Field label="Broker enforces MFA">
+          <Select value={brokerMfa} onChange={(e) => setBrokerMfa(e.target.value)}>
+            <option value="false">no — amr must say mfa or name two factors (default)</option>
+            <option value="true">yes — one code/passkey amr counts (the bundled Keycloak)</option>
+          </Select>
         </Field>
         <Field label="JIT default role">
           <Select value={defaultRoleId} onChange={(e) => setDefaultRoleId(e.target.value)}>
@@ -249,8 +258,9 @@ function OidcCard() {
       <p className={v.faint}>
         Authorization-code + PKCE; state and nonce are validated server-side and the client secret is
         stored encrypted, write-only — it is never returned by any endpoint. Sign-in maps the VERIFIED
-        email claim to an existing user; an account that has its own password is linked only after the
-        person proves it (password + code) or an admin approves below — never silently. With JIT off (the
+        email claim to an existing user only when that account has never been used; any account already in
+        use (signed in before, or linked to another provider) is linked only after the person proves it
+        (password + code) or an admin approves below — never silently. With JIT off (the
         default-deny default) an unknown identity is refused and audited. A provider with broker sign-in
         buttons (the bundled Keycloak) shows “Continue with Microsoft / Google / GitHub” on the sign-in page;
         see docs/deployment/SSO_KEYCLOAK.md. JIT-provisioned users are never admins and get at most the default role picked
@@ -303,6 +313,7 @@ function SamlCard() {
   const [domains, setDomains] = useState("");
   const [emailAttribute, setEmailAttribute] = useState("");
   const [groupsAttribute, setGroupsAttribute] = useState("");
+  const [mfaContexts, setMfaContexts] = useState("");
   const [defaultRoleId, setDefaultRoleId] = useState("");
   const [jit, setJit] = useState("false");
   const [idpInitiated, setIdpInitiated] = useState("false");
@@ -335,6 +346,9 @@ function SamlCard() {
                   allowIdpInitiated: idpInitiated === "true",
                   ...(emailAttribute ? { emailAttribute } : {}),
                   ...(groupsAttribute ? { groupsAttribute } : {}),
+                  ...(mfaContexts
+                    ? { mfaAuthnContexts: mfaContexts.split(",").map((x) => x.trim()).filter(Boolean) }
+                    : {}),
                   ...(domains
                     ? { allowedEmailDomains: domains.split(",").map((x) => x.trim()).filter(Boolean) }
                     : {}),
@@ -351,6 +365,7 @@ function SamlCard() {
                 setDomains("");
                 setEmailAttribute("");
                 setGroupsAttribute("");
+                setMfaContexts("");
                 setDefaultRoleId("");
                 setJit("false");
                 setIdpInitiated("false");
@@ -401,6 +416,13 @@ function SamlCard() {
             value={groupsAttribute}
             onChange={(e) => setGroupsAttribute(e.target.value)}
             placeholder="memberOf"
+          />
+        </Field>
+        <Field label="MFA authentication contexts (comma; blank = none — MFA then steps up to TOTP)">
+          <Input
+            value={mfaContexts}
+            onChange={(e) => setMfaContexts(e.target.value)}
+            placeholder="https://refeds.org/profile/mfa"
           />
         </Field>
         <Field label="JIT default role">
@@ -752,6 +774,11 @@ function LinkRequestsCard() {
           { key: "mfa", header: "MFA", render: (r) => (r.idpMfa ? <Badge tone="ok">asserted</Badge> : <Badge>not asserted</Badge>) },
           { key: "when", header: "Requested", render: (r) => new Date(r.createdAt).toLocaleString() },
           {
+            key: "approvals",
+            header: "Approvals",
+            render: (r) => `${r.approvals ?? 0} of ${r.requiredApprovals ?? 1}`,
+          },
+          {
             key: "actions",
             header: "",
             align: "right",
@@ -763,7 +790,15 @@ function LinkRequestsCard() {
                   <Button
                     size="sm"
                     onClick={() =>
-                      void act.run(() => api.post(`/v1/auth/link-requests/${r.id}/approve`, {}), "Link approved (audited)")
+                      void act.run(async () => {
+                        const res = await api.post<{ status: string; approvals?: number; requiredApprovals?: number }>(
+                          `/v1/auth/link-requests/${r.id}/approve`,
+                          {},
+                        );
+                        return res.status === "pending"
+                          ? `Approval ${res.approvals ?? 1} of ${res.requiredApprovals ?? 2} recorded — another administrator must also approve (audited)`
+                          : "Link approved (audited)";
+                      })
                     }
                   >
                     approve
