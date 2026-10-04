@@ -112,3 +112,66 @@ Everything else goes into `PathForward.md`: extensions to PF-02..PF-14 and new i
 - The pack scorecard shows coverage (controls checked ÷ mapped) beside the pass rate (passing ÷ checked). With nothing
   checked, the pass rate reads "unknown".
 - Owner decision (2026-10-04): ship v3 before the 2026-10-05 demo and update the demo script's trust-dashboard figures.
+
+## Amendment — batch D2 built, and its review fixes (2026-10-04)
+
+**What D2 shipped** (migrations 0140 and 0141). A7 and A15 are not part of this batch.
+- **A6 skill admission.** Every skill save (create, SKILL.md import, update, template seed, bundle import) runs the
+  ADR-0097 rules through `scanAdmissionUnits`, plus look-alike-letter and exfiltration-URL detectors. A high finding
+  refuses the save (422 `skill_admission_refused`, counts-only findings); a medium finding holds the skill until an admin
+  admits it with a reason. A held skill can't be attached, and a held pinned copy is kept out of the prompt. A
+  non-admin's widening to the workspace is a request an admin decides on the Admission review page. The ADR-0100 sweep
+  re-scans library rows and pinned copies. Each builder step records the digests of the skills it carried.
+- **A5 release-age cooldown.** `min_release_age_days` (0 = off, 7 recommended) holds new MCP servers, changed
+  manifests, registry imports and new skill versions until they are old enough by this deployment's own first sighting,
+  or an admin overrides one item with a reason (audited).
+- **A4 served-model record.** `usage_events.served_model` stores what the provider reported (never guessed), and the
+  `served_model_drift` rule compares it with the configured model using version-suffix matching.
+- **A9 unregistered AI traffic.** `unregistered_ai_traffic` reports model or MCP spend that no approved use case covers.
+  It only observes and never blocks.
+
+**Rules added by the review**
+1. **A skill's prompt text is its name plus its body.** `skillPromptSection(name, body)` is the one definition the
+   prompt, the scan and the digest all use. The attachment pins `snapshot_name` with the body, and the prompt heading is
+   the pinned name, never the live one. A rename is a content change: it is re-scanned, the version goes up, and agents
+   see "update available". A name may not contain line breaks, control characters or invisible formatting characters
+   (422 `skill_name_invalid`).
+2. **The phrase detectors read three copies of each text:** the raw text, a normalised copy (NFKC, invisible characters
+   removed, whitespace collapsed) and a copy folded through a small, documented map of Cyrillic and Greek look-alike
+   letters. A newline, a full-width spelling, or a look-alike spelling of an injection phrase is refused like the plain
+   phrase. A skill is also scanned as the prompt shows it, so a phrase split between the name and the body is caught.
+   The fix is in `scanAdmissionUnits`, so MCP manifests get it too (scanner versions `mcp-admission/2` and
+   `skill-admission/2`). These are still detectors: encodings and paraphrase still get past them.
+3. **A skill save is conditional.** A PATCH applies only if the row still has the digest and `updated_at` it was read
+   with (409 `skill_changed_concurrently` otherwise). Admission columns are written only when scanned text changes, and
+   the digest is of exactly the text stored. A builder step's trace records the digest of the bytes sent to the model.
+4. **Sharing an agent never widens a private skill's audience.** A turn carries a skill only if the person running it
+   may open that skill (its owner, an admin, or anyone once it is shared with the workspace). Everyone else runs the
+   agent without it. We chose this over turning the agent share into a pending request: it is the least disruptive
+   option that is still safe, because sharing keeps working, nothing private leaks, and the existing approval of a
+   skill's widening is the one way to include it. The editor marks such a skill "Only its owner".
+5. **Admins approve what they were shown.** Skill admit and release-age override require the digest (or `registration`)
+   the page displayed, and the write is conditional on it. If the item has changed since, the request gets a 409
+   (`skill_changed` or `release_changed`).
+6. **A9 coverage matches the use-case gate.** A use case covers its project only while it is approved and its
+   `approved_until` is null or in the future. A lapsed approval is listed on the finding.
+7. **A first manifest is aged by the later of two times:** the registration (or registry entry) sighting, and the first
+   sighting of that manifest's digest. A manifest nobody has seen before counts as seen when the server was registered.
+   So an ordinary registration waits once, but importing an old registry entry whose upstream now serves an unseen
+   manifest still waits.
+8. **Skills from before 0140 are scanned lazily:** on attach, on re-attach, and when a turn loads an `unscanned` (or
+   digest-mismatched) library row or pinned copy. The verdict is stored and applied, and a held skill is withheld. This
+   is idempotent.
+9. **A pin is an exact version.** A model card's `pinned_model_version` must match the binding's base model (its
+   expected served model if set, otherwise its configured model). A floating alias such as `latest` gets a 422. A
+   pinned-version drift raises a **high** alert, and an open high alert on an agent **blocks the deploy gate** for every
+   use case that depends on it, until someone acknowledges or resolves it. A binding may set
+   `agents.expected_served_model` (`PUT /v1/agents/:id/expected-served-model`, admin, audited) so that an endpoint
+   named after a deployment doesn't raise drift on every call.
+10. **A skill's release clock is its own:** sightings are keyed by (skill, digest). Manifests and registry entries are
+    still keyed by digest alone.
+11. **The pinned-copy re-scan rotates.** Copies are re-scanned least-recently-scanned first (`snapshot_scanned_at`),
+    so the per-pass cap no longer re-reads the same rows. An admission belongs to its digest: a copy admitted at an
+    older digest keeps its admission when it is re-scanned.
+12. **A9 has an index on `usage_events (object_type, at)`, and its alert titles contain no personal data.** Titles
+    reach ChatOps channels, so a caller is shown as "A user (id …)". The display name stays in the admin-only detail.
