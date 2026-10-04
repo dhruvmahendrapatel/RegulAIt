@@ -250,7 +250,11 @@ back afterwards; a live run leaves it set — recreate the database before the n
 
 ### 3B. Governance alerts and remediation — Ada, then Avery
 - **URL:** `/ui/admin/governance/alerts` → **Evaluate now**
-- **Screen:** the monitor's alerts (14 active on 2026-10-02) from its 9 rules, including:
+- **Screen:** the monitor's alerts (16 active after the 2026-10-04 rehearsal: 15 open, 1 acknowledged) from its 11
+  rules, including:
+  - *"Project hipaa-project: 4 model calls in 7 days, no approved use case links this project"* — new on
+    2026-10-04: AI spend that no approved use case covers (shadow AI caught from the ledger), with a
+    **Register as use case** link that opens intake prefilled. It only observes; nothing is blocked;
   - *"… inherits a HIGH rating from Acme Internal AI Platform"* — with the propagation path;
   - *"balanced-mock returned flagged content in 1 of N evaluated responses (semantic DLP)"* —
     continuous trace evaluation caught a credential the inline guardrail let through;

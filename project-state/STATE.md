@@ -21,6 +21,18 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-10-04 (evening) - ADR-0175 batch D2 pushed.** Migrations 0140 and 0141. Builder skills are admission-scanned with the
+ADR-0097 rules, in the form the prompt will show them (NFKC, invisible characters removed, look-alikes folded). Skills now
+have a digest and version and a pinned name. A held skill is withheld until an admin admits that exact digest, and widening
+a skill's visibility is a pending request. A shared agent's private skills run only for their owner and admins. Pre-0140
+skills are scanned lazily. The release-age cooldown (`min_release_age_days`, off by default, 7 recommended) holds new MCP
+servers, changed manifests, registry imports and skill versions, aged from our own first sighting; an admin can override
+one item, tied to its digest. Every call now records the model the provider served, and the new `served_model_drift` rule
+watches it: a pinned card version is high severity and holds the deploy gate. A per-binding expected served model avoids
+false alerts. `unregistered_ai_traffic` uses only unexpired approvals. Review: 12 findings, all fixed. Gate: gateway 3659
+passed, demo:prepare 18/18, mocked 183, spa 47. The demo shows one new alert (hipaa-project, a true finding); beat 3B is
+updated. Next: D2 remainder (A7 credential inventory, A15 energy estimate), then ADR-0173 batch 2c.
+
 **2026-10-04 (late afternoon) - ADR-0174 enterprise sign-in pushed; CI green on batch 2a.** Keycloak (optional `sso` compose profile)
 brokers Microsoft/Google/GitHub with OTP or passkey MFA. The sign-in page shows provider buttons, enterprise SSO and email.
 Break-glass-only local sign-in is available. Account linking needs a verified email plus proof or approval. `demo:set-passwords`
