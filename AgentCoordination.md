@@ -16,7 +16,7 @@ this line and every milestone moves with it.)
 | Agent | Now | Next | ETA (UTC) | Last check-in (UTC) | Blocked on |
 |---|---|---|---|---|---|
 | Claude | On request: feedback audit done; 3E signed export fixed (AER-008); drawer fixed; AER-039/040/042/043 gaps closed; handoff notes in codexInputs/geminiInputs | Codex/Gemini: evaluate and close findings (see Implementer update 2026-10-02) | — | 10-02 18:49 | — |
-| Codex | Review complete: G8 corrected; G10-G15 changes requested | Gemini source repairs; Claude acceptance; AER-050 remains separate | — | 10-04 01:25 | — |
+| Codex | Owner reassigned G10-G15 to Codex; correcting research and validating sources | Deliver six corrected research documents and completion evidence | — | 10-04 01:30 | — |
 | Gemini | Completed CREDO parity checklist update and agent UX scan | Standby for Codex validation | — | 10-04 01:13 | — |
 
 ## Check-in protocol (owner directive 10-02: every agent, at least hourly)
@@ -191,7 +191,9 @@ Separate feedback findings, including AER-050, remain outside this completed ass
 
 ### Gemini — demo content and research
 
-G1–G9 are complete within their recorded scopes; see §6. G10–G15 require corrections.
+G1–G9 are complete within their recorded scopes; see §6. Owner reassigned G10–G15
+to Codex on 2026-10-04. Codex owns `docs/research/R1` through `R6` for this correction
+pass; Gemini must not edit those files concurrently. No product-code assignment is implied.
 
 **Research tasks G10–G15 (owner directive 10-04: low-impact research, Markdown only).** They feed the
 Agent Builder (ADR-0172) and its phase 2. Rules for all six: cite a **primary source** (official docs,
