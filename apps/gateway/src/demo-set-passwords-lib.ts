@@ -103,7 +103,7 @@ export async function setDemoPasswords(db: Db, env: NodeJS.ProcessEnv): Promise<
       ok: false,
       exitCode: 1,
       lines: [
-        `demo:set-passwords refused: no valid demo licence is installed${signal ? ` (and this box looks like a real deployment: ${signal})` : ""}. Run demo:setup first (DEMO_RUNBOOK §1 step 4 — demo:prepare runs it), which installs the ephemeral demo licence. Nothing was changed.`,
+        `demo:set-passwords refused: no valid demo licence is installed${signal ? ` (and this box looks like a real deployment: ${signal})` : ""}. Run demo:setup first (DEMO_RUNBOOK §1 step 4 — demo:prepare runs it), which installs the ephemeral demo licence; under Docker Compose, put REGULAIT_DEMO_LICENSE=1 in the .env next to docker-compose.yml and run \`docker compose up -d\` again (demo only — never on an install). Nothing was changed.`,
       ],
     };
   }
