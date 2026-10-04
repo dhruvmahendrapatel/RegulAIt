@@ -21,6 +21,19 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-10-04 (night) - ADR-0175 D2 remainder, AER-056, Windows portability and the Docker demo password pushed.** A7: the
+Credentials admin page (18 stored credential types, flags, windowed and indexed ledger reads, paging). The `stale_credentials`
+alerts are off by default and roll up per type and flag. A15: energy and emissions estimates (admin-entered factors with no
+defaults shipped; unknown is never zero; demo factors apply to mock models only). Migration 0142 records when each secret was
+last set. Review: 8 findings, all fixed; alert cards are escaped for Slack and Teams. AER-056: an advisory-lock invariant
+serialises every writer that could remove the last sign-in path, with barrier race tests. Windows: two case-colliding file
+pairs renamed, plus a basename-collision guard in CI, a path-normalised NIST guard and a CRLF-safe coordination script. Docker:
+`REGULAIT_DEMO_LICENSE=1` in `.env` lets `demo:set-passwords` run under compose (ephemeral licence, keyring volume; a CRLF
+value is accepted). It was tested end to end in real containers: off is refused; on gives three 200 logins; it survives
+restart and down/up; no password in logs or audit. Gate: gateway 3720 + 3 test-helper fixes (proven on a crowded DB), demo
+18/18, mocked 188, spa 47, review 4/4. Container restarts kept killing long runs today. Next: ADR-0173 batch 2c, then
+ADR-0175 D3/D4.
+
 **2026-10-04 (evening) - ADR-0175 batch D2 pushed.** Migrations 0140 and 0141. Builder skills are admission-scanned with the
 ADR-0097 rules, in the form the prompt will show them (NFKC, invisible characters removed, look-alikes folded). Skills now
 have a digest and version and a pinned name. A held skill is withheld until an admin admits that exact digest, and widening
