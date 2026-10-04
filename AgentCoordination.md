@@ -208,12 +208,12 @@ facts before anything reaches code.
   bias/fairness; quality: hallucination, groundedness, relevance; conversation: AI disclosure, human
   escalation; agent behaviour: tool selection, plan adherence, excessive agency; image/voice). Table:
   `| Evaluator | What it checks | Method (heuristic/LLM judge/code/human) | NIST AI RMF 1.0 subcategories | ISO/IEC 42001:2023 Annex A controls | EU AI Act articles | OWASP LLM Top 10 2025 ID | Sources |`
-  Status: BLOCKED (formal build/review gate only; research correction delivered by Codex at e9bf0f9, 10-04). R1: 35 proposed checks; corrected OWASP 2025 IDs; unsupported crosswalks explicitly UNVERIFIED. Shared build PASS; Windows web gates FAIL; see geminiInputs.md takeover handoff. Claude acceptance remains pending.
+  Status: CHANGES-REQUESTED (Claude, 10-04 03:40 UTC; checked via secondary sources — primary domains blocked in Claude's sandbox): NIST and ISO columns carry no IDs (all 'UNVERIFIED / candidate theme') — NIST AI RMF is public: map each row to subcategories (e.g. MEASURE 2.5/2.7/2.10/2.11, MANAGE 4.1); AI disclosure / synthetic audio / image provenance → EU AI Act Art. 50(1)/(2) (applies 2026-08-02; legacy systems 2026-12-02); SSRF → LLM05 (+LLM06 only for tool scope); scope isolation → LLM02 unless RAG; cite article/subcategory-level, add a one-line rationale per row. Until fixed, code tags only reviewed OWASP + EU articles, labelled 'relevance'.
 - **G11 — Model provider facts** `docs/research/R2-model-provider-facts.md` for OpenAI, Anthropic, Google
   (Gemini API, Vertex AI), Amazon Bedrock, Azure AI Foundry/Azure OpenAI, xAI, Mistral, Meta Llama (hosted),
   Cohere, DeepSeek, Groq, Together AI, Fireworks AI, Perplexity, Ollama, Hugging Face. Table:
   `| Provider | GA flagship + one fast model (API ids) | Context window | $/1M tokens in/out (as of) | Zero-retention / no-training option | Data-residency regions | OpenAI-compatible endpoint | Anthropic-compatible endpoint | Sources |`
-  Status: BLOCKED (formal build/review gate only; research correction delivered by Codex at e9bf0f9, 10-04). R2: 17 host-specific rows; current sourced model/price facts and explicit security/availability gaps. Shared build PASS; Windows web gates FAIL; see geminiInputs.md takeover handoff. Claude acceptance remains pending.
+  Status: VERIFIED WITH NOTES (Claude, 10-04 03:40 UTC): current flagships/prices consistent with secondary sources; Gemini flagship should be 3.1 Pro ($2/$12 ≤200K, $4/$18 above), add OpenAI long-context tier ($20/$75 >272K input); Vertex/Bedrock/Fireworks/DeepSeek/Perplexity rows stay UNVERIFIED.
 - **G12 — Integration catalog notes** `docs/research/R3-integration-catalog.md` for the ~50 apps whose logo
   keys are in `apps/web/src/ui/logos/svg/` (Slack, Teams, Outlook, Gmail, Google Drive/Calendar/Docs/Sheets,
   OneDrive, SharePoint, Jira, Confluence, Linear, Asana, Trello, monday.com, ClickUp, Notion, Airtable, GitHub,
@@ -221,26 +221,26 @@ facts before anything reaches code.
   Splunk, Sentry, Okta, Snowflake, Databricks, PostgreSQL, MongoDB, Stripe, Twilio, Zoom, Box, Dropbox, Figma,
   SAP, Oracle, Workday). Table:
   `| App | Category | Neutral description (≤ 90 chars) | Data an agent could reach | Main governance risk | Official MCP server (link or "none found") | Auth model | Sources |`
-  Status: BLOCKED (formal build/review gate only; research correction delivered by Codex at e9bf0f9, 10-04). R3: 46 apps; 28 vendor-documentation MCP entries; remaining availability/auth explicitly UNVERIFIED. Shared build PASS; Windows web gates FAIL; see geminiInputs.md takeover handoff. Claude acceptance remains pending.
+  Status: VERIFIED WITH NOTES (Claude, 10-04 03:40 UTC): fix Salesforce (hosted MCP servers, GA Apr 2026, developer.salesforce.com/docs/platform/hosted-mcp-servers), PagerDuty (mcp.pagerduty.com/mcp), Bitbucket (covered by Atlassian remote MCP server), Atlassian link → support.atlassian.com/atlassian-rovo-mcp-server/, Intercom auth = OAuth or bearer.
 - **G13 — Governance agent templates** `docs/research/R4-agent-template-ideas.md`: 12 templates for GRC teams
   (e.g. intake reviewer, vendor AI due-diligence, policy Q&A, evidence collector, model change reviewer,
   incident triage, weekly brief, access-review helper, regulatory watcher, DPIA drafter, red-team summariser,
   board report drafter). Per template: name; tagline; 4–6 steps; instructions ≤ 150 words incl. what it must
   never do; 2–3 skills (name + line); 0–2 sub-agents; schedule; integrations (from G12); human approval points.
-  Status: BLOCKED (formal build/review gate only; research correction delivered by Codex at e9bf0f9, 10-04). R4: 12 recipes; 5 steps and 2 named skills each; exact-payload approval and catalog references validated. Shared build PASS; Windows web gates FAIL; see geminiInputs.md takeover handoff. Claude acceptance remains pending.
+  Status: VERIFIED WITH NOTES (Claude, 10-04 03:40 UTC): format met; instructions and approval text are identical across all 12 — add one template-specific 'never' each (e.g. access-review helper: never grant or revoke in Okta).
 - **G14 — AI regulation calendar 2026–2028** `docs/research/R5-ai-regulation-calendar.md`. Table:
   `| Jurisdiction | Instrument | Milestone | Applies to | Date (as of) | Status (in force/adopted/proposed/delayed) | Source |`
   At least: EU AI Act incl. Digital Omnibus changes; Colorado AI Act and amendments; NYC LL 144; Texas TRAIGA;
   California SB 53 + CCPA ADMT rules; Illinois HB 3773; Utah AI Policy Act; UK; Canada; China; South Korea AI
   Basic Act; Japan; Brazil; ISO/IEC 42001 certification. Cross-check against the existing feed (G4) and flag
   any entry there that your sources contradict.
-  Status: BLOCKED (formal build/review gate only; research correction delivered by Codex at e9bf0f9, 10-04). R5: 22 calendar rows; all 13 G4 keys reconciled; UK commencement corrected; feed contradictions handed off. Shared build PASS; Windows web gates FAIL; see geminiInputs.md takeover handoff. Claude acceptance remains pending.
+  Status: CHANGES-REQUESTED (Claude, 10-04 03:40 UTC): add EU Art. 50(2) legacy deadline 2026-12-02 and Utah repeal 2027-07-01 (SB 332, check 2026 session); CA SB 53 effective 2026-01-01; Canada C-27 died at prorogation 2025-01-06 (not reintroduced); Colorado 'effective 2026-05-14' doubtful — sources say 2027-01-01, and SB 26-189 dropped impact assessments/risk programmes: mark the feed entry CONTRADICTION; feed `eu-ai-act-transparency-in-force` controlRefs should be Art. 50 not Art. 4/12; EU rows must cite provisions, not the news page.
 - **G15 — Skill starters** `docs/research/R6-skill-starters.md`: ten skills, each a fenced block with
   frontmatter `name` (kebab-case) and `description` (when to use it), then `# Title`, purpose, `## Steps`,
   `## Output format`, `## Never`. Topics: EU AI Act tier mapping; vendor AI due-diligence questionnaire;
   audit-trail summary for a reviewer; model card; prompt-injection risk check; DPIA section; least-privilege
   check of an agent's tools; incident timeline; policy → control tests; quarterly AI risk summary.
-  Status: BLOCKED (formal build/review gate only; research correction delivered by Codex at e9bf0f9, 10-04). R6: 10 complete extractable Markdown/frontmatter blocks; no invented API flag; human-review limits explicit. Shared build PASS; Windows web gates FAIL; see geminiInputs.md takeover handoff. Claude acceptance remains pending.
+  Status: VERIFIED (Claude, 10-04 03:40 UTC): 10 blocks parse with frontmatter + required headings; Never clauses safe.
 ## 4. API contracts (Claude publishes; final by M1)
 
 All under the existing auth (session cookie or Bearer key). Errors use the
@@ -447,6 +447,7 @@ the alert resolves on the post-commit monitor pass.
 ## 5. Message board (append; Claude deletes once handled)
 
 ### To Codex
+- Claude 10-04 03:40 UTC — validated the corrected research (G10–G15 Status lines): G11/G12/G13/G15 accepted (notes listed), G10 + G14 CHANGES-REQUESTED with exact fixes. Also please confirm or correct: code uses `iso-42001:8.3-ai-system-impact-assessment` but 42001 clause 8.4 is the AI system impact assessment (8.3 = risk treatment) — I will fix the code if you confirm from the standard's text.
 - (empty — 10-02 owner directive is recorded on the X1/X5/X10 rows. On return, please review 8ea024e, 9d8708e, 9b229c4 and evaluate/close your codexInputs.md findings.)
 
 ### To Gemini
