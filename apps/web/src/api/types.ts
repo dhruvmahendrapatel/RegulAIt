@@ -825,3 +825,176 @@ export interface DirectoryUser {
   name: string | null;
   teams?: Array<{ id: string; name: string }>;
 }
+
+// ---- ADR-0172: the agent builder (/v1/builder/*) ---------------------------
+
+export type BuilderSharing = "private" | "workspace" | "people";
+export type BuilderConnectionFormat = "shared" | "per_user";
+export type BuilderCadence = "hourly" | "daily" | "weekdays" | "weekly";
+export type BuilderThreadStatus = "active" | "needs_attention" | "completed";
+export type BuilderChannelProvider = "slack" | "teams" | "outlook" | "email";
+
+export interface BuilderModelRef {
+  id: string;
+  name: string;
+  provider: string;
+  model: string;
+}
+
+export interface BuilderAgentSummary {
+  id: string;
+  name: string;
+  description: string | null;
+  color: string;
+  ownerUserId: string;
+  ownerName: string | null;
+  sharing: BuilderSharing;
+  modelAgent: BuilderModelRef | null;
+  templateId: string | null;
+  monthlyLimitUsd: number | null;
+  spentThisMonthUsd: number;
+  toolCount: number;
+  skillCount: number;
+  scheduleCount: number;
+  updatedAt: string;
+  canEdit: boolean;
+}
+
+export interface BuilderTool {
+  kind: "connector" | "mcp_tool";
+  refId: string;
+  name: string;
+  /** connector kind or MCP server name, for a logo */
+  provider: string | null;
+  requiresApproval: boolean;
+  entitledForYou: boolean;
+}
+
+export interface BuilderSubagent {
+  childId: string;
+  name: string;
+  description: string;
+  childName: string;
+}
+
+export interface BuilderMemoryItem {
+  id: string;
+  content: string;
+  createdByName: string | null;
+  createdAt: string;
+}
+
+export interface BuilderSchedule {
+  id: string;
+  name: string;
+  cadence: BuilderCadence;
+  timeUtc: string;
+  prompt: string;
+  enabled: boolean;
+  nextRunAt: string | null;
+  lastRunAt: string | null;
+}
+
+export interface BuilderChannel {
+  id: string;
+  provider: BuilderChannelProvider;
+  status: "connected" | "needs_setup";
+  connectionName: string | null;
+}
+
+export interface BuilderAgentDetail extends BuilderAgentSummary {
+  instructions: string;
+  connectionFormat: BuilderConnectionFormat;
+  computerUse: boolean;
+  sharedUserIds: string[];
+  sharedUsers: Array<{ id: string; name: string }>;
+  tools: BuilderTool[];
+  subagents: BuilderSubagent[];
+  skills: Array<{ id: string; name: string; description: string }>;
+  memory: BuilderMemoryItem[];
+  schedules: BuilderSchedule[];
+  channels: BuilderChannel[];
+}
+
+export interface BuilderThreadSummary {
+  id: string;
+  agentId: string;
+  agentName: string;
+  agentColor: string;
+  title: string;
+  status: BuilderThreadStatus;
+  source: "chat" | "schedule" | "channel";
+  lastMessagePreview: string | null;
+  updatedAt: string;
+}
+
+export interface BuilderMessage {
+  id: string;
+  role: "user" | "agent" | "system";
+  content: string;
+  model: string | null;
+  costUsd: number | null;
+  latencyMs: number | null;
+  createdAt: string;
+}
+
+export interface BuilderSkillSummary {
+  id: string;
+  name: string;
+  description: string;
+  visibility: "private" | "workspace";
+  ownerName: string | null;
+  usedBy: number;
+  updatedAt: string;
+  canEdit: boolean;
+}
+export interface BuilderSkillDetail extends BuilderSkillSummary {
+  body: string;
+}
+
+export interface BuilderTemplate {
+  id: string;
+  name: string;
+  tagline: string;
+  description: string;
+  category: string;
+  /** logo keys */
+  integrations: string[];
+  instructions: string;
+  skills: Array<{ name: string; description: string; body: string }>;
+  subagents: Array<{ name: string; description: string }>;
+  schedules: Array<{ name: string; cadence: BuilderCadence; timeUtc: string; prompt: string }>;
+  steps: string[];
+}
+
+export type BuilderIntegrationCategory = "productivity" | "developer" | "communication" | "data" | "security" | "ai";
+export interface BuilderIntegrationItem {
+  /** a logo key */
+  key: string;
+  name: string;
+  description: string;
+  category: BuilderIntegrationCategory;
+  status: "connected" | "available";
+  /** the admin page that connects it */
+  connectHref: string;
+  kind: "connector" | "mcp" | "chatops";
+}
+export interface BuilderIntegrationsResponse {
+  groups: Array<{ name: string; items: BuilderIntegrationItem[] }>;
+  custom: { mcpServers: Array<{ id: string; name: string; toolCount: number }> };
+}
+
+export interface BuilderUsage {
+  totals: { spendUsd: number; messages: number; agents: number; activeUsers: number };
+  byAgent: Array<{ agentId: string; name: string; spendUsd: number; messages: number; limitUsd: number | null }>;
+  byUser: Array<{ userId: string; name: string; spendUsd: number; messages: number }>;
+  byModel: Array<{ provider: string; model: string; spendUsd: number; messages: number }>;
+  daily: Array<{ date: string; spendUsd: number; messages: number }>;
+}
+
+/** GET /builder/agents/:id/export — portable: no ids, no owners */
+export interface BuilderBundle {
+  version: 1;
+  agent: { name: string; [k: string]: unknown };
+  skills: Array<Record<string, unknown>>;
+}
