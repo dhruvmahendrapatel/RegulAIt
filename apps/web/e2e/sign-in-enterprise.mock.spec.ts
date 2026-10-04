@@ -78,7 +78,12 @@ async function setTheme(page: Page, theme: (typeof THEMES)[number]) {
   await page.evaluate(async (next) => {
     document.documentElement.dataset.theme = next;
     localStorage.setItem("regulait.theme", next);
-    await Promise.all(document.getAnimations().map((a) => a.finished.catch(() => undefined)));
+    // wait for the finite transitions this flip starts (120 ms colour transitions). An infinite animation never
+    // finishes, and a transition on an element that is not rendered (inside a closed disclosure) never advances,
+    // so the wait is capped well above the longest real transition.
+    const finite = document.getAnimations().filter((a) => a.effect?.getTiming().iterations !== Infinity);
+    const settled = Promise.all(finite.map((a) => a.finished.catch(() => undefined)));
+    await Promise.race([settled, new Promise((resolve) => setTimeout(resolve, 1_000))]);
   }, theme);
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
 }
