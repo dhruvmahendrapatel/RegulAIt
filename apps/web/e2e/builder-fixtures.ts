@@ -39,7 +39,12 @@ export interface MockOptions {
   /** the caller is no longer entitled to the agent's model: chat refuses AFTER
    * recording the thread (403 agent_denied + threadId), like the gateway */
   denyModel?: boolean;
+  /** the org's attribution mandate is on: an agent with no project is refused
+   * (409 attribution_required, with the gateway's pointer to Advanced) */
+  attributionRequired?: boolean;
 }
+
+export const PROJECT = "66666666-0000-4000-8000-000000000001";
 
 export interface Recorded {
   method: string;
@@ -65,6 +70,7 @@ function agent(over: Partial<Json>): Json {
     instructions: "",
     connectionFormat: "shared",
     computerUse: false,
+    project: null,
     sharedUserIds: [],
     sharedUsers: [],
     tools: [],
@@ -78,8 +84,8 @@ function agent(over: Partial<Json>): Json {
 }
 
 const summaryOf = (a: Json) => {
-  const { instructions, connectionFormat, computerUse, sharedUserIds, sharedUsers, tools, subagents, skills, memory, schedules, channels, ...rest } = a;
-  void instructions, connectionFormat, computerUse, sharedUserIds, sharedUsers, subagents, memory, channels;
+  const { instructions, connectionFormat, computerUse, project, sharedUserIds, sharedUsers, tools, subagents, skills, memory, schedules, channels, ...rest } = a;
+  void instructions, connectionFormat, computerUse, project, sharedUserIds, sharedUsers, subagents, memory, channels;
   return { ...rest, toolCount: tools.length, skillCount: skills.length, scheduleCount: schedules.length };
 };
 
@@ -96,9 +102,9 @@ export function seedState(opts: MockOptions = {}) {
     monthlyLimitUsd: 50,
     spentThisMonthUsd: 42.5,
     tools: [{ kind: "connector", refId: CONN_JIRA, name: "Jira (governance)", provider: "jira", requiresApproval: false, entitledForYou: true }],
-    skills: [{ id: "sk-0001", name: "Assess an AI use case", description: "Use when a new AI use case needs a first review." }],
+    skills: [{ id: "sk-0001", name: "Assess an AI use case", description: "Use when a new AI use case needs a first review.", updateAvailable: true, unavailable: false }],
     memory: [{ id: "mem-0001", content: "The review board meets on Thursdays.", createdByName: "Avery Admin", createdAt: iso(600) }],
-    schedules: [{ id: "sch-0001", name: "Morning sweep", cadence: "weekdays", timeUtc: "08:30", prompt: "List new intake requests.", enabled: true, nextRunAt: iso(-600), lastRunAt: iso(800) }],
+    schedules: [{ id: "sch-0001", name: "Morning sweep", cadence: "weekdays", timeUtc: "08:30", prompt: "List new intake requests.", enabled: true, awaitingOwner: false, lastEditedByName: "Avery Admin", nextRunAt: iso(-600), lastRunAt: iso(800) }],
   });
   const risk = agent({
     name: "Vendor risk assessor",
@@ -261,6 +267,7 @@ export async function installBuilderMock(page: Page, opts: MockOptions = {}): Pr
       return json(route, { users: [{ id: ME, name: "Avery Admin" }, { id: DREW, name: "Drew Reviewer" }, { id: CORA, name: "Cora Analyst" }] });
     if (p === "/v1/model-providers/status") return json(route, { providers: { anthropic: { configured: true }, openai: { configured: true } } });
     if (p === `/v1/users/${ME}/model-credentials`) return json(route, { credentials: [] });
+    if (p === "/v1/projects") return json(route, { projects: [{ id: PROJECT, name: "Governance programme" }] });
 
     if (!p.startsWith("/v1/builder")) return json(route, {});
     const b = p.slice("/v1/builder".length);
@@ -284,10 +291,10 @@ export async function installBuilderMock(page: Page, opts: MockOptions = {}): Pr
         templateId: body.templateId ?? null,
         updatedAt: new Date().toISOString(),
         instructions: tpl ? tpl.instructions : "",
-        skills: tpl ? tpl.skills.map((k: Json) => ({ id: uid("skkkkkkk"), name: k.name, description: k.description })) : [],
+        skills: tpl ? tpl.skills.map((k: Json) => ({ id: uid("skkkkkkk"), name: k.name, description: k.description, updateAvailable: false, unavailable: false })) : [],
         subagents: children.map((c: Json) => ({ childId: c.id, name: c.name, description: c.description, childName: c.name })),
         // seeded schedules start OFF: nothing spends until the owner turns one on
-        schedules: tpl ? tpl.schedules.map((x: Json) => ({ id: uid("scheeeee"), ...x, enabled: false, nextRunAt: null, lastRunAt: null })) : [],
+        schedules: tpl ? tpl.schedules.map((x: Json) => ({ id: uid("scheeeee"), ...x, enabled: false, awaitingOwner: false, lastEditedByName: "Avery Admin", nextRunAt: null, lastRunAt: null })) : [],
         ...(body.modelAgentId === MODEL_B ? { modelAgent: { id: MODEL_B, name: "gpt-review", provider: "openai", model: "gpt-4.1" } } : {}),
       });
       st.agents.unshift(a);
@@ -314,10 +321,21 @@ export async function installBuilderMock(page: Page, opts: MockOptions = {}): Pr
           return json(route, { error: "validation", issues: [{ path: "color", message: `color must be one of ${PALETTE.join(", ")}` }] }, 400);
         Object.assign(a, body, body.color ? { color: String(body.color).toLowerCase() } : {});
         if (body.sharedUserIds) a.sharedUsers = body.sharedUserIds.map((id: string) => ({ id, name: id === DREW ? "Drew Reviewer" : id === CORA ? "Cora Analyst" : "Avery Admin" }));
+        if ("projectId" in body) a.project = body.projectId ? { id: body.projectId, name: body.projectId === PROJECT ? "Governance programme" : "Project" } : null;
+        delete a.projectId;
         if (body.modelAgentId) a.modelAgent = body.modelAgentId === MODEL_B ? { id: MODEL_B, name: "gpt-review", provider: "openai", model: "gpt-4.1" } : { id: MODEL_A, name: "claude-default", provider: "anthropic", model: "claude-sonnet" };
         a.updatedAt = new Date().toISOString();
         return json(route, { agent: detailOf(a) });
       }
+    }
+    if ((m = /^\/agents\/([^/]+)\/skills\/([^/]+)\/reattach$/.exec(b)) && method === "POST") {
+      const a = find(m[1]!);
+      if (!a) return json(route, { error: "unknown_builder_agent" }, 404);
+      if (!a.canEdit) return json(route, { error: "not_agent_editor", detail: "only the agent's owner or an admin can change it" }, 403);
+      const k = a.skills.find((x: Json) => x.id === m![2]);
+      if (!k) return json(route, { error: "unknown_skill", skillId: m[2] }, 404);
+      k.updateAvailable = false;
+      return json(route, { agent: detailOf(a) });
     }
     if ((m = /^\/agents\/([^/]+)\/(tools|subagents|skills|memory|schedules|channels|export|chat)(?:\/([^/]+))?$/.exec(b))) {
       const a = find(m[1]!);
@@ -346,7 +364,8 @@ export async function installBuilderMock(page: Page, opts: MockOptions = {}): Pr
       if (what === "skills" && method === "PUT") {
         a.skills = body.skillIds.map((id: string) => {
           const k = st.skills.find((x: Json) => x.id === id) ?? a.skills.find((x: Json) => x.id === id);
-          return { id, name: k?.name ?? id, description: k?.description ?? "" };
+          const kept = a.skills.find((x: Json) => x.id === id);
+          return { id, name: k?.name ?? id, description: k?.description ?? "", updateAvailable: kept?.updateAvailable ?? false, unavailable: false };
         });
         return json(route, { agent: detailOf(a) });
       }
@@ -360,14 +379,20 @@ export async function installBuilderMock(page: Page, opts: MockOptions = {}): Pr
         return route.fulfill({ status: 204, body: "" });
       }
       if (what === "schedules" && method === "POST") {
-        const sc = { id: uid("sch"), ...body, nextRunAt: nextRun(body.enabled), lastRunAt: null };
+        // someone other than the owner: saved OFF until the owner turns it on (gateway rule)
+        const isOwner = a.ownerUserId === ME;
+        const enabled = body.enabled && isOwner;
+        const sc = { id: uid("sch"), ...body, enabled, awaitingOwner: !isOwner, lastEditedByName: "Avery Admin", nextRunAt: nextRun(enabled), lastRunAt: null };
         a.schedules.push(sc);
         return json(route, sc, 201);
       }
       if (what === "schedules" && method === "PATCH") {
         const sc = a.schedules.find((x: Json) => x.id === sub);
         if (!sc) return json(route, { error: "unknown_schedule" }, 404);
+        if (a.ownerUserId !== ME && body.enabled === true)
+          return json(route, { error: "owner_must_enable_schedule", detail: "a schedule runs as the agent's owner, so only the owner can turn it on", ownerUserId: a.ownerUserId }, 403);
         Object.assign(sc, body);
+        if (body.enabled === true) sc.awaitingOwner = false;
         // enabling computes the next run; disabling clears it (gateway rule)
         sc.nextRunAt = sc.enabled ? (sc.nextRunAt ?? nextRun(true)) : null;
         return json(route, sc);
@@ -377,7 +402,9 @@ export async function installBuilderMock(page: Page, opts: MockOptions = {}): Pr
         return route.fulfill({ status: 204, body: "" });
       }
       if (what === "channels" && method === "POST") {
-        const ch = { id: uid("ch"), provider: body.provider, status: body.provider === "slack" ? "connected" : "needs_setup", connectionName: body.provider === "slack" ? "Governance Slack" : null };
+        // only an admin binds (auto-picks) a workspace chat connection (gateway rule)
+        const bound = st.isAdmin && body.provider === "slack";
+        const ch = { id: uid("ch"), provider: body.provider, status: bound ? "connected" : "needs_setup", connectionName: bound ? "Governance Slack" : null };
         a.channels.push(ch);
         return json(route, ch, 201);
       }
@@ -386,6 +413,8 @@ export async function installBuilderMock(page: Page, opts: MockOptions = {}): Pr
         return route.fulfill({ status: 204, body: "" });
       }
       if (what === "export" && method === "GET") {
+        // export is an editor act (owner or admin), like the gateway
+        if (!a.canEdit) return json(route, { error: "not_agent_editor", detail: "only the agent's owner or an admin can change it" }, 403);
         // portable: no ids and no owners; tools by name, re-resolved on import
         return json(route, {
           bundle: {
@@ -423,6 +452,16 @@ export async function installBuilderMock(page: Page, opts: MockOptions = {}): Pr
             402,
           );
         if (!a.modelAgent) return json(route, { error: "builder_agent_has_no_model", detail: "choose a model for this agent first" }, 409);
+        if (st.opts.attributionRequired && !a.project)
+          return json(
+            route,
+            {
+              error: "attribution_required",
+              detail: "dispatch attribution is required: name a project — choose a project for this agent in Configure → Advanced",
+              threadId: body.threadId ?? undefined,
+            },
+            409,
+          );
         if (!th) {
           th = { id: uid("th"), agentId: a.id, agentName: a.name, agentColor: a.color, title: body.message.replace(/\s+/g, " ").trim().slice(0, 80), status: "active", source: "chat", lastMessagePreview: "", updatedAt: "" };
           st.threads.unshift(th);

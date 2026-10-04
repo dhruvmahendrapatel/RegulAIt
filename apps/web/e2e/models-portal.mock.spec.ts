@@ -261,6 +261,10 @@ test.describe("ADR-0172: the model portal", () => {
     await page.getByRole("button", { name: "Run", exact: true }).click();
     await expect(page.getByTestId("run-result")).toContainText("agent_suspended");
     await expect(page.getByTestId("run-result")).toContainText("HTTP 409");
+    // not a governance decision: a neutral "Couldn't run", never labelled a refusal
+    await expect(page.getByTestId("run-result")).toContainText("Couldn't run");
+    await expect(page.getByTestId("run-result")).not.toContainText("Refused");
+    await expect(page.getByTestId("run-result")).toHaveAttribute("role", "status");
     await expect(page.getByTestId("run-result")).toContainText("is suspended: vendor review");
   });
 

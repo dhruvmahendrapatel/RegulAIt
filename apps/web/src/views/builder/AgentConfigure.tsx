@@ -17,7 +17,7 @@ import { providerLogoKey } from "../../ui/logos/providerLogo";
 import { ModelPicker, type ModelPickerAgent } from "../../ui/ModelPicker";
 import { useToast } from "../../ui/toast";
 import { AddConnectionDialog, AddSkillDialog, CodeDialog, NewScheduleDialog, NewSubagentDialog, type ToolCandidate } from "./AgentDialogs";
-import { bk, builderApi, useAgents, useDirectory, useMyModelTiles, type PatchAgentBody, type ScheduleBody } from "./builderApi";
+import { bk, builderApi, useAgents, useDirectory, useMyModelTiles, useMyProjects, type PatchAgentBody, type ScheduleBody } from "./builderApi";
 import { AGENT_COLORS, bundleFileName, parseLimitInput, scheduleSummary, spendState } from "./builderLogic";
 import { AgentAvatar, Icon, Section, Segmented, Switch, ToolLogo } from "./BuilderUi";
 import s from "./builder.module.css";
@@ -51,9 +51,21 @@ export function ChannelRows(props: { agent: BuilderAgentDetail; disabled: boolea
   const { agent } = props;
   const applied = useAgentChange(agent.id);
   const { toast } = useToast();
+  const { auth } = useSession();
+  const isAdmin = Boolean(auth?.isAdmin);
   const add = useMutation({
     mutationFn: (p: BuilderChannelProvider) => builderApi.addChannel(agent.id, p),
-    onSuccess: (ch, p) => applied(undefined, ch.status === "connected" ? `${CHANNELS.find((c) => c.provider === p)?.name} connected` : `${CHANNELS.find((c) => c.provider === p)?.name} added — it still needs setting up`),
+    onSuccess: (ch, p) => {
+      const label = CHANNELS.find((c) => c.provider === p)?.name;
+      applied(
+        undefined,
+        ch.status === "connected"
+          ? `${label} connected`
+          : isAdmin
+            ? `${label} added — no matching chat connection yet`
+            : `${label} added — an admin connects it to the workspace's chat connection`,
+      );
+    },
     onError: (e) => toast(errText(e), "error"),
   });
   const remove = useMutation({
@@ -79,7 +91,13 @@ export function ChannelRows(props: { agent: BuilderAgentDetail; disabled: boolea
                 {c.name}
                 {bound && (bound.status === "connected" ? <Badge tone="ok">Connected</Badge> : <Badge tone="warn">Needs setup</Badge>)}
               </span>
-              <span className={s.listRowSub}>{bound?.connectionName ? `Uses ${bound.connectionName}` : c.sub}</span>
+              <span className={s.listRowSub}>
+                {bound?.connectionName
+                  ? `Uses ${bound.connectionName}`
+                  : bound && bound.status === "needs_setup"
+                    ? "Waiting for an admin to connect it to a workspace chat connection"
+                    : c.sub}
+              </span>
             </span>
             {bound ? (
               <button type="button" className={s.iconBtn} aria-label={`Remove ${c.name}`} disabled={props.disabled || remove.isPending} onClick={() => remove.mutate(bound.id)}>
@@ -104,7 +122,15 @@ export function ConfigurePanel(props: { agent: BuilderAgentDetail; onOpenSkills:
   const { toast } = useToast();
   const { auth } = useSession();
   const applied = useAgentChange(agent.id);
+  const isOwner = auth?.userId === agent.ownerUserId;
   const models = useMyModelTiles(auth?.userId ?? null);
+  const projectsQ = useMyProjects();
+  // the agent's current project stays listed even if it is not one of yours
+  const projectOptions = useMemo(() => {
+    const mine = projectsQ.data?.projects ?? [];
+    const cur = agent.project;
+    return cur && !mine.some((p) => p.id === cur.id) ? [cur, ...mine] : mine;
+  }, [projectsQ.data, agent.project]);
   // the agent's current model stays on show even when it is not one the
   // editor may choose (an admin editing someone else's agent, say)
   const modelTiles = useMemo<ModelPickerAgent[]>(() => {
@@ -166,6 +192,12 @@ export function ConfigurePanel(props: { agent: BuilderAgentDetail; onOpenSkills:
     onError: (e) => toast(errText(e), "error"),
   });
 
+  const reattach = useMutation({
+    mutationFn: (skillId: string) => builderApi.reattachSkill(agent.id, skillId),
+    onSuccess: (res) => applied(res, "Skill updated to the newest version"),
+    onError: (e) => toast(errText(e), "error"),
+  });
+
   // ---- memory
   const addMemory = useMutation({
     mutationFn: (content: string) => builderApi.addMemory(agent.id, content),
@@ -186,9 +218,9 @@ export function ConfigurePanel(props: { agent: BuilderAgentDetail; onOpenSkills:
   const closeSched = useCallback(() => setSchedOpen(false), []);
   const addSchedule = useMutation({
     mutationFn: (body: ScheduleBody) => builderApi.addSchedule(agent.id, body),
-    onSuccess: () => {
+    onSuccess: (sc) => {
       setSchedOpen(false);
-      applied(undefined, "Schedule added");
+      applied(undefined, sc.awaitingOwner ? "Schedule added — it stays off until the owner turns it on" : "Schedule added");
     },
   });
   const toggleSchedule = useMutation({
@@ -463,9 +495,23 @@ export function ConfigurePanel(props: { agent: BuilderAgentDetail; onOpenSkills:
               <li key={k.id} className={s.listRow}>
                 <span className={s.sectionIcon}>{Icon.spark(15)}</span>
                 <span className={s.listRowMain}>
-                  <span className={s.listRowTitle}>{k.name}</span>
-                  <span className={`${s.listRowSub} ${s.clamp2}`}>{k.description}</span>
+                  <span className={s.listRowTitle}>
+                    {k.name}
+                    {k.unavailable ? <Badge tone="warn">No longer shared</Badge> : k.updateAvailable ? <Badge tone="info">Update available</Badge> : null}
+                  </span>
+                  <span className={`${s.listRowSub} ${s.clamp2}`}>
+                    {k.unavailable
+                      ? "Its author stopped sharing it, so the agent no longer uses it."
+                      : k.updateAvailable
+                        ? "The library copy changed. The agent keeps the version it has until you take the new one."
+                        : k.description}
+                  </span>
                 </span>
+                {k.updateAvailable && !k.unavailable && (
+                  <Button size="sm" aria-label={`Take the new version of ${k.name}`} disabled={ro || reattach.isPending} onClick={() => reattach.mutate(k.id)}>
+                    Update
+                  </Button>
+                )}
                 <button
                   type="button"
                   className={s.iconBtn}
@@ -486,7 +532,7 @@ export function ConfigurePanel(props: { agent: BuilderAgentDetail; onOpenSkills:
 
       <Section title="Memory" icon={Icon.brain()} count={agent.memory.length || undefined}>
         <p className={s.small} style={{ margin: 0 }}>
-          Lasting facts and preferences the agent is given in every conversation (the newest 20).
+          Lasting facts and preferences the agent is given in every conversation (the newest 20; an agent keeps up to 500).
         </p>
         {agent.memory.length > 0 && (
           <ul className={s.list} aria-label="Memory" style={{ listStyle: "none", margin: 0, padding: 0 }}>
@@ -525,7 +571,7 @@ export function ConfigurePanel(props: { agent: BuilderAgentDetail; onOpenSkills:
                 <span className={s.listRowMain}>
                   <span className={s.listRowTitle}>
                     {sc.name}
-                    {!sc.enabled && <Badge>Off</Badge>}
+                    {sc.awaitingOwner ? <Badge tone="warn">Waiting for the owner</Badge> : !sc.enabled && <Badge>Off</Badge>}
                   </span>
                   <span className={s.listRowSub}>
                     {scheduleSummary(sc.cadence, sc.timeUtc)}
@@ -533,11 +579,21 @@ export function ConfigurePanel(props: { agent: BuilderAgentDetail; onOpenSkills:
                       ? sc.nextRunAt
                         ? ` · next ${new Date(sc.nextRunAt).toLocaleString()}`
                         : ""
-                      : // template- and import-seeded schedules start off: nothing spends until the owner says so
-                        " · turn it on to start running"}
+                      : sc.awaitingOwner
+                        ? // it runs, and spends, as the owner — so only the owner switches it on
+                          ` · changed by ${sc.lastEditedByName ?? "someone else"}; only the owner can turn it on`
+                        : isOwner
+                          ? // template- and import-seeded schedules start off: nothing spends until the owner says so
+                            " · turn it on to start running"
+                          : " · only the owner can turn it on"}
                   </span>
                 </span>
-                <Switch checked={sc.enabled} label={`${sc.name} on`} disabled={ro || toggleSchedule.isPending} onChange={(v) => toggleSchedule.mutate({ id: sc.id, enabled: v })} />
+                <Switch
+                  checked={sc.enabled}
+                  label={`${sc.name} on`}
+                  disabled={ro || toggleSchedule.isPending || (!isOwner && !sc.enabled)}
+                  onChange={(v) => toggleSchedule.mutate({ id: sc.id, enabled: v })}
+                />
                 <button type="button" className={s.iconBtn} aria-label={`Remove schedule ${sc.name}`} disabled={ro || delSchedule.isPending} onClick={() => delSchedule.mutate(sc.id)}>
                   {Icon.trash()}
                 </button>
@@ -546,7 +602,7 @@ export function ConfigurePanel(props: { agent: BuilderAgentDetail; onOpenSkills:
           </ul>
         ) : (
           <p className={s.small} style={{ margin: 0 }}>
-            Run the agent automatically on a regular schedule. Each run uses the owner's access and lands in their inbox.
+            Run the agent automatically on a regular schedule. Each run uses the owner's access and lands in their inbox, so only the owner can turn a schedule on.
           </p>
         )}
         <button type="button" className={s.addRow} disabled={ro} onClick={() => setSchedOpen(true)}>
@@ -598,6 +654,28 @@ export function ConfigurePanel(props: { agent: BuilderAgentDetail; onOpenSkills:
           {...(ro ? { disabledReason: "Only the owner or an admin can change the model." } : {})}
           testId="agent-model"
         />
+        <Field label="Bill spend to project">
+          <Select
+            value={agent.project?.id ?? ""}
+            disabled={ro || patch.isPending}
+            onChange={(e) => {
+              const next = e.target.value || null;
+              if (next === (agent.project?.id ?? null)) return;
+              const label = projectOptions.find((p) => p.id === next)?.name;
+              patch.mutate({ body: { projectId: next }, msg: next ? `Spend now bills to ${label ?? "the project"}` : "Spend no longer bills to a project" });
+            }}
+          >
+            <option value="">No project</option>
+            {projectOptions.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </Select>
+        </Field>
+        <p className={s.small} style={{ margin: 0 }}>
+          The agent&apos;s replies count toward this project&apos;s spend and budget. You can choose projects you&apos;re a member of; people who chat with it must be members too.
+        </p>
         <Field label="Monthly spend limit (USD)" error={limitErr}>
           <Input inputMode="decimal" value={limit} onChange={(e) => setLimit(e.target.value)} placeholder="No limit" disabled={ro} />
         </Field>
@@ -641,9 +719,12 @@ export function ConfigurePanel(props: { agent: BuilderAgentDetail; onOpenSkills:
           <Button size="sm" onClick={() => setCodeOpen(true)}>
             {Icon.code(14)} Use in code
           </Button>
-          <Button size="sm" onClick={() => void exportAgent()}>
-            {Icon.download(14)} Export
-          </Button>
+          {/* export carries the instructions and skill bodies: an editor act */}
+          {!ro && (
+            <Button size="sm" onClick={() => void exportAgent()}>
+              {Icon.download(14)} Export
+            </Button>
+          )}
         </div>
         {!ro && (
           <div className={s.danger}>

@@ -891,6 +891,10 @@ export interface BuilderSchedule {
   timeUtc: string;
   prompt: string;
   enabled: boolean;
+  /** written or changed by someone other than the owner: off until the OWNER
+   * turns it on (it runs, and spends, as them) */
+  awaitingOwner: boolean;
+  lastEditedByName: string | null;
   nextRunAt: string | null;
   lastRunAt: string | null;
 }
@@ -906,11 +910,16 @@ export interface BuilderAgentDetail extends BuilderAgentSummary {
   instructions: string;
   connectionFormat: BuilderConnectionFormat;
   computerUse: boolean;
+  /** the project this agent's spend bills to */
+  project: { id: string; name: string } | null;
   sharedUserIds: string[];
   sharedUsers: Array<{ id: string; name: string | null }>;
   tools: BuilderTool[];
   subagents: BuilderSubagent[];
-  skills: Array<{ id: string; name: string; description: string }>;
+  /** skills are PINNED at attach: `updateAvailable` = the library copy changed
+   * since (re-attach to take it); `unavailable` = the owner can no longer see
+   * it, so it is left out of the agent's prompt */
+  skills: Array<{ id: string; name: string; description: string; updateAvailable: boolean; unavailable: boolean }>;
   memory: BuilderMemoryItem[];
   schedules: BuilderSchedule[];
   channels: BuilderChannel[];

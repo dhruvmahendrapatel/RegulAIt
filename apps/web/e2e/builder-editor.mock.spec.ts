@@ -3,7 +3,7 @@
  * the mocked Builder API. Each change asserts the exact body the page sent.
  */
 import { expect, test, type Page } from "@playwright/test";
-import { CONN_DRIVE, CONN_JIRA, CORA, expectAxeClean, installBuilderMock, sent, TOOL_SEARCH, TOOL_UPDATE, MODEL_B, type MockState } from "./builder-fixtures";
+import { CONN_DRIVE, CONN_JIRA, CORA, expectAxeClean, installBuilderMock, PROJECT, sent, TOOL_SEARCH, TOOL_UPDATE, MODEL_B, type MockState } from "./builder-fixtures";
 
 async function openEditor(page: Page, name = "Intake reviewer"): Promise<{ st: MockState; id: string }> {
   const st = await installBuilderMock(page);
@@ -139,6 +139,86 @@ test.describe("ADR-0172: agent editor", () => {
     expect(sent(st, "PUT", `/v1/builder/agents/${id}/skills`)).toEqual([{ skillIds: ["sk-0001", "sk-0002"] }, { skillIds: ["sk-0002"] }]);
   });
 
+  test("skills are pinned: 'Update available', and Update takes the library's newest version", async ({ page }) => {
+    const { st, id } = await openEditor(page);
+    const skills = section(page, "Knowledge").getByRole("list", { name: "Attached skills" });
+    const row = skills.getByRole("listitem").filter({ hasText: "Assess an AI use case" });
+    await expect(row.getByText("Update available")).toBeVisible();
+    await expect(row).toContainText("The agent keeps the version it has until you take the new one.");
+    await expectAxeClean(page, "editor, skill update available");
+    await row.getByRole("button", { name: "Take the new version of Assess an AI use case" }).click();
+    await expect(page.getByText("Skill updated to the newest version")).toBeVisible();
+    await expect(row.getByText("Update available")).toHaveCount(0);
+    expect(st.calls.filter((c) => c.method === "POST" && c.path === `/v1/builder/agents/${id}/skills/sk-0001/reattach`)).toHaveLength(1);
+  });
+
+  test("channels: for someone who is not an admin, a channel is recorded and waits for an admin to connect it", async ({ page }) => {
+    const st = await installBuilderMock(page, { isAdmin: false });
+    const id = st.agents.find((a) => a.name === "Intake reviewer")!.id;
+    await page.goto(`/ui/builder/agents/${id}`);
+    await expect(page.getByRole("heading", { level: 1, name: "Intake reviewer" })).toBeVisible();
+    const ch = section(page, "Channels");
+    await ch.getByRole("button", { name: "Set up Slack" }).click();
+    await expect(page.getByText("Slack added — an admin connects it to the workspace's chat connection")).toBeVisible();
+    await expect(ch.getByText("Needs setup")).toBeVisible();
+    await expect(ch.getByText("Waiting for an admin to connect it to a workspace chat connection")).toBeVisible();
+    await expect(ch.getByText(/^Uses /)).toHaveCount(0);
+    expect(sent(st, "POST", `/v1/builder/agents/${id}/channels`)).toEqual([{ provider: "slack" }]);
+  });
+
+  test("schedules on someone else's agent wait for its owner to turn them on", async ({ page }) => {
+    const st = await installBuilderMock(page);
+    const q = st.agents.find((a) => a.name === "Policy Q&A")!;
+    q.canEdit = true; // an admin may edit it, but schedules run (and spend) as Drew
+    q.schedules = [
+      { id: "sch-q001", name: "Weekly digest", cadence: "weekly", timeUtc: "09:00", prompt: "Digest", enabled: false, awaitingOwner: true, lastEditedByName: "Avery Admin", nextRunAt: null, lastRunAt: null },
+    ];
+    await page.goto(`/ui/builder/agents/${q.id}`);
+    await expect(page.getByRole("heading", { level: 1, name: "Policy Q&A" })).toBeVisible();
+    const sc = section(page, "Schedules");
+    const row = sc.getByRole("listitem").filter({ hasText: "Weekly digest" });
+    await expect(row.getByText("Waiting for the owner")).toBeVisible();
+    await expect(row).toContainText("changed by Avery Admin; only the owner can turn it on");
+    await expect(row.getByRole("switch", { name: "Weekly digest on" })).toBeDisabled();
+
+    await sc.getByRole("button", { name: "New schedule" }).click();
+    const dialog = page.getByRole("dialog", { name: "New schedule" });
+    await dialog.getByLabel("Name").fill("Friday brief");
+    await dialog.getByLabel("What should the agent do?").fill("Summarize the week.");
+    await dialog.getByRole("button", { name: "Add schedule" }).click();
+    await expect(page.getByText("Schedule added — it stays off until the owner turns it on")).toBeVisible();
+    const added = sc.getByRole("listitem").filter({ hasText: "Friday brief" });
+    await expect(added.getByText("Waiting for the owner")).toBeVisible();
+    await expect(added.getByRole("switch", { name: "Friday brief on" })).toBeDisabled();
+    expect(st.agents.find((a) => a.id === q.id)!.schedules.at(-1)).toMatchObject({ enabled: false, awaitingOwner: true });
+    await expectAxeClean(page, "editor, schedules waiting for the owner");
+  });
+
+  test("advanced: bill spend to a project; an unattributed agent's refusal points there", async ({ page }) => {
+    const st = await installBuilderMock(page, { attributionRequired: true });
+    const id = st.agents.find((a) => a.name === "Intake reviewer")!.id;
+    await page.goto(`/ui/builder/agents/${id}`);
+    await expect(page.getByRole("heading", { level: 1, name: "Intake reviewer" })).toBeVisible();
+    await page.getByLabel("Message Intake reviewer").fill("Anything new?");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(page.getByRole("alert")).toContainText("choose a project for this agent in Configure → Advanced");
+
+    await expand(page, "Advanced");
+    const adv = section(page, "Advanced");
+    await expect(adv.getByLabel("Bill spend to project")).toHaveValue("");
+    await adv.getByLabel("Bill spend to project").selectOption(PROJECT);
+    await expect(page.getByText("Spend now bills to Governance programme")).toBeVisible();
+    await expect(adv.getByLabel("Bill spend to project")).toHaveValue(PROJECT);
+    expect(sent(st, "PATCH", `/v1/builder/agents/${id}`)).toEqual([{ projectId: PROJECT }]);
+
+    await page.getByLabel("Message Intake reviewer").fill("Anything new now?");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(page.getByText("Intake reviewer: Here is what I found about: Anything new now?")).toBeVisible();
+    await adv.getByLabel("Bill spend to project").selectOption("");
+    await expect(page.getByText("Spend no longer bills to a project")).toBeVisible();
+    expect(sent(st, "PATCH", `/v1/builder/agents/${id}`).at(-1)).toEqual({ projectId: null });
+  });
+
   test("memory: add and remove", async ({ page }) => {
     const { st, id } = await openEditor(page);
     const mem = section(page, "Memory");
@@ -267,6 +347,10 @@ test.describe("ADR-0172: agent editor", () => {
     await expect(section(page, "Connections").getByRole("button", { name: "Add connection" })).toBeDisabled();
     await expect(section(page, "Sharing").getByRole("radio", { name: "Private" })).toBeDisabled();
     await expect(section(page, "Channels").getByRole("button", { name: "Set up Slack" })).toBeDisabled();
+    // export carries the instructions and skill bodies: editors only
+    await expand(page, "Advanced");
+    await expect(section(page, "Advanced").getByRole("button", { name: "Export" })).toHaveCount(0);
+    await expect(section(page, "Advanced").getByRole("button", { name: "Use in code" })).toBeVisible();
     await expectAxeClean(page, "editor, view only");
   });
 

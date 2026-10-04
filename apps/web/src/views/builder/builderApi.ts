@@ -66,6 +66,7 @@ export interface PatchAgentBody {
   sharedUserIds?: string[];
   monthlyLimitUsd?: number | null;
   computerUse?: boolean;
+  projectId?: string | null;
 }
 export interface ScheduleBody {
   name: string;
@@ -90,6 +91,8 @@ export const builderApi = {
   putSubagents: (id: string, subagents: Array<{ childId: string; name: string; description: string }>) =>
     api.put<{ agent: BuilderAgentDetail }>(`/v1/builder/agents/${id}/subagents`, { subagents }),
   putSkills: (id: string, skillIds: string[]) => api.put<{ agent: BuilderAgentDetail }>(`/v1/builder/agents/${id}/skills`, { skillIds }),
+  reattachSkill: (id: string, skillId: string) =>
+    api.post<{ agent: BuilderAgentDetail }>(`/v1/builder/agents/${id}/skills/${skillId}/reattach`, {}),
   addMemory: (id: string, content: string) => api.post<BuilderMemoryItem>(`/v1/builder/agents/${id}/memory`, { content }),
   deleteMemory: (id: string, memoryId: string) => api.del<unknown>(`/v1/builder/agents/${id}/memory/${memoryId}`),
   addSchedule: (id: string, body: ScheduleBody) => api.post<BuilderSchedule>(`/v1/builder/agents/${id}/schedules`, body),
@@ -150,6 +153,12 @@ export function useMyModels(userId: string | null) {
     queryFn: () => api.get<MyAgentsResponse>(`/v1/users/${userId}/agents`),
     enabled: !!userId,
   });
+}
+
+/** the projects the signed-in person may bill an agent to (a member's own;
+ * an admin's: all) — GET /v1/projects already scopes it that way */
+export function useMyProjects() {
+  return useQuery({ queryKey: ["projects"], queryFn: () => api.get<{ projects: Array<{ id: string; name: string }> }>("/v1/projects") });
 }
 
 /** people to share an agent with (names only) */
