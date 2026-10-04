@@ -21,6 +21,14 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-10-04 (late afternoon) - ADR-0174 enterprise sign-in pushed; CI green on batch 2a.** Keycloak (optional `sso` compose profile)
+brokers Microsoft/Google/GitHub with OTP or passkey MFA. The sign-in page shows provider buttons, enterprise SSO and email.
+Break-glass-only local sign-in is available. Account linking needs a verified email plus proof or approval. `demo:set-passwords`
+reads REGULAIT_DEMO_USER_PASSWORD(_FILE) and needs the demo licence. A security review found 12 issues; all are fixed (see the
+ADR-0174 amendment). Gate: gateway 3611 passed, demo:prepare 18/18, mocked 176, spa 47. CI's builder tool-use failure was
+phase2 leaving a fleet-wide rate limit behind (M-068). Not yet proven: a real Entra/Google/GitHub round trip through the
+bundled Keycloak. Next: ADR-0175 batch D2, then ADR-0173 batch 2c.
+
 **2026-10-04 (afternoon) - ADR-0173 batch 2a and NIST AI RMF pack v3 pushed.** Batch 2a (migrations 0136-0138) ships a governed
 tool loop in builder agents ("Ask first" confirmations, approval-queue pauses that resume on their own, pinned tool
 identity, cancel), inbound Slack/Teams, the model allow-list matrix, the Ctrl/K palette, and the owner rule that every
