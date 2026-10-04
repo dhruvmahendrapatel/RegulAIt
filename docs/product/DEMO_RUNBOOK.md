@@ -36,8 +36,9 @@ pnpm --filter @regulait/gateway demo:setup
 
 # (4b) OPTIONAL (ADR-0174) — one password you chose for Ada, Dana and Avery instead of the
 #     one-time passwords from (2). Read from the environment or a 0600 secret file, checked
-#     against the password policy, never printed, audited without the password. Refuses on a
-#     customer licence, and on a deployed-looking box unless (4)'s demo licence is installed.
+#     against the password policy, never printed, audited without the password. Runs only
+#     AFTER (4): it requires the ephemeral demo licence (4) installs, and refuses with no
+#     licence, an expired one, or a customer licence. (demo:prepare runs (4) for you.)
 read -rs REGULAIT_DEMO_USER_PASSWORD && export REGULAIT_DEMO_USER_PASSWORD
 pnpm --filter @regulait/gateway demo:set-passwords && unset REGULAIT_DEMO_USER_PASSWORD
 

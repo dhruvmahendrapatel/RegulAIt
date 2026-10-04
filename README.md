@@ -56,9 +56,10 @@ unset REGULAIT_DEMO_USER_PASSWORD
 It checks the password against the org password policy, clears the personas'
 one-time-password flag, revokes their live sessions, writes one audit row per
 persona (`demo-password-set`, naming the source — never the password), and
-never prints the password. It **refuses** when a customer (non-demo) licence is
-installed, and on a box that looks deployed (`REGULAIT_DEPLOY_MODE` or
-`REGULAIT_HSTS` set) unless the demo licence from `demo:prepare` is installed.
+never prints the password. It runs **only on a demo-licensed deployment**: run it
+after `demo:setup` (or `demo:prepare`, which runs it), which installs the ephemeral
+demo licence it requires — with no licence, an expired one, or a customer licence it
+refuses and changes nothing.
 Enterprise sign-in (Microsoft / Google / GitHub through the optional Keycloak
 broker, with MFA) is in [docs/deployment/SSO_KEYCLOAK.md](docs/deployment/SSO_KEYCLOAK.md).
 

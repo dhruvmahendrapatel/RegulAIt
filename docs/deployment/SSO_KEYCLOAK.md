@@ -155,9 +155,14 @@ provider ids and display names only — never an issuer, client id, secret or do
   (the evidence is their earlier `login-succeeded` audit row naming the provider). Through any other
   provider, they prove the account or are approved like anyone else.
 - **Break-glass.** Once SSO works, /ui/admin/sso → Sessions policy → *Email sign-in = break-glass admins
-  only* refuses password sign-in for everyone except the administrators you tick there. It refuses to engage
-  without an enabled SSO provider and at least one ticked admin who has a password. Keep the deploy-time
-  bootstrap token procedure (INSTALL.md) as the last-resort recovery.
+  only* refuses password sign-in — and the API-key browser exchange — for everyone except the
+  administrators you tick there (anyone else gets the same answer as a wrong password or an unknown key).
+  It refuses to engage without an enabled SSO provider and at least one ticked admin who has a password,
+  and while it is on, the change that would remove either is refused by name: demoting or deactivating
+  the last usable break-glass admin (`break_glass_last_admin`, also from SCIM) and disabling or deleting
+  the last enabled SSO provider (`break_glass_last_sso_provider`). Tick more than one break-glass admin. A
+  demoted admin leaves the list automatically. Keep the deploy-time bootstrap token procedure (INSTALL.md)
+  as the last-resort recovery.
 - **Demo personas** keep signing in with a password set by `demo:set-passwords` (see the README).
 
 ## 5. Hardening
