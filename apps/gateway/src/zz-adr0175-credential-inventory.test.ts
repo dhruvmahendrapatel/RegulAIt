@@ -340,10 +340,8 @@ describe("ADR-0175 A7 — when a secret was last set (migration 0142)", () => {
       (await db.select({ at: scimTokens.secretSetAt, created: scimTokens.createdAt }).from(scimTokens).where(eq(scimTokens.id, ids.scim!)))[0]!;
     const first = await stamp();
     expect(first.at).not.toBeNull();
-    // an old set date, so a bump is visible
-    await db.execute(sql`ALTER TABLE scim_tokens DISABLE TRIGGER scim_tokens_secret_set_trg`);
+    // an old set date, so a bump is visible (writing the stamp alone does not fire it)
     await db.update(scimTokens).set({ secretSetAt: new Date(Date.now() - 50 * DAY) }).where(eq(scimTokens.id, ids.scim!));
-    await db.execute(sql`ALTER TABLE scim_tokens ENABLE TRIGGER scim_tokens_secret_set_trg`);
     // a re-encryption-style rewrite (the walk sets the transaction flag)
     await db.transaction(async (tx) => {
       await tx.execute(sql`SELECT set_config('regulait.secret_reencrypt', 'on', true)`);
@@ -408,5 +406,6 @@ describe("ADR-0175 A7 — the stale_credentials monitor rule", () => {
     await evaluate();
     const still = (await episodes()).filter((a) => a.status !== "resolved" && flagged.some((id) => a.subjectKey === subject(id)));
     expect(still).toEqual([]);
-  });
+    // every flagged credential in this shared database was raised and resolved, so allow for the volume
+  }, 180_000);
 });

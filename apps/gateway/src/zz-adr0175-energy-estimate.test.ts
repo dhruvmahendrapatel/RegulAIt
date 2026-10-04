@@ -53,6 +53,7 @@ const ids = { admin: "", user: "", project: "", bare: "", useCase: "", orphanUse
 const adminAuth = { authorization: "" };
 const userAuth = { authorization: "" };
 let regionBefore: string | null = null;
+let createdDefault: string | null = null;
 
 const call = (method: "GET" | "POST" | "PUT" | "DELETE", url: string, headers: Record<string, string>, payload?: unknown) =>
   app.inject({ method, url, headers, ...(payload !== undefined ? { payload: payload as object } : {}) });
@@ -121,6 +122,7 @@ afterAll(async () => {
   await db.delete(energyFactors).where(sql`${energyFactors.subject} ILIKE ${`g175e-%-${RUN}`}`);
   await db.delete(aiUseCases).where(inArray(aiUseCases.id, [ids.useCase, ids.orphanUseCase]));
   await db.update(orgSettings).set({ energyRegion: regionBefore });
+  if (createdDefault) await db.delete(energyFactors).where(eq(energyFactors.id, createdDefault));
   await db.update(agents).set({ enabled: false }).where(eq(agents.id, ids.mockAgent));
   await db.delete(projects).where(eq(projects.id, ids.bare));
   app.server.closeAllConnections();
@@ -160,6 +162,22 @@ describe("ADR-0175 A15 — the energy estimate", () => {
     body = await estimate(`projectId=${ids.project}`);
     expect(body.estimate.emissionsG).toBe(0.5); // 0.005 kWh × 100
     expect(body.estimate.grid).toMatchObject({ region: regionSubject, sourceNote: "synthetic region" });
+    // the region OVERRIDES the org default: with a default present, the region still wins, and
+    // with no region the default applies
+    const [existingDefault] = await db.select({ id: energyFactors.id }).from(energyFactors).where(sql`${energyFactors.kind} = 'grid' AND lower(${energyFactors.subject}) = 'default'`);
+    if (!existingDefault) {
+      const d = await putFactor({ kind: "grid", subject: "default", gCo2ePerKwh: 1000, sourceNote: "synthetic default", version: "d1" });
+      expect(d.statusCode, d.body).toBe(201);
+      createdDefault = d.json().factor.id;
+    }
+    body = await estimate(`projectId=${ids.project}`);
+    expect(body.estimate.emissionsG).toBe(0.5);
+    if (createdDefault) {
+      await db.update(orgSettings).set({ energyRegion: null });
+      body = await estimate(`projectId=${ids.project}`);
+      expect(body.estimate.grid).toMatchObject({ subject: "default", region: null });
+      expect(body.estimate.emissionsG).toBe(5); // 0.005 kWh × 1000
+    }
 
     // an update is audited with its before/after
     const again = await putFactor({ kind: "model", subject: MODEL_A, whPer1kInput: 1, whPer1kOutput: 1, sourceNote: "synthetic test factor", version: "t2" });
