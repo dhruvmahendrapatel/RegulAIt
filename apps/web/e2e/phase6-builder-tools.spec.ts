@@ -181,19 +181,23 @@ test("an agent calls a granted MCP tool through the governed path and quotes the
   test.setTimeout(120_000);
   const agent = await agentWith(toolIds.branches, false);
   const thread = await say(agent, `Which branches exist? <<use-tool:${slug(REPO)}__list_branches>>`);
-  // the step as the API records it — if it is not done, the failure message carries WHY (the CI evidence)
+  // the step as the API records it — if it is not done, the failure carries WHY (the CI evidence)
   let detail = "";
-  await expect
-    .poll(
-      async () => {
-        const body = (await (await dana.request.get(`/v1/builder/threads/${thread}`)).json()) as { messages?: Array<{ steps?: Array<{ status?: string }> }> };
-        const steps = (body.messages ?? []).flatMap((m) => m.steps ?? []);
-        detail = JSON.stringify(steps).slice(0, 1500);
-        return steps.map((st) => st.status).join(",");
-      },
-      { timeout: 30_000, message: () => `tool step not done: ${detail}` },
-    )
-    .toContain("done");
+  try {
+    await expect
+      .poll(
+        async () => {
+          const body = (await (await dana.request.get(`/v1/builder/threads/${thread}`)).json()) as { messages?: Array<{ steps?: Array<{ status?: string }> }> };
+          const steps = (body.messages ?? []).flatMap((m) => m.steps ?? []);
+          detail = JSON.stringify(steps).slice(0, 2000);
+          return steps.map((st) => st.status).join(",");
+        },
+        { timeout: 30_000 },
+      )
+      .toContain("done");
+  } catch (err) {
+    throw new Error(`tool step not done: ${detail}`, { cause: err });
+  }
   const convo = dana.getByRole("region", { name: "Conversation" });
   const head = convo.getByRole("list", { name: "Tool calls" }).getByRole("button", { name: new RegExp(`${REPO} / list_branches`) });
   await expect(head).toContainText("Done", { timeout: 30_000 });
