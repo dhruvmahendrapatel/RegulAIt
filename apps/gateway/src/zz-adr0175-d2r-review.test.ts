@@ -6,6 +6,7 @@
  *     in SQL, on an index; the route pages; observe-only computes nothing.
  *  3. a demo energy factor is refused for a model any non-mock agent names,
  *     and the estimate applies one to mock-served calls only.
+ *  4. the `energy_estimate_available` collector ignores demo factors.
  *
  * Shared database (M-008, M-068): every row this file inserts is deleted in
  * afterAll, and the org settings it touches are restored.
@@ -35,6 +36,7 @@ import { encryptSecret } from "./secrets.js";
 import { hashToken } from "./token-hash.js";
 import { connectorLastUseQuery, virtualKeyLinkQuery } from "./credential-inventory.js";
 import { staleCredentialsInput } from "./governance-monitor.js";
+import { runCollector } from "./compliance-packs.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -50,7 +52,7 @@ const VK_AGENT = "7d1c0a5e-2b4f-4e8a-9c3d-5f6a7b8c9d0e";
 
 let db: Db;
 let app: ReturnType<typeof buildApp>;
-const ids = { admin: "", connector: "", connectorCred: "", custom: "", customAgent: "", vk: "", otherVk: "", project: "" };
+const ids = { admin: "", connector: "", connectorCred: "", custom: "", customAgent: "", vk: "", otherVk: "", project: "", project4: "" };
 /** every agent row this file inserts directly */
 const agentIds: string[] = [];
 const DEMO_MODEL = `g175r-demo-${RUN}`;
@@ -171,6 +173,7 @@ afterAll(async () => {
   await db.delete(energyFactors).where(sql`${energyFactors.subject} ILIKE ${`g175r-%-${RUN}`}`);
   if (agentIds.length) await db.delete(agents).where(inArray(agents.id, agentIds));
   if (ids.project) await db.delete(projects).where(eq(projects.id, ids.project));
+  if (ids.project4) await db.delete(projects).where(eq(projects.id, ids.project4));
   await call("POST", "/v1/governance/monitor/evaluate", AUTH);
   app.server.closeAllConnections();
   await app.close();
@@ -285,5 +288,37 @@ describe("review fix 3 — a demo energy factor describes the mock provider, and
     expect(e).toMatchObject({ callsTotal: 5, callsEstimated: 2, energyWh: 2, coverage: "2 of 5 calls estimated", usesDemoFactors: true });
     expect(e.unknownModels).toEqual([DEMO_MODEL]);
     expect(e.byModel.find((m: any) => m.servedBy === "not_mock")).toMatchObject({ calls: 3, status: "no_factor", energyWh: null });
+  });
+});
+
+describe("review fix 4 — the energy_estimate_available collector is not evidenced by a demo factor", () => {
+  it("counts calls covered by a real factor, and not calls covered only by a demo one", async () => {
+    const demoModel = `g175r-demo4-${RUN}`;
+    const realModel = `g175r-real4-${RUN}`;
+    const p = await call("POST", "/v1/projects", AUTH, { name: `g175r-project4-${RUN}` });
+    expect(p.statusCode, p.body).toBe(201);
+    ids.project4 = p.json().id;
+    const mock = await mkAgent("mock", demoModel);
+    expect((await putFactor({ kind: "model", subject: demoModel, whPer1kInput: 1, whPer1kOutput: 1, sourceNote: "demo", version: "demo", demo: true })).statusCode).toBe(201);
+    expect((await putFactor({ kind: "model", subject: realModel, whPer1kInput: 1, whPer1kOutput: 1, sourceNote: "synthetic real", version: "r1" })).statusCode).toBe(201);
+    const row = (model: string, agentId: string | null) => ({
+      userId: ids.admin,
+      objectType: "agent",
+      agentId,
+      provider: "mock",
+      model,
+      inputTokens: 100,
+      outputTokens: 100,
+      projectId: ids.project4,
+    });
+    await db.insert(usageEvents).values([row(demoModel, mock), row(demoModel, mock), row(demoModel, mock), row(realModel, null)]);
+    const ctx = {
+      periodStart: new Date(Date.now() - DAY),
+      periodEnd: new Date(Date.now() + 60_000),
+      projectIds: [ids.project4],
+      memberIds: [],
+      params: {},
+    };
+    expect(await runCollector(db, "energy_estimate_available", ctx)).toBe(1);
   });
 });
