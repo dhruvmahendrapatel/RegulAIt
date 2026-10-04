@@ -14,6 +14,11 @@
  *    re-checked for the person at run time (`entitledForYou`).
  *  - chat: the governed core as the caller (see builder-runtime.ts).
  *  - audit: `builder-agent-*` / `builder-skill-*` rows on every change.
+ *  - ADR-0175 A6: every skill save (create, SKILL.md import, update, template
+ *    seed, bundle import) is scanned by the ADR-0097 admission rules — high
+ *    refuses (422 `skill_admission_refused`), medium holds — and carries a
+ *    content digest and version. A held skill cannot be attached; widening a
+ *    skill's visibility beyond private waits for an admin.
  */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
@@ -118,6 +123,18 @@ import {
   type TurnPending,
 } from "./builder-runtime.js";
 import { loadVirtualKeyContext } from "./virtual-keys.js";
+import {
+  admissionColumns,
+  admitSkillText,
+  auditSkillAdmission,
+  pinnedBodyWithheld,
+  pinnedFrom,
+  sightSkill,
+  skillAttachRefusal,
+  skillRefusalBody,
+} from "./skill-admission.js";
+import { minReleaseAgeDays, skillReleaseStatus } from "./release-age.js";
+import type { McpAdmissionFinding } from "@regulait/shared";
 
 export interface BuilderRouteOptions {
   dataKey?: string | undefined;
@@ -354,7 +371,14 @@ async function agentDetail(db: Db, agent: BuilderAgentRow, viewer: Viewer) {
       .where(and(eq(builderAgentSubagents.parentId, agent.id), isNull(builderAgents.archivedAt)))
       .orderBy(asc(builderAgentSubagents.position)),
     db
-      .select({ skill: builderSkills, skillUpdatedAt: builderAgentSkills.skillUpdatedAt })
+      .select({
+        skill: builderSkills,
+        skillUpdatedAt: builderAgentSkills.skillUpdatedAt,
+        skillId: builderAgentSkills.skillId,
+        snapshotDigest: builderAgentSkills.snapshotDigest,
+        snapshotVersion: builderAgentSkills.snapshotVersion,
+        snapshotAdmissionState: builderAgentSkills.snapshotAdmissionState,
+      })
       .from(builderAgentSkills)
       .innerJoin(builderSkills, eq(builderAgentSkills.skillId, builderSkills.id))
       .where(and(eq(builderAgentSkills.agentId, agent.id), isNull(builderSkills.archivedAt)))
@@ -401,6 +425,10 @@ async function agentDetail(db: Db, agent: BuilderAgentRow, viewer: Viewer) {
       )
     : new Set<string>();
   const ownerViewer: Viewer = { userId: agent.ownerUserId, isAdmin: !!owner[0]?.isAdmin };
+  // ADR-0175: a pinned body the scanner holds (or the cooldown quarantines)
+  // is kept out of the prompt — say so beside the skill
+  const minDays = skills.length ? await minReleaseAgeDays(db) : 0;
+  const withheld = await Promise.all(skills.map((k) => pinnedBodyWithheld(db, k, minDays)));
   const names = await userNames(db, [
     ...shares.map((s) => s.userId),
     ...memory.map((m) => m.createdByUserId),
@@ -421,15 +449,17 @@ async function agentDetail(db: Db, agent: BuilderAgentRow, viewer: Viewer) {
       description: x.description,
       childName: canSeeAgent(x.child, viewer, sharedChildren.has(x.childId)) ? x.child.name : PRIVATE_AGENT_NAME,
     })),
-    skills: skills.map((k) => ({
+    skills: skills.map((k, i) => ({
       id: k.skill.id,
       name: k.skill.name,
       description: k.skill.description,
       /** the library copy changed since this agent pinned it: re-attach to take it */
       updateAvailable: k.skill.updatedAt.getTime() > k.skillUpdatedAt.getTime(),
-      /** the owner can no longer see it (made private by its author): it is
-       * left out of the agent's prompt */
-      unavailable: !skillVisible(k.skill, ownerViewer),
+      /** the owner can no longer see it (made private by its author), or its
+       * pinned body is withheld: it is left out of the agent's prompt */
+      unavailable: !skillVisible(k.skill, ownerViewer) || withheld[i] !== null,
+      /** ADR-0175: why the pinned body is withheld (absent when it runs) */
+      ...(withheld[i] ? { withheld: withheld[i], pinnedVersion: k.snapshotVersion } : {}),
     })),
     memory: memory.map((m) => ({
       id: m.id,
@@ -506,7 +536,19 @@ async function threadSummaries(db: Db, threads: BuilderThreadRow[]) {
  * a template skill's name with a workspace skill of their own wording and have
  * it silently attached to every agent made from that template.
  */
-async function ensureSkill(db: Db, ownerUserId: string, s: { name: string; description: string; body: string }) {
+/** ADR-0175 A6: a template or bundle skill the scanner refuses */
+class SkillRefusedError extends Error {
+  constructor(readonly body: ReturnType<typeof skillRefusalBody>) {
+    super(body.detail);
+  }
+}
+
+async function ensureSkill(
+  db: Db,
+  ownerUserId: string,
+  s: { name: string; description: string; body: string },
+  trigger: "template" | "bundle" = "template",
+) {
   const [existing] = await db
     .select()
     .from(builderSkills)
@@ -521,20 +563,21 @@ async function ensureSkill(db: Db, ownerUserId: string, s: { name: string; descr
     .orderBy(asc(builderSkills.createdAt))
     .limit(1);
   if (existing) return existing;
+  // ADR-0175 A6: a seeded or imported body is scanned like any other save
+  const admission = admitSkillText(s);
+  if (admission.state === "refused") throw new SkillRefusedError(skillRefusalBody(s.name, admission.scan));
   const [row] = await db
     .insert(builderSkills)
-    .values({ name: s.name, description: s.description, body: s.body, visibility: "private", ownerUserId })
+    .values({ name: s.name, description: s.description, body: s.body, visibility: "private", ownerUserId, ...admissionColumns(admission) })
     .returning();
+  await sightSkill(db, admission.digest);
+  await auditSkillAdmission(db, { userId: ownerUserId, skillId: row!.id, name: s.name, admission, trigger });
   return row!;
 }
 
-/** the pinned attachment row for a skill (its body and version now) */
-const pinned = (agentId: string, skill: BuilderSkillRow) => ({
-  agentId,
-  skillId: skill.id,
-  bodySnapshot: skill.body,
-  skillUpdatedAt: skill.updatedAt,
-});
+/** the pinned attachment row for a skill (its body, digest, version and
+ * verdict now) */
+const pinned = (agentId: string, skill: BuilderSkillRow) => pinnedFrom(agentId, skill);
 
 interface Seed {
   instructions: string;
@@ -546,9 +589,9 @@ interface Seed {
 /** attach seeded skills, child agents and schedules to a freshly created agent.
  * Child agents are private, owned by the creator, on the same model. Seeded
  * schedules start DISABLED: nothing spends until the owner turns one on. */
-async function applySeed(db: Db, agent: BuilderAgentRow, seed: Seed) {
+async function applySeed(db: Db, agent: BuilderAgentRow, seed: Seed, trigger: "template" | "bundle" = "template") {
   for (const s of seed.skills) {
-    const skill = await ensureSkill(db, agent.ownerUserId, s);
+    const skill = await ensureSkill(db, agent.ownerUserId, s, trigger);
     await db.insert(builderAgentSkills).values(pinned(agent.id, skill)).onConflictDoNothing();
   }
   let position = 0;
@@ -653,6 +696,12 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     const body = builderCreateAgentSchema.parse(req.body ?? {});
     const template = body.templateId ? findTemplate(body.templateId) : undefined;
     if (body.templateId && !template) return reply.status(404).send({ error: "unknown_template" });
+    // ADR-0175 A6: catalogue skills are scanned like any other body, before
+    // the agent exists (so a refusal leaves nothing half-made)
+    for (const sk of template?.skills ?? []) {
+      const admission = admitSkillText(sk);
+      if (admission.state === "refused") return reply.status(422).send(skillRefusalBody(sk.name, admission.scan));
+    }
     const noProject = await projectRefusal(db, viewer, body.projectId);
     if (noProject) return reply.status(noProject.status).send(noProject.body);
 
@@ -904,9 +953,19 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     // pinned at its current version (taking a newer version is a re-attach)
     const current = await db.select().from(builderAgentSkills).where(eq(builderAgentSkills.agentId, agent.id));
     const kept = new Map(current.map((c) => [c.skillId, c]));
+    // ADR-0175: a NEWLY attached skill must be admitted and past the cooldown
+    for (const id of ids) {
+      if (kept.has(id)) continue;
+      const refusal = await skillAttachRefusal(db, rows.find((r) => r.id === id)!);
+      if (refusal) {
+        await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-skill-attach-refused",
+          `skill not attached to '${agent.name}': ${String(refusal.detail)}`, { skillId: id, error: refusal.error }, "deny");
+        return reply.status(409).send(refusal);
+      }
+    }
     const next = ids.map((id) => {
       const k = kept.get(id);
-      return k ? { agentId: agent.id, skillId: id, bodySnapshot: k.bodySnapshot, skillUpdatedAt: k.skillUpdatedAt } : pinned(agent.id, rows.find((r) => r.id === id)!);
+      return k ? { ...k, agentId: agent.id, skillId: id } : pinned(agent.id, rows.find((r) => r.id === id)!);
     });
     const tooLarge = promptTooLarge(
       configuredPrompt(agent, next.map((n) => ({ name: rows.find((r) => r.id === n.skillId)!.name, body: n.bodySnapshot }))),
@@ -935,17 +994,33 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
       .where(and(eq(builderAgentSkills.agentId, agent.id), eq(builderAgentSkills.skillId, skillId)));
     const [skill] = link ? await db.select().from(builderSkills).where(eq(builderSkills.id, skillId)) : [];
     if (!link || !skill || !skillVisible(skill, viewer)) return reply.status(404).send({ error: "unknown_skill", skillId });
+    // ADR-0175: a held source skill (or a version still in cooldown) is not
+    // taken; the agent keeps running the body it already pinned
+    const refusal = await skillAttachRefusal(db, skill);
+    if (refusal) {
+      await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-skill-attach-refused",
+        `skill '${skill.name}' not re-attached on '${agent.name}': ${String(refusal.detail)}`, { skillId, error: refusal.error }, "deny");
+      return reply.status(409).send(refusal);
+    }
     const others = (await pinnedSkillsForRun(db, agent)).filter((x) => x.skillId !== skillId);
     const tooLarge = promptTooLarge(configuredPrompt(agent, [...others, { name: skill.name, body: skill.body }]));
     if (tooLarge) return reply.status(422).send(tooLarge);
     await db
       .update(builderAgentSkills)
-      .set({ bodySnapshot: skill.body, skillUpdatedAt: skill.updatedAt })
+      .set((({ agentId: _a, skillId: _s, ...rest }) => rest)(pinned(agent.id, skill)))
       .where(and(eq(builderAgentSkills.agentId, agent.id), eq(builderAgentSkills.skillId, skillId)));
     await touch(agent.id);
     await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-skill-reattached",
       `skill '${skill.name}' on '${agent.name}' updated to the library's current version`,
-      { skillId, from: link.skillUpdatedAt.toISOString(), to: skill.updatedAt.toISOString() });
+      {
+        skillId,
+        from: link.skillUpdatedAt.toISOString(),
+        to: skill.updatedAt.toISOString(),
+        fromVersion: link.snapshotVersion,
+        toVersion: skill.version,
+        fromDigest: link.snapshotDigest,
+        toDigest: skill.contentDigest,
+      });
     return { agent: await agentDetail(db, (await loadVisibleAgent(db, agent.id, viewer))!, viewer) };
   });
 
@@ -1281,6 +1356,15 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     }
     const skillsByName = new Map(bundle.skills.map((s) => [s.name, s]));
     const importedSkills = a.skills.map((n) => skillsByName.get(n) ?? { name: n, description: "", body: "" });
+    // ADR-0175 A6: a bundle's skill bodies are scanned before anything is
+    // created; one refused body refuses the whole import
+    for (const sk of importedSkills) {
+      const admission = admitSkillText(sk);
+      if (admission.state === "refused") {
+        await auditSkillAdmission(db, { userId: viewer.userId, skillId: null, name: sk.name, admission, trigger: "bundle" });
+        return reply.status(422).send(skillRefusalBody(sk.name, admission.scan));
+      }
+    }
     const tooLarge = promptTooLarge(configuredPrompt({ instructions: a.instructions, name: a.name, description: a.description }, importedSkills));
     if (tooLarge) return reply.status(422).send(tooLarge);
     // the model: the bundle's binding by name if the importer may use it
@@ -1343,7 +1427,7 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
       skills: importedSkills,
       subagents: a.subagents,
       schedules: a.schedules,
-    });
+    }, "bundle");
     await audit(db, viewer.userId, "builder_agent", agent!.id, "builder-agent-imported",
       `builder agent '${agent!.name}' imported (${uniqKeep.length} tool(s) kept, ${dropped.length} dropped)`,
       { dropped, modelAgentId: model?.id ?? null });
@@ -1544,6 +1628,10 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
   const skillView = async (rows: BuilderSkillRow[], viewer: Viewer) => {
     if (!rows.length) return [];
     const ids = rows.map((r) => r.id);
+    const minDays = await minReleaseAgeDays(db);
+    const releases = await Promise.all(
+      rows.map((r) => (minDays > 0 ? skillReleaseStatus(db, r.id, r.contentDigest, minDays) : Promise.resolve(null))),
+    );
     const [names, used] = await Promise.all([
       userNames(db, rows.map((r) => r.ownerUserId)),
       db
@@ -1554,7 +1642,7 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
         .groupBy(builderAgentSkills.skillId),
     ]);
     const usedBy = new Map(used.map((u) => [u.skillId, Number(u.n)]));
-    return rows.map((s) => ({
+    return rows.map((s, i) => ({
       id: s.id,
       name: s.name,
       description: s.description,
@@ -1563,6 +1651,18 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
       usedBy: usedBy.get(s.id) ?? 0,
       updatedAt: s.updatedAt.toISOString(),
       canEdit: viewer.isAdmin || s.ownerUserId === viewer.userId,
+      // ADR-0175 A6/A5 — integrity, verdict, pending widening, cooldown
+      version: s.version,
+      contentDigest: s.contentDigest,
+      admissionState: s.admissionState,
+      requestedVisibility: s.requestedVisibility,
+      ...(viewer.isAdmin || s.ownerUserId === viewer.userId
+        ? {
+            admissionSeverity: s.admissionSeverity,
+            admissionFindings: (s.admissionFindings as McpAdmissionFinding[] | null) ?? [],
+          }
+        : {}),
+      release: releases[i] ? { quarantined: releases[i]!.quarantined, readyAt: releases[i]!.readyAt, ageDays: releases[i]!.ageDays } : null,
     }));
   };
 
@@ -1598,23 +1698,55 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     return { skills: await skillView(rows, viewer) };
   });
 
-  const createSkill = async (viewer: Viewer, s: { name: string; description: string; body: string; visibility: "private" | "workspace" }, ruleId: string) => {
+  /** ADR-0175: a non-admin's widening is a REQUEST an admin decides; an
+   * admin's is applied. Narrowing is never gated. */
+  const visibilityFor = (viewer: Viewer, want: "private" | "workspace") =>
+    want === "workspace" && !viewer.isAdmin
+      ? { visibility: "private" as const, requestedVisibility: "workspace" as const, visibilityRequestedAt: new Date() }
+      : { visibility: want, requestedVisibility: null, visibilityRequestedAt: null };
+
+  /** null on success (with the created view), else the refusal already sent */
+  const createSkill = async (
+    viewer: Viewer,
+    s: { name: string; description: string; body: string; visibility: "private" | "workspace" },
+    ruleId: string,
+    trigger: "create" | "import",
+  ): Promise<{ ok: true; skill: Record<string, unknown> } | { ok: false; status: number; body: Record<string, unknown> }> => {
+    // ADR-0175 A6 — scan before anything is stored
+    const admission = admitSkillText(s);
+    if (admission.state === "refused") {
+      await auditSkillAdmission(db, { userId: viewer.userId, skillId: null, name: s.name, admission, trigger });
+      return { ok: false, status: 422, body: skillRefusalBody(s.name, admission.scan) };
+    }
+    const vis = visibilityFor(viewer, s.visibility);
     const [row] = await db
       .insert(builderSkills)
-      .values({ ...s, ownerUserId: viewer.userId })
+      .values({ ...s, ...vis, ownerUserId: viewer.userId, version: 1, ...admissionColumns(admission) })
       .returning();
-    await audit(db, viewer.userId, "builder_skill", row!.id, ruleId, `skill '${row!.name}' added to the library (${s.visibility})`, {
-      visibility: s.visibility,
+    await sightSkill(db, admission.digest);
+    await audit(db, viewer.userId, "builder_skill", row!.id, ruleId, `skill '${row!.name}' added to the library (${row!.visibility})`, {
+      visibility: row!.visibility,
+      requestedVisibility: row!.requestedVisibility,
+      version: 1,
+      digest: admission.digest,
+      admissionState: admission.state,
     });
+    await auditSkillAdmission(db, { userId: viewer.userId, skillId: row!.id, name: row!.name, admission, trigger });
+    if (vis.requestedVisibility) {
+      await audit(db, viewer.userId, "builder_skill", row!.id, "builder-skill-visibility-requested",
+        `widening skill '${row!.name}' to workspace is waiting for an admin`, { requested: "workspace" });
+    }
     const [view] = await skillView([row!], viewer);
-    return { ...view!, body: row!.body };
+    return { ok: true, skill: { ...view!, body: row!.body } };
   };
 
   app.post("/v1/builder/skills", async (req, reply) => {
     const viewer = viewerOf(req, reply);
     if (!viewer) return;
     const body = builderCreateSkillSchema.parse(req.body ?? {});
-    return reply.status(201).send({ skill: await createSkill(viewer, body, "builder-skill-created") });
+    const out = await createSkill(viewer, body, "builder-skill-created", "create");
+    if (!out.ok) return reply.status(out.status).send(out.body);
+    return reply.status(201).send({ skill: out.skill });
   });
 
   app.post("/v1/builder/skills/import", async (req, reply) => {
@@ -1629,7 +1761,9 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
       });
     }
     if (parsed.body.length > 20_000) return reply.status(422).send({ error: "skill_body_too_long" });
-    return reply.status(201).send({ skill: await createSkill(viewer, { ...parsed, visibility: "private" }, "builder-skill-imported") });
+    const out = await createSkill(viewer, { ...parsed, visibility: "private" }, "builder-skill-imported", "import");
+    if (!out.ok) return reply.status(out.status).send(out.body);
+    return reply.status(201).send({ skill: out.skill });
   });
 
   app.get("/v1/builder/skills/:id", async (req, reply) => {
@@ -1648,12 +1782,50 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     const s = await visibleSkill(req, reply, viewer, true);
     if (!s) return;
     const set: Partial<typeof builderSkills.$inferInsert> = { updatedAt: new Date() };
-    for (const k of ["name", "description", "body", "visibility"] as const) {
+    for (const k of ["name", "description", "body"] as const) {
       if (body[k] !== undefined) (set as Record<string, unknown>)[k] = body[k];
     }
+    // ADR-0175 A6 — any change to scanned text is re-scanned; a body change is
+    // a new version with a new digest (and, under A5, a new release)
+    const bodyChanged = body.body !== undefined && body.body !== s.body;
+    const textChanged = bodyChanged || (body.name !== undefined && body.name !== s.name) || (body.description !== undefined && body.description !== s.description);
+    let admission: ReturnType<typeof admitSkillText> | null = null;
+    if (textChanged || s.admissionState === "unscanned") {
+      const next = { name: body.name ?? s.name, description: body.description ?? s.description, body: body.body ?? s.body };
+      admission = admitSkillText(next, s.admittedDigest);
+      if (admission.state === "refused") {
+        await auditSkillAdmission(db, { userId: viewer.userId, skillId: s.id, name: next.name, admission, trigger: "update", previousState: s.admissionState });
+        return reply.status(422).send(skillRefusalBody(next.name, admission.scan));
+      }
+      Object.assign(set, admissionColumns(admission));
+      if (bodyChanged) set.version = s.version + 1;
+    }
+    // ADR-0175 — visibility: narrowing applies (and withdraws any request);
+    // a non-admin's widening becomes a request for an admin
+    let requested = false;
+    if (body.visibility !== undefined) {
+      if (body.visibility === "private") Object.assign(set, { visibility: "private", requestedVisibility: null, visibilityRequestedAt: null });
+      else if (body.visibility !== s.visibility && body.visibility !== s.requestedVisibility) {
+        const vis = visibilityFor(viewer, body.visibility);
+        Object.assign(set, vis);
+        requested = vis.requestedVisibility !== null;
+      }
+    }
     const [row] = await db.update(builderSkills).set(set).where(eq(builderSkills.id, s.id)).returning();
+    if (admission && bodyChanged) await sightSkill(db, admission.digest);
     await audit(db, viewer.userId, "builder_skill", s.id, "builder-skill-updated",
-      `skill '${row!.name}' updated (${Object.keys(body).join(", ")})`, { fields: Object.keys(body) });
+      `skill '${row!.name}' updated (${Object.keys(body).join(", ")})`, {
+        fields: Object.keys(body),
+        version: row!.version,
+        digest: row!.contentDigest,
+        ...(bodyChanged ? { fromVersion: s.version, fromDigest: s.contentDigest } : {}),
+        admissionState: row!.admissionState,
+      });
+    if (admission) await auditSkillAdmission(db, { userId: viewer.userId, skillId: s.id, name: row!.name, admission, trigger: "update", previousState: s.admissionState });
+    if (requested) {
+      await audit(db, viewer.userId, "builder_skill", s.id, "builder-skill-visibility-requested",
+        `widening skill '${row!.name}' to workspace is waiting for an admin`, { requested: "workspace" });
+    }
     const [view] = await skillView([row!], viewer);
     return { skill: { ...view!, body: row!.body } };
   });

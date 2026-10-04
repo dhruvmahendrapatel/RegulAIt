@@ -534,6 +534,9 @@ export {
   MCP_ADMISSION_HOLD_AT,
   MCP_ADMISSION_SCANNER_VERSION,
   scanMcpManifest,
+  scanAdmissionUnits,
+  maxSeverity,
+  severityAtLeast,
   scanUnitsForTool,
   manifestDigest,
   nextAdmissionState,
@@ -547,6 +550,38 @@ export {
   type McpAdmissionScan,
   type ScannableTool,
 } from "./mcp-admission.js";
+
+// ADR-0175 A6 — admission scanning for builder skills (the ADR-0097 rule set
+// through `scanAdmissionUnits`, plus confusable and exfiltration-URL detectors).
+export {
+  SKILL_ADMISSION_SCANNER_VERSION,
+  SKILL_ADMISSION_STATES,
+  SKILL_USABLE_STATES,
+  SKILL_ADMISSION_REFUSE_AT,
+  SKILL_ADMISSION_HOLD_AT,
+  SKILL_SKIPPED_MCP_RULES,
+  scanSkill,
+  nextSkillState,
+  skillStateUsable,
+  skillFindingCounts,
+  skillAdmissionRuleIds,
+  type SkillAdmissionState,
+  type SkillAdmissionScan,
+  type SkillScanInput,
+} from "./skill-admission.js";
+// ADR-0175 A5 — release-age cooldown (pure status + admin write shapes).
+export {
+  RELEASE_AGE_RECOMMENDED_DAYS,
+  RELEASE_AGE_MAX_DAYS,
+  RELEASE_AGE_KINDS,
+  releaseAgeStatus,
+  releaseOverrideSchema,
+  admitSkillSchema,
+  skillVisibilityDecisionSchema,
+  type ReleaseAgeKind,
+  type ReleaseAgeStatus,
+  type ReleaseOverride,
+} from "./release-age.js";
 
 // ADR-0101 — FEDERATED MCP REGISTRY, the pure half: the v0.1 `ServerListResponse`
 // wire schema, the remote-vs-package classification that decides what can become
@@ -2138,6 +2173,12 @@ export const updateOrgSettingsSchema = z
      * contributes no tools to discovery, until an admin clears it with a
      * reason. Recommended production setting: 'enforce'. */
     mcpAdmissionMode: z.enum(MCP_ADMISSION_MODES).optional(),
+    /** ADR-0175 A5: the release-age cooldown in days. 0 (default) = off. While
+     * on, a newly registered MCP server, a changed manifest, a federated import
+     * and a new skill version stay in quarantine until this deployment has
+     * known that exact digest this many days (and it is admitted), unless an
+     * admin overrides one item with a reason. Recommended: 7. */
+    minReleaseAgeDays: z.number().int().min(0).max(365).optional(),
     /** ADR-0062: the org's TIGHTENING dial over the deployment-wide egress
      * posture. 'inherit' (default) defers to the env-derived deploy mode;
      * 'strict' adjudicates compiled vendor endpoints against the egress

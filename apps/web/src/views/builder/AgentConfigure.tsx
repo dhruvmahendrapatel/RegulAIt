@@ -18,7 +18,7 @@ import { ModelPicker, type ModelPickerAgent } from "../../ui/ModelPicker";
 import { useToast } from "../../ui/toast";
 import { AddConnectionDialog, AddSkillDialog, CodeDialog, NewScheduleDialog, NewSubagentDialog, type ToolCandidate } from "./AgentDialogs";
 import { bk, builderApi, useAgents, useDirectory, useMyModelTiles, useMyProjects, type PatchAgentBody, type ScheduleBody } from "./builderApi";
-import { AGENT_COLORS, bundleFileName, parseLimitInput, scheduleSummary, spendState } from "./builderLogic";
+import { AGENT_COLORS, bundleFileName, parseLimitInput, scheduleSummary, skillWithheldCopy, spendState } from "./builderLogic";
 import { AgentAvatar, Icon, Section, Segmented, Switch, ToolLogo } from "./BuilderUi";
 import s from "./builder.module.css";
 
@@ -499,10 +499,18 @@ export function ConfigurePanel(props: { agent: BuilderAgentDetail; onOpenSkills:
                 <span className={s.listRowMain}>
                   <span className={s.listRowTitle}>
                     {k.name}
-                    {k.unavailable ? <Badge tone="warn">No longer shared</Badge> : k.updateAvailable ? <Badge tone="info">Update available</Badge> : null}
+                    {k.withheld ? (
+                      <Badge tone="warn">{skillWithheldCopy(k.withheld).badge}</Badge>
+                    ) : k.unavailable ? (
+                      <Badge tone="warn">No longer shared</Badge>
+                    ) : k.updateAvailable ? (
+                      <Badge tone="info">Update available</Badge>
+                    ) : null}
                   </span>
                   <span className={`${s.listRowSub} ${s.clamp2}`}>
-                    {k.unavailable
+                    {k.withheld
+                      ? skillWithheldCopy(k.withheld).sub
+                      : k.unavailable
                       ? "Its author stopped sharing it, so the agent no longer uses it."
                       : k.updateAvailable
                         ? "The library copy changed. The agent keeps the version it has until you take the new one."

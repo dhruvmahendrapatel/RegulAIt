@@ -79,6 +79,8 @@ export function toolStep(over: Partial<Json> = {}): Json {
   };
 }
 
+/** ADR-0175: a clean, first-version skill with no pending share and the waiting period off */
+export const SKILL_ADMISSION = { version: 1, contentDigest: "0".repeat(64), admissionState: "clean", requestedVisibility: null, release: null };
 export const PROJECT = "66666666-0000-4000-8000-000000000001";
 export const PROJECT_2 = "66666666-0000-4000-8000-000000000002";
 
@@ -184,9 +186,9 @@ export function seedState(opts: MockOptions = {}) {
   const skills: Json[] = opts.empty
     ? []
     : [
-        { id: "sk-0001", name: "Assess an AI use case", description: "Use when a new AI use case needs a first review.", visibility: "workspace", ownerName: "Avery Admin", usedBy: 1, updatedAt: iso(5000), canEdit: true, body: "---\nname: Assess an AI use case\ndescription: Use when a new AI use case needs a first review.\n---\n# Steps\n1. Read the request." },
-        { id: "sk-0002", name: "Draft an audit finding", description: "Use when a control gap needs writing up.", visibility: "workspace", ownerName: "Drew Reviewer", usedBy: 0, updatedAt: iso(9000), canEdit: false, body: "---\nname: Draft an audit finding\n---\n# Steps" },
-        { id: "sk-0003", name: "Map to EU AI Act", description: "Use when asked which EU AI Act tier applies.", visibility: "private", ownerName: "Avery Admin", usedBy: 0, updatedAt: iso(12000), canEdit: true, body: "---\nname: Map to EU AI Act\n---\n" },
+        { id: "sk-0001", name: "Assess an AI use case", description: "Use when a new AI use case needs a first review.", visibility: "workspace", ownerName: "Avery Admin", usedBy: 1, updatedAt: iso(5000), canEdit: true, ...SKILL_ADMISSION, body: "---\nname: Assess an AI use case\ndescription: Use when a new AI use case needs a first review.\n---\n# Steps\n1. Read the request." },
+        { id: "sk-0002", name: "Draft an audit finding", description: "Use when a control gap needs writing up.", visibility: "workspace", ownerName: "Drew Reviewer", usedBy: 0, updatedAt: iso(9000), canEdit: false, ...SKILL_ADMISSION, body: "---\nname: Draft an audit finding\n---\n# Steps" },
+        { id: "sk-0003", name: "Map to EU AI Act", description: "Use when asked which EU AI Act tier applies.", visibility: "private", ownerName: "Avery Admin", usedBy: 0, updatedAt: iso(12000), canEdit: true, ...SKILL_ADMISSION, body: "---\nname: Map to EU AI Act\n---\n" },
       ];
   const templates: Json[] = [
     {
@@ -617,14 +619,14 @@ export async function installBuilderMock(page: Page, opts: MockOptions = {}): Pr
     // ---- skills
     if (b === "/skills" && method === "GET") return json(route, { skills: st.skills.map(({ body: _b, ...k }: Json) => k) });
     if (b === "/skills" && method === "POST") {
-      const k = { id: uid("sk"), ...body, ownerName: "Avery Admin", usedBy: 0, updatedAt: new Date().toISOString(), canEdit: true };
+      const k = { id: uid("sk"), ...SKILL_ADMISSION, ...body, ownerName: "Avery Admin", usedBy: 0, updatedAt: new Date().toISOString(), canEdit: true };
       st.skills.unshift(k);
       return json(route, { skill: k }, 201);
     }
     if (b === "/skills/import" && method === "POST") {
       const name = /name:\s*(.+)/.exec(body.markdown)?.[1]?.trim() ?? "Imported";
       const description = /description:\s*(.+)/.exec(body.markdown)?.[1]?.trim() ?? "";
-      const k = { id: uid("sk"), name, description, body: body.markdown, visibility: "private", ownerName: "Avery Admin", usedBy: 0, updatedAt: new Date().toISOString(), canEdit: true };
+      const k = { id: uid("sk"), ...SKILL_ADMISSION, name, description, body: body.markdown, visibility: "private", ownerName: "Avery Admin", usedBy: 0, updatedAt: new Date().toISOString(), canEdit: true };
       st.skills.unshift(k);
       return json(route, { skill: k }, 201);
     }

@@ -151,6 +151,7 @@ const BY_ROUTE: Record<string, keyof typeof G> = {
   "/admin/regulait-llm": "spark",
   "/admin/connectors": "plug",
   "/admin/mcp-servers": "server",
+  "/admin/admission": "shield",
   "/admin/git-connections": "branch",
   "/admin/pm-connections": "kanban",
   "/admin/deploy-targets": "cloud",

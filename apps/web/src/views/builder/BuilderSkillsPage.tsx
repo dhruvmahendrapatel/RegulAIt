@@ -2,17 +2,23 @@
  * ADR-0172 — builder Skills: the shared library of packaged instructions
  * (SKILL.md) that agents pull in when a task calls for them. Create and edit in
  * a drawer, or import an existing SKILL.md file.
+ *
+ * ADR-0175: every save is checked by the admission detectors (a flagged skill
+ * is held for an admin, a blocked one is refused with the reason), each body
+ * change is a new version, sharing with the workspace waits for an admin, and
+ * an organization waiting period can hold a new version back.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ago } from "../../api/format";
 import type { BuilderSkillDetail } from "../../api/types";
+import { useSession } from "../../session/SessionContext";
 import { PageHeader } from "../../shell/AppShell";
 import { Badge, Button, ConfirmModal, EmptyState, ErrorState, Field, Input, SkeletonBlock, Textarea } from "../../ui/kit";
 import { useToast } from "../../ui/toast";
 import { bk, builderApi } from "./builderApi";
-import { parseSkillFrontmatter } from "./builderLogic";
+import { findingLines, parseSkillFrontmatter, shortDate, skillStatusBadge } from "./builderLogic";
 import { ChoiceCards, Drawer, Icon, Segmented } from "./BuilderUi";
 import s from "./builder.module.css";
 
@@ -34,6 +40,8 @@ function SkillDrawer(props: { skillId: string | "new" | null; onClose: () => voi
   const id = isNew ? null : props.skillId;
   const queryClient = useQueryClient();
   const { toast } = useToast();
+  const { auth } = useSession();
+  const isAdmin = !!auth?.isAdmin;
   const detail = useQuery({ queryKey: bk.skill(id ?? ""), queryFn: () => builderApi.getSkill(id!), enabled: !!id });
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
@@ -57,7 +65,7 @@ function SkillDrawer(props: { skillId: string | "new" | null; onClose: () => voi
       setName(k.name);
       setDescription(k.description);
       setBody(k.body);
-      setVisibility(k.visibility);
+      setVisibility(k.requestedVisibility ?? k.visibility);
       setError(null);
     }
     if (props.skillId === null) loaded.current = null;
@@ -67,7 +75,14 @@ function SkillDrawer(props: { skillId: string | "new" | null; onClose: () => voi
   const done = (res: { skill: BuilderSkillDetail } | unknown, msg: string) => {
     void queryClient.invalidateQueries({ queryKey: bk.skills });
     if (id) void queryClient.invalidateQueries({ queryKey: bk.skill(id) });
-    toast(msg, "success");
+    const saved = (res as { skill?: BuilderSkillDetail } | undefined)?.skill;
+    const extra =
+      saved?.admissionState === "held"
+        ? " — held for an admin's review before agents can use it"
+        : saved?.requestedVisibility === "workspace"
+          ? " — sharing with the workspace waits for an admin"
+          : "";
+    toast(`${msg}${extra}`, "success");
     props.onClose();
     return res;
   };
@@ -136,6 +151,14 @@ function SkillDrawer(props: { skillId: string | "new" | null; onClose: () => voi
               { value: "private", title: "Only me", sub: "Only your agents can use it.", icon: Icon.lock(16) },
             ]}
           />
+          {!isAdmin && !ro && visibility === "workspace" && detail.data?.skill.visibility !== "workspace" && (
+            <p className={s.note} style={{ margin: 0 }} data-testid="skill-share-note">
+              {detail.data?.skill.requestedVisibility === "workspace"
+                ? "Waiting for an admin to approve sharing with the workspace. It stays private until then."
+                : "Sharing with the workspace needs an admin's approval. The skill stays private until then."}
+            </p>
+          )}
+          {detail.data && <SkillAdmissionNote skill={detail.data.skill} />}
           <Field label="SKILL.md" error={body.length > 20000 ? "Use 20,000 characters or fewer" : null}>
             <Textarea className={s.bodyEditor} value={body} onChange={(e) => setBody(e.target.value)} disabled={ro} spellCheck={false} />
           </Field>
@@ -159,6 +182,38 @@ function SkillDrawer(props: { skillId: string | "new" | null; onClose: () => voi
         onCancel={() => setConfirm(false)}
       />
     </Drawer>
+  );
+}
+
+/** ADR-0175 — the verdict, version and waiting period of an open skill */
+function SkillAdmissionNote({ skill: k }: { skill: BuilderSkillDetail }) {
+  const findings = findingLines(k.admissionFindings ?? []);
+  const flagged = k.admissionState === "held" || k.admissionState === "refused";
+  return (
+    <div className={s.note} style={{ margin: 0 }} data-testid="skill-admission-note">
+      <span>
+        Version {k.version}
+        {k.admissionState === "admitted" ? " · admitted by an admin after review" : ""}
+        {k.release?.quarantined ? ` · in the organization's waiting period until ${shortDate(k.release.readyAt ?? "")}` : ""}
+      </span>
+      {flagged && (
+        <>
+          <br />
+          <span role="status">
+            {k.admissionState === "held"
+              ? "The admission detectors flagged this skill. Agents can't use it until an admin admits it."
+              : "The admission detectors blocked this version. Edit it to remove the flagged text."}
+          </span>
+          {findings.length > 0 && (
+            <ul style={{ margin: "4px 0 0", paddingLeft: 18 }} aria-label="Admission findings">
+              {findings.map((f) => (
+                <li key={f}>{f}</li>
+              ))}
+            </ul>
+          )}
+        </>
+      )}
+    </div>
   );
 }
 
@@ -270,6 +325,12 @@ export default function BuilderSkillsPage() {
                 <span className={`${s.muted} ${s.clamp2}`}>{k.description || "No description."}</span>
                 <span className={s.agentFacts} style={{ marginTop: "auto", paddingTop: 6, fontSize: "var(--text-xs)" }}>
                   <Badge tone={k.visibility === "workspace" ? "primary" : "neutral"}>{k.visibility === "workspace" ? "Workspace" : "Only me"}</Badge>
+                  {(() => {
+                    const b = skillStatusBadge(k);
+                    return b ? <Badge tone={b.tone}>{b.label}</Badge> : null;
+                  })()}
+                  <span>v{k.version}</span>
+                  <span className={s.dot} aria-hidden />
                   <span>
                     Used by {k.usedBy} agent{k.usedBy === 1 ? "" : "s"}
                   </span>

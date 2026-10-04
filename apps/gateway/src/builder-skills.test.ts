@@ -17,7 +17,15 @@ let admin: Person;
 const skill = async (who: Person, body: Record<string, unknown>) => {
   const r = await k.req("POST", "/v1/builder/skills", who.auth, { description: "", body: "# x", visibility: "private", ...body });
   expect(r.statusCode, r.body).toBe(201);
-  return r.json().skill as Record<string, any>;
+  const s = r.json().skill as Record<string, any>;
+  // ADR-0175: a non-admin's widening waits for an admin — approve it here, so
+  // these tests keep exercising what a workspace skill does
+  if (s.requestedVisibility === "workspace") {
+    const ok = await k.req("POST", `/v1/admission/skills/${s.id}/visibility`, admin.auth, { decision: "approve" });
+    expect(ok.statusCode, ok.body).toBe(200);
+    return { ...s, visibility: "workspace", requestedVisibility: null };
+  }
+  return s;
 };
 const listIds = async (who: Person) =>
   ((await k.req("GET", "/v1/builder/skills", who.auth)).json().skills as Array<{ id: string }>).map((s) => s.id);

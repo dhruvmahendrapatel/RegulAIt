@@ -553,6 +553,13 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/mcp-registries/:registryId/entries": "internal",
   "POST /v1/mcp-registries/entries/:entryId/import": "internal",
   "POST /v1/servers/:serverId/admission/clear": "internal",
+  // ADR-0175 A6/A5 — the builder-skill review queue and the release-age
+  // cooldown's admin surface (operator console, admin-only)
+  "GET /v1/admission/skills": "internal",
+  "POST /v1/admission/skills/:id/admit": "internal",
+  "POST /v1/admission/skills/:id/visibility": "internal",
+  "GET /v1/release-quarantine": "internal",
+  "POST /v1/release-quarantine/override": "internal",
   "PATCH /v1/servers/:serverId/tools/:toolName/price": "internal",
   "GET /v1/setup/status": "internal",
   // ADR-0063 — REGULAIT_DATA_KEY custody. Internal: an operator/admin console
@@ -1275,6 +1282,11 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/mcp-registries/:registryId/entries": "servers",
   "POST /v1/mcp-registries/entries/:entryId/import": "servers",
   "POST /v1/servers/:serverId/admission/clear": "servers",
+  "GET /v1/admission/skills": "builder",
+  "POST /v1/admission/skills/:id/admit": "builder",
+  "POST /v1/admission/skills/:id/visibility": "builder",
+  "GET /v1/release-quarantine": "servers",
+  "POST /v1/release-quarantine/override": "servers",
   "PATCH /v1/servers/:serverId/tools/:toolName/price": "servers",
   "GET /v1/setup/status": "setup",
   "GET /v1/security/data-key": "security",

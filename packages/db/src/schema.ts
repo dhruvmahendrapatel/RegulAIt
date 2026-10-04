@@ -666,6 +666,15 @@ export const mcpServers = pgTable("mcp_servers", {
   registryVersion: text("registry_version"),
   registryFirstSeenAt: timestamp("registry_first_seen_at", { withTimezone: true }),
   registryLastSyncedAt: timestamp("registry_last_synced_at", { withTimezone: true }),
+  /** ADR-0175 A5 (migration 0140) — THE RELEASE THIS SERVER IS ON, for the
+   * release-age cooldown. `releaseDigest` is the last manifest digest a sync
+   * observed (null until the first sync). `releaseSeenAt` is when this
+   * deployment first saw that release: registration time for a new server and
+   * its first manifest, the first sighting of the exact registry entry version
+   * for a federated import, and the first sighting of the exact digest for a
+   * changed manifest. Our own clock, never a publisher's date. */
+  releaseDigest: text("release_digest"),
+  releaseSeenAt: timestamp("release_seen_at", { withTimezone: true }).notNull().defaultNow(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -3558,6 +3567,9 @@ export const orgSettings = pgTable(
     mcpAdmissionMode: text("mcp_admission_mode", { enum: ["off", "log", "enforce"] })
       .notNull()
       .default("off"),
+    /** ADR-0175 A5 (migration 0140): the release-age cooldown in days. 0
+     * (DEFAULT) = off and byte-identical to pre-0140. Recommended: 7. */
+    minReleaseAgeDays: integer("min_release_age_days").notNull().default(0),
     /** ADR-0039 (migration 0050): the org network envelope — CIDR blocks
      * (IPv4 + IPv6) interactive access must come from. NULL/empty = no
      * restriction (today; upgrade locks nobody out). Malformed entries are
@@ -8715,6 +8727,8 @@ export type BuilderSharing = (typeof BUILDER_SHARING)[number];
 export const BUILDER_CONNECTION_FORMATS = ["shared", "per_user"] as const;
 export const BUILDER_TOOL_KINDS = ["connector", "mcp_tool"] as const;
 export const BUILDER_SKILL_VISIBILITY = ["private", "workspace"] as const;
+/** ADR-0175 A6 — mirrors SKILL_ADMISSION_STATES in @regulait/shared */
+export const BUILDER_SKILL_ADMISSION_STATES = ["unscanned", "clean", "held", "refused", "admitted"] as const;
 export const BUILDER_CADENCES = ["hourly", "daily", "weekdays", "weekly"] as const;
 export type BuilderCadence = (typeof BUILDER_CADENCES)[number];
 export const BUILDER_CHANNEL_PROVIDERS = ["slack", "teams", "outlook", "email"] as const;
@@ -8831,8 +8845,31 @@ export const builderSkills = pgTable(
     archivedAt: timestamp("archived_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    // ADR-0175 A6 (migration 0140) — admission and integrity.
+    /** sha256 (hex) of the body; backfilled by the migration */
+    contentDigest: text("content_digest").notNull().default(""),
+    /** goes up by one on every body change */
+    version: integer("version").notNull().default(1),
+    /** see SKILL_ADMISSION_STATES; 'unscanned' only for pre-0140 rows */
+    admissionState: text("admission_state", { enum: BUILDER_SKILL_ADMISSION_STATES }).notNull().default("unscanned"),
+    /** counts and locations only — never the matched text */
+    admissionFindings: jsonb("admission_findings"),
+    admissionSeverity: text("admission_severity", { enum: ["low", "medium", "high", "critical"] }),
+    admissionScannedAt: timestamp("admission_scanned_at", { withTimezone: true }),
+    admissionScannerVersion: text("admission_scanner_version"),
+    /** an admin's admission of a HELD skill, pinned to the digest admitted */
+    admittedBy: uuid("admitted_by"),
+    admittedAt: timestamp("admitted_at", { withTimezone: true }),
+    admitReason: text("admit_reason"),
+    admittedDigest: text("admitted_digest"),
+    /** a pending widening of visibility, waiting for an admin (null = none) */
+    requestedVisibility: text("requested_visibility", { enum: BUILDER_SKILL_VISIBILITY }),
+    visibilityRequestedAt: timestamp("visibility_requested_at", { withTimezone: true }),
   },
-  (t) => [index("builder_skills_owner_idx").on(t.ownerUserId)],
+  (t) => [
+    index("builder_skills_owner_idx").on(t.ownerUserId),
+    index("builder_skills_admission_idx").on(t.admissionState),
+  ],
 );
 
 export const builderAgentSkills = pgTable(
@@ -8850,8 +8887,48 @@ export const builderAgentSkills = pgTable(
     /** the skill's updated_at when pinned; newer = "update available" */
     skillUpdatedAt: timestamp("skill_updated_at", { withTimezone: true }).notNull().defaultNow(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    // ADR-0175 A6 (migration 0140) — the PINNED body is what runs, so it is
+    // what is scanned: its own digest, version and verdict.
+    snapshotDigest: text("snapshot_digest").notNull().default(""),
+    snapshotVersion: integer("snapshot_version").notNull().default(1),
+    snapshotAdmissionState: text("snapshot_admission_state", { enum: BUILDER_SKILL_ADMISSION_STATES })
+      .notNull()
+      .default("unscanned"),
   },
   (t) => [primaryKey({ columns: [t.agentId, t.skillId] }), index("builder_agent_skills_skill_idx").on(t.skillId)],
+);
+
+// ADR-0175 A5 (migration 0140) — RELEASE-AGE COOLDOWN.
+//
+// `release_sightings` is this deployment's own record of WHEN it first saw an
+// exact digest (a skill body, an MCP manifest, a registry entry version). Age
+// is always measured from here, never from a publisher's date. One row per
+// (kind, digest), first writer wins.
+export const RELEASE_SIGHTING_KINDS = ["skill", "mcp_manifest", "registry_entry"] as const;
+export const releaseSightings = pgTable(
+  "release_sightings",
+  {
+    kind: text("kind", { enum: RELEASE_SIGHTING_KINDS }).notNull(),
+    digest: text("digest").notNull(),
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.kind, t.digest] })],
+);
+
+/** An admin's per-item override of the cooldown: ONE subject at ONE digest,
+ * with a reason (audited). A new digest is a new release and is not covered. */
+export const releaseOverrides = pgTable(
+  "release_overrides",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    kind: text("kind", { enum: ["mcp_server", "skill"] }).notNull(),
+    subjectId: uuid("subject_id").notNull(),
+    digest: text("digest").notNull(),
+    overriddenBy: uuid("overridden_by"),
+    reason: text("reason").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("release_overrides_uq").on(t.kind, t.subjectId, t.digest)],
 );
 
 export const builderAgentMemory = pgTable(

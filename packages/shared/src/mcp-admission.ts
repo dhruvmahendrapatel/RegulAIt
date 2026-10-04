@@ -445,52 +445,10 @@ export function scanMcpManifest(tools: readonly ScannableTool[]): McpAdmissionSc
     const toolName = typeof tool?.name === "string" ? tool.name : "<unnamed>";
     const units = scanUnitsForTool(tool ?? { name: toolName });
     unitCount += units.length;
-    for (const unit of units) {
-      // 1. the MCP-specific phrase rules
-      for (const rule of MCP_RULES) {
-        const count = countMatches(unit.text, rule.re);
-        if (count > 0) {
-          findings.push({
-            rule: rule.id,
-            severity: rule.severity,
-            tool: toolName,
-            where: unit.where,
-            count,
-          });
-        }
-      }
-      // 2. hidden / invisible Unicode
-      for (const rule of HIDDEN_UNICODE_RULES) {
-        const count = countMatches(unit.text, rule.re);
-        if (count > 0) {
-          findings.push({
-            rule: rule.id,
-            severity: rule.severity,
-            tool: toolName,
-            where: unit.where,
-            count,
-          });
-        }
-      }
-      // 3. the ADR-0042 detectors, REUSED rather than re-implemented
-      for (const detector of [promptInjectionDetector, semanticDlpDetector]) {
-        for (const hit of detector.detect(unit.text)) {
-          findings.push({
-            rule: `guardrail.${detector.id}.${hit.category}`,
-            severity: GUARDRAIL_CATEGORY_SEVERITY[hit.category] ?? "medium",
-            tool: toolName,
-            where: unit.where,
-            count: hit.count,
-          });
-        }
-      }
-    }
+    findings.push(...scanAdmissionUnits(toolName, units));
   }
 
-  const severity = findings.reduce<McpAdmissionSeverity | null>(
-    (acc, f) => (acc === null ? f.severity : strictestSeverity(acc, f.severity)),
-    null,
-  );
+  const severity = maxSeverity(findings);
   return {
     scannerVersion: MCP_ADMISSION_SCANNER_VERSION,
     digest: manifestDigest(tools),
@@ -500,6 +458,69 @@ export function scanMcpManifest(tools: readonly ScannableTool[]): McpAdmissionSc
     toolCount: tools.length,
     unitCount,
   };
+}
+
+/**
+ * ADR-0175 A6 — THE REUSABLE ENTRY POINT. The exact rule set
+ * `scanMcpManifest` runs over one tool (the MCP phrase rules, the hidden-
+ * Unicode code-point rules and the reused ADR-0042 detectors), over any list
+ * of located text units. A builder skill is scanned through THIS function, so
+ * a skill and an MCP manifest are adjudicated by one implementation: a rule
+ * added here reaches both, and neither can drift from the other. `subject`
+ * lands in each finding's `tool` field (the skill name, for a skill).
+ * `skipRules` names MCP phrase rules that make no sense for the subject (a
+ * skill is BY DEFINITION text addressed to the model, so the rule that flags a
+ * tool description for addressing the model would fire on every skill).
+ *
+ * Pure, total, counts-and-locations only — the same contract as above.
+ */
+export function scanAdmissionUnits(
+  subject: string,
+  units: ReadonlyArray<{ where: string; text: string }>,
+  opts: { skipRules?: readonly string[] } = {},
+): McpAdmissionFinding[] {
+  const findings: McpAdmissionFinding[] = [];
+  const skip = new Set(opts.skipRules ?? []);
+  for (const unit of units) {
+    if (!unit.text) continue;
+    // 1. the MCP-specific phrase rules
+    for (const rule of MCP_RULES) {
+      if (skip.has(rule.id)) continue;
+      const count = countMatches(unit.text, rule.re);
+      if (count > 0) findings.push({ rule: rule.id, severity: rule.severity, tool: subject, where: unit.where, count });
+    }
+    // 2. hidden / invisible Unicode
+    for (const rule of HIDDEN_UNICODE_RULES) {
+      const count = countMatches(unit.text, rule.re);
+      if (count > 0) findings.push({ rule: rule.id, severity: rule.severity, tool: subject, where: unit.where, count });
+    }
+    // 3. the ADR-0042 detectors, REUSED rather than re-implemented
+    for (const detector of [promptInjectionDetector, semanticDlpDetector]) {
+      for (const hit of detector.detect(unit.text)) {
+        findings.push({
+          rule: `guardrail.${detector.id}.${hit.category}`,
+          severity: GUARDRAIL_CATEGORY_SEVERITY[hit.category] ?? "medium",
+          tool: subject,
+          where: unit.where,
+          count: hit.count,
+        });
+      }
+    }
+  }
+  return findings;
+}
+
+/** MAX severity across findings; null when there are none */
+export function maxSeverity(findings: readonly McpAdmissionFinding[]): McpAdmissionSeverity | null {
+  return findings.reduce<McpAdmissionSeverity | null>(
+    (acc, f) => (acc === null ? f.severity : strictestSeverity(acc, f.severity)),
+    null,
+  );
+}
+
+/** severity rank comparison for callers with their own threshold */
+export function severityAtLeast(s: McpAdmissionSeverity | null, floor: McpAdmissionSeverity): boolean {
+  return s !== null && SEVERITY_RANK[s] >= SEVERITY_RANK[floor];
 }
 
 /**

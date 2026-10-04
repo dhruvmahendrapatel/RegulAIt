@@ -939,7 +939,16 @@ export interface BuilderAgentDetail extends BuilderAgentSummary {
   /** skills are PINNED at attach: `updateAvailable` = the library copy changed
    * since (re-attach to take it); `unavailable` = the owner can no longer see
    * it, so it is left out of the agent's prompt */
-  skills: Array<{ id: string; name: string; description: string; updateAvailable: boolean; unavailable: boolean }>;
+  skills: Array<{
+    id: string;
+    name: string;
+    description: string;
+    updateAvailable: boolean;
+    unavailable: boolean;
+    /** ADR-0175: why the pinned body is kept out of the prompt (absent when it runs) */
+    withheld?: "held" | "refused" | "quarantined";
+    pinnedVersion?: number;
+  }>;
   memory: BuilderMemoryItem[];
   schedules: BuilderSchedule[];
   channels: BuilderChannel[];
@@ -1024,6 +1033,15 @@ export interface BuilderMessage {
   steps?: BuilderToolStep[];
 }
 
+/** ADR-0175 A6 — a skill's admission verdict */
+export type SkillAdmissionState = "unscanned" | "clean" | "held" | "refused" | "admitted";
+/** counts and locations only — never the matched text */
+export interface AdmissionFindingCount {
+  rule: string;
+  severity: "low" | "medium" | "high" | "critical";
+  where: string;
+  count: number;
+}
 export interface BuilderSkillSummary {
   id: string;
   name: string;
@@ -1033,6 +1051,17 @@ export interface BuilderSkillSummary {
   usedBy: number;
   updatedAt: string;
   canEdit: boolean;
+  /** ADR-0175 A6: goes up on every body change */
+  version: number;
+  contentDigest: string;
+  admissionState: SkillAdmissionState;
+  /** a widening waiting for an admin */
+  requestedVisibility: "private" | "workspace" | null;
+  /** owner and admins only */
+  admissionSeverity?: AdmissionFindingCount["severity"] | null;
+  admissionFindings?: AdmissionFindingCount[];
+  /** ADR-0175 A5: null while the cooldown is off */
+  release: { quarantined: boolean; readyAt: string | null; ageDays: number } | null;
 }
 export interface BuilderSkillDetail extends BuilderSkillSummary {
   body: string;
