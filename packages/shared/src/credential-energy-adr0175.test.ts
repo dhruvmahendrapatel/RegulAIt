@@ -128,7 +128,7 @@ describe("A7 stale_credentials rule", () => {
   it("observe-only (the default) raises nothing, and an open episode resolves", () => {
     const findings = evaluateMonitorRules(base({ credentials: { alerting: false, credentials: [flagged] } }));
     expect(findings.filter((x) => x.ruleId === "stale_credentials")).toEqual([]);
-    const plan = reconcileAlerts([{ id: "a1", ruleId: "stale_credentials", subjectKey: "credential:virtual_key:v1", title: "t" }], findings);
+    const plan = reconcileAlerts([{ id: "a1", ruleId: "stale_credentials", subjectKey: "credential:virtual_key:v1" }], findings);
     expect(plan.resolve).toEqual(["a1"]);
   });
 
