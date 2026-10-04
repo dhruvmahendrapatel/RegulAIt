@@ -202,6 +202,16 @@ describe("A15 energy estimate", () => {
     expect(estimateEnergy({ windowDays: 7, usage: [], factors: [], grid: null }).energyWh).toBeNull();
   });
 
+  it("a call whose tokens were not recorded is unknown even when its model has a factor", () => {
+    const e = estimateEnergy({
+      windowDays: 7,
+      usage: [{ model: "model-a", calls: 3, callsWithTokens: 2, inputTokens: 2000, outputTokens: 0 }],
+      factors: [factor("model-a")],
+      grid: null,
+    });
+    expect(e).toMatchObject({ callsEstimated: 2, callsUnknown: 1, coverage: "2 of 3 calls estimated", energyWh: 1 });
+  });
+
   it("says when a demo factor was used", () => {
     const e = estimateEnergy({
       windowDays: 7,
