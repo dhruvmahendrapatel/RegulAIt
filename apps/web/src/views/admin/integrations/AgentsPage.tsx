@@ -24,6 +24,8 @@ import {
   userOpts,
 } from "../adminKit";
 import { StewardshipCard } from "./AgentStewardship";
+import { ProviderMark, ProviderTiles } from "../../../ui/ModelPicker";
+import { providerLabel } from "../../models/modelBindings";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -81,17 +83,20 @@ export default function AgentsPage() {
                 key: "provider",
                 header: "Provider",
                 sort: (x) => x.provider,
-                render: (x) =>
-                  x.provider === "custom" ? (
-                    <>
-                      custom ·{" "}
-                      <span className={v.mono}>
-                        {x.customProviderId ? (endpointName.get(x.customProviderId) ?? x.customProviderId) : "—"}
+                render: (x) => (
+                  <ProviderMark provider={x.provider} label={providerLabel(x.provider)}>
+                    {x.provider === "custom" ? (
+                      <span>
+                        custom ·{" "}
+                        <span className={v.mono}>
+                          {x.customProviderId ? (endpointName.get(x.customProviderId) ?? x.customProviderId) : "—"}
+                        </span>
                       </span>
-                    </>
-                  ) : (
-                    x.provider
-                  ),
+                    ) : (
+                      x.provider
+                    )}
+                  </ProviderMark>
+                ),
               },
               { key: "tier", header: "Tier", align: "right", sort: (x) => x.tier, render: (x) => x.tier },
               {
@@ -181,6 +186,9 @@ const EMPTY_AGENT = {
   systemPrompt: "",
 };
 
+/** the provider kinds the register form offers (the gateway's createAgentSchema accepts these) */
+const REGISTER_PROVIDERS = ["anthropic", "openai", "google", "xai", "mock", "custom"];
+
 function RegisterAgentCard() {
   const act = useAction();
   const customProviders = useCustomProviders();
@@ -224,23 +232,17 @@ function RegisterAgentCard() {
           <Field label="Name">
             <Input required value={f.name} onChange={(e) => set("name", e.target.value)} placeholder="e.g. claude-opus" />
           </Field>
-          <Field label="Provider">
-            <Select
-              value={f.provider}
-              onChange={(e) => {
-                set("provider", e.target.value);
-                // never leave a stale endpoint id behind on a non-custom agent
-                if (e.target.value !== "custom") set("customProviderId", "");
-              }}
-              data-testid="agent-provider"
-            >
-              {["anthropic", "openai", "google", "xai", "mock", "custom"].map((p) => (
-                <option key={p} value={p}>
-                  {p}
-                </option>
-              ))}
-            </Select>
-          </Field>
+          <ProviderTiles
+            legend="Provider"
+            testId="agent-provider"
+            options={REGISTER_PROVIDERS.map((p) => ({ value: p, label: providerLabel(p) }))}
+            value={f.provider}
+            onChange={(p) => {
+              set("provider", p);
+              // never leave a stale endpoint id behind on a non-custom agent
+              if (p !== "custom") set("customProviderId", "");
+            }}
+          />
           {isCustom && (
             <Field label="Custom endpoint (enabled endpoints only)" grow>
               <Select
@@ -274,7 +276,7 @@ function RegisterAgentCard() {
             {selectable.length === 0 && (
               <p className={v.errLine} role="alert" data-testid="no-enabled-endpoints">
                 No custom endpoint is enabled yet. Register one under{" "}
-                <Link to="/admin/custom-providers">Integrations → Custom LLM providers</Link>, pass its
+                <Link to="/admin/custom-providers" style={{ textDecoration: "underline" }}>Integrations → Custom LLM providers</Link>, pass its
                 connection test, then enable it — only enabled endpoints can be bound to an agent.
               </p>
             )}

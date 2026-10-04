@@ -42,7 +42,9 @@ import {
   SkeletonBlock,
   Textarea,
 } from "../../ui/kit";
+import { ModelPicker } from "../../ui/ModelPicker";
 import { useToast } from "../../ui/toast";
+import { bindingsFromGranted } from "../models/modelBindings";
 import v from "../views.module.css";
 import s from "./chat.module.css";
 
@@ -136,6 +138,16 @@ export default function ChatPage() {
   const myProviders = (credsQ.data?.credentials ?? []).map((c) => c.provider);
   const providerStatus = providerStatusQ.data?.providers ?? {};
   const conversations = convosQ.data?.conversations ?? [];
+
+  // ADR-0172: the picker's tiles (logo, model id, tier, readiness)
+  const pickerAgents = useMemo(
+    () =>
+      bindingsFromGranted(agents, {
+        providerStatus: providerStatusQ.data?.providers ?? {},
+        myProviders: (credsQ.data?.credentials ?? []).map((c) => c.provider),
+      }),
+    [agents, providerStatusQ.data, credsQ.data],
+  );
 
   const providerConfigured = useCallback(
     (provider: string) => provider === "mock" || Boolean(providerStatus[provider]?.configured),
@@ -593,15 +605,7 @@ export default function ChatPage() {
                   No agents are granted to your account — ask an admin to grant you one.
                 </span>
               ) : (
-                <Field label="Agent">
-                  <Select value={agentId} onChange={(e) => setAgentId(e.target.value)} aria-label="Agent">
-                    {agents.map((a) => (
-                      <option key={a.agentId} value={a.agentId}>
-                        {a.name} · {a.provider} · tier {a.tier}
-                      </option>
-                    ))}
-                  </Select>
-                </Field>
+                <ModelPicker label="Agent" agents={pickerAgents} value={agentId} onChange={setAgentId} testId="chat-agent" />
               )}
               <Field label="Bill to">
                 <Select value={projectId} onChange={(e) => setProjectId(e.target.value)} aria-label="Bill to project">
