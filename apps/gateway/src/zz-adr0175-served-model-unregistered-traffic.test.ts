@@ -15,7 +15,7 @@
  * projectless traffic groups by virtual key, else by caller.
  *
  * Shared database (M-008): every assertion is scoped to subjects this file
- * creates; the usage rows it writes are deleted and its use case retired at
+ * creates; the usage rows it writes are deleted and its use case returned to proposed at
  * the end, so no condition it created outlives it.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -104,7 +104,7 @@ afterAll(async () => {
   const all = [...new Set([...usageIds, ...own.map((r) => r.id)])];
   if (all.length) await db.delete(usageEvents).where(inArray(usageEvents.id, all));
   await db.delete(usageEvents).where(eq(usageEvents.projectId, ids.project));
-  if (ids.useCase) await db.update(aiUseCases).set({ status: "retired" }).where(eq(aiUseCases.id, ids.useCase));
+  if (ids.useCase) await db.update(aiUseCases).set({ status: "proposed" }).where(eq(aiUseCases.id, ids.useCase)); // out of the monitor's scope
   // one last pass so the conditions this file created resolve rather than linger
   await call("POST", "/v1/governance/monitor/evaluate", admin.auth);
   app.server.closeAllConnections();
