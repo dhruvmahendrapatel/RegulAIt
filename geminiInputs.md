@@ -36,7 +36,19 @@ That targeted scan does not close GEM-nc-1's broader UI coverage gap.
 | GEM-nc-2 | n/a | Heuristic injection/jailbreak detector quality | OPEN | [App II NOT CHECKED] red-team corpus exists (`redteam.test.ts`); no precision/recall for prompt_injection/jailbreak; ADR-0135 covers secrets only | Detection quality unmeasured; needs an eval set | owner |
 | GEM-nc-3 | n/a | SCIM against a real Entra/Okta tenant | OPEN | [App II NOT CHECKED] `scim.ts:109-114` routes exist; no live-tenant test | Needs a real tenant | owner |
 | GEM-nc-4 | n/a | pm-provider outbound adapters | PARTIAL | [App II NOT CHECKED] six providers (AzureDevOps, Jira, Linear, Asana, Monday, GenericWebhook; `pm-provider/src/index.ts:329-1062`); `index.test.ts` (35) | No detailed outbound review; no live-tenant verification | claude (review); owner (tenants) |
-| G8 | n/a | Credo parity checklist refresh | OPEN | [Board §3 G8; `CREDO_PARITY_CHECKLIST_2026-09-30.md`] last change 19819ec (10-02 03:08) predates the 03:13 CHANGES-REQUESTED review; not referenced by any demo doc | All four review points unmet: rows 44-48, 50, 53 still SHIPPED; 51-52 'Missing' although ADR-0140..0145/0161/0162 make them Partial; 'Missing (Roadmap)' rows name no ROADMAP item; no GAIA private-preview note | gemini (rework; owner may reassign to claude) |
+| G8 | n/a | Credo parity checklist refresh | RESOLVED/DONE | `86b9a59`; Codex source review 2026-10-04 | Four requested document corrections present; product parity remains unclaimed | Closed; see delivery review below |
+
+## Agent UX / Ease-of-Use Scan (2026-10-03)
+
+The following feedback was collected from a code scan of the agent administration and builder surfaces (`apps/web/src/views/admin/integrations/AgentsPage.tsx` and `apps/web/src/views/builder/BuilderAgentEditorPage.tsx`):
+
+| ID | Area | Issue / Feedback | Recommendation |
+|---|---|---|---|
+| UX-AG-1 | Fallback Chains | Immediate auto-save on every chain mutation (add, remove, reorder) in `FallbackChainCard` breaks consistency with the explicit "Save" buttons used in all other forms on the page (Register, Pricing, Policy, Prompt). | Add a staging state for the fallback chain with a unified "Save Chain" button, or clearly label the section to indicate immediate application. |
+| UX-AG-2 | Custom Endpoints | If a bound custom endpoint is later disabled, the `RegisterAgentCard` dropdown may silently drop the selected value from the UI because it strictly filters `selectable = providers.filter(p => p.enabled)`. | Include the currently bound endpoint in the dropdown even if disabled (flagged as `(disabled)`), so the user sees the true state and isn't forced to overwrite it accidentally. |
+| UX-AG-3 | Pricing Intent | Using a blank input to mean "unpriced" for custom models is heavily caveated in help text but still prone to user error (users instinctively enter `0` for free/self-hosted models). | Add an explicit "Unpriced / Self-hosted" toggle that disables the number inputs, converting the UX from a negative constraint ("don't invent a number") to a positive choice. |
+| UX-AG-4 | Builder UI | `BuilderAgentEditorPage.tsx` is an empty scaffold (`<PageHeader title="Agent" />`). The entire agent builder experience (ADR-0172) is missing from the codebase. | Prioritize the implementation of ADR-0172; without it, agent creation and editing is heavily skewed toward basic admin catalog forms. |
+| UX-AG-5 | Entitlements | Role-granted agents in `EntitlementCard` lack a direct navigation path to the Role management page to remove the grant. The tooltip merely tells the user to go there manually. | Convert the "granted by role" tooltip into a clickable action or add a direct link to the corresponding Role editor. |
 
 ## Compact resolved / withdrawn register — do not rebuild
 
@@ -67,6 +79,68 @@ blocking heuristic guardrails, SAML/SCIM and partial compliance evidence packs a
 Transparent MCP expansion must remain explicitly governed; the old proposal for “ungoverned pass-through” is not an implementation instruction.
 GEM-D9's network-location half is implemented; device posture remains a separate decision.
 SOAR, live collectors, model-backed detectors and live-provider assurance are not closed by removing old prose.
+
+## Gemini delivery review — 2026-10-04 UTC (owner-requested)
+
+Reviewed delivery `50f004c` on target `dhruv/active`, at local/upstream snapshot
+`63bd838c5e2109a450e7e28464df51dfaa52b53e` after incorporating concurrent
+Gemini delivery `86b9a59`. Publication uses a clean detached worktree based on that
+upstream commit and targets only `dhruv/active`; prior local drafts remain preserved.
+All six research files were inspected structurally; primary-source spot checks below
+disprove readiness. This is not exhaustive verification of every provider or legal fact,
+nor a finding that these research-only defects are executing in the product.
+
+| Task | Review status / priority | Direct evidence and impact | Required correction / acceptance |
+|---|---|---|---|
+| G8 | RESOLVED/DONE (document corrections only) | `86b9a59` changes checklist lines 24,44–53: requested Partial statuses, preview caveat and named vendor-portal roadmap item are present; ROADMAP.md:824 contains that portal item. | Four original correction requests are addressed by direct document comparison. No new claim of full parity, test rerun or live vendor validation. Historical concern preserved in Git. |
+| G10 | CHANGES-REQUESTED / OPEN, high | `R1-evaluator-control-catalog.md:3,29` misnumber disclosure and excessive-agency checks under the claimed OWASP 2025 namespace. Sources are names, not URLs; ISO subcontrol/title pairs are unsupported by the suite identifier register. Incorrect mappings could become false compliance evidence. | Verify every mapping against the correct framework edition and exact source, recording checked date. Correct 2025 IDs, distinguish proposed relevance from compliance proof, and mark inaccessible/unverified mappings UNVERIFIED. Pass: every populated identifier resolves to its claimed title/version and every mapping has rationale plus primary citation. Do not invent ISO subcontrols from memory. |
+| G11 | CHANGES-REQUESTED / OPEN, high | `R2-model-provider-facts.md:4` lists retired Sonnet 3.5 June-2024 as GA. Rows give one context/price pair for two models and mix no-training with zero retention. A pricing homepage does not substantiate retention/residency. | Recheck each exact API ID and lifecycle on its actual host; pair price/context with each model and pricing tier. Separate training, retention, eligibility, regional availability and endpoint compatibility with primary links and checked dates, or UNVERIFIED. Pass: no retired model represented as current and each commercial/security claim is individually attributable. |
+| G12 | CHANGES-REQUESTED / OPEN, medium | `R3-integration-catalog.md:18` says no official Notion MCP found, contradicted by Notion's own hosted-server documentation. Rows such as line 32 place an upstream reference-server URL in the official-vendor column without verifying vendor ownership. | Recheck MCP availability and maintenance; distinguish vendor official, reference, community and unverified. Cite direct server/auth documentation and checked date; qualify unsuccessful searches. Pass: Notion corrected, each claimed official server has vendor provenance, and proposed reach is not represented as shipped RegulAIt integration support. |
+| G13 | CHANGES-REQUESTED / OPEN, medium | `R4-agent-template-ideas.md:45,60` provide no skills; other templates often have one, rather than required 2–3 with descriptions. Line 185 names Google Slides absent from G12. Twelve concepts exist but deliverable contract is incomplete. | Supply 2–3 named, described skills per template and ensure integrations resolve to G12 (or label a proposed catalog addition). Document approval/authorized scope before external writes. Pass: all 12 templates satisfy steps, word limit, skills, subagents, schedule, catalog integration and approval requirements; label recipes proposed rather than implemented. |
+| G14 | CHANGES-REQUESTED / OPEN, high | `R5-ai-regulation-calendar.md:12` asserts a UK instrument/date with only gov.uk homepage; this review could not substantiate that exact claim. Line 18 classifies a voluntary standard as a law-like in-force milestone. No explicit G4 feed comparison is delivered. | Cite exact official instrument and commencement/amendment provision per row, with checked date distinct from milestone. Mark unsubstantiated claims UNVERIFIED rather than guessing. Separate standard publication/certification from statutory obligation. Pass: every required jurisdiction covered and every relevant existing feed item classified match, contradiction or unverified with evidence. No legal-validity certification is implied. |
+| G15 | CHANGES-REQUESTED / OPEN, medium | `R6-skill-starters.md:1–17` and subsequent entries fence only YAML metadata, leaving the body outside and lacking actual frontmatter delimiters. Line 141 suggests an unspecified `opt_out=true` API flag. Ten outlines exist, not ten conformant starter blocks. | Fence each complete starter with YAML frontmatter and all required headings; validate each can be extracted unchanged. Cite factual/legal/API claims with checked dates or label illustrative/UNVERIFIED. Never convert a generic example flag or automated risk classification into an authoritative setting/legal determination. Pass: ten complete parseable blocks, unique kebab-case names, descriptions, required sections and explicit unknown/human-review handling. |
+
+Paths in the table are under `docs/research/` except G8's existing checklist.
+Task IDs are reused rather than opening duplicate product findings. G8 is closed in its narrow document-correction scope.
+
+### Primary-source checks (accessed 2026-10-04 UTC)
+
+- [OWASP's 2025 list](https://genai.owasp.org/llm-top-10/) places sensitive-information disclosure at LLM02 and excessive agency at LLM06, contradicting the R1 examples. Other mappings still require row-by-row validation.
+- [Anthropic retirement history](https://platform.claude.com/docs/en/about-claude/model-deprecations) records Sonnet 3.5 retirement on 2025-10-28. A historical model should not occupy a current GA flagship field.
+- [Notion MCP documentation](https://developers.notion.com/guides/mcp/overview) documents a Notion-hosted remote server and OAuth authorization. This directly refutes the R3 negative, not every other row.
+- [European Commission implementation announcement](https://digital-strategy.ec.europa.eu/en/news/ai-omnibus-enters-force) supports the calendar's later high-risk phase dates. Do not blanket-revert those dates merely because older suite guidance differs. Formal amended-text retrieval was incomplete in this pass; G14 still needs provision-level evidence and feed reconciliation.
+- Suite `docs/contracts/control-identifiers.md` is the repository-required identifier gate; it does not substantiate R1's asserted ISO subcontrol/title pairs. This is an unsupported-mapping observation, not a licensed-text verification of every ISO control.
+
+### Review execution and next handoff
+
+Source inspection used `Get-Content` on the board, six research files, G8 checklist,
+feedback and suite identifier contract; `rg -n` located the cited claims.
+No cloud calls, provider invocations, database tests or product mutations were used.
+The board's prior X11 backend blocker was stale: gateway `chatops.ts:247` returns
+`notifyAlertMinSeverity`; X11's existing verified closure remains intact.
+Codex's assigned review is complete; Gemini should repair G10/G11/G14 first, then
+G12, then G13/G15, before Claude's acceptance review. The separate AER-050
+remaining recovery/navigation work is not closed by this board cleanup.
+
+
+### Concurrent UX scan validation and execution limits
+
+Gemini's UX-AG-1..5 text above is preserved. Source checks at the reviewed snapshot:
+UX-AG-1 immediate saves are confirmed (`AgentsPage.tsx:482–497`); UX-AG-5's
+role navigation opportunity is supported at line 797. UX-AG-3 is a design suggestion,
+not a reproduced defect; unpriced and self-hosted must not be equated with zero cost.
+UX-AG-4's editor scaffold is confirmed, but “entire experience missing” is too broad:
+this is planned ADR-0172 work, not evidence that existing admin registration is absent.
+UX-AG-2 remains UNVERIFIED as stated: `RegisterAgentCard` initializes `EMPTY_AGENT`
+at lines 171–193 and POSTs a new agent, not an existing-binding editor. A provider
+being disabled during an in-progress draft is a separate case needing reproduction;
+do not allow binding disabled endpoints as a speculative fix.
+
+`node scripts/coordination.mjs lint` and `git diff --check` passed on the initial draft.
+`node --test scripts/coordination.test.mjs` failed before executing assertions:
+missing `vitest`; the file requires the Vitest runner, not Node's test runner.
+No dependency installation or product test pass is claimed. Final publication checks
+are recorded in the commit handoff; docs-only review did not exercise runtime UX.
 
 ## Update protocol
 
