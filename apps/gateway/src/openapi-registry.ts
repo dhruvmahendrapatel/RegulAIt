@@ -577,6 +577,12 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "DELETE /v1/chatops/identity-links/:linkId": "internal",
   "POST /v1/chatops/approvals/:approvalId/post": "internal",
   "POST /v1/chatops/:connectionName/interactions": "internal",
+  // ADR-0173 §2 — inbound conversations to builder agents. Internal for the
+  // same reason: provider-shaped callbacks whose contract is Slack's / Teams'.
+  "POST /v1/chatops/:connectionName/events": "internal",
+  "POST /v1/chatops/:connectionName/messages": "internal",
+  "GET /v1/chatops/builder-routes": "internal",
+  "PUT /v1/chatops/builder-routes/:channelId": "internal",
   // ADR-0056 — the governance copilot. Internal: the tool vocabulary, the
   // query plan and the evidence envelope will move as more ledgers become
   // readable, and an answer shape is not a contract we want to freeze while no
@@ -1270,6 +1276,10 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "DELETE /v1/chatops/identity-links/:linkId": "chatops",
   "POST /v1/chatops/approvals/:approvalId/post": "chatops",
   "POST /v1/chatops/:connectionName/interactions": "chatops",
+  "POST /v1/chatops/:connectionName/events": "chatops",
+  "POST /v1/chatops/:connectionName/messages": "chatops",
+  "GET /v1/chatops/builder-routes": "chatops",
+  "PUT /v1/chatops/builder-routes/:channelId": "chatops",
   "GET /v1/builder/agents": "builder",
   "POST /v1/builder/agents": "builder",
   "POST /v1/builder/agents/import": "builder",

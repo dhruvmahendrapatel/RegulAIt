@@ -8713,9 +8713,18 @@ export const builderAgentChannels = pgTable(
     chatopsConnectionId: uuid("chatops_connection_id").references(() => chatopsConnections.id, {
       onDelete: "set null",
     }),
+    /** ADR-0173 (migration 0137) — the platform channel an ADMIN routes to this
+     * agent; null = connection-wide (answers mentions / DMs while it is the
+     * only connection-wide binding on its connection) */
+    externalChannelId: text("external_channel_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("builder_agent_channels_agent_idx").on(t.agentId)],
+  (t) => [
+    index("builder_agent_channels_agent_idx").on(t.agentId),
+    uniqueIndex("builder_agent_channels_route_uq")
+      .on(t.chatopsConnectionId, t.externalChannelId)
+      .where(sql`${t.chatopsConnectionId} IS NOT NULL AND ${t.externalChannelId} IS NOT NULL`),
+  ],
 );
 
 export const builderThreads = pgTable(
@@ -8776,3 +8785,59 @@ export type BuilderSkillRow = typeof builderSkills.$inferSelect;
 export type BuilderScheduleRow = typeof builderAgentSchedules.$inferSelect;
 export type BuilderThreadRow = typeof builderThreads.$inferSelect;
 export type BuilderMessageRow = typeof builderMessages.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0173 §2 (migration 0137) — inbound channels to builder agents.
+// ---------------------------------------------------------------------------
+
+/** (connection, platform channel, platform thread, PERSON) -> builder thread.
+ * Per person because a builder thread is personal: two people in one Slack
+ * thread each talk to the agent as themselves, with their own entitlements. */
+export const builderChannelThreads = pgTable(
+  "builder_channel_threads",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => chatopsConnections.id, { onDelete: "cascade" }),
+    externalChannelId: text("external_channel_id").notNull(),
+    externalThreadId: text("external_thread_id").notNull(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => builderAgents.id, { onDelete: "cascade" }),
+    builderThreadId: uuid("builder_thread_id")
+      .notNull()
+      .references(() => builderThreads.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("builder_channel_threads_uq").on(t.connectionId, t.externalChannelId, t.externalThreadId, t.userId),
+    index("builder_channel_threads_thread_idx").on(t.builderThreadId),
+  ],
+);
+
+/** the de-duplication record: one row per platform delivery AND per message */
+export const builderChannelEvents = pgTable(
+  "builder_channel_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => chatopsConnections.id, { onDelete: "cascade" }),
+    externalEventId: text("external_event_id").notNull(),
+    messageKey: text("message_key").notNull(),
+    retryNum: integer("retry_num"),
+    receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("builder_channel_events_event_uq").on(t.connectionId, t.externalEventId),
+    uniqueIndex("builder_channel_events_message_uq").on(t.connectionId, t.messageKey),
+    index("builder_channel_events_received_idx").on(t.receivedAt),
+  ],
+);
+
+export type BuilderChannelThreadRow = typeof builderChannelThreads.$inferSelect;

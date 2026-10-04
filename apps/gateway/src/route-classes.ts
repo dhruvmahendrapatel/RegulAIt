@@ -35,6 +35,14 @@ export const AUTH_EXEMPT_ROUTES = new Set([
   // id is then mapped to a real human and the ONE decide path re-checks
   // entitlement server-side.
   "/v1/chatops/:connectionName/interactions",
+  // ADR-0173 §2 — inbound conversations to builder agents (Slack Events API,
+  // Teams outgoing webhook). Same posture as the interaction callback: the
+  // platform holds no RegulAIt credential, so the route authenticates IN-ROUTE
+  // on the workspace signing secret over the raw body (+ a replay guard)
+  // before anything else, and the sender then becomes a person only through
+  // an admin-made identity link; the turn runs as that person.
+  "/v1/chatops/:connectionName/events",
+  "/v1/chatops/:connectionName/messages",
   // /admin and /app are 302s to /ui (ADR-0026 phase-2 swap) — a browser
   // hits a bookmark before it has any credential, so the redirect itself
   // must not require one. The legacy shells they used to serve are GONE
@@ -480,6 +488,10 @@ export const NON_ADMIN_ROUTES = new Set([
   // and cannot be, the gate here. The gate that applies is the signature check
   // plus the identity mapping plus the one decide path.
   "POST /v1/chatops/:connectionName/interactions",
+  // ADR-0173 §2 — see the AUTH_EXEMPT note: signature + identity link, not
+  // admin-ness, is the gate on the two inbound conversation routes
+  "POST /v1/chatops/:connectionName/events",
+  "POST /v1/chatops/:connectionName/messages",
 ]);
 
 /**

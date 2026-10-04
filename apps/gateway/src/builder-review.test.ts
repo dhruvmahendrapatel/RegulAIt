@@ -79,7 +79,17 @@ beforeAll(async () => {
   }
 }, 120_000);
 
-afterAll(async () => k.close());
+/** ChatOps connections this file inserts — org-visible, so removed even when a
+ * test fails (an enabled leftover becomes another suite's default destination) */
+const chatopsRows: Array<{ connectionId: string; connectorId: string }> = [];
+
+afterAll(async () => {
+  for (const r of chatopsRows) {
+    await k.db.delete(chatopsConnections).where(eq(chatopsConnections.id, r.connectionId));
+    await k.db.delete(connectors).where(eq(connectors.id, r.connectorId));
+  }
+  await k.close();
+});
 
 describe("1. the monthly limit", () => {
   it("N parallel chats against a limit of less than one call's cost: exactly one is answered", async () => {
@@ -302,6 +312,7 @@ describe("6. channel binding", () => {
       .insert(chatopsConnections)
       .values({ name: `outlook-${k.RUN}`, provider: "outlook", connectorId: conn!.id, defaultChannel: "governance@example.com" })
       .returning();
+    chatopsRows.push({ connectionId: chat!.id, connectorId: conn!.id });
     const a = await newAgent(owner);
     const mine = await k.req("POST", `/v1/builder/agents/${a.id}/channels`, owner.auth, { provider: "outlook" });
     expect(mine.statusCode, mine.body).toBe(201);
