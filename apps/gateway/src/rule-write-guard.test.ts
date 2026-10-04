@@ -176,14 +176,16 @@ const AUDITED_WRITERS: AuditedWriter[] = [
     file: "agents-connectors.ts",
     method: "update",
     expr: "agents",
-    count: 3,
+    count: 4,
     why:
       "POST /v1/agents/:id/enabled, /owner and /lifecycle — three audited governance routes that write ONLY " +
-      "`enabled`, `ownerUserId` and the three lifecycle columns. None of those is an agent_config versioned " +
-      "field (the batch-B1 scope line refuses them from version bodies for exactly this reason: they are " +
-      "governance gates and accountability records with their own routes, not dispatch config), so no " +
-      "read-model divergence is possible. A fourth `.update(agents)` writing model or a price column must go " +
-      "through `applyRuleEdit` and raises this count.",
+      "`enabled`, `ownerUserId` and the three lifecycle columns — and (ADR-0175 review fix) PUT " +
+      "/v1/agents/:id/expected-served-model, audited, which writes ONLY `expected_served_model`: the model id " +
+      "the governance monitor compares a provider's report with. It changes nothing about a dispatch. None of " +
+      "those is an agent_config versioned field (the batch-B1 scope line refuses them from version bodies for " +
+      "exactly this reason: they are governance gates and accountability records with their own routes, not " +
+      "dispatch config), so no read-model divergence is possible. A fifth `.update(agents)` writing model or a " +
+      "price column must go through `applyRuleEdit` and raises this count.",
   },
   {
     file: "remediation.ts",
