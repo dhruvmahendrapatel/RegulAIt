@@ -12,12 +12,25 @@
  * Picking or Escape returns focus to the trigger; Tab or a click outside
  * closes without stealing focus back.
  *
+ * ADR-0173 §3 — "allowed here". Given a `feature` (chat, builder, …), the
+ * picker reads the org's model allow-list (GET /v1/model-policy, or a `policy`
+ * prop) and shows a binding the policy forbids for that feature as a DISABLED
+ * option (aria-disabled, "Not allowed here" and the reason) that cannot be
+ * picked. The gateway refuses such a call regardless; this says so first.
+ *
  * The label is NOT a <label>: a <label for> on a button replaces its name
  * (see kit Field), so it is a plain span referenced by aria-labelledby, and
  * `getByLabel(label)` still finds the trigger.
  */
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { Badge, type Tone } from "./kit";
+import {
+  modelPolicyVerdict,
+  useModelPolicy,
+  type ModelPolicyDataClass,
+  type ModelPolicyFeature,
+  type ModelPolicyView,
+} from "../views/models/modelPolicy";
 import { Logo } from "./logos/Logo";
 import { providerLogoKey } from "./logos/providerLogo";
 import k from "./kit.module.css";
@@ -65,7 +78,7 @@ function matches(a: ModelPickerAgent, q: string): boolean {
   return [a.name, a.model ?? "", a.provider, a.providerLabel].some((f) => f.toLowerCase().includes(q));
 }
 
-export function ModelPicker(props: {
+export interface ModelPickerProps {
   agents: readonly ModelPickerAgent[];
   value: string;
   onChange: (id: string) => void;
@@ -79,13 +92,34 @@ export function ModelPicker(props: {
   /** keep the label for assistive tech only (a compact toolbar, e.g. a composer) */
   hideLabel?: boolean;
   testId?: string;
-}) {
+  /** ADR-0173 §3: the product feature this choice is for; bindings the org's
+   * model policy forbids for it are shown disabled ("Not allowed here") */
+  feature?: ModelPolicyFeature;
+  /** the policy to judge by; omitted with a `feature` = read GET /v1/model-policy */
+  policy?: ModelPolicyView | null;
+  /** the data class of what will be sent, when the surface knows it */
+  dataClass?: ModelPolicyDataClass | null;
+}
+
+export function ModelPicker(props: ModelPickerProps) {
+  if (props.feature && props.policy === undefined) return <PolicyAwareModelPicker {...props} />;
+  return <ModelPickerView {...props} />;
+}
+
+/** reads the policy, then renders the same picker — kept apart so the query runs only where a feature is named */
+function PolicyAwareModelPicker(props: ModelPickerProps) {
+  const q = useModelPolicy();
+  return <ModelPickerView {...props} policy={q.data ?? null} />;
+}
+
+function ModelPickerView(props: ModelPickerProps) {
   const noun = props.noun ?? "model";
   const uid = useId();
   const labelId = `${uid}-label`;
   const valueId = `${uid}-value`;
   const listId = `${uid}-list`;
   const reasonId = `${uid}-reason`;
+  const policyReasonId = `${uid}-policy-reason`;
   const optId = (i: number) => `${uid}-opt-${i}`;
 
   const [open, setOpen] = useState(false);
@@ -99,6 +133,13 @@ export function ModelPicker(props: {
   const q = query.trim().toLowerCase();
   const shown = useMemo(() => props.agents.filter((a) => matches(a, q)), [props.agents, q]);
   const disabled = Boolean(props.disabledReason);
+  /** null = allowed here; a sentence = why the org's model policy forbids it */
+  const notAllowed = (a: ModelPickerAgent): string | null => {
+    if (!props.feature || !props.policy) return null;
+    const v = modelPolicyVerdict(props.policy, props.feature, a, props.dataClass ?? null);
+    return v.allowed ? null : v.reason;
+  };
+  const selectedNotAllowed = selected ? notAllowed(selected) : null;
 
   const openPicker = () => {
     if (disabled) return;
@@ -112,7 +153,7 @@ export function ModelPicker(props: {
     if (refocus) triggerRef.current?.focus();
   };
   const pick = (a: ModelPickerAgent | undefined) => {
-    if (!a) return;
+    if (!a || notAllowed(a)) return;
     props.onChange(a.id);
     close(true);
   };
@@ -198,7 +239,9 @@ export function ModelPicker(props: {
         aria-haspopup="dialog"
         aria-expanded={open}
         aria-labelledby={`${labelId} ${valueId}`}
-        aria-describedby={disabled ? reasonId : undefined}
+        aria-describedby={
+          [disabled ? reasonId : "", selectedNotAllowed ? policyReasonId : ""].filter(Boolean).join(" ") || undefined
+        }
         aria-disabled={disabled || undefined}
         onClick={() => (open ? close(false) : openPicker())}
         onKeyDown={onTriggerKey}
@@ -230,6 +273,11 @@ export function ModelPicker(props: {
           {props.disabledReason}
         </span>
       )}
+      {selectedNotAllowed && (
+        <span id={policyReasonId} className={s.reasonWarn} data-testid="picker-not-allowed">
+          Not allowed here: {selectedNotAllowed}
+        </span>
+      )}
       {open && (
         <div className={s.popover} role="dialog" aria-label={`Choose a${noun === "agent" ? "n" : ""} ${noun}`}>
           <input
@@ -256,22 +304,35 @@ export function ModelPicker(props: {
             </p>
           ) : (
             <ul id={listId} role="listbox" aria-label={noun === "agent" ? "Agents" : "Models"} className={s.list}>
-              {shown.map((a, i) => (
-                <li
-                  key={a.id}
-                  id={optId(i)}
-                  role="option"
-                  aria-selected={a.id === props.value}
-                  data-active={i === active || undefined}
-                  className={s.option}
-                  // keep focus in the search box; the click picks
-                  onMouseDown={(e) => e.preventDefault()}
-                  onMouseMove={() => setActive(i)}
-                  onClick={() => pick(a)}
-                >
-                  <ModelTileBody agent={a} size="sm" />
-                </li>
-              ))}
+              {shown.map((a, i) => {
+                const why = notAllowed(a);
+                return (
+                  <li
+                    key={a.id}
+                    id={optId(i)}
+                    role="option"
+                    aria-selected={a.id === props.value}
+                    aria-disabled={why ? true : undefined}
+                    aria-describedby={why ? `${optId(i)}-why` : undefined}
+                    data-active={i === active || undefined}
+                    className={s.option}
+                    // keep focus in the search box; the click picks
+                    onMouseDown={(e) => e.preventDefault()}
+                    onMouseMove={() => setActive(i)}
+                    onClick={() => pick(a)}
+                  >
+                    <ModelTileBody agent={a} size="sm" />
+                    {why && (
+                      <span className={s.notAllowed}>
+                        <Badge tone="warn">Not allowed here</Badge>
+                        <span id={`${optId(i)}-why`} className={s.notAllowedWhy}>
+                          {why}
+                        </span>
+                      </span>
+                    )}
+                  </li>
+                );
+              })}
             </ul>
           )}
         </div>

@@ -16,6 +16,7 @@ import { Lockup } from "../ui/Brand";
 import { InfoButton } from "../ui/kit";
 import { ADMIN_GROUPS, SUITES, WORKSPACE, SuiteGlyph, suiteHome, suiteOfPath, type NavEntry } from "./suites";
 import { NavGlyph, RailGlyph } from "./navIcons";
+import { CommandPalette } from "./CommandPalette";
 import s from "./shell.module.css";
 
 
@@ -142,6 +143,21 @@ export default function AppShell(props: { children: ReactNode }) {
       setSideOpen(true);
       setFocusOpen(true);
       filterRef.current?.focus();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, []);
+
+  // ADR-0173 §4 — Ctrl/⌘-K opens (and closes) the command palette from
+  // anywhere, form fields included: it is the one global shortcut, and the
+  // browser's own Ctrl-K (focus the address bar's search) is what it replaces
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key.toLowerCase() !== "k" || !(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
+      e.preventDefault();
+      setMenuOpen(false);
+      setPaletteOpen((o) => !o);
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
@@ -403,6 +419,20 @@ export default function AppShell(props: { children: ReactNode }) {
               says whose product this is, and the topbar is part of the canvas. */}
           <span className={s.topbarSpacer} />
           <button
+            type="button"
+            className={s.searchBtn}
+            aria-haspopup="dialog"
+            aria-expanded={paletteOpen}
+            aria-keyshortcuts="Control+K Meta+K"
+            onClick={() => setPaletteOpen(true)}
+          >
+            <RailGlyph name="search" className={s.searchBtnIcon} />
+            <span>Search</span>
+            <kbd className={s.kbd} aria-hidden>
+              {typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘K" : "Ctrl K"}
+            </kbd>
+          </button>
+          <button
             className={s.iconBtn}
             aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
             title={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
@@ -481,6 +511,12 @@ export default function AppShell(props: { children: ReactNode }) {
           {props.children}
         </main>
       </div>
+      <CommandPalette
+        open={paletteOpen}
+        onClose={() => setPaletteOpen(false)}
+        isAdmin={Boolean(auth?.isAdmin)}
+        userId={auth?.userId ?? null}
+      />
     </div>
   );
 }

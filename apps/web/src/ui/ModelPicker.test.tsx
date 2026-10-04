@@ -62,3 +62,32 @@ describe("ProviderMark / ProviderTiles", () => {
     expect(html).toMatch(/checked="" value="mock"/);
   });
 });
+
+describe("ModelPicker — ADR-0173 'allowed here'", () => {
+  const policy = {
+    rules: [
+      { feature: "chat" as const, dataClass: null, restricted: true, allowedAgentIds: ["b"], allowedProviders: [], defaultAgentId: null },
+    ],
+  };
+
+  it("says when the chosen model is not allowed for this feature, and ties the reason to the trigger", () => {
+    const html = renderToStaticMarkup(
+      <ModelPicker agents={agents} value="a" onChange={() => {}} label="Agent" feature="chat" policy={policy} />,
+    );
+    expect(html).toContain("Not allowed here:");
+    expect(html).toContain("does not allow this model for Chat");
+    const describedby = /aria-describedby="([^"]+)"/.exec(html)![1]!;
+    expect(html).toMatch(new RegExp(`id="${describedby}"[^>]*>Not allowed here:`));
+    // the trigger itself stays operable — only the forbidden choice is refused
+    expect(html).not.toContain('aria-disabled="true"');
+  });
+
+  it("is silent for an allowed model, for another feature, and when no feature is named", () => {
+    const allowed = renderToStaticMarkup(<ModelPicker agents={agents} value="b" onChange={() => {}} label="Agent" feature="chat" policy={policy} />);
+    expect(allowed).not.toContain("Not allowed here");
+    const otherFeature = renderToStaticMarkup(<ModelPicker agents={agents} value="a" onChange={() => {}} label="Agent" feature="builder" policy={policy} />);
+    expect(otherFeature).not.toContain("Not allowed here");
+    const noFeature = renderToStaticMarkup(<ModelPicker agents={agents} value="a" onChange={() => {}} label="Agent" policy={policy} />);
+    expect(noFeature).not.toContain("Not allowed here");
+  });
+});

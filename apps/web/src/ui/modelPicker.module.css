@@ -119,6 +119,30 @@
   border-color: var(--primary);
   box-shadow: inset 0 0 0 1px var(--primary);
 }
+/* ADR-0173 §3 — a binding the org's model policy forbids for this feature */
+.option[aria-disabled="true"] {
+  cursor: not-allowed;
+  background: var(--surface-2);
+}
+.option[aria-disabled="true"] > :first-child {
+  opacity: 0.6;
+}
+.notAllowed {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  margin-top: 6px;
+}
+.notAllowedWhy {
+  font-size: var(--text-xs);
+  color: var(--text-dim);
+  line-height: 1.35;
+}
+.reasonWarn {
+  font-size: var(--text-xs);
+  color: var(--warn-soft-text);
+}
 .none {
   margin: 0;
   padding: var(--s2);

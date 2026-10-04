@@ -33,6 +33,7 @@ import {
   type ModelBinding,
 } from "./modelBindings";
 import { buildSnippets, KEY_ENV, SNIPPET_TABS, type SnippetTab } from "./snippets";
+import { allowedFeatures, modelPolicyVerdict, useModelPolicy, type ModelPolicyView } from "./modelPolicy";
 import s from "./models.module.css";
 
 const DEFAULT_PROMPT = "Explain what an AI gateway does in one sentence.";
@@ -68,6 +69,10 @@ export default function ModelsPage() {
     enabled: Boolean(userId),
     queryFn: () => api.get<{ credentials: Array<{ provider: string }> }>(`/v1/users/${userId}/model-credentials`),
   });
+
+  // ADR-0173 §3 — the org's model allow-list: Run is the Chat feature
+  const policyQ = useModelPolicy();
+  const policy = policyQ.data ?? null;
 
   const listQ = isAdmin ? registryQ : grantsQ;
   const bindings = useMemo<ModelBinding[]>(() => {
@@ -171,6 +176,9 @@ export default function ModelsPage() {
                     onClick={() => select(b.id)}
                   >
                     <ModelTileBody agent={b} />
+                    {!modelPolicyVerdict(policy, "chat", b).allowed && (
+                      <span className={s.tileNote}>Not allowed in Chat by your organisation&apos;s model policy</span>
+                    )}
                   </button>
                 </li>
               ))}
@@ -178,13 +186,13 @@ export default function ModelsPage() {
           )}
         </Card>
 
-        <TryIt binding={selected} bindings={bindings} isAdmin={isAdmin} />
+        <TryIt binding={selected} bindings={bindings} isAdmin={isAdmin} policy={policy} />
       </div>
     </>
   );
 }
 
-function TryIt(props: { binding: ModelBinding | null; bindings: ModelBinding[]; isAdmin: boolean }) {
+function TryIt(props: { binding: ModelBinding | null; bindings: ModelBinding[]; isAdmin: boolean; policy: ModelPolicyView | null }) {
   const b = props.binding;
   const { toast } = useToast();
   const [prompt, setPrompt] = useState(DEFAULT_PROMPT);
@@ -211,12 +219,16 @@ function TryIt(props: { binding: ModelBinding | null; bindings: ModelBinding[]; 
   }
 
   const shownRun: RunState = runFor === b.id ? run : { kind: "idle" };
+  const chatVerdict = modelPolicyVerdict(props.policy, "chat", b);
   const blocked =
     b.readiness === "routing_only"
       ? "This binding has no model id, so it cannot be called directly."
-      : !prompt.trim()
-        ? "Write a request first."
-        : null;
+      : !chatVerdict.allowed
+        ? `Not allowed here: ${chatVerdict.reason}`
+        : !prompt.trim()
+          ? "Write a request first."
+          : null;
+  const usableIn = props.policy?.rules.length ? allowedFeatures(props.policy, b) : null;
 
   const send = async () => {
     setRunFor(b.id);
@@ -279,6 +291,17 @@ function TryIt(props: { binding: ModelBinding | null; bindings: ModelBinding[]; 
           </>
         )}
       </p>
+      {usableIn && (
+        <ul className={s.allowedIn} aria-label="Where your organisation's model policy allows this model" data-testid="allowed-in">
+          {usableIn.map((f) => (
+            <li key={f.feature}>
+              <Badge tone={f.allowed ? "ok" : "warn"}>
+                {f.label}: {f.allowed ? "allowed" : "not allowed"}
+              </Badge>
+            </li>
+          ))}
+        </ul>
+      )}
 
       <div className={s.fieldBlock}>
         <label className={s.label} htmlFor="models-request">

@@ -388,6 +388,47 @@ span.navIcon {
   color: var(--text);
 }
 
+/* ADR-0173 §4 — opens the command palette */
+.searchBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 8px 0 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface-1);
+  color: var(--text-dim);
+  font: inherit;
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+.searchBtn:hover {
+  background: var(--rg-hover);
+  color: var(--text);
+}
+.searchBtn:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.searchBtnIcon {
+  flex: none;
+}
+.kbd {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  padding: 1px 5px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text-dim);
+}
+@media (max-width: 640px) {
+  .kbd {
+    display: none;
+  }
+}
+
 .userBtn {
   display: inline-flex;
   align-items: center;
