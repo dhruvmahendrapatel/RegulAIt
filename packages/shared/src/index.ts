@@ -3122,6 +3122,7 @@ export {
   chatDecidable,
   alertMeetsThreshold,
   composeAlertCard,
+  escapeAdaptiveMarkdown,
   composeApprovalCard,
   composeDecidedCard,
   parseChatInteraction,

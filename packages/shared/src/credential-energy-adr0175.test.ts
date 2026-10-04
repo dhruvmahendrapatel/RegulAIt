@@ -120,7 +120,7 @@ describe("A7 stale_credentials rule", () => {
     expect(f.map((x) => x.subjectKey).sort()).toEqual(["credential:api_key:k2", "credential:virtual_key:v1"]);
     expect(f.find((x) => x.subjectKey === "credential:virtual_key:v1")).toMatchObject({
       severity: "medium",
-      title: "Virtual key 'batch-jobs': never expires, unused",
+      title: "Virtual key id 1: never expires, unused",
       detail: { flags: ["never_expires", "unused"], manageAt: "/admin/virtual-keys" },
     });
   });

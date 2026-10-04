@@ -396,7 +396,7 @@ describe("ADR-0175 A7 — the stale_credentials monitor rule", () => {
     expect(open.filter((a) => a.subjectKey === subject(`api_key:${ids.ownKey}`))).toEqual([]);
     expect(open.filter((a) => a.subjectKey === subject(`git_token:${ids.git}`))).toEqual([]);
     const vkAlert = open.find((a) => a.subjectKey === subject(`virtual_key:${ids.vk}`))!;
-    expect(vkAlert.title).toBe(`Virtual key 'g175c-vk-${RUN}': never expires, over scoped`);
+    expect(vkAlert.title).toBe(`Virtual key id ${ids.vk!.slice(0, 8)}: never expires, over scoped`);
     const plan = await call("GET", `/v1/governance/alerts/${vkAlert.id}/remediation`, people.adminAuth);
     expect(plan.statusCode, plan.body).toBe(200);
     expect(plan.json().candidates[0]).toMatchObject({ kind: "review_credential", executable: false, href: "/admin/virtual-keys" });

@@ -347,6 +347,13 @@ export interface MonitorCredentialInput {
 
 const sev = (id: MonitorRuleId): MonitorSeverity => MONITOR_RULES[id].severity;
 
+/** `<type>:<row uuid>` → the uuid's first 8 characters, prefixed "id " — an
+ * identifier an admin can find on the inventory, never a typed name */
+export function credentialShortId(id: string): string {
+  const row = id.slice(id.indexOf(":") + 1);
+  return `id ${row.replace(/[^0-9a-f-]/gi, "").slice(0, 8)}`;
+}
+
 export function evaluateMonitorRules(input: MonitorInput): MonitorFinding[] {
   const out: MonitorFinding[] = [];
   const floor = input.coverageFloorPct ?? DEFAULT_COVERAGE_FLOOR_PCT;
@@ -504,8 +511,10 @@ export function evaluateMonitorRules(input: MonitorInput): MonitorFinding[] {
   if (input.traffic) out.push(...unregisteredTrafficFindings(input.traffic));
 
   // ADR-0175 A7 — one episode per flagged credential, only when the org
-  // turned alerting on. Titles carry the credential's type and label, never
-  // a person's name (they reach ChatOps channels).
+  // turned alerting on. Titles reach ChatOps channels, so they carry the
+  // credential's type, flags and a short id — never its name, which is free
+  // text its creator typed (review fix); the name stays in the admin-only
+  // detail.
   if (input.credentials?.alerting) {
     for (const c of input.credentials.credentials) {
       if (c.flags.length === 0) continue;
@@ -514,7 +523,7 @@ export function evaluateMonitorRules(input: MonitorInput): MonitorFinding[] {
         ruleId: "stale_credentials",
         subjectKey: `credential:${c.id}`,
         severity: sev("stale_credentials"),
-        title: `${c.typeLabel} '${c.name}': ${flagWords.join(", ")}`,
+        title: `${c.typeLabel} ${credentialShortId(c.id)}: ${flagWords.join(", ")}`,
         detail: {
           credentialId: c.id,
           typeLabel: c.typeLabel,
