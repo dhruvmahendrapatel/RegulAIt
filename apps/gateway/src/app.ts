@@ -161,6 +161,8 @@ import { registerUseCaseDraftRoutes } from "./use-case-drafts.js";
 import { registerAgentCardRoutes } from "./agent-card.js";
 import { registerDependencyGraphRoutes } from "./dependency-graph.js";
 import { registerGovernanceMonitorRoutes } from "./governance-monitor.js";
+import { registerCredentialInventoryRoutes } from "./credential-inventory.js";
+import { registerEnergyRoutes } from "./energy.js";
 import { registerRegulatoryIntelRoutes } from "./regulatory-intel.js";
 import {
   REMEDIATION_PREFIX as GOVERNANCE_REMEDIATION_PREFIX,
@@ -4274,6 +4276,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerDependencyGraphRoutes(app, db);
   // ADR-0157 — governance monitor alerts (Monitor & Respond)
   registerGovernanceMonitorRoutes(app, db);
+  // ADR-0175 A7 — the non-human credential inventory (admin, read-only)
+  registerCredentialInventoryRoutes(app, db);
+  // ADR-0175 A15 — energy factors and the energy/emissions estimate (admin)
+  registerEnergyRoutes(app, db);
   // ADR-0158 — regulatory intelligence joined to our packs and use cases
   registerRegulatoryIntelRoutes(app, db);
   // ADR-0159 — remediation proposals for monitor alerts

@@ -218,6 +218,10 @@ export const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // of the vendor key?". A virtual key is an entitlement ceiling, not an
       // integration setting, which is why it is here and not under Cost.
       { label: "Virtual keys", to: "/admin/virtual-keys" },
+      // ADR-0175 A7 — beside the keys it inventories: every stored non-human
+      // credential (keys, tokens, provider and integration secrets) with its
+      // owner, age, use and flags, read-only, linking to where each is managed.
+      { label: "Credentials", to: "/admin/credentials" },
       { label: "SSO & sessions", to: "/admin/sso" },
       { label: "Provisioning (SCIM)", to: "/admin/provisioning" },
       // ADR-0038: where an IdP group becomes a role — and where the ones that

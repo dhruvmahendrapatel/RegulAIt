@@ -2192,6 +2192,16 @@ export const updateOrgSettingsSchema = z
      * known that exact digest this many days (and it is admitted), unless an
      * admin overrides one item with a reason. Recommended: 7. */
     minReleaseAgeDays: z.number().int().min(0).max(365).optional(),
+    /** ADR-0175 A7: the credential inventory's "unused" threshold in days
+     * (default 90). */
+    credentialUnusedDays: z.number().int().min(1).max(3650).optional(),
+    /** ADR-0175 A7: false (default) = the `stale_credentials` rule shows flags
+     * on the inventory page only; true = one alert episode per flagged
+     * credential. */
+    staleCredentialAlerts: z.boolean().optional(),
+    /** ADR-0175 A15: the grid region whose energy factor overrides the org
+     * default intensity. null = the default. */
+    energyRegion: z.string().trim().min(1).max(64).nullable().optional(),
     /** ADR-0062: the org's TIGHTENING dial over the deployment-wide egress
      * posture. 'inherit' (default) defers to the env-derived deploy mode;
      * 'strict' adjudicates compiled vendor endpoints against the egress
@@ -3112,6 +3122,7 @@ export {
   chatDecidable,
   alertMeetsThreshold,
   composeAlertCard,
+  escapeAdaptiveMarkdown,
   composeApprovalCard,
   composeDecidedCard,
   parseChatInteraction,
@@ -3636,7 +3647,38 @@ export {
   type MonitorUseCaseInput,
   type MonitorVendorInput,
   type OffStackServing,
+  type MonitorCredentialInput,
+  type StaleCredentialEpisode,
+  STALE_CREDENTIAL_DETAIL_IDS,
+  staleCredentialEpisodes,
 } from "./governance-monitor.js";
+
+// ADR-0175 A7 — the non-human credential inventory: types, flags (pure).
+export {
+  CREDENTIAL_FLAGS,
+  CREDENTIAL_FLAG_LABELS,
+  CREDENTIAL_TYPES,
+  CREDENTIAL_TYPE_IDS,
+  CREDENTIALS_NOT_STORED,
+  credentialFlags,
+  rotationAgeDays,
+  type CredentialFlag,
+  type CredentialFlagResult,
+  type CredentialRecord,
+  type CredentialType,
+  type CredentialTypeInfo,
+  type LastUsedSignal,
+} from "./credential-inventory.js";
+
+// ADR-0175 A15 — the energy and emissions estimate (pure).
+export {
+  ENERGY_ESTIMATE_LABEL,
+  estimateEnergy,
+  type EnergyEstimate,
+  type EnergyFactorInput,
+  type EnergyGridInput,
+  type EnergyUsageRow,
+} from "./energy-estimate.js";
 
 // ADR-0158 — regulatory intelligence: the feed shape (G4 authors the data) and
 // the pure join to this organisation's packs, controls and use cases.

@@ -288,6 +288,10 @@ describe("the walk", () => {
       .insert(modelCredentials)
       .values({ provider: `walk-pre-new-${Date.now()}`, keyCiphertext: legacy(encryptSecret(KEY_B, preNewPt)) })
       .returning();
+    // ADR-0175 A7: a re-encryption is not a rotation — migration 0142's
+    // trigger must leave the "last set" date alone (backdated so a bump shows)
+    const setAt = new Date(Date.now() - 10 * 86_400_000);
+    await db.update(modelCredentials).set({ secretSetAt: setAt }).where(eq(modelCredentials.id, preNew!.id));
 
     const startedBefore = await auditCount(REENCRYPTION_RULE_IDS.started);
     const completedBefore = await auditCount(REENCRYPTION_RULE_IDS.completed);
@@ -311,6 +315,7 @@ describe("the walk", () => {
     const [preNewAfter] = await db.select().from(modelCredentials).where(eq(modelCredentials.id, preNew!.id));
     expect(decryptSecret(KEY_B, preNewAfter!.keyCiphertext)).toBe(preNewPt);
     expect(storedKeyFingerprint(preNewAfter!.keyCiphertext)).toBe(FP_B);
+    expect(preNewAfter!.secretSetAt?.getTime()).toBe(setAt.getTime());
     expect(outcome.failures).toEqual([]);
 
     // the per-table accounting matches what was seeded

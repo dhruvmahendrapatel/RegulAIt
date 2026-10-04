@@ -107,6 +107,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   // for the release-age cooldown: free prose typed beside a review decision
   [s.builderSkills, ["admitReason"]],
   [s.releaseOverrides, ["reason"]],
+  // ADR-0175 A15 — the admin's note on where an energy factor came from
+  [s.energyFactors, ["sourceNote"]],
   // --- governance decisions and overrides (pillar 1) ---
   [s.approvals, ["decisionReason"]],
   [s.approvalDelegations, ["reason"]],

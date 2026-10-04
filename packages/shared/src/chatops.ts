@@ -340,6 +340,10 @@ export interface ApprovalCard {
   actions: ApprovalCardAction[];
   /** the sentence shown in place of the buttons when `actions` is empty */
   inAppOnlyNote: string | null;
+  /** ADR-0175 review fix: the body the Teams renderer shows, already made
+   * inert for Adaptive Card markdown. Absent = derived from `text` (approval
+   * cards, whose free-text fields are operator-supplied labels). */
+  teamsText?: string;
 }
 
 const IN_APP_ONLY_NOTE =
@@ -530,7 +534,7 @@ export function outlookMessageForCard(card: ApprovalCard): OutlookMessagePayload
 
 export function teamsActivityForCard(card: ApprovalCard): TeamsActivityPayload {
   const body: Array<Record<string, unknown>> = [
-    { type: "TextBlock", text: toAdaptiveMarkdown(card.text), wrap: true },
+    { type: "TextBlock", text: card.teamsText ?? toAdaptiveMarkdown(card.text), wrap: true },
     // The link is carried as TEXT as well as (when absolute) an action, so a
     // fenced card always still says WHERE to go even on a client that drops
     // the action bar. This is the "a link, not the content" half of the fence.
@@ -557,7 +561,7 @@ export function teamsActivityForCard(card: ApprovalCard): TeamsActivityPayload {
   }
 
   return {
-    text: card.text,
+    text: card.teamsText ?? card.text,
     attachments: [
       {
         contentType: TEAMS_ADAPTIVE_CARD_CONTENT_TYPE,
@@ -579,7 +583,33 @@ export function teamsActivityForCard(card: ApprovalCard): TeamsActivityPayload {
 // no actions, so no renderer can emit a button. The title is the alert's own
 // (names of use cases / agents / vendors — governance metadata, never prompt
 // or response content); the portal link is where a human acts.
+//
+// ADR-0175 review fix: AN ALERT TITLE IS FREE TEXT. It is built from names
+// people typed (a use case, an agent, a vendor, a risk), so it is made inert
+// for the channel that shows it: Slack's control characters (`& < >`) are
+// escaped, so a name cannot become a `<!channel>` broadcast, a `<@U…>`
+// mention or a `<https://evil|label>` link; Teams gets the same text with
+// Adaptive Card markdown escaped (Adaptive Cards render markdown and ignore
+// HTML, so markdown is the thing to neutralise there). Line breaks and
+// control characters in a free-text field are folded to spaces, so a name
+// cannot forge a second line of the card.
 // ---------------------------------------------------------------------------
+
+/** one line of free text: control characters (newlines included) → a space */
+function oneLine(text: string): string {
+  // eslint-disable-next-line no-control-regex
+  return text.replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, " ");
+}
+
+/**
+ * Make text INERT for an Adaptive Card TextBlock (Teams), which renders a
+ * markdown subset (emphasis, links, lists, headings) and shows HTML as plain
+ * text. Every markdown control character is backslash-escaped, so
+ * `[label](https://evil)` is shown literally rather than as a disguised link.
+ */
+export function escapeAdaptiveMarkdown(text: string): string {
+  return text.replace(/[\\`*_[\]()#|~<>]/g, (c) => `\\${c}`);
+}
 
 export function composeAlertCard(input: {
   alertId: string;
@@ -589,17 +619,25 @@ export function composeAlertCard(input: {
   portalUrl: string;
 }): ApprovalCard {
   const icon = input.severity === "high" ? "🔴" : input.severity === "medium" ? "🟠" : "⚪";
-  const text = `${icon} *Governance alert* — ${input.severity.toUpperCase()} — ${input.ruleLabel}\n${input.title}`;
+  const sev = input.severity.toUpperCase();
+  const label = oneLine(input.ruleLabel);
+  const title = oneLine(input.title);
+  const text = `${icon} *Governance alert* — ${sev} — ${escapeSlackText(label)}\n${escapeSlackText(title)}`;
+  const teamsText = `${icon} **Governance alert** — ${sev} — ${escapeAdaptiveMarkdown(label)}\n\n${escapeAdaptiveMarkdown(title)}`;
+  // the portal URL is ours (a path plus the alert's uuid); its Slack link
+  // syntax is still kept intact if it ever carried a control character
+  const href = input.portalUrl.replace(/[<>|]/g, encodeURIComponent);
   return {
     text,
     blocks: [
       { type: "section", text: { type: "mrkdwn", text } },
-      { type: "section", text: { type: "mrkdwn", text: `<${input.portalUrl}|Open in RegulAIt>` } },
+      { type: "section", text: { type: "mrkdwn", text: `<${href}|Open in RegulAIt>` } },
     ],
     redacted: false,
     portalUrl: input.portalUrl,
     actions: [],
     inAppOnlyNote: null,
+    teamsText,
   };
 }
 

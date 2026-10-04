@@ -175,3 +175,78 @@ Everything else goes into `PathForward.md`: extensions to PF-02..PF-14 and new i
     older digest keeps its admission when it is re-scanned.
 12. **A9 has an index on `usage_events (object_type, at)`, and its alert titles contain no personal data.** Titles
     reach ChatOps channels, so a caller is shown as "A user (id …)". The display name stays in the admin-only detail.
+
+## Amendment — D2 remainder: A7 and A15 built (2026-10-04)
+
+Migration 0142.
+
+- **A7 credential inventory.** `GET /v1/admin/credentials` (admin, read-only) aggregates every stored credential at
+  read time: API keys, virtual keys, SCIM tokens, platform, personal and custom-provider model keys, external-scorer
+  secrets, connector credentials, git and PM tokens, the PM webhook secret, deploy-target credentials and roles,
+  ChatOps signing secrets, OIDC client secrets, SAML SP keys, training-backend keys and the tracing export headers.
+  Every query names its columns; no ciphertext, hash or prefix is selected, and a test scans the response for
+  anything secret-shaped. MCP servers hold no stored upstream credential, and the export signing key and environment
+  provider keys live outside the database; the page says so.
+- **Last used** comes from a row's own `last_used_at` (API keys, virtual keys, SCIM tokens) or from a ledger that
+  records each use of exactly that credential (custom-provider agents, connector calls, signed ChatOps interactions).
+  Platform and personal provider keys, scorer, git, PM, deploy, OIDC, SAML, training and OTLP secrets have no signal,
+  are said to have none, and are never flagged unused.
+- **Age since rotation.** Most secrets are replaced in place by an upsert that keeps `created_at`. Migration 0142
+  adds a `*_set_at` stamp written by one trigger whenever the secret column changes; the data-key re-encryption
+  walk sets `regulait.secret_reencrypt` so a re-encryption is not a rotation. Pre-0142 rows are unknown and the age
+  counts from creation, marked as such.
+- **Flags**, each conservative: never expires (only credentials issued here: API keys, virtual keys, SCIM tokens; a
+  third party's secret has its expiry "not tracked"); past expiry; unused beyond `credential_unused_days` (default
+  90); owner deactivated (the owner, or the creator of an integration credential); over-scoped (an API key owned by
+  an administrator; a dispatch virtual key with no model list and no budget; no other type).
+- **`stale_credentials`** (medium, one episode per credential) is **observe-only by default**:
+  `stale_credential_alerts` is false, the flags show on the inventory, and an admin turns episodes on from the
+  page. Turning it off resolves open episodes. Access recommendations were not changed: they are grant-shaped and
+  their action is a certification campaign over grants, which a credential is not.
+- **A15 energy estimate.** `energy_factors` holds admin-entered factors with a source note and version: Wh per 1k
+  input and output tokens per model, and gCO2e per kWh for `default` or a region (`energy_region` picks it). We ship
+  no factor and no grid intensity. `GET /v1/energy/estimate` covers a project, or a use case through its project.
+  A model with no factor, or a call with no recorded tokens, is unknown, never zero; totals say "N of M calls
+  estimated"; with no grid intensity, emissions are unknown. A demo factor may be set only for a model the mock
+  provider serves, and is labelled. The cost dashboard (per project, plus the factor table) and the use case's Stack
+  tab show it. The `energy_estimate_available` collector counts the calls the estimate covers, for MEASURE 2.12; no
+  pack content changed.
+- **Demo check** (`demo:prepare` on a fresh database): the alert list is unchanged (13 active, no
+  `stale_credentials`). With alerting on, 11 of the 14 stored credentials would raise: every seeded API key is "never
+  expires", a true finding, because the shipped default API-key lifetime is none; the four keys owned by the admin
+  are also over-scoped. That is why the rule ships observe-only. The seed holds no energy factor, so the demo's
+  estimate reads unknown.
+
+### Amendment — review fixes (2026-10-04)
+
+Migration 0142 was edited in place (it had not been pushed).
+
+1. **Alert titles are inert in chat.** `composeAlertCard` escapes Slack's control characters (`& < >`) in the rule
+   label and title, folds line breaks, and gives Teams a body with Adaptive Card markdown escaped (Teams renders
+   markdown and shows HTML as text). A stale-credential title carries the type, the flag, the count, and a short id
+   when it covers one credential. It never carries a credential's name, which stays in the admin-only detail.
+2. **Every inventory ledger read is bounded.** A last use is read from the last `max(credential_unused_days, 90)`
+   days (`ledgerWindowDays`), and links from the last 90 days. An older use is not shown, and the unused reason says
+   how far back the ledger was read. Virtual-key links are matched to the keys in SQL on
+   `usage_events (virtual_key_id, at)`, which already existed (`usage_events_virtual_key_idx`, migration 0078).
+   Connector reads use the new partial `usage_events_connector_at_idx (connector_id, at)`. A custom provider's last
+   use is one grouped query. `GET /v1/admin/credentials` filters on the server and pages (`limit` default 100, max
+   500, `offset`, `flag=none`), and the page pages with it. With `stale_credential_alerts` off the monitor does not
+   compute the inventory. It passes an explicit not-alerting input, so open episodes still resolve.
+3. **A demo factor describes the mock provider only.** It is refused when any agent of another provider uses the
+   model id. The estimate also joins each call to the agent that served it and applies a demo factor only to calls a
+   mock agent served. A real provider's calls of that model are unknown.
+4. **`energy_estimate_available` ignores demo factors.**
+5. **Stale-credential episodes roll up.** There is one episode per (credential type, flag), with the count and the
+   first 20 ids, instead of one per credential. The inventory returns `alertPreview` from the same roll-up, and the
+   page shows next to the toggle how many episodes turning alerts on would raise now.
+6. **What counts as a rotation.** On insert, an explicit `*_set_at` is kept (restore, re-import), and `now()` is used
+   only when none is supplied. A rotation is any change to the stored secret column. In a ciphertext column,
+   re-saving the same plaintext is a rotation (random IV). In a hash column (`scim_tokens.token_hash`,
+   `pm_connections.webhook_secret_hash`) it is not. A data-key re-encryption is never a rotation.
+7. **`PUT /v1/energy/factors` is one upsert** on the `(kind, lower(subject))` index, under a per-factor advisory lock,
+   so the audit's before and after are exact. Concurrent writes no longer race into a unique-violation 409.
+8. **One failing optional monitor input skips only its rule.** The served-model, traffic and credential inputs each
+   feed one rule. If one fails, that rule is left out of the pass's evaluated set, so its open episodes are neither
+   refreshed nor resolved. The failure is audited (`governance-monitor-input-failed`) and reported in `notEvaluated`,
+   and every other rule still runs.

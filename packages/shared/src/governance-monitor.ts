@@ -110,6 +110,16 @@ export const MONITOR_RULES = {
       "the use case's project, the only join between the register and dispatch attribution, so this reports spend " +
       "outside that join — not proof that the traffic is ungoverned.",
   },
+  stale_credentials: {
+    label: "Credential needs attention",
+    severity: "medium",
+    description:
+      "A stored non-human credential (API key, virtual key, SCIM token, provider key, connector or integration " +
+      "secret) carries an inventory flag (ADR-0175 A7): never expires, past expiry, unused for longer than the org's " +
+      "threshold, owner deactivated, or over-scoped by its type's rule. One episode per credential type and flag, " +
+      "with the count and the first credential ids. Off by default: the flags show on the credential inventory, and " +
+      "an admin turns alert episodes on there.",
+  },
   dimension_coverage_below_floor: {
     label: "Trust dimension evidence coverage below floor",
     severity: "medium",
@@ -316,9 +326,76 @@ export interface MonitorInput {
   servedModels?: MonitorServedModelInput[];
   /** ADR-0175 A9 — absent = rule not evaluated */
   traffic?: MonitorTrafficInput;
+  /** ADR-0175 A7 — absent = rule not evaluated */
+  credentials?: MonitorCredentialInput;
+}
+
+/** ADR-0175 A7 — the flagged credentials from the inventory */
+export interface MonitorCredentialInput {
+  /** false = observe only: the flags stay on the inventory page and no
+   * episode is raised (an open one resolves) */
+  alerting: boolean;
+  credentials: Array<{
+    /** `<type>:<row id>` */
+    id: string;
+    typeLabel: string;
+    name: string;
+    flags: string[];
+    reasons: Record<string, string>;
+    manageAt: string;
+  }>;
 }
 
 const sev = (id: MonitorRuleId): MonitorSeverity => MONITOR_RULES[id].severity;
+
+/** `<type>:<row uuid>` → the uuid's first 8 characters, prefixed "id " — an
+ * identifier an admin can find on the inventory, never a typed name */
+export function credentialShortId(id: string): string {
+  const row = id.slice(id.indexOf(":") + 1);
+  return `id ${row.replace(/[^0-9a-f-]/gi, "").slice(0, 8)}`;
+}
+
+/** how many credential ids (and names) one stale-credential episode's detail lists */
+export const STALE_CREDENTIAL_DETAIL_IDS = 20;
+
+export interface StaleCredentialEpisode {
+  /** `credentials:<type>:<flag>` */
+  subjectKey: string;
+  type: string;
+  typeLabel: string;
+  flag: string;
+  count: number;
+  /** the first STALE_CREDENTIAL_DETAIL_IDS, in input order */
+  credentials: Array<{ id: string; name: string; reason: string | null }>;
+  manageAt: string;
+}
+
+/**
+ * ADR-0175 A7 review fix — THE ROLL-UP. Flagged credentials grouped by
+ * (type, flag): one episode each, carrying the count and the first ids. So
+ * turning alerting on raises at most (types × flags) episodes, however many
+ * credentials are flagged, and a credential with two flags counts in two. The
+ * inventory page uses the same function to say how many would raise now.
+ */
+export function staleCredentialEpisodes(credentials: MonitorCredentialInput["credentials"]): StaleCredentialEpisode[] {
+  const byKey = new Map<string, StaleCredentialEpisode>();
+  for (const c of credentials) {
+    const type = c.id.slice(0, Math.max(0, c.id.indexOf(":")));
+    for (const flag of c.flags) {
+      const subjectKey = `credentials:${type}:${flag}`;
+      let ep = byKey.get(subjectKey);
+      if (!ep) {
+        ep = { subjectKey, type, typeLabel: c.typeLabel, flag, count: 0, credentials: [], manageAt: c.manageAt };
+        byKey.set(subjectKey, ep);
+      }
+      ep.count += 1;
+      if (ep.credentials.length < STALE_CREDENTIAL_DETAIL_IDS) {
+        ep.credentials.push({ id: c.id, name: c.name, reason: c.reasons[flag] ?? null });
+      }
+    }
+  }
+  return [...byKey.values()].sort((a, b) => a.subjectKey.localeCompare(b.subjectKey));
+}
 
 export function evaluateMonitorRules(input: MonitorInput): MonitorFinding[] {
   const out: MonitorFinding[] = [];
@@ -475,6 +552,35 @@ export function evaluateMonitorRules(input: MonitorInput): MonitorFinding[] {
   }
 
   if (input.traffic) out.push(...unregisteredTrafficFindings(input.traffic));
+
+  // ADR-0175 A7 — only when the org turned alerting on: one episode per
+  // (credential type, flag), rolled up (review fix), with the count and the
+  // first ids. Titles reach ChatOps channels, so they carry the type, flag,
+  // count and (for a single credential) a short id — never a credential's
+  // name, which is free text its creator typed (review fix); names stay in
+  // the admin-only detail.
+  if (input.credentials?.alerting) {
+    for (const ep of staleCredentialEpisodes(input.credentials.credentials)) {
+      const flagWord = ep.flag.replace(/_/g, " ");
+      const which = ep.count === 1 ? `${ep.typeLabel} ${credentialShortId(ep.credentials[0]!.id)}` : `${ep.count} credentials of type ${ep.typeLabel}`;
+      out.push({
+        ruleId: "stale_credentials",
+        subjectKey: ep.subjectKey,
+        severity: sev("stale_credentials"),
+        title: `${which}: ${flagWord}`,
+        detail: {
+          type: ep.type,
+          typeLabel: ep.typeLabel,
+          flag: ep.flag,
+          count: ep.count,
+          credentialIds: ep.credentials.map((c) => c.id),
+          credentials: ep.credentials,
+          listed: ep.credentials.length,
+          manageAt: ep.manageAt,
+        },
+      });
+    }
+  }
 
   for (const r of input.risks) {
     if (r.status !== "open" && r.status !== "mitigating") continue;
