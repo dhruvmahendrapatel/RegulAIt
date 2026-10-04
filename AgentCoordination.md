@@ -16,7 +16,7 @@ this line and every milestone moves with it.)
 | Agent | Now | Next | ETA (UTC) | Last check-in (UTC) | Blocked on |
 |---|---|---|---|---|---|
 | Claude | On request: feedback audit done; 3E signed export fixed (AER-008); drawer fixed; AER-039/040/042/043 gaps closed; handoff notes in codexInputs/geminiInputs | Codex/Gemini: evaluate and close findings (see Implementer update 2026-10-02) | — | 10-02 18:49 | — |
-| Codex | X11 frontend ready at 51a816d; backend GET field requested | re-verify X1/X5/X10/X11 reviews and close any changes requested | — | 10-02 04:11 | GET /v1/chatops/connections omits notifyAlertMinSeverity |
+| Codex | Review complete: G8 corrected; G10-G15 changes requested | Gemini source repairs; Claude acceptance; AER-050 remains separate | — | 10-04 01:25 | — |
 | Gemini | Completed CREDO parity checklist update and agent UX scan | Standby for Codex validation | — | 10-04 01:13 | — |
 
 ## Check-in protocol (owner directive 10-02: every agent, at least hourly)
@@ -186,70 +186,12 @@ hand-drawn SVG. Every screen needs add/edit/remove where the object supports it
 (owner's standing UI-completeness directive), keyboard access, empty states,
 and an explicit "unmeasured" state.
 
-- **X1 — Intake wizard** — DONE 10-02 by Claude (owner directive; see §6).
-- **X2 — Use-case 360 page** — VERIFIED 10-02 (see §6).
-- **X3 — Trust dashboard** — VERIFIED 10-02 (see §6).
-- **X4 — Missing UIs for existing endpoints:** MCP discovery
-  (`POST /v1/shadow-ai/mcp-discovery`), "Register as use case" from a shadow-AI
-  finding (prefills X1), signed audit/report export buttons (`?signed=1`).
-  Status: VERIFIED (Claude, 10-02 03:49 UTC, review of `c48e634`): signed bundle is `.tar.gz`; shadow-AI registration prefills only name + description and every screening value is a valid gateway enum value, blank until answered. Follow-ups moved to X10.
-  Evidence: signed audit downloads use the gateway's `.tar.gz` bundle type.
-  Shadow-AI registration carries an explicit source/finding marker and prefills
-  only the observed-use name and description; every screening/context field is
-  blank and `Draft suggestions` remains disabled until the proposer explicitly
-  answers it. Browser coverage asserts the blank state and the exact non-demo
-  answers sent to `/v1/use-cases/intake/assist`. Formal gates: `corepack pnpm
-  --filter @regulait/web exec tsc --noEmit` PASS; `corepack pnpm --filter
-  @regulait/web build` PASS (197 modules); isolated Playwright PASS 4/4;
-  affordance census PASS 54/54. Added inspected light/dark
-  `08-shadow-ai-intake-prefill` screenshots.
-- **X5 — Playwright demo journey** — DONE 10-02 by Claude (owner directive; see §6).
-- **X7 — Monitor & Respond: governance alerts** — VERIFIED 10-02 (see §6).
-- **X8 — "Add risk from library"** on the risk register and X2 Risks tab: a
-  searchable picker over G2's `SCENARIO_LIBRARY` (filter by dimension and
-  domain) that prefills `POST /v1/risks` (title, description, category) and
-  then links the scenario's `suggestedControls` via `POST /v1/risks/:id/controls`.
-  Status: VERIFIED (Claude, 10-02 03:49 UTC, review of `4f30e21`): alias and TS path removed; reads `GET /v1/risks/scenarios`; web tsc + vite build PASS on Linux.
-  Evidence: `RiskLibraryPicker.tsx` fetches the reviewed, rating-free scenarios
-  from `GET /v1/risks/scenarios`; the temporary whole-package alias and TS path
-  override are removed. The UI uses the API's required dimension/domain fields
-  without fallbacks and requires explicit likelihood + impact selections before
-  enabling the POST.
-  `demo-governance.mock.spec.ts` asserts the button is disabled before both
-  choices and that the chosen `high` × `low` values reach the request. Formal
-  gates: `corepack pnpm --filter @regulait/web exec tsc --noEmit` PASS;
-  `corepack pnpm --filter @regulait/web build` PASS (196 modules); isolated
-  Playwright PASS 4/4; affordance census PASS 54/54. Updated light/dark
-  `05-use-case-risks` screenshots.
-- **X9 — Regulatory intelligence page** — VERIFIED 10-02 (see §6).
-- **X10 — Polish** — DONE 10-02 by Claude (owner directive; see §6).
-- **X11 — Alerts in chat (C14)** — VERIFIED 10-02 (see §6).
-- **X6 — Dependency graph view** — VERIFIED 10-02 (see §6).
-### Gemini — demo content, fixtures, script
+No open X1–X11 assignments; prior completion evidence is retained in §6.
+Separate feedback findings, including AER-050, remain outside this completed assignment list.
 
-- **G1 — Demo fixtures** — VERIFIED 10-02 (see §6).
-- **G2 — Agentic risk-scenario library** — VERIFIED 10-02 (see §6).
-- **G3 — Demo script + talk track v1** — VERIFIED 10-02 (see §6).
-- **G4 — Regulatory intelligence feed (data)** — VERIFIED 10-02 (see §6).
-- **G5 — Demo fixtures: dependency + monitoring beats** — VERIFIED 10-02 (see §6).
+### Gemini — demo content and research
 
-- **G6 — Demo script v2** — DONE 10-02 by Claude (owner directive; see §6).
-- **G7 — Demo Q&A** — DONE 10-02 by Claude (owner directive; see §6).
-- **G8 — Credo parity checklist refresh** `docs/product/CREDO_PARITY_CHECKLIST_2026-09-30.md`:
-  update each row's status from what actually shipped (ROADMAP §9 table,
-  ADR-0147…0161, `demo:check` beats); for every Credo capability cited, link
-  the public page it comes from (docs.sdk.credo.ai or credo.ai). Rows we lack
-  stay "missing" with the roadmap item — no rounding up.
-  Status: CHANGES-REQUESTED (Claude, 10-02 03:13): (1) seven rows marked SHIPPED are
-  Partial per ROADMAP §9 (shadow-AI: imported evidence only, no network scan;
-  policy inheritance not built; drift not continuous; model-tier detectors not
-  wired; remediation partial; GAIA-style context/citations absent) — mark
-  Partial with the remaining gap and update their "remaining work" column;
-  (2) "Data protection: Missing" → Partial (ADR-0140–0145); "Integration
-  delivery: Missing" → Partial (ADR-0161, 0162); (3) every "Missing (Roadmap)"
-  names its ROADMAP item; (4) note the GAIA page is private preview/noindex.
-  The 4 Credo URLs were fetched and match their summaries — good.
-- **G9 — One-page leave-behind** — DONE 10-02 by Claude (owner directive; see §6).
+G1–G9 are complete within their recorded scopes; see §6. G10–G15 require corrections.
 
 **Research tasks G10–G15 (owner directive 10-04: low-impact research, Markdown only).** They feed the
 Agent Builder (ADR-0172) and its phase 2. Rules for all six: cite a **primary source** (official docs,
@@ -264,12 +206,12 @@ facts before anything reaches code.
   bias/fairness; quality: hallucination, groundedness, relevance; conversation: AI disclosure, human
   escalation; agent behaviour: tool selection, plan adherence, excessive agency; image/voice). Table:
   `| Evaluator | What it checks | Method (heuristic/LLM judge/code/human) | NIST AI RMF 1.0 subcategories | ISO/IEC 42001:2023 Annex A controls | EU AI Act articles | OWASP LLM Top 10 2025 ID | Sources |`
-  Status: READY-FOR-REVIEW (50f004c)
+  Status: CHANGES-REQUESTED (Codex, owner-requested review 10-04); see geminiInputs.md delivery review, G10, for evidence and acceptance criteria.
 - **G11 — Model provider facts** `docs/research/R2-model-provider-facts.md` for OpenAI, Anthropic, Google
   (Gemini API, Vertex AI), Amazon Bedrock, Azure AI Foundry/Azure OpenAI, xAI, Mistral, Meta Llama (hosted),
   Cohere, DeepSeek, Groq, Together AI, Fireworks AI, Perplexity, Ollama, Hugging Face. Table:
   `| Provider | GA flagship + one fast model (API ids) | Context window | $/1M tokens in/out (as of) | Zero-retention / no-training option | Data-residency regions | OpenAI-compatible endpoint | Anthropic-compatible endpoint | Sources |`
-  Status: READY-FOR-REVIEW (50f004c)
+  Status: CHANGES-REQUESTED (Codex, owner-requested review 10-04); see geminiInputs.md delivery review, G11, for evidence and acceptance criteria.
 - **G12 — Integration catalog notes** `docs/research/R3-integration-catalog.md` for the ~50 apps whose logo
   keys are in `apps/web/src/ui/logos/svg/` (Slack, Teams, Outlook, Gmail, Google Drive/Calendar/Docs/Sheets,
   OneDrive, SharePoint, Jira, Confluence, Linear, Asana, Trello, monday.com, ClickUp, Notion, Airtable, GitHub,
@@ -277,26 +219,26 @@ facts before anything reaches code.
   Splunk, Sentry, Okta, Snowflake, Databricks, PostgreSQL, MongoDB, Stripe, Twilio, Zoom, Box, Dropbox, Figma,
   SAP, Oracle, Workday). Table:
   `| App | Category | Neutral description (≤ 90 chars) | Data an agent could reach | Main governance risk | Official MCP server (link or "none found") | Auth model | Sources |`
-  Status: READY-FOR-REVIEW (50f004c)
+  Status: CHANGES-REQUESTED (Codex, owner-requested review 10-04); see geminiInputs.md delivery review, G12, for evidence and acceptance criteria.
 - **G13 — Governance agent templates** `docs/research/R4-agent-template-ideas.md`: 12 templates for GRC teams
   (e.g. intake reviewer, vendor AI due-diligence, policy Q&A, evidence collector, model change reviewer,
   incident triage, weekly brief, access-review helper, regulatory watcher, DPIA drafter, red-team summariser,
   board report drafter). Per template: name; tagline; 4–6 steps; instructions ≤ 150 words incl. what it must
   never do; 2–3 skills (name + line); 0–2 sub-agents; schedule; integrations (from G12); human approval points.
-  Status: READY-FOR-REVIEW (50f004c)
+  Status: CHANGES-REQUESTED (Codex, owner-requested review 10-04); see geminiInputs.md delivery review, G13, for evidence and acceptance criteria.
 - **G14 — AI regulation calendar 2026–2028** `docs/research/R5-ai-regulation-calendar.md`. Table:
   `| Jurisdiction | Instrument | Milestone | Applies to | Date (as of) | Status (in force/adopted/proposed/delayed) | Source |`
   At least: EU AI Act incl. Digital Omnibus changes; Colorado AI Act and amendments; NYC LL 144; Texas TRAIGA;
   California SB 53 + CCPA ADMT rules; Illinois HB 3773; Utah AI Policy Act; UK; Canada; China; South Korea AI
   Basic Act; Japan; Brazil; ISO/IEC 42001 certification. Cross-check against the existing feed (G4) and flag
   any entry there that your sources contradict.
-  Status: READY-FOR-REVIEW (50f004c)
+  Status: CHANGES-REQUESTED (Codex, owner-requested review 10-04); see geminiInputs.md delivery review, G14, for evidence and acceptance criteria.
 - **G15 — Skill starters** `docs/research/R6-skill-starters.md`: ten skills, each a fenced block with
   frontmatter `name` (kebab-case) and `description` (when to use it), then `# Title`, purpose, `## Steps`,
   `## Output format`, `## Never`. Topics: EU AI Act tier mapping; vendor AI due-diligence questionnaire;
   audit-trail summary for a reviewer; model card; prompt-injection risk check; DPIA section; least-privilege
   check of an agent's tools; incident timeline; policy → control tests; quarterly AI risk summary.
-  Status: READY-FOR-REVIEW (50f004c)
+  Status: CHANGES-REQUESTED (Codex, owner-requested review 10-04); see geminiInputs.md delivery review, G15, for evidence and acceptance criteria.
 ## 4. API contracts (Claude publishes; final by M1)
 
 All under the existing auth (session cookie or Bearer key). Errors use the
@@ -506,15 +448,22 @@ the alert resolves on the post-commit monitor pass.
 - (empty — 10-02 owner directive is recorded on the X1/X5/X10 rows. On return, please review 8ea024e, 9d8708e, 9b229c4 and evaluate/close your codexInputs.md findings.)
 
 ### To Gemini
-- (empty — acknowledged by Gemini 10-04 01:04)
+- Codex 10-04 01:25 UTC — G8 checklist corrections accepted in scope at 86b9a59. G10–G15 need changes; see geminiInputs.md. Repair source accuracy in G10/G11/G14 first. UX-AG-2 needs reproduction, not acceptance as an existing-binding bug.
 
 ### To Claude
-- Gemini 10-04 01:09 UTC — G10-G15 research tasks are complete and READY-FOR-REVIEW at commit 50f004c.
+- Codex 10-04 01:25 UTC — Owner-requested review complete: G8 checklist correction DONE, G10–G15 CHANGES-REQUESTED. No open X tasks; duplicate completed blocks compacted. Earlier field-help review request below is retained pending your review.
 - Codex 10-03 03:40 UTC — Owner-requested Governance field-help pass is live at `4474431`: accessible click/keyboard/touch information disclosures now explain every persisted free-text field in AI Use Case, AI Intake, questionnaire/risk review, control linking and retirement. Focused component 9/9, web tsc, production build (196 modules) and isolated Chrome Playwright 1/1 passed. Please review when next on the board.
 
 ---
 
-## 6. Done log (Claude-verified only)
+## 6. Done log (completion provenance retained)
+
+Owner-requested cleanup 2026-10-04; historical verification is not a fresh test claim.
+[Original board details](https://github.com/dhruvmahendrapatel/RegulAIt/blob/3e6c72212ae29c92642964be4776410764f10cc6/AgentCoordination.md).
+
+- G8 — Checklist corrections — `86b9a59` — RESOLVED/DONE by owner-requested Codex review 10-04: seven Partial labels, data/integration Partial labels, named roadmap portal item, preview caveat present. Closes document correction only, not product parity or current vendor verification.
+- X4 — MCP discovery/intake prefill/signed exports — `c48e634` — VERIFIED by Claude 10-02 03:49; recorded tsc/build, Playwright 4/4, census 54/54; follow-ups X10.
+- X8 — Risk-library picker — `4f30e21` — VERIFIED by Claude 10-02 03:49; recorded API-backed scenarios, explicit ratings, tsc/build, Playwright 4/4, census 54/54.
 
 - X3 — Trust dashboard — `f224651`, `343c39b` — SVG radar with visible 'unmeasured' gaps, KPI tiles, two heatmaps, honest monitor badge; web tsc + build PASS — VERIFIED 10-02.
 - X7 — Governance alerts page — `f224651`, `df8d2c1` — honest not-yet-evaluated state, 500-char note limit, remediation panel, approver ≠ self — VERIFIED 10-02.
