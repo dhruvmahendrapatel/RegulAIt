@@ -113,12 +113,13 @@ afterAll(async () => {
 
 describe("ADR-0175 A4 — the served model is recorded", () => {
   it("a governed dispatch stores and returns what the provider reported serving", async () => {
-    const plain = await call("POST", `/v1/agents/${ids.swapped}/invoke`, admin.auth, { mode: "execute", input: "summarize the note", dispatch: true });
+    const plain = await call("POST", `/v1/agents/${ids.swapped}/invoke`, admin.auth, { mode: "execute", input: "summarize the note", dispatch: true, costSensitivity: "quality-sensitive" });
     expect(plain.statusCode, plain.body).toBe(200);
     const swapped = await call("POST", `/v1/agents/${ids.swapped}/invoke`, admin.auth, {
       mode: "execute",
       input: "summarize the note <<serve-as:g175m-other-model>>",
       dispatch: true,
+      costSensitivity: "quality-sensitive",
     });
     expect(swapped.statusCode, swapped.body).toBe(200);
     expect(swapped.json().dispatch.servedModel).toBe("g175m-other-model");
@@ -224,6 +225,7 @@ describe("ADR-0175 A9 — unregistered_ai_traffic", () => {
       mode: "execute",
       input: "draft the weekly summary",
       dispatch: true,
+      costSensitivity: "quality-sensitive",
       projectId: ids.project,
     });
     expect(r.statusCode, r.body).toBe(200); // observe-only
