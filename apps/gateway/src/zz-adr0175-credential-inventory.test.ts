@@ -91,10 +91,25 @@ const hash = (label: string) => {
   secretsSeen.push(h);
   return h;
 };
+/** the whole inventory, across pages: the route pages (default 100), and this
+ * file shares its database with every other suite, so its own rows can sit
+ * past the first page. Returns the first page's envelope with every page's
+ * credentials, in the same `{ json(), body }` shape a single response has. */
 const inventory = async (query = "") => {
-  const r = await call("GET", `/v1/admin/credentials${query}`, people.adminAuth);
-  expect(r.statusCode, r.body).toBe(200);
-  return r;
+  const sep = query.includes("?") ? "&" : "?";
+  const credentials: unknown[] = [];
+  let first: Record<string, unknown> | null = null;
+  for (let offset = 0; ; ) {
+    const r = await call("GET", `/v1/admin/credentials${query}${sep}limit=500&offset=${offset}`, people.adminAuth);
+    expect(r.statusCode, r.body).toBe(200);
+    const page = r.json() as { credentials: unknown[]; page: { total: number } };
+    first ??= page;
+    credentials.push(...page.credentials);
+    offset += page.credentials.length;
+    if (page.credentials.length === 0 || offset >= page.page.total) break;
+  }
+  const merged = { ...first!, credentials };
+  return { statusCode: 200, json: () => merged as any, body: JSON.stringify(merged) };
 };
 const mine = (body: { credentials: Array<{ id: string }> }) => {
   const own = new Set(Object.values(ids));
