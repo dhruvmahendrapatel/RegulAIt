@@ -542,16 +542,16 @@ export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): Schedu
       // manual sweep racing this job runs it once.
       name: SCHEDULER_JOB_NAMES.builderAgentSchedules,
       description:
-        "Run every enabled agent-builder schedule that has come due, as the agent's owner, through the governed " +
-        "dispatch path (owner entitlements, budgets and the agent's monthly limit apply). Each run lands in the " +
-        "owner's inbox as a thread that needs attention.",
+        "Run every agent-builder schedule the agent's owner turned on that has come due, as that owner, through the " +
+        "governed dispatch path (owner entitlements, budgets and the agent's monthly limit apply), at most 10 per " +
+        "owner per pass. Each run lands in the owner's inbox as a thread that needs attention.",
       adr: "ADR-0172",
       defaultIntervalSeconds: 5 * 60,
       run: async (ctx) => {
         const out = await runBuilderScheduleSweep(ctx.db, opts.dataKey, { now: ctx.now });
         return {
           itemsProcessed: out.ran + out.refused,
-          detail: { due: out.due, ran: out.ran, refused: out.refused, skipped: out.skipped.length },
+          detail: { due: out.due, ran: out.ran, refused: out.refused, skipped: out.skipped.length, deferred: out.deferred },
         };
       },
     },
