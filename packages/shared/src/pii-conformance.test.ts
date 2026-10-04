@@ -272,7 +272,7 @@ describe(`ADR-0117 PII conformance — vector set ${PII_VECTOR_SET_VERSION}`, ()
         expect(pct).toBeGreaterThan(row.pct * 0.8);
         expect(pct).toBeLessThan(row.pct * 1.2);
       }
-    });
+    }, 60_000); // 100k draws per shape: CPU-bound, so the default 5 s limit flakes on a loaded runner
 
     it("enabling all three 9-digit jurisdictions COMPOUNDS — the combined rate exceeds any one of them", () => {
       const combined = REALISTIC_CORPUS_RATES.find((x) => x.id === "r.order9_any")!;
