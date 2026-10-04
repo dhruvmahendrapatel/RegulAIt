@@ -176,6 +176,11 @@ export const authSessions = pgTable(
     lastSeenIp: text("last_seen_ip"),
     userAgent: text("user_agent"),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    /** ADR-0174 (migration 0139): the identity provider asserted MFA (RFC 8176
+     * `amr`, or a configured `acr`) for the login that minted this session.
+     * Such a session satisfies the org MFA requirement without a RegulAIt TOTP
+     * enrolment. false for every other origin and every pre-0139 row. */
+    idpMfa: boolean("idp_mfa").notNull().default(false),
   },
   (t) => [
     index("auth_sessions_user_idx").on(t.userId),
@@ -226,6 +231,14 @@ export const oidcProviders = pgTable("oidc_providers", {
    * attribute. Naming it does NOT grant anything: an asserted group still
    * confers nothing until an admin maps it (`group_role_mappings`). */
   groupsClaim: text("groups_claim"),
+  /** ADR-0174 (migration 0139): the upstream identity providers a BROKER
+   * (Keycloak) offers through this client — a subset of BROKER_IDPS. NULL =
+   * an ordinary enterprise IdP. Each entry becomes a "Continue with …" button
+   * that passes the broker an IdP hint (`kc_idp_hint`). */
+  brokerIdps: jsonb("broker_idps").$type<string[]>(),
+  /** ADR-0174: `acr` values that count as multi-factor for this provider, in
+   * addition to the RFC 8176 `amr` values. NULL = amr only. */
+  mfaAcrValues: jsonb("mfa_acr_values").$type<string[]>(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
@@ -350,6 +363,104 @@ export const samlAssertionIds = pgTable("saml_assertion_ids", {
    * assertion is refused on its own merits and the row can be swept. */
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
 });
+
+// --- ADR-0174: federated identity links (migration 0139) ---------------------
+/** the upstream identity providers the bundled broker can be hinted to */
+export const BROKER_IDPS = ["microsoft", "google", "github"] as const;
+export type BrokerIdp = (typeof BROKER_IDPS)[number];
+/** how a federated identity came to be linked to an account:
+ *  - preprovisioned — the account existed with NO local credential (an admin or
+ *    SCIM created it for exactly this person), so the verified email links it;
+ *  - jit            — the provider's JIT provisioning created the account;
+ *  - proof          — the person proved the existing local account (password,
+ *    plus TOTP when enrolled) in the same browser;
+ *  - admin          — an admin approved the link request. */
+export const FEDERATED_LINK_VIAS = ["preprovisioned", "jit", "proof", "admin"] as const;
+export type FederatedLinkVia = (typeof FEDERATED_LINK_VIAS)[number];
+
+/** which (provider, subject) is linked to which user. Looked up BEFORE the
+ * email match on every federated login: the IdP's stable subject is the
+ * anchor once a link exists. Exactly one of the two provider columns is set. */
+export const federatedIdentities = pgTable(
+  "federated_identities",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    oidcProviderId: uuid("oidc_provider_id").references(() => oidcProviders.id, { onDelete: "cascade" }),
+    samlProviderId: uuid("saml_provider_id").references(() => samlProviders.id, { onDelete: "cascade" }),
+    /** OIDC `sub`, or the SAML NameID */
+    subject: text("subject").notNull(),
+    linkedVia: text("linked_via", { enum: FEDERATED_LINK_VIAS }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    lastLoginAt: timestamp("last_login_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("federated_identities_oidc_subject_uq")
+      .on(t.oidcProviderId, t.subject)
+      .where(sql`${t.oidcProviderId} IS NOT NULL`),
+    uniqueIndex("federated_identities_saml_subject_uq")
+      .on(t.samlProviderId, t.subject)
+      .where(sql`${t.samlProviderId} IS NOT NULL`),
+    index("federated_identities_user_idx").on(t.userId),
+    check("federated_identities_one_provider_ck", sql`(${t.oidcProviderId} IS NULL) <> (${t.samlProviderId} IS NULL)`),
+    check(
+      "federated_identities_linked_via_ck",
+      sql`${t.linkedVia} IN ('preprovisioned', 'jit', 'proof', 'admin')`,
+    ),
+  ],
+);
+export type FederatedIdentityRow = typeof federatedIdentities.$inferSelect;
+
+export const FEDERATED_LINK_REQUEST_STATUSES = ["pending", "linked", "approved", "denied"] as const;
+export type FederatedLinkRequestStatus = (typeof FEDERATED_LINK_REQUEST_STATUSES)[number];
+
+/** a federated identity that matched an existing account holding a LOCAL
+ * credential (ADR-0174 §5). It never links silently: the person proves the
+ * local account in the same browser (the proof token, hashed, short-lived), or
+ * an admin approves. `linked` = proven by the person; `approved`/`denied` = an
+ * admin's decision. */
+export const federatedLinkRequests = pgTable(
+  "federated_link_requests",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    oidcProviderId: uuid("oidc_provider_id").references(() => oidcProviders.id, { onDelete: "cascade" }),
+    samlProviderId: uuid("saml_provider_id").references(() => samlProviders.id, { onDelete: "cascade" }),
+    subject: text("subject").notNull(),
+    /** the verified email the provider asserted */
+    email: text("email").notNull(),
+    /** the provider asserted MFA for the login that raised this request */
+    idpMfa: boolean("idp_mfa").notNull().default(false),
+    status: text("status", { enum: FEDERATED_LINK_REQUEST_STATUSES }).notNull().default("pending"),
+    /** sha256 of the browser-bound proof token (cookie); NULL once spent */
+    proofTokenHash: text("proof_token_hash"),
+    proofExpiresAt: timestamp("proof_expires_at", { withTimezone: true }),
+    /** how long an admin may still approve it */
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    decidedBy: uuid("decided_by").references(() => users.id, { onDelete: "set null" }),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("federated_link_requests_proof_token_uq")
+      .on(t.proofTokenHash)
+      .where(sql`${t.proofTokenHash} IS NOT NULL`),
+    index("federated_link_requests_status_idx").on(t.status),
+    check(
+      "federated_link_requests_one_provider_ck",
+      sql`(${t.oidcProviderId} IS NULL) <> (${t.samlProviderId} IS NULL)`,
+    ),
+    check(
+      "federated_link_requests_status_ck",
+      sql`${t.status} IN ('pending', 'linked', 'approved', 'denied')`,
+    ),
+  ],
+);
+export type FederatedLinkRequestRow = typeof federatedLinkRequests.$inferSelect;
 
 // --- ADR-0037: SCIM 2.0 provisioning (migration 0052) ------------------------
 // The IdP-machine-to-gateway plumbing an enterprise provisioning engine talks
@@ -3178,6 +3289,9 @@ export const ORG_PII_MODES = ["none", "log", "warn", "block"] as const;
 /** ADR-0025: who must have TOTP enrolled before their session leaves the
  * auth self-service surface. off = today's behaviour. */
 export const MFA_REQUIREMENTS = ["off", "admins", "all"] as const;
+/** ADR-0174: may people sign in with a local (email + password) account? */
+export const LOCAL_SIGN_IN_MODES = ["enabled", "break_glass_only"] as const;
+export type LocalSignInMode = (typeof LOCAL_SIGN_IN_MODES)[number];
 export const BUDGET_ENFORCEMENTS = ["block", "warn_only"] as const;
 export const APPROVAL_QUORUMS = ["all", "any"] as const;
 /** ADR-0062: the org's TIGHTENING dial over the deployment-wide egress
@@ -3359,6 +3473,14 @@ export const orgSettings = pgTable(
     /** true = password login 403s (SSO or API-key exchange only). Refused
      * while zero ENABLED OIDC providers exist — no self-lockouts. */
     ssoOnly: boolean("sso_only").notNull().default(false),
+    /** ADR-0174 (migration 0139): 'enabled' (default) = today. 'break_glass_only'
+     * = password sign-in is refused for everyone except the admins listed in
+     * `breakGlassUserIds` (SSO is the door; the break-glass admin is the spare
+     * key). Distinct from `ssoOnly`, which refuses password login for all. */
+    localSignIn: text("local_sign_in", { enum: LOCAL_SIGN_IN_MODES }).notNull().default("enabled"),
+    /** ADR-0174: the designated break-glass admins (user ids). Each must be an
+     * active admin with a password when break-glass mode is engaged. */
+    breakGlassUserIds: jsonb("break_glass_user_ids").$type<string[]>(),
     /** failed password logins within the window before a temporary lockout */
     loginLockoutThreshold: integer("login_lockout_threshold").notNull().default(5),
     loginLockoutWindowMinutes: integer("login_lockout_window_minutes").notNull().default(15),

@@ -139,8 +139,10 @@ describe("ADR-0031: rate-limit configuration", () => {
     expect(rateLimitWindowMs(cfg, "auth:1.2.3.4")).toBe(cfg.authWindowMs);
     expect(rateLimitWindowMs(cfg, "sso:1.2.3.4")).toBe(cfg.ssoWindowMs);
     expect(rateLimitWindowMs(cfg, "ip:1.2.3.4")).toBe(cfg.globalWindowMs);
-    // the credential endpoints are exactly the three unauthenticated ones
+    // the credential endpoints are exactly the unauthenticated ones — ADR-0174
+    // added the federated-link proof, which accepts a password and TOTP code
     expect([...AUTH_RATE_LIMIT_ROUTES].sort()).toEqual([
+      "/auth/link/confirm",
       "/auth/login",
       "/auth/login-with-key",
       "/auth/mfa/verify",

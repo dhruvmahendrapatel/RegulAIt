@@ -116,6 +116,8 @@ export const AUTH_RATE_LIMIT_ROUTES: ReadonlySet<string> = new Set([
   "/auth/login",
   "/auth/mfa/verify",
   "/auth/login-with-key",
+  // ADR-0174: the link proof accepts a password (and TOTP code)
+  "/auth/link/confirm",
 ]);
 
 /** CFG-06: the SSO return legs — unauthenticated, and expensive to refuse */

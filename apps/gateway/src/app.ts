@@ -1073,7 +1073,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
             });
           }
           // gate 2: org-mandated MFA enrollment (off|admins|all)
-          if (!session.totpEnabled && !AUTH_SELF_SERVICE_ROUTES.has(route) && session.ctx.userId) {
+          // ADR-0174: a federated session whose identity provider ASSERTED
+          // MFA (amr/acr, checked at the callback) already satisfies the dial.
+          if (!session.totpEnabled && !session.idpMfa && !AUTH_SELF_SERVICE_ROUTES.has(route) && session.ctx.userId) {
             const mustEnroll =
               org.mfaRequired === "all" || (org.mfaRequired === "admins" && session.ctx.isAdmin);
             if (mustEnroll) {

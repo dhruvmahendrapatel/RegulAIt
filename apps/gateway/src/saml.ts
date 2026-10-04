@@ -64,7 +64,7 @@ import {
   SAML_BINDING_COOKIE,
   auditAuth,
   createSession,
-  loadUserByEmail,
+  linkCookie,
   readCookie,
   refuseIpBlockedLogin,
   requestIsSecure,
@@ -78,6 +78,15 @@ import { loadOrgSettings } from "./org-settings.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { countEnabledSsoProviders, SSO_ONLY_LAST_PROVIDER } from "./sso-providers.js";
 import { normalizeAssertedGroups, reconcileGroupRoles } from "./group-roles.js";
+import {
+  hasLocalCredential,
+  LINK_PROOF_MINUTES,
+  matchFederatedAccount,
+  raiseLinkRequest,
+  recordFederatedLink,
+  touchFederatedLink,
+  type ProviderRef,
+} from "./federated-identity.js";
 
 export interface SamlRouteOptions {
   dataKey?: string;
@@ -686,7 +695,12 @@ export function registerSamlRoutes(app: FastifyInstance, db: Db, opts: SamlRoute
           { email, domain });
       }
 
-      let user = await loadUserByEmail(db, email);
+      // ADR-0174 §5: the linked (provider, NameID) first, then the asserted
+      // email — the SAME linking rule the OIDC callback answers to.
+      const ref: ProviderRef = { kind: "saml", id: provider.id, name: provider.name };
+      const subject = typeof profile.nameID === "string" && profile.nameID.length > 0 ? profile.nameID : email;
+      const match = await matchFederatedAccount(db, ref, subject, email);
+      let user = match.user;
       if (user?.disabledAt) {
         await auditAuth(db, null, user.id, "saml-login-failed", "deny",
           `SAML login refused: account '${email}' is deactivated`,
@@ -695,6 +709,22 @@ export function registerSamlRoutes(app: FastifyInstance, db: Db, opts: SamlRoute
           error: "user_disabled",
           detail: "this account has been deactivated — an admin can reactivate it",
         });
+      }
+      if (user && !match.linked) {
+        if (hasLocalCredential(user)) {
+          const link = await raiseLinkRequest(db, ref, subject, email, user.id, false);
+          await auditAuth(db, null, user.id, "federated-link-required", "deny",
+            `SAML identity from provider '${provider.name}' matched the existing account '${user.email}', which has a local credential — link pending proof or admin approval, no session minted`,
+            { phase: "saml-acs", provider: provider.name, providerKind: "saml", email, sub: subject, linkRequestId: link.requestId, refreshed: link.refreshed });
+          void reply.header("set-cookie", linkCookie(link.proofToken, requestIsSecure(req), LINK_PROOF_MINUTES * 60));
+          return reply.redirect("/ui/login?link=pending", 302);
+        }
+        await recordFederatedLink(db, ref, subject, user.id, "preprovisioned");
+        await auditAuth(db, null, user.id, "federated-identity-linked", "allow",
+          `SAML identity from provider '${provider.name}' linked to the pre-provisioned account '${user.email}' (no local credential)`,
+          { phase: "saml-acs", provider: provider.name, providerKind: "saml", email, sub: subject, linkedVia: "preprovisioned" });
+      } else if (user) {
+        await touchFederatedLink(db, ref, subject);
       }
       if (!user) {
         // DEFAULT-DENY, identical to OIDC: an unknown subject is refused
@@ -723,6 +753,7 @@ export function registerSamlRoutes(app: FastifyInstance, db: Db, opts: SamlRoute
         await auditAuth(db, null, user.id, "saml-user-provisioned", "allow",
           `user '${email}' JIT-provisioned via SAML provider '${provider.name}'${provider.defaultRoleId ? " with the provider's default role" : ""} (never admin)`,
           { phase: "saml-jit", provider: provider.name, email, defaultRoleId: provider.defaultRoleId });
+        await recordFederatedLink(db, ref, subject, user.id, "jit");
       }
 
       // ADR-0038 — group → role reconciliation from the assertion's group

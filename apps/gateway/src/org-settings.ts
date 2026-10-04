@@ -24,6 +24,8 @@ import {
   complianceProfiles,
   connectorRevocations,
   eq,
+  inArray,
+  isNotNull,
   isNull,
   lt,
   ne,
@@ -551,6 +553,64 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { 
       }
     }
     const before = await loadOrgSettings(db);
+    // ADR-0174 — break-glass local sign-in. Every named break-glass account
+    // must be a real, ACTIVE ADMIN; and the mode may only engage when somebody
+    // can still get in: at least one enabled SSO provider (the front door) and
+    // at least one break-glass admin with a password (the spare key). Checked
+    // over the MERGED values, like the API-key TTL dials below.
+    if (body.breakGlassUserIds && body.breakGlassUserIds.length > 0) {
+      const ids = [...new Set(body.breakGlassUserIds)];
+      const found = await db
+        .select({ id: users.id, isAdmin: users.isAdmin, disabledAt: users.disabledAt })
+        .from(users)
+        .where(inArray(users.id, ids));
+      const bad = ids.filter((id) => {
+        const u = found.find((f) => f.id === id);
+        return !u || !u.isAdmin || u.disabledAt !== null;
+      });
+      if (bad.length > 0) {
+        return reply.status(422).send({
+          error: "invalid_break_glass_user",
+          detail: "every break-glass account must be an existing, active administrator — nothing was saved",
+          invalid: bad,
+        });
+      }
+    }
+    if (body.localSignIn !== undefined || body.breakGlassUserIds !== undefined) {
+      const nextMode = body.localSignIn ?? before.localSignIn;
+      const nextIds = body.breakGlassUserIds !== undefined ? body.breakGlassUserIds : before.breakGlassUserIds;
+      if (nextMode === "break_glass_only") {
+        const enabled = await countEnabledSsoProviders(db);
+        if (enabled.total === 0) {
+          return reply.status(422).send({
+            error: "break_glass_needs_sso_provider",
+            detail:
+              "enable at least one SSO provider (OIDC or SAML) before restricting email sign-in to break-glass admins — otherwise only they could sign in",
+          });
+        }
+        const usable =
+          nextIds && nextIds.length > 0
+            ? await db
+                .select({ id: users.id })
+                .from(users)
+                .where(
+                  and(
+                    inArray(users.id, nextIds),
+                    eq(users.isAdmin, true),
+                    isNull(users.disabledAt),
+                    isNotNull(users.passwordHash),
+                  ),
+                )
+            : [];
+        if (usable.length === 0) {
+          return reply.status(422).send({
+            error: "break_glass_needs_admin",
+            detail:
+              "name at least one active administrator who has a password as a break-glass account before restricting email sign-in",
+          });
+        }
+      }
+    }
     // ADR-0039: CIDR blocks are validated at WRITE time — a malformed block
     // would silently match nothing at evaluation time (fail closed per
     // entry), so the honest failure is a 400 here, before anything is saved.
