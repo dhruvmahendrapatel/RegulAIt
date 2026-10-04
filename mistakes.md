@@ -1447,3 +1447,15 @@ Rule: before adding a spec to a CI step, run the whole step's spec list in CI's 
 that creates global state (fleet-wide rules, org settings, kill switches) removes it before it ends. When CI and local
 runs disagree, make the failure message carry the server's recorded reason (the API's outcome code and detail) before
 guessing.
+
+### M-069 (2026-10-04) - A shell script added to the image was tested on Linux only, and a Windows checkout broke it
+
+The Docker demo-password work changed the image's CMD to run `apps/gateway/docker-start.sh`. The repo had no
+`.gitattributes`, so Git for Windows (`core.autocrlf=true`) checked the script out with CRLF. In the container, `sh`
+stopped at line 22 ("Syntax error: newline unexpected (expecting ")")") and the gateway restart-looped on the owner's
+first run. CRLF had been tested only for the `.env` value, not for the script file itself, even though the owner works
+on Windows and Codex had just reported other Windows-only failures.
+
+Rule: any file a Linux container or CI executes (shell scripts, entrypoints) is pinned to LF in `.gitattributes`, and
+the Dockerfile normalises line endings on anything it executes from the build context. When the owner runs on
+Windows, test the CRLF form of every executed text file, not only of its inputs.

@@ -50,7 +50,13 @@ EXPOSE 3000
 # docker-compose.yml mounts a named volume there; Docker copies this
 # directory's owner and mode into a new volume, which is why it exists in the
 # image and belongs to `node`.
-RUN mkdir -p /app/audit-anchors /app/demo-license-keys \
+#
+# The start script is normalised to LF: a Windows checkout (git core.autocrlf=true)
+# hands the build context a CRLF copy, and `sh` stops at the first stray carriage
+# return ("Syntax error: newline unexpected"). .gitattributes pins *.sh to LF too;
+# this keeps a checkout made before that rule bootable.
+RUN sed -i 's/\r$//' apps/gateway/docker-start.sh \
+ && mkdir -p /app/audit-anchors /app/demo-license-keys \
  && chown node:node /app /app/audit-anchors /app/demo-license-keys \
  && chmod 0700 /app/demo-license-keys
 USER node

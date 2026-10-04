@@ -112,6 +112,46 @@ describe("docker-start.sh: the switch", () => {
 // 2. the keyring fallback
 // ---------------------------------------------------------------------------
 
+describe("docker-start.sh survives a Windows checkout (CRLF)", () => {
+  // git core.autocrlf=true (the Git for Windows default) writes the script with CRLF; `sh` in the
+  // container then fails at line 22 ("Syntax error: newline unexpected") and the gateway restart-loops.
+  const dockerfile = readFileSync(path.join(root, "Dockerfile"), "utf8");
+  const crlfCopy = () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "docker-start-crlf-"));
+    const file = path.join(dir, "docker-start.sh");
+    writeFileSync(file, readFileSync(startScript, "utf8").replace(/\r?\n/g, "\r\n"));
+    return { dir, file };
+  };
+
+  it("a CRLF copy does not parse as-is (the failure being guarded)", () => {
+    const { dir, file } = crlfCopy();
+    try {
+      expect(spawnSync("sh", ["-n", file]).status).not.toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("the Dockerfile strips CR from the start script before the image runs it, and the result parses", () => {
+    const step = dockerfile.match(/RUN sed -i 's\/\\r\$\/\/' apps\/gateway\/docker-start\.sh/);
+    expect(step, "Dockerfile normalises docker-start.sh line endings").not.toBeNull();
+    expect(dockerfile.indexOf(step![0])).toBeLessThan(dockerfile.indexOf("USER node"));
+    const { dir, file } = crlfCopy();
+    try {
+      execFileSync("sed", ["-i", "s/\\r$//", file]);
+      expect(spawnSync("sh", ["-n", file]).status).toBe(0);
+      expect(readFileSync(file, "utf8")).toBe(readFileSync(startScript, "utf8"));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it(".gitattributes pins shell scripts to LF", () => {
+    const attrs = readFileSync(path.join(root, ".gitattributes"), "utf8");
+    expect(attrs).toMatch(/^\*\.sh\s+text\s+eol=lf\s*$/m);
+  });
+});
+
 describe("licenseKeyringDir", () => {
   it("an EMPTY REGULAIT_LICENSE_KEYRING (compose's `${VAR:-}`) falls back to the default keyring", () => {
     const saved = process.env.REGULAIT_LICENSE_KEYRING;
