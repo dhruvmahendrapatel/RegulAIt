@@ -17,6 +17,7 @@ import { DependencyGraphPanel } from "./DependencyGraphPanel";
 import { RiskLibraryPicker } from "./RiskLibraryPicker";
 import { AgentStewardshipLine } from "../integrations/AgentStewardship";
 import type { AgentStewardship } from "../integrations/agentStewardship";
+import { EnergyEstimatePanel } from "../cost/EnergyEstimate";
 import {
   ACTIVITY_STATUS,
   PHASES,
@@ -146,7 +147,7 @@ export default function UseCaseOverviewPage() {
             ) : null}
             {tab === "frameworks" ? <FrameworksTab query={frameworks} /> : null}
             {tab === "risks" ? <RisksTab useCaseId={id} risks={data.risks} acceptance={acceptance} onRefresh={refresh} /> : null}
-            {tab === "stack" ? <StackTab data={data.stack} /> : null}
+            {tab === "stack" ? <StackTab useCaseId={id} data={data.stack} /> : null}
             {tab === "dependencies" ? <Card title="Dependencies and inherited risk"><DependencyGraphPanel useCaseId={id} /></Card> : null}
             {tab === "approvals" ? <ApprovalsTab approvals={data.approvals} userName={userName} /> : null}
             {tab === "audit" ? <AuditTab rows={data.audit} /> : null}
@@ -501,8 +502,8 @@ function RisksTab({ useCaseId, risks, acceptance, onRefresh }: { useCaseId: stri
   );
 }
 
-function StackTab({ data }: { data: OverviewResponse["stack"] }) {
-  return <div className={v.stack}><Card title="Agents">{data.agents.length === 0 ? <EmptyState title="No intended agents linked" body="The intake records the agent this use case will run on. Choose one at the stack step of the intake, or link it from the agent inventory." /> : data.agents.map((agent) => <AgentCard key={agent.id} id={agent.id} fallback={agent} />)}</Card><Card title="Vendors">{data.vendors.length === 0 ? <EmptyState title="No vendors resolved from this stack" /> : data.vendors.map((vendor) => <div key={vendor.id} className={v.listRow}><span className={v.grow}><strong>{vendor.name}</strong><br /><span className={v.faint}>{humanize(vendor.category)} · via {vendor.linkedVia.join(", ")}</span></span><Badge tone={vendor.status === "approved" ? "ok" : "warn"}>{humanize(vendor.status)}</Badge></div>)}</Card></div>;
+function StackTab({ useCaseId, data }: { useCaseId: string; data: OverviewResponse["stack"] }) {
+  return <div className={v.stack}><Card title="Agents">{data.agents.length === 0 ? <EmptyState title="No intended agents linked" body="The intake records the agent this use case will run on. Choose one at the stack step of the intake, or link it from the agent inventory." /> : data.agents.map((agent) => <AgentCard key={agent.id} id={agent.id} fallback={agent} />)}</Card><Card title="Vendors">{data.vendors.length === 0 ? <EmptyState title="No vendors resolved from this stack" /> : data.vendors.map((vendor) => <div key={vendor.id} className={v.listRow}><span className={v.grow}><strong>{vendor.name}</strong><br /><span className={v.faint}>{humanize(vendor.category)} · via {vendor.linkedVia.join(", ")}</span></span><Badge tone={vendor.status === "approved" ? "ok" : "warn"}>{humanize(vendor.status)}</Badge></div>)}</Card>{/* ADR-0175 A15 */}<Card title="Energy and emissions"><EnergyEstimatePanel useCaseId={useCaseId} /></Card></div>;
 }
 
 function AgentCard({ id, fallback }: { id: string; fallback: OverviewResponse["stack"]["agents"][number] }) {

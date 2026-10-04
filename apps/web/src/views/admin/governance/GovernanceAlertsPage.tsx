@@ -248,7 +248,7 @@ function RemediationPanel({ alertId }: { alertId: string }) {
                     <>
                       <ol className={s.remediationSteps}>{candidate.steps.map((step) => <li key={step}>{step}</li>)}</ol>
                       {candidate.href && candidate.href.startsWith("/") ? (
-                        <div><Link to={candidate.href}>{candidate.kind === "register_use_case" ? "Register as use case" : "Open"}</Link></div>
+                        <div><Link to={candidate.href}>{candidate.kind === "register_use_case" ? "Register as use case" : candidate.kind === "review_credential" ? "Manage credential" : "Open"}</Link></div>
                       ) : null}
                     </>
                   )}
@@ -303,7 +303,9 @@ function SubjectLinks({ alert }: { alert: GovernanceAlert }) {
           : subject.type === "project" && subject.id ? `/projects/${subject.id}`
             : subject.type === "virtual_key" ? "/admin/virtual-keys"
               : subject.type === "caller" ? "/admin/users"
-                : null;
+                // ADR-0175 A7 — a flagged credential opens the inventory
+                : subject.type === "credential" ? "/admin/credentials"
+                  : null;
   return (
     <div className={v.row}>
       {path ? <Link to={path}>Open {subject.type === "caller" ? "users" : subject.type.replace("_", " ")}</Link> : <span>{subject.label}</span>}

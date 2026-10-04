@@ -142,6 +142,7 @@ const BY_ROUTE: Record<string, keyof typeof G> = {
   "/admin/teams": "people",
   "/admin/client-access": "laptop",
   "/admin/virtual-keys": "key",
+  "/admin/credentials": "key",
   "/admin/sso": "lock",
   "/admin/provisioning": "sync",
   "/admin/group-mappings": "mapping",

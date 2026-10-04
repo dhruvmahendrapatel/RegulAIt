@@ -38,6 +38,7 @@ import TeamsPage from "./views/admin/identity/TeamsPage";
 import ClientAccessPage from "./views/admin/identity/ClientAccessPage";
 import SsoPage from "./views/admin/identity/SsoPage";
 import ScimPage from "./views/admin/identity/ScimPage";
+import CredentialsPage from "./views/admin/identity/CredentialsPage";
 import GroupMappingsPage from "./views/admin/identity/GroupMappingsPage";
 import VirtualKeysPage from "./views/admin/identity/VirtualKeysPage";
 import RulesEnginePage from "./views/admin/governance/RulesEnginePage";
@@ -188,6 +189,8 @@ export default function App() {
                         <Route path="group-mappings" element={<GroupMappingsPage />} />
                         {/* ADR-0066 */}
                         <Route path="virtual-keys" element={<VirtualKeysPage />} />
+                        {/* ADR-0175 A7 */}
+                        <Route path="credentials" element={<CredentialsPage />} />
                         <Route path="rules" element={<RulesEnginePage />} />
                         <Route path="simulation" element={<SimulationPage />} />
                         <Route path="abac-policies" element={<AbacPoliciesPage />} />
