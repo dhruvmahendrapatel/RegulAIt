@@ -101,6 +101,44 @@ export const NON_ADMIN_ROUTES = new Set([
   // able to hand the agent over, name a successor and record its review.
   "PATCH /v1/agents/:agentId/stewardship",
   "POST /v1/agents/:agentId/stewardship/review",
+  // ADR-0172 — the agent builder. Every route is a signed-in person's own
+  // workspace: visibility (owner / workspace / named people / admin) and edit
+  // (owner or admin) are checked in-handler, an identity-less token is refused
+  // (403 builder_requires_identity), tools are bounded by the EDITOR's own
+  // grants, and chat dispatches through the governed core as the caller. The
+  // manual schedule sweep (`POST /v1/builder/schedules/sweep`) is deliberately
+  // NOT here: running every due schedule is an operator act.
+  "GET /v1/builder/agents",
+  "POST /v1/builder/agents",
+  "POST /v1/builder/agents/import",
+  "GET /v1/builder/agents/:id",
+  "PATCH /v1/builder/agents/:id",
+  "DELETE /v1/builder/agents/:id",
+  "PUT /v1/builder/agents/:id/tools",
+  "PUT /v1/builder/agents/:id/subagents",
+  "PUT /v1/builder/agents/:id/skills",
+  "POST /v1/builder/agents/:id/memory",
+  "DELETE /v1/builder/agents/:id/memory/:memoryId",
+  "POST /v1/builder/agents/:id/schedules",
+  "PATCH /v1/builder/agents/:id/schedules/:scheduleId",
+  "DELETE /v1/builder/agents/:id/schedules/:scheduleId",
+  "POST /v1/builder/agents/:id/channels",
+  "DELETE /v1/builder/agents/:id/channels/:channelId",
+  "GET /v1/builder/agents/:id/export",
+  "POST /v1/builder/agents/:id/chat",
+  "GET /v1/builder/threads",
+  "GET /v1/builder/threads/:id",
+  "PATCH /v1/builder/threads/:id",
+  "GET /v1/builder/skills",
+  "POST /v1/builder/skills",
+  "POST /v1/builder/skills/import",
+  "GET /v1/builder/skills/:id",
+  "PATCH /v1/builder/skills/:id",
+  "DELETE /v1/builder/skills/:id",
+  "GET /v1/builder/templates",
+  "GET /v1/builder/templates/:id",
+  "GET /v1/builder/integrations",
+  "GET /v1/builder/usage",
   // ADR-0065 — creating a training job. Its gate is the caller's OWN
   // entitlement to the base agent the customisation is anchored to, checked
   // inside the handler by the same `evaluateAgent` path an invoke takes: a

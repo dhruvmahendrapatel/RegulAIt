@@ -3793,3 +3793,40 @@ export {
   type ReviewPolicyView,
   type UseCaseReviewView,
 } from "./review-policy.js";
+
+// ---------------------------------------------------------------------------
+// ADR-0172 — the agent builder's request vocabulary, bundle format, SKILL.md
+// parser and schedule cadence arithmetic.
+// ---------------------------------------------------------------------------
+export {
+  BUILDER_CADENCE_VALUES,
+  BUILDER_CHANNEL_PROVIDER_VALUES,
+  BUILDER_CONNECTION_FORMAT_VALUES,
+  BUILDER_SHARING_VALUES,
+  BUILDER_THREAD_STATUS_VALUES,
+  builderAddMemorySchema,
+  builderBundleSchema,
+  builderChatSchema,
+  builderCreateAgentSchema,
+  builderCreateChannelSchema,
+  builderCreateScheduleSchema,
+  builderCreateSkillSchema,
+  builderImportAgentSchema,
+  builderImportSkillSchema,
+  builderSetSkillsSchema,
+  builderSetSubagentsSchema,
+  builderSetToolsSchema,
+  builderThreadListQuerySchema,
+  builderToolInputSchema,
+  builderUpdateAgentSchema,
+  builderUpdateScheduleSchema,
+  builderUpdateSkillSchema,
+  builderUpdateThreadSchema,
+  builderUsageQuerySchema,
+  nextScheduleRun,
+  parseSkillMarkdown,
+  type BuilderBundle,
+  type BuilderCadenceValue,
+  type BuilderCreateAgent,
+  type BuilderUpdateAgent,
+} from "./builder.js";
