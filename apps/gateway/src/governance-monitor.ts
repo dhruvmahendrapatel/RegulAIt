@@ -39,8 +39,10 @@ import {
   or,
   gt,
   sql,
+  projects,
   usageEvents,
   users,
+  virtualKeys,
   gte,
   isNotNull,
   type Db,
@@ -52,6 +54,8 @@ import {
   evaluateMonitorRules,
   reconcileAlerts,
   type MonitorAgentInput,
+  type MonitorServedModelInput,
+  type MonitorTrafficInput,
   type MonitorVendorInput,
   type OffStackServing,
 } from "@regulait/shared";
@@ -209,6 +213,9 @@ export async function runGovernanceMonitor(
     risks,
     dimensions: trust.dimensions,
     labels,
+    // ADR-0175 A4 / A9 — read from the usage ledger; both observe only
+    servedModels: await servedModelsByAgent(db, now),
+    traffic: await unregisteredTrafficInput(db, now),
   });
 
   // -- reconcile -------------------------------------------------------------
@@ -390,6 +397,155 @@ export async function offStackServingByUseCase(db: Db, now: Date): Promise<Map<s
   return out;
 }
 
+/**
+ * ADR-0175 A4 — what the providers SAID they served, per agent, over the
+ * monitor window: ledger rows that carry a provider-reported model, grouped by
+ * (configured id, served id). Each row is compared with the configured id it
+ * was dispatched under (`usage_events.model`), not the agent's current one, so
+ * a config change inside the window is not mistaken for drift. Rows where the
+ * provider reported nothing are skipped — never guessed. The pins come from
+ * APPROVED, unexpired model cards (`pinned_model_version`).
+ */
+export async function servedModelsByAgent(db: Db, now: Date): Promise<MonitorServedModelInput[]> {
+  const since = new Date(now.getTime() - TRACE_EVAL_WINDOW_DAYS * 86_400_000);
+  const rows = await db
+    .select({
+      agentId: usageEvents.agentId,
+      configured: usageEvents.model,
+      served: usageEvents.servedModel,
+      calls: count(),
+      last: sql<Date>`max(${usageEvents.at})`,
+    })
+    .from(usageEvents)
+    .where(
+      and(
+        eq(usageEvents.objectType, "agent"),
+        isNotNull(usageEvents.agentId),
+        isNotNull(usageEvents.model),
+        isNotNull(usageEvents.servedModel),
+        gte(usageEvents.at, since),
+      ),
+    )
+    .groupBy(usageEvents.agentId, usageEvents.model, usageEvents.servedModel);
+  if (rows.length === 0) return [];
+  const agentIds = [...new Set(rows.map((r) => r.agentId!))];
+  const names = new Map(
+    (await db.select({ id: agents.id, name: agents.name }).from(agents).where(inArray(agents.id, agentIds))).map((a) => [a.id, a.name]),
+  );
+  const pins = new Map<string, string[]>();
+  for (const p of await db
+    .selectDistinct({ agentId: modelCards.agentId, pin: modelCards.pinnedModelVersion })
+    .from(modelCardApprovals)
+    .innerJoin(modelCards, eq(modelCards.id, modelCardApprovals.cardId))
+    .where(
+      and(
+        inArray(modelCards.agentId, agentIds),
+        isNotNull(modelCards.pinnedModelVersion),
+        eq(modelCardApprovals.status, "approved"),
+        or(isNull(modelCardApprovals.validUntil), gt(modelCardApprovals.validUntil, now)),
+      ),
+    )) {
+    if (p.agentId && p.pin) pins.set(p.agentId, [...(pins.get(p.agentId) ?? []), p.pin]);
+  }
+  const byAgent = new Map<string, MonitorServedModelInput>();
+  for (const r of rows) {
+    const id = r.agentId!;
+    const entry = byAgent.get(id) ?? {
+      agentId: id,
+      agentName: names.get(id) ?? id,
+      pinnedModelVersions: pins.get(id) ?? [],
+      windowDays: TRACE_EVAL_WINDOW_DAYS,
+      observations: [],
+    };
+    entry.observations.push({
+      configuredModel: r.configured!,
+      servedModel: r.served!,
+      calls: Number(r.calls),
+      lastServedAt: new Date(r.last).toISOString(),
+    });
+    byAgent.set(id, entry);
+  }
+  return [...byAgent.values()];
+}
+
+/**
+ * ADR-0175 A9 — model (`agent`) and MCP (`mcp_tool`) ledger rows over the
+ * monitor window, grouped by attribution, plus the projects an APPROVED use
+ * case links. The link is `ai_use_cases.project_id` — the ONLY join between
+ * the register and dispatch attribution (see use-case-gate.ts's header), so
+ * the rule reports spend outside that join; it cannot prove a call ungoverned.
+ * The ledger records the calling user and the virtual key, not which of a
+ * user's API keys was used, so key-less projectless traffic is grouped by
+ * caller. Observe-only: nothing here, or downstream of the alert, blocks.
+ */
+export async function unregisteredTrafficInput(db: Db, now: Date): Promise<MonitorTrafficInput> {
+  const since = new Date(now.getTime() - TRACE_EVAL_WINDOW_DAYS * 86_400_000);
+  const grouped = await db
+    .select({
+      projectId: usageEvents.projectId,
+      virtualKeyId: usageEvents.virtualKeyId,
+      userId: usageEvents.userId,
+      objectType: usageEvents.objectType,
+      calls: count(),
+      cost: sql<number | null>`sum(${usageEvents.costUsd})`,
+      last: sql<Date>`max(${usageEvents.at})`,
+    })
+    .from(usageEvents)
+    .where(and(inArray(usageEvents.objectType, ["agent", "mcp_tool"]), gte(usageEvents.at, since)))
+    .groupBy(usageEvents.projectId, usageEvents.virtualKeyId, usageEvents.userId, usageEvents.objectType);
+  const linked = await db
+    .select({ id: aiUseCases.id, name: aiUseCases.name, status: aiUseCases.status, projectId: aiUseCases.projectId })
+    .from(aiUseCases)
+    .where(isNotNull(aiUseCases.projectId));
+  const covered = new Set(linked.filter((u) => u.status === "approved").map((u) => u.projectId!));
+  const linkedNotApproved = new Map<string, Array<{ id: string; name: string; status: string }>>();
+  for (const u of linked) {
+    if (u.status === "approved") continue;
+    linkedNotApproved.set(u.projectId!, [...(linkedNotApproved.get(u.projectId!) ?? []), { id: u.id, name: u.name, status: u.status }]);
+  }
+  const rows = grouped.map((r) => ({
+    projectId: r.projectId,
+    virtualKeyId: r.virtualKeyId,
+    userId: r.userId,
+    kind: r.objectType === "mcp_tool" ? ("mcp" as const) : ("model" as const),
+    calls: Number(r.calls),
+    costUsd: r.cost === null ? null : Number(r.cost),
+    lastAt: new Date(r.last).toISOString(),
+  }));
+  const uncovered = rows.filter((r) => !(r.projectId && covered.has(r.projectId)));
+  const projectIds = [...new Set(uncovered.flatMap((r) => (r.projectId ? [r.projectId] : [])))];
+  const keyIds = [...new Set(uncovered.flatMap((r) => (r.virtualKeyId ? [r.virtualKeyId] : [])))];
+  const userIds = [...new Set(uncovered.map((r) => r.userId))].filter((id) => id !== NO_IDENTITY);
+  const projectNames = new Map(
+    projectIds.length
+      ? (await db.select({ id: projects.id, name: projects.name }).from(projects).where(inArray(projects.id, projectIds))).map((p) => [p.id, p.name])
+      : [],
+  );
+  const virtualKeyNames = new Map(
+    keyIds.length
+      ? (await db.select({ id: virtualKeys.id, name: virtualKeys.name }).from(virtualKeys).where(inArray(virtualKeys.id, keyIds))).map((k) => [k.id, k.name])
+      : [],
+  );
+  const userNames = new Map<string, string>([[NO_IDENTITY, "Platform (no user identity)"]]);
+  if (userIds.length) {
+    for (const u of await db
+      .select({ id: users.id, name: users.displayName, email: users.email })
+      .from(users)
+      .where(inArray(users.id, userIds))) {
+      userNames.set(u.id, u.name || u.email);
+    }
+  }
+  return {
+    windowDays: TRACE_EVAL_WINDOW_DAYS,
+    rows: uncovered,
+    coveredProjectIds: covered,
+    linkedNotApproved,
+    projectNames,
+    virtualKeyNames,
+    userNames,
+  };
+}
+
 /** `use_case:<id>>agent:<id>` → the dependency is the subject; the use case is context */
 function describeSubject(subjectKey: string, labels: Map<string, string>) {
   const parts = subjectKey.split(">");
@@ -461,6 +617,28 @@ export function registerGovernanceMonitorRoutes(app: FastifyInstance, db: Db): v
       if (riskIds.length) {
         for (const r of await db.select({ id: aiRisks.id, title: aiRisks.title }).from(aiRisks).where(inArray(aiRisks.id, riskIds))) {
           labels.set(`risk:${r.id}`, r.title);
+        }
+      }
+      // ADR-0175 A9 subjects: projects, virtual keys and callers
+      const idsOf = (prefix: string) =>
+        [...new Set(rows.flatMap((r) => (r.a.subjectKey.startsWith(prefix) ? [r.a.subjectKey.slice(prefix.length)] : [])))];
+      const projectIds = idsOf("project:");
+      if (projectIds.length) {
+        for (const p of await db.select({ id: projects.id, name: projects.name }).from(projects).where(inArray(projects.id, projectIds))) {
+          labels.set(`project:${p.id}`, p.name);
+        }
+      }
+      const keyIds = idsOf("virtual_key:");
+      if (keyIds.length) {
+        for (const k of await db.select({ id: virtualKeys.id, name: virtualKeys.name }).from(virtualKeys).where(inArray(virtualKeys.id, keyIds))) {
+          labels.set(`virtual_key:${k.id}`, k.name);
+        }
+      }
+      const callerIds = idsOf("caller:").filter((id) => id !== NO_IDENTITY);
+      if (idsOf("caller:").includes(NO_IDENTITY)) labels.set(`caller:${NO_IDENTITY}`, "Platform (no user identity)");
+      if (callerIds.length) {
+        for (const u of await db.select({ id: users.id, name: users.displayName, email: users.email }).from(users).where(inArray(users.id, callerIds))) {
+          labels.set(`caller:${u.id}`, u.name || u.email);
         }
       }
     }

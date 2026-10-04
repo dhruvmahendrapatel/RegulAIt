@@ -981,6 +981,13 @@
       "when": 1785075000000,
       "tag": "0140_skill_admission_release_age",
       "breakpoints": true
+    },
+    {
+      "idx": 141,
+      "version": "7",
+      "when": 1785076000000,
+      "tag": "0141_served_model",
+      "breakpoints": true
     }
   ]
 }

@@ -2565,6 +2565,12 @@ export const usageEvents = pgTable(
     /** null on connector rows (no provider/model/tokens) */
     provider: text("provider"),
     model: text("model"),
+    /** ADR-0175 A4 (migration 0141) — the model id the PROVIDER reported
+     * serving, verbatim (Anthropic/OpenAI `model`, Google `modelVersion`).
+     * `model` above is what we configured and asked for; this is what came
+     * back. NULL = the provider did not report one (and every pre-0141 row,
+     * every connector/MCP row, every semantic-cache hit) — never guessed. */
+    servedModel: text("served_model"),
     inputTokens: integer("input_tokens"),
     outputTokens: integer("output_tokens"),
     /** agent rows: measured tokens × list price. connector rows: the
@@ -2613,6 +2619,9 @@ export const usageEvents = pgTable(
     index("usage_events_user_idx").on(t.userId, t.at),
     index("usage_events_config_version_idx").on(t.configVersionId),
     index("usage_events_agent_config_version_idx").on(t.agentConfigVersionId),
+    // ADR-0175 A4/A9 — the governance monitor's window scans read the ledger
+    // by time; partial so it holds only agent rows that reported a served model
+    index("usage_events_served_model_idx").on(t.agentId, t.at).where(sql`${t.servedModel} IS NOT NULL`),
   ],
 );
 
@@ -4413,6 +4422,12 @@ export const modelCards = pgTable(
      * can follow — never a claim that anything is CERTIFIED. */
     standardRefs: jsonb("standard_refs").$type<string[]>().notNull().default([]),
     note: text("note"),
+    /** ADR-0175 A4 (migration 0141) — OPTIONAL exact model version this card's
+     * risk position was taken on (e.g. a dated snapshot id). NULL = the card
+     * covers the agent's configured model id under the version-suffix
+     * matching rule. When set, ANY served model that is not exactly this id
+     * raises `served_model_drift` at high severity. */
+    pinnedModelVersion: text("pinned_model_version"),
     createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
