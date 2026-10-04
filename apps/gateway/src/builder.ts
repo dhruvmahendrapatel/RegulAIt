@@ -1,0 +1,1422 @@
+/**
+ * ADR-0172 — THE AGENT BUILDER API (`/v1/builder/*`).
+ *
+ * Every route is for a SIGNED-IN PERSON (non-admin; owner/sharing checks
+ * in-handler). An identity-less token is refused with 403
+ * `builder_requires_identity`: a builder agent runs with its user's
+ * entitlements, and a token with no user has none to lend it. The one admin
+ * route is the manual schedule sweep, which runs every due schedule as each
+ * agent's OWNER, never as the caller.
+ *
+ *  - visibility: owner, everyone (sharing=workspace), listed people
+ *    (sharing=people), admins. Edit: owner or admin.
+ *  - tools: only what the EDITOR holds a grant for (403 tool_not_entitled),
+ *    re-checked for the person at run time (`entitledForYou`).
+ *  - chat: the governed core as the caller (see builder-runtime.ts).
+ *  - audit: `builder-agent-*` / `builder-skill-*` rows on every change.
+ */
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { z } from "zod";
+import {
+  agents,
+  and,
+  asc,
+  auditLog,
+  builderAgentChannels,
+  builderAgentMemory,
+  builderAgentSchedules,
+  builderAgentShares,
+  builderAgentSkills,
+  builderAgentSubagents,
+  builderAgentTools,
+  builderAgents,
+  builderMessages,
+  builderSkills,
+  builderThreads,
+  chatopsConnections,
+  connectors,
+  count,
+  desc,
+  eq,
+  gte,
+  inArray,
+  isNull,
+  mcpServers,
+  mcpTools,
+  or,
+  sql,
+  users,
+  type BuilderAgentRow,
+  type BuilderScheduleRow,
+  type BuilderSkillRow,
+  type BuilderThreadRow,
+  type Db,
+} from "@regulait/db";
+import {
+  builderAddMemorySchema,
+  builderChatSchema,
+  builderCreateAgentSchema,
+  builderCreateChannelSchema,
+  builderCreateScheduleSchema,
+  builderCreateSkillSchema,
+  builderImportAgentSchema,
+  builderImportSkillSchema,
+  builderSetSkillsSchema,
+  builderSetSubagentsSchema,
+  builderSetToolsSchema,
+  builderThreadListQuerySchema,
+  builderUpdateAgentSchema,
+  builderUpdateScheduleSchema,
+  builderUpdateSkillSchema,
+  builderUpdateThreadSchema,
+  builderUsageQuerySchema,
+  nextScheduleRun,
+  parseSkillMarkdown,
+  type BuilderBundle,
+  type BuilderCadenceValue,
+} from "@regulait/shared";
+import type { AgentRow } from "./agents-connectors.js";
+import {
+  canEditAgent,
+  defaultModelFor,
+  entitledConnectorIds,
+  entitledMcpToolIds,
+  listVisibleAgents,
+  loadConnectorsById,
+  loadMcpTools,
+  loadVisibleAgent,
+  modelAllowed,
+  type Viewer,
+} from "./builder-access.js";
+import { BUILDER_INTEGRATION_GROUPS, BUILDER_TEMPLATES, CONNECT_HREF, findTemplate } from "./builder-catalog.js";
+import {
+  messageView,
+  monthStartUtc,
+  runBuilderScheduleSweep,
+  runBuilderTurn,
+} from "./builder-runtime.js";
+import { loadVirtualKeyContext } from "./virtual-keys.js";
+
+export interface BuilderRouteOptions {
+  dataKey?: string | undefined;
+}
+
+const idParam = z.object({ id: z.string().uuid() });
+const memoryParam = z.object({ id: z.string().uuid(), memoryId: z.string().uuid() });
+const scheduleParam = z.object({ id: z.string().uuid(), scheduleId: z.string().uuid() });
+const channelParam = z.object({ id: z.string().uuid(), channelId: z.string().uuid() });
+const templateParam = z.object({ id: z.string().min(1).max(80) });
+
+const PALETTE = ["#5b6cff", "#0ea5e9", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#ec4899", "#14b8a6"];
+function colorFor(name: string): string {
+  let h = 0;
+  for (const ch of name) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return PALETTE[h % PALETTE.length]!;
+}
+
+/** the identity gate shared by every builder route */
+function viewerOf(req: FastifyRequest, reply: FastifyReply): Viewer | null {
+  const userId = req.authCtx.userId;
+  if (!userId) {
+    void reply.status(403).send({
+      error: "builder_requires_identity",
+      detail:
+        "A builder agent runs with the entitlements of the person using it. A token with no user identity has " +
+        "none to lend it.",
+    });
+    return null;
+  }
+  return { userId, isAdmin: req.authCtx.isAdmin };
+}
+
+async function audit(
+  db: Db,
+  userId: string,
+  objectType: "builder_agent" | "builder_skill",
+  objectId: string,
+  ruleId: string,
+  reason: string,
+  detail: Record<string, unknown> = {},
+  effect: "allow" | "deny" = "allow",
+) {
+  await db.insert(auditLog).values({ userId, objectType, objectId, detail, effect, ruleId, ruleChain: [], reason });
+}
+
+async function userNames(db: Db, ids: Array<string | null | undefined>): Promise<Map<string, string>> {
+  const uniq = [...new Set(ids.filter((x): x is string => !!x))];
+  if (!uniq.length) return new Map();
+  const rows = await db.select({ id: users.id, name: users.displayName }).from(users).where(inArray(users.id, uniq));
+  return new Map(rows.map((r) => [r.id, r.name]));
+}
+
+// ---------------------------------------------------------------------------
+// views
+// ---------------------------------------------------------------------------
+
+async function summaries(db: Db, rows: BuilderAgentRow[], viewer: Viewer) {
+  if (!rows.length) return [];
+  const ids = rows.map((r) => r.id);
+  const since = monthStartUtc();
+  const modelIds = [...new Set(rows.map((r) => r.modelAgentId).filter((x): x is string => !!x))];
+  const [models, names, spend, toolCounts, skillCounts, scheduleCounts] = await Promise.all([
+    modelIds.length
+      ? db
+          .select({ id: agents.id, name: agents.name, provider: agents.provider, model: agents.model })
+          .from(agents)
+          .where(inArray(agents.id, modelIds))
+      : Promise.resolve([]),
+    userNames(db, rows.map((r) => r.ownerUserId)),
+    db
+      .select({ agentId: builderMessages.agentId, total: sql<number>`coalesce(sum(${builderMessages.costUsd}), 0)::float8` })
+      .from(builderMessages)
+      .where(and(inArray(builderMessages.agentId, ids), gte(builderMessages.createdAt, since)))
+      .groupBy(builderMessages.agentId),
+    db
+      .select({ agentId: builderAgentTools.agentId, n: count() })
+      .from(builderAgentTools)
+      .where(inArray(builderAgentTools.agentId, ids))
+      .groupBy(builderAgentTools.agentId),
+    db
+      .select({ agentId: builderAgentSkills.agentId, n: count() })
+      .from(builderAgentSkills)
+      .innerJoin(builderSkills, eq(builderAgentSkills.skillId, builderSkills.id))
+      .where(and(inArray(builderAgentSkills.agentId, ids), isNull(builderSkills.archivedAt)))
+      .groupBy(builderAgentSkills.agentId),
+    db
+      .select({ agentId: builderAgentSchedules.agentId, n: count() })
+      .from(builderAgentSchedules)
+      .where(inArray(builderAgentSchedules.agentId, ids))
+      .groupBy(builderAgentSchedules.agentId),
+  ]);
+  const modelById = new Map(models.map((m) => [m.id, m]));
+  const by = <T extends { agentId: string }>(list: T[]) => new Map(list.map((x) => [x.agentId, x]));
+  const spendBy = by(spend);
+  const toolsBy = by(toolCounts);
+  const skillsBy = by(skillCounts);
+  const schedBy = by(scheduleCounts);
+  return rows.map((r) => ({
+    id: r.id,
+    name: r.name,
+    description: r.description,
+    color: r.color,
+    ownerUserId: r.ownerUserId,
+    ownerName: names.get(r.ownerUserId) ?? null,
+    sharing: r.sharing,
+    modelAgent: r.modelAgentId ? (modelById.get(r.modelAgentId) ?? null) : null,
+    templateId: r.templateId,
+    monthlyLimitUsd: r.monthlyLimitUsd,
+    spentThisMonthUsd: Number(Number(spendBy.get(r.id)?.total ?? 0).toFixed(6)),
+    toolCount: Number(toolsBy.get(r.id)?.n ?? 0),
+    skillCount: Number(skillsBy.get(r.id)?.n ?? 0),
+    scheduleCount: Number(schedBy.get(r.id)?.n ?? 0),
+    updatedAt: r.updatedAt.toISOString(),
+    canEdit: canEditAgent(r, viewer),
+  }));
+}
+
+function scheduleView(s: BuilderScheduleRow) {
+  return {
+    id: s.id,
+    name: s.name,
+    cadence: s.cadence,
+    timeUtc: s.timeUtc,
+    prompt: s.prompt,
+    enabled: s.enabled,
+    nextRunAt: s.nextRunAt ? s.nextRunAt.toISOString() : null,
+    lastRunAt: s.lastRunAt ? s.lastRunAt.toISOString() : null,
+  };
+}
+
+/** email channels ride the Outlook ChatOps connection (ADR-0121) */
+const chatopsProviderFor = (provider: string) => (provider === "email" ? "outlook" : provider);
+
+async function toolViews(db: Db, agentId: string, viewer: Viewer) {
+  const tools = await db
+    .select()
+    .from(builderAgentTools)
+    .where(eq(builderAgentTools.agentId, agentId))
+    .orderBy(asc(builderAgentTools.createdAt));
+  const connectorRows = await loadConnectorsById(db, tools.filter((t) => t.kind === "connector").map((t) => t.refId));
+  const mcpRows = await loadMcpTools(db, tools.filter((t) => t.kind === "mcp_tool").map((t) => t.refId));
+  const [okConnectors, okTools] = await Promise.all([
+    entitledConnectorIds(db, viewer.userId),
+    entitledMcpToolIds(db, viewer.userId, mcpRows),
+  ]);
+  return tools.map((t) => {
+    if (t.kind === "connector") {
+      const c = connectorRows.find((r) => r.id === t.refId);
+      return {
+        kind: t.kind,
+        refId: t.refId,
+        name: c?.name ?? "Unavailable connector",
+        provider: c ? (c.providerKind ?? c.kind) : null,
+        requiresApproval: t.requiresApproval,
+        entitledForYou: !!c && okConnectors.has(c.id),
+      };
+    }
+    const m = mcpRows.find((r) => r.id === t.refId);
+    return {
+      kind: t.kind,
+      refId: t.refId,
+      name: m ? m.name : "Unavailable tool",
+      provider: m?.serverName ?? null,
+      requiresApproval: t.requiresApproval,
+      entitledForYou: !!m && okTools.has(m.id),
+    };
+  });
+}
+
+async function agentDetail(db: Db, agent: BuilderAgentRow, viewer: Viewer) {
+  const [summary] = await summaries(db, [agent], viewer);
+  const [shares, tools, subs, skills, memory, schedules, channels] = await Promise.all([
+    db.select({ userId: builderAgentShares.userId }).from(builderAgentShares).where(eq(builderAgentShares.agentId, agent.id)),
+    toolViews(db, agent.id, viewer),
+    db
+      .select({
+        childId: builderAgentSubagents.childId,
+        name: builderAgentSubagents.name,
+        description: builderAgentSubagents.description,
+        childName: builderAgents.name,
+      })
+      .from(builderAgentSubagents)
+      .innerJoin(builderAgents, eq(builderAgentSubagents.childId, builderAgents.id))
+      .where(and(eq(builderAgentSubagents.parentId, agent.id), isNull(builderAgents.archivedAt)))
+      .orderBy(asc(builderAgentSubagents.position)),
+    db
+      .select({ id: builderSkills.id, name: builderSkills.name, description: builderSkills.description })
+      .from(builderAgentSkills)
+      .innerJoin(builderSkills, eq(builderAgentSkills.skillId, builderSkills.id))
+      .where(and(eq(builderAgentSkills.agentId, agent.id), isNull(builderSkills.archivedAt)))
+      .orderBy(asc(builderSkills.name)),
+    db
+      .select()
+      .from(builderAgentMemory)
+      .where(eq(builderAgentMemory.agentId, agent.id))
+      .orderBy(desc(builderAgentMemory.createdAt))
+      .limit(50),
+    db
+      .select()
+      .from(builderAgentSchedules)
+      .where(eq(builderAgentSchedules.agentId, agent.id))
+      .orderBy(asc(builderAgentSchedules.createdAt)),
+    db
+      .select({
+        id: builderAgentChannels.id,
+        provider: builderAgentChannels.provider,
+        connectionId: chatopsConnections.id,
+        connectionName: chatopsConnections.name,
+        connectionProvider: chatopsConnections.provider,
+        connectionEnabled: chatopsConnections.enabled,
+      })
+      .from(builderAgentChannels)
+      .leftJoin(chatopsConnections, eq(builderAgentChannels.chatopsConnectionId, chatopsConnections.id))
+      .where(eq(builderAgentChannels.agentId, agent.id))
+      .orderBy(asc(builderAgentChannels.createdAt)),
+  ]);
+  const names = await userNames(db, [...shares.map((s) => s.userId), ...memory.map((m) => m.createdByUserId)]);
+  return {
+    ...summary!,
+    instructions: agent.instructions,
+    connectionFormat: agent.connectionFormat,
+    computerUse: agent.computerUse,
+    sharedUserIds: shares.map((s) => s.userId),
+    sharedUsers: shares.map((s) => ({ id: s.userId, name: names.get(s.userId) ?? null })),
+    tools,
+    subagents: subs,
+    skills,
+    memory: memory.map((m) => ({
+      id: m.id,
+      content: m.content,
+      createdByName: m.createdByUserId ? (names.get(m.createdByUserId) ?? null) : null,
+      createdAt: m.createdAt.toISOString(),
+    })),
+    schedules: schedules.map(scheduleView),
+    channels: channels.map((c) => {
+      const connected =
+        !!c.connectionId && !!c.connectionEnabled && c.connectionProvider === chatopsProviderFor(c.provider);
+      return {
+        id: c.id,
+        provider: c.provider,
+        status: connected ? ("connected" as const) : ("needs_setup" as const),
+        connectionName: c.connectionName ?? null,
+      };
+    }),
+  };
+}
+
+function skillVisible(s: BuilderSkillRow, viewer: Viewer): boolean {
+  return !s.archivedAt && (viewer.isAdmin || s.ownerUserId === viewer.userId || s.visibility === "workspace");
+}
+
+async function threadSummaries(db: Db, threads: BuilderThreadRow[]) {
+  if (!threads.length) return [];
+  const ids = threads.map((t) => t.id);
+  const agentIds = [...new Set(threads.map((t) => t.agentId))];
+  const [agentRows, last] = await Promise.all([
+    db
+      .select({ id: builderAgents.id, name: builderAgents.name, color: builderAgents.color })
+      .from(builderAgents)
+      .where(inArray(builderAgents.id, agentIds)),
+    db
+      .selectDistinctOn([builderMessages.threadId], { threadId: builderMessages.threadId, content: builderMessages.content })
+      .from(builderMessages)
+      .where(inArray(builderMessages.threadId, ids))
+      .orderBy(builderMessages.threadId, desc(builderMessages.createdAt)),
+  ]);
+  const agentBy = new Map(agentRows.map((a) => [a.id, a]));
+  const lastBy = new Map(last.map((l) => [l.threadId, l.content]));
+  return threads.map((t) => ({
+    id: t.id,
+    agentId: t.agentId,
+    agentName: agentBy.get(t.agentId)?.name ?? null,
+    agentColor: agentBy.get(t.agentId)?.color ?? null,
+    title: t.title,
+    status: t.status,
+    source: t.source,
+    lastMessagePreview: (lastBy.get(t.id) ?? "").replace(/\s+/g, " ").slice(0, 160),
+    updatedAt: t.updatedAt.toISOString(),
+  }));
+}
+
+// ---------------------------------------------------------------------------
+// writers shared by create / template / import
+// ---------------------------------------------------------------------------
+
+/** find a skill with this name the user can see, else create it (private) */
+async function ensureSkill(db: Db, ownerUserId: string, s: { name: string; description: string; body: string }) {
+  const [existing] = await db
+    .select()
+    .from(builderSkills)
+    .where(
+      and(
+        eq(builderSkills.name, s.name),
+        isNull(builderSkills.archivedAt),
+        or(eq(builderSkills.ownerUserId, ownerUserId), eq(builderSkills.visibility, "workspace")),
+      ),
+    )
+    .orderBy(asc(builderSkills.createdAt))
+    .limit(1);
+  if (existing) return existing;
+  const [row] = await db
+    .insert(builderSkills)
+    .values({ name: s.name, description: s.description, body: s.body, visibility: "private", ownerUserId })
+    .returning();
+  return row!;
+}
+
+interface Seed {
+  instructions: string;
+  skills: Array<{ name: string; description: string; body: string }>;
+  subagents: Array<{ name: string; description: string }>;
+  schedules: Array<{ name: string; cadence: BuilderCadenceValue; timeUtc: string; prompt: string }>;
+}
+
+/** attach seeded skills, child agents and schedules to a freshly created agent.
+ * Child agents are private, owned by the creator, on the same model. Seeded
+ * schedules start DISABLED: nothing spends until the owner turns one on. */
+async function applySeed(db: Db, agent: BuilderAgentRow, seed: Seed) {
+  for (const s of seed.skills) {
+    const skill = await ensureSkill(db, agent.ownerUserId, s);
+    await db.insert(builderAgentSkills).values({ agentId: agent.id, skillId: skill.id }).onConflictDoNothing();
+  }
+  let position = 0;
+  for (const sub of seed.subagents) {
+    const [child] = await db
+      .insert(builderAgents)
+      .values({
+        name: sub.name.slice(0, 80),
+        description: sub.description.slice(0, 500),
+        color: colorFor(sub.name),
+        ownerUserId: agent.ownerUserId,
+        sharing: "private",
+        modelAgentId: agent.modelAgentId,
+        instructions: `# ${sub.name}\n\n${sub.description}`,
+        connectionFormat: agent.connectionFormat,
+        computerUse: false,
+      })
+      .returning();
+    await db.insert(builderAgentSubagents).values({
+      parentId: agent.id,
+      childId: child!.id,
+      name: sub.name.slice(0, 80),
+      description: sub.description.slice(0, 500),
+      position: position++,
+    });
+  }
+  for (const s of seed.schedules) {
+    await db.insert(builderAgentSchedules).values({
+      agentId: agent.id,
+      name: s.name,
+      cadence: s.cadence,
+      timeUtc: s.timeUtc,
+      prompt: s.prompt,
+      enabled: false,
+      nextRunAt: null,
+    });
+  }
+}
+
+/** would making `children` sub-agents of `parentId` close a cycle? */
+async function closesCycle(db: Db, parentId: string, children: string[]): Promise<boolean> {
+  const edges = await db
+    .select({ parentId: builderAgentSubagents.parentId, childId: builderAgentSubagents.childId })
+    .from(builderAgentSubagents);
+  const adj = new Map<string, string[]>();
+  for (const e of edges) {
+    if (e.parentId === parentId) continue; // replaced by this write
+    adj.set(e.parentId, [...(adj.get(e.parentId) ?? []), e.childId]);
+  }
+  const stack = [...children];
+  const seen = new Set<string>();
+  while (stack.length) {
+    const n = stack.pop()!;
+    if (n === parentId) return true;
+    if (seen.has(n)) continue;
+    seen.add(n);
+    stack.push(...(adj.get(n) ?? []));
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// routes
+// ---------------------------------------------------------------------------
+
+export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: BuilderRouteOptions = {}): void {
+  /** load an agent the viewer may see; sends 404 otherwise */
+  const visible = async (req: FastifyRequest, reply: FastifyReply, viewer: Viewer) => {
+    const { id } = idParam.parse(req.params);
+    const agent = await loadVisibleAgent(db, id, viewer);
+    if (!agent) {
+      void reply.status(404).send({ error: "unknown_builder_agent" });
+      return null;
+    }
+    return agent;
+  };
+  /** load an agent the viewer may EDIT; 404 when invisible, 403 when read-only */
+  const editable = async (req: FastifyRequest, reply: FastifyReply, viewer: Viewer) => {
+    const agent = await visible(req, reply, viewer);
+    if (!agent) return null;
+    if (!canEditAgent(agent, viewer)) {
+      void reply.status(403).send({ error: "not_agent_editor", detail: "only the agent's owner or an admin can change it" });
+      return null;
+    }
+    return agent;
+  };
+  const touch = (id: string) => db.update(builderAgents).set({ updatedAt: new Date() }).where(eq(builderAgents.id, id));
+
+  // --- agents ----------------------------------------------------------------
+
+  app.get("/v1/builder/agents", async (req, reply) => {
+    const viewer = viewerOf(req, reply);
+    if (!viewer) return;
+    return { agents: await summaries(db, await listVisibleAgents(db, viewer), viewer) };
+  });
+
+  app.post("/v1/builder/agents", async (req, reply) => {
+    const viewer = viewerOf(req, reply);
+    if (!viewer) return;
+    const body = builderCreateAgentSchema.parse(req.body ?? {});
+    const template = body.templateId ? findTemplate(body.templateId) : undefined;
+    if (body.templateId && !template) return reply.status(404).send({ error: "unknown_template" });
+
+    let model: AgentRow | null = null;
+    if (body.modelAgentId) {
+      const [m] = await db.select().from(agents).where(eq(agents.id, body.modelAgentId));
+      if (!m) return reply.status(404).send({ error: "unknown_model" });
+      if (!(await modelAllowed(db, viewer.userId, m))) {
+        return reply.status(403).send({ error: "model_not_entitled", detail: `you may not use the model '${m.name}'` });
+      }
+      model = m;
+    } else {
+      model = await defaultModelFor(db, viewer.userId);
+    }
+
+    const [agent] = await db
+      .insert(builderAgents)
+      .values({
+        name: body.name,
+        description: body.description ?? (template ? template.description.slice(0, 500) : ""),
+        color: colorFor(body.name),
+        ownerUserId: viewer.userId,
+        sharing: "private",
+        modelAgentId: model?.id ?? null,
+        templateId: template?.id ?? null,
+        instructions: template?.instructions ?? "",
+        connectionFormat: body.connectionFormat,
+        computerUse: body.computerUse,
+      })
+      .returning();
+    if (template) await applySeed(db, agent!, template);
+    await audit(db, viewer.userId, "builder_agent", agent!.id, "builder-agent-created", `builder agent '${agent!.name}' created`, {
+      templateId: template?.id ?? null,
+      modelAgentId: model?.id ?? null,
+      connectionFormat: body.connectionFormat,
+      computerUse: body.computerUse,
+    });
+    return reply.status(201).send({ agent: await agentDetail(db, agent!, viewer) });
+  });
+
+  app.get("/v1/builder/agents/:id", async (req, reply) => {
+    const viewer = viewerOf(req, reply);
+    if (!viewer) return;
+    const agent = await visible(req, reply, viewer);
+    if (!agent) return;
+    return { agent: await agentDetail(db, agent, viewer) };
+  });
+
+  app.patch("/v1/builder/agents/:id", async (req, reply) => {
+    const viewer = viewerOf(req, reply);
+    if (!viewer) return;
+    const body = builderUpdateAgentSchema.parse(req.body ?? {});
+    const agent = await editable(req, reply, viewer);
+    if (!agent) return;
+    if (body.connectionFormat !== undefined) {
+      return reply.status(409).send({
+        error: "connection_format_locked",
+        detail: "the connection format is fixed when an agent is created; create a new agent to change it",
+      });
+    }
+    if (body.modelAgentId !== undefined && body.modelAgentId !== agent.modelAgentId) {
+      const [m] = await db.select().from(agents).where(eq(agents.id, body.modelAgentId));
+      if (!m) return reply.status(404).send({ error: "unknown_model" });
+      if (!(await modelAllowed(db, viewer.userId, m))) {
+        return reply.status(403).send({ error: "model_not_entitled", detail: `you may not use the model '${m.name}'` });
+      }
+    }
+    if (body.sharedUserIds?.length) {
+      const found = await db.select({ id: users.id }).from(users).where(inArray(users.id, body.sharedUserIds));
+      if (found.length !== new Set(body.sharedUserIds).size) return reply.status(422).send({ error: "unknown_user" });
+    }
+    const set: Partial<typeof builderAgents.$inferInsert> = { updatedAt: new Date() };
+    for (const k of ["name", "description", "color", "instructions", "modelAgentId", "sharing", "computerUse"] as const) {
+      if (body[k] !== undefined) (set as Record<string, unknown>)[k] = body[k];
+    }
+    if (body.monthlyLimitUsd !== undefined) set.monthlyLimitUsd = body.monthlyLimitUsd;
+    const [updated] = await db.update(builderAgents).set(set).where(eq(builderAgents.id, agent.id)).returning();
+    if (body.sharedUserIds !== undefined) {
+      await db.delete(builderAgentShares).where(eq(builderAgentShares.agentId, agent.id));
+      const uniq = [...new Set(body.sharedUserIds)].filter((u) => u !== agent.ownerUserId);
+      if (uniq.length) await db.insert(builderAgentShares).values(uniq.map((userId) => ({ agentId: agent.id, userId })));
+    }
+    const changed = Object.keys(body);
+    if (body.sharing !== undefined || body.sharedUserIds !== undefined) {
+      await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-sharing-changed",
+        `sharing of '${agent.name}' set to ${body.sharing ?? agent.sharing}`,
+        { from: agent.sharing, to: body.sharing ?? agent.sharing, sharedUserIds: body.sharedUserIds ?? null });
+    }
+    if (body.monthlyLimitUsd !== undefined) {
+      await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-limit-changed",
+        `monthly limit of '${agent.name}' set to ${body.monthlyLimitUsd === null ? "none" : `$${body.monthlyLimitUsd}`}`,
+        { from: agent.monthlyLimitUsd, to: body.monthlyLimitUsd });
+    }
+    const rest = changed.filter((k) => !["sharing", "sharedUserIds", "monthlyLimitUsd"].includes(k));
+    if (rest.length) {
+      await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-updated",
+        `builder agent '${updated!.name}' updated (${rest.join(", ")})`,
+        { fields: rest, ...(body.modelAgentId ? { modelAgentId: body.modelAgentId } : {}) });
+    }
+    return { agent: await agentDetail(db, updated!, viewer) };
+  });
+
+  app.delete("/v1/builder/agents/:id", async (req, reply) => {
+    const viewer = viewerOf(req, reply);
+    if (!viewer) return;
+    const agent = await editable(req, reply, viewer);
+    if (!agent) return;
+    await db.update(builderAgents).set({ archivedAt: new Date(), updatedAt: new Date() }).where(eq(builderAgents.id, agent.id));
+    // an archived agent stops being anyone's sub-agent, and its schedules stop
+    await db.delete(builderAgentSubagents).where(eq(builderAgentSubagents.childId, agent.id));
+    await db.update(builderAgentSchedules).set({ enabled: false, nextRunAt: null }).where(eq(builderAgentSchedules.agentId, agent.id));
+    await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-deleted", `builder agent '${agent.name}' archived`);
+    return reply.status(204).send();
+  });
+
+  app.put("/v1/builder/agents/:id/tools", async (req, reply) => {
+    const viewer = viewerOf(req, reply);
+    if (!viewer) return;
+    const body = builderSetToolsSchema.parse(req.body ?? {});
+    const agent = await editable(req, reply, viewer);
+    if (!agent) return;
+    const connectorIds = body.tools.filter((t) => t.kind === "connector").map((t) => t.refId);
+    const toolIds = body.tools.filter((t) => t.kind === "mcp_tool").map((t) => t.refId);
+    const [connectorRows, mcpRows] = await Promise.all([loadConnectorsById(db, connectorIds), loadMcpTools(db, toolIds)]);
+    for (const id of connectorIds) {
+      if (!connectorRows.some((c) => c.id === id)) return reply.status(404).send({ error: "unknown_tool", refId: id });
+    }
+    for (const id of toolIds) {
+      if (!mcpRows.some((m) => m.id === id)) return reply.status(404).send({ error: "unknown_tool", refId: id });
+    }
+    // THE EDITOR'S OWN GRANTS bound the toolbox — admins included.
+    const [okConnectors, okTools] = await Promise.all([
+      entitledConnectorIds(db, viewer.userId),
+      entitledMcpToolIds(db, viewer.userId, mcpRows),
+    ]);
+    for (const c of connectorRows) {
+      if (!okConnectors.has(c.id)) {
+        await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-tool-not-entitled",
+          `refused adding connector '${c.name}' to '${agent.name}': the editor holds no grant for it`,
+          { kind: "connector", refId: c.id }, "deny");
+        return reply.status(403).send({
+          error: "tool_not_entitled",
+          tool: { kind: "connector", refId: c.id, name: c.name },
+          detail: `you hold no grant for the connector '${c.name}', so you cannot give it to an agent`,
+        });
+      }
+    }
+    for (const m of mcpRows) {
+      if (!okTools.has(m.id)) {
+        await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-tool-not-entitled",
+          `refused adding MCP tool '${m.serverName}/${m.name}' to '${agent.name}': the editor holds no grant for it`,
+          { kind: "mcp_tool", refId: m.id }, "deny");
+        return reply.status(403).send({
+          error: "tool_not_entitled",
+          tool: { kind: "mcp_tool", refId: m.id, name: `${m.serverName}/${m.name}` },
+          detail: `you hold no grant for the MCP tool '${m.serverName}/${m.name}', so you cannot give it to an agent`,
+        });
+      }
+    }
+    const seen = new Set<string>();
+    const rows = body.tools.filter((t) => {
+      const k = `${t.kind}:${t.refId}`;
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
+    await db.transaction(async (tx) => {
+      await tx.delete(builderAgentTools).where(eq(builderAgentTools.agentId, agent.id));
+      if (rows.length) {
+        await tx.insert(builderAgentTools).values(
+          rows.map((t) => ({ agentId: agent.id, kind: t.kind, refId: t.refId, requiresApproval: t.requiresApproval })),
+        );
+      }
+    });
+    await touch(agent.id);
+    await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-tools-changed",
+      `toolbox of '${agent.name}' set to ${rows.length} tool(s)`,
+      { tools: rows.map((t) => ({ kind: t.kind, refId: t.refId, requiresApproval: t.requiresApproval })) });
+    return { agent: await agentDetail(db, (await loadVisibleAgent(db, agent.id, viewer))!, viewer) };
+  });
+
+  app.put("/v1/builder/agents/:id/subagents", async (req, reply) => {
+    const viewer = viewerOf(req, reply);
+    if (!viewer) return;
+    const body = builderSetSubagentsSchema.parse(req.body ?? {});
+    const agent = await editable(req, reply, viewer);
+    if (!agent) return;
+    const childIds = [...new Set(body.subagents.map((s) => s.childId))];
+    if (childIds.includes(agent.id)) {
+      return reply.status(422).send({ error: "subagent_self", detail: "an agent cannot be its own sub-agent" });
+    }
+    for (const id of childIds) {
+      if (!(await loadVisibleAgent(db, id, viewer))) return reply.status(404).send({ error: "unknown_subagent", childId: id });
+    }
+    if (await closesCycle(db, agent.id, childIds)) {
+      return reply.status(422).send({
+        error: "subagent_cycle",
+        detail: "one of these agents already uses this agent (directly or through others) as a sub-agent",
+      });
+    }
+    await db.transaction(async (tx) => {
+      await tx.delete(builderAgentSubagents).where(eq(builderAgentSubagents.parentId, agent.id));
+      const seen = new Set<string>();
+      const rows = body.subagents.filter((s) => (seen.has(s.childId) ? false : (seen.add(s.childId), true)));
+      if (rows.length) {
+        await tx.insert(builderAgentSubagents).values(
+          rows.map((s, i) => ({ parentId: agent.id, childId: s.childId, name: s.name, description: s.description, position: i })),
+        );
+      }
+    });
+    await touch(agent.id);
+    await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-subagents-changed",
+      `sub-agents of '${agent.name}' set to ${childIds.length}`, { childIds });
+    return { agent: await agentDetail(db, (await loadVisibleAgent(db, agent.id, viewer))!, viewer) };
+  });
+
+  app.put("/v1/builder/agents/:id/skills", async (req, reply) => {
+    const viewer = viewerOf(req, reply);
+    if (!viewer) return;
+    const body = builderSetSkillsSchema.parse(req.body ?? {});
+    const agent = await editable(req, reply, viewer);
+    if (!agent) return;
+    const ids = [...new Set(body.skillIds)];
+    const rows = ids.length ? await db.select().from(builderSkills).where(inArray(builderSkills.id, ids)) : [];
+    for (const id of ids) {
+      const s = rows.find((r) => r.id === id);
+      if (!s || !skillVisible(s, viewer)) return reply.status(404).send({ error: "unknown_skill", skillId: id });
+    }
+    await db.transaction(async (tx) => {
+      await tx.delete(builderAgentSkills).where(eq(builderAgentSkills.agentId, agent.id));
+      if (ids.length) await tx.insert(builderAgentSkills).values(ids.map((skillId) => ({ agentId: agent.id, skillId })));
+    });
+    await touch(agent.id);
+    await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-skills-changed",
+      `skills of '${agent.name}' set to ${ids.length}`, { skillIds: ids });
+    return { agent: await agentDetail(db, (await loadVisibleAgent(db, agent.id, viewer))!, viewer) };
+  });
+
+  // --- memory ------------------------------------------------------------------
+
+  app.post("/v1/builder/agents/:id/memory", async (req, reply) => {
+    const viewer = viewerOf(req, reply);
+    if (!viewer) return;
+    const body = builderAddMemorySchema.parse(req.body ?? {});
+    const agent = await editable(req, reply, viewer);
+    if (!agent) return;
+    const [row] = await db
+      .insert(builderAgentMemory)
+      .values({ agentId: agent.id, content: body.content, createdByUserId: viewer.userId })
+      .returning();
+    await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-memory-added", `memory added to '${agent.name}'`, { memoryId: row!.id });
+    const names = await userNames(db, [viewer.userId]);
+    return reply.status(201).send({
+      id: row!.id,
+      content: row!.content,
+      createdByName: names.get(viewer.userId) ?? null,
+      createdAt: row!.createdAt.toISOString(),
+    });
+  });
+
+  app.delete("/v1/builder/agents/:id/memory/:memoryId", async (req, reply) => {
+    const viewer = viewerOf(req, reply);
+    if (!viewer) return;
+    const { memoryId } = memoryParam.parse(req.params);
+    const agent = await editable(req, reply, viewer);
+    if (!agent) return;
+    const deleted = await db
+      .delete(builderAgentMemory)
+      .where(and(eq(builderAgentMemory.id, memoryId), eq(builderAgentMemory.agentId, agent.id)))
+      .returning({ id: builderAgentMemory.id });
+    if (!deleted.length) return reply.status(404).send({ error: "unknown_memory" });
+    await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-memory-removed", `memory removed from '${agent.name}'`, { memoryId });
+    return reply.status(204).send();
+  });
+
+  // --- schedules -----------------------------------------------------------------
+
+  app.post("/v1/builder/agents/:id/schedules", async (req, reply) => {
+    const viewer = viewerOf(req, reply);
+    if (!viewer) return;
+    const body = builderCreateScheduleSchema.parse(req.body ?? {});
+    const agent = await editable(req, reply, viewer);
+    if (!agent) return;
+    const now = new Date();
+    const [row] = await db
+      .insert(builderAgentSchedules)
+      .values({
+        agentId: agent.id,
+        name: body.name,
+        cadence: body.cadence,
+        timeUtc: body.timeUtc,
+        prompt: body.prompt,
+        enabled: body.enabled,
+        nextRunAt: body.enabled ? nextScheduleRun(body.cadence, body.timeUtc, now, now) : null,
+        createdAt: now,
+      })
+      .returning();
+    await touch(agent.id);
+    await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-schedule-created",
+      `schedule '${body.name}' (${body.cadence} ${body.timeUtc} UTC) added to '${agent.name}'`,
+      { scheduleId: row!.id, cadence: body.cadence, timeUtc: body.timeUtc, enabled: body.enabled });
+    return reply.status(201).send(scheduleView(row!));
+  });
+
+  app.patch("/v1/builder/agents/:id/schedules/:scheduleId", async (req, reply) => {
+    const viewer = viewerOf(req, reply);
+    if (!viewer) return;
+    const { scheduleId } = scheduleParam.parse(req.params);
+    const body = builderUpdateScheduleSchema.parse(req.body ?? {});
+    const agent = await editable(req, reply, viewer);
+    if (!agent) return;
+    const [s] = await db
+      .select()
+      .from(builderAgentSchedules)
+      .where(and(eq(builderAgentSchedules.id, scheduleId), eq(builderAgentSchedules.agentId, agent.id)));
+    if (!s) return reply.status(404).send({ error: "unknown_schedule" });
+    const merged = { ...s, ...Object.fromEntries(Object.entries(body).filter(([, v]) => v !== undefined)) } as BuilderScheduleRow;
+    const now = new Date();
+    const timingChanged = body.cadence !== undefined || body.timeUtc !== undefined || body.enabled !== undefined;
+    const nextRunAt = !merged.enabled
+      ? null
+      : timingChanged || !s.nextRunAt
+        ? nextScheduleRun(merged.cadence as BuilderCadenceValue, merged.timeUtc, now, s.createdAt)
+        : s.nextRunAt;
+    const [row] = await db
+      .update(builderAgentSchedules)
+      .set({
+        name: merged.name,
+        cadence: merged.cadence,
+        timeUtc: merged.timeUtc,
+        prompt: merged.prompt,
+        enabled: merged.enabled,
+        nextRunAt,
+        updatedAt: now,
+      })
+      .where(eq(builderAgentSchedules.id, s.id))
+      .returning();
+    await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-schedule-updated",
+      `schedule '${merged.name}' of '${agent.name}' updated (${Object.keys(body).join(", ")})`,
+      { scheduleId: s.id, fields: Object.keys(body) });
+    return scheduleView(row!);
+  });
+
+  app.delete("/v1/builder/agents/:id/schedules/:scheduleId", async (req, reply) => {
+    const viewer = viewerOf(req, reply);
+    if (!viewer) return;
+    const { scheduleId } = scheduleParam.parse(req.params);
+    const agent = await editable(req, reply, viewer);
+    if (!agent) return;
+    const deleted = await db
+      .delete(builderAgentSchedules)
+      .where(and(eq(builderAgentSchedules.id, scheduleId), eq(builderAgentSchedules.agentId, agent.id)))
+      .returning({ id: builderAgentSchedules.id, name: builderAgentSchedules.name });
+    if (!deleted.length) return reply.status(404).send({ error: "unknown_schedule" });
+    await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-schedule-deleted",
+      `schedule '${deleted[0]!.name}' removed from '${agent.name}'`, { scheduleId });
+    return reply.status(204).send();
+  });
+
+  // Admin (the default gate): run due schedules now. Each runs as its agent's
+  // OWNER; the scheduler job `builder-agent-schedules` calls the same function.
+  app.post("/v1/builder/schedules/sweep", async () => {
+    return runBuilderScheduleSweep(db, opts.dataKey);
+  });
+
+  // --- channels -----------------------------------------------------------------
+
+  app.post("/v1/builder/agents/:id/channels", async (req, reply) => {
+    const viewer = viewerOf(req, reply);
+    if (!viewer) return;
+    const body = builderCreateChannelSchema.parse(req.body ?? {});
+    const agent = await editable(req, reply, viewer);
+    if (!agent) return;
+    const wanted = chatopsProviderFor(body.provider) as "slack" | "teams" | "outlook";
+    let connectionId: string | null = null;
+    if (body.chatopsConnectionId) {
+      const [c] = await db.select().from(chatopsConnections).where(eq(chatopsConnections.id, body.chatopsConnectionId));
+      if (!c) return reply.status(404).send({ error: "unknown_chatops_connection" });
+      if (c.provider !== wanted) {
+        return reply.status(422).send({
+          error: "chatops_provider_mismatch",
+          detail: `connection '${c.name}' is a ${c.provider} connection, not ${wanted}`,
+        });
+      }
+      connectionId = c.id;
+    } else {
+      const [c] = await db
+        .select()
+        .from(chatopsConnections)
+        .where(and(eq(chatopsConnections.provider, wanted), eq(chatopsConnections.enabled, true)))
+        .orderBy(asc(chatopsConnections.createdAt))
+        .limit(1);
+      connectionId = c?.id ?? null;
+    }
+    const [row] = await db
+      .insert(builderAgentChannels)
+      .values({ agentId: agent.id, provider: body.provider, chatopsConnectionId: connectionId })
+      .returning();
+    await touch(agent.id);
+    await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-channel-added",
+      `${body.provider} channel added to '${agent.name}'${connectionId ? "" : " (needs setup: no matching ChatOps connection)"}`,
+      { channelId: row!.id, provider: body.provider, chatopsConnectionId: connectionId });
+    const detail = await agentDetail(db, agent, viewer);
+    return reply.status(201).send(detail.channels.find((c) => c.id === row!.id));
+  });
+
+  app.delete("/v1/builder/agents/:id/channels/:channelId", async (req, reply) => {
+    const viewer = viewerOf(req, reply);
+    if (!viewer) return;
+    const { channelId } = channelParam.parse(req.params);
+    const agent = await editable(req, reply, viewer);
+    if (!agent) return;
+    const deleted = await db
+      .delete(builderAgentChannels)
+      .where(and(eq(builderAgentChannels.id, channelId), eq(builderAgentChannels.agentId, agent.id)))
+      .returning({ id: builderAgentChannels.id, provider: builderAgentChannels.provider });
+    if (!deleted.length) return reply.status(404).send({ error: "unknown_channel" });
+    await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-channel-removed",
+      `${deleted[0]!.provider} channel removed from '${agent.name}'`, { channelId });
+    return reply.status(204).send();
+  });
+
+  // --- export / import ---------------------------------------------------------
+
+  app.get("/v1/builder/agents/:id/export", async (req, reply) => {
+    const viewer = viewerOf(req, reply);
+    if (!viewer) return;
+    const agent = await visible(req, reply, viewer);
+    if (!agent) return;
+    const [model] = agent.modelAgentId
+      ? await db.select().from(agents).where(eq(agents.id, agent.modelAgentId))
+      : [];
+    const tools = await db.select().from(builderAgentTools).where(eq(builderAgentTools.agentId, agent.id));
+    const connectorRows = await loadConnectorsById(db, tools.filter((t) => t.kind === "connector").map((t) => t.refId));
+    const mcpRows = await loadMcpTools(db, tools.filter((t) => t.kind === "mcp_tool").map((t) => t.refId));
+    const detail = await agentDetail(db, agent, viewer);
+    const skillRows = detail.skills.length
+      ? await db.select().from(builderSkills).where(inArray(builderSkills.id, detail.skills.map((s) => s.id)))
+      : [];
+    const bundle: BuilderBundle = {
+      version: 1,
+      agent: {
+        name: agent.name,
+        description: agent.description,
+        color: agent.color,
+        instructions: agent.instructions,
+        connectionFormat: agent.connectionFormat,
+        computerUse: agent.computerUse,
+        monthlyLimitUsd: agent.monthlyLimitUsd,
+        model: model ? { name: model.name, provider: model.provider, model: model.model } : null,
+        tools: tools.flatMap((t): BuilderBundle["agent"]["tools"] => {
+          if (t.kind === "connector") {
+            const c = connectorRows.find((r) => r.id === t.refId);
+            return c ? [{ kind: "connector" as const, name: c.name, server: null, requiresApproval: t.requiresApproval }] : [];
+          }
+          const m = mcpRows.find((r) => r.id === t.refId);
+          return m ? [{ kind: "mcp_tool" as const, name: m.name, server: m.serverName, requiresApproval: t.requiresApproval }] : [];
+        }),
+        subagents: detail.subagents.map((s) => ({ name: s.name, description: s.description })),
+        skills: skillRows.map((s) => s.name),
+        schedules: detail.schedules.map((s) => ({
+          name: s.name,
+          cadence: s.cadence as BuilderCadenceValue,
+          timeUtc: s.timeUtc,
+          prompt: s.prompt,
+        })),
+      },
+      skills: skillRows.map((s) => ({ name: s.name, description: s.description, body: s.body })),
+    };
+    return { bundle };
+  });
+
+  app.post("/v1/builder/agents/import", async (req, reply) => {
+    const viewer = viewerOf(req, reply);
+    if (!viewer) return;
+    const { bundle } = builderImportAgentSchema.parse(req.body ?? {});
+    const a = bundle.agent;
+    // the model: the bundle's binding by name if the importer may use it
+    let model: AgentRow | null = null;
+    if (a.model) {
+      const [m] = await db.select().from(agents).where(eq(agents.name, a.model.name));
+      if (m && (await modelAllowed(db, viewer.userId, m))) model = m;
+    }
+    model ??= await defaultModelFor(db, viewer.userId);
+
+    // tools: re-resolved by name and re-entitled for the IMPORTER
+    const dropped: Array<{ kind: string; name: string; reason: "not_found" | "not_entitled" }> = [];
+    const keep: Array<{ kind: "connector" | "mcp_tool"; refId: string; requiresApproval: boolean }> = [];
+    const okConnectors = await entitledConnectorIds(db, viewer.userId);
+    for (const t of a.tools) {
+      const label = t.kind === "mcp_tool" && t.server ? `${t.server}/${t.name}` : t.name;
+      if (t.kind === "connector") {
+        const [c] = await db.select({ id: connectors.id }).from(connectors).where(eq(connectors.name, t.name));
+        if (!c) dropped.push({ kind: t.kind, name: label, reason: "not_found" });
+        else if (!okConnectors.has(c.id)) dropped.push({ kind: t.kind, name: label, reason: "not_entitled" });
+        else keep.push({ kind: "connector", refId: c.id, requiresApproval: t.requiresApproval });
+      } else {
+        const [m] = t.server
+          ? await db
+              .select({ id: mcpTools.id })
+              .from(mcpTools)
+              .innerJoin(mcpServers, eq(mcpTools.serverId, mcpServers.id))
+              .where(and(eq(mcpTools.name, t.name), eq(mcpServers.name, t.server)))
+          : [];
+        if (!m) {
+          dropped.push({ kind: t.kind, name: label, reason: "not_found" });
+          continue;
+        }
+        const info = await loadMcpTools(db, [m.id]);
+        if (!(await entitledMcpToolIds(db, viewer.userId, info)).has(m.id)) {
+          dropped.push({ kind: t.kind, name: label, reason: "not_entitled" });
+        } else keep.push({ kind: "mcp_tool", refId: m.id, requiresApproval: t.requiresApproval });
+      }
+    }
+    const [agent] = await db
+      .insert(builderAgents)
+      .values({
+        name: a.name,
+        description: a.description,
+        color: a.color ?? colorFor(a.name),
+        ownerUserId: viewer.userId,
+        sharing: "private",
+        modelAgentId: model?.id ?? null,
+        instructions: a.instructions,
+        connectionFormat: a.connectionFormat,
+        computerUse: a.computerUse,
+        monthlyLimitUsd: a.monthlyLimitUsd,
+      })
+      .returning();
+    const uniqKeep = [...new Map(keep.map((k) => [`${k.kind}:${k.refId}`, k])).values()];
+    if (uniqKeep.length) await db.insert(builderAgentTools).values(uniqKeep.map((k) => ({ ...k, agentId: agent!.id })));
+    const skillsByName = new Map(bundle.skills.map((s) => [s.name, s]));
+    await applySeed(db, agent!, {
+      instructions: a.instructions,
+      skills: a.skills.map((n) => skillsByName.get(n) ?? { name: n, description: "", body: "" }),
+      subagents: a.subagents,
+      schedules: a.schedules,
+    });
+    await audit(db, viewer.userId, "builder_agent", agent!.id, "builder-agent-imported",
+      `builder agent '${agent!.name}' imported (${uniqKeep.length} tool(s) kept, ${dropped.length} dropped)`,
+      { dropped, modelAgentId: model?.id ?? null });
+    return reply.status(201).send({ agent: await agentDetail(db, agent!, viewer), dropped });
+  });
+
+  // --- chat, threads, inbox ------------------------------------------------------
+
+  app.post("/v1/builder/agents/:id/chat", async (req, reply) => {
+    const viewer = viewerOf(req, reply);
+    if (!viewer) return;
+    const body = builderChatSchema.parse(req.body ?? {});
+    const agent = await visible(req, reply, viewer);
+    if (!agent) return;
+    const out = await runBuilderTurn(db, opts.dataKey, {
+      agent,
+      userId: viewer.userId,
+      message: body.message,
+      threadId: body.threadId,
+      source: "chat",
+      virtualKey: await loadVirtualKeyContext(db, req),
+    });
+    if (!out.ok) {
+      return reply.status(out.status).send({
+        error: out.error,
+        ...(out.detail ? { detail: out.detail } : {}),
+        ...(out.threadId ? { threadId: out.threadId } : {}),
+      });
+    }
+    const [thread] = await threadSummaries(db, [out.thread]);
+    return { thread, messages: out.messages.map(messageView) };
+  });
+
+  app.get("/v1/builder/threads", async (req, reply) => {
+    const viewer = viewerOf(req, reply);
+    if (!viewer) return;
+    const q = builderThreadListQuerySchema.parse(req.query ?? {});
+    const where = [eq(builderThreads.userId, viewer.userId)];
+    if (q.status !== "all") where.push(eq(builderThreads.status, q.status));
+    if (q.agentId) where.push(eq(builderThreads.agentId, q.agentId));
+    const rows = await db
+      .select()
+      .from(builderThreads)
+      .where(and(...where))
+      .orderBy(desc(builderThreads.updatedAt))
+      .limit(200);
+    return { threads: await threadSummaries(db, rows) };
+  });
+
+  const ownThread = async (req: FastifyRequest, reply: FastifyReply, viewer: Viewer) => {
+    const { id } = idParam.parse(req.params);
+    const [t] = await db.select().from(builderThreads).where(eq(builderThreads.id, id));
+    // threads are personal (like conversations): someone else's reads as unknown
+    if (!t || t.userId !== viewer.userId) {
+      void reply.status(404).send({ error: "unknown_thread" });
+      return null;
+    }
+    return t;
+  };
+
+  app.get("/v1/builder/threads/:id", async (req, reply) => {
+    const viewer = viewerOf(req, reply);
+    if (!viewer) return;
+    const t = await ownThread(req, reply, viewer);
+    if (!t) return;
+    const msgs = await db
+      .select()
+      .from(builderMessages)
+      .where(eq(builderMessages.threadId, t.id))
+      .orderBy(asc(builderMessages.createdAt));
+    const [thread] = await threadSummaries(db, [t]);
+    return { thread, messages: msgs.map(messageView) };
+  });
+
+  app.patch("/v1/builder/threads/:id", async (req, reply) => {
+    const viewer = viewerOf(req, reply);
+    if (!viewer) return;
+    const body = builderUpdateThreadSchema.parse(req.body ?? {});
+    const t = await ownThread(req, reply, viewer);
+    if (!t) return;
+    const [row] = await db
+      .update(builderThreads)
+      .set({ status: body.status, updatedAt: new Date() })
+      .where(eq(builderThreads.id, t.id))
+      .returning();
+    const [thread] = await threadSummaries(db, [row!]);
+    return { thread };
+  });
+
+  // --- skills library ---------------------------------------------------------
+
+  const skillView = async (rows: BuilderSkillRow[], viewer: Viewer) => {
+    if (!rows.length) return [];
+    const ids = rows.map((r) => r.id);
+    const [names, used] = await Promise.all([
+      userNames(db, rows.map((r) => r.ownerUserId)),
+      db
+        .select({ skillId: builderAgentSkills.skillId, n: count() })
+        .from(builderAgentSkills)
+        .innerJoin(builderAgents, eq(builderAgentSkills.agentId, builderAgents.id))
+        .where(and(inArray(builderAgentSkills.skillId, ids), isNull(builderAgents.archivedAt)))
+        .groupBy(builderAgentSkills.skillId),
+    ]);
+    const usedBy = new Map(used.map((u) => [u.skillId, Number(u.n)]));
+    return rows.map((s) => ({
+      id: s.id,
+      name: s.name,
+      description: s.description,
+      visibility: s.visibility,
+      ownerName: names.get(s.ownerUserId) ?? null,
+      usedBy: usedBy.get(s.id) ?? 0,
+      updatedAt: s.updatedAt.toISOString(),
+      canEdit: viewer.isAdmin || s.ownerUserId === viewer.userId,
+    }));
+  };
+
+  const visibleSkill = async (req: FastifyRequest, reply: FastifyReply, viewer: Viewer, forEdit: boolean) => {
+    const { id } = idParam.parse(req.params);
+    const [s] = await db.select().from(builderSkills).where(eq(builderSkills.id, id));
+    if (!s || !skillVisible(s, viewer)) {
+      void reply.status(404).send({ error: "unknown_skill" });
+      return null;
+    }
+    if (forEdit && !(viewer.isAdmin || s.ownerUserId === viewer.userId)) {
+      void reply.status(403).send({ error: "not_skill_editor", detail: "only the skill's owner or an admin can change it" });
+      return null;
+    }
+    return s;
+  };
+
+  app.get("/v1/builder/skills", async (req, reply) => {
+    const viewer = viewerOf(req, reply);
+    if (!viewer) return;
+    const rows = await db
+      .select()
+      .from(builderSkills)
+      .where(
+        viewer.isAdmin
+          ? isNull(builderSkills.archivedAt)
+          : and(
+              isNull(builderSkills.archivedAt),
+              or(eq(builderSkills.ownerUserId, viewer.userId), eq(builderSkills.visibility, "workspace")),
+            ),
+      )
+      .orderBy(asc(builderSkills.name));
+    return { skills: await skillView(rows, viewer) };
+  });
+
+  const createSkill = async (viewer: Viewer, s: { name: string; description: string; body: string; visibility: "private" | "workspace" }, ruleId: string) => {
+    const [row] = await db
+      .insert(builderSkills)
+      .values({ ...s, ownerUserId: viewer.userId })
+      .returning();
+    await audit(db, viewer.userId, "builder_skill", row!.id, ruleId, `skill '${row!.name}' added to the library (${s.visibility})`, {
+      visibility: s.visibility,
+    });
+    const [view] = await skillView([row!], viewer);
+    return { ...view!, body: row!.body };
+  };
+
+  app.post("/v1/builder/skills", async (req, reply) => {
+    const viewer = viewerOf(req, reply);
+    if (!viewer) return;
+    const body = builderCreateSkillSchema.parse(req.body ?? {});
+    return reply.status(201).send({ skill: await createSkill(viewer, body, "builder-skill-created") });
+  });
+
+  app.post("/v1/builder/skills/import", async (req, reply) => {
+    const viewer = viewerOf(req, reply);
+    if (!viewer) return;
+    const { markdown } = builderImportSkillSchema.parse(req.body ?? {});
+    const parsed = parseSkillMarkdown(markdown);
+    if (!parsed) {
+      return reply.status(422).send({
+        error: "skill_frontmatter_missing",
+        detail: "a SKILL.md starts with a --- block that names the skill (name: …) and describes it (description: …)",
+      });
+    }
+    if (parsed.body.length > 20_000) return reply.status(422).send({ error: "skill_body_too_long" });
+    return reply.status(201).send({ skill: await createSkill(viewer, { ...parsed, visibility: "private" }, "builder-skill-imported") });
+  });
+
+  app.get("/v1/builder/skills/:id", async (req, reply) => {
+    const viewer = viewerOf(req, reply);
+    if (!viewer) return;
+    const s = await visibleSkill(req, reply, viewer, false);
+    if (!s) return;
+    const [view] = await skillView([s], viewer);
+    return { skill: { ...view!, body: s.body } };
+  });
+
+  app.patch("/v1/builder/skills/:id", async (req, reply) => {
+    const viewer = viewerOf(req, reply);
+    if (!viewer) return;
+    const body = builderUpdateSkillSchema.parse(req.body ?? {});
+    const s = await visibleSkill(req, reply, viewer, true);
+    if (!s) return;
+    const set: Partial<typeof builderSkills.$inferInsert> = { updatedAt: new Date() };
+    for (const k of ["name", "description", "body", "visibility"] as const) {
+      if (body[k] !== undefined) (set as Record<string, unknown>)[k] = body[k];
+    }
+    const [row] = await db.update(builderSkills).set(set).where(eq(builderSkills.id, s.id)).returning();
+    await audit(db, viewer.userId, "builder_skill", s.id, "builder-skill-updated",
+      `skill '${row!.name}' updated (${Object.keys(body).join(", ")})`, { fields: Object.keys(body) });
+    const [view] = await skillView([row!], viewer);
+    return { skill: { ...view!, body: row!.body } };
+  });
+
+  app.delete("/v1/builder/skills/:id", async (req, reply) => {
+    const viewer = viewerOf(req, reply);
+    if (!viewer) return;
+    const s = await visibleSkill(req, reply, viewer, true);
+    if (!s) return;
+    await db.update(builderSkills).set({ archivedAt: new Date(), updatedAt: new Date() }).where(eq(builderSkills.id, s.id));
+    await audit(db, viewer.userId, "builder_skill", s.id, "builder-skill-deleted", `skill '${s.name}' removed from the library`);
+    return reply.status(204).send();
+  });
+
+  // --- templates, integrations, usage ------------------------------------------
+
+  app.get("/v1/builder/templates", async (req, reply) => {
+    if (!viewerOf(req, reply)) return;
+    return { templates: BUILDER_TEMPLATES };
+  });
+
+  app.get("/v1/builder/templates/:id", async (req, reply) => {
+    if (!viewerOf(req, reply)) return;
+    const { id } = templateParam.parse(req.params);
+    const template = findTemplate(id);
+    if (!template) return reply.status(404).send({ error: "unknown_template" });
+    return { template };
+  });
+
+  app.get("/v1/builder/integrations", async (req, reply) => {
+    if (!viewerOf(req, reply)) return;
+    const [connectorRows, serverRows, chatops, toolCounts] = await Promise.all([
+      db.select({ name: connectors.name, kind: connectors.kind, providerKind: connectors.providerKind }).from(connectors),
+      db.select({ id: mcpServers.id, name: mcpServers.name }).from(mcpServers).orderBy(asc(mcpServers.name)),
+      db.select({ provider: chatopsConnections.provider }).from(chatopsConnections).where(eq(chatopsConnections.enabled, true)),
+      db.select({ serverId: mcpTools.serverId, n: count() }).from(mcpTools).groupBy(mcpTools.serverId),
+    ]);
+    const chatopsProviders = new Set(chatops.map((c) => c.provider as string));
+    const connected = (kind: string, match: string[]) => {
+      if (kind === "chatops") return match.some((m) => chatopsProviders.has(m));
+      if (kind === "mcp") return serverRows.some((s) => match.some((m) => s.name.toLowerCase().includes(m)));
+      return connectorRows.some((c) =>
+        match.some(
+          (m) =>
+            c.kind.toLowerCase() === m || (c.providerKind ?? "").toLowerCase() === m || c.name.toLowerCase().includes(m),
+        ),
+      );
+    };
+    const counts = new Map(toolCounts.map((t) => [t.serverId, Number(t.n)]));
+    return {
+      groups: BUILDER_INTEGRATION_GROUPS.map((g) => ({
+        name: g.name,
+        items: g.items.map((i) => ({
+          key: i.key,
+          name: i.name,
+          description: i.description,
+          category: i.category,
+          status: connected(i.kind, i.match) ? ("connected" as const) : ("available" as const),
+          connectHref: CONNECT_HREF[i.kind],
+          kind: i.kind,
+        })),
+      })),
+      custom: { mcpServers: serverRows.map((s) => ({ id: s.id, name: s.name, toolCount: counts.get(s.id) ?? 0 })) },
+    };
+  });
+
+  app.get("/v1/builder/usage", async (req, reply) => {
+    const viewer = viewerOf(req, reply);
+    if (!viewer) return;
+    const { days } = builderUsageQuerySchema.parse(req.query ?? {});
+    const now = new Date();
+    const since = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - (days - 1)));
+    const scope = [gte(builderMessages.createdAt, since), eq(builderMessages.role, "agent")];
+    if (!viewer.isAdmin) {
+      const owned = await db
+        .select({ id: builderAgents.id })
+        .from(builderAgents)
+        .where(eq(builderAgents.ownerUserId, viewer.userId));
+      const ownedIds = owned.map((o) => o.id);
+      scope.push(
+        ownedIds.length
+          ? or(eq(builderMessages.userId, viewer.userId), inArray(builderMessages.agentId, ownedIds))!
+          : eq(builderMessages.userId, viewer.userId),
+      );
+    }
+    const where = and(...scope);
+    const spend = sql<number>`coalesce(sum(${builderMessages.costUsd}), 0)::float8`;
+    const day = sql<string>`to_char(${builderMessages.createdAt} at time zone 'UTC', 'YYYY-MM-DD')`;
+    const [totals, byAgent, byUser, byModel, daily] = await Promise.all([
+      db
+        .select({
+          spendUsd: spend,
+          messages: count(),
+          agents: sql<number>`count(distinct ${builderMessages.agentId})::int`,
+          activeUsers: sql<number>`count(distinct ${builderMessages.userId})::int`,
+        })
+        .from(builderMessages)
+        .where(where),
+      db
+        .select({ agentId: builderMessages.agentId, spendUsd: spend, messages: count() })
+        .from(builderMessages)
+        .where(where)
+        .groupBy(builderMessages.agentId),
+      db
+        .select({ userId: builderMessages.userId, spendUsd: spend, messages: count() })
+        .from(builderMessages)
+        .where(where)
+        .groupBy(builderMessages.userId),
+      db
+        .select({ provider: builderMessages.provider, model: builderMessages.model, spendUsd: spend, messages: count() })
+        .from(builderMessages)
+        .where(where)
+        .groupBy(builderMessages.provider, builderMessages.model),
+      db
+        .select({ date: day, spendUsd: spend, messages: count() })
+        .from(builderMessages)
+        .where(where)
+        .groupBy(day),
+    ]);
+    const agentRows = byAgent.length
+      ? await db
+          .select({ id: builderAgents.id, name: builderAgents.name, limitUsd: builderAgents.monthlyLimitUsd })
+          .from(builderAgents)
+          .where(inArray(builderAgents.id, byAgent.map((a) => a.agentId)))
+      : [];
+    const agentBy = new Map(agentRows.map((a) => [a.id, a]));
+    const names = await userNames(db, byUser.map((u) => u.userId));
+    const round = (n: unknown) => Number(Number(n ?? 0).toFixed(6));
+    const dailyBy = new Map(daily.map((d) => [d.date, d]));
+    const series = Array.from({ length: days }, (_, i) => {
+      const d = new Date(since.getTime() + i * 86_400_000).toISOString().slice(0, 10);
+      const row = dailyBy.get(d);
+      return { date: d, spendUsd: round(row?.spendUsd), messages: Number(row?.messages ?? 0) };
+    });
+    const bySpend = <T extends { spendUsd: number }>(a: T, b: T) => b.spendUsd - a.spendUsd;
+    return {
+      totals: {
+        spendUsd: round(totals[0]?.spendUsd),
+        messages: Number(totals[0]?.messages ?? 0),
+        agents: Number(totals[0]?.agents ?? 0),
+        activeUsers: Number(totals[0]?.activeUsers ?? 0),
+      },
+      byAgent: byAgent
+        .map((a) => ({
+          agentId: a.agentId,
+          name: agentBy.get(a.agentId)?.name ?? null,
+          spendUsd: round(a.spendUsd),
+          messages: Number(a.messages),
+          limitUsd: agentBy.get(a.agentId)?.limitUsd ?? null,
+        }))
+        .sort(bySpend),
+      byUser: byUser
+        .map((u) => ({ userId: u.userId, name: names.get(u.userId) ?? null, spendUsd: round(u.spendUsd), messages: Number(u.messages) }))
+        .sort(bySpend),
+      byModel: byModel
+        .map((m) => ({ provider: m.provider, model: m.model, spendUsd: round(m.spendUsd), messages: Number(m.messages) }))
+        .sort(bySpend),
+      daily: series,
+    };
+  });
+}

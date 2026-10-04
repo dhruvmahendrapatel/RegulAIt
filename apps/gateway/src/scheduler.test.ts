@@ -715,6 +715,10 @@ describe("every sweep is registered", () => {
         // endpoint that calls the same function, in
         // zz-adr0168-review-policy.test.ts; this list pins its registration.
         SCHEDULER_JOB_NAMES.useCaseRecertification,
+        // ADR-0172: runs due agent-builder schedules as each agent's owner.
+        // Driven end-to-end, through the admin sweep endpoint that calls the
+        // same function, in builder-chat.test.ts; this list pins registration.
+        SCHEDULER_JOB_NAMES.builderAgentSchedules,
       ].sort(),
     );
     for (const def of registry.values()) {

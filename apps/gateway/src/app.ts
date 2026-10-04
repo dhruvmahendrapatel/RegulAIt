@@ -408,6 +408,7 @@ import { registerCostReconciliationRoutes } from "./cost-reconcile.js";
 import { registerTracingRoutes } from "./tracing.js";
 import { registerCompliancePackRoutes } from "./compliance-packs.js";
 import { registerCopilotRoutes } from "./copilot.js";
+import { registerBuilderRoutes } from "./builder.js";
 import type { CopilotNarrator, RecommendationJudge } from "@regulait/shared";
 import { registerChatOpsRoutes } from "./chatops.js";
 import path from "node:path";
@@ -4298,6 +4299,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     dataKey: opts.dataKey,
     narrator: opts.copilotNarrator ?? null,
   });
+  // ADR-0172 — the agent builder. Non-admin (owner/sharing checks in-handler);
+  // chat dispatches through the governed core AS THE CALLER, so a builder
+  // agent never reaches more than the person using it holds.
+  registerBuilderRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0053 — the published contract: the OpenAPI document, the versioning /
   // deprecation policy, and the RFC-8594 Deprecation/Sunset headers. Registered
   // here (rather than first) only for readability; the inventory hook at the top

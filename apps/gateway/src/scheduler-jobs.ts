@@ -48,6 +48,7 @@ import { runMcpHealthProbeSweep } from "./mcp-health-probe.js";
 import { runGovernanceMonitor } from "./governance-monitor.js";
 import { runTraceEvaluationSweep } from "./trace-evaluation.js";
 import { runUseCaseRecertificationSweep } from "./review-policy.js";
+import { runBuilderScheduleSweep } from "./builder-runtime.js";
 import { toRegistry, type SchedulerJobDefinition, type SchedulerJobRegistry } from "./scheduler.js";
 
 const HOUR = 3600;
@@ -78,6 +79,7 @@ export const SCHEDULER_JOB_NAMES = {
   governanceMonitor: "governance-monitor-sweep",
   traceEvaluation: "trace-evaluation-sweep",
   useCaseRecertification: "use-case-recertification",
+  builderAgentSchedules: "builder-agent-schedules",
 } as const;
 
 export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): SchedulerJobDefinition[] {
@@ -528,6 +530,28 @@ export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): Schedu
         return {
           itemsProcessed: out.movedToReview,
           detail: { evaluated: out.evaluated, movedToReview: out.movedToReview, skipped: out.skipped.length },
+        };
+      },
+    },
+    {
+      // ADR-0172. Runs every due builder-agent schedule AS THE AGENT'S OWNER
+      // (never as the scheduler, which has no identity): the run is an
+      // ordinary governed dispatch with the owner's entitlements, budgets and
+      // the agent's monthly limit, and lands in the owner's inbox as a thread
+      // that needs attention. Each schedule is claimed compare-and-swap, so a
+      // manual sweep racing this job runs it once.
+      name: SCHEDULER_JOB_NAMES.builderAgentSchedules,
+      description:
+        "Run every enabled agent-builder schedule that has come due, as the agent's owner, through the governed " +
+        "dispatch path (owner entitlements, budgets and the agent's monthly limit apply). Each run lands in the " +
+        "owner's inbox as a thread that needs attention.",
+      adr: "ADR-0172",
+      defaultIntervalSeconds: 5 * 60,
+      run: async (ctx) => {
+        const out = await runBuilderScheduleSweep(ctx.db, opts.dataKey, { now: ctx.now });
+        return {
+          itemsProcessed: out.ran + out.refused,
+          detail: { due: out.due, ran: out.ran, refused: out.refused, skipped: out.skipped.length },
         };
       },
     },

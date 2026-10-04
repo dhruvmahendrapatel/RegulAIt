@@ -1047,6 +1047,11 @@ export const auditLog = pgTable(
         "remediation",
         // ADR-0161: one CI/CD deploy-gate evaluation (objectId = use case)
         "deploy_gate",
+        // ADR-0172: a builder agent created / changed / shared / run on a
+        // schedule / refused at its spend limit, and a builder skill change
+        // (objectId = the builder agent or skill). Plain text column — no DDL.
+        "builder_agent",
+        "builder_skill",
       ],
     })
       .notNull()
@@ -8492,3 +8497,264 @@ export const rateLimitCounters = pgTable(
 );
 
 export type RateLimitCounterRow = typeof rateLimitCounters.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0172 (migration 0135) — THE AGENT BUILDER.
+//
+// A builder agent is a CONFIGURATION, never an identity with its own
+// authority: it names one governed model binding (`model_agent_id`, a row of
+// the agent registry above), a toolbox of connectors / MCP tools the editor
+// held grants for, sub-agents, skills, memory, schedules and channels. Every
+// run dispatches through the existing governed core AS THE PERSON USING IT
+// (or, for a schedule, as the agent's OWNER), so nothing here can widen what
+// a human may reach. Spend is recorded on `builder_messages.cost_usd` (the
+// value the governed core measured) and the per-agent monthly limit is summed
+// from those rows.
+// ---------------------------------------------------------------------------
+
+export const BUILDER_SHARING = ["private", "workspace", "people"] as const;
+export type BuilderSharing = (typeof BUILDER_SHARING)[number];
+export const BUILDER_CONNECTION_FORMATS = ["shared", "per_user"] as const;
+export const BUILDER_TOOL_KINDS = ["connector", "mcp_tool"] as const;
+export const BUILDER_SKILL_VISIBILITY = ["private", "workspace"] as const;
+export const BUILDER_CADENCES = ["hourly", "daily", "weekdays", "weekly"] as const;
+export type BuilderCadence = (typeof BUILDER_CADENCES)[number];
+export const BUILDER_CHANNEL_PROVIDERS = ["slack", "teams", "outlook", "email"] as const;
+export const BUILDER_THREAD_STATUSES = ["active", "needs_attention", "completed"] as const;
+export const BUILDER_THREAD_SOURCES = ["chat", "schedule", "channel"] as const;
+export const BUILDER_MESSAGE_ROLES = ["user", "agent", "system"] as const;
+
+export const builderAgents = pgTable(
+  "builder_agents",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    description: text("description").notNull().default(""),
+    color: text("color").notNull().default("#5b6cff"),
+    ownerUserId: uuid("owner_user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "restrict" }),
+    sharing: text("sharing", { enum: BUILDER_SHARING }).notNull().default("private"),
+    /** the governed model binding; ON DELETE SET NULL — the agent survives a
+     * registry change and refuses to chat until a model is chosen again */
+    modelAgentId: uuid("model_agent_id").references(() => agents.id, { onDelete: "set null" }),
+    templateId: text("template_id"),
+    instructions: text("instructions").notNull().default(""),
+    /** fixed at creation (PATCH refuses it) */
+    connectionFormat: text("connection_format", { enum: BUILDER_CONNECTION_FORMATS }).notNull(),
+    computerUse: boolean("computer_use").notNull().default(false),
+    monthlyLimitUsd: doublePrecision("monthly_limit_usd"),
+    /** soft delete: archived agents are hidden from every list and refuse chat */
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("builder_agents_owner_idx").on(t.ownerUserId),
+    check(
+      "builder_agents_limit_ck",
+      sql`${t.monthlyLimitUsd} IS NULL OR (${t.monthlyLimitUsd} >= 0.01 AND ${t.monthlyLimitUsd} <= 100000)`,
+    ),
+  ],
+);
+
+export const builderAgentShares = pgTable(
+  "builder_agent_shares",
+  {
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => builderAgents.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.agentId, t.userId] }), index("builder_agent_shares_user_idx").on(t.userId)],
+);
+
+export const builderAgentTools = pgTable(
+  "builder_agent_tools",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => builderAgents.id, { onDelete: "cascade" }),
+    kind: text("kind", { enum: BUILDER_TOOL_KINDS }).notNull(),
+    /** connectors.id for a connector, mcp_tools.id for an MCP tool. FK-free
+     * (two target tables); a dangling ref renders as an unavailable tool. */
+    refId: uuid("ref_id").notNull(),
+    requiresApproval: boolean("requires_approval").notNull().default(false),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("builder_agent_tools_uq").on(t.agentId, t.kind, t.refId)],
+);
+
+export const builderAgentSubagents = pgTable(
+  "builder_agent_subagents",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    parentId: uuid("parent_id")
+      .notNull()
+      .references(() => builderAgents.id, { onDelete: "cascade" }),
+    childId: uuid("child_id")
+      .notNull()
+      .references(() => builderAgents.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    description: text("description").notNull().default(""),
+    position: integer("position").notNull().default(0),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("builder_agent_subagents_uq").on(t.parentId, t.childId),
+    index("builder_agent_subagents_child_idx").on(t.childId),
+    check("builder_agent_subagents_not_self_ck", sql`${t.parentId} <> ${t.childId}`),
+  ],
+);
+
+export const builderSkills = pgTable(
+  "builder_skills",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    description: text("description").notNull().default(""),
+    body: text("body").notNull().default(""),
+    visibility: text("visibility", { enum: BUILDER_SKILL_VISIBILITY }).notNull().default("private"),
+    ownerUserId: uuid("owner_user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "restrict" }),
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("builder_skills_owner_idx").on(t.ownerUserId)],
+);
+
+export const builderAgentSkills = pgTable(
+  "builder_agent_skills",
+  {
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => builderAgents.id, { onDelete: "cascade" }),
+    skillId: uuid("skill_id")
+      .notNull()
+      .references(() => builderSkills.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.agentId, t.skillId] }), index("builder_agent_skills_skill_idx").on(t.skillId)],
+);
+
+export const builderAgentMemory = pgTable(
+  "builder_agent_memory",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => builderAgents.id, { onDelete: "cascade" }),
+    content: text("content").notNull(),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("builder_agent_memory_agent_idx").on(t.agentId, t.createdAt)],
+);
+
+export const builderAgentSchedules = pgTable(
+  "builder_agent_schedules",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => builderAgents.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    cadence: text("cadence", { enum: BUILDER_CADENCES }).notNull(),
+    /** "HH:MM", UTC; for hourly only the minutes are used */
+    timeUtc: text("time_utc").notNull(),
+    prompt: text("prompt").notNull(),
+    enabled: boolean("enabled").notNull().default(true),
+    /** the claim column: the sweep advances it compare-and-swap, so two
+     * concurrent sweeps run a due schedule once */
+    nextRunAt: timestamp("next_run_at", { withTimezone: true }),
+    lastRunAt: timestamp("last_run_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("builder_agent_schedules_agent_idx").on(t.agentId),
+    index("builder_agent_schedules_due_idx").on(t.enabled, t.nextRunAt),
+    check("builder_agent_schedules_time_ck", sql`${t.timeUtc} ~ '^([01][0-9]|2[0-3]):[0-5][0-9]$'`),
+  ],
+);
+
+export const builderAgentChannels = pgTable(
+  "builder_agent_channels",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => builderAgents.id, { onDelete: "cascade" }),
+    provider: text("provider", { enum: BUILDER_CHANNEL_PROVIDERS }).notNull(),
+    chatopsConnectionId: uuid("chatops_connection_id").references(() => chatopsConnections.id, {
+      onDelete: "set null",
+    }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("builder_agent_channels_agent_idx").on(t.agentId)],
+);
+
+export const builderThreads = pgTable(
+  "builder_threads",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => builderAgents.id, { onDelete: "cascade" }),
+    /** whose thread this is — the chatting user, or the agent OWNER for a
+     * schedule run (the identity the run dispatched as) */
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    title: text("title").notNull(),
+    status: text("status", { enum: BUILDER_THREAD_STATUSES }).notNull().default("active"),
+    source: text("source", { enum: BUILDER_THREAD_SOURCES }).notNull().default("chat"),
+    scheduleId: uuid("schedule_id").references(() => builderAgentSchedules.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("builder_threads_user_idx").on(t.userId, t.updatedAt),
+    index("builder_threads_agent_idx").on(t.agentId),
+  ],
+);
+
+export const builderMessages = pgTable(
+  "builder_messages",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    threadId: uuid("thread_id")
+      .notNull()
+      .references(() => builderThreads.id, { onDelete: "cascade" }),
+    /** denormalised from the thread so spend sums need no join */
+    agentId: uuid("agent_id").notNull(),
+    /** the human the dispatch ran as (and who was billed) */
+    userId: uuid("user_id").notNull(),
+    role: text("role", { enum: BUILDER_MESSAGE_ROLES }).notNull(),
+    content: text("content").notNull(),
+    /** agent rows: the served binding, as the governed core reported it */
+    modelAgentId: uuid("model_agent_id"),
+    provider: text("provider"),
+    model: text("model"),
+    costUsd: doublePrecision("cost_usd"),
+    latencyMs: integer("latency_ms"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("builder_messages_thread_idx").on(t.threadId, t.createdAt),
+    index("builder_messages_agent_idx").on(t.agentId, t.createdAt),
+    index("builder_messages_user_idx").on(t.userId, t.createdAt),
+  ],
+);
+
+export type BuilderAgentRow = typeof builderAgents.$inferSelect;
+export type BuilderSkillRow = typeof builderSkills.$inferSelect;
+export type BuilderScheduleRow = typeof builderAgentSchedules.$inferSelect;
+export type BuilderThreadRow = typeof builderThreads.$inferSelect;
+export type BuilderMessageRow = typeof builderMessages.$inferSelect;
