@@ -223,6 +223,9 @@ export const oidcProviders = pgTable("oidc_providers", {
   clientId: text("client_id").notNull(),
   /** AES-256-GCM under REGULAIT_DATA_KEY; write-only at the API */
   clientSecretCiphertext: text("client_secret_ciphertext").notNull(),
+  /** ADR-0175 A7 (migration 0142): when the secret was last set, stamped by
+   * the `regulait_stamp_secret_set` trigger. NULL = set before 0142 (unknown). */
+  secretSetAt: timestamp("secret_set_at", { withTimezone: true }),
   enabled: boolean("enabled").notNull().default(true),
   /** NULL = any domain; else the verified email claim's domain must be listed */
   allowedEmailDomains: jsonb("allowed_email_domains").$type<string[]>(),
@@ -322,6 +325,9 @@ export const samlProviders = pgTable("saml_providers", {
    * AES-256-GCM under REGULAIT_DATA_KEY, WRITE-ONLY at the API — byte-identical
    * handling to oidc_providers.client_secret_ciphertext and the TOTP secret. */
   spPrivateKeyCiphertext: text("sp_private_key_ciphertext"),
+  /** ADR-0175 A7 (migration 0142): when the secret was last set, stamped by
+   * the `regulait_stamp_secret_set` trigger. NULL = set before 0142 (unknown). */
+  secretSetAt: timestamp("secret_set_at", { withTimezone: true }),
   /** the matching SP public certificate (PEM) — public by definition, it is
    * published in our SP metadata for the IdP admin to consume. */
   spCertificate: text("sp_certificate"),
@@ -527,6 +533,9 @@ export const scimTokens = pgTable("scim_tokens", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
   revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  /** ADR-0175 A7 (migration 0142): when the secret was last set, stamped by
+   * the `regulait_stamp_secret_set` trigger. NULL = set before 0142 (unknown). */
+  secretSetAt: timestamp("secret_set_at", { withTimezone: true }),
 });
 
 /**
@@ -1211,6 +1220,9 @@ export const auditLog = pgTable(
         // (objectId = the builder agent or skill). Plain text column — no DDL.
         "builder_agent",
         "builder_skill",
+        // ADR-0175 A15: an energy factor created / changed / removed
+        // (objectId = the factor row). Plain text column — no DDL.
+        "energy_factor",
       ],
     })
       .notNull()
@@ -1874,6 +1886,9 @@ export const customModelProviders = pgTable("custom_model_providers", {
    * local Ollama / LocalAI endpoint has no API key at all, and inventing a
    * placeholder would make "is this authenticated?" unanswerable. */
   keyCiphertext: text("key_ciphertext"),
+  /** ADR-0175 A7 (migration 0142): when the secret was last set, stamped by
+   * the `regulait_stamp_secret_set` trigger. NULL = set before 0142 (unknown). */
+  secretSetAt: timestamp("secret_set_at", { withTimezone: true }),
   /** the provider HALF of the plaintext-http opt-in. Both this AND the
    * matching egress_allow_hosts row must be true for an http:// baseUrl to be
    * reachable — one flag is a typo, two flags are a decision. */
@@ -1940,6 +1955,9 @@ export const externalScorers = pgTable("external_scorers", {
    * same discipline as custom_model_providers.key_ciphertext. NULLABLE: an
    * on-prem scorer that authenticates by network position has no secret. */
   keyCiphertext: text("key_ciphertext"),
+  /** ADR-0175 A7 (migration 0142): when the secret was last set, stamped by
+   * the `regulait_stamp_secret_set` trigger. NULL = set before 0142 (unknown). */
+  secretSetAt: timestamp("secret_set_at", { withTimezone: true }),
   /** which judge-backed scorer kinds this instrument CLAIMS to serve
    * (llm_as_judge / groundedness_judge / answer_relevance_judge). A claim,
    * not a verification — the gateway governs the call, it does not validate
@@ -2031,6 +2049,9 @@ export const connectorCredentials = pgTable("connector_credentials", {
     .unique()
     .references(() => connectors.id, { onDelete: "cascade" }),
   tokenCiphertext: text("token_ciphertext").notNull(),
+  /** ADR-0175 A7 (migration 0142): when the secret was last set, stamped by
+   * the `regulait_stamp_secret_set` trigger. NULL = set before 0142 (unknown). */
+  secretSetAt: timestamp("secret_set_at", { withTimezone: true }),
   baseUrl: text("base_url"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
@@ -2262,6 +2283,9 @@ export const gitConnections = pgTable("git_connections", {
   }).notNull(),
   baseUrl: text("base_url"),
   tokenCiphertext: text("token_ciphertext").notNull(),
+  /** ADR-0175 A7 (migration 0142): when the secret was last set, stamped by
+   * the `regulait_stamp_secret_set` trigger. NULL = set before 0142 (unknown). */
+  secretSetAt: timestamp("secret_set_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -2280,6 +2304,9 @@ export const deployTargets = pgTable("deploy_targets", {
   environment: text("environment"),
   baseUrl: text("base_url"),
   credentialCiphertext: text("credential_ciphertext"),
+  /** ADR-0175 A7 (migration 0142): when the secret was last set, stamped by
+   * the `regulait_stamp_secret_set` trigger. NULL = set before 0142 (unknown). */
+  secretSetAt: timestamp("secret_set_at", { withTimezone: true }),
   // §3 BYOC deployment mode: hosted (we run it), byoc (customer's own cloud
   // account/IAM), or air_gapped (customer-hosted, no execution-plane data ever
   // returns to the control plane — the deploy record we keep is metadata-only).
@@ -2436,6 +2463,9 @@ export const pmConnections = pgTable("pm_connections", {
   baseUrl: text("base_url"),
   project: text("project").notNull(),
   tokenCiphertext: text("token_ciphertext").notNull(),
+  /** ADR-0175 A7 (migration 0142): when the secret was last set, stamped by
+   * the `regulait_stamp_secret_set` trigger. NULL = set before 0142 (unknown). */
+  secretSetAt: timestamp("secret_set_at", { withTimezone: true }),
   mapping: jsonb("mapping"),
   /** jira only: REST API version (2 = legacy plain text, 3 = ADF rich text);
    * null = the provider default (v2) — connections minted before this column
@@ -2448,6 +2478,9 @@ export const pmConnections = pgTable("pm_connections", {
    * key — stored AES-256-GCM-encrypted like the connection token. Null on
    * connections minted before this column existed (legacy-header flows only). */
   webhookSecretCiphertext: text("webhook_secret_ciphertext"),
+  /** ADR-0175 A7 (migration 0142): when the webhook secret was last set (keyed
+   * on its hash, which a data-key re-encryption never rewrites). */
+  webhookSecretSetAt: timestamp("webhook_secret_set_at", { withTimezone: true }),
   /** O7 (migration 0045): what a detected drift does. 'manual' (default =
    * today) surfaces only; 'prefer_regulait' pushes RegulAIt's expected state
    * back to the PM tool; 'prefer_pm' adopts the PM tool's state on the link
@@ -2540,6 +2573,9 @@ export const modelCredentials = pgTable("model_credentials", {
   id: uuid("id").primaryKey().defaultRandom(),
   provider: text("provider").notNull().unique(),
   keyCiphertext: text("key_ciphertext").notNull(),
+  /** ADR-0175 A7 (migration 0142): when the secret was last set, stamped by
+   * the `regulait_stamp_secret_set` trigger. NULL = set before 0142 (unknown). */
+  secretSetAt: timestamp("secret_set_at", { withTimezone: true }),
   /** override for BYOC/air-gapped bridges; null = provider default endpoint */
   baseUrl: text("base_url"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -2644,6 +2680,9 @@ export const userModelCredentials = pgTable(
       .references(() => users.id, { onDelete: "cascade" }),
     provider: text("provider").notNull(),
     keyCiphertext: text("key_ciphertext").notNull(),
+    /** ADR-0175 A7 (migration 0142): when the secret was last set, stamped by
+     * the `regulait_stamp_secret_set` trigger. NULL = set before 0142 (unknown). */
+    secretSetAt: timestamp("secret_set_at", { withTimezone: true }),
     baseUrl: text("base_url"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -3585,6 +3624,16 @@ export const orgSettings = pgTable(
     /** ADR-0175 A5 (migration 0140): the release-age cooldown in days. 0
      * (DEFAULT) = off and byte-identical to pre-0140. Recommended: 7. */
     minReleaseAgeDays: integer("min_release_age_days").notNull().default(0),
+    /** ADR-0175 A7 (migration 0142): a credential older than this many days
+     * with no use in that many days is flagged "unused" on the inventory. */
+    credentialUnusedDays: integer("credential_unused_days").notNull().default(90),
+    /** ADR-0175 A7: false (DEFAULT) = the `stale_credentials` rule only shows
+     * flags on the inventory page; true = it raises one alert episode per
+     * flagged credential. */
+    staleCredentialAlerts: boolean("stale_credential_alerts").notNull().default(false),
+    /** ADR-0175 A15: the grid region whose `energy_factors` intensity
+     * overrides the org default for the energy estimate. NULL = default. */
+    energyRegion: text("energy_region"),
     /** ADR-0039 (migration 0050): the org network envelope — CIDR blocks
      * (IPv4 + IPv6) interactive access must come from. NULL/empty = no
      * restriction (today; upgrade locks nobody out). Malformed entries are
@@ -3826,6 +3875,8 @@ export const orgSettings = pgTable(
      * envelope over the JSON map — a collector API key is a credential like
      * every other admin-registered endpoint secret */
     tracingOtlpHeadersCiphertext: text("tracing_otlp_headers_ciphertext"),
+    /** ADR-0175 A7 (migration 0142): when the collector headers were last set */
+    tracingOtlpHeadersSetAt: timestamp("tracing_otlp_headers_set_at", { withTimezone: true }),
     tracingOtlpServiceName: text("tracing_otlp_service_name").notNull().default("regulait-gateway"),
 
     updatedBy: uuid("updated_by"),
@@ -5816,6 +5867,9 @@ export const chatopsConnections = pgTable("chatops_connections", {
    * hold. A DB check (migration 0112) requires one for slack/teams and forbids
    * one for outlook, so neither state can be created by any path. */
   signingSecretCiphertext: text("signing_secret_ciphertext"),
+  /** ADR-0175 A7 (migration 0142): when the secret was last set, stamped by
+   * the `regulait_stamp_secret_set` trigger. NULL = set before 0142 (unknown). */
+  secretSetAt: timestamp("secret_set_at", { withTimezone: true }),
   defaultChannel: text("default_channel").notNull(),
   /** ADR-0061's sensitivity dial. FALSE (the default) = an approval whose
    * project is in PII mode `block` posts a LINK with no buttons: a chat tap is
@@ -7095,6 +7149,9 @@ export const trainingBackendConfigs = pgTable(
     baseUrl: text("base_url"),
     /** AES-256-GCM under REGULAIT_DATA_KEY. Write-only; no route returns it. */
     keyCiphertext: text("key_ciphertext"),
+    /** ADR-0175 A7 (migration 0142): when the secret was last set, stamped by
+     * the `regulait_stamp_secret_set` trigger. NULL = set before 0142 (unknown). */
+    secretSetAt: timestamp("secret_set_at", { withTimezone: true }),
     allowPlaintextHttp: boolean("allow_plaintext_http").notNull().default(false),
     /** non-secret per-backend settings: a region, a project id, a namespace */
     settings: jsonb("settings").$type<Record<string, unknown>>().notNull().default({}),
@@ -9239,3 +9296,42 @@ export const builderChannelEvents = pgTable(
 );
 
 export type BuilderChannelThreadRow = typeof builderChannelThreads.$inferSelect;
+
+/**
+ * ADR-0175 A15 (migration 0142) — THE FACTORS BEHIND THE ENERGY ESTIMATE.
+ *
+ * Admin-entered, each with a source note and a version, because an estimate is
+ * only as honest as the number it multiplies by. A `model` row holds Wh per 1k
+ * input and per 1k output tokens for one model id (matched case-insensitively
+ * against `usage_events.model`); a `grid` row holds gCO2e per kWh for
+ * `default` or a named region (`org_settings.energy_region` picks the region).
+ *
+ * The product ships NO rows: no default factor for any real model and no
+ * default grid intensity. A model with no row is "unknown" in every estimate,
+ * never zero. `demo` marks a factor seeded for a mock model by the demo setup,
+ * which the UI labels as a demo value, not a measurement.
+ */
+export const ENERGY_FACTOR_KINDS = ["model", "grid"] as const;
+export const energyFactors = pgTable(
+  "energy_factors",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    kind: text("kind", { enum: ENERGY_FACTOR_KINDS }).notNull(),
+    subject: text("subject").notNull(),
+    whPer1kInput: doublePrecision("wh_per_1k_input"),
+    whPer1kOutput: doublePrecision("wh_per_1k_output"),
+    gCo2ePerKwh: doublePrecision("g_co2e_per_kwh"),
+    sourceNote: text("source_note").notNull(),
+    version: text("version").notNull(),
+    demo: boolean("demo").notNull().default(false),
+    updatedBy: uuid("updated_by"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("energy_factors_kind_subject_uq").on(t.kind, sql`lower(${t.subject})`),
+    check("energy_factors_kind_ck", sql`${t.kind} IN ('model', 'grid')`),
+  ],
+);
+
+export type EnergyFactorRow = typeof energyFactors.$inferSelect;
