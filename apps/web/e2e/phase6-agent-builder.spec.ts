@@ -9,7 +9,9 @@
  *     with it (the mock provider answers) and sees the reply with its cost,
  *     finds the thread in Agent inbox, then sets a tiny monthly limit and is
  *     refused by name once the agent's spend reaches it.
- *  2. An admin opens Agent usage and sees that agent's spend and Dana in it.
+ *  2. An admin opens Agent usage and sees that agent's spend and Dana in it,
+ *     and a schedule the admin writes on Dana's agent waits for Dana (it
+ *     would run, and spend, as her).
  *  3. Dana's /models portal lists the models she holds and a Run succeeds
  *     through governance.
  *
@@ -164,6 +166,9 @@ test("a non-admin creates an agent from a template and configures it", async ({ 
   expect(seeded.subagents.length).toBeGreaterThan(0);
   expect(seeded.schedules.length).toBeGreaterThan(0);
   expect(seeded.schedules.every((s: { enabled: boolean; nextRunAt: string | null }) => !s.enabled && s.nextRunAt === null)).toBe(true);
+  // template skills are Dana's own private copies, pinned at their current version
+  expect(seeded.skills.every((k: { updateAvailable: boolean; unavailable: boolean }) => !k.updateAvailable && !k.unavailable)).toBe(true);
+  expect(seeded.project).toBeNull();
 
   // instructions
   const kn = section(page, "Knowledge");
@@ -294,6 +299,21 @@ test("an admin sees that agent's spend in Agent usage", async ({ browser }) => {
   await expect(page.getByRole("meter", { name: `${AGENT} spend against its limit` })).toBeVisible();
   await page.getByRole("tab", { name: "By person" }).click();
   await expect(page.getByRole("row", { name: /Dana Developer/ })).toBeVisible();
+
+  // an admin may write a schedule on Dana's agent, but it runs (and spends) as
+  // Dana — so it is saved off and only Dana can turn it on
+  const CSRF = { "x-regulait-csrf": "1" };
+  const made = await page.request.post(`/v1/builder/agents/${agentId}/schedules`, {
+    headers: CSRF,
+    data: { name: "Admin digest", cadence: "daily", timeUtc: "07:00", prompt: "Write the digest.", enabled: true },
+  });
+  expect(made.status()).toBe(201);
+  const sc = (await made.json()) as { id: string; enabled: boolean; awaitingOwner: boolean };
+  expect(sc).toMatchObject({ enabled: false, awaitingOwner: true });
+  const turnOn = await page.request.patch(`/v1/builder/agents/${agentId}/schedules/${sc.id}`, { headers: CSRF, data: { enabled: true } });
+  expect(turnOn.status()).toBe(403);
+  expect(((await turnOn.json()) as { error: string }).error).toBe("owner_must_enable_schedule");
+  expect((await page.request.delete(`/v1/builder/agents/${agentId}/schedules/${sc.id}`, { headers: CSRF })).status()).toBe(204);
   track.assertClean("agent usage");
   await page.close();
 });
