@@ -211,36 +211,50 @@ export function registerEnergyRoutes(app: FastifyInstance, db: Db): void {
         });
       }
     }
-    const values = {
-      kind: body.kind,
-      subject: body.subject,
-      whPer1kInput: body.kind === "model" ? body.whPer1kInput : null,
-      whPer1kOutput: body.kind === "model" ? body.whPer1kOutput : null,
-      gCo2ePerKwh: body.kind === "grid" ? body.gCo2ePerKwh : null,
-      sourceNote: body.sourceNote,
-      version: body.version,
-      demo,
-      updatedBy: req.authCtx.userId,
-      updatedAt: new Date(),
-    };
-    const [existing] = await db
-      .select()
-      .from(energyFactors)
-      .where(and(eq(energyFactors.kind, body.kind), sql`lower(${energyFactors.subject}) = lower(${body.subject})`));
-    const [row] = existing
-      ? await db.update(energyFactors).set(values).where(eq(energyFactors.id, existing.id)).returning()
-      : await db.insert(energyFactors).values(values).returning();
-    await db.insert(auditLog).values({
-      userId: req.authCtx.userId ?? NIL,
-      objectType: "energy_factor",
-      objectId: row!.id,
-      detail: { before: existing ? publicFactor(existing) : null, after: publicFactor(row!) },
-      effect: "allow",
-      ruleId: existing ? "energy-factor-updated" : "energy-factor-created",
-      ruleChain: [],
-      reason: `${body.kind} energy factor for '${body.subject}' ${existing ? "updated" : "set"} (version ${body.version})`,
+    const wIn = body.kind === "model" ? body.whPer1kInput : null;
+    const wOut = body.kind === "model" ? body.whPer1kOutput : null;
+    const grid = body.kind === "grid" ? body.gCo2ePerKwh : null;
+    const by = req.authCtx.userId ?? null;
+    // Review fix: ONE UPSERT on the (kind, lower(subject)) unique index, so two
+    // concurrent writes of the same factor never collide into a 500. The
+    // per-factor advisory lock serialises writers of that one factor, so the
+    // audit's "before" is exactly the row this write replaced.
+    const { existing, row } = await db.transaction(async (tx) => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`energy_factor:${body.kind}:${body.subject.toLowerCase()}`}))`);
+      const [before] = await tx
+        .select()
+        .from(energyFactors)
+        .where(and(eq(energyFactors.kind, body.kind), sql`lower(${energyFactors.subject}) = lower(${body.subject})`));
+      const res = await tx.execute(sql`
+        INSERT INTO ${energyFactors} ("kind", "subject", "wh_per_1k_input", "wh_per_1k_output", "g_co2e_per_kwh",
+                                      "source_note", "version", "demo", "updated_by", "updated_at")
+        VALUES (${body.kind}, ${body.subject}, ${wIn}, ${wOut}, ${grid}, ${body.sourceNote}, ${body.version}, ${demo}, ${by}, now())
+        ON CONFLICT ("kind", lower("subject")) DO UPDATE SET
+          "subject" = EXCLUDED."subject",
+          "wh_per_1k_input" = EXCLUDED."wh_per_1k_input",
+          "wh_per_1k_output" = EXCLUDED."wh_per_1k_output",
+          "g_co2e_per_kwh" = EXCLUDED."g_co2e_per_kwh",
+          "source_note" = EXCLUDED."source_note",
+          "version" = EXCLUDED."version",
+          "demo" = EXCLUDED."demo",
+          "updated_by" = EXCLUDED."updated_by",
+          "updated_at" = EXCLUDED."updated_at"
+        RETURNING "id"`);
+      const id = (res.rows[0] as { id: string }).id;
+      const [after] = await tx.select().from(energyFactors).where(eq(energyFactors.id, id));
+      await tx.insert(auditLog).values({
+        userId: req.authCtx.userId ?? NIL,
+        objectType: "energy_factor",
+        objectId: id,
+        detail: { before: before ? publicFactor(before) : null, after: publicFactor(after!) },
+        effect: "allow",
+        ruleId: before ? "energy-factor-updated" : "energy-factor-created",
+        ruleChain: [],
+        reason: `${body.kind} energy factor for '${body.subject}' ${before ? "updated" : "set"} (version ${body.version})`,
+      });
+      return { existing: before, row: after! };
     });
-    return reply.status(existing ? 200 : 201).send({ factor: publicFactor(row!) });
+    return reply.status(existing ? 200 : 201).send({ factor: publicFactor(row) });
   });
 
   app.delete("/v1/energy/factors/:factorId", async (req, reply) => {

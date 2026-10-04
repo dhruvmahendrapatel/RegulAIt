@@ -9,6 +9,8 @@
  *  4. the `energy_estimate_available` collector ignores demo factors.
  *  6. an insert that carries its own `*_set_at` (a restore, a re-import)
  *     keeps it; one without a stamp is stamped now.
+ *  7. concurrent PUTs of one energy factor never 500, and each is audited
+ *     with the row it replaced.
  *
  * Shared database (M-008, M-068): every row this file inserts is deleted in
  * afterAll, and the org settings it touches are restored.
@@ -18,6 +20,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   agents,
+  and,
+  auditLog,
   connectorCredentials,
   connectors,
   createDb,
@@ -368,5 +372,36 @@ describe("review fix 6 — an insert keeps an explicit set date (restore, re-imp
       .where(eq(scimTokens.id, restoredScim[0]!))
       .returning({ at: scimTokens.secretSetAt });
     expect(Date.now() - row!.at!.getTime()).toBeLessThan(60_000);
+  });
+});
+
+describe("review fix 7 — PUT /v1/energy/factors is an upsert", () => {
+  it("concurrent writes of the same new factor never 500: one creates, the others update, each audited with before/after", async () => {
+    // several subjects at once, each written by four requests in parallel, so a check-then-insert race would surface
+    const subjects = Array.from({ length: 4 }, (_, i) => `g175r-race${i}-${RUN}`);
+    const results = await Promise.all(
+      subjects.flatMap((subject) =>
+        [1, 2, 3, 4].map((v) =>
+          putFactor({ kind: "model", subject: v % 2 ? subject : subject.toUpperCase(), whPer1kInput: v, whPer1kOutput: v, sourceNote: "race", version: `v${v}` }),
+        ),
+      ),
+    );
+    // never a 500, and never a refused write (a unique-violation 409) either
+    expect(results.filter((r) => r.statusCode !== 200 && r.statusCode !== 201).map((r) => `${r.statusCode} ${r.body}`)).toEqual([]);
+    for (const subject of subjects) {
+      const rows = await db.select().from(energyFactors).where(sql`lower(${energyFactors.subject}) = lower(${subject})`);
+      expect(rows).toHaveLength(1);
+      const audits = await db
+        .select({ ruleId: auditLog.ruleId, detail: auditLog.detail })
+        .from(auditLog)
+        .where(and(eq(auditLog.objectType, "energy_factor"), eq(auditLog.objectId, rows[0]!.id)));
+      expect(audits.map((a) => a.ruleId).sort()).toEqual(["energy-factor-created", "energy-factor-updated", "energy-factor-updated", "energy-factor-updated"]);
+      for (const a of audits) {
+        const d = a.detail as { before: { version: string } | null; after: { version: string } };
+        expect(d.after.version).toMatch(/^v[1-4]$/);
+        expect(d.before === null).toBe(a.ruleId === "energy-factor-created");
+      }
+    }
+    expect(results.filter((r) => r.statusCode === 201)).toHaveLength(subjects.length);
   });
 });
