@@ -161,8 +161,43 @@ const overview = {
   audit: [],
 };
 
-async function mockApi(page: Page) {
-  const state = { alerting: false, puts: [] as unknown[], estimateQueries: [] as string[] };
+/** 146 more flag-free API keys, for paging */
+const filler = Array.from({ length: 146 }, (_, i) =>
+  cred({
+    id: `api_key:f${i}`,
+    type: "api_key",
+    typeLabel: "API key",
+    name: `filler-${String(i).padStart(3, "0")}`,
+    manageAt: "/admin/users",
+    scope: "every entitlement of its owner",
+    expiresAt: "2027-01-02T00:00:00.000Z",
+    lastUsedAt: "2026-10-04T10:00:00.000Z",
+  }),
+);
+
+/** the server filters by type and flag, then pages (ADR-0175 review fix) */
+function inventoryPage(alerting: boolean, many: boolean, search: URLSearchParams) {
+  const inv = inventory(alerting);
+  const all = many ? [...inv.credentials, ...filler] : inv.credentials;
+  const type = search.get("type");
+  const flag = search.get("flag");
+  const limit = Number(search.get("limit") ?? 100);
+  const offset = Number(search.get("offset") ?? 0);
+  const matched = all.filter(
+    (c) =>
+      (!type || c.type === type) &&
+      (!flag || (flag === "none" ? (c.flags as string[]).length === 0 : (c.flags as string[]).includes(flag))),
+  );
+  return {
+    ...inv,
+    counts: { ...inv.counts, total: all.length },
+    page: { total: matched.length, limit, offset },
+    credentials: matched.slice(offset, offset + limit),
+  };
+}
+
+async function mockApi(page: Page, opts: { many?: boolean } = {}) {
+  const state = { alerting: false, puts: [] as unknown[], estimateQueries: [] as string[], credentialQueries: [] as string[] };
   await page.route("**/*", async (route) => {
     const url = new URL(route.request().url());
     const p = url.pathname;
@@ -170,7 +205,10 @@ async function mockApi(page: Page) {
     const method = route.request().method();
     if (p === "/auth/me") return json(route, { userId: "ada", isAdmin: true, via: "session", user: { id: "ada", email: "ada@example.test", displayName: "Ada Admin" }, mustChangePassword: false, totpEnabled: true, passwordSet: true, mfaSetupRequired: false });
     if (p === "/v1/me") return json(route, { userId: "ada", isAdmin: true, user: { id: "ada", email: "ada@example.test", displayName: "Ada Admin" } });
-    if (p === "/v1/admin/credentials") return json(route, inventory(state.alerting));
+    if (p === "/v1/admin/credentials") {
+      state.credentialQueries.push(url.search);
+      return json(route, inventoryPage(state.alerting, opts.many === true, url.searchParams));
+    }
     if (p === "/v1/org/settings" && method === "PUT") {
       const body = route.request().postDataJSON() as { staleCredentialAlerts?: boolean };
       state.puts.push(body);
@@ -242,6 +280,25 @@ test.describe("ADR-0175 A7: the credential inventory", () => {
     await page.getByLabel("Filter by flag").selectOption("__all__");
     await page.getByLabel("Filter by credential type").selectOption("api_key");
     await expect(table.locator("tbody tr")).toHaveCount(2);
+  });
+
+  test("pages through a large inventory, a hundred at a time, filtered on the server", async ({ page }) => {
+    const state = await mockApi(page, { many: true });
+    await page.goto("/ui/admin/credentials");
+    const table = page.getByRole("table").first();
+    await expect(page.getByText("Showing 1–100 of 150")).toBeVisible();
+    await expect(table.locator("tbody tr")).toHaveCount(100);
+    await expect(page.getByRole("button", { name: "Previous page" })).toBeDisabled();
+    await page.getByRole("button", { name: "Next page" }).click();
+    await expect(page.getByText("Showing 101–150 of 150")).toBeVisible();
+    await expect(table.locator("tbody tr")).toHaveCount(50);
+    await expect(page.getByRole("button", { name: "Next page" })).toBeDisabled();
+    expect(state.credentialQueries.some((q) => q.includes("offset=100") && q.includes("limit=100"))).toBe(true);
+    // a filter goes to the server and starts again at the first page
+    await page.getByLabel("Filter by flag").selectOption("unused");
+    await expect(page.getByText("Showing 1–1 of 1")).toBeVisible();
+    expect(state.credentialQueries.at(-1)).toContain("flag=unused");
+    expect(state.credentialQueries.at(-1)).toContain("offset=0");
   });
 
   test("alerts are observe-only until an admin turns them on", async ({ page }) => {

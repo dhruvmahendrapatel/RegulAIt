@@ -194,3 +194,11 @@ CREATE TABLE IF NOT EXISTS "energy_factors" (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX IF NOT EXISTS "energy_factors_kind_subject_uq" ON "energy_factors" ("kind", lower("subject"));
+--> statement-breakpoint
+-- 4. (review fix) The credential inventory reads the usage ledger only in a
+--    window, and per credential: a connector's last use and linked projects
+--    by (connector_id, at), partial because only connector rows carry one. A
+--    virtual key's links by (virtual_key_id, at): that index already exists
+--    (`usage_events_virtual_key_idx`, migration 0078) and is not recreated.
+CREATE INDEX IF NOT EXISTS "usage_events_connector_at_idx" ON "usage_events" ("connector_id", "at")
+  WHERE "connector_id" IS NOT NULL;

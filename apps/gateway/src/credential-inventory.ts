@@ -74,6 +74,76 @@ import { loadOrgSettings } from "./org-settings.js";
 /** how far back the ledger is read for a credential's linked projects/agents */
 export const CREDENTIAL_LINK_WINDOW_DAYS = 90;
 const LINK_CAP = 10;
+const DAY_MS = 86_400_000;
+
+/** GET /v1/admin/credentials paging */
+export const CREDENTIAL_PAGE_DEFAULT = 100;
+export const CREDENTIAL_PAGE_MAX = 500;
+
+/**
+ * ADR-0175 review fix: EVERY LEDGER READ HERE IS BOUNDED. A last use is read
+ * from the last `max(unused threshold, link window)` days — enough to judge
+ * "unused" exactly, and never the whole ledger; links from the 90-day link
+ * window. A credential whose last use is older than the window shows no last
+ * use, and its reason says how far back the ledger was read.
+ */
+export function credentialLedgerWindowDays(unusedDays: number): number {
+  return Math.max(unusedDays, CREDENTIAL_LINK_WINDOW_DAYS);
+}
+
+/**
+ * The virtual-key link query: one grouped, windowed read of agent rows, matched
+ * to the keys in SQL. Served by `usage_events_virtual_key_idx`
+ * (virtual_key_id, at). Exported so a test can EXPLAIN exactly this query.
+ */
+export function virtualKeyLinkQuery(db: Db, keyIds: string[], since: Date) {
+  return db
+    .select({
+      keyId: usageEvents.virtualKeyId,
+      projectId: usageEvents.projectId,
+      agentId: usageEvents.agentId,
+    })
+    .from(usageEvents)
+    .where(
+      and(
+        inArray(usageEvents.virtualKeyId, keyIds),
+        eq(usageEvents.objectType, "agent"),
+        gte(usageEvents.at, since),
+      ),
+    )
+    .groupBy(usageEvents.virtualKeyId, usageEvents.projectId, usageEvents.agentId);
+}
+
+/**
+ * A connector credential's last use: one grouped, windowed read of connector
+ * rows, served by `usage_events_connector_at_idx` (connector_id, at). Exported
+ * so a test can EXPLAIN exactly this query.
+ */
+export function connectorLastUseQuery(db: Db, connectorIds: string[], since: Date) {
+  return db
+    .select({ connectorId: usageEvents.connectorId, at: sql<Date>`max(${usageEvents.at})` })
+    .from(usageEvents)
+    .where(
+      and(
+        inArray(usageEvents.connectorId, connectorIds),
+        eq(usageEvents.objectType, "connector"),
+        gte(usageEvents.at, since),
+      ),
+    )
+    .groupBy(usageEvents.connectorId);
+}
+
+/** group rows by a key, in one pass */
+function groupBy<T, K>(rows: T[], key: (r: T) => K): Map<K, T[]> {
+  const m = new Map<K, T[]>();
+  for (const r of rows) {
+    const k = key(r);
+    const list = m.get(k);
+    if (list) list.push(r);
+    else m.set(k, [r]);
+  }
+  return m;
+}
 
 interface Ref {
   id: string;
@@ -101,6 +171,8 @@ export interface CredentialInventory {
   /** org_settings.stale_credential_alerts — false = observe only */
   alerting: boolean;
   linkWindowDays: number;
+  /** how far back the ledger is read for a ledger-derived last use */
+  ledgerWindowDays: number;
   types: Array<{
     type: CredentialType;
     label: string;
@@ -130,7 +202,9 @@ export async function computeCredentialInventory(
 ): Promise<CredentialInventory> {
   const now = opts.now ?? new Date();
   const org = await loadOrgSettings(db);
-  const linkSince = new Date(now.getTime() - CREDENTIAL_LINK_WINDOW_DAYS * 86_400_000);
+  const linkSince = new Date(now.getTime() - CREDENTIAL_LINK_WINDOW_DAYS * DAY_MS);
+  const ledgerWindowDays = credentialLedgerWindowDays(org.credentialUnusedDays);
+  const usedSince = new Date(now.getTime() - ledgerWindowDays * DAY_MS);
   const drafts: Draft[] = [];
 
   // --- issued here: API keys, virtual keys, SCIM tokens ----------------------
@@ -182,21 +256,14 @@ export async function computeCredentialInventory(
       lastUsedAt: virtualKeys.lastUsedAt,
     })
     .from(virtualKeys);
-  const vkLinks = vkRows.length
-    ? await db
-        .select({
-          keyId: usageEvents.virtualKeyId,
-          projectId: usageEvents.projectId,
-          agentId: usageEvents.agentId,
-        })
-        .from(usageEvents)
-        .where(and(isNotNull(usageEvents.virtualKeyId), gte(usageEvents.at, linkSince)))
-        .groupBy(usageEvents.virtualKeyId, usageEvents.projectId, usageEvents.agentId)
-    : [];
+  const vkLinks = groupBy(
+    vkRows.length ? await virtualKeyLinkQuery(db, vkRows.map((k) => k.id), linkSince) : [],
+    (l) => l.keyId,
+  );
   for (const k of vkRows) {
     const models = (k.allowedModels ?? []).filter(Boolean);
     const unrestricted = k.purpose === "dispatch" && models.length === 0 && k.budgetUsd === null;
-    const links = vkLinks.filter((l) => l.keyId === k.id);
+    const links = vkLinks.get(k.id) ?? [];
     drafts.push({
       id: `virtual_key:${k.id}`,
       type: "virtual_key",
@@ -310,14 +377,32 @@ export async function computeCredentialInventory(
     })
     .from(customModelProviders)
     .where(isNotNull(customModelProviders.keyCiphertext));
-  for (const c of customRows) {
-    const bound = agentRows.filter((a) => a.customProviderId === c.id);
-    const [last] = bound.length
+  // ONE grouped, windowed read for every custom provider's bound agents
+  const boundByProvider = groupBy(
+    agentRows.filter((a) => a.customProviderId !== null),
+    (a) => a.customProviderId,
+  );
+  const customAgentIds = customRows.flatMap((c) => (boundByProvider.get(c.id) ?? []).map((a) => a.id));
+  const agentLast = new Map(
+    (customAgentIds.length
       ? await db
-          .select({ at: sql<Date | null>`max(${usageEvents.at})` })
+          .select({ agentId: usageEvents.agentId, at: sql<Date>`max(${usageEvents.at})` })
           .from(usageEvents)
-          .where(and(eq(usageEvents.objectType, "agent"), inArray(usageEvents.agentId, bound.map((a) => a.id))))
-      : [];
+          .where(
+            and(
+              eq(usageEvents.objectType, "agent"),
+              gte(usageEvents.at, usedSince),
+              inArray(usageEvents.agentId, customAgentIds),
+            ),
+          )
+          .groupBy(usageEvents.agentId)
+      : []
+    ).map((r) => [r.agentId, new Date(r.at).getTime()]),
+  );
+  for (const c of customRows) {
+    const bound = boundByProvider.get(c.id) ?? [];
+    const lastMs = Math.max(-Infinity, ...bound.map((a) => agentLast.get(a.id) ?? -Infinity));
+    const last = Number.isFinite(lastMs) ? { at: new Date(lastMs) } : undefined;
     drafts.push({
       id: `custom_provider_key:${c.id}`,
       type: "custom_provider_key",
@@ -326,7 +411,8 @@ export async function computeCredentialInventory(
       ownerKind: c.createdBy ? "creator" : null,
       scope: "calls from the agents bound to this provider",
       createdAt: c.createdAt.toISOString(),
-      lastUsedAt: last?.at ? new Date(last.at).toISOString() : null,
+      lastUsedAt: last ? last.at.toISOString() : null,
+      lastUsedWindowDays: ledgerWindowDays,
       expiresAt: null,
       revokedAt: null,
       secretSetAt: iso(c.secretSetAt),
@@ -365,27 +451,7 @@ export async function computeCredentialInventory(
     });
   }
 
-  const connLast = await db
-    .select({
-      connectorId: usageEvents.connectorId,
-      at: sql<Date>`max(${usageEvents.at})`,
-    })
-    .from(usageEvents)
-    .where(and(eq(usageEvents.objectType, "connector"), isNotNull(usageEvents.connectorId)))
-    .groupBy(usageEvents.connectorId);
-  const connProjects = await db
-    .select({ connectorId: usageEvents.connectorId, projectId: usageEvents.projectId })
-    .from(usageEvents)
-    .where(
-      and(
-        eq(usageEvents.objectType, "connector"),
-        isNotNull(usageEvents.connectorId),
-        isNotNull(usageEvents.projectId),
-        gte(usageEvents.at, linkSince),
-      ),
-    )
-    .groupBy(usageEvents.connectorId, usageEvents.projectId);
-  for (const c of await db
+  const connCreds = await db
     .select({
       id: connectorCredentials.id,
       connectorId: connectorCredentials.connectorId,
@@ -395,8 +461,35 @@ export async function computeCredentialInventory(
       secretSetAt: connectorCredentials.secretSetAt,
     })
     .from(connectorCredentials)
-    .innerJoin(connectors, eq(connectors.id, connectorCredentials.connectorId))) {
-    const last = connLast.find((l) => l.connectorId === c.connectorId)?.at;
+    .innerJoin(connectors, eq(connectors.id, connectorCredentials.connectorId));
+  const credConnectorIds = [...new Set(connCreds.map((c) => c.connectorId))];
+  // windowed, and only for connectors that hold a credential; served by
+  // `usage_events_connector_at_idx` (connector_id, at)
+  const connLast = new Map(
+    (credConnectorIds.length ? await connectorLastUseQuery(db, credConnectorIds, usedSince) : []).map((r) => [
+      r.connectorId,
+      r.at,
+    ]),
+  );
+  const connProjects = groupBy(
+    credConnectorIds.length
+      ? await db
+          .select({ connectorId: usageEvents.connectorId, projectId: usageEvents.projectId })
+          .from(usageEvents)
+          .where(
+            and(
+              inArray(usageEvents.connectorId, credConnectorIds),
+              eq(usageEvents.objectType, "connector"),
+              isNotNull(usageEvents.projectId),
+              gte(usageEvents.at, linkSince),
+            ),
+          )
+          .groupBy(usageEvents.connectorId, usageEvents.projectId)
+      : [],
+    (p) => p.connectorId,
+  );
+  for (const c of connCreds) {
+    const last = connLast.get(c.connectorId);
     drafts.push({
       id: `connector_credential:${c.id}`,
       type: "connector_credential",
@@ -406,13 +499,14 @@ export async function computeCredentialInventory(
       scope: `governed calls of the ${c.kind} connector, within each caller's grant`,
       createdAt: c.createdAt.toISOString(),
       lastUsedAt: last ? new Date(last).toISOString() : null,
+      lastUsedWindowDays: ledgerWindowDays,
       expiresAt: null,
       revokedAt: null,
       secretSetAt: iso(c.secretSetAt),
       overScoped: false,
       status: "active",
-      linkedProjects: connProjects
-        .filter((p) => p.connectorId === c.connectorId && p.projectId)
+      linkedProjects: (connProjects.get(c.connectorId) ?? [])
+        .filter((p) => p.projectId)
         .map((p) => ({ id: p.projectId!, name: p.projectId! })),
     });
   }
@@ -535,10 +629,15 @@ export async function computeCredentialInventory(
     }
   }
 
-  const chatLast = await db
-    .select({ connectionId: chatopsInteractions.connectionId, at: sql<Date>`max(${chatopsInteractions.createdAt})` })
-    .from(chatopsInteractions)
-    .groupBy(chatopsInteractions.connectionId);
+  const chatLast = new Map(
+    (
+      await db
+        .select({ connectionId: chatopsInteractions.connectionId, at: sql<Date>`max(${chatopsInteractions.createdAt})` })
+        .from(chatopsInteractions)
+        .where(gte(chatopsInteractions.createdAt, usedSince))
+        .groupBy(chatopsInteractions.connectionId)
+    ).map((r) => [r.connectionId, r.at]),
+  );
   for (const c of await db
     .select({
       id: chatopsConnections.id,
@@ -551,7 +650,7 @@ export async function computeCredentialInventory(
     })
     .from(chatopsConnections)
     .where(isNotNull(chatopsConnections.signingSecretCiphertext))) {
-    const last = chatLast.find((l) => l.connectionId === c.id)?.at;
+    const last = chatLast.get(c.id);
     drafts.push({
       id: `chatops_signing_secret:${c.id}`,
       type: "chatops_signing_secret",
@@ -561,6 +660,7 @@ export async function computeCredentialInventory(
       scope: `verifies inbound ${c.provider} approvals and messages for this workspace`,
       createdAt: c.createdAt.toISOString(),
       lastUsedAt: last ? new Date(last).toISOString() : null,
+      lastUsedWindowDays: ledgerWindowDays,
       expiresAt: null,
       revokedAt: null,
       secretSetAt: iso(c.secretSetAt),
@@ -692,6 +792,7 @@ export async function computeCredentialInventory(
       revokedAt: d.revokedAt,
       secretSetAt: d.secretSetAt,
       overScoped: d.overScoped,
+      lastUsedWindowDays: d.lastUsedWindowDays ?? null,
     };
     const info = CREDENTIAL_TYPES[d.type];
     const { flags, reasons } = credentialFlags(rec, now, org.credentialUnusedDays);
@@ -722,6 +823,7 @@ export async function computeCredentialInventory(
     unusedDays: org.credentialUnusedDays,
     alerting: org.staleCredentialAlerts,
     linkWindowDays: CREDENTIAL_LINK_WINDOW_DAYS,
+    ledgerWindowDays,
     types: CREDENTIAL_TYPE_IDS.map((type) => {
       const info = CREDENTIAL_TYPES[type];
       return {
@@ -744,18 +846,32 @@ export async function computeCredentialInventory(
 const listQuery = z
   .object({
     type: z.enum(CREDENTIAL_TYPE_IDS as [CredentialType, ...CredentialType[]]).optional(),
-    flag: z.enum(CREDENTIAL_FLAGS).optional(),
+    /** a flag, or `none` for credentials with no flag */
+    flag: z.enum([...CREDENTIAL_FLAGS, "none"] as [CredentialFlag | "none", ...Array<CredentialFlag | "none">]).optional(),
     includeRevoked: z.enum(["true", "false"]).optional(),
+    limit: z.coerce.number().int().min(1).max(CREDENTIAL_PAGE_MAX).default(CREDENTIAL_PAGE_DEFAULT),
+    offset: z.coerce.number().int().min(0).max(1_000_000).default(0),
   })
   .strict();
 
 export function registerCredentialInventoryRoutes(app: FastifyInstance, db: Db): void {
+  /**
+   * Filtered, then paged (ADR-0175 review fix): `counts`, `types` and the
+   * flag counts describe the whole inventory; `credentials` is one page of
+   * the filtered list, and `page.total` is how many the filter matched.
+   */
   app.get("/v1/admin/credentials", async (req) => {
     const q = listQuery.parse(req.query);
     const inv = await computeCredentialInventory(db, { includeRevoked: q.includeRevoked === "true" });
+    const matched = inv.credentials.filter(
+      (c) =>
+        (!q.type || c.type === q.type) &&
+        (!q.flag || (q.flag === "none" ? c.flags.length === 0 : c.flags.includes(q.flag))),
+    );
     return {
       ...inv,
-      credentials: inv.credentials.filter((c) => (!q.type || c.type === q.type) && (!q.flag || c.flags.includes(q.flag))),
+      page: { total: matched.length, limit: q.limit, offset: q.offset },
+      credentials: matched.slice(q.offset, q.offset + q.limit),
     };
   });
 }

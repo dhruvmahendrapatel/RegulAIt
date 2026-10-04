@@ -2664,6 +2664,12 @@ export const usageEvents = pgTable(
     index("usage_events_served_model_idx").on(t.agentId, t.at).where(sql`${t.servedModel} IS NOT NULL`),
     // ADR-0175 review fix (migration 0141): the A9 window scan
     index("usage_events_object_type_at_idx").on(t.objectType, t.at),
+    // ADR-0066 (migration 0078): per-key reads; the A7 inventory's windowed
+    // virtual-key link query uses it too
+    index("usage_events_virtual_key_idx").on(t.virtualKeyId, t.at),
+    // ADR-0175 A7 review fix (migration 0142): the inventory's windowed
+    // connector reads; partial, since only connector rows carry one
+    index("usage_events_connector_at_idx").on(t.connectorId, t.at).where(sql`${t.connectorId} IS NOT NULL`),
   ],
 );
 

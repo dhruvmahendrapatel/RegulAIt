@@ -257,6 +257,10 @@ export interface CredentialRecord {
   secretSetAt: string | null;
   /** true when the scope makes this credential over-scoped by its type's rule */
   overScoped: boolean;
+  /** ADR-0175 review fix: a ledger-derived last use is read from a bounded
+   * window of the ledger. When set, a null `lastUsedAt` means "not used in
+   * this many days", not "never used". */
+  lastUsedWindowDays?: number | null;
 }
 
 export interface CredentialFlagResult {
@@ -287,7 +291,9 @@ export function credentialFlags(rec: CredentialRecord, now: Date, unusedDays: nu
       flags.push("unused");
       reasons.unused =
         last === null
-          ? `never used in the ${Math.floor((t - Date.parse(rec.createdAt)) / DAY)} days since it was created`
+          ? rec.lastUsedWindowDays
+            ? `no recorded use in the last ${rec.lastUsedWindowDays} days (the usage ledger is read that far back)`
+            : `never used in the ${Math.floor((t - Date.parse(rec.createdAt)) / DAY)} days since it was created`
           : `not used for ${Math.floor((t - last) / DAY)} days (threshold ${unusedDays})`;
     }
   }

@@ -66,6 +66,7 @@ import { ownershipFlagFor } from "./inventory.js";
 import { TRACE_EVAL_WINDOW_DAYS, traceSummaryForAgents } from "./trace-evaluation.js";
 import { notifyGovernanceAlerts } from "./chatops.js";
 import { computeCredentialInventory } from "./credential-inventory.js";
+import { loadOrgSettings } from "./org-settings.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 
@@ -337,8 +338,16 @@ export async function runGovernanceMonitor(
  * `stale_credential_alerts` off (the default) the rule is observe-only: the
  * flags are on the inventory page and no episode is raised.
  */
-export async function staleCredentialsInput(db: Db, now: Date): Promise<MonitorCredentialInput> {
-  const inv = await computeCredentialInventory(db, { now });
+export async function staleCredentialsInput(
+  db: Db,
+  now: Date,
+  compute: typeof computeCredentialInventory = computeCredentialInventory,
+): Promise<MonitorCredentialInput> {
+  // review fix: observe-only costs nothing. With alerting off the inventory
+  // is not computed; the explicit "not alerting" input still lets the rule
+  // run, so any open episode resolves cleanly instead of being stranded.
+  if (!(await loadOrgSettings(db)).staleCredentialAlerts) return { alerting: false, credentials: [] };
+  const inv = await compute(db, { now });
   return {
     alerting: inv.alerting,
     credentials: inv.credentials

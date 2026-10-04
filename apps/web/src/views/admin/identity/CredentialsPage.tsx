@@ -59,6 +59,7 @@ export interface CredentialInventory {
   unusedDays: number;
   alerting: boolean;
   linkWindowDays: number;
+  ledgerWindowDays?: number;
   types: Array<{
     type: string;
     label: string;
@@ -71,6 +72,8 @@ export interface CredentialInventory {
   notStored: Array<{ what: string; why: string }>;
   flagLabels: Record<Flag, string>;
   counts: { total: number; flagged: number; byFlag: Record<Flag, number> };
+  /** the filtered list's size and this page's place in it */
+  page: { total: number; limit: number; offset: number };
   credentials: CredentialRow[];
 }
 
@@ -82,23 +85,29 @@ const FLAG_TONE: Record<Flag, Tone> = {
   over_scoped: "warn",
 };
 const ALL = "__all__";
+/** rows per page; the server filters and pages (max 500) */
+const PAGE_SIZE = 100;
 const day = (iso: string | null) => (iso ? iso.slice(0, 10) : "");
 
 export default function CredentialsPage() {
-  const q = useQuery({
-    queryKey: ["admin", "credentials"],
-    queryFn: () => api.get<CredentialInventory>("/v1/admin/credentials"),
-  });
-  const inv = q.data;
   const [type, setType] = useState(ALL);
   const [flag, setFlag] = useState(ALL);
-  const rows = useMemo(
-    () =>
-      (inv?.credentials ?? []).filter(
-        (c) => (type === ALL || c.type === type) && (flag === ALL || (flag === "none" ? c.flags.length === 0 : c.flags.includes(flag as Flag))),
-      ),
-    [inv, type, flag],
-  );
+  const [offset, setOffset] = useState(0);
+  const search = useMemo(() => {
+    const p = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(offset) });
+    if (type !== ALL) p.set("type", type);
+    if (flag !== ALL) p.set("flag", flag);
+    return p.toString();
+  }, [type, flag, offset]);
+  const q = useQuery({
+    queryKey: ["admin", "credentials", search],
+    queryFn: () => api.get<CredentialInventory>(`/v1/admin/credentials?${search}`),
+    // keep the last page on screen while the next one loads
+    placeholderData: (prev) => prev,
+  });
+  const inv = q.data;
+  const rows = inv?.credentials ?? [];
+  const page = inv?.page ?? { total: rows.length, limit: PAGE_SIZE, offset };
   const noSignal = (inv?.types ?? []).filter((t) => t.lastUsed === "none");
 
   return (
@@ -123,7 +132,14 @@ export default function CredentialsPage() {
             <div className={v.stack}>
               <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
                 <Field label="Type">
-                  <Select value={type} onChange={(e) => setType(e.target.value)} aria-label="Filter by credential type">
+                  <Select
+                    value={type}
+                    onChange={(e) => {
+                      setType(e.target.value);
+                      setOffset(0);
+                    }}
+                    aria-label="Filter by credential type"
+                  >
                     <option value={ALL}>All types</option>
                     {(inv?.types ?? [])
                       .filter((t) => t.count > 0)
@@ -135,7 +151,14 @@ export default function CredentialsPage() {
                   </Select>
                 </Field>
                 <Field label="Flag">
-                  <Select value={flag} onChange={(e) => setFlag(e.target.value)} aria-label="Filter by flag">
+                  <Select
+                    value={flag}
+                    onChange={(e) => {
+                      setFlag(e.target.value);
+                      setOffset(0);
+                    }}
+                    aria-label="Filter by flag"
+                  >
                     <option value={ALL}>Any</option>
                     {(Object.keys(inv?.flagLabels ?? {}) as Flag[]).map((f) => (
                       <option key={f} value={f}>
@@ -259,9 +282,27 @@ export default function CredentialsPage() {
                   },
                 ]}
               />
+              <nav aria-label="Credential pages" style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                <span className={v.dim}>
+                  {page.total === 0
+                    ? "No credentials match"
+                    : `Showing ${page.offset + 1}–${Math.min(page.offset + rows.length, page.total)} of ${page.total}`}
+                </span>
+                <Button size="sm" disabled={page.offset === 0 || q.isFetching} onClick={() => setOffset(Math.max(0, page.offset - page.limit))}>
+                  Previous page
+                </Button>
+                <Button
+                  size="sm"
+                  disabled={page.offset + page.limit >= page.total || q.isFetching}
+                  onClick={() => setOffset(page.offset + page.limit)}
+                >
+                  Next page
+                </Button>
+              </nav>
               <span className={v.faint}>
                 * no set date was recorded for this secret before the inventory existed; the age counts from creation.
-                Linked projects and agents come from the last {inv?.linkWindowDays ?? 90} days of the usage ledger.
+                Linked projects and agents come from the last {inv?.linkWindowDays ?? 90} days of the usage ledger; a
+                last use found on the ledger, from the last {inv?.ledgerWindowDays ?? inv?.linkWindowDays ?? 90} days.
               </span>
             </div>
           </Card>
