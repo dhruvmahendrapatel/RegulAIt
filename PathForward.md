@@ -317,6 +317,91 @@ differentiate on.
 Add post-action validators that classify outcomes as `verified_success`, `verified_failure`, or
 `unknown`. An HTTP 200 or a tool's self-report is not proof that the intended world state exists.
 
+### Additions from the October 2026 document study (ADR-0175)
+
+The owner shared six documents: the NIST AI RMF 1.0 (AI 100-1), an identity-governance vendor's
+agent ebook, an AI application security-posture whitepaper, a code-security platform's
+self-description, and two product teardowns (a scanner-to-controls platform and an AI observability
+platform). What could be built now is in ADR-0175. What follows extends the items above or adds new
+ones. Vendor marketing figures were not imported as facts or targets.
+
+**Extensions to existing items**
+
+| Item | Addition | Why later / prerequisite |
+|---|---|---|
+| PF-02 | Agents authenticate as themselves, with agent identity on every agent-to-agent and MCP hop; co-stewards / multiple owners per agent | Workload-identity RFC and suite contract (immediate package item 5) |
+| PF-03 | Automatic shut-off on thresholds for public-facing AI (trip, not only propose; ADR-0175 ships the propose-only slice) | ADR on auto-containment, SLO metrics |
+| PF-04 | Our own SAST/SCA/secret/container scanning, SBOM and signed provenance; every scanner pinned by digest with signatures verified (a widely used open-source scanner had malicious releases published with a stolen credential in March 2026) | CI tool choices; settle the pnpm version mismatch first |
+| PF-06 | Per-user OAuth brokering binds the token endpoint to validated authorization-server metadata and the egress allow-list, with an adversarial test for a server advertising a foreign token endpoint | PF-06 not started |
+| PF-07 | Agent-to-agent interaction monitoring, typosquat/confusable detection, publisher provenance (ADR-0175's release-age cooldown and skill admission are the first slices) | Identity contract |
+| PF-08 | OpenTelemetry ingest of external agent traces with framework adapters, so external agents join the same trace and evidence spine | Wire contract |
+| PF-09 | AI BOM including training-data sources and per-model data flow; inventory of AI tools in the development stack | Standard choice (OWASP AIBOM / CycloneDX ML) |
+| PF-10 | Import external pentest and AI-pentest results as a register (retests, finding → control mapping, next-test schedule) that can satisfy required test classes | Adapter contract, licence review |
+| PF-11 | Evaluator models run inside the customer environment; per-entity confidence; custom entity types; a PHI pack; judge verdicts that carry their reasoning | Model hosting / provider adapters, benchmark corpus |
+| PF-12 | Data-poisoning controls, consent evidence for training data, a sensitivity inventory for inference and fine-tuning datasets | Scanner contract; suite ownership of LLM modules |
+| PF-13 | Packs for GDPR, SR 11-7, the NAIC AI model bulletin, NIST SP 800-218A, and the OWASP LLM / agentic Top 10 as a test taxonomy; a per-use-case crosswalk board | Curated content with per-control provenance; suite control-ID contract |
+| PF-14 | Reason-coded triage and grouping of detections, SIEM push (ADR-0135), identity-aware investigation, case management beyond the incident register | Detection engine, SIEM delivery gates |
+
+### PF-15 — P2 — Findings ingest and control engine
+
+Scanner-agnostic ingest (SARIF 2.1.0, OSCAL assessment results, a generic signed webhook) →
+fingerprinted findings → reason-coded triage (never auto-ignore a known-exploited issue; dev-only;
+low exploit probability; not reachable) → mapped to controls, with coverage and passing reported
+separately and time-boxed risk exceptions. *Prerequisite:* a `CAPABILITY_MAP.md` check (general GRC or
+scanner aggregation may belong to another suite module) and a normalized finding-schema contract.
+
+### PF-16 — P2 — Trust outputs
+
+A customer-facing report builder over frozen, hashed evidence snapshots: request link with NDA,
+approver-released expiring signed links, and SLA breaches shown honestly. *Prerequisite:* this is a
+public, unauthenticated surface, so it needs legal review, abuse controls and a hosting decision; any
+production designation needs the owner's explicit sign-off.
+
+### PF-17 — P2 — Runtime evidence connectors
+
+Pull evaluator metrics (hallucination, PII flags, jailbreak rate, drift, fairness) from external
+observability and evaluation platforms, or from raw OpenTelemetry, into measurable conditions.
+Export guardrail policy derived from intake to external guardrail runtimes. *Prerequisite:* partner
+APIs and credentials, a connector-health surface, and per-connector egress rules.
+
+### PF-18 — P3 — Developer-environment AI visibility
+
+Import usage from coding-assistant admin consoles; an endpoint policy for packages, extensions and
+AI tools with an approval queue and an exportable log; visibility into local file reads by coding
+agents. *Prerequisite:* partner admin APIs; an endpoint agent is a new trust boundary with OS
+packaging.
+
+### PF-19 — P3 — AI application code risk
+
+OWASP-LLM-aware scanning of customer application code, agent infrastructure-as-code scanning, and an
+AI change-impact review per pull request in the workflow engine's check stage. *Prerequisite:*
+integrate scanners through PF-15, do not build them.
+
+### PF-20 — P3 — Predictive-ML monitoring
+
+Segment-level drift, data-integrity checks, feature attribution and disparate impact for classic ML
+models. *Prerequisite:* model telemetry and connectors, mostly through PF-17.
+
+### PF-21 — P2 — Access-path graph
+
+A per-person view: human → agents → tools and connectors → data classes, built from grants, the
+dependency graph (ADR-0156) and observed lineage (ADR-0059), with blast radius from a person or a
+credential. Buildable now but UI-heavy; scheduled after the current batches.
+
+### PF-22 — P2 — Governance MCP server
+
+Expose read-mostly governance tools (open risks, control status, use-case status, request an
+exception, attach evidence) to coding agents, each call governed like any other MCP call.
+*Prerequisite:* a `CAPABILITY_MAP.md` check (the suite may own a shared MCP surface) and an
+entitlement model for a self-hosted server.
+
+**Ready but deprioritised** (candidates for the next batch): OSCAL export of pack evaluations;
+DPIA / FRIA impact assessments prefilled from intake, lineage and the model card (needs legal content
+review); a single connector-health surface; near-duplicate use-case detection at intake.
+
+**Out of scope:** cross-tenant benchmarks (ADR-0041 is single-tenant); rebuilding observability
+backends, scanners or evaluator models (integrate instead); product tours and videos.
+
 ## What to build, integrate, and defer
 
 | Treatment | Capabilities |

@@ -21,6 +21,14 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-10-04 (day) - Document study done; ADR-0175 decided; ADR-0173 batch 2a and ADR-0174 sign-in being built.** Owner shared six
+documents (NIST AI 100-1 plus vendor/teardown material, never named in the repo). ADR-0175 lists build-now batches D1-D4
+and PathForward.md gains PF-15..PF-22 plus extensions to PF-02..PF-14. Urgent finding: the NIST AI RMF pack and the demo
+content cite wrong subcategory IDs (GOVERN 1.2 used for GOVERN 2.1, MANAGE 2.2 for MANAGE 2.4, MEASURE 2.7 for MEASURE 2.11).
+Batch D1 (pack v3 plus a guard test) is being built now. Batch 2a (builder tool loop, inbound Slack/Teams, model allow-list,
+Ctrl/K palette; migrations 0136-0138) is being integrated. Sign-in (Keycloak broker, migration 0139) is in progress. New owner
+rule: every builder agent must be billed to a project. Next free migration: 0140.
+
 **2026-10-04 (early) - ADR-0172 phase 1: Agent Builder suite + model portal built.** Owner shared a product teardown (kept out of the repo)
 and asked for a separate no-code agent builder and a logo-rich model portal. Built on three parallel branches (backend: 33+ `/v1/builder/*`
 routes, migration 0135, 7 templates, apps catalog, owner-run schedules; web: Agent chat/inbox, Your agents + editor, templates, Apps & tools,
