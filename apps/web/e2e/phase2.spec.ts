@@ -269,6 +269,15 @@ test("rules engine: build a fleet-wide rate limit", async () => {
   await expect(page.getByRole("cell", { name: "fleet" }).last()).toBeVisible();
   await shot(page, "phase2-10-rules-engine");
   track.assertClean("rules engine");
+  // leave no fleet-wide limit behind: it counts EVERY MCP call, so a later spec on this database
+  // that lands inside the same 60 s window is refused "rate limit exhausted (server-wide)"
+  const list = (await (await page.request.get("/v1/rules/rate-limits")).json()) as {
+    rules: Array<{ id: string; scope: string; serverScope: string; maxCalls: number; windowSeconds: number }>;
+  };
+  for (const r of list.rules.filter((x) => x.scope === "fleet" && x.serverScope === "all" && x.maxCalls === 50 && x.windowSeconds === 60)) {
+    const del = await page.request.delete(`/v1/rules/rate-limits/${r.id}`, { headers: { "x-regulait-csrf": "1" } });
+    expect(del.status(), await del.text()).toBe(200);
+  }
 });
 
 test("simulation: the precedence-chain visualizer decides a live call", async () => {

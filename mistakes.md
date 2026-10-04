@@ -1433,3 +1433,17 @@ Rule: before pushing, `git fetch` and check whether the remote moved (`git rev-l
 If it did not, push without pulling. If it did and the local branch carries merges, use
 `git pull --no-rebase` (merge) or rebuild the integration on the new base and RE-RUN the gate — never
 `--rebase` a merge-bearing branch, and never push anything but the exact commit the gate ran on.
+
+### M-068 (2026-10-04) - A spec was added to a CI step after running it alone, not in that step's order
+
+`phase6-builder-tools.spec.ts` was added to CI's spa-journeys step after it passed on its own (8/8). In CI it runs after
+`phase2.spec.ts` on the same database, and phase2 leaves a fleet-wide 50-calls-per-60s MCP rate limit behind. On CI's
+faster runner the builder spec landed inside that window, so its governed tool call was refused ("rate limit exhausted:
+75/50 calls … server-wide"). Locally the same order happened to pass because the window had expired. A local repro was
+first run on a stale build (the main checkout had not been rebuilt after a merge), which gave misleading failures. The
+first diagnostic did not fire either, because Playwright's `expect.poll` `message` option is a string, not a function.
+
+Rule: before adding a spec to a CI step, run the whole step's spec list in CI's order on a fresh `pnpm -r build`. A spec
+that creates global state (fleet-wide rules, org settings, kill switches) removes it before it ends. When CI and local
+runs disagree, make the failure message carry the server's recorded reason (the API's outcome code and detail) before
+guessing.
