@@ -322,10 +322,18 @@ services:
   # then register it in /ui/admin/sso as an OIDC provider with broker sign-in
   # buttons — see docs/deployment/SSO_KEYCLOAK.md, which also covers the three
   # app registrations, secrets and hardening. No secret has a default here: the
-  # broker refuses to start while REGULAIT_KC_GATEWAY_CLIENT_SECRET or
-  # REGULAIT_KC_ADMIN_PASSWORD is empty (checked in the entrypoint, because
-  # compose interpolates every service even when its profile is off, so a
-  # `${VAR:?}` here would break the default `docker compose up`).
+  # broker refuses to start while REGULAIT_KC_GATEWAY_CLIENT_SECRET,
+  # REGULAIT_KC_ADMIN_PASSWORD or REGULAIT_KC_DB_PASSWORD is empty (checked in
+  # the entrypoints, because compose interpolates every service even when its
+  # profile is off, so a `${VAR:?}` here would break the default
+  # `docker compose up`).
+  #
+  # Keycloak gets its OWN database role (`keycloak`) that owns only the
+  # `keycloak` database — never the gateway's `regulait` role. The init job
+  # connects as the gateway's role once (it is the cluster's admin role in this
+  # compose file) to create that role and database; the gateway's role and
+  # database are not changed. Re-running it rotates the keycloak role's
+  # password to the current REGULAIT_KC_DB_PASSWORD.
   keycloak-db-init:
     image: postgres:16
     profiles: ["sso"]
@@ -334,12 +342,28 @@ services:
         condition: service_healthy
     environment:
       PGPASSWORD: ${REGULAIT_DB_PASSWORD:-regulait}
+      KC_DB_ROLE_PASSWORD: ${REGULAIT_KC_DB_PASSWORD:-}
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
         set -e
-        psql -h db -U regulait -d regulait -tAc "SELECT 1 FROM pg_database WHERE datname = 'keycloak'" | grep -q 1 \
-          || psql -h db -U regulait -d regulait -c "CREATE DATABASE keycloak"
+        if [ -z "$$KC_DB_ROLE_PASSWORD" ]; then
+          echo "keycloak-db-init refused: set REGULAIT_KC_DB_PASSWORD (see docs/deployment/SSO_KEYCLOAK.md)" >&2
+          exit 1
+        fi
+        # the password is read from the environment inside psql (\getenv) —
+        # never put on a command line
+        psql -h db -U regulait -d regulait -v ON_ERROR_STOP=1 <<'SQL'
+        \getenv kcpw KC_DB_ROLE_PASSWORD
+        SELECT format('CREATE ROLE keycloak LOGIN PASSWORD %L', :'kcpw')
+          WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'keycloak') \gexec
+        SELECT format('ALTER ROLE keycloak LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE PASSWORD %L', :'kcpw') \gexec
+        SELECT 'CREATE DATABASE keycloak OWNER keycloak'
+          WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'keycloak') \gexec
+        ALTER DATABASE keycloak OWNER TO keycloak;
+        REVOKE ALL ON DATABASE keycloak FROM PUBLIC;
+        GRANT CONNECT, TEMPORARY ON DATABASE keycloak TO keycloak;
+        SQL
     restart: "no"
     networks: [regulait]
 
@@ -355,16 +379,17 @@ services:
     entrypoint: ["/bin/bash", "-c"]
     command:
       - |
-        if [ -z "$$REGULAIT_KC_GATEWAY_CLIENT_SECRET" ] || [ -z "$$KC_BOOTSTRAP_ADMIN_PASSWORD" ]; then
-          echo "keycloak refused to start: set REGULAIT_KC_GATEWAY_CLIENT_SECRET and REGULAIT_KC_ADMIN_PASSWORD (see docs/deployment/SSO_KEYCLOAK.md)" >&2
+        if [ -z "$$REGULAIT_KC_GATEWAY_CLIENT_SECRET" ] || [ -z "$$KC_BOOTSTRAP_ADMIN_PASSWORD" ] || [ -z "$$KC_DB_PASSWORD" ]; then
+          echo "keycloak refused to start: set REGULAIT_KC_GATEWAY_CLIENT_SECRET, REGULAIT_KC_ADMIN_PASSWORD and REGULAIT_KC_DB_PASSWORD (see docs/deployment/SSO_KEYCLOAK.md)" >&2
           exit 1
         fi
         exec /opt/keycloak/bin/kc.sh start --import-realm
     environment:
       KC_DB: postgres
       KC_DB_URL: jdbc:postgresql://db:5432/keycloak
-      KC_DB_USERNAME: regulait
-      KC_DB_PASSWORD: ${REGULAIT_DB_PASSWORD:-regulait}
+      # its own role, owner of the keycloak database only (keycloak-db-init)
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${REGULAIT_KC_DB_PASSWORD:-}
       # the PUBLIC URL of the broker, as browsers reach it (TLS terminated in
       # front of it — caddy or the customer's own proxy)
       KC_HOSTNAME: ${REGULAIT_KC_HOSTNAME:-http://localhost:8080}

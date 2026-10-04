@@ -36,6 +36,7 @@ already configured keep working unchanged.
 # secrets — generate, never commit (a .env next to docker-compose.yml, mode 600)
 echo "REGULAIT_KC_GATEWAY_CLIENT_SECRET=$(openssl rand -hex 32)" >> .env
 echo "REGULAIT_KC_ADMIN_PASSWORD=$(openssl rand -base64 24)"   >> .env
+echo "REGULAIT_KC_DB_PASSWORD=$(openssl rand -hex 24)"         >> .env   # Keycloak's own database role
 echo "REGULAIT_PUBLIC_URL=https://regulait.acme.example"        >> .env   # where browsers reach regulAIt
 echo "REGULAIT_KC_HOSTNAME=https://id.acme.example"             >> .env   # where browsers reach Keycloak
 chmod 600 .env
@@ -43,9 +44,13 @@ chmod 600 .env
 docker compose --profile sso up -d keycloak
 ```
 
-The `keycloak` service refuses to start while `REGULAIT_KC_GATEWAY_CLIENT_SECRET` or
-`REGULAIT_KC_ADMIN_PASSWORD` is empty. Keycloak stores its data in a separate `keycloak` database on the
-same Postgres (created by the one-shot `keycloak-db-init` service).
+The `keycloak` service refuses to start while `REGULAIT_KC_GATEWAY_CLIENT_SECRET`,
+`REGULAIT_KC_ADMIN_PASSWORD` or `REGULAIT_KC_DB_PASSWORD` is empty (none of them has a default). Keycloak
+stores its data in a separate `keycloak` database on the same Postgres and signs in as its **own** role,
+`keycloak`, which owns that database and nothing else. The one-shot `keycloak-db-init` service creates both
+(and re-running it rotates the role's password to the current `REGULAIT_KC_DB_PASSWORD`); the gateway's own
+database role is never used by Keycloak and is not changed. On a managed Postgres, create the same role and
+database yourself and point `KC_DB_URL` at it.
 
 `--import-realm` imports the realm **only when it does not exist yet**. After the first start, change the
 realm in the admin console (or with `kcadm.sh`), not by editing the JSON — edits to the file are ignored
@@ -56,9 +61,9 @@ for an existing realm. Secrets in the JSON are placeholders only:
 | `REGULAIT_PUBLIC_URL` | regulAIt's public base URL; the client's redirect URI is `${REGULAIT_PUBLIC_URL}/auth/oidc/callback` |
 | `REGULAIT_KC_GATEWAY_CLIENT_SECRET` | the `regulait-gateway` client secret — the same value goes into /ui/admin/sso |
 | `REGULAIT_KC_MICROSOFT_CLIENT_ID` / `_CLIENT_SECRET` / `_TENANT` | Entra app registration; tenant defaults to `organizations` (work and school accounts of any tenant). Set your tenant id to admit only your organisation |
-| `REGULAIT_KC_GOOGLE_CLIENT_ID` / `_CLIENT_SECRET` / `_HOSTED_DOMAIN` | Google OAuth client; `HOSTED_DOMAIN` (e.g. `acme.example`) restricts to one Workspace domain |
+| `REGULAIT_KC_GOOGLE_CLIENT_ID` / `_CLIENT_SECRET` / `_HOSTED_DOMAIN` | Google OAuth client; `HOSTED_DOMAIN` (e.g. `acme.example`) restricts to one Workspace domain — a **deployment setting**, see below |
 | `REGULAIT_KC_GITHUB_CLIENT_ID` / `_CLIENT_SECRET` | GitHub OAuth app |
-| `REGULAIT_KC_SMTP_*` | outbound mail for email verification (needed for Microsoft and GitHub, see below) |
+| `REGULAIT_KC_SMTP_*` | outbound mail for email verification (needed for all three upstream IdPs, see below) |
 
 Prefer a secret store over a plain `.env` where you have one: compose `secrets:` files, Docker/Kubernetes
 secrets, or your cloud's secret manager injecting the same environment variables. Never put a secret in
@@ -82,14 +87,24 @@ The broker callback for each provider is `https://<REGULAIT_KC_HOSTNAME>/realms/
 **Google** (Google Cloud console → APIs & Services → Credentials → OAuth client ID → Web application)
 - Authorized redirect URI: `https://id.acme.example/realms/regulait/broker/google/endpoint`.
 - Configure the OAuth consent screen (internal for Workspace-only use).
-- Google only returns verified addresses, so the realm trusts them (`trustEmail = on`). Set
-  `REGULAIT_KC_GOOGLE_HOSTED_DOMAIN` to restrict to your Workspace domain.
+- The realm sets **trustEmail = off** for Google too (security review, ADR-0174 amendment): an address is
+  verified by Keycloak itself, by email, on first login (configure SMTP), rather than on the upstream's
+  word — the same rule for all three IdPs.
+- **`REGULAIT_KC_GOOGLE_HOSTED_DOMAIN` is a deployment setting, not a default.** Set it to your Workspace
+  domain (e.g. `acme.example`) and Keycloak asks Google for that domain only (`hd`); leave it empty and any
+  Google account can reach the broker, so also set *Allowed email domains* on the provider in regulAIt.
+  It is read from the realm import on first start; change it later in the admin console
+  (Identity providers → google → Hosted domain).
 
 **GitHub** (Settings → Developer settings → OAuth Apps → New OAuth App; or an organisation-owned app)
 - Homepage URL: `https://regulait.acme.example`.
 - Authorization callback URL: `https://id.acme.example/realms/regulait/broker/github/endpoint`.
 - Scope requested by the realm: `user:email`. The realm sets **trustEmail = off** for GitHub, so Keycloak
   verifies the address by email on first login.
+
+**First broker login stays Keycloak's stock flow.** Every IdP uses `first broker login`, which — when a
+brokered identity matches an existing Keycloak user by email — asks the person to confirm the link by email
+or by re-authenticating as that user. Do not replace it with a flow that links automatically.
 
 Leave a provider's id as `unset` (the default) and its button still appears in Keycloak but cannot complete;
 in regulAIt, only the IdPs you tick on the provider are shown (next section). Disable unused IdPs in the
@@ -110,9 +125,15 @@ Keycloak admin console.
    - Allowed email domains, JIT provisioning and the JIT default role behave exactly as for any OIDC
      provider (JIT is off by default: unknown people are refused).
    - MFA acr values: leave blank — the realm emits RFC 8176 `amr` (`otp` for a code, `hwk` for a passkey).
+   - **Broker enforces MFA**: tick it for the bundled realm. Its brokered logins can report a single `otp`
+     or `hwk`, which regulAIt counts as MFA only from a provider flagged as an MFA-enforcing broker.
 3. **Require MFA** (/ui/admin/sso → Sessions policy → Require TOTP MFA = admins or everyone). For federated
-   sign-ins this means the ID token must assert MFA (`amr` contains `mfa`, `otp`, `hwk`, `swk` or `pop`, or
-   `acr` is one of the provider's configured MFA acr values). A token without it is refused with a clear
+   sign-ins this means the ID token must assert MFA: `amr` contains `mfa`, or names two distinct factor
+   classes (something you know — `pwd`, `pin` — plus something you have or are — `otp`, `hwk`, `swk`,
+   `sms`, `fpt`, …); a single `otp`/`hwk`/`swk` counts only from a provider flagged *Broker enforces MFA*;
+   or `acr` is one of the provider's configured MFA acr values. A SAML provider's equivalent is its list of
+   multi-factor AuthnContextClassRef values; a SAML login without one steps up to the person's regulAIt TOTP
+   (or enrolment) before a session exists. An OIDC token without MFA is refused with a clear
    page and an audit row (`oidc-mfa-not-asserted`); a token with it satisfies the requirement without a
    regulAIt TOTP enrolment. Local accounts keep regulAIt's own TOTP.
 
@@ -122,11 +143,17 @@ provider ids and display names only — never an issuer, client id, secret or do
 ## 4. Accounts: linking, break-glass and demo personas
 
 - **Linking without takeover.** A federated identity links to an existing regulAIt account on the
-  verified email only when that account has **no local credential** (an admin or SCIM created it for
-  exactly this person). If the account has its own password or TOTP, the person is asked to prove it once
-  (password, plus authenticator code if enrolled) in the same browser, or an admin approves the request in
-  /ui/admin/sso → Account-link requests. Nobody can approve a link to their own account. The (provider,
-  subject) pair is the anchor from then on.
+  verified email only when that account has **never been used**: never signed in, no federated identity
+  yet, and no local credential (an admin or SCIM created it for exactly this person). Any other account —
+  one already linked to an identity provider, or one that has signed in before — is linked only after the
+  person proves it once (password, plus authenticator code if enrolled) in the same browser, or an admin
+  approves the request in /ui/admin/sso → Account-link requests (two different admins for an administrator
+  account). Nobody can approve a link to their own account. The (provider, issuer, subject) is the anchor
+  from then on; changing a provider's issuer or entity id removes its links.
+- **Existing SSO users keep working.** Someone who signed in through a provider before this release is
+  linked automatically the next time they sign in through that same provider with the same verified email
+  (the evidence is their earlier `login-succeeded` audit row naming the provider). Through any other
+  provider, they prove the account or are approved like anyone else.
 - **Break-glass.** Once SSO works, /ui/admin/sso → Sessions policy → *Email sign-in = break-glass admins
   only* refuses password sign-in for everyone except the administrators you tick there. It refuses to engage
   without an enabled SSO provider and at least one ticked admin who has a password. Keep the deploy-time
@@ -178,9 +205,9 @@ provider ids and display names only — never an issuer, client id, secret or do
 ## First-login checklist
 
 1. Sign in through each enabled button with a test account. Keycloak should ask you to verify your email
-   (Microsoft, GitHub) and to set up a code or passkey.
+   and to set up a code or passkey.
 2. In regulAIt, open /ui/admin → Audit log and find the `login-succeeded` row: `detail.idpMfa` must be
-   `true` and `detail.mfaVia` `amr`. If it is `false`, Keycloak did not emit `amr` — check that the `amr`
+   `true` and `detail.mfaVia` `amr` or `broker`. If it is `false`, Keycloak did not emit `amr` — check that the `amr`
    mapper is on the `regulait-gateway` client and that each MFA execution has its *Authenticator
    Reference* (`otp` / `hwk`) set, then turn on *Require MFA* only after this passes.
 3. With *Require MFA* on, a login that skips the second factor must be refused with the

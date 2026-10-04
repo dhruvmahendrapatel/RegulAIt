@@ -172,7 +172,7 @@
       "displayName": "Google",
       "providerId": "google",
       "enabled": true,
-      "trustEmail": true,
+      "trustEmail": false,
       "storeToken": false,
       "addReadTokenRoleOnCreate": false,
       "linkOnly": false,
