@@ -8819,6 +8819,8 @@ export const builderToolSteps = pgTable(
     /** the model-facing (namespaced) tool name */
     name: text("name").notNull(),
     displayName: text("display_name").notNull(),
+    /** connector provider kind or MCP server name (the web picks a logo) */
+    provider: text("provider"),
     toolCallId: text("tool_call_id"),
     /** REDACTED preview — never the raw payload */
     arguments: jsonb("arguments"),

@@ -19,6 +19,7 @@ import type {
   BuilderIntegrationsResponse,
   BuilderMemoryItem,
   BuilderMessage,
+  BuilderPendingStep,
   BuilderSchedule,
   BuilderSharing,
   BuilderSkillDetail,
@@ -78,6 +79,20 @@ export interface ScheduleBody {
 export interface ChatResponse {
   thread: BuilderThreadSummary;
   messages: BuilderMessage[];
+  /** ADR-0173: set while the turn waits on a tool step */
+  pending?: BuilderPendingStep | null;
+}
+
+/**
+ * ADR-0173 — fold one chat turn's response into the cached thread: messages
+ * replace by id (a resumed turn updates the agent message it already showed),
+ * and the pause (if any) is the response's, never a stale one.
+ */
+export function mergeTurn(prev: ChatResponse | undefined, res: ChatResponse): ChatResponse {
+  const byId = new Map((prev?.messages ?? []).map((m) => [m.id, m]));
+  for (const m of res.messages) byId.set(m.id, m);
+  const messages = [...byId.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  return { thread: res.thread, messages, pending: res.pending ?? null };
 }
 
 export const builderApi = {
@@ -113,6 +128,9 @@ export const builderApi = {
     ),
   getThread: (id: string) => api.get<ChatResponse>(`/v1/builder/threads/${id}`),
   patchThread: (id: string, status: BuilderThreadStatus) => api.patch<{ thread: BuilderThreadSummary }>(`/v1/builder/threads/${id}`, { status }),
+  /** ADR-0173: the thread owner answers an "Ask first" pause; returns the whole thread */
+  confirmStep: (threadId: string, stepId: string, decision: "approve" | "deny") =>
+    api.post<ChatResponse>(`/v1/builder/threads/${threadId}/steps/${stepId}/confirm`, { decision }),
 
   listSkills: () => api.get<{ skills: BuilderSkillSummary[] }>(`/v1/builder/skills`),
   getSkill: (id: string) => api.get<{ skill: BuilderSkillDetail }>(`/v1/builder/skills/${id}`),

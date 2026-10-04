@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS "builder_tool_steps" (
   "ref_id" uuid,
   "name" text NOT NULL,
   "display_name" text NOT NULL,
+  "provider" text,
   "tool_call_id" text,
   "arguments" jsonb,
   "arguments_digest" text NOT NULL,

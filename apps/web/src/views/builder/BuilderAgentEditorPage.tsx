@@ -8,12 +8,11 @@ import { useCallback, useMemo, useState, type ReactNode } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ago } from "../../api/format";
-import type { BuilderMessage } from "../../api/types";
 import { PageHeader } from "../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, RecordError, SkeletonBlock } from "../../ui/kit";
 import { useToast } from "../../ui/toast";
 import { ChannelRows, ConfigurePanel } from "./AgentConfigure";
-import { bk, builderApi, chatRefusal } from "./builderApi";
+import { bk, builderApi, chatRefusal, mergeTurn, type ChatResponse } from "./builderApi";
 import { AgentAvatar, Composer, Icon, MessageList, ModelChip } from "./BuilderUi";
 import { SharingBadge } from "./BuilderAgentsPage";
 import s from "./builder.module.css";
@@ -44,10 +43,7 @@ export default function BuilderAgentEditorPage() {
       setSendError(null);
     },
     onSuccess: (res) => {
-      queryClient.setQueryData(bk.thread(res.thread.id), (prev: { thread: unknown; messages: BuilderMessage[] } | undefined) => ({
-        thread: res.thread,
-        messages: [...(prev?.messages ?? []), ...res.messages],
-      }));
+      queryClient.setQueryData(bk.thread(res.thread.id), (prev: ChatResponse | undefined) => mergeTurn(prev, res));
       void queryClient.invalidateQueries({ queryKey: ["builder", "threads"] });
       void queryClient.invalidateQueries({ queryKey: bk.agent(agentId) });
       if (res.thread.id !== threadId) setParams({ thread: res.thread.id });
@@ -125,7 +121,14 @@ export default function BuilderAgentEditorPage() {
             ) : thread.isError ? (
               <RecordError noun="thread" error={thread.error} onRetry={() => void thread.refetch()} />
             ) : (
-              <MessageList messages={thread.data?.messages ?? []} agentName={agent.name} agentColor={agent.color} pending={pending} />
+              <MessageList
+                messages={thread.data?.messages ?? []}
+                agentName={agent.name}
+                agentColor={agent.color}
+                pending={pending}
+                waiting={thread.data?.pending ?? null}
+                threadId={threadId}
+              />
             )
           ) : setup ? (
             <SetupWalkthrough
@@ -180,7 +183,13 @@ export default function BuilderAgentEditorPage() {
                 {sendError}
               </p>
             )}
-            <Composer label={`Message ${agent.name}`} placeholder={`Message ${agent.name}…`} busy={send.isPending} onSend={(m) => send.mutate(m)} />
+            <Composer
+              label={`Message ${agent.name}`}
+              placeholder={threadId && thread.data?.pending ? "Answer the tool request above first" : `Message ${agent.name}…`}
+              busy={send.isPending}
+              disabled={!!(threadId && thread.data?.pending)}
+              onSend={(m) => send.mutate(m)}
+            />
           </div>
         </section>
         {panelOpen && (

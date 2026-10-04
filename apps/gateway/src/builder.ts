@@ -54,6 +54,7 @@ import {
   type BuilderScheduleRow,
   type BuilderSkillRow,
   type BuilderThreadRow,
+  type BuilderToolStepRow,
   type Db,
 } from "@regulait/db";
 import {
@@ -1347,19 +1348,24 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     return {
       thread,
       messages: out.messages.map((m) => messageView(m, steps)),
-      pending: out.pending ? await pendingView(out.pending) : null,
+      pending: out.pending ? pendingView(out.pending, steps) : null,
     };
   });
 
-  /** the pause a turn stopped on, as the thread shows it */
-  const pendingView = async (p: TurnPending) => ({
-    stepId: p.stepId,
-    status: p.status,
-    toolName: p.toolName,
-    displayName: p.displayName,
-    approvalId: p.approvalId,
-    approverName: p.approverName,
-  });
+  /** the pause a turn stopped on, as the thread shows it — with the step
+   * itself, so the confirmation shows the exact (redacted) arguments */
+  const pendingView = (p: TurnPending, steps: BuilderToolStepRow[]) => {
+    const step = steps.find((s) => s.id === p.stepId);
+    return {
+      stepId: p.stepId,
+      status: p.status,
+      toolName: p.toolName,
+      displayName: p.displayName,
+      approvalId: p.approvalId,
+      approverName: p.approverName,
+      ...(step ? { step: stepView(step) } : {}),
+    };
+  };
 
   app.get("/v1/builder/threads", async (req, reply) => {
     const viewer = viewerOf(req, reply);

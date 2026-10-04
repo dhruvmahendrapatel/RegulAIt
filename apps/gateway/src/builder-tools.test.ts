@@ -260,6 +260,8 @@ describe("Ask first: a confirmation in the thread, not an approval", () => {
     expect(body.thread.pendingStep).toMatchObject({ status: "pending_confirmation" });
     const step = body.messages[1].steps[0];
     expect(step).toMatchObject({ status: "pending_confirmation", requiresConfirmation: true, arguments: {} });
+    // the pause carries the step itself, so the card can show the exact call
+    expect(body.pending.step).toMatchObject({ id: step.id, arguments: {}, argumentsDigest: step.argumentsDigest });
     expect(hits.ask_first ?? 0).toBe(before); // nothing ran yet
     // no approvals-queue row: a confirmation is not an approval
     expect(await k.db.select().from(approvals).where(and(eq(approvals.userId, owner.id), eq(approvals.toolName, "ask_first")))).toHaveLength(0);

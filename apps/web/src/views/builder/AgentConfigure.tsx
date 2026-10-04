@@ -469,7 +469,9 @@ export function ConfigurePanel(props: { agent: BuilderAgentDetail; onOpenSkills:
           {Icon.plus(14)} Add connection
         </button>
         <p className={s.small} style={{ margin: 0 }}>
-          Today the agent is told about these tools and can describe how it would use them; calling them on its own comes in a later release.
+          The agent calls these tools on its own during a conversation. Every call runs as the person chatting, with their own access and your
+          organisation's policies; a connection marked Ask first waits for that person to approve the exact call, and organisation approval rules
+          still apply.
         </p>
       </Section>
 
