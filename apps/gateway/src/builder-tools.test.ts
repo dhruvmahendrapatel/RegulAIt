@@ -107,6 +107,7 @@ const newAgent = async (who: Person, tools: Array<{ tool: ToolName; askFirst?: b
     connectionFormat: "shared",
     computerUse: false,
     modelAgentId: model,
+    projectId: who.projectId,
   });
   expect(r.statusCode, r.body).toBe(201);
   const agent = r.json().agent as Record<string, any>;
@@ -143,6 +144,9 @@ beforeAll(async () => {
   limitedModel = model;
   await k.grantModel(owner.id, model);
   await k.grantModel(colleague.id, model);
+  // the colleague may bill the owner's project (shared agents bill there)
+  const member = await k.req("POST", `/v1/projects/${owner.projectId}/members`, k.BOOT, { userId: colleague.id, role: "contributor" });
+  expect(member.statusCode, member.body).toBeLessThan(300);
   const up = await startUpstream();
   upstreamClose = up.close;
   serverName = `bt${k.RUN}`;

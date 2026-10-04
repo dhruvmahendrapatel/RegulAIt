@@ -56,6 +56,8 @@ export interface CreateAgentBody {
   connectionFormat: BuilderConnectionFormat;
   computerUse: boolean;
   templateId?: string;
+  /** owner rule: every agent bills its spend to a project */
+  projectId: string;
 }
 export interface PatchAgentBody {
   name?: string;
@@ -67,7 +69,8 @@ export interface PatchAgentBody {
   sharedUserIds?: string[];
   monthlyLimitUsd?: number | null;
   computerUse?: boolean;
-  projectId?: string | null;
+  /** can be changed, never cleared (owner rule) */
+  projectId?: string;
 }
 export interface ScheduleBody {
   name: string;
@@ -117,8 +120,8 @@ export const builderApi = {
   addChannel: (id: string, provider: BuilderChannelProvider) => api.post<BuilderChannel>(`/v1/builder/agents/${id}/channels`, { provider }),
   deleteChannel: (id: string, channelId: string) => api.del<unknown>(`/v1/builder/agents/${id}/channels/${channelId}`),
   exportAgent: (id: string) => api.get<{ bundle: BuilderBundle }>(`/v1/builder/agents/${id}/export`),
-  importAgent: (bundle: BuilderBundle) =>
-    api.post<{ agent: BuilderAgentDetail; dropped: BuilderImportDropped[] }>(`/v1/builder/agents/import`, { bundle }),
+  importAgent: (bundle: BuilderBundle, projectId: string) =>
+    api.post<{ agent: BuilderAgentDetail; dropped: BuilderImportDropped[] }>(`/v1/builder/agents/import`, { bundle, projectId }),
 
   chat: (agentId: string, message: string, threadId?: string) =>
     api.post<ChatResponse>(`/v1/builder/agents/${agentId}/chat`, threadId ? { threadId, message } : { message }),

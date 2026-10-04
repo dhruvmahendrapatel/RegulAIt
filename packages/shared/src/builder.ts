@@ -72,6 +72,10 @@ export const builderCreateAgentSchema = z
     connectionFormat: z.enum(BUILDER_CONNECTION_FORMAT_VALUES),
     computerUse: z.boolean(),
     templateId: z.string().min(1).max(80).optional(),
+    /** owner rule (2026-10-04): every builder agent bills to a project. Optional
+     * in the parser only so the route can refuse a missing one by name
+     * (422 project_required). */
+    projectId: z.string().uuid().optional(),
   })
   .strict();
 export type BuilderCreateAgent = z.infer<typeof builderCreateAgentSchema>;
@@ -87,8 +91,10 @@ export const builderUpdateAgentSchema = z
     sharedUserIds: z.array(z.string().uuid()).max(200).optional(),
     monthlyLimitUsd: z.number().min(0.01).max(100_000).nullable().optional(),
     computerUse: z.boolean().optional(),
-    /** the project this agent's spend bills to (null clears it) */
-    projectId: z.string().uuid().nullable().optional(),
+    /** the project this agent's spend bills to. It cannot be cleared (owner
+     * rule): null or "" are parsed only so the route can refuse them by name
+     * (422 project_required). */
+    projectId: z.union([z.string().uuid(), z.literal(""), z.null()]).optional(),
     /** accepted by the parser only so the route can refuse it with a named 409 */
     connectionFormat: z.enum(BUILDER_CONNECTION_FORMAT_VALUES).optional(),
   })
@@ -252,7 +258,10 @@ export const builderBundleSchema = z
   })
   .strict();
 export type BuilderBundle = z.infer<typeof builderBundleSchema>;
-export const builderImportAgentSchema = z.object({ bundle: builderBundleSchema }).strict();
+/** the project comes from the REQUEST (the importer's choice), never the bundle */
+export const builderImportAgentSchema = z
+  .object({ bundle: builderBundleSchema, projectId: z.string().uuid().optional() })
+  .strict();
 
 /**
  * Parse a SKILL.md: YAML-ish frontmatter between `---` fences carrying `name`

@@ -39,9 +39,9 @@ export interface MockOptions {
   /** the caller is no longer entitled to the agent's model: chat refuses AFTER
    * recording the thread (403 agent_denied + threadId), like the gateway */
   denyModel?: boolean;
-  /** the org's attribution mandate is on: an agent with no project is refused
-   * (409 attribution_required, with the gateway's pointer to Advanced) */
-  attributionRequired?: boolean;
+  /** the projects GET /v1/projects lists (default: one, "Governance programme");
+   * owner rule: every agent bills to one */
+  projects?: Array<{ id: string; name: string }>;
   /** ADR-0173: the agent calls a tool on every chat turn — "plain" runs it,
    * "ask_first" pauses for the person (pending_confirmation), "approval"
    * pauses in the approvals queue (pending_approval, approver Riley Reviewer) */
@@ -80,6 +80,7 @@ export function toolStep(over: Partial<Json> = {}): Json {
 }
 
 export const PROJECT = "66666666-0000-4000-8000-000000000001";
+export const PROJECT_2 = "66666666-0000-4000-8000-000000000002";
 
 export interface Recorded {
   method: string;
@@ -105,7 +106,8 @@ function agent(over: Partial<Json>): Json {
     instructions: "",
     connectionFormat: "shared",
     computerUse: false,
-    project: null,
+    // owner rule (2026-10-04): every agent bills to a project
+    project: { id: PROJECT, name: "Governance programme" },
     sharedUserIds: [],
     sharedUsers: [],
     tools: [],
@@ -304,7 +306,7 @@ export async function installBuilderMock(page: Page, opts: MockOptions = {}): Pr
       return json(route, { users: [{ id: ME, name: "Avery Admin" }, { id: DREW, name: "Drew Reviewer" }, { id: CORA, name: "Cora Analyst" }] });
     if (p === "/v1/model-providers/status") return json(route, { providers: { anthropic: { configured: true }, openai: { configured: true } } });
     if (p === `/v1/users/${ME}/model-credentials`) return json(route, { credentials: [] });
-    if (p === "/v1/projects") return json(route, { projects: [{ id: PROJECT, name: "Governance programme" }] });
+    if (p === "/v1/projects") return json(route, { projects: st.opts.projects ?? [{ id: PROJECT, name: "Governance programme" }] });
 
     if (!p.startsWith("/v1/builder")) return json(route, {});
     const b = p.slice("/v1/builder".length);
@@ -317,6 +319,8 @@ export async function installBuilderMock(page: Page, opts: MockOptions = {}): Pr
     if (b === "/agents" && method === "POST") {
       const tpl = body.templateId ? st.templates.find((t: Json) => t.id === body.templateId) : null;
       if (body.templateId && !tpl) return json(route, { error: "unknown_template" }, 404);
+      if (!body.projectId) return json(route, { error: "project_required", detail: "every agent bills its spend to a project; choose one you are a member of" }, 422);
+      const project = { id: body.projectId, name: (st.opts.projects ?? [{ id: PROJECT, name: "Governance programme" }]).find((x) => x.id === body.projectId)?.name ?? "Project" };
       // a template's sub-agents become private child agents on the same model
       const children = (tpl?.subagents ?? []).map((sub: Json) => agent({ name: sub.name, description: sub.description, instructions: `# ${sub.name}\n\n${sub.description}` }));
       st.agents.push(...children);
@@ -333,11 +337,13 @@ export async function installBuilderMock(page: Page, opts: MockOptions = {}): Pr
         // seeded schedules start OFF: nothing spends until the owner turns one on
         schedules: tpl ? tpl.schedules.map((x: Json) => ({ id: uid("scheeeee"), ...x, enabled: false, awaitingOwner: false, lastEditedByName: "Avery Admin", nextRunAt: null, lastRunAt: null })) : [],
         ...(body.modelAgentId === MODEL_B ? { modelAgent: { id: MODEL_B, name: "gpt-review", provider: "openai", model: "gpt-4.1" } } : {}),
+        project,
       });
       st.agents.unshift(a);
       return json(route, { agent: detailOf(a) }, 201);
     }
     if (b === "/agents/import" && method === "POST") {
+      if (!body.projectId) return json(route, { error: "project_required", detail: "every agent bills its spend to a project; choose one you are a member of" }, 422);
       const a = agent({ name: body.bundle.agent.name, description: body.bundle.agent.description ?? "" });
       st.agents.unshift(a);
       return json(route, { agent: detailOf(a), dropped: [{ kind: "connector", name: "Payroll export", reason: "not_entitled" }] }, 201);
@@ -354,6 +360,8 @@ export async function installBuilderMock(page: Page, opts: MockOptions = {}): Pr
         if (!a.canEdit) return json(route, { error: "not_agent_editor", detail: "only the agent's owner or an admin can change it" }, 403);
         if ("connectionFormat" in body)
           return json(route, { error: "connection_format_locked", detail: "the connection format is fixed when an agent is created; create a new agent to change it" }, 409);
+        if ("projectId" in body && !body.projectId)
+          return json(route, { error: "project_required", detail: "every agent bills its spend to a project; choose one you are a member of" }, 422);
         if (body.color !== undefined && !PALETTE.includes(String(body.color).toLowerCase()))
           return json(route, { error: "validation", issues: [{ path: "color", message: `color must be one of ${PALETTE.join(", ")}` }] }, 400);
         Object.assign(a, body, body.color ? { color: String(body.color).toLowerCase() } : {});
@@ -489,16 +497,8 @@ export async function installBuilderMock(page: Page, opts: MockOptions = {}): Pr
             402,
           );
         if (!a.modelAgent) return json(route, { error: "builder_agent_has_no_model", detail: "choose a model for this agent first" }, 409);
-        if (st.opts.attributionRequired && !a.project)
-          return json(
-            route,
-            {
-              error: "attribution_required",
-              detail: "dispatch attribution is required: name a project — choose a project for this agent in Configure → Advanced",
-              threadId: body.threadId ?? undefined,
-            },
-            409,
-          );
+        // owner rule: a legacy agent with no project is refused before anything runs
+        if (!a.project) return json(route, { error: "builder_agent_needs_project", detail: "choose a project in Configure → Advanced" }, 409);
         if (!th) {
           th = { id: uid("th"), agentId: a.id, agentName: a.name, agentColor: a.color, title: body.message.replace(/\s+/g, " ").trim().slice(0, 80), status: "active", source: "chat", lastMessagePreview: "", updatedAt: "" };
           st.threads.unshift(th);

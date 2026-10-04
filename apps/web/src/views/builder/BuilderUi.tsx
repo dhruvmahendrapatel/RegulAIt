@@ -18,12 +18,12 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import type { BuilderMessage, BuilderPendingStep, BuilderTemplate, BuilderTool, BuilderToolStep, BuilderToolStepStatus } from "../../api/types";
 import { fmtUsd, fmtDur } from "../../api/format";
 import { useSession } from "../../session/SessionContext";
-import { Badge, Button, Field, Input, Modal, Tabs, Textarea } from "../../ui/kit";
+import { Badge, Button, Field, Input, Modal, Select, Tabs, Textarea } from "../../ui/kit";
 import { ModelPicker } from "../../ui/ModelPicker";
 import { Logo, hasLogo } from "../../ui/logos/Logo";
 import { providerLogoKey } from "../../ui/logos/providerLogo";
 import { useToast } from "../../ui/toast";
-import { bk, builderApi, chatRefusal, useMyModelTiles, type ChatResponse } from "./builderApi";
+import { bk, builderApi, chatRefusal, useMyModelTiles, useMyProjects, type ChatResponse } from "./builderApi";
 import { agentInitials, importMessage, parseBundleText, safeAgentColor } from "./builderLogic";
 import s from "./builder.module.css";
 
@@ -687,6 +687,45 @@ export function HeroArt(props: { template: Pick<BuilderTemplate, "id" | "categor
   );
 }
 
+// ---- the project an agent bills to (owner rule: required) ----------------------
+
+/**
+ * "Bill to project": every agent bills its spend to a project the creator is a
+ * member of. Preselects the only project when there is just one; with none,
+ * says how to get one instead of offering an empty list.
+ */
+export function ProjectSelect(props: { value: string; onChange: (id: string) => void; disabled?: boolean }) {
+  const projects = useMyProjects();
+  const list = projects.data?.projects ?? [];
+  const { value, onChange } = props;
+  useEffect(() => {
+    if (!value && list.length === 1) onChange(list[0]!.id);
+  }, [value, list, onChange]);
+  if (projects.isSuccess && list.length === 0) {
+    return (
+      <div className={s.note} role="note">
+        <span>
+          <strong>No project to bill to.</strong> Every agent bills its spend to a project you&apos;re a member of. Ask a project owner or an admin to add you to one.
+        </span>
+      </div>
+    );
+  }
+  return (
+    <Field label="Bill to project">
+      <Select value={value} onChange={(e) => onChange(e.target.value)} disabled={props.disabled || projects.isLoading} required>
+        <option value="" disabled>
+          {projects.isLoading ? "Loading projects…" : "Choose a project"}
+        </option>
+        {list.map((p) => (
+          <option key={p.id} value={p.id}>
+            {p.name}
+          </option>
+        ))}
+      </Select>
+    </Field>
+  );
+}
+
 // ---- new agent ------------------------------------------------------------------
 
 /**
@@ -705,6 +744,7 @@ export function NewAgentDialog(props: { open: boolean; onClose: () => void; temp
   const [format, setFormat] = useState<"shared" | "per_user">("shared");
   const [computer, setComputer] = useState<"yes" | "no">("no");
   const [modelId, setModelId] = useState("");
+  const [projectId, setProjectId] = useState("");
   const [error, setError] = useState<string | null>(null);
   const advId = useId();
 
@@ -716,6 +756,7 @@ export function NewAgentDialog(props: { open: boolean; onClose: () => void; temp
       setFormat("shared");
       setComputer("no");
       setModelId("");
+      setProjectId("");
       setError(null);
     }
   }, [props.open, props.templateName]);
@@ -728,6 +769,7 @@ export function NewAgentDialog(props: { open: boolean; onClose: () => void; temp
         ...(modelId ? { modelAgentId: modelId } : {}),
         connectionFormat: format,
         computerUse: computer === "yes",
+        projectId,
         ...(props.templateId ? { templateId: props.templateId } : {}),
       }),
     onSuccess: (res) => {
@@ -744,7 +786,7 @@ export function NewAgentDialog(props: { open: boolean; onClose: () => void; temp
     if (!create.isPending) onClose();
   }, [create.isPending, onClose]);
   const nameErr = name.length > 80 ? "Use 80 characters or fewer" : null;
-  const canCreate = name.trim().length > 0 && !nameErr && description.length <= 500 && !create.isPending;
+  const canCreate = name.trim().length > 0 && !nameErr && description.length <= 500 && !!projectId && !create.isPending;
 
   return (
     <Modal
@@ -780,6 +822,7 @@ export function NewAgentDialog(props: { open: boolean; onClose: () => void; temp
             rows={3}
           />
         </Field>
+        <ProjectSelect value={projectId} onChange={setProjectId} disabled={create.isPending} />
         <div>
           <Disclosure label="Advanced" open={advanced} onToggle={() => setAdvanced((a) => !a)} controls={advId} />
         </div>
@@ -834,6 +877,8 @@ export function useImportBundle() {
   const queryClient = useQueryClient();
   const { toast } = useToast();
   const [busy, setBusy] = useState(false);
+  const [pending, setPending] = useState<{ bundle: Parameters<typeof builderApi.importAgent>[0]; name: string } | null>(null);
+  const [projectId, setProjectId] = useState("");
   const onFile = async (file: File | undefined) => {
     if (!file) return;
     const parsed = parseBundleText(await file.text());
@@ -842,9 +887,16 @@ export function useImportBundle() {
       toast(parsed.error, "error");
       return;
     }
+    // owner rule: the importer chooses the project (never the bundle)
+    setProjectId("");
+    setPending({ bundle: parsed.bundle, name: parsed.bundle.agent.name });
+  };
+  const send = async () => {
+    if (!pending || !projectId) return;
     setBusy(true);
     try {
-      const res = await builderApi.importAgent(parsed.bundle);
+      const res = await builderApi.importAgent(pending.bundle, projectId);
+      setPending(null);
       void queryClient.invalidateQueries({ queryKey: bk.agents });
       toast(importMessage(res.agent.name, res.dropped ?? []),
         res.dropped?.length ? "info" : "success",
@@ -867,5 +919,29 @@ export function useImportBundle() {
       onChange={(e) => void onFile(e.target.files?.[0])}
     />
   );
-  return { input, open: () => inputRef.current?.click(), busy };
+  const dialog = (
+    <Modal
+      open={!!pending}
+      title={`Import ${pending?.name ?? "agent"}`}
+      onClose={() => !busy && setPending(null)}
+      actions={
+        <>
+          <Button onClick={() => setPending(null)} disabled={busy}>
+            Cancel
+          </Button>
+          <Button variant="primary" disabled={!projectId || busy} onClick={() => void send()}>
+            {busy ? "Importing…" : "Import"}
+          </Button>
+        </>
+      }
+    >
+      <div style={{ display: "flex", flexDirection: "column", gap: 12, color: "var(--rg-ink)" }}>
+        <p className={s.small} style={{ margin: 0 }}>
+          Tools and models are checked again for you; anything you can&apos;t use is left out.
+        </p>
+        <ProjectSelect value={projectId} onChange={setProjectId} disabled={busy} />
+      </div>
+    </Modal>
+  );
+  return { input, dialog, open: () => inputRef.current?.click(), busy };
 }

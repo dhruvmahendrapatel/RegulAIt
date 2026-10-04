@@ -64,6 +64,7 @@ import {
   eq,
   gte,
   inArray,
+  isNotNull,
   isNull,
   lt,
   lte,
@@ -403,6 +404,11 @@ async function withAgentGate(
   source: string,
   body: (model: ModelRow, lease: string | null) => Promise<TurnOutcome>,
 ): Promise<TurnOutcome> {
+  // owner rule (2026-10-04): every builder agent bills to a project. A legacy
+  // agent created before the rule is refused before anything is dispatched.
+  if (!agent.projectId) {
+    return { ok: false, status: 409, error: "builder_agent_needs_project", detail: "choose a project in Configure → Advanced" };
+  }
   if (!agent.modelAgentId) {
     return { ok: false, status: 409, error: "builder_agent_has_no_model", detail: "choose a model for this agent first" };
   }
@@ -1449,6 +1455,8 @@ export interface BuilderScheduleSweepResult {
   /** due schedules left for the next pass because their owner reached
    * BUILDER_LIMITS.sweepRunsPerOwner in this one (fairness, not failure) */
   deferred: number;
+  /** agents with due schedules skipped because they bill to no project */
+  skippedNeedsProject: number;
   threadIds: string[];
 }
 
@@ -1469,7 +1477,7 @@ export async function runBuilderScheduleSweep(
   opts: { now?: Date } = {},
 ): Promise<BuilderScheduleSweepResult> {
   const now = opts.now ?? new Date();
-  const out: BuilderScheduleSweepResult = { due: 0, ran: 0, refused: 0, skipped: [], deferred: 0, threadIds: [] };
+  const out: BuilderScheduleSweepResult = { due: 0, ran: 0, refused: 0, skipped: [], deferred: 0, skippedNeedsProject: 0, threadIds: [] };
   const due = await db
     .select({ s: builderAgentSchedules, ownerUserId: builderAgents.ownerUserId })
     .from(builderAgentSchedules)
@@ -1479,11 +1487,41 @@ export async function runBuilderScheduleSweep(
         eq(builderAgentSchedules.enabled, true),
         eq(builderAgentSchedules.enabledByUserId, builderAgents.ownerUserId),
         lte(builderAgentSchedules.nextRunAt, now),
+        // owner rule: an agent with no project never runs. Filtered HERE, not
+        // after the LIMIT, so legacy schedules cannot starve the rest.
+        isNotNull(builderAgents.projectId),
       ),
     )
     .orderBy(asc(builderAgentSchedules.nextRunAt))
     .limit(200);
   out.due = due.length;
+  // ...and said once per pass, not once per schedule
+  const projectless = await db
+    .select({ agentId: builderAgents.id, scheduleId: builderAgentSchedules.id })
+    .from(builderAgentSchedules)
+    .innerJoin(builderAgents, eq(builderAgentSchedules.agentId, builderAgents.id))
+    .where(
+      and(
+        eq(builderAgentSchedules.enabled, true),
+        lte(builderAgentSchedules.nextRunAt, now),
+        isNull(builderAgents.projectId),
+        isNull(builderAgents.archivedAt),
+      ),
+    )
+    .limit(500);
+  if (projectless.length) {
+    const agentIds = [...new Set(projectless.map((p) => p.agentId))];
+    out.skippedNeedsProject = agentIds.length;
+    await audit(
+      db,
+      ZERO_UUID,
+      ZERO_UUID,
+      "builder-agent-schedule-needs-project",
+      `${projectless.length} due schedule(s) on ${agentIds.length} agent(s) skipped: every agent must bill to a project (choose one in Configure → Advanced)`,
+      { agentIds: agentIds.slice(0, 100), schedules: projectless.length },
+      "deny",
+    );
+  }
   const perOwner = new Map<string, number>();
   for (const { s, ownerUserId } of due) {
     const n = perOwner.get(ownerUserId) ?? 0;

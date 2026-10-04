@@ -91,6 +91,7 @@ let adminTrack: ReturnType<typeof trackConsole>;
 let danaTrack: ReturnType<typeof trackConsole>;
 let adminName = "";
 let modelId = "";
+let projectId = "";
 const toolIds = { branches: "", schemas: "" };
 
 test.beforeAll(async ({ browser }: { browser: Browser }) => {
@@ -131,6 +132,11 @@ test.beforeAll(async ({ browser }: { browser: Browser }) => {
     expect(g.status(), await g.text()).toBeLessThan(300);
   }
   await post("/v1/rules/approvals", { userId: d.userId, serverId: wh.id, toolName: "list_schemas", approverUserId: a.userId });
+  // owner rule: every builder agent bills to a project Dana belongs to
+  const project = await post("/v1/projects", { name: `Builder tools e2e ${RUN}` });
+  projectId = project.id as string;
+  const member = await admin.request.post(`/v1/projects/${projectId}/members`, { headers: CSRF, data: { userId: d.userId, role: "contributor" } });
+  expect(member.status(), await member.text()).toBeLessThan(300);
 
   const held = (await (await dana.request.get(`/v1/users/${d.userId}/agents`)).json()) as { agents: Array<{ agentId: string; name: string }> };
   modelId = held.agents.find((x) => x.name === "balanced-mock")!.agentId;
@@ -150,7 +156,7 @@ async function agentWith(toolId: string, askFirst: boolean): Promise<{ id: strin
   const name = `Tools e2e ${RUN} ${Math.random().toString(36).slice(2, 6)}`;
   const made = await dana.request.post("/v1/builder/agents", {
     headers: CSRF,
-    data: { name, connectionFormat: "shared", computerUse: false, modelAgentId: modelId },
+    data: { name, connectionFormat: "shared", computerUse: false, modelAgentId: modelId, projectId },
   });
   expect(made.status(), await made.text()).toBe(201);
   const id = ((await made.json()) as { agent: { id: string } }).agent.id;

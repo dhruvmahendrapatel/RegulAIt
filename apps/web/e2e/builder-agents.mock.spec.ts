@@ -3,7 +3,7 @@
  * mocked Builder API (builder-fixtures.ts).
  */
 import { expect, test } from "@playwright/test";
-import { expectAxeClean, installBuilderMock, MODEL_B, sent } from "./builder-fixtures";
+import { expectAxeClean, installBuilderMock, MODEL_B, PROJECT, PROJECT_2, sent } from "./builder-fixtures";
 
 test.describe("ADR-0172: your agents", () => {
   test("cards show colour, model, sharing and spend against the limit; list view and search", async ({ page }) => {
@@ -50,8 +50,8 @@ test.describe("ADR-0172: your agents", () => {
     await expect(page2.getByRole("alert")).toContainText("builder store unavailable");
   });
 
-  test("new agent dialog: name, description, advanced choices, then the editor's setup steps", async ({ page }) => {
-    const st = await installBuilderMock(page);
+  test("new agent dialog: name, description, the project it bills to, advanced choices, then the editor's setup steps", async ({ page }) => {
+    const st = await installBuilderMock(page, { projects: [{ id: PROJECT, name: "Governance programme" }, { id: PROJECT_2, name: "Model risk" }] });
     await page.goto("/ui/builder/agents");
     await page.getByRole("button", { name: "New agent" }).first().click();
     const dialog = page.getByRole("dialog", { name: "New agent" });
@@ -60,6 +60,11 @@ test.describe("ADR-0172: your agents", () => {
     await expect(create).toBeDisabled();
     await dialog.getByLabel("Name your agent").fill("Evidence collector");
     await dialog.getByLabel("Describe what it should do").fill("Gathers evidence for controls due this month.");
+    // owner rule: no agent without a project — Create waits for one
+    await expect(dialog.getByLabel("Bill to project")).toHaveValue("");
+    await expect(create).toBeDisabled();
+    await dialog.getByLabel("Bill to project").selectOption(PROJECT_2);
+    await expect(create).toBeEnabled();
     await expect(dialog.getByRole("group", { name: "Connection format" })).toHaveCount(0);
     await dialog.getByRole("button", { name: "Advanced" }).click();
     await expect(dialog.getByRole("button", { name: "Advanced" })).toHaveAttribute("aria-expanded", "true");
@@ -78,7 +83,7 @@ test.describe("ADR-0172: your agents", () => {
 
     await expect(page).toHaveURL(/\/ui\/builder\/agents\/aaaaaaaa-.*\?setup=1/);
     expect(sent(st, "POST", "/v1/builder/agents")).toEqual([
-      { name: "Evidence collector", description: "Gathers evidence for controls due this month.", modelAgentId: MODEL_B, connectionFormat: "per_user", computerUse: true },
+      { name: "Evidence collector", description: "Gathers evidence for controls due this month.", modelAgentId: MODEL_B, connectionFormat: "per_user", computerUse: true, projectId: PROJECT_2 },
     ]);
     await expect(page.getByRole("heading", { level: 1, name: "Evidence collector" })).toBeVisible();
     const setup = page.getByRole("group", { name: "Agent setup" });
@@ -98,8 +103,26 @@ test.describe("ADR-0172: your agents", () => {
 
     const bundle = { version: 1, agent: { name: "Imported reviewer", description: "From another workspace" }, skills: [] };
     await file.setInputFiles({ name: "imported.agent.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify(bundle)) });
+    // the importer chooses the project the agent bills to (never the bundle)
+    const confirm = page.getByRole("dialog", { name: "Import Imported reviewer" });
+    await expect(confirm.getByLabel("Bill to project")).toHaveValue(PROJECT); // the only one, preselected
+    await expectAxeClean(page, "import: choose a project");
+    await confirm.getByRole("button", { name: "Import" }).click();
     await expect(page.getByText(/Imported Imported reviewer\. Left out 1 tool you don't have access to: Payroll export/)).toBeVisible();
-    expect(sent(st, "POST", "/v1/builder/agents/import")).toEqual([{ bundle }]);
+    expect(sent(st, "POST", "/v1/builder/agents/import")).toEqual([{ bundle, projectId: PROJECT }]);
     await expect(page.getByRole("heading", { level: 1, name: "Imported reviewer" })).toBeVisible();
+  });
+
+  test("with no project to bill to, the dialog says how to get one and cannot create", async ({ page }) => {
+    const st = await installBuilderMock(page, { projects: [] });
+    await page.goto("/ui/builder/agents");
+    await page.getByRole("button", { name: "New agent" }).first().click();
+    const dialog = page.getByRole("dialog", { name: "New agent" });
+    await dialog.getByLabel("Name your agent").fill("Orphan");
+    await expect(dialog.getByRole("note")).toContainText("No project to bill to");
+    await expect(dialog.getByRole("note")).toContainText("Ask a project owner or an admin to add you");
+    await expect(dialog.getByRole("button", { name: "Create agent" })).toBeDisabled();
+    await expectAxeClean(page, "new agent, no project");
+    expect(sent(st, "POST", "/v1/builder/agents")).toEqual([]);
   });
 });

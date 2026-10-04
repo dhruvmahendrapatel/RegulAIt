@@ -133,6 +133,38 @@ const stepParam = z.object({ id: z.string().uuid(), stepId: z.string().uuid() })
 function colorFor(name: string): string {
   return builderColorFor(name);
 }
+/** owner rule (2026-10-04): the named refusal for an agent with no project */
+const PROJECT_REQUIRED = {
+  error: "project_required",
+  detail: "every agent bills its spend to a project; choose one you are a member of",
+} as const;
+
+/**
+ * May `viewer` bill an agent's spend to `projectId`? Attribution is a member's
+ * act: the project must exist and the viewer must belong to it (or be an
+ * admin). null when allowed, else the status and body to send.
+ */
+async function projectRefusal(
+  db: Db,
+  viewer: Viewer,
+  projectId: string | null | undefined,
+): Promise<{ status: number; body: Record<string, unknown> } | null> {
+  if (!projectId) return { status: 422, body: { ...PROJECT_REQUIRED } };
+  const [project] = await db.select({ id: projects.id }).from(projects).where(eq(projects.id, projectId));
+  if (!project) return { status: 404, body: { error: "unknown_project" } };
+  if (viewer.isAdmin) return null;
+  const [member] = await db
+    .select({ userId: projectMembers.userId })
+    .from(projectMembers)
+    .where(and(eq(projectMembers.projectId, projectId), eq(projectMembers.userId, viewer.userId)));
+  return member
+    ? null
+    : {
+        status: 403,
+        body: { error: "not_a_project_member", detail: "you can only bill an agent's spend to a project you are a member of" },
+      };
+}
+
 /** a bundle may carry any #rrggbb from elsewhere; off-palette falls back */
 function paletteOr(color: string | undefined, name: string): string {
   const c = color?.toLowerCase();
@@ -531,6 +563,8 @@ async function applySeed(db: Db, agent: BuilderAgentRow, seed: Seed) {
         instructions: `# ${sub.name}\n\n${sub.description}`,
         connectionFormat: agent.connectionFormat,
         computerUse: false,
+        // owner rule: a seeded sub-agent bills where its parent does
+        projectId: agent.projectId,
       })
       .returning();
     await db.insert(builderAgentSubagents).values({
@@ -617,6 +651,8 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     const body = builderCreateAgentSchema.parse(req.body ?? {});
     const template = body.templateId ? findTemplate(body.templateId) : undefined;
     if (body.templateId && !template) return reply.status(404).send({ error: "unknown_template" });
+    const noProject = await projectRefusal(db, viewer, body.projectId);
+    if (noProject) return reply.status(noProject.status).send(noProject.body);
 
     let model: AgentRow | null = null;
     if (body.modelAgentId) {
@@ -643,12 +679,14 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
         instructions: template?.instructions ?? "",
         connectionFormat: body.connectionFormat,
         computerUse: body.computerUse,
+        projectId: body.projectId!,
       })
       .returning();
     if (template) await applySeed(db, agent!, template);
     await audit(db, viewer.userId, "builder_agent", agent!.id, "builder-agent-created", `builder agent '${agent!.name}' created`, {
       templateId: template?.id ?? null,
       modelAgentId: model?.id ?? null,
+      projectId: body.projectId,
       connectionFormat: body.connectionFormat,
       computerUse: body.computerUse,
     });
@@ -686,23 +724,11 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
       const found = await db.select({ id: users.id }).from(users).where(inArray(users.id, body.sharedUserIds));
       if (found.length !== new Set(body.sharedUserIds).size) return reply.status(422).send({ error: "unknown_user" });
     }
-    if (body.projectId) {
-      // attribution is a member's act: the editor must belong to the project
-      // (or be an admin) to bill an agent's spend to it
-      const [project] = await db.select({ id: projects.id }).from(projects).where(eq(projects.id, body.projectId));
-      if (!project) return reply.status(404).send({ error: "unknown_project" });
-      if (!viewer.isAdmin) {
-        const [member] = await db
-          .select({ userId: projectMembers.userId })
-          .from(projectMembers)
-          .where(and(eq(projectMembers.projectId, body.projectId), eq(projectMembers.userId, viewer.userId)));
-        if (!member) {
-          return reply.status(403).send({
-            error: "not_a_project_member",
-            detail: "you can only bill an agent's spend to a project you are a member of",
-          });
-        }
-      }
+    // owner rule: a project can be changed (by a member of the new one) but
+    // never cleared
+    if (body.projectId !== undefined && body.projectId !== agent.projectId) {
+      const refused = await projectRefusal(db, viewer, body.projectId);
+      if (refused) return reply.status(refused.status).send(refused.body);
     }
     if (body.instructions !== undefined) {
       const tooLarge = promptTooLarge(
@@ -734,7 +760,7 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     }
     if (body.projectId !== undefined && body.projectId !== agent.projectId) {
       await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-project-changed",
-        `spend of '${agent.name}' now bills to ${body.projectId ? `project ${body.projectId}` : "no project"}`,
+        `spend of '${agent.name}' now bills to project ${body.projectId}`,
         { from: agent.projectId, to: body.projectId });
     }
     const rest = changed.filter((k) => !["sharing", "sharedUserIds", "monthlyLimitUsd", "projectId"].includes(k));
@@ -1240,8 +1266,10 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
   app.post("/v1/builder/agents/import", async (req, reply) => {
     const viewer = viewerOf(req, reply);
     if (!viewer) return;
-    const { bundle } = builderImportAgentSchema.parse(req.body ?? {});
+    const { bundle, projectId } = builderImportAgentSchema.parse(req.body ?? {});
     const a = bundle.agent;
+    const noProject = await projectRefusal(db, viewer, projectId);
+    if (noProject) return reply.status(noProject.status).send(noProject.body);
     if (a.subagents.length > BUILDER_LIMITS.importSubagents) {
       return reply.status(422).send({
         error: "import_too_many_subagents",
@@ -1303,6 +1331,7 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
         connectionFormat: a.connectionFormat,
         computerUse: a.computerUse,
         monthlyLimitUsd: a.monthlyLimitUsd,
+        projectId: projectId!,
       })
       .returning();
     const uniqKeep = [...new Map(keep.map((k) => [`${k.kind}:${k.refId}`, k])).values()];

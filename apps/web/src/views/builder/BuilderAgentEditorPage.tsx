@@ -113,6 +113,21 @@ export default function BuilderAgentEditorPage() {
         </Button>
       </div>
 
+      {!agent.project && (
+        <div className={s.note} role="status" style={{ marginBottom: 12 }}>
+          <span>
+            <strong>This agent doesn&apos;t bill to a project yet, so it can&apos;t run.</strong>{" "}
+            {agent.canEdit
+              ? "Every agent must bill its spend to a project — choose one in Configure → Advanced."
+              : "Every agent must bill its spend to a project; ask its owner to choose one."}
+          </span>
+          {agent.canEdit && !panelOpen && (
+            <Button onClick={() => setPanelOpen(true)} style={{ marginLeft: "auto" }}>
+              Choose a project
+            </Button>
+          )}
+        </div>
+      )}
       <div className={panelOpen ? s.editor : s.editorSolo}>
         <section aria-label="Conversation" className={`${s.glass} ${s.convo}`}>
           {threadId ? (

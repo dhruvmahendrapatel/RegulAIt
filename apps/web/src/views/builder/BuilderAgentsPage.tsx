@@ -80,6 +80,7 @@ export default function BuilderAgentsPage() {
         }
       />
       {importer.input}
+      {importer.dialog}
       <div className={s.toolbar}>
         <Input className={s.search} type="search" aria-label="Search agents" placeholder="Search agents" value={query} onChange={(e) => setQuery(e.target.value)} />
         <span style={{ flex: 1 }} />
