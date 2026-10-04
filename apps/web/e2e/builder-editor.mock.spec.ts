@@ -194,29 +194,35 @@ test.describe("ADR-0172: agent editor", () => {
     await expectAxeClean(page, "editor, schedules waiting for the owner");
   });
 
-  test("advanced: bill spend to a project; an unattributed agent's refusal points there", async ({ page }) => {
-    const st = await installBuilderMock(page, { attributionRequired: true });
-    const id = st.agents.find((a) => a.name === "Intake reviewer")!.id;
-    await page.goto(`/ui/builder/agents/${id}`);
+  test("project required: a legacy agent with no project says so, refuses to chat, and is fixed in Advanced", async ({ page }) => {
+    const st = await installBuilderMock(page);
+    const a = st.agents.find((x) => x.name === "Intake reviewer")!;
+    a.project = null; // created before the owner rule
+    await page.goto(`/ui/builder/agents/${a.id}`);
     await expect(page.getByRole("heading", { level: 1, name: "Intake reviewer" })).toBeVisible();
+    await expect(page.getByRole("status").filter({ hasText: "doesn't bill to a project yet, so it can't run" })).toBeVisible();
     await page.getByLabel("Message Intake reviewer").fill("Anything new?");
     await page.getByRole("button", { name: "Send" }).click();
-    await expect(page.getByRole("alert")).toContainText("choose a project for this agent in Configure → Advanced");
+    await expect(page.getByRole("alert")).toContainText("choose a project in Configure → Advanced");
 
     await expand(page, "Advanced");
     const adv = section(page, "Advanced");
-    await expect(adv.getByLabel("Bill spend to project")).toHaveValue("");
-    await adv.getByLabel("Bill spend to project").selectOption(PROJECT);
+    const select = adv.getByLabel("Bill spend to project");
+    await expect(select).toHaveValue("");
+    // no way to choose "no project": only the placeholder (disabled) and real projects
+    await expect(select.getByRole("option", { name: "No project" })).toHaveCount(0);
+    await expect(select.getByRole("option", { name: "Choose a project" })).toBeDisabled();
+    await select.selectOption(PROJECT);
     await expect(page.getByText("Spend now bills to Governance programme")).toBeVisible();
-    await expect(adv.getByLabel("Bill spend to project")).toHaveValue(PROJECT);
-    expect(sent(st, "PATCH", `/v1/builder/agents/${id}`)).toEqual([{ projectId: PROJECT }]);
+    await expect(select).toHaveValue(PROJECT);
+    expect(sent(st, "PATCH", `/v1/builder/agents/${a.id}`)).toEqual([{ projectId: PROJECT }]);
+    await expect(page.getByRole("status").filter({ hasText: "doesn't bill to a project yet" })).toHaveCount(0);
+    // once it has a project the placeholder is gone: a project can be changed, never cleared
+    await expect(select.getByRole("option", { name: "Choose a project" })).toHaveCount(0);
 
     await page.getByLabel("Message Intake reviewer").fill("Anything new now?");
     await page.getByRole("button", { name: "Send" }).click();
     await expect(page.getByText("Intake reviewer: Here is what I found about: Anything new now?")).toBeVisible();
-    await adv.getByLabel("Bill spend to project").selectOption("");
-    await expect(page.getByText("Spend no longer bills to a project")).toBeVisible();
-    expect(sent(st, "PATCH", `/v1/builder/agents/${id}`).at(-1)).toEqual({ projectId: null });
   });
 
   test("memory: add and remove", async ({ page }) => {

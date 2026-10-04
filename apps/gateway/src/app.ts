@@ -410,6 +410,7 @@ import { registerTracingRoutes } from "./tracing.js";
 import { registerCompliancePackRoutes } from "./compliance-packs.js";
 import { registerCopilotRoutes } from "./copilot.js";
 import { registerBuilderRoutes } from "./builder.js";
+import { builderStepsAwaitingApproval, resumeBuilderAfterApproval } from "./builder-runtime.js";
 import type { CopilotNarrator, RecommendationJudge } from "@regulait/shared";
 import { registerChatOpsRoutes } from "./chatops.js";
 import path from "node:path";
@@ -3692,6 +3693,19 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       // Orchestration escalations (§3): approve = another attempt, deny = abort.
       if (updated.objectType === "run") {
         postCommit = await applyRunApprovalDecision(tx, updated, binaryDecision, deciderUserId, opts.dataKey);
+      }
+      // ADR-0173 §1: an MCP tool approval a builder agent's turn is paused on.
+      // Nothing is decided here — the decision is the approval row above. The
+      // turn RESUMES after commit (approved -> the identical call, which the
+      // governed path matches to this approval by its argument digest; denied
+      // -> the model is told who denied it and why), as the thread's person.
+      if (updated.objectType === "mcp_tool" && !postCommit) {
+        const waiting = await builderStepsAwaitingApproval(tx as unknown as Db, updated.id);
+        if (waiting.length) {
+          postCommit = async (d: Db) => {
+            await resumeBuilderAfterApproval(d, opts.dataKey, updated, binaryDecision, deciderUserId);
+          };
+        }
       }
       // Pillar 5 budget escalations + §9 context-conflict resolutions.
       if (updated.objectType === "project") {

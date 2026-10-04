@@ -138,6 +138,7 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /v1/builder/threads",
   "GET /v1/builder/threads/:id",
   "PATCH /v1/builder/threads/:id",
+  "POST /v1/builder/threads/:id/steps/:stepId/confirm",
   "GET /v1/builder/skills",
   "POST /v1/builder/skills",
   "POST /v1/builder/skills/import",

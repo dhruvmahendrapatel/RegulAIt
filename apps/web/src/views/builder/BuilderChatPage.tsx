@@ -8,11 +8,10 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ago } from "../../api/format";
-import type { BuilderMessage } from "../../api/types";
 import { PageHeader } from "../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, ErrorState, SkeletonBlock } from "../../ui/kit";
 import { ModelPicker } from "../../ui/ModelPicker";
-import { bk, builderApi, chatRefusal, useAgents } from "./builderApi";
+import { bk, builderApi, chatRefusal, mergeTurn, useAgents, type ChatResponse } from "./builderApi";
 import { agentTile, SOURCE_LABEL } from "./builderLogic";
 import { AgentAvatar, Composer, Icon, LogoStrip, MessageList, NewAgentDialog } from "./BuilderUi";
 import s from "./builder.module.css";
@@ -57,10 +56,7 @@ export default function BuilderChatPage() {
       setSendError(null);
     },
     onSuccess: (res) => {
-      queryClient.setQueryData(bk.thread(res.thread.id), (prev: { thread: unknown; messages: BuilderMessage[] } | undefined) => ({
-        thread: res.thread,
-        messages: [...(prev?.messages ?? []), ...res.messages],
-      }));
+      queryClient.setQueryData(bk.thread(res.thread.id), (prev: ChatResponse | undefined) => mergeTurn(prev, res));
       void queryClient.invalidateQueries({ queryKey: ["builder", "threads"] });
       if (res.thread.id !== threadId) setParams({ thread: res.thread.id });
     },
@@ -111,14 +107,27 @@ export default function BuilderChatPage() {
                   <Badge>{SOURCE_LABEL[t.source]}</Badge>
                 </div>
               )}
-              <MessageList messages={thread.data?.messages ?? []} agentName={t?.agentName ?? "Agent"} agentColor={t?.agentColor} pending={pending} />
+              <MessageList
+                messages={thread.data?.messages ?? []}
+                agentName={t?.agentName ?? "Agent"}
+                agentColor={t?.agentColor}
+                pending={pending}
+                waiting={thread.data?.pending ?? null}
+                threadId={threadId}
+              />
               <div className={s.convoFoot}>
                 {sendError && (
                   <p role="alert" className={s.note} style={{ color: "var(--danger)", margin: 0 }}>
                     {sendError}
                   </p>
                 )}
-                <Composer label="Message" placeholder={`Reply to ${t?.agentName ?? "the agent"}…`} busy={send.isPending} onSend={(m) => send.mutate(m)} />
+                <Composer
+                  label="Message"
+                  placeholder={thread.data?.pending ? "Answer the tool request above first" : `Reply to ${t?.agentName ?? "the agent"}…`}
+                  busy={send.isPending}
+                  disabled={!!thread.data?.pending}
+                  onSend={(m) => send.mutate(m)}
+                />
               </div>
             </div>
           )}
@@ -207,7 +216,11 @@ export default function BuilderChatPage() {
                   </span>
                   <span className={s.threadMeta}>
                     <span>{ago(t.updatedAt)}</span>
-                    {t.status === "needs_attention" && <Badge tone="warn">Needs you</Badge>}
+                    {t.pendingStep ? (
+                      <Badge tone="warn">{t.pendingStep.status === "pending_confirmation" ? "Needs your OK" : "Awaiting approval"}</Badge>
+                    ) : (
+                      t.status === "needs_attention" && <Badge tone="warn">Needs you</Badge>
+                    )}
                   </span>
                 </Link>
               ))}

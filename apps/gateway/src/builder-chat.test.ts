@@ -22,6 +22,7 @@ const newAgent = async (who: Person, extra: Record<string, unknown> = {}) => {
     name: `Chat agent ${Math.random().toString(36).slice(2, 7)}`,
     connectionFormat: "shared",
     computerUse: false,
+    projectId: who.projectId,
     ...extra,
   });
   expect(r.statusCode, r.body).toBe(201);
@@ -36,6 +37,10 @@ beforeAll(async () => {
   colleague = await k.person("colleague");
   // $100k per million tokens: any reply costs well over a cent
   pricedModel = await k.model("priced", { price: 100_000 });
+  // the colleague uses the owner's shared agents, which bill to the owner's
+  // project: a non-member is refused (not_a_project_member) before the model
+  const member = await k.req("POST", `/v1/projects/${owner.projectId}/members`, k.BOOT, { userId: colleague.id, role: "contributor" });
+  expect(member.statusCode, member.body).toBeLessThan(300);
   undispatchable = await k.model("no-model-id", { model: null });
   await k.grantModel(owner.id, pricedModel);
   await k.grantModel(owner.id, undispatchable);

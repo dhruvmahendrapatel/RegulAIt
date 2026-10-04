@@ -82,7 +82,7 @@ describe("skills library", () => {
 
   it("attaching counts usage, refuses a skill the editor cannot see, and feeds the runtime prompt until archived", async () => {
     const agent = (
-      await k.req("POST", "/v1/builder/agents", owner.auth, { name: "Skilled", connectionFormat: "shared", computerUse: false })
+      await k.req("POST", "/v1/builder/agents", owner.auth, { name: "Skilled", connectionFormat: "shared", computerUse: false, projectId: owner.projectId })
     ).json().agent;
     const s = await skill(owner, { name: `Cite sources ${k.RUN}`, body: "Always cite the section." });
     const theirs = await skill(colleague, { name: `Theirs ${k.RUN}` });

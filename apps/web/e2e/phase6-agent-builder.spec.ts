@@ -120,6 +120,27 @@ test.afterAll(async () => {
   await dana?.page.close();
 });
 
+/** owner rule (2026-10-04): every builder agent bills to a project. An admin
+ * makes one for this run (no budget, so the journey's spend is never capped by
+ * the seeded demo budgets) and adds Dana to it. */
+const PROJECT_NAME = `Agent builder e2e ${Date.now().toString(36)}`;
+let projectId = "";
+test.beforeAll(async ({ browser }) => {
+  test.setTimeout(120_000);
+  const page = await browser.newPage();
+  await signIn(page, "admin@regulait.local", [ADMIN_PASSWORD, state.passwords.admin], ADMIN_PASSWORD);
+  const CSRF = { "x-regulait-csrf": "1" };
+  const made = await page.request.post("/v1/projects", { headers: CSRF, data: { name: PROJECT_NAME } });
+  expect(made.status(), await made.text()).toBe(201);
+  projectId = ((await made.json()) as { id: string }).id;
+  const users = (await (await page.request.get("/v1/users")).json()) as { users?: Array<{ id: string; email: string }> } | Array<{ id: string; email: string }>;
+  const list = Array.isArray(users) ? users : (users.users ?? []);
+  const danaId = list.find((u) => u.email === "dana@regulait.local")!.id;
+  const added = await page.request.post(`/v1/projects/${projectId}/members`, { headers: CSRF, data: { userId: danaId, role: "contributor" } });
+  expect(added.status(), await added.text()).toBeLessThan(300);
+  await page.close();
+});
+
 const panel = (page: Page) => page.getByRole("complementary", { name: "Configure agent" });
 const section = (page: Page, title: string) => panel(page).getByRole("region", { name: title });
 async function expand(page: Page, title: string) {
@@ -151,6 +172,8 @@ test("a non-admin creates an agent from a template and configures it", async ({ 
   await page.getByRole("button", { name: "Create agent" }).click();
   const dialog = page.getByRole("dialog", { name: "New agent from AI intake reviewer" });
   await dialog.getByLabel("Name your agent").fill(AGENT);
+  // owner rule: an agent is created billed to a project the person belongs to
+  await dialog.getByLabel("Bill to project").selectOption({ label: PROJECT_NAME });
   await dialog.getByRole("button", { name: "Create agent" }).click();
   await expect(page).toHaveURL(/\/ui\/builder\/agents\/[0-9a-f-]{36}\?setup=1/);
   agentId = /agents\/([0-9a-f-]{36})/.exec(page.url())![1]!;
@@ -168,7 +191,7 @@ test("a non-admin creates an agent from a template and configures it", async ({ 
   expect(seeded.schedules.every((s: { enabled: boolean; nextRunAt: string | null }) => !s.enabled && s.nextRunAt === null)).toBe(true);
   // template skills are Dana's own private copies, pinned at their current version
   expect(seeded.skills.every((k: { updateAvailable: boolean; unavailable: boolean }) => !k.updateAvailable && !k.unavailable)).toBe(true);
-  expect(seeded.project).toBeNull();
+  expect(seeded.project).toMatchObject({ id: projectId, name: PROJECT_NAME });
 
   // instructions
   const kn = section(page, "Knowledge");

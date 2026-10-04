@@ -469,7 +469,9 @@ export function ConfigurePanel(props: { agent: BuilderAgentDetail; onOpenSkills:
           {Icon.plus(14)} Add connection
         </button>
         <p className={s.small} style={{ margin: 0 }}>
-          Today the agent is told about these tools and can describe how it would use them; calling them on its own comes in a later release.
+          The agent calls these tools on its own during a conversation. Every call runs as the person chatting, with their own access and your
+          organisation's policies; a connection marked Ask first waits for that person to approve the exact call, and organisation approval rules
+          still apply.
         </p>
       </Section>
 
@@ -659,13 +661,18 @@ export function ConfigurePanel(props: { agent: BuilderAgentDetail; onOpenSkills:
             value={agent.project?.id ?? ""}
             disabled={ro || patch.isPending}
             onChange={(e) => {
-              const next = e.target.value || null;
-              if (next === (agent.project?.id ?? null)) return;
+              const next = e.target.value;
+              // owner rule: a project can be changed, never cleared
+              if (!next || next === agent.project?.id) return;
               const label = projectOptions.find((p) => p.id === next)?.name;
-              patch.mutate({ body: { projectId: next }, msg: next ? `Spend now bills to ${label ?? "the project"}` : "Spend no longer bills to a project" });
+              patch.mutate({ body: { projectId: next }, msg: `Spend now bills to ${label ?? "the project"}` });
             }}
           >
-            <option value="">No project</option>
+            {!agent.project && (
+              <option value="" disabled>
+                Choose a project
+              </option>
+            )}
             {projectOptions.map((p) => (
               <option key={p.id} value={p.id}>
                 {p.name}
@@ -674,7 +681,7 @@ export function ConfigurePanel(props: { agent: BuilderAgentDetail; onOpenSkills:
           </Select>
         </Field>
         <p className={s.small} style={{ margin: 0 }}>
-          The agent&apos;s replies count toward this project&apos;s spend and budget. You can choose projects you&apos;re a member of; people who chat with it must be members too.
+          Every agent bills to a project: its replies and tool calls count toward that project&apos;s spend and budget. You can choose projects you&apos;re a member of; people who chat with it must be members too.
         </p>
         <Field label="Monthly spend limit (USD)" error={limitErr}>
           <Input inputMode="decimal" value={limit} onChange={(e) => setLimit(e.target.value)} placeholder="No limit" disabled={ro} />
