@@ -342,3 +342,40 @@ export function codeSnippets(agentId: string, origin: string): { curl: string; t
     ].join("\n"),
   };
 }
+
+// ---------------------------------------------------------------------------
+// ADR-0175 A6/A5 — skill admission and release-age copy
+// ---------------------------------------------------------------------------
+
+export type SkillWithheld = "held" | "refused" | "quarantined";
+
+/** the badge and the one-line reason beside an attached skill whose pinned
+ * body is kept out of the agent's prompt */
+export function skillWithheldCopy(why: SkillWithheld): { badge: string; sub: string } {
+  switch (why) {
+    case "held":
+      return { badge: "Held for review", sub: "The admission detectors flagged this skill. The agent skips it until an admin admits it." };
+    case "refused":
+      return { badge: "Blocked by scan", sub: "The admission detectors blocked this skill. The agent skips it until its owner fixes it." };
+    case "quarantined":
+      return { badge: "Waiting period", sub: "This version is newer than your organization's waiting period. The agent skips it until then." };
+  }
+}
+
+/** the library card's status badge for a skill, or null when there is nothing to say */
+export function skillStatusBadge(k: {
+  admissionState: string;
+  requestedVisibility: string | null;
+  release: { quarantined: boolean; readyAt: string | null } | null;
+}): { label: string; tone: "warn" | "danger" | "info" } | null {
+  if (k.admissionState === "refused") return { label: "Blocked by scan", tone: "danger" };
+  if (k.admissionState === "held") return { label: "Held for review", tone: "warn" };
+  if (k.release?.quarantined) return { label: `Waiting until ${shortDate(k.release.readyAt ?? "")}`, tone: "info" };
+  if (k.requestedVisibility === "workspace") return { label: "Sharing pending approval", tone: "info" };
+  return null;
+}
+
+/** "rule (severity ×count)" lines for a findings list — never the matched text */
+export function findingLines(findings: ReadonlyArray<{ rule: string; severity: string; where: string; count: number }>): string[] {
+  return findings.map((f) => `${f.rule} in ${f.where} (${f.severity}, ×${f.count})`);
+}

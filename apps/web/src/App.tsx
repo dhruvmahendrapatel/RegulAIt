@@ -63,6 +63,7 @@ import RecommendationsPage from "./views/admin/governance/RecommendationsPage";
 import SodRulesPage from "./views/admin/governance/SodRulesPage";
 import PosturePage from "./views/admin/governance/PosturePage";
 import RedTeamPage from "./views/admin/governance/RedTeamPage";
+import AdmissionReviewPage from "./views/admin/governance/AdmissionReviewPage";
 import ReportsPage from "./views/admin/cost/ReportsPage";
 import PromptVersionsPage from "./views/admin/governance/PromptVersionsPage";
 import ApprovalsAdminPage from "./views/admin/governance/ApprovalsAdminPage";
@@ -241,6 +242,7 @@ export default function App() {
                         <Route path="external-scorers" element={<ExternalScorersPage />} />
                         <Route path="connectors" element={<ConnectorsPage />} />
                         <Route path="mcp-servers" element={<McpServersPage />} />
+                        <Route path="admission" element={<AdmissionReviewPage />} />
                         <Route path="git-connections" element={<GitConnectionsPage />} />
                         <Route path="pm-connections" element={<PmConnectionsPage />} />
                         <Route path="deploy-targets" element={<DeployTargetsPage />} />
