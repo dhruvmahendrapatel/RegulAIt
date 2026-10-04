@@ -446,16 +446,43 @@ export function useConfirmStep(threadId: string | null | undefined) {
   });
 }
 
+/** the thread owner cancels a pause: nothing runs, the conversation is free again */
+export function useCancelStep(threadId: string | null | undefined) {
+  const queryClient = useQueryClient();
+  const { toast } = useToast();
+  return useMutation({
+    mutationFn: (stepId: string) => builderApi.cancelStep(threadId!, stepId),
+    onSuccess: (res: ChatResponse) => {
+      queryClient.setQueryData(bk.thread(res.thread.id), res);
+      void queryClient.invalidateQueries({ queryKey: ["builder", "threads"] });
+    },
+    onError: (e) => {
+      toast(chatRefusal(e).message, "error");
+      if (threadId) void queryClient.invalidateQueries({ queryKey: bk.thread(threadId) });
+      void queryClient.invalidateQueries({ queryKey: ["builder", "threads"] });
+    },
+  });
+}
+
 /**
  * The two pauses, never conflated. "Ask first" is a CONFIRMATION: the person
  * the agent runs as sees the exact (redacted) call and approves or denies it.
  * An organisation approval waits in the approvals queue for a named approver;
- * the conversation continues by itself once they decide.
+ * the conversation continues by itself once they decide. Either can be
+ * CANCELLED by the person (an approval nobody decides must not hold the
+ * conversation forever): the tool does not run and the composer is free again.
  */
 export function PauseCard(props: { waiting: BuilderPendingStep; threadId: string; agentName: string }) {
   const { waiting } = props;
   const confirm = useConfirmStep(props.threadId);
+  const cancel = useCancelStep(props.threadId);
   const titleId = useId();
+  const busy = confirm.isPending || cancel.isPending;
+  const cancelButton = (
+    <Button disabled={busy} onClick={() => cancel.mutate(waiting.stepId)} title="Stop waiting: the tool will not run">
+      Cancel
+    </Button>
+  );
   if (waiting.status === "pending_approval") {
     return (
       <div className={s.pauseCard} role="status" aria-labelledby={titleId}>
@@ -464,8 +491,16 @@ export function PauseCard(props: { waiting: BuilderPendingStep; threadId: string
         </p>
         <span>
           {props.agentName} asked to use <strong>{waiting.displayName}</strong>, and your organisation requires an approval for this call. The conversation continues on its own
-          once it is decided.
+          once it is decided. Cancel to stop waiting — the tool will not run.
         </span>
+        <div className={s.pauseActions}>
+          {cancelButton}
+          {cancel.isPending && (
+            <span role="status" className={s.small} style={{ alignSelf: "center" }}>
+              Working…
+            </span>
+          )}
+        </div>
       </div>
     );
   }
@@ -479,13 +514,14 @@ export function PauseCard(props: { waiting: BuilderPendingStep; threadId: string
       </span>
       <pre className={s.stepPre}>{argumentsText(waiting.step?.arguments ?? {})}</pre>
       <div className={s.pauseActions}>
-        <Button variant="primary" disabled={confirm.isPending} onClick={() => confirm.mutate({ stepId: waiting.stepId, decision: "approve" })}>
+        <Button variant="primary" disabled={busy} onClick={() => confirm.mutate({ stepId: waiting.stepId, decision: "approve" })}>
           Approve
         </Button>
-        <Button disabled={confirm.isPending} onClick={() => confirm.mutate({ stepId: waiting.stepId, decision: "deny" })}>
+        <Button disabled={busy} onClick={() => confirm.mutate({ stepId: waiting.stepId, decision: "deny" })}>
           Deny
         </Button>
-        {confirm.isPending && (
+        {cancelButton}
+        {busy && (
           <span role="status" className={s.small} style={{ alignSelf: "center" }}>
             Working…
           </span>

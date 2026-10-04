@@ -222,6 +222,17 @@ test("an organisation approval waits for the admin and the thread finishes when 
   // the admin decides in the one approvals queue
   const decided = await admin.request.post(`/v1/approvals/${approvalId}/decide`, { headers: CSRF, data: { decision: "approved" } });
   expect(decided.status(), await decided.text()).toBe(200);
+  // the turn resumes AFTER the decide response (ADR-0173 review): wait for it
+  // on the API before reading the page
+  await expect
+    .poll(
+      async () => {
+        const d = (await (await dana.request.get(`/v1/builder/threads/${thread}`)).json()) as { messages: Array<{ steps: Array<{ status: string }> }> };
+        return d.messages.flatMap((m) => m.steps).map((s) => s.status);
+      },
+      { timeout: 30_000 },
+    )
+    .toContain("done");
 
   await dana.reload();
   const convo = dana.getByRole("region", { name: "Conversation" });

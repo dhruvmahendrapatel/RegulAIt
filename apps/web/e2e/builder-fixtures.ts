@@ -594,6 +594,26 @@ export async function installBuilderMock(page: Page, opts: MockOptions = {}): Pr
       th.lastMessagePreview = msg.content;
       return json(route, { thread: th, messages: st.messages[th.id] ?? [], pending: null });
     }
+    // ADR-0173 review — the thread owner cancels a pause (a confirmation, or an
+    // approval nobody decides): nothing runs, a system note says so
+    if ((m = /^\/threads\/([^/]+)\/steps\/([^/]+)\/cancel$/.exec(b)) && method === "POST") {
+      const th = st.threads.find((t) => t.id === m![1]);
+      if (!th || th.foreign) return json(route, { error: "unknown_thread" }, 404);
+      const waiting = st.pending[th.id];
+      if (!waiting || waiting.stepId !== m[2])
+        return json(route, { error: "step_not_pending", detail: "this step is not waiting", thread: th, messages: st.messages[th.id] ?? [], pending: waiting ?? null }, 409);
+      const msg = (st.messages[th.id] ?? []).find((x: Json) => (x.steps ?? []).some((s: Json) => s.id === waiting.stepId));
+      const step = msg.steps.find((s: Json) => s.id === waiting.stepId);
+      const now = new Date().toISOString();
+      Object.assign(step, { status: "refused", outcomeCode: "cancelled_by_user", outcomeDetail: "cancelled by the person in the thread; the tool did not run", finishedAt: now });
+      const note = `Cancelled by you: '${step.displayName}' did not run. Send a message to continue.`;
+      st.messages[th.id]!.push({ id: uid("msg"), role: "system", content: note, model: null, costUsd: null, latencyMs: null, createdAt: now, steps: [] });
+      delete st.pending[th.id];
+      th.pendingStep = null;
+      th.status = "needs_attention";
+      th.lastMessagePreview = note;
+      return json(route, { thread: th, messages: st.messages[th.id] ?? [], pending: null });
+    }
     // ---- skills
     if (b === "/skills" && method === "GET") return json(route, { skills: st.skills.map(({ body: _b, ...k }: Json) => k) });
     if (b === "/skills" && method === "POST") {
