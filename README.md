@@ -49,7 +49,7 @@ environment or a secret file — never from the command line or the repository:
 ```bash
 # read it without echoing, or point REGULAIT_DEMO_USER_PASSWORD_FILE at a 0600 file
 read -rs REGULAIT_DEMO_USER_PASSWORD && export REGULAIT_DEMO_USER_PASSWORD
-pnpm --filter @regulait/gateway demo:set-passwords      # (docker: docker compose exec -e REGULAIT_DEMO_USER_PASSWORD gateway node apps/gateway/dist/demo-set-passwords.js)
+pnpm --filter @regulait/gateway demo:set-passwords      # Docker: see "Demo with your own password (Docker)" below
 unset REGULAIT_DEMO_USER_PASSWORD
 ```
 
@@ -60,6 +60,46 @@ never prints the password. It runs **only on a demo-licensed deployment**: run i
 after `demo:setup` (or `demo:prepare`, which runs it), which installs the ephemeral
 demo licence it requires — with no licence, an expired one, or a customer licence it
 refuses and changes nothing.
+
+**Demo with your own password (Docker).** Under Docker Compose the demo licence is one opt-in
+switch: `REGULAIT_DEMO_LICENSE=1` in the `.env` next to `docker-compose.yml`. The seed then
+mints a 30-day ephemeral demo licence ("NOT A PRODUCTION DEPLOYMENT") into a named volume the
+gateway also reads, so it survives
+`docker compose restart` and `down` / `up`, and a password you set is not reset on restart.
+**Demo only:** `scripts/install.sh` refuses the switch and pins it off. Without the switch,
+`docker compose up` behaves exactly as before.
+
+bash / zsh (macOS, Linux) — the password is typed without echo and never appears on a command
+line, in shell history, in compose files, in logs or in audit detail:
+
+```bash
+echo 'REGULAIT_DEMO_LICENSE=1' >> .env
+docker compose up -d --build
+printf 'Demo password: '; read -rs pw; echo
+REGULAIT_DEMO_USER_PASSWORD="$pw" docker compose exec -e REGULAIT_DEMO_USER_PASSWORD gateway node apps/gateway/dist/demo-set-passwords.js
+unset pw
+```
+
+Windows PowerShell (Docker Desktop):
+
+```powershell
+Add-Content -Path .env -Value 'REGULAIT_DEMO_LICENSE=1' -Encoding ascii
+docker compose up -d --build
+$sec = Read-Host -AsSecureString 'Demo password'
+try {
+  $env:REGULAIT_DEMO_USER_PASSWORD = [System.Net.NetworkCredential]::new('', $sec).Password
+  docker compose exec -e REGULAIT_DEMO_USER_PASSWORD gateway node apps/gateway/dist/demo-set-passwords.js
+} finally {
+  Remove-Item Env:REGULAIT_DEMO_USER_PASSWORD -ErrorAction SilentlyContinue; Remove-Variable sec
+}
+```
+
+Then sign in at **http://localhost:3000/ui** as `admin`, `dana` or `avery` with that password.
+`-e REGULAIT_DEMO_USER_PASSWORD` names the variable only, so `docker compose exec` copies its
+value from your shell into that one process. Use `-Encoding ascii` (not `>`, which writes UTF-16
+in Windows PowerShell 5.1 and compose cannot read). To drop the demo licence, remove the line
+and run `docker compose down -v`, which also deletes the demo data.
+
 Enterprise sign-in (Microsoft / Google / GitHub through the optional Keycloak
 broker, with MFA) is in [docs/deployment/SSO_KEYCLOAK.md](docs/deployment/SSO_KEYCLOAK.md).
 
