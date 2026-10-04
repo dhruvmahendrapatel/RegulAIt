@@ -1,0 +1,25 @@
+.logo {
+  display: inline-block;
+  flex: none;
+  object-fit: contain;
+}
+.monogram {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  color: #ffffff;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  line-height: 1;
+}
+/* single-colour marks are drawn dark; flip them on dark surfaces */
+:global(:root[data-theme="dark"]) .mono {
+  filter: invert(1) brightness(1.1);
+}
+@media (prefers-color-scheme: dark) {
+  :global(:root:not([data-theme="light"])) .mono {
+    filter: invert(1) brightness(1.1);
+  }
+}
