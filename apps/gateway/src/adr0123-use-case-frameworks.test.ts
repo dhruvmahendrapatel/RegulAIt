@@ -256,11 +256,21 @@ describe("a use case maps to ANY shipped framework", () => {
      * and it is the claim that matters — that a customer activating
      * `nist-ai-rmf` gets a control whose evidence is refusals occurring.
      */
-    const nist = DEFAULT_COMPLIANCE_PACKS.find((p) => p.framework === "nist-ai-rmf");
-    expect(nist, "the NIST AI RMF pack must ship").toBeTruthy();
-    const manage = nist!.controls.find((c) => c.controlRef === "nist-ai-rmf:MANAGE-2.2");
-    expect(manage?.collector).toBe("audit_decisions");
-    expect((manage?.collectorParams as { effect?: string })?.effect).toBe("deny");
+    const nist = DEFAULT_COMPLIANCE_PACKS.filter((p) => p.framework === "nist-ai-rmf");
+    expect(nist.length, "the NIST AI RMF pack must ship").toBeGreaterThan(0);
+    // ADR-0175: the latest version files this under its real id, MANAGE-2.4;
+    // v1 (immutable) still carries it as MANAGE-2.2, with the same evidence.
+    const latest = nist.reduce((a, b) => (b.version > a.version ? b : a));
+    const v1 = nist.find((p) => p.version === 1)!;
+    for (const [pack, ref] of [
+      [latest, "nist-ai-rmf:MANAGE-2.4"],
+      [v1, "nist-ai-rmf:MANAGE-2.2"],
+    ] as const) {
+      const manage = pack.controls.find((c) => c.controlRef === ref);
+      expect(manage?.collector, `v${pack.version} ${ref}`).toBe("audit_decisions");
+      expect((manage?.collectorParams as { effect?: string })?.effect).toBe("deny");
+    }
+    expect(latest.controls.some((c) => c.controlRef === "nist-ai-rmf:MANAGE-2.2")).toBe(false);
   });
 
   it("b: a use case with NO project is mapped but explicitly NOT evidenced", async () => {

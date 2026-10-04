@@ -159,10 +159,10 @@ export const REGULATORY_UPDATES: RegulatoryUpdate[] = [
     status: "in_force",
     frameworks: ["nist-ai-rmf"],
     controlRefs: [
-      "nist-ai-rmf:GOVERN-1.2",
+      "nist-ai-rmf:GOVERN-2.1",
       "nist-ai-rmf:MAP-4.1",
       "nist-ai-rmf:MEASURE-2.7",
-      "nist-ai-rmf:MANAGE-2.2",
+      "nist-ai-rmf:MANAGE-2.4",
     ],
     sourceUrl: "https://doi.org/10.6028/NIST.AI.100-1",
     verifiedOn: "2026-09-28",
@@ -184,7 +184,7 @@ export const REGULATORY_UPDATES: RegulatoryUpdate[] = [
     controlRefs: [
       "nist-ai-rmf:MEASURE-2.7",
       "nist-ai-rmf:MEASURE-2.11",
-      "nist-ai-rmf:MANAGE-2.2",
+      "nist-ai-rmf:MANAGE-2.4",
       "nist-ai-rmf:GOVERN-4.1",
     ],
     sourceUrl: "https://doi.org/10.6028/NIST.AI.600-1",
@@ -232,7 +232,7 @@ export const REGULATORY_UPDATES: RegulatoryUpdate[] = [
     controlRefs: [
       "eu-ai-act:art-9-risk-management-system",
       "eu-ai-act:art-14-human-oversight",
-      "nist-ai-rmf:GOVERN-1.2",
+      "nist-ai-rmf:GOVERN-2.1",
     ],
     sourceUrl: "https://leg.colorado.gov/bills/sb26-189",
     verifiedOn: "2026-10-01",
@@ -304,7 +304,7 @@ export const REGULATORY_UPDATES: RegulatoryUpdate[] = [
     controlRefs: [
       "eu-ai-act:art-14-human-oversight",
       "eu-ai-act:art-12-record-keeping",
-      "nist-ai-rmf:GOVERN-1.2",
+      "nist-ai-rmf:GOVERN-2.1",
     ],
     sourceUrl: "https://www.consumerfinance.gov/compliance/supervisory-guidance/cfpb-circular-2022-03/",
     verifiedOn: "2026-09-28",

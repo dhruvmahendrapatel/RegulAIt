@@ -241,12 +241,13 @@ deliberate act by a named operator, which is the right default and still a real 
 GET /v1/use-cases/<id>/frameworks?framework=nist-ai-rmf
 ```
 
-Five NIST AI RMF controls with **live evidence counts**, in one call, for any framework we ship.
-No longer a two-hop narration.
+The active NIST AI RMF pack (v3, subcategory IDs checked against NIST AI 100-1; ADR-0175) with **live
+evidence counts**, in one call, for any framework we ship. No longer a two-hop narration.
 
 **The moment worth setting up.** Keep the same screen from (b). The refusal you just demonstrated
-*is* the evidence for `nist-ai-rmf:MANAGE-2.2` — "mechanisms are in place to supersede, disengage
-or deactivate an AI system". It moves from `unsatisfied` to `satisfied` because a deny landed in
+*is* the evidence for `nist-ai-rmf:MANAGE-2.4` — "mechanisms are in place to supersede, disengage
+or deactivate an AI system". (Packs v1 and v2 filed this under MANAGE-2.2, which in the framework is
+sustaining the value of deployed systems; v3 corrects it.) It moves from `unsatisfied` to `satisfied` because a deny landed in
 the ledger attributed to this project. So: read the control as unsatisfied, make the refused call,
 re-read, watch it go green.
 
@@ -259,8 +260,9 @@ Two things to say out loud while it is on screen, because the payload says them:
 - **Evidence is collected per project.** The counts cover everything governed in that project, not
   this use case alone. A use case attributed to no project returns nulls, not zeros — "not
   measured" and "measured as none" are different claims.
-- **The attestation-required control stays outstanding.** `GOVERN-4.1` is organisational and the
-  platform will never count it as satisfied on its own say-so. A tool that marked it green would be
+- **The attestation-required controls stay outstanding.** `GOVERN-4.1` (and GOVERN 2.3, 3.1 and the
+  other organisational ones) cannot be observed, and the platform will never count them as satisfied
+  on its own say-so. A tool that marked them green would be
   the tick-box exercise this product exists to replace.
 
 ---
@@ -302,7 +304,7 @@ Two things to say out loud while it is on screen, because the payload says them:
 | activating a pack answers `license_feature_not_licensed` | the ephemeral demo licence is missing, or the gateway cannot see the keyring | re-run `demo:setup`, and start the gateway with `REGULAIT_LICENSE_KEYRING=<repo>/demo-license-keys` |
 | every MCP call returns `502 mcp_upstream_unreachable` | the demo MCP server is not running | restart `demo:mcp`. Since ADR-0126 this is a NAMED, audited refusal naming the server and its URL — it used to be an opaque 500 |
 | every MCP call returns `503 mcp_upstream_circuit_open` | five consecutive failures opened the breaker; it is refusing without contacting the upstream | start `demo:mcp`, then wait out the 30s cooldown — the next call probes and closes the circuit by itself. Nothing to reset by hand |
-| `MANAGE-2.2` stays `unsatisfied` after a refusal | the refused call carried no `x-regulait-project-id` | repeat it with the header; an unattributed refusal is correctly not counted |
+| `MANAGE-2.4` stays `unsatisfied` after a refusal | the refused call carried no `x-regulait-project-id` | repeat it with the header; an unattributed refusal is correctly not counted |
 | `docker compose up` fails / no docker daemon | the box has no container runtime | use the §1.1 native-Postgres path; you lose only the WORM anchor |
 | `no_data_key`, or stored credentials stop decrypting after a restart | `REGULAIT_DATA_KEY` was unset or regenerated between runs | export the SAME key in every terminal; on the native path a new key means re-seeding, not re-entering credentials |
 | posture reads 6 of 7 with the anchor row on a local destination | expected on the §1.1 path — no Object Lock bucket to grade | nothing to fix; present it as §2 describes |

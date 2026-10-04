@@ -11,6 +11,7 @@
  *   - the scorecard has no verdict field and every seed pack carries the
  *     honest markers ADR-0058 requires.
  */
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   COMPLIANCE_PACK_DISCLAIMER,
@@ -205,6 +206,8 @@ describe("the launch packs are honest data", () => {
     // ADR-0150: exactly two frameworks ship a second version (bias/safety controls)
     const versions = DEFAULT_COMPLIANCE_PACKS.map((p) => `${p.framework}@${p.version}`).sort();
     expect(versions.filter((v) => v.endsWith("@2"))).toEqual(["eu-ai-act@2", "nist-ai-rmf@2"]);
+    // ADR-0175: the NIST AI RMF pack alone ships a third version (ID correction)
+    expect(versions.filter((v) => v.endsWith("@3"))).toEqual(["nist-ai-rmf@3"]);
     expect(new Set(versions).size).toBe(versions.length);
   });
 
@@ -229,6 +232,65 @@ describe("the launch packs are honest data", () => {
         expect(pack.cascadePreset ?? null, `${pack.framework} has no tag to hang a preset on`).toBeNull();
       }
     }
+  });
+
+  describe("ADR-0175 — nist-ai-rmf v3 corrects the subcategory IDs without touching v1 or v2", () => {
+    const nist = (v: number) => DEFAULT_COMPLIANCE_PACKS.find((p) => p.framework === "nist-ai-rmf" && p.version === v)!;
+
+    it("v1 and v2 are byte-for-byte what was published (immutability)", () => {
+      // sha256 of JSON.stringify(pack), taken from the build BEFORE v3 was
+      // added. Any edit to a published version — even a typo fix — fails here;
+      // a correction is a new version, never a rewrite.
+      const digest = (p: unknown) => createHash("sha256").update(JSON.stringify(p)).digest("hex");
+      expect(digest(nist(1))).toBe("505b02ede976ece7148e14119ba21917f52774cfd61a31633135a83bdb0b988a");
+      expect(digest(nist(2))).toBe("8a51156213b6a81253cae990f6e047da6be0701fd57d28106b3f3305ecaa110b");
+      expect(nist(1).controls.map((c) => c.controlRef)).toContain("nist-ai-rmf:MANAGE-2.2");
+    });
+
+    it("v3 re-keys the two misfiled controls with their evidence unchanged", () => {
+      const v2 = new Map(nist(2).controls.map((c) => [c.controlRef, c]));
+      const v3 = new Map(nist(3).controls.map((c) => [c.controlRef, c]));
+      expect(v3.has("nist-ai-rmf:MANAGE-2.2")).toBe(false);
+      expect(v3.get("nist-ai-rmf:GOVERN-2.1")?.collector).toBe(v2.get("nist-ai-rmf:GOVERN-1.2")?.collector);
+      expect(v3.get("nist-ai-rmf:MANAGE-2.4")?.collector).toBe(v2.get("nist-ai-rmf:MANAGE-2.2")?.collector);
+      expect(v3.get("nist-ai-rmf:MANAGE-2.4")?.collectorParams).toEqual(v2.get("nist-ai-rmf:MANAGE-2.2")?.collectorParams);
+      // GOVERN-1.2 keeps its id but now means what the framework says
+      expect(v3.get("nist-ai-rmf:GOVERN-1.2")?.collector).not.toBe("abac_policies_active");
+      // MEASURE-2.7 (security) counts red-team runs, not quality evaluations
+      expect(v3.get("nist-ai-rmf:MEASURE-2.7")?.collectorParams).toEqual({ ruleIdPrefix: "redteam-run-" });
+    });
+
+    it("v3 marks the organisational subcategories attestation-required", () => {
+      const v3 = new Map(nist(3).controls.map((c) => [c.controlRef, c]));
+      for (const id of ["GOVERN-1.1", "GOVERN-2.2", "GOVERN-2.3", "GOVERN-3.1", "GOVERN-4.1"]) {
+        const c = v3.get(`nist-ai-rmf:${id}`);
+        expect(c?.attestationRequired, id).toBe(true);
+        expect(c?.collector, id).toBe("none");
+      }
+    });
+
+    it("v3's version note and description explain the correction", () => {
+      const v3 = nist(3);
+      expect(v3.title).toMatch(/ — v3 /);
+      expect(v3.provenance.note).toMatch(/GOVERN 1\.2 -> GOVERN 2\.1/);
+      expect(v3.provenance.note).toMatch(/MANAGE 2\.2 -> MANAGE 2\.4/);
+      expect(v3.provenance.note).toMatch(/v1 and v2 are unchanged/);
+      expect(v3.description).toMatch(/GOVERN 2\.1/);
+      expect(v3.provenance.reviewedBy ?? null).toBeNull();
+    });
+
+    it("v3 widens coverage with collector-backed controls and keeps every v2 subject", () => {
+      const v3 = nist(3).controls;
+      expect(v3.length).toBeGreaterThan(nist(2).controls.length * 3);
+      expect(v3.filter((c) => c.collector !== "none").length).toBeGreaterThan(20);
+      const refs = new Set(v3.map((c) => c.controlRef));
+      for (const kept of ["MAP-4.1", "MEASURE-2.7", "MEASURE-2.11", "MEASURE-2.6", "GOVERN-4.1"]) {
+        expect(refs, kept).toContain(`nist-ai-rmf:${kept}`);
+      }
+      for (const added of ["GOVERN-1.5", "GOVERN-1.6", "GOVERN-1.7", "GOVERN-6.1", "MANAGE-1.1", "MANAGE-1.4", "MEASURE-3.1"]) {
+        expect(refs, added).toContain(`nist-ai-rmf:${added}`);
+      }
+    });
   });
 
   it("refuses a cascadePreset without a cascadeTag, and an ill-typed preset", () => {

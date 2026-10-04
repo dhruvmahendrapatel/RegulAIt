@@ -207,18 +207,22 @@ export const INTAKE_SECTIONS = [
  * Mitigating controls a risk category is suggested with, by stable pack
  * `controlRef`. Every ref is asserted to exist by the test; a suggestion is
  * then narrowed to the frameworks actually suggested for this use case.
+ *
+ * NIST ids follow NIST AI 100-1 (ADR-0175): fairness is MEASURE 2.11,
+ * deactivation MANAGE 2.4, roles and access GOVERN 2.1, validity MEASURE 2.5,
+ * inventory GOVERN 1.6. `nist-ai-rmf-refs.test.ts` checks every one.
  */
 export const CATEGORY_SUGGESTED_CONTROLS: Readonly<Record<AiRiskCategory, readonly string[]>> = {
-  bias_fairness: ["eu-ai-act:art-9-risk-management-system", "iso-42001:8.3-ai-system-impact-assessment", "nist-ai-rmf:MEASURE-2.7"],
+  bias_fairness: ["eu-ai-act:art-9-risk-management-system", "iso-42001:8.3-ai-system-impact-assessment", "nist-ai-rmf:MEASURE-2.11"],
   unsafe_output: ["soc-2:CC7.2-monitoring", "eu-ai-act:art-15-accuracy-robustness"],
   prompt_injection: ["soc-2:CC7.2-monitoring", "eu-ai-act:art-15-accuracy-robustness"],
   data_leakage_pii: ["iso-27001:A.8.12", "soc-2:CC6.7-data-movement", "hipaa:164.312(a)(1)-access-control"],
-  tool_misuse: ["nist-ai-rmf:MANAGE-2.2", "soc-2:CC6.1-logical-access", "eu-ai-act:art-14-human-oversight"],
-  over_permissioning: ["iso-27001:A.5.15", "nist-ai-rmf:GOVERN-1.2", "pci-dss:7.2.1-least-privilege"],
-  hallucination: ["eu-ai-act:art-15-accuracy-robustness", "nist-ai-rmf:MEASURE-2.7"],
+  tool_misuse: ["nist-ai-rmf:MANAGE-2.4", "soc-2:CC6.1-logical-access", "eu-ai-act:art-14-human-oversight"],
+  over_permissioning: ["iso-27001:A.5.15", "nist-ai-rmf:GOVERN-2.1", "pci-dss:7.2.1-least-privilege"],
+  hallucination: ["eu-ai-act:art-15-accuracy-robustness", "nist-ai-rmf:MEASURE-2.5"],
   scope_drift: ["eu-ai-act:art-72-post-market-monitoring", "iso-42001:9.1-monitoring-measurement"],
   budget_overrun: ["iso-42001:9.1-monitoring-measurement"],
-  shadow_ai: ["nist-ai-rmf:MAP-4.1", "iso-42001:A.6-ai-system-lifecycle"],
+  shadow_ai: ["nist-ai-rmf:GOVERN-1.6", "iso-42001:A.6-ai-system-lifecycle"],
   third_party_ai: ["soc-2:CC9.2-vendor-risk", "nist-ai-rmf:MAP-4.1"],
 };
 
