@@ -21,6 +21,17 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-10-04 (early) - ADR-0172 phase 1: Agent Builder suite + model portal built.** Owner shared a product teardown (kept out of the repo)
+and asked for a separate no-code agent builder and a logo-rich model portal. Built on three parallel branches (backend: 33+ `/v1/builder/*`
+routes, migration 0135, 7 templates, apps catalog, owner-run schedules; web: Agent chat/inbox, Your agents + editor, templates, Apps & tools,
+Skills, Usage; model portal `/models` + ModelPicker), a wiring pass (toolbox-options route, palette colours, real-gateway phase6 journey in CI)
+and an independent review: no governance bypass (chat runs as the caller, schedules as the owner, both via executeGovernedDispatch); 11
+findings fixed (limit race via per-agent lease + priced-model rule, export authz, skill-name squatting, pinned skill snapshots + 48 KB
+prompt cap, project attribution, admin-only channel binding, owner-must-enable schedules, sub-agent name leak, caps + sweep fairness,
+integrations scoping, portal error labels). 72 vendored logos (MIT/CC0). Full gate green: suite 3494, prepare 18/18, real 2/2, mocked
+147/147, spa 44/44, review 4/4. Phase 1 limits per ADR-0172 (no autonomous tool calls, no inbound channels, computer use not provisioned).
+Gemini research G10-G15 delivered, Codex review requested changes, owner reassigned repairs to Codex; Claude validation pending.
+
 **2026-10-03 (night) - AER-050..055 intake UX built (ADR-0171); CI flakes from the router upgrade fixed.** Server-side drafts
 (one per user/scope, never browser storage), leave guard, Idempotency-Key on use-case create (window = 30-day draft life),
 kept edits on re-draft, framework rationales saved and shown, "Not sure" answers (count as yes, shown to reviewers), Review shows
