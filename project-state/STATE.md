@@ -21,6 +21,15 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-10-04 (afternoon) - ADR-0173 batch 2a and NIST AI RMF pack v3 pushed.** Batch 2a (migrations 0136-0138) ships a governed
+tool loop in builder agents ("Ask first" confirmations, approval-queue pauses that resume on their own, pinned tool
+identity, cancel), inbound Slack/Teams, the model allow-list matrix, the Ctrl/K palette, and the owner rule that every
+builder agent bills to a project. An adversarial review found 7 issues; all are fixed with tests. Gate: gateway 3562
+passed, demo:prepare 18/18, mocked 163, spa 44 (CI also runs phase6-builder-tools now). ADR-0175 D1 is pushed too
+(`nist-ai-rmf@3`, a guard test over the 72 IDs; demo beat 3A re-figured: security 20 %, privacy 100 %, compliance 70 %).
+ADR-0174 sign-in is built, with fixes for its security review (SAML MFA, relinking by email alone, break-glass leaks) in
+progress; migration 0139. Postgres was OOM-killed once today with several agents running: run one heavy suite at a time.
+
 **2026-10-04 (day) - Document study done; ADR-0175 decided; ADR-0173 batch 2a and ADR-0174 sign-in being built.** Owner shared six
 documents (NIST AI 100-1 plus vendor/teardown material, never named in the repo). ADR-0175 lists build-now batches D1-D4
 and PathForward.md gains PF-15..PF-22 plus extensions to PF-02..PF-14. Urgent finding: the NIST AI RMF pack and the demo
