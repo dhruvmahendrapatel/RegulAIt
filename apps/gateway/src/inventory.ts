@@ -877,6 +877,14 @@ export function registerInventoryRoutes(app: FastifyInstance, db: Db): void {
           .from(aiRisks)
           .where(eq(aiRisks.agentId, agentId)),
       ]);
+    // ADR-0175 A4 — the latest model the PROVIDER reported serving for this
+    // agent (any time, not only the window); null when none ever reported one
+    const [lastServed] = await db
+      .select({ servedModel: usageEvents.servedModel, configuredModel: usageEvents.model, at: usageEvents.at })
+      .from(usageEvents)
+      .where(and(eq(usageEvents.agentId, agentId), isNotNull(usageEvents.servedModel)))
+      .orderBy(desc(usageEvents.at))
+      .limit(1);
     const userName = new Map(userRows.map((u) => [u.id, u.displayName || u.email]));
     const agentName = new Map(agentNameRows.map((a) => [a.id, a.name]));
     const serverName = new Map(serverRows.map((s) => [s.id, s.name]));
@@ -956,6 +964,9 @@ export function registerInventoryRoutes(app: FastifyInstance, db: Db): void {
         dispatchesInWindow: dispatchAgg[0]?.n ?? 0,
         costUsdInWindow: dispatchAgg[0]?.costUsd ?? 0,
         lastDispatchAt: dispatchAgg[0]?.lastAt ?? null,
+        lastServedModel: lastServed
+          ? { servedModel: lastServed.servedModel!, configuredModel: lastServed.configuredModel, at: lastServed.at.toISOString() }
+          : null,
         mcpTools: [...observedTools.values()]
           .map((t) => ({
             serverId: t.serverId,

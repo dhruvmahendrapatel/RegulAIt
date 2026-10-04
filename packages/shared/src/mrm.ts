@@ -74,6 +74,9 @@ export const createModelCardSchema = z
     biasFairness: z.array(biasFairnessEntrySchema).max(50).default([]),
     standardRefs: z.array(z.string().min(1).max(200)).max(50).default([]),
     note: z.string().max(4000).nullish(),
+    /** ADR-0175 A4 — the exact model version this risk position was taken on;
+     * any other served id raises a high-severity served_model_drift alert */
+    pinnedModelVersion: z.string().trim().min(1).max(200).nullish(),
   })
   // the API twin of the DB CHECK: a card is about a registry agent OR a
   // self-hosted endpoint, never both and never neither
@@ -88,6 +91,8 @@ export const updateModelCardSchema = z.object({
   biasFairness: z.array(biasFairnessEntrySchema).max(50).optional(),
   standardRefs: z.array(z.string().min(1).max(200)).max(50).optional(),
   note: z.string().max(4000).nullish(),
+  /** null clears the pin */
+  pinnedModelVersion: z.string().trim().min(1).max(200).nullish(),
 });
 
 export const requestModelCardSignOffSchema = z

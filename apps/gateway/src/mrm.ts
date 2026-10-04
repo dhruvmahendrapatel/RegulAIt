@@ -671,6 +671,7 @@ export function registerMrmRoutes(app: FastifyInstance, db: Db) {
           biasFairness: body.biasFairness,
           standardRefs: body.standardRefs,
           note: body.note ?? null,
+          pinnedModelVersion: body.pinnedModelVersion ?? null,
           createdByUserId: req.authCtx.userId ?? null,
         })
         .returning();
@@ -709,6 +710,7 @@ export function registerMrmRoutes(app: FastifyInstance, db: Db) {
           ...(body.biasFairness !== undefined ? { biasFairness: body.biasFairness } : {}),
           ...(body.standardRefs !== undefined ? { standardRefs: body.standardRefs } : {}),
           ...(body.note !== undefined ? { note: body.note ?? null } : {}),
+          ...(body.pinnedModelVersion !== undefined ? { pinnedModelVersion: body.pinnedModelVersion ?? null } : {}),
           updatedAt: new Date(),
         })
         .where(eq(modelCards.id, id))
@@ -717,7 +719,16 @@ export function registerMrmRoutes(app: FastifyInstance, db: Db) {
         userId: req.authCtx.userId ?? NO_IDENTITY,
         objectType: "model_card",
         objectId: id,
-        detail: { phase: "authoring", action: "update", fields: Object.keys(body) },
+        detail: {
+          phase: "authoring",
+          action: "update",
+          fields: Object.keys(body),
+          // ADR-0175 A4: the pin decides what the monitor calls drift, so its
+          // change is recorded with both values
+          ...(body.pinnedModelVersion !== undefined
+            ? { pinnedModelVersion: { from: row.pinnedModelVersion, to: body.pinnedModelVersion ?? null } }
+            : {}),
+        },
         effect: "allow",
         ruleId: "mrm-card-updated",
         ruleChain: [],

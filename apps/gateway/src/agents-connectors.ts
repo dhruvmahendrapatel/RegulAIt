@@ -345,6 +345,10 @@ export type DispatchOutcome =
       result: {
         servedAgentId: string;
         model: string;
+        /** ADR-0175 A4: the model id the PROVIDER reported serving (may differ
+         * from `model`, the configured id). null when the provider did not
+         * say, and on a semantic-cache hit (no provider served this call). */
+        servedModel?: string | null;
         outputText: string;
         stopReason: string;
         refusal: boolean;
@@ -1654,6 +1658,8 @@ async function dispatchAttempt(
       result: {
         servedAgentId: served.id,
         model: cached.model ?? served.model,
+        // nothing was served by a provider on a cache hit — no claim to record
+        servedModel: null,
         outputText: cached.outputText,
         stopReason: "cached",
         refusal: false,
@@ -2237,6 +2243,9 @@ async function dispatchAttempt(
     baselineAgentId: baseline?.id ?? null,
     provider: served.provider,
     model: served.model,
+    // ADR-0175 A4 — what the provider SAID it served, beside what we asked
+    // for. NULL when the provider did not report one: never guessed.
+    servedModel: result.servedModel ?? null,
     inputTokens: result.usage.inputTokens,
     outputTokens: result.usage.outputTokens,
     costUsd,
@@ -2383,6 +2392,7 @@ async function dispatchAttempt(
     result: {
       servedAgentId: served.id,
       model: served.model,
+      servedModel: result.servedModel ?? null,
       outputText,
       stopReason: result.stopReason,
       refusal: result.refusal,
