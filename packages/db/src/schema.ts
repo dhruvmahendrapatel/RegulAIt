@@ -8931,6 +8931,14 @@ export const builderChannelThreads = pgTable(
     builderThreadId: uuid("builder_thread_id")
       .notNull()
       .references(() => builderThreads.id, { onDelete: "cascade" }),
+    /** where a LATER reply goes (a paused turn resumed from the web app or an
+     * approval): Slack channel / Teams conversation id of the newest message */
+    replyTarget: text("reply_target"),
+    /** Slack thread_ts (null = top level, e.g. a DM) / Teams activity id */
+    replyThreadRef: text("reply_thread_ref"),
+    /** the gateway's public origin as the newest message reached it, so the
+     * links in a later reply are absolute */
+    linkOrigin: text("link_origin"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

@@ -15,6 +15,7 @@ import { MODEL_NOT_ALLOWED_FOR_FEATURE } from "@regulait/shared";
 import { builderKit, type BuilderKit, type Person } from "./testing/builder-fixture.js";
 import { executeGovernedDispatch, type AgentRow } from "./agents-connectors.js";
 import { buildAgentDecider } from "./evals.js";
+import { runSequenceProbeTrial } from "./redteam-agentic.js";
 import { prepareCompatCall, AGENT_HEADER, COMPAT_MODE } from "./compat-core.js";
 import { listEntitledModels } from "./compat-models.js";
 import type { FastifyRequest } from "fastify";
@@ -205,7 +206,7 @@ describe("enforced in the shared model-access decision, per feature", () => {
   it("is scoped to its feature: restricting chat leaves the builder alone, and vice versa", async () => {
     await withPolicy([only("chat", [ALLOWED])], async () => {
       const b = await k.req("POST", "/v1/builder/agents", owner.auth, {
-        name: `scoped ${k.RUN}`, connectionFormat: "shared", computerUse: false, modelAgentId: BLOCKED,
+        name: `scoped ${k.RUN}`, connectionFormat: "shared", computerUse: false, modelAgentId: BLOCKED, projectId: owner.projectId,
       });
       expect(b.statusCode, b.body).toBe(201);
     });
@@ -386,11 +387,11 @@ describe("enforced in the shared model-access decision, per feature", () => {
   it("agent builder: a forbidden model cannot be chosen; the policy default is applied to a new agent", async () => {
     await withPolicy([only("builder", [ALLOWED], { defaultAgentId: ALLOWED })], async () => {
       const refused = await k.req("POST", "/v1/builder/agents", owner.auth, {
-        name: `bad model ${k.RUN}`, connectionFormat: "shared", computerUse: false, modelAgentId: BLOCKED,
+        name: `bad model ${k.RUN}`, connectionFormat: "shared", computerUse: false, modelAgentId: BLOCKED, projectId: owner.projectId,
       });
       expect(refused.statusCode, refused.body).toBe(403);
       const ok = await k.req("POST", "/v1/builder/agents", owner.auth, {
-        name: `good model ${k.RUN}`, connectionFormat: "shared", computerUse: false, modelAgentId: ALLOWED,
+        name: `good model ${k.RUN}`, connectionFormat: "shared", computerUse: false, modelAgentId: ALLOWED, projectId: owner.projectId,
       });
       expect(ok.statusCode, ok.body).toBe(201);
     });
@@ -398,7 +399,7 @@ describe("enforced in the shared model-access decision, per feature", () => {
     // NOT first by name ("mpol-allowed-…" sorts before "mpol-blocked-…"), which
     // is what the pre-policy fallback would have picked
     const create = () =>
-      k.req("POST", "/v1/builder/agents", owner.auth, { name: `default model ${k.RUN}`, connectionFormat: "shared", computerUse: false });
+      k.req("POST", "/v1/builder/agents", owner.auth, { name: `default model ${k.RUN}`, connectionFormat: "shared", computerUse: false, projectId: owner.projectId });
     const without = await create();
     expect(without.json().agent.modelAgent?.id).toBe(ALLOWED);
     await withPolicy([only("builder", [ALLOWED, BLOCKED], { defaultAgentId: BLOCKED })], async () => {
@@ -436,6 +437,42 @@ describe("enforced in the shared model-access decision, per feature", () => {
       const decide = await buildAgentDecider(k.db, owner.id);
       expect(decide(await agentRow(BLOCKED), "chat").ruleId).toBe(MODEL_NOT_ALLOWED_FOR_FEATURE);
       expect(decide(await agentRow(ALLOWED), "chat").effect).toBe("allow");
+    });
+  });
+
+  it("red-team sequence probes dispatch as evaluations: a forbidden binding is refused at the first turn", async () => {
+    // the multi-turn runner dispatches directly (not through the eval decider),
+    // so the feature has to ride on its own dispatch
+    const probe = {
+      probeKey: `mpol-seq-${k.RUN}`,
+      input: "first turn",
+      turns: ["second turn"],
+      scorerKind: "contains",
+      scorerConfig: { forbidden: ["zz-never-said-zz"] },
+      tools: null,
+      agentic: null,
+    } as unknown as Parameters<typeof runSequenceProbeTrial>[2]["probe"];
+    const run = async (agentId: string) =>
+      runSequenceProbeTrial(k.db, "a".repeat(64), {
+        agent: await agentRow(agentId),
+        userId: owner.id,
+        projectId: owner.projectId,
+        probe,
+        trial: 1,
+        redteamRunLabel: `mpol-${k.RUN}`,
+        libraryName: "mpol",
+        libraryVersion: 1,
+      });
+    await withPolicy([only("evals", [ALLOWED])], async () => {
+      const before = await usage(owner.id, BLOCKED);
+      const refused = await run(BLOCKED);
+      expect(JSON.stringify(refused)).toContain(MODEL_NOT_ALLOWED_FOR_FEATURE);
+      expect(refused.turnsDispatched).toBe(1);
+      expect(await usage(owner.id, BLOCKED)).toBe(before);
+      // positive control: the binding the matrix allows runs both turns
+      const ok = await run(ALLOWED);
+      expect(JSON.stringify(ok)).not.toContain(MODEL_NOT_ALLOWED_FOR_FEATURE);
+      expect(ok.turnsDispatched).toBe(2);
     });
   });
 

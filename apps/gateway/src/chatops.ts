@@ -95,6 +95,7 @@ import {
   chatDecidable,
   composeApprovalCard,
   composeDecidedCard,
+  escapeSlackText,
   parseChatInteraction,
   parseSlackEvent,
   parseTeamsMessage,
@@ -123,6 +124,7 @@ import { ConnectionEgressBlockedError, guardConnectionCall } from "./connection-
 import { EgressBlockedError } from "./egress-guard.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { projectPiiMode } from "./projects.js";
+import { baseUrlFor } from "./mcp-auth-metadata.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
@@ -743,7 +745,12 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
   // ADR-0173 §2 — builder agents over chat: the reply courier and the routes
   // =======================================================================
 
-  /** a builder agent's reply, threaded under the message it answers */
+  /** a builder agent's reply, threaded under the message it answers. The text
+   * is MODEL OUTPUT, so it is rendered inert for the platform: Slack gets its
+   * control characters escaped (no `<!channel>`, `<@U…>` or disguised
+   * `<url|label>` link can be produced), Teams gets it as plain text (no
+   * markdown/HTML rendering, so no disguised link; a Teams mention needs an
+   * `entities` entry, which this never sends). */
   const postBuilderReply: ChannelPoster = (conn, input, actorUserId, label) =>
     postToChat(
       conn,
@@ -751,14 +758,15 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
       (provider) =>
         provider === "teams"
           ? input.threadRef
-            ? { op: "conversations.replyToActivity", text: input.text, replyToId: input.threadRef }
-            : { op: "conversations.sendToConversation", text: input.text }
-          : { op: "chat.postMessage", text: input.text, ...(input.threadRef ? { thread_ts: input.threadRef } : {}) },
+            ? { op: "conversations.replyToActivity", text: input.text, textFormat: "plain", replyToId: input.threadRef }
+            : { op: "conversations.sendToConversation", text: input.text, textFormat: "plain" }
+          : { op: "chat.postMessage", text: escapeSlackText(input.text), ...(input.threadRef ? { thread_ts: input.threadRef } : {}) },
       actorUserId,
       label,
     );
   const channelDeps: ChannelDeps = { dataKey: opts.dataKey, post: postBuilderReply, log: app.log };
-  registerBuilderChannelRoutes(app, db);
+  // the routes, and the ONE subscriber that posts a resumed channel turn back
+  registerBuilderChannelRoutes(app, db, channelDeps);
   // a closing app waits for the turns it already acknowledged
   app.addHook("onClose", async () => drainChannelWork(db));
 
@@ -1018,7 +1026,7 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
 
       const retryRaw = headers[SLACK_RETRY_NUM_HEADER];
       const retryNum = retryRaw && /^\d{1,4}$/.test(retryRaw) ? Number(retryRaw) : null;
-      const ack = run(await acceptInboundMessage(db, channelDeps, conn, parsed.message, retryNum));
+      const ack = run(await acceptInboundMessage(db, channelDeps, conn, parsed.message, retryNum, baseUrlFor(req)));
       return reply.status(ack.status).send(ack.body);
     });
 
@@ -1037,7 +1045,7 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
       const fresh = teamsActivityFreshness(parsed.timestamp, now());
       if (!fresh.ok) return reply.status(401).send({ error: "unauthenticated", code: fresh.code });
 
-      const ack = run(await acceptInboundMessage(db, channelDeps, conn, parsed.message, null));
+      const ack = run(await acceptInboundMessage(db, channelDeps, conn, parsed.message, null, baseUrlFor(req)));
       return reply.status(ack.status).send(ack.body);
     });
   });

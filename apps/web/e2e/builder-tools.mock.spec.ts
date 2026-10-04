@@ -130,6 +130,45 @@ test.describe("ADR-0173: an organisation approval waits in the approvals queue",
   });
 });
 
+test.describe("ADR-0173 review: a pause can always be cancelled by the thread's person", () => {
+  test("Cancel on an Ask-first card: nothing runs, a note says so, and the composer is free", async ({ page }) => {
+    const st = await installBuilderMock(page, { toolMode: "ask_first" });
+    await page.goto("/ui/builder");
+    await page.getByLabel("Message").fill("Search our policies");
+    await page.getByLabel("Message").press("Enter");
+    const card = page.getByRole("group", { name: /^Allow / });
+    await expect(card.getByRole("button", { name: "Cancel" })).toBeVisible();
+    await expect(page.getByLabel("Message")).toBeDisabled();
+    await card.getByRole("button", { name: "Cancel" }).click();
+    await expect(card).toHaveCount(0);
+    await expect(page.getByText(/Cancelled by you: 'policy-docs \/ search_policies' did not run/)).toBeVisible();
+    await expect(page.getByLabel("Message")).toBeEnabled();
+    const th = st.threads[0]!;
+    const cancels = st.calls.filter((c) => c.method === "POST" && /\/steps\/[^/]+\/cancel$/.test(c.path));
+    expect(cancels).toHaveLength(1);
+    expect(cancels[0]!.path).toContain(`/v1/builder/threads/${th.id}/steps/`);
+    // a cancel is not a confirmation: nothing was approved or denied
+    expect(st.calls.filter((c) => /\/confirm$/.test(c.path))).toEqual([]);
+  });
+
+  test("Cancel on an approval wait: the person stops waiting for an approver who never decides", async ({ page }) => {
+    const st = await installBuilderMock(page, { toolMode: "approval" });
+    await page.goto("/ui/builder");
+    await page.getByLabel("Message").fill("Update the vendor policy");
+    await page.getByLabel("Message").press("Enter");
+    const wait = page.getByRole("status").filter({ hasText: "Waiting for approval by Riley Reviewer" });
+    await expect(wait).toBeVisible();
+    await expect(wait.getByRole("button", { name: "Approve" })).toHaveCount(0);
+    await expectAxeClean(page, "approval wait with cancel");
+    await wait.getByRole("button", { name: "Cancel" }).click();
+    await expect(wait).toHaveCount(0);
+    await expect(page.getByText(/Cancelled by you/)).toBeVisible();
+    await expect(page.getByLabel("Message")).toBeEnabled();
+    const th = st.threads[0]!;
+    expect(st.calls.filter((c) => c.method === "POST" && c.path.startsWith(`/v1/builder/threads/${th.id}/steps/`) && c.path.endsWith("/cancel"))).toHaveLength(1);
+  });
+});
+
 test.describe("ADR-0173: the toolbox copy", () => {
   test("the editor no longer says tools are only described", async ({ page }) => {
     const st = await installBuilderMock(page);

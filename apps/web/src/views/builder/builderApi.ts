@@ -134,6 +134,8 @@ export const builderApi = {
   /** ADR-0173: the thread owner answers an "Ask first" pause; returns the whole thread */
   confirmStep: (threadId: string, stepId: string, decision: "approve" | "deny") =>
     api.post<ChatResponse>(`/v1/builder/threads/${threadId}/steps/${stepId}/confirm`, { decision }),
+  /** ADR-0173 review: the thread owner cancels a pause (confirmation or approval); nothing runs */
+  cancelStep: (threadId: string, stepId: string) => api.post<ChatResponse>(`/v1/builder/threads/${threadId}/steps/${stepId}/cancel`, {}),
 
   listSkills: () => api.get<{ skills: BuilderSkillSummary[] }>(`/v1/builder/skills`),
   getSkill: (id: string) => api.get<{ skill: BuilderSkillDetail }>(`/v1/builder/skills/${id}`),

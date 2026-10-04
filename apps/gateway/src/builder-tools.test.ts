@@ -30,6 +30,7 @@ import { resolveModelProvider, type MockModelProvider } from "@regulait/model-pr
 import { builderKit, type BuilderKit, type Person } from "./testing/builder-fixture.js";
 import { resolveToolbox, runGovernedTool } from "./builder-tools.js";
 import { onBuilderTurnResumed } from "./builder-runtime.js";
+import { drainBackgroundWork } from "./background-work.js";
 
 let k: BuilderKit;
 let owner: Person;
@@ -245,12 +246,20 @@ describe("the loop runs a granted tool through the governed path", () => {
     expect(hits.get_time ?? 0).toBe(before);
     expect(await toolUsage(owner.id)).toBe(ownerUsage);
     expect(await toolUsage(colleague.id)).toBe(colleagueUsage);
-    // the colleague's model step never saw the owner's tool
-    expect(mock.dispatches.slice(mark)[0]!.tools ?? []).toEqual([]);
-    // positive control: the owner's own turn on the same agent runs it
+    // the colleague's model step never saw the owner's tool — not offered, and
+    // not NAMED in the system prompt either: only a count of what is withheld
+    const colleagueStep = mock.dispatches.slice(mark)[0]!;
+    expect(colleagueStep.tools ?? []).toEqual([]);
+    expect(colleagueStep.system ?? "").toContain("1 tool in this agent's toolbox is not available to you.");
+    expect(colleagueStep.system ?? "").not.toContain("get_time");
+    expect(colleagueStep.system ?? "").not.toContain(serverName);
+    // positive control: the owner's own turn on the same agent runs it (and
+    // its prompt names it — the absence above is not a prompt that names nothing)
+    const markOwner = mock.dispatches.length;
     const mine = await chat(owner, a.id, `time please <<use-tool:${modelName("get_time")}>>`);
     expect(mine.json().messages[1].steps[0].status).toBe("done");
     expect(hits.get_time).toBe(before + 1);
+    expect(mock.dispatches.slice(markOwner)[0]!.system ?? "").toContain(`${serverName} / get_time`);
   });
 });
 
@@ -354,6 +363,8 @@ describe("an organisation approval rule pauses in the approvals queue and resume
     const d = await k.req("POST", `/v1/approvals/${approvalId}/decide`, approver.auth, { decision: "approved" });
     expect(d.statusCode, d.body).toBe(200);
     expect(d.json().executionError).toBeUndefined();
+    // the turn resumes AFTER the decide response (tracked background work)
+    await drainBackgroundWork(k.db);
     expect(hits.needs_approval).toBe(before + 1);
     const detail = await thread(owner, body.thread.id);
     expect(detail.pending).toBeNull();
@@ -370,6 +381,7 @@ describe("an organisation approval rule pauses in the approvals queue and resume
     const body = (await chat(owner, a.id, `again <<use-tool:${modelName("needs_approval")}>>`)).json();
     const d = await k.req("POST", `/v1/approvals/${body.pending.approvalId}/decide`, approver.auth, { decision: "denied", reason: "not this week" });
     expect(d.statusCode, d.body).toBe(200);
+    await drainBackgroundWork(k.db);
     const detail = await thread(owner, body.thread.id);
     const step = allSteps(detail)[0];
     expect(step).toMatchObject({ status: "denied", outcomeCode: "approval_denied" });
@@ -414,6 +426,7 @@ describe("an organisation approval rule pauses in the approvals queue and resume
     await k.db.update(approvals).set({ argumentsDigest: "0".repeat(64) }).where(eq(approvals.id, body.pending.approvalId));
     const d = await k.req("POST", `/v1/approvals/${body.pending.approvalId}/decide`, approver.auth, { decision: "approved" });
     expect(d.statusCode, d.body).toBe(200);
+    await drainBackgroundWork(k.db);
     const detail = await thread(owner, body.thread.id);
     expect(detail.pending).toBeNull();
     expect(allSteps(detail)[0]).toMatchObject({ status: "refused", outcomeCode: "approval_binding_mismatch" });

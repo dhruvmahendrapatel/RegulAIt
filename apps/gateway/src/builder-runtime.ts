@@ -259,6 +259,9 @@ export type TurnOutcome =
       steps?: BuilderToolStepRow[];
       /** set when the turn is paused on a tool step */
       pending?: TurnPending;
+      /** a RESUMED segment: only the agent text it added (the agent message
+       * holds the whole turn, including what was said before the pause) */
+      resumedText?: string;
     }
   | { ok: false; status: number; error: string; detail?: string; threadId?: string };
 
@@ -470,12 +473,14 @@ export async function runBuilderTurn(db: Db, dataKey: string | undefined, args: 
     const [t] = await db.select().from(builderThreads).where(eq(builderThreads.id, args.threadId));
     if (!t || t.agentId !== agent.id) return { ok: false, status: 404, error: "unknown_thread" };
     if (t.userId !== userId) return { ok: false, status: 403, error: "not_your_thread" };
+    // a pause on an approval that lapsed ends here rather than blocking the thread
+    if (t.pendingTurnCiphertext && (await settleLapsedApprovalPause(db, t))) t.pendingTurnCiphertext = null;
     if (t.pendingTurnCiphertext) {
       return {
         ok: false,
         status: 409,
         error: "thread_waiting_on_tool_step",
-        detail: "this conversation is waiting on a tool call; confirm or deny it (or wait for its approver) first",
+        detail: "this conversation is waiting on a tool call; confirm or deny it, wait for its approver, or cancel it first",
         threadId: t.id,
       };
     }
@@ -493,6 +498,10 @@ interface QueuedCall {
   id: string;
   name: string;
   arguments: Record<string, unknown>;
+  /** WHICH tool the model named, pinned when it asked (kind + id), so a
+   * resume never runs a different tool that has since taken the same name.
+   * null = the name matched nothing in the toolbox the model was offered. */
+  target?: { kind: ToolEntry["kind"]; refId: string } | null;
   /** the step row already written for this call (a paused call) */
   stepId?: string;
   /** the governed call was already counted against the per-turn cap */
@@ -542,6 +551,9 @@ interface Segment {
   piiIntl: Awaited<ReturnType<typeof piiInternationalCategories>>;
   /** whether this segment resumed a paused turn (the thread goes back to active) */
   resumed: boolean;
+  /** how many of the turn's texts were written before this segment (a resumed
+   * segment reports only what it added) */
+  textStart: number;
   /** every message row this segment wrote or touched, for the response */
   touched: Set<string>;
   /** the newest model step's span — the tool calls it asked for hang from it */
@@ -574,7 +586,7 @@ async function maxStepsFor(db: Db): Promise<number> {
 async function openSegment(
   db: Db,
   dataKey: string | undefined,
-  base: Omit<Segment, "db" | "dataKey" | "maxSteps" | "trace" | "baseDetail" | "piiMode" | "piiIntl" | "touched" | "stepSpanId" | "decision">,
+  base: Omit<Segment, "db" | "dataKey" | "maxSteps" | "trace" | "baseDetail" | "piiMode" | "piiIntl" | "touched" | "stepSpanId" | "decision" | "textStart">,
 ): Promise<Segment> {
   const [maxSteps, piiMode, piiIntl] = await Promise.all([
     maxStepsFor(db),
@@ -600,6 +612,7 @@ async function openSegment(
     touched: new Set(),
     stepSpanId: null,
     decision: null,
+    textStart: 0,
     baseDetail: {
       surface: "builder",
       builderAgentId: base.agent.id,
@@ -901,11 +914,15 @@ async function runLoop(seg: Segment, state: LoopState): Promise<TurnOutcome> {
     if (outcome.result.outputText) blocks.push({ type: "text", text: outcome.result.outputText });
     for (const c of calls) blocks.push({ type: "tool_use", id: c.id, name: c.name, input: c.arguments ?? {} });
     state.messages.push({ role: "assistant", content: blocks });
-    state.queue = calls.map((c) => ({
-      id: c.id,
-      name: c.name,
-      arguments: (c.arguments && typeof c.arguments === "object" && !Array.isArray(c.arguments) ? c.arguments : {}) as Record<string, unknown>,
-    }));
+    state.queue = calls.map((c) => {
+      const named = box!.byName.get(c.name);
+      return {
+        id: c.id,
+        name: c.name,
+        arguments: (c.arguments && typeof c.arguments === "object" && !Array.isArray(c.arguments) ? c.arguments : {}) as Record<string, unknown>,
+        target: named ? { kind: named.kind, refId: named.refId } : null,
+      };
+    });
     // the tool calls hang from this step's span
     seg.stepSpanId = outcome.trace?.spanId ?? null;
   }
@@ -920,7 +937,37 @@ async function runQueue(seg: Segment, state: LoopState, box: Toolbox): Promise<T
   const { db } = seg;
   while (state.queue.length) {
     const call = state.queue[0]!;
-    const entry = box.byName.get(call.name) ?? null;
+    const named = box.byName.get(call.name) ?? null;
+    // the name resolves to a tool only while it still names THE tool the model
+    // asked for (pinned when it asked): never re-routed to another one
+    const target = call.target ?? null;
+    const entry = named && target && named.kind === target.kind && named.refId === target.refId ? named : null;
+
+    // a denied pause first: nothing runs, whatever the tool's name names now.
+    // The person declined an "Ask first" call...
+    if (call.resolution?.kind === "declined") {
+      await answer(seg, state, call, entry, {
+        status: "denied",
+        code: "declined_by_user",
+        detail: "the person declined this call",
+        modelText: "the person declined this tool call; do not retry it unless they ask you to",
+        isError: true,
+      });
+      continue;
+    }
+    // ...or an approver denied the organisation approval this call waited on
+    if (call.resolution?.kind === "approval_denied") {
+      const r = call.resolution;
+      const detail = `denied by ${r.approverName}${r.reason ? `: ${r.reason}` : ""}`;
+      await answer(seg, state, call, entry, {
+        status: "denied",
+        code: "approval_denied",
+        detail,
+        modelText: `this tool call was ${detail}`,
+        isError: true,
+      });
+      continue;
+    }
 
     // a call over the per-turn cap is refused without running
     if (!call.counted && state.toolCalls >= BUILDER_LIMITS.toolCallsPerTurn) {
@@ -933,6 +980,22 @@ async function runQueue(seg: Segment, state: LoopState, box: Toolbox): Promise<T
       });
       continue;
     }
+    // the tool the model asked for (and the person may have confirmed) is not
+    // the one that name resolves to now, or is gone: refused, nothing runs
+    if (!entry && target) {
+      const changed = !!named;
+      const detail = changed
+        ? `'${call.name}' now names a different tool than the one asked for, so nothing was run`
+        : `the tool asked for as '${call.name}' is no longer in this agent's toolbox for you, so nothing was run`;
+      await answer(seg, state, call, null, {
+        status: "refused",
+        code: changed ? "tool_changed_since_requested" : "tool_no_longer_available",
+        detail,
+        modelText: `refused: ${detail}`,
+        isError: true,
+      });
+      continue;
+    }
     // a tool not in the toolbox AS THIS PERSON MAY USE IT is never called
     if (!entry) {
       await answer(seg, state, call, null, {
@@ -940,31 +1003,6 @@ async function runQueue(seg: Segment, state: LoopState, box: Toolbox): Promise<T
         code: "tool_not_available",
         detail: `'${call.name}' is not in this agent's toolbox for you`,
         modelText: `refused: the tool '${call.name}' is not available to this person`,
-        isError: true,
-      });
-      continue;
-    }
-
-    // the person declined an "Ask first" call
-    if (call.resolution?.kind === "declined") {
-      await answer(seg, state, call, entry, {
-        status: "denied",
-        code: "declined_by_user",
-        detail: "the person declined this call",
-        modelText: "the person declined this tool call; do not retry it unless they ask you to",
-        isError: true,
-      });
-      continue;
-    }
-    // an approver denied the organisation approval this call waited on
-    if (call.resolution?.kind === "approval_denied") {
-      const r = call.resolution;
-      const detail = `denied by ${r.approverName}${r.reason ? `: ${r.reason}` : ""}`;
-      await answer(seg, state, call, entry, {
-        status: "denied",
-        code: "approval_denied",
-        detail,
-        modelText: `this tool call was ${detail}`,
         isError: true,
       });
       continue;
@@ -1137,33 +1175,40 @@ async function pause(
     });
     return null;
   }
+  // a NEW step is born `running`: it becomes pending only together with the
+  // paused state below, never before it
   const stepRow = call.stepId
     ? (await db.select().from(builderToolSteps).where(eq(builderToolSteps.id, call.stepId)))[0]!
-    : await newStep(seg, state, call, entry, status);
+    : await newStep(seg, state, call, entry, "running");
   call.stepId = stepRow.id;
-  await db
-    .update(builderToolSteps)
-    .set({
-      status,
-      approvalId,
-      outcomeCode: extra.code ?? null,
-      outcomeDetail: extra.detail ?? null,
-      ...(extra.latencyMs !== undefined ? { latencyMs: extra.latencyMs } : {}),
-      updatedAt: new Date(),
-    })
-    .where(eq(builderToolSteps.id, stepRow.id));
   // the resolution of an earlier pause on this call is spent
   delete call.resolution;
   await writeAgentMessage(seg, state);
-  const [thread] = await db
-    .update(builderThreads)
-    .set({
-      pendingTurnCiphertext: encryptSecret(seg.dataKey, JSON.stringify(state)),
-      status: "needs_attention",
-      updatedAt: new Date(),
-    })
-    .where(eq(builderThreads.id, seg.thread.id))
-    .returning();
+  // ATOMIC: the paused state and the pending step commit together, the state
+  // first. Whoever can see the step waiting (the approvals decide hook, the
+  // confirm route, a cancel) can therefore always restore the turn it belongs
+  // to — a hook firing between two separate writes would have read a pending
+  // step with no paused turn and abandoned it.
+  const ciphertext = encryptSecret(seg.dataKey, JSON.stringify(state));
+  const thread = await db.transaction(async (tx) => {
+    const [t] = await tx
+      .update(builderThreads)
+      .set({ pendingTurnCiphertext: ciphertext, status: "needs_attention", updatedAt: new Date() })
+      .where(eq(builderThreads.id, seg.thread.id))
+      .returning();
+    await tx
+      .update(builderToolSteps)
+      .set({
+        status,
+        approvalId,
+        outcomeCode: extra.code ?? null,
+        outcomeDetail: extra.detail ?? null,
+        ...(extra.latencyMs !== undefined ? { latencyMs: extra.latencyMs } : {}),
+        updatedAt: new Date(),
+      })
+      .where(eq(builderToolSteps.id, stepRow.id));
+    return t;
+  });
   seg.thread = thread ?? seg.thread;
   if (approvalId) {
     // The approvals queue may have decided this approval in the moment between
@@ -1224,7 +1269,7 @@ async function approverNameFor(db: Db, approvalId: string): Promise<string | nul
 }
 
 /** the turn's rows as the response returns them */
-async function segmentOutcome(seg: Segment, _state: LoopState): Promise<Extract<TurnOutcome, { ok: true }>> {
+async function segmentOutcome(seg: Segment, state: LoopState): Promise<Extract<TurnOutcome, { ok: true }>> {
   const { db } = seg;
   const ids = [...seg.touched];
   const [rows, steps, [thread]] = await Promise.all([
@@ -1237,6 +1282,7 @@ async function segmentOutcome(seg: Segment, _state: LoopState): Promise<Extract<
     thread: thread ?? seg.thread,
     messages: rows.sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime()),
     steps: steps.sort((a, b) => a.seq - b.seq),
+    ...(seg.resumed ? { resumedText: state.texts.slice(seg.textStart).join("\n\n") } : {}),
   };
 }
 
@@ -1277,11 +1323,24 @@ export interface ResumeArgs {
 }
 
 /**
- * Resume a turn paused on `stepId`. The step is CLAIMED atomically (status
- * pending_* -> running), so a double click, two approvers or a retry resume it
- * once (409 step_not_pending for the rest). Runs as the THREAD'S person, never
- * as the decider, after the same agent gate a new turn passes (visibility,
- * project, priced model, lease, limit).
+ * Answer a turn paused on `stepId`. Runs as the THREAD'S person, never as the
+ * decider.
+ *
+ *  - DENY ALWAYS GOES THROUGH. It runs nothing, so it needs no agent gate: the
+ *    step is claimed (pending_* -> denied) and finished first. Only then does
+ *    the agent CONTINUE — told of the denial — and only if the agent gate a new
+ *    turn passes allows it; if it does not (the person left the project, the
+ *    limit is reached, the model was deleted…), the paused turn is ended with
+ *    a note instead of being left waiting.
+ *  - APPROVE passes the agent gate (visibility, project, priced model, lease,
+ *    limit) and then CLAIMS the step (pending_* -> running), so a double click,
+ *    two approvers or a retry resume it once (409 step_not_pending for the
+ *    rest). A gate refusal ABANDONS the step and clears the paused turn with a
+ *    note: an answered pause never stays pending.
+ *  - The call that runs must still be THE tool the step names (kind + id); the
+ *    loop refuses it otherwise (runQueue).
+ *  - An exception in the resumed run puts the step in `error` and clears the
+ *    paused turn (never a thread stuck on a step nobody can answer).
  */
 export async function resumeBuilderStep(db: Db, dataKey: string | undefined, args: ResumeArgs): Promise<TurnOutcome> {
   const [thread] = await db.select().from(builderThreads).where(eq(builderThreads.id, args.threadId));
@@ -1292,103 +1351,369 @@ export async function resumeBuilderStep(db: Db, dataKey: string | undefined, arg
   if (step.status !== expected) {
     return { ok: false, status: 409, error: "step_not_pending", detail: `this step is ${step.status.replace("_", " ")}`, threadId: thread.id };
   }
+  let approverName = "an approver";
+  if (args.via === "approval") {
+    const [d] = await db.select({ name: users.displayName, email: users.email }).from(users).where(eq(users.id, args.deciderUserId));
+    approverName = d ? d.name || d.email : approverName;
+  }
+  const deny = args.decision === "deny";
+  const decisionAudit = () =>
+    audit(
+      db,
+      args.deciderUserId,
+      thread.agentId,
+      args.via === "confirmation" ? "builder-tool-step-confirmed" : "builder-tool-step-approval-decided",
+      `tool step '${step.displayName}' ${deny ? "denied" : "approved"} ` +
+        `(${args.via === "confirmation" ? "Ask first, by the person in the thread" : `organisation approval, by ${approverName}`}); the turn resumes`,
+      { builderThreadId: thread.id, builderStepId: step.id, via: args.via, decision: args.decision, approvalId: step.approvalId },
+      deny ? "deny" : "allow",
+    );
+
+  if (deny) {
+    const code = args.via === "confirmation" ? "declined_by_user" : "approval_denied";
+    const detail =
+      args.via === "confirmation" ? "the person declined this call" : `denied by ${approverName}${args.reason ? `: ${args.reason}` : ""}`;
+    const now = new Date();
+    const claimed = await db
+      .update(builderToolSteps)
+      .set({ status: "denied", outcomeCode: code, outcomeDetail: detail.slice(0, 1000), decidedByUserId: args.deciderUserId, updatedAt: now, finishedAt: now })
+      .where(and(eq(builderToolSteps.id, step.id), eq(builderToolSteps.status, expected)))
+      .returning({ id: builderToolSteps.id });
+    if (!claimed.length) return { ok: false, status: 409, error: "step_not_pending", threadId: thread.id };
+    await decisionAudit();
+    const gate = await resumeUnderGate(db, dataKey, thread, step, args, approverName, false);
+    let out: TurnOutcome = gate;
+    if (!gate.ok) {
+      // the denial stands; only the agent's continuation was refused
+      const [note] = await db
+        .insert(builderMessages)
+        .values({
+          threadId: thread.id,
+          agentId: thread.agentId,
+          userId: thread.userId,
+          role: "system",
+          content:
+            `'${step.displayName}' was ${args.via === "confirmation" ? "declined" : "denied"} and did not run. ` +
+            `The agent could not continue (${gate.error})${gate.detail ? `: ${gate.detail}` : ""}.`,
+        })
+        .returning();
+      const [t] = await db
+        .update(builderThreads)
+        .set({ pendingTurnCiphertext: null, status: "needs_attention", updatedAt: new Date() })
+        .where(eq(builderThreads.id, thread.id))
+        .returning();
+      const [s] = await db.select().from(builderToolSteps).where(eq(builderToolSteps.id, step.id));
+      out = { ok: true, thread: t ?? thread, messages: note ? [note] : [], steps: s ? [s] : [] };
+    }
+    await notifyResumed(db, thread.id, thread.source, out);
+    return out;
+  }
+
+  const out = await resumeUnderGate(db, dataKey, thread, step, args, approverName, true, decisionAudit);
+  if (!out.ok) {
+    // a refusal BEFORE the step was claimed (the agent gate): the pause was
+    // answered and will not be answered again, so it ends here, visibly
+    await endPausedStep(db, thread, step.id, {
+      from: [expected],
+      status: "refused",
+      code: out.error,
+      detail: out.detail ?? "the turn could not resume",
+      note: `Stopped (${out.error}): ${out.detail ?? "the turn could not resume"}. '${step.displayName}' did not run.`,
+      decidedByUserId: args.deciderUserId,
+    });
+  }
+  if (out.ok || out.status !== 409 || out.error !== "step_not_pending") await notifyResumed(db, thread.id, thread.source, out);
+  return out;
+}
+
+/** the agent gate, then (approve: claim the step) the restored loop */
+async function resumeUnderGate(
+  db: Db,
+  dataKey: string | undefined,
+  thread: BuilderThreadRow,
+  step: BuilderToolStepRow,
+  args: ResumeArgs,
+  approverName: string,
+  claim: boolean,
+  onClaimed?: () => Promise<void>,
+): Promise<TurnOutcome> {
+  const expected = args.via === "confirmation" ? "pending_confirmation" : "pending_approval";
   const [agent] = await db.select().from(builderAgents).where(eq(builderAgents.id, thread.agentId));
   const [person] = await db.select({ isAdmin: users.isAdmin, disabledAt: users.disabledAt }).from(users).where(eq(users.id, thread.userId));
   const visible = agent && person && !person.disabledAt ? await loadVisibleAgent(db, agent.id, { userId: thread.userId, isAdmin: person.isAdmin }) : null;
   if (!visible) {
-    await abandonPaused(db, thread, step, "agent_unavailable", "the agent is no longer available to the person this conversation runs as");
     return { ok: false, status: 409, error: "agent_unavailable", detail: "this agent is no longer available to you", threadId: thread.id };
   }
-  const out = await withAgentGate(db, visible, thread.userId, person!.isAdmin, thread.source, async (model, lease) => {
-    const claimed = await db
-      .update(builderToolSteps)
-      .set({ status: "running", decidedByUserId: args.deciderUserId, updatedAt: new Date() })
-      .where(and(eq(builderToolSteps.id, step.id), eq(builderToolSteps.status, expected)))
-      .returning({ id: builderToolSteps.id });
-    if (!claimed.length) return { ok: false, status: 409, error: "step_not_pending", threadId: thread.id };
-    const [fresh] = await db.select().from(builderThreads).where(eq(builderThreads.id, thread.id));
-    let state: LoopState | null = null;
+  return withAgentGate(db, visible, thread.userId, person!.isAdmin, thread.source, async (model, lease) => {
+    if (claim) {
+      const claimed = await db
+        .update(builderToolSteps)
+        .set({ status: "running", decidedByUserId: args.deciderUserId, updatedAt: new Date() })
+        .where(and(eq(builderToolSteps.id, step.id), eq(builderToolSteps.status, expected)))
+        .returning({ id: builderToolSteps.id });
+      if (!claimed.length) return { ok: false, status: 409, error: "step_not_pending", threadId: thread.id };
+      if (onClaimed) await onClaimed();
+    }
+    let seg: Segment | null = null;
     try {
-      state = fresh?.pendingTurnCiphertext && dataKey ? (JSON.parse(decryptSecret(dataKey, fresh.pendingTurnCiphertext)) as LoopState) : null;
-    } catch {
-      state = null;
+      const [fresh] = await db.select().from(builderThreads).where(eq(builderThreads.id, thread.id));
+      let state: LoopState | null = null;
+      try {
+        state = fresh?.pendingTurnCiphertext && dataKey ? (JSON.parse(decryptSecret(dataKey, fresh.pendingTurnCiphertext)) as LoopState) : null;
+      } catch {
+        state = null;
+      }
+      const call = state?.queue[0];
+      if (!state || state.v !== 1 || !call || call.stepId !== step.id) {
+        // (a denied step keeps its denial; only the turn is ended)
+        await endPausedStep(db, thread, step.id, {
+          from: claim ? ["running"] : null,
+          status: "refused",
+          code: "paused_turn_unreadable",
+          detail: "the paused turn could not be restored (a data-key change, or it was already resumed)",
+          note: "Stopped (paused_turn_unreadable): the paused turn could not be restored (a data-key change, or it was already resumed).",
+        });
+        return { ok: false, status: 409, error: "paused_turn_unreadable", threadId: thread.id };
+      }
+      // the step row is the record of WHICH tool was asked for: a state saved
+      // before calls were pinned takes its pin from there
+      if (call.target === undefined) {
+        call.target = step.kind !== "unknown" && step.refId ? { kind: step.kind, refId: step.refId } : null;
+      }
+      call.resolution =
+        args.via === "confirmation"
+          ? { kind: args.decision === "approve" ? "confirmed" : "declined" }
+          : args.decision === "approve"
+            ? { kind: "approved" }
+            : { kind: "approval_denied", approverName, reason: args.reason ?? null };
+      seg = await openSegment(db, dataKey, {
+        agent: visible,
+        userId: thread.userId,
+        isAdmin: person!.isAdmin,
+        source: thread.source,
+        virtualKey: null,
+        model,
+        thread: fresh ?? thread,
+        lease,
+        resumed: true,
+      });
+      seg.textStart = state.texts.length;
+      if (state.agentMessageId) seg.touched.add(state.agentMessageId);
+      return await runLoop(seg, state);
+    } catch (err) {
+      // never a thread stuck on a step nobody can answer: the step (and any
+      // call of this turn still marked running) goes to error, the paused
+      // state is cleared, the failure is audited
+      // one line, no query text: a database error's `cause` is the driver's
+      // own message (the wrapper's message embeds the SQL and its parameters)
+      const msg = (err instanceof Error ? (err.cause instanceof Error ? err.cause.message : err.message) : String(err))
+        .replace(/\s+/g, " ")
+        .slice(0, 300);
+      const now = new Date();
+      await db
+        .update(builderToolSteps)
+        .set({ status: "error", outcomeCode: "resume_failed", outcomeDetail: msg.slice(0, 300), updatedAt: now, finishedAt: now })
+        .where(and(eq(builderToolSteps.threadId, thread.id), inArray(builderToolSteps.status, ["running", "pending_confirmation", "pending_approval"])));
+      await db
+        .update(builderThreads)
+        .set({ pendingTurnCiphertext: null, status: "needs_attention", updatedAt: now })
+        .where(eq(builderThreads.id, thread.id));
+      await db.insert(builderMessages).values({
+        threadId: thread.id,
+        agentId: thread.agentId,
+        userId: thread.userId,
+        role: "system",
+        content: "Stopped (resume_failed): the conversation could not continue after the tool step. Send a message to try again.",
+      });
+      await audit(db, thread.userId, thread.agentId, "builder-tool-step-resume-failed",
+        `the paused turn of thread ${thread.id} failed while resuming: ${msg.slice(0, 300)}`,
+        { builderThreadId: thread.id, builderStepId: step.id, via: args.via, decision: args.decision }, "deny");
+      if (seg) await finishTrace(db, seg.trace, "error");
+      return { ok: false, status: 500, error: "resume_failed", detail: "the conversation could not continue after the tool step", threadId: thread.id };
     }
-    const call = state?.queue[0];
-    if (!state || state.v !== 1 || !call || call.stepId !== step.id) {
-      await abandonPaused(db, fresh ?? thread, step, "paused_turn_unreadable", "the paused turn could not be restored (a data-key change, or it was already resumed)");
-      return { ok: false, status: 409, error: "paused_turn_unreadable", threadId: thread.id };
-    }
-    let approverName = "an approver";
-    if (args.via === "approval") {
-      const [d] = await db.select({ name: users.displayName, email: users.email }).from(users).where(eq(users.id, args.deciderUserId));
-      approverName = d ? d.name || d.email : approverName;
-    }
-    call.resolution =
-      args.via === "confirmation"
-        ? { kind: args.decision === "approve" ? "confirmed" : "declined" }
-        : args.decision === "approve"
-          ? { kind: "approved" }
-          : { kind: "approval_denied", approverName, reason: args.reason ?? null };
-    const seg = await openSegment(db, dataKey, {
-      agent: visible,
-      userId: thread.userId,
-      isAdmin: person!.isAdmin,
-      source: thread.source,
-      virtualKey: null,
-      model,
-      thread: fresh ?? thread,
-      lease,
-      resumed: true,
-    });
-    if (state.agentMessageId) seg.touched.add(state.agentMessageId);
-    await audit(
-      db,
-      args.deciderUserId,
-      visible.id,
-      args.via === "confirmation" ? "builder-tool-step-confirmed" : "builder-tool-step-approval-decided",
-      `tool step '${step.displayName}' ${args.decision === "approve" ? "approved" : "denied"} ` +
-        `(${args.via === "confirmation" ? "Ask first, by the person in the thread" : `organisation approval, by ${approverName}`}); the turn resumes`,
-      { builderThreadId: thread.id, builderStepId: step.id, via: args.via, decision: args.decision, approvalId: step.approvalId },
-      args.decision === "approve" ? "allow" : "deny",
-    );
-    return runLoop(seg, state);
   });
-  if (!out.ok && args.via === "approval") {
-    // the approval was decided once and its hook will not fire again: a gate
-    // refusal here (a limit reached, a project membership gone) ends the turn
-    // visibly instead of leaving it waiting forever
-    const [still] = await db.select().from(builderToolSteps).where(eq(builderToolSteps.id, step.id));
-    if (still?.status === expected) {
-      await abandonPaused(db, thread, still, out.error, out.detail ?? "the turn could not resume");
-    }
+}
+
+/**
+ * End a paused turn on one step: the step moves (only from `from` — a claim,
+ * so a concurrent resume or cancel ends it once), the paused state is cleared
+ * and a system note says what happened, in ONE transaction. `from: null`
+ * leaves the step as it is (a denial already recorded) and ends only the
+ * turn. Returns the note when this call ended it, else null.
+ */
+async function endPausedStep(
+  db: Db,
+  thread: Pick<BuilderThreadRow, "id" | "agentId" | "userId">,
+  stepId: string,
+  opts: {
+    from: BuilderToolStepRow["status"][] | null;
+    status: "refused" | "denied" | "error";
+    code: string;
+    detail: string;
+    note: string;
+    decidedByUserId?: string | null;
+  },
+): Promise<BuilderMessageRow | null> {
+  const now = new Date();
+  return db.transaction(async (tx) => {
+    const moved = opts.from === null ? [{ id: stepId }] : await tx
+      .update(builderToolSteps)
+      .set({
+        status: opts.status,
+        outcomeCode: opts.code,
+        outcomeDetail: opts.detail.slice(0, 1000),
+        ...(opts.decidedByUserId !== undefined ? { decidedByUserId: opts.decidedByUserId } : {}),
+        updatedAt: now,
+        finishedAt: now,
+      })
+      .where(and(eq(builderToolSteps.id, stepId), inArray(builderToolSteps.status, opts.from)))
+      .returning({ id: builderToolSteps.id });
+    if (!moved.length) return null;
+    await tx
+      .update(builderThreads)
+      .set({ pendingTurnCiphertext: null, status: "needs_attention", updatedAt: now })
+      .where(eq(builderThreads.id, thread.id));
+    const [note] = await tx
+      .insert(builderMessages)
+      .values({ threadId: thread.id, agentId: thread.agentId, userId: thread.userId, role: "system", content: opts.note })
+      .returning();
+    return note ?? null;
+  });
+}
+
+/**
+ * ADR-0173 review — the way out of a pause nobody will answer (an approval
+ * never decided, a confirmation the person no longer wants): the thread's
+ * person or an admin CANCELS the pending step. Nothing runs; the step is
+ * refused, the paused turn cleared, a system note written and the act audited.
+ * A pending organisation approval the step waited on is superseded, so it
+ * leaves the approver's queue and can never be spent by a later identical call.
+ */
+export async function cancelBuilderStep(
+  db: Db,
+  args: { threadId: string; stepId: string; actorUserId: string; actorIsAdmin: boolean },
+): Promise<TurnOutcome> {
+  const [thread] = await db.select().from(builderThreads).where(eq(builderThreads.id, args.threadId));
+  if (!thread) return { ok: false, status: 404, error: "unknown_thread" };
+  const byOwner = thread.userId === args.actorUserId;
+  if (!byOwner && !args.actorIsAdmin) return { ok: false, status: 404, error: "unknown_thread" };
+  const [step] = await db.select().from(builderToolSteps).where(eq(builderToolSteps.id, args.stepId));
+  if (!step || step.threadId !== thread.id) return { ok: false, status: 404, error: "unknown_step" };
+  if (step.status !== "pending_confirmation" && step.status !== "pending_approval") {
+    return { ok: false, status: 409, error: "step_not_pending", detail: `this step is ${step.status.replace("_", " ")}`, threadId: thread.id };
   }
-  if (out.ok || out.status !== 409 || out.error !== "step_not_pending") await notifyResumed(thread.id, thread.source, out);
+  const code = byOwner ? "cancelled_by_user" : "cancelled_by_admin";
+  const who = byOwner ? "you" : "an admin";
+  const note = await endPausedStep(db, thread, step.id, {
+    from: ["pending_confirmation", "pending_approval"],
+    status: "refused",
+    code,
+    detail: `cancelled by ${byOwner ? "the person in the thread" : "an admin"}; the tool did not run`,
+    note: `Cancelled by ${who}: '${step.displayName}' did not run. Send a message to continue.`,
+    decidedByUserId: args.actorUserId,
+  });
+  if (!note) return { ok: false, status: 409, error: "step_not_pending", threadId: thread.id };
+  let supersededApprovalId: string | null = null;
+  if (step.approvalId) {
+    const moved = await db
+      .update(approvals)
+      .set({ status: "superseded", decisionReason: "superseded: the builder conversation waiting on this approval was cancelled" })
+      .where(and(eq(approvals.id, step.approvalId), eq(approvals.status, "pending")))
+      .returning({ id: approvals.id });
+    supersededApprovalId = moved[0]?.id ?? null;
+  }
+  await audit(
+    db,
+    args.actorUserId,
+    thread.agentId,
+    "builder-tool-step-cancelled",
+    `tool step '${step.displayName}' (${step.status.replace("_", " ")}) cancelled by ${byOwner ? "the thread's person" : "an admin"}; nothing ran`,
+    { builderThreadId: thread.id, builderStepId: step.id, from: step.status, approvalId: step.approvalId, supersededApprovalId, byAdmin: !byOwner },
+    "deny",
+  );
+  const [[t], [s]] = await Promise.all([
+    db.select().from(builderThreads).where(eq(builderThreads.id, thread.id)),
+    db.select().from(builderToolSteps).where(eq(builderToolSteps.id, step.id)),
+  ]);
+  const out: TurnOutcome = { ok: true, thread: t ?? thread, messages: [note], steps: s ? [s] : [] };
+  await notifyResumed(db, thread.id, thread.source, out);
   return out;
 }
 
-/** a paused turn that cannot continue: the step refused, the state dropped, a note */
-async function abandonPaused(db: Db, thread: BuilderThreadRow, step: BuilderToolStepRow, code: string, detail: string) {
-  const now = new Date();
-  await db
-    .update(builderToolSteps)
-    .set({ status: "refused", outcomeCode: code, outcomeDetail: detail, updatedAt: now, finishedAt: now })
-    .where(eq(builderToolSteps.id, step.id));
-  await db
-    .update(builderThreads)
-    .set({ pendingTurnCiphertext: null, status: "needs_attention", updatedAt: now })
-    .where(eq(builderThreads.id, thread.id));
-  await db.insert(builderMessages).values({
-    threadId: thread.id,
-    agentId: thread.agentId,
-    userId: thread.userId,
-    role: "system",
-    content: `Stopped (${code}): ${detail}`,
-  });
+/**
+ * A pause on an organisation approval that can no longer be answered — its
+ * approval passed `expires_at` (the org's TTL dial, stamped at queue time), was
+ * superseded, or is gone — is ended lazily, when the thread is next read or
+ * written to. A pending approval with NO expiry (the TTL dial off) never
+ * lapses by itself: the cancel action is the way out. Returns whether a pause
+ * was ended.
+ */
+export async function settleLapsedApprovalPause(db: Db, thread: BuilderThreadRow): Promise<boolean> {
+  if (!thread.pendingTurnCiphertext) return false;
+  const waiting = await db
+    .select({ step: builderToolSteps, apStatus: approvals.status, apExpiresAt: approvals.expiresAt })
+    .from(builderToolSteps)
+    .leftJoin(approvals, eq(builderToolSteps.approvalId, approvals.id))
+    .where(and(eq(builderToolSteps.threadId, thread.id), eq(builderToolSteps.status, "pending_approval")));
+  let ended = false;
+  for (const w of waiting) {
+    const now = Date.now();
+    const lapsed =
+      w.apStatus == null
+        ? "gone"
+        : w.apStatus === "superseded"
+          ? "superseded"
+          : (w.apStatus === "pending" || w.apStatus === "approved") && w.apExpiresAt && w.apExpiresAt.getTime() <= now
+            ? "expired"
+            : null;
+    if (!lapsed) continue;
+    const detail =
+      lapsed === "expired"
+        ? "the approval this call waited on expired before it was used"
+        : lapsed === "superseded"
+          ? "the approval this call waited on was superseded"
+          : "the approval this call waited on no longer exists";
+    const note = await endPausedStep(db, thread, w.step.id, {
+      from: ["pending_approval"],
+      status: "refused",
+      code: lapsed === "expired" ? "approval_expired" : "approval_withdrawn",
+      detail,
+      note: `Stopped: ${detail}, so '${w.step.displayName}' did not run. Send a message to continue.`,
+    });
+    if (!note) continue;
+    ended = true;
+    // an expired approval still PENDING is dead (it can never be spent) but the
+    // governed path would hand the same row to the next identical call, which
+    // would pause on it again: retire it visibly, so the next call raises a
+    // fresh one (the ADR-0105 discipline for consent that lapsed)
+    let supersededApprovalId: string | null = null;
+    if (lapsed === "expired" && w.apStatus === "pending" && w.step.approvalId) {
+      const moved = await db
+        .update(approvals)
+        .set({ status: "superseded", decisionReason: "superseded: this approval passed its expiry before it was decided" })
+        .where(and(eq(approvals.id, w.step.approvalId), eq(approvals.status, "pending")))
+        .returning({ id: approvals.id });
+      supersededApprovalId = moved[0]?.id ?? null;
+    }
+    await audit(db, thread.userId, thread.agentId, "builder-tool-step-approval-lapsed",
+      `tool step '${w.step.displayName}' ended: ${detail}`,
+      { builderThreadId: thread.id, builderStepId: w.step.id, approvalId: w.step.approvalId, lapsed, supersededApprovalId }, "deny");
+    await notifyResumed(db, thread.id, thread.source, {
+      ok: true,
+      thread: { ...thread, pendingTurnCiphertext: null, status: "needs_attention" },
+      messages: [note],
+      steps: [],
+    });
+  }
+  return ended;
 }
 
-/** what a resumed turn produced, for observers (e.g. inbound channels posting
- * the agent's final reply back into the platform thread) */
+/** what a resumed (or cancelled, or lapsed) paused turn produced, for
+ * observers — inbound channels post the agent's reply back into the platform
+ * thread. `db` names the database the turn ran on, so an app only acts on its
+ * own turns. */
 export type BuilderTurnResumedListener = (event: {
+  db: Db;
   threadId: string;
   source: BuilderThreadRow["source"];
   outcome: TurnOutcome;
@@ -1400,10 +1725,10 @@ export function onBuilderTurnResumed(listener: BuilderTurnResumedListener): () =
   resumedListeners.add(listener);
   return () => resumedListeners.delete(listener);
 }
-async function notifyResumed(threadId: string, source: BuilderThreadRow["source"], outcome: TurnOutcome) {
+async function notifyResumed(db: Db, threadId: string, source: BuilderThreadRow["source"], outcome: TurnOutcome) {
   for (const l of resumedListeners) {
     try {
-      await l({ threadId, source, outcome });
+      await l({ db, threadId, source, outcome });
     } catch {
       /* an observer never fails a turn */
     }

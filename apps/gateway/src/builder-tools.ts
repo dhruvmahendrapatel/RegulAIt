@@ -13,6 +13,7 @@
  * the model names that is not in the re-checked toolbox is refused here
  * without a call being made.
  */
+import { createHash } from "node:crypto";
 import {
   builderAgentTools,
   connectors,
@@ -62,7 +63,8 @@ export interface ToolEntry {
 export interface Toolbox {
   entries: ToolEntry[];
   byName: Map<string, ToolEntry>;
-  /** toolbox entries this person may not use — named in the prompt, never offered */
+  /** toolbox entries this person may not use — never offered and never named
+   * to the model (the prompt says only how many there are) */
   unavailable: Array<{ displayName: string; kind: "mcp_tool" | "connector" }>;
 }
 
@@ -75,15 +77,49 @@ function slug(s: string): string {
   return v || "tool";
 }
 
-/** a unique, provider-safe tool name */
-function uniqueName(base: string, taken: Set<string>): string {
-  let name = base.slice(0, TOOL_NAME_MAX);
-  for (let i = 2; taken.has(name); i++) {
-    const suffix = `_${i}`;
-    name = base.slice(0, TOOL_NAME_MAX - suffix.length) + suffix;
+/** a short, stable fingerprint of a toolbox entry's identity */
+function refHash(kind: string, refId: string): string {
+  return createHash("sha256").update(`${kind}:${refId}`).digest("hex").slice(0, 8);
+}
+
+/**
+ * The model-facing name of every configured toolbox entry, DETERMINISTIC and
+ * independent of row order and of who is asking. A name is
+ * `slug(server)__slug(tool)` (or `connector__slug(name)`) cut to 64
+ * characters. When two or more entries would share a name, EVERY one of them
+ * carries a short hash of its own identity (`…_<8 hex>`), so no entry "wins"
+ * the plain name by being inserted first — and the clash is judged over the
+ * whole configured toolbox (whatever this person may use), so a grant revoked
+ * from one person cannot hand its name to a different tool.
+ */
+export function toolNames(items: Array<{ kind: string; refId: string; base: string }>): Map<string, string> {
+  const cut = (b: string) => b.slice(0, TOOL_NAME_MAX);
+  const hashed = (it: { kind: string; refId: string; base: string }) => {
+    const suffix = `_${refHash(it.kind, it.refId)}`;
+    return it.base.slice(0, TOOL_NAME_MAX - suffix.length) + suffix;
+  };
+  const counts = new Map<string, number>();
+  for (const it of items) counts.set(cut(it.base), (counts.get(cut(it.base)) ?? 0) + 1);
+  const out = new Map<string, string>();
+  const taken = new Set<string>();
+  const sorted = [...items].sort((a, b) => `${a.kind}:${a.refId}`.localeCompare(`${b.kind}:${b.refId}`));
+  // the clashing names first: unique by construction
+  for (const it of sorted) {
+    if ((counts.get(cut(it.base)) ?? 0) < 2) continue;
+    const name = hashed(it);
+    out.set(`${it.kind}:${it.refId}`, name);
+    taken.add(name);
   }
-  taken.add(name);
-  return name;
+  // then the plain ones (a plain name equal to a hashed one is astronomically
+  // unlikely; it is hashed too rather than shadowing it)
+  for (const it of sorted) {
+    const key = `${it.kind}:${it.refId}`;
+    if (out.has(key)) continue;
+    const name = taken.has(cut(it.base)) ? hashed(it) : cut(it.base);
+    out.set(key, name);
+    taken.add(name);
+  }
+  return out;
 }
 
 /** the operations a connector kind supports (ADR-0121: outlook is send-only) */
@@ -158,8 +194,19 @@ export async function resolveToolbox(db: Db, agent: BuilderAgentRow, userId: str
         )
       : Promise.resolve(new Set<string>()),
   ]);
-  const taken = new Set<string>();
-  // a stable order, so the same toolbox always yields the same names
+  // names over the WHOLE configured toolbox (every tool that still exists),
+  // before the per-person entitlement filter — see toolNames
+  const names = toolNames(
+    rows.flatMap((r): Array<{ kind: string; refId: string; base: string }> => {
+      if (r.kind === "connector") {
+        const c = connectorRows.find((x) => x.id === r.refId);
+        return c ? [{ kind: r.kind, refId: r.refId, base: `connector__${slug(c.name)}` }] : [];
+      }
+      const m = mcpRows.find((x) => x.id === r.refId);
+      return m ? [{ kind: r.kind, refId: r.refId, base: `${slug(m.serverName)}__${slug(m.name)}` }] : [];
+    }),
+  );
+  // a stable order for the listing (the names do not depend on it)
   const ordered = [...rows].sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || a.id.localeCompare(b.id));
   for (const r of ordered) {
     if (r.kind === "connector") {
@@ -170,7 +217,7 @@ export async function resolveToolbox(db: Db, agent: BuilderAgentRow, userId: str
         continue;
       }
       const ops = connectorOperations(c.providerKind);
-      const name = uniqueName(`connector__${slug(c.name)}`, taken);
+      const name = names.get(`connector:${c.id}`)!;
       out.entries.push({
         name,
         displayName: c.name,
@@ -195,7 +242,7 @@ export async function resolveToolbox(db: Db, agent: BuilderAgentRow, userId: str
         out.unavailable.push({ displayName, kind: "mcp_tool" });
         continue;
       }
-      const name = uniqueName(`${slug(m.serverName)}__${slug(m.name)}`, taken);
+      const name = names.get(`mcp_tool:${m.id}`)!;
       out.entries.push({
         name,
         displayName,
@@ -233,8 +280,11 @@ export function toolboxPrompt(box: Toolbox): string | null {
   for (const e of box.entries) {
     lines.push(`- \`${e.name}\` — ${e.displayName} (${e.kind === "connector" ? "connector" : "MCP tool"}${e.requiresApproval ? ", asks first" : ""})`);
   }
-  for (const u of box.unavailable) {
-    lines.push(`- ${u.displayName} (${u.kind === "connector" ? "connector" : "MCP tool"}) — not available to this person; do not try to use it`);
+  // a tool the person holds no grant on is never NAMED to the model: its name
+  // (and with it the existence of a connector or MCP server) is not theirs
+  if (box.unavailable.length) {
+    const n = box.unavailable.length;
+    lines.push(`${n} tool${n === 1 ? "" : "s"} in this agent's toolbox ${n === 1 ? "is" : "are"} not available to you.`);
   }
   return lines.join("\n");
 }

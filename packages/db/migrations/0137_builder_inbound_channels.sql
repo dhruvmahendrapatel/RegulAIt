@@ -17,6 +17,11 @@
 --                             builder thread. Per PERSON: a builder thread is
 --                             personal, so two people in one Slack thread each
 --                             converse with the agent as themselves.
+--                             reply_target / reply_thread_ref / link_origin:
+--                             where a LATER reply goes (a paused turn resumed
+--                             from the web app or by an approval decision) and
+--                             the public origin its links are built on — from
+--                             the newest message of the conversation.
 --   builder_channel_events    the de-duplication record: one row per platform
 --                             delivery (Slack event_id / Teams activity id) and
 --                             per message, so a retry, a replay inside the
@@ -37,6 +42,9 @@ CREATE TABLE IF NOT EXISTS "builder_channel_threads" (
   "user_id" uuid NOT NULL REFERENCES "users"("id") ON DELETE CASCADE,
   "agent_id" uuid NOT NULL REFERENCES "builder_agents"("id") ON DELETE CASCADE,
   "builder_thread_id" uuid NOT NULL REFERENCES "builder_threads"("id") ON DELETE CASCADE,
+  "reply_target" text,
+  "reply_thread_ref" text,
+  "link_origin" text,
   "created_at" timestamp with time zone DEFAULT now() NOT NULL,
   "updated_at" timestamp with time zone DEFAULT now() NOT NULL
 );

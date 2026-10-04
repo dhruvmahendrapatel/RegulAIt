@@ -411,6 +411,7 @@ import { registerCompliancePackRoutes } from "./compliance-packs.js";
 import { registerCopilotRoutes } from "./copilot.js";
 import { registerBuilderRoutes } from "./builder.js";
 import { builderStepsAwaitingApproval, resumeBuilderAfterApproval } from "./builder-runtime.js";
+import { drainBackgroundWork, scheduleBackgroundWork } from "./background-work.js";
 import type { CopilotNarrator, RecommendationJudge } from "@regulait/shared";
 import { registerChatOpsRoutes } from "./chatops.js";
 import path from "node:path";
@@ -3698,12 +3699,37 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       // Nothing is decided here — the decision is the approval row above. The
       // turn RESUMES after commit (approved -> the identical call, which the
       // governed path matches to this approval by its argument digest; denied
-      // -> the model is told who denied it and why), as the thread's person.
+      // -> the model is told who denied it and why), as the thread's person —
+      // and AFTER THE RESPONSE (review): the approver's request never carries
+      // the resumed turn (model steps, tool calls), so the decide answers at
+      // once. Tracked background work: a closing app and a test drain it. A
+      // failure is audited (the resume records its own outcome on the step).
       if (updated.objectType === "mcp_tool" && !postCommit) {
         const waiting = await builderStepsAwaitingApproval(tx as unknown as Db, updated.id);
         if (waiting.length) {
           postCommit = async (d: Db) => {
-            await resumeBuilderAfterApproval(d, opts.dataKey, updated, binaryDecision, deciderUserId);
+            scheduleBackgroundWork(d, async () => {
+              try {
+                await resumeBuilderAfterApproval(d, opts.dataKey, updated, binaryDecision, deciderUserId);
+              } catch (err) {
+                await d.insert(auditLog).values({
+                  userId: deciderUserId,
+                  objectType: "mcp_tool",
+                  objectId: null,
+                  serverId: updated.serverId,
+                  toolName: updated.toolName,
+                  detail: { approvalId: updated.id, phase: "builder-resume" },
+                  effect: "deny",
+                  ruleId: "builder-tool-step-resume-failed",
+                  ruleChain: [],
+                  reason: `the builder turn waiting on approval ${updated.id} could not resume: ${
+                    err instanceof Error ? (err.cause instanceof Error ? err.cause.message : err.message) : String(err)
+                  }`
+                    .replace(/\s+/g, " ")
+                    .slice(0, 1000),
+                });
+              }
+            }, app.log);
           };
         }
       }
@@ -4333,6 +4359,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerSchedulerRoutes(app, db, { registry: schedulerJobRegistry({ dataKey: opts.dataKey }) });
   const stopAuditPruneScheduler = startAuditPruneScheduler(db);
   app.addHook("onClose", async () => stopAuditPruneScheduler());
+  // after-the-response work (a resumed builder turn, a channel reply) finishes first
+  app.addHook("onClose", async () => drainBackgroundWork(db));
   registerAnthropicCompat(app, db, { dataKey: opts.dataKey });
   registerOpenAiCompat(app, db, { dataKey: opts.dataKey });
   // ADR-0066 §1 — `GET /v1/models`. Gated by the same onRequest hook as the two

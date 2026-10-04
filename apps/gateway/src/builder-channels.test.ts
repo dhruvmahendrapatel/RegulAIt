@@ -35,6 +35,7 @@ import {
   composeChannelReply,
   drainChannelWork,
   pauseOf,
+  threadLink,
 } from "./builder-channels.js";
 import type { TurnOutcome } from "./builder-runtime.js";
 import { builderKit, type BuilderKit, type Person } from "./testing/builder-fixture.js";
@@ -184,6 +185,7 @@ async function newAgent(by: Person, extra: Record<string, unknown> = {}) {
     connectionFormat: "shared",
     computerUse: false,
     modelAgentId: model,
+    projectId: by.projectId,
     ...extra,
   });
   expect(r.statusCode, r.body).toBe(201);
@@ -205,6 +207,10 @@ beforeAll(async () => {
   model = await k.model("m", { price: 100_000 });
   await k.grantModel(owner.id, model);
   await k.grantModel(admin.id, model);
+  // every builder agent bills to a project: the colleague may bill the owner's
+  // (where the owner's shared agent spends)
+  const seat = await k.req("POST", `/v1/projects/${owner.projectId}/members`, k.BOOT, { userId: colleague.id, role: "contributor" });
+  expect(seat.statusCode, seat.body).toBeLessThan(300);
 
   upstream = http.createServer((req, res) => {
     let raw = "";
@@ -334,6 +340,8 @@ describe("the first walls: signature and replay", () => {
     expect(reply, JSON.stringify(posted.map((p) => p.url))).toBeTruthy();
     expect(reply!.body.type).toBe("message");
     expect(String(reply!.body.text).length).toBeGreaterThan(0);
+    // model output is shown as PLAIN text in Teams (no markdown/HTML, so no disguised link)
+    expect(reply!.body.textFormat).toBe("plain");
 
     // the SAME activity re-sent inside the window (a replay the HMAC cannot
     // catch) is de-duplicated by its activity id: no second turn
@@ -574,5 +582,8 @@ describe("what goes back", () => {
     expect(pauseOf(ok({}, [{ role: "agent", steps: [{ status: "pending_approval" }] }]))).toBe("approval");
     expect(pauseOf(ok({ steps: [{ status: "done" }] }))).toBeNull();
     expect(pauseOf({ ok: false, status: 403, error: "agent_denied" })).toBeNull();
+    // the link is the SPA's (under /ui), absolute when the public origin is known
+    expect(threadLink("t1", "https://gw.example.com/")).toBe("https://gw.example.com/ui/builder/inbox?tab=all&thread=t1");
+    expect(threadLink("t1", null)).toBe("/ui/builder/inbox?tab=all&thread=t1");
   });
 });
