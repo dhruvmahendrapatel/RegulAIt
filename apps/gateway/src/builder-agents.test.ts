@@ -61,7 +61,19 @@ beforeAll(async () => {
   await k.grantModel(admin.id, modelA);
 }, 120_000);
 
-afterAll(async () => k.close());
+/** ChatOps connections this file inserts. They are org-visible (an enabled
+ * one older than another suite's becomes that suite's default destination —
+ * chatops.test's un-named post picked this file's outlook connection and got
+ * 501), so they are removed even when a test fails. */
+const chatopsRows: Array<{ connectionId: string; connectorId: string }> = [];
+
+afterAll(async () => {
+  for (const r of chatopsRows) {
+    await k.db.delete(chatopsConnections).where(eq(chatopsConnections.id, r.connectionId));
+    await k.db.delete(connectors).where(eq(connectors.id, r.connectorId));
+  }
+  await k.close();
+});
 
 describe("identity", () => {
   it("refuses an identity-less token on every builder route family", async () => {
@@ -504,7 +516,8 @@ describe("memory, schedules, channels", () => {
       .insert(chatopsConnections)
       .values({ name: `outlook-${k.RUN}`, provider: "outlook", connectorId: conn!.id, defaultChannel: "governance@example.com" })
       .returning();
-    const email = await k.req("POST", `/v1/builder/agents/${a.id}/channels`, admin.auth, { provider: "email", chatopsConnectionId: chat!.id });
+    chatopsRows.push({ connectionId: chat!.id, connectorId: conn!.id });
+    const email =await k.req("POST", `/v1/builder/agents/${a.id}/channels`, admin.auth, { provider: "email", chatopsConnectionId: chat!.id });
     expect(email.json()).toMatchObject({ provider: "email", status: "connected", connectionName: `outlook-${k.RUN}` });
     const wrong = await k.req("POST", `/v1/builder/agents/${a.id}/channels`, admin.auth, { provider: "teams", chatopsConnectionId: chat!.id });
     expect(wrong.statusCode).toBe(422);
