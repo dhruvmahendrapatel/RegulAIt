@@ -338,14 +338,15 @@ export interface Suite {
  * without code. Every agent built here still runs through the gateway as the
  * person using it — their entitlements, budgets and approvals apply.
  */
+// labels are unique across every suite: the "/" filter searches them all
 export const BUILDER: NavEntry[] = [
-  { label: "Chat", to: "/builder" },
-  { label: "Inbox", to: "/builder/inbox" },
-  { label: "Agents", to: "/builder/agents" },
-  { label: "Templates", to: "/builder/templates" },
-  { label: "Integrations", to: "/builder/integrations" },
+  { label: "Agent chat", to: "/builder" },
+  { label: "Agent inbox", to: "/builder/inbox" },
+  { label: "Your agents", to: "/builder/agents" },
+  { label: "Agent templates", to: "/builder/templates" },
+  { label: "Apps & tools", to: "/builder/integrations" },
   { label: "Skills", to: "/builder/skills" },
-  { label: "Usage", to: "/builder/usage" },
+  { label: "Agent usage", to: "/builder/usage" },
 ];
 
 const BUILDER_SECTION = { group: "Agent builder", items: BUILDER };

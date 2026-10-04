@@ -130,6 +130,7 @@ test("admin login: one-time password → forced change → dashboard shows admin
   // always on screen" — so nothing is stranded. No "classic ↗" bridges.
   const suites = [
     ["workspace", "Workspace"],
+    ["agent-builder", "Agent Builder"],
     ["ai-governance", "AI Governance"],
     ["access-reviews", "Access Reviews"],
     ["approvals-audit", "Approvals & Audit"],

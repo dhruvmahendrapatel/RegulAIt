@@ -308,10 +308,12 @@ test("phone width: the drawer opens scoped, and the switcher still switches", as
   await page.setViewportSize({ width: 1400, height: 900 });
 });
 
-test("a non-admin gets no launcher, no switcher — just their Workspace", async () => {
+test("a non-admin gets no launcher — their Workspace, and the agent builder beside it", async () => {
   const dana = await (await page.context().browser()!.newContext()).newPage();
   await signIn(dana, "dana@regulait.local", [DANA_PASSWORD, state.passwords.dana], DANA_PASSWORD);
-  await expect(dana.getByLabel("Switch suite")).toHaveCount(0);
+  // ADR-0172: the agent builder is a non-admin suite, so a non-admin's switcher
+  // offers exactly Workspace and Agent Builder — nothing admin-only
+  await expect(dana.getByLabel("Switch suite").locator("option")).toHaveText(["Workspace", "Agent Builder"]);
   await expect(dana.locator('[data-testid^="suite-tile-"]')).toHaveCount(0);
   const aside = dana.locator("aside");
   for (const label of ["Chat", "Runs", "Projects", "Spend & savings"]) {
