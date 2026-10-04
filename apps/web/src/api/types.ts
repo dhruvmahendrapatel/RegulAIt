@@ -838,13 +838,13 @@ export interface BuilderModelRef {
   id: string;
   name: string;
   provider: string;
-  model: string;
+  model: string | null;
 }
 
 export interface BuilderAgentSummary {
   id: string;
   name: string;
-  description: string | null;
+  description: string;
   color: string;
   ownerUserId: string;
   ownerName: string | null;
@@ -907,7 +907,7 @@ export interface BuilderAgentDetail extends BuilderAgentSummary {
   connectionFormat: BuilderConnectionFormat;
   computerUse: boolean;
   sharedUserIds: string[];
-  sharedUsers: Array<{ id: string; name: string }>;
+  sharedUsers: Array<{ id: string; name: string | null }>;
   tools: BuilderTool[];
   subagents: BuilderSubagent[];
   skills: Array<{ id: string; name: string; description: string }>;
@@ -924,7 +924,7 @@ export interface BuilderThreadSummary {
   title: string;
   status: BuilderThreadStatus;
   source: "chat" | "schedule" | "channel";
-  lastMessagePreview: string | null;
+  lastMessagePreview: string;
   updatedAt: string;
 }
 
@@ -990,6 +990,27 @@ export interface BuilderUsage {
   byUser: Array<{ userId: string; name: string; spendUsd: number; messages: number }>;
   byModel: Array<{ provider: string; model: string; spendUsd: number; messages: number }>;
   daily: Array<{ date: string; spendUsd: number; messages: number }>;
+}
+
+/** GET /builder/toolbox-options — something the caller may add to a toolbox */
+export interface BuilderToolboxOption {
+  kind: "connector" | "mcp_tool";
+  /** the id PUT …/tools takes: a connector id, or the MCP tool's own id */
+  refId: string;
+  name: string;
+  /** connector provider kind, or MCP server name (for a logo) */
+  provider: string | null;
+  description?: string;
+  /** MCP tools only */
+  access?: "read" | "write";
+}
+
+/** POST /builder/agents/import — a bundled tool the importer did not get */
+export interface BuilderImportDropped {
+  kind: "connector" | "mcp_tool";
+  /** connector name, or "server/tool" */
+  name: string;
+  reason: "not_found" | "not_entitled";
 }
 
 /** GET /builder/agents/:id/export — portable: no ids, no owners */

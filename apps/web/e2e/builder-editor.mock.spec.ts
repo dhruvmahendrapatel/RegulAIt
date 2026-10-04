@@ -3,7 +3,7 @@
  * the mocked Builder API. Each change asserts the exact body the page sent.
  */
 import { expect, test, type Page } from "@playwright/test";
-import { CONN_DRIVE, CONN_JIRA, CORA, expectAxeClean, installBuilderMock, MODEL_B, sent, SERVER, type MockState } from "./builder-fixtures";
+import { CONN_DRIVE, CONN_JIRA, CORA, expectAxeClean, installBuilderMock, sent, TOOL_SEARCH, TOOL_UPDATE, MODEL_B, type MockState } from "./builder-fixtures";
 
 async function openEditor(page: Page, name = "Intake reviewer"): Promise<{ st: MockState; id: string }> {
   const st = await installBuilderMock(page);
@@ -95,7 +95,7 @@ test.describe("ADR-0172: agent editor", () => {
     expect(puts[0]).toEqual({
       tools: [
         { kind: "connector", refId: CONN_JIRA, requiresApproval: false },
-        { kind: "mcp_tool", refId: `${SERVER}:update_policy`, requiresApproval: true },
+        { kind: "mcp_tool", refId: TOOL_UPDATE, requiresApproval: true },
       ],
     });
     expect(puts[1].tools).toHaveLength(3);
@@ -108,7 +108,10 @@ test.describe("ADR-0172: agent editor", () => {
     await expect(toolbox.getByRole("switch", { name: "Ask before Jira (governance) runs" })).toHaveAttribute("aria-checked", "true");
     await toolbox.getByRole("button", { name: "Remove Policy drive" }).click();
     await expect(toolbox.getByRole("listitem")).toHaveCount(2);
-    expect(sent(st, "PUT", `/v1/builder/agents/${id}/tools`).at(-1).tools.map((t: { refId: string }) => t.refId)).toEqual([CONN_JIRA, `${SERVER}:update_policy`]);
+    expect(sent(st, "PUT", `/v1/builder/agents/${id}/tools`).at(-1).tools.map((t: { refId: string }) => t.refId)).toEqual([CONN_JIRA, TOOL_UPDATE]);
+    // the dialog listed only what GET /v1/builder/toolbox-options returned (never server:name ids)
+    expect(st.calls.some((c) => c.method === "GET" && c.path === "/v1/builder/toolbox-options")).toBe(true);
+    expect(sent(st, "PUT", `/v1/builder/agents/${id}/tools`).flatMap((b) => b.tools.map((t: { refId: string }) => t.refId))).not.toContain(TOOL_SEARCH);
   });
 
   test("knowledge: save instructions; add a skill from the library and remove one", async ({ page }) => {
@@ -171,7 +174,8 @@ test.describe("ADR-0172: agent editor", () => {
     const list = sc.getByRole("list", { name: "Schedules" });
     await expect(list.getByRole("listitem")).toHaveCount(2);
     await list.getByRole("switch", { name: "Friday brief on" }).click();
-    await expect(list.getByText("Paused")).toBeVisible();
+    await expect(list.getByText("Off", { exact: true })).toBeVisible();
+    expect(sent(st, "PATCH", `/v1/builder/agents/${id}/schedules/${st.agents.find((a) => a.id === id)!.schedules[1].id}`)).toEqual([{ enabled: false }]);
     await list.getByRole("button", { name: "Remove schedule Morning sweep" }).click();
     await expect(list.getByRole("listitem")).toHaveCount(1);
   });
@@ -211,8 +215,15 @@ test.describe("ADR-0172: agent editor", () => {
     const { st, id } = await openEditor(page);
     await expand(page, "Advanced");
     const adv = section(page, "Advanced");
-    await adv.getByLabel("Model").selectOption(MODEL_B);
+    // the shared ModelPicker: logo tiles with model id, tier and readiness
+    await expect(adv.getByLabel("Model")).toHaveAccessibleName(/^Model claude-default/);
+    await adv.getByLabel("Model").click();
+    const models = page.getByRole("dialog", { name: "Choose a model" }).getByRole("listbox", { name: "Models" });
+    await expect(models.getByRole("option")).toHaveCount(2);
+    await expect(models.getByRole("option", { name: /gpt-review/ })).toContainText("Ready");
+    await models.getByRole("option", { name: /gpt-review/ }).click();
     await expect(page.getByText("Model saved")).toBeVisible();
+    await expect(adv.getByLabel("Model")).toHaveAccessibleName(/^Model gpt-review/);
 
     await adv.getByLabel("Monthly spend limit (USD)").fill("0");
     await adv.getByRole("button", { name: "Save limit" }).click();

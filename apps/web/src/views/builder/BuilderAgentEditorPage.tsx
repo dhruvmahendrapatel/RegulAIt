@@ -13,7 +13,7 @@ import { PageHeader } from "../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, RecordError, SkeletonBlock } from "../../ui/kit";
 import { useToast } from "../../ui/toast";
 import { ChannelRows, ConfigurePanel } from "./AgentConfigure";
-import { bk, builderApi } from "./builderApi";
+import { bk, builderApi, chatRefusal } from "./builderApi";
 import { AgentAvatar, Composer, Icon, MessageList, ModelChip } from "./BuilderUi";
 import { SharingBadge } from "./BuilderAgentsPage";
 import s from "./builder.module.css";
@@ -52,7 +52,15 @@ export default function BuilderAgentEditorPage() {
       void queryClient.invalidateQueries({ queryKey: bk.agent(agentId) });
       if (res.thread.id !== threadId) setParams({ thread: res.thread.id });
     },
-    onError: (e) => setSendError(e instanceof Error ? e.message : String(e)),
+    onError: (e) => {
+      const r = chatRefusal(e);
+      setSendError(r.message);
+      if (r.threadId) {
+        void queryClient.invalidateQueries({ queryKey: bk.thread(r.threadId) });
+        void queryClient.invalidateQueries({ queryKey: ["builder", "threads"] });
+        if (r.threadId !== threadId) setParams({ thread: r.threadId });
+      }
+    },
     onSettled: () => setPending(null),
   });
 

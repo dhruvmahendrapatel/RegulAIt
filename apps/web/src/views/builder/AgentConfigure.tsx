@@ -5,17 +5,19 @@
  * gateway audits; nothing here widens what the agent can do beyond what the
  * person using it holds.
  */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { ago, fmtUsd } from "../../api/format";
+import { ago, fmtUsd, providerLabel } from "../../api/format";
 import type { BuilderAgentDetail, BuilderChannelProvider, BuilderSharing } from "../../api/types";
 import { useSession } from "../../session/SessionContext";
 import { Badge, Button, ConfirmModal, Field, Input, Meter, Select, Textarea } from "../../ui/kit";
 import { Logo } from "../../ui/logos/Logo";
+import { providerLogoKey } from "../../ui/logos/providerLogo";
+import { ModelPicker, type ModelPickerAgent } from "../../ui/ModelPicker";
 import { useToast } from "../../ui/toast";
 import { AddConnectionDialog, AddSkillDialog, CodeDialog, NewScheduleDialog, NewSubagentDialog, type ToolCandidate } from "./AgentDialogs";
-import { bk, builderApi, useAgents, useDirectory, useMyModels, type PatchAgentBody, type ScheduleBody } from "./builderApi";
+import { bk, builderApi, useAgents, useDirectory, useMyModelTiles, type PatchAgentBody, type ScheduleBody } from "./builderApi";
 import { AGENT_COLORS, bundleFileName, parseLimitInput, scheduleSummary, spendState } from "./builderLogic";
 import { AgentAvatar, Icon, Section, Segmented, Switch, ToolLogo } from "./BuilderUi";
 import s from "./builder.module.css";
@@ -102,7 +104,17 @@ export function ConfigurePanel(props: { agent: BuilderAgentDetail; onOpenSkills:
   const { toast } = useToast();
   const { auth } = useSession();
   const applied = useAgentChange(agent.id);
-  const models = useMyModels(auth?.userId ?? null);
+  const models = useMyModelTiles(auth?.userId ?? null);
+  // the agent's current model stays on show even when it is not one the
+  // editor may choose (an admin editing someone else's agent, say)
+  const modelTiles = useMemo<ModelPickerAgent[]>(() => {
+    const m = agent.modelAgent;
+    if (!m || models.tiles.some((t) => t.id === m.id)) return models.tiles;
+    return [
+      { id: m.id, name: m.name, provider: m.provider, providerLabel: providerLabel(m.provider), model: m.model, logoKey: providerLogoKey(m.provider), readinessLabel: "Not available to you", readinessTone: "neutral" },
+      ...models.tiles,
+    ];
+  }, [agent.modelAgent, models.tiles]);
   const directory = useDirectory();
   const allAgents = useAgents();
   const queryClient = useQueryClient();
@@ -181,7 +193,7 @@ export function ConfigurePanel(props: { agent: BuilderAgentDetail; onOpenSkills:
   });
   const toggleSchedule = useMutation({
     mutationFn: (v: { id: string; enabled: boolean }) => builderApi.patchSchedule(agent.id, v.id, { enabled: v.enabled }),
-    onSuccess: (_r, v) => applied(undefined, v.enabled ? "Schedule turned on" : "Schedule paused"),
+    onSuccess: (_r, v) => applied(undefined, v.enabled ? "Schedule turned on" : "Schedule turned off"),
     onError: (e) => toast(errText(e), "error"),
   });
   const delSchedule = useMutation({
@@ -513,11 +525,16 @@ export function ConfigurePanel(props: { agent: BuilderAgentDetail; onOpenSkills:
                 <span className={s.listRowMain}>
                   <span className={s.listRowTitle}>
                     {sc.name}
-                    {!sc.enabled && <Badge>Paused</Badge>}
+                    {!sc.enabled && <Badge>Off</Badge>}
                   </span>
                   <span className={s.listRowSub}>
                     {scheduleSummary(sc.cadence, sc.timeUtc)}
-                    {sc.enabled && sc.nextRunAt ? ` · next ${new Date(sc.nextRunAt).toLocaleString()}` : ""}
+                    {sc.enabled
+                      ? sc.nextRunAt
+                        ? ` · next ${new Date(sc.nextRunAt).toLocaleString()}`
+                        : ""
+                      : // template- and import-seeded schedules start off: nothing spends until the owner says so
+                        " · turn it on to start running"}
                   </span>
                 </span>
                 <Switch checked={sc.enabled} label={`${sc.name} on`} disabled={ro || toggleSchedule.isPending} onChange={(v) => toggleSchedule.mutate({ id: sc.id, enabled: v })} />
@@ -572,27 +589,15 @@ export function ConfigurePanel(props: { agent: BuilderAgentDetail; onOpenSkills:
       </Section>
 
       <Section title="Advanced" icon={Icon.shield()} defaultOpen={false}>
-        <Field label="Model">
-          <Select
-            value={agent.modelAgent?.id ?? ""}
-            disabled={ro || patch.isPending}
-            onChange={(e) => e.target.value && patch.mutate({ body: { modelAgentId: e.target.value }, msg: "Model saved" })}
-          >
-            {!agent.modelAgent && <option value="">Your default model</option>}
-            {agent.modelAgent && !(models.data?.agents ?? []).some((m) => m.agentId === agent.modelAgent!.id) && (
-              <option value={agent.modelAgent.id}>
-                {agent.modelAgent.name} · {agent.modelAgent.provider}
-              </option>
-            )}
-            {(models.data?.agents ?? [])
-              .filter((m) => !m.revoked)
-              .map((m) => (
-                <option key={m.agentId} value={m.agentId}>
-                  {m.name} · {m.provider}
-                </option>
-              ))}
-          </Select>
-        </Field>
+        <ModelPicker
+          label="Model"
+          agents={modelTiles}
+          value={agent.modelAgent?.id ?? ""}
+          onChange={(id) => id !== agent.modelAgent?.id && patch.mutate({ body: { modelAgentId: id }, msg: "Model saved" })}
+          placeholder="Your default model"
+          {...(ro ? { disabledReason: "Only the owner or an admin can change the model." } : {})}
+          testId="agent-model"
+        />
         <Field label="Monthly spend limit (USD)" error={limitErr}>
           <Input inputMode="decimal" value={limit} onChange={(e) => setLimit(e.target.value)} placeholder="No limit" disabled={ro} />
         </Field>

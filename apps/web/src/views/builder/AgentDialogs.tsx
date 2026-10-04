@@ -4,11 +4,10 @@
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { useQueries, useQuery } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import type { BuilderAgentDetail, BuilderAgentSummary, BuilderCadence } from "../../api/types";
-import { useSession } from "../../session/SessionContext";
 import { Button, EmptyState, ErrorState, Field, Input, Modal, Select, SkeletonBlock, Textarea } from "../../ui/kit";
-import { bk, builderApi, mcpToolRefId, myConnectors, myServerTools, type ScheduleBody } from "./builderApi";
+import { bk, builderApi, toolboxOptions, type ScheduleBody } from "./builderApi";
 import { CADENCES, codeSnippets, isValidTimeUtc, localTime, scheduleSummary } from "./builderLogic";
 import { CodeTabs, CopyButton, Icon, Segmented, Switch, ToolLogo } from "./BuilderUi";
 import s from "./builder.module.css";
@@ -27,8 +26,8 @@ export interface ToolCandidate {
 type ToolFilter = "all" | "connector" | "mcp_tool";
 
 /**
- * Lists only what the EDITOR holds a grant for: their connectors, and the MCP
- * tools each server shows them. The server re-checks every one on save.
+ * Lists only what the EDITOR may add (GET /v1/builder/toolbox-options — the
+ * same entitlement check the save makes), and the server re-checks on save.
  */
 export function AddConnectionDialog(props: {
   open: boolean;
@@ -37,8 +36,6 @@ export function AddConnectionDialog(props: {
   onAdd: (c: ToolCandidate) => void;
   busyRef: string | null;
 }) {
-  const { auth } = useSession();
-  const userId = props.open ? (auth?.userId ?? null) : null;
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<ToolFilter>("all");
   useEffect(() => {
@@ -48,43 +45,30 @@ export function AddConnectionDialog(props: {
     }
   }, [props.open]);
 
-  const connectors = useQuery({ queryKey: ["builder", "my-connectors", userId], queryFn: () => myConnectors(userId!), enabled: !!userId });
-  const integrations = useQuery({ queryKey: bk.integrations, queryFn: builderApi.integrations, enabled: props.open });
-  const servers = integrations.data?.custom.mcpServers ?? [];
-  const serverTools = useQueries({
-    queries: servers.map((sv) => ({
-      queryKey: ["builder", "my-server-tools", userId, sv.id],
-      queryFn: () => myServerTools(userId!, sv.id),
-      enabled: !!userId,
-    })),
-  });
+  const options = useQuery({ queryKey: bk.toolboxOptions, queryFn: toolboxOptions, enabled: props.open });
 
-  const candidates = useMemo<ToolCandidate[]>(() => {
-    const out: ToolCandidate[] = [];
-    for (const c of connectors.data?.connectors ?? []) {
-      if (c.revoked) continue;
-      out.push({ kind: "connector", refId: c.connectorId, name: c.name, provider: c.kind, sub: `Connector · ${c.kind}`, defaultApproval: false });
-    }
-    servers.forEach((sv, i) => {
-      for (const t of serverTools[i]?.data?.tools ?? []) {
-        out.push({
-          kind: "mcp_tool",
-          refId: mcpToolRefId(sv.id, t.name),
-          name: t.name,
-          provider: sv.name,
-          sub: `${sv.name} · ${t.kind === "write" ? "can make changes" : "read only"}`,
-          defaultApproval: t.kind === "write",
-        });
-      }
-    });
-    return out;
-  }, [connectors.data, servers, serverTools]);
+  const candidates = useMemo<ToolCandidate[]>(
+    () =>
+      (options.data?.options ?? []).map((o) =>
+        o.kind === "connector"
+          ? { kind: o.kind, refId: o.refId, name: o.name, provider: o.provider, sub: `Connector · ${o.provider ?? "custom"}`, defaultApproval: false }
+          : {
+              kind: o.kind,
+              refId: o.refId,
+              name: o.name,
+              provider: o.provider,
+              sub: `${o.provider ?? "MCP server"} · ${o.access === "write" ? "can make changes" : "read only"}`,
+              defaultApproval: o.access === "write",
+            },
+      ),
+    [options.data],
+  );
 
   const q = query.trim().toLowerCase();
   const shown = candidates.filter((c) => (filter === "all" || c.kind === filter) && (!q || `${c.name} ${c.sub}`.toLowerCase().includes(q)));
   const added = new Set(props.agent.tools.map((t) => `${t.kind}|${t.refId}`));
-  const loading = connectors.isLoading || integrations.isLoading || serverTools.some((x) => x.isLoading);
-  const failed = connectors.error ?? integrations.error;
+  const loading = options.isLoading;
+  const failed = options.error;
   const count = (k: ToolFilter) => candidates.filter((c) => k === "all" || c.kind === k).length;
 
   return (
@@ -117,7 +101,7 @@ export function AddConnectionDialog(props: {
           {loading ? (
             <SkeletonBlock lines={4} />
           ) : failed ? (
-            <ErrorState title="Couldn't load your connections" message={(failed as Error).message} onRetry={() => void connectors.refetch()} />
+            <ErrorState title="Couldn't load your connections" message={(failed as Error).message} onRetry={() => void options.refetch()} />
           ) : shown.length === 0 ? (
             <EmptyState
               title={candidates.length === 0 ? "No connections available to you" : "No matching connections"}

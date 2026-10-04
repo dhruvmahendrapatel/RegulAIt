@@ -29,10 +29,11 @@ export interface ModelPickerAgent {
   provider: string;
   providerLabel: string;
   model: string | null;
-  tier: number;
+  /** a governed binding's tier; omitted for a tile that is not a binding (a builder agent) */
+  tier?: number;
   logoKey: string | null;
-  readinessLabel: string;
-  readinessTone: Tone;
+  readinessLabel?: string;
+  readinessTone?: Tone;
 }
 
 /** the tile body the picker and the /models grid share; its logo is decorative (the provider is in the text) */
@@ -52,8 +53,8 @@ export function ModelTileBody(props: { agent: ModelPickerAgent; size?: "sm" | "m
       </span>
       <span className={s.tileBadges}>
         <span className={s.tileProvider}>{a.providerLabel}</span>
-        <Badge>Tier {a.tier}</Badge>
-        <Badge tone={a.readinessTone}>{a.readinessLabel}</Badge>
+        {a.tier !== undefined && <Badge>Tier {a.tier}</Badge>}
+        {a.readinessLabel && <Badge tone={a.readinessTone}>{a.readinessLabel}</Badge>}
       </span>
     </span>
   );
@@ -71,8 +72,15 @@ export function ModelPicker(props: {
   label: string;
   /** when set, the picker is unavailable and says why */
   disabledReason?: string;
+  /** the trigger's text when nothing is chosen (default "Choose a model") */
+  placeholder?: string;
+  /** what the tiles are — "model" (default) or "agent" (builder agents shown with their model) */
+  noun?: "model" | "agent";
+  /** keep the label for assistive tech only (a compact toolbar, e.g. a composer) */
+  hideLabel?: boolean;
   testId?: string;
 }) {
+  const noun = props.noun ?? "model";
   const uid = useId();
   const labelId = `${uid}-label`;
   const valueId = `${uid}-value`;
@@ -180,7 +188,7 @@ export function ModelPicker(props: {
 
   return (
     <div className={`${k.field} ${s.root}`} ref={rootRef} data-testid={props.testId}>
-      <span id={labelId} className={k.fieldLabel}>
+      <span id={labelId} className={props.hideLabel ? s.srOnly : k.fieldLabel}>
         {props.label}
       </span>
       <button
@@ -203,13 +211,14 @@ export function ModelPicker(props: {
             <span id={valueId} className={s.triggerText}>
               <span className={s.triggerName}>{selected.name}</span>
               <span className={s.triggerMeta}>
-                {selected.model ?? selected.providerLabel} · tier {selected.tier}
+                {selected.model ?? selected.providerLabel}
+                {selected.tier !== undefined ? ` · tier ${selected.tier}` : ""}
               </span>
             </span>
           </>
         ) : (
           <span id={valueId} className={s.triggerText}>
-            <span className={s.triggerPlaceholder}>Choose a model</span>
+            <span className={s.triggerPlaceholder}>{props.placeholder ?? `Choose a ${noun}`}</span>
           </span>
         )}
         <svg className={s.chevron} width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
@@ -222,18 +231,18 @@ export function ModelPicker(props: {
         </span>
       )}
       {open && (
-        <div className={s.popover} role="dialog" aria-label="Choose a model">
+        <div className={s.popover} role="dialog" aria-label={`Choose a${noun === "agent" ? "n" : ""} ${noun}`}>
           <input
             ref={searchRef}
             className={k.input}
             type="search"
             role="combobox"
-            aria-label="Search models"
+            aria-label={`Search ${noun}s`}
             aria-autocomplete="list"
             aria-expanded="true"
             aria-controls={listId}
             aria-activedescendant={shown.length ? optId(active) : undefined}
-            placeholder="Search models and providers"
+            placeholder={noun === "agent" ? "Search agents and models" : "Search models and providers"}
             value={query}
             onChange={(e) => {
               setQuery(e.target.value);
@@ -243,10 +252,10 @@ export function ModelPicker(props: {
           />
           {shown.length === 0 ? (
             <p className={s.none} role="status">
-              No models match “{query.trim()}”.
+              No {noun}s match “{query.trim()}”.
             </p>
           ) : (
-            <ul id={listId} role="listbox" aria-label="Models" className={s.list}>
+            <ul id={listId} role="listbox" aria-label={noun === "agent" ? "Agents" : "Models"} className={s.list}>
               {shown.map((a, i) => (
                 <li
                   key={a.id}

@@ -10,9 +10,10 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ago } from "../../api/format";
 import type { BuilderMessage } from "../../api/types";
 import { PageHeader } from "../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, ErrorState, Select, SkeletonBlock } from "../../ui/kit";
-import { bk, builderApi, useAgents } from "./builderApi";
-import { SOURCE_LABEL } from "./builderLogic";
+import { Badge, Button, Card, EmptyState, ErrorState, SkeletonBlock } from "../../ui/kit";
+import { ModelPicker } from "../../ui/ModelPicker";
+import { bk, builderApi, chatRefusal, useAgents } from "./builderApi";
+import { agentTile, SOURCE_LABEL } from "./builderLogic";
 import { AgentAvatar, Composer, Icon, LogoStrip, MessageList, NewAgentDialog } from "./BuilderUi";
 import s from "./builder.module.css";
 
@@ -63,24 +64,22 @@ export default function BuilderChatPage() {
       void queryClient.invalidateQueries({ queryKey: ["builder", "threads"] });
       if (res.thread.id !== threadId) setParams({ thread: res.thread.id });
     },
-    onError: (e) => setSendError(e instanceof Error ? e.message : String(e)),
+    onError: (e) => {
+      const r = chatRefusal(e);
+      setSendError(r.message);
+      if (r.threadId) {
+        void queryClient.invalidateQueries({ queryKey: bk.thread(r.threadId) });
+        void queryClient.invalidateQueries({ queryKey: ["builder", "threads"] });
+        if (r.threadId !== threadId) setParams({ thread: r.threadId });
+      }
+    },
     onSettled: () => setPending(null),
   });
 
+  // ADR-0172: the one picker — each agent as a tile with its model's provider logo
+  const pickerAgents = useMemo(() => list.map(agentTile), [list]);
   const picker = (
-    <Select
-      aria-label="Agent"
-      className={s.composerSelect}
-      value={agentId}
-      disabled={!!threadId || list.length === 0}
-      onChange={(e) => setAgentId(e.target.value)}
-    >
-      {list.map((a) => (
-        <option key={a.id} value={a.id}>
-          {a.name}
-        </option>
-      ))}
-    </Select>
+    <ModelPicker noun="agent" label="Agent" hideLabel agents={pickerAgents} value={agentId} onChange={setAgentId} placeholder="Choose an agent" testId="builder-chat-agent" />
   );
 
   if (threadId) {

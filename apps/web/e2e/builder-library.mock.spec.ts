@@ -34,13 +34,27 @@ test.describe("ADR-0172: templates", () => {
     await expect(dialog.getByLabel("Name your agent")).toHaveValue("AI intake reviewer");
     await dialog.getByRole("button", { name: "Create agent" }).click();
     await expect(page).toHaveURL(/\/ui\/builder\/agents\/aaaaaaaa-.*setup=1/);
-    expect(sent(st, "POST", "/v1/builder/agents")).toEqual([{ name: "AI intake reviewer", connectionFormat: "shared", computerUse: false, templateId: "tpl-intake" }]);
+    expect(sent(st, "POST", "/v1/builder/agents")).toEqual([{ name: "AI intake reviewer", connectionFormat: "shared", computerUse: false, templateId: "ai-intake-reviewer" }]);
     await expect(page.getByRole("group", { name: "Agent setup" }).getByText("Assess an AI use case")).toBeVisible();
+
+    // the template's schedule arrives OFF (nothing spends until the owner turns it on)
+    const schedules = page.getByRole("complementary", { name: "Configure agent" }).getByRole("region", { name: "Schedules" });
+    const row = schedules.getByRole("listitem").filter({ hasText: "Morning sweep" });
+    await expect(row.getByText("Off", { exact: true })).toBeVisible();
+    await expect(row).toContainText("turn it on to start running");
+    const toggle = row.getByRole("switch", { name: "Morning sweep on" });
+    await expect(toggle).toHaveAttribute("aria-checked", "false");
+    await toggle.click();
+    await expect(toggle).toHaveAttribute("aria-checked", "true");
+    await expect(row.getByText("Off", { exact: true })).toHaveCount(0);
+    await expect(row).toContainText("next ");
+    const created = st.agents.find((a) => a.templateId === "ai-intake-reviewer")!;
+    expect(sent(st, "PATCH", `/v1/builder/agents/${created.id}/schedules/${created.schedules[0].id}`)).toEqual([{ enabled: true }]);
   });
 
   test("a missing template and a failed list", async ({ page }) => {
     await installBuilderMock(page);
-    await page.goto("/ui/builder/templates/tpl-nope");
+    await page.goto("/ui/builder/templates/no-such-template");
     await expect(page.getByText("No such template")).toBeVisible();
     const page2 = await page.context().newPage();
     await installBuilderMock(page2, { fail: ["/templates"] });

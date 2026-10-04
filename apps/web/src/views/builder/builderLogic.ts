@@ -3,8 +3,13 @@
  * can be unit-tested without a DOM: bundle import parsing, schedule wording,
  * integrations filtering, usage shaping, spend-vs-limit, code snippets.
  */
+import { providerLabel as fmtProviderLabel } from "../../api/format";
+import type { ModelPickerAgent } from "../../ui/ModelPicker";
+import { providerLogoKey } from "../../ui/logos/providerLogo";
 import type {
+  BuilderAgentSummary,
   BuilderBundle,
+  BuilderImportDropped,
   BuilderCadence,
   BuilderIntegrationCategory,
   BuilderIntegrationsResponse,
@@ -30,6 +35,23 @@ export function safeAgentColor(color: string | null | undefined, name: string): 
   let h = 0;
   for (const c of name) h = (h * 31 + c.charCodeAt(0)) >>> 0;
   return AGENT_COLORS[h % AGENT_COLORS.length]!;
+}
+
+/**
+ * A builder agent as a picker tile: its name, and the model it runs on (the
+ * provider's logo and the binding's name), so choosing an agent also shows
+ * which governed model will answer.
+ */
+export function agentTile(a: Pick<BuilderAgentSummary, "id" | "name" | "modelAgent">): ModelPickerAgent {
+  const m = a.modelAgent;
+  return {
+    id: a.id,
+    name: a.name,
+    provider: m?.provider ?? "",
+    providerLabel: m ? fmtProviderLabel(m.provider) : "No model chosen",
+    model: m ? m.name : null,
+    logoKey: m ? providerLogoKey(m.provider) : null,
+  };
 }
 
 // ---- bundle import --------------------------------------------------------
@@ -81,6 +103,21 @@ export function parseBundleText(text: string): BundleParse {
 }
 
 /** `Vendor risk assessor` → `vendor-risk-assessor.agent.json` */
+/**
+ * What an import says when it is done. The gateway re-resolves every bundled
+ * tool for the IMPORTER and reports what it left out, and why: a tool that
+ * does not exist here, or one the importer holds no grant for.
+ */
+export function importMessage(agentName: string, dropped: readonly BuilderImportDropped[]): string {
+  if (!dropped.length) return `Imported ${agentName}`;
+  const noAccess = dropped.filter((d) => d.reason === "not_entitled").map((d) => d.name);
+  const missing = dropped.filter((d) => d.reason === "not_found").map((d) => d.name);
+  const parts: string[] = [];
+  if (noAccess.length) parts.push(`${noAccess.length === 1 ? "1 tool" : `${noAccess.length} tools`} you don't have access to: ${noAccess.join(", ")}`);
+  if (missing.length) parts.push(`${missing.length === 1 ? "1 tool that doesn't" : `${missing.length} tools that don't`} exist in this workspace: ${missing.join(", ")}`);
+  return `Imported ${agentName}. Left out ${parts.join("; and ")}.`;
+}
+
 export function bundleFileName(agentName: string): string {
   const slug = agentName
     .toLowerCase()
@@ -254,7 +291,7 @@ export function filterThreads(threads: BuilderThreadSummary[], query: string): B
   const q = query.trim().toLowerCase();
   if (!q) return threads;
   return threads.filter((t) =>
-    [t.title, t.agentName, t.lastMessagePreview ?? ""].some((s) => s.toLowerCase().includes(q)),
+    [t.title, t.agentName, t.lastMessagePreview].some((s) => s.toLowerCase().includes(q)),
   );
 }
 

@@ -67,7 +67,11 @@ test.describe("ADR-0172: your agents", () => {
     await expect(dialog.getByRole("radio", { name: /^No/ })).toBeChecked();
     await dialog.getByRole("radio", { name: /Per person/ }).check();
     await dialog.getByRole("radio", { name: /^Yes/ }).check();
-    await dialog.getByLabel("Model").selectOption(MODEL_B);
+    // the shared ModelPicker; the person's default model is shown until they choose
+    await expect(dialog.getByLabel("Model")).toHaveAccessibleName(/^Model claude-default/);
+    await dialog.getByLabel("Model").click();
+    await page.getByRole("listbox", { name: "Models" }).getByRole("option", { name: /gpt-review/ }).click();
+    await expect(dialog.getByLabel("Model")).toHaveAccessibleName(/^Model gpt-review/);
     await expect(dialog.getByText("isn't available in this workspace yet")).toBeVisible();
     await expectAxeClean(page, "new agent dialog, advanced open");
     await create.click();

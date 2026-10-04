@@ -18,12 +18,13 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import type { BuilderMessage, BuilderTool, BuilderTemplate } from "../../api/types";
 import { fmtUsd, fmtDur } from "../../api/format";
 import { useSession } from "../../session/SessionContext";
-import { Button, Field, Input, Modal, Select, Tabs, Textarea } from "../../ui/kit";
+import { Button, Field, Input, Modal, Tabs, Textarea } from "../../ui/kit";
+import { ModelPicker } from "../../ui/ModelPicker";
 import { Logo, hasLogo } from "../../ui/logos/Logo";
 import { providerLogoKey } from "../../ui/logos/providerLogo";
 import { useToast } from "../../ui/toast";
-import { bk, builderApi, useMyModels } from "./builderApi";
-import { agentInitials, parseBundleText, safeAgentColor } from "./builderLogic";
+import { bk, builderApi, useMyModelTiles } from "./builderApi";
+import { agentInitials, importMessage, parseBundleText, safeAgentColor } from "./builderLogic";
 import s from "./builder.module.css";
 
 // ---- glyphs (inline, decorative) -------------------------------------------
@@ -102,7 +103,7 @@ export function ToolLogo(props: { tool: Pick<BuilderTool, "kind" | "provider" | 
   return <Logo name={key} label={label} size={props.size ?? 20} />;
 }
 
-export function ModelChip(props: { model: { name: string; provider: string; model?: string } | null }) {
+export function ModelChip(props: { model: { name: string; provider: string; model?: string | null } | null }) {
   if (!props.model) return <span className={s.modelChip}>Workspace default model</span>;
   return (
     <span className={s.modelChip}>
@@ -520,7 +521,7 @@ export function NewAgentDialog(props: { open: boolean; onClose: () => void; temp
   const queryClient = useQueryClient();
   const { toast } = useToast();
   const { auth } = useSession();
-  const models = useMyModels(props.open ? (auth?.userId ?? null) : null);
+  const models = useMyModelTiles(props.open ? (auth?.userId ?? null) : null);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [advanced, setAdvanced] = useState(false);
@@ -627,18 +628,14 @@ export function NewAgentDialog(props: { open: boolean; onClose: () => void; temp
                 { value: "no", title: "No", sub: "Chat and tools only.", icon: Icon.chat(), badge: <span className={s.byline}>Default</span> },
               ]}
             />
-            <Field label="Model">
-              <Select value={modelId} onChange={(e) => setModelId(e.target.value)}>
-                <option value="">Your default model</option>
-                {(models.data?.agents ?? [])
-                  .filter((a) => !a.revoked)
-                  .map((a) => (
-                    <option key={a.agentId} value={a.agentId}>
-                      {a.name} · {a.provider}
-                    </option>
-                  ))}
-              </Select>
-            </Field>
+            <ModelPicker
+              label="Model"
+              agents={models.tiles}
+              value={modelId || models.defaultAgentId || ""}
+              onChange={setModelId}
+              placeholder="Your default model"
+              testId="new-agent-model"
+            />
           </div>
         )}
         {error && (
@@ -672,12 +669,8 @@ export function useImportBundle() {
     try {
       const res = await builderApi.importAgent(parsed.bundle);
       void queryClient.invalidateQueries({ queryKey: bk.agents });
-      const dropped = (res.dropped ?? []).map((d) => (typeof d === "string" ? d : (d.name ?? d.refId ?? "a tool")));
-      toast(
-        dropped.length
-          ? `Imported ${res.agent.name}. Left out ${dropped.length} tool${dropped.length === 1 ? "" : "s"} you don't have access to: ${dropped.join(", ")}.`
-          : `Imported ${res.agent.name}`,
-        dropped.length ? "info" : "success",
+      toast(importMessage(res.agent.name, res.dropped ?? []),
+        res.dropped?.length ? "info" : "success",
       );
       navigate(`/builder/agents/${res.agent.id}`);
     } catch (e) {

@@ -8,6 +8,7 @@ import {
   countIntegrations,
   filterIntegrations,
   filterThreads,
+  importMessage,
   isValidTimeUtc,
   localTime,
   parseBundleText,
@@ -20,6 +21,22 @@ import {
   spendState,
   withShare,
 } from "./builderLogic";
+
+describe("import result", () => {
+  it("names what the gateway left out, split by reason", () => {
+    expect(importMessage("A", [])).toBe("Imported A");
+    expect(importMessage("A", [{ kind: "connector", name: "Payroll export", reason: "not_entitled" }])).toBe(
+      "Imported A. Left out 1 tool you don't have access to: Payroll export.",
+    );
+    expect(
+      importMessage("A", [
+        { kind: "connector", name: "x", reason: "not_entitled" },
+        { kind: "mcp_tool", name: "docs/search", reason: "not_entitled" },
+        { kind: "connector", name: "gone", reason: "not_found" },
+      ]),
+    ).toBe("Imported A. Left out 2 tools you don't have access to: x, docs/search; and 1 tool that doesn't exist in this workspace: gone.");
+  });
+});
 
 describe("bundle import", () => {
   const good = { version: 1, agent: { name: "Intake reviewer", instructions: "x" }, skills: [{ name: "a" }] };
@@ -189,7 +206,7 @@ describe("identity and threads", () => {
     const base = { agentId: "a", agentColor: "#2563eb", status: "active" as const, source: "chat" as const, updatedAt: "" };
     const ts = [
       { ...base, id: "1", title: "Q3 vendor review", agentName: "Risk assessor", lastMessagePreview: "Two vendors flagged" },
-      { ...base, id: "2", title: "Morning sweep", agentName: "Intake reviewer", lastMessagePreview: null },
+      { ...base, id: "2", title: "Morning sweep", agentName: "Intake reviewer", lastMessagePreview: "" },
     ];
     expect(filterThreads(ts, "").length).toBe(2);
     expect(filterThreads(ts, "INTAKE").map((t) => t.id)).toEqual(["2"]);

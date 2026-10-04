@@ -17,7 +17,13 @@ test.describe("ADR-0172: agent chat", () => {
     await expectAxeClean(page, "chat start");
 
     const vendor = st.agents.find((a) => a.name === "Vendor risk assessor")!;
-    await page.getByLabel("Agent").selectOption(vendor.id);
+    // the shared picker, as agent tiles showing the model each one runs on
+    await page.getByLabel("Agent").click();
+    const agentList = page.getByRole("dialog", { name: "Choose an agent" }).getByRole("listbox", { name: "Agents" });
+    await expect(agentList.getByRole("option")).toHaveCount(3);
+    await expect(agentList.getByRole("option", { name: /Vendor risk assessor/ })).toContainText("gpt-review");
+    await agentList.getByRole("option", { name: /Vendor risk assessor/ }).click();
+    await expect(page.getByLabel("Agent")).toHaveAccessibleName(/^Agent Vendor risk assessor/);
     await expect(page.getByRole("button", { name: "Send" })).toBeDisabled();
     await page.getByLabel("Message").fill("Which vendors are high risk?");
     await page.getByLabel("Message").press("Enter");
@@ -43,7 +49,21 @@ test.describe("ADR-0172: agent chat", () => {
     await page.getByLabel("Message").fill("hello");
     await page.getByRole("button", { name: "Send" }).click();
     await expect(page.getByRole("alert")).toContainText(/agent spend limit reached/i);
+    await expect(page.getByRole("alert")).toContainText("monthly limit");
     await expect(page.getByLabel("Message")).toBeEnabled();
+    // the limit is checked before anything is recorded: no thread was opened
+    await expect(page).not.toHaveURL(/thread=/);
+  });
+
+  test("a refusal recorded in a thread opens that thread with the refusal note", async ({ page }) => {
+    await installBuilderMock(page, { denyModel: true });
+    await page.goto("/ui/builder");
+    await page.getByLabel("Message").fill("Summarise today");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(page).toHaveURL(/\?thread=th-/);
+    await expect(page.getByRole("alert")).toContainText("no grant for agent 'claude-default'");
+    await expect(page.getByText("Refused (agent_denied): no grant for agent 'claude-default'")).toBeVisible();
+    await expect(page.getByRole("heading", { level: 1, name: "Summarise today" })).toBeVisible();
   });
 
   test("no agents: the start page offers New agent and templates", async ({ page }) => {

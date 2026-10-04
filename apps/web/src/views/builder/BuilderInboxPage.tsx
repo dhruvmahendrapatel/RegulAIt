@@ -11,7 +11,7 @@ import type { BuilderMessage } from "../../api/types";
 import { PageHeader } from "../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, ErrorState, Input, SkeletonBlock, Tabs } from "../../ui/kit";
 import { useToast } from "../../ui/toast";
-import { bk, builderApi } from "./builderApi";
+import { bk, builderApi, chatRefusal } from "./builderApi";
 import { filterThreads, SOURCE_LABEL } from "./builderLogic";
 import { AgentAvatar, Composer, Icon, MessageList } from "./BuilderUi";
 import s from "./builder.module.css";
@@ -61,7 +61,12 @@ export default function BuilderInboxPage() {
       }));
       void queryClient.invalidateQueries({ queryKey: ["builder", "threads"] });
     },
-    onError: (e) => toast(e instanceof Error ? e.message : String(e), "error"),
+    onError: (e) => {
+      const r = chatRefusal(e);
+      toast(r.message, "error");
+      // the refusal was recorded in this thread: show its note
+      if (r.threadId) void queryClient.invalidateQueries({ queryKey: bk.thread(r.threadId) });
+    },
     onSettled: () => setPending(null),
   });
 
