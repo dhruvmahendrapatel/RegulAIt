@@ -81,7 +81,8 @@ import type { ModelChatMessage, ModelContentBlock } from "@regulait/model-provid
 import { BUILDER_LIMITS, nextScheduleRun, type BuilderCadenceValue } from "@regulait/shared";
 import { executeGovernedDispatch, type AgentRow } from "./agents-connectors.js";
 import { agentDecision } from "./copilot.js";
-import { loadVisibleAgent, skillVisible } from "./builder-access.js";
+import { BUILDER_MODEL_FEATURE, loadVisibleAgent, skillVisible } from "./builder-access.js";
+import { MODEL_NOT_ALLOWED_FOR_FEATURE } from "./model-policy.js";
 import {
   argumentsDigestFor,
   redactedArguments,
@@ -724,7 +725,7 @@ async function stepGate(seg: Segment, state: LoopState, phase: "step" | "tool"):
   if (phase === "step") {
     const [fresh] = await db.select().from(agents).where(eq(agents.id, seg.model.id));
     const model = (fresh ?? seg.model) as AgentRow;
-    const decision = await agentDecision(db, userId, model);
+    const decision = await agentDecision(db, userId, model, BUILDER_MODEL_FEATURE);
     if (decision.effect !== "allow") {
       const [row] = await db
         .insert(auditLog)
@@ -753,7 +754,8 @@ async function stepGate(seg: Segment, state: LoopState, phase: "step" | "tool"):
         model: model.model,
         attributes: { ...seg.baseDetail, ruleId: decision.ruleId, effect: decision.effect, step: state.modelSteps + 1 },
       });
-      return { ok: false, status: 403, error: "agent_denied", detail: decision.reason };
+      const error = decision.ruleId === MODEL_NOT_ALLOWED_FOR_FEATURE ? MODEL_NOT_ALLOWED_FOR_FEATURE : "agent_denied";
+      return { ok: false, status: 403, error, detail: decision.reason };
     }
     seg.decision = { effect: decision.effect, ruleId: decision.ruleId, ruleChain: decision.ruleChain, reason: decision.reason };
   }
@@ -812,6 +814,7 @@ async function runLoop(seg: Segment, state: LoopState): Promise<TurnOutcome> {
       ...(defs.length ? { tools: defs } : {}),
       ...(defs.length && toolsOff ? { toolChoice: "none" as const } : {}),
       projectId: seg.agent.projectId ?? null,
+      modelFeature: BUILDER_MODEL_FEATURE,
       virtualKey: seg.virtualKey,
       mode: "chat",
       trace: seg.trace,

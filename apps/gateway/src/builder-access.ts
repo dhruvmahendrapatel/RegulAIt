@@ -45,11 +45,6 @@ import {
 } from "./entitlements.js";
 import { admissionHidesTools } from "./mcp-admission.js";
 
-/** ADR-0173 §3 — the model-policy feature every builder dispatch runs under
- * (agent P's model allow-list; the name matches branch p2-p so the merge is
- * trivial). Wired into agentDecision / executeGovernedDispatch at integration. */
-export const BUILDER_MODEL_FEATURE = "builder" as const;
-
 export interface Viewer {
   userId: string;
   isAdmin: boolean;

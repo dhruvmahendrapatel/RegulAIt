@@ -308,6 +308,7 @@ export async function installBuilderMock(page: Page, opts: MockOptions = {}): Pr
     if (p === `/v1/users/${ME}/model-credentials`) return json(route, { credentials: [] });
     if (p === "/v1/projects") return json(route, { projects: st.opts.projects ?? [{ id: PROJECT, name: "Governance programme" }] });
 
+    if (p === "/v1/model-policy") return json(route, { scope: "you", updatedAt: null, rules: [] });
     if (!p.startsWith("/v1/builder")) return json(route, {});
     const b = p.slice("/v1/builder".length);
     if (st.opts.fail?.some((f) => b === f || b.startsWith(f + "/") || b.startsWith(f + "?")) && method === "GET")

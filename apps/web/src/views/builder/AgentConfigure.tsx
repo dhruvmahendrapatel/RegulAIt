@@ -655,6 +655,7 @@ export function ConfigurePanel(props: { agent: BuilderAgentDetail; onOpenSkills:
           placeholder="Your default model"
           {...(ro ? { disabledReason: "Only the owner or an admin can change the model." } : {})}
           testId="agent-model"
+          feature="builder"
         />
         <Field label="Bill spend to project">
           <Select

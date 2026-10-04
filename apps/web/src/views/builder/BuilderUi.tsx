@@ -855,6 +855,7 @@ export function NewAgentDialog(props: { open: boolean; onClose: () => void; temp
               onChange={setModelId}
               placeholder="Your default model"
               testId="new-agent-model"
+              feature="builder"
             />
           </div>
         )}
