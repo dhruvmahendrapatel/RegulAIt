@@ -1,6 +1,6 @@
 /** ADR-0175 A6/A5 — the skill status copy the library and the agent editor show. */
 import { describe, expect, it } from "vitest";
-import { findingLines, skillStatusBadge, skillWithheldCopy } from "./builderLogic";
+import { findingLines, skillPrivateOnSharedAgentCopy, skillStatusBadge, skillWithheldCopy } from "./builderLogic";
 
 describe("skillStatusBadge", () => {
   const base = { admissionState: "clean", requestedVisibility: null, release: null };
@@ -31,5 +31,15 @@ describe("findingLines", () => {
     expect(findingLines([{ rule: "skill.confusable.mixed_script", severity: "medium", where: "body", count: 2 }])).toEqual([
       "skill.confusable.mixed_script in body (medium, ×2)",
     ]);
+  });
+});
+
+describe("skillPrivateOnSharedAgentCopy (ADR-0175 review fix)", () => {
+  it("says the shared agent runs without the private skill, and how to include it", () => {
+    const open = skillPrivateOnSharedAgentCopy(false);
+    expect(open.badge).toBe("Only its owner");
+    expect(open.sub).toMatch(/run it without the skill/);
+    expect(open.sub).toMatch(/an admin approves/);
+    expect(skillPrivateOnSharedAgentCopy(true).sub).toMatch(/\(requested\)/);
   });
 });

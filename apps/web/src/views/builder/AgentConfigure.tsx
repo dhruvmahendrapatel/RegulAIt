@@ -18,7 +18,7 @@ import { ModelPicker, type ModelPickerAgent } from "../../ui/ModelPicker";
 import { useToast } from "../../ui/toast";
 import { AddConnectionDialog, AddSkillDialog, CodeDialog, NewScheduleDialog, NewSubagentDialog, type ToolCandidate } from "./AgentDialogs";
 import { bk, builderApi, useAgents, useDirectory, useMyModelTiles, useMyProjects, type PatchAgentBody, type ScheduleBody } from "./builderApi";
-import { AGENT_COLORS, bundleFileName, parseLimitInput, scheduleSummary, skillWithheldCopy, spendState } from "./builderLogic";
+import { AGENT_COLORS, bundleFileName, parseLimitInput, scheduleSummary, skillPrivateOnSharedAgentCopy, skillWithheldCopy, spendState } from "./builderLogic";
 import { AgentAvatar, Icon, Section, Segmented, Switch, ToolLogo } from "./BuilderUi";
 import s from "./builder.module.css";
 
@@ -498,13 +498,16 @@ export function ConfigurePanel(props: { agent: BuilderAgentDetail; onOpenSkills:
                 <span className={s.sectionIcon}>{Icon.spark(15)}</span>
                 <span className={s.listRowMain}>
                   <span className={s.listRowTitle}>
-                    {k.name}
+                    {k.pinnedName ?? k.name}
                     {k.withheld ? (
                       <Badge tone="warn">{skillWithheldCopy(k.withheld).badge}</Badge>
                     ) : k.unavailable ? (
                       <Badge tone="warn">No longer shared</Badge>
                     ) : k.updateAvailable ? (
                       <Badge tone="info">Update available</Badge>
+                    ) : null}
+                    {k.withheldFromOthers && !k.withheld && !k.unavailable ? (
+                      <Badge tone="info">{skillPrivateOnSharedAgentCopy(!!k.visibilityRequested).badge}</Badge>
                     ) : null}
                   </span>
                   <span className={`${s.listRowSub} ${s.clamp2}`}>
@@ -514,7 +517,9 @@ export function ConfigurePanel(props: { agent: BuilderAgentDetail; onOpenSkills:
                       ? "Its author stopped sharing it, so the agent no longer uses it."
                       : k.updateAvailable
                         ? "The library copy changed. The agent keeps the version it has until you take the new one."
-                        : k.description}
+                        : k.withheldFromOthers
+                          ? skillPrivateOnSharedAgentCopy(!!k.visibilityRequested).sub
+                          : k.description}
                   </span>
                 </span>
                 {k.updateAvailable && !k.unavailable && (

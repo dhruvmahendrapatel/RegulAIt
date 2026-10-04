@@ -948,6 +948,13 @@ export interface BuilderAgentDetail extends BuilderAgentSummary {
     /** ADR-0175: why the pinned body is kept out of the prompt (absent when it runs) */
     withheld?: "held" | "refused" | "quarantined";
     pinnedVersion?: number;
+    /** the name the agent runs with (pinned with the body; a rename is a new version) */
+    pinnedName?: string;
+    /** ADR-0175 review fix: a skill private to its owner on an agent shared
+     * beyond them — only its owner's (and admins') turns carry it */
+    withheldFromOthers?: boolean;
+    /** the owner has asked an admin to share the skill with the workspace */
+    visibilityRequested?: boolean;
   }>;
   memory: BuilderMemoryItem[];
   schedules: BuilderSchedule[];

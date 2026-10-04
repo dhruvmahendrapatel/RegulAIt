@@ -53,7 +53,10 @@ interface QuarantineItem {
   admissionState: string;
   version?: number;
   origin?: string;
+  /** a server's release: its manifest digest, or `registration` */
   release?: string;
+  /** a skill version's content digest */
+  digest?: string;
 }
 interface Quarantine {
   enabled: boolean;
@@ -100,12 +103,24 @@ export default function AdmissionReviewPage() {
     setPending(null);
     if (!p) return;
     if (p.kind === "admit") {
-      void act.run(() => api.post(`/v1/admission/skills/${p.skill.id}/admit`, { reason }), `Admitted ${p.skill.name}`);
+      // the digest of the content this page SHOWED: if the skill changed since,
+      // the gateway refuses (409) instead of admitting text nobody reviewed
+      void act.run(
+        () => api.post(`/v1/admission/skills/${p.skill.id}/admit`, { digest: p.skill.contentDigest, reason }),
+        `Admitted ${p.skill.name}`,
+      );
     } else if (p.kind === "deny-share") {
       void act.run(() => api.post(`/v1/admission/skills/${p.skill.id}/visibility`, { decision: "deny", reason }), `Sharing denied for ${p.skill.name}`);
     } else {
       void act.run(
-        () => api.post("/v1/release-quarantine/override", { kind: p.target, id: p.item.id, reason }),
+        () =>
+          api.post("/v1/release-quarantine/override", {
+            kind: p.target,
+            id: p.item.id,
+            // the release this page showed (a newer one is refused with 409)
+            digest: (p.target === "mcp_server" ? p.item.release : p.item.digest) ?? "",
+            reason,
+          }),
         `${p.item.name} allowed now`,
       );
     }
@@ -224,12 +239,15 @@ export default function AdmissionReviewPage() {
         body={
           pending?.kind === "admit" ? (
             <p style={{ margin: 0 }}>
-              Findings: {findingText(pending.skill.admissionFindings)}. Admitting covers this exact version only; a later edit is
-              checked again.
+              Version {pending.skill.version} (content {pending.skill.contentDigest.slice(0, 12)}). Findings:{" "}
+              {findingText(pending.skill.admissionFindings)}. Admitting covers this exact content only; if it changed after
+              this page loaded, nothing is admitted and you are asked to review the new content.
             </p>
           ) : pending?.kind === "override" ? (
             <p style={{ margin: 0 }}>
-              Skips the rest of the waiting period for this version only. A later change starts its own waiting period.
+              Skips the rest of the waiting period for this release only (
+              {(pending.target === "mcp_server" ? pending.item.release : pending.item.digest)?.slice(0, 12) ?? "unknown"}). A
+              later change starts its own waiting period.
             </p>
           ) : undefined
         }

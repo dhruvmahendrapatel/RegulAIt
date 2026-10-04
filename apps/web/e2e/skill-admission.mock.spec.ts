@@ -92,6 +92,21 @@ test.describe("ADR-0175: the agent editor", () => {
     await expect(row).toContainText("The agent skips it until an admin admits it.");
     await expect(row.getByText("No longer shared")).toHaveCount(0);
   });
+
+  test("a private skill on a shared agent says the others run without it", async ({ page }) => {
+    const st = await installBuilderMock(page);
+    const agent = st.agents.find((a) => a.name === "Intake reviewer")!;
+    agent.sharing = "workspace";
+    agent.skills = [
+      { id: "sk-0003", name: "Map to EU AI Act", pinnedName: "Map to EU AI Act", description: "", updateAvailable: false, unavailable: false, withheldFromOthers: true, visibilityRequested: false },
+    ];
+    await page.goto(`/ui/builder/agents/${agent.id}`);
+    const skills = page.getByRole("complementary", { name: "Configure agent" }).getByRole("list", { name: "Attached skills" });
+    const row = skills.getByRole("listitem").filter({ hasText: "Map to EU AI Act" });
+    await expect(row.getByText("Only its owner")).toBeVisible();
+    await expect(row).toContainText("People this agent is shared with run it without the skill.");
+    await expectAxeClean(page, "agent editor with a private skill on a shared agent");
+  });
 });
 
 /** the admin endpoints the Admission review page reads and writes */
@@ -104,7 +119,7 @@ async function installAdmissionMock(page: Page, st: MockState) {
     ],
   };
   await page.route("**/v1/admission/skills", (route) =>
-    json(route, { scannerVersion: "skill-admission/1", holdAt: "medium", refuseAt: "high", rules: [], skills: state.skills }),
+    json(route, { scannerVersion: "skill-admission/2", holdAt: "medium", refuseAt: "high", rules: [], skills: state.skills }),
   );
   await page.route(/\/v1\/admission\/skills\/[^/]+\/(admit|visibility)$/, (route) => {
     st.calls.push({ method: "POST", path: new URL(route.request().url()).pathname, body: route.request().postDataJSON() });
@@ -115,7 +130,7 @@ async function installAdmissionMock(page: Page, st: MockState) {
       enabled: state.days > 0,
       minReleaseAgeDays: state.days,
       recommendedDays: 7,
-      servers: state.days > 0 ? [{ id: "33333333-0000-4000-8000-0000000000aa", name: "weather-mcp", origin: "local", firstSeenAt: iso(0), ageDays: 0, readyAt: iso(7), quarantined: true, admissionState: "unscanned" }] : [],
+      servers: state.days > 0 ? [{ id: "33333333-0000-4000-8000-0000000000aa", name: "weather-mcp", origin: "local", release: "registration", firstSeenAt: iso(0), ageDays: 0, readyAt: iso(7), quarantined: true, admissionState: "unscanned" }] : [],
       skills: [],
     }),
   );
@@ -152,7 +167,8 @@ test.describe("ADR-0175: Admission review (admin)", () => {
     await modal.getByLabel("Reason").fill("brand name spelled in Cyrillic on purpose");
     await modal.getByRole("button", { name: "Admit" }).click();
     await expect(modal).toHaveCount(0);
-    expect(posted(st, "/v1/admission/skills/sk-held/admit")).toEqual([{ reason: "brand name spelled in Cyrillic on purpose" }]);
+    // the digest of the content the page showed travels with the admission
+    expect(posted(st, "/v1/admission/skills/sk-held/admit")).toEqual([{ digest: "0".repeat(64), reason: "brand name spelled in Cyrillic on purpose" }]);
 
     await page.getByRole("button", { name: "Approve sharing Model card check" }).click();
     await expect.poll(() => posted(st, "/v1/admission/skills/sk-share/visibility")).toEqual([{ decision: "approve" }]);
@@ -169,7 +185,7 @@ test.describe("ADR-0175: Admission review (admin)", () => {
     await allow.getByLabel("Reason").fill("internal server, reviewed");
     await allow.getByRole("button", { name: "Allow now" }).click();
     await expect.poll(() => posted(st, "/v1/release-quarantine/override")).toEqual([
-      { kind: "mcp_server", id: "33333333-0000-4000-8000-0000000000aa", reason: "internal server, reviewed" },
+      { kind: "mcp_server", id: "33333333-0000-4000-8000-0000000000aa", digest: "registration", reason: "internal server, reviewed" },
     ]);
     await expectAxeClean(page, "admission review with waiting period");
   });

@@ -362,6 +362,23 @@ export function skillWithheldCopy(why: SkillWithheld): { badge: string; sub: str
   }
 }
 
+/**
+ * ADR-0175 review fix — a skill private to its owner, on an agent shared with
+ * other people: the agent still runs for them, without this skill, until an
+ * admin approves the skill for the workspace.
+ */
+export function skillPrivateOnSharedAgentCopy(visibilityRequested: boolean): { badge: string; sub: string } {
+  return visibilityRequested
+    ? {
+        badge: "Only its owner",
+        sub: "This skill is private. People this agent is shared with run it without the skill until an admin approves sharing it (requested).",
+      }
+    : {
+        badge: "Only its owner",
+        sub: "This skill is private. People this agent is shared with run it without the skill. Share the skill with the workspace (an admin approves) to include it for them.",
+      };
+}
+
 /** the library card's status badge for a skill, or null when there is nothing to say */
 export function skillStatusBadge(k: {
   admissionState: string;
