@@ -7,6 +7,8 @@
  *  3. a demo energy factor is refused for a model any non-mock agent names,
  *     and the estimate applies one to mock-served calls only.
  *  4. the `energy_estimate_available` collector ignores demo factors.
+ *  6. an insert that carries its own `*_set_at` (a restore, a re-import)
+ *     keeps it; one without a stamp is stamped now.
  *
  * Shared database (M-008, M-068): every row this file inserts is deleted in
  * afterAll, and the org settings it touches are restored.
@@ -26,6 +28,7 @@ import {
   orgSettings,
   projects,
   runMigrations,
+  scimTokens,
   sql,
   usageEvents,
   virtualKeys,
@@ -53,6 +56,10 @@ const VK_AGENT = "7d1c0a5e-2b4f-4e8a-9c3d-5f6a7b8c9d0e";
 let db: Db;
 let app: ReturnType<typeof buildApp>;
 const ids = { admin: "", connector: "", connectorCred: "", custom: "", customAgent: "", vk: "", otherVk: "", project: "", project4: "" };
+/** scim tokens and connector credentials fix 6 inserts */
+const restoredScim: string[] = [];
+const restoredConnectorCreds: string[] = [];
+const restoredConnectors: string[] = [];
 /** every agent row this file inserts directly */
 const agentIds: string[] = [];
 const DEMO_MODEL = `g175r-demo-${RUN}`;
@@ -166,6 +173,9 @@ afterAll(async () => {
   if (orgBefore) await db.update(orgSettings).set({ staleCredentialAlerts: orgBefore.alerts, credentialUnusedDays: orgBefore.unusedDays });
   await db.delete(usageEvents).where(eq(usageEvents.userId, ids.admin));
   await db.delete(connectorCredentials).where(eq(connectorCredentials.id, ids.connectorCred));
+  if (restoredConnectorCreds.length) await db.delete(connectorCredentials).where(inArray(connectorCredentials.id, restoredConnectorCreds));
+  if (restoredScim.length) await db.delete(scimTokens).where(inArray(scimTokens.id, restoredScim));
+  if (restoredConnectors.length) await db.delete(connectors).where(inArray(connectors.id, restoredConnectors));
   await db.delete(connectors).where(eq(connectors.id, ids.connector));
   await db.delete(agents).where(eq(agents.id, ids.customAgent));
   await db.delete(customModelProviders).where(eq(customModelProviders.id, ids.custom));
@@ -320,5 +330,43 @@ describe("review fix 4 — the energy_estimate_available collector is not eviden
       params: {},
     };
     expect(await runCollector(db, "energy_estimate_available", ctx)).toBe(1);
+  });
+});
+
+describe("review fix 6 — an insert keeps an explicit set date (restore, re-import)", () => {
+  it("keeps a supplied *_set_at on insert, and stamps now() only when none is supplied", async () => {
+    const restoredAt = new Date(Date.now() - 123 * DAY);
+    const [kept] = await db
+      .insert(scimTokens)
+      .values({ name: `g175r-scim-restored-${RUN}`, tokenHash: hashToken(`g175r-scim-r-${RUN}`), secretSetAt: restoredAt })
+      .returning({ id: scimTokens.id, at: scimTokens.secretSetAt });
+    restoredScim.push(kept!.id);
+    expect(kept!.at!.getTime()).toBe(restoredAt.getTime());
+    const [fresh] = await db
+      .insert(scimTokens)
+      .values({ name: `g175r-scim-new-${RUN}`, tokenHash: hashToken(`g175r-scim-n-${RUN}`) })
+      .returning({ id: scimTokens.id, at: scimTokens.secretSetAt });
+    restoredScim.push(fresh!.id);
+    expect(Date.now() - fresh!.at!.getTime()).toBeLessThan(60_000);
+    // a ciphertext column the same way, and the inventory reports the restored age
+    const [c2] = await db.insert(connectors).values({ name: `g175r-connector-restored-${RUN}`, kind: "mock" }).returning({ id: connectors.id });
+    restoredConnectors.push(c2!.id);
+    const [conn] = await db
+      .insert(connectorCredentials)
+      .values({ connectorId: c2!.id, tokenCiphertext: encryptSecret(KEY, `g175r-restored-${RUN}`), secretSetAt: restoredAt })
+      .returning({ id: connectorCredentials.id, at: connectorCredentials.secretSetAt });
+    restoredConnectorCreds.push(conn!.id);
+    expect(conn!.at!.getTime()).toBe(restoredAt.getTime());
+    const inv = await inventory("?limit=500&type=scim_token");
+    expect(inv.credentials.find((c: any) => c.id === `scim_token:${kept!.id}`)).toMatchObject({ rotationSignal: "recorded", ageSinceRotationDays: 123 });
+  });
+
+  it("an update that changes the secret still stamps now(), even when it also writes a stamp", async () => {
+    const [row] = await db
+      .update(scimTokens)
+      .set({ tokenHash: hashToken(`g175r-scim-rotated-${RUN}`), secretSetAt: new Date(Date.now() - 400 * DAY) })
+      .where(eq(scimTokens.id, restoredScim[0]!))
+      .returning({ at: scimTokens.secretSetAt });
+    expect(Date.now() - row!.at!.getTime()).toBeLessThan(60_000);
   });
 });

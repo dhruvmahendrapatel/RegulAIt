@@ -5,13 +5,22 @@
 --    by an upsert that replaces the secret in place and keeps `created_at`, so
 --    "age since rotation" had no source. Each gets a nullable `*_set_at`
 --    column, stamped by ONE trigger function whenever the secret column
---    changes (and on insert when a secret is present). NULL on every pre-0142
+--    changes (and on insert when a secret is present and the insert does not
+--    carry a stamp of its own: a restore or re-import that supplies the
+--    original `*_set_at` keeps its rotation age). NULL on every pre-0142
 --    row: we do not know when those were last set, and the inventory says so
 --    rather than guessing. The data-key re-encryption walk rewrites
 --    ciphertext without changing the secret; it sets the transaction-local
 --    `regulait.secret_reencrypt = 'on'`, and the trigger leaves the stamp
 --    alone. api_keys and virtual_keys need no stamp: they are never rewritten
 --    (a new key is a new row), so their age since rotation is their age.
+--    WHAT COUNTS AS A ROTATION: any change to the stored secret column. Where
+--    that column is CIPHERTEXT, re-saving the same plaintext is a rotation:
+--    encryption uses a random IV, so the stored value changes and the stamp
+--    moves. Where it is a deterministic HASH (scim_tokens.token_hash,
+--    pm_connections.webhook_secret_hash), re-saving the same secret stores the
+--    same hash and is not. The trigger compares stored values; it never sees
+--    a plaintext.
 -- 2. org_settings: `credential_unused_days` (DEFAULT 90) is the inventory's
 --    "unused" threshold; `stale_credential_alerts` (DEFAULT false) decides
 --    whether the `stale_credentials` monitor rule raises alert episodes or
@@ -36,7 +45,8 @@ BEGIN
     RETURN NEW;
   END IF;
   IF TG_OP = 'INSERT' THEN
-    IF new_v IS NOT NULL THEN
+    -- an explicit stamp from the caller (a restore, a re-import) is kept
+    IF new_v IS NOT NULL AND (to_jsonb(NEW) ->> stamp_col) IS NULL THEN
       NEW := jsonb_populate_record(NEW, jsonb_build_object(stamp_col, now()));
     END IF;
     RETURN NEW;
