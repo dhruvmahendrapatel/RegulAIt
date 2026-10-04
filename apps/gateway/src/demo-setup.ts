@@ -37,7 +37,7 @@ import { fileURLToPath } from "node:url";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { generateKeyPairSync, sign } from "node:crypto";
 import { createDb, runMigrations } from "@regulait/db";
-import { LICENSE_FEATURES, LICENSE_SCHEMA_ID, canonicalLicenseBytes } from "@regulait/shared";
+import { LICENSE_FEATURES, LICENSE_SCHEMA_ID, canonicalLicenseBytes, nistAiRmfLabel } from "@regulait/shared";
 import { buildApp } from "./app.js";
 
 const connectionString =
@@ -233,12 +233,10 @@ for (const agent of agents.filter((a) => DEMO_AGENTS.includes(a.name))) {
       limitations:
         "A demo double. It is not evaluated for accuracy, bias or robustness and must not be relied on for any decision.",
       // Carried on the card so criterion (d) has framework evidence attached
-      // to the thing being governed, not only to the project.
-      standardRefs: [
-        "NIST AI RMF 1.0 — GOVERN 1.1 (policies for AI risk management)",
-        "NIST AI RMF 1.0 — MAP 2.3 (documented intended use and limitations)",
-        "NIST AI RMF 1.0 — MEASURE 2.1 (test sets and evaluation documented)",
-      ],
+      // to the thing being governed, not only to the project. ADR-0175: the
+      // label comes from the checked-in subcategory list, so it always names
+      // what the id means (intended use is MAP 1.1, knowledge limits MAP 2.2).
+      standardRefs: ["MAP-1.1", "MAP-2.2", "MEASURE-2.1"].map(nistAiRmfLabel),
     });
     card = created.card;
     if (!card?.id) {
@@ -620,11 +618,12 @@ ${blocked
 
   (d) MAP A USE CASE TO A FRAMEWORK WITH EVIDENCE   [tightened — ADR-0123]
       GET /v1/use-cases/<id>/frameworks?framework=nist-ai-rmf
-      Five NIST controls with LIVE evidence counts, in one call, for any
-      shipped framework — not a two-hop narration any more.
+      The active NIST pack (v3, IDs checked against NIST AI 100-1) with LIVE
+      evidence counts, in one call, for any shipped framework — not a
+      two-hop narration any more.
 
       DO THIS RIGHT AFTER (b), and keep the same screen up: the refusal you
-      just demonstrated IS the evidence for nist-ai-rmf:MANAGE-2.2
+      just demonstrated IS the evidence for nist-ai-rmf:MANAGE-2.4
       ("mechanisms to supersede, disengage or deactivate"). It moves from
       unsatisfied to satisfied because a deny landed in the ledger attributed
       to this project. Make the refused call WITH the project header
@@ -634,8 +633,9 @@ ${blocked
 
       Read the scope sentence out: evidence is collected per PROJECT, so the
       counts cover everything in that project, not this use case alone. And
-      the attestation-required control stays outstanding — an organisational
-      control is never counted as satisfied by the platform.
+      the attestation-required controls (GOVERN 2.3, 3.1, 4.1 and the rest)
+      stay outstanding — an organisational control is never counted as
+      satisfied by the platform.
 
   DO NOT, on this environment:
     · demo the optimisation cache (deliberately left off — a cached answer

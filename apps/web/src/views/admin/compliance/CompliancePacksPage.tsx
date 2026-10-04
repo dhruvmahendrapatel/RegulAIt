@@ -24,6 +24,7 @@ import { api } from "../../../api/client";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, Select, Table, Textarea } from "../../../ui/kit";
 import { QueryGate, RemoveButton, Stat, useAction } from "../adminKit";
+import { packRatios, pctText } from "./packRatios";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -182,6 +183,30 @@ const EXAMPLE = JSON.stringify(
   null,
   2,
 );
+
+/** ADR-0175 — coverage beside pass rate, from the totals the API already returns */
+function ScorecardRatios({ totals }: { totals: Scorecard["totals"] }) {
+  const r = packRatios(totals);
+  return (
+    <>
+      <div className={a.statRow} data-testid="pack-ratios">
+        <Stat
+          value={`${r.withEvidence} / ${r.mapped}`}
+          label={`Coverage ${pctText(r.coveragePct)}: mapped controls a ledger collector checks`}
+        />
+        <Stat
+          value={r.withEvidence > 0 ? `${r.passing} / ${r.withEvidence}` : "—"}
+          label={`Passing ${pctText(r.passingPct)}: of those, met their threshold this period`}
+        />
+      </div>
+      <p className={v.faint}>
+        Read the two together. Passing counts only controls with evidence; the rest of the mapped
+        controls are attestation-only or not addressed by platform configuration, so they lower coverage,
+        never the pass rate.
+      </p>
+    </>
+  );
+}
 
 export default function CompliancePacksPage() {
   const packs = useQuery({
@@ -527,6 +552,7 @@ export default function CompliancePacksPage() {
         <Card title={`Scorecard — ${scorecard.framework} v${scorecard.packVersion} (${scorecard.period.label})`}>
           {/* NO "compliant" badge here, because the payload has no such field. */}
           <p className={v.dim}>{scorecard.statement}</p>
+          <ScorecardRatios totals={scorecard.totals} />
           <div className={a.statRow}>
             <Stat value={scorecard.totals.satisfied} label="Evidenced from the ledgers" />
             <Stat value={scorecard.totals.unsatisfied} label="No evidence in the period" />

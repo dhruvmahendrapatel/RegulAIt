@@ -3427,6 +3427,16 @@ export {
   type TransitionRiskInput,
   type UpdateRiskInput,
 } from "./risks.js";
+// ADR-0175 — the 72 NIST AI RMF 1.0 subcategories (NIST AI 100-1 Tables 1–4)
+export {
+  NIST_AI_RMF_SUBCATEGORIES,
+  isNistAiRmfSubcategory,
+  nistAiRmfLabel,
+  nistAiRmfSubcategory,
+  normaliseNistAiRmfId,
+  type NistAiRmfFunction,
+  type NistAiRmfSubcategory,
+} from "./nist-ai-rmf-subcategories.js";
 // ADR-0148 — trust-dimension classification for compliance controls
 export {
   CONTROL_DIMENSION_OVERRIDES,

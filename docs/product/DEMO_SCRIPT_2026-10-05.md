@@ -234,12 +234,19 @@ back afterwards; a live run leaves it set — recreate the database before the n
 
 ### 3A. Trust dashboard — Ada
 - **URL:** `/ui/admin/governance/trust`
-- **Screen:** six-axis radar, KPI tiles, heatmap. 2026-10-02 figures: bias 100 %, security 50 %,
-  privacy **unmeasured**, reliability 0 %, safety 0 %, compliance 80 %.
-- **Action:** point at the unmeasured axis (privacy), then open the **security** drill-down.
+- **Screen:** six-axis radar, KPI tiles, heatmap. 2026-10-04 figures (NIST AI RMF pack v3, fresh
+  `demo:prepare`): bias 100 % (2/2), security **20 % (1/5)**, privacy 100 % (1/1), reliability 0 % (0/5),
+  safety 0 % (0/2), compliance 70 % (16/23); 53 % evidence coverage overall.
+- **Action:** point at the weakest axes (security 20 %, reliability and safety 0 %), then open the
+  **security** drill-down: 1 of 5 controls evidenced. The gaps are honest: no red-team run (NIST
+  MEASURE 2.7) and no MCP admission scan (MAP 4.2) has happened in this environment yet.
 - **Say:** "Each axis is evidence coverage: the share of applicable active-pack controls with
   evidence — measured from platform ledgers and guardrail configuration, with attestation-based
-  controls labelled. An axis with no applicable control is shown as unmeasured, never as a score."
+  controls labelled. A low number is a to-do list, not a grade: run a red-team pass and the security
+  axis moves. An axis with no applicable control would show as unmeasured, never as a score."
+- **If asked about NIST IDs:** the pack is version 3; it corrects two subcategory IDs earlier versions
+  had wrong (accountability is GOVERN 2.1, deactivation is MANAGE 2.4). Earlier versions stay as they
+  were, because published evidence is immutable.
 
 ### 3B. Governance alerts and remediation — Ada, then Avery
 - **URL:** `/ui/admin/governance/alerts` → **Evaluate now**

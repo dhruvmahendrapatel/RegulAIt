@@ -28,6 +28,12 @@ export const CONTROL_DIMENSION_OVERRIDES: Readonly<Record<string, TrustDimension
   "eu-ai-act:art-4-ai-literacy": "compliance",
   // NIST AI RMF — GOVERN 4.1 is the "safety-first mindset" practice
   "nist-ai-rmf:GOVERN-4.1": "safety",
+  // NIST AI RMF v3 (ADR-0175) — attestation-only subcategories
+  "nist-ai-rmf:GOVERN-1.1": "compliance",
+  "nist-ai-rmf:GOVERN-2.2": "compliance",
+  "nist-ai-rmf:GOVERN-2.3": "compliance",
+  "nist-ai-rmf:GOVERN-3.1": "compliance",
+  "nist-ai-rmf:MEASURE-2.4": "reliability",
   // ISO/IEC 27001
   "iso-27001:6.1.3": "security",
   "iso-27001:9.2": "compliance",
@@ -72,6 +78,8 @@ export function dimensionForControl(c: ControlForDimension): TrustDimension {
       // access control; a plain decision log evidences record-keeping
       if (p.effect === "deny" || p.objectType === "user") return "security";
       if (typeof p.ruleIdPrefix === "string" && p.ruleIdPrefix.startsWith("egress")) return "security";
+      // ADR-0175: red-team runs and MCP admission scans are security testing
+      if (typeof p.ruleIdPrefix === "string" && /^(redteam-|mcp-admission-)/.test(p.ruleIdPrefix)) return "security";
       return "compliance";
     case "eval_runs":
       return "reliability";
