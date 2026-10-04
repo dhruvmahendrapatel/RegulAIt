@@ -1504,7 +1504,11 @@ async function resumeUnderGate(
       // never a thread stuck on a step nobody can answer: the step (and any
       // call of this turn still marked running) goes to error, the paused
       // state is cleared, the failure is audited
-      const msg = err instanceof Error ? err.message : String(err);
+      // one line, no query text: a database error's `cause` is the driver's
+      // own message (the wrapper's message embeds the SQL and its parameters)
+      const msg = (err instanceof Error ? (err.cause instanceof Error ? err.cause.message : err.message) : String(err))
+        .replace(/\s+/g, " ")
+        .slice(0, 300);
       const now = new Date();
       await db
         .update(builderToolSteps)

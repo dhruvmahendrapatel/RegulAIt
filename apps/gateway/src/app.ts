@@ -3722,7 +3722,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
                   effect: "deny",
                   ruleId: "builder-tool-step-resume-failed",
                   ruleChain: [],
-                  reason: `the builder turn waiting on approval ${updated.id} could not resume: ${err instanceof Error ? err.message : String(err)}`.slice(0, 1000),
+                  reason: `the builder turn waiting on approval ${updated.id} could not resume: ${
+                    err instanceof Error ? (err.cause instanceof Error ? err.cause.message : err.message) : String(err)
+                  }`
+                    .replace(/\s+/g, " ")
+                    .slice(0, 1000),
                 });
               }
             }, app.log);
