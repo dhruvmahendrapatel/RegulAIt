@@ -116,8 +116,9 @@ export const MONITOR_RULES = {
     description:
       "A stored non-human credential (API key, virtual key, SCIM token, provider key, connector or integration " +
       "secret) carries an inventory flag (ADR-0175 A7): never expires, past expiry, unused for longer than the org's " +
-      "threshold, owner deactivated, or over-scoped by its type's rule. One episode per credential. Off by default: " +
-      "the flags show on the credential inventory, and an admin turns alert episodes on there.",
+      "threshold, owner deactivated, or over-scoped by its type's rule. One episode per credential type and flag, " +
+      "with the count and the first credential ids. Off by default: the flags show on the credential inventory, and " +
+      "an admin turns alert episodes on there.",
   },
   dimension_coverage_below_floor: {
     label: "Trust dimension evidence coverage below floor",
@@ -354,6 +355,48 @@ export function credentialShortId(id: string): string {
   return `id ${row.replace(/[^0-9a-f-]/gi, "").slice(0, 8)}`;
 }
 
+/** how many credential ids (and names) one stale-credential episode's detail lists */
+export const STALE_CREDENTIAL_DETAIL_IDS = 20;
+
+export interface StaleCredentialEpisode {
+  /** `credentials:<type>:<flag>` */
+  subjectKey: string;
+  type: string;
+  typeLabel: string;
+  flag: string;
+  count: number;
+  /** the first STALE_CREDENTIAL_DETAIL_IDS, in input order */
+  credentials: Array<{ id: string; name: string; reason: string | null }>;
+  manageAt: string;
+}
+
+/**
+ * ADR-0175 A7 review fix — THE ROLL-UP. Flagged credentials grouped by
+ * (type, flag): one episode each, carrying the count and the first ids. So
+ * turning alerting on raises at most (types × flags) episodes, however many
+ * credentials are flagged, and a credential with two flags counts in two. The
+ * inventory page uses the same function to say how many would raise now.
+ */
+export function staleCredentialEpisodes(credentials: MonitorCredentialInput["credentials"]): StaleCredentialEpisode[] {
+  const byKey = new Map<string, StaleCredentialEpisode>();
+  for (const c of credentials) {
+    const type = c.id.slice(0, Math.max(0, c.id.indexOf(":")));
+    for (const flag of c.flags) {
+      const subjectKey = `credentials:${type}:${flag}`;
+      let ep = byKey.get(subjectKey);
+      if (!ep) {
+        ep = { subjectKey, type, typeLabel: c.typeLabel, flag, count: 0, credentials: [], manageAt: c.manageAt };
+        byKey.set(subjectKey, ep);
+      }
+      ep.count += 1;
+      if (ep.credentials.length < STALE_CREDENTIAL_DETAIL_IDS) {
+        ep.credentials.push({ id: c.id, name: c.name, reason: c.reasons[flag] ?? null });
+      }
+    }
+  }
+  return [...byKey.values()].sort((a, b) => a.subjectKey.localeCompare(b.subjectKey));
+}
+
 export function evaluateMonitorRules(input: MonitorInput): MonitorFinding[] {
   const out: MonitorFinding[] = [];
   const floor = input.coverageFloorPct ?? DEFAULT_COVERAGE_FLOOR_PCT;
@@ -510,27 +553,30 @@ export function evaluateMonitorRules(input: MonitorInput): MonitorFinding[] {
 
   if (input.traffic) out.push(...unregisteredTrafficFindings(input.traffic));
 
-  // ADR-0175 A7 — one episode per flagged credential, only when the org
-  // turned alerting on. Titles reach ChatOps channels, so they carry the
-  // credential's type, flags and a short id — never its name, which is free
-  // text its creator typed (review fix); the name stays in the admin-only
-  // detail.
+  // ADR-0175 A7 — only when the org turned alerting on: one episode per
+  // (credential type, flag), rolled up (review fix), with the count and the
+  // first ids. Titles reach ChatOps channels, so they carry the type, flag,
+  // count and (for a single credential) a short id — never a credential's
+  // name, which is free text its creator typed (review fix); names stay in
+  // the admin-only detail.
   if (input.credentials?.alerting) {
-    for (const c of input.credentials.credentials) {
-      if (c.flags.length === 0) continue;
-      const flagWords = c.flags.map((f) => f.replace(/_/g, " "));
+    for (const ep of staleCredentialEpisodes(input.credentials.credentials)) {
+      const flagWord = ep.flag.replace(/_/g, " ");
+      const which = ep.count === 1 ? `${ep.typeLabel} ${credentialShortId(ep.credentials[0]!.id)}` : `${ep.count} credentials of type ${ep.typeLabel}`;
       out.push({
         ruleId: "stale_credentials",
-        subjectKey: `credential:${c.id}`,
+        subjectKey: ep.subjectKey,
         severity: sev("stale_credentials"),
-        title: `${c.typeLabel} ${credentialShortId(c.id)}: ${flagWords.join(", ")}`,
+        title: `${which}: ${flagWord}`,
         detail: {
-          credentialId: c.id,
-          typeLabel: c.typeLabel,
-          name: c.name,
-          flags: [...c.flags],
-          reasons: { ...c.reasons },
-          manageAt: c.manageAt,
+          type: ep.type,
+          typeLabel: ep.typeLabel,
+          flag: ep.flag,
+          count: ep.count,
+          credentialIds: ep.credentials.map((c) => c.id),
+          credentials: ep.credentials,
+          listed: ep.credentials.length,
+          manageAt: ep.manageAt,
         },
       });
     }

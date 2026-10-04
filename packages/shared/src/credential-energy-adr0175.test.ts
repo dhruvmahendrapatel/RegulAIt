@@ -107,7 +107,7 @@ const flagged = {
 };
 
 describe("A7 stale_credentials rule", () => {
-  it("is medium, and raises one episode per flagged credential when alerting is on", () => {
+  it("is medium, and raises one episode per credential type and flag when alerting is on", () => {
     expect(MONITOR_RULES.stale_credentials.severity).toBe("medium");
     const f = evaluateMonitorRules(
       base({
@@ -117,11 +117,16 @@ describe("A7 stale_credentials rule", () => {
         },
       }),
     ).filter((x) => x.ruleId === "stale_credentials");
-    expect(f.map((x) => x.subjectKey).sort()).toEqual(["credential:api_key:k2", "credential:virtual_key:v1"]);
-    expect(f.find((x) => x.subjectKey === "credential:virtual_key:v1")).toMatchObject({
+    expect(f.map((x) => x.subjectKey).sort()).toEqual([
+      "credentials:api_key:never_expires",
+      "credentials:api_key:unused",
+      "credentials:virtual_key:never_expires",
+      "credentials:virtual_key:unused",
+    ]);
+    expect(f.find((x) => x.subjectKey === "credentials:virtual_key:never_expires")).toMatchObject({
       severity: "medium",
-      title: "Virtual key id 1: never expires, unused",
-      detail: { flags: ["never_expires", "unused"], manageAt: "/admin/virtual-keys" },
+      title: "Virtual key id 1: never expires",
+      detail: { flag: "never_expires", count: 1, credentialIds: ["virtual_key:v1"], manageAt: "/admin/virtual-keys" },
     });
   });
 

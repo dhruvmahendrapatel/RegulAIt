@@ -65,6 +65,7 @@ import {
   CREDENTIALS_NOT_STORED,
   credentialFlags,
   rotationAgeDays,
+  staleCredentialEpisodes,
   type CredentialFlag,
   type CredentialRecord,
   type CredentialType,
@@ -185,6 +186,9 @@ export interface CredentialInventory {
   notStored: ReadonlyArray<{ what: string; why: string }>;
   flagLabels: Record<CredentialFlag, string>;
   counts: { total: number; flagged: number; byFlag: Record<CredentialFlag, number> };
+  /** what `stale_credentials` raises from this inventory when alerting is on:
+   * one episode per (type, flag), covering this many flagged credentials */
+  alertPreview: { episodes: number; credentials: number };
   credentials: InventoryRow[];
 }
 
@@ -839,6 +843,12 @@ export async function computeCredentialInventory(
     notStored: CREDENTIALS_NOT_STORED,
     flagLabels: CREDENTIAL_FLAG_LABELS,
     counts: { total: credentials.length, flagged: credentials.filter((c) => c.flags.length > 0).length, byFlag },
+    alertPreview: {
+      episodes: staleCredentialEpisodes(
+        credentials.map((c) => ({ id: c.id, typeLabel: c.typeLabel, name: c.name, flags: c.flags, reasons: {}, manageAt: c.manageAt })),
+      ).length,
+      credentials: credentials.filter((c) => c.flags.length > 0).length,
+    },
     credentials,
   };
 }

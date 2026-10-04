@@ -4,10 +4,12 @@
  *  1. A credential's name is free text: it never reaches an alert title, and
  *     every alert title is made inert for the chat channel that shows it.
  *  3. A demo energy factor applies to calls the mock provider served, only.
+ *  5. Stale-credential episodes roll up: one per (type, flag), with a count.
  */
 import { describe, expect, it } from "vitest";
 import { composeAlertCard, teamsActivityForCard } from "./chatops.js";
-import { evaluateMonitorRules, type MonitorInput } from "./governance-monitor.js";
+import { STALE_CREDENTIAL_DETAIL_IDS, evaluateMonitorRules, staleCredentialEpisodes, type MonitorInput } from "./governance-monitor.js";
+import { proposeRemediations } from "./remediation.js";
 import { estimateEnergy } from "./energy-estimate.js";
 
 const EVIL = "<!channel> <https://evil|portal>";
@@ -35,7 +37,7 @@ describe("review fix 1 — injection into ChatOps alert cards", () => {
     expect(f!.title).not.toContain(EVIL);
     expect(f!.title).not.toMatch(/[<>|!]/);
     expect(f!.title).toContain("3f2b9c1e");
-    expect(f!.detail).toMatchObject({ name: EVIL });
+    expect(f!.detail.credentials).toEqual([expect.objectContaining({ name: EVIL })]);
   });
 
   it("every alert title is escaped for Slack, and for Teams' Adaptive Card markdown", () => {
@@ -89,5 +91,38 @@ describe("review fix 3 — a demo factor applies to mock-served calls only", () 
     });
     expect(real).toMatchObject({ callsEstimated: 2, energyWh: 2 });
     expect(real.byModel).toHaveLength(1);
+  });
+});
+
+describe("review fix 5 — stale-credential episodes roll up per type and flag", () => {
+  const keys = Array.from({ length: 45 }, (_, i) => ({
+    id: `api_key:00000000-0000-4000-8000-${String(i).padStart(12, "0")}`,
+    typeLabel: "API key",
+    name: `svc-${i}`,
+    flags: ["never_expires"],
+    reasons: { never_expires: "no expiry is set" },
+    manageAt: "/admin/users",
+  }));
+  const vk = { id: "virtual_key:9a9a9a9a-0000-4000-8000-000000000001", typeLabel: "Virtual key", name: "batch", flags: ["unused", "never_expires"], reasons: {}, manageAt: "/admin/virtual-keys" };
+
+  it("46 flagged credentials raise 3 episodes, each with a count and the first ids", () => {
+    const f = evaluateMonitorRules(base({ credentials: { alerting: true, credentials: [...keys, vk] } })).filter((x) => x.ruleId === "stale_credentials");
+    expect(f.map((x) => x.subjectKey)).toEqual([
+      "credentials:api_key:never_expires",
+      "credentials:virtual_key:never_expires",
+      "credentials:virtual_key:unused",
+    ]);
+    const api = f[0]!;
+    expect(api.title).toBe("45 credentials of type API key: never expires");
+    expect(api.detail).toMatchObject({ type: "api_key", flag: "never_expires", count: 45, listed: STALE_CREDENTIAL_DETAIL_IDS });
+    expect(api.detail.credentialIds).toEqual(keys.slice(0, STALE_CREDENTIAL_DETAIL_IDS).map((k) => k.id));
+    // names stay out of every title
+    for (const x of f) expect(x.title).not.toMatch(/svc-|batch/);
+    expect(f[1]!.title).toBe("Virtual key id 9a9a9a9a: never expires");
+    // the same roll-up is what the inventory page previews
+    expect(staleCredentialEpisodes([...keys, vk])).toHaveLength(3);
+    const [rem] = proposeRemediations({ alert: { ruleId: "stale_credentials", subjectKey: api.subjectKey, detail: api.detail }, risks: new Map(), activeControls: new Map() });
+    expect(rem).toMatchObject({ kind: "review_credential", href: "/admin/users", params: { flag: "never_expires", type: "api_key" } });
+    expect(rem!.steps.join(" ")).toMatch(/never expires/);
   });
 });

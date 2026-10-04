@@ -9,8 +9,9 @@
  *  - each flag fires on the credential that earns it and not elsewhere;
  *  - migration 0142's trigger stamps a rewritten secret, and leaves the stamp
  *    alone for a data-key re-encryption;
- *  - `stale_credentials` raises one medium episode per flagged credential
- *    only while the org turned alerting on, and resolves them when it is off;
+ *  - `stale_credentials` raises one medium episode per credential type and
+ *    flag (review fix: rolled up) only while the org turned alerting on, and
+ *    resolves them when it is off;
  *  - the route is admin-only.
  *
  * Shared database (M-008, M-068): every row this file inserts is deleted in
@@ -366,37 +367,55 @@ describe("ADR-0175 A7 — the stale_credentials monitor rule", () => {
     db
       .select()
       .from(governanceAlerts)
-      .where(and(eq(governanceAlerts.ruleId, "stale_credentials"), sql`${governanceAlerts.subjectKey} LIKE ${"credential:%"}`));
+      .where(and(eq(governanceAlerts.ruleId, "stale_credentials"), sql`${governanceAlerts.subjectKey} LIKE ${"credential%"}`));
   const evaluate = async () => {
     const r = await call("POST", "/v1/governance/monitor/evaluate", people.adminAuth);
     expect(r.statusCode, r.body).toBe(200);
   };
-  const subject = (id: string) => `credential:${id}`;
+  const subject = (type: string, flag: string) => `credentials:${type}:${flag}`;
 
   it("is observe-only by default: flags on the page, no episode", async () => {
     expect(orgBefore!.alerts).toBe(false);
     await evaluate();
-    const open = (await episodes()).filter((a) => a.status !== "resolved" && a.subjectKey.includes(ids.vk!));
+    const open = (await episodes()).filter((a) => a.status !== "resolved");
     expect(open).toEqual([]);
-    expect((await inventory()).json().alerting).toBe(false);
+    const inv = (await inventory()).json();
+    expect(inv.alerting).toBe(false);
+    // the page can say what turning alerts on would raise: at most one episode per type and flag
+    expect(inv.alertPreview.credentials).toBe(inv.counts.flagged);
+    expect(inv.alertPreview.episodes).toBeGreaterThanOrEqual(6);
+    expect(inv.alertPreview.episodes).toBeLessThanOrEqual(CREDENTIAL_TYPE_IDS.length * 5);
   });
 
-  it("with alerting on, raises one medium episode per flagged credential, and resolves them when it is turned off", async () => {
+  it("with alerting on, raises one medium episode per credential type and flag, and resolves them when it is turned off", async () => {
     const on = await call("PUT", "/v1/org/settings", people.adminAuth, { staleCredentialAlerts: true });
     expect(on.statusCode, on.body).toBe(200);
     await evaluate();
     await evaluate(); // a second pass refreshes, never duplicates
     const open = (await episodes()).filter((a) => a.status !== "resolved");
-    const flagged = [`api_key:${ids.adminKey}`, `api_key:${ids.goneKey}`, `api_key:${ids.expiredKey}`, `api_key:${ids.oldKey}`, `virtual_key:${ids.vk}`, `custom_provider_key:${ids.custom}`];
-    for (const id of flagged) {
-      const mineOpen = open.filter((a) => a.subjectKey === subject(id));
-      expect(mineOpen, id).toHaveLength(1);
+    // this file's flagged credentials, by the (type, flag) episode that covers them
+    const flagged: Array<[string, string]> = [
+      ["api_key", "over_scoped"],
+      ["api_key", "owner_deactivated"],
+      ["api_key", "past_expiry"],
+      ["api_key", "unused"],
+      ["virtual_key", "never_expires"],
+      ["virtual_key", "over_scoped"],
+      ["custom_provider_key", "owner_deactivated"],
+    ];
+    for (const [type, flag] of flagged) {
+      const mineOpen = open.filter((a) => a.subjectKey === subject(type, flag));
+      expect(mineOpen, `${type}:${flag}`).toHaveLength(1);
       expect(mineOpen[0]!.severity).toBe("medium");
+      expect((mineOpen[0]!.detail as { count: number }).count).toBeGreaterThanOrEqual(1);
     }
-    expect(open.filter((a) => a.subjectKey === subject(`api_key:${ids.ownKey}`))).toEqual([]);
-    expect(open.filter((a) => a.subjectKey === subject(`git_token:${ids.git}`))).toEqual([]);
-    const vkAlert = open.find((a) => a.subjectKey === subject(`virtual_key:${ids.vk}`))!;
-    expect(vkAlert.title).toBe(`Virtual key id ${ids.vk!.slice(0, 8)}: never expires, over scoped`);
+    // never one episode per credential, and never more than one per (type, flag)
+    expect(open.filter((a) => a.subjectKey.startsWith("credential:"))).toEqual([]);
+    expect(new Set(open.map((a) => a.subjectKey)).size).toBe(open.length);
+    expect(open.length).toBe((await inventory()).json().alertPreview.episodes);
+    const vkAlert = open.find((a) => a.subjectKey === subject("virtual_key", "never_expires"))!;
+    expect(vkAlert.title).toMatch(/^(Virtual key id [0-9a-f]{8}|\d+ credentials of type Virtual key): never expires$/);
+    expect(vkAlert.title).not.toContain(`g175c-vk-${RUN}`);
     const plan = await call("GET", `/v1/governance/alerts/${vkAlert.id}/remediation`, people.adminAuth);
     expect(plan.statusCode, plan.body).toBe(200);
     expect(plan.json().candidates[0]).toMatchObject({ kind: "review_credential", executable: false, href: "/admin/virtual-keys" });
@@ -404,8 +423,6 @@ describe("ADR-0175 A7 — the stale_credentials monitor rule", () => {
     const off = await call("PUT", "/v1/org/settings", people.adminAuth, { staleCredentialAlerts: false });
     expect(off.statusCode, off.body).toBe(200);
     await evaluate();
-    const still = (await episodes()).filter((a) => a.status !== "resolved" && flagged.some((id) => a.subjectKey === subject(id)));
-    expect(still).toEqual([]);
-    // every flagged credential in this shared database was raised and resolved, so allow for the volume
+    expect((await episodes()).filter((a) => a.status !== "resolved")).toEqual([]);
   }, 180_000);
 });

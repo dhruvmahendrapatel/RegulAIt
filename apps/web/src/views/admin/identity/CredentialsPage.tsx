@@ -13,8 +13,8 @@
  * the page says so instead of showing a blank that reads as "never".
  *
  * The `stale_credentials` monitor rule is observe-only by default (the flags
- * stay here); the toggle at the top turns on one alert episode per flagged
- * credential.
+ * stay here); the toggle at the top turns on one alert episode per credential
+ * type and flag, and says beforehand how many would raise now.
  */
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
@@ -72,6 +72,8 @@ export interface CredentialInventory {
   notStored: Array<{ what: string; why: string }>;
   flagLabels: Record<Flag, string>;
   counts: { total: number; flagged: number; byFlag: Record<Flag, number> };
+  /** what turning alerts on would raise from this inventory now */
+  alertPreview?: { episodes: number; credentials: number };
   /** the filtered list's size and this page's place in it */
   page: { total: number; limit: number; offset: number };
   credentials: CredentialRow[];
@@ -338,6 +340,7 @@ export default function CredentialsPage() {
 
 function AlertingCard(props: { inv: CredentialInventory }) {
   const act = useAction();
+  const preview = props.inv.alertPreview;
   const [days, setDays] = useState("");
   const value = days === "" ? String(props.inv.unusedDays) : days;
   const n = Number(value);
@@ -371,9 +374,22 @@ function AlertingCard(props: { inv: CredentialInventory }) {
           </span>
           <span className={v.faint}>
             {props.inv.alerting
-              ? "Each flagged credential opens one alert episode on the next monitor pass."
-              : "Flags show here only. Turn alerts on to open one alert episode per flagged credential."}
+              ? "Each credential type and flag with a flagged credential opens one alert episode on the next monitor pass."
+              : "Flags show here only. Turn alerts on to open one alert episode per credential type and flag."}
           </span>
+          {preview && !props.inv.alerting ? (
+            <span role="note" aria-label="Alerts that would raise now">
+              {preview.episodes === 0 ? (
+                "Turning alerts on now would raise no episode: nothing is flagged."
+              ) : (
+                <>
+                  <Badge tone="warn">heads up</Badge> Turning alerts on now would raise {preview.episodes} alert episode
+                  {preview.episodes === 1 ? "" : "s"}, covering {preview.credentials} flagged credential
+                  {preview.credentials === 1 ? "" : "s"}.
+                </>
+              )}
+            </span>
+          ) : null}
         </div>
         <Button
           variant={props.inv.alerting ? undefined : "primary"}

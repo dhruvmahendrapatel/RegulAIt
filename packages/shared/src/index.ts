@@ -3648,6 +3648,9 @@ export {
   type MonitorVendorInput,
   type OffStackServing,
   type MonitorCredentialInput,
+  type StaleCredentialEpisode,
+  STALE_CREDENTIAL_DETAIL_IDS,
+  staleCredentialEpisodes,
 } from "./governance-monitor.js";
 
 // ADR-0175 A7 — the non-human credential inventory: types, flags (pure).

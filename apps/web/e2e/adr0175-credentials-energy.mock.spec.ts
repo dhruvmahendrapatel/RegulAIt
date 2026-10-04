@@ -63,6 +63,8 @@ const inventory = (alerting: boolean) => ({
   notStored: [{ what: "MCP server upstream auth", why: "MCP servers are registered by URL with no stored upstream credential" }],
   flagLabels,
   counts: { total: 4, flagged: 2, byFlag: { never_expires: 1, past_expiry: 0, unused: 1, owner_deactivated: 1, over_scoped: 1 } },
+  // one episode per (type, flag): virtual key × 3 flags, API key × unused
+  alertPreview: { episodes: 4, credentials: 2 },
   credentials: [
     cred({
       id: "virtual_key:v1",
@@ -305,6 +307,10 @@ test.describe("ADR-0175 A7: the credential inventory", () => {
     const state = await mockApi(page);
     await page.goto("/ui/admin/credentials");
     await expect(page.getByText("observe only", { exact: true })).toBeVisible();
+    // before turning them on, the page says how many episodes that would raise now
+    await expect(page.getByRole("note", { name: "Alerts that would raise now" })).toContainText(
+      "Turning alerts on now would raise 4 alert episodes, covering 2 flagged credentials.",
+    );
     await page.getByRole("button", { name: "Turn alerts on" }).click();
     await expect.poll(() => state.puts).toEqual([{ staleCredentialAlerts: true }]);
     await expect(page.getByRole("button", { name: "Turn alerts off" })).toBeVisible();

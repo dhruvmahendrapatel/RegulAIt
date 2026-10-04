@@ -332,10 +332,17 @@ export function proposeRemediations(ctx: RemediationContext): RemediationCandida
       ];
     }
     case "stale_credentials": {
+      // one episode per (type, flag) since the review fix; `flags` is read
+      // too so an episode recorded before it still gets its steps
       const d = alert.detail;
-      const flags = Array.isArray(d.flags) ? (d.flags as unknown[]).map(String) : [];
+      const flags = typeof d.flag === "string" ? [d.flag] : Array.isArray(d.flags) ? (d.flags as unknown[]).map(String) : [];
       const manageAt = typeof d.manageAt === "string" && d.manageAt.startsWith("/admin/") ? d.manageAt : "/admin/credentials";
-      const name = `${String(d.typeLabel ?? "credential")} '${String(d.name ?? s.id)}'`;
+      const count = typeof d.count === "number" ? d.count : 1;
+      const name =
+        count === 1
+          ? `the ${String(d.typeLabel ?? "credential")} it lists`
+          : `the ${count} credentials of type ${String(d.typeLabel ?? "credential")} it counts`;
+      const credentialIds = Array.isArray(d.credentialIds) ? (d.credentialIds as unknown[]).map(String) : d.credentialId ? [String(d.credentialId)] : [];
       const steps: string[] = [];
       if (flags.includes("owner_deactivated")) steps.push("Its owner is deactivated: revoke it, or re-issue it to an active owner if the integration is still needed.");
       if (flags.includes("unused")) steps.push("It has not been used within the org's threshold: confirm nothing depends on it, then revoke it.");
@@ -350,7 +357,7 @@ export function proposeRemediations(ctx: RemediationContext): RemediationCandida
           title: `Review ${name}`,
           rationale:
             "The credential inventory flagged it. Revoking or replacing a credential can break an integration, so it is a person's decision.",
-          params: { credentialId: String(d.credentialId ?? s.id) },
+          params: { credentialIds: credentialIds.join(","), ...(typeof d.flag === "string" ? { flag: d.flag } : {}), ...(typeof d.type === "string" ? { type: d.type } : {}) },
           steps,
           href: manageAt,
         },
