@@ -120,6 +120,25 @@
   }
 }
 
+/* ADR-0173 §3 — the org's model policy forbids this binding in Chat */
+.tileNote {
+  display: block;
+  margin-top: 6px;
+  font-size: var(--text-xs);
+  color: var(--warn-soft-text);
+}
+.allowedIn {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--text-sm);
+  color: var(--text-dim);
+}
+
 /* ---- try it -------------------------------------------------------------- */
 .selected {
   display: flex;

@@ -1,0 +1,175 @@
+/* ADR-0173 §3 — the model allow-list matrix (tokens only). */
+.scroll {
+  overflow-x: auto;
+  max-width: 100%;
+  border-radius: var(--radius-sm);
+}
+.scroll:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.matrix {
+  border-collapse: separate;
+  border-spacing: 0;
+  width: 100%;
+  min-width: 52rem;
+  font-size: var(--text-sm);
+}
+.caption {
+  text-align: left;
+  font-weight: 650;
+  color: var(--text);
+  padding-bottom: var(--s1);
+}
+.matrix th,
+.matrix td {
+  border-bottom: 1px solid var(--border);
+  padding: 6px 8px;
+  vertical-align: middle;
+}
+.corner {
+  text-align: left;
+  position: sticky;
+  left: 0;
+  background: var(--surface-1);
+  z-index: 1;
+}
+.featureHead {
+  text-align: center;
+  font-weight: 600;
+  color: var(--text);
+  min-width: 7.5rem;
+}
+.featureName {
+  display: block;
+  margin-bottom: 4px;
+}
+/* every control in the grid is a 20px target with room around it (WCAG 2.5.8) */
+.matrix input[type="checkbox"],
+.matrix input[type="radio"] {
+  width: 20px;
+  height: 20px;
+  margin: 3px;
+  vertical-align: middle;
+}
+.restrict,
+.cellRadio {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 4px;
+  font-weight: 400;
+  font-size: var(--text-xs);
+  color: var(--text-dim);
+  margin: 4px 0 0;
+}
+.providerRow th,
+.providerRow td {
+  background: var(--surface-2);
+}
+.providerRow th {
+  text-align: left;
+  font-weight: 600;
+  position: sticky;
+  left: 0;
+  z-index: 1;
+}
+.providerRow td {
+  text-align: center;
+}
+.bindingHead {
+  text-align: left;
+  font-weight: 400;
+  position: sticky;
+  left: 0;
+  background: var(--surface-1);
+  z-index: 1;
+  padding-left: 32px;
+}
+.bindingName {
+  display: block;
+  color: var(--text);
+  font-weight: 600;
+}
+.bindingModel {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-faint);
+}
+.cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+.cellOn,
+.cellOff {
+  text-align: center;
+}
+.cellOff {
+  background: var(--warn-soft);
+}
+.any {
+  font-size: var(--text-xs);
+  color: var(--text-faint);
+}
+.defaultRadio {
+  accent-color: var(--primary);
+}
+.warn {
+  margin: var(--s1) 0 0;
+  color: var(--warn-soft-text);
+  font-size: var(--text-sm);
+}
+.classList {
+  list-style: none;
+  margin: 0 0 var(--s2);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.classItem {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.classSummary {
+  flex: 1;
+  min-width: 12rem;
+  color: var(--text-dim);
+  font-size: var(--text-sm);
+}
+.classFieldset {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--s1) var(--s2);
+  margin: var(--s1) 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+}
+.classLegend {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  padding: 0 4px;
+}
+.classGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 12rem;
+}
+.classCheck {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  font-size: var(--text-sm);
+}
+.classCheck input[type="checkbox"] {
+  width: 20px;
+  height: 20px;
+  margin: 3px;
+}

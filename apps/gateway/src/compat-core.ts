@@ -65,7 +65,11 @@ import {
   type GovernedDispatchArgs,
 } from "./agents-connectors.js";
 import { loadAgentRevocations, loadRoleAgentGrants } from "./entitlements.js";
+import { MODEL_NOT_ALLOWED_FOR_FEATURE, loadModelPolicy, withModelPolicy, type ModelPolicyGate } from "./model-policy.js";
 import { loadVersions } from "./config-versions.js";
+
+/** ADR-0173 §3 — the OpenAI/Anthropic-compatible shims (and `/v1/models`) are the "compat" feature */
+export const COMPAT_FEATURE: ModelPolicyGate = { feature: "compat" };
 import { assertProjectAttribution, projectPiiMode } from "./projects.js";
 import { PROJECT_HEADER } from "./mcp-proxy.js";
 // ADR-0070 — the compat surfaces' entitlement refusal gets a `policy` deny span
@@ -652,19 +656,27 @@ export async function prepareCompatCall(
     ceilingTier = ceiling?.tier ?? null;
   }
   const compatExecutionMode = await loadExecutionMode(db);
+  // ADR-0173 §3 — the org's model allow-list for the "compat" feature, applied
+  // to the requested binding and every routing candidate through the shared helper
+  const compatModelPolicy = await loadModelPolicy(db);
   const evalFor = (a: AgentRow) =>
-    evaluateAgent({
-      userId,
-      // ADR-0124 — the IDE surface is a dispatch path and is gated like one.
-      // Developers' traffic is exactly what a halt is usually thrown for.
-      execution: postureOf(compatExecutionMode, agentHaltOf(a)),
-      agent: { id: a.id, name: a.name, tier: a.tier, enabled: a.enabled, modes: a.modes ?? null },
-      mode: COMPAT_MODE,
-      agentGrants: grants,
-      roleAgentGrants: roleGrants,
-      agentRevocations: revocations,
-      ceilingTier,
-    });
+    withModelPolicy(
+      evaluateAgent({
+        userId,
+        // ADR-0124 — the IDE surface is a dispatch path and is gated like one.
+        // Developers' traffic is exactly what a halt is usually thrown for.
+        execution: postureOf(compatExecutionMode, agentHaltOf(a)),
+        agent: { id: a.id, name: a.name, tier: a.tier, enabled: a.enabled, modes: a.modes ?? null },
+        mode: COMPAT_MODE,
+        agentGrants: grants,
+        roleAgentGrants: roleGrants,
+        agentRevocations: revocations,
+        ceilingTier,
+      }),
+      compatModelPolicy,
+      COMPAT_FEATURE,
+      a,
+    );
 
   // ADR-0066 §3 — THE PER-KEY ALLOW-LIST AT THE COMPAT SURFACE. Loaded once
   // here and threaded onto `prepared`, so the dispatch core sees it too and the
@@ -747,7 +759,12 @@ export async function prepareCompatCall(
       });
       await finishTrace(db, denyTrace, "denied", at);
     }
-    return { ok: false, status: 403, error: "agent_denied", detail: decision.reason };
+    return {
+      ok: false,
+      status: 403,
+      error: decision.ruleId === MODEL_NOT_ALLOWED_FOR_FEATURE ? MODEL_NOT_ALLOWED_FOR_FEATURE : "agent_denied",
+      detail: decision.reason,
+    };
   }
 
   // --- pillar-6 routing, ONLY in router_decides ------------------------------
@@ -975,6 +992,9 @@ export async function executeCompatCall(
     ...(args.onThinking ? { onThinking: args.onThinking } : {}),
     virtualKey: prepared.virtualKey,
     mode: COMPAT_MODE,
+    // ADR-0173 §3: the core re-applies the "compat" allow-list to the served
+    // binding and to every fallback hop
+    modelFeature: COMPAT_FEATURE,
     detail: {
       surface: `compat_${args.surface}`,
       mode: COMPAT_MODE,

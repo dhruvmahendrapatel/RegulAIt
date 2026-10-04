@@ -44,6 +44,7 @@ import RulesEnginePage from "./views/admin/governance/RulesEnginePage";
 import SimulationPage from "./views/admin/governance/SimulationPage";
 import AbacPoliciesPage from "./views/admin/governance/AbacPoliciesPage";
 import GuardrailsPage from "./views/admin/governance/GuardrailsPage";
+import ModelPolicyPage from "./views/admin/governance/ModelPolicyPage";
 import EvalsPage from "./views/admin/governance/EvalsPage";
 import ModelRiskPage from "./views/admin/governance/ModelRiskPage";
 import UseCasesPage from "./views/admin/governance/UseCasesPage";
@@ -190,6 +191,8 @@ export default function App() {
                         <Route path="simulation" element={<SimulationPage />} />
                         <Route path="abac-policies" element={<AbacPoliciesPage />} />
                         <Route path="guardrails" element={<GuardrailsPage />} />
+                        {/* ADR-0173 §3 */}
+                        <Route path="model-policy" element={<ModelPolicyPage />} />
                         <Route path="evals" element={<EvalsPage />} />
                         <Route path="model-risk" element={<ModelRiskPage />} />
                         {/* ADR-0080 */}

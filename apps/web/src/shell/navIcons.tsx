@@ -81,6 +81,8 @@ const G = {
   pause: `${ring(12, 12, 7.5)}M10 9.5v5M14 9.5v5`,
   flag: "M6.5 20V4.5M6.5 5h10l-2 3.5 2 3.5h-10",
   compass: `${ring(12, 12, 7.5)}M14.8 9.2l-1.6 4-4 1.6 1.6-4 4-1.6z`,
+  // ADR-0173 — a feature × model grid with one allowed tick
+  modelGrid: "M4.5 4.5h15v15h-15zM4.5 9.5h15M4.5 14.5h15M9.5 4.5v15M14.5 4.5v15M15.8 12l1.2 1.2 2-2.2",
 };
 
 /** route → glyph. Detail routes resolve through their list entry upstream. */
@@ -128,6 +130,7 @@ const BY_ROUTE: Record<string, keyof typeof G> = {
   "/admin/rules": "sliders",
   "/admin/abac-policies": "tag",
   "/admin/guardrails": "rails",
+  "/admin/model-policy": "modelGrid",
   "/admin/prompt-versions": "history",
   "/admin/simulation": "flask",
   "/admin/workflow-templates": "template",

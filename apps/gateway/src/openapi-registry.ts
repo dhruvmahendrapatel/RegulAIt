@@ -696,6 +696,9 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "DELETE /v1/use-cases/draft": "internal",
   // ADR-0124
   "GET /v1/execution": "internal",
+  // ADR-0173 §3 — the model allow-list matrix
+  "GET /v1/model-policy": "internal",
+  "PUT /v1/model-policy": "internal",
   "PUT /v1/execution/mode": "internal",
   "POST /v1/agents/:agentId/halt": "internal",
   "POST /v1/agents/:agentId/unhalt": "internal",
@@ -1372,6 +1375,8 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "PUT /v1/use-cases/draft": "use-cases",
   "DELETE /v1/use-cases/draft": "use-cases",
   "GET /v1/execution": "org-settings",
+  "GET /v1/model-policy": "agents",
+  "PUT /v1/model-policy": "agents",
   "PUT /v1/execution/mode": "org-settings",
   "POST /v1/agents/:agentId/halt": "agents",
   "POST /v1/agents/:agentId/unhalt": "agents",

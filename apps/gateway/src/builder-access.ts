@@ -34,7 +34,8 @@ import {
   type Db,
 } from "@regulait/db";
 import { visibleTools, type ToolRef } from "@regulait/policy-kernel";
-import { agentDecision } from "./copilot.js";
+import { agentDecision, featureDefaultModel } from "./copilot.js";
+import type { ModelPolicyGate } from "./model-policy.js";
 import type { AgentRow } from "./agents-connectors.js";
 import {
   loadConnectorRevocations,
@@ -106,14 +107,23 @@ export async function loadVisibleAgent(db: Db, id: string, viewer: Viewer): Prom
 // model bindings
 // ---------------------------------------------------------------------------
 
-/** may this user dispatch to this registry agent? The invoke path's check. */
+/** ADR-0173 §3 — the agent builder is the "builder" feature of the model
+ * allow-list. Exported so the builder turn (builder-runtime.ts) passes the same
+ * gate to `agentDecision` (and to the dispatch core as `modelFeature`). */
+export const BUILDER_MODEL_FEATURE: ModelPolicyGate = { feature: "builder" };
+
+/** may this user dispatch to this registry agent IN THE BUILDER? The invoke
+ * path's check plus the org's model allow-list for the builder. */
 export async function modelAllowed(db: Db, userId: string, agent: AgentRow): Promise<boolean> {
-  return (await agentDecision(db, userId, agent)).effect === "allow";
+  return (await agentDecision(db, userId, agent, BUILDER_MODEL_FEATURE)).effect === "allow";
 }
 
-/** the user's default binding if they may use it, else the first (by name)
- * dispatchable binding they may use; null when they hold none */
+/** the builder's policy default if this user may use it, else their own
+ * default binding if they may use it, else the first (by name) dispatchable
+ * binding they may use; null when they hold none */
 export async function defaultModelFor(db: Db, userId: string): Promise<AgentRow | null> {
+  const orgDefault = await featureDefaultModel(db, userId, BUILDER_MODEL_FEATURE);
+  if (orgDefault) return orgDefault;
   const [policy] = await db.select().from(userAgentPolicies).where(eq(userAgentPolicies.userId, userId));
   if (policy?.defaultAgentId) {
     const [preferred] = await db.select().from(agents).where(eq(agents.id, policy.defaultAgentId));
