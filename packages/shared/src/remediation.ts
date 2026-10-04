@@ -33,6 +33,8 @@ export const GUIDANCE_REMEDIATION_KINDS = [
   // ADR-0175 A4 / A9
   "review_served_model",
   "register_use_case",
+  // ADR-0175 A7
+  "review_credential",
 ] as const;
 export const REMEDIATION_KINDS = [...EXECUTABLE_REMEDIATION_KINDS, ...GUIDANCE_REMEDIATION_KINDS] as const;
 export type RemediationKind = (typeof REMEDIATION_KINDS)[number];
@@ -326,6 +328,31 @@ export function proposeRemediations(ctx: RemediationContext): RemediationCandida
             "The alert resolves once a window passes with the traffic under an approved use case.",
           ],
           href: `${USE_CASE_REGISTER_PATH}?${q.toString()}`,
+        },
+      ];
+    }
+    case "stale_credentials": {
+      const d = alert.detail;
+      const flags = Array.isArray(d.flags) ? (d.flags as unknown[]).map(String) : [];
+      const manageAt = typeof d.manageAt === "string" && d.manageAt.startsWith("/admin/") ? d.manageAt : "/admin/credentials";
+      const name = `${String(d.typeLabel ?? "credential")} '${String(d.name ?? s.id)}'`;
+      const steps: string[] = [];
+      if (flags.includes("owner_deactivated")) steps.push("Its owner is deactivated: revoke it, or re-issue it to an active owner if the integration is still needed.");
+      if (flags.includes("unused")) steps.push("It has not been used within the org's threshold: confirm nothing depends on it, then revoke it.");
+      if (flags.includes("past_expiry")) steps.push("It has expired: revoke it so the inventory no longer carries it.");
+      if (flags.includes("never_expires")) steps.push("It never expires: replace it with one that has an expiry (the org default TTL applies to new API keys).");
+      if (flags.includes("over_scoped")) steps.push("It is broader than it needs to be: replace it with a narrower credential (a virtual key with a model list and budget, or a key owned by a non-admin service user).");
+      steps.push("The alert resolves on the next monitor pass once no flag remains.");
+      return [
+        {
+          kind: "review_credential",
+          executable: false,
+          title: `Review ${name}`,
+          rationale:
+            "The credential inventory flagged it. Revoking or replacing a credential can break an integration, so it is a person's decision.",
+          params: { credentialId: String(d.credentialId ?? s.id) },
+          steps,
+          href: manageAt,
         },
       ];
     }

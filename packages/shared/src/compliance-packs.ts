@@ -120,6 +120,12 @@ export const EVIDENCE_COLLECTORS = [
    * records that an assessment was done and where its result lives; it does
    * not compute or grade fairness itself. */
   "model_card_fairness",
+  /** ADR-0175 A15: model calls on the usage ledger in the period (scoped by
+   * project) whose model has an admin-entered energy factor and whose token
+   * counts were recorded — the calls the energy and emissions ESTIMATE covers.
+   * Evidence that environmental impact is estimated (NIST AI RMF MEASURE
+   * 2.12), never a measurement of it. */
+  "energy_estimate_available",
   /** NOT AUTO-EVIDENCED. Pairs with attestationRequired. */
   "none",
 ] as const;

@@ -110,6 +110,15 @@ export const MONITOR_RULES = {
       "the use case's project, the only join between the register and dispatch attribution, so this reports spend " +
       "outside that join — not proof that the traffic is ungoverned.",
   },
+  stale_credentials: {
+    label: "Credential needs attention",
+    severity: "medium",
+    description:
+      "A stored non-human credential (API key, virtual key, SCIM token, provider key, connector or integration " +
+      "secret) carries an inventory flag (ADR-0175 A7): never expires, past expiry, unused for longer than the org's " +
+      "threshold, owner deactivated, or over-scoped by its type's rule. One episode per credential. Off by default: " +
+      "the flags show on the credential inventory, and an admin turns alert episodes on there.",
+  },
   dimension_coverage_below_floor: {
     label: "Trust dimension evidence coverage below floor",
     severity: "medium",
@@ -316,6 +325,24 @@ export interface MonitorInput {
   servedModels?: MonitorServedModelInput[];
   /** ADR-0175 A9 — absent = rule not evaluated */
   traffic?: MonitorTrafficInput;
+  /** ADR-0175 A7 — absent = rule not evaluated */
+  credentials?: MonitorCredentialInput;
+}
+
+/** ADR-0175 A7 — the flagged credentials from the inventory */
+export interface MonitorCredentialInput {
+  /** false = observe only: the flags stay on the inventory page and no
+   * episode is raised (an open one resolves) */
+  alerting: boolean;
+  credentials: Array<{
+    /** `<type>:<row id>` */
+    id: string;
+    typeLabel: string;
+    name: string;
+    flags: string[];
+    reasons: Record<string, string>;
+    manageAt: string;
+  }>;
 }
 
 const sev = (id: MonitorRuleId): MonitorSeverity => MONITOR_RULES[id].severity;
@@ -475,6 +502,30 @@ export function evaluateMonitorRules(input: MonitorInput): MonitorFinding[] {
   }
 
   if (input.traffic) out.push(...unregisteredTrafficFindings(input.traffic));
+
+  // ADR-0175 A7 — one episode per flagged credential, only when the org
+  // turned alerting on. Titles carry the credential's type and label, never
+  // a person's name (they reach ChatOps channels).
+  if (input.credentials?.alerting) {
+    for (const c of input.credentials.credentials) {
+      if (c.flags.length === 0) continue;
+      const flagWords = c.flags.map((f) => f.replace(/_/g, " "));
+      out.push({
+        ruleId: "stale_credentials",
+        subjectKey: `credential:${c.id}`,
+        severity: sev("stale_credentials"),
+        title: `${c.typeLabel} '${c.name}': ${flagWords.join(", ")}`,
+        detail: {
+          credentialId: c.id,
+          typeLabel: c.typeLabel,
+          name: c.name,
+          flags: [...c.flags],
+          reasons: { ...c.reasons },
+          manageAt: c.manageAt,
+        },
+      });
+    }
+  }
 
   for (const r of input.risks) {
     if (r.status !== "open" && r.status !== "mitigating") continue;
