@@ -32,7 +32,7 @@ export interface EnabledSsoCount {
  * this change" rather than "what exists now".
  */
 export async function countEnabledSsoProviders(
-  db: Db,
+  db: Pick<Db, "select">,
   exclude: { oidcId?: string; samlId?: string } = {},
 ): Promise<EnabledSsoCount> {
   const oidcRows = await db

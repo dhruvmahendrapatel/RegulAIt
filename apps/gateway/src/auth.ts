@@ -51,7 +51,6 @@ import { z } from "zod";
 import * as oidc from "openid-client";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { loadOrgSettings } from "./org-settings.js";
-import { countEnabledSsoProviders, SSO_ONLY_LAST_PROVIDER } from "./sso-providers.js";
 import { evaluateIpEnvelope } from "./net-policy.js";
 import { deviceLabel } from "./device-label.js";
 import { checkEgress, createGuardedFetch, type EgressDenied } from "./egress-guard.js";
@@ -76,7 +75,13 @@ import {
   type FederatedAnchor,
   type ProviderRef,
 } from "./federated-identity.js";
-import { breakGlassLockoutRefusal } from "./break-glass.js";
+import {
+  providerRemovalRefusal,
+  signInInvariantChecked,
+  signInInvariantWritten,
+  withSignInInvariant,
+  type SignInInvariantSite,
+} from "./break-glass.js";
 
 /** ADR-0066 kept this exported from `auth.ts` — the implementation moved to
  * `token-hash.ts` so `virtual-keys.ts` can share it without an import cycle,
@@ -792,7 +797,7 @@ export function otpauthUri(email: string, secretBase32: string): string {
 // --- audit helper -----------------------------------------------------------
 
 export function auditAuth(
-  db: Db,
+  db: Pick<Db, "insert">,
   actorUserId: string | null,
   targetUserId: string | null,
   ruleId: string,
@@ -2534,66 +2539,77 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
         });
       }
     }
+    const { clientSecret, ...rest } = body;
+    /** the write and its audit rows, on whichever handle the caller holds */
+    const apply = async (x: Pick<Db, "update" | "insert" | "delete">, site?: SignInInvariantSite) => {
+      const [row] = await x
+        .update(oidcProviders)
+        .set({
+          ...rest,
+          ...(clientSecret ? { clientSecretCiphertext: encryptSecret(opts.dataKey!, clientSecret) } : {}),
+          updatedAt: new Date(),
+        })
+        .where(eq(oidcProviders.id, providerId))
+        .returning();
+      if (site) await signInInvariantWritten(site);
+      await auditAuth(x, req.authCtx.userId, null, "oidc-provider-updated", "allow",
+        `OIDC provider '${existing.name}' updated: ${Object.keys(body).join(", ")}`,
+        { phase: "provider-updated", name: existing.name, changed: Object.keys(body), secretRotated: Boolean(clientSecret) },
+        "oidc_provider");
+      // ADR-0174 (finding 6): a new issuer is a different identity provider —
+      // the subjects linked under the old one mean nothing under the new one
+      if (body.issuerUrl !== undefined && body.issuerUrl !== existing.issuerUrl) {
+        const dropped = await dropProviderLinks(x, { kind: "oidc", id: providerId, name: existing.name });
+        await auditAuth(x, req.authCtx.userId, providerId, "federated-identities-reset", "allow",
+          `OIDC provider '${existing.name}' issuer changed: ${dropped.identities} linked identit${dropped.identities === 1 ? "y" : "ies"} and ${dropped.requests} pending link request(s) removed — each person links again on their next sign-in`,
+          { phase: "provider-updated", name: existing.name, fromIssuer: existing.issuerUrl, toIssuer: body.issuerUrl, ...dropped },
+          "oidc_provider");
+      }
+      return row!;
+    };
+    if (body.enabled !== false) return publicProvider(await apply(db));
     // lockout guard: disabling the LAST enabled provider while sso_only is on
     // would strand every human login. ADR-0036 GENERALIZED the count to both
     // provider families — with a live SAML provider, disabling the last OIDC
     // one no longer strands anybody, and the guard must not pretend otherwise.
-    if (body.enabled === false && existing.enabled) {
-      const org = await loadOrgSettings(db);
-      if (org.ssoOnly) {
-        const remaining = await countEnabledSsoProviders(db, { oidcId: providerId });
-        if (remaining.total === 0) return reply.status(409).send(SSO_ONLY_LAST_PROVIDER);
+    // ADR-0174 (finding 5): nor while email sign-in is break-glass only.
+    // AER-056: re-read, check, write and audit under the invariant lock, so a
+    // concurrent disable/delete/demotion/mode change cannot pass the same count.
+    const out = await withSignInInvariant(db, async (tx, org) => {
+      const [current] = await tx.select({ enabled: oidcProviders.enabled }).from(oidcProviders).where(eq(oidcProviders.id, providerId));
+      if (!current) return { status: 404, body: { error: "unknown_provider" } } as const;
+      if (current.enabled) {
+        const refusal = await providerRemovalRefusal(tx, org, { kind: "oidc_provider", providerId });
+        if (refusal) return { status: 409, body: refusal } as const;
+        await signInInvariantChecked("oidc-provider-disable");
       }
-      // ADR-0174 (finding 5): nor while email sign-in is break-glass only
-      const glass = await breakGlassLockoutRefusal(db, org, { kind: "oidc_provider", providerId });
-      if (glass) return reply.status(409).send(glass);
-    }
-    const { clientSecret, ...rest } = body;
-    const [row] = await db
-      .update(oidcProviders)
-      .set({
-        ...rest,
-        ...(clientSecret ? { clientSecretCiphertext: encryptSecret(opts.dataKey!, clientSecret) } : {}),
-        updatedAt: new Date(),
-      })
-      .where(eq(oidcProviders.id, providerId))
-      .returning();
-    await auditAuth(db, req.authCtx.userId, null, "oidc-provider-updated", "allow",
-      `OIDC provider '${existing.name}' updated: ${Object.keys(body).join(", ")}`,
-      { phase: "provider-updated", name: existing.name, changed: Object.keys(body), secretRotated: Boolean(clientSecret) },
-      "oidc_provider");
-    // ADR-0174 (finding 6): a new issuer is a different identity provider —
-    // the subjects linked under the old one mean nothing under the new one
-    if (body.issuerUrl !== undefined && body.issuerUrl !== existing.issuerUrl) {
-      const dropped = await dropProviderLinks(db, { kind: "oidc", id: providerId, name: existing.name });
-      await auditAuth(db, req.authCtx.userId, providerId, "federated-identities-reset", "allow",
-        `OIDC provider '${existing.name}' issuer changed: ${dropped.identities} linked identit${dropped.identities === 1 ? "y" : "ies"} and ${dropped.requests} pending link request(s) removed — each person links again on their next sign-in`,
-        { phase: "provider-updated", name: existing.name, fromIssuer: existing.issuerUrl, toIssuer: body.issuerUrl, ...dropped },
-        "oidc_provider");
-    }
-    return publicProvider(row!);
+      return { row: await apply(tx, "oidc-provider-disable") };
+    });
+    if (out.status !== undefined) return reply.status(out.status).send(out.body);
+    return publicProvider(out.row);
   });
 
   app.delete("/v1/auth/oidc-providers/:providerId", async (req, reply) => {
     const { providerId } = providerParam.parse(req.params);
-    const [existing] = await db.select().from(oidcProviders).where(eq(oidcProviders.id, providerId));
-    if (!existing) return reply.status(404).send({ error: "unknown_provider" });
-    if (existing.enabled) {
-      const org = await loadOrgSettings(db);
-      if (org.ssoOnly) {
-        // ADR-0036: OIDC + SAML counted together (see countEnabledSsoProviders)
-        const remaining = await countEnabledSsoProviders(db, { oidcId: providerId });
-        if (remaining.total === 0) return reply.status(409).send(SSO_ONLY_LAST_PROVIDER);
+    // AER-056: the lookup, both lockout guards (ADR-0036 sso_only, ADR-0174
+    // break-glass), the delete and its audit row are one locked transaction
+    const out = await withSignInInvariant(db, async (tx, org) => {
+      const [existing] = await tx.select().from(oidcProviders).where(eq(oidcProviders.id, providerId));
+      if (!existing) return { status: 404, body: { error: "unknown_provider" } } as const;
+      if (existing.enabled) {
+        const refusal = await providerRemovalRefusal(tx, org, { kind: "oidc_provider", providerId });
+        if (refusal) return { status: 409, body: refusal } as const;
+        await signInInvariantChecked("oidc-provider-delete");
       }
-      // ADR-0174 (finding 5): nor while email sign-in is break-glass only
-      const glass = await breakGlassLockoutRefusal(db, org, { kind: "oidc_provider", providerId });
-      if (glass) return reply.status(409).send(glass);
-    }
-    await db.delete(oidcProviders).where(eq(oidcProviders.id, providerId));
-    await auditAuth(db, req.authCtx.userId, null, "oidc-provider-deleted", "allow",
-      `OIDC provider '${existing.name}' deleted`,
-      { phase: "provider-deleted", name: existing.name },
-      "oidc_provider");
+      await tx.delete(oidcProviders).where(eq(oidcProviders.id, providerId));
+      await signInInvariantWritten("oidc-provider-delete");
+      await auditAuth(tx, req.authCtx.userId, null, "oidc-provider-deleted", "allow",
+        `OIDC provider '${existing.name}' deleted`,
+        { phase: "provider-deleted", name: existing.name },
+        "oidc_provider");
+      return { removed: true } as const;
+    });
+    if (out.status !== undefined) return reply.status(out.status).send(out.body);
     return { removed: true };
   });
 

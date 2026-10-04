@@ -21,14 +21,101 @@
  * Separately, a demoted user's id is dropped from `break_glass_user_ids` in
  * the same request, so the list never names somebody who is no longer an admin
  * (a deactivated admin keeps their place: reactivation restores them).
+ *
+ * ── CONCURRENCY (AER-056) ───────────────────────────────────────────────────
+ * A count is only a promise about the rows it read. Two administrative writes
+ * that each check "somebody would remain" and then commit separately can both
+ * pass — two admins demoting the two break-glass admins, an OIDC and a SAML
+ * provider disabled at once, SCIM deactivating one spare key while the admin
+ * API demotes the other, the mode engaged while the last provider is removed —
+ * and leave nobody. So every writer that can REDUCE either door, and the
+ * writer that engages or re-points the mode, runs its re-read, its check, its
+ * mutation and its audit row inside ONE transaction that first takes
+ * `pg_advisory_xact_lock(SIGN_IN_INVARIANT_LOCK_KEY)` (`withSignInInvariant`).
+ * The second writer waits on the lock, and under READ COMMITTED each of its
+ * later statements reads a fresh snapshot taken after the first committed, so
+ * it counts what really remains and gets the named refusal. The lock is
+ * released at COMMIT or ROLLBACK, so a failed write (an audit insert that
+ * throws) leaves neither a half-applied change nor a held lock. The ADR-0036
+ * `sso_only` guard and the ADR-0022 "last active admin" guard share the lock:
+ * they are the same kind of count over the same rows.
  */
 import { and, eq, inArray, isNotNull, isNull, ne, orgSettings, ORG_SETTINGS_ID, sql, users, type Db, type OrgSettingsRow } from "@regulait/db";
-import { countEnabledSsoProviders } from "./sso-providers.js";
+import { countEnabledSsoProviders, SSO_ONLY_LAST_PROVIDER } from "./sso-providers.js";
+
+/** a transaction on the gateway's handle (it inherits the audit-chain wrapper) */
+export type SignInTx = Parameters<Parameters<Db["transaction"]>[0]>[0];
+
+/**
+ * The advisory-lock key every sign-in-invariant writer serializes on. One
+ * global key, because the invariant is one global question ("can somebody
+ * still sign in?") over org_settings, users, oidc_providers and
+ * saml_providers. Arbitrary but fixed — `174` is the ADR — and distinct from
+ * `AUDIT_CHAIN_LOCK_KEY` (6_000_000_060) and `HEALTH_PROBE_CLAIM_LOCK_KEY`
+ * (6_000_000_037). Lock order: this one FIRST; the audit-chain lock (taken by
+ * the audit insert at the end) after it — never the other way round.
+ */
+export const SIGN_IN_INVARIANT_LOCK_KEY = 6_000_000_174;
+
+/** which writer reached the checked-but-not-yet-written point */
+export type SignInInvariantSite =
+  | "oidc-provider-disable"
+  | "oidc-provider-delete"
+  | "saml-provider-disable"
+  | "saml-provider-delete"
+  | "user-deactivate"
+  | "user-demote"
+  | "scim-deactivate"
+  | "org-settings";
+
+/**
+ * AER-056 — TEST-ONLY seams. Production never sets them. `checked` parks a
+ * writer after its invariant check and before its first write (where a race
+ * would bite), so a test can hold two writers there with a barrier;
+ * `written` runs after the mutation and before the audit row, so a test can
+ * inject a failure and prove that mutation and audit commit or roll back
+ * together.
+ */
+export const signInInvariantTestHooks: {
+  checked?: (site: SignInInvariantSite) => Promise<void>;
+  written?: (site: SignInInvariantSite) => Promise<void>;
+} = {};
+
+/** called by each writer between its check and its first write */
+export async function signInInvariantChecked(site: SignInInvariantSite): Promise<void> {
+  if (signInInvariantTestHooks.checked) await signInInvariantTestHooks.checked(site);
+}
+/** called by each writer between its mutation and its audit row */
+export async function signInInvariantWritten(site: SignInInvariantSite): Promise<void> {
+  if (signInInvariantTestHooks.written) await signInInvariantTestHooks.written(site);
+}
+
+/**
+ * Run `body` in a transaction that holds the sign-in invariant lock, with the
+ * org_settings singleton RE-READ after the lock was granted (so a mode or list
+ * change committed by the previous holder is what `body` sees). Everything
+ * `body` reads, checks, writes and audits through `tx` is one atomic unit.
+ */
+export async function withSignInInvariant<T>(
+  db: Db,
+  body: (tx: SignInTx, org: OrgSettingsRow) => Promise<T>,
+): Promise<T> {
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(${SIGN_IN_INVARIANT_LOCK_KEY})`);
+    let [org] = await tx.select().from(orgSettings).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+    if (!org) {
+      await tx.insert(orgSettings).values({ id: ORG_SETTINGS_ID }).onConflictDoNothing();
+      [org] = await tx.select().from(orgSettings).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+    }
+    if (!org) throw new Error("org_settings singleton missing");
+    return body(tx, org);
+  });
+}
 
 /** break-glass admins who could sign in right now, optionally ignoring one
  * user who is about to be demoted or deactivated */
 export async function usableBreakGlassAdmins(
-  db: Db,
+  db: Pick<Db, "select">,
   ids: readonly string[] | null,
   exceptUserId?: string,
 ): Promise<number> {
@@ -67,7 +154,7 @@ export type BreakGlassChange =
 
 /** null = the change keeps somebody able to sign in; otherwise the 409 body */
 export async function breakGlassLockoutRefusal(
-  db: Db,
+  db: Pick<Db, "select">,
   org: OrgSettingsRow,
   change: BreakGlassChange,
 ): Promise<typeof BREAK_GLASS_LAST_ADMIN | typeof BREAK_GLASS_LAST_SSO_PROVIDER | null> {
@@ -84,8 +171,30 @@ export async function breakGlassLockoutRefusal(
   return remaining.total === 0 ? BREAK_GLASS_LAST_SSO_PROVIDER : null;
 }
 
+/**
+ * Both refusals a provider disable/delete can meet, in the order the routes
+ * have always answered them: ADR-0036 `sso_only` (the last enabled provider
+ * while password login is off), then ADR-0174 break-glass. Call it inside
+ * `withSignInInvariant`, with the org row and transaction it hands you, and
+ * only for a provider that is enabled as re-read under the lock.
+ */
+export async function providerRemovalRefusal(
+  tx: Pick<Db, "select">,
+  org: OrgSettingsRow,
+  change: Extract<BreakGlassChange, { kind: "oidc_provider" | "saml_provider" }>,
+): Promise<typeof SSO_ONLY_LAST_PROVIDER | typeof BREAK_GLASS_LAST_SSO_PROVIDER | null> {
+  if (org.ssoOnly) {
+    const remaining = await countEnabledSsoProviders(
+      tx,
+      change.kind === "oidc_provider" ? { oidcId: change.providerId } : { samlId: change.providerId },
+    );
+    if (remaining.total === 0) return SSO_ONLY_LAST_PROVIDER;
+  }
+  return breakGlassLockoutRefusal(tx, org, change);
+}
+
 /** drop a user from the break-glass list (on demotion); true when they were on it */
-export async function dropBreakGlassUser(db: Db, userId: string): Promise<boolean> {
+export async function dropBreakGlassUser(db: Pick<Db, "update">, userId: string): Promise<boolean> {
   const updated = await db
     .update(orgSettings)
     .set({ breakGlassUserIds: sql`${orgSettings.breakGlassUserIds} - ${userId}::text` })
