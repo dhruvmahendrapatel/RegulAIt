@@ -98,3 +98,17 @@ Everything else goes into `PathForward.md`: extensions to PF-02..PF-14 and new i
   agents"); detectors are called detectors; energy figures are estimates. Standard IDs are checked against the source
   before committing.
 - Batches D1–D4 interleave with ADR-0173 batch 2c. A1 runs now because it corrects published evidence.
+
+## Amendment — batch D1 built (2026-10-04)
+
+- `nist-ai-rmf@3`: 31 controls, 25 evidenced by existing collectors (every audit filter checked against a rule id the
+  gateway really writes) and 6 attestation-required (GOVERN 1.1, 2.2, 2.3, 3.1, 4.1, and MEASURE 2.4 until a
+  trace-evaluation collector exists). v1/v2 are pinned by content hash in a test. MEASURE 2.7 now counts red-team runs,
+  not evaluation runs. MAP 2.2 is left out until model-card sign-off requires the limitations field. The remaining
+  subcategories are not mapped yet, because every mapped control counts as applicable on the trust dashboard.
+- Corrected refs in intake suggestions (bias → MEASURE 2.11, tool misuse → MANAGE 2.4, over-permissioning → GOVERN 2.1,
+  hallucination → MEASURE 2.5, shadow AI → GOVERN 1.6), the demo scenario library, fixtures, regulatory updates, the demo
+  model card and the runbook. A guard test checks every NIST AI RMF reference against the 72 IDs.
+- The pack scorecard shows coverage (controls checked ÷ mapped) beside the pass rate (passing ÷ checked). With nothing
+  checked, the pass rate reads "unknown".
+- Owner decision (2026-10-04): ship v3 before the 2026-10-05 demo and update the demo script's trust-dashboard figures.
