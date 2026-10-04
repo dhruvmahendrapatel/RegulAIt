@@ -245,6 +245,48 @@ describe("enforced in the shared model-access decision, per feature", () => {
     });
   });
 
+  it("a fallback hop the matrix forbids is skipped as DENIED, never served", async () => {
+    const primaryModel = `mpol-primary-model-${k.RUN}`;
+    const p = await k.req("POST", "/v1/agents", k.BOOT, {
+      name: `mpol-primary-${k.RUN}`, provider: "mock", tier: 1, modes: ["chat"], model: primaryModel,
+    });
+    expect(p.statusCode, p.body).toBe(201);
+    const PRIMARY = p.json().id as string;
+    await k.grantModel(owner.id, PRIMARY);
+    const chain = await k.req("PUT", `/v1/agents/${PRIMARY}/fallbacks`, k.BOOT, { fallbackAgentIds: [BLOCKED] });
+    expect(chain.statusCode, chain.body).toBe(200);
+    // fails ONLY on the primary's model id, so the hop would answer
+    const failPrimary = async () =>
+      executeGovernedDispatch(k.db, "a".repeat(64), {
+        userId: owner.id,
+        served: await agentRow(PRIMARY),
+        requestedAgentId: PRIMARY,
+        input: `please answer <<upstream-error:${primaryModel}>>`,
+        mode: "chat",
+        modelFeature: { feature: "chat" },
+      });
+    try {
+      await withPolicy([only("chat", [PRIMARY])], async () => {
+        const out = await failPrimary();
+        expect(out.ok).toBe(false);
+        if (!out.ok) {
+          expect(out.fallback?.hops).toEqual([
+            expect.objectContaining({ agentId: BLOCKED, outcome: "denied" }),
+          ]);
+          expect(out.fallback?.servedAgentId).toBeNull();
+        }
+      });
+      // positive control: the same chain serves from the hop when the matrix allows it
+      await withPolicy([only("chat", [PRIMARY, BLOCKED])], async () => {
+        const out = await failPrimary();
+        expect(out.ok, JSON.stringify(out)).toBe(true);
+        if (out.ok) expect(out.result.servedAgentId).toBe(BLOCKED);
+      });
+    } finally {
+      await k.req("PUT", `/v1/agents/${PRIMARY}/fallbacks`, k.BOOT, { fallbackAgentIds: [] });
+    }
+  });
+
   it("copilot narration: refused model_not_allowed_for_feature and audited; the allowed narrator runs", async () => {
     await withPolicy([only("copilot", [ALLOWED])], async () => {
       const r = await k.req("POST", "/v1/copilot/ask", owner.auth, { question: "spend this month?", narratorAgentId: BLOCKED });
