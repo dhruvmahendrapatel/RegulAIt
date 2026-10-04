@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import {
   bindingsFromGranted,
   bindingsFromRegistry,
+  classifyRunFailure,
   filterBindings,
   providerChips,
   providerLabel,
@@ -132,5 +133,30 @@ describe("filterBindings / providerChips", () => {
       ["Mock", 1],
       ["OpenAI", 1],
     ]);
+  });
+});
+
+describe("classifyRunFailure: only a governance refusal is 'Refused'", () => {
+  it("a 403 carrying the deciding rule is a refusal, with its rule and reason", () => {
+    expect(classifyRunFailure(403, { decision: { effect: "deny", ruleId: "no-grant", reason: "no grant" } }, "x")).toEqual({
+      kind: "refused",
+      ruleId: "no-grant",
+      reason: "no grant",
+    });
+    expect(classifyRunFailure(403, { error: "pii_blocked", ruleId: "pii-block", detail: "an email address" }, "x")).toEqual({
+      kind: "refused",
+      ruleId: "pii-block",
+      reason: "an email address",
+    });
+  });
+
+  it("a network failure, a 5xx, a 409 and a 403 without a rule are 'Couldn't run' with the code", () => {
+    expect(classifyRunFailure(null, null, "offline")).toEqual({ kind: "error", code: "network", message: "offline", status: null });
+    expect(classifyRunFailure(502, { error: "model_dispatch_failed" }, "upstream")).toMatchObject({ kind: "error", code: "model_dispatch_failed", status: 502 });
+    expect(classifyRunFailure(500, {}, "boom")).toMatchObject({ kind: "error", code: "HTTP 500" });
+    expect(classifyRunFailure(409, { error: "agent_suspended" }, "suspended")).toMatchObject({ kind: "error", code: "agent_suspended" });
+    expect(classifyRunFailure(403, { error: "forbidden" }, "no")).toMatchObject({ kind: "error", code: "forbidden" });
+    // an ALLOW decision on an error response is not a refusal either
+    expect(classifyRunFailure(403, { decision: { effect: "allow", ruleId: "grant-direct" } }, "x").kind).toBe("error");
   });
 });

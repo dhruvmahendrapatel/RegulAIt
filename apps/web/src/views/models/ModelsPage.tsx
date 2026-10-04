@@ -27,6 +27,7 @@ import {
   bindingsFromGranted,
   bindingsFromRegistry,
   filterBindings,
+  classifyRunFailure,
   providerChips,
   type BindingRow,
   type ModelBinding,
@@ -230,22 +231,11 @@ function TryIt(props: { binding: ModelBinding | null; bindings: ModelBinding[]; 
       setRun({ kind: "ok", result, latencyMs: performance.now() - t0 });
     } catch (e) {
       const latencyMs = performance.now() - t0;
-      if (e instanceof ApiError) {
-        const decision = e.payload.decision as InvokeResult["decision"] | undefined;
-        if (e.status === 403 && decision && decision.effect !== "allow" && !e.payload.error) {
-          setRun({ kind: "refused", ruleId: decision.ruleId, reason: decision.reason ?? null, latencyMs });
-        } else {
-          setRun({
-            kind: "error",
-            code: typeof e.payload.error === "string" ? e.payload.error : `HTTP ${e.status}`,
-            message: e.message,
-            status: e.status,
-            latencyMs,
-          });
-        }
-      } else {
-        setRun({ kind: "error", code: "network", message: codeSentence("network"), status: null, latencyMs });
-      }
+      const failure =
+        e instanceof ApiError
+          ? classifyRunFailure(e.status, e.payload as Record<string, unknown>, e.message)
+          : classifyRunFailure(null, null, codeSentence("network"));
+      setRun({ ...failure, latencyMs });
     }
   };
 
@@ -366,10 +356,11 @@ function RunResult(props: { run: RunState; bindings: ModelBinding[]; requestedId
     );
   }
   if (run.kind === "error") {
+    // not a governance decision: a neutral state with the code, never "Refused"
     return (
-      <div className={`${s.result} ${s.resultRefused}`} data-testid="run-result" role="alert">
+      <div className={s.result} data-testid="run-result" role="status">
         <div className={s.resultHead}>
-          <Badge tone="danger">Refused</Badge>
+          <Badge tone="neutral">Couldn&apos;t run</Badge>
           <span className={s.mono}>{run.code}</span>
           {run.status != null && <span className={s.stat}>HTTP {run.status}</span>}
           <span className={s.grow} />

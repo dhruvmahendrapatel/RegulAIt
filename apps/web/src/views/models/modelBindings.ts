@@ -176,3 +176,38 @@ export function providerChips(list: readonly ModelPickerAgent[]): Array<{ provid
   }
   return [...by.values()].sort((a, b) => a.label.localeCompare(b.label));
 }
+
+// ---------------------------------------------------------------------------
+// a failed Run, classified
+// ---------------------------------------------------------------------------
+
+export type RunFailure =
+  | { kind: "refused"; ruleId: string; reason: string | null }
+  | { kind: "error"; code: string; message: string; status: number | null };
+
+/**
+ * What a failed Run SAYS. Only a governance refusal — a 403 that carries the
+ * deciding rule (the invoke path's `{ decision }`, or a core refusal naming its
+ * `ruleId`) — is "Refused". Everything else (a network failure, a 5xx, a 409
+ * lifecycle state, a missing credential) is a neutral "Couldn't run" with its
+ * code: calling a transport error a governance decision would be a false
+ * accusation of the policy, and would hide an outage.
+ */
+export function classifyRunFailure(
+  status: number | null,
+  payload: Record<string, unknown> | null,
+  message: string,
+): RunFailure {
+  if (status === 403 && payload) {
+    const decision = payload["decision"] as { effect?: string; ruleId?: string; reason?: string | null } | undefined;
+    if (decision && decision.effect !== "allow" && typeof decision.ruleId === "string") {
+      return { kind: "refused", ruleId: decision.ruleId, reason: decision.reason ?? null };
+    }
+    if (typeof payload["ruleId"] === "string") {
+      const detail = payload["detail"];
+      return { kind: "refused", ruleId: payload["ruleId"] as string, reason: typeof detail === "string" ? detail : message };
+    }
+  }
+  const code = payload && typeof payload["error"] === "string" ? (payload["error"] as string) : status != null ? `HTTP ${status}` : "network";
+  return { kind: "error", code, message, status };
+}
