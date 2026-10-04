@@ -25,6 +25,8 @@ export interface NavEntry {
 export const WORKSPACE: NavEntry[] = [
   { label: "Home", to: "/" },
   { label: "Chat", to: "/chat" },
+  // ADR-0172: every model a person may use, as a portal — pick, try, copy the code
+  { label: "Models", to: "/models" },
   { label: "Runs", to: "/runs" },
   { label: "Workflows", to: "/workflows" },
   { label: "Inbox", to: "/inbox" },
@@ -330,6 +332,24 @@ export interface Suite {
 
 /** The workspace section, minus Home — Home is the launcher itself and renders
  *  as the sidebar's constant affordance, never as a suite entry. */
+/**
+ * ADR-0172 — the agent builder: a separate suite where people compose governed
+ * agents (instructions, tools, sub-agents, skills, memory, schedules, channels)
+ * without code. Every agent built here still runs through the gateway as the
+ * person using it — their entitlements, budgets and approvals apply.
+ */
+export const BUILDER: NavEntry[] = [
+  { label: "Chat", to: "/builder" },
+  { label: "Inbox", to: "/builder/inbox" },
+  { label: "Agents", to: "/builder/agents" },
+  { label: "Templates", to: "/builder/templates" },
+  { label: "Integrations", to: "/builder/integrations" },
+  { label: "Skills", to: "/builder/skills" },
+  { label: "Usage", to: "/builder/usage" },
+];
+
+const BUILDER_SECTION = { group: "Agent builder", items: BUILDER };
+
 const WORKSPACE_SECTION = {
   group: "Workspace",
   items: WORKSPACE.filter((n) => n.to !== "/"),
@@ -360,6 +380,13 @@ export const SUITES: Suite[] = [
     purpose: "Chat, runs, workflows, projects and your own spend.",
     admin: false,
     sections: [WORKSPACE_SECTION],
+  },
+  {
+    id: "agent-builder",
+    name: "Agent Builder",
+    purpose: "Build governed agents without code — instructions, tools, skills, memory and schedules.",
+    admin: false,
+    sections: [BUILDER_SECTION],
   },
   {
     id: "ai-governance",
@@ -495,6 +522,8 @@ export function SuiteGlyph(props: { suiteId: string }) {
   };
   const path = (() => {
     switch (props.suiteId) {
+      case "agent-builder": // a spark over a small agent — compose, then run
+        return <path {...p} d="M8 10h8a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2zm2.5 4h.01m3 0h.01M12 10V7m0 0l-1.5-1.5M12 7l1.5-1.5M17.5 4.5v2m-1-1h2" />;
       case "ai-governance": // shield — the governance posture over every call
         return <path {...p} d="M12 4l7 2.6v5.1c0 4.2-2.9 7.1-7 8.3-4.1-1.2-7-4.1-7-8.3V6.6L12 4zm-2.6 8.2l1.9 1.9 3.4-3.6" />;
       case "access-reviews": // rotating review loop

@@ -9,6 +9,16 @@ import ForcedPasswordChange from "./views/auth/ForcedPasswordChange";
 import ForcedMfaEnroll from "./views/auth/ForcedMfaEnroll";
 import HomePage from "./views/home/HomePage";
 import ChatPage from "./views/chat/ChatPage";
+import BuilderChatPage from "./views/builder/BuilderChatPage";
+import BuilderInboxPage from "./views/builder/BuilderInboxPage";
+import BuilderAgentsPage from "./views/builder/BuilderAgentsPage";
+import BuilderAgentEditorPage from "./views/builder/BuilderAgentEditorPage";
+import BuilderTemplatesPage from "./views/builder/BuilderTemplatesPage";
+import BuilderTemplateDetailPage from "./views/builder/BuilderTemplateDetailPage";
+import BuilderIntegrationsPage from "./views/builder/BuilderIntegrationsPage";
+import BuilderSkillsPage from "./views/builder/BuilderSkillsPage";
+import BuilderUsagePage from "./views/builder/BuilderUsagePage";
+import ModelsPage from "./views/models/ModelsPage";
 import RunsPage from "./views/runs/RunsPage";
 import RunDetailPage from "./views/runs/RunDetailPage";
 import WorkflowsPage from "./views/workflows/WorkflowsPage";
@@ -140,6 +150,16 @@ export default function App() {
               <Route element={<Protected />}>
                 <Route path="/" element={<HomePage />} />
                 <Route path="/chat" element={<ChatPage />} />
+                <Route path="/models" element={<ModelsPage />} />
+                <Route path="/builder" element={<BuilderChatPage />} />
+                <Route path="/builder/inbox" element={<BuilderInboxPage />} />
+                <Route path="/builder/agents" element={<BuilderAgentsPage />} />
+                <Route path="/builder/agents/:agentId" element={<BuilderAgentEditorPage />} />
+                <Route path="/builder/templates" element={<BuilderTemplatesPage />} />
+                <Route path="/builder/templates/:templateId" element={<BuilderTemplateDetailPage />} />
+                <Route path="/builder/integrations" element={<BuilderIntegrationsPage />} />
+                <Route path="/builder/skills" element={<BuilderSkillsPage />} />
+                <Route path="/builder/usage" element={<BuilderUsagePage />} />
                 <Route path="/runs" element={<RunsPage />} />
                 <Route path="/runs/:runId" element={<RunDetailPage />} />
                 <Route path="/workflows" element={<WorkflowsPage />} />
