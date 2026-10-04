@@ -416,8 +416,10 @@ export default function AppShell(props: { children: ReactNode }) {
             ☰
           </button>
           {/* No "regulAIt workspace" label: the lockup in the rail already
-              says whose product this is, and the topbar is part of the canvas. */}
-          <span className={s.topbarSpacer} />
+              says whose product this is, and the topbar is part of the canvas.
+              ADR-0173 §4: the search sits at the START of the bar, where the
+              page beneath holds its title rather than its actions, so the
+              sticky bar never lays a control over a page's own buttons. */}
           <button
             type="button"
             className={s.searchBtn}
@@ -432,6 +434,7 @@ export default function AppShell(props: { children: ReactNode }) {
               {typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘K" : "Ctrl K"}
             </kbd>
           </button>
+          <span className={s.topbarSpacer} />
           <button
             className={s.iconBtn}
             aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
