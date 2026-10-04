@@ -44,15 +44,24 @@
   display: block;
   margin-bottom: 4px;
 }
+/* every control in the grid is a 20px target with room around it (WCAG 2.5.8) */
+.matrix input[type="checkbox"],
+.matrix input[type="radio"] {
+  width: 20px;
+  height: 20px;
+  margin: 3px;
+  vertical-align: middle;
+}
 .restrict,
 .cellRadio {
-  display: inline-flex;
+  display: flex;
+  justify-content: center;
   align-items: center;
   gap: 4px;
   font-weight: 400;
   font-size: var(--text-xs);
   color: var(--text-dim);
-  margin: 0 4px;
+  margin: 4px 0 0;
 }
 .providerRow th,
 .providerRow td {
@@ -156,5 +165,11 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  min-height: 28px;
   font-size: var(--text-sm);
+}
+.classCheck input[type="checkbox"] {
+  width: 20px;
+  height: 20px;
+  margin: 3px;
 }

@@ -228,7 +228,7 @@ function TryIt(props: { binding: ModelBinding | null; bindings: ModelBinding[]; 
         : !prompt.trim()
           ? "Write a request first."
           : null;
-  const usableIn = props.policy?.rules.length ? allowedFeatures(props.policy, b) : null;
+  const usableIn = props.policy?.rules?.length ? allowedFeatures(props.policy, b) : null;
 
   const send = async () => {
     setRunFor(b.id);

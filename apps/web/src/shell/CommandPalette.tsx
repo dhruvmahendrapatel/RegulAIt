@@ -150,7 +150,9 @@ function PaletteDialog(props: { onClose: () => void; isAdmin: boolean; userId: s
 
   const open = (item: PaletteItem | undefined) => {
     if (!item) return;
-    setRecent((r) => pushRecent(r, item.key));
+    // written NOW, not in a state updater: closing unmounts this dialog in the
+    // same batch, and an updater queued on an unmounting component never runs
+    setRecent(pushRecent(recent, item.key));
     props.onClose();
     navigate(item.to);
   };

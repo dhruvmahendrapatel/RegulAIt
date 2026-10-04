@@ -75,7 +75,7 @@ export function ruleFor(
   feature: ModelPolicyFeature,
   dataClass: ModelPolicyDataClass | null,
 ): ModelPolicyRule | undefined {
-  return policy.rules.find((r) => r.feature === feature && (r.dataClass ?? null) === dataClass);
+  return (policy.rules ?? []).find((r) => r.feature === feature && (r.dataClass ?? null) === dataClass);
 }
 
 function admits(rule: ModelPolicyRule | undefined, binding: { id: string; provider: string }): boolean {
@@ -134,7 +134,11 @@ export function useModelPolicy(enabled = true) {
   return useQuery({
     queryKey: MODEL_POLICY_KEY,
     enabled,
-    queryFn: () => api.get<ModelPolicyView>("/v1/model-policy"),
+    // a body without a rules array reads as the empty policy, never a crash
+    queryFn: async (): Promise<ModelPolicyView> => {
+      const r = await api.get<Partial<ModelPolicyView>>("/v1/model-policy");
+      return { ...r, rules: Array.isArray(r?.rules) ? r.rules : [] };
+    },
     staleTime: 30_000,
   });
 }
