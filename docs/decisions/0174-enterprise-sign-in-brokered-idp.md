@@ -112,3 +112,24 @@ leave no usable break-glass admin or no enabled SSO provider. Rules as built:
   the lock. The races covered: demote/deactivate of the two break-glass admins, OIDC and SAML disable/delete mixed,
   SCIM against the admin API, and engaging the mode while the last provider is removed. Injected-failure cases check
   that the audit row and the state stay consistent.
+
+## Amendment — the demo password under Docker Compose (2026-10-04)
+
+`docker compose up` seeded the demo but installed no licence, so `demo:set-passwords` (item 8) always refused
+under Docker. One opt-in switch now covers that: **`REGULAIT_DEMO_LICENSE=1`** in the `.env` next to
+`docker-compose.yml`. The image's start script (`apps/gateway/docker-start.sh`, now the Dockerfile `CMD`) then sets
+`REGULAIT_EPHEMERAL_LICENSE=1` and `REGULAIT_LICENSE_KEYRING=/app/demo-license-keys` for the seed and the gateway.
+That directory is a named volume (`demo_license_keys`), so the licence still verifies after a restart or `down` /
+`up`. The rules:
+
+- Only the exact value `1` counts, and only with `SEED_DEMO=1` and a `hosted` (or unset) `REGULAIT_DEPLOY_MODE`.
+  With any other value neither variable is set, the gateway reads its default keyring, and no licence is minted:
+  the old `CMD` exactly. `scripts/install.sh` refuses the switch and pins it to `"0"` in its override.
+- The licence is still the seeder's ephemeral one. Its private key is never written. It runs for 30 days, its
+  tenant says "NOT A PRODUCTION DEPLOYMENT", and `demo:set-passwords` still refuses with no licence, an expired
+  one, or a customer licence.
+- The seed runs on every boot. It now keeps a licence that is valid, has more than 7 days left and verifies under
+  the keyring, instead of minting a new one each time (`ephemeral-license.ts`). Persona passwords that are already
+  set are left alone, as before.
+- The password goes from the presenter's shell into one `docker compose exec -e REGULAIT_DEMO_USER_PASSWORD`
+  process (README, "Demo with your own password (Docker)").
