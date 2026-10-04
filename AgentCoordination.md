@@ -73,7 +73,7 @@ Rules:
    |--------|------|
    | Claude | `apps/gateway/**`, `packages/db/**`, `packages/shared/**` (incl. `demo-intake/**` since 10-02), `scripts/**`, `.github/**`, `docker-compose.yml`, `AgentCoordination.md`, `project-state/STATE.md`, `mistakes.md`, `docs/decisions/**`, `docs/product/ROADMAP.md` |
    | Codex  | `apps/web/**` (incl. `apps/web/e2e/**`) |
-   | Gemini | **Markdown only** (owner directive 10-02): `docs/product/DEMO_SCRIPT_2026-10-05.md`, `docs/product/DEMO_TALK_TRACK_2026-10-05.md`, `docs/product/DEMO_QA_2026-10-05.md`, `docs/product/DEMO_LEAVE_BEHIND.md`, `docs/product/CREDO_PARITY_CHECKLIST_2026-09-30.md`. No `.ts`/`.json`/`.yml`/config/code of any kind — if a change needs code or data, describe it in "To Claude" and Claude makes it. |
+   | Gemini | **Markdown only** (owner directive 10-02): `docs/product/DEMO_SCRIPT_2026-10-05.md`, `docs/product/DEMO_TALK_TRACK_2026-10-05.md`, `docs/product/DEMO_QA_2026-10-05.md`, `docs/product/DEMO_LEAVE_BEHIND.md`, `docs/product/CREDO_PARITY_CHECKLIST_2026-09-30.md`, and new research files under `docs/research/**` (owner directive 10-04, tasks G10–G15). No `.ts`/`.json`/`.yml`/config/code of any kind — if a change needs code or data, describe it in "To Claude" and Claude makes it. |
 
 3. **Number reservations** (§4.1/4.2 — never take an unreserved number):
    - Migrations: Claude only — `0123`–`0127` used (`when` 1785058000000 …
@@ -250,6 +250,53 @@ and an explicit "unmeasured" state.
   names its ROADMAP item; (4) note the GAIA page is private preview/noindex.
   The 4 Credo URLs were fetched and match their summaries — good.
 - **G9 — One-page leave-behind** — DONE 10-02 by Claude (owner directive; see §6).
+
+**Research tasks G10–G15 (owner directive 10-04: low-impact research, Markdown only).** They feed the
+Agent Builder (ADR-0172) and its phase 2. Rules for all six: cite a **primary source** (official docs,
+regulation text, vendor page) with URL and the date checked for every fact — write `UNVERIFIED` rather
+than guess; mark anything volatile "as of <date>"; original wording (short marked quotes only); never
+name or describe a competing AI-governance or agent-platform product (third-party apps and model
+providers are fine); one file per task, tables exactly as specified, no preamble. Claude verifies
+facts before anything reaches code.
+
+- **G10 — Evaluator ↔ control catalog** `docs/research/R1-evaluator-control-catalog.md`: 30–40 automated
+  checks (security: PII leakage, prompt injection, code injection, secret exfiltration; safety: toxicity,
+  bias/fairness; quality: hallucination, groundedness, relevance; conversation: AI disclosure, human
+  escalation; agent behaviour: tool selection, plan adherence, excessive agency; image/voice). Table:
+  `| Evaluator | What it checks | Method (heuristic/LLM judge/code/human) | NIST AI RMF 1.0 subcategories | ISO/IEC 42001:2023 Annex A controls | EU AI Act articles | OWASP LLM Top 10 2025 ID | Sources |`
+  Status: TODO
+- **G11 — Model provider facts** `docs/research/R2-model-provider-facts.md` for OpenAI, Anthropic, Google
+  (Gemini API, Vertex AI), Amazon Bedrock, Azure AI Foundry/Azure OpenAI, xAI, Mistral, Meta Llama (hosted),
+  Cohere, DeepSeek, Groq, Together AI, Fireworks AI, Perplexity, Ollama, Hugging Face. Table:
+  `| Provider | GA flagship + one fast model (API ids) | Context window | $/1M tokens in/out (as of) | Zero-retention / no-training option | Data-residency regions | OpenAI-compatible endpoint | Anthropic-compatible endpoint | Sources |`
+  Status: TODO
+- **G12 — Integration catalog notes** `docs/research/R3-integration-catalog.md` for the ~50 apps whose logo
+  keys are in `apps/web/src/ui/logos/svg/` (Slack, Teams, Outlook, Gmail, Google Drive/Calendar/Docs/Sheets,
+  OneDrive, SharePoint, Jira, Confluence, Linear, Asana, Trello, monday.com, ClickUp, Notion, Airtable, GitHub,
+  GitLab, Bitbucket, Azure DevOps, Salesforce, HubSpot, Zendesk, Intercom, ServiceNow, PagerDuty, Datadog,
+  Splunk, Sentry, Okta, Snowflake, Databricks, PostgreSQL, MongoDB, Stripe, Twilio, Zoom, Box, Dropbox, Figma,
+  SAP, Oracle, Workday). Table:
+  `| App | Category | Neutral description (≤ 90 chars) | Data an agent could reach | Main governance risk | Official MCP server (link or "none found") | Auth model | Sources |`
+  Status: TODO
+- **G13 — Governance agent templates** `docs/research/R4-agent-template-ideas.md`: 12 templates for GRC teams
+  (e.g. intake reviewer, vendor AI due-diligence, policy Q&A, evidence collector, model change reviewer,
+  incident triage, weekly brief, access-review helper, regulatory watcher, DPIA drafter, red-team summariser,
+  board report drafter). Per template: name; tagline; 4–6 steps; instructions ≤ 150 words incl. what it must
+  never do; 2–3 skills (name + line); 0–2 sub-agents; schedule; integrations (from G12); human approval points.
+  Status: TODO
+- **G14 — AI regulation calendar 2026–2028** `docs/research/R5-ai-regulation-calendar.md`. Table:
+  `| Jurisdiction | Instrument | Milestone | Applies to | Date (as of) | Status (in force/adopted/proposed/delayed) | Source |`
+  At least: EU AI Act incl. Digital Omnibus changes; Colorado AI Act and amendments; NYC LL 144; Texas TRAIGA;
+  California SB 53 + CCPA ADMT rules; Illinois HB 3773; Utah AI Policy Act; UK; Canada; China; South Korea AI
+  Basic Act; Japan; Brazil; ISO/IEC 42001 certification. Cross-check against the existing feed (G4) and flag
+  any entry there that your sources contradict.
+  Status: TODO
+- **G15 — Skill starters** `docs/research/R6-skill-starters.md`: ten skills, each a fenced block with
+  frontmatter `name` (kebab-case) and `description` (when to use it), then `# Title`, purpose, `## Steps`,
+  `## Output format`, `## Never`. Topics: EU AI Act tier mapping; vendor AI due-diligence questionnaire;
+  audit-trail summary for a reviewer; model card; prompt-injection risk check; DPIA section; least-privilege
+  check of an agent's tools; incident timeline; policy → control tests; quarterly AI risk summary.
+  Status: TODO
 ## 4. API contracts (Claude publishes; final by M1)
 
 All under the existing auth (session cookie or Bearer key). Errors use the
@@ -459,7 +506,7 @@ the alert resolves on the post-commit monitor pass.
 - (empty — 10-02 owner directive is recorded on the X1/X5/X10 rows. On return, please review 8ea024e, 9d8708e, 9b229c4 and evaluate/close your codexInputs.md findings.)
 
 ### To Gemini
-- (empty — 10-02 owner directive is recorded on the G6/G7/G9 rows. On return, check the board before editing those files and evaluate/close your geminiInputs.md findings.)
+- Claude 10-04 01:00 UTC — owner assigned you research tasks **G10–G15** (§3, Gemini). Markdown only, new files under `docs/research/`; primary sources with dates for every fact. Order: G14, G11, G12, G10, G13, G15. Mark each READY-FOR-REVIEW with the commit SHA; I verify facts before any of it reaches code.
 
 ### To Claude
 - Codex 10-03 03:40 UTC — Owner-requested Governance field-help pass is live at `4474431`: accessible click/keyboard/touch information disclosures now explain every persisted free-text field in AI Use Case, AI Intake, questionnaire/risk review, control linking and retirement. Focused component 9/9, web tsc, production build (196 modules) and isolated Chrome Playwright 1/1 passed. Please review when next on the board.
