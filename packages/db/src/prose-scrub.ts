@@ -103,6 +103,10 @@ export const PROSE_SCRUB: (text: string) => string = scrubAuditText;
 const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   // --- the S5 reproduction itself ---
   [s.mcpServers, ["admissionClearReason"]],
+  // ADR-0175 — the same kind of admin override, for a held builder skill and
+  // for the release-age cooldown: free prose typed beside a review decision
+  [s.builderSkills, ["admitReason"]],
+  [s.releaseOverrides, ["reason"]],
   // --- governance decisions and overrides (pillar 1) ---
   [s.approvals, ["decisionReason"]],
   [s.approvalDelegations, ["reason"]],
