@@ -346,6 +346,10 @@ export async function runReencryptionWalk(db: Db, opts: ReencryptWalkOptions): P
       // against a concurrent credential edit; the watermark advance commits
       // with the rewrites or not at all.
       const finished = await db.transaction(async (tx) => {
+        // ADR-0175 A7: a re-encryption rewrites ciphertext, not the secret —
+        // tell migration 0142's `regulait_stamp_secret_set` trigger so the
+        // credential's "last set" date stays the date a human set it
+        await tx.execute(sql`SELECT set_config('regulait.secret_reencrypt', 'on', true)`);
         const where =
           `${c.column} IS NOT NULL` + (watermark ? ` AND id > '${watermark}'` : "");
         const res = await tx.execute(

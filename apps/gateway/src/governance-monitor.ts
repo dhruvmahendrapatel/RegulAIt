@@ -54,6 +54,7 @@ import {
   evaluateMonitorRules,
   reconcileAlerts,
   type MonitorAgentInput,
+  type MonitorCredentialInput,
   type MonitorServedModelInput,
   type MonitorTrafficInput,
   type MonitorVendorInput,
@@ -64,6 +65,7 @@ import { computeTrustDashboard } from "./trust-dashboard.js";
 import { ownershipFlagFor } from "./inventory.js";
 import { TRACE_EVAL_WINDOW_DAYS, traceSummaryForAgents } from "./trace-evaluation.js";
 import { notifyGovernanceAlerts } from "./chatops.js";
+import { computeCredentialInventory } from "./credential-inventory.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 
@@ -216,6 +218,9 @@ export async function runGovernanceMonitor(
     // ADR-0175 A4 / A9 — read from the usage ledger; both observe only
     servedModels: await servedModelsByAgent(db, now),
     traffic: await unregisteredTrafficInput(db, now),
+    // ADR-0175 A7 — always evaluated, so turning alerting off resolves the
+    // open episodes instead of stranding them
+    credentials: await staleCredentialsInput(db, now),
   });
 
   // -- reconcile -------------------------------------------------------------
@@ -324,6 +329,28 @@ export async function runGovernanceMonitor(
     refreshed: refreshedCount,
     resolved: resolvedCount,
     active: n,
+  };
+}
+
+/**
+ * ADR-0175 A7 — the credential inventory's flagged credentials. With the org's
+ * `stale_credential_alerts` off (the default) the rule is observe-only: the
+ * flags are on the inventory page and no episode is raised.
+ */
+export async function staleCredentialsInput(db: Db, now: Date): Promise<MonitorCredentialInput> {
+  const inv = await computeCredentialInventory(db, { now });
+  return {
+    alerting: inv.alerting,
+    credentials: inv.credentials
+      .filter((c) => c.flags.length > 0)
+      .map((c) => ({
+        id: c.id,
+        typeLabel: c.typeLabel,
+        name: c.name,
+        flags: c.flags,
+        reasons: c.flagReasons as Record<string, string>,
+        manageAt: c.manageAt,
+      })),
   };
 }
 

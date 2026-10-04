@@ -473,6 +473,8 @@ describe("6. the covered / NOT-covered inventory", () => {
     // ADR-0175: a held skill's admission reason and a release-age override reason
     "builder_skills.admit_reason",
     "release_overrides.reason",
+    // ADR-0175 A15: where an energy factor came from
+    "energy_factors.source_note",
     "agents.halted_reason",
     "agents.lifecycle_reason",
     "ai_endpoint_signatures.replacement_note",
