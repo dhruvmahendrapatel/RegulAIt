@@ -96,11 +96,24 @@ import {
   composeApprovalCard,
   composeDecidedCard,
   parseChatInteraction,
+  parseSlackEvent,
+  parseTeamsMessage,
+  SLACK_RETRY_NUM_HEADER,
   teamsActivityForCard,
+  teamsActivityFreshness,
   type ApprovalCard,
   verifyChatSignature,
   type ChatOpsProvider,
 } from "@regulait/shared";
+import {
+  acceptInboundMessage,
+  drainChannelWork,
+  registerBuilderChannelRoutes,
+  scheduleChannelWork,
+  type ChannelDeps,
+  type ChannelPoster,
+  type InboundResult,
+} from "./builder-channels.js";
 import {
   resolveConnectorProvider,
   SLACK_DEFAULT_BASE_URL,
@@ -439,6 +452,35 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
     actorUserId: string | null,
     label: string,
   ): Promise<{ ok: true; messageRef: string | null } | { ok: false; status: number; body: Record<string, unknown> }> {
+    // The SAME composed card, rendered for the provider that will show it. The
+    // fence decision is NOT re-taken here: `card.actions` is already empty when
+    // `chatDecidable` said no, and both renderers read that one field.
+    return postToChat(
+      conn,
+      channel,
+      (provider) =>
+        provider === "teams"
+          ? { op: "conversations.sendToConversation", ...teamsActivityForCard(card) }
+          : { op: "chat.postMessage", text: card.text, blocks: card.blocks },
+      actorUserId,
+      label,
+    );
+  }
+
+  /**
+   * THE ONE COURIER. Every chat post — an approval card, a decided card, a
+   * governance alert, a builder agent's reply (ADR-0173) — goes through here:
+   * the connector's own credential, the egress guard on every request URL, the
+   * connector-provider adapter. `payloadFor` only shapes the provider's message
+   * body; it cannot choose the destination host or skip the guard.
+   */
+  async function postToChat(
+    conn: typeof chatopsConnections.$inferSelect,
+    channel: string,
+    payloadFor: (provider: "slack" | "teams") => Record<string, unknown>,
+    actorUserId: string | null,
+    label: string,
+  ): Promise<{ ok: true; messageRef: string | null } | { ok: false; status: number; body: Record<string, unknown> }> {
     const [connector] = await db.select().from(connectors).where(eq(connectors.id, conn.connectorId));
     if (!connector) return { ok: false, status: 400, body: { error: "invalid_reference", detail: "the ChatOps connector was deleted" } };
     // ADR-0113 — TEAMS OUTBOUND EXISTS NOW. `connector-provider` grew a real
@@ -506,13 +548,7 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
       guarded.fetchImpl as unknown as Parameters<typeof resolveConnectorProvider>[1],
     );
 
-    // The SAME composed card, rendered for the provider that will show it. The
-    // fence decision is NOT re-taken here: `card.actions` is already empty when
-    // `chatDecidable` said no, and both renderers read that one field.
-    const payload =
-      conn.provider === "teams"
-        ? { op: "conversations.sendToConversation", ...teamsActivityForCard(card) }
-        : { op: "chat.postMessage", text: card.text, blocks: card.blocks };
+    const payload = payloadFor(conn.provider === "teams" ? "teams" : "slack");
 
     let result;
     try {
@@ -702,6 +738,29 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
     if (!ok) return reply.status(502).send({ error: "post_failed", detail: "see the chatops-alert-post-failed audit row" });
     return { posted: true, connection: conn.name, channel: body.channel ?? conn.defaultChannel };
   });
+
+  // =======================================================================
+  // ADR-0173 §2 — builder agents over chat: the reply courier and the routes
+  // =======================================================================
+
+  /** a builder agent's reply, threaded under the message it answers */
+  const postBuilderReply: ChannelPoster = (conn, input, actorUserId, label) =>
+    postToChat(
+      conn,
+      input.target,
+      (provider) =>
+        provider === "teams"
+          ? input.threadRef
+            ? { op: "conversations.replyToActivity", text: input.text, replyToId: input.threadRef }
+            : { op: "conversations.sendToConversation", text: input.text }
+          : { op: "chat.postMessage", text: input.text, ...(input.threadRef ? { thread_ts: input.threadRef } : {}) },
+      actorUserId,
+      label,
+    );
+  const channelDeps: ChannelDeps = { dataKey: opts.dataKey, post: postBuilderReply, log: app.log };
+  registerBuilderChannelRoutes(app, db);
+  // a closing app waits for the turns it already acknowledged
+  app.addHook("onClose", async () => drainChannelWork(db));
 
   // =======================================================================
   // Inbound: the callback. THE COURIER DELIVERS A REQUEST, NOT A DECISION.
@@ -898,6 +957,88 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
         via: conn.provider,
         ...(cardUpdate ? { cardUpdateError: cardUpdate } : {}),
       };
+    });
+
+    // =====================================================================
+    // ADR-0173 §2 — INBOUND CONVERSATIONS to builder agents.
+    //
+    // The same first walls as the interaction callback, in the same order and
+    // with the same cheapness rule: an unknown/disabled/send-only workspace and
+    // an unverifiable body are refused with a bare 401 before any write or any
+    // audit row. Everything after the platform is proved — de-duplication,
+    // routing, identity, visibility, the turn and the reply — lives in
+    // builder-channels.ts, and the turn runs AFTER the response.
+    // =====================================================================
+
+    type Verified = { conn: typeof chatopsConnections.$inferSelect; rawBody: string; headers: Record<string, string | undefined> };
+    const verifyInbound = async (
+      connectionName: string,
+      provider: "slack" | "teams",
+      rawBodyIn: unknown,
+      rawHeaders: Record<string, string | string[] | undefined>,
+    ): Promise<{ ok: true; v: Verified } | { ok: false; code?: string }> => {
+      const [conn] = await db.select().from(chatopsConnections).where(eq(chatopsConnections.name, connectionName));
+      // unknown, disabled, no data key, or a workspace of another provider:
+      // one indistinguishable 401, so a prober learns nothing
+      if (!conn || !conn.enabled || !opts.dataKey || conn.provider !== provider) return { ok: false };
+      // WALL 0 — no secret, no inbound (ADR-0121); refused before any decrypt
+      if (conn.signingSecretCiphertext === null) return { ok: false, code: "inbound_unsupported_by_design" };
+      const rawBody = typeof rawBodyIn === "string" ? rawBodyIn : "";
+      const headers: Record<string, string | undefined> = {};
+      for (const [k, v] of Object.entries(rawHeaders)) headers[k.toLowerCase()] = Array.isArray(v) ? v[0] : v;
+      // WALL 1 — signature (+ Slack's signed-timestamp replay window)
+      const sig = verifyChatSignature({
+        provider,
+        rawBody,
+        headers,
+        signingSecret: decryptSecret(opts.dataKey, conn.signingSecretCiphertext),
+        nowSeconds: now(),
+      });
+      if (!sig.ok) return { ok: false, code: sig.code };
+      return { ok: true, v: { conn, rawBody, headers } };
+    };
+
+    const run = (result: InboundResult) => {
+      if (result.work) scheduleChannelWork(db, result.work, app.log);
+      return result.ack;
+    };
+
+    scope.post("/v1/chatops/:connectionName/events", async (req, reply) => {
+      const { connectionName } = z.object({ connectionName: z.string().min(1).max(200) }).parse(req.params);
+      const checked = await verifyInbound(connectionName, "slack", req.body, req.headers);
+      if (!checked.ok) return reply.status(401).send({ error: "unauthenticated", ...(checked.code ? { code: checked.code } : {}) });
+      const { conn, rawBody, headers } = checked.v;
+
+      // WALL 2 — parse; unreadable is refused, never guessed
+      const parsed = parseSlackEvent(rawBody);
+      if (!parsed) return reply.status(400).send({ error: "unreadable_event" });
+      // Slack's handshake when the Events URL is saved — signed like any event
+      if (parsed.kind === "url_verification") return reply.status(200).send({ challenge: parsed.challenge });
+      if (parsed.kind === "ignored") return reply.status(200).send({ ok: true, ignored: parsed.reason });
+
+      const retryRaw = headers[SLACK_RETRY_NUM_HEADER];
+      const retryNum = retryRaw && /^\d{1,4}$/.test(retryRaw) ? Number(retryRaw) : null;
+      const ack = run(await acceptInboundMessage(db, channelDeps, conn, parsed.message, retryNum));
+      return reply.status(ack.status).send(ack.body);
+    });
+
+    scope.post("/v1/chatops/:connectionName/messages", async (req, reply) => {
+      const { connectionName } = z.object({ connectionName: z.string().min(1).max(200) }).parse(req.params);
+      const checked = await verifyInbound(connectionName, "teams", req.body, req.headers);
+      if (!checked.ok) return reply.status(401).send({ error: "unauthenticated", ...(checked.code ? { code: checked.code } : {}) });
+      const { conn, rawBody } = checked.v;
+
+      const parsed = parseTeamsMessage(rawBody);
+      if (!parsed) return reply.status(400).send({ error: "unreadable_message" });
+      // THE TEAMS REPLAY GUARD: the HMAC covers the body and the body carries
+      // the activity's timestamp, so a captured message re-sent after the
+      // window is refused here; one re-sent inside it is caught by the
+      // activity-id de-duplication record in builder-channels.ts.
+      const fresh = teamsActivityFreshness(parsed.timestamp, now());
+      if (!fresh.ok) return reply.status(401).send({ error: "unauthenticated", code: fresh.code });
+
+      const ack = run(await acceptInboundMessage(db, channelDeps, conn, parsed.message, null));
+      return reply.status(ack.status).send(ack.body);
     });
   });
 }

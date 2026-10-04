@@ -25,8 +25,8 @@ import s from "./builder.module.css";
 export const CHANNELS: Array<{ provider: BuilderChannelProvider; name: string; logo: string | null; sub: string }> = [
   { provider: "slack", name: "Slack", logo: "slack", sub: "Chat with the agent in Slack" },
   { provider: "teams", name: "Microsoft Teams", logo: "teams", sub: "Chat with the agent in Teams" },
-  { provider: "outlook", name: "Outlook", logo: "microsoft", sub: "Start the agent when an email arrives" },
-  { provider: "email", name: "Email", logo: null, sub: "Start the agent from a forwarding address" },
+  { provider: "outlook", name: "Outlook", logo: "microsoft", sub: "Send-only: an incoming email can't prove who sent it, so it never starts the agent" },
+  { provider: "email", name: "Email", logo: null, sub: "Send-only: an incoming email can't prove who sent it, so it never starts the agent" },
 ];
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -337,7 +337,7 @@ export function ConfigurePanel(props: { agent: BuilderAgentDetail; onOpenSkills:
 
       <Section title="Channels" icon={Icon.chat()} count={agent.channels.length || undefined}>
         <p className={s.small} style={{ margin: 0 }}>
-          Choose where people can reach this agent. A channel uses one of the workspace's chat connections; conversations arriving over channels come in a later release.
+          Choose where people can reach this agent. A channel uses one of the workspace's chat connections. In Slack and Teams, people whose chat account an admin has linked can mention the agent and get a reply in the thread; it runs with their own access, and anything needing a confirmation is finished here in RegulAIt. Email is send-only.
         </p>
         <ChannelRows agent={agent} disabled={ro} />
       </Section>
