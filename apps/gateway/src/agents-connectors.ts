@@ -647,11 +647,12 @@ export async function executeGovernedDispatch(
       await recordSkippedHop(label, reason, "fallback-hop-unavailable");
       continue;
     }
-    // RULE 2 — re-evaluate, never inherit. ADR-0173 §3: including the org's
-    // model allow-list for the caller's feature, when the caller named one.
+    // RULE 2 — re-evaluate, never inherit. (ADR-0173 §3: the org's model
+    // allow-list is applied to the hop by `dispatchOnce` below — the same
+    // served-binding check every attempt takes when the caller names its
+    // feature — and a refusal there is recorded as a DENIED hop.)
     const hopExecutionMode = await loadExecutionMode(db);
-    const hopPolicy = args.modelFeature ? await loadModelPolicy(db) : null;
-    const kernelDecision = evaluateAgent({
+    const decision = evaluateAgent({
       userId: args.userId,
       // ADR-0124 — a fallback hop is a real dispatch, so it is gated like one.
       // The hop agent's OWN halt matters most here: halting an agent must also
@@ -670,7 +671,6 @@ export async function executeGovernedDispatch(
       agentRevocations: revocationRows,
       ceilingTier,
     });
-    const decision = hopPolicy ? withModelPolicy(kernelDecision, hopPolicy, args.modelFeature, hopAgent) : kernelDecision;
     if (decision.effect !== "allow") {
       hops.push({ ...label, outcome: "denied", reason: decision.reason });
       await auditHop(label, "deny", "fallback-hop-denied", decision.reason, {
