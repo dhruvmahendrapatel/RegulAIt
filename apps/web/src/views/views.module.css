@@ -20,6 +20,13 @@
   grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: var(--s2);
 }
+/* cards side by side get the same 24px gutter as cards stacked */
+.grid2:has(> [data-rg-card]),
+.grid3:has(> [data-rg-card]),
+.grid4:has(> [data-rg-card]),
+.grid5:has(> [data-rg-card]) {
+  gap: var(--s3);
+}
 @media (max-width: 1100px) {
   .grid4 {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -45,12 +52,25 @@
   flex-direction: column;
   gap: var(--s2);
 }
+/* Calm comes from gutters between groups and hairlines within them: a stack
+   of cards (page sections) breathes at 24px; a stack of fields inside a card
+   keeps 16px. */
+.stack:has(> [data-rg-card]) {
+  gap: var(--s3);
+}
 /* vertical twin of .rowTight — an inline control plus its own error line */
 .stackTight {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
   gap: var(--s0);
+}
+/* A growing Field's 16rem basis is meant for rows; in a column it would be a
+   256px height. Two-attribute specificity so it wins over kit's .fieldGrow
+   whatever order the two stylesheets load in. */
+.stack > [data-rg-grow][class],
+.stackTight > [data-rg-grow][class] {
+  flex-basis: auto;
 }
 .row {
   display: flex;
@@ -75,9 +95,11 @@
   gap: var(--s0);
   min-width: 0;
 }
+/* KPI numerals: 20/600 — big enough to scan, never larger or heavier than
+   the card title above them. */
 .statValue {
-  font-size: var(--text-xl);
-  font-weight: 700;
+  font-size: 20px;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
   min-width: 0;
   overflow-wrap: anywhere;
@@ -89,11 +111,31 @@
   font-weight: 600;
   word-break: break-all;
 }
+/* Sentence case. Many stat labels are authored lower-case ("active seats"),
+   so the first letter is raised by CSS — the DOM text specs read is unchanged. */
 .statLabel {
-  font-size: var(--text-xs);
-  color: var(--text-faint);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-dim);
+}
+.statLabel::first-letter {
   text-transform: uppercase;
-  letter-spacing: 0.06em;
+}
+
+/* A KPI strip: the figures share one surface and are divided by hairlines,
+   never a row of separate Stat cards. */
+.kpiStrip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  row-gap: var(--s2);
+}
+.kpiStrip > * {
+  padding: 0 var(--s3);
+  border-left: 1px solid var(--border);
+}
+.kpiStrip > :first-child {
+  padding-left: 0;
+  border-left: 0;
 }
 
 .dim {
@@ -116,7 +158,7 @@
   display: flex;
   align-items: flex-start;
   gap: var(--s2);
-  padding: var(--s1) 0;
+  padding: 12px 0;
   border-bottom: 1px solid var(--border);
 }
 .listRow:last-child {
@@ -125,7 +167,7 @@
 
 .sectionTitle {
   font-size: var(--text-md);
-  font-weight: 650;
+  font-weight: 600;
   margin: var(--s3) 0 var(--s1);
 }
 
@@ -162,8 +204,8 @@
 .tile {
   display: flex;
   flex-direction: column;
-  gap: var(--s1);
-  padding: var(--s2);
+  gap: 6px;
+  padding: 12px;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background: var(--surface-1);
@@ -184,13 +226,27 @@
 .tile:hover .tileGlyph {
   color: var(--rg-signal-700);
 }
+/* glyph inline with the name: one header line per tile */
+.tileHead {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  min-width: 0;
+}
 .tileName {
-  font-weight: 650;
+  font-weight: 600;
   font-size: var(--text-md);
 }
+/* the purpose in at most two lines (one line cut most of the suite
+   questions mid-word); the full sentence is the title */
 .tileDesc {
   font-size: var(--text-sm);
   color: var(--text-dim);
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
 }
 .tileStat {
   margin-top: auto;
@@ -201,14 +257,13 @@
 }
 .tileStatValue {
   font-size: var(--text-lg);
-  font-weight: 700;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
 .tileStatLabel {
-  font-size: var(--text-xs);
-  color: var(--text-faint);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-dim);
 }
 
 /* A responsive row of stat tiles. `v.grid` is referenced by a dozen admin

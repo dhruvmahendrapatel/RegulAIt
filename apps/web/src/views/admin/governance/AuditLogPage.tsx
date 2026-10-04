@@ -24,6 +24,7 @@ import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Select, Table, type Tone } from "../../../ui/kit";
 import { useToast } from "../../../ui/toast";
 import { downloadCsv, optionEls, useAction, useUsers, userOpts } from "../adminKit";
+import k from "../../../ui/kit.module.css";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -99,6 +100,29 @@ export default function AuditLogPage() {
         title="Audit log"
         sub="Every governed decision, lifecycle action and settings change."
         info={<p>Every governed decision, lifecycle action and settings change lands here — one trail, all eight pillars. Filter by user and by deploy mode; the table loads the newest rows first and older ones on request, and the CSV export carries the full filtered trail.</p>}
+        actions={
+          <>
+            <Button
+              variant="ghost"
+              title="Download the FULL filtered trail, not only the rows loaded in the table"
+              onClick={() =>
+                void downloadCsv(`/v1/audit.csv${qs}`, "audit-log.csv", (msg) => toast(msg, "error"))
+              }
+            >
+              Download CSV
+            </Button>
+            <Button
+              variant="primary"
+              title="Download an offline-verifiable bundle containing the full filtered audit CSV, manifest, and signature"
+              onClick={() => {
+                const join = qs ? "&" : "?";
+                void downloadCsv(`/v1/audit.csv${qs}${join}signed=1`, "audit-log.signed.tar.gz", (msg) => toast(msg, "error"));
+              }}
+            >
+              Download signed bundle
+            </Button>
+          </>
+        }
       />
       <div className={v.stack}>
         <Card title="Retention">
@@ -118,7 +142,7 @@ export default function AuditLogPage() {
                 </span>
               </span>
               <span className={v.grow} />
-              <Button variant="danger" disabled={!ret.prunable} onClick={() => setConfirmPrune(true)}>
+              <Button disabled={!ret.prunable} onClick={() => setConfirmPrune(true)}>
                 Prune audit log
               </Button>
             </div>
@@ -139,38 +163,22 @@ export default function AuditLogPage() {
                 {optionEls(userOpts(users.data?.users), "— all users —")}
               </Select>
             </Field>
-            <Field label="Filter by deploy mode">
+            <Field
+              label="Filter by deploy mode"
+              helpLabel="a recorded deploy mode"
+              help={
+                <p>
+                  Only deploy-scoped actions — workflow deploys and rollbacks, governed infrastructure changes —
+                  carry a deploy mode. Other rows (tool calls, membership, settings) show <strong>none</strong>, and
+                  older rows recorded before deploy modes existed are never back-filled or guessed.
+                </p>
+              }
+            >
               <Select value={deployMode} onChange={(e) => setDeployMode(e.target.value)}>
                 {optionEls(MODE_OPTS, "— any mode —")}
               </Select>
             </Field>
-            <span className={v.grow} />
-            <Button
-              size="sm"
-              title="Download the FULL filtered trail, not only the rows loaded in the table"
-              onClick={() =>
-                void downloadCsv(`/v1/audit.csv${qs}`, "audit-log.csv", (msg) => toast(msg, "error"))
-              }
-            >
-              Download CSV
-            </Button>
-            <Button
-              size="sm"
-              variant="primary"
-              title="Download an offline-verifiable bundle containing the full filtered audit CSV, manifest, and signature"
-              onClick={() => {
-                const join = qs ? "&" : "?";
-                void downloadCsv(`/v1/audit.csv${qs}${join}signed=1`, "audit-log.signed.tar.gz", (msg) => toast(msg, "error"));
-              }}
-            >
-              Download signed bundle
-            </Button>
           </div>
-          <p className={v.faint}>
-            Only deploy-scoped actions — workflow deploys and rollbacks, governed infrastructure changes —
-            carry a deploy mode. Other rows (tool calls, membership, settings) show <strong>none</strong>, and
-            older rows recorded before deploy modes existed are never back-filled or guessed.
-          </p>
           <Table<AuditEntry & { rowKey: string }>
             columns={[
               {
@@ -182,23 +190,36 @@ export default function AuditLogPage() {
               {
                 key: "user",
                 header: "User",
-                render: (e) => actorLabel(e.userId, nameOf),
+                render: (e) => <span style={{ whiteSpace: "nowrap" }}>{actorLabel(e.userId, nameOf)}</span>,
               },
-              { key: "object", header: "Object", sort: (e) => e.objectType ?? "", render: (e) => (e.objectType ? humanize(e.objectType) : "—") },
+              {
+                // the event: the rule, with the object it touched as a faint prefix
+                key: "event",
+                header: "Event",
+                sort: (e) => `${e.objectType ?? ""} ${e.ruleId}`,
+                render: (e) => (
+                  <span style={{ whiteSpace: "nowrap" }} title={e.ruleId}>
+                    {e.objectType ? <span className={v.faint}>{humanize(e.objectType)} · </span> : null}
+                    {UUID_RE.test(e.ruleId) ? `Policy rule ${shortId(e.ruleId)}` : humanize(e.ruleId)}
+                  </span>
+                ),
+              },
               {
                 key: "effect",
                 header: "Effect",
                 sort: (e) => e.effect,
-                render: (e) => <Badge tone={effectTone(e.effect)}>{e.effect.replaceAll("_", " ")}</Badge>,
+                // the expected outcome is plain text; only a deny or a held action is tagged
+                render: (e) => e.effect === "allow"
+                  ? <span className={v.dim}>allow</span>
+                  : <Badge tone={effectTone(e.effect)}>{e.effect.replaceAll("_", " ")}</Badge>,
               },
-              { key: "rule", header: "Rule", render: (e) => <span style={{ whiteSpace: "nowrap" }} title={e.ruleId}>{UUID_RE.test(e.ruleId) ? `Policy rule ${shortId(e.ruleId)}` : humanize(e.ruleId)}</span> },
               {
                 key: "deployMode",
                 header: "Deploy mode",
                 sort: (e) => e.deployMode ?? "unknown",
                 render: (e) =>
                   e.deployMode ? (
-                    <Badge tone="info">{modeLabel(e.deployMode)}</Badge>
+                    <span>{modeLabel(e.deployMode)}</span>
                   ) : (
                     <span
                       className={v.dim}
@@ -208,7 +229,7 @@ export default function AuditLogPage() {
                     </span>
                   ),
               },
-              { key: "reason", header: "Reason", render: (e) => <span className={v.dim}>{e.reason ?? "—"}</span> },
+              { key: "reason", header: "Reason", render: (e) => <span className={`${v.dim} ${k.clamp2}`} title={e.reason ?? undefined}>{e.reason ?? "—"}</span> },
             ]}
             rows={rows}
             rowKey={(e) => e.rowKey}

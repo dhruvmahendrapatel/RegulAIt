@@ -38,6 +38,7 @@ import EvalsPage from "./views/admin/governance/EvalsPage";
 import ModelRiskPage from "./views/admin/governance/ModelRiskPage";
 import UseCasesPage from "./views/admin/governance/UseCasesPage";
 import IntakeWizardPage from "./views/admin/governance/IntakeWizardPage";
+import ReviewPolicyPage from "./views/admin/governance/ReviewPolicyPage";
 import TrustDashboardPage from "./views/admin/governance/TrustDashboardPage";
 import UseCaseOverviewPage from "./views/admin/governance/UseCaseOverviewPage";
 import GovernanceAlertsPage from "./views/admin/governance/GovernanceAlertsPage";
@@ -174,6 +175,7 @@ export default function App() {
                         {/* ADR-0080 */}
                         <Route path="use-cases" element={<UseCasesPage />} />
                         <Route path="governance/intake" element={<IntakeWizardPage />} />
+                        <Route path="governance/review-policy" element={<ReviewPolicyPage />} />
                         <Route path="governance/trust" element={<TrustDashboardPage />} />
                         <Route path="governance/use-cases/:id" element={<UseCaseOverviewPage />} />
                         <Route path="governance/use-cases" element={<Navigate to="/admin/use-cases" replace />} />

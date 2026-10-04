@@ -173,7 +173,12 @@ test("workflows: list and open a seeded instance (stage rail)", async () => {
   await expect(firstRow).toBeVisible();
   await firstRow.click();
 
-  await expect(page.getByText("Pipeline")).toBeVisible();
+  // wait for the DETAIL page before reading it: the list page also contains
+  // "Pipeline" text (a template type, a hint), and React Router 7 commits the
+  // navigation in a transition, so an immediate read on a slow runner still
+  // sees the list and fails as ambiguous (CI 37153859311)
+  await expect(page).toHaveURL(/\/workflows\/[0-9a-f-]{36}/);
+  await expect(page.getByText("Pipeline", { exact: true })).toBeVisible();
   // the same two pillar-8 / pillar-4 surfaces hang off a workflow instance
   await expect(page.locator("section", { hasText: "PM work items" }).first()).toBeVisible();
   await expect(page.locator("section", { hasText: "Decision ledger" }).first()).toBeVisible();

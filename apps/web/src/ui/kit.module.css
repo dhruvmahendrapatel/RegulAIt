@@ -12,7 +12,7 @@
   background: var(--surface-1);
   color: var(--text);
   font-size: var(--text-sm);
-  font-weight: 550;
+  font-weight: 600;
   line-height: 1.5;
   cursor: pointer;
   transition: background 120ms ease, border-color 120ms ease;
@@ -35,6 +35,30 @@
 .btnPrimary:hover:not(:disabled) {
   background: var(--primary-strong);
   border-color: var(--primary-strong);
+}
+/* Dark theme: the primary is TONAL — a Signal tint fill with Signal text and
+   edge — rather than a solid neon block that outshines the content. The
+   signal-700 on signal-tint pair is one brand-contract already measures
+   (8.5:1). Both dark selectors, matching tokens.css. */
+@media (prefers-color-scheme: dark) {
+  :global(:root:not([data-theme="light"])) .btnPrimary {
+    background: var(--rg-signal-tint);
+    border-color: var(--rg-signal-700);
+    color: var(--rg-signal-700);
+  }
+  :global(:root:not([data-theme="light"])) .btnPrimary:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--rg-signal) 22%, var(--rg-surface));
+    border-color: var(--rg-signal-700);
+  }
+}
+:global(:root[data-theme="dark"]) .btnPrimary {
+  background: var(--rg-signal-tint);
+  border-color: var(--rg-signal-700);
+  color: var(--rg-signal-700);
+}
+:global(:root[data-theme="dark"]) .btnPrimary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--rg-signal) 22%, var(--rg-surface));
+  border-color: var(--rg-signal-700);
 }
 .btnDanger {
   composes: btn;
@@ -72,12 +96,34 @@
   flex: 1 1 16rem;
   min-width: min(16rem, 100%);
 }
+/* a fieldset laid out exactly like a field: the browser's border, padding
+   and legend indent are reset so the group sits in a grid beside plain fields */
+.fieldset {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s0);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.fieldset > legend {
+  padding: 0;
+  margin-bottom: var(--s0);
+}
+/* Labels are sentence case at normal tracking. Uppercase letter-spaced micro
+   labels were the busy texture on every form; size and position now carry the
+   hierarchy instead. Only the CSS changed — the label TEXT is untouched. */
 .fieldLabel {
-  font-size: var(--text-xs);
+  font-size: var(--text-sm);
   font-weight: 600;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  color: var(--text-faint);
+  color: var(--text-dim);
+}
+.fieldLabelRow {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  min-height: 24px;
 }
 .input,
 .select,
@@ -110,19 +156,33 @@
   color: var(--danger);
   font-size: var(--text-xs);
 }
+/* `<Field label="&nbsp;"><Button/></Field>` aligns a submit button with the
+   inputs beside it. The field is a column flexbox, so without this the button
+   stretched into a full-width slab. */
+.field > button {
+  align-self: flex-start;
+}
 
-/* ---- Card ---- */
+/* ---- Card ----
+   One edge, not two: a hairline on the white surface against the canvas is the
+   whole separation. Shadows are kept for things that genuinely float (modals,
+   menus, toasts, popovers); a card that sits in the page flow does not float.
+   The 8px radius reads as a tool rather than a marketing tile. */
 .card {
-  background: var(--surface-1);
+  /* ADR-0169: near-opaque over the shaded field — the field tints the card,
+     never enough to move a contrast ratio (inputs inside stay solid) */
+  background: var(--rg-glass);
   border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-sm);
+  border-radius: var(--radius-md);
+  box-shadow: none;
   padding: var(--s2);
 }
+/* A card title must outrank the KPI numerals and bold row titles beneath it,
+   so it is the size step that does the work — not tracking or extra weight. */
 .cardTitle {
-  font-size: var(--text-sm);
-  font-weight: 650;
-  letter-spacing: 0.02em;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0;
   margin-bottom: var(--s1);
   display: flex;
   align-items: center;
@@ -144,16 +204,17 @@
   border-collapse: collapse;
   font-size: var(--text-sm);
 }
+/* The header is a heavier hairline, not a tinted band: one rule separates it
+   from the rows, the same way the rows separate from each other. */
 .table th {
   text-align: left;
-  padding: 10px 14px;
-  font-size: var(--text-xs);
+  padding: 12px 16px;
+  font-size: var(--text-sm);
   font-weight: 600;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  color: var(--text-faint);
-  background: var(--surface-2);
-  border-bottom: 1px solid var(--border);
+  color: var(--text-dim);
+  /* transparent, so a head row inside a glass card is not a whiter band */
+  background: transparent;
+  border-bottom: 1px solid var(--border-strong);
   white-space: nowrap;
 }
 .thSortable {
@@ -161,19 +222,22 @@
   user-select: none;
 }
 .thSortable:hover {
-  color: var(--text-dim);
+  color: var(--text);
 }
 .sortArrow {
   margin-left: 4px;
   font-size: 9px;
 }
 .table td {
-  padding: 10px 14px;
+  padding: 12px 16px;
   border-bottom: 1px solid var(--border);
   vertical-align: middle;
 }
 .table tr:last-child td {
   border-bottom: none;
+}
+.table tbody tr:hover td {
+  background: var(--surface-2);
 }
 .rowClickable {
   cursor: pointer;
@@ -324,7 +388,7 @@
 }
 .modalTitle {
   font-size: var(--text-lg);
-  font-weight: 650;
+  font-weight: 600;
   margin-bottom: var(--s1);
 }
 .modalBody {
@@ -350,7 +414,7 @@
   background: none;
   color: var(--text-dim);
   font-size: var(--text-sm);
-  font-weight: 550;
+  font-weight: 600;
   cursor: pointer;
   border-bottom: 2px solid transparent;
   margin-bottom: -1px;
@@ -642,3 +706,13 @@ a.barLabel {
   font-size: var(--text-sm);
 }
 
+
+/* Long table text: two lines, then an ellipsis. Pair with a `title` attribute
+   carrying the full value so nothing is lost, only folded. */
+.clamp2 {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+}

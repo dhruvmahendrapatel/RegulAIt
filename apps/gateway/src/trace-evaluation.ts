@@ -4,9 +4,20 @@
  * `runTraceEvaluationSweep` takes the next batch of completed model-call spans
  * (`llm`, `fallback_hop`; status `ok`) that have no evaluation yet, runs the
  * pure evaluator from `packages/shared/src/trace-evaluation.ts` over their
- * stored previews, and writes one counts-only row per span. The cursor is the
- * newest evaluated `span_started_at`, re-read with an overlap; the unique span
- * id makes the overlap harmless.
+ * stored previews, and writes one counts-only row per span.
+ *
+ * NO HIGH-WATER CURSOR (AER-045). The work queue is the anti-join itself:
+ * every eligible span with no `trace_evaluations` row. An earlier version paged
+ * on `started_at >= max(evaluated span_started_at) - 10 min`, which permanently
+ * skipped any model call that finished (or committed) after a newer span had
+ * moved the cursor past its start. No timestamp on `trace_spans` is
+ * commit-ordered (`ended_at` is caller-supplied, `created_at` is transaction
+ * start), so none can carry a cursor. Instead the scan floor is FIXED: the
+ * first sweep's own evaluation time less the first-run lookback, read back as
+ * `min(evaluated_at)`. It never advances, so a span started after it stays
+ * reachable until it is evaluated; the unique `span_id` index plus
+ * `ON CONFLICT DO NOTHING ... RETURNING` makes that exactly once, and the
+ * result counts only the rows this pass actually wrote.
  *
  * Reached two ways, one implementation: the ADR-0064 scheduler job
  * (`trace-evaluation-sweep`, 15 min) and `POST /v1/governance/trace-evaluations/run`.
@@ -38,10 +49,11 @@ import {
 } from "@regulait/shared";
 
 export const TRACE_EVAL_WINDOW_DAYS = 7;
-const OVERLAP_MS = 10 * 60_000;
 const FIRST_RUN_LOOKBACK_MS = TRACE_EVAL_WINDOW_DAYS * 86_400_000;
 
 export interface TraceSweepResult {
+  /** spans selected this pass; the outcome counts below cover only the rows
+   * this pass wrote, so a concurrent pass never double-counts a span */
   scanned: number;
   evaluated: number;
   flagged: number;
@@ -57,10 +69,14 @@ export async function runTraceEvaluationSweep(
 ): Promise<TraceSweepResult> {
   const now = opts.now ?? new Date();
   const limit = opts.limit ?? 500;
-  const [cursorRow] = await db
-    .select({ at: sql<Date | null>`max(${traceEvaluations.spanStartedAt})` })
+  // Fixed floor, not a moving cursor: anchored on the FIRST evaluation ever
+  // written, so it only bounds pre-deployment history and never skips a span
+  // that completes late. Before any evaluation exists it is the plain lookback.
+  const [firstRow] = await db
+    .select({ at: sql<Date | string | null>`min(${traceEvaluations.evaluatedAt})` })
     .from(traceEvaluations);
-  const cursor = cursorRow?.at ? new Date(new Date(cursorRow.at).getTime() - OVERLAP_MS) : new Date(now.getTime() - FIRST_RUN_LOOKBACK_MS);
+  const anchor = firstRow?.at ? new Date(firstRow.at) : now;
+  const floor = new Date(Math.min(anchor.getTime(), now.getTime()) - FIRST_RUN_LOOKBACK_MS);
 
   const spans = await db
     .select({
@@ -78,21 +94,17 @@ export async function runTraceEvaluationSweep(
       and(
         inArray(traceSpans.kind, ["llm", "fallback_hop"]),
         eq(traceSpans.status, "ok"),
-        gte(traceSpans.startedAt, cursor),
+        gte(traceSpans.startedAt, floor),
         isNull(traceEvaluations.id),
       ),
     )
-    .orderBy(traceSpans.startedAt)
+    .orderBy(traceSpans.startedAt, traceSpans.id)
     .limit(limit);
 
   const out: TraceSweepResult = { scanned: spans.length, evaluated: 0, flagged: 0, withheld: 0, noContent: 0, capped: spans.length === limit };
   if (spans.length === 0) return out;
   const rows = spans.map((s) => {
     const r = evaluateTraceContent(s);
-    if (r.outcome === "evaluated") out.evaluated += 1;
-    else if (r.outcome === "withheld") out.withheld += 1;
-    else out.noContent += 1;
-    if (r.flagged) out.flagged += 1;
     return {
       spanId: s.id,
       traceId: s.traceId,
@@ -105,7 +117,17 @@ export async function runTraceEvaluationSweep(
     };
   });
   for (let i = 0; i < rows.length; i += 200) {
-    await db.insert(traceEvaluations).values(rows.slice(i, i + 200)).onConflictDoNothing();
+    const inserted = await db
+      .insert(traceEvaluations)
+      .values(rows.slice(i, i + 200))
+      .onConflictDoNothing()
+      .returning({ outcome: traceEvaluations.outcome, flagged: traceEvaluations.flagged });
+    for (const r of inserted) {
+      if (r.outcome === "evaluated") out.evaluated += 1;
+      else if (r.outcome === "withheld") out.withheld += 1;
+      else out.noContent += 1;
+      if (r.flagged) out.flagged += 1;
+    }
   }
   return out;
 }

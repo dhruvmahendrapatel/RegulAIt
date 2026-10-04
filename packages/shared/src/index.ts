@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { acceptRisksSchema } from "./review-policy.js";
+import { intakeScreeningAnswersPatchSchema, intakeScreeningAnswersSchema } from "./intake-assist.js";
 // ADR-0068 §5: the attack-class vocabulary is needed IN SCOPE here (not merely
 // re-exported below) so the compliance-profile schema validates a framework's
 // red-team gating classes against the one authoritative list.
@@ -800,11 +802,83 @@ export const createRateLimitSchema = z
   })
   .superRefine(refineRuleScope);
 
+/** ADR-0168 — a condition's due date: a calendar date (`YYYY-MM-DD`, due at
+ * the END of that day, UTC) or a full ISO-8601 timestamp. */
+const conditionDueAt = z
+  .string()
+  .refine(
+    (v) =>
+      /^\d{4}-\d{2}-\d{2}$/.test(v)
+        ? !Number.isNaN(Date.parse(`${v}T00:00:00Z`)) && new Date(`${v}T00:00:00Z`).toISOString().startsWith(v)
+        : z.string().datetime({ offset: true }).safeParse(v).success,
+    { message: "dueAt must be a date (YYYY-MM-DD) or an ISO-8601 timestamp" },
+  );
+
+/** Resolve a validated `dueAt` to the instant it falls due. */
+export function conditionDueInstant(dueAt: string): Date {
+  return /^\d{4}-\d{2}-\d{2}$/.test(dueAt) ? new Date(`${dueAt}T23:59:59.999Z`) : new Date(dueAt);
+}
+
+export const USE_CASE_CONDITION_TEXT_MAX = 500;
+
+/** ADR-0168 — one condition an intake approval imposes. `blocking: true` =
+ * BEFORE go-live (the deploy gate refuses while it is open); `false` = AFTER
+ * go-live (tracked, shown overdue after `dueAt`, never blocks). */
+export const approvalConditionSchema = z
+  .object({
+    text: z.string().trim().min(1).max(USE_CASE_CONDITION_TEXT_MAX),
+    ownerUserId: z.string().uuid().optional(),
+    dueAt: conditionDueAt,
+    blocking: z.boolean(),
+  })
+  .strict();
+export type ApprovalConditionInput = z.infer<typeof approvalConditionSchema>;
+
 // The decider is the authenticated caller — never a body field.
+// ADR-0168 widens it, never narrows it: `returned` (send back for
+// information; `reason` REQUIRED — refused 422 `return_reason_required`) and
+// `conditions` (only with `approved`, only on an intake sign-off — the
+// decide path refuses everything else BY NAME with a 422). A body of only
+// `decision: approved|denied` + optional `reason` parses exactly as before;
+// an empty `conditions: []` is the same as none.
 export const decideApprovalSchema = z.object({
-  decision: z.enum(["approved", "denied"]),
+  decision: z.enum(["approved", "denied", "returned"]),
   reason: z.string().optional(),
+  conditions: z.array(approvalConditionSchema).max(20).optional(),
+  // ADR-0168 amendment: only with `approved` on an intake review, only by a
+  // risk acceptor the review policy names (else 403 `not_a_risk_acceptor`);
+  // every risk must belong to the use case (else 422 `risk_not_on_use_case`).
+  acceptRisks: acceptRisksSchema.optional(),
 });
+
+/** ADR-0168 — `POST /v1/use-cases/:id/conditions/:conditionId/met`. ADR-0170
+ * §3: a before-go-live (blocking) condition REQUIRES the note — a missing or
+ * whitespace-only note is refused 422 `condition_note_required` by the route,
+ * so the schema accepts an empty note and lets the route name the refusal. */
+export const markConditionMetSchema = z
+  .object({ note: z.string().trim().max(2000).optional() })
+  .strict();
+
+/** ADR-0168 — a condition as `GET /v1/use-cases/:id` returns it. */
+export interface UseCaseConditionView {
+  id: string;
+  approvalId: string;
+  text: string;
+  ownerUserId: string | null;
+  ownerName: string | null;
+  dueAt: string;
+  blocking: boolean;
+  status: "open" | "met" | "waived";
+  metAt: string | null;
+  metByName: string | null;
+  note: string | null;
+  /** open, and `dueAt` has passed */
+  overdue: boolean;
+  /** ADR-0170 §3: whether the VIEWER may mark this condition met right now
+   * (open, and the server's closing rule allows them). A before-go-live
+   * condition also needs a note. */
+  canMarkMet: boolean;
+}
 
 export const createApiKeySchema = z.object({
   name: z.string().min(1),
@@ -990,10 +1064,39 @@ export const setAgentOwnerSchema = z.object({ ownerUserId: z.string().uuid().nul
  * non-active target (enforced with a named 422 in the gateway so the refusal
  * is self-explaining); retired is terminal — the gateway refuses transitions
  * OUT of it by name. */
+export const AGENT_LIFECYCLE_STATUS_VALUES = [
+  "proposed",
+  "active",
+  "under_review",
+  "suspended",
+  "deprecated",
+  "retired",
+] as const;
 export const setAgentLifecycleSchema = z.object({
-  status: z.enum(["active", "deprecated", "retired"]),
+  status: z.enum(AGENT_LIFECYCLE_STATUS_VALUES),
   reason: z.string().min(1).max(2000).optional(),
 });
+
+/** ADR-0168 amendment item 6: agent STEWARDSHIP — steward (the ADR-0089
+ * accountable owner), successor, lifecycle status and the next review date, in
+ * one audited write. Every field is optional; a field left out keeps its value,
+ * null clears it. The gateway refuses a successor equal to the steward, a
+ * deactivated steward/successor, a non-active status without a reason, a next
+ * review in the past, and any move out of `retired` (terminal). Callable by an
+ * admin or the agent's CURRENT steward. */
+export const setAgentStewardshipSchema = z
+  .object({
+    stewardUserId: z.string().uuid().nullable().optional(),
+    successorUserId: z.string().uuid().nullable().optional(),
+    lifecycleStatus: z.enum(AGENT_LIFECYCLE_STATUS_VALUES).optional(),
+    lifecycleReason: z.string().trim().min(1).max(2000).optional(),
+    nextReviewAt: z.string().datetime({ offset: true }).nullable().optional(),
+  })
+  .strict()
+  .refine((b) => Object.values(b).some((v) => v !== undefined), {
+    message: "name at least one stewardship field to change",
+  });
+export type SetAgentStewardship = z.infer<typeof setAgentStewardshipSchema>;
 
 /** ADR-0023: set/clear an existing agent's admin base system prompt (null
  * clears — an explicit choice, mirroring the agent-policy clear semantics) */
@@ -1393,6 +1496,14 @@ export const reportChecksSchema = z.object({
    * initiator and any result is `passed` — reporting your own check green is
    * a self-attestation, and the reason is what the approver reads. */
   reason: z.string().max(2000).optional(),
+  /** AER-048: the workflow ROUND these results were produced for — the
+   * instance's `round` (GET /v1/workflows/instances/:id → instance.round),
+   * which a re-open (artifact resubmitted, sign-off returned) bumps. A report
+   * naming a round that is no longer current is refused with 409
+   * `stale_check_report` and audited. OMITTED = "the current round": the
+   * report is taken for whatever round is current when it is applied (the
+   * pre-AER-048 behaviour, kept for existing CI integrations). */
+  round: z.number().int().min(0).optional(),
 });
 
 /** §2 re-run a check stage that is parked at blocked_on_check, after the failing
@@ -2055,6 +2166,9 @@ export const updateOrgSettingsSchema = z
     budgetHardBlockPct: z.number().int().min(1).max(100).optional(),
     // approvals
     approvalQuorum: approvalQuorumSchema.optional(),
+    /** AER-048 (migration 0130): allow key-authenticated workflow check
+     * reports that name no `round` (false = refused 422 round_required). */
+    checkReportsAllowUnbound: z.boolean().optional(),
     // ADR-0022: approver-delegation master switch + persisted default
     // infra-remediation approver (null clears it)
     approvalDelegationEnabled: z.boolean().optional(),
@@ -3199,6 +3313,12 @@ export const AI_USE_CASE_DATA_SENSITIVITIES = [
   "regulated",
 ] as const;
 
+/** ADR-0171 / AER-052 — per-framework rationale, keyed by compliance tag */
+export const frameworkRationalesSchema = z.record(
+  z.string().min(1).max(200),
+  z.string().trim().min(1).max(2000),
+);
+
 export const createUseCaseSchema = z.object({
   name: z.string().min(1).max(200),
   description: z.string().min(1).max(4000),
@@ -3209,6 +3329,15 @@ export const createUseCaseSchema = z.object({
   /** agent REFERENCES the proposer intends to use — validated server-side */
   intendedAgentIds: z.array(z.string().uuid()).max(20).default([]),
   projectId: z.string().uuid().optional(),
+  /** ADR-0168 amendment — every Classify-step answer (flat), STORED so a
+   * sent-back use case can be resubmitted prefilled. Optional; it changes
+   * nothing else at registration (the tier is still computed from the
+   * submitted questionnaire). */
+  screeningAnswers: intakeScreeningAnswersSchema.optional(),
+  /** ADR-0171 / AER-052 — the owner's own "why it applies" per framework.
+   * Every key must be one of `complianceTags` (422
+   * `rationale_for_unlisted_framework` otherwise); shown to reviewers. */
+  frameworkRationales: frameworkRationalesSchema.optional(),
 });
 
 /** editable while the intake is in flight; `status` is NOT here on purpose —
@@ -3219,7 +3348,31 @@ export const updateUseCaseSchema = z.object({
   businessContext: z.string().min(1).max(4000).optional(),
   intendedAgentIds: z.array(z.string().uuid()).max(20).optional(),
   projectId: z.string().uuid().nullable().optional(),
+  /** ADR-0168 amendment — RESUBMISSION: accepted only while the use case is
+   * `needs_info`. Every Classify-step answer (flat): the EU AI Act tier is
+   * recomputed from the EU keys (never accepted as a tier) and
+   * `dataSensitivity` from `dataCategories` when given. The resubmitted
+   * questionnaire version carries the same answers block and is screened
+   * again on submission. */
+  screeningAnswers: intakeScreeningAnswersPatchSchema.optional(),
+  /** ADR-0171 / AER-052 — replaces the stored rationales; keys must be among
+   * the use case's complianceTags */
+  frameworkRationales: frameworkRationalesSchema.optional(),
 });
+
+/**
+ * ADR-0171 / AER-050 — the intake wizard's server-side draft. `state` is the
+ * wizard's own opaque JSON object; the gateway stores it for the signed-in
+ * user only and never reads inside it. Size is checked in bytes at the route
+ * (413 `draft_too_large` above USE_CASE_DRAFT_MAX_BYTES).
+ */
+export const USE_CASE_DRAFT_MAX_BYTES = 256 * 1024;
+export const useCaseDraftScopeSchema = z.object({
+  scope: z.union([z.literal("new"), z.string().uuid()]),
+});
+export const putUseCaseDraftSchema = z
+  .object({ state: z.record(z.string(), z.unknown()) })
+  .strict();
 
 export const retireUseCaseSchema = z.object({
   reason: z.string().min(1).max(2000),
@@ -3277,6 +3430,12 @@ export {
   buildIntakeNarrativePrompt,
   composeQuestionnaireDraft,
   intakeAssistRequestSchema,
+  intakeContextSchema,
+  intakeScreeningAnswersSchema,
+  intakeScreeningAnswersPatchSchema,
+  INTAKE_BOOLEAN_QUESTION_KEYS,
+  deriveDataSensitivityFromCategories,
+  type IntakeScreeningAnswers,
   parseIntakeNarrative,
   renderQuestionnaireMarkdown,
   suggestIntake,
@@ -3437,6 +3596,11 @@ export {
   euAiActAnswersSchema,
   extractEuAiActAnswers,
   renderEuAiActAnswersBlock,
+  unsureAnswerViolations,
+  unsureListSchema,
+  unsureViolationDetail,
+  EU_AI_ACT_BOOLEAN_KEYS,
+  UNSURE_ANSWER_MUST_COUNT_AS_YES,
   EU_AI_ACT_ANNEX_III_DOMAINS,
   EU_AI_ACT_ANSWERS_FENCE,
   EU_AI_ACT_AFFECTED_PERSONS,
@@ -3584,7 +3748,48 @@ export const authzCheckRequestSchema = z.object({
       mfaCompleted: z.boolean().nullish(),
     })
     .optional(),
+
+  /**
+   * AER-026 — THE PROXY'S OWN NAME FOR THE SUBJECT, kept beside the subject.
+   *
+   * `userId` is the RegulAIt user the proxy RESOLVED its authenticated identity
+   * to (for Kong: the consumer's `custom_id`). A ledger that records only the
+   * result of that mapping cannot answer "which Kong consumer was this?" when
+   * a mapping turns out to be wrong — and a wrong mapping is an authorization
+   * decision about the wrong person, which is the first question an auditor
+   * asks. So the proxy also sends the identity it mapped FROM, and the row
+   * keeps both.
+   *
+   * PROVENANCE ONLY. It is never a decision input, never appears in
+   * `contextApplied`, and never crosses back into the response. Bounded so the
+   * ledger cannot be used as a dumping ground by whoever holds the PDP key.
+   */
+  proxyConsumer: z
+    .object({
+      id: z.string().min(1).max(128),
+      username: z.string().min(1).max(256).nullish(),
+    })
+    .optional(),
 });
 export type AuthzCheckRequest = z.infer<typeof authzCheckRequestSchema>;
 
 export { REGULATORY_UPDATES } from "./demo-intake/regulatory-updates.js";
+
+// ---------------------------------------------------------------------------
+// ADR-0168 amendment — the review policy (reviewer roles per tier, risk
+// acceptors), the risk-acceptance body and the recertification sweep body.
+// ---------------------------------------------------------------------------
+export {
+  acceptRisksSchema,
+  recertificationSweepSchema,
+  reviewPolicyInputSchema,
+  reviewPolicyRoleSchema,
+  reviewPolicyTierSchema,
+  REVIEW_POLICY_TIER_KEYS,
+  REVIEW_ROLE_ID_RE,
+  type AcceptRisksInput,
+  type ReviewPolicyInput,
+  type ReviewPolicyTierKey,
+  type ReviewPolicyView,
+  type UseCaseReviewView,
+} from "./review-policy.js";

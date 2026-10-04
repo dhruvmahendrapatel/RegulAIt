@@ -104,6 +104,7 @@ export const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // enforces.
       { label: "Use cases", to: "/admin/use-cases", also: ["/admin/governance/use-cases"] },
       { label: "AI intake", to: "/admin/governance/intake" },
+      { label: "Review policy", to: "/admin/governance/review-policy" },
       { label: "Dependency graph", to: "/admin/governance/graph" },
       { label: "Regulatory intelligence", to: "/admin/governance/regulatory" },
       // ADR-0045 — the RISK-ACCEPTANCE gate beside the quality gate: "has a

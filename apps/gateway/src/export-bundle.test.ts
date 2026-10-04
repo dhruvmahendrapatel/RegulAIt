@@ -1,7 +1,18 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
 import { createHash, generateKeyPairSync } from "node:crypto";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, existsSync, readdirSync } from "node:fs";
+import {
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+  renameSync,
+  rmSync,
+  existsSync,
+  readdirSync,
+  symlinkSync,
+  lstatSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -645,11 +656,135 @@ describe("TAMPERING — every one of these must be caught, with its OWN message"
     verifyOk(bundle);
     const { dir, root } = unpack(bundle);
     writeFileSync(path.join(root, "audit/rows/999999999.payload"), "private bytes");
-    expectRefused(
+    const out = expectRefused(
       repack(dir, "t-extra-audit"),
       ["--fingerprint", realFingerprint],
       "unlisted audit payloads",
     );
+    // and the refusal NAMES the file, so the auditor is not left to diff
+    expect(out).toContain("audit/rows/999999999.payload");
+  });
+
+  it("an audit payload whose NAME is not a sequence number (AER-009)", () => {
+    verifyOk(bundle);
+    // (1) nonnumeric: a name the chain could never have listed
+    {
+      const { dir, root } = unpack(bundle);
+      writeFileSync(path.join(root, "audit/rows/abc.payload"), "private bytes");
+      const out = expectRefused(
+        repack(dir, "t-nonnumeric-audit"),
+        ["--fingerprint", realFingerprint],
+        "AUDIT PAYLOAD NAME MALFORMED",
+      );
+      expect(out).toContain("audit/rows/abc.payload");
+    }
+    // (2) an ALTERNATE SPELLING of a listed seq, beside the real file. A
+    // verifier that compared the names numerically would fold 0<seq> onto
+    // <seq> and wave a second payload for the same row through unhashed.
+    const pristine = unpack(bundle).root;
+    const victim = readdirSync(path.join(pristine, "audit", "rows")).sort()[0]!;
+    const seq = victim.replace(".payload", "");
+    expect(seq).toMatch(/^[1-9][0-9]*$/);
+    {
+      const { dir, root } = unpack(bundle);
+      writeFileSync(path.join(root, "audit/rows", `0${seq}.payload`), readFileSync(path.join(root, "audit/rows", victim)));
+      const r = runVerifier(repack(dir, "t-altspelling-audit"), ["--fingerprint", realFingerprint]);
+      expect(r.code, `expected a refusal, got:\n${r.out}`).not.toBe(0);
+      // the same refusal class as (1), so it is deliberately NOT pushed into
+      // the distinctness set below; what it adds is the NAMED spelling
+      expect(r.out).toContain("AUDIT PAYLOAD NAME MALFORMED");
+      expect(r.out).toContain(`audit/rows/0${seq}.payload`);
+    }
+    // (3) the alternate spelling INSTEAD of the real file: the listed row
+    // must be reported missing, not found under its other name
+    {
+      const { dir, root } = unpack(bundle);
+      renameSync(path.join(root, "audit/rows", victim), path.join(root, "audit/rows", `0${seq}.payload`));
+      const r = runVerifier(repack(dir, "t-altspelling-renamed"), ["--fingerprint", realFingerprint]);
+      expect(r.code, `expected a refusal, got:\n${r.out}`).not.toBe(0);
+      expect(r.out).toContain(`AUDIT ROW MISSING: audit/rows/${seq}.payload`);
+    }
+  });
+
+  it("a SYMLINK under audit/rows — beside a listed payload, aimed outside, or AS one (AER-009 review)", () => {
+    verifyOk(bundle);
+    const pristine = unpack(bundle).root;
+    const victim = readdirSync(path.join(pristine, "audit", "rows")).sort()[0]!;
+    const seq = victim.replace(".payload", "");
+    expect(seq).toMatch(/^[1-9][0-9]*$/);
+    // Every case below is a tree a `find -type f` enumeration does not see at
+    // all, while `[ -f ]` and sha256sum follow the link: the pre-fix verifier
+    // printed [VERIFIED] for each and --extract-to carried the link into the
+    // "verified" tree. The refusal must come from the EXTRACTED TREE, before
+    // the signature is even checked — so before any name or listing check.
+    const refusedAsNonRegular = (out: string, entry: string) => {
+      expect(out).toContain("NON-REGULAR ENTRY IN BUNDLE");
+      expect(out).toContain(entry);
+      expect(out).not.toContain("[VERIFIED]");
+      expect(out).not.toContain("signature verifies");
+      expect(out).not.toContain("AUDIT PAYLOAD NAME MALFORMED");
+    };
+    // (1) "01.payload -> 1.payload", on the segment's first listed seq: an
+    // alternate spelling that POINTS AT the real row, so its bytes hash right.
+    {
+      const { dir, root } = unpack(bundle);
+      const link = path.join(root, "audit/rows", `0${seq}.payload`);
+      symlinkSync(victim, link);
+      expect(lstatSync(link).isSymbolicLink()).toBe(true); // the tamper happened (M-033)
+      const out = expectRefused(
+        repack(dir, "t-symlink-altspelling"),
+        ["--fingerprint", realFingerprint],
+        "NON-REGULAR ENTRY IN BUNDLE",
+      );
+      refusedAsNonRegular(out, `audit/rows/0${seq}.payload`);
+    }
+    // (2) "abc.payload -> /etc/hostname": a link out of the bundle entirely,
+    // which reads as the AUDITOR'S file on the auditor's machine. Same refusal
+    // class as (1), so deliberately not pushed into the distinctness set.
+    {
+      const { dir, root } = unpack(bundle);
+      const link = path.join(root, "audit/rows/abc.payload");
+      symlinkSync("/etc/hostname", link);
+      expect(lstatSync(link).isSymbolicLink()).toBe(true);
+      const r = runVerifier(repack(dir, "t-symlink-outside"), ["--fingerprint", realFingerprint]);
+      expect(r.code, `expected a refusal, got:\n${r.out}`).not.toBe(0);
+      refusedAsNonRegular(r.out, "audit/rows/abc.payload");
+    }
+    // (3) the LISTED payload itself replaced by a link to a byte-identical copy
+    // outside the bundle: its content_hash verifies through the link, so only
+    // refusing the link as a link catches it.
+    {
+      const { dir, root } = unpack(bundle);
+      const real = path.join(root, "audit/rows", victim);
+      const outside = path.join(workDir, `outside-${scratchSeq}-${victim}`);
+      writeFileSync(outside, readFileSync(real));
+      rmSync(real);
+      symlinkSync(outside, real);
+      expect(sha256File(real)).toBe(sha256File(outside)); // the hash would pass
+      const r = runVerifier(repack(dir, "t-symlink-listed"), ["--fingerprint", realFingerprint]);
+      expect(r.code, `expected a refusal, got:\n${r.out}`).not.toBe(0);
+      refusedAsNonRegular(r.out, `audit/rows/${victim}`);
+    }
+  });
+
+  it("ONE listed audit payload removed, the chain left intact (AER-009)", () => {
+    verifyOk(bundle);
+    const { dir, root } = unpack(bundle);
+    const lines = readFileSync(path.join(root, "audit", "chain.tsv"), "utf8").trim().split("\n");
+    expect(lines.length).toBeGreaterThan(2);
+    // the row the "deleted chain row" case above removes — but ONLY its
+    // bytes this time. chain.tsv still lists it and the manifest is untouched
+    // (payload files are not in the manifest; the signed chain is what names
+    // them), so the signature still verifies and the CHAIN listing is what
+    // must report the hole: as a missing row, not as a sequence gap.
+    const seq = lines[1]!.split("\t")[0]!;
+    const gone = path.join(root, "audit", "rows", `${seq}.payload`);
+    expect(existsSync(gone)).toBe(true);
+    rmSync(gone);
+    const out = expectRefused(repack(dir, "t-row-missing"), ["--fingerprint", realFingerprint], "AUDIT ROW MISSING");
+    expect(out).toContain(`audit/rows/${seq}.payload`);
+    expect(out).not.toContain("sequence gap");
+    expect(out).toContain("signature verifies");
   });
 
   it("a listed file removed from the bundle", () => {

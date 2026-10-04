@@ -1,0 +1,166 @@
+/* ADR-0171 (AER-050..054): the intake's draft, missing-answer, re-draft and
+   proposal-review blocks. Tokens only, so both themes follow. */
+
+.unsureNote {
+  display: block;
+  margin-top: 2px;
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* ---- the missing-answers summary (AER-053) ------------------------------ */
+.missing {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+  padding: var(--s2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+}
+.missingTitle {
+  margin: 0;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text);
+}
+.missingList {
+  margin: 0;
+  padding-left: var(--s3);
+  color: var(--text);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+.missingGroup { font-weight: 600; }
+
+/* ---- the draft line and the resume offer (AER-050) ---------------------- */
+.draftLine {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: var(--text-xs);
+}
+.resume {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+  flex-wrap: wrap;
+  padding: var(--s2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: var(--text-sm);
+}
+.resume p { margin: 0; }
+.resumeActions {
+  display: flex;
+  gap: var(--s1);
+  flex-wrap: wrap;
+}
+
+/* ---- changed classification: what a re-draft would change (AER-051) ----- */
+.redraft {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+  padding: var(--s2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: var(--text-sm);
+}
+.redraft h3 {
+  margin: 0;
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+.redraft ul {
+  margin: 0;
+  padding-left: var(--s3);
+  line-height: 1.5;
+}
+.redraft p { margin: 0; }
+.redraftActions {
+  display: flex;
+  gap: var(--s1);
+  flex-wrap: wrap;
+}
+
+/* ---- the final review: the proposal itself (AER-054) -------------------- */
+.proposal {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+}
+.section {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+}
+.section > summary {
+  padding: var(--s1) var(--s2);
+  cursor: pointer;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text);
+}
+.count {
+  color: var(--text-dim);
+  font-weight: 400;
+}
+.sectionBody {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+  padding: 0 var(--s2) var(--s2);
+  font-size: var(--text-sm);
+  color: var(--text);
+}
+.sectionBody p { margin: 0; }
+/* a link inside a sentence is underlined, not told apart by colour alone */
+.sectionBody a {
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+.sectionBody ul {
+  margin: 0;
+  padding-left: var(--s3);
+  line-height: 1.5;
+}
+.itemTitle { font-weight: 600; }
+.itemText {
+  display: block;
+  white-space: pre-wrap;
+}
+.excluded { color: var(--text-dim); }
+.sectionActions {
+  display: flex;
+  justify-content: flex-end;
+}
+.answers {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2px var(--s2);
+  margin: 0;
+}
+.answers dt { color: var(--text-dim); }
+.answers dd { margin: 0; }
+
+/* ---- the record and the review task: lifecycle detail not loaded (AER-055) */
+.detailState {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  flex-wrap: wrap;
+  margin: 0;
+  color: var(--text);
+  font-size: var(--text-sm);
+}
+.rationale {
+  display: block;
+  color: var(--text-dim);
+  font-size: var(--text-sm);
+  white-space: pre-wrap;
+}

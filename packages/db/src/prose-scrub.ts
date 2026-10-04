@@ -184,6 +184,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   // ADR-0157 / ADR-0159 — an alert acknowledgement is operator prose; a
   // remediation's rationale embeds risk and agent titles a person typed.
   [s.governanceAlerts, ["ackNote"]],
+  // ADR-0168 — a condition-met note is operator prose.
+  [s.useCaseConditions, ["note"]],
   [s.remediationProposals, ["rationale"]],
   // --- machine-written free text that quotes an error, and ADR-0111's
   //     EXPORTED OBSERVABILITY COPY ---

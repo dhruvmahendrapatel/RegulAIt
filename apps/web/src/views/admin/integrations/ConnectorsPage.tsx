@@ -23,7 +23,54 @@ import {
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
-const PROVIDER_KINDS = ["", "http", "webhook", "slack", "github", "jira", "snowflake", "generic", "mock"];
+/**
+ * The execution adapters an admin can pick; "" is governance-only (no adapter).
+ * A hand-maintained mirror of connector-provider's `CONNECTOR_PROVIDER_KINDS`
+ * — the gateway's adr0121 suite pins it against that union AND against the
+ * strict egress posture, so a kind this list offers is always one the egress
+ * guard can name (AER-015: teams and outlook used to be creatable only by API).
+ */
+export const PROVIDER_KINDS = ["", "http", "webhook", "slack", "teams", "outlook", "github", "jira", "snowflake", "generic", "mock"];
+
+/**
+ * The adapters whose platform credential is a JSON document rather than a bare
+ * token, and that document's keys. A hand-maintained mirror of
+ * connector-provider's `teamsCredentialSchema` / `outlookCredentialSchema` —
+ * the gateway's adr0121 suite pins these keys, and which of them are optional,
+ * against the schemas. (Snowflake has its own structured form below.) Without
+ * this an admin who picks the teams or outlook adapter sees only a "Token / API
+ * key" field, pastes a bare secret, and the save 400s with
+ * invalid_connector_credential.
+ */
+export const JSON_CREDENTIAL_FIELDS: Record<string, { required: string[]; optional: string[] }> = {
+  teams: { required: ["appId", "appPassword"], optional: ["tenantId", "loginBaseUrl"] },
+  outlook: { required: ["appId", "appPassword", "tenantId", "senderUpn"], optional: ["loginBaseUrl"] },
+};
+
+/** what an optional key is for — shown beside it in the hint */
+const OPTIONAL_KEY_NOTES: Record<string, string> = {
+  tenantId: "omit for a multi-tenant bot",
+  loginBaseUrl: "sovereign-cloud Entra login host only",
+};
+
+/** the JSON a JSON-credential adapter expects, as the field's placeholder; null for a bare-token adapter */
+export function credentialJsonTemplate(kind: string | null | undefined): string | null {
+  const shape = kind ? JSON_CREDENTIAL_FIELDS[kind] : undefined;
+  if (!shape) return null;
+  return JSON.stringify(Object.fromEntries(shape.required.map((k) => [k, "…"])), null, 2);
+}
+
+/** one sentence naming the document's required and optional keys */
+export function credentialJsonHint(kind: string | null | undefined): string | null {
+  const shape = kind ? JSON_CREDENTIAL_FIELDS[kind] : undefined;
+  if (!shape) return null;
+  const optional = shape.optional.map((k) => (OPTIONAL_KEY_NOTES[k] ? `${k} (${OPTIONAL_KEY_NOTES[k]})` : k));
+  return (
+    `The ${kind} credential is a JSON object, not a bare token: {${shape.required.join(", ")}}` +
+    (optional.length ? `; optional: ${optional.join(", ")}` : "") +
+    ". The server validates the shape at save time."
+  );
+}
 
 export default function ConnectorsPage() {
   const connectors = useConnectors();
@@ -144,6 +191,7 @@ function CredentialCard(props: { connectors: Connector[] }) {
   const [connectorId, setConnectorId] = useState("");
   const selected = props.connectors.find((c) => c.id === connectorId) ?? null;
   const isSnowflake = selected?.providerKind === "snowflake";
+  const jsonTemplate = credentialJsonTemplate(selected?.providerKind);
 
   const cred = useQuery({
     queryKey: ["admin", "connector-credential", connectorId],
@@ -243,6 +291,21 @@ function CredentialCard(props: { connectors: Connector[] }) {
                   malformed credential 400s here with an actionable message instead of failing opaquely at
                   first invoke.
                 </p>
+              </>
+            ) : jsonTemplate ? (
+              <>
+                <Field label="Credential (JSON — never shown again)">
+                  <Textarea
+                    required
+                    rows={6}
+                    value={token}
+                    onChange={(e) => setToken(e.target.value)}
+                    placeholder={jsonTemplate}
+                    autoComplete="off"
+                    style={{ fontFamily: "var(--font-mono)", fontSize: "var(--text-xs)" }}
+                  />
+                </Field>
+                <p className={v.faint}>{credentialJsonHint(selected?.providerKind)}</p>
               </>
             ) : (
               <Field label="Token / API key">

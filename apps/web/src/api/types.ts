@@ -340,6 +340,10 @@ export interface CheckResult {
   selfReported?: boolean;
   reportedByUserId?: string | null;
   reason?: string | null;
+  /** AER-047: true when NOTHING reported this check and the template's
+   * offlineAutoPass opt-in passed it anyway — never CI's green. A check with no
+   * report and no opt-in has status "pending" and holds the stage. */
+  autoPassed?: boolean;
 }
 
 export interface WorkflowDetailResponse {
@@ -349,6 +353,9 @@ export interface WorkflowDetailResponse {
     createdAt: string;
     projectId?: string | null;
     initiatorUserId?: string | null;
+    /** AER-048: the workflow round (bumped by every re-open) a check report
+     * binds to */
+    round?: number;
     change?: { description?: string; changeType?: string; environment?: string };
     definition: { stages: WorkflowStage[] };
     state: { currentStageIndex: number; stageStatuses: Record<number, string> };
@@ -374,7 +381,8 @@ export interface WorkflowListResponse {
 
 export interface Approval {
   id: string;
-  status: "pending" | "approved" | "denied" | "consumed" | "superseded";
+  /** `returned` = sent back for information (an intake sign-off only, ADR-0168) */
+  status: "pending" | "approved" | "denied" | "returned" | "consumed" | "superseded";
   objectType: string;
   stageId: string | null;
   requestedAt: string;
@@ -404,6 +412,19 @@ export interface Approval {
   decidedByName?: string | null;
   objectLabel?: string | null;
   delegatedFrom?: string;
+  /** the AI use case an intake sign-off decides, when the gateway names it (not yet in the ADR-0168
+   * contract — the review panel falls back to matching the use-case list by workflow instance) */
+  useCaseId?: string | null;
+  /** ADR-0168 amendment: the reviewer role this intake review is for (one review per role the
+   * review policy requires for the tier); absent on the single named-approver path */
+  reviewRole?: { id: string; name: string } | null;
+  /** ADR-0046 routing + SLA sidecar — absent when no routing rule is enabled */
+  assignment?: {
+    assigneeKind?: string;
+    slaState?: string | null;
+    dueAt?: string | null;
+    [key: string]: unknown;
+  };
   contextConflict?: {
     key: string;
     conflicting: ConflictSide;
@@ -626,4 +647,181 @@ export interface AuditEntry {
    * as a mode; render it as "unknown". */
   deployMode?: "hosted" | "byoc" | "air_gapped" | null;
   reason?: string | null;
+}
+
+// ---- AI use-case lifecycle (ADR-0168) ------------------------------------
+
+export type UseCaseStatus = "proposed" | "under_review" | "needs_info" | "approved" | "rejected" | "retired";
+
+/** a condition attached to an intake approval — `blocking` = before go-live (the deploy gate refuses while open) */
+export interface UseCaseCondition {
+  id: string;
+  approvalId: string;
+  text: string;
+  ownerUserId: string | null;
+  ownerName: string | null;
+  dueAt: string;
+  blocking: boolean;
+  status: "open" | "met" | "waived";
+  metAt: string | null;
+  metByName: string | null;
+  overdue: boolean;
+  /** whether the signed-in viewer may mark it met (the server's rule, computed
+   * for them; absent from an older gateway — treated as "no") */
+  canMarkMet?: boolean;
+}
+
+/** the fields GET /v1/use-cases/:id adds for the approval lifetime and its conditions */
+export interface UseCaseLifecycleDetail {
+  useCase: {
+    id: string;
+    status: UseCaseStatus;
+    approvedAt?: string | null;
+    approvedUntil?: string | null;
+    approvalExpired?: boolean;
+    /** an expired approval moved back into review by the recertification sweep */
+    recertification?: boolean;
+    /** the approval's end (= approvedUntil) that started the re-review */
+    recertificationDueAt?: string | null;
+    [key: string]: unknown;
+  };
+  conditions?: UseCaseCondition[];
+  /** one per required review in the current round; [] on the single named-approver path */
+  reviews?: UseCaseReview[];
+  /** risk rows with their acceptance, when a risk acceptor accepted residual risk */
+  risks?: UseCaseRiskAcceptance[];
+  /** what the registration screen needs to update and resubmit a use case sent back for information */
+  resubmission?: UseCaseResubmission;
+  /** ADR-0171: the owner's own words for why each accepted framework applies ({} when none) */
+  frameworkRationales?: Record<string, string>;
+  /** ADR-0171: the yes/no screening answers the owner was not sure about (each counted as yes) */
+  screeningUnsure?: string[];
+}
+
+export interface ApprovalConditionInput {
+  text: string;
+  ownerUserId?: string;
+  dueAt: string;
+  blocking: boolean;
+}
+
+/** POST /v1/approvals/:id/decide — `returned` needs a reason; conditions ride only on an approved intake sign-off */
+export interface DecideApprovalBody {
+  decision: "approved" | "denied" | "returned";
+  reason?: string;
+  conditions?: ApprovalConditionInput[];
+  /** only with `approved`, only from a risk acceptor named in the review policy */
+  acceptRisks?: AcceptRisksInput;
+}
+
+export interface AcceptRisksInput {
+  riskIds: string[];
+  /** 10..2000 characters */
+  rationale: string;
+}
+
+// ---- review policy and the review round (ADR-0168 amendment, afternoon) ----
+
+export type ReviewTier = "minimal" | "limited" | "high" | "prohibited" | "unscreened";
+
+/** a reviewer role: any member may decide that role's review */
+export interface ReviewerRole {
+  /** slug, [a-z0-9-]{2,40} */
+  id: string;
+  name: string;
+  memberUserIds: string[];
+}
+
+export interface ReviewTierPolicy {
+  /** each role listed is ONE required review */
+  roleIds: string[];
+  /** 1..36 — overrides the default approval lifetime for the tier */
+  validityMonths: number;
+}
+
+/** GET /v1/governance/review-policy (any signed-in user) */
+export interface ReviewPolicy {
+  roles: ReviewerRole[];
+  tiers: Partial<Record<ReviewTier, ReviewTierPolicy>>;
+  riskAcceptorUserIds: string[];
+  updatedAt: string | null;
+  updatedByName: string | null;
+}
+
+/** PUT /v1/governance/review-policy (admin) */
+export interface ReviewPolicyInput {
+  roles: ReviewerRole[];
+  tiers: Partial<Record<ReviewTier, ReviewTierPolicy>>;
+  riskAcceptorUserIds: string[];
+}
+
+/** `superseded`: the round was closed by another role's denial or send-back
+ * before this review was decided */
+export type UseCaseReviewStatus = "pending" | "approved" | "returned" | "denied" | "superseded";
+
+export interface UseCaseReview {
+  roleId: string;
+  roleName: string;
+  status: UseCaseReviewStatus;
+  deciderName: string | null;
+  decidedAt: string | null;
+  approvalId: string;
+}
+
+export interface UseCaseRiskAcceptance {
+  id: string;
+  title?: string;
+  status?: string;
+  acceptedByName?: string | null;
+  acceptedAt?: string | null;
+  acceptanceRationale?: string | null;
+}
+
+/** the structured EU AI Act screening answers (the shared euAiActAnswersSchema) */
+export interface EuAiActScreeningAnswers {
+  purposeDomain: string;
+  affectedPersons: string[];
+  decisionAutonomy: string;
+  biometricUse: string;
+  emotionRecognition: boolean;
+  socialScoring: boolean;
+  manipulativeTechniques: boolean;
+  profilesNaturalPersons: boolean;
+  safetyComponent: boolean;
+  interactsWithHumans: boolean;
+  generatesSyntheticContent: boolean;
+}
+
+/** the registration Classify step's context answers beyond the EU AI Act set
+ * (the shared intakeContextSchema) */
+export interface IntakeContextAnswers {
+  sectors: string[];
+  dataCategories: string[];
+  deployment: string;
+  euNexus: boolean;
+  usesExternalVendor: boolean;
+  generative: boolean;
+  autonomousActions: boolean;
+  toolsUsed: string[];
+}
+
+/** EVERY Classify-step answer, flat — `screeningAnswers` on POST /v1/use-cases
+ * and on the resubmission PATCH (the shared intakeScreeningAnswersSchema) */
+export type IntakeScreeningAnswers = EuAiActScreeningAnswers & IntakeContextAnswers;
+
+export interface UseCaseResubmission {
+  allowed: boolean;
+  /** the stored Classify answers; a use case registered before they were
+   * stored carries the EU answers of its questionnaire only */
+  screeningAnswers: (EuAiActScreeningAnswers & Partial<IntakeContextAnswers> & { unsure?: string[] }) | null;
+  questionnaire: { version: number; content: string } | null;
+  returnReason: string | null;
+  returnedByName: string | null;
+}
+
+/** GET /v1/users/directory — ids, names and teams only; readable by every signed-in user */
+export interface DirectoryUser {
+  id: string;
+  name: string | null;
+  teams?: Array<{ id: string; name: string }>;
 }

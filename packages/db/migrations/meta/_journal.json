@@ -897,6 +897,48 @@
       "when": 1785063000000,
       "tag": "0128_tracing_otlp_headers_ciphertext",
       "breakpoints": true
+    },
+    {
+      "idx": 129,
+      "version": "7",
+      "when": 1785064000000,
+      "tag": "0129_use_case_conditions_lifetime",
+      "breakpoints": true
+    },
+    {
+      "idx": 130,
+      "version": "7",
+      "when": 1785065000000,
+      "tag": "0130_workflow_instance_round_tokens",
+      "breakpoints": true
+    },
+    {
+      "idx": 131,
+      "version": "7",
+      "when": 1785066000000,
+      "tag": "0131_governance_review_policy",
+        "breakpoints": true
+      },
+      {
+      "idx": 132,
+      "version": "7",
+      "when": 1785067000000,
+      "tag": "0132_agent_stewardship",
+      "breakpoints": true
+    },
+    {
+      "idx": 133,
+      "version": "7",
+      "when": 1785068000000,
+      "tag": "0133_use_case_lifetime_backfill",
+      "breakpoints": true
+    },
+    {
+      "idx": 134,
+      "version": "7",
+      "when": 1785069000000,
+      "tag": "0134_intake_drafts_idempotency",
+      "breakpoints": true
     }
   ]
 }

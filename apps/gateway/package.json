@@ -8,7 +8,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "dev": "node --loader ts-node/esm src/main.ts",
     "start": "node dist/main.js",
-    "test": "vitest run",
+    "test": "vitest run --dir src",
     "seed": "node dist/seed.js",
     "demo:mcp": "node dist/demo-mcp-server.js",
     "demo:setup": "node dist/demo-setup.js",
@@ -63,7 +63,7 @@
   },
   "devDependencies": {
     "@types/node": "26.1.1",
-    "vitest": "^3.2.4",
+    "vitest": "^4.1.11",
     "xml-crypto": "6.1.2"
   }
 }

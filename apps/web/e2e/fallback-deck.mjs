@@ -16,7 +16,9 @@
  *        → apps/web/e2e/artifacts/demo/fallback-deck.html (one self-contained file)
  *
  * Keys: → / Space next, ← previous, Home / End, T toggles the screenshot theme
- * (only with --dark). A missing screenshot is a build error, never a blank slide.
+ * (only with --dark), S shows or hides the presenter's "Say" line (hidden by
+ * default, so a shared screen shows the product, not the script). A missing
+ * screenshot is a build error, never a blank slide.
  */
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -47,8 +49,9 @@ const BEATS = [
     beat: "2B",
     persona: "Avery",
     shots: [
-      ["real-05-avery-signoff", "The sign-off waits for Avery, never the proposer"],
-      ["real-05b-avery-approved", "Approved: one audited decision"],
+      ["real-05-avery-signoff", "Avery reviews the evidence in one task panel — never the proposer"],
+      ["real-05a-avery-conditions", "Approve with conditions: a before-go-live condition holds deployment"],
+      ["real-05b-avery-approved", "Approved for six months (high tier): one audited decision"],
     ],
   },
   { beat: "2C", persona: "Pipeline", gate: "real-gate.txt" },
@@ -162,6 +165,7 @@ const html = `<!doctype html>
     font: 15px/1.6 ui-monospace, "SF Mono", Menlo, Consolas, monospace; white-space: pre-wrap; }
   footer { display: flex; align-items: flex-end; gap: 16px; }
   .say { margin: 0; flex: 1; font-size: 16px; }
+  body:not(.presenter) .say { visibility: hidden; }
   .say::before { content: "Say  "; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
   .count { color: var(--muted); font-size: 13px; white-space: nowrap; font-variant-numeric: tabular-nums; }
   @media (max-width: 700px) { .slide { padding: 12px 16px; } .phase { display: none; } h1 { font-size: 18px; } }
@@ -181,6 +185,7 @@ ${slideHtml}
     if (["ArrowRight", "PageDown", " "].includes(e.key)) { e.preventDefault(); show(i + 1); }
     else if (["ArrowLeft", "PageUp"].includes(e.key)) { e.preventDefault(); show(i - 1); }
     else if (e.key === "Home") show(0);
+    else if (e.key === "s" || e.key === "S") document.body.classList.toggle("presenter");
     else if (e.key === "End") show(slides.length - 1);
     else if (e.key === "t" || e.key === "T") {
       dark = !dark;

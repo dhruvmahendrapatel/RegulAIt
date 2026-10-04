@@ -459,9 +459,56 @@ export const EU_AI_ACT_ANSWERS_FENCE = "eu-ai-act-answers";
 const FENCE_RE = /```eu-ai-act-answers[^\S\n]*\n([\s\S]*?)```/g;
 
 export type EuAiActExtraction =
-  | { status: "ok"; answers: EuAiActAnswers }
+  /** `unsure` is the block's optional "Not sure" list (ADR-0171 / AER-053):
+   * ABSENT when the block carries no `unsure` key at all, so a caller can tell
+   * "said nothing about uncertainty" from "was sure of every answer" */
+  | { status: "ok"; answers: EuAiActAnswers; unsure?: string[] }
   | { status: "missing" }
-  | { status: "invalid"; error: string };
+  /** `code` names a refusal a route can answer with by name (422) */
+  | { status: "invalid"; error: string; code?: typeof UNSURE_ANSWER_MUST_COUNT_AS_YES };
+
+/** the yes/no questions of the screening — the only answers that can be "Not sure" */
+export const EU_AI_ACT_BOOLEAN_KEYS = [
+  "emotionRecognition",
+  "socialScoring",
+  "manipulativeTechniques",
+  "profilesNaturalPersons",
+  "safetyComponent",
+  "interactsWithHumans",
+  "generatesSyntheticContent",
+] as const satisfies ReadonlyArray<keyof EuAiActAnswers>;
+
+/**
+ * ADR-0171 / AER-053 — "NOT SURE" IS A GOVERNED ANSWER, NEVER A SILENT NO.
+ * The error code every surface refuses an inconsistent "Not sure" with.
+ */
+export const UNSURE_ANSWER_MUST_COUNT_AS_YES = "unsure_answer_must_count_as_yes" as const;
+
+/** the wire shape of an `unsure` list — keys only; the rule is checked apart */
+export const unsureListSchema = z.array(z.string().min(1).max(64)).max(32);
+
+/**
+ * The keys of `unsure` that break the rule: each must name a yes/no question
+ * in `booleanKeys` AND that answer must be `true` — the conservative reading
+ * the classifier then sees. A "Not sure" stored beside a `false` would be a
+ * silent No wearing a flag, so it is refused rather than corrected. Returns
+ * the offending keys (empty = consistent).
+ */
+export function unsureAnswerViolations(
+  answers: Readonly<Record<string, unknown>>,
+  unsure: readonly string[],
+  booleanKeys: readonly string[],
+): string[] {
+  return unsure.filter((k) => !booleanKeys.includes(k) || answers[k] !== true);
+}
+
+/** the human sentence for a violation — the same wording on every surface */
+export function unsureViolationDetail(keys: readonly string[]): string {
+  return (
+    `"Not sure" answers are treated as "yes" until a reviewer confirms them, so each one must name a ` +
+    `yes/no question answered true — not consistent: ${keys.join(", ")}`
+  );
+}
 
 /** deterministic extraction of the answers block from questionnaire markdown */
 export function extractEuAiActAnswers(markdown: string): EuAiActExtraction {
@@ -483,6 +530,16 @@ export function extractEuAiActAnswers(markdown: string): EuAiActExtraction {
         "a submitted tier is refused — the tier is computed server-side from the answers, never accepted from a payload",
     };
   }
+  // ADR-0171: the optional "Not sure" list rides beside the answers; it is
+  // never an input to the classifier (which sees the conservative `true`)
+  let unsure: string[] | null = null;
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && "unsure" in parsed) {
+    const { unsure: raw, ...rest } = parsed as Record<string, unknown>;
+    const list = unsureListSchema.safeParse(raw);
+    if (!list.success) return { status: "invalid", error: "unsure must be a list of answer keys" };
+    unsure = [...new Set(list.data)];
+    parsed = rest;
+  }
   const result = euAiActAnswersSchema.safeParse(parsed);
   if (!result.success) {
     return {
@@ -492,7 +549,13 @@ export function extractEuAiActAnswers(markdown: string): EuAiActExtraction {
         .join("; ")}`,
     };
   }
-  return { status: "ok", answers: result.data };
+  if (unsure) {
+    const bad = unsureAnswerViolations(result.data, unsure, EU_AI_ACT_BOOLEAN_KEYS);
+    if (bad.length > 0) {
+      return { status: "invalid", error: unsureViolationDetail(bad), code: UNSURE_ANSWER_MUST_COUNT_AS_YES };
+    }
+  }
+  return unsure ? { status: "ok", answers: result.data, unsure } : { status: "ok", answers: result.data };
 }
 
 /** render the canonical block the UI embeds into the questionnaire markdown */

@@ -8,7 +8,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { z } from "zod";
-import { and, connectors, createDb, eq, mcpTools, modelCredentials, projects, runMigrations, usageEvents, type Db } from "@regulait/db";
+import { and, connectors, createDb, eq, inArray, mcpTools, modelCredentials, projects, runMigrations, usageEvents, type Db } from "@regulait/db";
 // ADR-0104 — the consent fingerprint the approvals queue row is bound to.
 import { approvalArgumentsDigest } from "@regulait/shared";
 import { resolveModelProvider, type MockModelProvider } from "@regulait/model-provider";
@@ -126,6 +126,19 @@ async function mcpClientFor(userId: string, intent?: string): Promise<Client> {
   return client;
 }
 
+// AER-047: this suite drives check stages whose templates opt in to the
+// labelled offline auto-pass (offlineAutoPass). The opt-in FAILS CLOSED unless
+// the process declares offline mode, so the suite declares it — and restores
+// the environment afterwards.
+const priorOfflineChecks = process.env.REGULAIT_OFFLINE_CHECKS;
+beforeAll(() => {
+  process.env.REGULAIT_OFFLINE_CHECKS = "1";
+});
+afterAll(() => {
+  if (priorOfflineChecks === undefined) delete process.env.REGULAIT_OFFLINE_CHECKS;
+  else process.env.REGULAIT_OFFLINE_CHECKS = priorOfflineChecks;
+});
+
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
@@ -184,9 +197,36 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  app.server.closeAllConnections();
-  await app.close();
-  await upstream.close();
+  // SHARED-STATE DISCIPLINE (PENDING S8, diagnosed 2026-10-03). This file
+  // upserts a PLATFORM credential for anthropic, openai, google and xai, each
+  // pointing at a loopback fake it closes on the way out and each encrypted
+  // under THIS file's data key. Left behind, the next file to dispatch on one
+  // of those providers under a different key finds a stored credential it
+  // cannot decrypt — `decryptSecret` throws, nothing maps that to a status —
+  // and gets a 500 where it asserted 409 `no_model_credential`
+  // (compat-longtail.test.ts, "THE ASYMMETRY, provider side"). Whether that
+  // happened depended on whether one of the four files that wipe the slot ran
+  // in between, which is why it was intermittent. Take exactly these slots
+  // back; the file owns them while it runs, the same way env-fallback does.
+  //
+  // The take-back runs LAST and in a `finally`: a close that throws (or a
+  // beforeAll that failed before `app`/`upstream` were assigned) must not be
+  // able to skip it, and it must not be able to skip the closes either. The
+  // `db` guard covers a beforeAll that failed before the pool existed.
+  try {
+    try {
+      app?.server.closeAllConnections();
+      await app?.close();
+    } finally {
+      await upstream?.close();
+    }
+  } finally {
+    if (db) {
+      await db
+        .delete(modelCredentials)
+        .where(inArray(modelCredentials.provider, ["anthropic", "openai", "google", "xai"]));
+    }
+  }
 });
 
 describe("MCP proxy path", () => {
@@ -1348,7 +1388,9 @@ describe("workflow engine (EPIC-03 slice)", () => {
       { id: "requirements", type: "artifact_generation", output: "requirements_file" },
       { id: "requirements_signoff", type: "human_approval", approvers: ["requesting_user"] },
       { id: "build", type: "automated_build", scope: "requirements_file" },
-      { id: "checks", type: "automated_check", checks: ["ci_tests"] },
+      // AER-047: no CI reports ci_tests in this journey, so the stage opts in
+      // to the labelled offline auto-pass (the default would wait for a report)
+      { id: "checks", type: "automated_check", checks: ["ci_tests"], offlineAutoPass: true },
     ],
   };
 
@@ -2084,10 +2126,16 @@ describe("git executor hardening (review follow-ups)", () => {
     });
     await approveCurrent("signoff");
 
-    // branch + open_pr replayed idempotently — same PR, no 422 wedge
+    // AER-049: the re-open is a new review round — branch + open_pr run again
+    // against a FRESH, round-named branch and a NEW PR (no 422 wedge on the
+    // round-0 branch, which already exists); round 0's branch/PR are history
     view = await app.inject({ method: "GET", headers: umaAuth, url: `/v1/workflows/instances/${instanceId}` });
     expect(view.json().instance.status).toBe("blocked_on_approval");
-    expect(view.json().instance.context.prId).toBe(prIdBefore);
+    expect(view.json().instance.round).toBe(1);
+    expect(view.json().instance.context.branch).toBe(`regulait/${String(instanceId).slice(0, 8)}-r1`);
+    expect(view.json().instance.context.prId).toBeTruthy();
+    expect(view.json().instance.context.prId).not.toBe(prIdBefore);
+    expect(view.json().instance.context["effects:history"][0]).toMatchObject({ round: 0, values: { prId: prIdBefore } });
     expect(view.json().instance.context.lastError).toBeUndefined();
 
     await approveCurrent("merge_gate");

@@ -1,4 +1,4 @@
-import type { Db } from "@regulait/db";
+import { auditLog, type Db } from "@regulait/db";
 import { loadExecutionMode } from "./execution-posture.js";
 
 /** Every external provider mutation outside the AI/MCP dispatch kernel. */
@@ -29,13 +29,48 @@ export class ExternalEffectBlockedError extends Error {
   }
 }
 
+/** AER-048 (review item 1): who/what an external effect is recorded against.
+ * When given, every provider call that is actually MADE writes one audit row
+ * (`external-effect:<operation>`) — performed or failed — so an effect whose
+ * result is later discarded is still on the one trail. `summarize` picks the
+ * identifying, non-sensitive fields of the result (ids, never credentials or
+ * provider detail strings). */
+export interface ExternalWriteAudit<T> {
+  userId: string;
+  objectType: (typeof auditLog.$inferInsert)["objectType"];
+  objectId: string;
+  detail?: Record<string, unknown>;
+  summarize?: (result: T) => Record<string, unknown>;
+}
+
 /** Re-read the dial after preparation, immediately before the provider call. */
 export async function runExternalWrite<T>(
   db: Db,
   operation: ExternalWriteOperation,
   call: () => Promise<T>,
+  audit?: ExternalWriteAudit<T>,
 ): Promise<T> {
   const mode = await loadExecutionMode(db);
   if (mode !== "normal") throw new ExternalEffectBlockedError(operation, mode);
-  return call();
+  if (!audit) return call();
+  const record = (outcome: "performed" | "failed", extra: Record<string, unknown>) =>
+    db.insert(auditLog).values({
+      userId: audit.userId,
+      objectType: audit.objectType,
+      objectId: audit.objectId,
+      detail: { operation, outcome, ...(audit.detail ?? {}), ...extra },
+      effect: "allow",
+      ruleId: `external-effect:${operation}`,
+      ruleChain: [],
+      reason: `external write '${operation}' ${outcome === "performed" ? "performed" : "attempted and failed"}`,
+    });
+  let result: T;
+  try {
+    result = await call();
+  } catch (err) {
+    await record("failed", { error: err instanceof Error ? err.message : String(err) });
+    throw err;
+  }
+  await record("performed", audit.summarize ? audit.summarize(result) : {});
+  return result;
 }

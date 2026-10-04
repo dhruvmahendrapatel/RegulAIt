@@ -24,8 +24,14 @@
  * (M-018). Every assertion is scoped to ids this file created (M-008).
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createDb, eq, inArray, mcpServers, notInArray, runMigrations, type Db } from "@regulait/db";
-import { runMcpHealthProbeSweep } from "./mcp-health-probe.js";
+import { createDb, eq, inArray, mcpServers, notInArray, runMigrations, sql, type Db } from "@regulait/db";
+import {
+  claimHealthProbeBatch,
+  healthProbeEligibility,
+  HEALTH_PROBE_CLAIM_LOCK_KEY,
+  runMcpHealthProbeSweep,
+  type McpHealthProbeResult,
+} from "./mcp-health-probe.js";
 import { resolveBreakerConfig, setBreakerConfig, breakerConfig } from "./upstream-breaker.js";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
@@ -355,5 +361,225 @@ describe("AER-037 — a bounded pass rotates, so the tail is late and never star
     await runMcpHealthProbeSweep(db, { limit: LIMIT });
     const after = await cursors();
     for (const id of rotation) expect(after.get(id)).toBe(before.get(id));
+  }, 60_000);
+});
+
+// ===========================================================================
+// AER-037, second pass — two passes AT ONCE claim disjoint sets.
+// ===========================================================================
+//
+// The rotation above is a property of passes in SEQUENCE. The first fix also
+// claimed that "two concurrent passes select disjoint sets" — in a comment
+// between a SELECT and an UPDATE that were two statements, with nothing
+// enforcing it: a second pass arriving in the gap picked the same head,
+// stamped it again and probed it again. The claim is now one statement (`for
+// update skip locked` plus the stamp), and this is the test that can tell the
+// two apart.
+//
+// MAKING THE OVERLAP CERTAIN rather than likely: a trigger on this test's rows
+// sleeps while their cursor is being stamped, so the second pass's claim is
+// guaranteed to arrive while the first pass's claim still holds its row locks.
+// Column- and name-scoped, so the breaker writes the probes make, and every
+// other suite's rows, never touch it; dropped in `finally` whatever happens.
+//
+// WHAT IS READ is the world, then the report: every one of these upstreams is
+// dead and the threshold is 1, so a probe is an opened breaker with ONE
+// recorded failure. Probed twice is two failures; never probed is a closed
+// breaker with none. Each pass's `opened` list names what it took, and the
+// two lists must partition the set.
+
+describe("AER-037 — two concurrent passes claim DISJOINT sets", () => {
+  const LIMIT = 3;
+  const COUNT = 2 * LIMIT;
+  const tag = `zz-pair-${randomUUID().slice(0, 8)}`;
+  const pair: string[] = [];
+  const names: string[] = [];
+
+  beforeAll(async () => {
+    for (let i = 0; i < COUNT; i += 1) {
+      // registration order and name order disagree, as in the rotation block
+      const name = `${tag}-${String(COUNT - i).padStart(2, "0")}`;
+      names.push(name);
+      pair.push(await register(name, DEAD_URL));
+    }
+    // park the rest of the estate — the rotation block says why this is safe
+    await db
+      .update(mcpServers)
+      .set({ lastHealthProbeAt: new Date(), breakerOpenedAt: null, breakerLastError: null })
+      .where(notInArray(mcpServers.id, pair));
+  }, 60_000);
+
+  it("no upstream is probed twice and none is skipped when two passes overlap", async () => {
+    // the tag is this test's own and hex-only, so inlining it in DDL is safe
+    expect(tag).toMatch(/^zz-pair-[0-9a-f]{8}$/);
+    const fnName = `zz_aer037_hold_${tag.slice(-8)}`;
+    await db.execute(
+      sql.raw(`
+      create or replace function ${fnName}() returns trigger as $$
+      begin
+        perform pg_sleep(0.25);
+        return new;
+      end $$ language plpgsql;
+    `),
+    );
+    await db.execute(
+      sql.raw(
+        `create trigger ${fnName} before update of last_health_probe_at on mcp_servers ` +
+          `for each row when (new.name like '${tag}-%') execute function ${fnName}()`,
+      ),
+    );
+    try {
+      const [a, b] = await Promise.all([
+        runMcpHealthProbeSweep(db, { limit: LIMIT }),
+        runMcpHealthProbeSweep(db, { limit: LIMIT }),
+      ]);
+
+      // THE PARTITION, from each pass's own report of what it opened.
+      const ours = (out: McpHealthProbeResult) => out.opened.filter((n) => names.includes(n)).sort();
+      const tookA = ours(a);
+      const tookB = ours(b);
+      expect(tookA, `pass A: ${JSON.stringify(a)}`).toHaveLength(LIMIT);
+      expect(tookB, `pass B: ${JSON.stringify(b)}`).toHaveLength(LIMIT);
+      expect(
+        tookA.filter((n) => tookB.includes(n)),
+        "no upstream was probed by both passes",
+      ).toEqual([]);
+      expect([...tookA, ...tookB].sort(), "no upstream was skipped").toEqual([...names].sort());
+
+      // AND THE WORLD AGREES: exactly one recorded failure on every row. A
+      // report could partition correctly while a row was probed twice
+      // underneath it; the failure count cannot.
+      const rows = await db
+        .select({
+          name: mcpServers.name,
+          failures: mcpServers.breakerConsecutiveFailures,
+          openedAt: mcpServers.breakerOpenedAt,
+        })
+        .from(mcpServers)
+        .where(inArray(mcpServers.id, pair));
+      expect(rows).toHaveLength(COUNT);
+      for (const r of rows) {
+        expect(r.failures, `${r.name} was probed exactly once`).toBe(1);
+        expect(r.openedAt, `${r.name} was probed at all`).not.toBeNull();
+      }
+    } finally {
+      await db.execute(sql.raw(`drop trigger if exists ${fnName} on mcp_servers`));
+      await db.execute(sql.raw(`drop function if exists ${fnName}()`));
+    }
+  }, 60_000);
+});
+
+// ===========================================================================
+// AER-037 — the interleaving `skip locked` alone did not cover: a claim whose
+// SNAPSHOT predates the other claim's commit but whose LOCKS come after it.
+// ===========================================================================
+//
+// The overlap test above holds A's row locks for B's whole statement, so B only
+// ever meets rows that are still locked and skips them. The reviewer's case is
+// the other ordering: B takes its statement snapshot while A's claim is
+// uncommitted, A commits, and only THEN does B reach A's rows. Unlocked by
+// then, they are locked by B, re-checked against the WHERE clause (which does
+// not look at the cursor) and claimed a second time.
+//
+// Driven deterministically, with no sleeps:
+//  1. A second connection holds a GATE advisory lock.
+//  2. Claim A runs inside a transaction the test keeps open, so its stamps are
+//     uncommitted (and, after the fix, so is its claim lock).
+//  3. Claim B starts with `eligible` extended by a function that waits on the
+//     gate. Evaluated per row during B's scan, it parks B AFTER B's snapshot and
+//     BEFORE B locks anything. After the fix, B parks earlier still, on the
+//     claim lock, before its claim statement has a snapshot at all.
+//  4. Once B is seen waiting on an advisory lock, A commits; then the gate is
+//     released; then B finishes.
+// The two claimed sets must be disjoint and together cover the six rows.
+
+describe("AER-037 — a claim whose snapshot predates another claim's commit", () => {
+  const LIMIT = 3;
+  const COUNT = 2 * LIMIT;
+  const tag = `zz-snap-${randomUUID().slice(0, 8)}`;
+  const ids: string[] = [];
+  const names: string[] = [];
+
+  beforeAll(async () => {
+    for (let i = 0; i < COUNT; i += 1) {
+      const name = `${tag}-${String(COUNT - i).padStart(2, "0")}`;
+      names.push(name);
+      ids.push(await register(name, DEAD_URL));
+    }
+    // park the rest of the estate — the rotation block says why this is safe;
+    // this file's earlier blocks left breakers open and cursors null on their
+    // own rows, which would otherwise jump this queue
+    await db
+      .update(mcpServers)
+      .set({ lastHealthProbeAt: new Date(), breakerOpenedAt: null, breakerLastError: null })
+      .where(notInArray(mcpServers.id, ids));
+  }, 60_000);
+
+  it("claim B, started before claim A commits, takes none of A's rows", async () => {
+    expect(tag).toMatch(/^zz-snap-[0-9a-f]{8}$/);
+    const gateFn = `zz_aer037_gate_${tag.slice(-8)}`;
+    const K1 = 37_037;
+    const gate = 1 + Math.floor(Math.random() * 2_000_000_000);
+    // the gate is a SHARED xact lock, so B's per-row calls stack harmlessly
+    // and all release with B's own statement or transaction
+    await db.execute(
+      sql.raw(`
+      create or replace function ${gateFn}() returns boolean as $$
+      begin
+        perform pg_advisory_xact_lock_shared(${K1}, ${gate});
+        return true;
+      end $$ language plpgsql volatile;
+    `),
+    );
+    const holder = createDb(DATABASE_URL!);
+    const gateConn = await (holder.$client as unknown as {
+      connect: () => Promise<{ query: (t: string) => Promise<unknown>; release: () => void }>;
+    }).connect();
+    let b: Promise<Array<{ name: string }>> | undefined;
+    try {
+      await gateConn.query(`select pg_advisory_lock(${K1}, ${gate})`);
+
+      let tookA: string[] = [];
+      await db.transaction(async (outer) => {
+        // A — claimed and stamped, NOT committed until this callback returns
+        tookA = (await claimHealthProbeBatch(outer, LIMIT, healthProbeEligibility())).map((r) => r.name);
+
+        // B — on its own pooled connection; not awaited, it is about to park
+        b = claimHealthProbeBatch(db, LIMIT, sql`${healthProbeEligibility()} and ${sql.raw(gateFn)}()`);
+
+        // B is parked on an advisory lock: the gate (its snapshot taken, no
+        // row locked yet) or, with the claim serialized, the claim lock
+        const deadline = Date.now() + 15_000;
+        for (;;) {
+          const r = (await db.execute(sql`
+            select count(*)::int as "n" from pg_locks
+            where locktype = 'advisory' and not granted
+              and ((objsubid = 2 and classid = ${K1} and objid = ${gate})
+                or (objsubid = 1 and ((classid::bigint << 32) | objid::bigint) = ${HEALTH_PROBE_CLAIM_LOCK_KEY}))
+          `)) as unknown as { rows: Array<{ n: number }> };
+          if (r.rows[0]!.n >= 1) break;
+          if (Date.now() > deadline) throw new Error("claim B never parked on an advisory lock");
+          await new Promise((res) => setTimeout(res, 20));
+        }
+      });
+      // A has COMMITTED. Only now may B reach any row.
+      await gateConn.query(`select pg_advisory_unlock(${K1}, ${gate})`);
+      const tookB = (await b!).map((r) => r.name);
+
+      const oursA = tookA.filter((n) => names.includes(n)).sort();
+      const oursB = tookB.filter((n) => names.includes(n)).sort();
+      expect(oursA, `claim A: ${JSON.stringify(tookA)}`).toHaveLength(LIMIT);
+      expect(
+        oursA.filter((n) => oursB.includes(n)),
+        `claim B re-claimed A's rows: A=${JSON.stringify(oursA)} B=${JSON.stringify(oursB)}`,
+      ).toEqual([]);
+      expect([...oursA, ...oursB].sort(), "together they cover every row once").toEqual([...names].sort());
+    } finally {
+      await gateConn.query(`select pg_advisory_unlock_all()`).catch(() => undefined);
+      await b?.catch(() => undefined);
+      gateConn.release();
+      await holder.$client.end();
+      await db.execute(sql.raw(`drop function if exists ${gateFn}()`));
+    }
   }, 60_000);
 });

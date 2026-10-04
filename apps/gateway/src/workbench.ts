@@ -197,7 +197,15 @@ export async function ensureAssignment(
     // approver-visibility checks and ADR-0027's quorum count keep reading a
     // meaningful `approverUserId`. A role/team rule does NOT — it waits for a
     // claim, because a NOT NULL column cannot hold a team.
-    if (rule.assigneeKind === "user" && rule.assigneeId !== row.approverUserId && row.status === "pending") {
+    // ADR-0170 §2: a review-role row is never re-pointed — its decision right
+    // is live role membership, and its stored approver must not drift to a
+    // routed non-member who might later read as "the named approver".
+    if (
+      rule.assigneeKind === "user" &&
+      rule.assigneeId !== row.approverUserId &&
+      row.status === "pending" &&
+      row.reviewRoleId === null
+    ) {
       await db
         .update(approvals)
         .set({ approverUserId: rule.assigneeId })
@@ -243,10 +251,12 @@ export async function reassignApprovalApprover(
   approvalId: string,
   newApproverUserId: string,
 ): Promise<boolean> {
+  // ADR-0170 §2: never a review-role row (its decision right is live role
+  // membership, not the stored approver) — refused like a decided row.
   const [moved] = await db
     .update(approvals)
     .set({ approverUserId: newApproverUserId })
-    .where(and(eq(approvals.id, approvalId), eq(approvals.status, "pending")))
+    .where(and(eq(approvals.id, approvalId), eq(approvals.status, "pending"), isNull(approvals.reviewRoleId)))
     .returning();
   return moved !== undefined;
 }
@@ -779,10 +789,14 @@ export function registerWorkbenchRoutes(app: FastifyInstance, db: Db, opts: Work
       .where(and(eq(approvalAssignments.id, assignment.id), isNull(approvalAssignments.claimedByUserId)))
       .returning();
     if (!claimed) return reply.status(409).send({ error: "already_claimed" });
-    await db
-      .update(approvals)
-      .set({ approverUserId: me })
-      .where(and(eq(approvals.id, id), eq(approvals.status, "pending")));
+    // ADR-0170 §2: a claim records who took the item; on a review-role row it
+    // does NOT move the stored approver — deciding one takes live membership.
+    if (row.reviewRoleId === null) {
+      await db
+        .update(approvals)
+        .set({ approverUserId: me })
+        .where(and(eq(approvals.id, id), eq(approvals.status, "pending")));
+    }
     await db.insert(auditLog).values({
       userId: me,
       objectType: row.objectType,
@@ -800,9 +814,12 @@ export function registerWorkbenchRoutes(app: FastifyInstance, db: Db, opts: Work
       effect: "allow",
       ruleId: "approval-claimed",
       ruleChain: [],
-      reason: "an eligible member claimed a routed approval; it is now theirs to decide",
+      reason:
+        row.reviewRoleId === null
+          ? "an eligible member claimed a routed approval; it is now theirs to decide"
+          : "an eligible member claimed a routed review; deciding it still takes live membership of the review role",
     });
-    return { claimed: true, approverUserId: me };
+    return { claimed: true, approverUserId: row.reviewRoleId === null ? me : row.approverUserId };
   });
 
   // ---------------- saved views ----------------

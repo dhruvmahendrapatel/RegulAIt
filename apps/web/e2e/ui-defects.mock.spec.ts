@@ -139,10 +139,21 @@ test("UXJ-06: the intake opens blank — the worked example is loaded only on re
   await page.goto("/ui/admin/governance/intake");
   await expect(page.getByLabel("Use-case name")).toHaveValue("");
   await expect(page.getByLabel("What will the system do?")).toHaveValue("");
+  await page.getByText("Use-case name", { exact: true }).click();
+  await expect(page.getByLabel("Use-case name")).toBeFocused();
+  // ADR-0168: the field explains itself in a hint under it, read as its description
+  await expect(page.getByLabel("Use-case name")).toHaveAccessibleDescription(/A name reviewers will recognize/);
+  await expect(page.getByRole("button", { name: "Continue" })).toBeDisabled();
+  // the classification also opens blank: reach it with a name and purpose typed in
+  await page.getByLabel("Use-case name").fill("Blank check");
+  await page.getByLabel("What will the system do?").fill("Checks that nothing is pre-selected.");
+  await page.getByRole("button", { name: "Continue" }).click();
   await expect(page.getByLabel("Social scoring")).toHaveValue("");
   await expect(page.getByRole("button", { name: "Draft suggestions" })).toBeDisabled();
+  await page.getByRole("button", { name: "Back" }).click();
   await page.getByRole("button", { name: "Fill in an example" }).click();
   await expect(page.getByLabel("Use-case name")).toHaveValue("Credit-limit-increase assistant");
+  await page.getByRole("button", { name: "Continue" }).click();
   await expect(page.getByLabel("Social scoring")).toHaveValue("no");
   await expect(page.getByRole("button", { name: "Draft suggestions" })).toBeEnabled();
 });

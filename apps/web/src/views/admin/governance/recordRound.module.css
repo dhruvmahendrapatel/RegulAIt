@@ -1,0 +1,62 @@
+/* The use-case record's review-round additions (ADR-0168 amendment): the
+   band's primary "Update and resubmit", the sent-back and re-review notes and
+   the accepted risks. */
+
+.bandPrimary {
+  display: inline-flex;
+  align-items: center;
+  padding: 7px 14px;
+  border: 1px solid var(--rg-signal-400);
+  border-radius: var(--rg-r-sm);
+  background: var(--rg-signal-400);
+  color: var(--rg-dark-surface);
+  font-size: var(--text-md);
+  font-weight: 650;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.bandPrimary:hover {
+  filter: brightness(1.06);
+}
+.bandPrimary:focus-visible {
+  outline: 2px solid var(--rg-dark-ink);
+  outline-offset: 2px;
+}
+
+.returned {
+  margin: 0;
+  padding: 12px var(--s2);
+  border-left: 3px solid var(--rg-medium);
+  border-radius: var(--rg-r-sm);
+  background: var(--surface-1);
+  box-shadow: var(--rg-shadow-sm);
+  color: var(--rg-ink);
+  font-size: var(--text-md);
+}
+
+.accepted {
+  display: grid;
+  gap: var(--s1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.accepted li {
+  display: grid;
+  gap: 2px;
+}
+.acceptedTitle {
+  font-weight: 600;
+  color: var(--rg-ink);
+}
+.acceptedBy {
+  margin: 0;
+  color: var(--rg-ink-label);
+  font-size: var(--text-sm);
+}
+
+/* a link inside a sentence is underlined, never told apart by colour alone */
+.inlineLink {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}

@@ -536,6 +536,7 @@ describe("6. the covered / NOT-covered inventory", () => {
     "trace_spans.output_preview",
     "trace_spans.status_reason",
     "training_datasets.note",
+    "use_case_conditions.note",
     "vendor_account_aliases.reason",
     "vendor_domain_rules.reason",
     "workflow_templates.retired_reason",

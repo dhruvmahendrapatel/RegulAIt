@@ -28,9 +28,13 @@ import {
 import { useToast } from "../../ui/toast";
 import { McpActionReview } from "../approvals/McpActionReview";
 import { inspectApprovalAction } from "../approvals/approvalReview";
+import { ReviewPanel } from "../approvals/ReviewPanel";
+import { intakeUseCaseName, isIntakeSignoff } from "../approvals/reviewDecision";
+import { shortDate } from "../admin/governance/useCaseLifecycle";
 import v from "../views.module.css";
 
 const approvalLabel = (a: Approval): string => {
+  if (isIntakeSignoff(a)) return "AI use case sign-off";
   if (a.objectType === "mcp_tool") return `MCP action: ${a.toolName ?? "unknown tool"}`;
   const sentinel = approvalStageLabel(a);
   if (sentinel) return sentinel;
@@ -170,13 +174,14 @@ export default function InboxPage() {
               const canDecide = named || delegated || Boolean(auth?.isAdmin);
               const target = approvalTarget(a);
               const inst = a.instanceId ? instances[a.instanceId] : undefined;
+              const intake = isIntakeSignoff(a);
               const controls = (blockedReason: string | null) => <div className={v.row} style={{ flexWrap: "wrap" }}>
                 <Input style={{ maxWidth: 260 }}
                   placeholder={named || delegated ? "reason (optional)" : "reason (required - admin override)"}
                   aria-label="Decision reason" value={reasons[a.id] ?? ""}
                   onChange={(e) => setReasons((r) => ({ ...r, [a.id]: e.target.value }))} />
-                <Button size="sm" variant="primary" disabled={deciding === a.id || !!blockedReason} onClick={() => void decide(a, "approved")}>Approve</Button>
-                <Button size="sm" variant="danger" disabled={deciding === a.id} onClick={() => void decide(a, "denied")}>Deny</Button>
+                <Button size="sm" disabled={deciding === a.id || !!blockedReason} onClick={() => void decide(a, "approved")}>Approve</Button>
+                <Button size="sm" variant="ghost" disabled={deciding === a.id} onClick={() => void decide(a, "denied")}>Deny</Button>
                 {rowErrors[a.id] && <div className={v.errLine} role="alert">{rowErrors[a.id]}</div>}
               </div>;
               return (
@@ -187,7 +192,7 @@ export default function InboxPage() {
                       {a.objectLabel && (
                         <>
                           {" · "}
-                          {target ? <Link to={target}>{a.objectLabel}</Link> : a.objectLabel}
+                          {intake ? intakeUseCaseName(a) : target ? <Link to={target}>{a.objectLabel}</Link> : a.objectLabel}
                         </>
                       )}
                       {!a.objectLabel && target && (
@@ -214,8 +219,15 @@ export default function InboxPage() {
                     )}
                   </div>
                   <div className={v.faint}>
-                    {a.objectType} · requested by {a.requestedByName ?? "unknown"} · {ago(a.requestedAt)}
+                    {intake ? "Use case" : a.objectType} · requested by {a.requestedByName ?? "unknown"} · {ago(a.requestedAt)}
+                    {a.assignment?.dueAt ? ` · due ${shortDate(a.assignment.dueAt)}` : ""}
                   </div>
+                  {intake ? (
+                    <div className={v.row}>
+                      <ReviewPanel approval={a} />
+                      {!canDecide && <span className={v.faint}>awaiting {a.approverName ?? "the named approver"}</span>}
+                    </div>
+                  ) : <>
                   {inst && <MergeGateEvidence inst={inst} />}
                   {a.contextConflict && <ConflictPreview conflict={a.contextConflict} />}
                   {canDecide ? (
@@ -226,6 +238,7 @@ export default function InboxPage() {
                       <span className={v.faint}>awaiting {a.approverName ?? "the named approver"}</span>
                     </>
                   )}
+                  </>}
                 </div>
               );
             })
@@ -239,7 +252,7 @@ export default function InboxPage() {
                 <div className={v.grow}>
                   <div style={{ fontSize: "var(--text-sm)" }}>
                     {approvalLabel(a)}
-                    {a.objectLabel && <span className={v.faint}> · {a.objectLabel}</span>}
+                    {a.objectLabel && <span className={v.faint}> · {isIntakeSignoff(a) ? intakeUseCaseName(a) : a.objectLabel}</span>}
                   </div>
                   <div className={v.faint}>
                     requested by {a.requestedByName ?? "unknown"} · decided by {a.decidedByName ?? "—"}
@@ -247,7 +260,7 @@ export default function InboxPage() {
                     {a.decisionReason ? ` · “${a.decisionReason}”` : ""}
                   </div>
                 </div>
-                <StatusBadge status={a.status} />
+                {a.status === "returned" ? <Badge tone="warn">sent back</Badge> : <StatusBadge status={a.status} />}
                 {a.objectType === "mcp_tool" && <McpActionReview approval={a} />}
               </div>
             ))}
@@ -306,17 +319,35 @@ function MergeGateEvidence(props: { inst: WorkflowDetailResponse }) {
               key={`${c.check}-${i}`}
               // ADR-0167 (AUTHZ-06): a pass the initiator reported themselves is
               // not CI's colour — the approver sees that before signing off
-              tone={c.selfReported ? "warn" : c.status === "passed" ? "ok" : "danger"}
+              // AER-047: an auto-passed check was never run — nothing reported
+              // it and the template's offline mode passed it; a pending one is
+              // still waiting. Neither is CI's green.
+              tone={
+                c.selfReported || c.autoPassed || c.status === "pending"
+                  ? "warn"
+                  : c.status === "passed"
+                    ? "ok"
+                    : "danger"
+              }
               title={
-                c.selfReported
-                  ? `Reported by the change's own initiator, not by CI${c.reason ? ` — reason: ${c.reason}` : ""}${c.detail ? ` (${c.detail})` : ""}`
-                  : (c.detail ?? "")
+                c.autoPassed
+                  ? "Auto-passed — no result was reported for this check (offline mode)"
+                  : c.selfReported
+                    ? `Reported by the change's own initiator, not by CI${c.reason ? ` — reason: ${c.reason}` : ""}${c.detail ? ` (${c.detail})` : ""}`
+                    : (c.detail ?? "")
               }
             >
               {c.check} · {c.status}
+              {c.autoPassed ? " · auto-passed (no report)" : ""}
               {c.selfReported ? " · self-reported" : ""}
             </Badge>
           ))}
+        </div>
+      )}
+      {checkRows.some((c) => c.autoPassed) && (
+        <div className={v.faint}>
+          No result was reported for {checkRows.filter((c) => c.autoPassed).length} check(s) — the template's
+          offline mode auto-passed them; nothing ran them.
         </div>
       )}
       {deploys.some((d) => d?.dryRun) && (

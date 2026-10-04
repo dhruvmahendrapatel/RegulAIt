@@ -23,6 +23,8 @@ import {
   classifyEuAiActTier,
   euAiActAnswersSchema,
   renderEuAiActAnswersBlock,
+  unsureListSchema,
+  EU_AI_ACT_BOOLEAN_KEYS,
   type EuAiActAnswers,
 } from "./eu-ai-act.js";
 import {
@@ -52,28 +54,105 @@ export const INTAKE_DATA_CATEGORIES = [
 ] as const;
 export const INTAKE_DEPLOYMENTS = ["internal", "customer-facing", "public"] as const;
 
+/** the registration Classify step's context answers (beyond the EU AI Act set) */
+export const intakeContextShape = {
+  sectors: z.array(z.enum(INTAKE_SECTORS)).max(6).default([]),
+  dataCategories: z.array(z.enum(INTAKE_DATA_CATEGORIES)).max(7).default([]),
+  deployment: z.enum(INTAKE_DEPLOYMENTS),
+  /** placed on the EU market or affecting people in the EU */
+  euNexus: z.boolean(),
+  /** a third party's model or service is in the path */
+  usesExternalVendor: z.boolean(),
+  /** produces free-form text/images rather than a score or label */
+  generative: z.boolean(),
+  /** an agent takes actions through tools, not only answers */
+  autonomousActions: z.boolean(),
+  toolsUsed: z.array(z.string().min(1).max(200)).max(50).default([]),
+};
+export const intakeContextSchema = z.object(intakeContextShape).strict();
+
+/**
+ * ADR-0168 amendment — EVERY answer the registration Classify step collects,
+ * as ONE flat object: the EU AI Act screening answers plus the context
+ * answers. Stored with the use case at registration (`screeningAnswers` on
+ * `POST /v1/use-cases`, optional) so a sent-back use case can be resubmitted
+ * prefilled; `PATCH` in `needs_info` takes the same set and recomputes the
+ * tier (from the EU keys) and `dataSensitivity` (from `dataCategories`).
+ */
+export const intakeScreeningAnswersSchema = euAiActAnswersSchema
+  .extend(intakeContextShape)
+  /** ADR-0171 / AER-053 — the yes/no answers the owner marked "Not sure".
+   * Each must be a key of INTAKE_BOOLEAN_QUESTION_KEYS answered `true` (the
+   * conservative reading the tier is computed from); the gateway refuses
+   * anything else with 422 `unsure_answer_must_count_as_yes`. */
+  .extend({ unsure: unsureListSchema.optional() })
+  .strict();
+export type IntakeScreeningAnswers = z.infer<typeof intakeScreeningAnswersSchema>;
+
+/** PATCH form: the EU keys are required (the tier is recomputed from them);
+ * context keys may be omitted, and an omitted key keeps its stored value */
+export const intakeScreeningAnswersPatchSchema = euAiActAnswersSchema
+  .extend({
+    sectors: intakeContextShape.sectors.removeDefault().optional(),
+    dataCategories: intakeContextShape.dataCategories.removeDefault().optional(),
+    deployment: intakeContextShape.deployment.optional(),
+    euNexus: intakeContextShape.euNexus.optional(),
+    usesExternalVendor: intakeContextShape.usesExternalVendor.optional(),
+    generative: intakeContextShape.generative.optional(),
+    autonomousActions: intakeContextShape.autonomousActions.optional(),
+    toolsUsed: intakeContextShape.toolsUsed.removeDefault().optional(),
+    /** ADR-0171: the COMPLETE "Not sure" set for this resubmission —
+     * omitted means none (it replaces the stored set; it is never merged) */
+    unsure: unsureListSchema.optional(),
+  })
+  .strict();
+
+/** ADR-0171 / AER-053 — every yes/no question of the Classify step, i.e. the
+ * answers that may be marked "Not sure": the EU AI Act flags plus the
+ * context flags. */
+export const INTAKE_BOOLEAN_QUESTION_KEYS: readonly string[] = [
+  ...EU_AI_ACT_BOOLEAN_KEYS,
+  "euNexus",
+  "usesExternalVendor",
+  "generative",
+  "autonomousActions",
+];
+
+/**
+ * AER-042 — a use case's `dataSensitivity` from its declared data categories,
+ * the same rule the registration wizard applies. FAIL CLOSED: no categories
+ * (or an unknown one) is the strictest level.
+ */
+export function deriveDataSensitivityFromCategories(
+  categories: readonly string[],
+): "public" | "internal" | "confidential" | "regulated" {
+  const order = ["public", "internal", "confidential", "regulated"] as const;
+  const levelFor: Record<string, (typeof order)[number]> = {
+    health: "regulated",
+    "sensitive-personal": "regulated",
+    "payment-card": "regulated",
+    financial: "regulated",
+    personal: "confidential",
+    proprietary: "confidential",
+    public: "public",
+  };
+  if (categories.length === 0) return "regulated";
+  let worst = 0;
+  for (const c of categories) {
+    const level = levelFor[c];
+    if (!level) return "regulated";
+    worst = Math.max(worst, order.indexOf(level));
+  }
+  return order[worst]!;
+}
+
 export const intakeAssistRequestSchema = z
   .object({
     title: z.string().min(1).max(200),
     description: z.string().min(1).max(8000),
     /** the SAME strict answers ADR-0085 screens on — never a tier */
     euAiAct: euAiActAnswersSchema,
-    context: z
-      .object({
-        sectors: z.array(z.enum(INTAKE_SECTORS)).max(6).default([]),
-        dataCategories: z.array(z.enum(INTAKE_DATA_CATEGORIES)).max(7).default([]),
-        deployment: z.enum(INTAKE_DEPLOYMENTS),
-        /** placed on the EU market or affecting people in the EU */
-        euNexus: z.boolean(),
-        /** a third party's model or service is in the path */
-        usesExternalVendor: z.boolean(),
-        /** produces free-form text/images rather than a score or label */
-        generative: z.boolean(),
-        /** an agent takes actions through tools, not only answers */
-        autonomousActions: z.boolean(),
-        toolsUsed: z.array(z.string().min(1).max(200)).max(50).default([]),
-      })
-      .strict(),
+    context: intakeContextSchema,
     /** ask the governed model to rewrite the narrative sections (gateway) */
     draftNarrative: z.boolean().default(false),
     /** the registry agent to draft with — entitlement-checked like any invoke */

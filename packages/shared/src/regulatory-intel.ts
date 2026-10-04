@@ -88,7 +88,7 @@ export interface RegulatoryImpact {
 }
 
 /** live = could be affected: everything except rejected and retired */
-const LIVE_USE_CASE = new Set(["proposed", "under_review", "approved"]);
+const LIVE_USE_CASE = new Set(["proposed", "under_review", "needs_info", "approved"]);
 const EVIDENCED = new Set<string>(["satisfied", "attested"]);
 
 export function computeRegulatoryImpact(

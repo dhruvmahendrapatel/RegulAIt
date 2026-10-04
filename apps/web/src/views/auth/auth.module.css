@@ -4,9 +4,8 @@
   align-items: center;
   justify-content: center;
   padding: var(--s3);
-  background:
-    radial-gradient(1100px 500px at 15% -10%, var(--primary-soft) 0%, transparent 55%),
-    var(--surface-0);
+  /* ADR-0169: the app-wide shaded field (global.css) shows through */
+  background: transparent;
 }
 
 .panel {

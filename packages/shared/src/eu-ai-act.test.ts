@@ -20,6 +20,8 @@ import {
   euAiActAnswersSchema,
   extractEuAiActAnswers,
   renderEuAiActAnswersBlock,
+  unsureAnswerViolations,
+  UNSURE_ANSWER_MUST_COUNT_AS_YES,
   EU_AI_ACT_ANNEX_III_DOMAINS,
   EU_AI_ACT_PURPOSE_DOMAINS,
   EU_AI_ACT_RULESET_V1,
@@ -324,5 +326,34 @@ describe("the answers block — round-trip, refusals", () => {
     const parsed = euAiActAnswersSchema.parse(withoutAffected);
     expect(parsed.affectedPersons).toEqual([]);
     expect(() => euAiActAnswersSchema.parse({ ...baseline, extra: 1 })).toThrow();
+  });
+});
+
+describe("ADR-0171 / AER-053 — 'Not sure' in the answers block", () => {
+  const block = (a: Record<string, unknown>) =>
+    "# Q\n\n```eu-ai-act-answers\n" + JSON.stringify(a) + "\n```\n";
+
+  it("a 'Not sure' yes is accepted, split off the answers, and the classifier sees the yes", () => {
+    const r = extractEuAiActAnswers(block({ ...baseline, socialScoring: true, unsure: ["socialScoring", "socialScoring"] }));
+    expect(r.status).toBe("ok");
+    if (r.status !== "ok") return;
+    expect(r.unsure).toEqual(["socialScoring"]);
+    expect(r.answers).not.toHaveProperty("unsure");
+    expect(classifyEuAiActTier(r.answers).tier).toBe("prohibited");
+  });
+
+  it("a 'Not sure' that is not a yes is refused by name — never a silent no", () => {
+    const no = extractEuAiActAnswers(block({ ...baseline, unsure: ["socialScoring"] }));
+    expect(no).toMatchObject({ status: "invalid", code: UNSURE_ANSWER_MUST_COUNT_AS_YES });
+    const notYesNo = extractEuAiActAnswers(block({ ...baseline, unsure: ["purposeDomain"] }));
+    expect(notYesNo).toMatchObject({ status: "invalid", code: UNSURE_ANSWER_MUST_COUNT_AS_YES });
+    expect(extractEuAiActAnswers(block({ ...baseline, unsure: "socialScoring" })).status).toBe("invalid");
+  });
+
+  it("a block without `unsure` says nothing about it (no key on the result)", () => {
+    const r = extractEuAiActAnswers(block(baseline));
+    expect(r).toEqual({ status: "ok", answers: baseline });
+    expect(r).not.toHaveProperty("unsure");
+    expect(unsureAnswerViolations({ a: true, b: false }, ["a", "b", "c"], ["a", "b"])).toEqual(["b", "c"]);
   });
 });

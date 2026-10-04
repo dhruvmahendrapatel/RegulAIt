@@ -42,8 +42,18 @@ export type PostV1AgentsByAgentIdInvokeBody = {
   };
 
 export type PostV1ApprovalsByApprovalIdDecideBody = {
-    decision: "approved" | "denied";
+    decision: "approved" | "denied" | "returned";
     reason?: string;
+    conditions?: Array<{
+      text: string;
+      ownerUserId?: string;
+      dueAt: string;
+      blocking: boolean;
+    }>;
+    acceptRisks?: {
+      riskIds: Array<string>;
+      rationale: string;
+    };
   };
 
 export type PostV1ConnectorsByConnectorIdInvokeBody = {

@@ -51,10 +51,9 @@
   align-items: baseline;
 }
 .kvKey {
-  color: var(--text-faint);
-  font-size: var(--text-xs);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
+  color: var(--text-dim);
+  font-size: var(--text-sm);
+  font-weight: 600;
 }
 .kvVal {
   font-size: var(--text-sm);
@@ -89,7 +88,7 @@
   align-items: center;
   justify-content: center;
   font-size: var(--text-xs);
-  font-weight: 650;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
   background: var(--surface-2);
   color: var(--text-dim);
@@ -158,6 +157,26 @@
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.04em;
+}
+
+/* a sub-section inside a card: a heading and a top hairline, no second box */
+.subSection {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  margin-top: var(--s2);
+  padding-top: var(--s2);
+  border-top: 1px solid var(--border);
+}
+.subSection > :first-child {
+  margin-top: 0;
+}
+
+/* verbatim sentences (adapter verification and limits) keep the snippet's
+   box but read as prose: sans, not monospace */
+.snippetProse {
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
 }
 
 /* copy-paste config snippet */
@@ -265,10 +284,12 @@
   border: 1px solid var(--border);
   background: var(--surface-2);
 }
+/* an accepted outcome is the expected result: stated plainly, no fill or
+   border. Refusals (.outcomeDeny) stay loud. */
 .outcomeOk {
-  border-color: var(--ok);
-  background: var(--ok-soft);
-  color: var(--ok-soft-text);
+  padding: 0;
+  border: 0;
+  background: none;
 }
 .outcomeDeny {
   border-color: var(--danger);
@@ -306,7 +327,7 @@
 .basisMoney {
   font-family: var(--font-mono);
   font-size: var(--text-lg);
-  font-weight: 700;
+  font-weight: 600;
 }
 
 /* The admin console's stat-tile row. Referenced by ShadowAiPage, BillingPage,
@@ -355,15 +376,13 @@
    a <button> inside a <label> would toggle the control when clicked. */
 .labelRow { display: flex; align-items: center; gap: 2px; }
 .inlineLabel {
-  font-size: var(--text-xs); font-weight: 600; letter-spacing: 0.05em;
-  text-transform: uppercase; color: var(--text-faint);
+  font-size: var(--text-sm); font-weight: 600; color: var(--text-dim);
 }
 
 .review { margin: 0; display: flex; flex-direction: column; gap: var(--s1); }
 .review > div { display: grid; grid-template-columns: minmax(9rem, 12rem) 1fr; gap: var(--s1); align-items: baseline; }
 .review dt {
-  font-size: var(--text-xs); font-weight: 600; letter-spacing: 0.05em;
-  text-transform: uppercase; color: var(--text-faint);
+  font-size: var(--text-sm); font-weight: 600; color: var(--text-dim);
 }
 .review dd { margin: 0; color: var(--text); overflow-wrap: anywhere; }
 .review dd em { color: var(--text-dim); }

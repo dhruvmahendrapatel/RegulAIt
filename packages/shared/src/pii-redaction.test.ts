@@ -10,6 +10,10 @@ describe("validated PII redaction foundation", () => {
       const result = redactPII(text, ALL_INTERNATIONAL_CATEGORIES);
       if (vector.id === "p.cpf.in_json") {
         expect(result.text).toBe('before <{"cpf":"[CPF]"}> after');
+      } else if (vector.id === "p.bsn.ons_kenmerk") {
+        // the BSN at the head of the letter reference, and ONLY it: the dot
+        // after its ninth digit and the reference's tail survive
+        expect(result.text).toBe("before <Ons kenmerk [BSN].T.SC.19.001> after");
       } else {
         expect(result.text).toMatch(/^before <\[[A-Z_]+\]> after$/);
       }

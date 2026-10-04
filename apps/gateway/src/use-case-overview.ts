@@ -18,7 +18,8 @@
  * /v1/use-cases/:id/frameworks` owns that computation (ADR-0123) and the page
  * calls it — two copies of a compliance mapping would drift.
  *
- * Visibility: the owner and admins, exactly the detail route's rule.
+ * Visibility: the owner, admins and the intake sign-off's reviewer (ADR-0168),
+ * exactly the detail route's rule (`canReadUseCase`).
  */
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
@@ -40,7 +41,7 @@ import {
 import { RISK_CATEGORY_DIMENSION, type AiRiskCategory } from "@regulait/shared";
 import { loadCardsForSubject } from "./mrm.js";
 import { loadRiskControls } from "./risks.js";
-import { USE_CASE_QUESTIONNAIRE_OUTPUT } from "./use-cases.js";
+import { canReadUseCase, USE_CASE_QUESTIONNAIRE_OUTPUT } from "./use-cases.js";
 
 const params = z.object({ useCaseId: z.string().uuid() });
 
@@ -49,7 +50,8 @@ export function registerUseCaseOverviewRoutes(app: FastifyInstance, db: Db): voi
     const { useCaseId } = params.parse(req.params);
     const [useCase] = await db.select().from(aiUseCases).where(eq(aiUseCases.id, useCaseId));
     if (!useCase) return reply.status(404).send({ error: "not_found" });
-    if (!req.authCtx.isAdmin && req.authCtx.userId !== useCase.ownerUserId) {
+    // ADR-0168: + the reviewer of its intake sign-off (read-only)
+    if (!(await canReadUseCase(db, useCase, req.authCtx))) {
       return reply.status(403).send({ error: "forbidden", detail: "a use case is visible to its owner and to admins" });
     }
     const now = new Date();
@@ -106,6 +108,16 @@ export function registerUseCaseOverviewRoutes(app: FastifyInstance, db: Db): voi
       .where(eq(aiRisks.useCaseId, useCaseId))
       .orderBy(desc(aiRisks.createdAt));
     const controls = await loadRiskControls(db, risks.map((r) => r.id));
+    const acceptorIds = [...new Set(risks.map((r) => r.acceptedByUserId).filter((x): x is string => !!x))];
+    const acceptorName = new Map(
+      (acceptorIds.length
+        ? await db
+            .select({ id: users.id, displayName: users.displayName, email: users.email })
+            .from(users)
+            .where(inArray(users.id, acceptorIds))
+        : []
+      ).map((u) => [u.id, u.displayName || u.email]),
+    );
 
     const providers = [...new Set(agentRows.map((a) => a.provider))];
     const customProviderIds = agentRows.map((a) => a.customProviderId).filter((x): x is string => !!x);
@@ -178,6 +190,10 @@ export function registerUseCaseOverviewRoutes(app: FastifyInstance, db: Db): voi
             ? { likelihood: r.residualLikelihood, impact: r.residualImpact }
             : null,
         controls: controls.get(r.id) ?? [],
+        // ADR-0168 amendment: an acceptance recorded on a sign-off (or the register)
+        acceptedByName: r.acceptedByUserId ? (acceptorName.get(r.acceptedByUserId) ?? null) : null,
+        acceptedAt: r.acceptedAt,
+        acceptanceRationale: r.status === "accepted" ? r.acceptanceNote : null,
       })),
       summary: {
         risks: risks.length,

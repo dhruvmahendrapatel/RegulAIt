@@ -1278,7 +1278,9 @@ export const approvals = pgTable(
     stageId: text("stage_id"),
     approverUserId: uuid("approver_user_id").notNull(),
     status: text("status", {
-      enum: ["pending", "approved", "denied", "consumed", "superseded"],
+      // ADR-0168: 'returned' — an intake sign-off sent back for information.
+      // No DB CHECK on this column (migration 0001), so a TS-only widening.
+      enum: ["pending", "approved", "denied", "returned", "consumed", "superseded"],
     })
       .notNull()
       .default("pending"),
@@ -1319,9 +1321,22 @@ export const approvals = pgTable(
      * row queued before 0107, or an org that has deliberately set the dial to
      * NULL. Never rewritten by a later dial change. */
     expiresAt: timestamp("expires_at", { withTimezone: true }),
+    // ADR-0168 amendment (migration 0131) — A REVIEW ROUND. An intake sign-off
+    // routed by the review policy is one row per required reviewer role: any
+    // member of the role may decide it (never the proposer). The name is a
+    // snapshot (a renamed or removed role still reads true on old rounds) and
+    // the round numbers the use case's review rounds. All three NULL on every
+    // other approval, including the single-named-approver intake path.
+    reviewRoleId: text("review_role_id"),
+    reviewRoleName: text("review_role_name"),
+    reviewRound: integer("review_round"),
   },
   (t) => [
     index("approvals_status_idx").on(t.status),
+    check(
+      "approvals_review_role_check",
+      sql`(${t.reviewRoleId} IS NULL) = (${t.reviewRoleName} IS NULL) AND (${t.reviewRoleId} IS NULL) = (${t.reviewRound} IS NULL)`,
+    ),
     check("approvals_preview_kind_check", sql`${t.argumentsPreviewKind} IN ('arguments_v1', 'mcp_redacted_v1')`),
     check("approvals_scope_check", sql`${t.approvalScope} IN ('action', 'tool')`),
     check("approvals_redacted_scope_check", sql`${t.argumentsPreviewKind} IS DISTINCT FROM 'mcp_redacted_v1' OR ${t.approvalScope} IS NOT DISTINCT FROM 'action'`),
@@ -1582,7 +1597,20 @@ export const revocations = pgTable(
  *                  refuses with a named 409 (`agent_retired`, the ADR-0045
  *                  gate idiom). Grants and history stay readable — rows are
  *                  never deleted; re-registering is a NEW agent. */
-export const AGENT_LIFECYCLE_STATUSES = ["active", "deprecated", "retired"] as const;
+/*
+ * ADR-0168 amendment item 6 (migration 0132) widens the vocabulary for agent
+ * stewardship: `proposed` (registered, not yet in service), `under_review`
+ * (a steward is reviewing it) and `suspended` (temporarily OUT OF SERVICE —
+ * dispatch refuses with a named 409 `agent_suspended`, exactly like retired
+ * but reversible). proposed / under_review warn only, like deprecated. */
+export const AGENT_LIFECYCLE_STATUSES = [
+  "proposed",
+  "active",
+  "under_review",
+  "suspended",
+  "deprecated",
+  "retired",
+] as const;
 export type AgentLifecycleStatus = (typeof AGENT_LIFECYCLE_STATUSES)[number];
 
 export const agents = pgTable("agents", {
@@ -1616,6 +1644,16 @@ export const agents = pgTable("agents", {
     .default("active"),
   lifecycleReason: text("lifecycle_reason"),
   lifecycleChangedAt: timestamp("lifecycle_changed_at", { withTimezone: true }),
+  // ADR-0168 amendment item 6 (migration 0132) — STEWARDSHIP. The steward is
+  // `ownerUserId` above (one accountable-human record, named `stewardUserId`
+  // in the API). The successor takes over when the steward leaves; a DB CHECK
+  // (agents_successor_not_steward_ck) keeps the two different people. FKs ON
+  // DELETE SET NULL in SQL. "Orphaned" and "review overdue" are computed at
+  // read time — no stored flag.
+  successorUserId: uuid("successor_user_id"),
+  nextReviewAt: timestamp("next_review_at", { withTimezone: true }),
+  lastReviewedAt: timestamp("last_reviewed_at", { withTimezone: true }),
+  lastReviewedByUserId: uuid("last_reviewed_by_user_id"),
   // OPTIMIZATION §7/§8: list price per million tokens; null = unpriced, the
   // optimizer will never route toward (or estimate savings against) it.
   costPerMTokIn: doublePrecision("cost_per_mtok_in"),
@@ -1999,6 +2037,14 @@ export const workflowInstances = pgTable(
     /** outputs of executed stages (branch, prId, prUrl, mergeSha, lastError) */
     context: jsonb("context").$type<Record<string, unknown>>().notNull().default({}),
     status: text("status").notNull(),
+    /** AER-048 (migration 0130): bumped on every RE-OPEN (artifact resubmitted
+     * after its stage completed; sign-off returned). A check report binds to
+     * it — a report for a previous round is refused (409) and audited. */
+    round: integer("round").notNull().default(0),
+    /** AER-048: bumped on every entry into an executable stage and on every
+     * re-open. An executor captures it with its claim and commits its result
+     * only if it is still current. */
+    stageEntry: integer("stage_entry").notNull().default(0),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -3226,6 +3272,13 @@ export const orgSettings = pgTable(
      * approver must approve; 'any' = the first approval advances the stage and
      * supersedes the rest. */
     approvalQuorum: text("approval_quorum", { enum: APPROVAL_QUORUMS }).notNull().default("all"),
+    /** AER-048 (migration 0130): may a KEY-authenticated caller (CI) report
+     * workflow check results WITHOUT naming the round they were produced for?
+     * false (default) = fail closed: such a report is refused 422
+     * `round_required`. true = the pre-AER-048 behaviour — an unbound report
+     * is taken for whatever round is current when it is applied. A person in
+     * the console (session) may always omit it. */
+    checkReportsAllowUnbound: boolean("check_reports_allow_unbound").notNull().default(false),
     /** ADR-0022: master switch for approver delegation. ON (default) = active
      * delegation windows widen the delegate's inbox and let them decide
      * on-behalf-of. OFF = a strict separation-of-duties org: creating
@@ -7525,6 +7578,10 @@ export type TraceSpanRow = typeof traceSpans.$inferSelect;
 export const AI_USE_CASE_STATUSES = [
   "proposed",
   "under_review",
+  /** ADR-0168 (migration 0129): a reviewer SENT the intake back for
+   * information — the instance rests at its questionnaire stage until a new
+   * version is submitted, which re-requests the sign-off */
+  "needs_info",
   "approved",
   "rejected",
   "retired",
@@ -7578,6 +7635,28 @@ export const aiUseCases = pgTable(
     >(),
     euAiActRulesetVersion: integer("eu_ai_act_ruleset_version"),
     decidedAt: timestamp("decided_at", { withTimezone: true }),
+    /** ADR-0168 (migration 0129) — AN APPROVAL HAS A LIFETIME. Both set
+     * together by the approving sign-off (`syncUseCaseForInstance`):
+     * high/prohibited/unscreened tier → +6 months, minimal/limited → +12.
+     * Enforced at the deploy gate (`approval_expired`); not swept yet. */
+    approvedAt: timestamp("approved_at", { withTimezone: true }),
+    approvedUntil: timestamp("approved_until", { withTimezone: true }),
+    /** ADR-0168 amendment (migration 0131): true while an approval that
+     * EXPIRED is back in review — set by the recertification sweep, cleared
+     * by the next approve/reject decision. */
+    recertification: boolean("recertification").notNull().default(false),
+    /** ADR-0168 amendment (migration 0131): every Classify-step answer
+     * (flat: EU AI Act answers + intake context), kept for resubmission
+     * prefill. NULL = registered without them. Never an input to the tier. */
+    intakeAnswers: jsonb("intake_answers").$type<Record<string, unknown>>(),
+    /** ADR-0171 / AER-052 (migration 0134): the owner's "why it applies" per
+     * framework, keyed by compliance tag (every key is one of
+     * `complianceTags`). Shown to reviewers; never an input to any decision. */
+    frameworkRationales: jsonb("framework_rationales").$type<Record<string, string>>().notNull().default({}),
+    /** ADR-0171 / AER-053 (migration 0134): the yes/no screening answers the
+     * owner marked "Not sure". Every listed answer is stored (and screened)
+     * as `true`, the conservative reading; reviewers see the list. */
+    screeningUnsure: jsonb("screening_unsure").$type<string[]>().notNull().default([]),
     retiredReason: text("retired_reason"),
     retiredAt: timestamp("retired_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -7585,6 +7664,10 @@ export const aiUseCases = pgTable(
   },
   (t) => [
     check("ai_use_cases_name_check", sql`length(btrim(${t.name})) > 0`),
+    check(
+      "ai_use_cases_approval_lifetime_check",
+      sql`(${t.approvedAt} IS NULL) = (${t.approvedUntil} IS NULL)`,
+    ),
     check(
       "ai_use_cases_eu_tier_consistency_check",
       sql`(${t.euAiActTier} IS NULL) = (${t.euAiActRulesetVersion} IS NULL) AND (${t.euAiActTier} IS NULL) = (${t.euAiActReasons} IS NULL)`,
@@ -7608,6 +7691,140 @@ export const aiUseCases = pgTable(
 );
 
 export type AiUseCaseRow = typeof aiUseCases.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0171 / AER-050 (migration 0134) — INTAKE DRAFTS AND IDEMPOTENT CREATION.
+//
+// `use_case_drafts`: the intake wizard's work-in-progress, server-side and per
+// user (questionnaire text can be sensitive, so it never lives in browser
+// storage). One draft per (user, scope): scope `new` is the registration
+// wizard, a use-case id is that use case's resubmission. `state` is the
+// wizard's opaque JSON; the gateway never reads inside it.
+//
+// `use_case_idempotency_keys`: an `Idempotency-Key` on POST /v1/use-cases is
+// CLAIMED here inside the create transaction — the unique (user_id, key)
+// index is what makes two concurrent duplicates unable to both create. The
+// stored `response` is the original 201 body, replayed for 24 hours.
+// ---------------------------------------------------------------------------
+
+export const useCaseDrafts = pgTable(
+  "use_case_drafts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    scope: text("scope").notNull(),
+    state: jsonb("state").$type<Record<string, unknown>>().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("use_case_drafts_user_scope_uq").on(t.userId, t.scope),
+    index("use_case_drafts_updated_idx").on(t.updatedAt),
+  ],
+);
+
+export type UseCaseDraftRow = typeof useCaseDrafts.$inferSelect;
+
+export const useCaseIdempotencyKeys = pgTable(
+  "use_case_idempotency_keys",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    key: text("key").notNull(),
+    useCaseId: uuid("use_case_id").references(() => aiUseCases.id, { onDelete: "cascade" }),
+    /** the original 201 body, replayed verbatim on a retry */
+    response: jsonb("response").$type<Record<string, unknown>>(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("use_case_idempotency_keys_key_check", sql`length(${t.key}) BETWEEN 1 AND 200`),
+    uniqueIndex("use_case_idempotency_keys_user_key_uq").on(t.userId, t.key),
+    index("use_case_idempotency_keys_created_idx").on(t.createdAt),
+  ],
+);
+
+export type UseCaseIdempotencyKeyRow = typeof useCaseIdempotencyKeys.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0168 (migration 0129) — APPROVAL CONDITIONS ("approve with conditions").
+// Imposed by an intake sign-off, written in the decision's own transaction.
+// `blocking` = before go-live: the deploy gate refuses while it is open.
+// Not blocking = after go-live: tracked, shown overdue after `dueAt`, never
+// blocks. Marked met by the condition's owner, the use case's owner or an
+// admin (audited `use-case-condition-met`).
+// ---------------------------------------------------------------------------
+
+export const USE_CASE_CONDITION_STATUSES = ["open", "met", "waived"] as const;
+export type UseCaseConditionStatus = (typeof USE_CASE_CONDITION_STATUSES)[number];
+
+export const useCaseConditions = pgTable(
+  "use_case_conditions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    useCaseId: uuid("use_case_id")
+      .notNull()
+      .references(() => aiUseCases.id, { onDelete: "cascade" }),
+    /** the decision that imposed it */
+    approvalId: uuid("approval_id")
+      .notNull()
+      .references(() => approvals.id, { onDelete: "cascade" }),
+    text: text("text").notNull(),
+    ownerUserId: uuid("owner_user_id").references(() => users.id, { onDelete: "set null" }),
+    dueAt: timestamp("due_at", { withTimezone: true }).notNull(),
+    blocking: boolean("blocking").notNull(),
+    status: text("status", { enum: USE_CASE_CONDITION_STATUSES }).notNull().default("open"),
+    metAt: timestamp("met_at", { withTimezone: true }),
+    metByUserId: uuid("met_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    note: text("note"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("use_case_conditions_status_check", sql`${t.status} IN ('open', 'met', 'waived')`),
+    check("use_case_conditions_text_check", sql`length(btrim(${t.text})) BETWEEN 1 AND 500`),
+    check("use_case_conditions_met_check", sql`(${t.status} = 'open') = (${t.metAt} IS NULL)`),
+    index("use_case_conditions_use_case_idx").on(t.useCaseId, t.status),
+    index("use_case_conditions_approval_idx").on(t.approvalId),
+  ],
+);
+
+export type UseCaseConditionRow = typeof useCaseConditions.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0168 amendment (migration 0131) — THE REVIEW POLICY. One row (id
+// 'default'), admin-edited: reviewer roles with members, per EU AI Act tier
+// the roles that must sign (each role = one required review) and an optional
+// approval lifetime, and who may accept risk. No row, or a tier with no
+// roles, keeps the intake template's single named approver.
+// ---------------------------------------------------------------------------
+
+export interface ReviewPolicyRole {
+  id: string;
+  name: string;
+  memberUserIds: string[];
+}
+export interface ReviewPolicyTier {
+  roleIds: string[];
+  validityMonths?: number;
+}
+
+export const governanceReviewPolicy = pgTable(
+  "governance_review_policy",
+  {
+    id: text("id").primaryKey().default("default"),
+    roles: jsonb("roles").$type<ReviewPolicyRole[]>().notNull().default([]),
+    tiers: jsonb("tiers").$type<Record<string, ReviewPolicyTier>>().notNull().default({}),
+    riskAcceptorUserIds: jsonb("risk_acceptor_user_ids").$type<string[]>().notNull().default([]),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedByUserId: uuid("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
+  },
+  (t) => [check("governance_review_policy_singleton_check", sql`${t.id} = 'default'`)],
+);
+
+export type GovernanceReviewPolicyRow = typeof governanceReviewPolicy.$inferSelect;
 
 // ---------------------------------------------------------------------------
 // ADR-0084 (migration 0088) — the AI vendor registry (third-party AI risk).
@@ -8181,7 +8398,7 @@ export const sodRuleSides = pgTable(
     ),
     check(
       "sod_rule_sides_lifecycle_value_check",
-      sql`${t.patternDimension} <> 'lifecycle_status' OR ${t.patternValue} IN ('active', 'deprecated', 'retired')`,
+      sql`${t.patternDimension} <> 'lifecycle_status' OR ${t.patternValue} IN ('proposed', 'active', 'under_review', 'suspended', 'deprecated', 'retired')`,
     ),
     index("sod_rule_sides_rule_idx").on(t.ruleId),
   ],

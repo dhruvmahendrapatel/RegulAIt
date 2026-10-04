@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { and, auditLog, createDb, eq, runMigrations, type Db } from "@regulait/db";
@@ -93,7 +93,9 @@ async function registerTemplate(name: string, changeType: string, deployTarget: 
           { id: "intake", type: "trigger" },
           { id: "gate", type: "human_approval", approvers: [anaId] },
           { id: "deploy", type: "deployment", connection: deployTarget, environment: "production", ...(condition ? { condition } : {}) },
-          { id: "verify", type: "automated_check", checks: ["smoke"], onFailure: "rollback", rollbackStageId: "undo" },
+          // AER-047: tests that leave 'smoke' unreported rely on the labelled
+          // offline auto-pass, so the shape opts in explicitly
+          { id: "verify", type: "automated_check", checks: ["smoke"], onFailure: "rollback", rollbackStageId: "undo", offlineAutoPass: true },
           { id: "undo", type: "rollback", connection: deployTarget },
           { id: "done", type: "human_approval", approvers: [anaId] },
         ],
@@ -123,6 +125,19 @@ async function start(changeType: string, environment = "wd-env") {
   expect(res.statusCode).toBe(201);
   return res.json().id as string;
 }
+
+// AER-047: this suite drives check stages whose templates opt in to the
+// labelled offline auto-pass (offlineAutoPass). The opt-in FAILS CLOSED unless
+// the process declares offline mode, so the suite declares it — and restores
+// the environment afterwards.
+const priorOfflineChecks = process.env.REGULAIT_OFFLINE_CHECKS;
+beforeAll(() => {
+  process.env.REGULAIT_OFFLINE_CHECKS = "1";
+});
+afterAll(() => {
+  if (priorOfflineChecks === undefined) delete process.env.REGULAIT_OFFLINE_CHECKS;
+  else process.env.REGULAIT_OFFLINE_CHECKS = priorOfflineChecks;
+});
 
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
@@ -203,7 +218,7 @@ describe("deploy → verify → rollback", () => {
       method: "POST",
       headers: piaAuth,
       url: `/v1/workflows/instances/${id}/checks`,
-      payload: { stageId: "verify", results: [{ check: "smoke", status: "failed", severity: "critical" }] },
+      payload: { round: 0, stageId: "verify", results: [{ check: "smoke", status: "failed", severity: "critical" }] },
     });
     await approveGate(id);
     const inst = await view(id);

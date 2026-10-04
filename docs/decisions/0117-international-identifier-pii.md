@@ -173,3 +173,22 @@ Instead of *"measured 22/25 on the suite's own PII contract"*:
 > *"A conformance contract of 36 positives and 39 negatives, with nine known misses documented and
 > asserted, and per-jurisdiction false-positive rates measured and pinned — reproducible from a
 > clean checkout of the product."*
+
+## Amendment 2026-10-03 — explicit layouts per scheme (AER-006)
+
+Every digit-run scheme used to accept one optional separator after **any** digit, so `1 2 3 4 5 6 7 8 2`
+was a BSN candidate. Each scheme now takes the issuing authority's published groupings plus the bare
+run, and nothing else (`5b61d1b`): Aadhaar `4 4 4` / `4-4-4`; CPF `3.3.3-2` and `9-2`; BSN `3.3.3` and
+`4.2.3` (the Belastingdienst fiscal-number print and the SBR *Ons kenmerk* `1234.56.789.T.XX.jj.nnn`
+reference); SIN `3 3 3` / `3-3-3`; TFN `3 3 3`; Steuer-ID `2 3 3 3`; NIR `1 2 2 2 3 3 2`. The first cut
+dropped BSN `4.2.3` and CPF `9-2`, both of which fired before; review caught it and `93317d7` restored
+them as explicit layouts. Space-grouped CPF stays a documented miss (`m.cpf.space_grouped`).
+
+The contract is now vector set **2026-10-03.2: 39 positives, 50 negatives, 9 documented misses**
+(2026-09-19.2 was 36/39/9; 2026-10-03.1 added nine every-digit negatives, one per layout; 2026-10-03.2
+added `p.bsn.dotted_4_2_3`, `p.bsn.ons_kenmerk`, `p.cpf.hyphen_9_2`, `n.bsn.every_digit_dotted_4_2_3`,
+`n.cpf.every_digit_hyphenated`). Every new negative is checksum-valid, so only the grammar keeps it
+silent, and restoring the old any-separator grammar makes them fire. Measured false-positive rates are
+unchanged. The category default stays empty, and the categories are set through
+`PUT /v1/org/settings` (`piiInternationalCategories`) — there is no Org-settings control yet (owner
+decision AER-006: build the UI, or keep the claim API-only).

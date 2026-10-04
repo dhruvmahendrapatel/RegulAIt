@@ -33,6 +33,7 @@ import { deleteAgentGrantById, deleteConnectorGrantById } from "./grant-revocati
 // ADR-0091 — toxic-combination SoD: the mint-time gate on the two direct
 // agent/connector grant endpoints (the other seven mint paths live in app.ts).
 import { refuseSodMint } from "./sod.js";
+import { refuseLifecycleChangedConcurrently, registerAgentStewardshipRoutes, withStewardship } from "./agent-stewardship.js";
 import { evaluateAgent, evaluateConnector } from "@regulait/policy-kernel";
 import { agentHaltOf, loadExecutionMode, postureOf } from "./execution-posture.js";
 import {
@@ -1204,35 +1205,79 @@ async function dispatchAttempt(
   // which keeps the entitlement history readable and the retirement
   // reversible as a record, never as a dispatch. `deprecated` deliberately
   // does NOT appear here: deprecation only WARNS in the ADR-0082 inventory.
-  if (served.lifecycleStatus === "retired") {
+  //
+  // ADR-0168 amendment item 6: `suspended` refuses through the same gate with
+  // its own name (409 agent_suspended) — out of service like retired, but
+  // reversible by an admin (ADR-0170 item 7: a steward may suspend, only an
+  // admin returns the agent to service). proposed / under_review warn only.
+  //
+  // ADR-0170 item 7 (review finding): the gate judges the agent the request
+  // NAMED as well as the one that serves. Model routing (invoke, compat
+  // router_decides) may downroute a request for agent A onto agent B; if A is
+  // suspended or retired the request is refused under A's name instead of
+  // being quietly served by B. Fallback hops carry the same requestedAgentId,
+  // so a hop never serves a request for an out-of-service agent either.
+  const lifecycleSubjects: Array<{
+    agent: Pick<AgentRow, "id" | "name" | "model" | "lifecycleStatus" | "lifecycleReason">;
+    requested: boolean;
+  }> = [];
+  if (requestedAgentId && requestedAgentId !== served.id) {
+    const [requestedRow] = await db
+      .select({
+        id: agents.id,
+        name: agents.name,
+        model: agents.model,
+        lifecycleStatus: agents.lifecycleStatus,
+        lifecycleReason: agents.lifecycleReason,
+      })
+      .from(agents)
+      .where(eq(agents.id, requestedAgentId));
+    if (requestedRow) lifecycleSubjects.push({ agent: requestedRow, requested: true });
+  }
+  lifecycleSubjects.push({ agent: served, requested: false });
+  for (const { agent: subject, requested } of lifecycleSubjects) {
+    const status = subject.lifecycleStatus;
+    if (status !== "suspended" && status !== "retired") continue;
+    const why = subject.lifecycleReason;
     const [lcRow] = await db
       .insert(auditLog)
       .values({
         userId,
         objectType: "agent",
-        objectId: served.id,
+        objectId: subject.id,
         detail: {
           phase: "dispatch",
-          agentId: served.id,
-          agentName: served.name,
-          model: served.model,
-          lifecycleStatus: "retired",
-          lifecycleReason: served.lifecycleReason,
+          agentId: subject.id,
+          agentName: subject.name,
+          model: subject.model,
+          lifecycleStatus: status,
+          lifecycleReason: why,
+          ...(requested ? { requestedAgent: true, servedAgentId: served.id, servedAgentName: served.name } : {}),
           ...(args.projectId ? { projectId: args.projectId } : {}),
         },
         effect: "deny",
-        ruleId: "agent-retired-dispatch-refused",
+        ruleId: status === "suspended" ? "agent-suspended-dispatch-refused" : "agent-retired-dispatch-refused",
         ruleChain: [],
-        reason: `agent '${served.name}' is retired${served.lifecycleReason ? ` (${served.lifecycleReason})` : ""} — a retired agent refuses dispatch; its grants and history remain readable`,
+        reason:
+          status === "suspended"
+            ? `agent '${subject.name}' is suspended${why ? ` (${why})` : ""} — a suspended agent refuses dispatch until an admin returns it to service`
+            : `agent '${subject.name}' is retired${why ? ` (${why})` : ""} — a retired agent refuses dispatch; its grants and history remain readable`,
       })
       .returning({ id: auditLog.id });
     sink.auditLogId = lcRow?.id ?? null;
-    return {
-      ok: false,
-      status: 409,
-      error: "agent_retired",
-      detail: `agent '${served.name}' is retired${served.lifecycleReason ? `: ${served.lifecycleReason}` : ""} — retirement is terminal; re-registering is a new agent`,
-    };
+    return status === "suspended"
+      ? {
+          ok: false,
+          status: 409,
+          error: "agent_suspended",
+          detail: `agent '${subject.name}' is suspended${why ? `: ${why}` : ""} — an admin can return it to service`,
+        }
+      : {
+          ok: false,
+          status: 409,
+          error: "agent_retired",
+          detail: `agent '${subject.name}' is retired${why ? `: ${why}` : ""} — retirement is terminal; re-registering is a new agent`,
+        };
   }
 
   // ADR-0066 §2/§3 — THE VIRTUAL-KEY CEILING. Placed FIRST, before the MRM
@@ -2544,6 +2589,9 @@ export function registerAgentConnectorRoutes(
   db: Db,
   opts: { dataKey?: string } = {},
 ) {
+  // ADR-0168 amendment item 6 — steward / successor / lifecycle / review.
+  registerAgentStewardshipRoutes(app, db);
+
   /**
    * ADR-0034 amendment — WRITE-TIME EGRESS CHECK for a credential `baseUrl`.
    *
@@ -2988,7 +3036,10 @@ export function registerAgentConnectorRoutes(
   // REL-10: bounded — `limit` (default LIST_DEFAULT_LIMIT, max LIST_MAX_LIMIT)
   app.get("/v1/agents", async (req) => {
     const { limit } = listLimitQuery.parse(req.query);
-    return { agents: await db.select().from(agents).orderBy(agents.name).limit(limit) };
+    // ADR-0168 amendment item 6: each row carries its stewardship view
+    // (stewardName, successorName, orphaned, reviewOverdue, cadence) computed
+    // at read time — no stored flag.
+    return { agents: await withStewardship(db, await db.select().from(agents).orderBy(agents.name).limit(limit)) };
   });
 
   // -------------------------------------------------------------------------
@@ -3176,9 +3227,12 @@ export function registerAgentConnectorRoutes(
       }
       ownerEmail = owner.email;
     }
+    // ADR-0168 item 6: the successor stepping up leaves the successor slot
+    // empty (the DB CHECK keeps steward and successor two different people)
+    const promotesSuccessor = !!body.ownerUserId && body.ownerUserId === agent.successorUserId;
     const [row] = await db
       .update(agents)
-      .set({ ownerUserId: body.ownerUserId })
+      .set({ ownerUserId: body.ownerUserId, ...(promotesSuccessor ? { successorUserId: null } : {}) })
       .where(eq(agents.id, agentId))
       .returning();
     await db.insert(auditLog).values({
@@ -3190,6 +3244,7 @@ export function registerAgentConnectorRoutes(
         from: agent.ownerUserId,
         to: body.ownerUserId,
         ...(ownerEmail ? { ownerEmail } : {}),
+        ...(promotesSuccessor ? { promotedSuccessor: true } : {}),
       },
       effect: "allow",
       ruleId: body.ownerUserId ? "agent-owner-set" : "agent-owner-cleared",
@@ -3235,8 +3290,11 @@ export function registerAgentConnectorRoutes(
         lifecycleReason: body.status === "active" ? null : (body.reason ?? null),
         lifecycleChangedAt: new Date(),
       })
-      .where(eq(agents.id, agentId))
+      // ADR-0170 item 7: compare-and-swap on the status read above — a
+      // concurrent retire + set-active must not un-retire the agent
+      .where(and(eq(agents.id, agentId), eq(agents.lifecycleStatus, agent.lifecycleStatus)))
       .returning();
+    if (!row) return refuseLifecycleChangedConcurrently(reply, agent.lifecycleStatus);
     await db.insert(auditLog).values({
       userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
       objectType: "agent",
@@ -3255,7 +3313,11 @@ export function registerAgentConnectorRoutes(
           ? `agent '${agent.name}' retired: ${body.reason} — dispatch now refuses with 409 agent_retired; grants and history remain readable`
           : body.status === "deprecated"
             ? `agent '${agent.name}' deprecated: ${body.reason} — a WARNING in the inventory; dispatch is not blocked`
-            : `agent '${agent.name}' returned to active (was ${agent.lifecycleStatus})`,
+            : body.status === "suspended"
+              ? `agent '${agent.name}' suspended: ${body.reason} — dispatch now refuses with 409 agent_suspended until it returns to service`
+              : body.status === "active"
+                ? `agent '${agent.name}' returned to active (was ${agent.lifecycleStatus})`
+                : `agent '${agent.name}' moved to ${body.status}: ${body.reason} — a WARNING in the inventory; dispatch is not blocked`,
     });
     return row;
   });

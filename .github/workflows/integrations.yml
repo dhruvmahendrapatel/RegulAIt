@@ -35,15 +35,39 @@ on:
       # affect it, so it stays out and doc-only changes still skip the job.
       - "apps/gateway/src/**"
       - "packages/**"
+      # AER-034: the lockfile decides which dependency versions the gateway the
+      # harness starts is built from. A bump that touches nothing under the
+      # paths above still changes that gateway, so it runs this gate too.
+      - "pnpm-lock.yaml"
 
 jobs:
   kong-adapter:
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
+    # PINNED BY DIGEST (AER-034). `kong:3.6` and `postgres:16` are tags, and a
+    # tag is a pointer the registry may move under a passing run — a job that
+    # pulled "whatever 3.6 is today" was verified against nothing in
+    # particular, which is what "pinned" was claiming not to be. Both images
+    # are therefore named by content digest, and the Kong one is logged after
+    # the pull so the job's output says exactly what the adapter ran against.
+    #
+    # To bump one: resolve the tag's digest from the registry's manifest API
+    # with an anonymous pull token, never by guessing or by copying a digest
+    # from a web page —
+    #
+    #   token=$(curl -sS "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/kong:pull" | jq -r .token)
+    #   curl -sSI -H "Authorization: Bearer $token" \
+    #     -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json" \
+    #     https://registry-1.docker.io/v2/library/kong/manifests/3.6 | grep -i docker-content-digest
+    #
+    # (same for library/postgres, tag 16). The digest is the multi-arch INDEX
+    # digest, which is what `docker pull name:tag@sha256:…` resolves on every
+    # platform. Resolved 2026-10-03. The service image below and the
+    # POSTGRES_IMAGE echoed in the log step must move together.
     services:
       postgres:
-        image: postgres:16
+        image: postgres:16@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54
         env:
           POSTGRES_USER: regulait
           POSTGRES_PASSWORD: regulait
@@ -57,10 +81,11 @@ jobs:
           --health-retries 10
 
     env:
-      # PINNED. An adapter verified against "whatever Kong is latest today" is
-      # verified against nothing in particular — the ordering and sandbox
-      # behaviour this plugin depends on are version-specific.
-      KONG_IMAGE: kong:3.6
+      # PINNED BY DIGEST — see the note on `services` above. The ordering and
+      # sandbox behaviour this plugin depends on are version-specific, and a
+      # tag alone could not hold the version still.
+      KONG_IMAGE: kong:3.6@sha256:a42d2b4503e7b6674ca7914883bdb0d2274b806b0e397a6af28d1dd57aafce4e
+      POSTGRES_IMAGE: postgres:16@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54
       E2E_PG: postgres://regulait:regulait@localhost:5432
 
     steps:
@@ -74,8 +99,16 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm -r build
 
-      - name: Pull the pinned Kong image
-        run: docker pull "$KONG_IMAGE"
+      - name: Pull the digest-pinned Kong image and log what was pulled
+        # The digests appear in the job log in the job's own words, from the
+        # daemon's image store rather than from this file — so the log is a
+        # record of what ran, not a restatement of what was asked for.
+        run: |
+          docker pull "$KONG_IMAGE"
+          echo "kong image ref:      $KONG_IMAGE"
+          echo "kong repo digests:   $(docker image inspect --format '{{join .RepoDigests ", "}}' "$KONG_IMAGE")"
+          echo "postgres image ref:  $POSTGRES_IMAGE"
+          echo "postgres repo digests: $(docker image inspect --format '{{join .RepoDigests ", "}}' "$POSTGRES_IMAGE")"
 
       - name: Verify the Kong adapter's deny path
         run: node integrations/kong/test/verify.mjs

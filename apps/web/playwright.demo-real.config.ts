@@ -1,7 +1,8 @@
 import { defineConfig } from "@playwright/test";
 
 /**
- * The REAL seeded-database demo journey (`e2e/demo-intake.spec.ts`) against a
+ * The REAL seeded-database demo journey (`e2e/demo-intake.spec.ts`), then the
+ * review-policy journey (`e2e/demo-review-policy.spec.ts`), against a
  * gateway you have already started on a `demo:prepare` database — no global
  * setup, no seeding here (the journey mutates the database: prepare a fresh one
  * for every run). Used by `.github/workflows/demo.yml` and the dry run:
@@ -19,7 +20,9 @@ const baseURL = process.env.E2E_BASE_URL ?? "http://127.0.0.1:3105";
 
 export default defineConfig({
   testDir: "./e2e",
-  testMatch: "demo-intake.spec.ts",
+  // the Monday journey first (file order), then the review-policy journey,
+  // which restores the policy it sets so the journey above never sees one
+  testMatch: ["demo-intake.spec.ts", "demo-review-policy.spec.ts"],
   timeout: 180_000,
   expect: { timeout: 15_000 },
   workers: 1,

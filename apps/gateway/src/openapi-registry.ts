@@ -102,6 +102,9 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   // ADR-0089 — ownership + lifecycle, admin governance writes on the registry.
   "POST /v1/agents/:agentId/lifecycle": "internal",
   "POST /v1/agents/:agentId/owner": "internal",
+  // ADR-0168 amendment item 6 — stewardship (admin or current steward).
+  "PATCH /v1/agents/:agentId/stewardship": "internal",
+  "POST /v1/agents/:agentId/stewardship/review": "internal",
   "POST /v1/agents/:agentId/system-prompt": "internal",
   "GET /v1/api/versioning": "public-stable",
   "GET /v1/approvals": "public-stable",
@@ -645,6 +648,10 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   // ADR-0123 — the framework mapping. Internal like its siblings until the
   // use-cases surface as a whole is published.
   "GET /v1/use-cases/:useCaseId/frameworks": "internal",
+  // ADR-0171 — the intake wizard's drafts: a UI convenience, never published
+  "GET /v1/use-cases/draft": "internal",
+  "PUT /v1/use-cases/draft": "internal",
+  "DELETE /v1/use-cases/draft": "internal",
   // ADR-0124
   "GET /v1/execution": "internal",
   "PUT /v1/execution/mode": "internal",
@@ -654,6 +661,12 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "POST /v1/servers/:serverId/tools/:toolName/unhalt": "internal",
   "PATCH /v1/use-cases/:useCaseId": "internal",
   "POST /v1/use-cases/:useCaseId/retire": "internal",
+  // ADR-0168 — mark an approval condition met (owner/use-case owner/admin)
+  "POST /v1/use-cases/:useCaseId/conditions/:conditionId/met": "internal",
+  // ADR-0168 amendment — review policy and recertification sweep
+  "GET /v1/governance/review-policy": "internal",
+  "PUT /v1/governance/review-policy": "internal",
+  "POST /v1/governance/recertification/sweep": "internal",
   // ADR-0084 — the AI vendor registry: new surface, internal until the shape settles
   "GET /v1/vendors": "internal",
   "POST /v1/vendors": "internal",
@@ -804,6 +817,8 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/agents/:agentId/invoke": "agents",
   "POST /v1/agents/:agentId/lifecycle": "agents",
   "POST /v1/agents/:agentId/owner": "agents",
+  "PATCH /v1/agents/:agentId/stewardship": "agents",
+  "POST /v1/agents/:agentId/stewardship/review": "agents",
   "POST /v1/agents/:agentId/system-prompt": "agents",
   "GET /v1/api/versioning": "api",
   "GET /v1/approvals": "approvals",
@@ -1273,6 +1288,9 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/use-cases/:useCaseId/overview": "use-cases",
   "GET /v1/use-cases/:useCaseId": "use-cases",
   "GET /v1/use-cases/:useCaseId/frameworks": "use-cases",
+  "GET /v1/use-cases/draft": "use-cases",
+  "PUT /v1/use-cases/draft": "use-cases",
+  "DELETE /v1/use-cases/draft": "use-cases",
   "GET /v1/execution": "org-settings",
   "PUT /v1/execution/mode": "org-settings",
   "POST /v1/agents/:agentId/halt": "agents",
@@ -1281,6 +1299,10 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/servers/:serverId/tools/:toolName/unhalt": "servers",
   "PATCH /v1/use-cases/:useCaseId": "use-cases",
   "POST /v1/use-cases/:useCaseId/retire": "use-cases",
+  "POST /v1/use-cases/:useCaseId/conditions/:conditionId/met": "use-cases",
+  "GET /v1/governance/review-policy": "use-cases",
+  "PUT /v1/governance/review-policy": "use-cases",
+  "POST /v1/governance/recertification/sweep": "use-cases",
   "GET /v1/vendors": "vendors",
   "POST /v1/vendors": "vendors",
   "GET /v1/vendors/:vendorId": "vendors",

@@ -98,6 +98,15 @@ export default function WorkflowDetailPage() {
         )
       : [];
 
+  // AER-047: a check stage waiting on results it was never sent rests at
+  // awaiting_execution — name the missing checks instead of "in flight"
+  const pendingChecks: CheckResult[] =
+    current && current.type === "automated_check" && inst.status === "awaiting_execution"
+      ? ((ctx[`checks:${current.id}`] as CheckResult[] | undefined) ?? []).filter(
+          (c) => c.status === "pending",
+        )
+      : [];
+
   const checkCards = def.stages
     .filter((st) => st.type === "automated_check" && ctx[`checks:${st.id}`])
     .map((st) => ({
@@ -270,8 +279,20 @@ export default function WorkflowDetailPage() {
         {inst.status === "awaiting_execution" && (
           <Card>
             <span className={v.rowTight}>
-              <Badge tone="info">executing</Badge>
-              <span className={v.dim}>a nested run or git operation is in flight</span>
+              {pendingChecks.length > 0 ? (
+                <>
+                  <Badge tone="warn">waiting on check results</Badge>
+                  <span className={v.dim}>
+                    no result has been reported for {pendingChecks.map((c) => c.check).join(", ")} — a check
+                    nobody reported never passes; this stage continues when CI posts its results
+                  </span>
+                </>
+              ) : (
+                <>
+                  <Badge tone="info">executing</Badge>
+                  <span className={v.dim}>a nested run or git operation is in flight</span>
+                </>
+              )}
               {current && typeof ctx[`runId:${current.id}`] === "string" && (
                 <Link to={`/runs/${ctx[`runId:${current.id}`]}`}>watch the run</Link>
               )}
@@ -335,6 +356,10 @@ export default function WorkflowDetailPage() {
                               stageId: current.id,
                               results: [{ check: c.check, status: "passed", detail: "remediated" }],
                               ...(checkReason.trim() ? { reason: checkReason.trim() } : {}),
+                              // AER-048: bind the result to the round on screen —
+                              // if the change was re-opened meanwhile, the
+                              // gateway refuses it (409) instead of applying it
+                              ...(typeof inst.round === "number" ? { round: inst.round } : {}),
                             }),
                           `Marked ${c.check} passing — re-run checks to proceed`,
                         )
@@ -474,6 +499,14 @@ export default function WorkflowDetailPage() {
                     }
                   >
                     self-reported
+                  </Badge>
+                )}
+                {c.autoPassed && (
+                  <Badge
+                    tone="warn"
+                    title="Nothing reported a result for this check — the template's offline mode passed it (offlineAutoPass)"
+                  >
+                    auto-passed · no report
                   </Badge>
                 )}
                 <span className={v.faint}>{c.detail ?? ""}</span>
