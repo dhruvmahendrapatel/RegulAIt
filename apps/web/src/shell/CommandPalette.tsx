@@ -29,7 +29,7 @@ import {
   readRecent,
   searchPalette,
   type PaletteItem,
-} from "./commandPalette";
+} from "./commandPaletteModel";
 import s from "./commandPalette.module.css";
 
 const quiet = async <T,>(p: Promise<T>): Promise<T | null> => {

@@ -9,7 +9,7 @@ import {
   stewardReviewLimit,
   stewardshipPatch,
   type AgentStewardship,
-} from "./agentStewardship";
+} from "./agentStewardshipModel";
 
 const agent = (over: Partial<AgentStewardship> = {}): AgentStewardship => ({
   stewardUserId: "ada",

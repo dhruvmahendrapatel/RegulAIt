@@ -16,7 +16,7 @@ import { detailRationales, detailUnsure, questionLabel } from "./registrationMod
 import { DependencyGraphPanel } from "./DependencyGraphPanel";
 import { RiskLibraryPicker } from "./RiskLibraryPicker";
 import { AgentStewardshipLine } from "../integrations/AgentStewardship";
-import type { AgentStewardship } from "../integrations/agentStewardship";
+import type { AgentStewardship } from "../integrations/agentStewardshipModel";
 import {
   ACTIVITY_STATUS,
   PHASES,

@@ -33,7 +33,18 @@ import { NIST_AI_RMF_SUBCATEGORIES, isNistAiRmfSubcategory, nistAiRmfLabel, norm
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "../../..");
-const SELF = path.relative(REPO, fileURLToPath(import.meta.url));
+/**
+ * A repo-relative path with `/` separators, whatever platform computed it.
+ * Every comparison below is against slash-separated literals
+ * (`"apps/gateway/src/"`, `"packages/shared/src/compliance-packs.ts"`), and
+ * `path.relative` returns backslash-separated paths on Windows — where, before this
+ * was normalised ONCE here, three cases failed and the gateway-evidence case
+ * received no gateway files at all (codexInputs G10-G15-VERIFY).
+ */
+function repoRel(from: string, to: string, rel: (a: string, b: string) => string = path.relative): string {
+  return rel(from, to).replace(/\\/g, "/");
+}
+const SELF = repoRel(REPO, fileURLToPath(import.meta.url));
 
 /** where references live: pack definitions, intake assist, demo library and
  * fixtures, the gateway (demo setup, tests), the console and its e2e mocks,
@@ -62,7 +73,7 @@ function walk(dir: string, out: string[]) {
 const FILES = (() => {
   const out: string[] = [];
   for (const root of SCAN_ROOTS) walk(path.join(REPO, root), out);
-  return out.map((f) => ({ rel: path.relative(REPO, f), text: readFileSync(f, "utf8") })).filter((f) => f.rel !== SELF);
+  return out.map((f) => ({ rel: repoRel(REPO, f), text: readFileSync(f, "utf8") })).filter((f) => f.rel !== SELF);
 })();
 
 function hits(re: RegExp): Array<{ rel: string; line: number; match: RegExpExecArray }> {
@@ -204,12 +215,34 @@ describe("the specific confusions stay corrected", () => {
   });
 });
 
+/** the gateway's product sources (not its tests), by repo-relative path */
+const isGatewaySource = (rel: string) => rel.startsWith("apps/gateway/src/") && !/\.test\.ts$/.test(rel) && rel.endsWith(".ts");
+
+describe("repo-relative paths are slash-separated on every platform (G10-G15-VERIFY)", () => {
+  it("a Windows-computed relative path compares equal to the slash literals the guards use", () => {
+    const win = (file: string) => repoRel("C:\\src\\RegulAIt", file, path.win32.relative);
+    expect(win("C:\\src\\RegulAIt\\packages\\shared\\src\\compliance-packs.ts")).toBe("packages/shared/src/compliance-packs.ts");
+    expect(isGatewaySource(win("C:\\src\\RegulAIt\\apps\\gateway\\src\\auth.ts"))).toBe(true);
+    expect(isGatewaySource(win("C:\\src\\RegulAIt\\apps\\gateway\\src\\auth.test.ts"))).toBe(false);
+    // the POSIX spelling is unchanged
+    expect(repoRel("/r", "/r/apps/gateway/src/auth.ts", path.posix.relative)).toBe("apps/gateway/src/auth.ts");
+  });
+
+  it("every scanned path is already slash-separated, so no comparison sees a platform separator", () => {
+    expect(FILES.length).toBeGreaterThan(100);
+    expect(FILES.filter((f) => f.rel.includes("\\")).map((f) => f.rel)).toEqual([]);
+    expect(SELF).toBe("packages/shared/src/nist-ai-rmf-refs.test.ts");
+  });
+});
+
 describe("the latest pack's audit-log evidence is evidence the gateway really writes", () => {
-  const gatewaySource = FILES.filter(
-    (f) => f.rel.startsWith("apps/gateway/src/") && !/\.test\.ts$/.test(f.rel) && f.rel.endsWith(".ts"),
-  )
-    .map((f) => f.text)
-    .join("\n");
+  const gatewayFiles = FILES.filter((f) => isGatewaySource(f.rel));
+  const gatewaySource = gatewayFiles.map((f) => f.text).join("\n");
+
+  it("reads the gateway's sources (non-vacuity: a missing-evidence failure must not mean 'no files scanned')", () => {
+    expect(gatewayFiles.length).toBeGreaterThan(50);
+    expect(gatewayFiles.map((f) => f.rel)).toContain("apps/gateway/src/auth.ts");
+  });
   /** rule ids the gateway builds from a template rather than a literal: the
    * literal cannot be grepped, so the template is named and checked instead */
   const TEMPLATED: Record<string, string> = { "use-case-approved": "ruleId: `use-case-${next}`" };

@@ -34,7 +34,7 @@ import {
   type AgentStewardship,
   type StewardshipDraft,
   type StewardshipFilter,
-} from "./agentStewardship";
+} from "./agentStewardshipModel";
 import st from "./agentStewardship.module.css";
 import v from "../../views.module.css";
 
