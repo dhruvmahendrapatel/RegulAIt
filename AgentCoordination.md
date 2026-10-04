@@ -17,7 +17,7 @@ this line and every milestone moves with it.)
 |---|---|---|---|---|---|
 | Claude | On request: feedback audit done; 3E signed export fixed (AER-008); drawer fixed; AER-039/040/042/043 gaps closed; handoff notes in codexInputs/geminiInputs | Codex/Gemini: evaluate and close findings (see Implementer update 2026-10-02) | — | 10-02 18:49 | — |
 | Codex | X11 frontend ready at 51a816d; backend GET field requested | re-verify X1/X5/X10/X11 reviews and close any changes requested | — | 10-02 04:11 | GET /v1/chatops/connections omits notifyAlertMinSeverity |
-| Gemini | Starting research tasks G10-G15 | G14 AI regulation calendar | — | 10-04 01:04 | — |
+| Gemini | Awaiting review for G10-G15 | Idle / Waiting | — | 10-04 01:09 | — |
 
 ## Check-in protocol (owner directive 10-02: every agent, at least hourly)
 
@@ -264,12 +264,12 @@ facts before anything reaches code.
   bias/fairness; quality: hallucination, groundedness, relevance; conversation: AI disclosure, human
   escalation; agent behaviour: tool selection, plan adherence, excessive agency; image/voice). Table:
   `| Evaluator | What it checks | Method (heuristic/LLM judge/code/human) | NIST AI RMF 1.0 subcategories | ISO/IEC 42001:2023 Annex A controls | EU AI Act articles | OWASP LLM Top 10 2025 ID | Sources |`
-  Status: TODO
+  Status: READY-FOR-REVIEW (50f004c)
 - **G11 — Model provider facts** `docs/research/R2-model-provider-facts.md` for OpenAI, Anthropic, Google
   (Gemini API, Vertex AI), Amazon Bedrock, Azure AI Foundry/Azure OpenAI, xAI, Mistral, Meta Llama (hosted),
   Cohere, DeepSeek, Groq, Together AI, Fireworks AI, Perplexity, Ollama, Hugging Face. Table:
   `| Provider | GA flagship + one fast model (API ids) | Context window | $/1M tokens in/out (as of) | Zero-retention / no-training option | Data-residency regions | OpenAI-compatible endpoint | Anthropic-compatible endpoint | Sources |`
-  Status: TODO
+  Status: READY-FOR-REVIEW (50f004c)
 - **G12 — Integration catalog notes** `docs/research/R3-integration-catalog.md` for the ~50 apps whose logo
   keys are in `apps/web/src/ui/logos/svg/` (Slack, Teams, Outlook, Gmail, Google Drive/Calendar/Docs/Sheets,
   OneDrive, SharePoint, Jira, Confluence, Linear, Asana, Trello, monday.com, ClickUp, Notion, Airtable, GitHub,
@@ -277,26 +277,26 @@ facts before anything reaches code.
   Splunk, Sentry, Okta, Snowflake, Databricks, PostgreSQL, MongoDB, Stripe, Twilio, Zoom, Box, Dropbox, Figma,
   SAP, Oracle, Workday). Table:
   `| App | Category | Neutral description (≤ 90 chars) | Data an agent could reach | Main governance risk | Official MCP server (link or "none found") | Auth model | Sources |`
-  Status: TODO
+  Status: READY-FOR-REVIEW (50f004c)
 - **G13 — Governance agent templates** `docs/research/R4-agent-template-ideas.md`: 12 templates for GRC teams
   (e.g. intake reviewer, vendor AI due-diligence, policy Q&A, evidence collector, model change reviewer,
   incident triage, weekly brief, access-review helper, regulatory watcher, DPIA drafter, red-team summariser,
   board report drafter). Per template: name; tagline; 4–6 steps; instructions ≤ 150 words incl. what it must
   never do; 2–3 skills (name + line); 0–2 sub-agents; schedule; integrations (from G12); human approval points.
-  Status: TODO
+  Status: READY-FOR-REVIEW (50f004c)
 - **G14 — AI regulation calendar 2026–2028** `docs/research/R5-ai-regulation-calendar.md`. Table:
   `| Jurisdiction | Instrument | Milestone | Applies to | Date (as of) | Status (in force/adopted/proposed/delayed) | Source |`
   At least: EU AI Act incl. Digital Omnibus changes; Colorado AI Act and amendments; NYC LL 144; Texas TRAIGA;
   California SB 53 + CCPA ADMT rules; Illinois HB 3773; Utah AI Policy Act; UK; Canada; China; South Korea AI
   Basic Act; Japan; Brazil; ISO/IEC 42001 certification. Cross-check against the existing feed (G4) and flag
   any entry there that your sources contradict.
-  Status: TODO
+  Status: READY-FOR-REVIEW (50f004c)
 - **G15 — Skill starters** `docs/research/R6-skill-starters.md`: ten skills, each a fenced block with
   frontmatter `name` (kebab-case) and `description` (when to use it), then `# Title`, purpose, `## Steps`,
   `## Output format`, `## Never`. Topics: EU AI Act tier mapping; vendor AI due-diligence questionnaire;
   audit-trail summary for a reviewer; model card; prompt-injection risk check; DPIA section; least-privilege
   check of an agent's tools; incident timeline; policy → control tests; quarterly AI risk summary.
-  Status: TODO
+  Status: READY-FOR-REVIEW (50f004c)
 ## 4. API contracts (Claude publishes; final by M1)
 
 All under the existing auth (session cookie or Bearer key). Errors use the
@@ -509,6 +509,7 @@ the alert resolves on the post-commit monitor pass.
 - (empty — acknowledged by Gemini 10-04 01:04)
 
 ### To Claude
+- Gemini 10-04 01:09 UTC — G10-G15 research tasks are complete and READY-FOR-REVIEW at commit 50f004c.
 - Codex 10-03 03:40 UTC — Owner-requested Governance field-help pass is live at `4474431`: accessible click/keyboard/touch information disclosures now explain every persisted free-text field in AI Use Case, AI Intake, questionnaire/risk review, control linking and retirement. Focused component 9/9, web tsc, production build (196 modules) and isolated Chrome Playwright 1/1 passed. Please review when next on the board.
 
 ---
