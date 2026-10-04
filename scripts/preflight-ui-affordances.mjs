@@ -36,16 +36,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
  * should have a button now"; adding one is a decision, so it should be a diff
  * somebody reviews.
  */
-const DELIBERATELY_API_ONLY = new Map([
-  // TEMPORARY (ADR-0172): the builder web half (task BW) is built in parallel and
-  // lands the delete controls for these; the ADR-0172 wiring pass removes every
-  // entry below as part of its acceptance.
-  ["/v1/builder/agents/:x", "TEMPORARY ADR-0172: agent editor Advanced > Delete lands with the builder web half (BW)"],
-  ["/v1/builder/agents/:x/channels/:x", "TEMPORARY ADR-0172: Configure > Channels remove lands with the builder web half (BW)"],
-  ["/v1/builder/agents/:x/memory/:x", "TEMPORARY ADR-0172: Configure > Memory remove lands with the builder web half (BW)"],
-  ["/v1/builder/agents/:x/schedules/:x", "TEMPORARY ADR-0172: Configure > Schedules remove lands with the builder web half (BW)"],
-  ["/v1/builder/skills/:x", "TEMPORARY ADR-0172: skill editor Delete lands with the builder web half (BW)"],
-]);
+const DELIBERATELY_API_ONLY = new Map([]);
 
 const walk = (dir, out = []) => {
   for (const e of readdirSync(dir)) {

@@ -1,6 +1,8 @@
 /**
- * ADR-0172 — every Builder API call the web makes, in one place, so the wiring
- * pass can diff this file against the gateway's routes. All under /v1/builder.
+ * ADR-0172 — every Builder API call the web makes, in one place, so it can be
+ * diffed against the gateway's routes. All under /v1/builder, written as full
+ * literals: scripts/preflight-ui-affordances.mjs finds a screen's DELETE (and
+ * add) calls by their `/v1/...` path text.
  */
 import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -31,8 +33,6 @@ import type {
   ProviderStatusResponse,
 } from "../../api/types";
 import { bindingsFromGranted } from "../models/modelBindings";
-
-const B = "/v1/builder";
 
 export const bk = {
   agents: ["builder", "agents"] as const,
@@ -80,50 +80,50 @@ export interface ChatResponse {
 }
 
 export const builderApi = {
-  listAgents: () => api.get<{ agents: BuilderAgentSummary[] }>(`${B}/agents`),
-  createAgent: (body: CreateAgentBody) => api.post<{ agent: BuilderAgentDetail }>(`${B}/agents`, body),
-  getAgent: (id: string) => api.get<{ agent: BuilderAgentDetail }>(`${B}/agents/${id}`),
-  patchAgent: (id: string, body: PatchAgentBody) => api.patch<{ agent: BuilderAgentDetail }>(`${B}/agents/${id}`, body),
-  deleteAgent: (id: string) => api.del<unknown>(`${B}/agents/${id}`),
+  listAgents: () => api.get<{ agents: BuilderAgentSummary[] }>(`/v1/builder/agents`),
+  createAgent: (body: CreateAgentBody) => api.post<{ agent: BuilderAgentDetail }>(`/v1/builder/agents`, body),
+  getAgent: (id: string) => api.get<{ agent: BuilderAgentDetail }>(`/v1/builder/agents/${id}`),
+  patchAgent: (id: string, body: PatchAgentBody) => api.patch<{ agent: BuilderAgentDetail }>(`/v1/builder/agents/${id}`, body),
+  deleteAgent: (id: string) => api.del<unknown>(`/v1/builder/agents/${id}`),
   putTools: (id: string, tools: Array<{ kind: "connector" | "mcp_tool"; refId: string; requiresApproval: boolean }>) =>
-    api.put<{ agent: BuilderAgentDetail }>(`${B}/agents/${id}/tools`, { tools }),
+    api.put<{ agent: BuilderAgentDetail }>(`/v1/builder/agents/${id}/tools`, { tools }),
   putSubagents: (id: string, subagents: Array<{ childId: string; name: string; description: string }>) =>
-    api.put<{ agent: BuilderAgentDetail }>(`${B}/agents/${id}/subagents`, { subagents }),
-  putSkills: (id: string, skillIds: string[]) => api.put<{ agent: BuilderAgentDetail }>(`${B}/agents/${id}/skills`, { skillIds }),
-  addMemory: (id: string, content: string) => api.post<BuilderMemoryItem>(`${B}/agents/${id}/memory`, { content }),
-  deleteMemory: (id: string, memoryId: string) => api.del<unknown>(`${B}/agents/${id}/memory/${memoryId}`),
-  addSchedule: (id: string, body: ScheduleBody) => api.post<BuilderSchedule>(`${B}/agents/${id}/schedules`, body),
+    api.put<{ agent: BuilderAgentDetail }>(`/v1/builder/agents/${id}/subagents`, { subagents }),
+  putSkills: (id: string, skillIds: string[]) => api.put<{ agent: BuilderAgentDetail }>(`/v1/builder/agents/${id}/skills`, { skillIds }),
+  addMemory: (id: string, content: string) => api.post<BuilderMemoryItem>(`/v1/builder/agents/${id}/memory`, { content }),
+  deleteMemory: (id: string, memoryId: string) => api.del<unknown>(`/v1/builder/agents/${id}/memory/${memoryId}`),
+  addSchedule: (id: string, body: ScheduleBody) => api.post<BuilderSchedule>(`/v1/builder/agents/${id}/schedules`, body),
   patchSchedule: (id: string, scheduleId: string, body: Partial<ScheduleBody>) =>
-    api.patch<BuilderSchedule>(`${B}/agents/${id}/schedules/${scheduleId}`, body),
-  deleteSchedule: (id: string, scheduleId: string) => api.del<unknown>(`${B}/agents/${id}/schedules/${scheduleId}`),
-  addChannel: (id: string, provider: BuilderChannelProvider) => api.post<BuilderChannel>(`${B}/agents/${id}/channels`, { provider }),
-  deleteChannel: (id: string, channelId: string) => api.del<unknown>(`${B}/agents/${id}/channels/${channelId}`),
-  exportAgent: (id: string) => api.get<{ bundle: BuilderBundle }>(`${B}/agents/${id}/export`),
+    api.patch<BuilderSchedule>(`/v1/builder/agents/${id}/schedules/${scheduleId}`, body),
+  deleteSchedule: (id: string, scheduleId: string) => api.del<unknown>(`/v1/builder/agents/${id}/schedules/${scheduleId}`),
+  addChannel: (id: string, provider: BuilderChannelProvider) => api.post<BuilderChannel>(`/v1/builder/agents/${id}/channels`, { provider }),
+  deleteChannel: (id: string, channelId: string) => api.del<unknown>(`/v1/builder/agents/${id}/channels/${channelId}`),
+  exportAgent: (id: string) => api.get<{ bundle: BuilderBundle }>(`/v1/builder/agents/${id}/export`),
   importAgent: (bundle: BuilderBundle) =>
-    api.post<{ agent: BuilderAgentDetail; dropped: BuilderImportDropped[] }>(`${B}/agents/import`, { bundle }),
+    api.post<{ agent: BuilderAgentDetail; dropped: BuilderImportDropped[] }>(`/v1/builder/agents/import`, { bundle }),
 
   chat: (agentId: string, message: string, threadId?: string) =>
-    api.post<ChatResponse>(`${B}/agents/${agentId}/chat`, threadId ? { threadId, message } : { message }),
+    api.post<ChatResponse>(`/v1/builder/agents/${agentId}/chat`, threadId ? { threadId, message } : { message }),
   listThreads: (status: "needs_attention" | "completed" | "all", agentId?: string) =>
     api.get<{ threads: BuilderThreadSummary[] }>(
-      `${B}/threads?status=${status}${agentId ? `&agentId=${encodeURIComponent(agentId)}` : ""}`,
+      `/v1/builder/threads?status=${status}${agentId ? `&agentId=${encodeURIComponent(agentId)}` : ""}`,
     ),
-  getThread: (id: string) => api.get<ChatResponse>(`${B}/threads/${id}`),
-  patchThread: (id: string, status: BuilderThreadStatus) => api.patch<{ thread: BuilderThreadSummary }>(`${B}/threads/${id}`, { status }),
+  getThread: (id: string) => api.get<ChatResponse>(`/v1/builder/threads/${id}`),
+  patchThread: (id: string, status: BuilderThreadStatus) => api.patch<{ thread: BuilderThreadSummary }>(`/v1/builder/threads/${id}`, { status }),
 
-  listSkills: () => api.get<{ skills: BuilderSkillSummary[] }>(`${B}/skills`),
-  getSkill: (id: string) => api.get<{ skill: BuilderSkillDetail }>(`${B}/skills/${id}`),
+  listSkills: () => api.get<{ skills: BuilderSkillSummary[] }>(`/v1/builder/skills`),
+  getSkill: (id: string) => api.get<{ skill: BuilderSkillDetail }>(`/v1/builder/skills/${id}`),
   createSkill: (body: { name: string; description: string; body: string; visibility: "private" | "workspace" }) =>
-    api.post<{ skill: BuilderSkillDetail }>(`${B}/skills`, body),
+    api.post<{ skill: BuilderSkillDetail }>(`/v1/builder/skills`, body),
   patchSkill: (id: string, body: Partial<{ name: string; description: string; body: string; visibility: "private" | "workspace" }>) =>
-    api.patch<{ skill: BuilderSkillDetail }>(`${B}/skills/${id}`, body),
-  deleteSkill: (id: string) => api.del<unknown>(`${B}/skills/${id}`),
-  importSkill: (markdown: string) => api.post<{ skill: BuilderSkillDetail }>(`${B}/skills/import`, { markdown }),
+    api.patch<{ skill: BuilderSkillDetail }>(`/v1/builder/skills/${id}`, body),
+  deleteSkill: (id: string) => api.del<unknown>(`/v1/builder/skills/${id}`),
+  importSkill: (markdown: string) => api.post<{ skill: BuilderSkillDetail }>(`/v1/builder/skills/import`, { markdown }),
 
-  listTemplates: () => api.get<{ templates: BuilderTemplate[] }>(`${B}/templates`),
-  getTemplate: (id: string) => api.get<{ template: BuilderTemplate }>(`${B}/templates/${id}`),
-  integrations: () => api.get<BuilderIntegrationsResponse>(`${B}/integrations`),
-  usage: (days: 7 | 30) => api.get<BuilderUsage>(`${B}/usage?days=${days}`),
+  listTemplates: () => api.get<{ templates: BuilderTemplate[] }>(`/v1/builder/templates`),
+  getTemplate: (id: string) => api.get<{ template: BuilderTemplate }>(`/v1/builder/templates/${id}`),
+  integrations: () => api.get<BuilderIntegrationsResponse>(`/v1/builder/integrations`),
+  usage: (days: 7 | 30) => api.get<BuilderUsage>(`/v1/builder/usage?days=${days}`),
 };
 
 /**
@@ -162,7 +162,7 @@ export function useDirectory() {
  * decided by the gateway with the same entitlement helpers its PUT …/tools
  * check uses, and carrying the ids that PUT accepts (an MCP tool's own id).
  */
-export const toolboxOptions = () => api.get<{ options: BuilderToolboxOption[] }>(`${B}/toolbox-options`);
+export const toolboxOptions = () => api.get<{ options: BuilderToolboxOption[] }>(`/v1/builder/toolbox-options`);
 
 /**
  * The models the signed-in person may use, as picker tiles (logo, model id,
