@@ -66,7 +66,29 @@ export interface OidcProvider {
   /** ADR-0038: which id_token claim carries group membership. null = this
    * provider emits no group signal, so its logins never reconcile roles. */
   groupsClaim: string | null;
+  /** ADR-0174: non-null = a broker (Keycloak); each entry is a sign-in button */
+  brokerIdps?: Array<"microsoft" | "google" | "github"> | null;
+  /** ADR-0174: acr values that count as multi-factor for this provider */
+  mfaAcrValues?: string[] | null;
   enabled: boolean;
+}
+
+/** ADR-0174 §5 — a federated identity waiting to be linked to an account */
+export interface LinkRequest {
+  id: string;
+  userId: string;
+  userEmail: string;
+  userDisplayName: string;
+  provider: string;
+  protocol: "oidc" | "saml";
+  subject: string;
+  email: string;
+  idpMfa: boolean;
+  status: "pending" | "linked" | "approved" | "denied";
+  expired: boolean;
+  createdAt: string;
+  expiresAt: string;
+  decidedAt: string | null;
 }
 
 /** ADR-0036 — the SAML twin. Note what is NOT here: the SP private key is
