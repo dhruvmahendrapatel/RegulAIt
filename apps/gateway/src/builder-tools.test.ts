@@ -23,11 +23,13 @@ import {
   builderToolSteps,
   eq,
   mcpTools,
+  sql,
   usageEvents,
 } from "@regulait/db";
 import { resolveModelProvider, type MockModelProvider } from "@regulait/model-provider";
 import { builderKit, type BuilderKit, type Person } from "./testing/builder-fixture.js";
 import { resolveToolbox, runGovernedTool } from "./builder-tools.js";
+import { onBuilderTurnResumed } from "./builder-runtime.js";
 
 let k: BuilderKit;
 let owner: Person;
@@ -41,7 +43,7 @@ const mock = resolveModelProvider({ provider: "mock" }) as MockModelProvider;
 
 /** invocations per tool, counted by the upstream itself */
 const hits: Record<string, number> = {};
-const TOOLS = ["get_time", "ask_first", "needs_approval", "flip_halt", "priced", "looper"] as const;
+const TOOLS = ["get_time", "ask_first", "needs_approval", "early_approval", "flip_halt", "priced", "looper"] as const;
 type ToolName = (typeof TOOLS)[number];
 const toolIds: Partial<Record<ToolName, string>> = {};
 const toolGrants: Partial<Record<ToolName, string>> = {};
@@ -289,6 +291,22 @@ describe("Ask first: a confirmation in the thread, not an approval", () => {
     expect(hits.ask_first).toBe(before + 1);
   });
 
+  it("observers hear about a resumed turn (inbound channels post the final reply)", async () => {
+    const heard: Array<{ threadId: string; ok: boolean }> = [];
+    const off = onBuilderTurnResumed((e) => {
+      heard.push({ threadId: e.threadId, ok: e.outcome.ok });
+    });
+    try {
+      const a = await newAgent(owner, [{ tool: "ask_first", askFirst: true }]);
+      const { thread: t, messages } = (await chat(owner, a.id, `please <<use-tool:${modelName("ask_first")}>>`)).json();
+      expect(heard).toEqual([]);
+      await k.req("POST", `/v1/builder/threads/${t.id}/steps/${messages[1].steps[0].id}/confirm`, owner.auth, { decision: "approve" });
+      expect(heard).toEqual([{ threadId: t.id, ok: true }]);
+    } finally {
+      off();
+    }
+  });
+
   it("deny records the refusal, tells the model, and never runs the tool", async () => {
     const a = await newAgent(owner, [{ tool: "ask_first", askFirst: true }]);
     const before = hits.ask_first ?? 0;
@@ -354,6 +372,34 @@ describe("an organisation approval rule pauses in the approvals queue and resume
     expect(step.outcomeDetail).toBe(`denied by approver ${k.RUN}: not this week`);
     expect(detail.messages.find((m: { role: string }) => m.role === "agent").content).toContain("not this week");
     expect(hits.needs_approval ?? 0).toBe(before);
+  });
+
+  it("an approval decided before the pause was stored is carried on, not left waiting", async () => {
+    const r = await k.req("POST", "/v1/rules/approvals", k.BOOT, { userId: owner.id, serverId, toolName: "early_approval", approverUserId: approver.id });
+    expect(r.statusCode, r.body).toBe(201);
+    // the approver decides INSTANTLY: the queue row is born approved, i.e. before
+    // the builder has written its pending step (the hook finds nothing to resume)
+    const fn = `bt_early_${k.RUN}`;
+    await k.db.execute(sql.raw(`CREATE OR REPLACE FUNCTION ${fn}() RETURNS trigger AS $$ BEGIN
+      IF NEW.server_id = '${serverId}' AND NEW.tool_name = 'early_approval' THEN
+        NEW.status := 'approved'; NEW.decided_by := '${approver.id}'; NEW.decided_at := now();
+      END IF; RETURN NEW; END $$ LANGUAGE plpgsql`));
+    await k.db.execute(sql.raw(`CREATE TRIGGER ${fn} BEFORE INSERT ON approvals FOR EACH ROW EXECUTE FUNCTION ${fn}()`));
+    try {
+      const a = await newAgent(owner, [{ tool: "early_approval" }]);
+      const before = hits.early_approval ?? 0;
+      const res = await chat(owner, a.id, `go <<use-tool:${modelName("early_approval")}>>`);
+      expect(res.statusCode, res.body).toBe(200);
+      expect(res.json().pending).toBeNull();
+      const step = res.json().messages[1].steps[0];
+      expect(step).toMatchObject({ status: "done", resultPreview: "early_approval ran" });
+      expect(hits.early_approval).toBe(before + 1);
+      const [row] = await k.db.select().from(approvals).where(eq(approvals.id, step.approvalId));
+      expect(row!.status).toBe("consumed");
+    } finally {
+      await k.db.execute(sql.raw(`DROP TRIGGER IF EXISTS ${fn} ON approvals`));
+      await k.db.execute(sql.raw(`DROP FUNCTION IF EXISTS ${fn}()`));
+    }
   });
 
   it("an approval that no longer binds to the call is refused on resume, not run", async () => {

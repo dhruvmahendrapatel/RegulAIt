@@ -1156,6 +1156,38 @@ async function pause(
     .where(eq(builderThreads.id, seg.thread.id))
     .returning();
   seg.thread = thread ?? seg.thread;
+  if (approvalId) {
+    // The approvals queue may have decided this approval in the moment between
+    // the governed path queueing it and the step above being written — the
+    // decide hook would then have found no waiting step. Re-read it now that
+    // the pause is durable: if it is already decided and the step is still
+    // ours to claim, carry the decision on inline instead of waiting forever.
+    const [ap] = await db
+      .select({ status: approvals.status, decidedBy: approvals.decidedBy, reason: approvals.decisionReason })
+      .from(approvals)
+      .where(eq(approvals.id, approvalId));
+    if (ap && (ap.status === "approved" || ap.status === "denied" || ap.status === "returned")) {
+      const claimed = await db
+        .update(builderToolSteps)
+        .set({ status: "running", decidedByUserId: ap.decidedBy, updatedAt: new Date() })
+        .where(and(eq(builderToolSteps.id, stepRow.id), eq(builderToolSteps.status, "pending_approval")))
+        .returning({ id: builderToolSteps.id });
+      if (claimed.length) {
+        await db
+          .update(builderThreads)
+          .set({ pendingTurnCiphertext: null, status: seg.thread.status === "needs_attention" && seg.source !== "schedule" ? "active" : seg.thread.status })
+          .where(eq(builderThreads.id, seg.thread.id));
+        let decider = "an approver";
+        if (ap.decidedBy) {
+          const [d] = await db.select({ name: users.displayName, email: users.email }).from(users).where(eq(users.id, ap.decidedBy));
+          decider = d ? d.name || d.email : decider;
+        }
+        call.resolution =
+          ap.status === "approved" ? { kind: "approved" } : { kind: "approval_denied", approverName: decider, reason: ap.reason };
+        return null;
+      }
+    }
+  }
   await finishTrace(db, seg.trace, "ok");
   let approverName: string | null = null;
   if (approvalId) approverName = await approverNameFor(db, approvalId);
@@ -1321,6 +1353,7 @@ export async function resumeBuilderStep(db: Db, dataKey: string | undefined, arg
       await abandonPaused(db, thread, still, out.error, out.detail ?? "the turn could not resume");
     }
   }
+  if (out.ok || out.status !== 409 || out.error !== "step_not_pending") await notifyResumed(thread.id, thread.source, out);
   return out;
 }
 
@@ -1342,6 +1375,30 @@ async function abandonPaused(db: Db, thread: BuilderThreadRow, step: BuilderTool
     role: "system",
     content: `Stopped (${code}): ${detail}`,
   });
+}
+
+/** what a resumed turn produced, for observers (e.g. inbound channels posting
+ * the agent's final reply back into the platform thread) */
+export type BuilderTurnResumedListener = (event: {
+  threadId: string;
+  source: BuilderThreadRow["source"];
+  outcome: TurnOutcome;
+}) => void | Promise<void>;
+const resumedListeners = new Set<BuilderTurnResumedListener>();
+/** subscribe to resumed turns; returns the unsubscribe. A listener's failure
+ * never affects the turn (it is caught and dropped). */
+export function onBuilderTurnResumed(listener: BuilderTurnResumedListener): () => void {
+  resumedListeners.add(listener);
+  return () => resumedListeners.delete(listener);
+}
+async function notifyResumed(threadId: string, source: BuilderThreadRow["source"], outcome: TurnOutcome) {
+  for (const l of resumedListeners) {
+    try {
+      await l({ threadId, source, outcome });
+    } catch {
+      /* an observer never fails a turn */
+    }
+  }
 }
 
 /** builder tool steps waiting on this approvals-queue row (the decide hook) */
