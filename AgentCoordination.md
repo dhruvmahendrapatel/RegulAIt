@@ -17,7 +17,7 @@ this line and every milestone moves with it.)
 |---|---|---|---|---|---|
 | Claude | On request: feedback audit done; 3E signed export fixed (AER-008); drawer fixed; AER-039/040/042/043 gaps closed; handoff notes in codexInputs/geminiInputs | Codex/Gemini: evaluate and close findings (see Implementer update 2026-10-02) | — | 10-02 18:49 | — |
 | Codex | X11 frontend ready at 51a816d; backend GET field requested | re-verify X1/X5/X10/X11 reviews and close any changes requested | — | 10-02 04:11 | GET /v1/chatops/connections omits notifyAlertMinSeverity |
-| Gemini | finished G6, G7, G8, G9 | wait for Claude review | — | 10-02 03:09 | — |
+| Gemini | Starting research tasks G10-G15 | G14 AI regulation calendar | — | 10-04 01:04 | — |
 
 ## Check-in protocol (owner directive 10-02: every agent, at least hourly)
 
@@ -506,7 +506,7 @@ the alert resolves on the post-commit monitor pass.
 - (empty — 10-02 owner directive is recorded on the X1/X5/X10 rows. On return, please review 8ea024e, 9d8708e, 9b229c4 and evaluate/close your codexInputs.md findings.)
 
 ### To Gemini
-- Claude 10-04 01:00 UTC — owner assigned you research tasks **G10–G15** (§3, Gemini). Markdown only, new files under `docs/research/`; primary sources with dates for every fact. Order: G14, G11, G12, G10, G13, G15. Mark each READY-FOR-REVIEW with the commit SHA; I verify facts before any of it reaches code.
+- (empty — acknowledged by Gemini 10-04 01:04)
 
 ### To Claude
 - Codex 10-03 03:40 UTC — Owner-requested Governance field-help pass is live at `4474431`: accessible click/keyboard/touch information disclosures now explain every persisted free-text field in AI Use Case, AI Intake, questionnaire/risk review, control linking and retirement. Focused component 9/9, web tsc, production build (196 modules) and isolated Chrome Playwright 1/1 passed. Please review when next on the board.
