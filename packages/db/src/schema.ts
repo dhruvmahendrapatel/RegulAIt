@@ -1844,6 +1844,10 @@ export const agents = pgTable("agents", {
   // through it would silently poison every one of those. ON DELETE RESTRICT:
   // an endpoint an agent still points at cannot be deleted out from under it.
   customProviderId: uuid("custom_provider_id"),
+  // ADR-0175 review fix (migration 0141): the model id the provider is
+  // EXPECTED to report serving, when it differs from `model` (an endpoint
+  // whose configured id is a deployment name). NULL = compare with `model`.
+  expectedServedModel: text("expected_served_model"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -2622,6 +2626,8 @@ export const usageEvents = pgTable(
     // ADR-0175 A4/A9 — the governance monitor's window scans read the ledger
     // by time; partial so it holds only agent rows that reported a served model
     index("usage_events_served_model_idx").on(t.agentId, t.at).where(sql`${t.servedModel} IS NOT NULL`),
+    // ADR-0175 review fix (migration 0141): the A9 window scan
+    index("usage_events_object_type_at_idx").on(t.objectType, t.at),
   ],
 );
 
@@ -8861,9 +8867,10 @@ export const builderSkills = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
     // ADR-0175 A6 (migration 0140) — admission and integrity.
-    /** sha256 (hex) of the body; backfilled by the migration */
+    /** sha256 (hex) of the prompt section: `skillPromptSection(name, body)`;
+     * backfilled by the migration */
     contentDigest: text("content_digest").notNull().default(""),
-    /** goes up by one on every body change */
+    /** goes up by one on every name or body change */
     version: integer("version").notNull().default(1),
     /** see SKILL_ADMISSION_STATES; 'unscanned' only for pre-0140 rows */
     admissionState: text("admission_state", { enum: BUILDER_SKILL_ADMISSION_STATES }).notNull().default("unscanned"),
@@ -8909,25 +8916,38 @@ export const builderAgentSkills = pgTable(
     snapshotAdmissionState: text("snapshot_admission_state", { enum: BUILDER_SKILL_ADMISSION_STATES })
       .notNull()
       .default("unscanned"),
+    /** the skill NAME pinned with the body: the prompt heading. A rename is a
+     * new version, taken only by a re-attach */
+    snapshotName: text("snapshot_name").notNull().default(""),
+    /** when the pinned copy was last scanned: the re-scan pass rotates by it */
+    snapshotScannedAt: timestamp("snapshot_scanned_at", { withTimezone: true }),
   },
-  (t) => [primaryKey({ columns: [t.agentId, t.skillId] }), index("builder_agent_skills_skill_idx").on(t.skillId)],
+  (t) => [
+    primaryKey({ columns: [t.agentId, t.skillId] }),
+    index("builder_agent_skills_skill_idx").on(t.skillId),
+    index("builder_agent_skills_scanned_idx").on(t.snapshotScannedAt),
+  ],
 );
 
 // ADR-0175 A5 (migration 0140) — RELEASE-AGE COOLDOWN.
 //
 // `release_sightings` is this deployment's own record of WHEN it first saw an
-// exact digest (a skill body, an MCP manifest, a registry entry version). Age
-// is always measured from here, never from a publisher's date. One row per
-// (kind, digest), first writer wins.
+// exact digest (a skill version, an MCP manifest, a registry entry version).
+// Age is always measured from here, never from a publisher's date. One row per
+// (kind, subject, digest), first writer wins. A skill's clock is its own
+// (subject_id = the skill); manifests and registry entries use the nil uuid,
+// so a digest seen on one server is not new on another.
 export const RELEASE_SIGHTING_KINDS = ["skill", "mcp_manifest", "registry_entry"] as const;
+export const NIL_SIGHTING_SUBJECT = "00000000-0000-0000-0000-000000000000";
 export const releaseSightings = pgTable(
   "release_sightings",
   {
     kind: text("kind", { enum: RELEASE_SIGHTING_KINDS }).notNull(),
+    subjectId: uuid("subject_id").notNull().default(NIL_SIGHTING_SUBJECT),
     digest: text("digest").notNull(),
     firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [primaryKey({ columns: [t.kind, t.digest] })],
+  (t) => [primaryKey({ columns: [t.kind, t.subjectId, t.digest] })],
 );
 
 /** An admin's per-item override of the cooldown: ONE subject at ONE digest,

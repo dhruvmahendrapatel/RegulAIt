@@ -11,6 +11,11 @@
 --    rule; set = any other served id raises `served_model_drift` at high
 --    severity.
 -- 3. A partial index for the monitor's window scan of reported served models.
+-- 4. `agents.expected_served_model`: OPTIONAL per-binding model id the provider
+--    is expected to report (an endpoint whose configured id is a deployment
+--    name serves a model with a different id). NULL = compare with `model`.
+-- 5. `usage_events (object_type, at)`: the unregistered-AI-traffic rule's
+--    window scan over model and MCP rows.
 --
 -- Additive and idempotent: nullable columns, no default changes the meaning of
 -- an existing row.
@@ -20,3 +25,7 @@ ALTER TABLE "model_cards" ADD COLUMN IF NOT EXISTS "pinned_model_version" text;
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "usage_events_served_model_idx"
   ON "usage_events" ("agent_id", "at") WHERE "served_model" IS NOT NULL;
+--> statement-breakpoint
+ALTER TABLE "agents" ADD COLUMN IF NOT EXISTS "expected_served_model" text;
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "usage_events_object_type_at_idx" ON "usage_events" ("object_type", "at");
