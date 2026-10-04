@@ -41,6 +41,8 @@ interface RemediationCandidate {
   rationale: string;
   params: Record<string, unknown>;
   steps: string[];
+  /** a guidance step that starts in an existing screen (ADR-0175 A9: the register flow, prefilled) */
+  href?: string;
 }
 interface RemediationProposal {
   id: string;
@@ -243,7 +245,12 @@ function RemediationPanel({ alertId }: { alertId: string }) {
                       {approvers.length === 0 ? <span className={v.hint}>Another user is required; proposers cannot approve their own remediation.</span> : null}
                     </div>
                   ) : (
-                    <ol className={s.remediationSteps}>{candidate.steps.map((step) => <li key={step}>{step}</li>)}</ol>
+                    <>
+                      <ol className={s.remediationSteps}>{candidate.steps.map((step) => <li key={step}>{step}</li>)}</ol>
+                      {candidate.href && candidate.href.startsWith("/") ? (
+                        <div><Link to={candidate.href}>{candidate.kind === "register_use_case" ? "Register as use case" : "Open"}</Link></div>
+                      ) : null}
+                    </>
                   )}
                 </div>
               );
@@ -292,10 +299,14 @@ function SubjectLinks({ alert }: { alert: GovernanceAlert }) {
       : subject.type === "agent" ? "/admin/agents"
       : subject.type === "vendor" ? `/admin/vendors${subject.id ? `?vendorId=${subject.id}` : ""}`
         : subject.type === "risk" ? `/admin/risks?riskId=${subject.id ?? ""}`
-          : null;
+          // ADR-0175 A9 subjects
+          : subject.type === "project" && subject.id ? `/projects/${subject.id}`
+            : subject.type === "virtual_key" ? "/admin/virtual-keys"
+              : subject.type === "caller" ? "/admin/users"
+                : null;
   return (
     <div className={v.row}>
-      {path ? <Link to={path}>Open {subject.type.replace("_", " ")}</Link> : <span>{subject.label}</span>}
+      {path ? <Link to={path}>Open {subject.type === "caller" ? "users" : subject.type.replace("_", " ")}</Link> : <span>{subject.label}</span>}
       {subject.context ? <Link to={`/admin/governance/use-cases/${subject.context.id}`}>Context: {subject.context.label}</Link> : null}
     </div>
   );

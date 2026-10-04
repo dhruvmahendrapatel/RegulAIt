@@ -30,6 +30,9 @@ export const GUIDANCE_REMEDIATION_KINDS = [
   "author_control",
   "tighten_output_guardrail",
   "contain_routing",
+  // ADR-0175 A4 / A9
+  "review_served_model",
+  "register_use_case",
 ] as const;
 export const REMEDIATION_KINDS = [...EXECUTABLE_REMEDIATION_KINDS, ...GUIDANCE_REMEDIATION_KINDS] as const;
 export type RemediationKind = (typeof REMEDIATION_KINDS)[number];
@@ -51,7 +54,13 @@ export interface RemediationCandidate {
   params: Record<string, string>;
   /** guidance kinds: what a person does, in order */
   steps: string[];
+  /** guidance kinds that start in an existing screen: the in-app path that
+   * opens it, prefilled where the alert allows (ADR-0175 A9) */
+  href?: string;
 }
+
+/** ADR-0175 A9 — the existing register flow, prefilled from an alert */
+export const USE_CASE_REGISTER_PATH = "/admin/governance/intake";
 
 export interface RemediationRiskInput {
   id: string;
@@ -246,6 +255,80 @@ export function proposeRemediations(ctx: RemediationContext): RemediationCandida
           ],
         },
       ];
+    case "served_model_drift": {
+      const pins = Array.isArray(alert.detail.pinnedModelVersions) ? (alert.detail.pinnedModelVersions as unknown[]).map(String) : [];
+      const obs = Array.isArray(alert.detail.observations)
+        ? (alert.detail.observations as Array<{ servedModel?: unknown }>).map((o) => String(o.servedModel ?? ""))
+        : [];
+      const served = [...new Set(obs.filter(Boolean))].join(", ") || "another model";
+      return [
+        {
+          kind: "review_served_model",
+          executable: false,
+          title: `Confirm why ${label(s.tail)} was served ${served}`,
+          rationale:
+            (pins.length
+              ? `The approved model card pins ${pins.join(", ")}; the provider reported serving something else. `
+              : "The provider reported serving a different model than the agent is configured for. ") +
+            "The model-card review covered the model the reviewers saw; a change underneath it is a decision for a person.",
+          params: { agentId: s.id },
+          steps: [
+            "Compare the served and configured ids on the alert, and check the provider's notice of the alias or deployment change.",
+            "If the change is unwanted, configure the agent with an exact dated id so the provider cannot move it.",
+            "If it is acceptable, re-review the model card (and update its pinned version) so the approval covers what serves.",
+            "The alert resolves once a window passes with every served model matching.",
+          ],
+        },
+      ];
+    }
+    case "unregistered_ai_traffic": {
+      const d = alert.detail;
+      const kind = String(d.subjectType ?? s.type);
+      const name = String(d.subjectLabel ?? label(s.tail));
+      const window = Number(d.windowDays ?? 0);
+      const volume = [
+        Number(d.modelCalls ?? 0) ? `${Number(d.modelCalls)} model calls` : null,
+        Number(d.mcpCalls ?? 0) ? `${Number(d.mcpCalls)} MCP tool calls` : null,
+      ]
+        .filter(Boolean)
+        .join(" and ");
+      const where =
+        kind === "project"
+          ? `project ${name}, which no approved use case links`
+          : kind === "virtual_key"
+            ? `virtual key ${name}, with no project`
+            : `${name}, with no project and no virtual key`;
+      const title = kind === "project" ? `AI use in project ${name}` : kind === "virtual_key" ? `AI use through virtual key ${name}` : `AI use by ${name}`;
+      const description =
+        `Observed by the governance monitor: ${volume || "AI traffic"}${window ? ` in ${window} days` : ""} attributed to ${where}. ` +
+        (kind === "project"
+          ? `Once approved, link this use case to project ${name} so its traffic is covered.`
+          : "Once approved, link this use case to the project the traffic belongs to, and send the traffic with that project.");
+      const q = new URLSearchParams({ source: "monitor", title, description });
+      const pending = Array.isArray(d.linkedUseCasesNotApproved) ? (d.linkedUseCasesNotApproved as Array<{ name?: unknown; status?: unknown }>) : [];
+      return [
+        {
+          kind: "register_use_case",
+          executable: false,
+          title: `Register ${kind === "project" ? `project ${name}'s` : `${name}'s`} AI use as a use case`,
+          rationale:
+            `${volume || "AI traffic"} ran outside every approved use case. ` +
+            (pending.length
+              ? `${pending.map((u) => `${String(u.name)} (${String(u.status).replace(/_/g, " ")})`).join(", ")} already links this project but is not approved. `
+              : "") +
+            "Registering it puts the traffic in the register and through review; nothing is blocked meanwhile.",
+          params: kind === "project" ? { projectId: s.id } : kind === "virtual_key" ? { virtualKeyId: s.id } : { userId: s.id },
+          steps: [
+            "Open the register flow (prefilled from this alert) and describe what the traffic is for.",
+            kind === "project"
+              ? `After it is created, set its project to ${name}, then send it for review.`
+              : "After it is created, link it to the project the traffic belongs to, and have callers send that project with their calls.",
+            "The alert resolves once a window passes with the traffic under an approved use case.",
+          ],
+          href: `${USE_CASE_REGISTER_PATH}?${q.toString()}`,
+        },
+      ];
+    }
     case "dimension_coverage_below_floor":
       return [
         {
