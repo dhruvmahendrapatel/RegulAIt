@@ -195,6 +195,7 @@ export const authSessions = pgTable(
   ],
 );
 
+export const MFA_PENDING_ORIGINS = ["password", "saml"] as const;
 /** short-lived password-accepted-awaiting-TOTP state (ADR-0025). Token hashed
  * like a session's; consumed on success; expires in minutes either way. */
 export const authMfaPending = pgTable("auth_mfa_pending", {
@@ -205,7 +206,14 @@ export const authMfaPending = pgTable("auth_mfa_pending", {
     .references(() => users.id, { onDelete: "cascade" }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
-});
+  /** ADR-0174 security review (migration 0139): the origin the session takes
+   * once the code verifies — `password`, or `saml` for a SAML login that had
+   * to step up to the account's own TOTP because the assertion did not carry
+   * a multi-factor AuthnContextClassRef. */
+  origin: text("origin", { enum: MFA_PENDING_ORIGINS }).notNull().default("password"),
+  /** the SAML provider a `saml` step-up came through (null for `password`) */
+  samlProviderId: uuid("saml_provider_id").references(() => samlProviders.id, { onDelete: "cascade" }),
+}, (t) => [check("auth_mfa_pending_origin_ck", sql`${t.origin} IN ('password', 'saml')`)]);
 
 // --- ADR-0025: OIDC SSO ------------------------------------------------------
 export const oidcProviders = pgTable("oidc_providers", {
@@ -239,6 +247,11 @@ export const oidcProviders = pgTable("oidc_providers", {
   /** ADR-0174: `acr` values that count as multi-factor for this provider, in
    * addition to the RFC 8176 `amr` values. NULL = amr only. */
   mfaAcrValues: jsonb("mfa_acr_values").$type<string[]>(),
+  /** ADR-0174 security review: this provider is a broker that itself enforces
+   * a second factor (the bundled Keycloak realm requires a code or passkey), so
+   * a single `otp`/`hwk`/`swk` amr from it counts as MFA. false = the amr must
+   * say `mfa` or name two distinct factor classes. */
+  brokerEnforcesMfa: boolean("broker_enforces_mfa").notNull().default(false),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
@@ -320,6 +333,12 @@ export const samlProviders = pgTable("saml_providers", {
    * Naming it grants nothing on its own: an asserted group confers nothing
    * until an admin maps it (`group_role_mappings`). */
   groupsAttribute: text("groups_attribute"),
+  /** ADR-0174 security review (migration 0139): AuthnContextClassRef values
+   * that count as multi-factor for this IdP — the SAML twin of
+   * `oidc_providers.mfa_acr_values`. Read only from the VERIFIED assertion.
+   * NULL = no assertion from this IdP counts as MFA; when the org requires MFA
+   * the person steps up to their RegulAIt TOTP (or enrols one). */
+  mfaAuthnContexts: jsonb("mfa_authn_contexts").$type<string[]>(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
@@ -374,8 +393,13 @@ export type BrokerIdp = (typeof BROKER_IDPS)[number];
  *  - jit            — the provider's JIT provisioning created the account;
  *  - proof          — the person proved the existing local account (password,
  *    plus TOTP when enrolled) in the same browser;
- *  - admin          — an admin approved the link request. */
-export const FEDERATED_LINK_VIAS = ["preprovisioned", "jit", "proof", "admin"] as const;
+ *  - admin          — an admin approved the link request (two distinct
+ *    admins when the account is an admin);
+ *  - prior_sso      — the account signed in through THIS provider row before
+ *    migration 0139 (its pre-0139 `login-succeeded` audit row names the
+ *    provider and the same verified email), so its first post-0139 sign-in
+ *    through that provider records the link. */
+export const FEDERATED_LINK_VIAS = ["preprovisioned", "jit", "proof", "admin", "prior_sso"] as const;
 export type FederatedLinkVia = (typeof FEDERATED_LINK_VIAS)[number];
 
 /** which (provider, subject) is linked to which user. Looked up BEFORE the
@@ -390,6 +414,12 @@ export const federatedIdentities = pgTable(
       .references(() => users.id, { onDelete: "cascade" }),
     oidcProviderId: uuid("oidc_provider_id").references(() => oidcProviders.id, { onDelete: "cascade" }),
     samlProviderId: uuid("saml_provider_id").references(() => samlProviders.id, { onDelete: "cascade" }),
+    /** the OIDC `iss` claim, or the SAML IdP entity id. Matched on every login;
+     * a provider whose issuer/entity id changes loses its links (audited). */
+    issuer: text("issuer").notNull(),
+    /** the SAML NameID Format ('' for OIDC). A transient NameID is never an
+     * anchor: such an IdP is anchored on its verified email (`email-anchor`). */
+    subjectFormat: text("subject_format").notNull().default(""),
     /** OIDC `sub`, or the SAML NameID */
     subject: text("subject").notNull(),
     linkedVia: text("linked_via", { enum: FEDERATED_LINK_VIAS }).notNull(),
@@ -398,16 +428,16 @@ export const federatedIdentities = pgTable(
   },
   (t) => [
     uniqueIndex("federated_identities_oidc_subject_uq")
-      .on(t.oidcProviderId, t.subject)
+      .on(t.oidcProviderId, t.issuer, t.subject)
       .where(sql`${t.oidcProviderId} IS NOT NULL`),
     uniqueIndex("federated_identities_saml_subject_uq")
-      .on(t.samlProviderId, t.subject)
+      .on(t.samlProviderId, t.issuer, t.subjectFormat, t.subject)
       .where(sql`${t.samlProviderId} IS NOT NULL`),
     index("federated_identities_user_idx").on(t.userId),
     check("federated_identities_one_provider_ck", sql`(${t.oidcProviderId} IS NULL) <> (${t.samlProviderId} IS NULL)`),
     check(
       "federated_identities_linked_via_ck",
-      sql`${t.linkedVia} IN ('preprovisioned', 'jit', 'proof', 'admin')`,
+      sql`${t.linkedVia} IN ('preprovisioned', 'jit', 'proof', 'admin', 'prior_sso')`,
     ),
   ],
 );
@@ -430,6 +460,9 @@ export const federatedLinkRequests = pgTable(
       .references(() => users.id, { onDelete: "cascade" }),
     oidcProviderId: uuid("oidc_provider_id").references(() => oidcProviders.id, { onDelete: "cascade" }),
     samlProviderId: uuid("saml_provider_id").references(() => samlProviders.id, { onDelete: "cascade" }),
+    /** see federatedIdentities.issuer / subjectFormat */
+    issuer: text("issuer").notNull(),
+    subjectFormat: text("subject_format").notNull().default(""),
     subject: text("subject").notNull(),
     /** the verified email the provider asserted */
     email: text("email").notNull(),
@@ -441,6 +474,9 @@ export const federatedLinkRequests = pgTable(
     proofExpiresAt: timestamp("proof_expires_at", { withTimezone: true }),
     /** how long an admin may still approve it */
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    /** admin approvals so far (one suffices for a member; an admin account
+     * needs two DISTINCT approvers). `userId` null = the bootstrap operator. */
+    approvals: jsonb("approvals").$type<Array<{ userId: string | null; at: string }>>().notNull().default([]),
     decidedBy: uuid("decided_by").references(() => users.id, { onDelete: "set null" }),
     decidedAt: timestamp("decided_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

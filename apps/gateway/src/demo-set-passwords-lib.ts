@@ -10,10 +10,12 @@
  *    (shell history) and never a default;
  *  - it must pass the org's own password policy (the same `checkPasswordPolicy`
  *    every password write answers to);
- *  - it runs only on a demo deployment: refused when a non-demo licence is
- *    installed, and refused on a box that shows a sign of being a real
- *    deployment (`REGULAIT_DEPLOY_MODE` / `REGULAIT_HSTS`, the ADR-0167 signal)
- *    unless the installed licence is the demo licence;
+ *  - it runs only on a demo-licensed deployment (ADR-0174 §6, enforced as
+ *    written since the security review): the installed licence must be a
+ *    VALID demo licence — the ephemeral one `demo:setup` (step 4 of
+ *    DEMO_RUNBOOK §1, and therefore `demo:prepare`) installs, or seed's opt-in
+ *    `REGULAIT_EPHEMERAL_LICENSE=1` one. No licence, an expired one, or a
+ *    customer licence is a refusal, whatever the box looks like;
  *  - it clears the one-time / forced-change flag, resets the lockout counters
  *    and revokes the personas' live sessions (a password change does);
  *  - it writes one audit row per persona that names WHAT happened and from
@@ -95,13 +97,13 @@ export async function setDemoPasswords(db: Db, env: NodeJS.ProcessEnv): Promise<
       ],
     };
   }
-  const signal = networkFacingSignal(env);
-  if (signal && !demoLicensed) {
+  if (demoLicensed !== true) {
+    const signal = networkFacingSignal(env);
     return {
       ok: false,
       exitCode: 1,
       lines: [
-        `demo:set-passwords refused: this box looks like a real deployment (${signal}) and no demo licence is installed. Run demo:prepare (which installs the demo licence) or use a local demo box. Nothing was changed.`,
+        `demo:set-passwords refused: no valid demo licence is installed${signal ? ` (and this box looks like a real deployment: ${signal})` : ""}. Run demo:setup first (DEMO_RUNBOOK §1 step 4 — demo:prepare runs it), which installs the ephemeral demo licence. Nothing was changed.`,
       ],
     };
   }

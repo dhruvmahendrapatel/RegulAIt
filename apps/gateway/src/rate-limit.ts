@@ -118,6 +118,9 @@ export const AUTH_RATE_LIMIT_ROUTES: ReadonlySet<string> = new Set([
   "/auth/login-with-key",
   // ADR-0174: the link proof accepts a password (and TOTP code)
   "/auth/link/confirm",
+  // ADR-0174 (finding 11): the broker-hinted start is unauthenticated and its
+  // refusals are audited, so it is bounded per IP like the credential routes
+  "/auth/oidc/:providerId/login",
 ]);
 
 /** CFG-06: the SSO return legs — unauthenticated, and expensive to refuse */

@@ -140,12 +140,15 @@ describe("ADR-0031: rate-limit configuration", () => {
     expect(rateLimitWindowMs(cfg, "sso:1.2.3.4")).toBe(cfg.ssoWindowMs);
     expect(rateLimitWindowMs(cfg, "ip:1.2.3.4")).toBe(cfg.globalWindowMs);
     // the credential endpoints are exactly the unauthenticated ones — ADR-0174
-    // added the federated-link proof, which accepts a password and TOTP code
+    // added the federated-link proof, which accepts a password and TOTP code,
+    // and (security review, finding 11) the broker-hinted start, whose
+    // refusals are audited
     expect([...AUTH_RATE_LIMIT_ROUTES].sort()).toEqual([
       "/auth/link/confirm",
       "/auth/login",
       "/auth/login-with-key",
       "/auth/mfa/verify",
+      "/auth/oidc/:providerId/login",
     ]);
     // CFG-06: and the SSO return legs are exactly the two
     expect([...SSO_RATE_LIMIT_ROUTES].sort()).toEqual(["/auth/oidc/callback", "/auth/saml/:providerId/acs"]);

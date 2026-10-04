@@ -60,20 +60,23 @@ import { normalizeAssertedGroups, reconcileGroupRoles } from "./group-roles.js";
 import { hashToken } from "./token-hash.js";
 import { isVirtualKeyToken, resolveVirtualKey, touchVirtualKey } from "./virtual-keys.js";
 import {
-  hasLocalCredential,
+  anchorLinkedUser,
+  anchorOfRequest,
+  dropProviderLinks,
   idTokenMfa,
   LINK_COOKIE,
   LINK_PROOF_MINUTES,
   loadPendingProof,
-  matchFederatedAccount,
+  normalizeClaimEmail,
   orgRequiresMfa,
-  providerRefOf,
   raiseLinkRequest,
   recordFederatedLink,
-  subjectLinkedUser,
+  resolveFederatedLogin,
   touchFederatedLink,
+  type FederatedAnchor,
   type ProviderRef,
 } from "./federated-identity.js";
+import { breakGlassLockoutRefusal } from "./break-glass.js";
 
 /** ADR-0066 kept this exported from `auth.ts` — the implementation moved to
  * `token-hash.ts` so `virtual-keys.ts` can share it without an import cycle,
@@ -1016,6 +1019,32 @@ export function linkCookie(value: string, secure: boolean, maxAgeSeconds: number
   return `${LINK_COOKIE}=${value}; Path=/auth/link; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSeconds}` + (secure ? "; Secure" : "");
 }
 
+/** ADR-0174 (finding 1): the pending-MFA token of a SAML login that must step
+ * up to the account's TOTP. HttpOnly, scoped to /auth/mfa, minutes-long. */
+export const MFA_PENDING_COOKIE = "regulait_mfa_pending";
+export function mfaPendingCookie(value: string, secure: boolean, maxAgeSeconds: number): string {
+  return `${MFA_PENDING_COOKIE}=${value}; Path=/auth/mfa; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSeconds}` + (secure ? "; Secure" : "");
+}
+
+/** park a SAML login at the TOTP step: no session exists until the code
+ * verifies at POST /auth/mfa/verify (which mints it with origin `saml`) */
+export async function beginSamlTotpStepUp(
+  db: Db,
+  userId: string,
+  samlProviderId: string,
+): Promise<{ token: string; maxAgeSeconds: number }> {
+  const { token, tokenHash } = generateSessionToken();
+  await db.delete(authMfaPending).where(eq(authMfaPending.userId, userId));
+  await db.insert(authMfaPending).values({
+    tokenHash,
+    userId,
+    origin: "saml",
+    samlProviderId,
+    expiresAt: new Date(Date.now() + MFA_PENDING_MINUTES * 60_000),
+  });
+  return { token, maxAgeSeconds: MFA_PENDING_MINUTES * 60 };
+}
+
 export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRouteOptions = {}) {
   const setSession = async (
     reply: FastifyReply,
@@ -1108,6 +1137,22 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
       verifyPassword(body.password, null);
       return fail("locked_out");
     }
+    // ADR-0174 (security review, finding 3): in break-glass mode only a
+    // designated admin may use a local password, and that is decided BEFORE the
+    // password result is trusted. Everybody else gets the SAME uniform 401 a
+    // wrong password gets, after paying the same scrypt cost against their own
+    // hash — so neither the status, the body nor the timing says whether the
+    // password was right, and the account is no oracle for who is break-glass.
+    // The lockout counter is left exactly as it was: a refused login neither
+    // resets it (which would let a correct guess wipe a brute-force trail) nor
+    // advances it (password sign-in is closed to this account anyway).
+    if (!localSignInAllowed(org, user)) {
+      verifyPassword(body.password, user.passwordHash); // same cost, result unused
+      await auditAuth(db, null, user.id, "local-sign-in-refused", "deny",
+        `password sign-in refused for '${user.email}': local sign-in is break-glass only and this account is not a designated break-glass admin`,
+        { phase: "login", email: user.email, method: "password", localSignIn: org.localSignIn, identifierKind: kind });
+      return reply.status(401).send(UNIFORM_LOGIN_401);
+    }
     if (!verifyPassword(body.password, user.passwordHash)) {
       return fail(user.passwordHash ? "wrong_password" : "no_password_set");
     }
@@ -1117,20 +1162,6 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
       .update(users)
       .set({ failedLoginCount: 0, lastFailedLoginAt: null, lockedUntil: null })
       .where(eq(users.id, user.id));
-
-    // ADR-0174: in break-glass mode only a designated admin may use a local
-    // password. Checked AFTER the password verified, so the refusal is never an
-    // oracle for which accounts are break-glass: a wrong password still gets the
-    // uniform 401 above.
-    if (!localSignInAllowed(org, user)) {
-      await auditAuth(db, null, user.id, "local-sign-in-refused", "deny",
-        `password sign-in refused for '${user.email}': local sign-in is break-glass only and this account is not a designated break-glass admin`,
-        { phase: "login", email: user.email, method: "password", localSignIn: org.localSignIn });
-      return reply.status(403).send({
-        error: "local_sign_in_disabled",
-        detail: "email sign-in is reserved for break-glass administrators in this organization — use single sign-on",
-      });
-    }
 
     if (user.totpEnabled) {
       // two-step: password accepted → short-lived pending-MFA token, no cookie
@@ -1169,13 +1200,26 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
       return reply;
     }
     const now = new Date();
+    // ADR-0174 (finding 1): a SAML login that stepped up to TOTP carries its
+    // pending token in an HttpOnly cookie (the ACS answered with a redirect, so
+    // there was no JSON body to hand it over in); a password login still sends
+    // it in the body.
+    const cookieToken = readCookie(req.headers.cookie, MFA_PENDING_COOKIE);
+    const presented = body.pendingToken ?? cookieToken;
+    if (!presented) return reply.status(401).send({ error: "invalid_or_expired_pending_token" });
     const [pending] = await db
       .select()
       .from(authMfaPending)
-      .where(and(eq(authMfaPending.tokenHash, hashToken(body.pendingToken)), gt(authMfaPending.expiresAt, now)));
+      .where(and(eq(authMfaPending.tokenHash, hashToken(presented)), gt(authMfaPending.expiresAt, now)));
     if (!pending) return reply.status(401).send({ error: "invalid_or_expired_pending_token" });
     const [user] = await db.select().from(users).where(eq(users.id, pending.userId));
     if (!user || user.disabledAt || !user.totpEnabled || !user.totpSecretCiphertext || !opts.dataKey) {
+      return reply.status(401).send({ error: "invalid_or_expired_pending_token" });
+    }
+    // a password login's second step answers to the break-glass mode as it is
+    // NOW — it may have tightened since the password step
+    if (pending.origin === "password" && !localSignInAllowed(org, user)) {
+      await db.delete(authMfaPending).where(eq(authMfaPending.id, pending.id));
       return reply.status(401).send({ error: "invalid_or_expired_pending_token" });
     }
     const secret = decryptSecret(opts.dataKey, user.totpSecretCiphertext);
@@ -1190,11 +1234,20 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     await db.delete(authMfaPending).where(eq(authMfaPending.id, pending.id));
     await db.update(users).set({ totpLastUsedStep: step }).where(eq(users.id, user.id));
     // ADR-0028: the second factor does not change WHICH credential established
-    // the session — a MFA-completed login is still 'password' origin.
-    await setSession(reply, req, user.id, org, "password");
-    await auditAuth(db, user.id, user.id, "login-succeeded", "allow",
-      `user '${user.email}' signed in with password + TOTP`,
-      { phase: "login", email: user.email, method: "password+totp" });
+    // the session — a MFA-completed login is still 'password' origin, and a
+    // SAML login that stepped up to TOTP is still 'saml' (ADR-0174).
+    if (cookieToken) void reply.header("set-cookie", mfaPendingCookie("", requestIsSecure(req), 0));
+    if (pending.origin === "saml") {
+      await setSession(reply, req, user.id, org, "saml");
+      await auditAuth(db, user.id, user.id, "login-succeeded", "allow",
+        `user '${user.email}' signed in via SAML + TOTP step-up`,
+        { phase: "login", email: user.email, method: "saml", mfa: "totp-step-up", providerId: pending.samlProviderId });
+    } else {
+      await setSession(reply, req, user.id, org, "password");
+      await auditAuth(db, user.id, user.id, "login-succeeded", "allow",
+        `user '${user.email}' signed in with password + TOTP`,
+        { phase: "login", email: user.email, method: "password+totp" });
+    }
     return reply.send({
       ok: true,
       userId: user.id,
@@ -1240,6 +1293,19 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
       });
     }
     const org = await loadOrgSettings(db);
+    // ADR-0174 (finding 9): in break-glass mode a browser session from an API
+    // key is a local sign-in like any other — only a designated break-glass
+    // admin may have one. Everybody else gets the same answer as an unknown
+    // key; the key itself keeps working for programmatic use. The bootstrap
+    // exchange (no user) is the operator's own break-glass path, unchanged.
+    if (ctx.via === "api-key" && ctx.userId && org.localSignIn === "break_glass_only") {
+      if (!localSignInAllowed(org, { id: ctx.userId, isAdmin: ctx.isAdmin })) {
+        await auditAuth(db, null, ctx.userId, "local-sign-in-refused", "deny",
+          "API-key browser sign-in refused: local sign-in is break-glass only and this account is not a designated break-glass admin",
+          { phase: "login", method: "api-key-exchange", localSignIn: org.localSignIn });
+        return reply.status(401).send({ error: "invalid_key" });
+      }
+    }
     // ADR-0039: an exchanged API-key session is the AUTOMATION path — governed
     // by api_key_ip_policy, never by the human knob. The bootstrap exchange is
     // the break-glass path and is never IP-restricted.
@@ -1662,6 +1728,7 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     /** ADR-0174: non-null = a broker; each entry is a "Continue with …" button */
     brokerIdps: p.brokerIdps,
     mfaAcrValues: p.mfaAcrValues,
+    brokerEnforcesMfa: p.brokerEnforcesMfa,
     createdAt: p.createdAt,
     updatedAt: p.updatedAt,
     // client_secret_ciphertext deliberately absent: secrets are WRITE-ONLY
@@ -1759,7 +1826,9 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
         ...samlRows.map((p) => ({ id: p.id, name: p.name, protocol: "saml" as const })),
       ],
       local: { mode: localMode, emailForm: localMode === "enabled" },
-      apiKeyExchange: true,
+      // ADR-0174 (finding 9): break-glass mode closes the API-key exchange to
+      // everyone but the break-glass admins, so the page stops offering it
+      apiKeyExchange: org.localSignIn !== "break_glass_only",
     };
   });
 
@@ -1859,6 +1928,14 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     const { returnTo } = returnToQuery.parse({ returnTo: q.returnTo });
     const rawIdp = q.idp;
     if (rawIdp === undefined) return beginOidcLogin(req, reply, providerId, returnTo, null);
+    // ADR-0174 (finding 11): the provider is looked up FIRST — an unknown id
+    // is a plain 404 that writes nothing, so an unauthenticated caller cannot
+    // fill the audit trail with provider ids of its own choosing.
+    const [known] = await db
+      .select({ id: oidcProviders.id })
+      .from(oidcProviders)
+      .where(and(eq(oidcProviders.id, providerId), eq(oidcProviders.enabled, true)));
+    if (!known) return reply.status(404).send({ error: "unknown_provider" });
     if (typeof rawIdp !== "string" || !(BROKER_IDP_VALUES as readonly string[]).includes(rawIdp)) {
       await auditAuth(db, null, providerId, "oidc-idp-hint-refused", "deny",
         "OIDC sign-in refused: the requested identity provider is not on the broker allow-list",
@@ -1944,9 +2021,11 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
       return reply.status(401).send({ error: "oidc_validation_failed" });
     }
 
-    const email = typeof claims.email === "string" ? claims.email.toLowerCase() : null;
+    // ADR-0174 (finding 7): ONE normalisation (NFKC, trimmed, case-folded)
+    const normalized = normalizeClaimEmail(claims.email);
+    const email = normalized?.email ?? null;
     const emailVerified = claims.email_verified === true;
-    if (!email || !emailVerified) {
+    if (!normalized || !email || !emailVerified) {
       await auditAuth(db, null, null, "oidc-login-failed", "deny",
         `OIDC login refused: no verified email claim (provider '${provider.name}')`,
         { phase: "oidc-callback", provider: provider.name, sub: claims.sub, emailPresent: Boolean(email), emailVerified });
@@ -1960,12 +2039,27 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
       return reply.status(403).send({ error: "email_domain_not_allowed" });
     }
 
-    // ADR-0174 §5: the linked (provider, subject) first, then the verified
-    // email — READ-ONLY, so a refusal below writes nothing but its audit row.
+    // ADR-0174 §5: the linked (provider, issuer, subject) first, then the
+    // verified email — READ-ONLY, so a refusal below writes nothing but its
+    // audit row. The issuer is the token's own (validated) `iss`.
     const ref: ProviderRef = { kind: "oidc", id: provider.id, name: provider.name };
     const subject = String(claims.sub);
-    const match = await matchFederatedAccount(db, ref, subject, email);
-    let user = match.user;
+    const anchor: FederatedAnchor = {
+      ref,
+      issuer: typeof claims.iss === "string" ? claims.iss : provider.issuerUrl,
+      subjectFormat: "",
+      subject,
+    };
+    const resolution = await resolveFederatedLogin(db, anchor, normalized);
+    if (resolution.kind === "not_linkable") {
+      await auditAuth(db, null, null, "oidc-login-failed", "deny",
+        `OIDC login refused: provider '${provider.name}' asserted an email outside plain ASCII, which is never matched to an account`,
+        { phase: "oidc-callback", provider: provider.name, sub: subject, why: "email_not_linkable" });
+      return federatedRefusal(req, reply, 403, "email_not_linkable",
+        "This email address can't be used to sign in",
+        "Your identity provider sent an email address with characters outside plain ASCII. Ask your administrator to link your account.");
+    }
+    let user = resolution.kind === "none" ? null : resolution.user;
     if (user?.disabledAt) {
       await auditAuth(db, null, user.id, "oidc-login-failed", "deny",
         `OIDC login refused: account '${email}' is deactivated`,
@@ -1976,9 +2070,10 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
       });
     }
     // ADR-0174 §4: when the org requires MFA for this person, the IdP must
-    // assert it (RFC 8176 amr, or an acr value configured for the provider).
+    // assert it (RFC 8176 amr — `mfa` or two factor classes, or one possession
+    // factor from an MFA-enforcing broker — or a configured acr value).
     // A JIT-created user is never an admin, so 'admins' never applies to one.
-    const mfa = idTokenMfa(claims as Record<string, unknown>, provider.mfaAcrValues ?? null);
+    const mfa = idTokenMfa(claims as Record<string, unknown>, provider.mfaAcrValues ?? null, provider.brokerEnforcesMfa);
     const orgNow = await loadOrgSettings(db);
     if (orgRequiresMfa(orgNow, user?.isAdmin ?? false) && !mfa.asserted) {
       await auditAuth(db, null, user?.id ?? null, "oidc-mfa-not-asserted", "deny",
@@ -1988,26 +2083,28 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
         "Multi-factor sign-in required",
         "Your organization requires multi-factor authentication, and your identity provider did not confirm a second factor for this sign-in. Sign in again and complete the code or passkey step, or ask your administrator to require MFA at the identity provider.");
     }
-    if (user && !match.linked) {
-      if (hasLocalCredential(user)) {
-        // ADR-0174 §5: an account somebody can prove locally is NEVER taken
-        // over on an asserted email alone. The person proves it in this
-        // browser (password, plus TOTP when enrolled) or an admin approves.
-        const link = await raiseLinkRequest(db, ref, subject, email, user.id, mfa.asserted);
-        await auditAuth(db, null, user.id, "federated-link-required", "deny",
-          `OIDC identity from provider '${provider.name}' matched the existing account '${user.email}', which has a local credential — link pending proof or admin approval, no session minted`,
-          { phase: "oidc-callback", provider: provider.name, providerKind: "oidc", email, sub: subject, linkRequestId: link.requestId, refreshed: link.refreshed });
-        void reply.header("set-cookie", linkCookie(link.proofToken, requestIsSecure(req), LINK_PROOF_MINUTES * 60));
-        return reply.redirect("/ui/login?link=pending", 302);
-      }
-      // a password-less account was created by an admin or SCIM for exactly
-      // this person: the verified email links it, as it always has
-      await recordFederatedLink(db, ref, subject, user.id, "preprovisioned");
-      await auditAuth(db, null, user.id, "federated-identity-linked", "allow",
-        `OIDC identity from provider '${provider.name}' linked to the pre-provisioned account '${user.email}' (no local credential)`,
-        { phase: "oidc-callback", provider: provider.name, providerKind: "oidc", email, sub: subject, linkedVia: "preprovisioned" });
-    } else if (user) {
-      await touchFederatedLink(db, ref, subject);
+    if (resolution.kind === "proof") {
+      // ADR-0174 §5: an account already in use is NEVER taken over on an
+      // asserted email alone. The person proves it in this browser
+      // (password, plus TOTP when enrolled) or an admin approves.
+      const link = await raiseLinkRequest(db, anchor, email, resolution.user.id, mfa.asserted);
+      await auditAuth(db, null, resolution.user.id, "federated-link-required", "deny",
+        `OIDC identity from provider '${provider.name}' matched the existing account '${resolution.user.email}', which is already in use — link pending proof or admin approval, no session minted`,
+        { phase: "oidc-callback", provider: provider.name, providerId: provider.id, providerKind: "oidc", email, sub: subject, why: resolution.why, linkRequestId: link.requestId, refreshed: link.refreshed });
+      void reply.header("set-cookie", linkCookie(link.proofToken, requestIsSecure(req), LINK_PROOF_MINUTES * 60));
+      return reply.redirect("/ui/login?link=pending", 302);
+    }
+    if (resolution.kind === "link") {
+      // a never-used pre-provisioned account, or a pre-0139 SSO user signing
+      // in again through the provider they already used (the backfill)
+      await recordFederatedLink(db, anchor, resolution.user.id, resolution.via);
+      await auditAuth(db, null, resolution.user.id, "federated-identity-linked", "allow",
+        resolution.via === "prior_sso"
+          ? `OIDC identity from provider '${provider.name}' linked to '${resolution.user.email}', who signed in through this provider before migration 0139 (backfill)`
+          : `OIDC identity from provider '${provider.name}' linked to the pre-provisioned account '${resolution.user.email}' (never signed in, no local credential)`,
+        { phase: "oidc-callback", provider: provider.name, providerId: provider.id, providerKind: "oidc", email, sub: subject, issuer: anchor.issuer, linkedVia: resolution.via });
+    } else if (resolution.kind === "linked") {
+      await touchFederatedLink(db, anchor);
     }
     if (!user) {
       // DEFAULT-DENY: an unknown subject is refused unless the admin opted
@@ -2037,7 +2134,7 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
       await auditAuth(db, null, user.id, "oidc-user-provisioned", "allow",
         `user '${email}' JIT-provisioned via OIDC provider '${provider.name}'${provider.defaultRoleId ? " with the provider's default role" : ""} (never admin)`,
         { phase: "oidc-jit", provider: provider.name, email, sub: claims.sub, defaultRoleId: provider.defaultRoleId });
-      await recordFederatedLink(db, ref, subject, user.id, "jit");
+      await recordFederatedLink(db, anchor, user.id, "jit");
     }
 
     // ADR-0038 — group → role reconciliation from the id_token's groups claim.
@@ -2080,7 +2177,8 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     await setSession(reply, req, user.id, org, "oidc", { idpMfa: mfa.asserted }); // ADR-0028, ADR-0174
     await auditAuth(db, user.id, user.id, "login-succeeded", "allow",
       `user '${email}' signed in via OIDC provider '${provider.name}'`,
-      { phase: "login", email, method: "oidc", provider: provider.name, idpMfa: mfa.asserted, mfaVia: mfa.via });
+      // providerId marks this as a post-0139 row: never backfill evidence
+      { phase: "login", email, method: "oidc", provider: provider.name, providerId: provider.id, idpMfa: mfa.asserted, mfaVia: mfa.via });
     return reply.redirect(login.returnTo, 302);
   });
 
@@ -2153,6 +2251,17 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
       if (step === null) return failProof("wrong_code");
       totpStepUsed = step;
     }
+    // ADR-0174 (finding 12): the identity-already-linked refusal comes BEFORE
+    // the request is spent, so a refused confirm leaves it pending (an admin
+    // can still see and deny it) instead of marking it `linked` with no link.
+    const anchor = anchorOfRequest(pending, providerName);
+    const owner = await anchorLinkedUser(db, anchor);
+    if (owner && owner !== user.id) {
+      await auditAuth(db, null, user.id, "federated-link-proof-refused", "deny",
+        `link proof for '${user.email}' refused: the identity from '${providerName}' is already linked to another account — request left pending`,
+        { phase: "link-confirm", linkRequestId: pending.id, provider: providerName, sub: pending.subject });
+      return reply.status(409).send({ error: "identity_already_linked", detail: "this identity is already linked to another account" });
+    }
     // proven: spend the request, record the link, reset the counters
     const spent = await db
       .update(federatedLinkRequests)
@@ -2160,12 +2269,7 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
       .where(and(eq(federatedLinkRequests.id, pending.id), eq(federatedLinkRequests.status, "pending")))
       .returning({ id: federatedLinkRequests.id });
     if (spent.length === 0) return reply.status(401).send({ error: "no_pending_link" });
-    const ref = providerRefOf(pending, providerName);
-    const owner = await subjectLinkedUser(db, ref, pending.subject);
-    if (owner && owner !== user.id) {
-      return reply.status(409).send({ error: "identity_already_linked", detail: "this identity is already linked to another account" });
-    }
-    await recordFederatedLink(db, ref, pending.subject, user.id, "proof");
+    await recordFederatedLink(db, anchor, user.id, "proof");
     await db
       .update(users)
       .set({
@@ -2182,7 +2286,7 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     await setSession(reply, req, user.id, org, method, { idpMfa: pending.idpMfa });
     await auditAuth(db, user.id, user.id, "login-succeeded", "allow",
       `user '${user.email}' signed in via ${method.toUpperCase()} provider '${providerName}' (identity linked by proof)`,
-      { phase: "login", email: user.email, method, provider: providerName, idpMfa: pending.idpMfa });
+      { phase: "login", email: user.email, method, provider: providerName, providerId: anchor.ref.id, idpMfa: pending.idpMfa });
     return reply.send({ ok: true, userId: user.id, isAdmin: user.isAdmin, mustChangePassword: user.mustChangePassword });
   });
 
@@ -2206,6 +2310,8 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
         email: federatedLinkRequests.email,
         idpMfa: federatedLinkRequests.idpMfa,
         status: federatedLinkRequests.status,
+        approvals: federatedLinkRequests.approvals,
+        userIsAdmin: users.isAdmin,
         createdAt: federatedLinkRequests.createdAt,
         expiresAt: federatedLinkRequests.expiresAt,
         decidedAt: federatedLinkRequests.decidedAt,
@@ -2230,6 +2336,9 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
         email: r.email,
         idpMfa: r.idpMfa,
         status: r.status,
+        // ADR-0174 (finding 12): an admin account needs two distinct approvers
+        approvals: r.approvals.length,
+        requiredApprovals: r.userIsAdmin ? 2 : 1,
         expired: r.status === "pending" && r.expiresAt.getTime() <= now,
         createdAt: r.createdAt,
         expiresAt: r.expiresAt,
@@ -2261,26 +2370,74 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     const [target] = await db.select().from(users).where(eq(users.id, row.userId));
     if (!target || target.disabledAt) return reply.status(409).send({ error: "user_disabled" });
     const providerName = await linkProviderName(row);
-    const ref = providerRefOf(row, providerName);
+    const anchor = anchorOfRequest(row, providerName);
     if (decision === "approved") {
-      const owner = await subjectLinkedUser(db, ref, row.subject);
+      const owner = await anchorLinkedUser(db, anchor);
       if (owner && owner !== row.userId) {
         return reply.status(409).send({ error: "identity_already_linked", detail: "this identity is already linked to another account" });
       }
     }
+    const now = new Date();
+    // ADR-0174 (finding 12): linking an identity to an ADMIN account takes two
+    // DISTINCT approvers (neither of them the account itself — refused above);
+    // a member account takes one. The bootstrap operator counts as one
+    // approver. A first approval is recorded and the request stays pending.
+    if (decision === "approved") {
+      const required = target.isAdmin ? 2 : 1;
+      const approverKey = req.authCtx.userId ?? "bootstrap";
+      if (row.approvals.some((a) => (a.userId ?? "bootstrap") === approverKey)) {
+        return reply.status(409).send({
+          error: "already_approved_by_you",
+          detail: "linking an identity to an administrator needs a second, different administrator to approve",
+        });
+      }
+      const approvals = [...row.approvals, { userId: req.authCtx.userId, at: now.toISOString() }];
+      if (approvals.length < required) {
+        const recorded = await db
+          .update(federatedLinkRequests)
+          .set({ approvals })
+          .where(
+            and(
+              eq(federatedLinkRequests.id, row.id),
+              eq(federatedLinkRequests.status, "pending"),
+              sql`jsonb_array_length(${federatedLinkRequests.approvals}) = ${row.approvals.length}`,
+            ),
+          )
+          .returning({ id: federatedLinkRequests.id });
+        if (recorded.length === 0) return reply.status(409).send({ error: "link_request_not_pending" });
+        await auditAuth(db, req.authCtx.userId, row.userId, "federated-link-approval-recorded", "allow",
+          `admin approval ${approvals.length} of ${required} recorded for linking the identity '${row.email}' from '${providerName}' to the administrator account '${target.email}'${body.reason ? `: ${body.reason}` : ""}`,
+          { phase: "link-decision", linkRequestId: row.id, provider: providerName, sub: row.subject, email: row.email, approvals: approvals.length, required, via: req.authCtx.via });
+        return reply.send({ ok: true, status: "pending", approvals: approvals.length, requiredApprovals: required });
+      }
+      const updated = await db
+        .update(federatedLinkRequests)
+        .set({ status: "approved", approvals, proofTokenHash: null, decidedAt: now, decidedBy: req.authCtx.userId })
+        .where(
+          and(
+            eq(federatedLinkRequests.id, row.id),
+            eq(federatedLinkRequests.status, "pending"),
+            sql`jsonb_array_length(${federatedLinkRequests.approvals}) = ${row.approvals.length}`,
+          ),
+        )
+        .returning({ id: federatedLinkRequests.id });
+      if (updated.length === 0) return reply.status(409).send({ error: "link_request_not_pending" });
+      await recordFederatedLink(db, anchor, row.userId, "admin");
+      await auditAuth(db, req.authCtx.userId, row.userId, "federated-link-approved", "allow",
+        `admin approved linking the identity '${row.email}' from '${providerName}' to the account '${target.email}'${required > 1 ? ` (approval ${approvals.length} of ${required})` : ""}${body.reason ? `: ${body.reason}` : ""}`,
+        { phase: "link-decision", linkRequestId: row.id, provider: providerName, sub: row.subject, email: row.email, decision, approvals: approvals.length, required, via: req.authCtx.via });
+      return reply.send({ ok: true, status: "approved", approvals: approvals.length, requiredApprovals: required });
+    }
     const updated = await db
       .update(federatedLinkRequests)
-      .set({ status: decision, proofTokenHash: null, decidedAt: new Date(), decidedBy: req.authCtx.userId })
+      .set({ status: "denied", proofTokenHash: null, decidedAt: now, decidedBy: req.authCtx.userId })
       .where(and(eq(federatedLinkRequests.id, row.id), eq(federatedLinkRequests.status, "pending")))
       .returning({ id: federatedLinkRequests.id });
     if (updated.length === 0) return reply.status(409).send({ error: "link_request_not_pending" });
-    if (decision === "approved") await recordFederatedLink(db, ref, row.subject, row.userId, "admin");
-    await auditAuth(db, req.authCtx.userId, row.userId,
-      decision === "approved" ? "federated-link-approved" : "federated-link-denied",
-      decision === "approved" ? "allow" : "deny",
-      `admin ${decision} linking the identity '${row.email}' from '${providerName}' to the account '${target.email}'${body.reason ? `: ${body.reason}` : ""}`,
+    await auditAuth(db, req.authCtx.userId, row.userId, "federated-link-denied", "deny",
+      `admin denied linking the identity '${row.email}' from '${providerName}' to the account '${target.email}'${body.reason ? `: ${body.reason}` : ""}`,
       { phase: "link-decision", linkRequestId: row.id, provider: providerName, sub: row.subject, email: row.email, decision, via: req.authCtx.via });
-    return reply.send({ ok: true, status: decision });
+    return reply.send({ ok: true, status: "denied" });
   };
   app.post("/v1/auth/link-requests/:requestId/approve", (req, reply) => decideLinkRequest(req, reply, "approved"));
   app.post("/v1/auth/link-requests/:requestId/deny", (req, reply) => decideLinkRequest(req, reply, "denied"));
@@ -2340,6 +2497,7 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
         // ADR-0174: a broker's upstream IdPs and the acr values meaning MFA
         brokerIdps: body.brokerIdps ?? null,
         mfaAcrValues: body.mfaAcrValues ?? null,
+        brokerEnforcesMfa: body.brokerEnforcesMfa ?? false,
       })
       .returning();
     await auditAuth(db, req.authCtx.userId, null, "oidc-provider-created", "allow",
@@ -2386,6 +2544,9 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
         const remaining = await countEnabledSsoProviders(db, { oidcId: providerId });
         if (remaining.total === 0) return reply.status(409).send(SSO_ONLY_LAST_PROVIDER);
       }
+      // ADR-0174 (finding 5): nor while email sign-in is break-glass only
+      const glass = await breakGlassLockoutRefusal(db, org, { kind: "oidc_provider", providerId });
+      if (glass) return reply.status(409).send(glass);
     }
     const { clientSecret, ...rest } = body;
     const [row] = await db
@@ -2401,6 +2562,15 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
       `OIDC provider '${existing.name}' updated: ${Object.keys(body).join(", ")}`,
       { phase: "provider-updated", name: existing.name, changed: Object.keys(body), secretRotated: Boolean(clientSecret) },
       "oidc_provider");
+    // ADR-0174 (finding 6): a new issuer is a different identity provider —
+    // the subjects linked under the old one mean nothing under the new one
+    if (body.issuerUrl !== undefined && body.issuerUrl !== existing.issuerUrl) {
+      const dropped = await dropProviderLinks(db, { kind: "oidc", id: providerId, name: existing.name });
+      await auditAuth(db, req.authCtx.userId, providerId, "federated-identities-reset", "allow",
+        `OIDC provider '${existing.name}' issuer changed: ${dropped.identities} linked identit${dropped.identities === 1 ? "y" : "ies"} and ${dropped.requests} pending link request(s) removed — each person links again on their next sign-in`,
+        { phase: "provider-updated", name: existing.name, fromIssuer: existing.issuerUrl, toIssuer: body.issuerUrl, ...dropped },
+        "oidc_provider");
+    }
     return publicProvider(row!);
   });
 
@@ -2415,6 +2585,9 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
         const remaining = await countEnabledSsoProviders(db, { oidcId: providerId });
         if (remaining.total === 0) return reply.status(409).send(SSO_ONLY_LAST_PROVIDER);
       }
+      // ADR-0174 (finding 5): nor while email sign-in is break-glass only
+      const glass = await breakGlassLockoutRefusal(db, org, { kind: "oidc_provider", providerId });
+      if (glass) return reply.status(409).send(glass);
     }
     await db.delete(oidcProviders).where(eq(oidcProviders.id, providerId));
     await auditAuth(db, req.authCtx.userId, null, "oidc-provider-deleted", "allow",

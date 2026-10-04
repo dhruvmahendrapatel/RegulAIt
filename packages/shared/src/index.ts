@@ -2415,7 +2415,9 @@ export type SetUsernameRequest = z.infer<typeof setUsernameSchema>;
 /** step 2 of a TOTP-enabled login: the pending token from step 1 + a code */
 export const mfaVerifySchema = z
   .object({
-    pendingToken: z.string().min(1).max(512),
+    /** ADR-0174: optional — a SAML login that stepped up to TOTP carries its
+     * pending token in an HttpOnly cookie instead of the body */
+    pendingToken: z.string().min(1).max(512).optional(),
     code: z.string().regex(/^\d{6}$/, "a TOTP code is 6 digits"),
   })
   .strict();
@@ -2502,6 +2504,9 @@ export const createOidcProviderSchema = z
     brokerIdps: z.array(brokerIdpSchema).min(1).max(3).nullable().optional(),
     /** ADR-0174: `acr` values that count as multi-factor, besides RFC 8176 amr */
     mfaAcrValues: z.array(z.string().trim().min(1).max(256)).min(1).max(10).nullable().optional(),
+    /** ADR-0174 (security review): this provider is a broker that itself
+     * enforces a second factor, so one otp/hwk/swk amr counts as MFA */
+    brokerEnforcesMfa: z.boolean().optional(),
   })
   .strict();
 export type CreateOidcProvider = z.infer<typeof createOidcProviderSchema>;
@@ -2523,6 +2528,9 @@ export const updateOidcProviderSchema = z
     brokerIdps: z.array(brokerIdpSchema).min(1).max(3).nullable().optional(),
     /** ADR-0174: `acr` values that count as multi-factor, besides RFC 8176 amr */
     mfaAcrValues: z.array(z.string().trim().min(1).max(256)).min(1).max(10).nullable().optional(),
+    /** ADR-0174 (security review): this provider is a broker that itself
+     * enforces a second factor, so one otp/hwk/swk amr counts as MFA */
+    brokerEnforcesMfa: z.boolean().optional(),
   })
   .strict();
 export type UpdateOidcProvider = z.infer<typeof updateOidcProviderSchema>;
@@ -2577,6 +2585,9 @@ const samlProviderFields = {
   /** ADR-0038: the SAML attribute carrying group membership (`groups`,
    * `memberOf`, …). null = no group signal from this provider. */
   groupsAttribute: groupsClaimSchema,
+  /** ADR-0174 (security review): AuthnContextClassRef values that count as
+   * multi-factor for this IdP (the twin of OIDC `mfaAcrValues`) */
+  mfaAuthnContexts: z.array(z.string().trim().min(1).max(512)).min(1).max(10).nullable(),
   /** OPTIONAL SP private key (PEM) for request signing / encrypted assertions.
    * WRITE-ONLY: stored AES-256-GCM under REGULAIT_DATA_KEY and never returned. */
   spPrivateKey: z.string().min(1).max(16384),
@@ -2619,6 +2630,7 @@ export const createSamlProviderSchema = z
     allowIdpInitiated: samlProviderFields.allowIdpInitiated.optional(),
     emailAttribute: samlProviderFields.emailAttribute.optional(),
     groupsAttribute: samlProviderFields.groupsAttribute.optional(),
+    mfaAuthnContexts: samlProviderFields.mfaAuthnContexts.optional(),
     spPrivateKey: samlProviderFields.spPrivateKey.optional(),
     spCertificate: samlProviderFields.spCertificate.optional(),
   })
@@ -2642,6 +2654,7 @@ export const updateSamlProviderSchema = z
     allowIdpInitiated: samlProviderFields.allowIdpInitiated.optional(),
     emailAttribute: samlProviderFields.emailAttribute.optional(),
     groupsAttribute: samlProviderFields.groupsAttribute.optional(),
+    mfaAuthnContexts: samlProviderFields.mfaAuthnContexts.optional(),
     spPrivateKey: samlProviderFields.spPrivateKey.optional(),
     spCertificate: samlProviderFields.spCertificate.optional(),
   })
