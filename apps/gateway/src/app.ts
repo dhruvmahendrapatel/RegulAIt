@@ -160,6 +160,7 @@ import { registerUseCaseOverviewRoutes } from "./use-case-overview.js";
 import { registerUseCaseDraftRoutes } from "./use-case-drafts.js";
 import { registerAgentCardRoutes } from "./agent-card.js";
 import { registerDependencyGraphRoutes } from "./dependency-graph.js";
+import { registerRunGraphRoutes } from "./run-graph.js";
 import { registerGovernanceMonitorRoutes } from "./governance-monitor.js";
 import { registerCredentialInventoryRoutes } from "./credential-inventory.js";
 import { registerEnergyRoutes } from "./energy.js";
@@ -4274,6 +4275,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerAgentCardRoutes(app, db);
   // ADR-0156 — the AI-system dependency graph with propagated declared risk
   registerDependencyGraphRoutes(app, db);
+  // ADR-0173 batch 2b — the read-only run graph (builder turn, orchestration run, use case)
+  registerRunGraphRoutes(app, db);
   // ADR-0157 — governance monitor alerts (Monitor & Respond)
   registerGovernanceMonitorRoutes(app, db);
   // ADR-0175 A7 — the non-human credential inventory (admin, read-only)

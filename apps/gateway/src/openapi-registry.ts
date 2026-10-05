@@ -407,6 +407,10 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/inventory/agents/:agentId": "internal",
   "GET /v1/agents/:agentId/card": "internal",
   "GET /v1/inventory/graph": "internal",
+  // ADR-0173 batch 2b — the run graph (a console view, not a published contract)
+  "GET /v1/run-graph/builder-turn/:threadId/:turn": "internal",
+  "GET /v1/run-graph/orchestration/:runId": "internal",
+  "GET /v1/run-graph/use-case/:useCaseId": "internal",
   "GET /v1/governance/alerts": "internal",
   // ADR-0175 A7 / A15 — the credential inventory and the energy estimate (admin console)
   "GET /v1/admin/credentials": "internal",
@@ -1178,6 +1182,9 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/inventory/agents/:agentId": "inventory",
   "GET /v1/agents/:agentId/card": "inventory",
   "GET /v1/inventory/graph": "inventory",
+  "GET /v1/run-graph/builder-turn/:threadId/:turn": "tracing",
+  "GET /v1/run-graph/orchestration/:runId": "tracing",
+  "GET /v1/run-graph/use-case/:useCaseId": "tracing",
   "GET /v1/governance/alerts": "reports",
   "GET /v1/admin/credentials": "reports",
   "GET /v1/energy/factors": "reports",

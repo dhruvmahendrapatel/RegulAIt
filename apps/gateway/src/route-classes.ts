@@ -158,6 +158,13 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /v1/builder/integrations",
   "GET /v1/builder/toolbox-options",
   "GET /v1/builder/usage",
+  // ADR-0173 batch 2b — the run graph. Read-only, and each read is gated in the
+  // handler by exactly who may open the underlying object: a builder turn by
+  // the thread's person or an admin (404 unknown_thread otherwise), a run by
+  // GET /v1/runs/:runId's rule (404), a use case by canReadUseCase (403).
+  "GET /v1/run-graph/builder-turn/:threadId/:turn",
+  "GET /v1/run-graph/orchestration/:runId",
+  "GET /v1/run-graph/use-case/:useCaseId",
   // ADR-0065 — creating a training job. Its gate is the caller's OWN
   // entitlement to the base agent the customisation is anchored to, checked
   // inside the handler by the same `evaluateAgent` path an invoke takes: a
