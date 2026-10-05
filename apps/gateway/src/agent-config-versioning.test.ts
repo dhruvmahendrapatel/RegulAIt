@@ -17,6 +17,9 @@ import {
   type Db,
 } from "@regulait/db";
 import { canaryBucket } from "@regulait/shared";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 /**
  * Batch B1 — `agent_config` STOPS BEING VOCABULARY (ADR-0048 deviation 2 /
@@ -180,6 +183,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
 
   const ana = await makeUser("acfg-ana@example.com");
   anaId = ana.id;
@@ -227,6 +231,7 @@ afterAll(async () => {
   await db.delete(configCanaryObservations).where(inArray(configCanaryObservations.artifactId, ids));
   await db.delete(configActivationEvents).where(inArray(configActivationEvents.artifactId, ids));
   await db.delete(configVersions).where(inArray(configVersions.artifactId, ids));
+  await restoreSb2Gates();
 });
 
 // ---------------------------------------------------------------------------

@@ -199,6 +199,8 @@ test("runs: goal decomposition drafts a reviewable, editable plan (pillar 7)", a
   await page
     .getByLabel("Describe the goal")
     .fill("Add per-tool price overrides to the MCP admin surface and prove they persist");
+  // ADR-0181: every governed dispatch names a project, the lead's draft included
+  await page.getByLabel("Bill to").selectOption({ label: "demo-project" });
   await page.getByRole("button", { name: "Draft plan with a lead agent" }).click();
   await expect(page.getByText("Plan drafted").first()).toBeVisible();
 

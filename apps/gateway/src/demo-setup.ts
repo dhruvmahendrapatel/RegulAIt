@@ -645,10 +645,11 @@ ${blocked
   DO NOT, on this environment:
     · demo the optimisation cache (deliberately left off — a cached answer
       looks like a fast model and is not one);
-    · claim hardening blocks unattributed calls everywhere. It binds the
-      NATIVE dispatch only. The MCP proxy and the compat edge have their own
-      switches and this preset sets neither — the posture page says so in the
-      attribution control's own text, so read it rather than talking past it.
+    · credit the preset with blocking unattributed calls. The native dispatch,
+      the MCP proxy and the compat edge each have their own switch; all three
+      are ON by default (ADR-0181) and the preset sets only the native one —
+      the posture page says so in the attribution control's own text. An MCP
+      call needs the x-regulait-project-id header on its transport.
 `);
 
 await app.close();
