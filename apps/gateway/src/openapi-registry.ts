@@ -877,6 +877,26 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/workflows/templates": "internal",
   "POST /v1/workflows/templates": "internal",
   "POST /v1/workflows/templates/:templateId/retire": "internal",
+
+  // ===== ADR-0180 (D3) — continuous assurance. Internal: admin console and
+  // governance surfaces whose shapes are still moving. Append-only per owner.
+  // --- P0
+  "GET /v1/org/settings/assurance-gate-mode": "internal",
+  "PUT /v1/org/settings/assurance-gate-mode": "internal",
+  // --- A2
+  "POST /v1/use-cases/:useCaseId/conditions/:conditionId/evaluate": "internal",
+  "POST /v1/use-cases/:useCaseId/conditions/:conditionId/waive": "internal",
+  // --- A3
+  "GET /v1/governance/review-policy/required-tests": "internal",
+  "PUT /v1/governance/review-policy/required-tests": "internal",
+  // --- A8
+  "GET /v1/builder/agents/:id/autonomy": "internal",
+  "PUT /v1/builder/agents/:id/autonomy": "internal",
+  // --- A10
+  "GET /v1/risk-tolerances": "internal",
+  "PUT /v1/risk-tolerances": "internal",
+  "GET /v1/risks/:riskId/acceptances": "internal",
+  "POST /v1/risks/:riskId/acceptances": "internal",
 };
 
 /**
@@ -1637,4 +1657,23 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/workflows/templates": "workflows",
   "POST /v1/workflows/templates": "workflows",
   "POST /v1/workflows/templates/:templateId/retire": "workflows",
+
+  // ===== ADR-0180 (D3) — continuous assurance. Append-only per owner.
+  // --- P0
+  "GET /v1/org/settings/assurance-gate-mode": "org",
+  "PUT /v1/org/settings/assurance-gate-mode": "org",
+  // --- A2
+  "POST /v1/use-cases/:useCaseId/conditions/:conditionId/evaluate": "use-cases",
+  "POST /v1/use-cases/:useCaseId/conditions/:conditionId/waive": "use-cases",
+  // --- A3
+  "GET /v1/governance/review-policy/required-tests": "use-cases",
+  "PUT /v1/governance/review-policy/required-tests": "use-cases",
+  // --- A8
+  "GET /v1/builder/agents/:id/autonomy": "builder",
+  "PUT /v1/builder/agents/:id/autonomy": "builder",
+  // --- A10
+  "GET /v1/risk-tolerances": "risks",
+  "PUT /v1/risk-tolerances": "risks",
+  "GET /v1/risks/:riskId/acceptances": "risks",
+  "POST /v1/risks/:riskId/acceptances": "risks",
 };

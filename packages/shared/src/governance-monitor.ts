@@ -137,6 +137,53 @@ export const MONITOR_RULES = {
       "A measured trust dimension's evidence coverage (ADR-0148) is below the floor. Unmeasured dimensions " +
       "do not fire — a gap is reported on the dashboard, not as an alert on every install.",
   },
+  // --- ADR-0180 (ADR-0175 batch D3): continuous assurance -------------------
+  condition_metric_breached: {
+    label: "Measured condition breached",
+    severity: "high",
+    description:
+      "A measured approval condition (ADR-0180 A2) on a use case failed its last evaluation: the metric, over its " +
+      "window and with at least its minimum samples, is on the wrong side of the threshold. Too few samples " +
+      "neither raises nor resolves the episode. A breach reopens review only when the condition says so and two " +
+      "consecutive evaluations have breached.",
+  },
+  required_test_stale: {
+    label: "Required AI test missing, stale or failing",
+    severity: "high",
+    description:
+      "A test class the review policy requires for the use case's risk tier (ADR-0180 A3) has no completed run for " +
+      "an agent of its stack on the stack's current configuration, or the newest run is older than the freshness " +
+      "limit, did not measure the class, or is past its threshold.",
+  },
+  autonomy_declared_below_observed: {
+    label: "Agent autonomy declared below what it does",
+    severity: "medium",
+    description:
+      "A steward declared a builder agent's autonomy class (ADR-0180 A8) lower than the class derived from what " +
+      "the agent is set up to do: schedules, sub-agents, write tools without Ask-first, inbound channels and " +
+      "computer use.",
+  },
+  autonomy_floor_unmet: {
+    label: "Autonomy control floor not met",
+    severity: "high",
+    description:
+      "The controls an agent's autonomy class requires (ADR-0180 A8) are not all in place for a use case it " +
+      "serves. Builder agents count toward a use case through their shared project.",
+  },
+  residual_above_tolerance: {
+    label: "Residual risk above tolerance",
+    severity: "high",
+    description:
+      "A risk's residual band is above the org's tolerance for its category or tier (ADR-0180 A10; by default " +
+      "anything above medium) and no valid acceptance covers it.",
+  },
+  risk_acceptance_expired: {
+    label: "Risk acceptance expired",
+    severity: "medium",
+    description:
+      "A time-boxed residual-risk acceptance (ADR-0180 A10) passed its expiry. The risk is reopened and needs a " +
+      "new decision.",
+  },
 } as const satisfies Record<string, { label: string; severity: MonitorSeverity; description: string }>;
 export type MonitorRuleId = keyof typeof MONITOR_RULES;
 export const MONITOR_RULE_IDS = Object.keys(MONITOR_RULES) as MonitorRuleId[];
@@ -340,6 +387,40 @@ export interface MonitorInput {
   credentials?: MonitorCredentialInput;
   /** ADR-0173 batch 2c — every KRI with its measurement; absent = rule not evaluated */
   kris?: MonitorKriInput[];
+  /** ADR-0180 — the continuous-assurance rules, each fed by its item owner's
+   * loader; an absent rule key = that rule not evaluated */
+  assurance?: Partial<Record<AssuranceMonitorRuleId, MonitorAssuranceInput>>;
+}
+
+/** ADR-0180 — the six continuous-assurance rules. Their evaluation is owned by
+ * the D3 items (the gateway loaders compute the breaches from the ledgers);
+ * the monitor turns each breach into a finding and reconciles it like any other. */
+export const ASSURANCE_MONITOR_RULE_IDS = [
+  "condition_metric_breached",
+  "required_test_stale",
+  "autonomy_declared_below_observed",
+  "autonomy_floor_unmet",
+  "residual_above_tolerance",
+  "risk_acceptance_expired",
+] as const satisfies readonly MonitorRuleId[];
+export type AssuranceMonitorRuleId = (typeof ASSURANCE_MONITOR_RULE_IDS)[number];
+
+/** one breached subject of an assurance rule */
+export interface MonitorAssuranceSubject {
+  /** e.g. `use_case:<id>>condition:<id>`; stable across passes */
+  subjectKey: string;
+  /** reaches ChatOps channels: names and ids, never free text a person typed */
+  title: string;
+  /** absent = the rule's catalogue severity */
+  severity?: MonitorSeverity;
+  detail: Record<string, unknown>;
+}
+
+export interface MonitorAssuranceInput {
+  breaches: MonitorAssuranceSubject[];
+  /** subjects measured with too few samples: an open episode is HELD
+   * (neither refreshed nor resolved), as for a KRI below its minimum samples */
+  heldSubjectKeys?: string[];
 }
 
 /** ADR-0173 batch 2c — one KRI and what the monitor measured for it */
@@ -649,6 +730,14 @@ export function evaluateMonitorRules(input: MonitorInput): MonitorFinding[] {
         minSamples: k.minSamples,
       },
     });
+  }
+
+  // ADR-0180 — the continuous-assurance rules: the item owners' loaders decide
+  // what breached; each breach is one finding under its rule.
+  for (const ruleId of ASSURANCE_MONITOR_RULE_IDS) {
+    for (const b of input.assurance?.[ruleId]?.breaches ?? []) {
+      out.push({ ruleId, subjectKey: b.subjectKey, severity: b.severity ?? sev(ruleId), title: b.title, detail: b.detail });
+    }
   }
 
   for (const r of input.risks) {

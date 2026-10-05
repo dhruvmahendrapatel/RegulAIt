@@ -18,6 +18,7 @@
  * pipeline, so a release that would be refused at runtime is refused at
  * build time with reasons a developer can act on.
  */
+import type { DeployGateAssuranceInput } from "./assurance.js";
 
 export const DEPLOY_GATE_REASON_CODES = [
   "use_case_not_approved",
@@ -52,7 +53,10 @@ export interface DeployGateAgentInput {
   modelCardApproved: boolean;
 }
 
-export interface DeployGateInput {
+/** ADR-0180: the continuous-assurance inputs (`assuranceMode`,
+ * `conditionVerdicts`, `requiredTests`, `autonomy`, `residualRisks`), all
+ * optional; A3 composes them into the decision. */
+export interface DeployGateInput extends DeployGateAssuranceInput {
   useCase: {
     id: string;
     name: string;

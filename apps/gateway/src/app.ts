@@ -436,6 +436,12 @@ import { registerTracingRoutes } from "./tracing.js";
 import { registerCompliancePackRoutes } from "./compliance-packs.js";
 import { registerCopilotRoutes } from "./copilot.js";
 import { registerBuilderRoutes } from "./builder.js";
+// ADR-0180 (D3) — continuous assurance: P0's gate-mode setting and each item owner's routes
+import { registerAssuranceSettingsRoutes } from "./assurance-settings.js";
+import { registerConditionMetricRoutes } from "./condition-metrics.js";
+import { registerRequiredTestRoutes } from "./required-tests.js";
+import { registerAutonomyRoutes } from "./autonomy.js";
+import { registerRiskToleranceRoutes } from "./risk-tolerance.js";
 import { builderStepsAwaitingApproval, resumeBuilderAfterApproval } from "./builder-runtime.js";
 import { drainBackgroundWork, scheduleBackgroundWork } from "./background-work.js";
 import type { CopilotNarrator, RecommendationJudge } from "@regulait/shared";
@@ -4540,6 +4546,17 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerKriRoutes(app, db);
   registerDashboardRoutes(app, db);
   registerAutomationRuleRoutes(app, db, { dataKey: opts.dataKey });
+
+  // ADR-0180 (ADR-0175 batch D3) — continuous assurance. One registration per
+  // owner module; each owner fills in its own file. P0: the assurance gate
+  // mode (admin-only, audited). A2 measurable conditions, A3 required tests,
+  // A8 autonomy, A10 risk tolerance and acceptance (stubs answer 501 until
+  // their owner lands).
+  registerAssuranceSettingsRoutes(app, db);
+  registerConditionMetricRoutes(app, db);
+  registerRequiredTestRoutes(app, db);
+  registerAutonomyRoutes(app, db);
+  registerRiskToleranceRoutes(app, db);
 
   // ADR-0031 item 2: the audit read surface used to be hard-capped at 100 rows
   // with a userId filter (plus PR #79's deployMode) and nothing else — for a

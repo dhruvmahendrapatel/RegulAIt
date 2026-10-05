@@ -553,6 +553,12 @@ describe("6. the covered / NOT-covered inventory", () => {
     "trace_spans.status_reason",
     "training_datasets.note",
     "use_case_conditions.note",
+    // ADR-0180: a condition waiver reason, a risk acceptance's rationale and
+    // revoke reason, a steward's autonomy note
+    "use_case_conditions.waive_reason",
+    "risk_acceptances.rationale",
+    "risk_acceptances.revoke_reason",
+    "builder_agents.autonomy_note",
     "vendor_account_aliases.reason",
     "vendor_domain_rules.reason",
     "workflow_templates.retired_reason",
@@ -566,6 +572,7 @@ describe("6. the covered / NOT-covered inventory", () => {
     expect([...PROSE_SCRUB_EXCLUSIONS].sort()).toEqual([
       "audit_log.reason",
       "mcp_registry_entries.conflict_reason",
+      "risk_acceptances.compensating_controls",
       "trace_retention_holds.release_reason",
       "usage_events.stop_reason",
     ]);

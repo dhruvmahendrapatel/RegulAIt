@@ -49,9 +49,12 @@ import {
   type Db,
 } from "@regulait/db";
 import {
+  ASSURANCE_MONITOR_RULE_IDS,
   MONITOR_RULES,
   MONITOR_RULE_IDS,
   effectiveRiskRating,
+  type AssuranceMonitorRuleId,
+  type MonitorAssuranceInput,
   evaluateMonitorRules,
   kriStates,
   kriSubjectKey,
@@ -73,6 +76,11 @@ import { notifyGovernanceAlerts } from "./chatops.js";
 import { computeCredentialInventory } from "./credential-inventory.js";
 import { loadOrgSettings } from "./org-settings.js";
 import { kriMonitorInput } from "./kri.js";
+// ADR-0180 — each D3 item owner's monitor loader, from that owner's module
+import { conditionMetricsMonitorInput } from "./condition-metrics.js";
+import { requiredTestsMonitorInput } from "./required-tests.js";
+import { autonomyMonitorInput } from "./autonomy.js";
+import { residualRiskMonitorInput } from "./risk-tolerance.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 
@@ -106,13 +114,27 @@ export interface MonitorOptionalInputs {
   credentials: (db: Db, now: Date) => Promise<MonitorCredentialInput>;
   /** ADR-0173 batch 2c — every KRI, measured */
   kris: (db: Db, now: Date) => Promise<MonitorKriInput[]>;
+  /** ADR-0180 — the continuous-assurance rules, one loader per D3 item owner
+   * (each lives in that owner's module; P0 shipped them reporting nothing) */
+  conditionMetrics: AssuranceLoader;
+  requiredTests: AssuranceLoader;
+  autonomy: AssuranceLoader;
+  residualRisks: AssuranceLoader;
 }
-const OPTIONAL_INPUT_RULE: Record<keyof MonitorOptionalInputs, MonitorRuleId> = {
-  servedModels: "served_model_drift",
-  traffic: "unregistered_ai_traffic",
-  credentials: "stale_credentials",
-  kris: "kri_threshold_breached",
+type AssuranceLoader = (db: Db, now: Date) => Promise<Partial<Record<AssuranceMonitorRuleId, MonitorAssuranceInput>>>;
+/** the rules each optional input feeds: a failed load leaves ALL of them
+ * unevaluated for the pass */
+const OPTIONAL_INPUT_RULES: Record<keyof MonitorOptionalInputs, readonly MonitorRuleId[]> = {
+  servedModels: ["served_model_drift"],
+  traffic: ["unregistered_ai_traffic"],
+  credentials: ["stale_credentials"],
+  kris: ["kri_threshold_breached"],
+  conditionMetrics: ["condition_metric_breached"],
+  requiredTests: ["required_test_stale"],
+  autonomy: ["autonomy_declared_below_observed", "autonomy_floor_unmet"],
+  residualRisks: ["residual_above_tolerance", "risk_acceptance_expired"],
 };
+const ASSURANCE_INPUTS = ["conditionMetrics", "requiredTests", "autonomy", "residualRisks"] as const;
 
 export async function runGovernanceMonitor(
   db: Db,
@@ -139,6 +161,10 @@ export async function runGovernanceMonitor(
     traffic: unregisteredTrafficInput,
     credentials: (d, n) => staleCredentialsInput(d, n),
     kris: kriMonitorInput,
+    conditionMetrics: conditionMetricsMonitorInput,
+    requiredTests: requiredTestsMonitorInput,
+    autonomy: autonomyMonitorInput,
+    residualRisks: residualRiskMonitorInput,
     ...opts.optionalInputs,
   };
   const failedInputs: Array<{ input: keyof MonitorOptionalInputs; ruleId: MonitorRuleId; error: string }> = [];
@@ -148,7 +174,8 @@ export async function runGovernanceMonitor(
     try {
       return (await loaders[input](db, now)) as Awaited<ReturnType<MonitorOptionalInputs[K]>>;
     } catch (err) {
-      failedInputs.push({ input, ruleId: OPTIONAL_INPUT_RULE[input], error: (err instanceof Error ? err.message : String(err)).slice(0, 500) });
+      const error = (err instanceof Error ? err.message : String(err)).slice(0, 500);
+      for (const ruleId of OPTIONAL_INPUT_RULES[input]) failedInputs.push({ input, ruleId, error });
       return undefined;
     }
   };
@@ -267,6 +294,15 @@ export async function runGovernanceMonitor(
       .filter((s) => s.state === "insufficient")
       .map((s) => `kri_threshold_breached|${kriSubjectKey(s.kri.id)}`),
   );
+  // ADR-0180 — the continuous-assurance rules. A rule no loader reported on
+  // (its loader failed, or returned no key for it) is not evaluated this pass;
+  // a subject measured with too few samples HOLDS its episode, like a KRI.
+  const assurance: Partial<Record<AssuranceMonitorRuleId, MonitorAssuranceInput>> = {};
+  for (const input of ASSURANCE_INPUTS) Object.assign(assurance, (await optional(input)) ?? {});
+  const unreportedAssuranceRules = ASSURANCE_MONITOR_RULE_IDS.filter((r) => assurance[r] === undefined);
+  for (const [ruleId, a] of Object.entries(assurance)) {
+    for (const k of a?.heldSubjectKeys ?? []) heldSubjects.add(`${ruleId}|${k}`);
+  }
 
   const findings = evaluateMonitorRules({
     useCases,
@@ -282,8 +318,9 @@ export async function runGovernanceMonitor(
     // the org has it off), so turning alerting off resolves the open episodes
     credentials: await optional("credentials"),
     kris: kriInput,
+    assurance,
   });
-  const notEvaluated = new Set<string>(failedInputs.map((f) => f.ruleId));
+  const notEvaluated = new Set<string>([...failedInputs.map((f) => f.ruleId), ...unreportedAssuranceRules]);
   for (const f of failedInputs) {
     await db.insert(auditLog).values({
       userId: actor,
