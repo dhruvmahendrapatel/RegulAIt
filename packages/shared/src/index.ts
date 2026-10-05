@@ -4120,3 +4120,16 @@ export {
   traceFilterSchema,
   type TraceFilter,
 } from "./trace-filters.js";
+// ADR-0173 batch 2c (T): trace standards and export profiles
+export {
+  TRACE_EXPORT_PROFILES,
+  TRACE_STANDARDS_PINS,
+  isContentAttributeKey,
+  openInferenceAttributes,
+  otelEvaluationAttributes,
+  otelProviderName,
+  stripContentAttributes,
+  type OtelAttrValue,
+  type TraceExportProfile,
+  type TraceScoreRecord,
+} from "./tracing.js";

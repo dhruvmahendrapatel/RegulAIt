@@ -217,8 +217,22 @@ export interface ModelDispatchResult {
    * note: OpenAI's own `output_tokens` already INCLUDES reasoning tokens —
    * that is the provider's billed output total, so `outputTokens` carries it
    * unchanged, and `reasoningTokens` surfaces the reasoning SUBSET distinctly
-   * rather than folding it in silently. Never add the two together. */
-  usage: { inputTokens: number; outputTokens: number; reasoningTokens?: number };
+   * rather than folding it in silently. Never add the two together.
+   *
+   * ADR-0173 batch 2c (trace standards): `cacheReadInputTokens` /
+   * `cacheCreationInputTokens` are the provider's own prompt-cache counts,
+   * present only when it reported a positive one (Anthropic
+   * `cache_read_input_tokens` / `cache_creation_input_tokens`; OpenAI
+   * `cached_tokens`, which is read-only — OpenAI reports no cache write). They
+   * are OBSERVABILITY ONLY: no price or budget reads them, so a cost figure is
+   * byte-identical with or without them. */
+  usage: {
+    inputTokens: number;
+    outputTokens: number;
+    reasoningTokens?: number;
+    cacheReadInputTokens?: number;
+    cacheCreationInputTokens?: number;
+  };
   /** provider-side message/request identifier for cross-system audit joins */
   providerMessageId: string | null;
   /** ADR-0175 A4 — THE MODEL THE PROVIDER SAYS IT SERVED, verbatim from the
@@ -229,6 +243,12 @@ export interface ModelDispatchResult {
    * say — NEVER filled in from the request, because a guess here would hide
    * exactly the change this field exists to show. */
   servedModel?: string | null;
+}
+
+/** the provider's prompt-cache counts, only when positive (see `usage`) */
+function cacheUsage(read: unknown, creation: unknown): { cacheReadInputTokens?: number; cacheCreationInputTokens?: number } {
+  const pos = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v > 0;
+  return { ...(pos(read) ? { cacheReadInputTokens: read } : {}), ...(pos(creation) ? { cacheCreationInputTokens: creation } : {}) };
 }
 
 /** the provider-reported model id, or null — a blank or non-string value is
@@ -406,6 +426,7 @@ export class AnthropicProvider implements ModelProvider {
         // which INCLUDES thinking tokens — carried unchanged, never re-derived
         inputTokens: msg.usage.input_tokens,
         outputTokens: msg.usage.output_tokens,
+        ...cacheUsage(msg.usage.cache_read_input_tokens, msg.usage.cache_creation_input_tokens),
       },
       providerMessageId: msg.id ?? null,
       servedModel: reportedModel(msg.model),
@@ -646,7 +667,7 @@ async function dispatchChatCompletions(
         let finishReason: string | null = null;
         let id: string | null = null;
         let servedModel: string | null = null;
-        let usage = { inputTokens: 0, outputTokens: 0 };
+        let usage: ModelDispatchResult["usage"] = { inputTokens: 0, outputTokens: 0 };
         // tool_calls arrive fragmented across deltas, keyed by index
         const toolAcc = new Map<number, { id: string; name: string; args: string }>();
         for await (const chunk of stream) {
@@ -670,6 +691,7 @@ async function dispatchChatCompletions(
             usage = {
               inputTokens: chunk.usage.prompt_tokens ?? 0,
               outputTokens: chunk.usage.completion_tokens ?? 0,
+              ...cacheUsage(chunk.usage.prompt_tokens_details?.cached_tokens, undefined),
             };
           }
         }
@@ -715,6 +737,7 @@ async function dispatchChatCompletions(
         usage: {
           inputTokens: res.usage?.prompt_tokens ?? 0,
           outputTokens: res.usage?.completion_tokens ?? 0,
+          ...cacheUsage(res.usage?.prompt_tokens_details?.cached_tokens, undefined),
         },
         providerMessageId: res.id ?? null,
         servedModel: reportedModel(res.model),
@@ -856,6 +879,7 @@ function normalizeOpenAiResponse(res: OpenAI.Responses.Response): ModelDispatchR
       inputTokens: res.usage?.input_tokens ?? 0,
       outputTokens: res.usage?.output_tokens ?? 0,
       ...(reasoningTokens > 0 ? { reasoningTokens } : {}),
+      ...cacheUsage(res.usage?.input_tokens_details?.cached_tokens, undefined),
     },
     providerMessageId: res.id ?? null,
     servedModel: reportedModel(res.model),

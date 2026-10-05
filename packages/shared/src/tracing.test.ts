@@ -320,7 +320,8 @@ describe("OTel mapping", () => {
     expect(a["gen_ai.operation.name"]).toBe("chat");
     expect(a["gen_ai.usage.input_tokens"]).toBe(12);
     expect(a["gen_ai.usage.output_tokens"]).toBe(34);
-    expect(a["gen_ai.response.finish_reasons"]).toBe("end_turn");
+    // ADR-0177 gap 2 (batch 2c): an ARRAY, as the convention defines it
+    expect(a["gen_ai.response.finish_reasons"]).toEqual(["end_turn"]);
     expect(a["gen_ai.conversation.id"]).toBe("sess-1");
     expect(a["session.id"]).toBe("sess-1");
     // NO STANDARD GENAI COST KEY EXISTS. Inventing one would be squatting.
@@ -334,7 +335,10 @@ describe("OTel mapping", () => {
     expect(withheld["gen_ai.input.messages"]).toBeUndefined();
     expect(withheld["gen_ai.output.messages"]).toBeUndefined();
     const included = otelAttributesForSpan(s, { includeContent: true });
-    expect(included["gen_ai.input.messages"]).toBe("the prompt");
+    // ADR-0177 gap 4 (batch 2c): structured message parts, not a bare preview
+    expect(JSON.parse(included["gen_ai.input.messages"] as string)).toEqual([
+      { role: "user", parts: [{ type: "text", content: "the prompt" }] },
+    ]);
   });
 
   it("does NOT claim a GenAI operation for a span that is not one", () => {

@@ -348,6 +348,13 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /v1/traces",
   "GET /v1/traces/:traceId",
   "GET /v1/sessions",
+  // ADR-0173 batch 2c (T) — trace TAGS. A person labels their OWN traces; the
+  // handler refuses (403 + deny audit) anyone but the trace's owner or an
+  // admin, and the bulk route skips such traces with a reason. Non-admin on
+  // purpose: tagging your own work is not a policy act.
+  "PUT /v1/traces/:traceId/tags/:key",
+  "DELETE /v1/traces/:traceId/tags/:key",
+  "POST /v1/traces/tags",
   "GET /v1/cost-events",
   "GET /v1/usage-events",
   // ADR-0047: a team lead generating and reading THEIR OWN scorecard. Every

@@ -209,6 +209,10 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/sessions": "internal",
   "GET /v1/tracing/config": "internal",
   "POST /v1/tracing/export": "internal",
+  // ADR-0173 batch 2c (T) — trace tags; internal while the trace shape settles
+  "PUT /v1/traces/:traceId/tags/:key": "internal",
+  "DELETE /v1/traces/:traceId/tags/:key": "internal",
+  "POST /v1/traces/tags": "internal",
   "GET /v1/cost-imports": "internal",
   "POST /v1/cost-imports": "internal",
   "GET /v1/cost-imports/adapters": "internal",
@@ -1003,6 +1007,10 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/sessions": "tracing",
   "GET /v1/tracing/config": "tracing",
   "POST /v1/tracing/export": "tracing",
+  // ADR-0173 batch 2c (T)
+  "PUT /v1/traces/:traceId/tags/:key": "tracing",
+  "DELETE /v1/traces/:traceId/tags/:key": "tracing",
+  "POST /v1/traces/tags": "tracing",
   "GET /v1/cost-imports": "cost-imports",
   "POST /v1/cost-imports": "cost-imports",
   "GET /v1/cost-imports/adapters": "cost-imports",

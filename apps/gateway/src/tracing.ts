@@ -51,9 +51,11 @@
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
 import {
+  agents,
   and,
   asc,
   auditLog,
+  count,
   desc,
   eq,
   gte,
@@ -61,8 +63,10 @@ import {
   isNotNull,
   lte,
   sql,
+  traceScores,
   traceSpans,
   traces,
+  usageEvents,
   type Db,
   type TraceKind,
   type TraceRow,
@@ -72,13 +76,21 @@ import {
 } from "@regulait/db";
 import {
   OTLP_EXPORT_LIMITS,
+  TRACE_EXPORT_PROFILES,
+  TRACE_STANDARDS_PINS,
   buildOtlpPayload,
   buildSpanTree,
+  refineTraceFilter,
+  resolveTraceScope,
   summariseSpanTree,
+  traceFilterBaseSchema,
   tracePreview,
   type SpanRecord,
+  type TraceScoreRecord,
 } from "@regulait/shared";
 import { loadOrgSettings, otlpHeadersForExport } from "./org-settings.js";
+import { traceFilterConditions } from "./trace-scores.js";
+import { loadTraceTags, registerTraceTagRoutes } from "./trace-tags.js";
 import { loadEgressAllowList } from "./custom-providers.js";
 import { checkEgress, createGuardedFetch } from "./egress-guard.js";
 
@@ -485,18 +497,17 @@ export async function loadTraceSpans(db: Db, traceId: string, limit = 2000): Pro
 // Routes
 // ---------------------------------------------------------------------------
 
-const listQuerySchema = z.object({
-  userId: z.string().uuid().optional(),
-  projectId: z.string().uuid().optional(),
-  sessionId: z.string().min(1).max(200).optional(),
-  kind: z.enum(["dispatch", "run", "workflow", "conversation", "tool", "eval"]).optional(),
-  status: z.enum(["running", "ok", "error", "denied"]).optional(),
-  /** the killer filter: show me the traces where governance refused something */
-  deniedOnly: z.coerce.boolean().optional(),
-  from: z.string().datetime().optional(),
-  to: z.string().datetime().optional(),
-  limit: z.coerce.number().int().min(1).max(200).optional(),
-});
+/**
+ * ADR-0173 batch 2c (T): the list and the sessions view take the SHARED trace
+ * filter (packages/shared/src/trace-filters.ts) — agent, model, cost, latency,
+ * score, flagged and tag beside the original fields, with `deniedOnly` (the
+ * killer filter: where governance refused something) unchanged. Scoping is
+ * `resolveTraceScope` + `traceFilterConditions`: a non-admin is ALWAYS
+ * confined to their own traces under every filter, and so is `total`.
+ */
+const listQuerySchema = traceFilterBaseSchema
+  .extend({ limit: z.coerce.number().int().min(1).max(200).optional() })
+  .superRefine(refineTraceFilter);
 
 const exportSchema = z.object({
   from: z.string().datetime().optional(),
@@ -505,6 +516,8 @@ const exportSchema = z.object({
   limit: z.number().int().min(1).max(500).optional(),
   /** dry run: build the payload, adjudicate egress, send nothing */
   dryRun: z.boolean().optional(),
+  /** ADR-0173 batch 2c: the attribute vocabulary. An enum; default otel_genai. */
+  profile: z.enum(TRACE_EXPORT_PROFILES).optional(),
 });
 
 export const MAX_SPANS_PER_TRACE = 2000;
@@ -543,9 +556,10 @@ export function registerTracingRoutes(app: FastifyInstance, db: Db, opts: { data
    * without a deterministic order has bitten this project before.
    */
   app.get("/v1/traces", async (req, reply) => {
-    const q = listQuerySchema.parse(req.query ?? {});
+    const { limit, ...filter } = listQuerySchema.parse(req.query ?? {});
     const isAdmin = req.authCtx.isAdmin;
-    if (!isAdmin && q.userId && q.userId !== req.authCtx.userId) {
+    const scope = resolveTraceScope({ userId: req.authCtx.userId ?? NIL_UUID, isAdmin }, filter);
+    if (!scope.ok) {
       return reply.status(403).send({
         error: "forbidden",
         detail:
@@ -553,25 +567,20 @@ export function registerTracingRoutes(app: FastifyInstance, db: Db, opts: { data
           "(same posture as GET /v1/users/:userId/cost-consolidated)",
       });
     }
-    const scopedUserId = isAdmin ? (q.userId ?? null) : req.authCtx.userId;
-    const conds = [];
-    if (scopedUserId) conds.push(eq(traces.userId, scopedUserId));
-    if (q.projectId) conds.push(eq(traces.projectId, q.projectId));
-    if (q.sessionId) conds.push(eq(traces.sessionId, q.sessionId));
-    if (q.kind) conds.push(eq(traces.kind, q.kind));
-    if (q.status) conds.push(eq(traces.status, q.status));
-    if (q.deniedOnly) conds.push(sql`${traces.deniedSpanCount} > 0`);
-    if (q.from) conds.push(gte(traces.startedAt, new Date(q.from)));
-    if (q.to) conds.push(lte(traces.startedAt, new Date(q.to)));
+    const where = traceFilterConditions(filter, { scopeUserId: scope.scopeUserId });
     const rows = await db
       .select()
       .from(traces)
-      .where(conds.length ? and(...conds) : undefined)
+      .where(where)
       .orderBy(desc(traces.startedAt), desc(traces.id))
-      .limit(q.limit ?? 50);
+      .limit(limit ?? 50);
+    // the SAME predicate, so a count can never see what the page cannot
+    const [counted] = await db.select({ n: count() }).from(traces).where(where);
+    const tags = await loadTraceTags(db, rows.map((r) => r.id));
     return {
-      traces: rows.map(traceProjection),
-      scope: isAdmin && !q.userId ? "fleet" : "self",
+      traces: rows.map((r) => ({ ...traceProjection(r), tags: tags.get(r.id) ?? [] })),
+      total: counted?.n ?? 0,
+      scope: isAdmin && !filter.userId ? "fleet" : "self",
       note: TRACE_SCOPE_NOTE,
     };
   });
@@ -581,20 +590,16 @@ export function registerTracingRoutes(app: FastifyInstance, db: Db, opts: { data
    * workflow reads as one thing. One grouped query, not N.
    */
   app.get("/v1/sessions", async (req, reply) => {
-    const q = listQuerySchema.parse(req.query ?? {});
+    const { limit, ...filter } = listQuerySchema.parse(req.query ?? {});
     const isAdmin = req.authCtx.isAdmin;
-    if (!isAdmin && q.userId && q.userId !== req.authCtx.userId) {
+    const scope = resolveTraceScope({ userId: req.authCtx.userId ?? NIL_UUID, isAdmin }, filter);
+    if (!scope.ok) {
       return reply.status(403).send({
         error: "forbidden",
         detail: "you may list only your own sessions",
       });
     }
-    const scopedUserId = isAdmin ? (q.userId ?? null) : req.authCtx.userId;
-    const conds = [isNotNull(traces.sessionId)];
-    if (scopedUserId) conds.push(eq(traces.userId, scopedUserId));
-    if (q.projectId) conds.push(eq(traces.projectId, q.projectId));
-    if (q.from) conds.push(gte(traces.startedAt, new Date(q.from)));
-    if (q.to) conds.push(lte(traces.startedAt, new Date(q.to)));
+    const conds = [isNotNull(traces.sessionId), traceFilterConditions(filter, { scopeUserId: scope.scopeUserId })];
     const rows = await db
       .select({
         sessionId: traces.sessionId,
@@ -614,10 +619,10 @@ export function registerTracingRoutes(app: FastifyInstance, db: Db, opts: { data
       .where(and(...conds))
       .groupBy(traces.sessionId, traces.kind, traces.userId, traces.projectId)
       .orderBy(sql`max(${traces.startedAt}) desc`, sql`${traces.sessionId} desc`)
-      .limit(q.limit ?? 50);
+      .limit(limit ?? 50);
     return {
       sessions: rows,
-      scope: isAdmin && !q.userId ? "fleet" : "self",
+      scope: isAdmin && !filter.userId ? "fleet" : "self",
       note: TRACE_SCOPE_NOTE,
     };
   });
@@ -648,10 +653,16 @@ export function registerTracingRoutes(app: FastifyInstance, db: Db, opts: { data
     const projected = kept.map(spanProjection);
     const tree = buildSpanTree(projected);
     const totals = summariseSpanTree(projected);
+    const tags = await loadTraceTags(db, [traceId]);
+    const scores = await loadTraceScores(db, [traceId]);
     return {
       trace: traceProjection(row),
       tree,
       totals,
+      // ADR-0173 batch 2c: the trace's tags and recorded scores (score and
+      // label only — a reviewer's comment stays with its annotation)
+      tags: tags.get(traceId) ?? [],
+      scores: scores.map((sc) => ({ spanId: sc.spanId, source: sc.source, name: sc.name, value: sc.value, label: sc.label })),
       // Rule 2's honest residual, surfaced: if the trace's own rollup counted
       // more spans than are stored, a write was lost and the tree is INCOMPLETE.
       partial: !truncated && row.spanCount > projected.length,
@@ -678,6 +689,10 @@ export function registerTracingRoutes(app: FastifyInstance, db: Db, opts: { data
         headerNames: headers ? Object.keys(headers) : [],
       },
       limits: OTLP_EXPORT_LIMITS,
+      // ADR-0173 batch 2c: the export vocabularies and the pinned versions
+      profiles: TRACE_EXPORT_PROFILES,
+      defaultProfile: "otel_genai",
+      standards: TRACE_STANDARDS_PINS,
       retention:
         "Traces are pruned by the SAME §8.3 compliance-cascade audit-retention floor that prunes " +
         "the audit log (org-settings `defaultAuditRetentionDays` composed with every compliance " +
@@ -747,6 +762,7 @@ export function registerTracingRoutes(app: FastifyInstance, db: Db, opts: { data
       .limit(body.limit ?? 100);
 
     const bundles: Array<{ trace: ReturnType<typeof traceProjection>; spans: SpanRecord[] }> = [];
+    let scores: TraceScoreRecord[] = [];
     if (traceRows.length > 0) {
       // ONE query for every span of every exported trace — not one per trace.
       const spanRows = await db
@@ -754,20 +770,29 @@ export function registerTracingRoutes(app: FastifyInstance, db: Db, opts: { data
         .from(traceSpans)
         .where(inArray(traceSpans.traceId, traceRows.map((t) => t.id)))
         .orderBy(asc(traceSpans.traceId), asc(traceSpans.seq));
+      const enrich = await exportEnrichment(db, spanRows);
       const byTrace = new Map<string, SpanRecord[]>();
       for (const s of spanRows) {
         const list = byTrace.get(s.traceId) ?? [];
-        list.push(spanProjection(s));
+        list.push({
+          ...spanProjection(s),
+          servedModel: s.usageEventId ? (enrich.servedModel.get(s.usageEventId) ?? null) : null,
+          agentName: s.agentId ? (enrich.agentName.get(s.agentId) ?? null) : null,
+        });
         byTrace.set(s.traceId, list);
       }
       for (const t of traceRows) {
         bundles.push({ trace: traceProjection(t), spans: byTrace.get(t.id) ?? [] });
       }
+      scores = await loadTraceScores(db, traceRows.map((t) => t.id));
     }
+    const profile = body.profile ?? "otel_genai";
 
     const payload = buildOtlpPayload({
       serviceName: org.tracingOtlpServiceName ?? "regulait-gateway",
       traces: bundles,
+      profile,
+      scores,
       // Content leaves the deployment ONLY when the org already allows storing
       // it. An install with capture off exports the tree, timings, costs and
       // deny reasons and no prompt text.
@@ -781,6 +806,7 @@ export function registerTracingRoutes(app: FastifyInstance, db: Db, opts: { data
       return {
         dryRun: true,
         endpoint,
+        profile,
         traceCount: payload.traceCount,
         spanCount: payload.spanCount,
         body: payload.body,
@@ -831,7 +857,7 @@ export function registerTracingRoutes(app: FastifyInstance, db: Db, opts: { data
       ok
         ? `exported ${payload.spanCount} span(s) across ${payload.traceCount} trace(s) to ${endpoint}`
         : `OTLP endpoint ${endpoint} rejected the export with HTTP ${status}`,
-      { endpoint, traceCount: payload.traceCount, spanCount: payload.spanCount, status },
+      { endpoint, traceCount: payload.traceCount, spanCount: payload.spanCount, status, profile },
     );
     if (!ok) {
       return reply.status(502).send({
@@ -842,10 +868,60 @@ export function registerTracingRoutes(app: FastifyInstance, db: Db, opts: { data
     return {
       exported: true,
       endpoint,
+      profile,
       traceCount: payload.traceCount,
       spanCount: payload.spanCount,
       contentIncluded: org.tracingCaptureContent !== false,
       limits: OTLP_EXPORT_LIMITS,
     };
   });
+
+  // ADR-0173 batch 2c (T): key/value tags on a trace (owner or admin)
+  registerTraceTagRoutes(app, db);
+}
+
+/**
+ * The export-only facts a span REFERENCES rather than restates (rule 1): the
+ * model the provider reported serving (`usage_events.served_model`, ADR-0175
+ * A4) and the registry agent's name. Two queries for the whole export.
+ */
+async function exportEnrichment(
+  db: Db,
+  spans: readonly TraceSpanRow[],
+): Promise<{ servedModel: Map<string, string | null>; agentName: Map<string, string> }> {
+  const usageIds = [...new Set(spans.map((s) => s.usageEventId).filter((v): v is string => !!v))];
+  const agentIds = [...new Set(spans.map((s) => s.agentId).filter((v): v is string => !!v))];
+  const servedModel = new Map<string, string | null>();
+  const agentName = new Map<string, string>();
+  if (usageIds.length) {
+    const rows = await db
+      .select({ id: usageEvents.id, servedModel: usageEvents.servedModel })
+      .from(usageEvents)
+      .where(inArray(usageEvents.id, usageIds));
+    for (const r of rows) servedModel.set(r.id, r.servedModel);
+  }
+  if (agentIds.length) {
+    const rows = await db.select({ id: agents.id, name: agents.name }).from(agents).where(inArray(agents.id, agentIds));
+    for (const r of rows) agentName.set(r.id, r.name);
+  }
+  return { servedModel, agentName };
+}
+
+/** The recorded scores of these traces: name, value, label and source only. */
+export async function loadTraceScores(db: Db, traceIds: readonly string[]): Promise<TraceScoreRecord[]> {
+  if (traceIds.length === 0) return [];
+  const rows = await db
+    .select({
+      traceId: traceScores.traceId,
+      spanId: traceScores.spanId,
+      source: traceScores.source,
+      name: traceScores.name,
+      value: traceScores.value,
+      label: traceScores.label,
+      createdAt: traceScores.createdAt,
+    })
+    .from(traceScores)
+    .where(inArray(traceScores.traceId, [...traceIds]))
+    .orderBy(asc(traceScores.createdAt), asc(traceScores.id));
+  return rows.map((r) => ({ ...r, createdAt: r.createdAt.toISOString() }));
 }
