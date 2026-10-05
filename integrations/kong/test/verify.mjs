@@ -1001,6 +1001,17 @@ plugins:
   check("a denied consumer is refused AND the upstream is never called",
     r.status === 403 && (await upstreamCount()) === 0,
     `status ${r.status}, upstream count ${await upstreamCount()}`);
+  // AER-028 / ADR-0179 — the PDP decided that deny WITHOUT arguments (this
+  // adapter never sends them), so the refusal says so: data-scope rules are not
+  // supported at the Kong edge, and an operator must be able to tell that limit
+  // from an ordinary policy refusal. PENDING ITS FIRST CI RUN (plugin 0.4.0);
+  // the same behaviour is pinned locally by test/handler_spec.lua.
+  {
+    const denyBody = await r.json().catch(() => null);
+    check("a deny decided without arguments is tagged notEvaluated: [\"args\"]",
+      Array.isArray(denyBody?.notEvaluated) && denyBody.notEvaluated.includes("args"),
+      `body=${JSON.stringify(denyBody)}`);
+  }
 
   // (d) FORGED SUBJECT -> a header naming the entitled user is REFUSED, with
   //     its own reason, whoever sends it. The stranger must not borrow an

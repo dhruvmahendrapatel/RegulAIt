@@ -115,5 +115,16 @@ jobs:
           echo "postgres image ref:  $POSTGRES_IMAGE"
           echo "postgres repo digests: $(docker image inspect --format '{{join .RepoDigests ", "}}' "$POSTGRES_IMAGE")"
 
+      # ADR-0179 (AER-028, AER-036): the plugin's decision logic with `kong`
+      # stubbed — data-scope rules unsupported at the edge and tagged as such,
+      # and the mixed-auth session-origin cases (key-auth and basic-auth derive;
+      # OIDC, SAML and jwt routes carry only the operator's assertion; a
+      # contradiction is refused). Seconds, and runnable anywhere `lua` is.
+      - name: Unit-check the Kong plugin's decision logic
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq lua5.4
+          lua5.4 integrations/kong/test/handler_spec.lua
+
       - name: Verify the Kong adapter's deny path
         run: node integrations/kong/test/verify.mjs
