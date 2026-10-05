@@ -12,6 +12,7 @@ import {
   gte,
   governancePolicyEpoch,
   inArray,
+  lt,
   mcpServers,
   or,
   rateLimits,
@@ -128,6 +129,52 @@ export interface GovernedEvaluation {
    * where a shadow is recorded rather than returned.
    */
   candidateDecision?: Decision;
+  /**
+   * AER-014 — present only on a REPLAY (`simulate.replay`), when a rate limit
+   * that binds this call needs history the audit trail no longer holds. The
+   * candidate decision is then withheld (absent), never guessed: an undercount
+   * would read as "allowed" and an assumed-full window as "denied", and both
+   * would be invented. The string says which limit and why.
+   */
+  replayIndeterminate?: string;
+}
+
+/**
+ * AER-014 — THE REPLAY CLOCK. A dry run re-decides a RECORDED call, so a rate
+ * limit must count what had happened BEFORE that call, not what has happened
+ * before now. Absent, nothing changes: the enforcement path and `/v1/evaluate`
+ * keep counting from `Date.now()` exactly as they always have.
+ */
+export interface ReplayClock {
+  /** the recorded call's instant. A limit counts allowed calls in
+   * `[asOf - window, asOf)` — strictly before, so the call never counts itself. */
+  asOf: Date;
+  /** the newest audit-retention prune cutoff, or null when the trail has never
+   * been pruned. Rows older than it may be gone, so a window that reaches back
+   * past it is TRUNCATED and the replay is indeterminate. */
+  lookbackHorizon: Date | null;
+  /** optional batched answer to the same question `countFor` asks, so a replay
+   * over many recorded calls can fetch its counts in one query per limit shape
+   * instead of one per call. Must count exactly what the direct query counts. */
+  countAllowed?: (q: ReplayCountQuery) => Promise<number>;
+}
+
+/** the question a rate limit asks of the audit trail, in replay */
+export interface ReplayCountQuery {
+  /** the rate-limit row asking: the served row, or a simulated version of it */
+  limitId: string;
+  userId: string;
+  /** null = an all-servers limit, counted across every server */
+  serverId: string | null;
+  toolName: string | null;
+  windowSeconds: number;
+  /** the asking row's ceiling. The kernel only ever compares a count against
+   * the ceiling of the limit it belongs to, and ABAC's usage percentage caps
+   * at 100, so a batch caller may treat every count at or above the highest
+   * ceiling that reads it as one value when deduplicating evaluations. */
+  maxCalls: number;
+  from: Date;
+  to: Date;
 }
 
 /** one stored consent this call refused to spend, and why */
@@ -212,7 +259,7 @@ export async function governedEvaluate(
    * corrupt the very canary measurements an operator is relying on. A preview
    * must execute nothing.
    */
-  simulate?: { versionId: string },
+  simulate?: { versionId: string; replay?: ReplayClock },
   preparedPii?: PreparedPiiApproval,
   /**
    * AER-039 — the upstream this call will execute against, from the SAME
@@ -433,12 +480,38 @@ export async function governedEvaluate(
   // The count is always this user's allowed calls in the window; an
   // all-servers limit counts across every server, a server-scoped one stays
   // pinned to this server (identical to the legacy behaviour).
-  const countFor = async (l: { serverScope: string; toolName: string | null; windowSeconds: number }) => {
-    const windowStart = new Date(Date.now() - l.windowSeconds * 1000);
+  //
+  // AER-014: on a REPLAY the window ends at the recorded call's instant and
+  // counts only what came STRICTLY BEFORE it. Without a replay clock this is
+  // byte-identical to before: the window starts at `Date.now() - window` and
+  // has no upper bound.
+  const replay = simulate?.replay;
+  const countFor = async (l: {
+    id: string;
+    serverScope: string;
+    toolName: string | null;
+    windowSeconds: number;
+    maxCalls: number;
+  }) => {
+    const clockMs = replay ? replay.asOf.getTime() : Date.now();
+    const windowStart = new Date(clockMs - l.windowSeconds * 1000);
+    if (replay?.countAllowed) {
+      return replay.countAllowed({
+        limitId: l.id,
+        userId,
+        serverId: l.serverScope === "all" ? null : serverId,
+        toolName: l.toolName,
+        windowSeconds: l.windowSeconds,
+        maxCalls: l.maxCalls,
+        from: windowStart,
+        to: replay.asOf,
+      });
+    }
     const conditions = [
       eq(auditLog.userId, userId),
       eq(auditLog.effect, "allow"),
       gte(auditLog.at, windowStart),
+      ...(replay ? [lt(auditLog.at, replay.asOf)] : []),
       // ADR-0127 — count EXECUTIONS, not questions. `/v1/evaluate` and the G9
       // authorization callout answer "what would you decide" and run nothing,
       // but they wrote an `allow` row like any other, so a preview spent the
@@ -708,6 +781,9 @@ export async function governedEvaluate(
   // to the rule under test and to nothing else. The shadow is RETURNED and the
   // canary write below is skipped entirely.
   let candidateDecision: Decision | undefined;
+  /** the limit rows the candidate pass was decided against (AER-014) */
+  let candidateLimitRows: readonly { id: string; toolName: string | null; windowSeconds: number }[] =
+    limitsWithCounts;
   if (simulate) {
     const [ver] = await db
       .select()
@@ -743,10 +819,33 @@ export async function governedEvaluate(
           servedScopeRules,
           approvedApprovalId,
         );
+        candidateLimitRows = candidateLimits;
       }
       // `data_scope_rule` is deliberately absent — see ADR-0120. Evaluating one
       // needs the call's ARGUMENTS, and the recorded transcript stores counts
       // only (§8.4), so a replayed answer would be a guess wearing a number.
+    }
+  }
+
+  // AER-014 — A TRUNCATED LOOKBACK IS INDETERMINATE, NEVER ALLOW OR DENY. A
+  // limit that binds this call (its tool, or every tool) and whose window
+  // reaches back past the newest audit-retention prune may be missing calls
+  // that really happened, so its count is a floor, not a count. The candidate
+  // decision is withheld rather than reported on a number we know may be low.
+  let replayIndeterminate: string | undefined;
+  if (replay && candidateDecision && replay.lookbackHorizon) {
+    const horizonMs = replay.lookbackHorizon.getTime();
+    const truncated = candidateLimitRows.find(
+      (l) =>
+        (l.toolName == null || l.toolName === tool.name) &&
+        replay.asOf.getTime() - l.windowSeconds * 1000 < horizonMs,
+    );
+    if (truncated) {
+      candidateDecision = undefined;
+      replayIndeterminate =
+        `rate limit ${truncated.id} counts the ${truncated.windowSeconds}s before ` +
+        `${replay.asOf.toISOString()}, but audit history older than ` +
+        `${replay.lookbackHorizon.toISOString()} has been pruned, so the count cannot be reconstructed`;
     }
   }
 
@@ -822,6 +921,7 @@ export async function governedEvaluate(
     policyEpoch,
     retiredApprovals,
     ...(candidateDecision ? { candidateDecision } : {}),
+    ...(replayIndeterminate ? { replayIndeterminate } : {}),
   };
 }
 

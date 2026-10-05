@@ -137,8 +137,11 @@ export const REPLAY_FIDELITY_DISCLOSURE =
   "Replay is EXACT for entitlement and approval flips, because audit_log records the user, the server, " +
   "the tool and the decision. It is NOT exact for anything keyed on call arguments, decision-time rate " +
   "counters, or session facts — none of which the audit trail stores — and every such run says so " +
-  "instead of smoothing it over. A simulation is a preview of the recorded past, never a promise about " +
-  "future traffic.";
+  "instead of smoothing it over. A proposed RATE LIMIT is replayed against the calls recorded strictly " +
+  "before each replayed call, inside that limit's window; where audit retention has pruned part of the " +
+  "window the call is counted as indeterminate rather than allowed or denied. A run that reaches its " +
+  "deadline is reported as incomplete, with how many calls it evaluated, and is not stored as a " +
+  "preview. A simulation is a preview of the recorded past, never a promise about future traffic.";
 
 export const ABAC_CANNOT_GRANT_NOTE =
   "`newly_allowed` is structurally always zero for an ABAC candidate: a Cedar 'permit' means 'nothing " +
@@ -409,6 +412,59 @@ export const POLICY_SIMULATION_MAX_WINDOW_DAYS = 180;
 export const POLICY_SIMULATION_MAX_ROWS = 20_000;
 export const POLICY_SIMULATION_DEFAULT_WINDOW_DAYS = 30;
 export const POLICY_SIMULATION_DEFAULT_ROW_CAP = 5_000;
+
+// ---------------------------------------------------------------------------
+// AER-016 — run bounds
+// ---------------------------------------------------------------------------
+
+/** how long one run may replay before it stops and reports itself incomplete */
+export const POLICY_SIMULATION_DEFAULT_DEADLINE_MS = 20_000;
+/** runs one caller may have in flight at once (per gateway replica) */
+export const POLICY_SIMULATION_DEFAULT_MAX_PER_CALLER = 1;
+/** runs the whole gateway replica may have in flight at once */
+export const POLICY_SIMULATION_DEFAULT_MAX_GLOBAL = 4;
+
+export interface PolicySimulationRunLimits {
+  deadlineMs: number;
+  maxPerCaller: number;
+  maxGlobal: number;
+}
+
+/**
+ * The run bounds, from the environment. A value that is missing, not a whole
+ * number, or below the floor falls back to the default rather than to "no
+ * limit": a typo in an env var must never be the thing that switches a bound
+ * off. Read per request, so an operator's change applies without a restart.
+ */
+export function resolvePolicySimulationRunLimits(
+  env: Record<string, string | undefined>,
+): PolicySimulationRunLimits {
+  const int = (raw: string | undefined, fallback: number, min: number): number => {
+    const t = raw?.trim();
+    if (!t || !/^\d+$/.test(t)) return fallback;
+    const n = Number(t);
+    return Number.isSafeInteger(n) && n >= min ? n : fallback;
+  };
+  return {
+    deadlineMs: int(env.REGULAIT_POLICY_SIMULATION_DEADLINE_MS, POLICY_SIMULATION_DEFAULT_DEADLINE_MS, 1),
+    maxPerCaller: int(env.REGULAIT_POLICY_SIMULATION_MAX_PER_CALLER, POLICY_SIMULATION_DEFAULT_MAX_PER_CALLER, 1),
+    maxGlobal: int(env.REGULAIT_POLICY_SIMULATION_MAX_GLOBAL, POLICY_SIMULATION_DEFAULT_MAX_GLOBAL, 1),
+  };
+}
+
+/** what a run that hit its deadline says about itself, on the response */
+export function policySimulationIncompleteNote(input: {
+  evaluated: number;
+  total: number;
+  deadlineMs: number;
+}): string {
+  return (
+    `INCOMPLETE: the run reached its ${input.deadlineMs} ms deadline after evaluating ${input.evaluated} of ` +
+    `${input.total} recorded decision(s). No blast radius is reported and no preview was stored, because ` +
+    "counts over part of the transcript would read as the whole of it. Narrow the window, the subjects " +
+    "or the row cap and run it again."
+  );
+}
 
 export const startPolicySimulationSchema = z
   .object({

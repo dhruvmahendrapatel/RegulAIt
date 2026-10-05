@@ -4309,3 +4309,12 @@ export {
   regulatoryUpdateProblems,
   type RegulatoryInstrumentKind,
 } from "./regulatory-intel.js";
+// AER-016 (ADR-0179) — policy simulation run bounds: deadline and concurrency.
+export {
+  POLICY_SIMULATION_DEFAULT_DEADLINE_MS,
+  POLICY_SIMULATION_DEFAULT_MAX_GLOBAL,
+  POLICY_SIMULATION_DEFAULT_MAX_PER_CALLER,
+  policySimulationIncompleteNote,
+  resolvePolicySimulationRunLimits,
+  type PolicySimulationRunLimits,
+} from "./policy-simulation.js";

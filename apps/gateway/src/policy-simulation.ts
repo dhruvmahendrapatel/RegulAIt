@@ -89,6 +89,8 @@ import {
 import { abacEngine, type AbacPolicy, type AbacRequest } from "@regulait/policy-kernel/abac";
 import {
   ABAC_CANNOT_GRANT_NOTE,
+  AUDIT_ADVISORY_KEY,
+  POLICY_SIMULATION_DEFAULT_DEADLINE_MS,
   POLICY_SIMULATION_DEFAULT_ROW_CAP,
   POLICY_SIMULATION_DEFAULT_WINDOW_DAYS,
   REPLAY_FIDELITY_DISCLOSURE,
@@ -96,7 +98,9 @@ import {
   analyzeReplayFidelity,
   classifyReplay,
   isFlip,
+  policySimulationIncompleteNote,
   policySimulationSettingsSchema,
+  resolvePolicySimulationRunLimits,
   resolvePolicySimulationScope,
   startPolicySimulationSchema,
   summarizeBlastRadius,
@@ -105,9 +109,9 @@ import {
   type RecordedEffect,
   type ReplayedDecision,
 } from "@regulait/shared";
-import { assembleAbacRequest } from "./abac.js";
+import { assembleAbacRequest, loadActiveAbacPolicies } from "./abac.js";
 import { loadComplianceProfileCanaryDivergence } from "./config-versions.js";
-import { governedEvaluate } from "./governed-evaluate.js";
+import { governedEvaluate, type ReplayCountQuery } from "./governed-evaluate.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 const SINGLETON = "singleton";
@@ -195,11 +199,146 @@ export interface PolicySimulationOptions {
   note?: string | null | undefined;
   /** pins the window end; tests and a future async runner supply it */
   now?: Date;
+  /** AER-016: how long the replay may run before it stops (default 20 s) */
+  deadlineMs?: number;
+  /** AER-016: the clock the deadline is read from; tests supply one */
+  clock?: () => number;
+}
+
+/**
+ * AER-016 — WHAT A RUN THAT HIT ITS DEADLINE RETURNS. It is not a preview:
+ * it carries no buckets, no names and no stored row, only how far it got. A
+ * partial blast radius would read as the whole one, and an activation gate
+ * that asks "was this version ever previewed?" must not be satisfied by a run
+ * that stopped halfway.
+ */
+export interface PolicySimulationIncomplete {
+  ok: true;
+  incomplete: true;
+  /** recorded decisions re-decided before the deadline */
+  evaluated: number;
+  /** recorded decisions the run would have had to re-decide */
+  total: number;
+  capped: boolean;
+  deadlineMs: number;
+  windowStart: Date;
+  windowEnd: Date;
 }
 
 export type PolicySimulationOutcome =
-  | { ok: true; simulation: PolicySimulationRow; flips: number }
+  | { ok: true; incomplete?: false; simulation: PolicySimulationRow; flips: number }
+  | PolicySimulationIncomplete
   | { ok: false; status: number; error: string; detail?: string };
+
+/** AER-016: the run's deadline, read from an injectable clock */
+function runDeadline(opts: { deadlineMs?: number | undefined; clock?: (() => number) | undefined }) {
+  const clock = opts.clock ?? Date.now;
+  const deadlineMs = opts.deadlineMs ?? POLICY_SIMULATION_DEFAULT_DEADLINE_MS;
+  const endsAt = clock() + deadlineMs;
+  return { deadlineMs, passed: () => clock() >= endsAt };
+}
+
+/** AER-016: the incomplete run is still a read of other people's traffic, so
+ * it is audited exactly like a finished one, saying how far it got. */
+async function recordIncompleteRun(
+  db: Db,
+  args: {
+    requestedByUserId: string | null;
+    objectType: "abac_policy" | "restriction_rule";
+    objectId: string | null;
+    candidate: Record<string, unknown>;
+    evaluated: number;
+    total: number;
+    capped: boolean;
+    deadlineMs: number;
+    windowDays: number;
+    scope: PolicySimulationScopeDecision;
+  },
+): Promise<void> {
+  await db.insert(auditLog).values({
+    userId: args.requestedByUserId ?? NIL_UUID,
+    objectType: args.objectType,
+    objectId: args.objectId,
+    detail: {
+      phase: "blast-radius",
+      ...args.candidate,
+      status: "incomplete",
+      evaluated: args.evaluated,
+      total: args.total,
+      capped: args.capped,
+      deadlineMs: args.deadlineMs,
+      windowDays: args.windowDays,
+      scopeRuleId: args.scope.ruleId,
+      scopeSubjects: args.scope.userIds ? args.scope.userIds.length : "org-wide",
+      dryRun: true,
+    },
+    effect: "allow",
+    ruleId: "policy-simulation-incomplete",
+    ruleChain: [],
+    reason: policySimulationIncompleteNote({
+      evaluated: args.evaluated,
+      total: args.total,
+      deadlineMs: args.deadlineMs,
+    }),
+  });
+}
+
+/**
+ * AER-014 — THE AUDIT TRAIL'S LOOKBACK HORIZON: the newest cutoff any
+ * retention prune has applied (`runAuditPruneOnce` records it on its own meta
+ * row). Rows older than it may have been deleted, so a replayed rate-limit
+ * window that reaches back past it cannot be counted and is indeterminate.
+ * Null = the trail has never been pruned, so every window is complete.
+ *
+ * Every prune counts, including one that deleted nothing: taking the newest
+ * cutoff is the conservative reading — it can only make more replayed rows
+ * indeterminate, never fewer.
+ */
+export async function loadAuditLookbackHorizon(db: Db): Promise<Date | null> {
+  const [row] = await db
+    .select({ cutoff: sql<string | Date | null>`max((${auditLog.detail} ->> 'cutoff')::timestamptz)` })
+    .from(auditLog)
+    .where(eq(auditLog.ruleId, "audit-log-pruned"));
+  return row?.cutoff ? new Date(row.cutoff) : null;
+}
+
+/**
+ * AER-016 — ONE QUERY PER LIMIT SHAPE, NOT ONE PER RECORDED CALL. For every
+ * recorded decision in `auditLogIds`, how many allowed, non-advisory calls its
+ * user made in the `windowSeconds` STRICTLY BEFORE it — the predicate
+ * `governedEvaluate`'s `countFor` applies, evaluated against each recorded
+ * row's own stored timestamp (microsecond precision, so a call never counts
+ * itself and an earlier call in the same millisecond still does).
+ */
+async function batchedAllowCounts(
+  db: Db,
+  auditLogIds: readonly string[],
+  spec: { serverId: string | null; toolName: string | null; windowSeconds: number },
+): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  // one bound array parameter per statement, chunked so each stays modest
+  for (let i = 0; i < auditLogIds.length; i += 5_000) {
+    const chunk = auditLogIds.slice(i, i + 5_000);
+    const res = await db.execute(sql`
+      SELECT r.id::text AS id, (
+        SELECT count(*)::int FROM audit_log a
+        WHERE a.user_id = r.user_id
+          AND a.effect = 'allow'
+          AND a.at >= r.at - (${spec.windowSeconds}::int * interval '1 second')
+          AND a.at < r.at
+          AND (a.detail ->> ${AUDIT_ADVISORY_KEY}) IS DISTINCT FROM 'true'
+          ${spec.serverId ? sql`AND a.server_id = ${spec.serverId}` : sql``}
+          ${spec.toolName ? sql`AND a.tool_name = ${spec.toolName}` : sql``}
+      ) AS n
+      FROM audit_log r
+      WHERE r.id = ANY(${`{${chunk.join(",")}}`}::uuid[])
+    `);
+    for (const row of res.rows as Array<{ id: string; n: number | string }>) {
+      out.set(row.id, Number(row.n));
+    }
+  }
+  return out;
+}
 
 function candidateEffectOf(decision: { effect: string }): CandidateEffect {
   if (decision.effect === "forbid") return "forbid";
@@ -268,6 +407,10 @@ export interface RuleSimulationOptions {
   requestedByUserId: string | null;
   note?: string | null | undefined;
   now?: Date;
+  /** AER-016: how long the replay may run before it stops (default 20 s) */
+  deadlineMs?: number;
+  /** AER-016: the clock the deadline is read from; tests supply one */
+  clock?: () => number;
 }
 
 /** Decision.effect (the kernel's vocabulary) -> the replay vocabulary. */
@@ -345,16 +488,111 @@ export async function runRuleSimulation(
     : [];
   const toolKind = new Map(toolRows.map((t) => [`${t.serverId}|${t.name}`, t.kind]));
 
-  const replayed: ReplayedDecision[] = [];
+  // AER-014 — the replay clock's other half: how far back the audit trail is
+  // still complete. Read once per run, not once per row.
+  const lookbackHorizon = await loadAuditLookbackHorizon(db);
+  const deadline = runDeadline(opts);
+
+  // AER-016 — BATCHED REPLAY. Each recorded call is re-decided AT ITS OWN
+  // INSTANT (AER-014), so rate-limit counts differ row by row and the
+  // evaluation cannot simply be cached per (user, server, tool). What CAN be
+  // shared is everything else: within one (user, server, tool) group, two rows
+  // whose limits see the same counts get the same decision, because the
+  // evaluation is a function of the stored rules and those counts.
+  //
+  //  - counts are fetched ONE QUERY PER LIMIT SHAPE for the whole group
+  //    (`batchedAllowCounts`), the first time an evaluation asks for that shape;
+  //  - a row is evaluated only when its count signature is new to its group.
+  //    A count at or above the highest ceiling that READS it is one value (the
+  //    kernel only compares a count with its own limit's `maxCalls`; ABAC's
+  //    usage percentage caps at 100), so a busy subject needs at most
+  //    `ceiling + 1` evaluations per shape, not one per recorded call;
+  //  - the signature also carries whether each shape's window is truncated by
+  //    audit retention, because that alone turns a row indeterminate.
+  type Shape = {
+    key: string;
+    serverId: string | null;
+    toolName: string | null;
+    windowSeconds: number;
+    /** the highest ceiling any decision that matters compares this count with */
+    ceiling: number;
+  };
+  // WHICH CEILINGS READ A COUNT. Only the CANDIDATE decision is kept, so the
+  // served version of the limit under test reads its count only through ABAC's
+  // usage percentage — and only when an active ABAC policy reads that
+  // attribute at all (the same source test `analyzeReplayFidelity` applies).
+  // Its served ceiling is otherwise irrelevant, and saturating at the
+  // candidate's ceiling is what lets "tighten 1000/h to 1/h" replay in two
+  // evaluations, not 1001.
+  const abacReadsUsage = (await loadActiveAbacPolicies(db)).some((p) =>
+    p.source.includes("rateLimitUsagePct"),
+  );
+  const candidateBody = (version.body ?? {}) as { maxCalls?: unknown };
+  const ceilingFor = (q: ReplayCountQuery): number => {
+    if (version.artifactType !== "rate_limit" || q.limitId !== version.artifactId) return q.maxCalls;
+    const candidateMax = typeof candidateBody.maxCalls === "number" ? candidateBody.maxCalls : q.maxCalls;
+    return abacReadsUsage ? Math.max(candidateMax, q.maxCalls) : candidateMax;
+  };
+  const groups = new Map<string, typeof considered>();
   for (const row of considered) {
-    const serverId = row.serverId!;
-    const toolName = row.toolName!;
+    const key = `${row.userId}|${row.serverId}|${row.toolName}`;
+    const g = groups.get(key);
+    if (g) g.push(row);
+    else groups.set(key, [row]);
+  }
+
+  const verdicts = new Map<string, { candidate: CandidateEffect; ruleId: string | null }>();
+  let evaluated = 0;
+  let timedOut = false;
+  for (const group of groups.values()) {
+    if (timedOut) break;
+    const first = group[0]!;
+    const serverId = first.serverId!;
+    const toolName = first.toolName!;
     const kind = toolKind.get(`${serverId}|${toolName}`);
-    let candidate: CandidateEffect = null;
-    let ruleId: string | null = null;
-    if (kind) {
-      // A tool that has left the inventory cannot have its call rebuilt, so
-      // that row stays INDETERMINATE rather than being guessed at.
+    const groupIds = group.map((r) => r.id);
+    const shapes = new Map<string, Shape>();
+    const counts = new Map<string, Map<string, number>>();
+    const memo = new Map<string, { candidate: CandidateEffect; ruleId: string | null }>();
+
+    const countsFor = async (shape: Shape) => {
+      let m = counts.get(shape.key);
+      if (!m) {
+        m = await batchedAllowCounts(db, groupIds, shape);
+        counts.set(shape.key, m);
+      }
+      return m;
+    };
+    const signatureOf = (row: (typeof group)[number]): string =>
+      [...shapes.values()]
+        .sort((a, b) => a.key.localeCompare(b.key))
+        .map((sh) => {
+          const n = counts.get(sh.key)?.get(row.id) ?? 0;
+          const truncated =
+            lookbackHorizon != null &&
+            row.at.getTime() - sh.windowSeconds * 1000 < lookbackHorizon.getTime();
+          return `${sh.key}=${Math.min(n, sh.ceiling)}${truncated ? "!" : ""}`;
+        })
+        .join(";");
+
+    for (const row of group) {
+      if (deadline.passed()) {
+        timedOut = true;
+        break;
+      }
+      evaluated += 1;
+      if (!kind) {
+        // A tool that has left the inventory cannot have its call rebuilt, so
+        // that row stays INDETERMINATE rather than being guessed at.
+        verdicts.set(row.id, { candidate: null, ruleId: null });
+        continue;
+      }
+      const known = memo.get(signatureOf(row));
+      if (known) {
+        verdicts.set(row.id, known);
+        continue;
+      }
+      let shapesChanged = false;
       const evaluation = await governedEvaluate(
         db,
         row.userId,
@@ -364,13 +602,78 @@ export async function runRuleSimulation(
         null,
         null,
         undefined,
-        { versionId: version.id },
+        {
+          versionId: version.id,
+          replay: {
+            asOf: row.at,
+            lookbackHorizon,
+            countAllowed: async (q: ReplayCountQuery) => {
+              const key = `${q.serverId ?? "*"}|${q.toolName ?? "*"}|${q.windowSeconds}`;
+              const ceiling = ceilingFor(q);
+              let shape = shapes.get(key);
+              if (!shape) {
+                shape = {
+                  key,
+                  serverId: q.serverId,
+                  toolName: q.toolName,
+                  windowSeconds: q.windowSeconds,
+                  ceiling,
+                };
+                shapes.set(key, shape);
+                shapesChanged = true;
+              } else if (ceiling > shape.ceiling) {
+                shape.ceiling = ceiling;
+                shapesChanged = true;
+              }
+              return (await countsFor(shape)).get(row.id) ?? 0;
+            },
+          },
+        },
       );
-      if (evaluation.candidateDecision) {
-        candidate = candidateEffectOfDecision(evaluation.candidateDecision.effect);
-        ruleId = evaluation.candidateDecision.ruleId ?? null;
-      }
+      const verdict = evaluation.candidateDecision
+        ? {
+            candidate: candidateEffectOfDecision(evaluation.candidateDecision.effect),
+            ruleId: evaluation.candidateDecision.ruleId ?? null,
+          }
+        : { candidate: null, ruleId: null };
+      verdicts.set(row.id, verdict);
+      // a shape seen for the first time, or a ceiling raised, invalidates the
+      // signatures computed before it, so they are dropped rather than trusted
+      if (shapesChanged) memo.clear();
+      memo.set(signatureOf(row), verdict);
     }
+  }
+
+  if (timedOut) {
+    await recordIncompleteRun(db, {
+      requestedByUserId: opts.requestedByUserId,
+      objectType: "restriction_rule",
+      objectId: null,
+      candidate: { candidateArtifactType: version.artifactType, candidateVersionId: version.id },
+      evaluated,
+      total: considered.length,
+      capped,
+      deadlineMs: deadline.deadlineMs,
+      windowDays: opts.windowDays,
+      scope: opts.scope,
+    });
+    return {
+      ok: true,
+      incomplete: true,
+      evaluated,
+      total: considered.length,
+      capped,
+      deadlineMs: deadline.deadlineMs,
+      windowStart,
+      windowEnd: now,
+    };
+  }
+
+  const replayed: ReplayedDecision[] = [];
+  for (const row of considered) {
+    const serverId = row.serverId!;
+    const toolName = row.toolName!;
+    const { candidate, ruleId } = verdicts.get(row.id) ?? { candidate: null, ruleId: null };
     replayed.push({
       auditLogId: row.id,
       userId: row.userId,
@@ -636,8 +939,36 @@ export async function runPolicySimulation(
     return req;
   }
 
+  // AER-016 — the same deadline as a rule replay. This loop is already
+  // batched (attribute assembly is memoized per distinct call shape and the
+  // Cedar evaluation is in memory), but a 20k-row transcript is still bounded.
+  const deadline = runDeadline(opts);
   const replayed: ReplayedDecision[] = [];
   for (const row of considered) {
+    if (deadline.passed()) {
+      await recordIncompleteRun(db, {
+        requestedByUserId: opts.requestedByUserId,
+        objectType: "abac_policy",
+        objectId: policy?.id ?? null,
+        candidate: { policyVersionId: version.id, policyVersion: version.version },
+        evaluated: replayed.length,
+        total: considered.length,
+        capped,
+        deadlineMs: deadline.deadlineMs,
+        windowDays: opts.windowDays,
+        scope: opts.scope,
+      });
+      return {
+        ok: true,
+        incomplete: true,
+        evaluated: replayed.length,
+        total: considered.length,
+        capped,
+        deadlineMs: deadline.deadlineMs,
+        windowStart,
+        windowEnd: now,
+      };
+    }
     const serverId = row.serverId!;
     const toolName = row.toolName!;
     const attributed = projectByCall.get(`${row.userId}|${serverId}|${toolName}`) ?? null;
@@ -811,6 +1142,50 @@ async function complianceProfileCanaryField(
   return { complianceProfileCanaryDivergence: { canaries, note: PROFILE_CANARY_PREVIEW_NOTE } };
 }
 
+// ---------------------------------------------------------------------------
+// AER-016 — concurrency bounds
+// ---------------------------------------------------------------------------
+
+/**
+ * Runs in flight on THIS replica: per caller and in total. A run is a read of
+ * up to 20k recorded decisions, reachable by a non-admin, so without a bound a
+ * handful of callers could keep the database busy indefinitely. A caller who
+ * already has a run in flight, or a replica already running its maximum, is
+ * refused with 429 and a Retry-After of the deadline (no run lasts longer).
+ *
+ * In-process by design: the bound protects this replica's pool, and with N
+ * replicas the global ceiling is N times this one. Moving the run to a
+ * background job (a shared queue) is the deferred redesign ADR-0179 names.
+ * A non-blocking try-acquire with a refusal is what is needed here, not a
+ * queue that would hold requests open, so no queueing library fits.
+ */
+const inFlightByCaller = new Map<string, number>();
+let inFlightGlobal = 0;
+
+/** take a slot, or say why not. Exported for the tests that hold one. */
+export function tryAcquireSimulationSlot(
+  callerKey: string,
+  limits: { maxPerCaller: number; maxGlobal: number },
+): { ok: true; release: () => void } | { ok: false; reason: "caller_busy" | "global_busy" } {
+  const mine = inFlightByCaller.get(callerKey) ?? 0;
+  if (mine >= limits.maxPerCaller) return { ok: false, reason: "caller_busy" };
+  if (inFlightGlobal >= limits.maxGlobal) return { ok: false, reason: "global_busy" };
+  inFlightByCaller.set(callerKey, mine + 1);
+  inFlightGlobal += 1;
+  let released = false;
+  return {
+    ok: true,
+    release: () => {
+      if (released) return;
+      released = true;
+      inFlightGlobal -= 1;
+      const left = (inFlightByCaller.get(callerKey) ?? 1) - 1;
+      if (left <= 0) inFlightByCaller.delete(callerKey);
+      else inFlightByCaller.set(callerKey, left);
+    },
+  };
+}
+
 export function registerPolicySimulationRoutes(app: FastifyInstance, db: Db): void {
   const refuse = (
     actorUserId: string | null,
@@ -856,25 +1231,66 @@ export function registerPolicySimulationRoutes(app: FastifyInstance, db: Db): vo
       });
       return reply.status(403).send({ error: "simulation_scope_denied", detail: scope.reason });
     }
+    // AER-016: bounded runs. The slot is taken after the scope check (a refused
+    // caller holds nothing) and released however the run ends.
+    const limits = resolvePolicySimulationRunLimits(process.env);
+    const slot = tryAcquireSimulationSlot(callerId ?? "bootstrap", limits);
+    if (!slot.ok) {
+      return reply
+        .status(429)
+        .header("retry-after", String(Math.max(1, Math.ceil(limits.deadlineMs / 1000))))
+        .send({
+          error: "simulation_busy",
+          detail:
+            slot.reason === "caller_busy"
+              ? `you already have ${limits.maxPerCaller} simulation run(s) in flight; wait for it to finish`
+              : `this gateway is already running ${limits.maxGlobal} simulation run(s); try again shortly`,
+        });
+    }
     // ADR-0120: the same surface, the same scope check and the same stored
     // shape for both candidate kinds — only the re-decision differs.
-    const outcome = body.ruleVersionId
-      ? await runRuleSimulation(db, {
-          ruleVersionId: body.ruleVersionId,
-          windowDays: body.windowDays,
-          rowCap: body.rowCap,
-          scope,
-          requestedByUserId: callerId,
-          note: body.note ?? null,
-        })
-      : await runPolicySimulation(db, {
-          policyVersionId: body.policyVersionId!,
-          windowDays: body.windowDays,
-          rowCap: body.rowCap,
-          scope,
-          requestedByUserId: callerId,
-          note: body.note ?? null,
-        });
+    let outcome: PolicySimulationOutcome;
+    try {
+      outcome = body.ruleVersionId
+        ? await runRuleSimulation(db, {
+            ruleVersionId: body.ruleVersionId,
+            windowDays: body.windowDays,
+            rowCap: body.rowCap,
+            scope,
+            requestedByUserId: callerId,
+            note: body.note ?? null,
+            deadlineMs: limits.deadlineMs,
+          })
+        : await runPolicySimulation(db, {
+            policyVersionId: body.policyVersionId!,
+            windowDays: body.windowDays,
+            rowCap: body.rowCap,
+            scope,
+            requestedByUserId: callerId,
+            note: body.note ?? null,
+            deadlineMs: limits.deadlineMs,
+          });
+    } finally {
+      slot.release();
+    }
+    if (outcome.ok && outcome.incomplete) {
+      // AER-016: an HONEST incomplete result. 200, not 201: nothing was
+      // created. No buckets, no names, no simulation row — only how far the
+      // run got, so it can never be read as a finished preview.
+      return reply.status(200).send({
+        status: "incomplete",
+        evaluated: outcome.evaluated,
+        total: outcome.total,
+        capped: outcome.capped,
+        deadlineMs: outcome.deadlineMs,
+        windowStart: outcome.windowStart,
+        windowEnd: outcome.windowEnd,
+        detail: policySimulationIncompleteNote(outcome),
+        scope: { ruleId: scope.ruleId, reason: scope.reason, orgWide: scope.userIds === null },
+        fidelity: REPLAY_FIDELITY_DISCLOSURE,
+        dryRun: true,
+      });
+    }
     if (!outcome.ok) {
       return reply
         .status(outcome.status)
@@ -886,6 +1302,7 @@ export function registerPolicySimulationRoutes(app: FastifyInstance, db: Db): vo
       .where(eq(policySimulationFlips.simulationId, outcome.simulation.id))
       .orderBy(desc(policySimulationFlips.occurredAt));
     return reply.status(201).send({
+      status: "complete",
       simulation: outcome.simulation,
       /** the SPECIFIC calls that would flip — a preview names them */
       samples: flips,
