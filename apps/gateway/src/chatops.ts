@@ -354,6 +354,10 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
         // outlook connection legitimately holds none, and reporting `true`
         // for it would assert a control that does not exist.
         signingSecretSet: r.signingSecretCiphertext !== null,
+        // ADR-0179 (AER-015) — whether a card can be posted here at all. False
+        // for an outlook row registered before registration was refused: it
+        // still lists and still refuses inbound, and a post to it answers 501.
+        outboundSupported: CHATOPS_OUTBOUND_PROVIDERS.includes(r.provider as ChatOpsProvider),
         // ADR-0173 batch 2b — the Teams bot (identifiers, not secrets)
         botAppId: r.botAppId,
         botTenantId: r.botTenantId,
@@ -370,6 +374,27 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
 
   app.post("/v1/chatops/connections", async (req, reply) => {
     const body = createConnectionSchema.parse(req.body);
+    // ADR-0179 (AER-015) — A WORKSPACE THAT CAN NEVER DELIVER A CARD IS REFUSED.
+    //
+    // A ChatOps workspace exists to carry approval cards out. Outlook was
+    // registrable (ADR-0121, send-only) but no outbound sender exists for it, so
+    // every card posted to one answered 501 `outbound_provider_unsupported` —
+    // after the admin had registered it and been told it was connected. The
+    // refusal now happens here, FIRST, before the connector or the data key is
+    // looked at, because nothing else about the request can make it work.
+    // Read from the outbound list rather than naming outlook, so it lifts the
+    // day a sender lands. Existing rows are untouched: they still list, still
+    // refuse inbound (ADR-0121) and still 501 on a post, and the list below
+    // now says so with `outboundSupported: false`.
+    if (!CHATOPS_OUTBOUND_PROVIDERS.includes(body.provider)) {
+      return reply.status(422).send({
+        error: "outbound_provider_unavailable",
+        detail:
+          `${body.provider} cannot be registered for ChatOps approval cards yet: there is no outbound sender for it, ` +
+          `so a workspace registered now could never deliver a card. Inbound ${body.provider} stays refused by ` +
+          `design (ADR-0121). Use slack or teams, or decide approvals in the portal.`,
+      });
+    }
     if (!opts.dataKey) {
       return reply.status(400).send({
         error: "data_key_required",
