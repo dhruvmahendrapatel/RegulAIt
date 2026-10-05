@@ -23,6 +23,7 @@ import { createDb, runMigrations, backupRuns, eq } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { ensureEphemeralLicense } from "./ephemeral-license.js";
 import { dataKeyFormatError } from "./secrets.js";
+import { ensureDemoModelCards } from "./demo-strict-governance.js";
 
 const connectionString =
   process.env.DATABASE_URL ?? "postgres://regulait:regulait@localhost:5432/regulait";
@@ -759,6 +760,9 @@ if (DATA_KEY) {
     pmWebhookSecret = created.webhookSecret ?? null;
   }
 }
+
+// --- ADR-0181 SB2: approved model cards (mrmEnforced is on by default) ------
+for (const n of (await ensureDemoModelCards(app, { bootstrapToken: BOOT, averyAuth, averyId })).notes) console.log(`  ${n}`);
 
 // --- demo activity: governed evaluations + real metered spend ------------
 // Unlike every object above, activity is append-only by nature (audit rows

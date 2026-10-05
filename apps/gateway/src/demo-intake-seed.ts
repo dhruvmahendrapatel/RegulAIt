@@ -13,6 +13,7 @@ import * as shared from "@regulait/shared";
 import type { DemoIntakeFixtures } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { seedDemoIntake } from "./demo-intake-seed-lib.js";
+import { recertifyDemoModelCards } from "./demo-strict-governance.js";
 
 const connectionString = process.env.DATABASE_URL ?? "postgres://regulait:regulait@localhost:5432/regulait";
 const BOOT = process.env.REGULAIT_BOOTSTRAP_TOKEN ?? "seed-bootstrap";
@@ -38,6 +39,8 @@ console.log(`demo:intake — ${fixtures.company.name}`);
 console.log(`  created ${report.created.length}, skipped ${report.skipped.length}, failed ${report.failed.length}`);
 for (const n of report.notes) console.log(`  note    ${n}`);
 for (const f of report.failed) console.log(`  FAILED  ${f}`);
+// ADR-0181 SB2: the required-test runs above moved the cards' ledger; Avery recertifies them
+for (const n of await recertifyDemoModelCards(app, BOOT)) console.log(`  ${n}`);
 await app.close();
 await (db.$client as { end: () => Promise<void> }).end();
 process.exit(report.failed.length ? 2 : 0);

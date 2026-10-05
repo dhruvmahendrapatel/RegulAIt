@@ -168,6 +168,16 @@ export interface MrmGateContext {
   model: string | null;
   customProviderId: string | null;
   projectId?: string | null;
+  /**
+   * ADR-0181: the dispatch is an EVALUATION — an eval-suite case, its judge, or
+   * a red-team probe (the server-side `evals` model feature; no HTTP caller
+   * can set it). Staleness-forces-recertification does not refuse these: the
+   * evidence a recertification needs is exactly what they produce, and a run
+   * started after certification is itself ledger drift, so refusing them would
+   * let no certified card ever be re-tested. The base gate (an approved,
+   * unexpired card) still applies to them in full.
+   */
+  evaluation?: boolean;
 }
 
 /**
@@ -230,6 +240,32 @@ export async function mrmDispatchGate(
       0,
     );
     if (totalChanges < org.mrmStalenessRecertThreshold) return null;
+    if (ctx.evaluation) {
+      // ADR-0181: recorded, not refused — see `MrmGateContext.evaluation`
+      await db.insert(auditLog).values({
+        userId: ctx.userId,
+        objectType: "model_card",
+        objectId: liveCard.id,
+        detail: {
+          phase: "dispatch",
+          agentId: ctx.agentId,
+          agentName: ctx.agentName,
+          mrmReason: "staleness_evaluation_allowed",
+          modelCardId: liveCard.id,
+          stalenessThreshold: org.mrmStalenessRecertThreshold,
+          staleness: { lastCertifiedAt: staleness.lastCertifiedAt, totalChanges, summary: staleness.summary },
+          ...(ctx.projectId ? { projectId: ctx.projectId } : {}),
+        },
+        effect: "allow",
+        ruleId: "mrm-staleness-evaluation-allowed",
+        ruleChain: [],
+        reason:
+          `model card '${liveCard.intendedUse}' is STALE (${totalChanges} ledger change(s) since certification) — ` +
+          "this evaluation dispatch was allowed so the evidence a recertification needs can be gathered; " +
+          "production dispatch stays refused until the card is recertified",
+      });
+      return null;
+    }
     const detail =
       `the risk sign-off on model card '${liveCard.intendedUse}' is live but STALE: ` +
       `${staleness.summary} (${totalChanges} ledger change(s) since certification on ` +

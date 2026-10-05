@@ -1403,6 +1403,9 @@ async function dispatchAttempt(
     model: served.model,
     customProviderId: served.customProviderId ?? null,
     projectId: args.projectId ?? null,
+    // ADR-0181: eval cases, judges and red-team probes name the server-side
+    // `evals` feature; staleness does not refuse them (see MrmGateContext)
+    evaluation: args.modelFeature?.feature === "evals",
   });
   if (mrmRefusal) {
     return {
