@@ -72,6 +72,7 @@ import {
   builderAgents,
   builderChannelEvents,
   builderChannelThreads,
+  builderMessages,
   builderStepChatPrompts,
   builderThreads,
   builderToolSteps,
@@ -753,7 +754,9 @@ export async function postResumedChannelTurn(
  *  6. the answer runs through `resumeBuilderStep(via: "confirmation")` — the
  *     function the web route calls, which claims the step itself — after the
  *     response, because Slack expects an answer within 3 seconds. Its outcome
- *     is posted back into the thread by the resumed-turn subscriber.
+ *     is posted back into the thread by the resumed-turn subscriber; only
+ *     then is the button message rewritten, with the real outcome (a failed
+ *     resume releases the claim).
  */
 export async function acceptStepInteraction(
   db: Db,
@@ -817,6 +820,23 @@ export async function acceptStepInteraction(
     });
   }
 
+  /** the posted message's reply, REBUILT FROM WHAT REGULAIT STORED (the
+   * step's agent message, behind the same fence and link as when it was
+   * posted) — never from the blocks the click carries back (ADR-0173 batch 2b
+   * review) */
+  const storedReply = async (): Promise<string> => {
+    const [message] = await db.select({ content: builderMessages.content }).from(builderMessages).where(eq(builderMessages.id, step.messageId));
+    const [mapped] = await db
+      .select({ linkOrigin: builderChannelThreads.linkOrigin })
+      .from(builderChannelThreads)
+      .where(and(eq(builderChannelThreads.builderThreadId, thread.id), eq(builderChannelThreads.connectionId, conn.id)))
+      .orderBy(desc(builderChannelThreads.updatedAt))
+      .limit(1);
+    const content = message?.content.trim() ?? "";
+    if (!content && !fenced) return "";
+    return composeChannelReply({ replyText: content, fenced, pause: null, link: threadLink(thread.id, mapped?.linkOrigin ?? null) });
+  };
+
   /** rewrite the posted message: the outcome in place of the buttons */
   const retire = (outcome: string) => async () => {
     if (!prompt.messageRef) return;
@@ -828,7 +848,7 @@ export async function acceptStepInteraction(
           target: prompt.channel,
           threadRef: null,
           text: outcome,
-          blocks: composeStepAnsweredBlocks({ sections: click.messageSections, outcome }),
+          blocks: composeStepAnsweredBlocks({ text: await storedReply(), outcome }),
           updateRef: prompt.messageRef,
         },
         person.id,
@@ -860,19 +880,42 @@ export async function acceptStepInteraction(
     detail);
 
   const by = person.displayName || person.email;
+  const verb = click.answer === "approve" ? "Approved" : "Denied";
+  // The message is rewritten AFTER the resume, with what really happened
+  // (ADR-0173 batch 2b review): rewriting it first said "Approved" for an
+  // answer the resume could still refuse.
   const work = async () => {
-    await retire(click.answer === "approve" ? `Approved by ${by}. The agent continues.` : `Denied by ${by}.`)();
-    const out = await resumeBuilderStep(db, deps.dataKey, {
-      threadId: thread.id,
-      stepId: step.id,
-      via: "confirmation",
-      decision: click.answer,
-      deciderUserId: person.id,
-    });
-    if (!out.ok) {
-      await audit(db, person.id, "builder_agent", thread.agentId, BUILDER_CHANNEL_RULE_IDS.stepResumeFailed, "deny",
-        `the ${click.answer} of tool step '${step.displayName}' from ${conn.provider} did not resume the turn: ${out.error}${out.detail ? ` (${out.detail})` : ""}`,
-        { ...detail, error: out.error });
+    let out: TurnOutcome;
+    try {
+      out = await resumeBuilderStep(db, deps.dataKey, {
+        threadId: thread.id,
+        stepId: step.id,
+        via: "confirmation",
+        decision: click.answer,
+        deciderUserId: person.id,
+      });
+    } catch (err) {
+      deps.log?.error({ err, builderStepId: step.id }, "builder step resume from chat failed");
+      out = { ok: false, status: 500, error: "internal_error" };
+    }
+    if (out.ok) {
+      await retire(`${verb} by ${by}.`)();
+      return;
+    }
+    await audit(db, person.id, "builder_agent", thread.agentId, BUILDER_CHANNEL_RULE_IDS.stepResumeFailed, "deny",
+      `the ${click.answer} of tool step '${step.displayName}' from ${conn.provider} did not resume the turn: ${out.error}${out.detail ? ` (${out.detail})` : ""}`,
+      { ...detail, error: out.error });
+    // the answer was not applied, so the claim is released: the record never
+    // says this prompt took an answer it did not
+    await db
+      .update(builderStepChatPrompts)
+      .set({ answeredAt: null, answeredByUserId: null, answer: null })
+      .where(and(eq(builderStepChatPrompts.id, prompt.id), eq(builderStepChatPrompts.answeredByUserId, person.id)));
+    const [now] = await db.select({ status: builderToolSteps.status }).from(builderToolSteps).where(eq(builderToolSteps.id, step.id));
+    // still waiting: the buttons stay, so the person can answer again; no
+    // longer waiting: the message says what became of it, not "Approved"
+    if (now && now.status !== "pending_confirmation") {
+      await retire(`${verb} by ${by}, but the turn did not resume (${out.error}). This step is ${now.status.replace(/_/g, " ")}.`)();
     }
   };
   return { ack: { status: 200, body: { ok: true, answer: click.answer } }, work };

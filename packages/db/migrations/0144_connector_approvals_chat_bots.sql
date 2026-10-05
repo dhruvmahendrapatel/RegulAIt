@@ -19,6 +19,11 @@
 --    workspace and channel, the message handle (to update it), and the ONE
 --    answer it took. `answered_at` is claimed once, so a second click (or a
 --    second person) is refused.
+-- 4. SLACK WORKSPACE PIN (batch 2b review). `slack_team_id` (optional, slack
+--    only) names the one Slack workspace (team) whose signed events and
+--    interactions this connection accepts; one from another team is refused
+--    and audited even when its signature verifies (a signing secret is per
+--    app, and one app can be installed in several workspaces).
 --
 -- Additive and idempotent (the one replaced CHECK is dropped and re-added).
 ALTER TABLE "approvals" ADD COLUMN IF NOT EXISTS "connector_id" uuid REFERENCES "connectors"("id") ON DELETE CASCADE;
@@ -36,6 +41,13 @@ ALTER TABLE "chatops_connections" ADD COLUMN IF NOT EXISTS "bot_openid_metadata_
 DO $$ BEGIN
   ALTER TABLE "chatops_connections" ADD CONSTRAINT "chatops_connections_bot_teams_check"
     CHECK (("bot_app_id" IS NULL AND "bot_tenant_id" IS NULL AND "bot_openid_metadata_url" IS NULL) OR "provider" = 'teams');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+--> statement-breakpoint
+ALTER TABLE "chatops_connections" ADD COLUMN IF NOT EXISTS "slack_team_id" text;
+--> statement-breakpoint
+DO $$ BEGIN
+  ALTER TABLE "chatops_connections" ADD CONSTRAINT "chatops_connections_slack_team_check"
+    CHECK ("slack_team_id" IS NULL OR "provider" = 'slack');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 --> statement-breakpoint
 -- 0112 required a signing secret on every slack/teams row. A teams workspace

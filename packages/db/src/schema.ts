@@ -6112,6 +6112,10 @@ export const chatopsConnections = pgTable("chatops_connections", {
   /** optional: the OpenID metadata whose JWKS signs bot tokens (null = the
    * platform's public default) */
   botOpenidMetadataUrl: text("bot_openid_metadata_url"),
+  /** ADR-0173 batch 2b review (migration 0144) — optional: the one Slack
+   * workspace (team id) whose signed events and interactions are accepted.
+   * Slack only (DB check). */
+  slackTeamId: text("slack_team_id"),
   createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (t) => [
@@ -6119,6 +6123,7 @@ export const chatopsConnections = pgTable("chatops_connections", {
     "chatops_connections_bot_teams_check",
     sql`(${t.botAppId} IS NULL AND ${t.botTenantId} IS NULL AND ${t.botOpenidMetadataUrl} IS NULL) OR ${t.provider} = 'teams'`,
   ),
+  check("chatops_connections_slack_team_check", sql`${t.slackTeamId} IS NULL OR ${t.provider} = 'slack'`),
 ]);
 
 /**

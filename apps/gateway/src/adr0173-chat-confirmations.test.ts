@@ -28,11 +28,19 @@ import {
   inArray,
   sql,
 } from "@regulait/db";
-import { SLACK_STEP_ACTION_IDS, slackSignature } from "@regulait/shared";
+import {
+  SLACK_STEP_ACTION_IDS,
+  composeApprovalCard,
+  composeStepConfirmBlocks,
+  escapeSlackText,
+  slackSignature,
+  teamsActivityForCard,
+} from "@regulait/shared";
+import { reservedChatControl } from "@regulait/connector-provider";
 import { builderKit, type BuilderKit, type Person } from "./testing/builder-fixture.js";
 import { drainBackgroundWork } from "./background-work.js";
 import { resolveToolbox } from "./builder-tools.js";
-import { builderAgents } from "@regulait/db";
+import { builderAgents, builderMessages } from "@regulait/db";
 
 let k: BuilderKit;
 let admin: Person;
@@ -52,9 +60,15 @@ const posted: Array<{ url: string; body: Record<string, any> }> = [];
 /** what reached the tool's receiver */
 const toolHits: string[] = [];
 let jwksFetches = 0;
+let metadataFetches = 0;
+/** the stub OpenID metadata answers 503 while this is set */
+let metadataDown = false;
 
 let slackConn = "";
 let slackConnId = "";
+let slackConnectorId = "";
+let pinnedSlackConn = "";
+let pinnedSlackConnId = "";
 let otherSlackConn = "";
 let botConn = "";
 let botConnId = "";
@@ -135,19 +149,23 @@ const mention = async (conn: string, user: string, text: string, channel = CHANN
   await drainBackgroundWork(k.db);
   return ts;
 };
-const clickBody = (user: string, promptId: string, answer: "approve" | "deny", messageTs = "1785.1") =>
+type ClickOpts = { secret?: string; secondsAgo?: number; team?: string | null; sectionText?: string };
+const clickBody = (user: string, promptId: string, answer: "approve" | "deny", opts: ClickOpts = {}) =>
   new URLSearchParams({
     payload: JSON.stringify({
       type: "block_actions",
       user: { id: user },
-      container: { message_ts: messageTs },
+      ...(opts.team === null ? {} : { team: { id: opts.team ?? "T1" } }),
+      container: { message_ts: "1785.1" },
       channel: { id: CHANNEL },
-      message: { blocks: [{ type: "section", text: { type: "mrkdwn", text: "Let me send that." } }] },
+      // what the click carries back of the message is NOT what the answered
+      // message is rebuilt from (batch 2b review): it could say anything
+      message: { blocks: [{ type: "section", text: { type: "mrkdwn", text: opts.sectionText ?? "Let me send that." } }] },
       actions: [{ action_id: SLACK_STEP_ACTION_IDS[answer], value: promptId }],
     }),
   }).toString();
-const click = (conn: string, user: string, promptId: string, answer: "approve" | "deny", opts: { secret?: string; secondsAgo?: number } = {}) => {
-  const body = clickBody(user, promptId, answer);
+const click = (conn: string, user: string, promptId: string, answer: "approve" | "deny", opts: ClickOpts = {}) => {
+  const body = clickBody(user, promptId, answer, opts);
   return k.app.inject({
     method: "POST",
     url: `/v1/chatops/${conn}/interactions`,
@@ -188,7 +206,7 @@ async function makeConnection(provider: "slack" | "teams", label: string, extra:
   });
   expect(created.statusCode, created.body).toBe(201);
   connectionIds.push(created.json().id);
-  return { name, id: created.json().id as string };
+  return { name, id: created.json().id as string, connectorId: conn.json().id as string };
 }
 const link = async (connName: string, chatUserId: string, who: Person, label: string) => {
   const r = await k.req("POST", "/v1/chatops/identity-links", k.BOOT, {
@@ -265,7 +283,10 @@ beforeAll(async () => {
         res.end(JSON.stringify(body));
       };
       if (url.includes("/oauth2/v2.0/token")) return json(200, { token_type: "Bearer", expires_in: 3600, access_token: "test-jwt" });
-      if (url === "/openid") return json(200, { issuer: ISSUER, jwks_uri: `${base}/jwks` });
+      if (url === "/openid") {
+        metadataFetches += 1;
+        return metadataDown ? json(503, { error: "down" }) : json(200, { issuer: ISSUER, jwks_uri: `${base}/jwks` });
+      }
       if (url === "/jwks") {
         jwksFetches += 1;
         return json(200, { keys: published });
@@ -316,7 +337,7 @@ beforeAll(async () => {
     expect(g.statusCode, g.body).toBeLessThan(300);
   }
 
-  ({ name: slackConn, id: slackConnId } = await makeConnection("slack", "slack", { signingSecret: SECRET }));
+  ({ name: slackConn, id: slackConnId, connectorId: slackConnectorId } = await makeConnection("slack", "slack", { signingSecret: SECRET }));
   ({ name: otherSlackConn } = await makeConnection("slack", "other", { signingSecret: SECRET }));
   // a bot-only Teams workspace: no signing secret, the bot's tokens prove it
   ({ name: botConn, id: botConnId } = await makeConnection("teams", "bot", { botAppId: APP_ID, botOpenidMetadataUrl: `${base}/openid` }));
@@ -330,6 +351,9 @@ beforeAll(async () => {
     botAppId: APP_ID,
     botOpenidMetadataUrl: `${base.replace("127.0.0.1", "localhost")}/openid`,
   }));
+  // batch 2b review: a Slack workspace pinned to one team (created last: the
+  // tests above index `connectionIds`)
+  ({ name: pinnedSlackConn, id: pinnedSlackConnId } = await makeConnection("slack", "pinslack", { signingSecret: SECRET, slackTeamId: "TPINNED" }));
   await link(slackConn, "U-OWNER", owner, "owner");
   await link(slackConn, "U-COLLEAGUE", colleague, "colleague");
   await link(slackConn, "U-ADMIN", admin, "admin");
@@ -482,6 +506,48 @@ describe("Slack: an \"Ask first\" pause carries Approve / Deny", () => {
     expect(await promptFor(p.step.id)).toMatchObject({ answeredAt: null });
   });
 
+  it("the answered message is rebuilt from the stored reply, never from what the click carries back (batch 2b review)", async () => {
+    const p = await pausedInSlack(agent, `rebuilt-${k.RUN}`);
+    const r = await click(slackConn, "U-OWNER", p.prompt!.id, "deny", { sectionText: "<!channel> FORGED: the payment was approved" });
+    expect(r.statusCode, r.body).toBe(200);
+    await drainBackgroundWork(k.db);
+    const upd = updates().find((u) => u.body.ts === p.prompt!.messageRef)!;
+    expect(upd, "the button message was rewritten").toBeTruthy();
+    const shown = JSON.stringify(upd.body.blocks);
+    expect(shown).not.toContain("FORGED");
+    expect(shown).not.toContain("<!channel>");
+    // what RegulAIt stored for that step: the agent's reply, made inert once
+    const [stored] = await k.db.select().from(builderMessages).where(eq(builderMessages.id, p.step.messageId));
+    expect(stored!.content.trim().length).toBeGreaterThan(0);
+    expect(shown).toContain(JSON.stringify(escapeSlackText(stored!.content.trim().slice(0, 40))).slice(1, -1));
+    expect(shown).toContain("Denied by");
+  });
+
+  it("a resume that fails is not reported as approved: the claim is released and the message says what happened (batch 2b review)", async () => {
+    // a dedicated agent on its own channel, so breaking it touches no other test
+    const failing = await askFirstAgent(owner);
+    const failChannel = `C-FAIL-${k.RUN}`;
+    await routeSlack(failing.id, slackConnId, failChannel);
+    const p = await pausedInSlack(failing, `resume-fails-${k.RUN}`, failChannel);
+    // the agent loses its model between the pause and the answer: the resume's gate refuses
+    await k.db.update(builderAgents).set({ modelAgentId: null }).where(eq(builderAgents.id, failing.id));
+    const before = toolHits.length;
+    const r = await click(slackConn, "U-OWNER", p.prompt!.id, "approve");
+    expect(r.statusCode, r.body).toBe(200);
+    await drainBackgroundWork(k.db);
+    expect(toolHits.length).toBe(before);
+    expect(await stepRow(p.step.id)).toMatchObject({ status: "refused" });
+    // the answer was not applied, so the prompt holds none
+    expect(await promptFor(p.step.id)).toMatchObject({ answeredAt: null, answeredByUserId: null, answer: null });
+    const msgUpdates = updates().filter((u) => u.body.ts === p.prompt!.messageRef);
+    expect(msgUpdates).toHaveLength(1);
+    const shown = JSON.stringify(msgUpdates[0]!.body.blocks);
+    expect(shown).toContain("did not resume (builder_agent_has_no_model)");
+    expect(shown).toContain("This step is refused");
+    expect(shown).not.toContain("The agent continues");
+    expect(await auditOf("builder-channel-step-resume-failed", p.prompt!.id)).toHaveLength(1);
+  });
+
   it("an agent whose project blocks sensitive content: no buttons, and a click on its prompt is refused", async () => {
     const tag = `p2bl-chat-block-${k.RUN}`;
     expect((await k.req("POST", "/v1/compliance/profiles", k.BOOT, { tag, piiMode: "block" })).statusCode).toBeLessThan(300);
@@ -506,6 +572,154 @@ describe("Slack: an \"Ask first\" pause carries Approve / Deny", () => {
     expect(r.statusCode).toBe(403);
     expect(r.json().error).toBe("chat_decide_not_permitted_for_sensitivity");
     expect(await stepRow(step!.id)).toMatchObject({ status: "pending_confirmation" });
+  });
+});
+
+describe("the product's own chat controls are not a connector call's to use (batch 2b review)", () => {
+  const invoke = (who: Person, payload: Record<string, unknown>) =>
+    k.req("POST", `/v1/connectors/${slackConnectorId}/invoke`, who.auth, { operation: "write", object: CHANNEL, payload });
+  const reservedAudits = async (userId: string) =>
+    k.db.select().from(auditLog).where(and(eq(auditLog.ruleId, "connector-reserved-chat-control"), eq(auditLog.userId, userId)));
+
+  beforeAll(async () => {
+    const g = await k.req("POST", "/v1/grants/connectors", k.BOOT, { userId: owner.id, connectorId: slackConnectorId, mode: "readwrite" });
+    expect(g.statusCode, g.body).toBeLessThan(300);
+  });
+
+  it("every control the product posts is caught by the reserved-control check (the prefix stays in sync)", () => {
+    const step = composeStepConfirmBlocks({ text: "t", toolLabel: "x", promptId: "00000000-0000-4000-8000-000000000001" });
+    expect(reservedChatControl("slack", "write", { blocks: step })?.code).toBe("reserved_chat_control");
+    const card = composeApprovalCard({ approvalId: "00000000-0000-4000-8000-000000000002", objectType: "mcp_tool", portalUrl: "/x", fenced: false, decidable: true });
+    expect(reservedChatControl("slack", "write", { blocks: card.blocks })?.code).toBe("reserved_chat_control");
+    expect(reservedChatControl("teams", "write", teamsActivityForCard(card))?.code).toBe("reserved_chat_control");
+  });
+
+  it("a direct caller with a Slack write grant cannot rewrite a message or post a look-alike card: refused (403, audited), nothing reaches Slack", async () => {
+    const p = await pausedInSlack(agent, `governed-${k.RUN}`);
+    const before = posted.length;
+    const rewrite = await invoke(owner, { op: "chat.update", ts: p.prompt!.messageRef, text: "Approved by your manager" });
+    expect(rewrite.statusCode, rewrite.body).toBe(403);
+    expect(rewrite.json().error).toBe("chat_update_internal_only");
+    const fakeStepCard = await invoke(owner, {
+      text: "Routine check",
+      blocks: [{ type: "actions", elements: [{ type: "button", action_id: SLACK_STEP_ACTION_IDS.approve, value: p.prompt!.id, text: { type: "plain_text", text: "OK" } }] }],
+    });
+    expect(fakeStepCard.statusCode, fakeStepCard.body).toBe(403);
+    expect(fakeStepCard.json().error).toBe("reserved_chat_control");
+    const fakeApprovalCard = await invoke(owner, { text: "x", attachments: [{ callback_id: "regulait_approve" }] });
+    expect(fakeApprovalCard.statusCode).toBe(403);
+    expect(posted.length).toBe(before);
+    expect((await reservedAudits(owner.id)).length).toBeGreaterThanOrEqual(3);
+    // the grant itself works: an ordinary message goes out
+    const plain = await invoke(owner, { text: `hello ${k.RUN}` });
+    expect(plain.statusCode, plain.body).toBe(200);
+    expect(posted.length).toBe(before + 1);
+    expect((await click(slackConn, "U-OWNER", p.prompt!.id, "deny")).statusCode).toBe(200);
+    await drainBackgroundWork(k.db);
+  });
+
+  it("the builder tool path: an agent (or a prompt injection steering it) is refused the same way, and the model is told", async () => {
+    const r = await k.req("POST", "/v1/builder/agents", owner.auth, {
+      name: `Slack writer ${Math.random().toString(36).slice(2, 7)}`,
+      connectionFormat: "shared",
+      computerUse: false,
+      modelAgentId: model,
+      projectId: owner.projectId,
+    });
+    expect(r.statusCode, r.body).toBe(201);
+    const id = r.json().agent.id as string;
+    const t = await k.req("PUT", `/v1/builder/agents/${id}/tools`, owner.auth, {
+      tools: [{ kind: "connector", refId: slackConnectorId, requiresApproval: false }],
+    });
+    expect(t.statusCode, t.body).toBe(200);
+    const [row] = await k.db.select().from(builderAgents).where(eq(builderAgents.id, id));
+    const toolName = (await resolveToolbox(k.db, row!, owner.id)).entries[0]!.name;
+    const before = posted.length;
+    for (const [payload, code] of [
+      [{ op: "chat.update", ts: "1785.1", text: "Approved" }, "chat_update_internal_only"],
+      [{ text: "x", blocks: [{ type: "actions", block_id: "regulait_step", elements: [] }] }, "reserved_chat_control"],
+    ] as const) {
+      const args = Buffer.from(JSON.stringify({ operation: "write", object: CHANNEL, payload })).toString("base64");
+      const turn = await k.req("POST", `/v1/builder/agents/${id}/chat`, owner.auth, { message: `do it <<use-tool:${toolName}>> <<use-tool-args:${args}>>` });
+      expect(turn.statusCode, turn.body).toBe(200);
+      const detail = (await k.req("GET", `/v1/builder/threads/${turn.json().thread.id}`, owner.auth)).json();
+      const step = (detail.messages as Array<{ steps: any[] }>).flatMap((m) => m.steps)[0];
+      expect(step, JSON.stringify(detail.messages)).toMatchObject({ kind: "connector", status: "denied", outcomeCode: code });
+    }
+    expect(posted.length).toBe(before);
+  });
+});
+
+describe("the Slack workspace pin (batch 2b review)", () => {
+  const event = (team: string | null) => {
+    const ts = `${1788000000 + ++seq}.000${seq}`;
+    return JSON.stringify({
+      type: "event_callback",
+      ...(team ? { team_id: team } : {}),
+      event_id: `Ev-pin-${k.RUN}-${ts}`,
+      event: { type: "app_mention", user: "U-OWNER", channel: CHANNEL, ts, text: "<@UBOT> hi" },
+    });
+  };
+  const sendEvent = (raw: string) =>
+    k.app.inject({ method: "POST", url: `/v1/chatops/${pinnedSlackConn}/events`, headers: slackHeaders(raw), payload: raw });
+  const refusals = async () =>
+    k.db.select().from(auditLog).where(and(eq(auditLog.ruleId, "chatops-slack-refused-team"), eq(auditLog.objectId, pinnedSlackConnId)));
+
+  it("a signed event or click from another team (or naming none) is refused, audited, and runs nothing; the pinned team passes", async () => {
+    const before = { posted: posted.length, refusals: (await refusals()).length };
+    for (const team of ["TOTHER", null]) {
+      const r = await sendEvent(event(team));
+      expect(r.statusCode, r.body).toBe(403);
+      expect(r.json().error).toBe("team_not_allowed");
+    }
+    const strangerClick = await click(pinnedSlackConn, "U-OWNER", "00000000-0000-4000-8000-000000000009", "approve", { team: "TOTHER" });
+    expect(strangerClick.statusCode).toBe(403);
+    expect(strangerClick.json().error).toBe("team_not_allowed");
+    await drainBackgroundWork(k.db);
+    expect(posted.length).toBe(before.posted);
+    expect((await refusals()).length).toBe(before.refusals + 3);
+    // the pinned team gets through the pin (to whatever comes next)
+    const ok = await sendEvent(event("TPINNED"));
+    expect(ok.statusCode, ok.body).toBe(200);
+    const pinnedClick = await click(pinnedSlackConn, "U-OWNER", "00000000-0000-4000-8000-000000000009", "approve", { team: "TPINNED" });
+    expect(pinnedClick.statusCode).toBe(404);
+    expect(pinnedClick.json().error).toBe("unknown_prompt");
+    // Slack's URL handshake names no team and runs nothing: still answered
+    const hs = JSON.stringify({ type: "url_verification", challenge: "c-1" });
+    const handshake = await sendEvent(hs);
+    expect(handshake.statusCode, handshake.body).toBe(200);
+    expect(handshake.json().challenge).toBe("c-1");
+    await drainBackgroundWork(k.db);
+  });
+
+  it("an unpinned workspace accepts any team (the pin is opt-in)", async () => {
+    const r = await click(slackConn, "U-OWNER", "00000000-0000-4000-8000-000000000009", "approve", { team: "TANY" });
+    expect(r.statusCode).toBe(404);
+  });
+
+  it("the pin is admin-set, slack only, and audited when changed", async () => {
+    const conns = (await k.req("GET", "/v1/chatops/connections", k.BOOT)).json().connections as any[];
+    expect(conns.find((c) => c.name === pinnedSlackConn)).toMatchObject({ slackTeamId: "TPINNED" });
+    const onTeams = await k.req("PATCH", `/v1/chatops/connections/${botConnId}`, k.BOOT, { slackTeamId: "T1" });
+    expect(onTeams.statusCode).toBe(400);
+    expect(onTeams.json().error).toBe("slack_team_slack_only");
+    expect((await k.req("PATCH", `/v1/chatops/connections/${pinnedSlackConnId}`, owner.auth, { slackTeamId: "T1" })).statusCode).toBe(403);
+    const changed = await k.req("PATCH", `/v1/chatops/connections/${pinnedSlackConnId}`, k.BOOT, { slackTeamId: "TNEW" });
+    expect(changed.statusCode, changed.body).toBe(200);
+    expect(changed.json().slackTeamId).toBe("TNEW");
+    const audits = await k.db.select().from(auditLog).where(and(eq(auditLog.ruleId, "chatops-slack-team-changed"), eq(auditLog.objectId, pinnedSlackConnId)));
+    expect(audits).toHaveLength(1);
+    expect((await k.req("PATCH", `/v1/chatops/connections/${pinnedSlackConnId}`, k.BOOT, { slackTeamId: "TPINNED" })).statusCode).toBe(200);
+    const teamsPinned = await k.req("POST", "/v1/chatops/connections", k.BOOT, {
+      name: `cc-teams-team-${k.RUN}`,
+      provider: "teams",
+      connectorId: connectorIds[3], // the bot workspace's teams connector
+      defaultChannel: CHANNEL,
+      signingSecret: SECRET,
+      slackTeamId: "T1",
+    });
+    expect(teamsPinned.statusCode).toBe(400);
+    expect(teamsPinned.json().error).toBe("slack_team_slack_only");
   });
 });
 
@@ -564,6 +778,37 @@ describe("Teams: the Bot Framework endpoint", () => {
     expect(again.statusCode, again.body).toBe(200);
     expect(jwksFetches).toBe(fetchesBefore + 1);
     await drainBackgroundWork(k.db);
+  });
+
+  it("a metadata refresh keeps the key set when jwks_uri is unchanged, and a FAILED refresh keeps the last good keys (batch 2b review)", async () => {
+    // every request re-reads the metadata for this test (TTL 0); restored after
+    const prevTtl = process.env.REGULAIT_TEAMS_BOT_METADATA_TTL_SECONDS;
+    process.env.REGULAIT_TEAMS_BOT_METADATA_TTL_SECONDS = "0";
+    try {
+      const warm = await sendBot(botConn, activity({ user: "aad-owner", text: "warm" }).body, `Bearer ${await token(k1)}`);
+      expect(warm.statusCode, warm.body).toBe(200);
+      const fetches = { metadata: metadataFetches, jwks: jwksFetches };
+      for (const text of ["refresh-1", "refresh-2"]) {
+        const r = await sendBot(botConn, activity({ user: "aad-owner", text }).body, `Bearer ${await token(k1)}`);
+        expect(r.statusCode, r.body).toBe(200);
+      }
+      expect(metadataFetches).toBe(fetches.metadata + 2); // the metadata WAS re-read …
+      expect(jwksFetches).toBe(fetches.jwks); // … and the unchanged key set was not re-downloaded
+      // the metadata host goes down: a valid token still verifies against the last good keys
+      metadataDown = true;
+      const during = await sendBot(botConn, activity({ user: "aad-owner", text: "outage" }).body, `Bearer ${await token(k1)}`);
+      expect(during.statusCode, during.body).toBe(200);
+      expect(metadataFetches).toBeGreaterThan(fetches.metadata + 2); // a refresh was attempted, and failed
+      // and a forged key is still refused
+      const forged = await sendBot(botConn, activity({ user: "aad-owner", text: "forged" }).body, `Bearer ${await token(unpublished)}`);
+      expect(forged.statusCode).toBe(401);
+      expect(forged.json().code).toBe("unknown_signing_key");
+    } finally {
+      metadataDown = false;
+      if (prevTtl === undefined) delete process.env.REGULAIT_TEAMS_BOT_METADATA_TTL_SECONDS;
+      else process.env.REGULAIT_TEAMS_BOT_METADATA_TTL_SECONDS = prevTtl;
+      await drainBackgroundWork(k.db);
+    }
   });
 
   it("a pinned tenant: another tenant's activity is refused (403, audited) even with a valid token", async () => {

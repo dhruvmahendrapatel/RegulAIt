@@ -28,14 +28,15 @@ const click = (over: Record<string, unknown> = {}, action: Record<string, unknow
   }).toString();
 
 describe("parseSlackStepInteraction", () => {
-  it("reads a step click: who, which prompt, which answer, where — and the message's own sections", () => {
+  it("reads a step click: who, which prompt, which answer, where — and NOTHING of the message's own content", () => {
+    // the clicked message's blocks are never read: the answered message is
+    // rebuilt from stored data (ADR-0173 batch 2b review)
     expect(parseSlackStepInteraction(click())).toEqual({
       chatUserId: "U-ME",
       promptId: PROMPT,
       answer: "approve",
       messageRef: "1785.1",
       channel: "C-1",
-      messageSections: ["Let me check &lt;x&gt;"],
     });
     expect(parseSlackStepInteraction(click({}, { action_id: SLACK_STEP_ACTION_IDS.deny }))?.answer).toBe("deny");
   });
@@ -83,10 +84,11 @@ describe("composeStepConfirmBlocks / composeStepAnsweredBlocks", () => {
     for (const s of sections) expect(s.text.text.length).toBeLessThanOrEqual(3_000);
   });
 
-  it("an answered message keeps its sections (not re-escaped) and has no buttons", () => {
-    const blocks = composeStepAnsweredBlocks({ sections: ["Let me check &lt;x&gt;"], outcome: "Approved by Ann." });
+  it("an answered message is rebuilt from the stored reply, made inert once, with no buttons", () => {
+    const blocks = composeStepAnsweredBlocks({ text: "Let me check <x> <!channel>", outcome: "Approved by Ann." });
     expect(blocks.some((b) => b.type === "actions")).toBe(false);
-    expect(JSON.stringify(blocks)).toContain("Let me check &lt;x&gt;");
+    expect(JSON.stringify(blocks)).toContain("Let me check &lt;x&gt; &lt;!channel&gt;");
+    expect(JSON.stringify(blocks)).not.toContain("<!channel>");
     expect(JSON.stringify(blocks)).not.toContain("&amp;lt;");
   });
 });
