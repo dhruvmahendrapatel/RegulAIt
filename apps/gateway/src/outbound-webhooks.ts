@@ -76,8 +76,11 @@ import { checkEgress, createGuardedFetch, egressRefusal, type EgressResolver } f
 import { scheduleBackgroundWork } from "./background-work.js";
 
 const NIL_USER = "00000000-0000-0000-0000-000000000000";
+/** one attempt's claim; well past the send deadline (WEBHOOK_LIMITS.timeoutMs) */
 const LEASE_SECONDS = 60;
 const SWEEP_LIMIT = 100;
+/** a pass stops claiming new deliveries after this; the scheduler runs it every 60 s */
+const SWEEP_BUDGET_MS = 45_000;
 
 export const WEBHOOK_RULE_IDS = {
   created: "webhook-subscription-created",
@@ -88,6 +91,7 @@ export const WEBHOOK_RULE_IDS = {
   egressBlocked: "egress-blocked",
   gaveUp: "webhook-delivery-failed",
   requeued: "webhook-delivery-requeued",
+  sweepRun: "webhook-sweep-run",
 } as const;
 
 /** test seams only: no production caller passes either (see GuardedFetchOptions) */
@@ -247,28 +251,44 @@ export async function sendSignedWebhook(
 /**
  * One attempt at one delivery. Claims the row with a lease first (a racing
  * sweep finds it leased and skips it), sends, then records the outcome.
- * Returns the row as recorded, or null when it was not due / not claimable.
+ * Returns the row as recorded, or null when it was not due, not claimable, or
+ * its lease was lost before the outcome could be written.
+ *
+ * TIME. Nothing here reuses a caller's clock reading for anything but "is it
+ * due": the lease is taken from the time of the claim, the signature's
+ * `webhook-timestamp` from the moment of sending (a receiver rejects a stale
+ * one, so a pass held up by a slow receiver must not sign later deliveries with
+ * its start time), and the backoff from that same send time. `dueBy` is the
+ * sweep's selection time — the only thing a pass's `now` decides.
+ *
+ * OWNERSHIP. Every outcome UPDATE is conditional on the lease this attempt
+ * wrote still being the row's lease (`lease_until = <claimed value>`). If the
+ * lease ran out and another worker claimed the row, this attempt writes
+ * nothing and returns null rather than overwriting that worker's result.
  */
 export async function attemptDelivery(
   db: Db,
   dataKey: string | undefined,
   deliveryId: string,
   deps: WebhookDeliveryDeps = {},
-  now: Date = new Date(),
+  dueBy?: Date,
 ): Promise<WebhookDeliveryRow | null> {
+  const claimAt = new Date();
   const [claimed] = await db
     .update(webhookDeliveries)
-    .set({ leaseUntil: new Date(now.getTime() + LEASE_SECONDS * 1000) })
+    .set({ leaseUntil: new Date(claimAt.getTime() + LEASE_SECONDS * 1000) })
     .where(
       and(
         eq(webhookDeliveries.id, deliveryId),
         eq(webhookDeliveries.status, "pending"),
-        or(isNull(webhookDeliveries.nextRetryAt), lte(webhookDeliveries.nextRetryAt, now)),
-        or(isNull(webhookDeliveries.leaseUntil), lt(webhookDeliveries.leaseUntil, now)),
+        or(isNull(webhookDeliveries.nextRetryAt), lte(webhookDeliveries.nextRetryAt, dueBy ?? claimAt)),
+        or(isNull(webhookDeliveries.leaseUntil), lt(webhookDeliveries.leaseUntil, claimAt)),
       ),
     )
     .returning();
   if (!claimed) return null;
+  // the outcome is written only while this attempt still holds the row
+  const stillOurs = and(eq(webhookDeliveries.id, claimed.id), eq(webhookDeliveries.leaseUntil, claimed.leaseUntil!));
   const [sub] = await db.select().from(webhookSubscriptions).where(eq(webhookSubscriptions.id, claimed.subscriptionId));
   const attempts = claimed.attempts + 1;
   if (!sub || !sub.active) {
@@ -277,30 +297,31 @@ export async function attemptDelivery(
       .set({
         status: "failed",
         attempts,
-        lastAttemptAt: now,
+        lastAttemptAt: new Date(),
         lastError: "the subscription was deactivated before this was delivered",
         nextRetryAt: null,
         leaseUntil: null,
       })
-      .where(eq(webhookDeliveries.id, claimed.id))
+      .where(stillOurs)
       .returning();
     return row ?? null;
   }
-  const out = await sendSignedWebhook(db, dataKey, sub, claimed.messageId, claimed.event, claimed.payload, now, deps);
+  const sentAt = new Date();
+  const out = await sendSignedWebhook(db, dataKey, sub, claimed.messageId, claimed.event, claimed.payload, sentAt, deps);
   if (out.ok) {
     const [row] = await db
       .update(webhookDeliveries)
       .set({
         status: "delivered",
         attempts,
-        lastAttemptAt: now,
+        lastAttemptAt: sentAt,
         responseCode: out.responseCode,
         lastError: null,
-        deliveredAt: now,
+        deliveredAt: new Date(),
         nextRetryAt: null,
         leaseUntil: null,
       })
-      .where(eq(webhookDeliveries.id, claimed.id))
+      .where(stillOurs)
       .returning();
     return row ?? null;
   }
@@ -310,14 +331,15 @@ export async function attemptDelivery(
     .set({
       status: exhausted ? "failed" : "pending",
       attempts,
-      lastAttemptAt: now,
+      lastAttemptAt: sentAt,
       responseCode: out.responseCode,
       lastError: out.error,
-      nextRetryAt: exhausted ? null : new Date(now.getTime() + webhookRetryDelaySeconds(attempts) * 1000),
+      nextRetryAt: exhausted ? null : new Date(sentAt.getTime() + webhookRetryDelaySeconds(attempts) * 1000),
       leaseUntil: null,
     })
-    .where(eq(webhookDeliveries.id, claimed.id))
+    .where(stillOurs)
     .returning();
+  if (!row) return null;
   if (exhausted) {
     await db.insert(auditLog).values({
       userId: NIL_USER,
@@ -333,32 +355,50 @@ export async function attemptDelivery(
   return row ?? null;
 }
 
-/** the scheduler's retry pass (and the manual sweep route): every due pending delivery, bounded */
+/**
+ * The scheduler's retry pass (and the manual sweep route): every due pending
+ * delivery, bounded. `now` only SELECTS what is due; each attempt takes its own
+ * time for its lease and its signature (see `attemptDelivery`).
+ *
+ * A dead receiver cannot starve the others: once one of a subscription's
+ * deliveries gets no HTTP answer at all (timeout, refused connection), its
+ * remaining deliveries wait for a later pass instead of each burning a full
+ * timeout here, and the pass stops claiming new work once its time budget is
+ * spent. Both leave the rows `pending` and due (`deferred`); nothing is lost.
+ */
 export async function runWebhookDeliverySweep(
   db: Db,
   dataKey: string | undefined,
-  opts: { now?: Date; limit?: number; deps?: WebhookDeliveryDeps } = {},
-): Promise<{ due: number; delivered: number; retrying: number; failed: number; skipped: number }> {
+  opts: { now?: Date; limit?: number; budgetMs?: number; deps?: WebhookDeliveryDeps } = {},
+): Promise<{ due: number; delivered: number; retrying: number; failed: number; skipped: number; deferred: number }> {
   const now = opts.now ?? new Date();
+  const started = Date.now();
+  const budgetMs = opts.budgetMs ?? SWEEP_BUDGET_MS;
   const due = await db
-    .select({ id: webhookDeliveries.id })
+    .select({ id: webhookDeliveries.id, subscriptionId: webhookDeliveries.subscriptionId })
     .from(webhookDeliveries)
     .where(
       and(
         eq(webhookDeliveries.status, "pending"),
         or(isNull(webhookDeliveries.nextRetryAt), lte(webhookDeliveries.nextRetryAt, now)),
-        or(isNull(webhookDeliveries.leaseUntil), lt(webhookDeliveries.leaseUntil, now)),
+        or(isNull(webhookDeliveries.leaseUntil), lt(webhookDeliveries.leaseUntil, new Date())),
       ),
     )
     .orderBy(webhookDeliveries.nextRetryAt)
     .limit(opts.limit ?? SWEEP_LIMIT);
-  const out = { due: due.length, delivered: 0, retrying: 0, failed: 0, skipped: 0 };
+  const out = { due: due.length, delivered: 0, retrying: 0, failed: 0, skipped: 0, deferred: 0 };
+  const unanswered = new Set<string>();
   for (const d of due) {
+    if (unanswered.has(d.subscriptionId) || Date.now() - started >= budgetMs) {
+      out.deferred += 1;
+      continue;
+    }
     const row = await attemptDelivery(db, dataKey, d.id, opts.deps ?? {}, now);
     if (!row) out.skipped += 1;
     else if (row.status === "delivered") out.delivered += 1;
     else if (row.status === "failed") out.failed += 1;
     else out.retrying += 1;
+    if (row && row.status !== "delivered" && row.responseCode === null) unanswered.add(d.subscriptionId);
   }
   return out;
 }
@@ -633,5 +673,13 @@ export function registerOutboundWebhookRoutes(
     return publicDelivery(row);
   });
 
-  app.post("/v1/webhooks/sweep", async () => runWebhookDeliverySweep(db, opts.dataKey, { deps }));
+  // a manual sweep SENDS deliveries, so it is an admin action on the record
+  app.post("/v1/webhooks/sweep", async (req) => {
+    const out = await runWebhookDeliverySweep(db, opts.dataKey, { deps });
+    await audit(actor(req), null, WEBHOOK_RULE_IDS.sweepRun,
+      `webhook retry sweep run by an admin: ${out.due} due, ${out.delivered} delivered, ${out.retrying} retrying, ` +
+        `${out.failed} failed, ${out.skipped} skipped, ${out.deferred} deferred`,
+      { phase: "webhook-sweep", ...out });
+    return out;
+  });
 }
