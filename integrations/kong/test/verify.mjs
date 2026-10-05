@@ -1002,14 +1002,16 @@ plugins:
     r.status === 403 && (await upstreamCount()) === 0,
     `status ${r.status}, upstream count ${await upstreamCount()}`);
   // AER-028 / ADR-0179 — the PDP decided that deny WITHOUT arguments (this
-  // adapter never sends them), so the refusal says so: data-scope rules are not
-  // supported at the Kong edge, and an operator must be able to tell that limit
-  // from an ordinary policy refusal. PENDING ITS FIRST CI RUN (plugin 0.4.0);
-  // the same behaviour is pinned locally by test/handler_spec.lua.
+  // adapter never sends them), so the refusal says exactly that and no more:
+  // `decidedWithout: ["args"]`. It does not claim the arguments were needed —
+  // this stranger is refused for having no grant — because the PDP's answer
+  // does not say so (ADR-0179 review, finding 5). PENDING ITS FIRST CI RUN
+  // (plugin 0.4.0); the same behaviour is pinned by test/handler_spec.lua.
   {
     const denyBody = await r.json().catch(() => null);
-    check("a deny decided without arguments is tagged notEvaluated: [\"args\"]",
-      Array.isArray(denyBody?.notEvaluated) && denyBody.notEvaluated.includes("args"),
+    check("a deny decided without arguments is tagged decidedWithout: [\"args\"]",
+      Array.isArray(denyBody?.decidedWithout) && denyBody.decidedWithout.includes("args") &&
+        denyBody.notEvaluated === undefined,
       `body=${JSON.stringify(denyBody)}`);
   }
 

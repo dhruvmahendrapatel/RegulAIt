@@ -1,0 +1,11 @@
+-- busted configuration for the regulait-authz plugin spec. Run `busted` from
+-- integrations/kong; CI pins the runner, its rocks and the interpreter
+-- (.github/workflows/integrations.yml, test/regulait-authz-spec-dev-1.rockspec).
+return {
+  default = {
+    ROOT = { "test" },
+    pattern = "_spec",
+    -- the plugin resolves as kong.plugins.regulait-authz.* from this directory
+    lpath = "./?.lua;./?/init.lua",
+  },
+}
