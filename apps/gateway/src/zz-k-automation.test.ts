@@ -51,6 +51,7 @@ import {
   eq,
   evalDatasets,
   inArray,
+  complianceProfiles,
   orgSettings,
   ORG_SETTINGS_ID,
   runMigrations,
@@ -106,6 +107,7 @@ const createdEvaluationTraceIds: string[] = [];
 let allowId: string | null = null;
 let receiver: http.Server | null = null;
 let priorRetentionDays: number | null = null;
+let priorProfileRetention: Array<{ id: string; d: number }> = [];
 let floorDays = 0;
 let maxHold = 0;
 
@@ -203,7 +205,22 @@ beforeAll(async () => {
   const [prior] = await db.select({ d: orgSettings.defaultAuditRetentionDays }).from(orgSettings).where(eq(orgSettings.id, ORG_SETTINGS_ID));
   priorRetentionDays = prior?.d ?? null;
   await db.update(orgSettings).set({ defaultAuditRetentionDays: 365 }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+  // The §8.3 floor is the MAX of the org default and every compliance
+  // profile's retention. A profile another file left behind (CI ran one with
+  // a multi-year retention) would push the floor past the 3-year hold cap and
+  // make every "hold beyond the floor" refused. Pin the floor to exactly the
+  // org default for this file; restored in afterAll.
+  priorProfileRetention = (
+    await db.select({ id: complianceProfiles.id, d: complianceProfiles.auditRetentionDays }).from(complianceProfiles)
+  ).filter((p) => p.d != null) as Array<{ id: string; d: number }>;
+  if (priorProfileRetention.length) {
+    await db
+      .update(complianceProfiles)
+      .set({ auditRetentionDays: null })
+      .where(inArray(complianceProfiles.id, priorProfileRetention.map((p) => p.id)));
+  }
   floorDays = (await retentionFloorDays(db))!;
+  expect(floorDays, "this file needs the §8.3 floor pinned to its own 365-day org default").toBe(365);
   maxHold = maxRetentionHoldDays(floorDays)!;
 }, 120_000);
 
@@ -218,6 +235,9 @@ afterAll(async () => {
     await new Promise<void>((r) => receiver!.close(() => r()));
   }
   await db.update(orgSettings).set({ defaultAuditRetentionDays: priorRetentionDays }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+  for (const p of priorProfileRetention) {
+    await db.update(complianceProfiles).set({ auditRetentionDays: p.d }).where(eq(complianceProfiles.id, p.id));
+  }
   if (createdRuleIds.length) await db.delete(automationRules).where(inArray(automationRules.id, createdRuleIds));
   if (createdSubscriptionIds.length) await db.delete(webhookSubscriptions).where(inArray(webhookSubscriptions.id, createdSubscriptionIds));
   if (createdUserIds.length) {
