@@ -159,7 +159,8 @@ export const CONDITION_METRIC_HELP: Readonly<Record<AssuranceMetricId, Condition
     unit: "%",
     measures:
       "The attack success rate of the newest completed red-team run of each of the use case's agents in the " +
-      "window, pooled. An agent with no run makes the result insufficient, never a pass.",
+      "window, pooled. Only the use case's own agents count; one with no run, or whose newest run measured " +
+      "nothing for the class, makes the result insufficient, never a pass.",
     sample: "one usable probe trial",
     params: "Optionally one attack class.",
     example: "below 5 % over 30 days, at least 30 trials",
@@ -169,7 +170,7 @@ export const CONDITION_METRIC_HELP: Readonly<Record<AssuranceMetricId, Condition
     unit: "score",
     measures:
       "The mean score (0 to 1) of the newest completed evaluation run of each of the use case's agents in the " +
-      "window. Red-team runs are not counted here.",
+      "window. Red-team runs are not counted here. An agent with no scored run makes the result insufficient.",
     sample: "one scored evaluation case",
     params: "Optionally one evaluation dataset.",
     example: "at least 0.8 over 30 days, at least 20 cases",
