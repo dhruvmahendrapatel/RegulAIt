@@ -344,6 +344,7 @@ import {
   registerPromptRegistryRoutes,
 } from "./prompt-registry.js";
 import { registerOutboundWebhookRoutes } from "./outbound-webhooks.js";
+import { registerAnnotationRoutes } from "./annotations.js";
 import { registerPlaygroundRoutes } from "./playground.js";
 // ADR-0097 — the tool-poisoning admission gate (part A) and the RFC 9728
 // protected-resource metadata + WWW-Authenticate challenge (part B).
@@ -4510,6 +4511,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerPromptRegistryRoutes(app, db, { dataKey: opts.dataKey });
   registerPlaygroundRoutes(app, db, { dataKey: opts.dataKey });
   registerOutboundWebhookRoutes(app, db, { dataKey: opts.dataKey });
+
+  // ADR-0173 batch 2c
+  // Q: annotation queues. Queue setup, enqueue, export and the SLA sweep are
+  // admin (default gate); the reviewer inbox, item read and submit are in
+  // NON_ADMIN_ROUTES and gated in-handler (named reviewer or admin; no self-review).
+  registerAnnotationRoutes(app, db, { dataKey: opts.dataKey });
 
   // ADR-0031 item 2: the audit read surface used to be hard-capped at 100 rows
   // with a userId filter (plus PR #79's deployMode) and nothing else — for a

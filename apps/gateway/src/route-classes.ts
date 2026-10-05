@@ -550,6 +550,16 @@ export const NON_ADMIN_ROUTES = new Set([
   "POST /v1/chatops/:connectionName/messages",
   // ADR-0173 batch 2b — the bot's token + identity link, not admin-ness, is the gate
   "POST /v1/chatops/:connectionName/bot",
+  // ADR-0173 batch 2c (Q) — a named reviewer works an annotation queue from
+  // their inbox without being an admin (owner decision, 2026-10-05). Each
+  // handler checks in-handler: the inbox is the caller's own assignments; the
+  // item read admits a named reviewer of the item's queue or an admin (anyone
+  // else: 403 + a deny audit row; every read audited; previews only for a
+  // non-admin); submit admits a named reviewer only and refuses self-review.
+  // Queue setup, enqueue, export and the SLA sweep stay admin (not here).
+  "GET /v1/annotations/inbox",
+  "GET /v1/annotations/items/:itemId",
+  "POST /v1/annotations/items/:itemId/submissions",
 ]);
 
 /**
