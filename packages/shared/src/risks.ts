@@ -26,6 +26,18 @@
  * not quantified risk math, and this register does not pretend it is.
  */
 import { z } from "zod";
+import {
+  ASSURANCE_DEFAULTS,
+  RESIDUAL_RISK_BANDS,
+  RISK_RESPONSE_TYPES,
+  RISK_TOLERANCE_SCOPE_KINDS,
+  TOLERANCE_BANDS,
+  maxAcceptanceMonths,
+  type ResidualRiskBand,
+  type RiskToleranceScopeKind,
+  type ToleranceBand,
+} from "./assurance.js";
+import { REVIEW_POLICY_TIER_KEYS } from "./review-policy.js";
 
 // ---------------------------------------------------------------------------
 // Vocabularies
@@ -535,3 +547,133 @@ export const DEFAULT_RISK_LIBRARY: RiskLibraryEntry[] = [
     evidenceResolvers: ["output_safety_config", "guardrail_blocks"],
   },
 ];
+
+// ---------------------------------------------------------------------------
+// ADR-0180 §6 (A10) — risk tolerance and time-boxed acceptance, the pure half.
+// The gateway half (routes, `residualPosition`, the expiry sweep, the monitor
+// loader) is `apps/gateway/src/risk-tolerance.ts`.
+// ---------------------------------------------------------------------------
+
+/** a compensating control named beside an acceptance: an optional pack
+ * control ref and what it does, in prose (the gateway scrubs the prose) */
+export const compensatingControlSchema = z
+  .object({
+    controlRef: z.string().trim().min(3).max(200).nullable().optional(),
+    description: z.string().trim().min(1).max(1000),
+  })
+  .strict();
+export type CompensatingControlInput = z.infer<typeof compensatingControlSchema>;
+
+/** `POST /v1/risks/:riskId/acceptances`. `expiresAt` absent = the longest the
+ * residual band allows (6 calendar months for high/critical, 12 otherwise);
+ * one beyond that is refused, never clamped. */
+export const createRiskAcceptanceSchema = z
+  .object({
+    responseType: z.enum(RISK_RESPONSE_TYPES),
+    rationale: z.string().trim().min(10).max(4000),
+    compensatingControls: z.array(compensatingControlSchema).max(20).default([]),
+    expiresAt: z.string().datetime({ offset: true }).optional(),
+  })
+  .strict();
+export type CreateRiskAcceptanceInput = z.infer<typeof createRiskAcceptanceSchema>;
+
+/** the categories and review tiers a tolerance may be scoped to */
+export const RISK_TOLERANCE_SCOPE_KEYS: Readonly<Record<RiskToleranceScopeKind, readonly string[]>> = {
+  category: AI_RISK_CATEGORIES,
+  tier: REVIEW_POLICY_TIER_KEYS,
+};
+
+/** `PUT /v1/risk-tolerances` — the WHOLE configured set; an empty list returns
+ * the org to the strict default in code */
+export const putRiskTolerancesSchema = z
+  .object({
+    tolerances: z
+      .array(
+        z
+          .object({
+            scopeKind: z.enum(RISK_TOLERANCE_SCOPE_KINDS),
+            scopeKey: z.string().min(1).max(64),
+            maxBand: z.enum(TOLERANCE_BANDS),
+          })
+          .strict(),
+      )
+      .max(AI_RISK_CATEGORIES.length + REVIEW_POLICY_TIER_KEYS.length),
+  })
+  .strict()
+  .superRefine((v, ctx) => {
+    const seen = new Set<string>();
+    v.tolerances.forEach((t, i) => {
+      if (!RISK_TOLERANCE_SCOPE_KEYS[t.scopeKind].includes(t.scopeKey)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["tolerances", i, "scopeKey"],
+          message: `'${t.scopeKey}' is not a known ${t.scopeKind}`,
+        });
+      }
+      const k = `${t.scopeKind}:${t.scopeKey}`;
+      if (seen.has(k)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["tolerances", i],
+          message: `${t.scopeKind} '${t.scopeKey}' is listed twice`,
+        });
+      }
+      seen.add(k);
+    });
+  });
+export type PutRiskTolerancesInput = z.infer<typeof putRiskTolerancesSchema>;
+
+/** `months` calendar months after `from`, in UTC, clamped to the last day of
+ * the target month (31 Aug + 6 months = 28/29 Feb, never 2/3 Mar), so a cap of
+ * "6 months" never runs past six calendar months. Native Date on purpose: the
+ * package carries no date library, and `addMonthsUtc` elsewhere rolls over. */
+export function addCalendarMonthsUtc(from: Date, months: number): Date {
+  const d = new Date(from.getTime());
+  const day = d.getUTCDate();
+  d.setUTCDate(1);
+  d.setUTCMonth(d.getUTCMonth() + months);
+  const lastDay = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).getUTCDate();
+  d.setUTCDate(Math.min(day, lastDay));
+  return d;
+}
+
+/** the latest an acceptance of residual risk at `band`, made at `acceptedAt`, may expire */
+export function maxAcceptanceExpiry(band: ResidualRiskBand, acceptedAt: Date): Date {
+  return addCalendarMonthsUtc(acceptedAt, maxAcceptanceMonths(band));
+}
+
+/** true when residual risk at `band` sits above a tolerance of `max` */
+export function bandExceedsTolerance(band: ResidualRiskBand, max: ToleranceBand): boolean {
+  return TOLERANCE_BANDS.indexOf(band) > TOLERANCE_BANDS.indexOf(max);
+}
+
+/** true when an acceptance recorded at `accepted` still covers residual risk at `band` */
+export function acceptanceCoversBand(accepted: ResidualRiskBand, band: ResidualRiskBand): boolean {
+  return RESIDUAL_RISK_BANDS.indexOf(accepted) >= RESIDUAL_RISK_BANDS.indexOf(band);
+}
+
+export interface ToleranceRowInput {
+  scopeKind: RiskToleranceScopeKind;
+  scopeKey: string;
+  maxBand: ToleranceBand;
+}
+
+/**
+ * The tolerance that applies to one risk. With no configured row for its
+ * category or its use case's tier, the STRICT DEFAULT in code applies
+ * (`ASSURANCE_DEFAULTS.toleranceMaxBand`, medium). With rows for both, the
+ * STRICTER wins (secure by default: relaxing one scope never relaxes another);
+ * on a tie the category row is named.
+ */
+export function resolveRiskTolerance(
+  rows: readonly ToleranceRowInput[],
+  risk: { category: string; tier: string | null },
+): { band: ToleranceBand; source: "default" | "category" | "tier" } {
+  const matches: Array<{ band: ToleranceBand; source: "category" | "tier" }> = [];
+  const cat = rows.find((r) => r.scopeKind === "category" && r.scopeKey === risk.category);
+  if (cat) matches.push({ band: cat.maxBand, source: "category" });
+  const tier = risk.tier !== null ? rows.find((r) => r.scopeKind === "tier" && r.scopeKey === risk.tier) : undefined;
+  if (tier) matches.push({ band: tier.maxBand, source: "tier" });
+  if (matches.length === 0) return { band: ASSURANCE_DEFAULTS.toleranceMaxBand, source: "default" };
+  return matches.reduce((a, b) => (TOLERANCE_BANDS.indexOf(b.band) < TOLERANCE_BANDS.indexOf(a.band) ? b : a));
+}

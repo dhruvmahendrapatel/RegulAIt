@@ -597,10 +597,14 @@ export const NON_ADMIN_ROUTES = new Set([
   //
   // --- A10: risk tolerance and acceptance ------------------------------------
   // The acceptance HISTORY reads like the risk detail: owner-or-admin in the
-  // handler. DELIBERATELY ABSENT, so ADMIN-ONLY: GET/PUT /v1/risk-tolerances
-  // (org policy) and POST /v1/risks/:riskId/acceptances (accepting residual
-  // risk is an org-wide act, like the legacy accept).
+  // handler. RECORDING an acceptance admits an admin OR a risk acceptor the
+  // review policy names (the ADR-0168 rule, the same people who may accept on
+  // a sign-off), checked in the handler, which also refuses the use case's
+  // owner (ADR-0170 §8); every refusal is audited. DELIBERATELY ABSENT, so
+  // ADMIN-ONLY: GET/PUT /v1/risk-tolerances (org policy) and the legacy
+  // POST /v1/risks/:riskId/accept.
   "GET /v1/risks/:riskId/acceptances",
+  "POST /v1/risks/:riskId/acceptances",
 ]);
 
 /**

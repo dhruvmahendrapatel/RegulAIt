@@ -4395,3 +4395,19 @@ export {
   type MonitorAssuranceInput,
   type MonitorAssuranceSubject,
 } from "./governance-monitor.js";
+// ADR-0180 §6 (A10) — risk tolerance and time-boxed acceptance, the pure half
+export {
+  RISK_TOLERANCE_SCOPE_KEYS,
+  acceptanceCoversBand,
+  addCalendarMonthsUtc,
+  bandExceedsTolerance,
+  compensatingControlSchema,
+  createRiskAcceptanceSchema,
+  maxAcceptanceExpiry,
+  putRiskTolerancesSchema,
+  resolveRiskTolerance,
+  type CompensatingControlInput,
+  type CreateRiskAcceptanceInput,
+  type PutRiskTolerancesInput,
+  type ToleranceRowInput,
+} from "./risks.js";

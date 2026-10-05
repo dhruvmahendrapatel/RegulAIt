@@ -220,10 +220,7 @@ describe("ADR-0180 D3 route stubs", () => {
     { method: "PUT", route: "/v1/governance/review-policy/required-tests", url: "/v1/governance/review-policy/required-tests", cls: "admin" },
     { method: "GET", route: "/v1/builder/agents/:id/autonomy", url: "/v1/builder/agents/00000000-0000-4000-8000-000000000003/autonomy", cls: "user" },
     { method: "PUT", route: "/v1/builder/agents/:id/autonomy", url: "/v1/builder/agents/00000000-0000-4000-8000-000000000003/autonomy", cls: "user" },
-    { method: "GET", route: "/v1/risk-tolerances", url: "/v1/risk-tolerances", cls: "admin" },
-    { method: "PUT", route: "/v1/risk-tolerances", url: "/v1/risk-tolerances", cls: "admin" },
-    { method: "GET", route: "/v1/risks/:riskId/acceptances", url: "/v1/risks/00000000-0000-4000-8000-000000000004/acceptances", cls: "user" },
-    { method: "POST", route: "/v1/risks/:riskId/acceptances", url: "/v1/risks/00000000-0000-4000-8000-000000000004/acceptances", cls: "admin" },
+    // A10's four routes are built: zz-adr0180-a10-risk-tolerance.test.ts pins them
   ];
 
   it.each(STUBS)("$method $route: classed $cls, 501 not_implemented until its owner lands", async (s) => {
