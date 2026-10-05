@@ -28,6 +28,8 @@ export const MODEL_POLICY_FEATURES = [
   "evals",
   "orchestration",
   "compat",
+  // ADR-0173 batch 2b: the prompt playground ("policy sandbox")
+  "playground",
 ] as const;
 export type ModelPolicyFeature = (typeof MODEL_POLICY_FEATURES)[number];
 
@@ -40,6 +42,7 @@ export const MODEL_POLICY_FEATURE_LABELS: Record<ModelPolicyFeature, string> = {
   evals: "Evaluations",
   orchestration: "Orchestration",
   compat: "Compatible APIs",
+  playground: "Prompt playground",
 };
 
 /** the use-case data classes (AI_USE_CASE_DATA_SENSITIVITIES), restated to keep this module dependency-free */

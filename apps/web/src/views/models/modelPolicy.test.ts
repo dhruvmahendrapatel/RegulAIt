@@ -63,6 +63,8 @@ describe("modelPolicyVerdict (mirror)", () => {
     const p: ModelPolicyView = { rules: [rule({ allowedAgentIds: ["a"] })] };
     const f = allowedFeatures(p, B);
     expect(f.find((x) => x.feature === "chat")?.allowed).toBe(false);
-    expect(f.filter((x) => x.allowed)).toHaveLength(6);
+    // ADR-0173 batch 2b added the eighth feature, "playground": seven are unrestricted here
+    expect(f.filter((x) => x.allowed)).toHaveLength(7);
+    expect(f.find((x) => x.feature === "playground")?.allowed).toBe(true);
   });
 });

@@ -719,6 +719,10 @@ describe("every sweep is registered", () => {
         // Driven end-to-end, through the admin sweep endpoint that calls the
         // same function, in builder-chat.test.ts; this list pins registration.
         SCHEDULER_JOB_NAMES.builderAgentSchedules,
+        // ADR-0173 batch 2b: retries outbound webhook deliveries. Driven
+        // end-to-end, through the admin sweep endpoint that calls the same
+        // function, in outbound-webhooks.test.ts; this list pins registration.
+        SCHEDULER_JOB_NAMES.webhookDeliveries,
       ].sort(),
     );
     for (const def of registry.values()) {

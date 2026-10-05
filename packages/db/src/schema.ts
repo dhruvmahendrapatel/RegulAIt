@@ -1215,6 +1215,15 @@ export const auditLog = pgTable(
         // ADR-0173 §3: an admin replacing the model allow-list matrix
         // (objectId null — the policy is org-wide). Plain text column — no DDL.
         "model_policy",
+        // ADR-0173 batch 2b: a prompt created / committed / tagged / promoted
+        // (objectId = the prompt), and an outbound webhook subscription changed,
+        // tested or a delivery given up (objectId = the subscription). Plain
+        // text column — no DDL.
+        "prompt",
+        // an approval of kind prompt_promotion audits under its own kind
+        // (the decide path writes override/self-review/delegation rows so)
+        "prompt_promotion",
+        "webhook_subscription",
         // ADR-0172: a builder agent created / changed / shared / run on a
         // schedule / refused at its spend limit, and a builder skill change
         // (objectId = the builder agent or skill). Plain text column — no DDL.
@@ -3948,6 +3957,8 @@ export const MODEL_POLICY_FEATURE_VALUES = [
   "evals",
   "orchestration",
   "compat",
+  // ADR-0173 batch 2b (migration 0143): the prompt playground
+  "playground",
 ] as const;
 export const MODEL_POLICY_DATA_CLASS_VALUES = ["public", "internal", "confidential", "regulated"] as const;
 
@@ -3969,6 +3980,203 @@ export const modelPolicyRules = pgTable(
   (t) => [uniqueIndex("model_policy_rules_feature_class_uq").on(t.feature, sql`COALESCE(${t.dataClass}, '')`)],
 );
 export type ModelPolicyRuleRow = typeof modelPolicyRules.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0173 batch 2b (migration 0143) — the governed prompt registry and
+// outbound webhooks
+// ---------------------------------------------------------------------------
+//
+// A prompt is an identity (name, owner, visibility, project); its content is
+// IMMUTABLE commits addressed by a hash over {template, model config,
+// variables, output schema, tools, parent}; tags are movable names pointing
+// at commits. Moving `prod` is an approvals-queue decision: a promotion row
+// pins the (prompt, tag, commit hash) digest, and the tag moves only in the
+// decide hook, only if that binding still holds.
+export const PROMPT_VISIBILITY = ["private", "workspace", "people"] as const;
+export const PROMPT_PROMOTION_STATUSES = ["pending_approval", "applied", "denied", "stale"] as const;
+
+export const prompts = pgTable(
+  "prompts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    description: text("description").notNull().default(""),
+    ownerUserId: uuid("owner_user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "restrict" }),
+    visibility: text("visibility", { enum: PROMPT_VISIBILITY }).notNull().default("private"),
+    projectId: uuid("project_id").references(() => projects.id, { onDelete: "set null" }),
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("prompts_owner_idx").on(t.ownerUserId),
+    uniqueIndex("prompts_name_live_uq").on(sql`lower(${t.name})`).where(sql`${t.archivedAt} IS NULL`),
+    check("prompts_visibility_ck", sql`${t.visibility} IN ('private', 'workspace', 'people')`),
+  ],
+);
+export type PromptRow = typeof prompts.$inferSelect;
+
+export const promptShares = pgTable(
+  "prompt_shares",
+  {
+    promptId: uuid("prompt_id")
+      .notNull()
+      .references(() => prompts.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.promptId, t.userId] }), index("prompt_shares_user_idx").on(t.userId)],
+);
+
+export const promptCommits = pgTable(
+  "prompt_commits",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    promptId: uuid("prompt_id")
+      .notNull()
+      .references(() => prompts.id, { onDelete: "cascade" }),
+    /** sha256 hex of the canonical content + parent (shared `promptCommitHash`) */
+    hash: text("hash").notNull(),
+    parentHash: text("parent_hash"),
+    template: text("template").notNull(),
+    modelConfig: jsonb("model_config").$type<{ agentId: string | null; maxTokens: number | null }>().notNull(),
+    variables: jsonb("variables").$type<string[]>().notNull().default([]),
+    outputSchema: jsonb("output_schema").$type<Record<string, unknown> | null>(),
+    tools: jsonb("tools")
+      .$type<Array<{ name: string; description: string; inputSchema: Record<string, unknown> }>>()
+      .notNull()
+      .default([]),
+    authorUserId: uuid("author_user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "restrict" }),
+    message: text("message").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("prompt_commits_prompt_hash_uq").on(t.promptId, t.hash),
+    index("prompt_commits_prompt_created_idx").on(t.promptId, t.createdAt),
+    check("prompt_commits_hash_ck", sql`${t.hash} ~ '^[0-9a-f]{64}$'`),
+  ],
+);
+export type PromptCommitRow = typeof promptCommits.$inferSelect;
+
+export const promptTags = pgTable(
+  "prompt_tags",
+  {
+    promptId: uuid("prompt_id")
+      .notNull()
+      .references(() => prompts.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    commitId: uuid("commit_id")
+      .notNull()
+      .references(() => promptCommits.id, { onDelete: "cascade" }),
+    movedByUserId: uuid("moved_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    movedAt: timestamp("moved_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.promptId, t.name] }),
+    check("prompt_tags_name_ck", sql`${t.name} ~ '^[a-z][a-z0-9_-]{0,31}$'`),
+  ],
+);
+export type PromptTagRow = typeof promptTags.$inferSelect;
+
+export const promptPromotions = pgTable(
+  "prompt_promotions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    promptId: uuid("prompt_id")
+      .notNull()
+      .references(() => prompts.id, { onDelete: "cascade" }),
+    tag: text("tag").notNull(),
+    commitId: uuid("commit_id")
+      .notNull()
+      .references(() => promptCommits.id, { onDelete: "cascade" }),
+    commitHash: text("commit_hash").notNull(),
+    /** the commit the tag pointed at when this was requested (null = the tag was new) */
+    previousCommitHash: text("previous_commit_hash"),
+    /** shared `promptPromotionDigest({promptId, tag, commitHash})` — the approval's binding */
+    bindingDigest: text("binding_digest").notNull(),
+    requestedByUserId: uuid("requested_by_user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "restrict" }),
+    approverUserId: uuid("approver_user_id").notNull(),
+    approvalId: uuid("approval_id").references(() => approvals.id, { onDelete: "set null" }),
+    status: text("status", { enum: PROMPT_PROMOTION_STATUSES }).notNull().default("pending_approval"),
+    decidedByUserId: uuid("decided_by_user_id"),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    result: jsonb("result").$type<Record<string, unknown>>(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("prompt_promotions_one_pending_uq")
+      .on(t.promptId, t.tag)
+      .where(sql`${t.status} = 'pending_approval'`),
+    index("prompt_promotions_approval_idx").on(t.approvalId),
+    check(
+      "prompt_promotions_status_ck",
+      sql`${t.status} IN ('pending_approval', 'applied', 'denied', 'stale')`,
+    ),
+  ],
+);
+export type PromptPromotionRow = typeof promptPromotions.$inferSelect;
+
+/** admin-managed outbound webhook subscriptions; the secret is a data-key envelope */
+export const webhookSubscriptions = pgTable("webhook_subscriptions", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  name: text("name").notNull().unique(),
+  url: text("url").notNull(),
+  /** registered event names or `<family>.*` selectors */
+  events: jsonb("events").$type<string[]>().notNull().default([]),
+  /** the Standard Webhooks `whsec_` signing secret, encrypted with REGULAIT_DATA_KEY */
+  secretCiphertext: text("secret_ciphertext").notNull(),
+  active: boolean("active").notNull().default(true),
+  allowPlaintextHttp: boolean("allow_plaintext_http").notNull().default(false),
+  createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+  secretRotatedAt: timestamp("secret_rotated_at", { withTimezone: true }).notNull().defaultNow(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+export type WebhookSubscriptionRow = typeof webhookSubscriptions.$inferSelect;
+
+export const WEBHOOK_DELIVERY_STATUS_VALUES = ["pending", "delivered", "failed"] as const;
+
+/** one event to one subscription; retried on the scheduler sweep until delivered or out of attempts */
+export const webhookDeliveries = pgTable(
+  "webhook_deliveries",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    subscriptionId: uuid("subscription_id")
+      .notNull()
+      .references(() => webhookSubscriptions.id, { onDelete: "cascade" }),
+    event: text("event").notNull(),
+    /** the Standard Webhooks `webhook-id`: one per event, the same on every retry */
+    messageId: text("message_id").notNull(),
+    /** ids, names, hashes, actor ids and timestamps only (shared `webhookPayloadFor`) */
+    payload: jsonb("payload").$type<Record<string, unknown>>().notNull(),
+    status: text("status", { enum: WEBHOOK_DELIVERY_STATUS_VALUES }).notNull().default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    maxAttempts: integer("max_attempts").notNull(),
+    nextRetryAt: timestamp("next_retry_at", { withTimezone: true }),
+    lastAttemptAt: timestamp("last_attempt_at", { withTimezone: true }),
+    responseCode: integer("response_code"),
+    lastError: text("last_error"),
+    /** a claim lease so a manual sweep racing the scheduler sends once */
+    leaseUntil: timestamp("lease_until", { withTimezone: true }),
+    deliveredAt: timestamp("delivered_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("webhook_deliveries_due_idx").on(t.status, t.nextRetryAt),
+    index("webhook_deliveries_subscription_idx").on(t.subscriptionId, t.createdAt),
+    check("webhook_deliveries_status_ck", sql`${t.status} IN ('pending', 'delivered', 'failed')`),
+    check("webhook_deliveries_attempts_ck", sql`${t.attempts} >= 0 AND ${t.attempts} <= ${t.maxAttempts}`),
+  ],
+);
+export type WebhookDeliveryRow = typeof webhookDeliveries.$inferSelect;
 
 // ---------------------------------------------------------------------------
 // ADR-0040 (migration 0054) — ABAC / policy-as-code

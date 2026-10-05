@@ -995,6 +995,13 @@
       "when": 1785077000000,
       "tag": "0142_credential_inventory_energy",
       "breakpoints": true
+    },
+    {
+      "idx": 143,
+      "version": "7",
+      "when": 1785078000000,
+      "tag": "0143_prompt_registry_webhooks",
+      "breakpoints": true
     }
   ]
 }

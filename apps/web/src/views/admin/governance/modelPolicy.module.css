@@ -38,7 +38,9 @@
   text-align: center;
   font-weight: 600;
   color: var(--text);
-  min-width: 7.5rem;
+  /* eight features (ADR-0173 batch 2b added the playground) still fit a
+   * 1440px window without scrolling a control under the sticky column */
+  min-width: 6.25rem;
 }
 .featureName {
   display: block;

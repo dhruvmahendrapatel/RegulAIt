@@ -337,6 +337,14 @@ import { registerOpenAiCompat } from "./compat-openai.js";
 import { registerModelsDiscovery } from "./compat-models.js";
 import { registerVirtualKeyRoutes, routesForPurpose } from "./virtual-keys.js";
 import { registerModelPolicyRoutes } from "./model-policy.js";
+// ADR-0173 batch 2b — the governed prompt registry, outbound webhooks and the playground
+import {
+  applyPromptPromotionDecision,
+  precheckPromptPromotionDecision,
+  registerPromptRegistryRoutes,
+} from "./prompt-registry.js";
+import { registerOutboundWebhookRoutes } from "./outbound-webhooks.js";
+import { registerPlaygroundRoutes } from "./playground.js";
 // ADR-0097 — the tool-poisoning admission gate (part A) and the RFC 9728
 // protected-resource metadata + WWW-Authenticate challenge (part B).
 import {
@@ -3543,6 +3551,13 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       const refusal = await precheckRemediationDecision(db, row, deciderUserId);
       if (refusal) return fail(refusal.status, refusal.body);
     }
+    // ADR-0173 batch 2b — `cannot_approve_own_prompt_commit`, keyed on the
+    // DECIDER so the commit's author cannot reach its promotion through
+    // delegation or the admin override above.
+    if (row.objectType === "prompt_promotion") {
+      const refusal = await precheckPromptPromotionDecision(db, row, deciderUserId);
+      if (refusal) return fail(refusal.status, refusal.body);
+    }
     // Separation-of-duties guard: the person deciding IS the person who
     // triggered the governed action. Still decidable (alternate-approver
     // routing is deliberately out of scope) but never silently — a recorded
@@ -3863,6 +3878,19 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
             await runGovernanceMonitor(d, { actorUserId: deciderUserId });
           };
         }
+      }
+      // ADR-0173 batch 2b — a prompt promotion: approved = the tag moves HERE,
+      // inside the decision's transaction, only if the promotion's stored
+      // (prompt, tag, commit hash) binding still matches; denied = nothing
+      // moves. Post-commit: the webhook deliveries it enqueued are kicked.
+      if (updated.objectType === "prompt_promotion") {
+        postCommit = await applyPromptPromotionDecision(
+          tx as unknown as Db,
+          updated,
+          binaryDecision,
+          deciderUserId,
+          opts.dataKey,
+        );
       }
       return { updated, postCommit, refusal: null };
     });
@@ -4442,6 +4470,13 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // read of the policy as it applies to them (NON_ADMIN_ROUTES); PUT is admin.
   // Enforcement is NOT here: it is the shared model-access decision's.
   registerModelPolicyRoutes(app, db);
+  // ADR-0173 batch 2b — the prompt registry and the playground are a person's
+  // own work (NON_ADMIN_ROUTES, visibility and edit checked in-handler; every
+  // playground call is a governed dispatch as the caller under the
+  // "playground" feature). Outbound webhooks are admin-only.
+  registerPromptRegistryRoutes(app, db, { dataKey: opts.dataKey });
+  registerPlaygroundRoutes(app, db, { dataKey: opts.dataKey });
+  registerOutboundWebhookRoutes(app, db, { dataKey: opts.dataKey });
 
   // ADR-0031 item 2: the audit read surface used to be hard-capped at 100 rows
   // with a userId filter (plus PR #79's deployMode) and nothing else — for a
