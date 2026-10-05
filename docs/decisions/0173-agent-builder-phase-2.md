@@ -215,3 +215,32 @@ the proof was taken by switching it off in a throwaway worktree.
 - the web field for the Slack team pin;
 - the deferred count on the Webhooks page;
 - OpenAPI text for the `<promptId>@tag` form.
+
+## Amendment — batch 2c defined (owner, 2026-10-05)
+
+Items 5–8 plus the automation rules from item 9 (the webhooks shipped in 2b). Migrations 0146–0150. Two additions from
+ADR-0177 fit here and are included:
+- **Step 1, trace standards:** the OTel GenAI emitter fixes and an OpenInference export profile.
+- **Clean-room item 8:** weighted judge panels, calibration against annotation labels (Cohen's kappa), and repeated runs
+  with bootstrap confidence intervals. This is observe-only: calibration never changes a gate.
+
+**Owner decisions:**
+- **Annotation queue reviewers.** A named reviewer on an annotation queue may read the trace previews of that queue's
+  items. Every read is audited, and nobody reviews their own traces or runs. Everyone else still gets the existing
+  owner-or-admin rule.
+- **Retention holds.** An automation rule's "extend retention" action holds a trace for at most twice the §8.3 floor,
+  capped at three years. An erasure request always releases a hold, and the release is audited.
+
+**Settled under standing rules:**
+- KRIs are the metric registry that ADR-0175 A2 reuses.
+- "Datasets from past intakes" moves to ADR-0175 A11.
+- OWASP references come from promptfoo's MIT framework tables, vendored with attribution.
+- New dashboards use `recharts` (MIT). Migrating the existing hand-written charts is a later open-source replacement item.
+- No new navigation group:
+  - Traces gains filters, tags, actions and an Automations tab;
+  - Quality & Security gains "Annotation queues";
+  - reviewers work from the Inbox;
+  - Evaluations gains a Catalog, Compare and Judge calibration;
+  - Compliance packs show "tested by";
+  - Overview gains "Monitoring".
+
