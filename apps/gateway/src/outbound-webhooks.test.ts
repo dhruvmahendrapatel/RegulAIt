@@ -137,9 +137,14 @@ describe("admin-only", () => {
 });
 
 describe("egress and signing", () => {
-  it("a loopback receiver is refused until an admin allow-lists it", async () => {
+  it("a receiver is refused until an admin allow-lists its host", async () => {
+    // a host no file allow-lists: 127.0.0.1 is shared with other files' fixtures,
+    // so the refusal is proven on a name unique to this run (default-deny
+    // refuses it before any lookup); the positive control is every test below
+    const host = `owh-denied-${k.RUN}.example.test`;
+    expect(await k.db.select().from(egressAllowHosts).where(eq(egressAllowHosts.host, host))).toEqual([]);
     const r = await k.req("POST", "/v1/webhooks", admin.auth, {
-      name: `owh-denied-${k.RUN}`, url: url("/denied"), events: ["prompt.*"], allowPlaintextHttp: true,
+      name: `owh-denied-${k.RUN}`, url: `https://${host}/denied`, events: ["prompt.*"],
     });
     expect(r.statusCode, r.body).toBe(400);
     expect(r.json().error).toBe("egress_blocked");
