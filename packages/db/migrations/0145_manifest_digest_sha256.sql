@@ -36,6 +36,15 @@
 -- therefore goes stale and is re-queued once, exactly as when an admin edits
 -- the server (fail closed; the approval TTL bounds how many exist).
 --
+-- UPGRADE NOTE (mixed versions): stop every older gateway replica BEFORE the
+-- first upgraded one boots. An old replica still syncing writes FNV digests;
+-- the re-pin's per-row compare-and-set never overwrites such a write (the row
+-- is left unverified and fails closed), but a row an old replica writes after
+-- the re-pin has run is never re-pinned and is re-adjudicated on its next sync.
+--
+-- A failed re-pin is FATAL to boot (nothing is changed; the restart retries):
+-- serving without it would re-hold every cleared server on its first sync.
+--
 -- Additive and idempotent.
 CREATE TABLE IF NOT EXISTS "data_backfills" (
   "name" text PRIMARY KEY NOT NULL,
