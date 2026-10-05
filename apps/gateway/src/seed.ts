@@ -23,6 +23,7 @@ import { createDb, runMigrations, backupRuns, eq } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { ensureEphemeralLicense } from "./ephemeral-license.js";
 import { dataKeyFormatError } from "./secrets.js";
+import { demoKeyExpiresAt, SEED_PERSONA_KEY_TTL_DAYS, seedStrictIdentity } from "./demo-identity.js";
 
 const connectionString =
   process.env.DATABASE_URL ?? "postgres://regulait:regulait@localhost:5432/regulait";
@@ -124,7 +125,7 @@ for (const [name, id] of [
   ["dana", danaId],
   ["avery", averyId],
 ] as const) {
-  keys[name] = (await call("POST", `/v1/users/${id}/keys`, { name: "seed" })).token;
+  keys[name] = (await call("POST", `/v1/users/${id}/keys`, { name: "seed", expiresAt: demoKeyExpiresAt(SEED_PERSONA_KEY_TTL_DAYS) })).token;
 }
 const danaAuth = { authorization: `Bearer ${keys.dana}` };
 const averyAuth = { authorization: `Bearer ${keys.avery}` };
@@ -1353,6 +1354,7 @@ if (process.env.REGULAIT_EPHEMERAL_LICENSE === "1") {
   console.log(result.line);
 }
 
+await seedStrictIdentity((m, u) => call(m, u)); // ADR-0181 SA
 await app.close();
 // end the pool so the process exits NOW instead of lingering on idle
 // connections for the pool timeout (a window in which a killed connection

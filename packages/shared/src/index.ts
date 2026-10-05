@@ -923,9 +923,9 @@ export interface UseCaseConditionView {
 export const createApiKeySchema = z.object({
   name: z.string().min(1),
   /** ADR-0098 — the caller-supplied expiry, ISO-8601. Three distinct inputs:
-   *  - ABSENT: the org's `apiKeyDefaultTtlDays` applies, falling back to
-   *    `apiKeyMaxTtlDays` when only a ceiling is configured, and to NO expiry
-   *    when neither is (the shipped defaults — byte-identical to pre-0098).
+   *  - ABSENT: the org's `apiKeyDefaultTtlDays` applies (90 days by default,
+   *    ADR-0181), falling back to `apiKeyMaxTtlDays` when only a ceiling is
+   *    configured, and to NO expiry only when an admin has cleared both.
    *  - a TIMESTAMP: honoured, unless it exceeds `apiKeyMaxTtlDays`, in which
    *    case issuance is REFUSED BY NAME (422) rather than clamped.
    *  - `null`: an explicit request for a key that never expires. Honoured
@@ -2324,9 +2324,9 @@ export const updateOrgSettingsSchema = z
     sessionIpAllowlist: z.array(z.string().trim().min(1).max(64)).max(256).nullable().optional(),
     sessionIpPolicy: ipPolicySchema.optional(),
     apiKeyIpPolicy: ipPolicySchema.optional(),
-    /** ADR-0098 (migration 0104): API-KEY LIFETIME. Two dials, both null by
-     * default so the shipped posture is exactly pre-0098 — a newly issued key
-     * never expires. `apiKeyDefaultTtlDays` is the lifetime (in days) applied
+    /** ADR-0098 (migration 0104): API-KEY LIFETIME. Two dials, 90 and 365
+     * days by default (ADR-0181, migration 0156; both were null = never
+     * expires). `apiKeyDefaultTtlDays` is the lifetime (in days) applied
      * to a key issued with no caller-supplied expiry; `apiKeyMaxTtlDays` is
      * the CEILING on what any issuer may request, and a request over it —
      * including an explicit request for no expiry at all — is refused by name
@@ -4481,3 +4481,5 @@ export {
 } from "./required-tests.js";
 // ADR-0180 FA3: the evidence bar a run must meet to count for a required test
 export { REQUIRED_TEST_EVIDENCE_BAR, evidenceShortfall } from "./required-tests.js";
+// ADR-0181 SA — strict identity defaults and the OIDC JIT domain rule
+export * from "./identity-defaults.js";

@@ -230,6 +230,15 @@ sed -i '/^REGULAIT_BOOTSTRAP_TOKEN=/d' /opt/regulait/.env
 docker compose -p regulait up -d
 ```
 
+A fresh install starts strict (ADR-0181). The admin's first browser sign-in enrols a TOTP
+authenticator before anything else opens, because MFA is required for admins. Passwords need three
+character classes, an idle session ends after 30 minutes, and an API key issued without an expiry
+lasts 90 days, with a ceiling of 365. Approver delegation is off. An admin can relax each of these
+in the admin portal or through `PUT /v1/org/settings`, and the audit row records the old and new
+values. An OIDC provider with JIT provisioning must name its allowed email domains, and a SAML
+provider requires a signed response unless an admin turns that off for an IdP that signs only the
+assertion.
+
 ### 2. Wire your IdP
 
 OIDC providers are **database rows**, not environment variables — `--oidc-issuer` only records what

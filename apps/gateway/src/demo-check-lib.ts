@@ -13,6 +13,7 @@
  * or proposes a remediation — those are live demo moments.
  */
 import type { FastifyInstance } from "fastify";
+import { DEMO_SCRIPT_KEY_TTL_DAYS, demoKeyExpiresAt } from "./demo-identity.js";
 import type { DemoIntakeFixtures } from "@regulait/shared";
 
 export type CheckLevel = "PASS" | "WARN" | "FAIL";
@@ -59,7 +60,7 @@ export async function runDemoCheck(
     else add("0 Personas", "PASS", `${role}: ${email}`);
   }
   if (!ada) return out;
-  const key = await call("POST", `/v1/users/${ada.id}/keys`, boot, { name: "demo-check" });
+  const key = await call("POST", `/v1/users/${ada.id}/keys`, boot, { name: "demo-check", expiresAt: demoKeyExpiresAt(DEMO_SCRIPT_KEY_TTL_DAYS) });
   const auth = { authorization: `Bearer ${key.body.token}` };
 
   // --- 1 Discover: shadow AI ---------------------------------------------------------------

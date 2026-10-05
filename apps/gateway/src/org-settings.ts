@@ -63,6 +63,7 @@ import { recordSchedulerFailure, recordSchedulerSuccess } from "./scheduler-heal
 import { evaluateIpEnvelope, isValidCidr } from "./net-policy.js";
 import { countEnabledSsoProviders } from "./sso-providers.js";
 import { signInInvariantChecked, signInInvariantWritten, withSignInInvariant } from "./break-glass.js";
+import { settingTransitions } from "./setting-transitions.js";
 
 export type { OrgSettingsRow };
 
@@ -804,7 +805,14 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { 
         userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
         objectType: "org_settings",
         objectId: null,
-        detail: { via: req.authCtx.via, changed, after: redactSettings(after), approvalTtlPosture: approvalTtlPosture(after) },
+        detail: {
+          via: req.authCtx.via,
+          changed,
+          // ADR-0181: every relaxed (or tightened) dial is answerable as old -> new
+          transitions: settingTransitions(redactSettings(locked), changed, ["tracingOtlpHeaders"]),
+          after: redactSettings(after),
+          approvalTtlPosture: approvalTtlPosture(after),
+        },
         effect: "allow",
         ruleId: "org-settings-updated",
         ruleChain: [],

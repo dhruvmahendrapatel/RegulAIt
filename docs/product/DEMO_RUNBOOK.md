@@ -51,6 +51,13 @@ pnpm --filter @regulait/gateway demo:set-passwords && unset REGULAIT_DEMO_USER_P
 HOST=127.0.0.1 REGULAIT_OFFLINE_CHECKS=1 pnpm --filter @regulait/gateway start
 ```
 
+**Ada enrols two-factor once (ADR-0181).** MFA is required for admins by default. At Ada's first
+sign-in the app shows an enrolment secret: add it to an authenticator app on the presenting phone
+and type the 6-digit code. Every later sign-in as Ada asks for a code. Dana and Avery are not
+admins and are not asked. Do this during preparation, not in front of the audience. The API keys
+that `seed` and `demo:setup` print expire after 30 days; the keys the intake, traffic, check and
+gate scripts mint for their own run expire after one day.
+
 ### 1.1 Without docker — a native Postgres path
 
 Docker is not available everywhere this gets demoed (a locked-down laptop, a cloud dev box, a
@@ -164,7 +171,8 @@ When the whole stack runs under `docker compose` (no pnpm on the box), one switc
 3. Set the password with the bash or PowerShell commands in the README ("Demo with your own
    password (Docker)"). The value goes from your shell into one `docker compose exec` process via
    `-e REGULAIT_DEMO_USER_PASSWORD`. It is never on a command line or in a file.
-4. Sign in at `http://localhost:3000/ui` as `admin`, `dana` or `avery`, and go to §1.2.
+4. Sign in at `http://localhost:3000/ui` as `admin`, `dana` or `avery`, and go to §1.2. The first
+   `admin` sign-in enrols two-factor (see §1).
 
 **Once per database.** The prep steps run only when the database has not been prepared yet: the
 marker is the API key `demo:traffic` mints (a row in the database, so it goes with the data).

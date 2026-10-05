@@ -79,6 +79,7 @@ import { refuseIfFeatureNotLicensed } from "./licensing.js";
 import { loadOrgSettings } from "./org-settings.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { normalizeAssertedGroups, reconcileGroupRoles } from "./group-roles.js";
+import { settingTransitions } from "./setting-transitions.js";
 import {
   dropProviderLinks,
   LINK_PROOF_MINUTES,
@@ -922,7 +923,7 @@ export function registerSamlRoutes(app: FastifyInstance, db: Db, opts: SamlRoute
         defaultRoleId: body.defaultRoleId ?? null,
         jitProvisioning: body.jitProvisioning ?? false,
         wantAssertionsSigned: body.wantAssertionsSigned ?? true,
-        wantAuthnResponseSigned: body.wantAuthnResponseSigned ?? false,
+        wantAuthnResponseSigned: body.wantAuthnResponseSigned ?? true, // ADR-0181: strict by default
         allowIdpInitiated: body.allowIdpInitiated ?? false,
         emailAttribute: body.emailAttribute ?? null,
         // ADR-0038: naming the attribute turns the group SIGNAL on. It grants
@@ -949,6 +950,8 @@ export function registerSamlRoutes(app: FastifyInstance, db: Db, opts: SamlRoute
         // it is recorded here so "we trusted every email this IdP asserts" is
         // answerable from the audit trail, not only from the current row.
         allowedEmailDomains: body.allowedEmailDomains ?? null,
+        wantAssertionsSigned: row!.wantAssertionsSigned,
+        wantAuthnResponseSigned: row!.wantAuthnResponseSigned,
         certCount: body.idpSigningCerts.length,
       },
       "saml_provider");
@@ -1006,6 +1009,8 @@ export function registerSamlRoutes(app: FastifyInstance, db: Db, opts: SamlRoute
           phase: "provider-updated",
           name: existing.name,
           changed: Object.keys(body),
+          // ADR-0181: a relaxed posture flag is answerable as old -> new
+          transitions: settingTransitions(existing, rest, ["idpSigningCerts", "spCertificate"]),
           privateKeyRotated: Boolean(spPrivateKey),
         },
         "saml_provider");

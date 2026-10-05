@@ -24,6 +24,7 @@
  * did not produce its intended effect says so. Synthetic data only.
  */
 import type { FastifyInstance } from "fastify";
+import { DEMO_SCRIPT_KEY_TTL_DAYS, demoKeyExpiresAt } from "./demo-identity.js";
 import type { DemoIntakeFixtures } from "@regulait/shared";
 
 type Json = Record<string, any>;
@@ -76,7 +77,7 @@ export async function runDemoTraffic(
     return report;
   }
   const keyFor = async (id: string) =>
-    ({ authorization: `Bearer ${(await call("POST", `/v1/users/${id}/keys`, boot, { name: DEMO_TRAFFIC_KEY_NAME })).body.token}` });
+    ({ authorization: `Bearer ${(await call("POST", `/v1/users/${id}/keys`, boot, { name: DEMO_TRAFFIC_KEY_NAME, expiresAt: demoKeyExpiresAt(DEMO_SCRIPT_KEY_TTL_DAYS) })).body.token}` });
   const danaAuth = await keyFor(dana.id);
   const adaAuth = await keyFor(ada.id);
 

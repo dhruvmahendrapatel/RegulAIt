@@ -19,11 +19,11 @@
  *   apiKeyDefaultTtlDays  — the lifetime applied when the caller supplies none
  *   apiKeyMaxTtlDays      — the ceiling on what any issuer may REQUEST
  *
- * Both default to NULL, and with both NULL this whole module answers "no
- * expiry" to every question, so a fresh install issues exactly the
- * never-expiring keys it issued before ADR-0098. That is ADR-0021's "a fresh
- * settings row changes nothing" invariant, and `api-key-expiry.test.ts` pins
- * it rather than trusting it.
+ * ADR-0181 (migration 0156): they default to 90 and 365 days, so a fresh
+ * install issues keys that expire. An admin may clear either (NULL), audited;
+ * with both NULL this module answers "no expiry" to every question, the
+ * pre-0181 posture. `api-key-expiry.test.ts` pins both the strict fresh-org
+ * values and the relaxed behaviour.
  *
  * REFUSE, NEVER CLAMP. A request for a longer lifetime than the ceiling allows
  * is a 422 naming the knob, the ceiling and the longest expiry that WOULD have
