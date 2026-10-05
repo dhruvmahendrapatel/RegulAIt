@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { REGULATORY_UPDATES } from "./regulatory-updates.js";
 import { DEFAULT_COMPLIANCE_PACKS } from "../compliance-packs.js";
 import { COMPLIANCE_PACK_FRAMEWORKS } from "../compliance-packs.js";
-import { REGULATORY_UPDATE_STATUSES } from "../regulatory-intel.js";
+import { REGULATORY_INSTRUMENT_KINDS, REGULATORY_UPDATE_STATUSES, regulatoryUpdateProblems } from "../regulatory-intel.js";
 
 describe("REGULATORY_UPDATES", () => {
   // ---------------------------------------------------------------------------
@@ -70,8 +70,8 @@ describe("REGULATORY_UPDATES", () => {
     for (const u of REGULATORY_UPDATES) {
       const effective = new Date(u.effectiveDate).getTime();
       const verified = new Date(u.verifiedOn).getTime();
-      if (u.status === "in_force") {
-        expect(effective, `'${u.key}' is in_force but effectiveDate is after verifiedOn`).toBeLessThanOrEqual(verified);
+      if (u.status === "in_force" || u.status === "published" || u.status === "withdrawn") {
+        expect(effective, `'${u.key}' is ${u.status} but effectiveDate is after verifiedOn`).toBeLessThanOrEqual(verified);
       } else if (u.status === "upcoming") {
         expect(effective, `'${u.key}' is upcoming but effectiveDate is before or on verifiedOn`).toBeGreaterThan(verified);
       }
@@ -117,6 +117,67 @@ describe("REGULATORY_UPDATES", () => {
       expect(u.summary.length, `empty summary on '${u.key}'`).toBeGreaterThan(0);
       expect(u.instrument.length, `empty instrument on '${u.key}'`).toBeGreaterThan(0);
       expect(u.jurisdiction.length, `empty jurisdiction on '${u.key}'`).toBeGreaterThan(0);
+    }
+  });
+});
+
+// ADR-0179 G14-FEED: the factual corrections, pinned per entry so a later edit
+// cannot quietly reintroduce a withdrawn circular as current, a voluntary
+// standard as law in force, or an enforcement date as the effective date.
+describe("REGULATORY_UPDATES — G14-FEED reconciliation", () => {
+  const byKey = (key: string) => {
+    const u = REGULATORY_UPDATES.find((x) => x.key === key);
+    expect(u, `missing entry '${key}'`).toBeDefined();
+    return u!;
+  };
+
+  it("every entry satisfies the feed consistency rules", () => {
+    expect(REGULATORY_UPDATES.flatMap(regulatoryUpdateProblems)).toEqual([]);
+  });
+
+  it("every entry names an instrument kind", () => {
+    for (const u of REGULATORY_UPDATES) {
+      expect(REGULATORY_INSTRUMENT_KINDS as readonly string[], `'${u.key}'`).toContain(u.instrumentKind);
+    }
+  });
+
+  it("CFPB Circular 2022-03 is withdrawn guidance, withdrawn on 2025-05-12, sourced to the withdrawal register", () => {
+    const u = byKey("cfpb-adverse-action-ai");
+    expect(u).toMatchObject({ status: "withdrawn", instrumentKind: "guidance", withdrawnOn: "2025-05-12", effectiveDate: "2022-05-26" });
+    expect(u.sourceUrl).toBe("https://www.consumerfinance.gov/compliance/guidance/withdrawn-guidance/");
+    expect(u.summary).toContain("pending legal review");
+  });
+
+  it("NYC Local Law 144 separates its effective date (2023-01-01) from enforcement (2023-07-05)", () => {
+    const u = byKey("nyc-local-law-144");
+    expect(u).toMatchObject({ instrumentKind: "law", status: "in_force", effectiveDate: "2023-01-01", enforcementDate: "2023-07-05" });
+    expect(u.sourceUrl).toContain("GUID=B051915D-A9AC-451E-81F8-6596032FA3F9");
+  });
+
+  it("NIST AI RMF, NIST AI 600-1 and ISO/IEC 42001 are voluntary standards: published, never in force", () => {
+    for (const key of ["nist-ai-rmf-1-0", "nist-ai-rmf-genai-profile", "iso-42001-published"]) {
+      expect(byKey(key)).toMatchObject({ instrumentKind: "voluntary_standard", status: "published" });
+    }
+    const voluntaryInForce = REGULATORY_UPDATES.filter((u) => u.instrumentKind === "voluntary_standard" && u.status === "in_force");
+    expect(voluntaryInForce.map((u) => u.key)).toEqual([]);
+  });
+
+  it("keeps the source-supported EU Digital Omnibus dates", () => {
+    expect(byKey("eu-digital-omnibus-on-ai").effectiveDate).toBe("2026-07-27");
+    expect(byKey("eu-ai-act-high-risk-annex-iii-in-force").effectiveDate).toBe("2027-12-02");
+    expect(byKey("eu-ai-act-high-risk-annex-i-in-force").effectiveDate).toBe("2028-08-02");
+  });
+
+  it("reconciles all 13 entries: counts by status and by instrument kind", () => {
+    const tally = (values: string[]) => values.reduce<Record<string, number>>((acc, v) => ({ ...acc, [v]: (acc[v] ?? 0) + 1 }), {});
+    expect(REGULATORY_UPDATES).toHaveLength(13);
+    expect(tally(REGULATORY_UPDATES.map((u) => u.status))).toEqual({ in_force: 6, upcoming: 3, published: 3, withdrawn: 1 });
+    expect(tally(REGULATORY_UPDATES.map((u) => u.instrumentKind))).toEqual({ law: 9, guidance: 1, voluntary_standard: 3 });
+  });
+
+  it("a withdrawal date is never later than the date the entry was verified", () => {
+    for (const u of REGULATORY_UPDATES) {
+      if (u.withdrawnOn) expect(u.withdrawnOn <= u.verifiedOn, `'${u.key}'`).toBe(true);
     }
   });
 });

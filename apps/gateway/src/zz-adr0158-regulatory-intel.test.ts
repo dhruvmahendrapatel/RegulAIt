@@ -36,6 +36,7 @@ const entry = (over: Partial<RegulatoryUpdate> = {}): RegulatoryUpdate => ({
   instrument: "Synthetic instrument",
   title: "Synthetic obligation",
   summary: "test entry",
+  instrumentKind: "law",
   effectiveDate: "2027-01-01",
   status: "upcoming",
   frameworks: ["eu-ai-act", `no-such-framework-${RUN}`],
@@ -113,5 +114,59 @@ describe("ADR-0158 regulatory intelligence", () => {
     const m = await app.inject({ method: "POST", url: "/v1/users", headers: AUTH, payload: { email: `g158-m-${RUN}@example.com`, displayName: "M" } });
     const key = (await app.inject({ method: "POST", url: `/v1/users/${m.json().id}/keys`, headers: AUTH, payload: { name: "k" } })).json().token;
     expect((await app.inject({ method: "GET", url: "/v1/regulatory/updates", headers: { authorization: `Bearer ${key}` } })).statusCode).toBe(403);
+  });
+
+  // ADR-0179 G14-FEED: withdrawn and voluntary entries are counted for what they are
+  it("counts withdrawn and published entries apart from in-force law; a withdrawn entry is never a gap or next effective", async () => {
+    const now = new Date("2026-10-05T12:00:00Z");
+    const feed = [
+      entry({ key: `law-${RUN}`, status: "in_force", effectiveDate: "2023-01-01", enforcementDate: "2023-07-05" }),
+      entry({ key: `std-${RUN}`, instrumentKind: "voluntary_standard", status: "published", effectiveDate: "2023-12-18" }),
+      // withdrawn before it took effect: it has a future date and control gaps, and must still not lead
+      entry({ key: `gone-${RUN}`, instrumentKind: "guidance", status: "withdrawn", effectiveDate: "2026-11-01", withdrawnOn: "2026-11-02" }),
+      entry({ key: `next-${RUN}`, status: "upcoming", effectiveDate: "2027-01-01" }),
+    ];
+    const out = await computeRegulatoryFeed(db, { now, feed });
+    expect(out.summary).toMatchObject({
+      total: 4,
+      inForce: 1,
+      upcoming: 1,
+      proposed: 0,
+      published: 1,
+      withdrawn: 1,
+      byKind: { law: 2, guidance: 1, voluntary_standard: 1 },
+      // every synthetic entry maps an unknown control, so each current one has a gap; the withdrawn one is not counted
+      withControlGaps: 3,
+      nextEffective: `next-${RUN}`,
+    });
+    const law = out.updates.find((u) => u.key === `law-${RUN}`)!;
+    expect(law).toMatchObject({ effectiveDate: "2023-01-01", enforcementDate: "2023-07-05", instrumentKind: "law" });
+    expect(out.notes.applicability).toContain("pending legal review");
+  });
+
+  it("refuses an inconsistent feed instead of presenting a voluntary standard as in force", async () => {
+    await expect(
+      computeRegulatoryFeed(db, { feed: [entry({ instrumentKind: "voluntary_standard", status: "in_force" })] }),
+    ).rejects.toThrow(/voluntary standard is never in force/);
+  });
+
+  it("filters the loaded feed by status 'withdrawn' and by instrument kind", async () => {
+    const withdrawn = await app.inject({ method: "GET", url: "/v1/regulatory/updates?status=withdrawn", headers: AUTH });
+    expect(withdrawn.statusCode, withdrawn.body).toBe(200);
+    const w = withdrawn.json();
+    expect(w.filter).toEqual({ status: "withdrawn", kind: null, framework: null });
+    expect(w.updates.map((u: { key: string }) => u.key)).toEqual(["cfpb-adverse-action-ai"]);
+    expect(w.updates[0]).toMatchObject({ withdrawnOn: "2025-05-12", instrumentKind: "guidance" });
+    expect(w.summary).toMatchObject({ total: 13, inForce: 6, upcoming: 3, published: 3, withdrawn: 1, byKind: { law: 9, guidance: 1, voluntary_standard: 3 } });
+
+    const voluntary = (await app.inject({ method: "GET", url: "/v1/regulatory/updates?kind=voluntary_standard", headers: AUTH })).json();
+    expect(voluntary.updates.map((u: { key: string }) => u.key).sort()).toEqual(["iso-42001-published", "nist-ai-rmf-1-0", "nist-ai-rmf-genai-profile"]);
+    for (const u of voluntary.updates) expect(u.status).toBe("published");
+    const inForce = (await app.inject({ method: "GET", url: "/v1/regulatory/updates?status=in_force", headers: AUTH })).json();
+    for (const u of inForce.updates) expect(u.instrumentKind).not.toBe("voluntary_standard");
+    const nyc = inForce.updates.find((u: { key: string }) => u.key === "nyc-local-law-144");
+    expect(nyc).toMatchObject({ effectiveDate: "2023-01-01", enforcementDate: "2023-07-05" });
+
+    expect((await app.inject({ method: "GET", url: "/v1/regulatory/updates?kind=bogus", headers: AUTH })).statusCode).toBe(400);
   });
 });
