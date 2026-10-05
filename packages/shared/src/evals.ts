@@ -1298,12 +1298,20 @@ export const EVAL_TRACE_SKIP_REASONS = [
   "already_in_dataset",
   "duplicate_in_request",
   "unusable_scorer_config",
+  /** a trace (the `traceIds` form) with no model-call span to turn into a row */
+  "no_model_call",
 ] as const;
 export type EvalTraceSkipReason = (typeof EVAL_TRACE_SKIP_REASONS)[number];
 
+/**
+ * `spanIds` (rows chosen span by span) or `traceIds` (whole traces: each
+ * trace's model-call spans become rows) — EXACTLY ONE of them. The route
+ * answers 422 for both or neither, so this schema leaves both optional.
+ */
 export const datasetFromTracesSchema = z
   .object({
-    spanIds: z.array(z.string().uuid()).min(1).max(EVAL_TRACE_ROWS_MAX),
+    spanIds: z.array(z.string().uuid()).min(1).max(EVAL_TRACE_ROWS_MAX).optional(),
+    traceIds: z.array(z.string().uuid()).min(1).max(EVAL_TRACE_ROWS_MAX).optional(),
   })
   .strict();
 

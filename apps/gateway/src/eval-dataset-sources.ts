@@ -36,6 +36,8 @@ import crypto from "node:crypto";
 import type { FastifyBaseLogger, FastifyInstance } from "fastify";
 import { z } from "zod";
 import {
+  and,
+  asc,
   auditLog,
   eq,
   evalCases,
@@ -66,7 +68,10 @@ const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
 export interface AddTracesToDatasetInput {
   datasetId: string;
-  spanIds: readonly string[];
+  /** rows chosen span by span — exactly one of `spanIds` / `traceIds` */
+  spanIds?: readonly string[] | undefined;
+  /** whole traces: each trace's model-call (`llm`) spans become rows */
+  traceIds?: readonly string[] | undefined;
   /** the admin (or the automation rule's author) doing it */
   actorUserId: string | null;
   /** set when an automation rule does it (K) */
@@ -116,14 +121,77 @@ type SpanPreview = {
 
 const blank = (s: string | null | undefined) => s === null || s === undefined || s.trim().length === 0;
 
+/**
+ * The `traceIds` form: each trace's GenAI-operation (model call, span kind
+ * `llm`) spans, in trace and span order. A trace that does not exist, or has no
+ * model-call span, is skipped with its own id and the reason; a repeated trace
+ * id is `duplicate_in_request`.
+ */
+async function expandTraces(
+  db: Db,
+  traceIds: readonly string[],
+): Promise<{ spanIds: string[]; skipped: Array<{ id: string; reason: EvalTraceSkipReason }> }> {
+  const uuid = z.string().uuid();
+  const valid = [...new Set(traceIds)].filter((i) => uuid.safeParse(i).success);
+  const known = valid.length
+    ? new Set((await db.select({ id: traces.id }).from(traces).where(inArray(traces.id, valid))).map((r) => r.id))
+    : new Set<string>();
+  const spans = valid.length
+    ? await db
+        .select({ id: traceSpans.id, traceId: traceSpans.traceId })
+        .from(traceSpans)
+        .where(and(inArray(traceSpans.traceId, valid), eq(traceSpans.kind, "llm")))
+        .orderBy(asc(traceSpans.seq), asc(traceSpans.id))
+    : [];
+  const spanIds: string[] = [];
+  const skipped: Array<{ id: string; reason: EvalTraceSkipReason }> = [];
+  const seen = new Set<string>();
+  for (const id of traceIds) {
+    if (seen.has(id)) {
+      skipped.push({ id, reason: "duplicate_in_request" });
+      continue;
+    }
+    seen.add(id);
+    if (!known.has(id)) {
+      skipped.push({ id, reason: "not_found" });
+      continue;
+    }
+    const mine = spans.filter((s) => s.traceId === id).map((s) => s.id);
+    if (mine.length === 0) skipped.push({ id, reason: "no_model_call" });
+    spanIds.push(...mine);
+  }
+  return { spanIds, skipped };
+}
+
 export async function addTracesToDataset(db: Db, input: AddTracesToDatasetInput): Promise<AddTracesToDatasetOutcome> {
-  if (input.spanIds.length === 0) return { ok: false, status: 400, error: "no_span_ids" };
-  if (input.spanIds.length > EVAL_TRACE_ROWS_MAX) {
+  const bySpan = input.spanIds !== undefined && input.spanIds.length > 0;
+  const byTrace = input.traceIds !== undefined && input.traceIds.length > 0;
+  if (bySpan === byTrace) {
+    return {
+      ok: false,
+      status: 422,
+      error: "span_ids_or_trace_ids",
+      detail: "send exactly one of `spanIds` or `traceIds`",
+    };
+  }
+  const sent = bySpan ? input.spanIds!.length : input.traceIds!.length;
+  if (sent > EVAL_TRACE_ROWS_MAX) {
     return {
       ok: false,
       status: 422,
       error: "too_many_rows",
-      detail: `at most ${EVAL_TRACE_ROWS_MAX} spans per call; ${input.spanIds.length} were sent`,
+      detail: `at most ${EVAL_TRACE_ROWS_MAX} ${bySpan ? "spans" : "traces"} per call; ${sent} were sent`,
+    };
+  }
+  const expanded = byTrace ? await expandTraces(db, input.traceIds!) : { spanIds: [...input.spanIds!], skipped: [] };
+  if (expanded.spanIds.length > EVAL_TRACE_ROWS_MAX) {
+    return {
+      ok: false,
+      status: 422,
+      error: "too_many_rows",
+      detail:
+        `those traces hold ${expanded.spanIds.length} model-call spans; at most ${EVAL_TRACE_ROWS_MAX} rows are ` +
+        "added per call. Send fewer traces, or choose spans.",
     };
   }
   const [dataset] = await db.select().from(evalDatasets).where(eq(evalDatasets.id, input.datasetId));
@@ -140,11 +208,11 @@ export async function addTracesToDataset(db: Db, input: AddTracesToDatasetInput)
   const cfgParsed = evalScorerConfigSchema.safeParse(dataset.scorerConfig ?? {});
   const cfg: EvalScorerConfig = cfgParsed.success ? cfgParsed.data : {};
 
-  const spans = await loadSpans(db, input.spanIds);
-  const skipped: Array<{ id: string; reason: EvalTraceSkipReason }> = [];
+  const spans = await loadSpans(db, expanded.spanIds);
+  const skipped: Array<{ id: string; reason: EvalTraceSkipReason }> = [...expanded.skipped];
   const rows: Array<{ spanId: string; caseId: string; traceId: string }> = [];
   const seen = new Set<string>();
-  for (const id of input.spanIds) {
+  for (const id of expanded.spanIds) {
     if (seen.has(id)) {
       skipped.push({ id, reason: "duplicate_in_request" });
       continue;
@@ -199,6 +267,7 @@ export async function addTracesToDataset(db: Db, input: AddTracesToDatasetInput)
       datasetName: dataset.name,
       datasetVersion: dataset.version,
       added: rows.length,
+      form: byTrace ? "traceIds" : "spanIds",
       spanIds: rows.map((r) => r.spanId),
       traceIds: [...new Set(rows.map((r) => r.traceId))],
       skipped: skipped.map((s) => ({ id: s.id, reason: s.reason })),
@@ -369,13 +438,17 @@ export async function evaluateTraceSpans(db: Db, input: EvaluateTraceSpansInput)
 const idParam = z.object({ id: z.string().uuid() });
 
 export function registerEvalDatasetSourceRoutes(app: FastifyInstance, db: Db, opts: { dataKey?: string }) {
-  /** T's traces page "Add to dataset": `{spanIds}` → `{added, skipped:[{id, reason}]}` */
+  /**
+   * T's traces page "Add to dataset": `{traceIds}` (whole traces) or
+   * `{spanIds}` — exactly one, else 422 — answering `{added, skipped:[{id, reason}]}`.
+   */
   app.post("/v1/evals/datasets/:id/from-traces", async (req, reply) => {
     const { id } = idParam.parse(req.params);
     const body = datasetFromTracesSchema.parse(req.body);
     const out = await addTracesToDataset(db, {
       datasetId: id,
       spanIds: body.spanIds,
+      traceIds: body.traceIds,
       actorUserId: req.authCtx.userId ?? null,
       dataKey: opts.dataKey,
       log: req.log,

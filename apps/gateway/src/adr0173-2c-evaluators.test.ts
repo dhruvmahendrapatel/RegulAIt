@@ -167,7 +167,10 @@ async function insertCases(datasetId: string, version: number, n: number, kind: 
   return rows;
 }
 
-async function makeTrace(ownerId: string, spans: Array<{ input: string | null; output: string | null; withheld?: boolean }>) {
+async function makeTrace(
+  ownerId: string,
+  spans: Array<{ input: string | null; output: string | null; withheld?: boolean; kind?: "llm" | "tool" }>,
+) {
   const [t] = await db
     .insert(traces)
     .values({ kind: "dispatch", name: `e2c-trace-${tag}`, userId: ownerId, status: "ok", projectId })
@@ -178,7 +181,7 @@ async function makeTrace(ownerId: string, spans: Array<{ input: string | null; o
       spans.map((s, i) => ({
         traceId: t!.id,
         seq: i,
-        kind: "llm" as const,
+        kind: s.kind ?? ("llm" as const),
         name: `e2c-span-${i}`,
         status: "ok" as const,
         startedAt: new Date(),
@@ -320,6 +323,52 @@ describe("datasets from traces", () => {
     expect(await db.select().from(evalCases).where(eq(evalCases.datasetId, ds.id))).toHaveLength(1);
   });
 
+  it("accepts whole traces: each trace's model-call spans become rows, under the same per-row reasons", async () => {
+    const ds = await makeDataset(`e2c-ft-traces-${tag}`);
+    const a = await makeTrace(memberId, [
+      { input: "<<e2c-t1>> first call", output: "ok one" },
+      { input: "tool args", output: "tool result", kind: "tool" },
+      { input: "[withheld]", output: "[withheld]", withheld: true },
+    ]);
+    const b = await makeTrace(memberId, [{ input: "only a tool", output: "x", kind: "tool" }]);
+    const unknown = crypto.randomUUID();
+    const res = await app.inject({
+      method: "POST",
+      url: `/v1/evals/datasets/${ds.id}/from-traces`,
+      headers: adminAuth,
+      payload: { traceIds: [a.traceId, b.traceId, unknown, a.traceId] },
+    });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().added).toBe(1);
+    expect(res.json().skipped).toEqual([
+      { id: b.traceId, reason: "no_model_call" },
+      { id: unknown, reason: "not_found" },
+      { id: a.traceId, reason: "duplicate_in_request" },
+      { id: a.spanIds[2], reason: "content_withheld" },
+    ]);
+    const cases = await db.select().from(evalCases).where(eq(evalCases.datasetId, ds.id));
+    expect(cases.map((c) => c.sourceSpanId)).toEqual([a.spanIds[0]]);
+  });
+
+  it("takes exactly one of traceIds or spanIds (422 for both or neither), and at most 200 rows after expansion", async () => {
+    const ds = await makeDataset(`e2c-ft-form-${tag}`);
+    const t = await makeTrace(memberId, [{ input: "<<e2c-t2>> q", output: "ok" }]);
+    const post = (payload: unknown) =>
+      app.inject({ method: "POST", url: `/v1/evals/datasets/${ds.id}/from-traces`, headers: adminAuth, payload });
+    const both = await post({ traceIds: [t.traceId], spanIds: t.spanIds });
+    expect(both.statusCode).toBe(422);
+    expect(both.json().error).toBe("span_ids_or_trace_ids");
+    expect((await post({})).statusCode).toBe(422);
+    const big = await makeTrace(
+      memberId,
+      Array.from({ length: 201 }, (_, i) => ({ input: `<<e2c-big-${i}>> q`, output: "ok" })),
+    );
+    const over = await post({ traceIds: [big.traceId] });
+    expect(over.statusCode).toBe(422);
+    expect(over.json().error).toBe("too_many_rows");
+    expect(await db.select().from(evalCases).where(eq(evalCases.datasetId, ds.id))).toHaveLength(0);
+  });
+
   it("takes at most 200 rows per call", async () => {
     const ds = await makeDataset(`e2c-ft-cap-${tag}`);
     const ids = Array.from({ length: 201 }, () => crypto.randomUUID());
@@ -413,6 +462,7 @@ describe("pack coverage counts as tested only from a completed run that passed i
     expect(map[ref]!.length).toBeGreaterThan(0);
     expect(map[ref]!.every((e) => e.status === "not_run")).toBe(true);
     expect(await countTestedEvaluators(db, ref, scope())).toBe(0);
+    expect(await runCollector(db, "evaluator_tested", { ...scope(), memberIds: null, params: {}, controlRef: ref })).toBe(0);
   });
 
   it("a completed run whose gate FAILED is 'failed', and still not tested", async () => {
@@ -844,13 +894,17 @@ describe("judge calibration", () => {
   /** the human says pass on even cases, except they disagree with the judge on the first `flip` */
   function labels(count: number, flip = 0) {
     const inputs = (globalThis as Record<string, unknown>).__e2cInputs as Map<string, string>;
-    return async (_kind: string, ids: string[]) =>
-      ids.slice(0, count).map((id, i) => {
+    return async (_kind: string, ids: string[]) => {
+      labelledIds = ids.slice(0, count);
+      return ids.slice(0, count).map((id, i) => {
         const even = judgePass(inputs.get(id)!);
         const human = i < flip ? !even : even;
         return { subjectId: id, label: human ? "pass" : "fail", value: null, completed: true };
       });
+    };
   }
+  /** the ids the fake was asked about, in the order it labelled them */
+  let labelledIds: string[] = [];
 
   it("is 503 when no annotation-label source is wired (never invented agreement)", async () => {
     const res = await app.inject({ method: "POST", url: `/v1/evals/runs/${runId}/calibration`, headers: adminAuth, payload: {} });
@@ -887,7 +941,9 @@ describe("judge calibration", () => {
     expect(even.pairs).toBe(20);
     // recompute the expected pairs: judge = even, human = even except the first 4 flipped
     const inputs = (globalThis as Record<string, unknown>).__e2cInputs as Map<string, string>;
-    const expected = resultIds.slice(0, 20).map((id, i) => {
+    expect(labelledIds).toHaveLength(24);
+    expect(new Set(labelledIds)).toEqual(new Set(resultIds));
+    const expected = labelledIds.slice(0, 20).map((id, i) => {
       const j = judgePass(inputs.get(id)!);
       return [j ? "pass" : "fail", (i < 4 ? !j : j) ? "pass" : "fail"] as const;
     });
