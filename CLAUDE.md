@@ -103,7 +103,8 @@ every agent prompt and every review.
 2. **Existing hand-written code is replaced.** Where we already wrote something an open-source module solves, replacing ours
    with the validated module is the default, not an option. The replacement keeps or extends our tests.
 3. **"Validated" means all of these:**
-   - the licence is MIT, Apache-2.0, BSD or ISC (no GPL, AGPL, EPL, SSPL or BSL in shipped code);
+   - the licence is MIT, Apache-2.0, BSD or ISC, or a public-domain dedication (Unlicense, CC0-1.0, 0BSD); no GPL, AGPL,
+     EPL, SSPL or BSL in shipped code;
    - it is actively maintained (a release in about the last 12 months, responsive issues, no unpatched critical advisory);
    - the exact version is pinned through the lockfile;
    - it works air-gapped (no runtime downloads or CDNs);
