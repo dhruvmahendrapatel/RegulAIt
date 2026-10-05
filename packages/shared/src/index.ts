@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { acceptRisksSchema } from "./review-policy.js";
+import { conditionDueAtSchema } from "./assurance.js";
 import { intakeScreeningAnswersPatchSchema, intakeScreeningAnswersSchema } from "./intake-assist.js";
 // ADR-0068 §5: the attack-class vocabulary is needed IN SCOPE here (not merely
 // re-exported below) so the compliance-profile schema validates a framework's
@@ -849,16 +850,9 @@ export const createRateLimitSchema = z
   .superRefine(refineRuleScope);
 
 /** ADR-0168 — a condition's due date: a calendar date (`YYYY-MM-DD`, due at
- * the END of that day, UTC) or a full ISO-8601 timestamp. */
-const conditionDueAt = z
-  .string()
-  .refine(
-    (v) =>
-      /^\d{4}-\d{2}-\d{2}$/.test(v)
-        ? !Number.isNaN(Date.parse(`${v}T00:00:00Z`)) && new Date(`${v}T00:00:00Z`).toISOString().startsWith(v)
-        : z.string().datetime({ offset: true }).safeParse(v).success,
-    { message: "dueAt must be a date (YYYY-MM-DD) or an ISO-8601 timestamp" },
-  );
+ * the END of that day, UTC) or a full ISO-8601 timestamp. ADR-0180: defined
+ * once in assurance.ts, which measured conditions share. */
+const conditionDueAt = conditionDueAtSchema;
 
 /** Resolve a validated `dueAt` to the instant it falls due. */
 export function conditionDueInstant(dueAt: string): Date {
@@ -4318,3 +4312,172 @@ export {
   resolvePolicySimulationRunLimits,
   type PolicySimulationRunLimits,
 } from "./policy-simulation.js";
+
+// ADR-0180 (ADR-0175 batch D3) — continuous assurance: the shared contract the
+// four item owners (A2 conditions, A3 required tests, A8 autonomy, A10 risk
+// tolerance) build on, and the monitor's assurance inputs.
+export {
+  ASSURANCE_DEFAULTS,
+  ASSURANCE_GATE_MODES,
+  ASSURANCE_LIMITS,
+  ASSURANCE_METRICS,
+  ASSURANCE_METRIC_IDS,
+  AUTONOMY_CLASSES,
+  AUTONOMY_CLASS_INFO,
+  CONDITION_CADENCES,
+  CONDITION_KINDS,
+  CONDITION_ON_BREACH,
+  CONDITION_OPERATORS,
+  DEFAULT_ASSURANCE_GATE_MODE,
+  MEASURED_CONDITION_KINDS,
+  MEASUREMENT_STATES,
+  NOT_RUN_MEASUREMENT,
+  NO_AUTONOMY_FACTS,
+  REQUIRED_TEST_STATES,
+  RESIDUAL_RISK_BANDS,
+  RISK_RESPONSE_TYPES,
+  RISK_TOLERANCE_SCOPE_KINDS,
+  TOLERANCE_BANDS,
+  assuranceGateModeSchema,
+  conditionDueAtSchema,
+  maxAcceptanceMonths,
+  measuredConditionInputSchema,
+  metricSpecSchema,
+  noopAutonomyFloorFor,
+  noopEvaluateUseCaseConditions,
+  noopMeasureAssuranceMetric,
+  noopRequiredTestConditionsFor,
+  noopResidualPosition,
+  setAssuranceGateModeSchema,
+  waiveConditionSchema,
+  type AssuranceGateMode,
+  type AssuranceMetricId,
+  type AssuranceScope,
+  type AutonomyClass,
+  type AutonomyFacts,
+  type AutonomyFloorForFn,
+  type AutonomyFloorResult,
+  type ConditionCadence,
+  type ConditionInput,
+  type ConditionKind,
+  type ConditionOnBreach,
+  type ConditionOperator,
+  type ConditionVerdict,
+  type DeployGateAssuranceInput,
+  type EvaluateUseCaseConditionsFn,
+  type EvidenceRef,
+  type ManualConditionInput,
+  type MeasureAssuranceMetricFn,
+  type MeasuredConditionInput,
+  type MeasuredConditionKind,
+  type Measurement,
+  type MeasurementState,
+  type MetricSpec,
+  type RequiredTestClass,
+  type RequiredTestConditionsForFn,
+  type RequiredTestPolicy,
+  type RequiredTestState,
+  type RequiredTestStatus,
+  type RequiredTestTierPolicy,
+  type ResidualPosition,
+  type ResidualPositionFn,
+  type ResidualRiskBand,
+  type RiskAcceptanceSummary,
+  type RiskResponseType,
+  type RiskToleranceScopeKind,
+  type SetAssuranceGateModeInput,
+  type ToleranceBand,
+  type WaiveConditionInput,
+} from "./assurance.js";
+export {
+  ASSURANCE_MONITOR_RULE_IDS,
+  type AssuranceMonitorRuleId,
+  type MonitorAssuranceInput,
+  type MonitorAssuranceSubject,
+} from "./governance-monitor.js";
+// ADR-0180 §5 (A8) — the agent autonomy class: derivation rules and control floors.
+export {
+  AUTONOMY_AGENTIC_TEST_CLASSES,
+  AUTONOMY_FLOORS,
+  AUTONOMY_FLOOR_IDS,
+  AUTONOMY_GUARDRAIL_DETECTORS,
+  AUTONOMY_OBSERVATION_WINDOW_DAYS,
+  AUTONOMY_RULES,
+  AUTONOMY_RULE_IDS,
+  AUTONOMY_SCOPE_NOTE,
+  NO_AUTONOMY_OBSERVATION,
+  agenticOwaspId,
+  autonomyLevel,
+  autonomyReasons,
+  checkAutonomyFloors,
+  declareAutonomySchema,
+  declaredBelowObserved,
+  deriveAutonomyClass,
+  effectiveAutonomyClass,
+  floorConditions,
+  floorsForClass,
+  guardrailModeLevel,
+  maxAutonomyClass,
+  mergeAutonomyFacts,
+  type AutonomyAgenticTestClass,
+  type AutonomyFloorCheck,
+  type AutonomyFloorEvidence,
+  type AutonomyFloorId,
+  type AutonomyFloorSpec,
+  type AutonomyGuardrailDetector,
+  type AutonomyObservation,
+  type AutonomyObservedFacts,
+  type AutonomyReason,
+  type AutonomyRule,
+  type AutonomyRuleId,
+  type BuilderAgentAutonomyView,
+  type DeclareAutonomyInput,
+} from "./autonomy.js";
+// ADR-0180 §6 (A10) — risk tolerance and time-boxed acceptance, the pure half
+export {
+  RISK_TOLERANCE_SCOPE_KEYS,
+  acceptanceCoversBand,
+  addCalendarMonthsUtc,
+  bandExceedsTolerance,
+  compensatingControlSchema,
+  createRiskAcceptanceSchema,
+  maxAcceptanceExpiry,
+  putRiskTolerancesSchema,
+  resolveRiskTolerance,
+  type CompensatingControlInput,
+  type CreateRiskAcceptanceInput,
+  type PutRiskTolerancesInput,
+  type ToleranceRowInput,
+} from "./risks.js";
+// ADR-0180 A2 — measurable conditions: the state rule, metric params and help
+export * from "./condition-metrics.js";
+// ADR-0180 A3 — required AI test classes per risk tier, and the gate's assurance vocabulary
+export {
+  ASSURANCE_GATE_REASON_CODES,
+  DEPLOY_GATE_REASON_INFO,
+  type DeployGateAssuranceSummary,
+} from "./deploy-gate.js";
+export {
+  DEFAULT_REQUIRED_MAX_ASR_PCT,
+  DEFAULT_REQUIRED_MIN_SCORE,
+  REQUIRED_TEST_DEFAULTS,
+  REQUIRED_TEST_DEFAULTS_NOTE,
+  UNMEASURABLE_EXPLANATION,
+  effectiveRequiredTests,
+  evaluateRequiredTests,
+  owaspMeasurability,
+  owaspTestClassInfo,
+  requiredTestClassSchema,
+  requiredTestConditionsFor,
+  requiredTestPolicyProblems,
+  requiredTestPolicySchema,
+  requiredTestThresholds,
+  requiredTestTierPolicySchema,
+  type OwaspMeasurability,
+  type RequiredTestAgent,
+  type RequiredTestPolicyProblem,
+  type RequiredTestRunEvidence,
+  type RequiredTestStatusRow,
+} from "./required-tests.js";
+// ADR-0180 FA3: the evidence bar a run must meet to count for a required test
+export { REQUIRED_TEST_EVIDENCE_BAR, evidenceShortfall } from "./required-tests.js";

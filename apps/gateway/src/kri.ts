@@ -74,13 +74,29 @@ export const KRI_MONITOR_RULE = "kri_threshold_breached";
 // measurement
 // ---------------------------------------------------------------------------
 
-export interface KriScopeSpec {
-  scope: "fleet" | "agent" | "project";
-  scopeId: string | null;
-}
+/** A KRI's own scope (fleet, one agent, one project), or — ADR-0180 A2 — an
+ * ASSURANCE scope: a use case's project PLUS its agent set (a trace counts
+ * when it is in the project OR any of its spans ran one of the agents). An
+ * assurance scope with neither a project nor an agent matches nothing, never
+ * the whole fleet. Only the measurement takes `assurance`; a stored KRI's
+ * scope stays fleet/agent/project. */
+export type KriScopeSpec =
+  | { scope: "fleet" | "agent" | "project"; scopeId: string | null }
+  | { scope: "assurance"; projectId: string | null; agentIds: readonly string[] };
 
 /** the trace predicate for a scope */
 function scopeCondition(s: KriScopeSpec): SQL {
+  if (s.scope === "assurance") {
+    const parts: SQL[] = [];
+    if (s.projectId) parts.push(eq(traces.projectId, s.projectId));
+    if (s.agentIds.length > 0) {
+      parts.push(
+        sql`exists (select 1 from ${traceSpans} where ${traceSpans.traceId} = ${traces.id} and ${inArray(traceSpans.agentId, [...s.agentIds])})`,
+      );
+    }
+    if (parts.length === 0) return sql`false`;
+    return parts.length === 1 ? parts[0]! : sql`(${sql.join(parts, sql` or `)})`;
+  }
   if (s.scope === "project" && s.scopeId) return eq(traces.projectId, s.scopeId);
   if (s.scope === "agent" && s.scopeId) {
     return sql`exists (select 1 from ${traceSpans} where ${traceSpans.traceId} = ${traces.id} and ${traceSpans.agentId} = ${s.scopeId})`;
@@ -171,6 +187,42 @@ export async function measureKri(
   }
   const [a] = await kriTraceQuery(db, s, since, now);
   return traceMetricValue(k.metric, a as TraceAgg);
+}
+
+/**
+ * ADR-0180 A2 — one trace metric over an ASSURANCE scope (a use case's project
+ * plus its agent set): the same aggregate a KRI uses, plus the ids of the
+ * finished traces it rests on (for `error_rate` the error traces first; then
+ * newest first; at most `evidenceLimit`). Content-free like every query here.
+ */
+export async function measureTraceMetricForScope(
+  db: Db,
+  metric: Exclude<KriMetric, "feedback_score">,
+  scope: { projectId: string | null; agentIds: readonly string[] },
+  since: Date,
+  until: Date,
+  evidenceLimit = 20,
+): Promise<{ value: number | null; samples: number; traceIds: string[] }> {
+  const s: KriScopeSpec = { scope: "assurance", projectId: scope.projectId, agentIds: scope.agentIds };
+  const [a] = await kriTraceQuery(db, s, since, until);
+  const m = traceMetricValue(metric, a as TraceAgg);
+  const evidence = await db
+    .select({ id: traces.id })
+    .from(traces)
+    .where(
+      and(
+        gte(traces.startedAt, since),
+        lte(traces.startedAt, until),
+        scopeCondition(s),
+        ne(traces.status, "running"),
+      ),
+    )
+    .orderBy(
+      ...(metric === "error_rate" ? [sql`(${traces.status} = 'error') desc`] : []),
+      sql`${traces.startedAt} desc`,
+    )
+    .limit(evidenceLimit);
+  return { ...m, traceIds: evidence.map((r) => r.id) };
 }
 
 async function scopeLabels(db: Db, rows: Array<Pick<KriRow, "scope" | "scopeId">>): Promise<Map<string, string>> {

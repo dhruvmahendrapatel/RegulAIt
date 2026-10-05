@@ -1153,30 +1153,139 @@
                   "conditions": {
                     "type": "array",
                     "items": {
-                      "type": "object",
-                      "properties": {
-                        "text": {
-                          "type": "string",
-                          "minLength": 1,
-                          "maxLength": 500
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "text": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 500
+                            },
+                            "ownerUserId": {
+                              "type": "string",
+                              "format": "uuid"
+                            },
+                            "dueAt": {
+                              "type": "string"
+                            },
+                            "blocking": {
+                              "type": "boolean"
+                            },
+                            "kind": {
+                              "type": "string",
+                              "enum": [
+                                "manual"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "text",
+                            "dueAt",
+                            "blocking",
+                            "kind"
+                          ],
+                          "additionalProperties": false
                         },
-                        "ownerUserId": {
-                          "type": "string",
-                          "format": "uuid"
-                        },
-                        "dueAt": {
-                          "type": "string"
-                        },
-                        "blocking": {
-                          "type": "boolean"
+                        {
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "enum": [
+                                "metric",
+                                "test_class",
+                                "autonomy_floor"
+                              ]
+                            },
+                            "text": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 500
+                            },
+                            "ownerUserId": {
+                              "type": "string",
+                              "format": "uuid"
+                            },
+                            "dueAt": {
+                              "type": "string"
+                            },
+                            "blocking": {
+                              "type": "boolean"
+                            },
+                            "metric": {
+                              "type": "string",
+                              "enum": [
+                                "trace_eval_flag_rate",
+                                "guardrail_hits",
+                                "guardrail_mode",
+                                "redteam_asr",
+                                "eval_mean_score",
+                                "eval_pass_rate",
+                                "spend_usd",
+                                "error_rate",
+                                "pack_control_evidenced"
+                              ]
+                            },
+                            "params": {
+                              "type": "object",
+                              "additionalProperties": {},
+                              "default": {}
+                            },
+                            "operator": {
+                              "type": "string",
+                              "enum": [
+                                "lt",
+                                "lte",
+                                "gt",
+                                "gte",
+                                "eq"
+                              ]
+                            },
+                            "threshold": {
+                              "type": "number"
+                            },
+                            "windowDays": {
+                              "type": "integer",
+                              "minimum": 1,
+                              "maximum": 90
+                            },
+                            "minSamples": {
+                              "type": "integer",
+                              "minimum": 1,
+                              "maximum": 100000
+                            },
+                            "cadence": {
+                              "type": "string",
+                              "enum": [
+                                "hourly",
+                                "daily",
+                                "weekly"
+                              ],
+                              "default": "daily"
+                            },
+                            "onBreach": {
+                              "type": "string",
+                              "enum": [
+                                "alert",
+                                "reopen_review"
+                              ],
+                              "default": "alert"
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "text",
+                            "blocking",
+                            "metric",
+                            "operator",
+                            "threshold",
+                            "windowDays",
+                            "minSamples"
+                          ],
+                          "additionalProperties": false
                         }
-                      },
-                      "required": [
-                        "text",
-                        "dueAt",
-                        "blocking"
-                      ],
-                      "additionalProperties": false
+                      ]
                     },
                     "maxItems": 20
                   },

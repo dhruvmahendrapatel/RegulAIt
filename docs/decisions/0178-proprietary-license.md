@@ -37,3 +37,8 @@ npm publishing and grants nothing.
   setting). It would also affect public CI minutes and the GHCR image visibility.
 - The copyright holder is named by GitHub account. Replace that with the owner's legal name or company once one exists.
   Have a lawyer review the text before any commercial use.
+
+## Amendment (2026-10-05): copyright holder named
+
+At the owner's instruction, the copyright holder is now **Dhruv Patel**. Enquiries still go through the
+"dhruvmahendrapatel" GitHub account.

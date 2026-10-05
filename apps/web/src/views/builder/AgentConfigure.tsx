@@ -20,6 +20,7 @@ import { AddConnectionDialog, AddSkillDialog, CodeDialog, NewScheduleDialog, New
 import { bk, builderApi, useAgents, useDirectory, useMyModelTiles, useMyProjects, type PatchAgentBody, type ScheduleBody } from "./builderApi";
 import { AGENT_COLORS, bundleFileName, parseLimitInput, scheduleSummary, skillPrivateOnSharedAgentCopy, skillWithheldCopy, spendState } from "./builderLogic";
 import { AgentAvatar, Icon, Section, Segmented, Switch, ToolLogo } from "./BuilderUi";
+import { AutonomyPanel } from "./AutonomyPanel";
 import s from "./builder.module.css";
 
 export const CHANNELS: Array<{ provider: BuilderChannelProvider; name: string; logo: string | null; sub: string }> = [
@@ -658,6 +659,13 @@ export function ConfigurePanel(props: { agent: BuilderAgentDetail; onOpenSkills:
           {Icon.plus(14)} New sub-agent
         </button>
       </Section>
+
+      {/* ADR-0180 A8 — the steward's view: only the owner or an admin may read it */}
+      {!ro && (
+        <Section title="Autonomy" icon={Icon.check()} defaultOpen={false}>
+          <AutonomyPanel agent={agent} />
+        </Section>
+      )}
 
       <Section title="Advanced" icon={Icon.shield()} defaultOpen={false}>
         <ModelPicker

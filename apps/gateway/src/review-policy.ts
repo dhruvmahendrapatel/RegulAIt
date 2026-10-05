@@ -291,6 +291,110 @@ export interface RecertificationSweepResult {
   skipped: Array<{ id: string; reason: string }>;
 }
 
+export type ReopenUseCaseReviewResult =
+  | {
+      ok: true;
+      /** run AFTER the caller's transaction commits */
+      postCommit: ApprovalPostCommit;
+      instanceId: string;
+      /** the intake instance's new workflow round */
+      workflowRound: number;
+      /** the review-policy round opened, null on the single-approver path */
+      reviewRound: number | null;
+      roles: Array<{ id: string; name: string }>;
+      approvalIds: string[];
+    }
+  | { ok: false; reason: string };
+
+/**
+ * PUT AN APPROVED USE CASE BACK INTO REVIEW — the one re-open both the
+ * recertification sweep (approval expired) and the measured-condition
+ * evaluator (ADR-0180 A2: two consecutive breaches of a `reopen_review`
+ * condition) take. Inside the CALLER's transaction, which already holds the
+ * use case row: the (completed) intake instance is re-opened at its last
+ * sign-off stage through the generic kernel re-open, a new review round is
+ * opened per the review policy, and the use case moves to `under_review`.
+ * The caller writes its own audit row (each says why it re-opened) and runs
+ * `postCommit` after its commit. Authorisation is the caller's.
+ */
+export async function reopenUseCaseReview(
+  tx: Tx,
+  uc: AiUseCaseRow,
+  reason: string,
+  actor: {
+    actorUserId: string | null;
+    /** who the kernel's audit rows name when `actorUserId` is null */
+    systemActor: string;
+    /** true = an EXPIRED approval back in review (the UI says so); false = any other re-review */
+    recertification: boolean;
+    /** the review policy, when the caller already loaded it */
+    policy?: StoredReviewPolicy | null;
+    dataKey?: string;
+  },
+): Promise<ReopenUseCaseReviewResult> {
+  if (!uc.workflowInstanceId) return { ok: false, reason: "no_intake_instance" };
+  const [inst] = await tx
+    .select()
+    .from(workflowInstances)
+    .where(eq(workflowInstances.id, uc.workflowInstanceId))
+    .for("update");
+  if (!inst) return { ok: false, reason: "no_intake_instance" };
+  if (inst.status !== "completed") return { ok: false, reason: `intake_instance_${inst.status}` };
+  const def = inst.definition as WorkflowDefinition;
+  let signoff = -1;
+  for (let i = def.stages.length - 1; i >= 0; i--) {
+    if (def.stages[i]!.type === "human_approval") {
+      signoff = i;
+      break;
+    }
+  }
+  if (signoff < 0) return { ok: false, reason: "no_signoff_stage" };
+  const stage = def.stages[signoff]!;
+  // AER-049: the generic kernel re-open — the one path every re-open takes.
+  // It archives the round's effect records into `effects:history`, bumps
+  // round / stage_entry, supersedes any live gate and re-requests the
+  // sign-off from the template's approvers (nested as a savepoint in this
+  // transaction, so the use case and the instance move together).
+  const reopened = await reopenWorkflowInstance(tx, inst.id, {
+    stageId: stage.id,
+    reason,
+    actorUserId: actor.actorUserId,
+    systemActor: actor.systemActor,
+    ...(actor.dataKey ? { dataKey: actor.dataKey } : {}),
+  });
+  const policy = actor.policy === undefined ? await loadReviewPolicy(tx as unknown as Db) : actor.policy;
+  const roles = requiredRolesFor(policy, uc.euAiActTier);
+  let reviewRound: number | null = null;
+  let approvalIds: string[];
+  if (roles.length > 0) {
+    // the review policy routes this tier: the template's rows the re-open
+    // just wrote become one row per required role, as on a first round
+    const r = await replaceWithReviewRound(tx, inst, stage.id, roles, [uc.ownerUserId, inst.initiatorUserId]);
+    reviewRound = r.round;
+    approvalIds = r.ids;
+  } else {
+    approvalIds = (
+      await tx
+        .select({ id: approvals.id })
+        .from(approvals)
+        .where(and(eq(approvals.instanceId, inst.id), eq(approvals.stageId, stage.id), eq(approvals.status, "pending")))
+    ).map((a) => a.id);
+  }
+  await tx
+    .update(aiUseCases)
+    .set({ status: "under_review", recertification: actor.recertification, updatedAt: new Date() })
+    .where(eq(aiUseCases.id, uc.id));
+  return {
+    ok: true,
+    postCommit: reopened.postCommit,
+    instanceId: inst.id,
+    workflowRound: reopened.round,
+    reviewRound,
+    roles: roles.map((r) => ({ id: r.id, name: r.name })),
+    approvalIds,
+  };
+}
+
 /**
  * Move every approved use case whose approval has expired back into review.
  * The scheduler job (`use-case-recertification`) and the admin endpoint call
@@ -336,62 +440,23 @@ export async function runUseCaseRecertificationSweep(
         if (!uc || uc.status !== "approved" || !uc.approvedUntil || uc.approvedUntil.getTime() > now.getTime()) {
           return { ok: false, reason: "no_longer_expired" };
         }
-        if (!uc.workflowInstanceId) return { ok: false, reason: "no_intake_instance" };
-        const [inst] = await tx
-          .select()
-          .from(workflowInstances)
-          .where(eq(workflowInstances.id, uc.workflowInstanceId))
-          .for("update");
-        if (!inst) return { ok: false, reason: "no_intake_instance" };
-        if (inst.status !== "completed") return { ok: false, reason: `intake_instance_${inst.status}` };
-        const def = inst.definition as WorkflowDefinition;
-        let signoff = -1;
-        for (let i = def.stages.length - 1; i >= 0; i--) {
-          if (def.stages[i]!.type === "human_approval") {
-            signoff = i;
-            break;
-          }
-        }
-        if (signoff < 0) return { ok: false, reason: "no_signoff_stage" };
-        const stage = def.stages[signoff]!;
-        // AER-049: the generic kernel re-open — the one path every re-open takes.
-        // It archives the round's effect records into `effects:history`, bumps
-        // round / stage_entry, supersedes any live gate and re-requests the
-        // sign-off from the template's approvers (nested as a savepoint in this
-        // transaction, so the use case and the instance move together).
-        const reopened = await reopenWorkflowInstance(tx, inst.id, {
-          stageId: stage.id,
-          reason:
-            `recertification: the approval recorded for AI use case '${uc.name}' expired on ` +
+        const reopened = await reopenUseCaseReview(
+          tx,
+          uc,
+          `recertification: the approval recorded for AI use case '${uc.name}' expired on ` +
             `${uc.approvedUntil.toISOString().slice(0, 10)}`,
-          actorUserId: opts.actorUserId ?? null,
-          systemActor: RECERTIFICATION_SYSTEM_ACTOR,
-          ...(opts.dataKey ? { dataKey: opts.dataKey } : {}),
-        });
+          {
+            actorUserId: opts.actorUserId ?? null,
+            systemActor: RECERTIFICATION_SYSTEM_ACTOR,
+            recertification: true,
+            policy,
+            ...(opts.dataKey ? { dataKey: opts.dataKey } : {}),
+          },
+        );
+        if (!reopened.ok) return reopened;
         postCommits.push(reopened.postCommit);
-        const roles = requiredRolesFor(policy, uc.euAiActTier);
-        let round: number | null = null;
-        let approvalIds: string[];
-        if (roles.length > 0) {
-          // the review policy routes this tier: the template's rows the re-open
-          // just wrote become one row per required role, as on a first round
-          const r = await replaceWithReviewRound(tx, inst, stage.id, roles, [uc.ownerUserId, inst.initiatorUserId]);
-          round = r.round;
-          approvalIds = r.ids;
-        } else {
-          approvalIds = (
-            await tx
-              .select({ id: approvals.id })
-              .from(approvals)
-              .where(
-                and(eq(approvals.instanceId, inst.id), eq(approvals.stageId, stage.id), eq(approvals.status, "pending")),
-              )
-          ).map((a) => a.id);
-        }
-        await tx
-          .update(aiUseCases)
-          .set({ status: "under_review", recertification: true, updatedAt: new Date() })
-          .where(eq(aiUseCases.id, uc.id));
+        const { roles, approvalIds } = reopened;
+        const round = reopened.reviewRound;
         await tx.insert(auditLog).values({
           userId: opts.actorUserId ?? NO_IDENTITY,
           objectType: "ai_use_case",
@@ -402,8 +467,8 @@ export async function runUseCaseRecertificationSweep(
             from: "approved",
             to: "under_review",
             approvedUntil: uc.approvedUntil.toISOString(),
-            workflowInstanceId: inst.id,
-            workflowRound: reopened.round,
+            workflowInstanceId: reopened.instanceId,
+            workflowRound: reopened.workflowRound,
             tier: tierKeyFor(uc.euAiActTier),
             reviewRound: round,
             roles: roles.map((r) => ({ id: r.id, name: r.name })),

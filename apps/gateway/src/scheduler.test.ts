@@ -32,7 +32,7 @@ import {
   toRegistry,
   type SchedulerJobDefinition,
 } from "./scheduler.js";
-import { SCHEDULER_JOB_NAMES, schedulerJobRegistry } from "./scheduler-jobs.js";
+import { RISK_ACCEPTANCE_EXPIRY_JOB_NAME, SCHEDULER_JOB_NAMES, schedulerJobRegistry } from "./scheduler-jobs.js";
 import { closeAll, dropScratchDatabase } from "./testing/scratch-db.js";
 
 /**
@@ -736,6 +736,13 @@ describe("every sweep is registered", () => {
         // their 30-day window. Driven end-to-end in
         // aer050-replay-retention.test.ts; this list pins registration.
         SCHEDULER_JOB_NAMES.idempotencyKeySweep,
+        // ADR-0180 A2: evaluates measured approval conditions on their
+        // cadence. Driven end-to-end in zz-adr0180-a2-conditions.test.ts;
+        // this list pins registration.
+        SCHEDULER_JOB_NAMES.conditionEvaluation,
+        // ADR-0180 A10: expires lapsed residual-risk acceptances and reopens
+        // the risk. Driven end-to-end in zz-adr0180-a10-risk-tolerance.test.ts.
+        RISK_ACCEPTANCE_EXPIRY_JOB_NAME,
       ].sort(),
     );
     for (const def of registry.values()) {

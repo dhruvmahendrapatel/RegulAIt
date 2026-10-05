@@ -1,5 +1,22 @@
 import { sql } from "drizzle-orm";
-import { APPROVAL_OBJECT_TYPES } from "@regulait/shared";
+import {
+  APPROVAL_OBJECT_TYPES,
+  // ADR-0180 (migration 0155): the continuous-assurance vocabularies, kept in
+  // lockstep with the migration's CHECKs by being the same constants
+  ASSURANCE_GATE_MODES,
+  ASSURANCE_METRIC_IDS,
+  AUTONOMY_CLASSES,
+  CONDITION_CADENCES,
+  CONDITION_KINDS,
+  CONDITION_ON_BREACH,
+  CONDITION_OPERATORS,
+  MEASUREMENT_STATES,
+  RESIDUAL_RISK_BANDS,
+  RISK_RESPONSE_TYPES,
+  RISK_TOLERANCE_SCOPE_KINDS,
+  TOLERANCE_BANDS,
+  type RequiredTestPolicy,
+} from "@regulait/shared";
 import {
   bigint,
   check,
@@ -1299,6 +1316,12 @@ export const auditLog = pgTable(
     index("audit_log_prune_marker_at_idx")
       .on(t.at)
       .where(sql`${t.ruleId} = 'audit-log-pruned'`),
+    // migration 0155 (ADR-0180 A2): the guardrail hit rows only (the ids
+    // guardrails.ts writes as `guardrail-${outcome}`), so the guardrail_hits
+    // condition metric never scans the trail
+    index("audit_log_guardrail_hits_idx")
+      .on(t.ruleId, t.at)
+      .where(sql`${t.ruleId} IN ('guardrail-blocked', 'guardrail-warned', 'guardrail-logged')`),
   ],
 );
 
@@ -3767,6 +3790,17 @@ export const orgSettings = pgTable(
       .notNull()
       .default("off"),
 
+    // --- ADR-0180 (migration 0155): the continuous-assurance gate ----------
+    /** Secure by default: 'enforce' — the deploy gate HOLDS on the D3 checks
+     * (failing measurable conditions; missing, stale or failing required
+     * tests; unmet autonomy floors; residual risk above tolerance). 'warn'
+     * reports them without holding; 'off' skips them and the gate says so.
+     * Written only by the admin-only, audited
+     * `PUT /v1/org/settings/assurance-gate-mode`. */
+    assuranceGateMode: text("assurance_gate_mode", { enum: ASSURANCE_GATE_MODES })
+      .notNull()
+      .default("enforce"),
+
     // --- B6b / ADR-0080 amendment (migration 0101): the attribution mandate --
     /** FALSE (default) = today, byte-identical: a governed dispatch that names
      * no `projectId` runs and lands in the explicit "Unattributed" cost bucket
@@ -3937,6 +3971,10 @@ export const orgSettings = pgTable(
     check(
       "org_settings_use_case_gate_mode_check",
       sql`${t.useCaseGateMode} IN ('off', 'warn', 'enforce')`,
+    ),
+    check(
+      "org_settings_assurance_gate_mode_check",
+      sql`${t.assuranceGateMode} IN ('off', 'warn', 'enforce')`,
     ),
     check(
       "org_settings_mrm_staleness_recert_threshold_check",
@@ -8385,6 +8423,32 @@ export const useCaseConditions = pgTable(
     metByUserId: uuid("met_by_user_id").references(() => users.id, { onDelete: "set null" }),
     note: text("note"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+
+    // --- ADR-0180 A2 (migration 0155): MEASURED conditions -----------------
+    /** `manual` = the ADR-0168 free-text condition (closed by hand). Any other
+     * kind carries a metric spec and is closed ONLY by passing evidence. */
+    kind: text("kind", { enum: CONDITION_KINDS }).notNull().default("manual"),
+    metric: text("metric", { enum: ASSURANCE_METRIC_IDS }),
+    params: jsonb("params").$type<Record<string, unknown>>().notNull().default({}),
+    operator: text("operator", { enum: CONDITION_OPERATORS }),
+    threshold: doublePrecision("threshold"),
+    windowDays: integer("window_days"),
+    minSamples: integer("min_samples"),
+    cadence: text("cadence", { enum: CONDITION_CADENCES }),
+    onBreach: text("on_breach", { enum: CONDITION_ON_BREACH }).notNull().default("alert"),
+    /** the last evaluation; `insufficient` / `not_run` are never a pass */
+    lastValue: doublePrecision("last_value"),
+    lastSamples: integer("last_samples"),
+    lastState: text("last_state", { enum: MEASUREMENT_STATES }),
+    lastEvaluatedAt: timestamp("last_evaluated_at", { withTimezone: true }),
+    consecutiveBreaches: integer("consecutive_breaches").notNull().default(0),
+    /** `{type, id}[]` pointers at the ledger rows the last evaluation rests on */
+    evidence: jsonb("evidence").$type<Array<{ type: string; id: string }>>().notNull().default([]),
+    /** an admin WAIVER (reason required): a gate warning, never a pass. The
+     * ADR-0168 met check still applies, so a waiver also stamps `met_at`. */
+    waivedBy: uuid("waived_by").references(() => users.id, { onDelete: "set null" }),
+    waivedAt: timestamp("waived_at", { withTimezone: true }),
+    waiveReason: text("waive_reason"),
   },
   (t) => [
     check("use_case_conditions_status_check", sql`${t.status} IN ('open', 'met', 'waived')`),
@@ -8392,6 +8456,38 @@ export const useCaseConditions = pgTable(
     check("use_case_conditions_met_check", sql`(${t.status} = 'open') = (${t.metAt} IS NULL)`),
     index("use_case_conditions_use_case_idx").on(t.useCaseId, t.status),
     index("use_case_conditions_approval_idx").on(t.approvalId),
+    // migration 0155 (ADR-0180 A2)
+    check(
+      "use_case_conditions_kind_check",
+      sql`${t.kind} IN ('manual', 'metric', 'test_class', 'autonomy_floor')`,
+    ),
+    check(
+      "use_case_conditions_metric_check",
+      sql`${t.metric} IS NULL OR ${t.metric} IN ('trace_eval_flag_rate', 'guardrail_hits', 'guardrail_mode', 'redteam_asr', 'eval_mean_score', 'eval_pass_rate', 'spend_usd', 'error_rate', 'pack_control_evidenced')`,
+    ),
+    check(
+      "use_case_conditions_measured_check",
+      sql`(${t.kind} = 'manual') = (${t.metric} IS NULL) AND (${t.metric} IS NULL OR (${t.operator} IS NOT NULL AND ${t.threshold} IS NOT NULL AND ${t.windowDays} IS NOT NULL AND ${t.minSamples} IS NOT NULL AND ${t.cadence} IS NOT NULL))`,
+    ),
+    check("use_case_conditions_operator_check", sql`${t.operator} IS NULL OR ${t.operator} IN ('lt', 'lte', 'gt', 'gte', 'eq')`),
+    check("use_case_conditions_window_check", sql`${t.windowDays} IS NULL OR ${t.windowDays} BETWEEN 1 AND 90`),
+    check("use_case_conditions_min_samples_check", sql`${t.minSamples} IS NULL OR ${t.minSamples} BETWEEN 1 AND 100000`),
+    check("use_case_conditions_cadence_check", sql`${t.cadence} IS NULL OR ${t.cadence} IN ('hourly', 'daily', 'weekly')`),
+    check("use_case_conditions_on_breach_check", sql`${t.onBreach} IN ('alert', 'reopen_review')`),
+    check(
+      "use_case_conditions_last_state_check",
+      sql`${t.lastState} IS NULL OR ${t.lastState} IN ('pass', 'fail', 'insufficient', 'not_run')`,
+    ),
+    check("use_case_conditions_breaches_check", sql`${t.consecutiveBreaches} >= 0`),
+    check(
+      "use_case_conditions_evidence_check",
+      sql`jsonb_typeof(${t.evidence}) = 'array' AND jsonb_typeof(${t.params}) = 'object'`,
+    ),
+    check(
+      "use_case_conditions_waived_check",
+      sql`(${t.status} = 'waived') = (${t.waivedAt} IS NOT NULL) AND (${t.waivedAt} IS NULL OR length(btrim(coalesce(${t.waiveReason}, ''))) BETWEEN 1 AND 2000)`,
+    ),
+    index("use_case_conditions_measured_idx").on(t.useCaseId).where(sql`${t.kind} <> 'manual'`),
   ],
 );
 
@@ -8424,8 +8520,16 @@ export const governanceReviewPolicy = pgTable(
     riskAcceptorUserIds: jsonb("risk_acceptor_user_ids").$type<string[]>().notNull().default([]),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
     updatedByUserId: uuid("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    /** ADR-0180 A3 (migration 0155): per tier, the required AI test classes and
+     * their freshness. A separate column (not inside `tiers`) so the policy
+     * PUT, which rebuilds `tiers`, cannot drop it; written only by the
+     * required-tests route. An absent tier = the strict default in code. */
+    requiredTests: jsonb("required_tests").$type<RequiredTestPolicy>().notNull().default({}),
   },
-  (t) => [check("governance_review_policy_singleton_check", sql`${t.id} = 'default'`)],
+  (t) => [
+    check("governance_review_policy_singleton_check", sql`${t.id} = 'default'`),
+    check("governance_review_policy_required_tests_check", sql`jsonb_typeof(${t.requiredTests}) = 'object'`),
+  ],
 );
 
 export type GovernanceReviewPolicyRow = typeof governanceReviewPolicy.$inferSelect;
@@ -9159,12 +9263,28 @@ export const builderAgents = pgTable(
     archivedAt: timestamp("archived_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    // --- ADR-0180 A8 (migration 0155): the DECLARED autonomy class ----------
+    /** a steward's declaration; null = none, so the observed (derived) class
+     * applies. The observed class is derived from the agent's setup and never
+     * stored. A declaration below the observed class is flagged. */
+    declaredAutonomyClass: text("declared_autonomy_class", { enum: AUTONOMY_CLASSES }),
+    autonomyDeclaredBy: uuid("autonomy_declared_by").references(() => users.id, { onDelete: "set null" }),
+    autonomyDeclaredAt: timestamp("autonomy_declared_at", { withTimezone: true }),
+    autonomyNote: text("autonomy_note"),
   },
   (t) => [
     index("builder_agents_owner_idx").on(t.ownerUserId),
     check(
       "builder_agents_limit_ck",
       sql`${t.monthlyLimitUsd} IS NULL OR (${t.monthlyLimitUsd} >= 0.01 AND ${t.monthlyLimitUsd} <= 100000)`,
+    ),
+    check(
+      "builder_agents_autonomy_class_ck",
+      sql`${t.declaredAutonomyClass} IS NULL OR ${t.declaredAutonomyClass} IN ('assist', 'supervised', 'delegated', 'autonomous')`,
+    ),
+    check(
+      "builder_agents_autonomy_declared_ck",
+      sql`(${t.declaredAutonomyClass} IS NULL) = (${t.autonomyDeclaredAt} IS NULL) AND (${t.autonomyNote} IS NULL OR length(${t.autonomyNote}) <= 2000)`,
     ),
   ],
 );
@@ -10193,3 +10313,102 @@ export const requestIdempotencyKeys = pgTable(
   ],
 );
 export type RequestIdempotencyKeyRow = typeof requestIdempotencyKeys.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0180 A10 (migration 0155) — RISK TOLERANCE and TIME-BOXED ACCEPTANCE.
+//
+// `risk_tolerances`: per risk category or review tier, the highest residual
+// band the org tolerates. EMPTY by design: the strict default (residual above
+// `medium` needs a valid acceptance) lives in code, so no row is the strict
+// state, and an admin relaxing it is an audited write here.
+//
+// `risk_acceptances`: the acceptance HISTORY, never overwritten. A live
+// acceptance is one not superseded, expired or revoked; at most one per risk.
+// The DB caps the expiry (184 days for high/critical, 366 otherwise, as
+// absolute hours) behind the calendar 6/12-month rule the gateway applies.
+// `compensating_controls` is `{controlRef, description}[]`: jsonb, which the
+// prose-scrub registry cannot reach, so the writer scrubs each description
+// (see PROSE_SCRUB_EXCLUSIONS).
+// ---------------------------------------------------------------------------
+
+export const riskTolerances = pgTable(
+  "risk_tolerances",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    scopeKind: text("scope_kind", { enum: RISK_TOLERANCE_SCOPE_KINDS }).notNull(),
+    /** an AI risk category, or a review-policy tier key */
+    scopeKey: text("scope_key").notNull(),
+    maxBand: text("max_band", { enum: TOLERANCE_BANDS }).notNull(),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedByUserId: uuid("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("risk_tolerances_scope_kind_check", sql`${t.scopeKind} IN ('category', 'tier')`),
+    check("risk_tolerances_scope_key_check", sql`length(btrim(${t.scopeKey})) BETWEEN 1 AND 64`),
+    check("risk_tolerances_max_band_check", sql`${t.maxBand} IN ('none', 'low', 'medium', 'high', 'critical')`),
+    uniqueIndex("risk_tolerances_scope_uq").on(t.scopeKind, t.scopeKey),
+  ],
+);
+export type RiskToleranceRow = typeof riskTolerances.$inferSelect;
+
+export const riskAcceptances = pgTable(
+  "risk_acceptances",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    riskId: uuid("risk_id")
+      .notNull()
+      .references(() => aiRisks.id, { onDelete: "cascade" }),
+    useCaseId: uuid("use_case_id").references(() => aiUseCases.id, { onDelete: "set null" }),
+    responseType: text("response_type", { enum: RISK_RESPONSE_TYPES }).notNull(),
+    /** the residual band at the moment of acceptance */
+    residualBand: text("residual_band", { enum: RESIDUAL_RISK_BANDS }).notNull(),
+    acceptedByUserId: uuid("accepted_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    acceptedAt: timestamp("accepted_at", { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    rationale: text("rationale").notNull(),
+    compensatingControls: jsonb("compensating_controls")
+      .$type<Array<{ controlRef: string | null; description: string }>>()
+      .notNull()
+      .default([]),
+    supersededAt: timestamp("superseded_at", { withTimezone: true }),
+    supersededById: uuid("superseded_by_id"),
+    /** stamped by the expiry sweep, which also reopens the risk */
+    expiredAt: timestamp("expired_at", { withTimezone: true }),
+    revokedByUserId: uuid("revoked_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    revokeReason: text("revoke_reason"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    foreignKey({
+      name: "risk_acceptances_superseded_by_id_fkey",
+      columns: [t.supersededById],
+      foreignColumns: [t.id],
+    }).onDelete("set null"),
+    check(
+      "risk_acceptances_response_type_check",
+      sql`${t.responseType} IN ('accept', 'mitigate_partially', 'transfer', 'avoid_pending')`,
+    ),
+    check("risk_acceptances_residual_band_check", sql`${t.residualBand} IN ('low', 'medium', 'high', 'critical')`),
+    check("risk_acceptances_rationale_check", sql`length(btrim(${t.rationale})) BETWEEN 1 AND 4000`),
+    check(
+      "risk_acceptances_expiry_check",
+      sql`${t.expiresAt} > ${t.acceptedAt} AND ${t.expiresAt} <= ${t.acceptedAt} + CASE WHEN ${t.residualBand} IN ('high', 'critical') THEN interval '4416 hours' ELSE interval '8784 hours' END`,
+    ),
+    check(
+      "risk_acceptances_controls_check",
+      sql`jsonb_typeof(${t.compensatingControls}) = 'array' AND jsonb_array_length(${t.compensatingControls}) <= 20`,
+    ),
+    check("risk_acceptances_revoke_check", sql`(${t.revokedAt} IS NULL) = (${t.revokeReason} IS NULL)`),
+    uniqueIndex("risk_acceptances_live_uq")
+      .on(t.riskId)
+      .where(sql`${t.supersededAt} IS NULL AND ${t.expiredAt} IS NULL AND ${t.revokedAt} IS NULL`),
+    index("risk_acceptances_risk_idx").on(t.riskId, t.acceptedAt),
+    index("risk_acceptances_expiry_idx")
+      .on(t.expiresAt)
+      .where(sql`${t.supersededAt} IS NULL AND ${t.expiredAt} IS NULL AND ${t.revokedAt} IS NULL`),
+  ],
+);
+export type RiskAcceptanceRow = typeof riskAcceptances.$inferSelect;

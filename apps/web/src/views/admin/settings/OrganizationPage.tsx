@@ -168,6 +168,12 @@ function Loaded(props: { settings: Record<string, unknown> }) {
     useCaseGateMode: str(s, "useCaseGateMode") || "off",
   });
 
+  // --- 5b1. Continuous-assurance gate (ADR-0180) ---------------------------
+  // Its own admin-only, audited route (the general org PUT does not take it).
+  const assuranceGate = useSection({
+    assuranceGateMode: str(s, "assuranceGateMode") || "enforce",
+  });
+
   // --- 5b2. Attribution mandate (ADR-0080 B6b amendment) -------------------
   const attribution = useSection({
     dispatchAttributionRequired: str(s, "dispatchAttributionRequired") || "false",
@@ -590,6 +596,36 @@ function Loaded(props: { settings: Record<string, unknown> }) {
               <option value="off">off — approval registers intent, nothing is refused (default)</option>
               <option value="warn">warn — record + annotate what enforce would refuse</option>
               <option value="enforce">enforce — 409 for use-case-linked projects with no approved use case</option>
+            </Select>
+          </Field>
+        </SectionShell>
+      </Card>
+
+      <Card title="5b1 · Continuous-assurance deploy gate (ADR-0180)">
+        <SectionShell
+          title="Do the deploy gate's continuous-assurance checks hold a release?"
+          busy={assuranceGate.act.busy}
+          error={assuranceGate.act.error}
+          submitLabel="Save assurance gate"
+          onSubmit={() =>
+            void assuranceGate.act.run(
+              () =>
+                api.put("/v1/org/settings/assurance-gate-mode", {
+                  mode: assuranceGate.f.assuranceGateMode as "off" | "warn" | "enforce",
+                }),
+              "Assurance gate saved (audited)",
+            )
+          }
+          help="The strict default is enforce. The deploy gate then holds a release when a measured approval condition is failing, a required AI test is missing, stale or failing, an agent's autonomy floor is not met, or a residual risk is above tolerance with no valid acceptance. The checks run live against every use case. 'warn' reports them on the gate without holding; 'off' skips them, and the gate response says they were skipped. Every change is audited with the old and the new value."
+        >
+          <Field label="Continuous-assurance gate">
+            <Select
+              value={assuranceGate.f.assuranceGateMode}
+              onChange={(e) => assuranceGate.set("assuranceGateMode", e.target.value)}
+            >
+              <option value="enforce">enforce — hold the release (strict default)</option>
+              <option value="warn">warn — report the checks, do not hold</option>
+              <option value="off">off — skip the checks (the gate says so)</option>
             </Select>
           </Field>
         </SectionShell>

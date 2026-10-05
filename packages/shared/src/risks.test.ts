@@ -23,6 +23,11 @@ import {
   RISK_CATEGORY_EVIDENCE,
   RISK_EVIDENCE_RESOLVERS,
   TRUST_DIMENSIONS,
+  acceptanceCoversBand,
+  bandExceedsTolerance,
+  maxAcceptanceExpiry,
+  putRiskTolerancesSchema,
+  resolveRiskTolerance,
   riskLibraryEntrySchema,
   setResidualRiskSchema,
   transitionRiskSchema,
@@ -139,5 +144,60 @@ describe("ADR-0147 — residual position", () => {
     expect(setResidualRiskSchema.safeParse({ likelihood: null, impact: null }).success).toBe(true);
     expect(setResidualRiskSchema.safeParse({ likelihood: "low", impact: null }).success).toBe(false);
     expect(setResidualRiskSchema.safeParse({ likelihood: "extreme", impact: "low" }).success).toBe(false);
+  });
+});
+
+describe("ADR-0180 §6 (A10): tolerance and the acceptance cap, pure", () => {
+  it("applies the strict default with no rows, and the stricter of category and tier", () => {
+    expect(resolveRiskTolerance([], { category: "hallucination", tier: null })).toEqual({ band: "medium", source: "default" });
+    const rows = [
+      { scopeKind: "category" as const, scopeKey: "hallucination", maxBand: "high" as const },
+      { scopeKind: "tier" as const, scopeKey: "high", maxBand: "none" as const },
+    ];
+    // the minimal tier has no row, so it sits at the strict default: the relaxed category does not reach it
+    expect(resolveRiskTolerance(rows, { category: "hallucination", tier: "minimal" })).toEqual({ band: "medium", source: "default" });
+    expect(resolveRiskTolerance(rows, { category: "hallucination", tier: "high" })).toEqual({ band: "none", source: "tier" });
+    expect(resolveRiskTolerance(rows, { category: "shadow_ai", tier: "high" })).toEqual({ band: "none", source: "tier" });
+  });
+
+  it("FA10 finding 3: relaxing one scope never relaxes another; an unconfigured scope counts at the strict default", () => {
+    const catOnly = [{ scopeKind: "category" as const, scopeKey: "hallucination", maxBand: "high" as const }];
+    // only category:hallucination = high is configured; the high tier is not relaxed, so it stays medium
+    expect(resolveRiskTolerance(catOnly, { category: "hallucination", tier: "high" })).toEqual({ band: "medium", source: "default" });
+    // no tier at all (a risk with no use case) is the default on that side too: fail closed
+    expect(resolveRiskTolerance(catOnly, { category: "hallucination", tier: null })).toEqual({ band: "medium", source: "default" });
+    const tierOnly = [{ scopeKind: "tier" as const, scopeKey: "minimal", maxBand: "high" as const }];
+    expect(resolveRiskTolerance(tierOnly, { category: "hallucination", tier: "minimal" })).toEqual({ band: "medium", source: "default" });
+    // relaxing both scopes relaxes the risk; the category is named on a tie
+    const both = [...catOnly, ...tierOnly];
+    expect(resolveRiskTolerance(both, { category: "hallucination", tier: "minimal" })).toEqual({ band: "high", source: "category" });
+    // tightening one scope always applies, and a configured row is named over the default on a tie
+    expect(resolveRiskTolerance([{ scopeKind: "category", scopeKey: "hallucination", maxBand: "low" }], { category: "hallucination", tier: "high" })).toEqual({ band: "low", source: "category" });
+    expect(resolveRiskTolerance([{ scopeKind: "tier", scopeKey: "high", maxBand: "medium" }], { category: "hallucination", tier: "high" })).toEqual({ band: "medium", source: "tier" });
+  });
+
+  it("compares bands strictly: equal to the tolerance is within it", () => {
+    expect(bandExceedsTolerance("medium", "medium")).toBe(false);
+    expect(bandExceedsTolerance("high", "medium")).toBe(true);
+    expect(bandExceedsTolerance("low", "none")).toBe(true);
+    expect(acceptanceCoversBand("high", "medium")).toBe(true);
+    expect(acceptanceCoversBand("medium", "high")).toBe(false);
+  });
+
+  it("caps an acceptance at 6 calendar months for high/critical and 12 otherwise", () => {
+    const at = new Date("2026-08-31T00:00:00Z");
+    expect(maxAcceptanceExpiry("critical", at).toISOString()).toBe("2027-02-28T00:00:00.000Z");
+    expect(maxAcceptanceExpiry("high", at).toISOString()).toBe("2027-02-28T00:00:00.000Z");
+    expect(maxAcceptanceExpiry("medium", at).toISOString()).toBe("2027-08-31T00:00:00.000Z");
+    expect(maxAcceptanceExpiry("low", at).toISOString()).toBe("2027-08-31T00:00:00.000Z");
+  });
+
+  it("refuses an unknown or duplicated tolerance scope", () => {
+    expect(putRiskTolerancesSchema.safeParse({ tolerances: [] }).success).toBe(true);
+    expect(
+      putRiskTolerancesSchema.safeParse({ tolerances: [{ scopeKind: "tier", scopeKey: "hallucination", maxBand: "high" }] }).success,
+    ).toBe(false);
+    const dup = { scopeKind: "category", scopeKey: "shadow_ai", maxBand: "low" };
+    expect(putRiskTolerancesSchema.safeParse({ tolerances: [dup, dup] }).success).toBe(false);
   });
 });

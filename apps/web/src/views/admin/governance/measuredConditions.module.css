@@ -1,0 +1,30 @@
+/* ADR-0180 A2 — a measured condition's standing on the use-case record:
+   its spec, last evaluation, state and evidence, under the condition text. */
+
+.condCell {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s0);
+  max-width: 52ch;
+  color: var(--rg-ink);
+}
+
+.measured {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: var(--text-sm);
+}
+
+.waiveReason {
+  display: block;
+  max-width: 40ch;
+  white-space: normal;
+}
+
+.actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--s1);
+}

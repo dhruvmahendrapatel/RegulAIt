@@ -43,6 +43,7 @@ import {
 } from "@regulait/db";
 import { renderEuAiActAnswersBlock, type EuAiActAnswers } from "@regulait/shared";
 import { buildApp } from "./app.js";
+import { setAssuranceGateModeForTest } from "./testing/assurance-mode.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -206,6 +207,7 @@ describe("ADR-0168 approve with conditions", () => {
         code: "open_blocking_condition",
         severity: "block",
         message: `"g168 conditions ${RUN}" has 1 open before-go-live condition(s): DPIA signed by the DPO`,
+        explanation: expect.any(String), // ADR-0180: every reason carries its plain-language meaning
         ref: { type: "use_case", id: uc.id },
       },
     ]);
@@ -285,6 +287,7 @@ describe("ADR-0168 approval lifetime", () => {
         code: "approval_expired",
         severity: "block",
         message: `"g168 lifetime ${RUN}" approval expired on 2026-01-15; re-review required`,
+        explanation: expect.any(String), // ADR-0180: every reason carries its plain-language meaning
         ref: { type: "use_case", id: uc.id },
       },
     ]);
@@ -483,4 +486,15 @@ describe("ADR-0168 reviewer access and the queue's use-case link", () => {
     expect(r.statusCode, r.body).toBe(200);
     expect((await get(`/v1/use-cases/${uc.id}`, asReviewer)).statusCode).toBe(200);
   });
+});
+
+// ADR-0180: this file pins the gate rules above; the continuous-assurance checks
+// (strict `enforce` by default) are pinned in zz-adr0180-a3-required-tests.test.ts.
+// M-068: the strict default is restored before the file ends.
+let restoreAssuranceMode = async (): Promise<void> => {};
+beforeAll(async () => {
+  restoreAssuranceMode = await setAssuranceGateModeForTest(db, "off");
+});
+afterAll(async () => {
+  await restoreAssuranceMode();
 });

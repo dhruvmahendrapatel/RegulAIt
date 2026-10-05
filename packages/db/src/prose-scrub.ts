@@ -197,8 +197,15 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   // ADR-0157 / ADR-0159 — an alert acknowledgement is operator prose; a
   // remediation's rationale embeds risk and agent titles a person typed.
   [s.governanceAlerts, ["ackNote"]],
-  // ADR-0168 — a condition-met note is operator prose.
-  [s.useCaseConditions, ["note"]],
+  // ADR-0168 — a condition-met note is operator prose. ADR-0180 A2: so is an
+  // admin's waiver reason (one entry per table: merged here).
+  [s.useCaseConditions, ["note", "waiveReason"]],
+  // ADR-0180 A10 — why a residual risk is acceptable, and why an acceptance
+  // was revoked: prose typed beside a risk decision. The compensating
+  // controls are jsonb, which this registry cannot reach (see the exclusions).
+  [s.riskAcceptances, ["rationale", "revokeReason"]],
+  // ADR-0180 A8 — a steward's note on the autonomy class they declared
+  [s.builderAgents, ["autonomyNote"]],
   [s.remediationProposals, ["rationale"]],
   // --- machine-written free text that quotes an error, and ADR-0111's
   //     EXPORTED OBSERVABILITY COPY ---
@@ -255,10 +262,16 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
  * - `trace_retention_holds.release_reason` — a DB CHECK limits it to
  *   `'erasure'` or `'admin'` (ADR-0173 batch 2c); the free-text erasure
  *   reference goes to `audit_log`, which ADR-0099 scrubs.
+ * - `risk_acceptances.compensating_controls` — jsonb
+ *   (`{controlRef, description}[]`, ADR-0180 A10), and this registry scrubs
+ *   declared STRING columns only (the ADR-0115 `eval_results.detail`
+ *   answer). The one writer, the risk-acceptance route, scrubs each
+ *   `description` with `PROSE_SCRUB` before the insert.
  */
 export const PROSE_SCRUB_EXCLUSIONS: readonly string[] = [
   "audit_log.reason",
   "mcp_registry_entries.conflict_reason",
+  "risk_acceptances.compensating_controls",
   "trace_retention_holds.release_reason",
   "usage_events.stop_reason",
 ];

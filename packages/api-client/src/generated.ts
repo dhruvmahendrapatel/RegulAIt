@@ -49,6 +49,21 @@ export type PostV1ApprovalsByApprovalIdDecideBody = {
       ownerUserId?: string;
       dueAt: string;
       blocking: boolean;
+      kind: "manual";
+    } | {
+      kind: "metric" | "test_class" | "autonomy_floor";
+      text: string;
+      ownerUserId?: string;
+      dueAt?: string;
+      blocking: boolean;
+      metric: "trace_eval_flag_rate" | "guardrail_hits" | "guardrail_mode" | "redteam_asr" | "eval_mean_score" | "eval_pass_rate" | "spend_usd" | "error_rate" | "pack_control_evidenced";
+      params?: Record<string, unknown>;
+      operator: "lt" | "lte" | "gt" | "gte" | "eq";
+      threshold: number;
+      windowDays: number;
+      minSamples: number;
+      cadence?: "hourly" | "daily" | "weekly";
+      onBreach?: "alert" | "reopen_review";
     }>;
     acceptRisks?: {
       riskIds: Array<string>;

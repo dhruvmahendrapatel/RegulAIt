@@ -1065,6 +1065,13 @@
       "when": 1785089000000,
       "tag": "0154_audit_prune_marker_index",
       "breakpoints": true
+    },
+    {
+      "idx": 155,
+      "version": "7",
+      "when": 1785090000000,
+      "tag": "0155_continuous_assurance",
+      "breakpoints": true
     }
   ]
 }

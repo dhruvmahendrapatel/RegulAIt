@@ -570,6 +570,41 @@ export const NON_ADMIN_ROUTES = new Set([
   // POST /v1/evals/traces/evaluate (an admin reading other people's trace
   // previews, audited), GET /v1/evals/compare and POST /v1/evals/runs/:id/
   // calibration (fleet-wide result reads). Nothing is added to this set.
+
+  // ===== ADR-0180 (ADR-0175 batch D3) — continuous assurance ================
+  // Each owner's block below is APPEND-ONLY for that owner.
+  //
+  // --- P0: the assurance gate mode -------------------------------------------
+  // DELIBERATELY ABSENT, so ADMIN-ONLY: GET and PUT /v1/org/settings/
+  // assurance-gate-mode. Relaxing the strict default is an org-wide act.
+  //
+  // --- A2: measurable conditions ---------------------------------------------
+  // DELIBERATELY ABSENT, so ADMIN-ONLY: POST /v1/use-cases/:useCaseId/
+  // conditions/:conditionId/evaluate (reads fleet ledgers) and .../waive (only
+  // an admin may waive, with a reason; ADR-0180 §3).
+  //
+  // --- A3: required AI test classes ------------------------------------------
+  // Any signed-in user may READ the required tests, as they may read the review
+  // policy they belong to. The PUT stays admin through the default gate.
+  "GET /v1/governance/review-policy/required-tests",
+  //
+  // --- A8: agent autonomy class ----------------------------------------------
+  // A builder agent is a person's own workspace (ADR-0172): visibility and
+  // edit (owner or admin, the agent's steward) are checked in-handler, as for
+  // every other builder route above.
+  "GET /v1/builder/agents/:id/autonomy",
+  "PUT /v1/builder/agents/:id/autonomy",
+  //
+  // --- A10: risk tolerance and acceptance ------------------------------------
+  // The acceptance HISTORY reads like the risk detail: owner-or-admin in the
+  // handler. RECORDING an acceptance admits an admin OR a risk acceptor the
+  // review policy names (the ADR-0168 rule, the same people who may accept on
+  // a sign-off), checked in the handler, which also refuses the use case's
+  // owner (ADR-0170 §8); every refusal is audited. DELIBERATELY ABSENT, so
+  // ADMIN-ONLY: GET/PUT /v1/risk-tolerances (org policy) and the legacy
+  // POST /v1/risks/:riskId/accept.
+  "GET /v1/risks/:riskId/acceptances",
+  "POST /v1/risks/:riskId/acceptances",
 ]);
 
 /**
