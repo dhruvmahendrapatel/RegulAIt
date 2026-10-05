@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { auditLog, createDb, eq, runMigrations, sql, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { snapshotOrgSettingsForTest } from "./testing/strict-data-posture.js";
 import { loadOrgSettings } from "./org-settings.js";
 
 /**
@@ -67,9 +68,14 @@ async function withAuditFailure(run: () => Promise<void>): Promise<void> {
   }
 }
 
+let restoreSb1Posture: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0181: this file hardens FROM a fixed lax starting posture, which its
+  // helper writes; the strict values SB1 owns are recorded here and put back
+  // LAST in afterAll, so the shared database is handed on as it was found.
+  restoreSb1Posture = await snapshotOrgSettingsForTest(db, ["defaultPiiMode", "semanticCachePolicy"]);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "f".repeat(64), auditAnchorSink: null });
   await restoreShippedDefaults();
 });
@@ -78,6 +84,7 @@ afterAll(async () => {
   await db.execute(sql.raw("DROP TRIGGER IF EXISTS aer013_test_reject_audit ON audit_log"));
   await db.execute(sql.raw("DROP FUNCTION IF EXISTS aer013_test_reject_audit()"));
   await restoreShippedDefaults();
+  await restoreSb1Posture?.();
   await app.close();
 });
 

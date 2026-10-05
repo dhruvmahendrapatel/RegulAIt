@@ -75,6 +75,23 @@ export async function setOrgSettingsForTest(db: Db, patch: OrgPatch): Promise<()
   };
 }
 
+/**
+ * Record the CURRENT values of some org_settings keys and change nothing; the
+ * returned `restore()` puts exactly those values back. For a file whose own
+ * helper writes a fixed lax "starting posture" (the posture-preset suites):
+ * call this first in beforeAll and `restore()` LAST in afterAll, so the file
+ * hands the shared database on with the strict values it found.
+ */
+export async function snapshotOrgSettingsForTest(
+  db: Db,
+  keys: ReadonlyArray<keyof typeof orgSettings.$inferInsert>,
+): Promise<() => Promise<void>> {
+  const before = pick(await loadOrgSettings(db), keys as string[]) as OrgPatch;
+  return async () => {
+    await db.update(orgSettings).set(before).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+  };
+}
+
 /** Set interception_settings keys for a test; `restore()` puts the previous values back. */
 export async function setInterceptionSettingsForTest(db: Db, patch: InterceptionPatch): Promise<() => Promise<void>> {
   const before = pick(await loadInterceptionSettings(db), Object.keys(patch)) as InterceptionPatch;

@@ -141,10 +141,6 @@ let restoreSb1Posture: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
-  // ADR-0181: the org PII floor ships at block. This file pins behaviour unrelated to
-  // PII handling, so it sets the floor off explicitly, and the injection and jailbreak
-  // layers to warn (they are not under test here); restored in afterAll.
-  restoreSb1Posture = await relaxDataPostureForTest(db, { org: { defaultPiiMode: "none" }, interception: false, guardrails: { promptInjectionMode: "warn", jailbreakMode: "warn" } });
   app = buildApp(db, { bootstrapToken: BOOT });
   await app.ready();
 
@@ -202,6 +198,11 @@ beforeAll(async () => {
     .from(guardrailConfigs)
     .where(eq(guardrailConfigs.scope, "org"));
   priorGuardrail = existing;
+  // ADR-0181: the org PII floor ships at block. This file pins behaviour unrelated to
+  // PII handling, so it sets the floor off explicitly, and the injection and jailbreak
+  // layers to warn (they are not under test here); restored in afterAll
+  // (taken AFTER the guardrail snapshot above, so that snapshot stays the true prior).
+  restoreSb1Posture = await relaxDataPostureForTest(db, { org: { defaultPiiMode: "none" }, interception: false, guardrails: { promptInjectionMode: "warn", jailbreakMode: "warn" } });
 });
 
 afterAll(async () => {

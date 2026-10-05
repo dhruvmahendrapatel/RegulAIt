@@ -201,7 +201,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await setPolicy("opt_in");
+  await setPolicy("off"); // ADR-0181: the shipped default
   // restore ADR-0020's shipped posture (shared database, M-040)
   await app.inject({
     method: "PUT", url: "/v1/interception/settings", headers: AUTH,

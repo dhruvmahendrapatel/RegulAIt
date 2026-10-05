@@ -11,6 +11,7 @@ import {
   type Db,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
 
 /**
  * PILLAR 6 §8/§10 — semantic caching, end to end: a REAL per-(user,agent)
@@ -109,15 +110,20 @@ const cacheRows = async (userId: string) =>
 let agentId: string;
 let otherAgentId: string;
 
+let restoreSb1Posture: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0181: the semantic cache ships OFF and the org PII floor at block. This file pins
+  // the opt-in cache itself, so it sets opt_in and the floor off explicitly; restored in afterAll.
+  restoreSb1Posture = await relaxDataPostureForTest(db, { org: { semanticCachePolicy: "opt_in", defaultPiiMode: "none" }, interception: false, guardrails: false });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   agentId = await makeAgent("sc-agent");
   otherAgentId = await makeAgent("sc-other-agent", "mock-fast");
 });
 
 afterAll(async () => {
+  await restoreSb1Posture?.();
   app.server.closeAllConnections();
   await app.close();
 });
