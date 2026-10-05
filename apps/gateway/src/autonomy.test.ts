@@ -35,6 +35,10 @@ import {
 import { builderKit, type BuilderKit, type Person } from "./testing/builder-fixture.js";
 import { AUTONOMY_DECLARED_RULE_ID, AUTONOMY_READ_RULE_ID, autonomyFloorFor, autonomyMonitorInput } from "./autonomy.js";
 
+/** an autonomy floor is always a measured condition; the union also admits manual ones */
+const paramsOf = (c: { kind: string }): Record<string, unknown> =>
+  "params" in c ? ((c as { params: Record<string, unknown> }).params ?? {}) : {};
+
 let k: BuilderKit;
 let owner: Person;
 let colleague: Person;
@@ -329,7 +333,7 @@ describe("autonomyFloorFor: the project join and the floors", () => {
     expect(r.derived).toBe("autonomous");
     expect(r.facts.schedules).toBeGreaterThanOrEqual(1);
     expect(r.unmet.every((c) => c.kind === "autonomy_floor" && c.blocking)).toBe(true);
-    expect(r.unmet.filter((c) => c.params["builderAgentId"] === a.id).map((c) => c.params["floor"])).toEqual(
+    expect(r.unmet.filter((c) => paramsOf(c)["builderAgentId"] === a.id).map((c) => paramsOf(c)["floor"])).toEqual(
       expect.arrayContaining(["guardrails_warn", "guardrails_block", "model_card_approved", "agentic_redteam_measured", "monthly_limit_set", "agentic_redteam_passing"]),
     );
 
@@ -349,7 +353,7 @@ describe("autonomyFloorFor: the project join and the floors", () => {
     await k.db.insert(builderAgentSchedules).values({ agentId: a.id, name: "s", cadence: "daily", timeUtc: "09:00", prompt: "p", enabled: true });
     await addTool(a.id, "mcp_tool", writeTool, true);
     const uc = await newUseCase(solo.projectId);
-    const unmet = async () => [...new Set((await autonomyFloorFor(k.db, uc)).unmet.map((c) => c.params["floor"]))].sort();
+    const unmet = async () => [...new Set((await autonomyFloorFor(k.db, uc)).unmet.map((c) => paramsOf(c)["floor"]))].sort();
     expect(await unmet()).toEqual(
       ["agentic_redteam_measured", "agentic_redteam_passing", "guardrails_block", "guardrails_warn", "model_card_approved", "monthly_limit_set"].sort(),
     );
