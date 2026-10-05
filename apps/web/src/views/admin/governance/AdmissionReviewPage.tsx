@@ -267,7 +267,8 @@ function WaitingPeriodCard(props: {
   const { q } = props;
   const act = useAction();
   const [days, setDays] = useState<string>("");
-  const current = q?.minReleaseAgeDays ?? 0;
+  // ADR-0181: the shipped default is 7 days, so the not-yet-loaded fallback is too
+  const current = q?.minReleaseAgeDays ?? 7;
   const value = days === "" ? String(current) : days;
   const n = Number(value);
   const valid = Number.isInteger(n) && n >= 0 && n <= 365;

@@ -24,8 +24,8 @@
  *
  * Three honesty rules the UI keeps rather than leaving to the ADR:
  *
- *  - The two environment-backed controls (the WORM audit anchor, the
- *    scheduler) render as NOT SETTABLE with their OBSERVED state, never as a
+ *  - The environment-backed controls (the WORM audit anchor, the scheduler,
+ *    database TLS) render as NOT SETTABLE with their OBSERVED state, never as a
  *    switch. An API call cannot set an environment variable, and a button that
  *    implied otherwise would be a lie with a cursor on it.
  *  - The overall verdict stays "not hardened" while those two are unmet even
@@ -105,6 +105,8 @@ export default function EnforcementPosturePage() {
   const enforcement = controls.filter((c) => c.group === "enforcement");
   const optimisation = controls.filter((c) => c.group === "optimisation");
   const blocked = report?.summary.blockedByEnvironment ?? [];
+  // ADR-0181: the database hop's TLS posture (environment-backed, never a switch)
+  const dbTls = controls.find((c) => c.key === "databaseTls")?.current as string | undefined;
 
   const harden = () =>
     void act.run(async () => {
@@ -178,6 +180,12 @@ export default function EnforcementPosturePage() {
                 label="execution"
               />
               <Stat
+                value={
+                  <Badge tone={dbTls === "required" ? "ok" : "danger"}>{dbTls ?? "—"}</Badge>
+                }
+                label="database TLS"
+              />
+              <Stat
                 value={`${report?.summary.enforcementSatisfied ?? 0} of ${report?.summary.enforcementTotal ?? 0}`}
                 label="enforcement controls on"
               />
@@ -209,6 +217,19 @@ export default function EnforcementPosturePage() {
                 }
                 // the page that can actually DO something about it
                 action={<Link to="/admin/execution">Open execution control</Link>}
+              />
+            )}
+
+            {/* ADR-0181: TLS to Postgres is the default; running without it is
+                an explicit, visible relaxation (REGULAIT_DATABASE_SSL=disable). */}
+            {dbTls === "relaxed" && (
+              <EmptyState
+                title="database TLS: relaxed"
+                body={
+                  "REGULAIT_DATABASE_SSL=disable is set, so the gateway talks to Postgres in plaintext. " +
+                  "That is acceptable only for a database on the same host (the local demo, docker-compose). " +
+                  "Unset it, or set require, for any other deployment; the gateway also says so loudly at boot."
+                }
               />
             )}
 

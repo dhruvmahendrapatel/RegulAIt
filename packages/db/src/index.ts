@@ -92,8 +92,11 @@ export interface DbPoolConfig {
   connectionTimeoutMillis: number;
   /** idle client reaped after (REGULAIT_DB_IDLE_TIMEOUT_MS, default 30000) */
   idleTimeoutMillis: number;
-  /** REGULAIT_DATABASE_SSL: off (default) | require (verify the server cert) |
-   * no-verify (TLS without verification — a self-signed RDS/BYOC box) */
+  /** REGULAIT_DATABASE_SSL (ADR-0181): require (DEFAULT — TLS, server cert
+   * verified) | no-verify (TLS without verification — a self-signed RDS/BYOC
+   * box) | disable (plaintext — a local Postgres without TLS, e.g. the demo
+   * and docker-compose, which set it explicitly). `off` is the resolved name
+   * of `disable`. */
   ssl: "off" | "require" | "no-verify";
 }
 
@@ -104,8 +107,13 @@ export const DB_POOL_DEFAULTS: Readonly<DbPoolConfig> = Object.freeze({
   // scratch databases after waiting for idle clients to reap, and a longer
   // reap would turn every teardown into a timeout
   idleTimeoutMillis: 10_000,
-  ssl: "off",
+  // ADR-0181: TLS is required unless the environment explicitly says disable
+  ssl: "require",
 });
+
+/** the explicit opt-outs. Anything else that is set but unrecognised resolves
+ * to `require`: a typo must fail toward TLS, never toward plaintext. */
+const DB_SSL_DISABLE_VALUES = ["disable", "disabled", "off", "false", "0", "no"] as const;
 
 function envPositiveInt(env: NodeJS.ProcessEnv, name: string, dflt: number): number {
   const raw = env[name];
@@ -118,12 +126,11 @@ function envPositiveInt(env: NodeJS.ProcessEnv, name: string, dflt: number): num
 
 export function resolveDbPoolConfig(env: NodeJS.ProcessEnv = process.env): DbPoolConfig {
   const rawSsl = (env.REGULAIT_DATABASE_SSL ?? "").trim().toLowerCase();
-  const ssl: DbPoolConfig["ssl"] =
-    rawSsl === "require" || rawSsl === "verify" || rawSsl === "on" || rawSsl === "true"
-      ? "require"
-      : rawSsl === "no-verify"
-        ? "no-verify"
-        : "off";
+  const ssl: DbPoolConfig["ssl"] = (DB_SSL_DISABLE_VALUES as readonly string[]).includes(rawSsl)
+    ? "off"
+    : rawSsl === "no-verify"
+      ? "no-verify"
+      : "require";
   return {
     max: envPositiveInt(env, "REGULAIT_DB_POOL_MAX", DB_POOL_DEFAULTS.max),
     connectionTimeoutMillis: envPositiveInt(env, "REGULAIT_DB_CONNECT_TIMEOUT_MS", DB_POOL_DEFAULTS.connectionTimeoutMillis),
@@ -139,8 +146,33 @@ export function describeDbPool(cfg: DbPoolConfig): string {
       ? "tls required, server certificate verified"
       : cfg.ssl === "no-verify"
         ? "tls on, server certificate NOT verified (REGULAIT_DATABASE_SSL=no-verify)"
-        : "tls off (REGULAIT_DATABASE_SSL unset — set `require` when Postgres is across a network)";
+        : "TLS OFF — RELAXED (REGULAIT_DATABASE_SSL=disable): the database hop is plaintext; acceptable only for a local Postgres on this host";
   return `pool max ${cfg.max}, connect/wait deadline ${cfg.connectionTimeoutMillis}ms, idle reap ${cfg.idleTimeoutMillis}ms, ${tls}`;
+}
+
+/** ADR-0181: the database hop's TLS posture in one word, for the posture read.
+ * `required` is the default; `unverified` is TLS without certificate checks;
+ * `relaxed` is plaintext (an explicit REGULAIT_DATABASE_SSL=disable). */
+export type DatabaseTlsPosture = "required" | "unverified" | "relaxed";
+
+export function databaseTlsPosture(cfg: Pick<DbPoolConfig, "ssl">): DatabaseTlsPosture {
+  return cfg.ssl === "require" ? "required" : cfg.ssl === "no-verify" ? "unverified" : "relaxed";
+}
+
+/** ADR-0181: the LOUD boot warning when TLS to Postgres is off. Empty when it
+ * is on. Lines, so the caller's logger prints each one. */
+export function databaseTlsBootWarning(cfg: Pick<DbPoolConfig, "ssl">): string[] {
+  if (cfg.ssl !== "off") return [];
+  const bar = "!".repeat(78);
+  return [
+    bar,
+    "!! WARNING: DATABASE TLS IS OFF (REGULAIT_DATABASE_SSL=disable) — RELAXED POSTURE",
+    "!! Every query, credential envelope and audit row crosses the database hop in",
+    "!! plaintext. This is acceptable ONLY for a Postgres on this host (the local",
+    "!! demo, docker-compose). Unset the variable, or set `require`, for any other.",
+    "!! GET /v1/org/posture reports `databaseTls: relaxed` while this is set.",
+    bar,
+  ];
 }
 
 export function createDb(connectionString: string, override: Partial<DbPoolConfig> = {}) {

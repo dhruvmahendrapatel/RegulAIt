@@ -18,9 +18,11 @@
  *    page that lists switches without naming their blast radius invites an
  *    admin to harden a live deployment at 4pm on a Friday.
  *
- * 2. TWO CONTROLS ARE NOT SETTINGS COLUMNS AND ARE NEVER CLAIMED. The audit
- *    anchor is resolved from S3 environment variables and the scheduler from
- *    `REGULAIT_SCHEDULER`. AN API CALL CANNOT SET AN ENVIRONMENT VARIABLE.
+ * 2. THREE CONTROLS ARE NOT SETTINGS COLUMNS AND ARE NEVER CLAIMED. The audit
+ *    anchor is resolved from S3 environment variables, the scheduler from
+ *    `REGULAIT_SCHEDULER` and the database TLS posture from
+ *    `REGULAIT_DATABASE_SSL` (ADR-0181). AN API CALL CANNOT SET AN ENVIRONMENT
+ *    VARIABLE.
  *    They are reported with `settable: false` and their OBSERVED state, and
  *    `harden` neither touches them nor counts them as applied. This follows the
  *    precedent ADR-0060 set in `audit-chain.ts`: `tamperResistant` is read from
@@ -36,6 +38,8 @@ import {
   eq,
   ORG_SETTINGS_ID,
   orgSettings,
+  databaseTlsPosture,
+  resolveDbPoolConfig,
   type Db,
   type OrgSettingsRow,
 } from "@regulait/db";
@@ -172,6 +176,7 @@ async function environmentControls(sources: Required<Pick<PostureSources, "sink"
   const lockMode = observation?.mode ?? (sink === null ? "off" : "constant");
 
   const scheduler = resolveSchedulerConfig(sources.env);
+  const dbTls = databaseTlsPosture(resolveDbPoolConfig(sources.env));
 
   return [
     {
@@ -207,6 +212,22 @@ async function environmentControls(sources: Required<Pick<PostureSources, "sink"
         "nothing directly, and it cannot be switched on from here: it is REGULAIT_SCHEDULER in the " +
         "process environment. While it is off the SLA timers, red-team sweeps, admission re-scans " +
         "and cost reconciliation simply never run — the controls exist and nothing drives them.",
+    },
+    {
+      // ADR-0181: TLS to Postgres is the default; `relaxed` is an explicit
+      // REGULAIT_DATABASE_SSL=disable (the local demo, docker-compose). Read
+      // from the same resolver the pool was built with.
+      key: "databaseTls",
+      group: "enforcement",
+      current: dbTls,
+      hardened: "required",
+      satisfied: dbTls === "required",
+      settable: false,
+      refuses:
+        "nothing, and it cannot be switched on from here: it is REGULAIT_DATABASE_SSL in the process " +
+        "environment (default `require`). `relaxed` means the database hop is plaintext " +
+        "(REGULAIT_DATABASE_SSL=disable) — acceptable only for a Postgres on the same host; " +
+        "`unverified` means TLS without a certificate check (no-verify).",
     },
   ];
 }

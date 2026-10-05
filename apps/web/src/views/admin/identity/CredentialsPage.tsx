@@ -12,9 +12,10 @@
  * Where nothing records a last use, or an expiry is held by a third party,
  * the page says so instead of showing a blank that reads as "never".
  *
- * The `stale_credentials` monitor rule is observe-only by default (the flags
- * stay here); the toggle at the top turns on one alert episode per credential
- * type and flag, and says beforehand how many would raise now.
+ * The `stale_credentials` monitor rule raises alerts by default (ADR-0181):
+ * one alert episode per credential type and flag. The toggle at the top turns
+ * that off (observe only: the flags stay here), audited, and says beforehand
+ * how many episodes turning it back on would raise now.
  */
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";

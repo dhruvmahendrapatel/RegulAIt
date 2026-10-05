@@ -1222,8 +1222,8 @@ export async function runBackupVerifyOnce(
  * org-settings.ts): an hourly unref'd tick that re-reads org settings each
  * time (an admin's change applies without a restart), runs when the
  * configured interval has elapsed, never crashes the gateway, and returns
- * the stop function the app's onClose hook calls. OFF by default
- * (backupVerifyEnabled=false = today's no-scheduler behaviour).
+ * the stop function the app's onClose hook calls. ON by default since
+ * ADR-0181 (backupVerifyEnabled=true); an admin may switch it off, audited.
  */
 /** ONE tick of the backup-verification scheduler. Exported so a test can drive
  * it without waiting an hour — the timer below is the only other caller. */
@@ -1256,8 +1256,8 @@ export function startBackupVerifyScheduler(db: Db): () => void {
 const SEVERITY_ORDER: InfraSeverity[] = ["low", "medium", "high", "critical"];
 
 export function registerInfraRoutes(app: FastifyInstance, db: Db, _dataKey?: string) {
-  // O5: the backup-verification scheduler boots with the infra routes (OFF by
-  // default via org settings) — unref'd, stopped on close, exactly like the
+  // O5: the backup-verification scheduler boots with the infra routes (ON by
+  // default via org settings since ADR-0181) — unref'd, stopped on close, like the
   // audit auto-prune scheduler app.ts starts beside registerOrgSettingsRoutes.
   const stopBackupVerifyScheduler = startBackupVerifyScheduler(db);
   app.addHook("onClose", async () => stopBackupVerifyScheduler());

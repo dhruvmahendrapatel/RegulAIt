@@ -605,8 +605,8 @@ export const mcpServers = pgTable("mcp_servers", {
   pricePerCallUsd: doublePrecision("price_per_call_usd"),
   /** ADR-0043 (migration 0049): may this server's URL resolve into ordinary
    * private LAN space (RFC1918 / loopback / ULA)? NULL = inherit the org
-   * default (org_settings.mcpPrivateRangesDefault, true by default — the
-   * self-hosted `http://mcp.internal:9000` case is the ORDINARY deployment).
+   * default (org_settings.mcpPrivateRangesDefault, false by default since
+   * ADR-0181: a private address needs this flag or an allow entry).
    * 169.254.0.0/16 (IMDS) and the other unconditional ranges are NEVER opened
    * by this flag; a PUBLIC-internet URL still needs an egress_allow_hosts
    * entry regardless of it. */
@@ -3607,11 +3607,12 @@ export const orgSettings = pgTable(
       .default(90),
 
     // --- O5 (migration 0045): scheduled backup verification --------------
-    /** OFF (default) = today's behaviour: success ledger rows only ever come
-     * from the seed or a manual write. ON = the boot scheduler verifies
-     * recent recovery points per backup_target on the interval below, via the
-     * existing provider scan path, and writes source-labelled ledger rows. */
-    backupVerifyEnabled: boolean("backup_verify_enabled").notNull().default(false),
+    /** ON (default since ADR-0181, migration 0159) = the boot scheduler
+     * verifies recent recovery points per backup_target on the interval below,
+     * via the existing provider scan path, and writes source-labelled ledger
+     * rows. OFF = success ledger rows only ever come from the seed or a manual
+     * write; an admin may relax it (audited). */
+    backupVerifyEnabled: boolean("backup_verify_enabled").notNull().default(true),
     backupVerifyIntervalHours: integer("backup_verify_interval_hours").notNull().default(24),
 
     // --- orchestration worker caps -----------------------------------------
@@ -3668,33 +3669,34 @@ export const orgSettings = pgTable(
      * entirely flips this and an org that never registers one is unaffected. */
     customModelProvidersEnabled: boolean("custom_model_providers_enabled").notNull().default(true),
     /** ADR-0043 (migration 0049): the org default for MCP servers whose
-     * allowPrivateRanges is null. TRUE (default) = a self-hosted MCP server on
-     * a private address Just Works with zero ceremony — the guard fires on the
-     * risky public-internet case, not the ordinary internal one (ADR-0041's
-     * BYOC/air-gapped buyer). FALSE = strict: every server needs an explicit
-     * per-server allowPrivateRanges=true (or an egress_allow_hosts entry with
-     * the private-range opt-in) before a private-range URL is reachable.
+     * allowPrivateRanges is null. FALSE (default since ADR-0181, migration
+     * 0159) = strict: every server needs an explicit per-server
+     * allowPrivateRanges=true (or an egress_allow_hosts entry with the
+     * private-range opt-in) before a private-range URL is reachable. TRUE = a
+     * self-hosted MCP server on a private address is reachable with zero
+     * ceremony; an admin may relax to it (audited).
      * Link-local/IMDS stays unconditionally blocked in BOTH postures. */
-    mcpPrivateRangesDefault: boolean("mcp_private_ranges_default").notNull().default(true),
-    /** ADR-0097 (migration 0103): the MCP ADMISSION posture. 'off' (DEFAULT)
-     * runs no manifest scan at all and is byte-identical to pre-0103. 'log'
-     * scans every sync and records the verdict/findings on the server row
-     * without ever refusing. 'enforce' refuses a `held` server BEFORE any
-     * upstream connect and keeps it out of tool discovery until an admin
-     * clears it with a reason. Recommended production setting: 'enforce'. */
+    mcpPrivateRangesDefault: boolean("mcp_private_ranges_default").notNull().default(false),
+    /** ADR-0097 (migration 0103): the MCP ADMISSION posture. 'enforce'
+     * (DEFAULT since ADR-0181, migration 0159) refuses a `held` server BEFORE
+     * any upstream connect and keeps it out of tool discovery until an admin
+     * clears it with a reason. 'log' scans every sync and records the
+     * verdict/findings on the server row without ever refusing. 'off' runs no
+     * manifest scan at all. An admin may relax it (audited). */
     mcpAdmissionMode: text("mcp_admission_mode", { enum: ["off", "log", "enforce"] })
       .notNull()
-      .default("off"),
-    /** ADR-0175 A5 (migration 0140): the release-age cooldown in days. 0
-     * (DEFAULT) = off and byte-identical to pre-0140. Recommended: 7. */
-    minReleaseAgeDays: integer("min_release_age_days").notNull().default(0),
+      .default("enforce"),
+    /** ADR-0175 A5 (migration 0140): the release-age cooldown in days. 7
+     * (DEFAULT since ADR-0181, migration 0159). 0 = off; an admin may relax
+     * it (audited). */
+    minReleaseAgeDays: integer("min_release_age_days").notNull().default(7),
     /** ADR-0175 A7 (migration 0142): a credential older than this many days
      * with no use in that many days is flagged "unused" on the inventory. */
     credentialUnusedDays: integer("credential_unused_days").notNull().default(90),
-    /** ADR-0175 A7: false (DEFAULT) = the `stale_credentials` rule only shows
-     * flags on the inventory page; true = it raises one alert episode per
-     * flagged credential. */
-    staleCredentialAlerts: boolean("stale_credential_alerts").notNull().default(false),
+    /** ADR-0175 A7: true (DEFAULT since ADR-0181, migration 0159) = the
+     * `stale_credentials` rule raises one alert episode per flagged
+     * credential; false = it only shows flags on the inventory page. */
+    staleCredentialAlerts: boolean("stale_credential_alerts").notNull().default(true),
     /** ADR-0175 A15: the grid region whose `energy_factors` intensity
      * overrides the org default for the energy estimate. NULL = default. */
     energyRegion: text("energy_region"),
@@ -3892,10 +3894,11 @@ export const orgSettings = pgTable(
      * an air-gapped posture a compromised admin account can switch off from a
      * web form is not one.
      *
-     * 'inherit' (default) = today's behaviour: the env-derived mode decides.
-     * 'strict'            = adjudicate compiled vendor endpoints against
-     *                       `egress_allow_hosts` regardless of mode, so a
-     *                       hosted or BYOC box can opt in.
+     * 'strict'  (DEFAULT since ADR-0181, migration 0159) = adjudicate
+     *           compiled vendor endpoints against `egress_allow_hosts`
+     *           regardless of mode, on a hosted or BYOC box too.
+     * 'inherit' = the env-derived mode decides (hosted/BYOC permissive); an
+     *           admin may relax to it (audited).
      *
      * Composition is MAX over {permissive < strict}: there is no value here
      * that loosens an air_gapped deployment, by construction rather than by
@@ -3904,7 +3907,7 @@ export const orgSettings = pgTable(
       enum: EGRESS_COMPILED_DEFAULT_POLICIES,
     })
       .notNull()
-      .default("inherit"),
+      .default("strict"),
 
     // --- ADR-0065 (migration 0077): RegulAIt-LLM ----------------------------
     /** THE MASTER SWITCH over custom-model creation, following ADR-0034's
@@ -5412,17 +5415,17 @@ export const ANOMALY_STATUS_VALUES = ["open", "acknowledged", "dismissed"] as co
 export const FORECAST_METHOD_VALUES = ["run_rate", "ewma"] as const;
 
 /** The admin dial (ADR-0021 conventions). One row per project plus at most one
- * ORG-WIDE DEFAULT (projectId null). `enabled` defaults FALSE — ADR-0049 §3's
- * OFF-by-default posture, so a deployment that never turns this on behaves
- * byte-identically to before migration 0061. `lastEvaluatedAt` staying null is
- * how "nothing fires on a timer" is VISIBLE rather than merely documented. */
+ * ORG-WIDE DEFAULT (projectId null). `enabled` defaults TRUE since ADR-0181
+ * (migration 0159), which reverses ADR-0049 §3's OFF-by-default posture; an
+ * admin may switch it off (audited). `lastEvaluatedAt` staying null is how
+ * "nothing fires on a timer" is VISIBLE rather than merely documented. */
 export const spendMonitorPolicies = pgTable(
   "spend_monitor_policies",
   {
     id: uuid("id").primaryKey().defaultRandom(),
     /** null = the org-wide default; a project row overrides it */
     projectId: uuid("project_id").references(() => projects.id, { onDelete: "cascade" }),
-    enabled: boolean("enabled").notNull().default(false),
+    enabled: boolean("enabled").notNull().default(true),
     sensitivity: text("sensitivity", { enum: ANOMALY_SENSITIVITY_VALUES }).notNull().default("medium"),
     baselineDays: integer("baseline_days").notNull().default(30),
     /** ADR-0049 §5's alert-not-block bias, as the column default */
