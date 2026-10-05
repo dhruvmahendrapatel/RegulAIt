@@ -59,3 +59,52 @@ fixes.
   audit work above.
 - An audit of existing hand-written components against mature libraries follows. Each finding is either a replacement ADR
   or a recorded "keep, because …".
+
+## Amendment — audit of existing hand-written code (2026-10-05)
+
+A read-only audit compared existing hand-written components with mature libraries. The results below are the decisions;
+each "replace" ships under this ADR with its own tests, and the larger ones get their own ADR.
+
+**Security fixes found by the audit (scheduled first):**
+1. **The MCP manifest digest is 64-bit FNV-1a.** Admin clearance and the release-age cooldown are pinned to it, so a
+   server can swap in a colliding manifest after clearance. Move to SHA-256 (`node:crypto`), with a one-time re-pin
+   migration so cleared servers are not mass re-held. Training dataset checksums move off 32-bit FNV too.
+2. **Secret patterns used by the DLP guardrail and the audit scrub miss current token formats.** Missed: Anthropic
+   `sk-ant-api03-`, OpenAI `sk-proj-`, GitHub `github_pat_`, Stripe `sk_live_`, Google `AIza`, GitLab `glpat-`. Patch now.
+   Then vendor a maintained, permissively licensed rule set as pinned data, with the false-positive policy decided first
+   (on the audit path, a redaction permanently changes evidence).
+3. **The IP range classification behind the egress guard misses five special ranges:** IPv4-compatible `::a.b.c.d`, 6to4
+   `2002::/16`, local NAT64 `64:ff9b:1::/48`, deprecated site-local `fec0::/10` and discard `100::/64`. Add them now. The
+   parser swap (`ipaddr.js` or `net.BlockList`) gets its own ADR.
+
+**Replace now (small, with tests):**
+- one CSV writer and parser on `csv-stringify` / `csv-parse` with formula-injection escaping (unsigned downloads; the
+  signed export bundle keeps its byte format unless a bundle schema bump is decided);
+- SKILL.md frontmatter parsed with `yaml`;
+- eval output schemas validated with Ajv (already pinned) instead of a partial hand-written subset;
+- the Snowflake key-pair JWT signed with `jose`;
+- month arithmetic clamped to the end of the month (31 Aug + 6 months landed on 3 Mar, past policy);
+- the retrieval tokenizer made Unicode-aware (`\p{L}\p{N}`), since it dropped non-ASCII text;
+- password hashing moved to async `scrypt`, so it no longer blocks the event loop.
+
+**Replace with their own ADR:**
+- an accessible dialog/tabs primitive for the shared Modal (Radix or React Aria): the shared Modal has no focus trap and no
+  focus restore across 51 call sites;
+- Standard Webhooks for the generic PM webhook, with a dual-signing window;
+- `openapi-typescript` for the client generator;
+- reconsidering `undici` for the DNS-pinned fetch.
+
+**Keep, with reasons:**
+- retry/backoff (one budget per sequence, no retry of our own refusals);
+- the circuit breaker (Postgres-backed across replicas, audited);
+- the scheduler (governance "skipped, and why" records);
+- the rate-limit store (local-first);
+- the OTLP encoder (stored rows, air-gapped);
+- the licence and export-bundle formats (exact bytes, verifiable with openssl);
+- chat/PM HMAC checks (vendor-exact; merge the duplicate constant-time compares);
+- the PII detectors and MCP scanner (deterministic and offline; optional adapters per §4);
+- token estimates (vendor tokenizers are not all public).
+
+Admission notes:
+- `dompurify` would be admitted only under its Apache-2.0 option, recorded explicitly;
+- `react-markdown` fails the maintenance rule. If chat ever renders markdown, use `markdown-it` or `marked`.
