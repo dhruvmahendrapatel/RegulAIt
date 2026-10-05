@@ -224,6 +224,14 @@ describe("ADR-0180 A3 deploy-gate composition", () => {
     const d = evaluateDeployGate(rest);
     expect(d.decision).toBe("deny");
     expect(d.reasons.map((r) => r.code)).toEqual(["assurance_check_unavailable"]);
+    // fail closed under enforce, a labelled warning under warn — never a silent pass
+    const { residualRisks: _r, autonomy: _a, ...partial } = base({ assuranceMode: "warn", requiredTests: [] });
+    const w = evaluateDeployGate(partial);
+    expect(w.decision).toBe("allow");
+    expect(w.reasons.map((r) => [r.code, r.severity])).toEqual([
+      ["assurance_check_unavailable", "warn"],
+      ["assurance_check_unavailable", "warn"],
+    ]);
   });
 
   it("composes the other owners' results: failing and waived conditions, unmet floors, residual above tolerance", () => {
