@@ -20,8 +20,9 @@
  *  - ONE COUNT PER CADENCE WINDOW (FA2 finding 5): two evaluations inside one
  *    window add one breach, not two, and do not move the window anchor.
  *  - NO PARTIAL PASS (FA2 finding 2): red-team and eval metrics read only the
- *    use case's own agents, and an in-scope agent that measured nothing makes
- *    the result insufficient.
+ *    use case's own agents, judged on the WEAKEST agent (worst value, smallest
+ *    sample count), and an in-scope agent that measured nothing makes the
+ *    result insufficient.
  *  - STORED READS (FA2 finding 6): the monitor and the manual `/met` refusal
  *    read the persisted evaluation; neither measures the ledgers live.
  *  - SCRUB GROWTH (FA2 finding 7a): a waiver reason that the credential scrub
@@ -728,6 +729,59 @@ describe("FA2 finding 2: partial evidence never passes", () => {
     expect(m.state).toBe("insufficient");
     // the probed agent alone does pass
     expect((await measureAssuranceMetric(db, asrSpec, { projectId: uc.projectId, agentIds: [probed] }, new Date())).state).toBe("pass");
+  }, 120_000);
+
+  it("red team: judged on the WEAKEST agent — a strong agent never masks a weak one", async () => {
+    const uc = await propose("rt-worst");
+    const ds = await dataset();
+    const [lib] = await db.insert(redteamLibraries).values({ name: `a2c-lib-worst-${RUN}` }).returning();
+    libraryIds.push(lib!.id);
+    const strong = await agent("rt-strong");
+    const weak = await agent("rt-weak");
+    // 0 % over 200 probes and 50 % over 10: pooled 5/210 = 2.4 % would pass a 10 % ceiling
+    await redteam(uc.projectId, strong, [{ attackClass: "tool_abuse", probes: 200, resisted: 200, defeated: 0 }], ds, lib!);
+    await redteam(uc.projectId, weak, [{ attackClass: "tool_abuse", probes: 10, resisted: 5, defeated: 5 }], ds, lib!);
+    const spec = { ...asrSpec, operator: "lte" as const, threshold: 10, minSamples: 10 };
+    const m = await measureAssuranceMetric(db, spec, { projectId: uc.projectId, agentIds: [strong, weak] }, new Date());
+    expect(m).toMatchObject({ state: "fail", value: 50, samples: 10 });
+    // the evidence cites every agent's run
+    expect(m.evidence.filter((e) => e.type === "redteam_run")).toHaveLength(2);
+    // a thin agent makes the whole result insufficient: the smallest count is the sample count
+    expect((await measureAssuranceMetric(db, { ...spec, minSamples: 20 }, { projectId: uc.projectId, agentIds: [strong, weak] }, new Date())).state).toBe(
+      "insufficient",
+    );
+  }, 120_000);
+
+  it("evals: judged on the WEAKEST agent's score", async () => {
+    const uc = await propose("eval-worst");
+    const ds = await dataset();
+    const strong = await agent("ev-strong");
+    const weak = await agent("ev-weak");
+    for (const [agentId, meanScore, cases, passedCases] of [
+      [strong, 0.95, 100, 100],
+      [weak, 0.5, 10, 5],
+    ] as const) {
+      await db.insert(evalRuns).values({
+        datasetId: ds,
+        datasetVersion: 1,
+        agentId,
+        agentName: "a2c",
+        trigger: "manual",
+        status: "completed",
+        projectId: uc.projectId,
+        cases,
+        passedCases,
+        meanScore,
+        finishedAt: ago(HOUR),
+      });
+    }
+    const scope = { projectId: uc.projectId, agentIds: [strong, weak] };
+    // pooled (95 + 5) / 110 = 0.91 would pass at least 0.8
+    const score = { metric: "eval_mean_score" as const, params: {}, operator: "gte" as const, threshold: 0.8, windowDays: 30, minSamples: 10 };
+    expect(await measureAssuranceMetric(db, score, scope, new Date())).toMatchObject({ state: "fail", value: 0.5, samples: 10 });
+    // pooled 105 / 110 = 95 % would pass at least 90 %
+    const rate = { ...score, metric: "eval_pass_rate" as const, threshold: 90 };
+    expect(await measureAssuranceMetric(db, rate, scope, new Date())).toMatchObject({ state: "fail", value: 50, samples: 10 });
   }, 120_000);
 
   it("evals: an in-scope agent whose newest run has no score makes a score condition insufficient", async () => {

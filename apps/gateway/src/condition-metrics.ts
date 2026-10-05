@@ -39,7 +39,9 @@
  *     `last_evaluated_at` anchor; a forced re-evaluation inside the window
  *     refreshes `last_value`/`last_state` but never double-counts;
  *   - red-team and evaluation metrics read ONLY the use case's own agents when
- *     it names them, and an in-scope agent that contributed no measured trial
+ *     it names them, judge each agent separately and report the WEAKEST one
+ *     (`weakestAgent`: the worst per-agent value, the smallest per-agent
+ *     sample count), and an in-scope agent that contributed no measured trial
  *     makes the result insufficient, never a pass;
  *   - the monitor and the manual `/met` refusal read the PERSISTED `last_*`
  *     columns — the scheduled sweep owns measurement;
@@ -243,6 +245,34 @@ async function measureGuardrailMode(db: Db, spec: MetricSpec, scope: AssuranceSc
   return finish(spec, weakest, targets.length, ref("guardrail_policy", targets.map((t) => t.evidence)));
 }
 
+/**
+ * THE WEAKEST AGENT DECIDES. A per-agent ledger (red team, evals) is judged
+ * agent by agent: the value is the per-agent reading that most fails the
+ * condition (the highest attack success rate, the lowest score or pass rate,
+ * the farthest from an `eq` threshold), and the sample count is the SMALLEST
+ * per-agent count, so one thinly measured agent makes the whole result
+ * insufficient. A strong agent with many trials can never mask a weak one,
+ * as a pooled rate would.
+ */
+function weakestAgent(spec: Pick<MetricSpec, "operator" | "threshold">, perAgent: Array<{ value: number; samples: number }>): { value: number | null; samples: number } {
+  if (perAgent.length === 0) return { value: null, samples: 0 };
+  const badness = (v: number) => {
+    switch (spec.operator) {
+      case "lt":
+      case "lte":
+        return v;
+      case "gt":
+      case "gte":
+        return -v;
+      case "eq":
+        return Math.abs(v - spec.threshold);
+    }
+  };
+  let worst = perAgent[0]!;
+  for (const a of perAgent) if (badness(a.value) > badness(worst.value)) worst = a;
+  return { value: worst.value, samples: Math.min(...perAgent.map((a) => a.samples)) };
+}
+
 async function measureRedTeamAsr(db: Db, spec: MetricSpec, scope: AssuranceScope, since: Date, now: Date, params: Record<string, unknown>) {
   const rows = await db
     .select({
@@ -269,8 +299,7 @@ async function measureRedTeamAsr(db: Db, spec: MetricSpec, scope: AssuranceScope
     if (!newest.has(key)) newest.set(key, r);
   }
   const attackClass = typeof params.attackClass === "string" ? params.attackClass : null;
-  let defeats = 0;
-  let trials = 0;
+  const perAgent: Array<{ value: number; samples: number }> = [];
   // an agent whose newest run measured nothing (it did not probe the class,
   // or it has no attack success rate) is as absent as an agent with no run
   let silent = 0;
@@ -287,15 +316,12 @@ async function measureRedTeamAsr(db: Db, spec: MetricSpec, scope: AssuranceScope
       probes = r.asrTrials;
       defeated = r.asr * r.asrTrials;
     }
-    if (probes > 0) {
-      trials += probes;
-      defeats += defeated;
-    } else {
-      silent += 1;
-    }
+    if (probes > 0) perAgent.push({ value: (defeated / probes) * 100, samples: probes });
+    else silent += 1;
   }
   const missing = scope.agentIds.filter((a) => !newest.has(a));
-  return finish(spec, trials > 0 ? (defeats / trials) * 100 : null, trials, ref("redteam_run", [...newest.values()].map((r) => r.id)), {
+  const w = weakestAgent(spec, perAgent);
+  return finish(spec, w.value, w.samples, ref("redteam_run", [...newest.values()].map((r) => r.id)), {
     incomplete: missing.length > 0 || silent > 0,
   });
 }
@@ -328,10 +354,7 @@ async function measureEval(db: Db, spec: MetricSpec, scope: AssuranceScope, sinc
     const key = r.agentId ?? `run:${r.id}`;
     if (!newest.has(key)) newest.set(key, r);
   }
-  let cases = 0;
-  let passed = 0;
-  let scoreSum = 0;
-  let scored = 0;
+  const perAgent: Array<{ value: number; samples: number }> = [];
   // an agent whose newest run measured nothing for THIS metric (no cases, or
   // no mean score for a score condition) is as absent as an agent with no run
   let silent = 0;
@@ -340,17 +363,14 @@ async function measureEval(db: Db, spec: MetricSpec, scope: AssuranceScope, sinc
       silent += 1;
       continue;
     }
-    cases += r.cases;
-    passed += r.passedCases;
-    if (r.meanScore !== null) {
-      scoreSum += r.meanScore * r.cases;
-      scored += r.cases;
-    }
+    perAgent.push({
+      value: spec.metric === "eval_mean_score" ? r.meanScore! : (r.passedCases / r.cases) * 100,
+      samples: r.cases,
+    });
   }
   const missing = scope.agentIds.filter((a) => !newest.has(a));
-  const value =
-    spec.metric === "eval_mean_score" ? (scored > 0 ? scoreSum / scored : null) : cases > 0 ? (passed / cases) * 100 : null;
-  return finish(spec, value, spec.metric === "eval_mean_score" ? scored : cases, ref("eval_run", [...newest.values()].map((r) => r.id)), {
+  const w = weakestAgent(spec, perAgent);
+  return finish(spec, w.value, w.samples, ref("eval_run", [...newest.values()].map((r) => r.id)), {
     incomplete: missing.length > 0 || silent > 0,
   });
 }
