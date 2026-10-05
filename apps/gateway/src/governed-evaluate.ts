@@ -12,7 +12,6 @@ import {
   gte,
   governancePolicyEpoch,
   inArray,
-  lt,
   mcpServers,
   or,
   rateLimits,
@@ -153,10 +152,16 @@ export interface ReplayClock {
    * been pruned. Rows older than it may be gone, so a window that reaches back
    * past it is TRUNCATED and the replay is indeterminate. */
   lookbackHorizon: Date | null;
-  /** optional batched answer to the same question `countFor` asks, so a replay
-   * over many recorded calls can fetch its counts in one query per limit shape
-   * instead of one per call. Must count exactly what the direct query counts. */
-  countAllowed?: (q: ReplayCountQuery) => Promise<number>;
+  /**
+   * THE ONE COUNTER A REPLAY USES. Required: a replay never falls back to the
+   * live path's query. That fallback used to compare against `asOf`, a JS Date
+   * truncated to the millisecond, while the batched counter compares the
+   * stored microsecond timestamps, so two calls in the same millisecond
+   * counted differently depending on which path ran (ADR-0179 review, finding
+   * 8). `policy-simulation.ts` supplies it (`replayCounterFor` for one row,
+   * `batchedAllowCounts` for a group); both run the same SQL.
+   */
+  countAllowed: (q: ReplayCountQuery) => Promise<number>;
 }
 
 /** the question a rate limit asks of the audit trail, in replay */
@@ -482,9 +487,10 @@ export async function governedEvaluate(
   // pinned to this server (identical to the legacy behaviour).
   //
   // AER-014: on a REPLAY the window ends at the recorded call's instant and
-  // counts only what came STRICTLY BEFORE it. Without a replay clock this is
-  // byte-identical to before: the window starts at `Date.now() - window` and
-  // has no upper bound.
+  // counts only what came STRICTLY BEFORE it, answered by the replay's own
+  // counter against the stored timestamps (never by the query below, whose
+  // clock is a JS Date). Without a replay clock this is byte-identical to
+  // before: the window starts at `Date.now() - window` and has no upper bound.
   const replay = simulate?.replay;
   const countFor = async (l: {
     id: string;
@@ -495,7 +501,10 @@ export async function governedEvaluate(
   }) => {
     const clockMs = replay ? replay.asOf.getTime() : Date.now();
     const windowStart = new Date(clockMs - l.windowSeconds * 1000);
-    if (replay?.countAllowed) {
+    if (replay) {
+      if (typeof replay.countAllowed !== "function") {
+        throw new Error("a replay clock must carry its countAllowed counter; there is no direct replay count");
+      }
       return replay.countAllowed({
         limitId: l.id,
         userId,
@@ -511,7 +520,6 @@ export async function governedEvaluate(
       eq(auditLog.userId, userId),
       eq(auditLog.effect, "allow"),
       gte(auditLog.at, windowStart),
-      ...(replay ? [lt(auditLog.at, replay.asOf)] : []),
       // ADR-0127 — count EXECUTIONS, not questions. `/v1/evaluate` and the G9
       // authorization callout answer "what would you decide" and run nothing,
       // but they wrote an `allow` row like any other, so a preview spent the

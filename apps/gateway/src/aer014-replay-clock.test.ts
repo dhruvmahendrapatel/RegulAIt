@@ -12,7 +12,7 @@ import {
 } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { governedEvaluate } from "./governed-evaluate.js";
-import { runRuleSimulation } from "./policy-simulation.js";
+import { replayCounterFor, runRuleSimulation } from "./policy-simulation.js";
 
 /**
  * AER-014 (ADR-0179 §1) — A REPLAYED RATE LIMIT COUNTS WHAT HAD HAPPENED BEFORE
@@ -194,12 +194,15 @@ describe("AER-014: a replayed rate limit counts the calls strictly before the re
       null,
       null,
       undefined,
-      { versionId: candidateVersionId, replay: { asOf: at.B, lookbackHorizon: null } },
+      {
+        versionId: candidateVersionId,
+        replay: { asOf: at.B, lookbackHorizon: null, countAllowed: replayCounterFor(db, ids.B) },
+      },
     );
     expect(replayed.candidateDecision?.effect).toBe("deny");
     expect(replayed.candidateDecision?.ruleId).toBe(limitId);
 
-    // the direct (unbatched) count also stops at the recorded instant: at A's
+    // the single-row counter also stops at the recorded instant: at A's
     // instant nothing came before, so A is permitted
     const atA = await governedEvaluate(
       db,
@@ -210,7 +213,10 @@ describe("AER-014: a replayed rate limit counts the calls strictly before the re
       null,
       null,
       undefined,
-      { versionId: candidateVersionId, replay: { asOf: at.A, lookbackHorizon: null } },
+      {
+        versionId: candidateVersionId,
+        replay: { asOf: at.A, lookbackHorizon: null, countAllowed: replayCounterFor(db, ids.A) },
+      },
     );
     expect(atA.candidateDecision?.effect).toBe("allow");
   });
@@ -250,7 +256,10 @@ describe("AER-014: a replayed rate limit counts the calls strictly before the re
         null,
         null,
         undefined,
-        { versionId: candidateVersionId, replay: { asOf: at.B, lookbackHorizon: cutoff } },
+        {
+          versionId: candidateVersionId,
+          replay: { asOf: at.B, lookbackHorizon: cutoff, countAllowed: replayCounterFor(db, ids.B) },
+        },
       );
       expect(direct.candidateDecision).toBeUndefined();
       expect(direct.replayIndeterminate).toMatch(/pruned/);

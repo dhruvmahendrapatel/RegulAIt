@@ -1,0 +1,11 @@
+-- ADR-0179 review fix (finding 1) — the policy-simulation replay's lookback
+-- horizon, read cheaply.
+--
+-- `loadAuditLookbackHorizon` (apps/gateway/src/policy-simulation.ts) takes the
+-- newest cutoff any retention prune has applied, from the prune's own meta
+-- rows (`rule_id = 'audit-log-pruned'`, written by `runAuditPruneOnce`). The
+-- audit trail had no index that predicate could use, so every preview scanned
+-- all of `audit_log` to find a handful of rows. This partial index holds only
+-- the prune markers (at most one per prune pass, and old markers are pruned
+-- with everything else), so the lookup reads the index instead of the trail.
+CREATE INDEX IF NOT EXISTS "audit_log_prune_marker_at_idx" ON "audit_log" ("at") WHERE "rule_id" = 'audit-log-pruned';

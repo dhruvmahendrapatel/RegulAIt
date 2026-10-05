@@ -70,8 +70,23 @@ const AUTH = { authorization: `Bearer ${BOOT}` };
 const TAG = "psh-framework";
 const STRICT_TAG = "psh-strict";
 
-/** the exact pre-B8b response key sets — the byte-identical pin */
-const POST_KEYS = ["abacCannotGrant", "dryRun", "fidelity", "samples", "scope", "simulation"];
+/** the exact pre-B8b response key sets — the byte-identical pin. AER-016
+ * (ADR-0179) added `status` ("complete" here) to every POST answer. */
+const POST_KEYS = ["abacCannotGrant", "dryRun", "fidelity", "samples", "scope", "simulation", "status"];
+/** AER-016: a run that reached its deadline answers this, and only this */
+const INCOMPLETE_KEYS = [
+  "capped",
+  "deadlineMs",
+  "detail",
+  "dryRun",
+  "evaluated",
+  "fidelity",
+  "scope",
+  "status",
+  "total",
+  "windowEnd",
+  "windowStart",
+];
 const GET_KEYS = ["abacCannotGrant", "fidelity", "samples", "simulation", "unreplayableAttributes"];
 
 let db: Db;
@@ -376,6 +391,22 @@ describe("B8b (3) — the preview surfaces the STORED divergence, admin-only", (
     const res = await simulate(nonAdminAuth);
     expect(res.statusCode, res.body).toBe(201);
     expect(Object.keys(res.json()).sort()).toEqual(POST_KEYS);
+  });
+
+  it("(5) an INCOMPLETE run (deadline reached) never carries the field either, even for an admin", async () => {
+    // divergence is stored (test 3) and the caller is an admin, so only the
+    // incomplete shape itself can keep the field off this response
+    const saved = process.env.REGULAIT_POLICY_SIMULATION_DEADLINE_MS;
+    process.env.REGULAIT_POLICY_SIMULATION_DEADLINE_MS = "1";
+    try {
+      const res = await simulate();
+      expect(res.statusCode, res.body).toBe(200);
+      expect(res.json().status).toBe("incomplete");
+      expect(Object.keys(res.json()).sort()).toEqual(INCOMPLETE_KEYS);
+    } finally {
+      if (saved === undefined) delete process.env.REGULAIT_POLICY_SIMULATION_DEADLINE_MS;
+      else process.env.REGULAIT_POLICY_SIMULATION_DEADLINE_MS = saved;
+    }
   });
 });
 
