@@ -543,6 +543,12 @@ export const NON_ADMIN_ROUTES = new Set([
   "POST /v1/chatops/:connectionName/messages",
   // ADR-0173 batch 2b — the bot's token + identity link, not admin-ness, is the gate
   "POST /v1/chatops/:connectionName/bot",
+  // ADR-0173 batch 2c (E) — DELIBERATELY ABSENT, so each stays ADMIN-ONLY (the
+  // default): GET /v1/evals/catalog, GET /v1/evals/catalog/tested-by (an
+  // org-wide read of run evidence), POST /v1/evals/datasets/:id/from-traces and
+  // POST /v1/evals/traces/evaluate (an admin reading other people's trace
+  // previews, audited), GET /v1/evals/compare and POST /v1/evals/runs/:id/
+  // calibration (fleet-wide result reads). Nothing is added to this set.
 ]);
 
 /**

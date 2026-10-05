@@ -1023,6 +1023,13 @@
       "when": 1785081000000,
       "tag": "0146_trace_tags_scores",
       "breakpoints": true
+    },
+    {
+      "idx": 149,
+      "version": "7",
+      "when": 1785084000000,
+      "tag": "0149_eval_catalog_panels",
+      "breakpoints": true
     }
   ]
 }

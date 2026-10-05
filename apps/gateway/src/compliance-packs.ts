@@ -100,6 +100,7 @@ import {
 } from "@regulait/shared";
 import { refuseIfFeatureNotLicensed } from "./licensing.js";
 import { callerProjectIds, callerTeamIds, resolveScopeProjectIds } from "./reporting.js";
+import { countTestedEvaluators } from "./eval-catalog.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 /** a uuid that cannot exist, so an empty allow-list yields an empty result set
@@ -138,6 +139,9 @@ export interface CollectorContext {
    * column of their own (approvals). Null exactly when projectIds is null. */
   memberIds: string[] | null;
   params: CollectorParams;
+  /** ADR-0173 batch 2c: the control being assessed — the `evaluator_tested`
+   * collector counts the catalog evaluators that cite it */
+  controlRef?: string;
 }
 
 /** the scoped id list, or the impossible uuid so an empty allow-list selects
@@ -343,6 +347,15 @@ export async function runCollector(
       return row?.n ?? 0;
     }
 
+    case "evaluator_tested": {
+      // ADR-0173 batch 2c: TEST evidence. Counts the catalog evaluators that
+      // cite this control and passed a completed run in the period; "not run"
+      // and "ran and failed" both count zero. Same function as the "tested
+      // by" chip, so the scorecard and the chip cannot disagree.
+      if (!ctx.controlRef) return 0;
+      return countTestedEvaluators(db, ctx.controlRef, { periodStart, periodEnd, projectIds });
+    }
+
     default: {
       // an unknown collector is NOT silently zero-and-green: it is a hard
       // failure, because a pack referencing a collector this build does not
@@ -398,6 +411,7 @@ export async function evaluatePack(db: Db, args: EvaluatePackArgs): Promise<Pack
       projectIds: args.projectIds,
       memberIds,
       params: (c.collectorParams ?? {}) as CollectorParams,
+      controlRef: c.controlRef,
     });
     const att = attestations.find((a) => a.controlRef === c.controlRef);
     assessments.push(

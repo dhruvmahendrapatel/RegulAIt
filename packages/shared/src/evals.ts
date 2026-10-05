@@ -40,6 +40,7 @@ import {
   type ClaimSupport,
   type JudgedClaimVerdict,
 } from "./groundedness.js";
+import { JUDGE_PANEL_LIMITS, judgePanelSchema } from "./judge-panels.js";
 
 // ---------------------------------------------------------------------------
 // Kinds
@@ -1265,8 +1266,60 @@ export const startEvalRunSchema = z.object({
   /** pin the comparison to a specific prior run instead of the resolved baseline */
   baselineRunId: z.string().uuid().nullish(),
   note: z.string().max(2000).optional(),
+  /**
+   * ADR-0173 batch 2c — a weighted panel of 2–5 judges for the judge-backed
+   * cases, instead of `judgeAgentId`. Every verdict is kept; the case score is
+   * their weighted mean. Mutually exclusive with `judgeAgentId`.
+   */
+  judgePanel: judgePanelSchema.optional(),
+  /** ADR-0173 batch 2c — judge each judge-backed case this many times (1–5) */
+  repetitions: z.number().int().min(1).max(JUDGE_PANEL_LIMITS.maxRepetitions).default(1),
 });
 
 export const setEvalBaselineSchema = z.object({
   isBaseline: z.boolean().default(true),
 });
+
+// ---------------------------------------------------------------------------
+// ADR-0173 batch 2c — datasets from traces, and evaluators on traces
+// ---------------------------------------------------------------------------
+
+/** at most this many span ids per "add to dataset" or "evaluate traces" call */
+export const EVAL_TRACE_ROWS_MAX = 200;
+
+/**
+ * Why a span was not added to a dataset (or not evaluated). Fixed codes, so a
+ * caller (the traces page, an automation rule) can count them without parsing.
+ */
+export const EVAL_TRACE_SKIP_REASONS = [
+  "not_found",
+  "content_withheld",
+  "no_content",
+  "already_in_dataset",
+  "duplicate_in_request",
+  "unusable_scorer_config",
+] as const;
+export type EvalTraceSkipReason = (typeof EVAL_TRACE_SKIP_REASONS)[number];
+
+export const datasetFromTracesSchema = z
+  .object({
+    spanIds: z.array(z.string().uuid()).min(1).max(EVAL_TRACE_ROWS_MAX),
+  })
+  .strict();
+
+/**
+ * Run ONE deterministic scorer over trace span previews. Judge-backed kinds are
+ * refused: an evaluator on traces never dispatches a model, and it reads only
+ * the stored preview, never more content than the trace already holds.
+ */
+export const evaluateTracesSchema = z
+  .object({
+    scorerKind: evalScorerKindSchema,
+    scorerConfig: evalScorerConfigSchema.default({}),
+    /** the reference, for the scorers that need one (exact, numeric, …) */
+    expected: z.union([z.string(), z.number(), z.record(z.unknown()), z.array(z.unknown())]).nullish(),
+    spanIds: z.array(z.string().uuid()).min(1).max(EVAL_TRACE_ROWS_MAX),
+    /** the trace-score name the results are recorded under */
+    scoreName: z.string().regex(/^[a-z0-9_.-]{1,64}$/).optional(),
+  })
+  .strict();
