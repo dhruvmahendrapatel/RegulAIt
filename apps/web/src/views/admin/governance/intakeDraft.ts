@@ -43,7 +43,7 @@ export type DraftStatus =
  */
 export type DraftSaveOutcome =
   | { kind: "saved" }
-  | { kind: "not-kept"; reason: "off" | "offer" | "loading" | "empty" | "stopped" }
+  | { kind: "not-kept"; reason: "off" | "offer" | "loading" | "empty" | "stopped" | "owner-changed" }
   | { kind: "failed"; tooLarge: boolean };
 
 /**
@@ -61,15 +61,27 @@ const SAVE_DELAY_MS = 1000;
 const KEEPALIVE_MAX_BYTES = 60_000;
 export const draftPath = (scope: string) => `/v1/use-cases/draft?scope=${encodeURIComponent(scope)}`;
 
+/**
+ * ADR-0179 security review, item 6 — every draft write names the person whose
+ * draft this page loaded. A save queued behind a slow one, or the keepalive
+ * exit save, can reach the gateway after that person signed out and someone
+ * else signed in on this browser, carrying the new person's cookie; the
+ * gateway refuses a write that names someone else (409 `draft_owner_changed`),
+ * so it can never land in the new person's draft.
+ */
+export const DRAFT_OWNER_HEADER = "x-regulait-draft-owner";
+export const draftOwnerHeaders = (owner: string | null): Record<string, string> =>
+  owner ? { [DRAFT_OWNER_HEADER]: owner } : {};
+
 /** the exit save: same credential and CSRF header as the api client, sent with `keepalive` */
-async function putOnExit(path: string, body: string): Promise<boolean> {
+export async function putOnExit(path: string, body: string, owner: string | null): Promise<boolean> {
   const payload = JSON.stringify({ state: JSON.parse(body) as unknown });
   try {
     const res = await fetch(path, {
       method: "PUT",
       credentials: "include",
       keepalive: new Blob([payload]).size <= KEEPALIVE_MAX_BYTES,
-      headers: { [CSRF_HEADER]: "1", "content-type": "application/json" },
+      headers: { [CSRF_HEADER]: "1", "content-type": "application/json", ...draftOwnerHeaders(owner) },
       body: payload,
     });
     return res.ok;
@@ -81,10 +93,18 @@ async function putOnExit(path: string, body: string): Promise<boolean> {
 export function useIntakeDraft<S>(opts: {
   scope: string;
   enabled: boolean;
+  /** the signed-in person: the draft this page loads, and every write, is theirs */
+  userId: string | null;
   /** the state to keep; null while the form holds nothing worth saving */
   snapshot: S | null;
 }) {
   const { scope, enabled } = opts;
+  const currentUser = useRef(opts.userId);
+  currentUser.current = opts.userId;
+  /** whose draft this page loaded (ADR-0179 item 6): fixed at the first read, named on every write */
+  const owner = useRef<string | null>(null);
+  /** the person signed in now is not the one whose draft this is: nothing more is sent */
+  const ownerChanged = () => owner.current !== null && currentUser.current !== owner.current;
   const [status, setStatus] = useState<DraftStatus>(enabled ? { kind: "loading" } : { kind: "off", reason: "not-signed-in" });
   const statusRef = useRef(status);
   statusRef.current = status;
@@ -103,6 +123,7 @@ export function useIntakeDraft<S>(opts: {
   useEffect(() => {
     if (!enabled) return;
     let live = true;
+    owner.current = currentUser.current;
     api.get<{ draft?: DraftRecord | null }>(draftPath(scope)).then(
       (res) => {
         if (!live) return;
@@ -139,12 +160,17 @@ export function useIntakeDraft<S>(opts: {
       const body = latest.current;
       const kind = statusRef.current.kind;
       if (stopped.current) return { kind: "not-kept", reason: "stopped" };
+      if (ownerChanged()) return { kind: "not-kept", reason: "owner-changed" };
       if (kind === "off" || kind === "offer" || kind === "loading") return { kind: "not-kept", reason: kind };
       if (body === null) return { kind: "not-kept", reason: "empty" };
       if (body === saved.current) return { kind: "saved" };
       setStatus({ kind: "saving" });
       try {
-        const res = await api.put<{ draft?: DraftRecord }>(draftPath(scope), { state: JSON.parse(body) as unknown });
+        const res = await api.putWithHeaders<{ draft?: DraftRecord }>(
+          draftPath(scope),
+          { state: JSON.parse(body) as unknown },
+          draftOwnerHeaders(owner.current),
+        );
         saved.current = body;
         if (!stopped.current) {
           // a change made while this save was in flight is still waiting
@@ -175,11 +201,12 @@ export function useIntakeDraft<S>(opts: {
     clearTimer();
     const body = latest.current;
     const kind = statusRef.current.kind;
-    if (stopped.current || body === null || body === saved.current) return;
+    if (stopped.current || body === null || body === saved.current || ownerChanged()) return;
     if (kind === "off" || kind === "offer" || kind === "loading" || kind === "done") return;
+    const who = owner.current;
     const send = () => {
       if (body === saved.current) return;
-      void putOnExit(draftPath(scope), body).then((ok) => {
+      void putOnExit(draftPath(scope), body, who).then((ok) => {
         if (ok) saved.current = body;
       });
     };

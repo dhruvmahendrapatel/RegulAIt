@@ -122,7 +122,7 @@ import { callerProjectIds, callerTeamIds, resolveScopeProjectIds } from "./repor
 // ADR-0089 (gap L21): the ONE granted computation and its never-blend note —
 // imported from the inventory, never reimplemented.
 import { buildAgentHolderIndex, INVENTORY_NOTES } from "./inventory.js";
-import { IDEMPOTENCY_WINDOW_MS, readIdempotencyKey } from "./request-idempotency.js";
+import { IDEMPOTENCY_WINDOW_MS, readIdempotencyKey, referencedId, replayReference } from "./request-idempotency.js";
 import {
   createWorkflowTemplateValidated,
   startWorkflowInstanceWithTemplates,
@@ -403,7 +403,10 @@ export async function syncUseCaseForInstance(
     const months = policyValidityMonths(policy, fresh?.tier ?? null) ?? approvalLifetimeMonths(fresh?.tier ?? null);
     lifetime = { approvedAt, approvedUntil: addMonthsUtc(approvedAt, months), months, tier: fresh?.tier ?? null };
   }
-  await db
+  // compare-and-swap on the status this sync read: two syncs racing for the
+  // same move (an artifact submission and its idempotent replay, ADR-0179)
+  // move the use case, and audit the move, once
+  const moved = await db
     .update(aiUseCases)
     .set({
       status: next,
@@ -412,7 +415,9 @@ export async function syncUseCaseForInstance(
       ...(decided ? { decidedAt: new Date(), recertification: false } : {}),
       ...(lifetime ? { approvedAt: lifetime.approvedAt, approvedUntil: lifetime.approvedUntil } : {}),
     })
-    .where(eq(aiUseCases.id, useCase.id));
+    .where(and(eq(aiUseCases.id, useCase.id), eq(aiUseCases.status, useCase.status)))
+    .returning({ id: aiUseCases.id });
+  if (moved.length === 0) return;
   await db.insert(auditLog).values({
     userId: actorUserId ?? useCase.ownerUserId,
     objectType: "ai_use_case",
@@ -1271,6 +1276,41 @@ async function idempotentReplayFor(db: Db, userId: string, key: string): Promise
   return hit.response;
 }
 
+/** the 201 body of a create: the row, its intake instance, and how to fill the questionnaire */
+const createdBody = (row: AiUseCaseRow, instance: { id: string; status: string; state: unknown }): Record<string, unknown> => ({
+  ...row,
+  instance,
+  questionnaireTemplate: USE_CASE_QUESTIONNAIRE_TEMPLATE,
+  note:
+    "fill the questionnaire and submit it as the intake instance's " +
+    `'${USE_CASE_QUESTIONNAIRE_OUTPUT}' artifact; the sign-off decision on the one approvals ` +
+    "queue is what approves this use case",
+});
+
+/**
+ * ADR-0179 security review, item 3: a claim keeps a reference to the use case
+ * (`replayReference`), not the 201 body with its description and answers. A
+ * replay rebuilds the body from the use case and its instance as they stand,
+ * under the read rule (its owner or an admin); a caller who can no longer read
+ * it gets its id only. A claim stored before the change holds the full body
+ * and is replayed verbatim.
+ */
+async function useCaseReplayBody(
+  db: Db,
+  stored: Record<string, unknown>,
+  caller: { userId: string; isAdmin: boolean },
+): Promise<Record<string, unknown>> {
+  const useCaseId = referencedId(stored);
+  if (!useCaseId) return stored;
+  const [row] = await db.select().from(aiUseCases).where(eq(aiUseCases.id, useCaseId));
+  if (!row || !row.workflowInstanceId || (!caller.isAdmin && row.ownerUserId !== caller.userId)) return { id: useCaseId };
+  const [instance] = await db
+    .select({ id: workflowInstances.id, status: workflowInstances.status, state: workflowInstances.state })
+    .from(workflowInstances)
+    .where(eq(workflowInstances.id, row.workflowInstanceId));
+  return instance ? createdBody(row, instance) : { id: useCaseId };
+}
+
 /** thrown inside the create transaction to roll back the key claim with it */
 class CreateRefused extends Error {
   constructor(readonly status: number, readonly body: Record<string, unknown>) {
@@ -1433,9 +1473,12 @@ export function registerUseCaseRoutes(
     const keyRead = readIdempotencyKey(req);
     if (!keyRead.ok) return reply.status(400).send(keyRead.body);
     const idemKey = keyRead.key;
+    const caller = { userId, isAdmin: req.authCtx.isAdmin };
     if (idemKey) {
       const replay = await idempotentReplayFor(db, userId, idemKey);
-      if (replay) return reply.status(200).header("Idempotent-Replay", "true").send(replay);
+      if (replay) {
+        return reply.status(200).header("Idempotent-Replay", "true").send(await useCaseReplayBody(db, replay, caller));
+      }
     }
 
     // ADR-0171 / AER-052 — rationales only for frameworks this use case carries
@@ -1552,20 +1595,13 @@ export function registerUseCaseRoutes(
           ruleChain: [],
           reason: `AI use case '${body.name}' proposed — intake workflow started`,
         });
-        const created: Record<string, unknown> = {
-          ...row,
-          instance: started.instance,
-          questionnaireTemplate: USE_CASE_QUESTIONNAIRE_TEMPLATE,
-          note:
-            "fill the questionnaire and submit it as the intake instance's " +
-            `'${USE_CASE_QUESTIONNAIRE_OUTPUT}' artifact; the sign-off decision on the one approvals ` +
-            "queue is what approves this use case",
-        };
+        const created = createdBody(row!, started.instance);
         if (idemKey) {
-          // stored as the JSON the caller received, so a replay is byte-for-byte the same shape
+          // ADR-0179 review item 3: the claim keeps a reference, not the body;
+          // a replay rebuilds the same shape from the use case (useCaseReplayBody)
           await tx
             .update(useCaseIdempotencyKeys)
-            .set({ useCaseId: row!.id, response: JSON.parse(JSON.stringify(created)) as Record<string, unknown> })
+            .set({ useCaseId: row!.id, response: replayReference(row!.id) })
             .where(and(eq(useCaseIdempotencyKeys.userId, userId), eq(useCaseIdempotencyKeys.key, idemKey)));
         }
         return { kind: "created" as const, body: created };
@@ -1583,7 +1619,7 @@ export function registerUseCaseRoutes(
           detail: "a request with this Idempotency-Key has not finished — retry shortly",
         });
       }
-      return reply.status(200).header("Idempotent-Replay", "true").send(outcome.body);
+      return reply.status(200).header("Idempotent-Replay", "true").send(await useCaseReplayBody(db, outcome.body, caller));
     }
     return reply.status(201).send(outcome.body);
   });

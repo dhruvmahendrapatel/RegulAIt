@@ -182,6 +182,7 @@ function ResubmitForm(props: { useCaseId: string; detail: Detail; record: string
   const draft = useIntakeDraft<ResubmitDraft>({
     scope: props.useCaseId,
     enabled: auth?.via === "session",
+    userId: auth?.userId ?? null,
     snapshot: dirty ? { kind: "resubmission", version: 1, step, description, businessContext, form, affected, sections } : null,
   });
   const resumeDraft = () => {

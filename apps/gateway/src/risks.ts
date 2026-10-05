@@ -43,7 +43,14 @@
  * was registered by a person.
  */
 import type { FastifyInstance } from "fastify";
-import { idempotentReplay, readIdempotencyKey, requestDigestOf, withIdempotencyKey } from "./request-idempotency.js";
+import {
+  idempotentReplay,
+  readIdempotencyKey,
+  referencedId,
+  replayReference,
+  requestDigestOf,
+  withIdempotencyKey,
+} from "./request-idempotency.js";
 import {
   agentGrants,
   agents,
@@ -766,9 +773,23 @@ export function registerRiskRoutes(app: FastifyInstance, db: Db): void {
         detail: "an Idempotency-Key belongs to a person; the bootstrap token has no identity to keep one under",
       });
     }
+    // ADR-0179 review item 3: the claim keeps a reference to the risk, not its
+    // text; the replay is the risk as it stands, under the GET rule (its
+    // owner or an admin) — a caller who can no longer read it gets its id
+    // only. A claim stored before the change holds the full body and is
+    // replayed verbatim.
+    const replayed = async (stored: Record<string, unknown>) => {
+      const riskId = referencedId(stored);
+      let out = stored;
+      if (riskId) {
+        const [row] = await db.select().from(aiRisks).where(eq(aiRisks.id, riskId));
+        out = row && (req.authCtx.isAdmin || row.ownerUserId === callerId) ? row : { id: riskId };
+      }
+      return reply.status(200).header("Idempotent-Replay", "true").send(out);
+    };
     if (claim) {
       const prior = await idempotentReplay(db, claim);
-      if (prior?.kind === "replay") return reply.status(200).header("Idempotent-Replay", "true").send(prior.body);
+      if (prior?.kind === "replay") return replayed(prior.body);
       if (prior?.kind === "conflict") return reply.status(prior.status).send(prior.body);
     }
     const refs = await validateReferences(body);
@@ -819,9 +840,9 @@ export function registerRiskRoutes(app: FastifyInstance, db: Db): void {
       return row!;
     };
     if (!claim) return reply.status(201).send(await db.transaction((tx) => register(tx as unknown as Db)));
-    const outcome = await withIdempotencyKey(db, claim, register);
+    const outcome = await withIdempotencyKey(db, claim, register, (row) => replayReference(row.id));
     if (outcome.kind === "fresh") return reply.status(201).send(outcome.body);
-    if (outcome.kind === "replay") return reply.status(200).header("Idempotent-Replay", "true").send(outcome.body);
+    if (outcome.kind === "replay") return replayed(outcome.body);
     return reply.status(outcome.status).send(outcome.body);
   });
 

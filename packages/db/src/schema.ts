@@ -8305,7 +8305,10 @@ export type AiUseCaseRow = typeof aiUseCases.$inferSelect;
 // `use_case_idempotency_keys`: an `Idempotency-Key` on POST /v1/use-cases is
 // CLAIMED here inside the create transaction — the unique (user_id, key)
 // index is what makes two concurrent duplicates unable to both create. The
-// stored `response` is the original 201 body, replayed for 24 hours.
+// stored `response` is a reference to the use case (`{ replayOf: id }`), the
+// replay rebuilt from it, for 30 days (ADR-0179); a claim stored before that
+// holds the original 201 body. Claims past 30 days are deleted by the
+// `idempotency-key-sweep` scheduler job.
 // ---------------------------------------------------------------------------
 
 export const useCaseDrafts = pgTable(
@@ -10165,7 +10168,9 @@ export type TraceRetentionHoldRow = typeof traceRetentionHolds.$inferSelect;
 // and questionnaire-artifact writes (apps/gateway/src/request-idempotency.ts).
 // Claimed inside the transaction that writes the record; `scope` names the
 // route and its target, `requestDigest` the request the key was first used
-// with, `response` the original body replayed on a retry. Per caller.
+// with, `response` what a retry's replay is built from (a reference to the
+// record, `{ replayOf: id }`, where the route wrote one; older claims hold the
+// full body). Per caller. Deleted after 30 days by `idempotency-key-sweep`.
 // ---------------------------------------------------------------------------
 
 export const requestIdempotencyKeys = pgTable(

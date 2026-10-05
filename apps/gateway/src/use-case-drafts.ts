@@ -39,6 +39,28 @@ const draftView = (row: { scope: string; state: Record<string, unknown>; updated
   updatedAt: row.updatedAt,
 });
 
+/**
+ * ADR-0179 security review, item 6 — WHOSE DRAFT A WRITE IS. The wizard
+ * names the person whose draft it loaded in this header on every save. A save
+ * that was queued or sent as the page went (the keepalive exit save) can
+ * arrive after that person signed out and someone else signed in on the same
+ * browser; the cookie it carries is then the new person's. A write naming a
+ * different person is refused (409 `draft_owner_changed`) and stores nothing.
+ * The header is optional: a client that does not send it is unchanged.
+ */
+export const DRAFT_OWNER_HEADER = "x-regulait-draft-owner";
+
+async function refuseOtherOwner(req: FastifyRequest, reply: FastifyReply, userId: string): Promise<boolean> {
+  const named = req.headers[DRAFT_OWNER_HEADER];
+  if (named === undefined || named === userId) return false;
+  await reply.status(409).send({
+    error: "draft_owner_changed",
+    detail:
+      "this draft belongs to the person who started it, not to the one signed in now; it was not stored under your account",
+  });
+  return true;
+}
+
 async function pruneStaleDrafts(db: Db): Promise<void> {
   const cutoff = new Date(Date.now() - USE_CASE_DRAFT_TTL_DAYS * 24 * 60 * 60 * 1000);
   await db.delete(useCaseDrafts).where(lt(useCaseDrafts.updatedAt, cutoff));
@@ -95,6 +117,7 @@ export function registerUseCaseDraftRoutes(app: FastifyInstance, db: Db): void {
   app.put("/v1/use-cases/draft", async (req, reply) => {
     const who = await authorizeScope(db, req, reply);
     if (!who) return reply;
+    if (await refuseOtherOwner(req, reply, who.userId)) return reply;
     const { state } = putUseCaseDraftSchema.parse(req.body);
     const bytes = Buffer.byteLength(JSON.stringify(state), "utf8");
     if (bytes > USE_CASE_DRAFT_MAX_BYTES) {
@@ -120,6 +143,7 @@ export function registerUseCaseDraftRoutes(app: FastifyInstance, db: Db): void {
   app.delete("/v1/use-cases/draft", async (req, reply) => {
     const who = await authorizeScope(db, req, reply);
     if (!who) return reply;
+    if (await refuseOtherOwner(req, reply, who.userId)) return reply;
     await db
       .delete(useCaseDrafts)
       .where(and(eq(useCaseDrafts.userId, who.userId), eq(useCaseDrafts.scope, who.scope)));
