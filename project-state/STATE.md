@@ -25,6 +25,7 @@ roadmap: ../docs/product/ROADMAP.md
 `LICENSE` (viewing only; no copying, use, hosting, distribution or competing use without written permission) and
 `"license": "UNLICENSED"` in every package manifest. Third-party code keeps its own licences. Making the repository private
 is the only technical barrier; that's the owner's call.
+
 **2026-10-05 - ADR-0176 amended: public-domain dedications (Unlicense, CC0-1.0, 0BSD) are allowed licences** (owner),
 prompted by `fast-sha256` (Unlicense) under `standardwebhooks` in batch 2b. CLAUDE.md's universal build rule updated.
 
