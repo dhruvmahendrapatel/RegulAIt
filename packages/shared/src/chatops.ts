@@ -32,7 +32,8 @@
  * (`pending → decided` is a guarded transition). Saying "verified" for both and
  * quietly meaning different things would be the dishonest option.
  */
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHmac } from "node:crypto";
+import { constantTimeEqual } from "./constant-time.js";
 
 export const CHATOPS_PROVIDERS = ["slack", "teams", "outlook"] as const;
 export type ChatOpsProvider = (typeof CHATOPS_PROVIDERS)[number];
@@ -77,13 +78,6 @@ export type ChatSignatureResult = ChatSignatureOk | ChatSignatureRefused;
 
 const refuse = (code: ChatSignatureFailure, detail: string): ChatSignatureRefused => ({ ok: false, code, detail });
 
-/** constant-time compare that cannot throw on a length mismatch */
-function safeEqual(a: string, b: string): boolean {
-  const ab = Buffer.from(a, "utf8");
-  const bb = Buffer.from(b, "utf8");
-  if (ab.length !== bb.length) return false;
-  return timingSafeEqual(ab, bb);
-}
 
 /** exactly Slack's documented base string. Exported so a test can build a
  * VALID signature the same way Slack does, rather than asserting against a
@@ -143,7 +137,7 @@ export function verifyChatSignature(input: ChatSignatureInput): ChatSignatureRes
       return refuse("future_timestamp", `request timestamp is ${-age}s in the future, outside the ${window}s window`);
     }
     const expected = slackSignature(input.signingSecret, ts, input.rawBody);
-    if (!safeEqual(expected, presented)) {
+    if (!constantTimeEqual(expected, presented)) {
       return refuse("bad_signature", "signature does not match the signing secret over (timestamp, body)");
     }
     return { ok: true, provider: "slack", replayWindowEnforced: true };
@@ -153,7 +147,7 @@ export function verifyChatSignature(input: ChatSignatureInput): ChatSignatureRes
     const presented = input.headers[TEAMS_AUTHORIZATION_HEADER];
     if (!presented) return refuse("missing_signature", "no Authorization HMAC header — an unsigned callback is not a callback");
     const expected = teamsSignature(input.signingSecret, input.rawBody);
-    if (!safeEqual(expected, presented)) {
+    if (!constantTimeEqual(expected, presented)) {
       return refuse("bad_signature", "HMAC does not match the signing secret over the body");
     }
     // STATED PLAINLY: the Teams outgoing-webhook HMAC covers the body only.

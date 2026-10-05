@@ -527,6 +527,9 @@ export {
 // ADR-0042's prompt-injection and DLP detectors and adding the four
 // manifest-specific classes they lack (tool-ordering directives, sensitive
 // local paths, exfiltration-shaped directives, hidden/bidi Unicode).
+// ADR-0176 — the one constant-time comparison (on node:crypto).
+export { constantTimeEqual } from "./constant-time.js";
+
 export {
   MCP_ADMISSION_SEVERITIES,
   MCP_ADMISSION_MODES,
