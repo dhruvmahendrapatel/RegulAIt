@@ -64,7 +64,10 @@ export function canonicalDigest(value: unknown): string {
 function canonicalise(value: unknown): unknown {
   if (Array.isArray(value)) return value.map((item) => (item === undefined ? null : canonicalise(item)));
   if (value && typeof value === "object") {
-    const out: Record<string, unknown> = {};
+    // null prototype (ADR-0176 review): a `__proto__` key must stay an ordinary
+    // key; assigned into a plain `{}` it becomes the prototype and
+    // JSON.stringify drops it, so two different inputs digest the same
+    const out = Object.create(null) as Record<string, unknown>;
     for (const key of Object.keys(value as Record<string, unknown>).sort()) {
       const member = (value as Record<string, unknown>)[key];
       if (member !== undefined) out[key] = canonicalise(member);

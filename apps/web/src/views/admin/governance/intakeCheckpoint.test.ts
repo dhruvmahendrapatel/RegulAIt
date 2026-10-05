@@ -161,3 +161,19 @@ describe("AER-046 planSubmission — a retry reuses a record only when its input
     expect(plan.kind).toBe("refuse");
   });
 });
+
+describe("canonicalDigest treats __proto__ as an ordinary key (ADR-0176 review)", () => {
+  it("inputs that differ only under a __proto__ key digest differently", () => {
+    const a = JSON.parse('{"name":"x","__proto__":{"dataSensitivity":"public"}}') as unknown;
+    const b = JSON.parse('{"name":"x","__proto__":{"dataSensitivity":"regulated"}}') as unknown;
+    expect(canonicalDigest(a)).not.toBe(canonicalDigest(b));
+    expect(canonicalDigest(a)).toContain('"__proto__"');
+  });
+
+  it("a nested __proto__ is kept too, and key order still does not matter", () => {
+    const a = JSON.parse('{"answers":{"__proto__":{"x":1},"y":2}}') as unknown;
+    const b = JSON.parse('{"answers":{"y":2,"__proto__":{"x":1}}}') as unknown;
+    expect(canonicalDigest(a)).toBe(canonicalDigest(b));
+    expect(canonicalDigest(a)).not.toBe(canonicalDigest(JSON.parse('{"answers":{"y":2}}') as unknown));
+  });
+});
