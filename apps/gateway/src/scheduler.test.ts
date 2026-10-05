@@ -727,6 +727,11 @@ describe("every sweep is registered", () => {
         // Driven end-to-end, through the admin sweep endpoint that calls the
         // same function, in annotations.test.ts; this list pins registration.
         SCHEDULER_JOB_NAMES.annotationSla,
+        // ADR-0173 batch 2c (K): runs active automation rules as their
+        // authors. Driven end-to-end, through the same function the admin
+        // sweep endpoint calls, in zz-k-automation.test.ts; this list pins
+        // registration.
+        SCHEDULER_JOB_NAMES.automationRules,
       ].sort(),
     );
     for (const def of registry.values()) {

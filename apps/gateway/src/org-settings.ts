@@ -34,6 +34,8 @@ import {
   orgSettings,
   ORG_SETTINGS_ID,
   revocations,
+  sql,
+  traceRetentionHolds,
   traces,
   users,
   type Db,
@@ -213,7 +215,7 @@ function prunableWhere(
  * a framework's audit trail. Both null (the default) = nothing is ever
  * eligible for pruning (fail-safe: keep all) — unchanged behaviour.
  */
-export async function retentionFloor(db: Db): Promise<RetentionFloor> {
+async function composedRetention(db: Db) {
   const [profiles, org] = await Promise.all([
     db.select().from(complianceProfiles),
     loadOrgSettings(db),
@@ -229,6 +231,18 @@ export async function retentionFloor(db: Db): Promise<RetentionFloor> {
     profileFloor != null && orgDays != null
       ? Math.max(profileFloor, orgDays)
       : (profileFloor ?? orgDays);
+  return { withDays, org, orgDays, retainedDays };
+}
+
+/** ADR-0173 batch 2c (K): the composed §8.3 floor in days (null = no floor,
+ * keep everything), without counting prunable rows. A trace retention hold is
+ * bounded by it (at most twice the floor, at most three years). */
+export async function retentionFloorDays(db: Db): Promise<number | null> {
+  return (await composedRetention(db)).retainedDays;
+}
+
+export async function retentionFloor(db: Db): Promise<RetentionFloor> {
+  const { withDays, org, orgDays, retainedDays } = await composedRetention(db);
   if (retainedDays == null) {
     // no global floor = keep everything = nothing prunable. A4: per-mode
     // overrides are irrelevant here — they can only EXTEND retention, and
@@ -312,11 +326,21 @@ export async function runAuditPruneOnce(
   // inventing one would mean guessing. The global floor is used, which is the
   // SHORTER of the two and therefore the safe direction. Spans go with their
   // trace by ON DELETE CASCADE — one delete, no orphans.
+  //
+  // ADR-0173 batch 2c (K) — RETENTION HOLDS. A trace an automation rule held
+  // (`trace_retention_holds`, at most 2x this floor and 3 years) is skipped
+  // while its hold is live and unreleased, and deleted by the first pass after
+  // the hold expires. A hold an erasure request released protects nothing.
   let tracesDeleted = 0;
   try {
     const removed = await db
       .delete(traces)
-      .where(lt(traces.startedAt, f.cutoff))
+      .where(
+        and(
+          lt(traces.startedAt, f.cutoff),
+          sql`not exists (select 1 from ${traceRetentionHolds} where ${traceRetentionHolds.traceId} = ${traces.id} and ${traceRetentionHolds.releasedAt} is null and ${traceRetentionHolds.holdUntil} > ${new Date().toISOString()}::timestamptz)`,
+        ),
+      )
       .returning({ id: traces.id });
     tracesDeleted = removed.length;
   } catch {

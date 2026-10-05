@@ -258,7 +258,8 @@ test.describe("ADR-0173 2c: traces as the evidence spine", () => {
 
     // the Automations slot
     await page.getByRole("tab", { name: "Automations" }).click();
-    await expect(page.getByText("Automation rules are set up by an admin.")).toBeVisible();
+    // K's tab is mounted in the slot (its own journey: monitoring-automations.mock.spec.ts)
+    await expect(page.getByText("No automation rules yet")).toBeVisible();
     await expectAxeClean(page, "traces, automations tab");
   });
 });

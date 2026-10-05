@@ -69,6 +69,7 @@
   },
   "devDependencies": {
     "@types/node": "26.1.1",
+    "simple-statistics": "7.12.1",
     "vitest": "^4.1.11",
     "xml-crypto": "6.1.2"
   }

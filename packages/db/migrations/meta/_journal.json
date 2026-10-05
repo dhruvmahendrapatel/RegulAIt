@@ -1037,6 +1037,13 @@
       "when": 1785084000000,
       "tag": "0149_eval_catalog_panels",
       "breakpoints": true
+    },
+    {
+      "idx": 150,
+      "version": "7",
+      "when": 1785085000000,
+      "tag": "0150_kri_automation",
+      "breakpoints": true
     }
   ]
 }

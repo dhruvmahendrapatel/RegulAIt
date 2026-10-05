@@ -260,6 +260,10 @@ export const NON_ADMIN_ROUTES = new Set([
   "PUT /v1/prompts/:promptId/tags/:tag",
   "POST /v1/playground/run",
   "POST /v1/playground/evaluate",
+  // ADR-0173 batch 2c (K) — deliberately NONE of the KRI, series, dashboard,
+  // automation-rule or retention-hold routes is here: a KRI or a rule is
+  // policy, a series reads every user's traces, and a rule acts on them.
+  // They stay behind the admin gate (zz-k-monitoring.test.ts asserts 403).
   "PATCH /v1/use-cases/:useCaseId",
   // ADR-0171 / AER-050: the intake wizard's own drafts. Any signed-in user
   // keeps their OWN draft (the handler refuses a token with no user identity,

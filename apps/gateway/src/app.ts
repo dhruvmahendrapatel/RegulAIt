@@ -345,6 +345,10 @@ import {
 } from "./prompt-registry.js";
 import { registerOutboundWebhookRoutes } from "./outbound-webhooks.js";
 import { annotationLabelsFor, registerAnnotationRoutes } from "./annotations.js";
+// ADR-0173 batch 2c (K)
+import { registerKriRoutes } from "./kri.js";
+import { registerDashboardRoutes } from "./dashboards.js";
+import { registerAutomationRuleRoutes } from "./automation-rules.js";
 import { registerPlaygroundRoutes } from "./playground.js";
 // ADR-0097 — the tool-poisoning admission gate (part A) and the RFC 9728
 // protected-resource metadata + WWW-Authenticate challenge (part B).
@@ -4539,6 +4543,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // admin (default gate); the reviewer inbox, item read and submit are in
   // NON_ADMIN_ROUTES and gated in-handler (named reviewer or admin; no self-review).
   registerAnnotationRoutes(app, db, { dataKey: opts.dataKey });
+  // (K) monitoring KRIs, series and dashboards, automation rules and retention
+  // holds — all admin-only (none is in NON_ADMIN_ROUTES).
+  registerKriRoutes(app, db);
+  registerDashboardRoutes(app, db);
+  registerAutomationRuleRoutes(app, db, { dataKey: opts.dataKey });
 
   // ADR-0031 item 2: the audit read surface used to be hard-capped at 100 rows
   // with a userId filter (plus PR #79's deployMode) and nothing else — for a

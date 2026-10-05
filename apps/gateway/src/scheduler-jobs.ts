@@ -51,6 +51,7 @@ import { runUseCaseRecertificationSweep } from "./review-policy.js";
 import { runBuilderScheduleSweep } from "./builder-runtime.js";
 import { runWebhookDeliverySweep } from "./outbound-webhooks.js";
 import { runAnnotationSlaSweep } from "./annotations.js";
+import { productionAutomationActionDeps, runAutomationRuleSweep } from "./automation-rules.js";
 import { toRegistry, type SchedulerJobDefinition, type SchedulerJobRegistry } from "./scheduler.js";
 
 const HOUR = 3600;
@@ -85,6 +86,7 @@ export const SCHEDULER_JOB_NAMES = {
   webhookDeliveries: "webhook-delivery-retry",
   // ADR-0173 batch 2c (Q)
   annotationSla: "annotation-sla-sweep",
+  automationRules: "automation-rule-sweep",
 } as const;
 
 export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): SchedulerJobDefinition[] {
@@ -592,6 +594,27 @@ export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): Schedu
       run: async (ctx) => {
         const out = await runAnnotationSlaSweep(ctx.db, opts.dataKey, { now: ctx.now });
         return { itemsProcessed: out.breached, detail: { breached: out.breached } };
+      },
+    },
+    {
+      // ADR-0173 batch 2c (K). Runs every active automation rule over traces
+      // that ended since its cursor: filter, deterministic sampling, then the
+      // rule's actions AS ITS AUTHOR (paused, audited, if the author is no
+      // longer an active admin). The scheduler has no identity and lends none.
+      name: SCHEDULER_JOB_NAMES.automationRules,
+      description:
+        "Run the active automation rules over newly finished traces (at most 500 traces and 45 seconds per pass, and " +
+        "each rule's daily cap): filter, deterministic sampling, then send to an annotation queue, add to a dataset, " +
+        "notify one webhook or hold the trace's retention, as the rule's author. A rule whose author is no longer an " +
+        "active admin is paused and the pause audited.",
+      adr: "ADR-0173",
+      defaultIntervalSeconds: 5 * 60,
+      run: async (ctx) => {
+        const out = await runAutomationRuleSweep(ctx.db, productionAutomationActionDeps(opts.dataKey), {
+          now: ctx.now,
+          dataKey: opts.dataKey,
+        });
+        return { itemsProcessed: out.examined, detail: { ...out } };
       },
     },
   ];
