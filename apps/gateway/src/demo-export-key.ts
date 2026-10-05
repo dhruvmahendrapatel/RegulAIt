@@ -8,7 +8,8 @@
  * stays stable for a rehearsal and the demo), prints the fingerprint, and prints the two variables
  * to set before `demo:prepare` and the gateway start.
  *
- *   --env   print only `export …` lines (for `eval "$(… --env)"` in bash/CI)
+ *   --env   print only `export …` lines on stdout (for `eval "$(… --env)"` in bash/CI and the Docker
+ *           demo's start script); the fingerprint goes to stderr
  *
  * Demo key only — a real deployment generates its key OFF the gateway host (README step 1).
  */
@@ -38,6 +39,9 @@ const publicKeyPem = createPublicKey(createPrivateKey(readFileSync(keyPath)) as 
 const fingerprint = publicKeyFingerprint(publicKeyPem);
 
 if (process.argv.includes("--env")) {
+  // stdout stays the two `export` lines (CI appends them to $GITHUB_ENV, the Docker start script evals them);
+  // the fingerprint goes to stderr so a log still shows what an auditor pins. Never the key itself.
+  console.error(`${created ? "Created" : "Reusing"} the demo export-signing key ${keyPath} — fingerprint ${fingerprint}`);
   console.log(`export REGULAIT_EXPORT_SIGNING_KEY='${keyPath}'`);
   console.log(`export REGULAIT_EXPORT_SIGNING_KEY_ID='${KEY_ID}'`);
 } else {

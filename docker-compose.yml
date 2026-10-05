@@ -201,9 +201,14 @@ services:
       # seed mint its EPHEMERAL demo licence (30 days, says "NOT A PRODUCTION
       # DEPLOYMENT") so `demo:set-passwords` can give Ada, Dana and Avery one
       # password you chose — see README "Demo with your own password (Docker)".
+      # It also prepares the demo exactly like `demo:prepare` (demo MCP server
+      # in the container, export-signing key, REGULAIT_OFFLINE_CHECKS=1,
+      # setup → intake → traffic → check once per database; demo:check's
+      # summary is in `docker compose logs gateway`).
       # Only the exact value "1" does anything (apps/gateway/docker-start.sh);
-      # unset, the gateway reads its default keyring and no licence is minted,
-      # exactly as before. scripts/install.sh pins it to "0".
+      # unset, the gateway reads its default keyring, no licence is minted and
+      # none of the demo prep runs, exactly as before. scripts/install.sh pins
+      # it to "0".
       REGULAIT_DEMO_LICENSE: ${REGULAIT_DEMO_LICENSE:-}
       # ADR-0031 (narrowing ADR-0029): which peers may speak for the client via
       # X-Forwarded-*. `req.ip` is recorded on every auth_sessions row and is
@@ -290,8 +295,10 @@ services:
       # SSM verification step (`curl -sf localhost:3000/...`) relies on it.
       - "127.0.0.1:3000:3000"
     volumes:
-      # The DEMO licence keyring (public keys only; the private half is never
-      # written). Read only when REGULAIT_DEMO_LICENSE=1; otherwise it stays
+      # The DEMO licence keyring (the licence's public key only; its private
+      # half is never written) plus, under export-signing/, the demo's
+      # export-signing keypair for the signed audit export (a demo key, made
+      # once and reused). Read only when REGULAIT_DEMO_LICENSE=1; otherwise it stays
       # empty and unused. Named, so the demo licence still verifies after
       # `docker compose restart gateway` and `down` / `up`; `down -v` drops it
       # together with the database that holds the licence.

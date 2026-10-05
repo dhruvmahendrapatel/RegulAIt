@@ -28,6 +28,15 @@ import type { DemoIntakeFixtures } from "@regulait/shared";
 
 type Json = Record<string, any>;
 
+/**
+ * The name of the API keys this script mints for Dana and Ada before any
+ * traffic is sent. The Docker demo (apps/gateway/docker-start.sh, via
+ * demo-docker-prepared.ts) reads a row with this name as "this database has
+ * been prepared": demo:traffic ADDS traffic on every run, so it must run once
+ * per database, and this row lives with the data (`down -v` removes it).
+ */
+export const DEMO_TRAFFIC_KEY_NAME = "demo-traffic";
+
 export interface TrafficResult {
   scenario: "routine" | "routed" | "leak" | "blocked" | "attempt";
   agent: string;
@@ -67,7 +76,7 @@ export async function runDemoTraffic(
     return report;
   }
   const keyFor = async (id: string) =>
-    ({ authorization: `Bearer ${(await call("POST", `/v1/users/${id}/keys`, boot, { name: "demo-traffic" })).body.token}` });
+    ({ authorization: `Bearer ${(await call("POST", `/v1/users/${id}/keys`, boot, { name: DEMO_TRAFFIC_KEY_NAME })).body.token}` });
   const danaAuth = await keyFor(dana.id);
   const adaAuth = await keyFor(ada.id);
 

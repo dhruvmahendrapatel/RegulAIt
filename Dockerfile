@@ -45,8 +45,10 @@ EXPOSE 3000
 # directory itself; everything else is read-only to it, which is what a
 # container escape or an RCE in a dependency then lands as.
 #
-# /app/demo-license-keys is the DEMO keyring (public keys only), used solely
-# when REGULAIT_DEMO_LICENSE=1 (see apps/gateway/docker-start.sh).
+# /app/demo-license-keys is the DEMO keyring (the licence's public key only),
+# used solely when REGULAIT_DEMO_LICENSE=1 (see apps/gateway/docker-start.sh).
+# In that mode it also holds export-signing/, the demo's export-signing keypair
+# for the signed audit export (a demo key, like `demo:export-key` makes natively).
 # docker-compose.yml mounts a named volume there; Docker copies this
 # directory's owner and mode into a new volume, which is why it exists in the
 # image and belongs to `node`.
@@ -71,6 +73,8 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=90s --retries=3 \
 # Migrations run on boot (idempotent). SEED_DEMO=1 loads the demo dataset
 # first — also idempotent, keys are printed to the container log ONCE.
 # REGULAIT_DEMO_LICENSE=1 additionally lets that seed mint the ephemeral demo
-# licence; unset (the default), the script is exactly the old one-liner:
+# licence and prepares the demo like `demo:prepare` (demo MCP server, export key,
+# setup → intake → traffic → check, once per database); unset (the default), the
+# script is exactly the old one-liner:
 #   if [ "$SEED_DEMO" = "1" ]; then node apps/gateway/dist/seed.js; fi; exec node apps/gateway/dist/main.js
 CMD ["sh", "apps/gateway/docker-start.sh"]
