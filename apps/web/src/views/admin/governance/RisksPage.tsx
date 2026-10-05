@@ -14,8 +14,13 @@
  *    render in their own labelled block beside the ledger numbers; no
  *    combined score exists anywhere.
  *  - **Acceptance is a record, not a control.** Accepting residual risk is an
- *    admin act with a required note; it changes no enforcement, and the
- *    evidence measured at that moment is frozen into the audit trail.
+ *    admin (or named risk acceptor) act with a required rationale; it changes
+ *    no enforcement, and the evidence measured at that moment is frozen into
+ *    the audit trail.
+ *  - **Acceptance is time-boxed (ADR-0180 §6).** Each acceptance has an expiry
+ *    capped by the residual level (6 months for high or critical, 12
+ *    otherwise); history is kept, and an expired acceptance reopens the risk.
+ *    The admin's tolerance editor sits at the top of the page.
  */
 import { useState } from "react";
 import { useSearchParams } from "react-router-dom";
@@ -28,6 +33,9 @@ import { QueryGate, optionEls, useAction, useAgents, useProjects, agentOpts } fr
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 import { RiskLibraryPicker } from "./RiskLibraryPicker";
+import { RiskAcceptancePanel } from "./RiskAcceptancePanel";
+import { RiskTolerancePanel } from "./RiskTolerancePanel";
+import { useSession } from "../../../session/SessionContext";
 
 type RiskStatus = "open" | "mitigating" | "accepted" | "closed";
 
@@ -138,7 +146,7 @@ export default function RisksPage() {
 
   // detail actions
   const [transitionReason, setTransitionReason] = useState("");
-  const [acceptNote, setAcceptNote] = useState("");
+  const { auth } = useSession();
 
   const seedFromLibrary = (key: string) => {
     setLibKey(key);
@@ -165,6 +173,7 @@ export default function RisksPage() {
         info={<p>The register that makes the measurements legible as risk: a named scenario, an owner, the mitigating control we actually enforce, and a residual-risk acceptance record. Evidence is computed live from the real ledgers at read time — never hand-ticked — and likelihood/impact stay declared human judgments beside it, never blended into a score.</p>}
       />
       <div className={v.stack}>
+        {auth?.isAdmin ? <RiskTolerancePanel /> : null}
         <RiskLibraryPicker onAdded={() => void refreshAll()} />
         {/* ---------------- register ---------------- */}
         <Card title="Register a risk">
@@ -407,33 +416,8 @@ export default function RisksPage() {
                     </div>
                   )}
 
-                  {/* acceptance (admin) */}
-                  {(d.risk.status === "open" || d.risk.status === "mitigating") && (
-                    <div className={a.formRow}>
-                      <Field label="Accept residual risk (admin) — why is the remaining risk acceptable?" grow>
-                        <Input
-                          value={acceptNote}
-                          onChange={(e) => setAcceptNote(e.target.value)}
-                          placeholder="block-mode cascade in place; residual exposure accepted for Q3"
-                        />
-                      </Field>
-                      <Field label=" ">
-                        <Button
-                          variant="danger"
-                          disabled={act.busy || !acceptNote.trim()}
-                          onClick={() =>
-                            void act.run(async () => {
-                              await api.post(`/v1/risks/${d.risk.id}/accept`, { note: acceptNote.trim() });
-                              setAcceptNote("");
-                              await refreshAll();
-                            }, "Residual risk accepted — a record, not a control; the evidence at this moment is frozen into the audit trail")
-                          }
-                        >
-                          Accept residual risk
-                        </Button>
-                      </Field>
-                    </div>
-                  )}
+                  {/* ADR-0180 §6: tolerance vs residual, the acceptance history, the time-boxed accept form */}
+                  <RiskAcceptancePanel key={d.risk.id} riskId={d.risk.id} onChanged={() => void refreshAll()} />
                 </div>
               </Card>
             )}
