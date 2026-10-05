@@ -100,11 +100,20 @@ export function limitExplanation(band: Band | null, maxMonths: number | null, ma
   );
 }
 
+/** A response of the wrong shape becomes a retryable error in the panel, never a
+ * render crash that unmounts the whole app. */
+function assertAcceptanceHistory(x: unknown): AcceptanceHistory {
+  const v = x as Partial<AcceptanceHistory> | null;
+  const ok = !!v && !!v.position && typeof v.position === "object" && Array.isArray(v.acceptances) && typeof v.canAccept === "boolean";
+  if (!ok) throw new Error("The acceptance history came back in an unexpected form. Retry, or check the gateway version.");
+  return v as AcceptanceHistory;
+}
+
 export function RiskAcceptancePanel(props: { riskId: string; onChanged?: () => void }) {
   const act = useAction();
   const q = useQuery({
     queryKey: ["admin", "risk-acceptances", props.riskId],
-    queryFn: () => api.get<AcceptanceHistory>(`/v1/risks/${props.riskId}/acceptances`),
+    queryFn: async () => assertAcceptanceHistory(await api.get<unknown>(`/v1/risks/${props.riskId}/acceptances`)),
   });
   const [responseType, setResponseType] = useState("accept");
   const [rationale, setRationale] = useState("");
