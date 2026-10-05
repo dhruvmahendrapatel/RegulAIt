@@ -11,7 +11,8 @@
  *   GET    /v1/prompts/:promptId/diff?from=&to=      diff any two commits
  *   PUT    /v1/prompts/:promptId/tags/:tag           move a tag (owner or admin);
  *                                                    `prod` goes to the approvals queue
- *   GET    /v1/prompts/resolve?ref=name@tag          what a `prompt@tag` reference resolves to
+ *   GET    /v1/prompts/resolve?ref=<id|name>@tag     what a `prompt@tag` reference resolves to
+ *                                                    (`<promptId>@tag` is the stable form)
  *
  * Every route is a signed-in person's own work (non-admin, ADR-0172's builder
  * model): visibility is owner / workspace / named people / admins, plus the
@@ -21,9 +22,12 @@
  * PROMOTION TO `prod` (separation of duties). Moving `prod` never moves the
  * tag in the request. It writes a `prompt_promotions` row pinned to the
  * (prompt, tag, commit hash) digest and an ordinary `prompt_promotion` row in
- * the one approvals queue. The approver may not be the commit's author — at
- * request time, and again in the decide path keyed on the DECIDER, so no
- * delegation or admin override reaches a person's own commit. The tag moves
+ * the one approvals queue. The approver may not have written ANY commit the
+ * promotion would put in prod — the promoted one or any between it and the
+ * commit prod holds (`promotionRange`), so a change cannot be laundered
+ * through someone else's child commit — at request time, again in the decide
+ * path keyed on the DECIDER (so no delegation or admin override reaches a
+ * person's own change), and once more inside the decide hook. The tag moves
  * only in the decide hook (`applyPromptPromotionDecision`), inside the
  * decision's transaction, and only if the stored binding still matches.
  *
@@ -56,6 +60,7 @@ import {
   type PromptRow,
 } from "@regulait/db";
 import {
+  PROMPT_LIMITS,
   PROMPT_PROD_TAG,
   extractPromptVariables,
   promptCommitCreateSchema,
@@ -251,11 +256,24 @@ export function diffPromptCommits(from: PromptCommitRow, to: PromptCommitRow) {
 // ---------------------------------------------------------------------------
 
 /**
- * Resolve `name@tag` (or `name@<commit hash>`) for a viewer: the commit the
- * reference points at now, or null when the prompt is not visible to them,
- * the tag does not exist, or the reference is malformed. A builder agent that
- * links its instructions to `prompt@prod` calls this at run time AS THE
- * PERSON THE TURN RUNS AS, so a prompt they may not see is never read.
+ * Resolve a prompt reference for a viewer: the commit it points at now, or
+ * null when the prompt is not visible to them, is archived, the tag does not
+ * exist, or the reference is malformed. Two forms, each `<prompt>@<target>`
+ * where the target is a tag name or a full commit hash:
+ *
+ *  - `<promptId>@tag` (the prompt's uuid) — RECOMMENDED for anything stored,
+ *    such as the future builder-agent link from its instructions to
+ *    `prompt@prod`. An id never changes hands: once the prompt is archived the
+ *    link stops resolving, instead of following whoever next creates a prompt
+ *    with the same name.
+ *  - `name@tag` — a convenience for a person typing a reference. It resolves
+ *    only the one LIVE (non-archived) prompt of that name, and only when the
+ *    caller may see it; after an archive and a re-create it names the new
+ *    prompt, which is why stored links use the id form. (A name can never
+ *    have the form of an id, so the two forms cannot collide.)
+ *
+ * Whatever stores a link calls this at run time AS THE PERSON THE TURN RUNS
+ * AS, so a prompt they may not see is never read.
  */
 export async function resolvePromptRef(
   db: Db,
@@ -266,10 +284,16 @@ export async function resolvePromptRef(
   if (at <= 0 || at === ref.length - 1) return null;
   const name = ref.slice(0, at).trim();
   const target = ref.slice(at + 1).trim();
+  const byId = z.string().uuid().safeParse(name).success;
   const [p] = await db
     .select()
     .from(prompts)
-    .where(and(isNull(prompts.archivedAt), sql`lower(${prompts.name}) = lower(${name})`));
+    .where(
+      and(
+        isNull(prompts.archivedAt),
+        byId ? eq(prompts.id, name.toLowerCase()) : sql`lower(${prompts.name}) = lower(${name})`,
+      ),
+    );
   if (!p || !(await canSeePrompt(db, p, viewer))) return null;
   if (/^[0-9a-f]{64}$/.test(target)) {
     const [c] = await db.select().from(promptCommits).where(and(eq(promptCommits.promptId, p.id), eq(promptCommits.hash, target)));
@@ -285,28 +309,83 @@ export async function resolvePromptRef(
 }
 
 // ---------------------------------------------------------------------------
+// separation of duties over the WHOLE change a promotion carries
+// ---------------------------------------------------------------------------
+
+/**
+ * What a promotion would put in prod is not one commit: it is every commit
+ * between the commit prod holds now and the promoted one. Checking only the
+ * promoted commit's author lets a change be laundered through a child commit
+ * (Alice writes C2, Bob makes child C3, Alice approves C3). So the walk follows
+ * `parentHash` from the promoted commit back to `stopHash` (the commit prod
+ * holds; excluded), or to the root when prod is unset or is not an ancestor
+ * (a rollback then counts its whole history, which only ever refuses more).
+ *
+ * Fails closed: a parent that does not resolve inside this prompt
+ * (`chain_broken`) or a range longer than PROMPT_LIMITS.promotionRangeCommits
+ * (`chain_too_long`) is an answer of its own, never a partial author list.
+ */
+export type PromotionRange =
+  | { ok: true; commitHashes: string[]; authorUserIds: Set<string> }
+  | { ok: false; reason: "chain_broken" | "chain_too_long"; authorUserIds: Set<string> };
+
+export async function promotionRange(db: Db, promptId: string, commitHash: string, stopHash: string | null): Promise<PromotionRange> {
+  const max = PROMPT_LIMITS.promotionRangeCommits;
+  // one recursive query, depth-capped one past the limit so "too long" is visible
+  const res = (await db.execute(sql`
+    WITH RECURSIVE chain(hash, parent_hash, author_user_id, depth) AS (
+      SELECT hash, parent_hash, author_user_id, 1
+        FROM prompt_commits
+       WHERE prompt_id = ${promptId} AND hash = ${commitHash}
+      UNION ALL
+      SELECT c.hash, c.parent_hash, c.author_user_id, chain.depth + 1
+        FROM chain
+        JOIN prompt_commits c ON c.prompt_id = ${promptId} AND c.hash = chain.parent_hash
+       WHERE chain.parent_hash IS DISTINCT FROM ${stopHash}::text AND chain.depth <= ${max}
+    )
+    SELECT hash, parent_hash, author_user_id::text AS author_user_id FROM chain ORDER BY depth
+  `)) as unknown as { rows: Array<{ hash: string; parent_hash: string | null; author_user_id: string }> };
+  const rows = res.rows;
+  const authorUserIds = new Set(rows.map((r) => r.author_user_id));
+  if (!rows.length) return { ok: false, reason: "chain_broken", authorUserIds };
+  if (rows.length > max) return { ok: false, reason: "chain_too_long", authorUserIds };
+  const last = rows[rows.length - 1]!;
+  const ended = last.parent_hash === null || (stopHash !== null && last.parent_hash === stopHash);
+  if (!ended) return { ok: false, reason: "chain_broken", authorUserIds };
+  return { ok: true, commitHashes: rows.map((r) => r.hash), authorUserIds };
+}
+
+const CHAIN_REFUSAL_DETAIL =
+  "the commits between prod and the promoted commit could not all be read (a parent is missing, or the range is longer than " +
+  `${PROMPT_LIMITS.promotionRangeCommits} commits), so who wrote them cannot be checked; nothing is promoted`;
+
+// ---------------------------------------------------------------------------
 // the decide path's two hooks (called from app.ts decideOneApproval)
 // ---------------------------------------------------------------------------
 
-/** separation of duties keyed on the DECIDER: the commit's author never decides its promotion */
+/**
+ * Separation of duties keyed on the DECIDER: nobody who wrote ANY commit the
+ * promotion would put in prod (see `promotionRange`) decides it — through
+ * delegation or an admin override alike. A broken chain is not refused here
+ * (a deny must stay possible); the decide hook records an approve of it stale
+ * and moves nothing.
+ */
 export async function precheckPromptPromotionDecision(
   db: Db,
   approval: { id: string },
   deciderUserId: string,
 ): Promise<{ status: number; body: Record<string, unknown> } | null> {
-  const [row] = await db
-    .select({ authorUserId: promptCommits.authorUserId })
-    .from(promptPromotions)
-    .innerJoin(promptCommits, eq(promptCommits.id, promptPromotions.commitId))
-    .where(eq(promptPromotions.approvalId, approval.id));
-  if (row && row.authorUserId === deciderUserId) {
+  const [p] = await db.select().from(promptPromotions).where(eq(promptPromotions.approvalId, approval.id));
+  if (!p) return null;
+  const range = await promotionRange(db, p.promptId, p.commitHash, p.previousCommitHash);
+  if (range.authorUserIds.has(deciderUserId)) {
     return {
       status: 403,
       body: {
         error: "cannot_approve_own_prompt_commit",
         detail:
-          "the decider wrote the commit this promotion would put in prod — promoting one's own change is not a review; " +
-          "another approver must decide it",
+          "the decider wrote a commit this promotion would put in prod (the promoted commit or one between it and the " +
+          "commit prod holds) — promoting one's own change is not a review; another approver must decide it",
       },
     };
   }
@@ -367,6 +446,10 @@ export async function applyPromptPromotionDecision(
       .from(promptTags)
       .innerJoin(promptCommits, eq(promptCommits.id, promptTags.commitId))
       .where(and(eq(promptTags.promptId, p.promptId), eq(promptTags.name, p.tag)));
+    // separation of duties holds HERE too, inside the transaction that would
+    // move the tag, whatever path reached it: the decider wrote no commit in
+    // the range, and the range was read whole
+    const range = await promotionRange(tx, p.promptId, p.commitHash, p.previousCommitHash);
     const reason =
       p.bindingDigest !== expected || approval.argumentsDigest !== expected
         ? "binding_mismatch"
@@ -376,9 +459,13 @@ export async function applyPromptPromotionDecision(
             ? "prompt_archived"
             : (current?.hash ?? null) !== p.previousCommitHash
               ? "tag_moved_since_request"
-              : null;
+              : range.authorUserIds.has(deciderUserId)
+                ? "separation_of_duties"
+                : !range.ok
+                  ? "chain_unverifiable"
+                  : null;
     if (reason) {
-      outcome = await finish("stale", { reason });
+      outcome = await finish("stale", { reason, ...(range.ok ? {} : { chain: range.reason }) });
     } else {
       await tx
         .insert(promptTags)
@@ -754,8 +841,17 @@ export function registerPromptRegistryRoutes(app: FastifyInstance, db: Db, opts:
     if (!body.approverUserId) {
       return reply.status(422).send({ error: "approver_required", detail: "moving prod needs an approver who did not write the commit" });
     }
-    if (body.approverUserId === commit.authorUserId) {
-      return reply.status(409).send({ error: "approver_is_author", detail: "the approver may not be the commit's author; name someone else" });
+    // the approver wrote none of the commits this would put in prod — the
+    // promoted one or any between it and the commit prod holds now
+    const range = await promotionRange(db, p.id, commit.hash, current?.hash ?? null);
+    if (range.authorUserIds.has(body.approverUserId)) {
+      return reply.status(409).send({
+        error: "approver_is_author",
+        detail: "the approver wrote a commit this promotion would put in prod (the promoted commit or one between it and prod); name someone else",
+      });
+    }
+    if (!range.ok) {
+      return reply.status(409).send({ error: "promotion_chain_unverifiable", reason: range.reason, detail: CHAIN_REFUSAL_DETAIL });
     }
     if (body.approverUserId === viewer.userId) {
       return reply.status(409).send({ error: "approver_is_requester", detail: "name an approver other than yourself" });
