@@ -53,7 +53,7 @@ is what PathForward and ADR-0176 §4 already rule out.
 
 | Mode | What it means | Licence bar |
 |---|---|---|
-| **A. Library** | Linked into our shipped code | ADR-0176 unchanged: MIT, Apache-2.0, BSD or ISC; maintained; pinned; air-gapped; in `THIRD_PARTY.md` |
+| **A. Library** | Linked into our shipped code | ADR-0176: MIT, Apache-2.0, BSD, ISC or a public-domain dedication (Unlicense, CC0-1.0, 0BSD); maintained; pinned; air-gapped; in `THIRD_PARTY.md` |
 | **B. Sidecar engine** | A separate process or container we ship or reference by digest. It calls our gateway (so every model call stays governed) or is called through a scanner contract, and its results are normalised into our records | Same as A for anything we ship. An LGPL engine that the **customer** installs may be allowed only by a written owner exception. Never AGPL, ELv2, BSL or SSPL |
 | **C. Vendored content** | Rules, patterns, datasets or mapping tables copied in as pinned data, with attribution | Permissive licence on the data itself, provenance recorded (repository, commit, file hash). Never copyrighted excerpts, leaked prompts or unknown-licence material (PathForward PF-10) |
 | **D. Standard or interop** | We implement an open format or API and talk to a service the customer runs (an OTLP destination, a registry API) | Any licence: we ship none of their code. Their hosted-service restrictions bind the customer, not us |

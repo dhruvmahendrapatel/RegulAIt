@@ -21,6 +21,9 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-10-05 - ADR-0176 amended: public-domain dedications (Unlicense, CC0-1.0, 0BSD) are allowed licences** (owner),
+prompted by `fast-sha256` (Unlicense) under `standardwebhooks` in batch 2b. CLAUDE.md's universal build rule updated.
+
 **2026-10-05 - ADR-0177: plan for 22 open-source AI security, evaluation and observability projects (docs only).** The
 owner supplied 22 projects and asked to document how they fit, without building yet. Licences were verified from the
 repositories. The owner's assumption ("all open source, keep the licence") doesn't hold for every project: Elastic (asqav,
