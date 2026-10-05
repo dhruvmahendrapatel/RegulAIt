@@ -12,6 +12,7 @@ import {
   createDb,
   eq,
   inArray,
+  mcpServers,
   policySimulationFlips,
   policySimulations,
   projects,
@@ -101,6 +102,7 @@ let abacVersionId: string;
 let nonAdminId: string;
 let nonAdminAuth: { authorization: string };
 let controlSimulationId: string;
+let recordedServerId: string | undefined;
 
 const profileObservations = () =>
   db
@@ -230,6 +232,7 @@ afterAll(async () => {
   }
   if (abacPolicyId) await db.delete(abacPolicies).where(eq(abacPolicies.id, abacPolicyId));
   if (nonAdminId) await db.delete(auditLog).where(eq(auditLog.userId, nonAdminId));
+  if (recordedServerId) await db.delete(mcpServers).where(eq(mcpServers.id, recordedServerId));
   await app?.close();
 });
 
@@ -396,6 +399,30 @@ describe("B8b (3) — the preview surfaces the STORED divergence, admin-only", (
   it("(5) an INCOMPLETE run (deadline reached) never carries the field either, even for an admin", async () => {
     // divergence is stored (test 3) and the caller is an admin, so only the
     // incomplete shape itself can keep the field off this response
+    // A run over zero recorded calls completes: there is nothing for the
+    // deadline to stop. Record one call of our own so the run has a row to
+    // reach its deadline on. Without it, the outcome depends on what other
+    // test files left in a shared database.
+    const s = await app.inject({
+      method: "POST",
+      url: "/v1/servers",
+      headers: AUTH,
+      payload: { name: "psh-recorded-server", url: "http://127.0.0.1:9/" },
+    });
+    expect(s.statusCode, s.body).toBe(201);
+    recordedServerId = s.json().id as string;
+    await db.insert(auditLog).values({
+      userId: nonAdminId,
+      objectType: "mcp_tool",
+      objectId: recordedServerId,
+      serverId: recordedServerId,
+      toolName: "psh_tool",
+      effect: "allow",
+      ruleId: "psh-recorded-allow",
+      ruleChain: [],
+      reason: "a recorded governed call for the incomplete-run case",
+      at: new Date(Date.now() - 60_000),
+    });
     const saved = process.env.REGULAIT_POLICY_SIMULATION_DEADLINE_MS;
     process.env.REGULAIT_POLICY_SIMULATION_DEADLINE_MS = "1";
     try {
