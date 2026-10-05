@@ -10,6 +10,7 @@
  * reason code that appears.
  */
 import type { FastifyInstance } from "fastify";
+import { DEMO_SCRIPT_KEY_TTL_DAYS, demoKeyExpiresAt } from "./demo-identity.js";
 
 type Json = Record<string, any>;
 
@@ -37,7 +38,7 @@ export async function runDemoGate(
   const users: Json[] = (await call("GET", "/v1/users", boot)).body.users ?? [];
   const ada = users.find((u) => u.email === "admin@regulait.local");
   if (!ada) return { ok: false, exitCode: 2, lines: ["admin@regulait.local not found — run demo:prepare first"] };
-  const token = (await call("POST", `/v1/users/${ada.id}/keys`, boot, { name: "demo-gate pipeline" })).body.token as string;
+  const token = (await call("POST", `/v1/users/${ada.id}/keys`, boot, { name: "demo-gate pipeline", expiresAt: demoKeyExpiresAt(DEMO_SCRIPT_KEY_TTL_DAYS) })).body.token as string;
   const auth = { authorization: `Bearer ${token}` };
 
   const ucs: Json[] = (await call("GET", "/v1/use-cases", auth)).body.useCases ?? [];

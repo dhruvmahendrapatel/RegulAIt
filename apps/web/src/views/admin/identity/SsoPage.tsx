@@ -135,8 +135,13 @@ function OidcCard() {
             onChange={(e) => setClientSecret(e.target.value)}
           />
         </Field>
-        <Field label="Allowed email domains (comma, empty = any)">
-          <Input value={domains} onChange={(e) => setDomains(e.target.value)} placeholder="example.com" />
+        <Field label="Allowed email domains (comma; required when JIT is on, empty = any)">
+          <Input
+            value={domains}
+            onChange={(e) => setDomains(e.target.value)}
+            placeholder="example.com"
+            required={jit === "true"}
+          />
         </Field>
         <Field label="Groups claim (blank = no group signal from this IdP)">
           <Input
@@ -169,7 +174,7 @@ function OidcCard() {
         <Field label="JIT provisioning">
           <Select value={jit} onChange={(e) => setJit(e.target.value)}>
             <option value="false">off — unknown users are refused (default)</option>
-            <option value="true">on — first login creates the user (never admin)</option>
+            <option value="true">on — first login creates the user (never admin; needs allowed domains)</option>
           </Select>
         </Field>
         <Button type="submit" variant="primary" disabled={act.busy}>
@@ -317,6 +322,7 @@ function SamlCard() {
   const [defaultRoleId, setDefaultRoleId] = useState("");
   const [jit, setJit] = useState("false");
   const [idpInitiated, setIdpInitiated] = useState("false");
+  const [responseSigned, setResponseSigned] = useState("true");
   const [deleteProvider, setDeleteProvider] = useState<SamlProvider | null>(null);
   const [metadataFor, setMetadataFor] = useState<SamlProvider | null>(null);
 
@@ -344,6 +350,7 @@ function SamlCard() {
                   idpSigningCerts: splitCerts(certs),
                   jitProvisioning: jit === "true",
                   allowIdpInitiated: idpInitiated === "true",
+                  wantAuthnResponseSigned: responseSigned === "true",
                   ...(emailAttribute ? { emailAttribute } : {}),
                   ...(groupsAttribute ? { groupsAttribute } : {}),
                   ...(mfaContexts
@@ -369,6 +376,7 @@ function SamlCard() {
                 setDefaultRoleId("");
                 setJit("false");
                 setIdpInitiated("false");
+                setResponseSigned("true");
               }
             });
         }}
@@ -440,6 +448,12 @@ function SamlCard() {
           <Select value={idpInitiated} onChange={(e) => setIdpInitiated(e.target.value)}>
             <option value="false">off — only sign-ins we started (default)</option>
             <option value="true">on — accept unsolicited assertions</option>
+          </Select>
+        </Field>
+        <Field label="Signed SAML response">
+          <Select value={responseSigned} onChange={(e) => setResponseSigned(e.target.value)}>
+            <option value="true">required — the response and the assertion are signed (default)</option>
+            <option value="false">not required — the IdP signs only the assertion</option>
           </Select>
         </Field>
         <Button type="submit" variant="primary" disabled={act.busy}>
@@ -669,8 +683,8 @@ function SessionsPolicyForm(props: { settings: Record<string, unknown> }) {
           {num("Idle timeout (minutes)", "sessionIdleMinutes")}
           <Field label="Require TOTP MFA">
             <Select value={f.mfaRequired} onChange={(e) => set("mfaRequired", e.target.value)}>
-              <option value="off">off (self-service — default)</option>
-              <option value="admins">admins must enroll</option>
+              <option value="off">off (self-service)</option>
+              <option value="admins">admins must enroll (default)</option>
               <option value="all">everyone must enroll</option>
             </Select>
           </Field>

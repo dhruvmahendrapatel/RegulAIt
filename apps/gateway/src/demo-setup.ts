@@ -39,6 +39,7 @@ import { generateKeyPairSync, sign } from "node:crypto";
 import { createDb, runMigrations } from "@regulait/db";
 import { LICENSE_FEATURES, LICENSE_SCHEMA_ID, canonicalLicenseBytes, nistAiRmfLabel } from "@regulait/shared";
 import { buildApp } from "./app.js";
+import { demoKeyExpiresAt, SEED_PERSONA_KEY_TTL_DAYS } from "./demo-identity.js";
 
 const connectionString =
   process.env.DATABASE_URL ?? "postgres://regulait:regulait@localhost:5432/regulait";
@@ -174,7 +175,7 @@ if (!admin || !dana || !avery) {
  * Minted fresh on every run and printed once, like every secret here.
  */
 const averyKey: string = (
-  await call("POST", `/v1/users/${avery.id}/keys`, { name: "demo-setup" })
+  await call("POST", `/v1/users/${avery.id}/keys`, { name: "demo-setup", expiresAt: demoKeyExpiresAt(SEED_PERSONA_KEY_TTL_DAYS) })
 ).token;
 const AVERY_AUTH = { authorization: `Bearer ${averyKey}` };
 
@@ -186,7 +187,7 @@ const AVERY_AUTH = { authorization: `Bearer ${averyKey}` };
  * question that matters before presenting.
  */
 const danaKey: string = (
-  await call("POST", `/v1/users/${dana.id}/keys`, { name: "demo-setup" })
+  await call("POST", `/v1/users/${dana.id}/keys`, { name: "demo-setup", expiresAt: demoKeyExpiresAt(SEED_PERSONA_KEY_TTL_DAYS) })
 ).token;
 const DANA_AUTH = { authorization: `Bearer ${danaKey}` };
 

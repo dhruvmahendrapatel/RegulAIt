@@ -141,6 +141,17 @@ describe("approver visibility — party to the instance (top blocker)", () => {
 });
 
 describe("approver delegation (ADR-0022)", () => {
+  // ADR-0181: delegation ships OFF. This block is about how it behaves when an
+  // admin turns it on, so it does that through the real route, and puts the
+  // strict default back afterwards (M-068).
+  beforeAll(async () => {
+    const on = await app.inject({ method: "PUT", headers: AUTH, url: "/v1/org/settings", payload: { approvalDelegationEnabled: true } });
+    expect(on.statusCode).toBe(200);
+  });
+  afterAll(async () => {
+    await app.inject({ method: "PUT", headers: AUTH, url: "/v1/org/settings", payload: { approvalDelegationEnabled: false } });
+  });
+
   it("inside the window: delegate sees the delegator's pending rows (marked), reads the instance, decides on-behalf-of — both audited", async () => {
     await mkTemplate("ux-del", "ux-del-change");
     const id = await startInstance("ux-del-change");

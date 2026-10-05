@@ -10,6 +10,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { mkdirSync, writeFileSync, createWriteStream } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { resetTotpStore } from "./totp-sign-in";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "../../..");
@@ -44,6 +45,8 @@ export default async function globalSetup() {
     `DROP DATABASE IF EXISTS ${DB_NAME} WITH (FORCE)`, `${PG}/postgres`]);
   execFileSync("psql", ["-v", "ON_ERROR_STOP=1", "-c",
     `CREATE DATABASE ${DB_NAME}`, `${PG}/postgres`]);
+  // ADR-0181: a fresh database has no TOTP enrolments, so no recorded secrets
+  resetTotpStore();
 
   // The suite licenses itself, with an EPHEMERAL key the seeder mints and
   // throws away (see seed.ts). Without it, tier-gated features default CLOSED

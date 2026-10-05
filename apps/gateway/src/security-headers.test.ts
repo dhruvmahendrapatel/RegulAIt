@@ -153,12 +153,20 @@ describe("ADR-0029 amendment: the gateway owns Strict-Transport-Security", () =>
     for (const a of built) await a.close();
   });
 
-  it("sends the ADR's default — one day, host-scoped — on a genuinely secure hop", async () => {
+  it("sends the ADR-0181 default — one year, host-scoped — on a genuinely secure hop", async () => {
     const res = await mk().inject({ method: "GET", url: "/health", ...TLS_HOP });
     expect(res.statusCode).toBe(200);
-    // the value the ADR-0029 amendment commits to, asserted exactly
+    // ADR-0181 (strict defaults): one year, asserted exactly; was one day
     expect(res.headers["strict-transport-security"]).toBe(DEFAULT_HSTS);
-    expect(DEFAULT_HSTS).toBe("max-age=86400");
+    expect(DEFAULT_HSTS).toBe("max-age=31536000");
+    // a fresh process with REGULAIT_HSTS unset sends the same value
+    expect(resolveHsts({})).toBe("max-age=31536000");
+  });
+
+  it("a host whose name may change hands relaxes it explicitly", async () => {
+    const relaxed = mk(resolveHsts({ [HSTS_ENV]: "max-age=86400" }));
+    const res = await relaxed.inject({ method: "GET", url: "/health", ...TLS_HOP });
+    expect(res.headers["strict-transport-security"]).toBe("max-age=86400");
   });
 
   it("the default claims no subdomains and requests no preload", async () => {
@@ -209,7 +217,7 @@ describe("ADR-0029 amendment: the gateway owns Strict-Transport-Security", () =>
   });
 
   describe("resolveHsts / REGULAIT_HSTS", () => {
-    it("defaults to the bounded value when the variable is unset", () => {
+    it("defaults to the one-year value when the variable is unset", () => {
       expect(resolveHsts({})).toBe(DEFAULT_HSTS);
     });
 
@@ -240,8 +248,10 @@ describe("ADR-0029 amendment: the gateway owns Strict-Transport-Security", () =>
     it("describes the posture loudly enough to notice in a boot log", () => {
       expect(describeHsts(null)).toContain("OFF");
       expect(describeHsts(DEFAULT_HSTS)).toContain(DEFAULT_HSTS);
-      // the default is unremarkable and carries no warnings
-      expect(describeHsts(DEFAULT_HSTS)).not.toContain("[");
+      // the one-year default says, in the boot log, that it cannot be revoked
+      expect(describeHsts(DEFAULT_HSTS)).toContain("non-revocable");
+      // a one-day relaxation is unremarkable and carries no warnings
+      expect(describeHsts("max-age=86400")).not.toContain("[");
       const loud = describeHsts("max-age=31536000; includeSubDomains; preload");
       expect(loud).toContain("PRELOAD");
       expect(loud).toContain("includeSubDomains");

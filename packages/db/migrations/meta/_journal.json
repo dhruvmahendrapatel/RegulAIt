@@ -1072,6 +1072,13 @@
       "when": 1785090000000,
       "tag": "0155_continuous_assurance",
       "breakpoints": true
+    },
+    {
+      "idx": 156,
+      "version": "7",
+      "when": 1785091000000,
+      "tag": "0156_strict_identity_defaults",
+      "breakpoints": true
     }
   ]
 }

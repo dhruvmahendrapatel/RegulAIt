@@ -46,7 +46,10 @@ import {
   totpDisableSchema,
   updateOidcProviderSchema,
   constantTimeEqual,
+  OIDC_JIT_DOMAINS_REQUIRED,
+  oidcJitDomainsMissing,
 } from "@regulait/shared";
+import { settingTransitions } from "./setting-transitions.js";
 import { z } from "zod";
 import * as oidc from "openid-client";
 import { decryptSecret, encryptSecret } from "./secrets.js";
@@ -703,91 +706,20 @@ export function recoveryReason(user: {
 }
 
 // --- TOTP (RFC 6238 via HMAC-SHA1, zero deps) -------------------------------
-
-const BASE32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-
-export function base32Encode(buf: Buffer): string {
-  let bits = 0;
-  let value = 0;
-  let out = "";
-  for (const byte of buf) {
-    value = (value << 8) | byte;
-    bits += 8;
-    while (bits >= 5) {
-      out += BASE32_ALPHABET[(value >>> (bits - 5)) & 31];
-      bits -= 5;
-    }
-  }
-  if (bits > 0) out += BASE32_ALPHABET[(value << (5 - bits)) & 31];
-  return out;
-}
-
-export function base32Decode(s: string): Buffer {
-  const clean = s.toUpperCase().replace(/=+$/, "").replace(/\s+/g, "");
-  let bits = 0;
-  let value = 0;
-  const out: number[] = [];
-  for (const ch of clean) {
-    const idx = BASE32_ALPHABET.indexOf(ch);
-    if (idx < 0) throw new Error("invalid base32");
-    value = (value << 5) | idx;
-    bits += 5;
-    if (bits >= 8) {
-      out.push((value >>> (bits - 8)) & 0xff);
-      bits -= 8;
-    }
-  }
-  return Buffer.from(out);
-}
-
-export const TOTP_PERIOD_SECONDS = 30;
-export const TOTP_DIGITS = 6;
-
-export function generateTotpSecret(): string {
-  return base32Encode(randomBytes(20)); // 160-bit secret per RFC 4226
-}
-
-export function totpStep(atMs: number = Date.now()): number {
-  return Math.floor(atMs / 1000 / TOTP_PERIOD_SECONDS);
-}
-
-export function totpCode(secretBase32: string, step: number): string {
-  const counter = Buffer.alloc(8);
-  counter.writeBigUInt64BE(BigInt(step));
-  const digest = createHmac("sha1", base32Decode(secretBase32)).update(counter).digest();
-  const offset = digest[digest.length - 1]! & 0x0f;
-  const bin =
-    ((digest[offset]! & 0x7f) << 24) |
-    (digest[offset + 1]! << 16) |
-    (digest[offset + 2]! << 8) |
-    digest[offset + 3]!;
-  return String(bin % 10 ** TOTP_DIGITS).padStart(TOTP_DIGITS, "0");
-}
-
-/**
- * Verify a code within ±1 time-step (clock skew tolerance) with REPLAY
- * PROTECTION: any step <= lastUsedStep is refused, so a consumed code can
- * never be replayed inside its validity window. Returns the consumed step
- * (to persist as the new lastUsedStep) or null.
- */
-export function verifyTotp(
-  secretBase32: string,
-  code: string,
-  lastUsedStep: number | null,
-  atMs: number = Date.now(),
-): number | null {
-  const now = totpStep(atMs);
-  for (const step of [now, now - 1, now + 1]) {
-    if (lastUsedStep !== null && step <= lastUsedStep) continue;
-    if (constantTimeEqual(totpCode(secretBase32, step), code)) return step;
-  }
-  return null;
-}
-
-export function otpauthUri(email: string, secretBase32: string): string {
-  const label = encodeURIComponent(`RegulAIt:${email}`);
-  return `otpauth://totp/${label}?secret=${secretBase32}&issuer=RegulAIt&algorithm=SHA1&digits=${TOTP_DIGITS}&period=${TOTP_PERIOD_SECONDS}`;
-}
+// The implementation lives in `totp.ts` (ADR-0181: the e2e journeys load it
+// without the rest of this module); every name is re-exported unchanged.
+export {
+  base32Decode,
+  base32Encode,
+  generateTotpSecret,
+  otpauthUri,
+  TOTP_DIGITS,
+  TOTP_PERIOD_SECONDS,
+  totpCode,
+  totpStep,
+  verifyTotp,
+} from "./totp.js";
+import { generateTotpSecret, otpauthUri, verifyTotp } from "./totp.js";
 
 // --- audit helper -----------------------------------------------------------
 
@@ -2450,6 +2382,23 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
 
   // ---- admin CRUD for OIDC providers (default admin gate applies) ----------
 
+  /** ADR-0181: JIT on with no allowed domains is refused by name, audited */
+  const refuseJitWithoutDomains = async (
+    reply: FastifyReply,
+    actorUserId: string | null,
+    name: string,
+    providerId: string | null,
+  ) => {
+    const detail =
+      "JIT provisioning creates an account from whatever email the identity provider asserts, so it needs " +
+      "allowedEmailDomains: name the domains this provider may provision (or turn JIT off). Nothing was saved.";
+    await auditAuth(db, actorUserId, providerId, OIDC_JIT_DOMAINS_REQUIRED, "deny",
+      `OIDC provider '${name}' write refused: JIT provisioning without allowed email domains`,
+      { phase: providerId ? "provider-updated" : "provider-created", name, error: OIDC_JIT_DOMAINS_REQUIRED },
+      "oidc_provider");
+    return reply.status(422).send({ error: OIDC_JIT_DOMAINS_REQUIRED, detail });
+  };
+
   app.get("/v1/auth/oidc-providers", async () => {
     const rows = await db.select().from(oidcProviders);
     return { providers: rows.map(publicProvider) };
@@ -2457,6 +2406,8 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
 
   app.post("/v1/auth/oidc-providers", async (req, reply) => {
     const body = createOidcProviderSchema.parse(req.body);
+    // ADR-0181: JIT provisioning needs the email domains it accepts
+    if (oidcJitDomainsMissing(body)) return refuseJitWithoutDomains(reply, req.authCtx.userId, body.name, null);
     if (!opts.dataKey) {
       return reply.status(409).send({
         error: "data_key_required",
@@ -2508,7 +2459,7 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
       .returning();
     await auditAuth(db, req.authCtx.userId, null, "oidc-provider-created", "allow",
       `OIDC provider '${body.name}' created (issuer ${body.issuerUrl})`,
-      { phase: "provider-created", name: body.name, issuerUrl: body.issuerUrl, jitProvisioning: body.jitProvisioning ?? false, brokerIdps: body.brokerIdps ?? null },
+      { phase: "provider-created", name: body.name, issuerUrl: body.issuerUrl, jitProvisioning: body.jitProvisioning ?? false, allowedEmailDomains: body.allowedEmailDomains ?? null, brokerIdps: body.brokerIdps ?? null },
       "oidc_provider");
     return reply.status(201).send(publicProvider(row!));
   });
@@ -2518,6 +2469,16 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     const body = updateOidcProviderSchema.parse(req.body);
     const [existing] = await db.select().from(oidcProviders).where(eq(oidcProviders.id, providerId));
     if (!existing) return reply.status(404).send({ error: "unknown_provider" });
+    // ADR-0181: checked over the EFFECTIVE values, so a two-step PATCH cannot
+    // turn JIT on before (or clear the domains after) naming them
+    if (
+      oidcJitDomainsMissing({
+        jitProvisioning: body.jitProvisioning ?? existing.jitProvisioning,
+        allowedEmailDomains: body.allowedEmailDomains !== undefined ? body.allowedEmailDomains : existing.allowedEmailDomains,
+      })
+    ) {
+      return refuseJitWithoutDomains(reply, req.authCtx.userId, existing.name, providerId);
+    }
     if (body.clientSecret && !opts.dataKey) {
       return reply.status(409).send({ error: "data_key_required" });
     }
@@ -2555,7 +2516,14 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
       if (site) await signInInvariantWritten(site);
       await auditAuth(x, req.authCtx.userId, null, "oidc-provider-updated", "allow",
         `OIDC provider '${existing.name}' updated: ${Object.keys(body).join(", ")}`,
-        { phase: "provider-updated", name: existing.name, changed: Object.keys(body), secretRotated: Boolean(clientSecret) },
+        {
+          phase: "provider-updated",
+          name: existing.name,
+          changed: Object.keys(body),
+          // ADR-0181: a relaxed posture flag is answerable as old -> new
+          transitions: settingTransitions(existing, rest),
+          secretRotated: Boolean(clientSecret),
+        },
         "oidc_provider");
       // ADR-0174 (finding 6): a new issuer is a different identity provider —
       // the subjects linked under the old one mean nothing under the new one

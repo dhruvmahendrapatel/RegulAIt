@@ -29,6 +29,7 @@ import {
   type DemoUseCase,
 } from "@regulait/shared";
 import { VENDOR_QUESTIONNAIRE_TEMPLATE } from "./vendors.js";
+import { DEMO_SCRIPT_KEY_TTL_DAYS, demoKeyExpiresAt } from "./demo-identity.js";
 
 type Json = Record<string, any>;
 type Headers = Record<string, string>;
@@ -82,7 +83,7 @@ export async function seedDemoIntake(
       u = r.body;
       report.created.push(`user ${email}`);
     }
-    const key = await call("POST", `/v1/users/${u!.id}/keys`, { name: "demo-intake-seed" });
+    const key = await call("POST", `/v1/users/${u!.id}/keys`, { name: "demo-intake-seed", expiresAt: demoKeyExpiresAt(DEMO_SCRIPT_KEY_TTL_DAYS) });
     return { id: u!.id as string, auth: { authorization: `Bearer ${key.body.token}` } };
   }
   const ada = await persona("admin@regulait.local", "Ada Admin", true);

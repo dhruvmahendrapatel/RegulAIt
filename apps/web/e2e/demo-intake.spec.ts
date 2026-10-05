@@ -1,4 +1,5 @@
 import { expect, test, type Browser, type Page } from "@playwright/test";
+import { passTotp } from "./totp-sign-in";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -24,11 +25,14 @@ async function freshUser(page: Page, email: string, password: string) {
   await page.getByLabel("Email").fill(email);
   await page.getByLabel("Password", { exact: true }).fill(minted.password);
   await page.getByRole("button", { name: "Sign in" }).click();
+  // ADR-0181: an admin who already enrolled answers the TOTP challenge first
+  await passTotp(page, email, page.getByLabel("Current (one-time) password"));
   await page.getByLabel("Current (one-time) password").fill(minted.password);
   await page.getByLabel("New password", { exact: true }).fill(password);
   await page.getByLabel("Confirm new password").fill(password);
   await page.getByRole("button", { name: "Set password & continue" }).click();
-  await expect(page.getByRole("heading", { name: /Welcome back/ })).toBeVisible();
+  // ...and an admin who has not enrols now, from the secret on screen
+  await passTotp(page, email, page.getByRole("heading", { name: /Welcome back/ }));
 }
 
 async function shotBoth(page: Page, name: string) {

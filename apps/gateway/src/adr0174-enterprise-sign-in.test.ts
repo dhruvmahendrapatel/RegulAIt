@@ -902,7 +902,7 @@ describe("account linking without takeover (§5)", () => {
   });
 
   it("finding 7: a look-alike (non-ASCII) email never reaches an ASCII account, and a non-ASCII stored address never matches an ASCII claim", async () => {
-    const jit = (await mkProvider({ name: `jit-${tag}`, jitProvisioning: true })).id;
+    const jit = (await mkProvider({ name: `jit-${tag}`, jitProvisioning: true, allowedEmailDomains: ["adr0174.example"] })).id;
     const victim = `kate-${tag}@adr0174.example`;
     const victimId = await mkUser(victim);
     // U+212A KELVIN SIGN lower-cases to ASCII k in JavaScript and Postgres
@@ -961,7 +961,8 @@ describe("account linking without takeover (§5)", () => {
     const uid = await mkUser(address, true);
     await givePassword(uid, address);
     const sub = `admin-target-${tag}`;
-    expect((await roundTrip(providerId, { email: address, sub })).headers.location).toBe("/ui/login?link=pending");
+    // ADR-0181: MFA is required for admins, so the IdP asserts it (RFC 8176)
+    expect((await roundTrip(providerId, { email: address, sub, amr: ["mfa"] })).headers.location).toBe("/ui/login?link=pending");
     const [pend] = await db.select().from(federatedLinkRequests).where(and(eq(federatedLinkRequests.userId, uid), eq(federatedLinkRequests.status, "pending")));
     const list = await app.inject({ method: "GET", url: "/v1/auth/link-requests", headers: AUTH });
     expect(list.json().requests.find((x: { id: string }) => x.id === pend!.id)).toMatchObject({ approvals: 0, requiredApprovals: 2 });

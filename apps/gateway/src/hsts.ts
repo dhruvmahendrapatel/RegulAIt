@@ -43,11 +43,11 @@
  *
  * ## The setting
  *
- *   REGULAIT_HSTS unset        -> `max-age=86400` — one day, no
- *                                 includeSubDomains, no preload. See below.
+ *   REGULAIT_HSTS unset        -> `max-age=31536000` — one year, no
+ *                                 includeSubDomains, no preload (ADR-0181).
  *   REGULAIT_HSTS=off|none|""  -> no header at all.
- *   REGULAIT_HSTS=<value>      -> that exact value, e.g. on a real domain
- *                                 `max-age=31536000; includeSubDomains`.
+ *   REGULAIT_HSTS=<value>      -> that exact value, e.g. a host whose name may
+ *                                 change hands relaxes to `max-age=86400`.
  *
  * A malformed value throws at boot rather than being silently dropped. A
  * browser ignores a malformed HSTS header, so the quiet failure mode is
@@ -55,21 +55,22 @@
  * this module exists to end. `max-age=0` is valid and is the documented way to
  * actively *unpin* visitors, so there is a valid string for every intent.
  *
- * ## Why one day by default, and no includeSubDomains
+ * ## Why one year by default (ADR-0181), and no includeSubDomains
  *
- * HSTS is conventionally ramped, and a default is by definition the value
- * applied by deployments that have not thought about it, so it takes the
- * conservative rung. One day still does the job the header exists for — it
- * defends a returning user's session cookie against an active downgrade on the
- * next plaintext navigation — while bounding the blast radius of a hostname
- * that changes hands to a single day.
+ * ADR-0181 makes every default the strict one, relaxable by the operator. A
+ * year is the conventional full-strength value: it defends a returning user's
+ * session cookie against an active downgrade for as long as they keep coming
+ * back. The earlier one-day default took the conservative rung of a ramp; an
+ * operator now takes that rung explicitly where it is needed.
  *
- * That bound is not theoretical on the dev stack. ADR-0032 attached an Elastic
- * IP, so `<dashed-ip>.sslip.io` is now stable across the nightly power cycle —
- * the premise ADR-0029 refused HSTS on has genuinely weakened. But `terraform
- * destroy` releases the EIP, and a re-created one is a *different* address, so
- * `3.229.246.126` can still return to the AWS pool and land with an unrelated
- * customer. They would inherit our hostname *and* our pin.
+ * Where it is needed is a host whose name can change hands. The dev stack is
+ * the example: ADR-0032 attached an Elastic IP, so `<dashed-ip>.sslip.io` is
+ * stable across the nightly power cycle, but `terraform destroy` releases the
+ * EIP, and a re-created one is a *different* address, so `3.229.246.126` can
+ * return to the AWS pool and land with an unrelated customer, who would
+ * inherit our hostname *and* our pin. Such a host sets
+ * `REGULAIT_HSTS=max-age=86400` (one day) or `off`; the boot log prints the
+ * effective value either way.
  *
  * `includeSubDomains` is off by default because we serve no subdomains — it
  * buys this deployment exactly nothing — and because sslip.io resolves *any*
@@ -88,8 +89,8 @@
 
 export const HSTS_ENV = "REGULAIT_HSTS";
 
-/** One day, host-scoped, no preload. See the module header for the reasoning. */
-export const DEFAULT_HSTS = "max-age=86400";
+/** One year, host-scoped, no preload (ADR-0181). See the module header. */
+export const DEFAULT_HSTS = "max-age=31536000";
 
 const OFF = new Set(["", "off", "none", "false", "0", "no", "disabled"]);
 

@@ -568,7 +568,7 @@ function Loaded(props: { settings: Record<string, unknown> }) {
               onChange={(e) => approvals.set("approvalDelegationEnabled", e.target.value)}
             >
               <option value="true">enabled (delegation windows apply)</option>
-              <option value="false">disabled (strict separation of duties)</option>
+              <option value="false">disabled (strict separation of duties — default)</option>
             </Select>
           </Field>
         </SectionShell>

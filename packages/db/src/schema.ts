@@ -244,7 +244,9 @@ export const oidcProviders = pgTable("oidc_providers", {
    * the `regulait_stamp_secret_set` trigger. NULL = set before 0142 (unknown). */
   secretSetAt: timestamp("secret_set_at", { withTimezone: true }),
   enabled: boolean("enabled").notNull().default(true),
-  /** NULL = any domain; else the verified email claim's domain must be listed */
+  /** NULL = any domain; else the verified email claim's domain must be listed.
+   * ADR-0181 (migration 0156): REQUIRED (non-empty) whenever jit_provisioning
+   * is on — CHECK oidc_providers_jit_domains_ck, and a named 422 at the API. */
   allowedEmailDomains: jsonb("allowed_email_domains").$type<string[]>(),
   /** role granted to JIT-provisioned users (never admin); NULL = no role */
   defaultRoleId: uuid("default_role_id").references(() => roles.id, { onDelete: "set null" }),
@@ -274,7 +276,14 @@ export const oidcProviders = pgTable("oidc_providers", {
   brokerEnforcesMfa: boolean("broker_enforces_mfa").notNull().default(false),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-});
+}, (t) => [
+  // ADR-0181 (migration 0156): JIT provisioning creates accounts from whatever
+  // email the IdP asserts, so it needs a non-empty domain allow-list.
+  check(
+    "oidc_providers_jit_domains_ck",
+    sql`NOT ${t.jitProvisioning} OR (CASE WHEN jsonb_typeof(${t.allowedEmailDomains}) = 'array' THEN jsonb_array_length(${t.allowedEmailDomains}) > 0 ELSE false END)`,
+  ),
+]);
 
 /** one row per authorization redirect: state (single-use), nonce and the PKCE
  * verifier live server-side, never in the browser. Swept by expiry. */
@@ -322,14 +331,16 @@ export const samlProviders = pgTable("saml_providers", {
   defaultRoleId: uuid("default_role_id").references(() => roles.id, { onDelete: "set null" }),
   /** default-deny: an unknown subject with JIT off is 403'd and audited */
   jitProvisioning: boolean("jit_provisioning").notNull().default(false),
-  /** posture flags handed straight to the library. Defaulting BOTH signature
-   * requirements on would break the (common) IdP that signs only the
-   * assertion, so want_authn_response_signed defaults false while
-   * want_assertions_signed defaults TRUE — at least one signature over the
-   * assertion is always required, and turning want_assertions_signed off is
-   * refused at the API (see samlProviderSchema). */
+  /** posture flags handed straight to the library. ADR-0181 (migration
+   * 0156): BOTH default TRUE (want_authn_response_signed was false), so the
+   * Response envelope and the assertion are each signed. An IdP that signs
+   * only the assertion is accommodated by an admin turning
+   * want_authn_response_signed off for that provider, audited. At least one
+   * signature over the assertion is always required: turning
+   * want_assertions_signed off is refused at the API unless the response
+   * signature is on (see samlProviderSchema). */
   wantAssertionsSigned: boolean("want_assertions_signed").notNull().default(true),
-  wantAuthnResponseSigned: boolean("want_authn_response_signed").notNull().default(false),
+  wantAuthnResponseSigned: boolean("want_authn_response_signed").notNull().default(true),
   /** IdP-initiated SSO is a known CSRF / stolen-assertion surface: OPT-IN per
    * provider. Off (the default) means an assertion with no matching
    * outstanding InResponseTo correlation row is REFUSED. */
@@ -3564,11 +3575,12 @@ export const orgSettings = pgTable(
      * is taken for whatever round is current when it is applied. A person in
      * the console (session) may always omit it. */
     checkReportsAllowUnbound: boolean("check_reports_allow_unbound").notNull().default(false),
-    /** ADR-0022: master switch for approver delegation. ON (default) = active
+    /** ADR-0022: master switch for approver delegation. ON = active
      * delegation windows widen the delegate's inbox and let them decide
-     * on-behalf-of. OFF = a strict separation-of-duties org: creating
-     * delegations is refused and existing windows stop applying immediately. */
-    approvalDelegationEnabled: boolean("approval_delegation_enabled").notNull().default(true),
+     * on-behalf-of. OFF (the ADR-0181 default, migration 0156; was ON) =
+     * strict separation of duties: creating delegations is refused and
+     * existing windows stop applying immediately. An admin may turn it on. */
+    approvalDelegationEnabled: boolean("approval_delegation_enabled").notNull().default(false),
     /** ADR-0022 (portal defect fix): the org's default infra-remediation
      * approver. Persisted so the Infrastructure page's approver pick survives
      * reloads and admins; each propose call still names its approver
@@ -3631,11 +3643,15 @@ export const orgSettings = pgTable(
     // for users who HAVE a password, and the defaults are the sane-secure
     // baseline the ADR records.
     passwordMinLength: integer("password_min_length").notNull().default(12),
-    /** how many character classes (lower/upper/digit/other) a password needs */
-    passwordRequireClasses: integer("password_require_classes").notNull().default(2),
+    /** how many character classes (lower/upper/digit/other) a password needs.
+     * ADR-0181 (migration 0156): 3 by default (was 2); an admin may relax it. */
+    passwordRequireClasses: integer("password_require_classes").notNull().default(3),
     sessionLifetimeHours: integer("session_lifetime_hours").notNull().default(24),
-    sessionIdleMinutes: integer("session_idle_minutes").notNull().default(120),
-    mfaRequired: text("mfa_required", { enum: MFA_REQUIREMENTS }).notNull().default("off"),
+    /** ADR-0181 (migration 0156): 30 idle minutes by default (was 120). */
+    sessionIdleMinutes: integer("session_idle_minutes").notNull().default(30),
+    /** ADR-0181 (migration 0156): `admins` by default (was `off`): an admin
+     * enrols TOTP before reaching the app; other users are not forced. */
+    mfaRequired: text("mfa_required", { enum: MFA_REQUIREMENTS }).notNull().default("admins"),
     /** true = password login 403s (SSO or API-key exchange only). Refused
      * while zero ENABLED OIDC providers exist — no self-lockouts. */
     ssoOnly: boolean("sso_only").notNull().default(false),
@@ -3715,23 +3731,18 @@ export const orgSettings = pgTable(
     apiKeyIpPolicy: text("api_key_ip_policy", { enum: IP_POLICIES }).notNull().default("off"),
 
     // --- ADR-0098 (migration 0104): API-KEY LIFETIME -----------------------
-    /** THE DEFAULT applied to a key issued with no caller-supplied expiry.
-     * NULL (DEFAULT) = no default lifetime, so a newly issued key still never
-     * expires and behaviour is byte-identical to pre-0104 — ADR-0021's "a
-     * fresh settings row changes nothing" invariant, held here too. A number
-     * is a lifetime in DAYS from the moment of issuance.
-     * Recommended production setting: 90. It is NOT flipped here, because a
-     * control that starts expiring live credentials on upgrade is how a
-     * security feature gets turned back off permanently (ADR-0097's reasoning
-     * for `mcp_admission_mode`, applied verbatim). */
-    apiKeyDefaultTtlDays: integer("api_key_default_ttl_days"),
-    /** THE CEILING on what any issuer may request, in DAYS. NULL (DEFAULT) =
-     * no ceiling, so an issuer may ask for any expiry or none. When set, a
-     * request for a longer lifetime — INCLUDING an explicit request for no
-     * expiry at all — is REFUSED BY NAME (422), never silently clamped: a
-     * clamp hands back a credential with a lifetime nobody asked for and
-     * nobody was told about. Recommended production setting: 365. */
-    apiKeyMaxTtlDays: integer("api_key_max_ttl_days"),
+    /** THE DEFAULT applied to a key issued with no caller-supplied expiry, a
+     * lifetime in DAYS from the moment of issuance. ADR-0181 (migration
+     * 0156): 90 by default (was NULL = never expires). An admin may relax it
+     * (NULL = no default lifetime; the ceiling, if any, then applies). */
+    apiKeyDefaultTtlDays: integer("api_key_default_ttl_days").default(90),
+    /** THE CEILING on what any issuer may request, in DAYS. ADR-0181
+     * (migration 0156): 365 by default (was NULL = no ceiling). A request for
+     * a longer lifetime — INCLUDING an explicit request for no expiry at all —
+     * is REFUSED BY NAME (422), never silently clamped: a clamp hands back a
+     * credential with a lifetime nobody asked for and nobody was told about.
+     * An admin may relax it (NULL = no ceiling), audited. */
+    apiKeyMaxTtlDays: integer("api_key_max_ttl_days").default(365),
 
     // --- ADR-0105 (migration 0107): APPROVAL LIFETIME ----------------------
     /** HOW LONG an approved-but-unspent MCP tool-call consent stays spendable,

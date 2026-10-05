@@ -15,6 +15,7 @@ import {
 } from "@regulait/db";
 import { loadUserByEmail } from "./auth.js";
 import { activeDelegationFrom } from "./delegations.js";
+import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { resolveArtifactProviderForDispatch } from "./regulait-llm.js";
 
 /**
@@ -150,6 +151,16 @@ describe("training artifacts: `agent_id` is not unique, so dispatch must order",
 // ---------------------------------------------------------------------------
 
 describe("approval delegations: overlapping windows must resolve to the latest one", () => {
+  // ADR-0181: delegation ships OFF, under which no window resolves at all.
+  // This block is about which window wins once an admin turns it on.
+  let restoreDelegation: (() => Promise<void>) | null = null;
+  beforeAll(async () => {
+    restoreDelegation = await relaxIdentityForTest(db, { approvalDelegationEnabled: true });
+  });
+  afterAll(async () => {
+    await restoreDelegation?.();
+  });
+
   /**
    * Nothing constrains (from_user_id, to_user_id) to one row, and nothing
    * should: a delegation is a WINDOW, and re-issuing one while an older window

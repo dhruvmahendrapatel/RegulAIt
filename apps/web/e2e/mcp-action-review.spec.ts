@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { passTotp } from "./totp-sign-in";
 import { readFileSync } from "node:fs";
 import http from "node:http";
 import { createRequire } from "node:module";
@@ -42,14 +43,14 @@ async function signIn(page: Page) {
     await page.getByRole("button", { name: "Sign in" }).click();
     const welcome = page.getByRole("heading", { name: /Welcome back/ });
     const change = page.getByText("Your password is one-time");
-    await expect(welcome.or(change).or(page.getByText(/password is incorrect/)).first()).toBeVisible();
+    await passTotp(page, "admin@regulait.local", welcome.or(change).or(page.getByText(/password is incorrect/)));
     if (await welcome.isVisible()) return;
     if (await change.isVisible()) {
       await page.getByLabel("Current (one-time) password").fill(candidate);
       await page.getByLabel("New password", { exact: true }).fill(password);
       await page.getByLabel("Confirm new password").fill(password);
       await page.getByRole("button", { name: "Set password & continue" }).click();
-      await expect(welcome).toBeVisible();
+      await passTotp(page, "admin@regulait.local", welcome);
       return;
     }
   }

@@ -15,6 +15,7 @@
  * every late addition to this suite.
  */
 import { expect, test, type Page } from "@playwright/test";
+import { passTotp } from "./totp-sign-in";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -43,7 +44,7 @@ async function signIn(page: Page, email: string, candidates: string[], settleOn:
     const welcome = page.getByRole("heading", { name: /Welcome back/ });
     const forcedChange = page.getByText("Your password is one-time");
     const rejected = page.getByText(/password is incorrect/);
-    await expect(welcome.or(forcedChange).or(rejected).first()).toBeVisible();
+    await passTotp(page, email, welcome.or(forcedChange).or(rejected));
 
     if (await welcome.isVisible()) return password;
     if (await forcedChange.isVisible()) {
@@ -51,7 +52,7 @@ async function signIn(page: Page, email: string, candidates: string[], settleOn:
       await page.getByLabel("New password", { exact: true }).fill(settleOn);
       await page.getByLabel("Confirm new password").fill(settleOn);
       await page.getByRole("button", { name: "Set password & continue" }).click();
-      await expect(welcome).toBeVisible();
+      await passTotp(page, email, welcome);
       return settleOn;
     }
     expect(i, `no candidate password worked for admin`).toBeLessThan(candidates.length - 1);
