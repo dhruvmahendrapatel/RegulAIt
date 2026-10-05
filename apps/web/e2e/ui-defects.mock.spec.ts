@@ -5,6 +5,8 @@
  * side alone — no database, no seed, no real session.
  */
 import { expect, test, type Page, type Route } from "@playwright/test";
+import { generateTotpSecret, verifyTotp } from "../../gateway/dist/totp.js";
+import { passTotp, recordTotpSecret } from "./totp-sign-in";
 
 type Persona = { id: string; email: string; displayName: string };
 const USER_A: Persona = { id: "user-a", email: "avery@example.test", displayName: "Avery Admin" };
@@ -27,10 +29,18 @@ async function routeApi(page: Page, handler: (route: Route, pathname: string, me
 const json = (route: Route, body: unknown, status = 200) =>
   route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
 
+/** ADR-0181: the personas are admins with TOTP enrolled, so the mocked
+ * gateway asks for a code after the password, exactly as the real one does,
+ * and checks it with the gateway's own TOTP code. */
+const TOTP_SECRET = generateTotpSecret();
+let totpLastStep: number | null = null;
+
 async function signIn(page: Page, u: Persona) {
+  recordTotpSecret(u.email, TOTP_SECRET);
   await page.getByLabel("Email or username").fill(u.email);
   await page.getByLabel("Password", { exact: true }).fill("correct horse battery staple");
   await page.getByRole("button", { name: "Sign in" }).click();
+  await passTotp(page, u.email, page.locator("button[aria-haspopup=menu]"));
 }
 
 test("L4: signing out clears the previous user's cached data before the next sign-in", async ({ page }) => {
@@ -46,7 +56,14 @@ test("L4: signing out clears the previous user's cached data before the next sig
     if (p === "/auth/me") return current ? json(route, authMe(current)) : json(route, { error: "unauthenticated" }, 401);
     if (p === "/v1/me") return json(route, current ? { userId: current.id, isAdmin: true, user: current } : {});
     if (p === "/auth/logout") { current = null; return json(route, {}); }
-    if (p === "/auth/login") { current = USER_B; return json(route, {}); }
+    if (p === "/auth/login") return json(route, { mfaRequired: true, pendingToken: "synthetic-pending-token" });
+    if (p === "/auth/mfa/verify") {
+      const step = verifyTotp(TOTP_SECRET, String(route.request().postDataJSON()?.code ?? ""), totpLastStep);
+      if (step === null) return json(route, { error: "invalid_code" }, 401);
+      totpLastStep = step;
+      current = USER_B;
+      return json(route, {});
+    }
     if (p === "/v1/approvals") {
       approvalsRequests += 1;
       // the second answer is slow on purpose: a stale cache would be painted

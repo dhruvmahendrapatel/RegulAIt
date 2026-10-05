@@ -17,6 +17,7 @@
  * Sign-in is order-independent (M-017). Zero console errors are asserted.
  */
 import { expect, test, type Browser, type Page } from "@playwright/test";
+import { passTotp } from "./totp-sign-in";
 import { spawn, type ChildProcess } from "node:child_process";
 import { readFileSync } from "node:fs";
 import net from "node:net";
@@ -55,14 +56,14 @@ async function signIn(page: Page, email: string, candidates: string[], settleOn:
     const welcome = page.getByRole("heading", { name: /Welcome back/ });
     const forcedChange = page.getByText("Your password is one-time");
     const rejected = page.getByText(/password is incorrect/);
-    await expect(welcome.or(forcedChange).or(rejected).first()).toBeVisible();
+    await passTotp(page, email, welcome.or(forcedChange).or(rejected));
     if (await welcome.isVisible()) return;
     if (await forcedChange.isVisible()) {
       await page.getByLabel("Current (one-time) password").fill(password);
       await page.getByLabel("New password", { exact: true }).fill(settleOn);
       await page.getByLabel("Confirm new password").fill(settleOn);
       await page.getByRole("button", { name: "Set password & continue" }).click();
-      await expect(welcome).toBeVisible();
+      await passTotp(page, email, welcome);
       return;
     }
     expect(i, `no candidate password worked for ${email}`).toBeLessThan(candidates.length - 1);

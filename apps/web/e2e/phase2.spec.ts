@@ -21,6 +21,7 @@
  * proactive settings read, a developer from the 409 they can only learn from.
  */
 import { expect, test, type Page } from "@playwright/test";
+import { passTotp } from "./totp-sign-in";
 import { mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -115,13 +116,15 @@ test("admin login: one-time password → forced change → dashboard shows admin
   await page.getByLabel("Password", { exact: true }).fill(minted.password);
   await page.getByRole("button", { name: "Sign in" }).click();
 
-  await expect(page.getByText("Your password is one-time")).toBeVisible();
+  // ADR-0181: the admin answers the TOTP challenge if already enrolled...
+  await passTotp(page, "admin@regulait.local", page.getByText("Your password is one-time"));
   await page.getByLabel("Current (one-time) password").fill(minted.password);
   await page.getByLabel("New password", { exact: true }).fill(ADMIN_PASSWORD);
   await page.getByLabel("Confirm new password").fill(ADMIN_PASSWORD);
   await page.getByRole("button", { name: "Set password & continue" }).click();
 
-  await expect(page.getByRole("heading", { name: /Welcome back/ })).toBeVisible();
+  // ...or enrols now, from the secret on screen
+  await passTotp(page, "admin@regulait.local", page.getByRole("heading", { name: /Welcome back/ }));
   // ADR-0094 replaced the always-visible 11-section rail with a home launcher
   // plus a suite-scoped sidebar. The old assertion (every ADR-0093 section
   // heading visible at once) is restated at equivalent strength for the new
