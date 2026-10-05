@@ -41,14 +41,29 @@ export const CHATOPS_OUTBOUND_PROVIDERS = ["slack", "teams"];
  * shared's `verifyChatSignature` (`inbound_unsupported_by_design`). */
 export const CHATOPS_SEND_ONLY_PROVIDERS = ["outlook"];
 
+/** ADR-0179 (AER-015): a provider the courier cannot post to cannot be
+ * registered — the API answers 422 `outbound_provider_unavailable` — so its
+ * option is shown, disabled, with the reason. Derived from the outbound mirror,
+ * so the option comes back the day a sender lands. */
+export function chatOpsProviderRegistrable(provider: string): boolean {
+  return CHATOPS_OUTBOUND_PROVIDERS.includes(provider);
+}
+
+/** why a provider cannot be registered, or null when it can */
+export function chatOpsProviderUnavailableReason(provider: string): string | null {
+  if (chatOpsProviderRegistrable(provider)) return null;
+  const inbound = CHATOPS_SEND_ONLY_PROVIDERS.includes(provider) ? ` Inbound ${provider} stays refused by design.` : "";
+  return `${provider} can't be registered for approval cards yet: there is no outbound sender for it, so a workspace would never deliver a card.${inbound}`;
+}
+
 /** the option label, saying only what is true of the provider today */
 export function chatOpsProviderLabel(provider: string): string {
   const notes: string[] = [];
-  if (CHATOPS_SEND_ONLY_PROVIDERS.includes(provider)) {
-    notes.push("send-only by design — no signing secret; approvers decide from the portal link");
+  if (!chatOpsProviderRegistrable(provider)) {
+    notes.push("unavailable: no outbound sender yet");
   }
-  if (!CHATOPS_OUTBOUND_PROVIDERS.includes(provider)) {
-    notes.push("the courier cannot post to it yet");
+  if (CHATOPS_SEND_ONLY_PROVIDERS.includes(provider)) {
+    notes.push("send-only by design, no signing secret");
   }
   return notes.length > 0 ? `${provider} (${notes.join("; ")})` : provider;
 }
@@ -96,6 +111,9 @@ interface Connection {
   botAppId?: string | null;
   botTenantId?: string | null;
   botEndpoint?: string | null;
+  /** ADR-0179 — false for a workspace the courier cannot post a card to (an
+   * outlook row registered before registration was refused) */
+  outboundSupported?: boolean;
 }
 interface ConnectionsResponse {
   connections: Connection[];
@@ -168,7 +186,21 @@ export default function ChatOpsPage() {
               rowKey={(r) => r.id}
               columns={[
                 { key: "name", header: "Name", render: (r) => r.name },
-                { key: "provider", header: "Provider", render: (r) => <code>{r.provider}</code> },
+                {
+                  key: "provider",
+                  header: "Provider",
+                  render: (r) =>
+                    r.outboundSupported === false ? (
+                      <span className={v.row}>
+                        <code>{r.provider}</code>
+                        <Badge tone="warn" title="There is no outbound sender for this provider, so approval cards posted here are refused. Decide in the portal.">
+                          cannot send cards
+                        </Badge>
+                      </span>
+                    ) : (
+                      <code>{r.provider}</code>
+                    ),
+                },
                 { key: "channel", header: "Default channel", render: (r) => r.defaultChannel },
                 {
                   key: "alerts",
@@ -249,12 +281,17 @@ export default function ChatOpsPage() {
         <Field label="Provider">
           <Select value={provider} onChange={(e) => setProvider(e.target.value)}>
             {CHATOPS_PROVIDERS.map((p) => (
-              <option key={p} value={p}>
+              <option key={p} value={p} disabled={!chatOpsProviderRegistrable(p)}>
                 {chatOpsProviderLabel(p)}
               </option>
             ))}
           </Select>
         </Field>
+        {CHATOPS_PROVIDERS.filter((p) => !chatOpsProviderRegistrable(p)).map((p) => (
+          <p key={p} className={v.faint} data-testid={`chatops-unavailable-${p}`}>
+            {chatOpsProviderUnavailableReason(p)}
+          </p>
+        ))}
         <Field label="Connector (holds the bot token)">
           <Select value={connectorId} onChange={(e) => setConnectorId(e.target.value)}>
             <option value="">select…</option>

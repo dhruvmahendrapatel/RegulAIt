@@ -93,16 +93,27 @@ test("an admin builds, reorders and prunes a fallback chain", async ({ page }) =
   await expect(items.first()).toContainText("fb-second");
 
   // reorder: third becomes first
-  await items.nth(1).getByRole("button", { name: "↑" }).click();
+  await items.nth(1).getByRole("button", { name: "Move fb-third up" }).click();
   await expect(card.getByRole("listitem").first()).toContainText("fb-third");
 
-  // and the order persisted server-side, not just in local state
+  // ADR-0179 (UX-AG-1): every edit above is a DRAFT — nothing is in force yet
   const primary = made.find((m) => m.name === "fb-primary")!;
-  const readBack = await fetch(`${state.baseUrl}/v1/agents/${primary.id}/fallbacks`, { headers: BOOT });
-  const chain = (await readBack.json()).fallbacks as Array<{ name: string }>;
-  expect(chain.map((c) => c.name)).toEqual(["fb-third", "fb-second"]);
+  const serverChain = async () => {
+    const readBack = await fetch(`${state.baseUrl}/v1/agents/${primary.id}/fallbacks`, { headers: BOOT });
+    return ((await readBack.json()).fallbacks as Array<{ name: string }>).map((c) => c.name);
+  };
+  await expect(card.getByText("Unsaved changes")).toBeVisible();
+  expect(await serverChain()).toEqual([]);
 
-  // remove one
-  await card.getByRole("listitem").first().getByRole("button", { name: "Remove" }).click();
+  // and Save chain persists the order server-side, not just in local state
+  await card.getByRole("button", { name: "Save chain" }).click();
+  await expect(card.getByText("Saved — this is the chain in force.")).toBeVisible();
+  expect(await serverChain()).toEqual(["fb-third", "fb-second"]);
+
+  // remove one, then save it
+  await card.getByRole("button", { name: "Remove fb-third from the chain" }).click();
   await expect(card.getByRole("listitem")).toHaveCount(1);
+  await card.getByRole("button", { name: "Save chain" }).click();
+  await expect(card.getByText("Saved — this is the chain in force.")).toBeVisible();
+  expect(await serverChain()).toEqual(["fb-second"]);
 });

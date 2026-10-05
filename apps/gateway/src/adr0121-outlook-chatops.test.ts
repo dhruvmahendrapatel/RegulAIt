@@ -42,14 +42,19 @@ import type { EgressAllowEntry } from "./egress-guard.js";
  *
  * PASS CRITERIA, WRITTEN BEFORE THE RUN (M-023):
  *
- *  1. Registering outlook with NO signing secret returns 201, and the stored
- *     ROW (M-026 — verified by SELECT, not by the status code) has
- *     `provider = 'outlook'` and `signing_secret_ciphertext IS NULL`.
+ *  1. AMENDED BY ADR-0179 (AER-015): registering outlook is now REFUSED with
+ *     422 `outbound_provider_unavailable` and writes no row, because no
+ *     outbound sender exists and a registered workspace could never deliver a
+ *     card. The storage half survives: a PRE-EXISTING outlook row (written
+ *     directly, as one registered before the refusal would be) is admitted with
+ *     `provider = 'outlook'` and `signing_secret_ciphertext IS NULL`, and
+ *     criteria 5 and 7 run against it.
  *  2. PAIRED POSITIVE (M-033): slack registered in the same suite stores a
  *     NON-NULL ciphertext. Without this, criterion 1 would pass equally
  *     against a route that stored null for every provider.
- *  3. outlook + a signing secret is REFUSED with `signing_secret_not_applicable`
- *     and writes NO row — asserted by row count, not by the status alone.
+ *  3. outlook + a signing secret is REFUSED and writes NO row — asserted by row
+ *     count, not by the status alone. (ADR-0179: the 422 outbound refusal now
+ *     answers first; `signing_secret_not_applicable` is the second wall.)
  *  4. slack WITHOUT a signing secret is REFUSED with `signing_secret_required`
  *     and writes no row. This is the other half of criterion 3: a route that
  *     simply made the field optional for everyone would pass 3 and fail here.
@@ -177,15 +182,35 @@ afterAll(async () => {
 });
 
 describe("registering a send-only provider", () => {
-  it("1+2: outlook registers holding NO secret, while slack in the same suite holds one", async () => {
+  it("1+2 (ADR-0179): outlook registration is REFUSED with 422 and writes nothing; a pre-existing outlook row still holds NO secret, while slack holds one", async () => {
+    const before = await connectionCount();
     const outlook = await post("/v1/chatops/connections", {
       name: OUTLOOK_CONNECTION,
       provider: "outlook",
       connectorId: outlookConnectorId,
       defaultChannel: "approvers@example.com",
     });
-    // the exact call that used to be a 500 on the CHECK constraint
-    expect(outlook.statusCode, outlook.body).toBe(201);
+    // ADR-0179 (AER-015): there is no outbound sender for outlook, so a
+    // workspace registered for approval cards could never deliver one. This
+    // was a 201 followed by a 501 on every post.
+    expect(outlook.statusCode, outlook.body).toBe(422);
+    expect(outlook.json().error).toBe("outbound_provider_unavailable");
+    expect(String(outlook.json().detail)).toMatch(/no outbound sender/);
+    expect(String(outlook.json().detail)).toMatch(/ADR-0121/);
+    expect(await connectionCount()).toBe(before);
+    expect(await rowFor(OUTLOOK_CONNECTION)).toBeUndefined();
+
+    // A ROW REGISTERED BEFORE THE REFUSAL (2026-09-24 .. ADR-0179) is what the
+    // rest of this file is about now: the storage still admits it (migration
+    // 0112's CHECK and 0144's secret rule), and it must keep listing and keep
+    // refusing inbound. It is written the only way one can be now — directly.
+    await db.insert(chatopsConnections).values({
+      name: OUTLOOK_CONNECTION,
+      provider: "outlook",
+      connectorId: outlookConnectorId,
+      signingSecretCiphertext: null,
+      defaultChannel: "approvers@example.com",
+    });
 
     const slack = await post("/v1/chatops/connections", {
       name: SLACK_CONNECTION,
@@ -209,7 +234,7 @@ describe("registering a send-only provider", () => {
     expect(sRow?.signingSecretCiphertext?.length).toBeGreaterThan(0);
   });
 
-  it("3: a signing secret on outlook is refused by name, and writes nothing", async () => {
+  it("3: outlook with a signing secret is refused too, and writes nothing", async () => {
     const before = await connectionCount();
     const res = await post("/v1/chatops/connections", {
       name: `${OUTLOOK_CONNECTION}-with-secret`,
@@ -218,8 +243,11 @@ describe("registering a send-only provider", () => {
       signingSecret: `adr0121-unused-${RUN}`,
       defaultChannel: "approvers@example.com",
     });
-    expect(res.statusCode).toBe(400);
-    expect(res.json().error).toBe("signing_secret_not_applicable");
+    // ADR-0179: the outbound refusal comes FIRST, because nothing else about the
+    // request can make an outlook workspace work. `signing_secret_not_applicable`
+    // (ADR-0121) stays in the route as the second wall for the day a sender lands.
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error).toBe("outbound_provider_unavailable");
     // the refusal is also a non-write
     expect(await connectionCount()).toBe(before);
   });
@@ -275,12 +303,17 @@ describe("what the admin surface says about it", () => {
   it("7: reports the secret as set for slack and unset for outlook, in one response", async () => {
     const res = await app.inject({ method: "GET", url: "/v1/chatops/connections", headers: AUTH });
     expect(res.statusCode).toBe(200);
-    const rows: Array<{ name: string; provider: string; signingSecretSet: boolean }> =
+    const rows: Array<{ name: string; provider: string; signingSecretSet: boolean; outboundSupported: boolean }> =
       res.json().connections;
     const outlook = rows.find((r) => r.name === OUTLOOK_CONNECTION);
     const slack = rows.find((r) => r.name === SLACK_CONNECTION);
     expect(outlook?.signingSecretSet).toBe(false);
     expect(slack?.signingSecretSet).toBe(true);
+    // ADR-0179 (AER-015): the pre-existing outlook row still lists, and says it
+    // cannot carry a card — in the same response as a slack row that can, so a
+    // constant cannot satisfy it
+    expect(outlook?.outboundSupported).toBe(false);
+    expect(slack?.outboundSupported).toBe(true);
   });
 });
 

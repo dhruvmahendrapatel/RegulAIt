@@ -22,6 +22,33 @@
 > DB-backed mode and other auth plugins are NOT covered — and the priority
 > ordering this plugin depends on is version-specific, so a different Kong is
 > unverified until the harness runs against it.
+>
+> **Not supported at the Kong edge (ADR-0179):**
+> - **Data-scope rules.** The plugin sends no tool arguments, so a data-scope
+>   rule on the governed tool **always denies** here. This is not parity with an
+>   in-line dispatch, and nothing in this directory claims it is. Every deny
+>   the PDP decided without arguments carries `"notEvaluated": ["args"]` in its
+>   body and a warning in Kong's error log, so the limit is visible.
+> - **A derived session origin for OIDC or SAML.** Only `key-auth` (`api_key`)
+>   and `basic-auth` (`password`) derive the origin from the credential. For
+>   OIDC, SAML, `jwt` and every other auth plugin the origin is the
+>   **operator's assertion** (`asserted_session_origin`) or absent.
+
+## Support matrix — what is claimed, and what proves it
+
+| Behaviour | Status | Proved by |
+| --- | --- | --- |
+| deny path, forged headers, identity refusals, fail-closed PDP failures | supported | `test/verify.mjs` against `kong:3.6` (see the list below) |
+| `projectId` sent from per-route config | supported | `verify.mjs` reads `contextApplied` back from the PDP ledger |
+| session origin derived for `key-auth` → `api_key` | supported | `verify.mjs` (ledger) and `test/handler_spec.lua` |
+| session origin derived for `basic-auth` → `password` | supported in the plugin; **not run in Kong** | `test/handler_spec.lua` only |
+| OIDC / SAML / `jwt` origin | **asserted by the operator, never derived** | `test/handler_spec.lua`; the PDP labels it `principal.asserted` (`apps/gateway/src/aer036-mixed-auth-origin.test.ts`) |
+| an asserted origin that contradicts a derived one | refused, `session_origin_contradicts_credential`, PDP never asked | `verify.mjs` (key-auth + `oidc`) and `test/handler_spec.lua` (key-auth and basic-auth) |
+| data-scope rules | **not supported: always deny** | `test/handler_spec.lua` (no `args`, deny tagged); `verify.mjs` asserts `args` is not claimed and (pending its first CI run) the tag; the PDP side in `aer036-mixed-auth-origin.test.ts` |
+| `mfaCompleted` | not sent: Kong cannot observe it | `test/handler_spec.lua` (no field in the question) |
+
+Run the unit spec with any Lua 5.1+ interpreter: `lua integrations/kong/test/handler_spec.lua`.
+CI runs it in `.github/workflows/integrations.yml` before the container harness.
 
 `kong/plugins/regulait-authz/` is a custom Kong plugin: `handler.lua` and
 `schema.lua`.
@@ -232,16 +259,39 @@ What it does now:
   no longer be accepted in silence, and the ledger records the exact value under
   `assertedPrincipal.sessionOrigin` with `principal.asserted` in `contextApplied`.
 
-**The honest residue.** For OIDC and SAML the configured value is still an assertion this adapter
-cannot verify, because nothing in Kong's community plugin set gives an equally reliable per-request
-signal. Scope such a route to one auth mechanism and treat the field as the trusted assertion it is
-named after. Omitting it entirely is always safe: absent reads as `unknown`, the weakest input.
+**The honest residue: for OIDC and SAML the origin is operator-asserted (ADR-0179).** Only
+`key-auth` and `basic-auth` derive the origin. For OIDC and SAML the configured value is an
+assertion this adapter cannot verify, because nothing in Kong's community plugin set gives an
+equally reliable per-request signal. The same holds for `jwt`, `oauth2`, `hmac-auth`, `ldap-auth`
+and any other plugin: their credentials derive nothing. (A `jwt` credential also carries a `key`
+field; until plugin 0.4.0 that was misread as key-auth and labelled `api_key`, so an `oidc`
+assertion on a JWT route was refused. Only a credential with `key` and none of `secret`,
+`algorithm` or `rsa_public_key` is key-auth now.) The PDP cannot tell a derived origin from an
+asserted one either: on `/v1/authz/check` every origin is the caller's claim, which is why the
+response labels it `principal.asserted`. Scope such a route to one auth mechanism and treat the
+field as the trusted assertion it is named after. Omitting it entirely is always safe: absent reads
+as `unknown`, the weakest input.
+
+The mixed-auth cases are pinned by `test/handler_spec.lua`:
+
+| credential on the route | `asserted_session_origin` | result |
+| --- | --- | --- |
+| key-auth | none | `api_key` derived and sent |
+| key-auth | `oidc`, `saml` or `password` | **refused**, `session_origin_contradicts_credential`, PDP never asked |
+| basic-auth | none, or `password` | `password` derived and sent |
+| basic-auth | `oidc` or `saml` | **refused**, as above |
+| OIDC / SAML (credential names no mechanism) | `oidc` / `saml` | the assertion is sent; the PDP labels it `principal.asserted` |
+| `jwt` | `oidc` | the assertion is sent (a `jwt` credential is not key-auth) |
+| anything underivable | none | no principal is sent; the PDP reads `unknown` |
 
 There is deliberately **no `mfa_completed`**. Kong cannot observe whether a second factor was
 completed, and a configured `true` would be an assertion nobody checked sitting in the trusted path.
 Absent reads as "unknown", which is the weakest input a policy can get — the safe direction.
 
-### Known limitation — this plugin sends no `args`
+### Not supported — data-scope rules at the Kong edge (this plugin sends no `args`)
+
+**Data-scope rules are not supported at the Kong edge.** This is a narrowed claim (ADR-0179), not
+a bug awaiting a fix: forwarding a projection of the arguments from Kong is future work.
 
 The plugin sends `userId`, `serverId`, `toolName` and the two fields above, and **not the call's
 arguments**. Kong would have to buffer and parse the request body to supply them, and then map that
@@ -259,3 +309,19 @@ rule. Either govern a route whose tool carries no data-scope rule, or extend the
 `["projectId","principal"]` — with `args` conspicuously absent — rather than as a mystery. The
 harness asserts exactly that against the PDP's own ledger, including that `args` is NOT claimed: a
 disclosure in a README is a promise, and this one is now measured.
+
+**How a refusal tells you (plugin 0.4.0).** The plugin cannot know in advance whether a data-scope
+rule applies — rules live in the PDP and change at runtime — so it does not pre-empt the PDP. It
+**tags** the answer instead: whenever the PDP returns `deny` and its `contextApplied` does not name
+`args`, the `403` body carries
+
+```json
+{ "message": "forbidden by policy", "decision": "deny",
+  "notEvaluated": ["args"],
+  "note": "decided without tool arguments: this Kong adapter does not forward them, so a data-scope rule on this tool always denies at the Kong edge" }
+```
+
+and Kong's error log gets a warning naming the rule id from `x-regulait-reason`. Look that id up in
+the ledger: a data-scope rule there means this limit, anything else is an ordinary refusal. The tag
+is not a header, because the five protocol header names are a closed set refused on inbound
+requests. `approval_required` and `allow` are never tagged.
