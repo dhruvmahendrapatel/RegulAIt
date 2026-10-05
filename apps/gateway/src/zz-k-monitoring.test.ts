@@ -12,6 +12,9 @@
  *  5. A series has at most 500 buckets and shows the top 20 groups plus
  *     "other"; no query here selects a content column.
  *  6. A dashboard has at most 24 panels, each validated.
+ *  Fix round B: a window total (trace volume, cost) ignores minSamples, so a
+ *  drop to 0 traces breaches "volume below 10" (K4b); the agent series reads
+ *  only the spans of traces in its window (K5).
  *
  * Every fixture trace carries a project id unique to this run, so the KRIs
  * and series measure only this file's traces. Global state (KRIs, alerts,
@@ -276,6 +279,44 @@ describe("K4: KRI episodes through the governance monitor", () => {
   });
 });
 
+describe("K4b: a window total is a measurement, never 'too few samples' (fix round B)", () => {
+  it("a drop to 0 traces breaches 'trace volume below 10'; cost is 0 with no traces and unknown with only unpriced ones", async () => {
+    const EMPTY = crypto.randomUUID(); // a project with no traces at all
+    const vol = await createKri({
+      name: `k-mon volume ${RUN}`,
+      metric: "trace_volume",
+      scope: "project",
+      scopeId: EMPTY,
+      windowDays: 1,
+      comparator: "below",
+      threshold: 10,
+      // the default minSamples (20) would have suppressed this forever
+    });
+    expect(vol.statusCode).toBe(201);
+    expect(vol.json().minSamples).toBe(20);
+    const id = vol.json().id as string;
+    // a sampled metric on the same empty project still waits for its samples
+    const errs = await createKri({ name: `k-mon empty errors ${RUN}`, metric: "error_rate", scope: "project", scopeId: EMPTY, windowDays: 1, threshold: 0 });
+    const errsId = errs.json().id as string;
+
+    await runGovernanceMonitor(db, { actorUserId: admin.id });
+    const raised = await activeAlert(id);
+    expect(raised?.ruleId).toBe("kri_threshold_breached");
+    expect(raised?.detail).toMatchObject({ value: 0, samples: 0, threshold: 10 });
+    expect(await activeAlert(errsId)).toBeNull();
+    const list = (await app.inject({ method: "GET", url: "/v1/kris", headers: admin.auth })).json().kris as Array<{ id: string; measurement: unknown }>;
+    expect(list.find((k) => k.id === id)?.measurement).toEqual({ value: 0, samples: 0, state: "breached" });
+    expect(list.find((k) => k.id === errsId)?.measurement).toMatchObject({ state: "insufficient" });
+
+    const now = new Date();
+    const at = { scope: "project" as const, windowDays: 1, scoreName: null, metric: "cost_usd" as const };
+    expect(await measureKri(db, { ...at, scopeId: EMPTY }, now)).toEqual({ value: 0, samples: 0 });
+    const UNPRICED = crypto.randomUUID();
+    await db.insert(traces).values({ kind: "dispatch", name: `k-mon unpriced ${RUN}`, userId: member.id, projectId: UNPRICED, status: "ok", startedAt: minutesAgo(5) });
+    expect(await measureKri(db, { ...at, scopeId: UNPRICED }, now)).toEqual({ value: null, samples: 0 });
+  });
+});
+
 describe("K5: series", () => {
   const enc = (d: Date) => encodeURIComponent(d.toISOString());
   it("at most 500 buckets", async () => {
@@ -325,6 +366,17 @@ describe("K5: series", () => {
       ]),
     ];
     for (const s of sqls) expect(s).not.toMatch(content);
+  });
+
+  it("the agent series reads only the spans of traces in its window (fix round B)", () => {
+    const now = new Date();
+    const q = { metric: "trace_volume" as const, from: minutesAgo(60).toISOString(), to: now.toISOString(), bucket: "day" as const, groupBy: "agent" as const };
+    for (const s of [seriesTraceQuery(db, q).toSQL().sql, seriesFeedbackQuery(db, { ...q, metric: "feedback_score" }).toSQL().sql]) {
+      const pairs = s.slice(s.indexOf("select distinct"));
+      expect(pairs).toMatch(
+        /^select distinct .* from "trace_spans" where \("trace_spans"\."agent_id" is not null and "trace_spans"\."trace_id" in \(select "id" from "traces" where \("traces"\."started_at" >= \$\d+ and "traces"\."started_at" <= \$\d+\)\)\)\) "trace_agents"/,
+      );
+    }
   });
 });
 

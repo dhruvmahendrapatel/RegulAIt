@@ -8075,6 +8075,11 @@ export const traces = pgTable(
     index("traces_project_idx").on(t.projectId, t.startedAt),
     index("traces_root_idx").on(t.kind, t.rootRefId),
     index("traces_started_idx").on(t.startedAt),
+    // migration 0151: the automation sweep's keyset (automation-rules.ts
+    // `endedMsUtc`, written identically there)
+    index("traces_ended_ms_id_idx")
+      .on(sql`date_trunc('milliseconds', ${t.endedAt} AT TIME ZONE 'UTC')`, t.id)
+      .where(sql`${t.endedAt} IS NOT NULL`),
   ],
 );
 

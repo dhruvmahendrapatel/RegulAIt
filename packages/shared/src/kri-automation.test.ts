@@ -10,6 +10,7 @@ import {
   AUTOMATION_LIMITS,
   SERIES_LIMITS,
   automationBackfillSchema,
+  automationFilterIsPostHoc,
   automationRuleCreateSchema,
   automationSampled,
   dashboardSchema,
@@ -17,6 +18,7 @@ import {
   evaluateMonitorRules,
   foldTopGroups,
   kriCreateSchema,
+  kriMetricIsWindowTotal,
   kriStates,
   maxRetentionHoldDays,
   reconcileAlerts,
@@ -48,6 +50,21 @@ describe("KRIs: enums and bounds", () => {
     expect(evaluateKri(k, { value: 5, samples: 20 })).toBe("ok");
     expect(evaluateKri({ ...k, comparator: "below" }, { value: 5, samples: 20 })).toBe("breached");
     expect(evaluateKri(k, { value: null, samples: 500 })).toBe("insufficient");
+  });
+
+  it("a window total (trace volume, cost) ignores minSamples: the window is the sample", () => {
+    const below = { comparator: "below" as const, threshold: 10, minSamples: 20 };
+    expect(kriMetricIsWindowTotal("trace_volume")).toBe(true);
+    expect(kriMetricIsWindowTotal("cost_usd")).toBe(true);
+    expect(kriMetricIsWindowTotal("error_rate")).toBe(false);
+    expect(evaluateKri({ ...below, metric: "trace_volume" }, { value: 0, samples: 0 })).toBe("breached");
+    expect(evaluateKri({ ...below, metric: "trace_volume" }, { value: 12, samples: 12 })).toBe("ok");
+    expect(evaluateKri({ ...below, metric: "cost_usd" }, { value: 0, samples: 0 })).toBe("breached");
+    // unknown spend is still no data
+    expect(evaluateKri({ ...below, metric: "cost_usd" }, { value: null, samples: 0 })).toBe("insufficient");
+    // the sampled metrics keep the rule
+    expect(evaluateKri({ ...below, metric: "error_rate" }, { value: 0, samples: 3 })).toBe("insufficient");
+    expect(evaluateKri({ ...below, metric: "latency_p99" }, { value: 1, samples: 19 })).toBe("insufficient");
   });
 
   it("an insufficient KRI's open episode is neither refreshed nor resolved; an ok one resolves", () => {
@@ -154,6 +171,14 @@ describe("automation sampling", () => {
 
 describe("automation rule bounds", () => {
   const base = { name: "r", actions: [{ type: "queue", queueId: ID }] };
+  it("a filter on a tag, a score or the flag is post-hoc (rescanned for late arrivals); flagged:false is not", () => {
+    expect(automationFilterIsPostHoc({ tagKey: "a.b" })).toBe(true);
+    expect(automationFilterIsPostHoc({ scoreName: "helpfulness", scoreMin: 1 })).toBe(true);
+    expect(automationFilterIsPostHoc({ flagged: true })).toBe(true);
+    expect(automationFilterIsPostHoc({ flagged: false })).toBe(false);
+    expect(automationFilterIsPostHoc({ status: "error", minCostUsd: 1 })).toBe(false);
+    expect(AUTOMATION_LIMITS.lateArrivalWindowHours).toBe(24);
+  });
   it("one to four actions, one of each type", () => {
     expect(automationRuleCreateSchema.safeParse(base).success).toBe(true);
     expect(automationRuleCreateSchema.safeParse({ ...base, actions: [] }).success).toBe(false);

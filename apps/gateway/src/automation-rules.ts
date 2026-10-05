@@ -24,6 +24,11 @@
  *      filter (the shared trace filter, unscoped — the author is an admin),
  *      oldest first. Each is SAMPLED by `sha256(ruleId:traceId)` (shared
  *      `automationSampled`), so a trace gets the same answer on every pass.
+ *   3b. LATE ARRIVALS. A rule whose filter reads a tag, a score or the flag
+ *      (all of which land after the trace ends) also re-reads, behind its
+ *      cursor, the traces that ended in the last 24 hours (never before the
+ *      rule existed) that now match, are sampled and are not matched yet
+ *      (`automationLateArrivalsQuery`). Older late arrivals need a backfill.
  *   4. A sampled trace is CLAIMED by inserting its (rule, trace) match; the
  *      unique index makes a re-run, an overlapping backfill or a concurrent
  *      pass a no-op, so no action ever runs twice for one trace.
@@ -82,6 +87,7 @@ import {
 import {
   AUTOMATION_LIMITS,
   automationBackfillSchema,
+  automationFilterIsPostHoc,
   automationFilterSchema,
   automationRuleCreateSchema,
   automationRuleUpdateSchema,
@@ -159,15 +165,19 @@ export interface AutomationActionDeps {
   extendRetention(db: Db, a: AutomationActionInput & { days: number }): Promise<AutomationActionOutcome>;
 }
 
-/** Q's export, as the batch 2c contract states it */
+/** Q's export. `ruleId` lands on the item, its audit row and `trace.queued`;
+ * the returned `deliveryIds` are pending `trace.queued` deliveries the caller
+ * kicks (Q enqueues them inside its transaction). */
 export type EnqueueAnnotationItemsFn = (
   db: Db,
-  a: { queueId: string; subjects: Array<{ kind: "trace"; id: string }>; actorUserId: string },
-) => Promise<{ added: number; skipped: Array<{ id: string; reason: string }> }>;
-/** E's export, as the batch 2c contract states it */
+  a: { queueId: string; subjects: Array<{ kind: "trace"; id: string }>; actorUserId: string; ruleId: string },
+) => Promise<{ added: number; skipped: Array<{ id: string; reason: string }>; deliveryIds?: string[] | undefined }>;
+/** E's export. `ruleId` lands on its audit row and `trace.added_to_dataset`;
+ * `dataKey` signs the deliveries it kicks (without it every attempt fails
+ * unsigned and is spent). */
 export type AddTracesToDatasetFn = (
   db: Db,
-  a: { datasetId: string; spanIds: string[]; actorUserId: string },
+  a: { datasetId: string; spanIds: string[]; actorUserId: string; ruleId: string; dataKey: string | undefined },
 ) => Promise<{ added: number; skipped: Array<{ id: string; reason: string }> }>;
 
 /** a skip reason from Q or E, as an outcome. "Already there" is success: the action is idempotent. */
@@ -219,7 +229,10 @@ export function automationActionDeps(
         queueId: a.queueId,
         subjects: [{ kind: "trace", id: a.traceId }],
         actorUserId: a.actorUserId,
+        ruleId: a.ruleId,
       });
+      // Q enqueues `trace.queued` in its transaction and leaves the kick to its caller
+      if (r.deliveryIds?.length) kickWebhookDeliveries(db, opts.dataKey, r.deliveryIds);
       if (r.added > 0) return { ok: true };
       return r.skipped[0] ? outcomeFromSkip(r.skipped[0].reason) : { ok: true };
     },
@@ -227,7 +240,13 @@ export function automationActionDeps(
       if (!opts.addTracesToDataset) return { ok: false, reason: "action_unavailable", retryable: false };
       const spanIds = await datasetSpanIdsForTrace(db, a.traceId);
       if (!spanIds.length) return { ok: false, reason: "no_eligible_spans", retryable: false };
-      const r = await opts.addTracesToDataset(db, { datasetId: a.datasetId, spanIds, actorUserId: a.actorUserId });
+      const r = await opts.addTracesToDataset(db, {
+        datasetId: a.datasetId,
+        spanIds,
+        actorUserId: a.actorUserId,
+        ruleId: a.ruleId,
+        dataKey: opts.dataKey,
+      });
       if (r.added > 0) return { ok: true };
       return r.skipped[0] ? outcomeFromSkip(r.skipped[0].reason) : { ok: true };
     },
@@ -356,16 +375,25 @@ export async function placeRetentionHold(
 }
 
 /**
- * ERASURE ALWAYS WINS. Release every live hold on the named traces, or on
- * every trace of the named person; audited one row per hold. A hold released
- * for erasure is never re-applied by a rule (`placeRetentionHold` refuses).
- * This is the primitive a data-subject erasure workflow calls.
+ * ERASURE ALWAYS WINS. Release every live hold on every trace of the named
+ * person (erasure), or on the named traces or person (an admin release);
+ * audited one row per hold. A hold released for erasure is never re-applied
+ * by a rule (`placeRetentionHold` refuses), so an ERASURE release is scoped to
+ * a PERSON, never to a hand-picked list of trace ids: an erasure request is
+ * about someone, and "erasure" on arbitrary traces would permanently disarm
+ * holds on other people's traces. This is the primitive a data-subject
+ * erasure workflow calls.
  */
-export async function releaseRetentionHolds(
-  db: Db,
-  a: { userId?: string | undefined; traceIds?: string[] | undefined; reason: "erasure" | "admin"; reference: string; actorUserId: string | null; now?: Date },
-): Promise<{ released: number; traceIds: string[] }> {
+export type ReleaseRetentionHoldsInput = { reference: string; actorUserId: string | null; now?: Date } & (
+  | { reason: "erasure"; userId: string; traceIds?: undefined }
+  | { reason: "admin"; userId?: string | undefined; traceIds?: string[] | undefined }
+);
+
+export async function releaseRetentionHolds(db: Db, a: ReleaseRetentionHoldsInput): Promise<{ released: number; traceIds: string[] }> {
   const now = a.now ?? new Date();
+  if (a.reason === "erasure" && (!a.userId || a.traceIds !== undefined)) {
+    throw new Error("an erasure release names the person (userId), never trace ids");
+  }
   const scope = a.traceIds?.length
     ? inArray(traceRetentionHolds.traceId, a.traceIds)
     : a.userId
@@ -675,6 +703,23 @@ async function retryMatches(
   return { retried, ok, failed };
 }
 
+/**
+ * THE KEYSET EXPRESSION: a trace's end, in UTC, truncated to the millisecond a
+ * JS `Date` (and so the stored cursor) can hold. Truncating keeps a trace
+ * that ended at .123456 from sorting after a cursor of .123 forever.
+ *
+ * It is written EXACTLY as migration 0151's `traces_ended_ms_id_idx` indexes
+ * it (`date_trunc('milliseconds', ended_at AT TIME ZONE 'UTC'), id`, partial
+ * on `ended_at IS NOT NULL`): the `AT TIME ZONE 'UTC'` makes it immutable, so
+ * it can be indexed at all, and the keyset compare and the ORDER BY then walk
+ * that index instead of sorting every finished trace. Change one, change the
+ * other (zz-k-automation's EXPLAIN test fails if they drift).
+ */
+const endedMsUtc = sql`date_trunc('milliseconds', ${traces.endedAt} at time zone 'UTC')`;
+const endedMsText = sql<string>`to_char(${endedMsUtc}, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`;
+const keyOf = (at: Date, id: string | null) =>
+  sql`((${at.toISOString()}::timestamptz at time zone 'UTC'), ${id ?? NIL_USER}::uuid)`;
+
 /** the keyset scan: traces that ended after the cursor, in (ended_at ms, id) order */
 export function automationCandidatesQuery(
   db: Db,
@@ -683,19 +728,77 @@ export function automationCandidatesQuery(
   now: Date,
   limit: number,
 ) {
-  const endedMs = sql`date_trunc('milliseconds', ${traces.endedAt})`;
   return db
-    .select({ id: traces.id, endedAt: sql<string>`to_char(${endedMs} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')` })
+    .select({ id: traces.id, endedAt: endedMsText })
     .from(traces)
     .where(
       and(
         traceFilterConditions(filter, { scopeUserId: null }),
         isNotNull(traces.endedAt),
         lte(traces.endedAt, now),
-        sql`(${endedMs}, ${traces.id}) > (${rule.cursorEndedAt.toISOString()}::timestamptz, ${rule.cursorTraceId ?? NIL_USER}::uuid)`,
+        sql`(${endedMsUtc}, ${traces.id}) > ${keyOf(rule.cursorEndedAt, rule.cursorTraceId)}`,
       ),
     )
-    .orderBy(endedMs, asc(traces.id))
+    .orderBy(endedMsUtc, asc(traces.id))
+    .limit(limit);
+}
+
+/**
+ * The sampling decision in SQL, for the late-arrival rescan only: the first 8
+ * bytes of `sha256("<ruleId>:<traceId>")` against `rate * 2^64`, the same
+ * comparison as shared `automationSampled` (bytea compares as unsigned
+ * big-endian). It only keeps traces the rule would never act on out of the
+ * rescan; `automationSampled` still decides every trace. `null` = everything
+ * is in the sample.
+ */
+function sampledInSql(ruleId: string, rate: number) {
+  if (rate >= 1) return null;
+  const bound = BigInt(Math.ceil(rate * 2 ** 64));
+  if (bound >= 2n ** 64n) return null;
+  const hex = bound.toString(16).padStart(16, "0");
+  return sql`substring(sha256(convert_to(${ruleId}::text || ':' || ${traces.id}::text, 'UTF8')) from 1 for 8) < decode(${hex}, 'hex')`;
+}
+
+/**
+ * LATE ARRIVALS. A tag, a score or the ADR-0160 flag lands AFTER its trace
+ * ends, so the keyset scan (which only moves forward on `ended_at`) can pass a
+ * trace before the thing the rule's filter reads exists. For a rule whose
+ * filter reads one (`automationFilterIsPostHoc`), each pass also re-reads the
+ * traces it already passed that ended in the last
+ * `AUTOMATION_LIMITS.lateArrivalWindowHours` (24 h), never before the rule
+ * existed, and that now match, are in its sample, and have no match yet.
+ * Excluding matched and unsampled traces in SQL keeps every row this returns
+ * a real new match, so the rescan cannot spend a pass re-reading the same
+ * traces; the (rule, trace) unique index still makes it idempotent. Oldest
+ * first; what a pass leaves (the 500-trace / 45 s / daily caps) the next one
+ * picks up, because a matched trace drops out.
+ */
+export function automationLateArrivalsQuery(
+  db: Db,
+  rule: Pick<AutomationRuleRow, "id" | "samplingRate" | "createdAt">,
+  cursor: { endedAt: Date; traceId: string | null },
+  filter: z.infer<typeof automationFilterSchema>,
+  now: Date,
+  limit: number,
+) {
+  const windowStart = new Date(
+    Math.max(now.getTime() - AUTOMATION_LIMITS.lateArrivalWindowHours * 3_600_000, rule.createdAt.getTime()),
+  );
+  return db
+    .select({ id: traces.id, endedAt: endedMsText })
+    .from(traces)
+    .where(
+      and(
+        traceFilterConditions(filter, { scopeUserId: null }),
+        isNotNull(traces.endedAt),
+        lte(traces.endedAt, now),
+        sql`${endedMsUtc} >= (${windowStart.toISOString()}::timestamptz at time zone 'UTC')`,
+        sql`(${endedMsUtc}, ${traces.id}) <= ${keyOf(cursor.endedAt, cursor.traceId)}`,
+        sampledInSql(rule.id, rule.samplingRate) ?? undefined,
+        sql`not exists (select 1 from ${automationMatches} where ${automationMatches.ruleId} = ${rule.id} and ${automationMatches.traceId} = ${traces.id})`,
+      ),
+    )
+    .orderBy(endedMsUtc, asc(traces.id))
     .limit(limit);
 }
 
@@ -797,6 +900,37 @@ export async function runAutomationRuleSweep(
         .set({ cursorEndedAt: cursor.endedAt, cursorTraceId: cursor.traceId, ...(backfillDone ? { backfillUntil: null } : {}) })
         .where(eq(automationRules.id, rule.id));
     }
+
+    // LATE ARRIVALS (see automationLateArrivalsQuery): only behind the cursor,
+    // inside the same pass budget and daily cap
+    if (stopped || !automationFilterIsPostHoc(filter.data) || !(rule.samplingRate > 0)) continue;
+    if (overBudget() || out.examined >= maxTraces) {
+      out.truncated = true;
+      continue;
+    }
+    const lateLimit = maxTraces - out.examined;
+    const late = await automationLateArrivalsQuery(db, rule, cursor, filter.data, now, lateLimit);
+    for (const t of late) {
+      if (overBudget()) {
+        out.truncated = true;
+        break;
+      }
+      if (automationSampled(rule.id, t.id, rule.samplingRate)) {
+        if (remaining <= 0) {
+          out.capped.push(rule.id);
+          break;
+        }
+        const res = await matchAndAct(db, deps, rule, t.id, false, now, opts.dataKey);
+        if (res.created) {
+          out.matched += 1;
+          out.actionsOk += res.ok;
+          out.actionsFailed += res.failed;
+          remaining -= 1;
+        }
+      }
+      out.examined += 1;
+    }
+    if (late.length === lateLimit && out.examined >= maxTraces) out.truncated = true;
   }
   return out;
 }
@@ -813,16 +947,27 @@ const holdsQuery = z.object({
   userId: z.string().uuid().optional(),
   limit: z.coerce.number().int().min(1).max(200).default(100),
 });
+/** the erasure request's or ticket's reference, kept in the audit row */
+const releaseReference = z.string().trim().min(1).max(200);
+/** an ERASURE release is scoped to the person (all of their traces); only an
+ * admin release may name trace ids (see `releaseRetentionHolds`) */
 const releaseBody = z
-  .object({
-    userId: z.string().uuid().optional(),
-    traceIds: z.array(z.string().uuid()).min(1).max(500).optional(),
-    reason: z.enum(["erasure", "admin"]),
-    /** the erasure request's or ticket's reference, kept in the audit row */
-    reference: z.string().trim().min(1).max(200),
-  })
-  .strict()
-  .refine((b) => (b.userId === undefined) !== (b.traceIds === undefined), { message: "name a userId or traceIds, not both" });
+  .discriminatedUnion("reason", [
+    z.object({ reason: z.literal("erasure"), userId: z.string().uuid(), reference: releaseReference }).strict(),
+    z
+      .object({
+        reason: z.literal("admin"),
+        userId: z.string().uuid().optional(),
+        traceIds: z.array(z.string().uuid()).min(1).max(500).optional(),
+        reference: releaseReference,
+      })
+      .strict(),
+  ])
+  .superRefine((b, ctx) => {
+    if (b.reason === "admin" && (b.userId === undefined) === (b.traceIds === undefined)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["traceIds"], message: "name a userId or traceIds, not both" });
+    }
+  });
 
 type RuleView = ReturnType<typeof ruleView>;
 function ruleView(r: AutomationRuleRow, extra: { authorName: string | null; stats?: Record<string, unknown> }) {
@@ -1129,12 +1274,9 @@ export function registerAutomationRuleRoutes(
 
   app.post("/v1/retention-holds/release", async (req) => {
     const b = releaseBody.parse(req.body);
-    return releaseRetentionHolds(db, {
-      userId: b.userId,
-      traceIds: b.traceIds,
-      reason: b.reason,
-      reference: b.reference,
-      actorUserId: req.authCtx.userId ?? null,
-    });
+    const actorUserId = req.authCtx.userId ?? null;
+    return b.reason === "erasure"
+      ? releaseRetentionHolds(db, { reason: "erasure", userId: b.userId, reference: b.reference, actorUserId })
+      : releaseRetentionHolds(db, { reason: "admin", userId: b.userId, traceIds: b.traceIds, reference: b.reference, actorUserId });
   });
 }

@@ -20,26 +20,42 @@
  *  A8  the retention action holds a trace within the bound; the prune skips a
  *      live hold and deletes an expired one; an erasure request releases the
  *      hold (audited) and a released hold is never re-applied.
+ *  A9  late arrivals (fix round B): a flag, tag or score that lands after
+ *      the trace ended is still matched within the 24 h rescan window, the
+ *      SQL sample pre-filter agrees with `automationSampled`, and the window
+ *      ends at 24 h.
+ *  A10 the keyset scan walks migration 0151's index (EXPLAIN).
+ *  A11 the production wiring carries the rule id to Q and E, kicks Q's
+ *      deliveries, and signs E's (a real receiver checks the signature).
+ *  A12 an erasure release is scoped to a person, never to trace ids.
  *
  * Global state: the org's default audit retention (restored), webhook
  * subscriptions, rules, holds, traces and users created here are removed in
  * afterAll (M-068).
  */
 import crypto from "node:crypto";
+import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { Webhook } from "standardwebhooks";
 import {
   and,
+  annotationItems,
+  annotationQueues,
   auditLog,
   automationMatches,
   automationRules,
   createDb,
+  egressAllowHosts,
   eq,
+  evalDatasets,
   inArray,
   orgSettings,
   ORG_SETTINGS_ID,
   runMigrations,
+  sql,
+  traceEvaluations,
   traceRetentionHolds,
   traceSpans,
   traceTags,
@@ -49,15 +65,19 @@ import {
   webhookSubscriptions,
   type Db,
 } from "@regulait/db";
-import { maxRetentionHoldDays } from "@regulait/shared";
+import { AUTOMATION_LIMITS, automationSampled, maxRetentionHoldDays } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import {
   automationActionDeps,
+  automationCandidatesQuery,
   placeRetentionHold,
+  productionAutomationActionDeps,
+  releaseRetentionHolds,
   runAutomationRuleSweep,
   type AutomationActionDeps,
   type AutomationActionOutcome,
 } from "./automation-rules.js";
+import { drainBackgroundWork } from "./background-work.js";
 import { retentionFloorDays, runAuditPruneOnce } from "./org-settings.js";
 import { encryptSecret } from "./secrets.js";
 
@@ -80,6 +100,11 @@ let member: { id: string; auth: Auth };
 const createdUserIds: string[] = [];
 const createdRuleIds: string[] = [];
 const createdSubscriptionIds: string[] = [];
+const createdQueueIds: string[] = [];
+const createdDatasetIds: string[] = [];
+const createdEvaluationTraceIds: string[] = [];
+let allowId: string | null = null;
+let receiver: http.Server | null = null;
 let priorRetentionDays: number | null = null;
 let floorDays = 0;
 let maxHold = 0;
@@ -183,6 +208,15 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  await drainBackgroundWork(db);
+  if (createdQueueIds.length) await db.delete(annotationQueues).where(inArray(annotationQueues.id, createdQueueIds));
+  if (createdDatasetIds.length) await db.delete(evalDatasets).where(inArray(evalDatasets.id, createdDatasetIds));
+  if (createdEvaluationTraceIds.length) await db.delete(traceEvaluations).where(inArray(traceEvaluations.traceId, createdEvaluationTraceIds));
+  if (allowId) await db.delete(egressAllowHosts).where(eq(egressAllowHosts.id, allowId));
+  if (receiver) {
+    receiver.closeAllConnections();
+    await new Promise<void>((r) => receiver!.close(() => r()));
+  }
   await db.update(orgSettings).set({ defaultAuditRetentionDays: priorRetentionDays }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
   if (createdRuleIds.length) await db.delete(automationRules).where(inArray(automationRules.id, createdRuleIds));
   if (createdSubscriptionIds.length) await db.delete(webhookSubscriptions).where(inArray(webhookSubscriptions.id, createdSubscriptionIds));
@@ -468,5 +502,211 @@ describe("A8: retention holds", () => {
     });
     await runAuditPruneOnce(db, admin.id, false);
     expect(await left()).toEqual([]);
+  });
+});
+
+/** the ADR-0160 flag on a trace, landing whenever the test says (it has no FK; afterAll removes it) */
+async function flag(...traceIds: string[]) {
+  createdEvaluationTraceIds.push(...traceIds);
+  await db
+    .insert(traceEvaluations)
+    .values(traceIds.map((traceId) => ({ spanId: crypto.randomUUID(), traceId, spanStartedAt: new Date(), outcome: "evaluated" as const, flagged: true })));
+}
+const flaggedRule = (value: string, extra: Record<string, unknown> = {}) =>
+  queueRule(value, { filter: { tagKey: TAG, tagValue: value, flagged: true }, ...extra });
+
+describe("A9: late arrivals (a flag, tag or score that lands after the trace ended)", () => {
+  it("T1 ends, T2 ends flagged, the pass matches T2; T1 flagged later is matched on the next pass", async () => {
+    const ruleId = (await createRule(flaggedRule("late"))).json().id as string;
+    const t1 = await makeTrace("late", later(1000));
+    const t2 = await makeTrace("late", later(2000));
+    await flag(t2);
+    const { deps, calls } = fakeDeps();
+    const p1 = await runAutomationRuleSweep(db, deps, { ruleId, now: later() });
+    expect(p1.matched).toBe(1);
+    expect(calls.map((c) => c.traceId)).toEqual([t2]);
+
+    await flag(t1); // the cursor is already past T1
+    const p2 = await runAutomationRuleSweep(db, deps, { ruleId, now: later() });
+    expect(p2.matched).toBe(1);
+    expect(calls.map((c) => c.traceId)).toEqual([t2, t1]);
+    const [m] = await db.select().from(automationMatches).where(and(eq(automationMatches.ruleId, ruleId), eq(automationMatches.traceId, t1)));
+    expect(m).toMatchObject({ backfill: false, status: "done" });
+
+    // a matched trace drops out of the rescan: nothing is examined, nothing runs twice
+    const p3 = await runAutomationRuleSweep(db, deps, { ruleId, now: later() });
+    expect(p3).toMatchObject({ matched: 0, examined: 0 });
+    expect(calls).toHaveLength(2);
+  });
+
+  it("the rescan reaches back 24 hours and no further", async () => {
+    const base = Date.now();
+    const ruleId = (await createRule(flaggedRule("late24"))).json().id as string;
+    const t = await makeTrace("late24", new Date(base + 1000));
+    const marker = await makeTrace("late24", new Date(base + 2000));
+    await flag(marker);
+    const { deps, calls } = fakeDeps();
+    // the pass matches the flagged marker, so the cursor is past T
+    expect((await runAutomationRuleSweep(db, deps, { ruleId, now: new Date(base + 60_000) })).matched).toBe(1);
+    await flag(t);
+    const h = AUTOMATION_LIMITS.lateArrivalWindowHours * 3_600_000;
+    expect(AUTOMATION_LIMITS.lateArrivalWindowHours).toBe(24);
+    const past = await runAutomationRuleSweep(db, deps, { ruleId, now: new Date(base + 1000 + h + 60_000) });
+    expect(past.matched).toBe(0);
+    const inside = await runAutomationRuleSweep(db, deps, { ruleId, now: new Date(base + h - 60_000) });
+    expect(inside.matched).toBe(1);
+    expect(calls.map((c) => c.traceId)).toEqual([marker, t]);
+  });
+
+  it("the SQL sample pre-filter agrees with automationSampled, so unsampled traces are never re-read", async () => {
+    const ruleId = (await createRule(flaggedRule("late-s", { samplingRate: 0.5 }))).json().id as string;
+    const ids = await makeTraces("late-s", 60, later(1000));
+    // a flagged trace after them moves the cursor past all 60 (sampled in or not)
+    const marker = await makeTrace("late-s", later(5000));
+    await flag(marker);
+    const { deps, calls } = fakeDeps();
+    const p0 = await runAutomationRuleSweep(db, deps, { ruleId, now: later() });
+    expect(p0.examined).toBe(1);
+    calls.length = 0;
+    await flag(...ids);
+    const p = await runAutomationRuleSweep(db, deps, { ruleId, now: later() });
+    const expected = ids.filter((id) => automationSampled(ruleId, id, 0.5));
+    expect(expected.length).toBeGreaterThan(10);
+    expect(expected.length).toBeLessThan(50);
+    expect(calls.map((c) => c.traceId).sort()).toEqual([...expected].sort());
+    expect(p.examined).toBe(expected.length);
+  });
+});
+
+describe("A10: the keyset scan walks migration 0151's index", () => {
+  it("EXPLAIN: the cursor compare and the ORDER BY use traces_ended_ms_id_idx, with no sort", async () => {
+    const q = automationCandidatesQuery(db, { cursorEndedAt: new Date(), cursorTraceId: null }, {}, later(), 500);
+    const plan = await db.transaction(async (tx) => {
+      // on a small test table the planner would rightly prefer a seq scan or a
+      // bitmap scan and a sort; this asks whether the index CAN serve both the
+      // compare and the order, i.e. that the expressions match exactly
+      await tx.execute(sql`set local enable_seqscan = off`);
+      await tx.execute(sql`set local enable_bitmapscan = off`);
+      const r = await tx.execute(sql`explain (format json) ${q}`);
+      return JSON.stringify(r.rows);
+    });
+    expect(plan).toContain("traces_ended_ms_id_idx");
+    expect(plan).toMatch(/"Index Cond":"\(ROW\(date_trunc/);
+    expect(plan).not.toMatch(/"Node Type":"(Incremental )?Sort"/);
+  });
+});
+
+describe("A11: the production wiring", () => {
+  it("Q's item and audit row carry the rule id; Q's and E's deliveries are kicked and signed", async () => {
+    const hits: Array<{ headers: Record<string, string>; body: string }> = [];
+    receiver = http.createServer((req, res) => {
+      let raw = "";
+      req.on("data", (c) => (raw += c));
+      req.on("end", () => {
+        const headers: Record<string, string> = {};
+        for (const [h, v] of Object.entries(req.headers)) if (typeof v === "string") headers[h] = v;
+        hits.push({ headers, body: raw });
+        res.writeHead(204);
+        res.end();
+      });
+    });
+    await new Promise<void>((r) => receiver!.listen(0, "127.0.0.1", r));
+    const port = (receiver.address() as { port: number }).port;
+    const [existing] = await db.select().from(egressAllowHosts).where(eq(egressAllowHosts.host, "127.0.0.1"));
+    if (existing) {
+      // another file's entry: use it as it is, and never delete what is not ours
+      expect(existing.allowPrivateRanges && existing.allowPlaintextHttp).toBe(true);
+    } else {
+      const [row] = await db
+        .insert(egressAllowHosts)
+        .values({ host: "127.0.0.1", allowPrivateRanges: true, allowPlaintextHttp: true, note: "k-auto test receiver" })
+        .returning();
+      allowId = row!.id;
+    }
+    const sub = await app.inject({
+      method: "POST",
+      url: "/v1/webhooks",
+      headers: admin.auth,
+      payload: { name: `k-auto rcv ${RUN}`, url: `http://127.0.0.1:${port}/hook`, events: ["trace.queued", "trace.added_to_dataset"], allowPlaintextHttp: true },
+    });
+    expect(sub.statusCode, sub.body).toBe(201);
+    const subId = sub.json().id as string;
+    createdSubscriptionIds.push(subId);
+    const queue = await app.inject({
+      method: "POST",
+      url: "/v1/annotation-queues",
+      headers: admin.auth,
+      payload: { name: `k-auto q ${RUN}`, rubric: { criteria: [{ name: "helpfulness", kind: "score", min: 1, max: 5, step: 1 }] }, reviewerUserIds: [admin.id] },
+    });
+    expect(queue.statusCode, queue.body).toBe(201);
+    const queueId = queue.json().id as string;
+    createdQueueIds.push(queueId);
+    const ds = await app.inject({
+      method: "POST",
+      url: "/v1/evals/datasets",
+      headers: admin.auth,
+      payload: { name: `k-auto ds ${RUN}`, scorerKind: "contains", scorerConfig: { needles: ["ok"] } },
+    });
+    expect(ds.statusCode, ds.body).toBe(201);
+    const datasetId = ds.json().id as string;
+    createdDatasetIds.push(datasetId);
+
+    const ruleId = (
+      await createRule(queueRule("wire", { actions: [{ type: "queue", queueId }, { type: "dataset", datasetId }] }))
+    ).json().id as string;
+    const traceId = await makeTrace("wire", later(1000));
+    await db.update(traceSpans).set({ inputPreview: "is it ok?", outputPreview: "ok" }).where(eq(traceSpans.traceId, traceId));
+
+    const p = await runAutomationRuleSweep(db, productionAutomationActionDeps(DATA_KEY), { ruleId, now: later() });
+    expect(p).toMatchObject({ matched: 1, actionsOk: 2, actionsFailed: 0 });
+    await drainBackgroundWork(db);
+
+    const [item] = await db.select().from(annotationItems).where(and(eq(annotationItems.queueId, queueId), eq(annotationItems.traceId, traceId)));
+    expect(item?.ruleId).toBe(ruleId);
+    const [qAudit] = await db.select().from(auditLog).where(and(eq(auditLog.objectId, queueId), eq(auditLog.ruleId, "annotation-items-queued")));
+    expect(qAudit).toMatchObject({ userId: admin.id });
+    expect(qAudit?.detail).toMatchObject({ automationRuleId: ruleId, added: 1 });
+    const [eAudit] = await db.select().from(auditLog).where(and(eq(auditLog.objectId, datasetId), eq(auditLog.ruleId, "eval-dataset-from-traces")));
+    expect(eAudit?.detail).toMatchObject({ ruleId, added: 1 });
+
+    // both deliveries went out on their first attempt (kicked, signed, not spent on a missing key)
+    const deliveries = await db.select().from(webhookDeliveries).where(eq(webhookDeliveries.subscriptionId, subId));
+    expect(deliveries.map((d) => [d.event, d.status, d.attempts]).sort()).toEqual([
+      ["trace.added_to_dataset", "delivered", 1],
+      ["trace.queued", "delivered", 1],
+    ]);
+    expect(deliveries.every((d) => d.payload["ruleId"] === ruleId)).toBe(true);
+    expect(hits).toHaveLength(2);
+    const wh = new Webhook(sub.json().secret as string);
+    for (const h of hits) expect(() => wh.verify(h.body, h.headers)).not.toThrow();
+  });
+});
+
+describe("A12: an erasure release is scoped to a person", () => {
+  it("erasure naming trace ids is refused; an admin release may name traces", async () => {
+    const old = new Date(Date.now() - DAY);
+    const a = await makeTrace("rel", old, { startedAt: old });
+    const b = await makeTrace("rel", old, { startedAt: old });
+    for (const t of [a, b]) {
+      expect(await placeRetentionHold(db, { traceId: t, days: floorDays + 1, ruleId: null, actorUserId: admin.id, now: new Date() })).toMatchObject({ ok: true });
+    }
+    const release = (payload: Record<string, unknown>) =>
+      app.inject({ method: "POST", url: "/v1/retention-holds/release", headers: admin.auth, payload });
+    expect((await release({ traceIds: [a], reason: "erasure", reference: `E-${RUN}` })).statusCode).toBe(400);
+    expect((await release({ userId: member.id, traceIds: [a], reason: "erasure", reference: `E-${RUN}` })).statusCode).toBe(400);
+    expect((await release({ userId: member.id, traceIds: [a], reason: "admin", reference: `E-${RUN}` })).statusCode).toBe(400);
+    await expect(
+      releaseRetentionHolds(db, { reason: "erasure", traceIds: [a], reference: "x", actorUserId: admin.id } as unknown as Parameters<typeof releaseRetentionHolds>[1]),
+    ).rejects.toThrow(/person/);
+    const live = async () =>
+      (await db.select().from(traceRetentionHolds).where(inArray(traceRetentionHolds.traceId, [a, b])))
+        .filter((h) => h.releasedAt === null)
+        .map((h) => h.traceId);
+    expect((await live()).sort()).toEqual([a, b].sort());
+
+    const byTrace = await release({ traceIds: [a], reason: "admin", reference: `T-${RUN}` });
+    expect(byTrace.statusCode).toBe(200);
+    expect(byTrace.json()).toEqual({ released: 1, traceIds: [a] });
+    expect(await live()).toEqual([b]);
   });
 });
