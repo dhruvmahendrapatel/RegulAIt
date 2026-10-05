@@ -62,6 +62,7 @@ import {
   connectorDefaultBaseUrl,
   isConnectorProviderKind,
   resolveConnectorProvider,
+  reservedChatControl,
 } from "@regulait/connector-provider";
 import {
   approvalArgumentsDigest,
@@ -341,6 +342,19 @@ export async function executeGovernedConnectorCall(
         detail: { phase: "input", operation: body.operation, projectId }, effect: "deny",
         ruleId: "pii-transform-refused", ruleChain: [], reason: "Connector payload or routing identity cannot be safely transformed" });
       return out.status(403).send({ error: "pii_transform_refused", detail: "Connector payload or routing identity cannot be safely transformed." });
+    }
+
+    // ADR-0173 batch 2b review — the product's own chat controls are not a
+    // connector call's to use: no rewriting a message (`chat.update` is the
+    // courier's alone) and no posting a card that carries our reserved
+    // approve / confirm controls. Checked on what the CALLER sent, before the
+    // kernel, so nothing is queued for approval, executed or billed.
+    const reserved = reservedChatControl(connector.providerKind ?? "", body.operation, originalInvocation.payload);
+    if (reserved) {
+      await db.insert(auditLog).values({ userId, objectType: "connector", objectId: connectorId,
+        detail: { phase: "input", operation: body.operation, code: reserved.code, projectId, ...(args.detail ?? {}) }, effect: "deny",
+        ruleId: "connector-reserved-chat-control", ruleChain: [], reason: `connector '${connector.name}': ${reserved.detail}` });
+      return out.status(403).send({ error: reserved.code, detail: reserved.detail });
     }
 
     const [grants, roleConnectorGrantsForUser, connectorRevocationsForUser] = await Promise.all([

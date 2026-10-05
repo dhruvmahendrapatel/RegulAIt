@@ -73,12 +73,21 @@ export type BotAuthResult = { ok: true; claims: JWTPayload } | { ok: false; code
 
 interface KeySource {
   issuer: string;
+  jwksUri: string;
   jwks: JWTVerifyGetKey & { jwks: () => { keys: Array<Record<string, unknown>> } | undefined };
   fetchedAt: number;
 }
 
+/** the last metadata read that worked (kept through later failures), and
+ * when a read last failed (so failures are retried no faster than the
+ * cooldown) */
+interface CacheEntry {
+  source: KeySource | null;
+  failedAt: number | null;
+}
+
 /** per database handle (one per app), per metadata URL */
-const sources = new WeakMap<object, Map<string, KeySource | { failedAt: number }>>();
+const sources = new WeakMap<object, Map<string, CacheEntry>>();
 
 function guardedFetcher(db: Db, ctx: { connectorId: string; connectionName: string }) {
   return async (url: string, init?: RequestInit): Promise<Response> => {
@@ -104,15 +113,11 @@ async function keySource(
   if (!perDb) sources.set(db as object, (perDb = new Map()));
   const t = tuning();
   const cached = perDb.get(metadataUrl);
-  if (cached && !opts.reload) {
-    if ("failedAt" in cached) {
-      // a failed fetch is remembered for the cooldown: an unauthenticated
-      // caller cannot make us re-fetch on every request
-      if (Date.now() - cached.failedAt < t.unknownKidCooldownMs) return null;
-    } else if (Date.now() - cached.fetchedAt < t.metadataTtlMs) {
-      return cached;
-    }
-  }
+  const lastGood = cached?.source ?? null;
+  // a failed read is remembered for the cooldown (reload included): an
+  // unauthenticated caller cannot make us re-fetch on every request
+  if (cached?.failedAt != null && Date.now() - cached.failedAt < t.unknownKidCooldownMs) return lastGood;
+  if (lastGood && !opts.reload && cached?.failedAt == null && Date.now() - lastGood.fetchedAt < t.metadataTtlMs) return lastGood;
   const fetcher = guardedFetcher(db, ctx);
   try {
     const res = await fetcher(metadataUrl, { method: "GET", headers: { accept: "application/json" }, redirect: "manual", signal: AbortSignal.timeout(5_000) });
@@ -121,21 +126,30 @@ async function keySource(
     const issuer = typeof doc.issuer === "string" && doc.issuer ? doc.issuer : null;
     const jwksUri = typeof doc.jwks_uri === "string" && doc.jwks_uri ? doc.jwks_uri : null;
     if (!issuer || !jwksUri) throw new Error("metadata names no issuer or jwks_uri");
-    const jwks = createRemoteJWKSet(new URL(jwksUri), {
-      cacheMaxAge: t.jwksMaxAgeMs,
-      cooldownDuration: t.unknownKidCooldownMs,
-      timeoutDuration: 5_000,
-      [customFetch]: (url, init) => fetcher(url, init),
-    }) as KeySource["jwks"];
-    const source: KeySource = { issuer, jwks, fetchedAt: Date.now() };
-    perDb.set(metadataUrl, source);
+    // the same JWKS URI keeps the same key set (and jose's cache of it): a
+    // metadata refresh is not a reason to re-download every key
+    const jwks =
+      lastGood && lastGood.jwksUri === jwksUri
+        ? lastGood.jwks
+        : (createRemoteJWKSet(new URL(jwksUri), {
+            cacheMaxAge: t.jwksMaxAgeMs,
+            cooldownDuration: t.unknownKidCooldownMs,
+            timeoutDuration: 5_000,
+            [customFetch]: (url, init) => fetcher(url, init),
+          }) as KeySource["jwks"]);
+    const source: KeySource = { issuer, jwksUri, jwks, fetchedAt: Date.now() };
+    perDb.set(metadataUrl, { source, failedAt: null });
     return source;
   } catch (err) {
     // refused by the egress guard (audited there), unreachable, or not a
-    // metadata document: the endpoint is unavailable until the next attempt
+    // metadata document. A failed REFRESH keeps the last good source (its
+    // issuer and key set are still the platform's; jose re-reads the keys on
+    // its own schedule): a metadata outage must not turn every valid token
+    // away. With no good read ever, the endpoint is unavailable until the next
+    // attempt.
     if (!(err instanceof ConnectionEgressBlockedError) && !(err instanceof Error)) throw err;
-    perDb.set(metadataUrl, { failedAt: Date.now() });
-    return null;
+    perDb.set(metadataUrl, { source: lastGood, failedAt: Date.now() });
+    return lastGood;
   }
 }
 

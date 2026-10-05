@@ -977,9 +977,9 @@ export interface SlackStepInteraction {
   answer: StepAnswer;
   messageRef: string | null;
   channel: string | null;
-  /** the `mrkdwn` section texts of the message clicked (our own reply, as
-   * Slack holds it), so the answered message keeps them */
-  messageSections: string[];
+  // The clicked message's own blocks are deliberately NOT read (ADR-0173
+  // batch 2b review): the answered message is rebuilt from what RegulAIt
+  // stored, never from content the click carries back.
 }
 
 /**
@@ -1010,16 +1010,7 @@ export function parseSlackStepInteraction(rawBody: string): SlackStepInteraction
   if (!chatUserId || !answer || !value || !UUID_RE.test(value)) return null;
   const container = p.container as Record<string, unknown> | undefined;
   const channelObj = p.channel as Record<string, unknown> | undefined;
-  const message = p.message as Record<string, unknown> | undefined;
-  const blocks = Array.isArray(message?.blocks) ? (message.blocks as unknown[]) : [];
-  const messageSections = blocks
-    .slice(0, 20)
-    .map((b) => (b && typeof b === "object" ? (b as Record<string, unknown>) : {}))
-    .filter((b) => b.type === "section")
-    .map((b) => (b.text && typeof b.text === "object" ? (b.text as Record<string, unknown>) : {}))
-    .filter((t) => t.type === "mrkdwn" && typeof t.text === "string")
-    .map((t) => (t.text as string).slice(0, SLACK_SECTION_MAX));
-  return { chatUserId, promptId: value, answer, messageRef: nonEmpty(container?.message_ts), channel: nonEmpty(channelObj?.id), messageSections };
+  return { chatUserId, promptId: value, answer, messageRef: nonEmpty(container?.message_ts), channel: nonEmpty(channelObj?.id) };
 }
 
 /** Slack caps one section's text at 3000 characters */
@@ -1059,15 +1050,13 @@ export function composeStepConfirmBlocks(input: { text: string; toolLabel: strin
 }
 
 /**
- * The same message once answered (or no longer answerable): its sections as
- * Slack holds them (our own, already inert text — re-escaping would double the
- * entities), the outcome, and no buttons.
+ * The same message once answered (or no longer answerable), rebuilt from what
+ * RegulAIt stored — never from the blocks a click carries back (ADR-0173 batch
+ * 2b review): `text` is the reply as composed for the thread, made inert here
+ * exactly as the pause message's was; then the outcome, and no buttons.
  */
-export function composeStepAnsweredBlocks(input: { sections: string[]; outcome: string }): Array<Record<string, unknown>> {
-  return [
-    ...input.sections.map((text) => ({ type: "section", text: { type: "mrkdwn", text: text.slice(0, SLACK_SECTION_MAX) } })),
-    plainContext(input.outcome),
-  ];
+export function composeStepAnsweredBlocks(input: { text: string; outcome: string }): Array<Record<string, unknown>> {
+  return [...replySections(input.text), plainContext(input.outcome)];
 }
 
 // ---------------------------------------------------------------------------
