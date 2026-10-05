@@ -1030,6 +1030,13 @@
       "when": 1785083000000,
       "tag": "0148_annotation_queues",
       "breakpoints": true
+    },
+    {
+      "idx": 149,
+      "version": "7",
+      "when": 1785084000000,
+      "tag": "0149_eval_catalog_panels",
+      "breakpoints": true
     }
   ]
 }

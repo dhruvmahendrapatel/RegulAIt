@@ -18,6 +18,11 @@
  *  - **The baseline is a deliberate act.** Pinning a run as the baseline
  *    changes what every future gate is measured against, so it is a button
  *    with a consequence spelled out, and it lands in the audit log.
+ *
+ * ADR-0173 batch 2c adds three tabs' worth: the evaluator CATALOG (every
+ * evaluator with the controls it evidences), COMPARE (any two runs of one
+ * dataset version), and, in the run form and run detail, a weighted JUDGE
+ * PANEL with repetitions and the observe-only JUDGE CALIBRATION card.
  */
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -33,8 +38,12 @@ import {
   Input,
   Select,
   Table,
+  Tabs,
   Textarea,
 } from "../../../ui/kit";
+import EvalsCatalogTab from "./EvalsCatalogTab";
+import EvalsCompareTab from "./EvalsCompareTab";
+import EvalsJudgeCalibration from "./EvalsJudgeCalibration";
 import {
   QueryGate,
   RemoveButton,
@@ -105,6 +114,19 @@ interface RunRow {
   costUsd: number;
   judgeImpl: string | null;
   startedAt: string;
+  /** ADR-0173 batch 2c */
+  judgePanel?: Array<{ agentId: string | null; agentName: string; weight: number }> | null;
+  repetitions?: number;
+  scoreCi?: { low: number; high: number; level: number; resamples: number } | null;
+}
+interface VerdictRow {
+  id: string;
+  caseId: string | null;
+  judgeName: string;
+  weight: number;
+  repetition: number;
+  score: number | null;
+  error: string | null;
 }
 interface DiffRow {
   caseId: string | null;
@@ -157,7 +179,20 @@ const pct = (n: number | null | undefined) => (n == null ? "—" : `${Math.round
 const signed = (n: number | null | undefined) =>
   n == null ? "—" : `${n > 0 ? "+" : ""}${n.toFixed(3)}`;
 
+const TABS = [
+  { id: "runs", label: "Datasets and runs" },
+  { id: "catalog", label: "Catalog" },
+  { id: "compare", label: "Compare" },
+];
+
+/** ADR-0173 batch 2c: the panel editor's rows (2–5 judges, positive weights) */
+interface PanelRow {
+  agentId: string;
+  weight: string;
+}
+
 export default function EvalsPage() {
+  const [tab, setTab] = useState("runs");
   const agents = useAgents();
   const projects = useProjects();
   const act = useAction();
@@ -200,7 +235,7 @@ export default function EvalsPage() {
     queryKey: ["admin", "eval-run", selectedRun],
     enabled: Boolean(selectedRun),
     queryFn: () =>
-      api.get<{ run: RunRow; results: ResultRow[]; baseline: RunRow | null; diff: DiffRow[] }>(
+      api.get<{ run: RunRow; results: ResultRow[]; baseline: RunRow | null; diff: DiffRow[]; verdicts?: VerdictRow[] }>(
         `/v1/evals/runs/${selectedRun}`,
       ),
   });
@@ -227,6 +262,24 @@ export default function EvalsPage() {
   const [runJudge, setRunJudge] = useState("");
   const [runProject, setRunProject] = useState("");
   const [runTolerance, setRunTolerance] = useState("0.05");
+  // ADR-0173 batch 2c — a weighted judge panel and repetitions
+  const [usePanel, setUsePanel] = useState(false);
+  const [panel, setPanel] = useState<PanelRow[]>([
+    { agentId: "", weight: "1" },
+    { agentId: "", weight: "1" },
+  ]);
+  const [runRepetitions, setRunRepetitions] = useState("1");
+  const panelProblem = !usePanel
+    ? null
+    : panel.length < 2 || panel.length > 5
+      ? "A panel has 2 to 5 judges."
+      : panel.some((m) => !m.agentId)
+        ? "Choose an agent for every judge."
+        : new Set(panel.map((m) => m.agentId)).size !== panel.length
+          ? "A judge may sit on the panel only once."
+          : panel.some((m) => !(Number(m.weight) > 0))
+            ? "Every weight must be a positive number."
+            : null;
 
   return (
     <>
@@ -235,6 +288,16 @@ export default function EvalsPage() {
         sub="Golden datasets and scored runs — what the workflow check gate blocks on."
         info={<p>Golden datasets, scored runs, and the baseline comparison the workflow check gate blocks on. Every eval dispatch goes through the same governed core as any other call — entitlements, budget, PII and guardrails all apply, and the spend lands in the one usage ledger. An eval is not a bypass.</p>}
       />
+      <Tabs tabs={TABS} active={tab} onChange={setTab} />
+      {tab === "catalog" ? (
+        <div className={v.stack}>
+          <EvalsCatalogTab />
+        </div>
+      ) : tab === "compare" ? (
+        <div className={v.stack}>
+          <EvalsCompareTab runs={runs.data?.runs ?? []} />
+        </div>
+      ) : (
       <div className={v.stack}>
         {/* ------- ADR-0072: what the numbers MEAN, and what is stranded ---- */}
         <Card title="Scoring semantics — which stored measurements are still comparable">
@@ -640,7 +703,10 @@ export default function EvalsPage() {
                       await api.post("/v1/evals/runs", {
                         datasetId: selectedDataset,
                         agentId: runAgent,
-                        judgeAgentId: runJudge || undefined,
+                        ...(usePanel
+                          ? { judgePanel: panel.map((m) => ({ agentId: m.agentId, weight: Number(m.weight) })) }
+                          : { judgeAgentId: runJudge || undefined }),
+                        repetitions: Number(runRepetitions) || 1,
                         projectId: runProject || undefined,
                         tolerance: Number(runTolerance),
                       });
@@ -657,10 +723,19 @@ export default function EvalsPage() {
                     </Select>
                   </Field>
                   <Field label="Judge (llm_as_judge cases only)">
-                    <Select value={runJudge} onChange={(e) => setRunJudge(e.target.value)}>
+                    <Select value={runJudge} onChange={(e) => setRunJudge(e.target.value)} disabled={usePanel}>
                       <option value="">(none)</option>
                       {optionEls(agentOpts(agents.data?.agents))}
                     </Select>
+                  </Field>
+                  <Field label="Judge repetitions (1–5)">
+                    <Input
+                      type="number"
+                      min={1}
+                      max={5}
+                      value={runRepetitions}
+                      onChange={(e) => setRunRepetitions(e.target.value)}
+                    />
                   </Field>
                   <Field label="Bill to project">
                     <Select value={runProject} onChange={(e) => setRunProject(e.target.value)}>
@@ -671,10 +746,76 @@ export default function EvalsPage() {
                   <Field label="Tolerance">
                     <Input value={runTolerance} onChange={(e) => setRunTolerance(e.target.value)} />
                   </Field>
-                  <Button type="submit" variant="primary" disabled={act.busy || !runAgent}>
+                  <Button type="submit" variant="primary" disabled={act.busy || !runAgent || panelProblem !== null}>
                     Run now
                   </Button>
                 </form>
+                {/* ADR-0173 batch 2c — the weighted judge panel */}
+                <fieldset className={v.stack} data-testid="judge-panel" style={{ border: 0, padding: 0, margin: "var(--s2) 0 0" }}>
+                  <legend className={v.sectionTitle}>Judge panel</legend>
+                  <label>
+                    <input type="checkbox" checked={usePanel} onChange={(e) => setUsePanel(e.target.checked)} /> Score the
+                    judged cases with a weighted panel of 2–5 judges instead of one judge
+                  </label>
+                  {usePanel ? (
+                    <>
+                      <p className={v.faint}>
+                        Every judge scores every judged case; the case score is the weighted mean, and every verdict is
+                        kept. A judge whose call fails is recorded as an error and leaves the mean — it is never counted
+                        as a zero. Judges × cases × repetitions is capped at 500.
+                      </p>
+                      {panel.map((m, i) => (
+                        <div className={a.formRow} key={i}>
+                          <Field label={`Judge ${i + 1}`} grow>
+                            <Select
+                              value={m.agentId}
+                              onChange={(e) =>
+                                setPanel(panel.map((x, j) => (j === i ? { ...x, agentId: e.target.value } : x)))
+                              }
+                            >
+                              <option value="">Select…</option>
+                              {optionEls(agentOpts(agents.data?.agents))}
+                            </Select>
+                          </Field>
+                          <Field label={`Weight of judge ${i + 1}`}>
+                            <Input
+                              type="number"
+                              min={0}
+                              step="0.1"
+                              value={m.weight}
+                              onChange={(e) =>
+                                setPanel(panel.map((x, j) => (j === i ? { ...x, weight: e.target.value } : x)))
+                              }
+                            />
+                          </Field>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            disabled={panel.length <= 2}
+                            aria-label={`Remove judge ${i + 1}`}
+                            onClick={() => setPanel(panel.filter((_, j) => j !== i))}
+                          >
+                            Remove
+                          </Button>
+                        </div>
+                      ))}
+                      <div className={v.row}>
+                        <Button
+                          size="sm"
+                          disabled={panel.length >= 5}
+                          onClick={() => setPanel([...panel, { agentId: "", weight: "1" }])}
+                        >
+                          Add judge
+                        </Button>
+                      </div>
+                      {panelProblem ? (
+                        <p className={v.faint} role="status" data-testid="panel-problem">
+                          {panelProblem}
+                        </p>
+                      ) : null}
+                    </>
+                  ) : null}
+                </fieldset>
               </div>
             </Card>
           )}
@@ -763,6 +904,25 @@ export default function EvalsPage() {
                   ? ` — scored with judge ${runDetail.data.run.judgeImpl}`
                   : ""}
               </div>
+              {/* ADR-0173 batch 2c — the panel, the repetitions and the interval */}
+              {(runDetail.data.run.judgePanel?.length ?? 0) > 0 || (runDetail.data.run.repetitions ?? 1) > 1 ? (
+                <div className={a.statRow} data-testid="run-panel-summary">
+                  {(runDetail.data.run.judgePanel?.length ?? 0) > 0 ? (
+                    <Stat
+                      value={runDetail.data.run.judgePanel!.length}
+                      label={`judges: ${runDetail.data.run.judgePanel!.map((m) => `${m.agentName} ×${m.weight}`).join(", ")}`}
+                    />
+                  ) : null}
+                  <Stat value={runDetail.data.run.repetitions ?? 1} label="repetitions per judge" />
+                  <Stat value={(runDetail.data.verdicts ?? []).length} label="verdicts kept" />
+                  {runDetail.data.run.scoreCi ? (
+                    <Stat
+                      value={`${runDetail.data.run.scoreCi.low.toFixed(3)} – ${runDetail.data.run.scoreCi.high.toFixed(3)}`}
+                      label={`${Math.round(runDetail.data.run.scoreCi.level * 100)}% bootstrap interval on the mean score (seeded)`}
+                    />
+                  ) : null}
+                </div>
+              ) : null}
               {runDetail.data.baseline ? (
                 <Table
                   rows={runDetail.data.diff}
@@ -831,8 +991,12 @@ export default function EvalsPage() {
               </div>
             </Card>
           )}
+          {selectedRun && runDetail.data && (runDetail.data.run.judgeImpl || (runDetail.data.verdicts ?? []).length > 0) ? (
+            <EvalsJudgeCalibration runId={selectedRun} />
+          ) : null}
         </QueryGate>
       </div>
+      )}
     </>
   );
 }

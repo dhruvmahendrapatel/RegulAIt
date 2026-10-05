@@ -344,7 +344,7 @@ import {
   registerPromptRegistryRoutes,
 } from "./prompt-registry.js";
 import { registerOutboundWebhookRoutes } from "./outbound-webhooks.js";
-import { registerAnnotationRoutes } from "./annotations.js";
+import { annotationLabelsFor, registerAnnotationRoutes } from "./annotations.js";
 import { registerPlaygroundRoutes } from "./playground.js";
 // ADR-0097 — the tool-poisoning admission gate (part A) and the RFC 9728
 // protected-resource metadata + WWW-Authenticate challenge (part B).
@@ -4116,7 +4116,29 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // /v1/evals/runs, which is in NON_ADMIN_ROUTES because its gate is the
   // caller's own agent entitlement, checked inside the runner exactly as an
   // invoke would check it.
-  registerEvalRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0173 batch 2c: judge calibration reads human labels from annotation
+  // queues (eval-result items). One reviewer's submission becomes one label:
+  // its first label-criterion value (by criterion name) and its first score
+  // that is already on a 0..1 scale. Calibration's own positive / negative
+  // label lists and threshold decide pass or fail; a score on another scale is
+  // not guessed at.
+  registerEvalRoutes(app, db, {
+    dataKey: opts.dataKey,
+    labelsFor: async (kind, ids) => {
+      const labels = await annotationLabelsFor(db, { kind, ids });
+      return labels.map((l) => {
+        const entries = Object.entries(l.values).sort(([a], [b]) => a.localeCompare(b));
+        const label = entries.find(([, v]) => typeof v === "string")?.[1];
+        const value = entries.find(([, v]) => typeof v === "number" && v >= 0 && v <= 1)?.[1];
+        return {
+          subjectId: l.subjectId,
+          label: typeof label === "string" ? label : null,
+          value: typeof value === "number" ? value : null,
+          completed: l.itemStatus === "completed",
+        };
+      });
+    },
+  });
   // ADR-0045 — the model risk management registry: model cards, the
   // recertification chain, evidence links onto ADR-0044 eval runs, the expiry
   // sweep, and the org toggle that turns "reviewed for a stated purpose" into

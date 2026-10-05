@@ -20,6 +20,7 @@
  */
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { TestedByChip, useTestedBy } from "./TestedByChip";
 import { api } from "../../../api/client";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, Select, Table, Textarea } from "../../../ui/kit";
@@ -121,7 +122,7 @@ interface Scorecard {
   packVersion: number;
   packTitle: string;
   cascadeTag: string | null;
-  period: { label: string };
+  period: { label: string; start?: string; end?: string };
   totals: {
     controls: number;
     satisfied: number;
@@ -217,6 +218,10 @@ export default function CompliancePacksPage() {
 
   const [draft, setDraft] = useState(EXAMPLE);
   const [scorecard, setScorecard] = useState<Scorecard | null>(null);
+  // ADR-0173 batch 2c — which pack the scorecard is for, so the "tested by"
+  // chips can ask the evaluator catalog about the same controls and period
+  const [scorecardPackId, setScorecardPackId] = useState<string | null>(null);
+  const testedBy = useTestedBy(scorecardPackId, scorecard?.period ?? null);
   const [diffView, setDiffView] = useState<DiffResponse | null>(null);
   const [period, setPeriod] = useState("current_quarter");
 
@@ -267,6 +272,7 @@ export default function CompliancePacksPage() {
         period,
       });
       setScorecard(res.scorecard);
+      setScorecardPackId(p.id);
     }, "Scorecard computed from the ledgers");
   };
 
@@ -582,9 +588,23 @@ export default function CompliancePacksPage() {
                   ),
               },
               { key: "collector", header: "Collector", render: (c) => <code>{c.collector}</code> },
+              // ADR-0173 batch 2c — the catalog evaluators that cite this
+              // control; only a completed run that PASSED in the period counts
+              ...(testedBy.data?.controls
+                ? [
+                    {
+                      key: "testedBy",
+                      header: "Tested by",
+                      render: (c: ControlAssessment) => (
+                        <TestedByChip controlRef={c.controlRef} entries={testedBy.data?.controls?.[c.controlRef]} />
+                      ),
+                    },
+                  ]
+                : []),
               { key: "note", header: "Note", render: (c) => <span className={v.dim}>{c.note}</span> },
             ]}
           />
+          {testedBy.data?.controls ? <p className={v.faint}>{testedBy.data.note}</p> : null}
           <p className={v.faint}>{scorecard.disclaimer}</p>
         </Card>
       ) : null}

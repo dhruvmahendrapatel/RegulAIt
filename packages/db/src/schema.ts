@@ -4425,7 +4425,9 @@ const EVAL_SCORER_KINDS_SQL = sql.raw(
  */
 export const SCORING_SEMANTICS_VERSION = 2;
 
-export const EVAL_RUN_TRIGGERS = ["manual", "workflow", "scheduled"] as const;
+/** ADR-0173 batch 2c (migration 0149): `config_change` = the drift sweep re-ran
+ * a pinned baseline because the agent's configuration hash changed */
+export const EVAL_RUN_TRIGGERS = ["manual", "workflow", "scheduled", "config_change"] as const;
 export const EVAL_RUN_STATUSES = ["running", "completed", "error", "denied"] as const;
 
 /** ONE ROW PER (name, version). A version is frozen the moment a run references
@@ -4486,6 +4488,11 @@ export const evalCases = pgTable(
      * asked. */
     contextInPrompt: boolean("context_in_prompt").notNull().default(true),
     tags: jsonb("tags").$type<string[]>().notNull().default([]),
+    /** ADR-0173 batch 2c (migration 0149): the trace span this case was built
+     * from, when it was. FK-free on purpose: a dataset row is authored content
+     * and outlives the §8.3 trace prune. Unique per dataset version. */
+    sourceTraceId: uuid("source_trace_id"),
+    sourceSpanId: uuid("source_span_id"),
     /** NULL = inherit the dataset's default scorer */
     scorerKind: text("scorer_kind", { enum: EVAL_SCORER_KINDS }),
     scorerConfig: jsonb("scorer_config").$type<Record<string, unknown>>(),
@@ -4502,6 +4509,9 @@ export const evalCases = pgTable(
       foreignColumns: [evalDatasets.id, evalDatasets.version],
     }).onDelete("cascade"),
     index("eval_cases_dataset_idx").on(t.datasetId, t.datasetVersion),
+    uniqueIndex("eval_cases_source_span_uq")
+      .on(t.datasetId, t.datasetVersion, t.sourceSpanId)
+      .where(sql`${t.sourceSpanId} IS NOT NULL`),
   ],
 );
 
@@ -4575,11 +4585,41 @@ export const evalRuns = pgTable(
       .default(SCORING_SEMANTICS_VERSION),
     error: text("error"),
     note: text("note"),
+    // --- ADR-0173 batch 2c (migration 0149) ---------------------------------
+    /** sha256 over the measured configuration (model, tier, system-prompt
+     * hash, custom provider): what `config_change` compares */
+    configHash: text("config_hash"),
+    /** the pinned baseline a `config_change` run re-ran */
+    configChangeOfRunId: uuid("config_change_of_run_id"),
+    /** who pinned this run as THE baseline; a config_change re-run runs as
+     * this person and is skipped when they are gone */
+    baselinePinnedByUserId: uuid("baseline_pinned_by_user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    /** [{agentId, agentName, weight}] for a weighted judge-panel run */
+    judgePanel: jsonb("judge_panel").$type<Array<{ agentId: string | null; agentName: string; weight: number }>>(),
+    /** judge repetitions per case (1..5) */
+    repetitions: integer("repetitions").notNull().default(1),
+    /** the seeded bootstrap interval on the mean score */
+    scoreCi: jsonb("score_ci").$type<Record<string, unknown>>(),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
     finishedAt: timestamp("finished_at", { withTimezone: true }),
   },
   (t) => [
-    check("eval_runs_trigger_check", sql`${t.trigger} IN ('manual','workflow','scheduled')`),
+    check(
+      "eval_runs_trigger_check",
+      sql`${t.trigger} IN ('manual','workflow','scheduled','config_change')`,
+    ),
+    check("eval_runs_repetitions_check", sql`${t.repetitions} >= 1 AND ${t.repetitions} <= 5`),
+    foreignKey({
+      name: "eval_runs_config_change_of_run_id_fk",
+      columns: [t.configChangeOfRunId],
+      foreignColumns: [t.id],
+    }).onDelete("set null"),
+    /** each (pinned baseline, configuration) pair re-runs at most once */
+    uniqueIndex("eval_runs_config_change_uq")
+      .on(t.configChangeOfRunId, t.configHash)
+      .where(sql`${t.trigger} = 'config_change'`),
     check("eval_runs_scoring_semantics_check", sql`${t.scoringSemantics} >= 1`),
     check("eval_runs_status_check", sql`${t.status} IN ('running','completed','error','denied')`),
     check("eval_runs_tolerance_check", sql`${t.tolerance} >= 0 AND ${t.tolerance} <= 1`),
@@ -9862,3 +9902,44 @@ export const annotationSubmissions = pgTable(
   ],
 );
 export type AnnotationSubmissionRow = typeof annotationSubmissions.$inferSelect;
+// ADR-0173 batch 2c — E (migration 0149): every judge verdict of a panel run.
+// ---------------------------------------------------------------------------
+
+/**
+ * One judge's verdict on one case in one repetition. A panel run combines the
+ * verdicts into the case's `eval_results` score by weight, and KEEPS every
+ * verdict here, so a combined number can always be taken apart. A failed judge
+ * call is a row with `error` and no score, never a fabricated zero.
+ */
+export const evalJudgeVerdicts = pgTable(
+  "eval_judge_verdicts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    runId: uuid("run_id")
+      .notNull()
+      .references(() => evalRuns.id, { onDelete: "cascade" }),
+    caseId: uuid("case_id").references(() => evalCases.id, { onDelete: "set null" }),
+    judgeAgentId: uuid("judge_agent_id").references(() => agents.id, { onDelete: "set null" }),
+    /** the judge's stable name on this run (its instrument id) */
+    judgeName: text("judge_name").notNull(),
+    weight: doublePrecision("weight").notNull(),
+    repetition: integer("repetition").notNull(),
+    score: doublePrecision("score"),
+    passed: boolean("passed"),
+    rationale: text("rationale"),
+    error: text("error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("eval_judge_verdicts_uq").on(t.runId, t.caseId, t.judgeName, t.repetition),
+    index("eval_judge_verdicts_run_idx").on(t.runId),
+    check("eval_judge_verdicts_weight_check", sql`${t.weight} > 0`),
+    check("eval_judge_verdicts_repetition_check", sql`${t.repetition} >= 1 AND ${t.repetition} <= 5`),
+    check(
+      "eval_judge_verdicts_score_check",
+      sql`${t.score} IS NULL OR (${t.score} >= 0 AND ${t.score} <= 1)`,
+    ),
+    check("eval_judge_verdicts_outcome_check", sql`${t.score} IS NOT NULL OR ${t.error} IS NOT NULL`),
+  ],
+);
+export type EvalJudgeVerdictRow = typeof evalJudgeVerdicts.$inferSelect;
