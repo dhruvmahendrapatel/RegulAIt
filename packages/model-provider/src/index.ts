@@ -2145,8 +2145,23 @@ function mockDecompositionReply(goal: string, system: string, tier: MockTier): s
 // with a text answer that QUOTES the tool result, so the whole governed loop
 // is demoable with zero external keys. "<<use-tool-loop:NAME>>" keeps
 // requesting the tool on EVERY turn (never finalizes) — the deterministic way
-// to exercise a node's maxTurns cap.
+// to exercise a node's maxTurns cap. "<<use-tool-args:BASE64>>" (ADR-0173
+// batch 2b) gives that tool_use the base64-encoded JSON object as its
+// arguments instead of the canned empty object, so a governed write (a
+// connector `{operation, object, payload}`) can be exercised end to end.
 // ---------------------------------------------------------------------------
+
+/** the arguments named by a `<<use-tool-args:BASE64>>` sentinel, or `{}` */
+function mockToolArguments(historyText: string): Record<string, unknown> {
+  const m = historyText.match(/<<use-tool-args:([A-Za-z0-9+/=]+)>>/);
+  if (!m) return {};
+  try {
+    const parsed: unknown = JSON.parse(Buffer.from(m[1]!, "base64").toString("utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
 
 /** flatten a turn's content to plain text (text + tool_result bodies) so the
  * intent/tier/sentinel logic reads a string regardless of block vs string */
@@ -2320,7 +2335,7 @@ export class MockModelProvider implements ModelProvider {
         outputText: "",
         stopReason: "tool_use",
         refusal: false,
-        toolCalls: [{ id: `mock-tool-${seq}`, name: wantToolName, arguments: {} }],
+        toolCalls: [{ id: `mock-tool-${seq}`, name: wantToolName, arguments: mockToolArguments(historyText) }],
         ...(thinkingOut ? { thinking: thinkingOut } : {}),
         usage: { inputTokens: mockTokens(historyText), outputTokens: 1 + thinkingTokens },
         providerMessageId: `mock-msg-${seq}`,

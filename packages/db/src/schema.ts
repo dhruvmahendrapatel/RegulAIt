@@ -1223,6 +1223,9 @@ export const auditLog = pgTable(
         // ADR-0175 A15: an energy factor created / changed / removed
         // (objectId = the factor row). Plain text column — no DDL.
         "energy_factor",
+        // ADR-0173 batch 2b: a decision on a held connector write (the
+        // approvals queue's object type rides the audit row). Plain text — no DDL.
+        "connector_call",
       ],
     })
       .notNull()
@@ -1506,6 +1509,9 @@ export const approvals = pgTable(
     reviewRoleId: text("review_role_id"),
     reviewRoleName: text("review_role_name"),
     reviewRound: integer("review_round"),
+    // ADR-0173 batch 2b (migration 0144) — a 'connector_call' approval: the
+    // connector the consent may be spent against. NULL on every other kind.
+    connectorId: uuid("connector_id").references(() => connectors.id, { onDelete: "cascade" }),
   },
   (t) => [
     index("approvals_status_idx").on(t.status),
@@ -1525,6 +1531,9 @@ export const approvals = pgTable(
       t.status,
       t.argumentsDigest,
     ),
+    index("approvals_connector_binding_idx")
+      .on(t.userId, t.connectorId, t.status, t.argumentsDigest)
+      .where(sql`${t.connectorId} IS NOT NULL`),
   ],
 );
 
@@ -5886,9 +5895,23 @@ export const chatopsConnections = pgTable("chatops_connections", {
    * this workspace; null = alerts are not posted (opt-in) */
   notifyAlertMinSeverity: text("notify_alert_min_severity", { enum: ["medium", "high"] }),
   enabled: boolean("enabled").notNull().default(true),
+  /** ADR-0173 batch 2b (migration 0144) — Microsoft Teams Bot Framework. The
+   * bot's app id is the audience its tokens must carry; null = the bot
+   * endpoint is off. Teams only (DB check). */
+  botAppId: text("bot_app_id"),
+  /** optional: the tenant an activity must come from */
+  botTenantId: text("bot_tenant_id"),
+  /** optional: the OpenID metadata whose JWKS signs bot tokens (null = the
+   * platform's public default) */
+  botOpenidMetadataUrl: text("bot_openid_metadata_url"),
   createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});
+}, (t) => [
+  check(
+    "chatops_connections_bot_teams_check",
+    sql`(${t.botAppId} IS NULL AND ${t.botTenantId} IS NULL AND ${t.botOpenidMetadataUrl} IS NULL) OR ${t.provider} = 'teams'`,
+  ),
+]);
 
 /**
  * THE CRUX (ADR-0061 §2). A chat interaction arrives under the BOT's connection
@@ -9302,6 +9325,37 @@ export const builderChannelEvents = pgTable(
 );
 
 export type BuilderChannelThreadRow = typeof builderChannelThreads.$inferSelect;
+
+/**
+ * ADR-0173 batch 2b (migration 0144) — the Slack message carrying Approve /
+ * Deny for one "Ask first" pause. Binds the buttons to the workspace that
+ * posted them (a click arriving on another connection names no prompt), holds
+ * the message handle the answer updates, and records the ONE answer:
+ * `answered_at` is claimed once, so a second click is refused.
+ */
+export const builderStepChatPrompts = pgTable(
+  "builder_step_chat_prompts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    stepId: uuid("step_id")
+      .notNull()
+      .references(() => builderToolSteps.id, { onDelete: "cascade" }),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => chatopsConnections.id, { onDelete: "cascade" }),
+    channel: text("channel").notNull(),
+    messageRef: text("message_ref"),
+    postedAt: timestamp("posted_at", { withTimezone: true }).notNull().defaultNow(),
+    answeredAt: timestamp("answered_at", { withTimezone: true }),
+    answeredByUserId: uuid("answered_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    answer: text("answer", { enum: ["approve", "deny"] }),
+  },
+  (t) => [
+    uniqueIndex("builder_step_chat_prompts_step_uq").on(t.stepId, t.connectionId),
+    check("builder_step_chat_prompts_answer_check", sql`${t.answer} IS NULL OR ${t.answer} IN ('approve', 'deny')`),
+  ],
+);
+export type BuilderStepChatPromptRow = typeof builderStepChatPrompts.$inferSelect;
 
 /**
  * ADR-0175 A15 (migration 0142) — THE FACTORS BEHIND THE ENERGY ESTIMATE.

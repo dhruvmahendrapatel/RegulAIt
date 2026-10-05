@@ -995,6 +995,13 @@
       "when": 1785077000000,
       "tag": "0142_credential_inventory_energy",
       "breakpoints": true
+    },
+    {
+      "idx": 144,
+      "version": "7",
+      "when": 1785079000000,
+      "tag": "0144_connector_approvals_chat_bots",
+      "breakpoints": true
     }
   ]
 }

@@ -100,7 +100,7 @@ const MODES: Array<{
     label: "Require approval",
     tone: "warn",
     blastRadius:
-      "Nothing runs unattended. An MCP tool call is QUEUED for the named approver; model dispatch and connector calls are REFUSED instead, because those paths have no per-call approval queue. Use read-only if reads should keep flowing.",
+      "Nothing runs unattended. An MCP tool call or a connector write is QUEUED for the named approver; model dispatch and connector reads are REFUSED instead, because those paths have no per-call approval queue. Use read-only if reads should keep flowing.",
   },
   {
     mode: "halted",

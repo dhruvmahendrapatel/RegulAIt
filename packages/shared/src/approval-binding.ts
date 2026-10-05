@@ -87,6 +87,8 @@ export const APPROVAL_OBJECT_TYPES = [
   "sod_override",
   // ADR-0159: an executable remediation for a governance-monitor alert
   "remediation",
+  // ADR-0173 batch 2b: a connector WRITE held by the execution dial
+  "connector_call",
 ] as const;
 export type ApprovalObjectType = (typeof APPROVAL_OBJECT_TYPES)[number];
 
@@ -103,6 +105,7 @@ export const APPROVAL_OBJECT_TYPE_LABELS: Record<ApprovalObjectType, string> = {
   grant_certification: "certification-campaign item",
   sod_override: "separation-of-duties override",
   remediation: "governance remediation",
+  connector_call: "connector write",
 };
 
 /**
@@ -331,13 +334,28 @@ export interface ApprovalRuleVersionRef {
  * goes stale and is re-queued, fail-closed). Operational churn on the server
  * row — breaker counters, health cursors — is deliberately NOT here.
  */
-export interface ApprovalTargetRef {
-  kind: "mcp_server";
-  serverId: string;
-  url: string;
-  allowPrivateRanges: boolean | null;
-  admissionManifestDigest: string | null;
-}
+export type ApprovalTargetRef =
+  | {
+      kind: "mcp_server";
+      serverId: string;
+      url: string;
+      allowPrivateRanges: boolean | null;
+      admissionManifestDigest: string | null;
+    }
+  /**
+   * ADR-0173 batch 2b — a connector write's target: the connector, its
+   * provider kind and the EFFECTIVE base URL (the credential's override, else
+   * the connector's, else null for the compiled vendor endpoint). Repointing
+   * any of them under the same connector id is a new target, so a consent
+   * signed for the old one goes stale. The credential token is not here: a
+   * rotation does not change where the bytes go.
+   */
+  | {
+      kind: "connector";
+      connectorId: string;
+      providerKind: string | null;
+      baseUrl: string | null;
+    };
 
 /** The identity of the POLICY CONTEXT a consent was granted under. */
 export interface ApprovalContextRef {
@@ -395,15 +413,22 @@ export function approvalContextDigest(ref: ApprovalContextRef): string {
         .map((p) => ({ policyId: p.policyId, version: p.version, source: p.source })),
       requiredApproverUserId: ref.requiredApproverUserId ?? null,
       approvalScope: ref.approvalScope,
-      target: ref.target
-        ? {
-            kind: ref.target.kind,
-            serverId: ref.target.serverId,
-            url: ref.target.url,
-            allowPrivateRanges: ref.target.allowPrivateRanges ?? null,
-            admissionManifestDigest: ref.target.admissionManifestDigest ?? null,
-          }
-        : null,
+      target: !ref.target
+        ? null
+        : ref.target.kind === "connector"
+          ? {
+              kind: ref.target.kind,
+              connectorId: ref.target.connectorId,
+              providerKind: ref.target.providerKind ?? null,
+              baseUrl: ref.target.baseUrl ?? null,
+            }
+          : {
+              kind: ref.target.kind,
+              serverId: ref.target.serverId,
+              url: ref.target.url,
+              allowPrivateRanges: ref.target.allowPrivateRanges ?? null,
+              admissionManifestDigest: ref.target.admissionManifestDigest ?? null,
+            },
     })}`,
   );
 }

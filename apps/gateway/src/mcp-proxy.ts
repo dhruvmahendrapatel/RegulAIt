@@ -356,12 +356,19 @@ export async function consumeBoundApproval(
  * about WHICH rows it moves, and exact about never moving one that was spent.
  *
  * Returns the ids actually retired.
+ *
+ * ADR-0173 batch 2b: exported for the connector write path, which retires a
+ * stale connector consent the same way — `ctx.connector` names it, and the
+ * audit row then sits on the connector instead of an MCP tool.
  */
-async function supersedeStaleConsent(
+export async function supersedeStaleConsent(
   db: Db,
   rows: readonly RetiredApproval[],
-  ctx: { userId: string; serverId: string; toolName: string; projectId: string | null },
+  ctx:
+    | { userId: string; serverId: string; toolName: string; projectId: string | null; connector?: undefined }
+    | { userId: string; connector: { id: string; name: string }; projectId: string | null; serverId?: undefined; toolName?: undefined },
 ): Promise<string[]> {
+  const subject = ctx.connector ? `connector '${ctx.connector.name}'` : `tool '${ctx.toolName}'`;
   const retired: string[] = [];
   for (const row of rows) {
     const moved = await db
@@ -379,8 +386,9 @@ async function supersedeStaleConsent(
     retired.push(row.id);
     await db.insert(auditLog).values({
       userId: ctx.userId,
-      serverId: ctx.serverId,
-      toolName: ctx.toolName,
+      ...(ctx.connector
+        ? { objectType: "connector" as const, objectId: ctx.connector.id }
+        : { serverId: ctx.serverId, toolName: ctx.toolName }),
       // the approval id rides in `detail.approvalId`, exactly as ADR-0046's
       // `approval-routed` / `approval-sla-breached` rows do, so "what happened
       // to this approval" stays ONE query on one objectType.
@@ -395,8 +403,8 @@ async function supersedeStaleConsent(
       ruleChain: [],
       reason:
         row.reason === "expired"
-          ? `approval '${row.id}' for tool '${ctx.toolName}' expired before it was spent and was superseded`
-          : `approval '${row.id}' for tool '${ctx.toolName}' was granted under a policy context that has ` +
+          ? `approval '${row.id}' for ${subject} expired before it was spent and was superseded`
+          : `approval '${row.id}' for ${subject} was granted under a policy context that has ` +
             `since changed (matched rules, their active config versions, the required approver or the ` +
             `approval scope) and was superseded`,
     });
