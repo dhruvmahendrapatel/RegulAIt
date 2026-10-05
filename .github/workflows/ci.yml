@@ -73,6 +73,11 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+# Least privilege for GITHUB_TOKEN (CodeQL "workflow does not contain permissions"): every job here only
+# checks out code and uploads artifacts; nothing writes to the repository, issues, PRs or packages.
+permissions:
+  contents: read
+
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
