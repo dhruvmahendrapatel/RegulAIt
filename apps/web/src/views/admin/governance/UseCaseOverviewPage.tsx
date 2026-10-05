@@ -10,6 +10,7 @@ import v from "../../views.module.css";
 import s from "./demoGovernance.module.css";
 import rec from "./record.module.css";
 import rr from "./recordRound.module.css";
+import mc from "./measuredConditions.module.css";
 import ix from "./intakeHelp.module.css";
 import { resubmitPath } from "./registryModel";
 import { detailRationales, detailUnsure, questionLabel } from "./registrationModel";
@@ -19,6 +20,16 @@ import { AgentStewardshipLine } from "../integrations/AgentStewardship";
 import type { AgentStewardship } from "../integrations/agentStewardshipModel";
 import { EnergyEstimatePanel } from "../cost/EnergyEstimate";
 import { RunGraph } from "../../../ui/runGraph/RunGraph";
+import { useSession } from "../../../session/SessionContext";
+import {
+  EVIDENCE_LABEL,
+  MEASUREMENT_STATE_LABEL,
+  MEASUREMENT_STATE_TONE,
+  evidenceHref,
+  formatMeasured,
+  isMeasured,
+  type MeasuredConditionFields,
+} from "../../approvals/metricConditions";
 import {
   ACTIVITY_STATUS,
   PHASES,
@@ -345,6 +356,50 @@ function OverviewTab(props: {
 
 /** what a before-go-live condition's closing note may hold (the server's limit) */
 const NOTE_MAX = 2000;
+/** what a waiver's reason may hold (the server's limit) */
+const WAIVE_MAX = 2000;
+
+type RecordCondition = UseCaseCondition & MeasuredConditionFields;
+
+/** ADR-0180 A2: a measured condition's last evaluation, its state and the rows it rests on */
+function MeasuredStanding({ row }: { row: RecordCondition }) {
+  const state = row.lastState ?? null;
+  const evidence = row.evidence ?? [];
+  const shown = evidence.slice(0, 3);
+  return (
+    <div className={mc.measured}>
+      <span className={v.faint}>Measured: {row.spec ?? "metric condition"}</span>
+      {row.status === "waived" ? null : state ? (
+        <span>
+          <Badge tone={MEASUREMENT_STATE_TONE[state]}>{MEASUREMENT_STATE_LABEL[state]}</Badge>{" "}
+          <span className={v.faint}>
+            {formatMeasured(row.metric ?? null, row.lastValue ?? null)} over {row.lastSamples ?? 0} sample{row.lastSamples === 1 ? "" : "s"}
+            {row.lastEvaluatedAt ? `, checked ${ago(row.lastEvaluatedAt)}` : ""}
+            {(row.consecutiveBreaches ?? 0) > 1 ? `, ${row.consecutiveBreaches} breaches in a row` : ""}
+          </span>
+        </span>
+      ) : (
+        <span className={v.faint}>Not evaluated yet</span>
+      )}
+      {shown.length > 0 ? (
+        <span className={v.faint}>
+          Evidence:{" "}
+          {shown.map((ref, i) => {
+            const href = evidenceHref(ref);
+            const label = `${EVIDENCE_LABEL[ref.type] ?? humanize(ref.type)} ${ref.id.slice(0, 8)}`;
+            return (
+              <span key={`${ref.type}:${ref.id}`}>
+                {i > 0 ? ", " : ""}
+                {href ? <Link to={href}>{label}</Link> : label}
+              </span>
+            );
+          })}
+          {evidence.length > shown.length ? ` and ${evidence.length - shown.length} more` : ""}
+        </span>
+      ) : null}
+    </div>
+  );
+}
 
 function ConditionsCard(props: {
   useCaseId: string;
@@ -355,20 +410,41 @@ function ConditionsCard(props: {
   onRefresh: () => Promise<void>;
 }) {
   const action = useAction();
+  const { auth } = useSession();
+  const isAdmin = Boolean(auth?.isAdmin);
+  const conditions = props.conditions as RecordCondition[];
   // a before-go-live condition is confirmed with a note saying what was done
   const [closing, setClosing] = useState<UseCaseCondition | null>(null);
   const [note, setNote] = useState("");
   const [noteError, setNoteError] = useState<string | null>(null);
-  const open = props.conditions.filter((c) => c.status === "open").length;
+  // ADR-0180 A2: an administrator's waiver, with a reason
+  const [waiving, setWaiving] = useState<RecordCondition | null>(null);
+  const [waiveReason, setWaiveReason] = useState("");
+  const [waiveError, setWaiveError] = useState<string | null>(null);
+  const open = conditions.filter((c) => c.status === "open").length;
   const markMet = (row: UseCaseCondition, body: { note?: string }) =>
     action.run(async () => {
       await api.post(`/v1/use-cases/${props.useCaseId}/conditions/${row.id}/met`, body);
       await props.onRefresh();
     }, "Condition marked met");
+  const evaluateNow = (row: RecordCondition) =>
+    action.run(async () => {
+      const out = await api.post<{ verdict: { state: string; status: string } }>(`/v1/use-cases/${props.useCaseId}/conditions/${row.id}/evaluate`, {});
+      await props.onRefresh();
+      const state = out.verdict.state as keyof typeof MEASUREMENT_STATE_LABEL;
+      return out.verdict.status === "met" && row.status === "open"
+        ? "Evidence passes: the condition is met"
+        : `Evaluated: ${MEASUREMENT_STATE_LABEL[state] ?? out.verdict.state}`;
+    });
   const closeDialog = () => {
     setClosing(null);
     setNote("");
     setNoteError(null);
+  };
+  const closeWaive = () => {
+    setWaiving(null);
+    setWaiveReason("");
+    setWaiveError(null);
   };
   const confirmClosing = async () => {
     if (!closing) return;
@@ -377,57 +453,105 @@ function ConditionsCard(props: {
     if (text.length > NOTE_MAX) return setNoteError(`Keep the note to ${NOTE_MAX} characters or fewer`);
     if (await markMet(closing, { note: text })) closeDialog();
   };
+  const confirmWaive = async () => {
+    if (!waiving) return;
+    const text = waiveReason.trim();
+    if (!text) return setWaiveError("Say why this condition is waived");
+    if (text.length > WAIVE_MAX) return setWaiveError(`Keep the reason to ${WAIVE_MAX} characters or fewer`);
+    const ok = await action.run(async () => {
+      await api.post(`/v1/use-cases/${props.useCaseId}/conditions/${waiving.id}/waive`, { reason: text });
+      await props.onRefresh();
+    }, "Condition waived");
+    if (ok) closeWaive();
+  };
   return (
-    <Card title="Conditions of approval" actions={props.detailState === "ok" && props.conditions.length ? <span className={v.faint}>{open ? `${open} open` : "All met"}</span> : undefined}>
+    <Card title="Conditions of approval" actions={props.detailState === "ok" && conditions.length ? <span className={v.faint}>{open ? `${open} open` : conditions.some((c) => c.status === "waived") ? "None open" : "All met"}</span> : undefined}>
       {props.detailState !== "ok" ? (
         <DetailUnknown state={props.detailState} what="conditions" onRetry={props.onRetryDetail} />
-      ) : props.conditions.length === 0 ? (
+      ) : conditions.length === 0 ? (
         <p className={v.dim}>
           {props.status === "approved"
             ? "This use case was approved without conditions."
             : "No conditions yet. A reviewer can attach conditions when approving."}
         </p>
       ) : (
-        <Table<UseCaseCondition>
-          rows={props.conditions}
+        <Table<RecordCondition>
+          rows={conditions}
           rowKey={(row) => row.id}
           columns={[
-            { key: "text", header: "Condition", render: (row) => <span className={rec.condText}>{row.text}</span> },
+            {
+              key: "text",
+              header: "Condition",
+              render: (row) => (
+                <div className={mc.condCell}>
+                  <span>{row.text}</span>
+                  {isMeasured(row) ? <MeasuredStanding row={row} /> : null}
+                </div>
+              ),
+            },
             { key: "when", header: "When", render: (row) => <span className={rec.nowrap}>{row.blocking ? "Before go-live" : "After go-live"}</span> },
-            { key: "owner", header: "Owner", render: (row) => row.ownerName ?? <span className={v.faint}>Not assigned</span> },
+            { key: "owner", header: "Owner", render: (row) => row.ownerName ?? <span className={v.faint}>{isMeasured(row) ? "The evaluator" : "Not assigned"}</span> },
             { key: "due", header: "Due", render: (row) => <span className={rec.nowrap}>{shortDate(row.dueAt)}</span> },
             {
               key: "status",
               header: "Status",
               render: (row) => {
                 const state = conditionState(row);
-                return <span className={rec.nowrap}><Badge tone={state.tone}>{state.label}</Badge>{row.status === "met" && row.metAt ? <span className={v.faint}> {shortDate(row.metAt)}{row.metByName ? ` by ${row.metByName}` : ""}</span> : null}</span>;
+                return (
+                  <span className={rec.nowrap}>
+                    <Badge tone={state.tone}>{state.label}</Badge>
+                    {row.status === "met" && row.metAt ? <span className={v.faint}> {shortDate(row.metAt)}{row.metByName ? ` by ${row.metByName}` : isMeasured(row) ? " on passing evidence" : ""}</span> : null}
+                    {row.status === "waived" ? (
+                      <span className={v.faint}> {row.waivedAt ? shortDate(row.waivedAt) : ""}{row.waivedByName ? ` by ${row.waivedByName}` : ""}</span>
+                    ) : null}
+                    {row.status === "waived" && row.waiveReason ? <span className={`${v.faint} ${mc.waiveReason}`}>{row.waiveReason}</span> : null}
+                  </span>
+                );
               },
             },
             {
               key: "act",
               header: "",
               align: "right",
-              render: (row) => canMarkMet(row) ? (
-                <Button
-                  size="sm"
-                  disabled={action.busy}
-                  aria-label={`Mark met: ${row.text}`}
-                  onClick={() => {
-                    if (row.blocking) setClosing(row);
-                    else void markMet(row, {});
-                  }}
-                >
-                  Mark met
-                </Button>
-              ) : null,
+              render: (row) => (
+                <span className={mc.actions}>
+                  {canMarkMet(row) ? (
+                    <Button
+                      size="sm"
+                      disabled={action.busy}
+                      aria-label={`Mark met: ${row.text}`}
+                      onClick={() => {
+                        if (row.blocking) setClosing(row);
+                        else void markMet(row, {});
+                      }}
+                    >
+                      Mark met
+                    </Button>
+                  ) : null}
+                  {isAdmin && isMeasured(row) && row.status !== "waived" ? (
+                    <Button size="sm" disabled={action.busy} aria-label={`Evaluate now: ${row.text}`} onClick={() => void evaluateNow(row)}>
+                      Evaluate now
+                    </Button>
+                  ) : null}
+                  {isAdmin && row.status !== "waived" ? (
+                    <Button size="sm" variant="ghost" disabled={action.busy} aria-label={`Waive: ${row.text}`} onClick={() => setWaiving(row)}>
+                      Waive
+                    </Button>
+                  ) : null}
+                </span>
+              ),
             },
           ]}
         />
       )}
-      {props.conditions.some((c) => c.status === "open" && c.blocking && !canMarkMet(c)) ? (
+      {conditions.some((c) => c.status === "open" && c.blocking && !isMeasured(c) && !canMarkMet(c)) ? (
         <p className={v.faint}>
           A before-go-live condition is confirmed by someone other than the person who proposed the use case: the condition's owner, a reviewer who approved it, or an administrator.
+        </p>
+      ) : null}
+      {conditions.some(isMeasured) ? (
+        <p className={v.faint}>
+          A measured condition is closed only when its evidence passes; nobody marks it met by hand, and too few samples never counts as a pass. A waived condition shows at the deploy gate as a warning, never as a pass.
         </p>
       ) : null}
       <Modal
@@ -456,6 +580,40 @@ function ConditionsCard(props: {
                 onChange={(event) => {
                   setNote(event.target.value);
                   if (noteError) setNoteError(null);
+                }}
+              />
+            </Field>
+          </div>
+        ) : null}
+      </Modal>
+      <Modal
+        open={waiving !== null}
+        title="Waive condition"
+        onClose={closeWaive}
+        actions={
+          <>
+            <Button onClick={closeWaive}>Cancel</Button>
+            <Button variant="danger" disabled={action.busy} onClick={() => void confirmWaive()}>
+              {action.busy ? "Saving…" : "Waive condition"}
+            </Button>
+          </>
+        }
+      >
+        {waiving ? (
+          <div className={v.stack}>
+            <p className={v.dim}>{waiving.text}</p>
+            <p className={v.faint}>
+              A waiver is your recorded decision that this condition no longer has to be met. It is audited with your reason, and the deploy gate shows it as a warning, never as a pass.
+            </p>
+            <Field label="Why it is waived" error={waiveError}>
+              <Textarea
+                rows={4}
+                maxLength={WAIVE_MAX}
+                value={waiveReason}
+                aria-invalid={waiveError ? true : undefined}
+                onChange={(event) => {
+                  setWaiveReason(event.target.value);
+                  if (waiveError) setWaiveError(null);
                 }}
               />
             </Field>
