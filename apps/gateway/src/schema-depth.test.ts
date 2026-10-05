@@ -22,6 +22,11 @@ import {
 import { resolveModelProvider, type MockModelProvider } from "@regulait/model-provider";
 import { buildApp } from "./app.js";
 import { PROJECT_HEADER } from "./mcp-proxy.js";
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+
+// ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
+// seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 
 /**
  * ADR-0023 — the wave-3 SCHEMA-OWNING slice, end to end at the gateway edge.
@@ -213,6 +218,7 @@ function wireFor(marker: string) {
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   gatewayUrl = await app.listen({ port: 0, host: "127.0.0.1" });
   mock = resolveModelProvider({ provider: "mock" }) as MockModelProvider;
@@ -333,6 +339,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreStrictAdmission?.();
   // restore the shipped interception defaults for later suites on this DB
   await db
     .update(interceptionSettings)

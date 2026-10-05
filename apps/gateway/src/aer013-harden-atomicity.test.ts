@@ -39,7 +39,7 @@ const count = async (ruleId: string) =>
 
 async function restoreShippedDefaults() {
   const r = await app.inject({ method: "PUT", url: "/v1/org/settings", headers: AUTH, payload: {
-    defaultPiiMode: "none", mcpAdmissionMode: "off", useCaseGateMode: "off",
+    defaultPiiMode: "none", mcpAdmissionMode: "enforce", useCaseGateMode: "off",
     dispatchAttributionRequired: false, semanticCachePolicy: "opt_in",
   } });
   expect(r.statusCode).toBe(200);
@@ -120,7 +120,7 @@ describe("atomicity — a failed audit insert rolls the settings change back", (
       const after = await loadOrgSettings(db);
       expect(after.defaultPiiMode).toBe("none");
       expect(after.mrmEnforced).toBe(false);
-      expect(after.mcpAdmissionMode).toBe("off");
+      expect(after.mcpAdmissionMode).toBe("enforce");
       expect(after.updatedAt?.getTime()).toBe(before.updatedAt?.getTime());
       expect(await count("org-posture-hardened")).toBe(presetBefore);
       expect(await count("mrm-enforcement-enabled")).toBe(mrmBefore);

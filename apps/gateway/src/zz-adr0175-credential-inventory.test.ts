@@ -389,8 +389,10 @@ describe("ADR-0175 A7 — the stale_credentials monitor rule", () => {
   };
   const subject = (type: string, flag: string) => `credentials:${type}:${flag}`;
 
-  it("is observe-only by default: flags on the page, no episode", async () => {
-    expect(orgBefore!.alerts).toBe(false);
+  it("alerts by default (ADR-0181); an admin's OFF is observe-only: flags on the page, no episode", async () => {
+    expect(orgBefore!.alerts).toBe(true);
+    const off = await call("PUT", "/v1/org/settings", people.adminAuth, { staleCredentialAlerts: false });
+    expect(off.statusCode, off.body).toBe(200);
     await evaluate();
     const open = (await episodes()).filter((a) => a.status !== "resolved");
     expect(open).toEqual([]);

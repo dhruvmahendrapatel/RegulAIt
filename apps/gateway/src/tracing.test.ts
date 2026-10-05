@@ -83,6 +83,11 @@ import {
 } from "@regulait/db";
 import { buildSpanTree, flattenSpanTree, buildOtlpPayload, otlpSpanId, otlpTraceId } from "@regulait/shared";
 import { buildApp } from "./app.js";
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+
+// ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
+// seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -235,6 +240,7 @@ async function spansOf(traceId: string): Promise<TraceSpanRow[]> {
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   await app.ready();
 
@@ -340,6 +346,7 @@ beforeAll(async () => {
 }, 180_000);
 
 afterAll(async () => {
+  await restoreStrictAdmission?.();
   // Restore the org singleton EXACTLY — every other suite reads it.
   if (priorOrg) {
     await db

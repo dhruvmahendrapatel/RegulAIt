@@ -24,6 +24,11 @@ import {
 } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { PROJECT_HEADER } from "./compat-core.js";
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+
+// ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
+// seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 
 /**
  * ADR-0024 (ROADMAP §6 O11 / O13 / O15) — interception DEPTH, end to end.
@@ -219,6 +224,7 @@ const NOT_FOUND_MESSAGES = {
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   gatewayUrl = await app.listen({ port: 0, host: "127.0.0.1" });
 
@@ -321,6 +327,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreStrictAdmission?.();
   // restore the shipped defaults + clear scope rules so a later suite sharing
   // this database sees a pristine posture
   await db

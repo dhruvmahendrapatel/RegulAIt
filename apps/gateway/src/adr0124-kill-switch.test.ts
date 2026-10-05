@@ -20,6 +20,11 @@ import {
 import { executionGate } from "@regulait/policy-kernel";
 import { buildApp } from "./app.js";
 import { executeGovernedToolCall } from "./mcp-proxy.js";
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+
+// ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
+// seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 
 /**
  * ADR-0124 — THE KILL SWITCH AND SAFE MODES, PROVED BY ATTACK.
@@ -164,6 +169,7 @@ async function startUpstream(): Promise<{ url: string; close: () => Promise<void
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "a".repeat(64) });
 
   const u = await post("/v1/users", {
@@ -205,6 +211,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreStrictAdmission?.();
   await setMode("normal", "adr0124 teardown — returning the shared database to normal");
   await upstreamClose?.();
   app.server.closeAllConnections();

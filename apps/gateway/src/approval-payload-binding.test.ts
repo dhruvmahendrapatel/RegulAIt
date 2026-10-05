@@ -18,6 +18,11 @@ import {
 import { approvalArgumentsDigest } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { executeGovernedToolCall } from "./mcp-proxy.js";
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+
+// ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
+// seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 
 /**
  * F05 / ADR-0104 — AN APPROVAL IS BOUND TO THE ARGUMENTS IT WAS APPROVED FOR.
@@ -195,6 +200,7 @@ async function queueAndApprove(opts: {
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "e".repeat(64) });
   await app.listen({ port: 0, host: "127.0.0.1" });
   const up = await startUpstream();
@@ -258,6 +264,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreStrictAdmission?.();
   app.server.closeAllConnections();
   await app.close();
   await upstreamClose();

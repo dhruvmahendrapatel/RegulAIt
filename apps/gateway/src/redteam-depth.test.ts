@@ -59,6 +59,11 @@ import {
   type RedTeamProbeAsr,
 } from "@regulait/shared";
 import { buildApp } from "./app.js";
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+
+// ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
+// seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -109,6 +114,7 @@ const statOf = (stats: RedTeamProbeAsr[], key: string) => stats.find((s) => s.pr
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
 
   const anna = await makeUser("rtd-anna@example.com");
@@ -204,6 +210,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreStrictAdmission?.();
   // leave no cross-suite footprint: the compliance profile this file creates is
   // under its own tag, and the classified project is its own.
   // this file's compliance profile sits under its own `rtd-hipaa` tag and its

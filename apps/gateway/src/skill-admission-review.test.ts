@@ -10,6 +10,11 @@ import { and, auditLog, builderAgentSkills, builderAgents, builderSkills, eq, sq
 import { builderKit, type BuilderKit, type Person } from "./testing/builder-fixture.js";
 import { buildSystemPrompt } from "./builder-runtime.js";
 import { runSkillAdmissionRescan, skillDigest } from "./skill-admission.js";
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+
+// ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
+// seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 
 let k: BuilderKit;
 let owner: Person;
@@ -50,6 +55,7 @@ const setLink = (agentId: string, skillId: string, values: Partial<typeof builde
 
 beforeAll(async () => {
   k = await builderKit("bld-rev");
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(k.db);
   owner = await k.person("owner");
   colleague = await k.person("colleague");
   admin = await k.person("admin", { admin: true });
@@ -57,7 +63,10 @@ beforeAll(async () => {
   await k.grantModel(owner.id, model);
 }, 120_000);
 
-afterAll(async () => k.close());
+afterAll(async () => {
+  await restoreStrictAdmission?.();
+  await k.close();
+});
 
 describe("finding 1 — the skill NAME is pinned, scanned, digested and validated", () => {
   it("a rename is a new version and 'update available'; the agent keeps the pinned name; a held name never reaches a prompt", async () => {

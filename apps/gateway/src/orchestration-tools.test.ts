@@ -7,6 +7,11 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { z } from "zod";
 import { createDb, runMigrations, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+
+// ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
+// seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 
 /**
  * PILLAR 7 DEPTH — tool-using multi-turn workers. A worker node becomes a
@@ -124,6 +129,7 @@ const mkNode = (id: string, agentId: string, extra: Record<string, unknown> = {}
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "a".repeat(64) });
   upstream = await startUpstream();
   approverId = await mkUser("otools-approver@example.com", "Otools Approver");
@@ -135,6 +141,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreStrictAdmission?.();
   app.server.closeAllConnections();
   await app.close();
   await upstream.close();

@@ -41,6 +41,11 @@ import { buildApp } from "./app.js";
 import { governedEvaluate } from "./governed-evaluate.js";
 import { abacPrincipalFromRequest } from "./abac-principal.js";
 import { assembleAbacRequest, loadActiveAbacPolicies } from "./abac.js";
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+
+// ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
+// seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -138,6 +143,7 @@ async function atTime<T>(iso: string, fn: () => Promise<T>): Promise<T> {
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
   app = buildApp(db, { bootstrapToken: BOOT });
 
   userId = await mkUser("abac-pat@example.com");
@@ -187,6 +193,7 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  await restoreStrictAdmission?.();
   // Active ABAC policies are GLOBAL state: leaving one enabled would silently
   // change what every later file's governed calls decide. Delete everything
   // this file created (cascades the version rows), then hand the process TZ

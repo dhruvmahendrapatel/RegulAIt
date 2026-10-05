@@ -28,7 +28,7 @@
  * ABSENT even with an OIDC provider row present and enabled.
  *
  * SHARED-STATE DISCIPLINE. This file mutates the `org_settings` singleton's
- * `mcpAdmissionMode` and restores it to the shipped `off` in `afterAll`; it
+ * `mcpAdmissionMode` and restores the value it found in `afterAll`; it
  * deletes exactly the servers, users and OIDC row it created; and every count
  * assertion is a DELTA, never an absolute, except inside the emptiness checks
  * that are scoped to a server this file alone created.
@@ -62,6 +62,13 @@ import {
   manifestDigest,
 } from "@regulait/shared";
 import { buildApp } from "./app.js";
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+import { loadOrgSettings } from "./org-settings.js";
+
+// ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
+// seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
+let foundAdmissionMode: "off" | "log" | "enforce" = "enforce";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -258,6 +265,8 @@ const auditSince = async (since: Date, ruleIds: string[]) =>
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
+  foundAdmissionMode = (await loadOrgSettings(db)).mcpAdmissionMode;
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   await app.ready();
   cleanUpstream = await startUpstream("clean");
@@ -284,8 +293,9 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
-  // restore the org singleton to the SHIPPED posture for whatever runs next
-  await setMode("off");
+  await restoreStrictAdmission?.();
+  // restore the org singleton to the posture it FOUND (ADR-0181: shipped `enforce`)
+  await setMode(foundAdmissionMode);
   if (createdServerIds.length > 0) {
     await db.delete(mcpServers).where(inArray(mcpServers.id, createdServerIds));
   }
@@ -404,10 +414,13 @@ describe("ADR-0097 — the scanner itself", () => {
 // 1. The DEFAULT is byte-identical — the load-bearing assertion
 // ===========================================================================
 
-describe("ADR-0097 — the knob's default changes nothing", () => {
+describe("ADR-0097 — `off` changes nothing (an admin's relaxation since ADR-0181)", () => {
   let serverId: string;
 
-  it("ships `off`, and a POISONED manifest under it behaves exactly as before", async () => {
+  it("relaxed to `off` by an admin, a POISONED manifest behaves exactly as before", async () => {
+    // the shipped value (enforce, ADR-0181) is pinned on a FRESH org by
+    // zz-adr0181-sc-strict-defaults.test.ts, not against this shared database
+    await setMode("off");
     const settings = await app.inject({ method: "GET", headers: AUTH, url: "/v1/org/settings" });
     expect(settings.json().settings.mcpAdmissionMode).toBe("off");
 
@@ -656,9 +669,9 @@ describe("ADR-0097 — enforce mode holds a poisoned server", () => {
   });
 
   it("restores the shipped posture", async () => {
-    await setMode("off");
+    await setMode("enforce");
     const settings = await app.inject({ method: "GET", headers: AUTH, url: "/v1/org/settings" });
-    expect(settings.json().settings.mcpAdmissionMode).toBe("off");
+    expect(settings.json().settings.mcpAdmissionMode).toBe("enforce");
   });
 });
 

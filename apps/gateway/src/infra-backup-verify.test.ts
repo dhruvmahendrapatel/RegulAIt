@@ -92,19 +92,19 @@ describe("runBackupVerifyOnce — honest, source-labelled ledger rows", () => {
 describe("org toggle + scheduler shape", () => {
   it("backupVerifyEnabled defaults OFF with a 24h interval; the PUT flips it and is audited", async () => {
     const s = await app.inject({ method: "GET", url: "/v1/org/settings", headers: adminAuth });
-    expect(s.json().settings.backupVerifyEnabled).toBe(false); // default = today
+    expect(s.json().settings.backupVerifyEnabled).toBe(true); // ADR-0181: on by default
     expect(s.json().settings.backupVerifyIntervalHours).toBe(24);
     const put = await app.inject({
       method: "PUT", url: "/v1/org/settings", headers: adminAuth,
-      payload: { backupVerifyEnabled: true, backupVerifyIntervalHours: 6 },
+      payload: { backupVerifyEnabled: false, backupVerifyIntervalHours: 6 },
     });
     expect(put.statusCode).toBe(200);
-    expect(put.json().settings.backupVerifyEnabled).toBe(true);
+    expect(put.json().settings.backupVerifyEnabled).toBe(false);
     expect(put.json().settings.backupVerifyIntervalHours).toBe(6);
-    // restore the default so the rest of the suite sees today's behaviour
+    // restore the shipped default (ADR-0181: on) for the rest of the suite
     await app.inject({
       method: "PUT", url: "/v1/org/settings", headers: adminAuth,
-      payload: { backupVerifyEnabled: false, backupVerifyIntervalHours: 24 },
+      payload: { backupVerifyEnabled: true, backupVerifyIntervalHours: 24 },
     });
   });
 

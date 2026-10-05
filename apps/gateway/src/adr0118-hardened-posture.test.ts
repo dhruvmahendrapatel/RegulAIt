@@ -46,7 +46,7 @@ async function restoreShippedDefaults() {
     headers: AUTH,
     payload: {
       defaultPiiMode: "none",
-      mcpAdmissionMode: "off",
+      mcpAdmissionMode: "enforce", // ADR-0181 ships enforce
       useCaseGateMode: "off",
       dispatchAttributionRequired: false,
       semanticCachePolicy: "opt_in",

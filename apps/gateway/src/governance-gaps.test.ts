@@ -21,6 +21,11 @@ import {
 import { buildApp } from "./app.js";
 import { installLicenseFixture, removeLicenseFixture } from "./testing/license-fixture.js";
 import { PROJECT_HEADER } from "./mcp-proxy.js";
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+
+// ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
+// seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 
 /**
  * ADR-0019 — the four governance gaps, end to end at the gateway edge.
@@ -188,6 +193,7 @@ async function invokeAgent(agentId: string, extra: Record<string, unknown> = {})
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   // ADR-0052 §4: this suite exercises a route now tier-gated on
   // `advanced_orchestration` — run under a real signed license granting it
@@ -287,6 +293,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreStrictAdmission?.();
   await removeLicenseFixture(db);
   app.server.closeAllConnections();
   await app.close();

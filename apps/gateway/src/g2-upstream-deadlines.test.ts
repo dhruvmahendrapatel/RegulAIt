@@ -27,6 +27,11 @@ import { buildApp } from "./app.js";
 import { TIMEOUT_DEFAULTS, resolveTimeoutConfig } from "./timeouts.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+
+// ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
+// seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -64,6 +69,7 @@ async function listenOnEphemeral(server: net.Server | http.Server): Promise<numb
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
 
   // A deliberately tiny connect deadline. The default is 10s and a test that
   // waited that long twice would be the slowest file in the suite; the
@@ -105,6 +111,7 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  await restoreStrictAdmission?.();
   app.server.closeAllConnections();
   await app.close();
   for (const sock of blackHoleSockets) sock.destroy();

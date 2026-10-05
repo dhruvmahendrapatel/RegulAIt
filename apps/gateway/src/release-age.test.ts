@@ -27,6 +27,11 @@ import { importRegistryEntry, registryEntryDigest } from "./mcp-registry.js";
 import { recordSighting } from "./release-age.js";
 import { skillDigest } from "./skill-admission.js";
 import { manifestDigest } from "@regulait/shared";
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+
+// ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
+// seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 
 let k: BuilderKit;
 let owner: Person;
@@ -76,17 +81,20 @@ const tools = (desc: string) => [{ name: "lookup", description: desc, inputSchem
 
 beforeAll(async () => {
   k = await builderKit("rel-age");
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(k.db, ["mcpPrivateRangesDefault"]);
   owner = await k.person("owner");
   admin = await k.person("admin", { admin: true });
 }, 120_000);
 
 afterAll(async () => {
+  await restoreStrictAdmission?.();
   // M-068: global state this file created is removed before it ends
-  await k.req("PUT", "/v1/org/settings", k.BOOT, { minReleaseAgeDays: 0 });
+  // ADR-0181: the shipped default is 7, so that is what is handed on
+  await k.req("PUT", "/v1/org/settings", k.BOOT, { minReleaseAgeDays: 7 });
   await k.close();
 });
 
-describe("off (0, the default) quarantines nothing", () => {
+describe("off (0, an admin's relaxation since ADR-0181) quarantines nothing", () => {
   it("a brand-new server and a brand-new skill are usable at once", async () => {
     await setDays(0);
     const id = await registerServer(`rel-off-${k.RUN}`);

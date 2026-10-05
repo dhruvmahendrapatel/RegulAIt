@@ -21,6 +21,11 @@ import { DEFAULT_APPROVAL_TTL_HOURS } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { governedEvaluate } from "./governed-evaluate.js";
 import { consumeBoundApproval, executeGovernedToolCall } from "./mcp-proxy.js";
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+
+// ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
+// seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 
 /**
  * F14 / ADR-0105 — A CONSENT IS BOUND TO THE POLICY THAT DEMANDED IT, AND IT
@@ -211,6 +216,7 @@ async function activateRuleVersion(ruleId: string, body: Record<string, unknown>
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "f".repeat(64) });
   await app.listen({ port: 0, host: "127.0.0.1" });
   const up = await startUpstream();
@@ -264,6 +270,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreStrictAdmission?.();
   app.server.closeAllConnections();
   await app.close();
   await upstreamClose();
