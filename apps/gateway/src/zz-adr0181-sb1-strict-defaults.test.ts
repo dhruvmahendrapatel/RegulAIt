@@ -213,6 +213,18 @@ describe("ADR-0181 SB1 — the strict posture bites on the dispatch path", () =>
     expect(r.json().error).toBe("streaming_rejected_on_block_project");
   });
 
+  it("a client that declares it accepts a buffered answer gets one, disclosed, instead of the 400", async () => {
+    const r = await app.inject({
+      method: "POST",
+      url: `/v1/agents/${mockAgentId}/invoke`,
+      headers: { ...userAuth, "x-regulait-accept-buffered": "1" },
+      payload: { mode: "execute", dispatch: true, input: "Summarize the quarterly report", stream: true },
+    });
+    expect(r.statusCode, r.body).toBe(200);
+    expect(r.headers["content-type"]).toContain("application/json");
+    expect(r.json().streamingSuppressed).toBe(true);
+  });
+
   it("a provider key in the environment is NOT used: the env fallback is off", async () => {
     process.env.GOOGLE_API_KEY = SYNTHETIC_GOOGLE_KEY;
     const r = await invoke(googleAgentId, { input: "Summarize the quarterly report" });

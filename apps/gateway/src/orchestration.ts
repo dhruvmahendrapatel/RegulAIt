@@ -62,6 +62,7 @@ import {
   runEventSchema,
 } from "@regulait/shared";
 import {
+  acceptsBufferedStream,
   agentProviderToken,
   configuredProviders,
   executeGovernedDispatch,
@@ -155,12 +156,14 @@ async function resolveStreamRequest(
   db: Db,
   rawBody: unknown,
   projectId: string | null,
+  acceptBuffered = false,
 ): Promise<StreamRequest> {
   const { stream } = streamFlagSchema.parse(rawBody ?? {});
   if (stream !== true) return { mode: "off" };
   if ((await projectPiiMode(db, projectId)) !== "block") return { mode: "stream" };
   const iset = await loadInterceptionSettings(db);
-  if (iset.streamingOnBlockMode === "reject") {
+  // ADR-0181: a client that accepts a buffered answer is not refused
+  if (iset.streamingOnBlockMode === "reject" && !acceptBuffered) {
     return {
       mode: "rejected",
       status: 400,
@@ -2314,7 +2317,7 @@ export function registerOrchestrationRoutes(
     if (loaded.error) return reply.status(loaded.error).send({ error: "unavailable" });
     if (!req.authCtx.userId) return reply.status(403).send({ error: "bootstrap_cannot_drive" });
 
-    const streamReq = await resolveStreamRequest(db, req.body, loaded.run.projectId ?? null);
+    const streamReq = await resolveStreamRequest(db, req.body, loaded.run.projectId ?? null, acceptsBufferedStream(req.headers));
     if (streamReq.mode === "rejected") return reply.status(streamReq.status).send(streamReq.body);
 
     if (streamReq.mode === "stream") {
@@ -2413,7 +2416,7 @@ export function registerOrchestrationRoutes(
     // the JSON response carries `streamingSuppressed: true` (400 under
     // ADR-0021 'reject'). Without stream:true this route is byte-identical to
     // its pre-streaming behaviour.
-    const streamReq = await resolveStreamRequest(db, req.body, run.projectId ?? null);
+    const streamReq = await resolveStreamRequest(db, req.body, run.projectId ?? null, acceptsBufferedStream(req.headers));
     if (streamReq.mode === "rejected") return reply.status(streamReq.status).send(streamReq.body);
     const sse = streamReq.mode === "stream" ? sseChannel(reply) : null;
 

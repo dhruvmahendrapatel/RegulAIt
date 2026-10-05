@@ -15,7 +15,7 @@ import {
   type DragEvent,
 } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, errMessage, readSse, ssePost, STREAM_REJECTED_HEADER } from "../../api/client";
+import { api, errMessage, readSse, ssePost } from "../../api/client";
 import type {
   ConversationDetail,
   ConversationSummary,
@@ -429,7 +429,7 @@ export default function ChatPage() {
               ? "The model declined this request."
               : (j.dispatch.outputText ?? "");
             if (j.dispatch.pii) d.pii = j.dispatch.pii;
-            if (j.streamingSuppressed || res.headers.get(STREAM_REJECTED_HEADER)) {
+            if (j.streamingSuppressed) {
               d.note =
                 "Streaming is disabled here: an output control (the PII mode or a guardrail) is in block mode, so output is checked in full before any of it is sent.";
             }

@@ -2556,6 +2556,20 @@ export function platformEnvKeyName(provider: string): string | null {
 export const ENV_FALLBACK_PROVIDERS = ["anthropic", "openai", "google", "xai"] as const;
 
 /**
+ * ADR-0181: the request header a client sends to say "if this call may not
+ * stream, answer it buffered instead". `streamingOnBlockMode: 'reject'` (the
+ * strict default) exists for clients that REQUIRE a stream and must learn at
+ * once that they will not get one; a client that names this header has said
+ * it does not require one, so it gets ADR-0019's buffered, disclosed answer
+ * rather than a 400. The SPA sends it; third-party clients do not.
+ */
+export const ACCEPT_BUFFERED_STREAM_HEADER = "x-regulait-accept-buffered";
+export function acceptsBufferedStream(headers: Record<string, string | string[] | undefined>): boolean {
+  const v = headers[ACCEPT_BUFFERED_STREAM_HEADER];
+  return (Array.isArray(v) ? v[0] : v)?.trim() === "1";
+}
+
+/**
  * ADR-0034 — the key an agent is looked up under in `configuredProviders`'s
  * set. For every shipped vendor this is just the provider kind (today's
  * behaviour, byte-identical). For a custom-provider agent it is the SPECIFIC
@@ -3756,7 +3770,9 @@ export function registerAgentConnectorRoutes(
     // streaming learns immediately instead of receiving an unasked-for shape.
     if (streamSuppressed) {
       const iset = await loadInterceptionSettings(db);
-      if (iset.streamingOnBlockMode === "reject") {
+      // ADR-0181: a client that declares it accepts a buffered answer did not
+      // REQUIRE streaming, which is the only client 'reject' exists to warn
+      if (iset.streamingOnBlockMode === "reject" && !acceptsBufferedStream(req.headers)) {
         return reply.status(400).send({
           error: "streaming_rejected_on_block_project",
           detail:

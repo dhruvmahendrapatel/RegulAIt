@@ -19,7 +19,7 @@
 import { useCallback, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, errMessage, readSse, ssePost, STREAM_REJECTED_HEADER } from "../../api/client";
+import { api, errMessage, readSse, ssePost } from "../../api/client";
 import type { MyAgentsResponse, NodeStatus, RunDetailResponse, RunGraphNode } from "../../api/types";
 import { ago, approvalStageLabel, fmtDur, fmtUsd } from "../../api/format";
 import { useSession } from "../../session/SessionContext";
@@ -227,7 +227,7 @@ export default function RunDetailPage() {
         void refresh();
         return;
       }
-      if (j?.streamingSuppressed || res.headers.get(STREAM_REJECTED_HEADER)) toast(STREAM_SUPPRESSED_NOTE);
+      if (j?.streamingSuppressed) toast(STREAM_SUPPRESSED_NOTE);
       const label = STOP_LABELS[j?.stoppedReason ?? ""] ?? `stopped: ${String(j?.stoppedReason ?? "").replaceAll("_", " ")}`;
       toast(`Auto-advance took ${j?.steps?.length ?? 0} step${(j?.steps?.length ?? 0) === 1 ? "" : "s"} — ${label}`);
       void refresh();
@@ -298,7 +298,7 @@ export default function RunDetailPage() {
             void refresh();
             return;
           }
-          if (j?.streamingSuppressed || res.headers.get(STREAM_REJECTED_HEADER)) toast(STREAM_SUPPRESSED_NOTE);
+          if (j?.streamingSuppressed) toast(STREAM_SUPPRESSED_NOTE);
         }
         await api.post(`/v1/runs/${runId}/events`, { kind: "node_submitted", nodeId: node.id });
         toast("Node dispatched — output submitted for review", "success");
