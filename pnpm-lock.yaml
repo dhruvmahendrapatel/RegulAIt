@@ -128,12 +128,18 @@ importers:
       ajv-formats:
         specifier: 3.0.1
         version: 3.0.1(ajv@8.20.0)
+      diff:
+        specifier: 9.0.0
+        version: 9.0.0
       fastify:
         specifier: ^5.12.2
         version: 5.12.5
       openid-client:
         specifier: ^6.8.4
         version: 6.8.8
+      standardwebhooks:
+        specifier: 1.1.1
+        version: 1.1.1
       zod:
         specifier: ^3.25.67
         version: 3.25.76
@@ -1680,6 +1686,10 @@ packages:
   dequal@2.0.3:
     resolution: {integrity: sha512-0je+qPKHEMohvfRTCEo3CrPG6cAzAYgmzKyxRiYSSDkS6eGJdyVJm7WaYA5ECaAD9wLB2T4EEeymA5aFVcYXCA==}
     engines: {node: '>=6'}
+
+  diff@9.0.0:
+    resolution: {integrity: sha512-svtcdpS8CgJyqAjEQIXdb3OjhFVVYjzGAPO8WGCmRbrml64SPw/jJD4GoE98aR7r25A0XcgrK3F02yw9R/vhQw==}
+    engines: {node: '>=0.3.1'}
 
   drizzle-kit@0.31.11:
     resolution: {integrity: sha512-YCYqxTLIB2OCqf6w9/Vef13baBVbwQIPcbT4Y56AfO6B9ajZhDhD8Jkveg/hJvT/iuMloKD/IYYkyMMNhr7Kqg==}
@@ -4425,6 +4435,8 @@ snapshots:
   depd@2.0.0: {}
 
   dequal@2.0.3: {}
+
+  diff@9.0.0: {}
 
   drizzle-kit@0.31.11:
     dependencies:

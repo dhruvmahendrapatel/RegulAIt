@@ -23,6 +23,7 @@ export const MODEL_POLICY_FEATURES = [
   "evals",
   "orchestration",
   "compat",
+  "playground",
 ] as const;
 export type ModelPolicyFeature = (typeof MODEL_POLICY_FEATURES)[number];
 
@@ -34,6 +35,7 @@ export const MODEL_POLICY_FEATURE_LABELS: Record<ModelPolicyFeature, string> = {
   evals: "Evaluations",
   orchestration: "Orchestration",
   compat: "Compatible APIs",
+  playground: "Prompt playground",
 };
 
 /** one line per feature: where in the product it applies */
@@ -45,6 +47,7 @@ export const MODEL_POLICY_FEATURE_HINTS: Record<ModelPolicyFeature, string> = {
   evals: "Evaluation and red-team runs — the agent under test and the judge.",
   orchestration: "Runs: plan envelopes, workers and goal decomposition.",
   compat: "The OpenAI- and Anthropic-compatible endpoints and their model list.",
+  playground: "The Agent Builder's prompt playground: single runs and evaluate-mode rows.",
 };
 
 export const MODEL_POLICY_DATA_CLASSES = ["public", "internal", "confidential", "regulated"] as const;

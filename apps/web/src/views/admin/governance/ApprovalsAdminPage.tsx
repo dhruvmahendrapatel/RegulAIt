@@ -38,7 +38,7 @@ import v from "../../views.module.css";
 const labelOf = (r: Approval) => isIntakeSignoff(r) ? "AI use case sign-off" : r.objectType === "mcp_tool" ? r.toolName ?? "MCP action" : approvalStageLabel(r) ?? r.stageId ?? r.objectType;
 
 /**
- * Mirrors `APPROVAL_OBJECT_TYPES` in @regulait/shared — the eleven kinds THE ONE
+ * Mirrors `APPROVAL_OBJECT_TYPES` in @regulait/shared — the twelve kinds THE ONE
  * QUEUE holds. The SPA deliberately does not import the shared package (the
  * convention used for every other mirrored enum here), and the gateway parses
  * this parameter with that exact enum, so a value drifting out of the shared
@@ -61,6 +61,7 @@ const OBJECT_TYPES: Array<[string, string]> = [
   ["grant_certification", "certification-campaign item"],
   ["sod_override", "separation-of-duties override"],
   ["remediation", "governance-alert remediation"],
+  ["prompt_promotion", "prompt promotion to prod"],
 ];
 
 export default function ApprovalsAdminPage() {

@@ -87,6 +87,8 @@ export const APPROVAL_OBJECT_TYPES = [
   "sod_override",
   // ADR-0159: an executable remediation for a governance-monitor alert
   "remediation",
+  // ADR-0173 batch 2b: moving a prompt's prod tag (bound to prompt, tag, commit hash)
+  "prompt_promotion",
 ] as const;
 export type ApprovalObjectType = (typeof APPROVAL_OBJECT_TYPES)[number];
 
@@ -103,6 +105,7 @@ export const APPROVAL_OBJECT_TYPE_LABELS: Record<ApprovalObjectType, string> = {
   grant_certification: "certification-campaign item",
   sod_override: "separation-of-duties override",
   remediation: "governance remediation",
+  prompt_promotion: "prompt promotion to prod",
 };
 
 /**

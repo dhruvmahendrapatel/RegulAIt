@@ -97,7 +97,7 @@ describe("the policy itself", () => {
       expect(r.statusCode, r.body).toBe(200);
       expect(r.json().rules).toEqual([]);
       expect(r.json().features.map((f: { id: string }) => f.id)).toEqual([
-        "chat", "builder", "copilot", "intake_assist", "evals", "orchestration", "compat",
+        "chat", "builder", "copilot", "intake_assist", "evals", "orchestration", "compat", "playground",
       ]);
     }
     const inv = await k.req("POST", `/v1/agents/${BLOCKED}/invoke`, owner.auth, { mode: "chat", input: "hi" });

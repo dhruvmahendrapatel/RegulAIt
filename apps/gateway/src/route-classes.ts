@@ -229,6 +229,25 @@ export const NON_ADMIN_ROUTES = new Set([
   // picker shows "Not allowed here" from it. Non-admins see binding ids only
   // for bindings they hold a grant on. The PUT stays admin-only.
   "GET /v1/model-policy",
+  // ADR-0173 batch 2b — the prompt registry and the playground are a person's
+  // own work, like the builder: visibility (owner / workspace / named people /
+  // a promotion's named approver / admin) and edit (owner or admin) are
+  // checked in-handler, an identity-less token is refused, moving `prod` goes
+  // through the approvals queue, and every playground call is a governed
+  // dispatch as the caller. The outbound-webhook routes are deliberately NOT
+  // here: what leaves the deployment, and to where, is an admin decision.
+  "GET /v1/prompts",
+  "POST /v1/prompts",
+  "GET /v1/prompts/resolve",
+  "GET /v1/prompts/:promptId",
+  "PATCH /v1/prompts/:promptId",
+  "DELETE /v1/prompts/:promptId",
+  "POST /v1/prompts/:promptId/commits",
+  "GET /v1/prompts/:promptId/commits/:hash",
+  "GET /v1/prompts/:promptId/diff",
+  "PUT /v1/prompts/:promptId/tags/:tag",
+  "POST /v1/playground/run",
+  "POST /v1/playground/evaluate",
   "PATCH /v1/use-cases/:useCaseId",
   // ADR-0171 / AER-050: the intake wizard's own drafts. Any signed-in user
   // keeps their OWN draft (the handler refuses a token with no user identity,
