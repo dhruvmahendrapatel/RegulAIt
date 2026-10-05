@@ -46,6 +46,76 @@ permissions:
   contents: read
 
 jobs:
+  # ADR-0179 (AER-028, AER-036): the plugin's decision logic with `kong`
+  # stubbed — data-scope rules unsupported at the edge and tagged as such, and
+  # the mixed-auth session-origin cases (key-auth and basic-auth derive; OIDC,
+  # SAML and jwt routes carry only the operator's assertion; a contradiction is
+  # refused). Its own job: it needs no docker and no gateway, so it answers in
+  # seconds and is not hidden behind the container harness when that fails.
+  #
+  # OPEN SOURCE FIRST (ADR-0176; ADR-0179 review, finding 9). The spec used to
+  # run on a hand-written runner under an unpinned `lua5.4`, which is neither
+  # the interpreter Kong runs nor a validated runner. It now runs on busted
+  # (MIT) under LuaJIT — the Lua 5.1 dialect of the OpenResty LuaJIT 2.1 that
+  # Kong embeds — and every piece is pinned exactly:
+  #   * the runner image by name (`ubuntu-24.04`, not `ubuntu-latest`), so the
+  #     apt versions below exist;
+  #   * LuaJIT and LuaRocks by exact Debian version;
+  #   * busted and every transitive rock by `==` in
+  #     integrations/kong/test/regulait-authz-spec-dev-1.rockspec, fetched only
+  #     from luarocks.org (`--only-server`, so no fallback mirror is consulted),
+  #     and the installed tree is then compared against that list.
+  # The spec uses no OpenResty-only API, so upstream LuaJIT 2.1 and the
+  # OpenResty fork run it identically.
+  kong-plugin-spec:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      LUAJIT_DEB: "2.1.0+git20231223.c525bcb+dfsg-1"
+      LUAROCKS_DEB: "3.8.0+dfsg1-1"
+      ROCKSPEC: integrations/kong/test/regulait-authz-spec-dev-1.rockspec
+      ROCKS_TREE: /tmp/regulait-kong-rocks
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the pinned LuaJIT and LuaRocks
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            "luajit=$LUAJIT_DEB" "libluajit-5.1-2=$LUAJIT_DEB" \
+            "libluajit-5.1-common=$LUAJIT_DEB" "libluajit-5.1-dev=$LUAJIT_DEB" \
+            "luarocks=$LUAROCKS_DEB"
+          luajit -v
+          luarocks --version
+
+      - name: Install busted and its rocks at the pinned versions
+        # C rocks (luafilesystem, luasystem, lua-term) build against LuaJIT's
+        # own headers, so what is loaded is what was compiled for it.
+        run: |
+          luarocks --lua-version=5.1 --tree "$ROCKS_TREE" --only-server https://luarocks.org \
+            build --only-deps "$ROCKSPEC" LUA_INCDIR=/usr/include/luajit-2.1
+
+      - name: Fail if the installed rocks differ from the pin list
+        # One list: the rockspec. Any rock it does not name, or a version it
+        # does not name, fails here rather than running the spec on it.
+        run: |
+          expected=$(grep -oE '"[a-z_-]+ == [^"]+"' "$ROCKSPEC" | tr -d '"' | awk '{print $1" "$3}' | sort)
+          installed=$(luarocks --lua-version=5.1 --tree "$ROCKS_TREE" list --porcelain | awk '{print $1" "$2}' | sort)
+          echo "$installed"
+          diff <(echo "$expected") <(echo "$installed")
+
+      - name: Unit-check the Kong plugin's decision logic (busted on LuaJIT)
+        working-directory: integrations/kong
+        # busted is run BY luajit explicitly rather than through the luarocks
+        # wrapper, whose shebang names whichever `lua` the tree was set up for.
+        # A run that found no spec cases must not pass, so the count is checked.
+        run: |
+          eval "$(luarocks --lua-version=5.1 --tree "$ROCKS_TREE" path)"
+          luajit "$ROCKS_TREE/lib/luarocks/rocks-5.1/busted/2.3.0-1/bin/busted" -o TAP | tee "$RUNNER_TEMP/busted.tap"
+          n=$(grep -cE '^ok ' "$RUNNER_TEMP/busted.tap")
+          echo "passed: $n"
+          test "$n" -ge 24
+
   kong-adapter:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -114,17 +184,6 @@ jobs:
           echo "kong repo digests:   $(docker image inspect --format '{{join .RepoDigests ", "}}' "$KONG_IMAGE")"
           echo "postgres image ref:  $POSTGRES_IMAGE"
           echo "postgres repo digests: $(docker image inspect --format '{{join .RepoDigests ", "}}' "$POSTGRES_IMAGE")"
-
-      # ADR-0179 (AER-028, AER-036): the plugin's decision logic with `kong`
-      # stubbed — data-scope rules unsupported at the edge and tagged as such,
-      # and the mixed-auth session-origin cases (key-auth and basic-auth derive;
-      # OIDC, SAML and jwt routes carry only the operator's assertion; a
-      # contradiction is refused). Seconds, and runnable anywhere `lua` is.
-      - name: Unit-check the Kong plugin's decision logic
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq lua5.4
-          lua5.4 integrations/kong/test/handler_spec.lua
 
       - name: Verify the Kong adapter's deny path
         run: node integrations/kong/test/verify.mjs
