@@ -80,7 +80,10 @@ jobs:
       group: demo-journey-${{ github.event.pull_request.number || github.ref }}
       cancel-in-progress: true
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 20, not 15: this run took 14m51s on 2026-10-05, and the serial mocked suite
+    # alone ~11.5 min (ADR-0179 added specs). Re-measure, or shard the mocked
+    # suite, before raising it again.
+    timeout-minutes: 20
 
     services:
       postgres:
