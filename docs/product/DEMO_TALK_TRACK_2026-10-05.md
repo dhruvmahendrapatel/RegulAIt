@@ -66,7 +66,8 @@ actually saw — and is labelled as an attestation where it cannot be.
 - **Deploy gate**: a pipeline asks `POST /v1/gates/deploy` whether a use case may ship. Approval,
   the approved stack, halts, the model-risk decision and open alerts combine into allow/deny with
   reasons; an open HIGH alert blocks, an acknowledged one warns; every answer is audited with the
-  build ref (ADR-0161). Shown live with `demo:gate`.
+  build ref (ADR-0161). It also checks, live and strict by default, that the AI tests the risk tier
+  requires passed recently on the configuration being shipped (ADR-0180). Shown live with `demo:gate`.
 
 ### 8. Regulatory intelligence joined to our own state
 - A curated, source-dated feed of obligations (e.g. the Digital Omnibus on AI moving Annex III

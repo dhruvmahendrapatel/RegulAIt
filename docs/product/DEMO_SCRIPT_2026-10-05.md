@@ -219,14 +219,24 @@ back afterwards; a live run leaves it set — recreate the database before the n
 - **Action:** `pnpm --filter @regulait/gateway demo:gate -- "Real-Time Fraud Detection Engine" production build-4417`
 - **Screen:** `DENY` with exactly two **BLOCK open_high_alert** lines — an inherited HIGH rating
   from *Acme Internal AI Platform*, and *1 call … to premium-mock was served by fast-mock, which is
-  outside its approved stack* — then *pipeline STOPPED*; exit code 1. (Verified on the 2026-10-03
+  outside its approved stack* — then `assurance: enforced (mode enforce)`, one plain-language line
+  per reason code, and *pipeline STOPPED*; exit code 1. (Verified on the 2026-10-03
   integrated build: since agent stewardship, premium-mock has a steward, so the earlier
   unowned-agent WARN no longer prints.)
+- **Why no required-test line (ADR-0180):** the high tier requires the OWASP prompt-injection,
+  sensitive-information, excessive-agency and agentic test classes, passed within 30 days on the
+  agent's current configuration. `demo:intake` runs the *Demo assurance suite* red-team library
+  against premium-mock (and balanced-mock) through the real red-team route, so those requirements
+  are met and add no line. On a database prepared more than 30 days earlier, the gate truthfully adds
+  **BLOCK required_test_stale**; re-run `demo:intake` to refresh the evidence.
 - **Then:** in Profile A, acknowledge those two alerts (3B shows how), re-run the command:
   `ALLOW` with the same items now **WARN acknowledged_high_alert**; exit 0.
 - **Say:** "The pipeline asks the same governance state the runtime enforces — approval, the
   approved stack, halts, the model-risk gate, open alerts. An open HIGH alert blocks; once a
-  person has acknowledged it, it becomes a warning. Every answer is audited with the build ref."
+  person has acknowledged it, it becomes a warning. It also checks continuous assurance live: the
+  AI tests this risk tier requires must have passed recently, on the configuration being shipped,
+  for every agent. That check is strict by default; an admin can set it to warn or off, and the
+  gate says which. Every answer is audited with the build ref."
 
 ---
 
@@ -234,12 +244,13 @@ back afterwards; a live run leaves it set — recreate the database before the n
 
 ### 3A. Trust dashboard — Ada
 - **URL:** `/ui/admin/governance/trust`
-- **Screen:** six-axis radar, KPI tiles, heatmap. 2026-10-04 figures (NIST AI RMF pack v3, fresh
-  `demo:prepare`): bias 100 % (2/2), security **20 % (1/5)**, privacy 100 % (1/1), reliability 0 % (0/5),
-  safety 0 % (0/2), compliance 70 % (16/23); 53 % evidence coverage overall.
-- **Action:** point at the weakest axes (security 20 %, reliability and safety 0 %), then open the
-  **security** drill-down: 1 of 5 controls evidenced. The gaps are honest: no red-team run (NIST
-  MEASURE 2.7) and no MCP admission scan (MAP 4.2) has happened in this environment yet.
+- **Screen:** six-axis radar, KPI tiles, heatmap. 2026-10-05 figures (NIST AI RMF pack v3, fresh
+  `demo:prepare` with the ADR-0180 required-test runs): bias 100 % (2/2), security **40 % (2/5)**,
+  privacy 100 % (1/1), reliability 60 % (3/5), safety 0 % (0/2), compliance 70 % (16/23); 63 %
+  evidence coverage overall (24/38).
+- **Action:** point at the weakest axes (safety 0 %, security 40 %), then open the **security**
+  drill-down: 2 of 5 controls evidenced. The seeded required-test red-team runs now count as
+  evidence; the three remaining gaps are honest, and the drill-down names each one.
 - **Say:** "Each axis is evidence coverage: the share of applicable active-pack controls with
   evidence — measured from platform ledgers and guardrail configuration, with attestation-based
   controls labelled. A low number is a to-do list, not a grade: run a red-team pass and the security
@@ -262,7 +273,10 @@ back afterwards; a live run leaves it set — recreate the database before the n
     fast-mock, which is outside its approved stack"* — the cost optimizer moved approved traffic
     to an agent the approval never covered;
   - *"… depends on grok, which is unowned"* (since 2026-10-03 grok is the one seeded agent with
-    no steward; Dana is its named successor, so the remediation below promotes her).
+    no steward; Dana is its named successor, so the remediation below promotes her);
+  - *"Project ai-assurance-testing: 12 model calls in 7 days, no approved use case links this
+    project"* — since 2026-10-05 (ADR-0180): the seeded required-test red-team runs are billed to
+    their own project, and the monitor reports that spend honestly as traffic no use case covers.
 - **Action:**
   1. Open an **unowned-agent** alert → **Acknowledge** with a note.
   2. Under **Remediation**, the executable candidate *"Make Dana Developer the owner of …"*:
