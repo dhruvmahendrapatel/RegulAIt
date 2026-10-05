@@ -228,7 +228,10 @@ back afterwards; a live run leaves it set — recreate the database before the n
   agent's current configuration. `demo:intake` runs the *Demo assurance suite* red-team library
   against premium-mock (and balanced-mock) through the real red-team route, so those requirements
   are met and add no line. On a database prepared more than 30 days earlier, the gate truthfully adds
-  **BLOCK required_test_stale**; re-run `demo:intake` to refresh the evidence.
+  **BLOCK required_test_stale**; re-run `demo:intake` to refresh the evidence. Its one HIGH residual
+  risk (*Fraud model falsely blocks transactions …*) carries a seeded, time-boxed acceptance (Ada,
+  partial mitigation, two compensating controls, six months), so `residual_above_tolerance` does not
+  print either.
 - **Then:** in Profile A, acknowledge those two alerts (3B shows how), re-run the command:
   `ALLOW` with the same items now **WARN acknowledged_high_alert**; exit 0.
 - **Say:** "The pipeline asks the same governance state the runtime enforces — approval, the
@@ -276,7 +279,10 @@ back afterwards; a live run leaves it set — recreate the database before the n
     no steward; Dana is its named successor, so the remediation below promotes her);
   - *"Project ai-assurance-testing: 12 model calls in 7 days, no approved use case links this
     project"* — since 2026-10-05 (ADR-0180): the seeded required-test red-team runs are billed to
-    their own project, and the monitor reports that spend honestly as traffic no use case covers.
+    their own project, and the monitor reports that spend honestly as traffic no use case covers;
+  - two **residual_above_tolerance** alerts (ADR-0180): *HR Resume Screening Assistant* and
+    *Call-Centre Voice IVR Assistant* each carry a HIGH residual risk with no acceptance. Neither is
+    approved, so the story leaves them truthfully above tolerance.
 - **Action:**
   1. Open an **unowned-agent** alert → **Acknowledge** with a note.
   2. Under **Remediation**, the executable candidate *"Make Dana Developer the owner of …"*:
