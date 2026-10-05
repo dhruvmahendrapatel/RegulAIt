@@ -430,7 +430,22 @@ Llama Community licences, and some are no longer maintained. In summary:
 | PF-14 | Monitor rules ported from Sentinel's AI-agent hunting content (MCP-server baseline drift, sharing-scope expansion, instruction change after approval, jailbreak correlation); later, a RegulAIt rule pack for Sentinel users as an ADR-0135 export target | None for the rules |
 | PF-15 | SARIF import covers Strix output | Finding schema |
 | PF-17 | Pull langfuse evaluation scores into measurable conditions; langfuse and Phoenix stay customer-run OTLP destinations, never bundled | Connector health surface |
-| PF-20 | Evidently (Apache-2.0) as an optional drift sidecar; Apache DataSketches if privacy-preserving sketches are needed (whylogs is unmaintained) | PF-23, model telemetry |
+| PF-20 | Evidently (Apache-2.0) as an optional drift sidecar; mergeable drift profiles learned from whylogs (clean-room; no maintained DataSketches port fits); legal check of the Phoenix patents before any error-times-volume segment ranking | PF-23, model telemetry |
+
+**Learned from rejected projects (clean-room, ADR-0177 amendment).** We use what these projects do, not their code:
+- passkey-signed approvals (PF-01);
+- signed per-decision receipts with an offline verifier, and RFC 3161 timestamps on audit anchors (PF-09);
+- output-schema validation with a bounded re-ask (PF-05/PF-11);
+- an insecure-code output detector built on CodeShield's MIT rules (PF-11/PF-19);
+- runaway-agent limits on tool and connector calls (PF-03/PF-14);
+- coverage attestation and SARIF/CVSS import (PF-10/PF-15);
+- judge panels calibrated against human labels (2c/PF-11);
+- goal-hijack checks over traces (PF-14);
+- allow-list pickle scanning (PF-12);
+- system-prompt leak canaries (PF-11);
+- Apache-2.0 guard models (PF-11);
+- a durable SIEM forwarder (PF-14);
+- mergeable drift profiles (PF-20).
 
 ### PF-23 — P2 — Sidecar engine contract and the Engines page
 

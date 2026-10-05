@@ -99,7 +99,7 @@ a P2 or P3 item. "Never" means rejected. Licences were read from the repositorie
 | 19 | Arize-ai/phoenix | Server ELv2 with patent notices; client and OTel packages Apache-2.0 | **D** only: customers may point our OTLP export at their own copy. We never bundle or host it | Trace export settings (destination) | Soon (interop test) |
 | 20 | Scale3-Labs/langtrace | Server AGPL-3.0; dormant since 2025 | **E**. Agents using its SDK can still reach us through generic OTLP ingest (PF-08) | — | Never |
 | 21 | evidentlyai/evidently | Apache-2.0 | **B** an optional Python sidecar for statistical data drift and batch evals over sampled traces. Results feed measurable conditions (PF-17, PF-20). `DO_NOT_TRACK` forced on; its runtime word-list download is pre-baked | Governance alerts and conditions; a hashed report snapshot as evidence | Later (soon if PF-17 needs drift first) |
-| 22 | whylabs/whylogs | Apache-2.0; vendor shut down | **E**. If PF-20 needs privacy-preserving data sketches, evaluate Apache DataSketches directly | — | Never |
+| 22 | whylabs/whylogs | Apache-2.0; vendor shut down | **E**. Its idea (mergeable drift profiles) is in the clean-room amendment below. Python `datasketches` hasn't released since 2025-03 and there is no JavaScript port, so drift sketches come from the Evidently sidecar or a small permissive library | — | Never |
 
 **Standards that come with these projects (mode D):**
 - **OpenTelemetry GenAI semantic conventions** stay our primary trace vocabulary. The conventions moved to
@@ -218,3 +218,70 @@ contract ADR.
 Research notes with the evidence per project (licence files, release dates, telemetry switches, file paths) were produced
 on 2026-10-05 from shallow clones. The verdicts above are the decision record. A project's licence or maintenance status
 can change, so each adapter batch re-verifies before adding anything.
+
+## Amendment — clean-room study of the rejected and limited projects (owner, 2026-10-05)
+
+The owner asked: "whatever repositories that we decided never or discarded due to license, can we at least understand what
+they do and how they do it to include those features?" Yes, under clean-room rules:
+- For Elastic, BSL, AGPL and LGPL code, and for commercial `ee/` or `enterprise/` directories, we read only README files,
+  documentation and published specifications.
+- We describe each behaviour in our own words, and nothing is copied or closely paraphrased.
+- Our implementation is written from that description.
+- Ideas, behaviour and open standards are free to use. Code under those licences is not.
+- The open-source-first rule still applies to each feature: a permissive library is used where one exists.
+
+**Features worth building, ranked.** Each carries its PathForward item and phase.
+
+| # | Feature (learned from) | How it works | Permissive library or standard | Item | UI home | Phase |
+|---|---|---|---|---|---|---|
+| 1 | Passkey-signed approvals (asqav) | The approver's passkey signs the ADR-0104 action digest; the server re-checks the signature before execution | `@simplewebauthn/server` (MIT) | PF-01 | Approvals queue | Soon |
+| 2 | A signed receipt per decision, with an offline verifier (asqav, pipelock) | Canonical JSON (RFC 8785), SHA-256, Ed25519 signature, linked to the previous receipt. The verifier separates "invalid" from "could not check", and states what a pass cannot prove | `canonicalize` (Apache-2.0), only if it reproduces our exact bytes; otherwise our canonical JSON stays as a written exception | PF-09 | Audit log | Soon |
+| 3 | An independent timestamp on audit anchors (asqav) | An RFC 3161 timestamp token over each anchored chain head; optionally a transparency-log entry | `pkijs` (BSD-3), `@sigstore/verify` (Apache-2.0) | PF-09 | Audit log | Soon |
+| 4 | Output-schema validation with a bounded re-ask (Guardrails AI) | The gateway checks the model's output against the requested JSON Schema. On failure it re-asks up to N times (each re-ask is governed and costed), or repairs, filters or blocks | Ajv (already pinned) | PF-05, PF-11 | Agent builder, Playground | Next |
+| 5 | Insecure-code detector for model output (CodeShield) | CWE-tagged regex rules over code blocks in model output | CodeShield's MIT rule files as vendored data, run with a linear-time regex engine; its Semgrep tier is excluded | PF-11, PF-19 | Guardrails | Next (with ADR-0177 step 2) |
+| 6 | Runaway-agent limits on tool and connector calls (pipelock) | Per-person caps on repeating the same tool with the same arguments, loop detection, a wall-clock cap, a cap on distinct destinations, and a cap on outbound data entropy (slow exfiltration) | None needed; reuses the ADR-0104 argument digest | PF-03, PF-14 | Execution control | Soon |
+| 7 | Coverage attestation, plus SARIF and CVSS import (Strix, PentestGPT; reporting only) | "Tested" kept separate from "claimed"; gaps listed; a budget-stopped run marked incomplete; SARIF fingerprints keep a dismissal across re-runs; base and contextual CVSS with reasoning; an unknown severity fails the gate | SARIF 2.1.0 (checked with Ajv), `ae-cvss-calculator` (Apache-2.0) | PF-10, PF-15 | Red-teaming | Soon |
+| 8 | Judge panels and judge calibration (Phoenix) | Several weighted judges with all verdicts kept; agreement with human labels from annotation queues (Cohen's kappa); repeated runs with confidence intervals; pairwise and tool-use evaluators. This answers ADR-0044's open limit that the judge itself is unproven | `simple-statistics` (ISC) | ADR-0173 2c, PF-11 | Evaluations | Soon |
+| 9 | OTel GenAI to OpenInference conversion, and replaying a traced span in the playground (Phoenix) | Attribute mapping; open a span's inputs in the playground | `@arizeai/openinference-genai` (Apache-2.0) instead of a hand-written mapper | PF-08 | Traces, Playground | Next (step 1) |
+| 10 | Goal-hijack check over agent traces (LlamaFirewall AlignmentCheck) | A judge compares the person's stated goal with the agent's actions, as an ADR-0160 trace evaluator, in observe mode first | None maintained; built on our judge | PF-14 | Governance alerts | Soon |
+| 11 | Allow-list pickle scanning (fickling) | Read pickle opcodes without executing them, and compare every import with an allow-list | `modelaudit` (MIT; its telemetry must be turned off) or Python's built-in `pickletools`, inside the PF-12 scanner | PF-12 | Admission review | Soon |
+| 12 | System-prompt leak detection (trylonai, pipelock) | A per-agent canary token, plus overlap between the output and the agent's own instructions | Small amount of our own code; none fits | PF-11 | Guardrails | Next |
+| 13 | Permissive guard models in place of Llama Guard and Prompt Guard | Customer-hosted classifiers behind the PF-11 provider interface | Apache-2.0 models: Granite Guardian, Qwen3Guard (the Stream variant runs repository code at load, so it needs review), a DeBERTa prompt-injection classifier, WildGuard (gated download) | PF-11 | Guardrails: providers | Later |
+| 14 | A durable SIEM forwarder (design from pipelock's docs) | A local spool, a cursor that advances only on acknowledgement, an exact-host allow-list safe against DNS rebinding; OCSF, RFC 5424 syslog and CEF formats | Standards only | PF-14, ADR-0135 | SIEM export settings | Soon |
+| 15 | Mergeable drift profiles (whylogs) | Per-field quantile, distinct-count and frequent-item sketches, compared with Hellinger, KS or chi-square tests | The Evidently sidecar, or `tdigest` (MIT, one maintainer) | PF-20 | Governance alerts and conditions | Later |
+
+**Skipped**, because we already have them, they are only marketing, or they are offensive capability:
+- langfuse's enterprise audit viewer, retention and SSO (we have all three);
+- its "spend alerts", which are for its own subscription bill;
+- obot's user and device caps;
+- trylonai's deny-lists;
+- Guardrails AI validators that duplicate ADR-0042;
+- Phoenix's prompt management (ADR-0173 has it);
+- exploitation and proof-of-concept generation in PentestGPT and Strix;
+- pickle injection in fickling.
+
+**Also worth knowing:**
+- obot's endpoint agent ("sentry", MIT) inventories local AI tools and enforces allow-lists through coding-assistant
+  hooks, failing closed. It's a candidate for PF-18.
+- langfuse's ingestion-masking hook fails open by default. If we build one for PF-08, ours fails closed.
+
+**Patent check needed (flag only, not a legal conclusion).** Phoenix's IP notice lists two Arize AI patents, US
+11,315,043 and US 11,615,345 (both "Systems and methods for optimizing a machine learning model", active, expiring in
+2041). Their claims describe ranking slices of a classic ML model's predictions by an error or performance metric
+weighted by how many predictions fall in the slice, and using that to optimise the model. They do not appear to cover LLM
+tracing, OpenInference conversion, datasets, experiments, judges or the playground. **Two designs need a legal check
+before they are built:**
+- PF-20 segment analysis that ranks segments by error times volume, or feeds that ranking back into retraining;
+- any "worst slices" view built on drift profiles.
+
+**Correction:** the whylogs row above previously suggested evaluating Apache DataSketches. Its Python package has had no
+release since 2025-03 (failing the maintenance rule), and there is no JavaScript port on npm.
+
+Not verified in this study:
+- GitHub API facts (maintainer counts, archive flags), because the API was unavailable; npm, PyPI and Hugging Face dates
+  were used instead;
+- Semgrep's exact licence;
+- `modelaudit`'s telemetry switch;
+- the CVSS v4 support in `ae-cvss-calculator`;
+- the licences of the guard models' training data;
+- whether `canonicalize` reproduces our canonical bytes after a Postgres round trip, which needs a test first.
