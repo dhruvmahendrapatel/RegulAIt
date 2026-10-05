@@ -21,6 +21,14 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-10-05 - Batch 2c merged (PR #124). ADR-0179: the October Codex feedback batch is defined.** The owner chose:
+- fix the policy-simulation replay and add bounds;
+- narrow the Kong and OIDC/SAML claims;
+- refuse Outlook ChatOps until an outbound sender exists;
+- keep the documented budget threshold, with a concurrency test.
+
+The batch also covers regulatory-feed accuracy, intake recovery and two agent-page fixes. After it come D3 and then D4.
+
 **2026-10-05 - ADR-0173 batch 2c built and reviewed** (migrations 0146 and 0148–0151; 0147 retired, next is 0152).
 - **Traces:** filters, tags, and actions to add to a dataset or send to a queue. The OTel GenAI and OpenInference
   export profiles have a conformance test.
