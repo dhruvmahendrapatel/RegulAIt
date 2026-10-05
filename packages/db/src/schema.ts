@@ -1208,6 +1208,12 @@ export const auditLog = pgTable(
         // text column — no DDL needed.
         "governance_alert",
         "governance_monitor",
+        // ADR-0173 batch 2c (K): a KRI or a monitoring dashboard created /
+        // changed / deleted, and an automation rule created / changed /
+        // paused / backfilled / matched (objectId = the row). Plain text — no DDL.
+        "kri",
+        "monitoring_dashboard",
+        "automation_rule",
         // ADR-0159: a remediation proposed / applied / denied / failed
         "remediation",
         // ADR-0161: one CI/CD deploy-gate evaluation (objectId = use case)
@@ -9701,3 +9707,203 @@ export const traceScores = pgTable(
   ],
 );
 export type TraceScoreRow = typeof traceScores.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0173 batch 2c — K (migration 0150): monitoring KRIs, dashboards,
+// automation rules, their match log, and retention holds on traces.
+// ---------------------------------------------------------------------------
+
+/** mirrors `KRI_METRICS` in packages/shared/src/kri.ts */
+export const KRI_METRIC_VALUES = [
+  "trace_volume",
+  "error_rate",
+  "latency_p50",
+  "latency_p99",
+  "cost_usd",
+  "feedback_score",
+] as const;
+/** mirrors `KRI_SCOPES` in packages/shared/src/kri.ts */
+export const KRI_SCOPE_VALUES = ["fleet", "agent", "project"] as const;
+export const KRI_COMPARATOR_VALUES = ["above", "below"] as const;
+
+/**
+ * A key risk indicator: one metric over traces, a scope, a rolling window
+ * (at most 90 days) and a threshold. The governance monitor evaluates every
+ * enabled KRI on its pass (rule `kri_threshold_breached`, subject
+ * `kri:<id>`). Below `min_samples` a KRI neither breaches nor resolves. This
+ * table is the metric registry ADR-0175 A2 reuses. Admin-only.
+ */
+export const kris = pgTable(
+  "kris",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    metric: text("metric", { enum: KRI_METRIC_VALUES }).notNull(),
+    scope: text("scope", { enum: KRI_SCOPE_VALUES }).notNull().default("fleet"),
+    /** the agent or project id; null exactly when scope = 'fleet' */
+    scopeId: uuid("scope_id"),
+    windowDays: integer("window_days").notNull().default(7),
+    comparator: text("comparator", { enum: KRI_COMPARATOR_VALUES }).notNull().default("above"),
+    threshold: doublePrecision("threshold").notNull(),
+    minSamples: integer("min_samples").notNull().default(20),
+    severity: text("severity", { enum: GOVERNANCE_ALERT_SEVERITIES }).notNull().default("medium"),
+    /** feedback_score only: the annotation score name to average (null = every annotation score) */
+    scoreName: text("score_name"),
+    enabled: boolean("enabled").notNull().default(true),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "kris_metric_ck",
+      sql`${t.metric} IN ('trace_volume', 'error_rate', 'latency_p50', 'latency_p99', 'cost_usd', 'feedback_score')`,
+    ),
+    check("kris_scope_ck", sql`${t.scope} IN ('fleet', 'agent', 'project')`),
+    check("kris_scope_id_ck", sql`(${t.scope} = 'fleet') = (${t.scopeId} IS NULL)`),
+    check("kris_window_ck", sql`${t.windowDays} BETWEEN 1 AND 90`),
+    check("kris_comparator_ck", sql`${t.comparator} IN ('above', 'below')`),
+    check("kris_min_samples_ck", sql`${t.minSamples} BETWEEN 1 AND 100000`),
+    check("kris_severity_ck", sql`${t.severity} IN ('low', 'medium', 'high')`),
+  ],
+);
+export type KriRow = typeof kris.$inferSelect;
+
+/** a saved monitoring dashboard: at most 24 panels, each validated by the
+ * shared `dashboardPanelSchema` on write (and the count CHECKed here) */
+export const monitoringDashboards = pgTable(
+  "monitoring_dashboards",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    panels: jsonb("panels").$type<Array<Record<string, unknown>>>().notNull().default([]),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [check("monitoring_dashboards_panels_ck", sql`jsonb_array_length(${t.panels}) <= 24`)],
+);
+export type MonitoringDashboardRow = typeof monitoringDashboards.$inferSelect;
+
+export const AUTOMATION_RULE_STATUSES = ["active", "paused"] as const;
+export const AUTOMATION_MATCH_STATUSES = ["done", "retry", "failed"] as const;
+export interface AutomationActionResult {
+  type: string;
+  /** pending = not yet run (a pass stopped, or the process died, after the match was claimed) */
+  status: "ok" | "failed" | "pending";
+  /** a fixed code, never error text */
+  reason: string | null;
+  attempts: number;
+  /** a failed action the next pass may retry (until AUTOMATION_LIMITS.maxAttempts) */
+  retryable: boolean;
+}
+
+/**
+ * An automation rule: a stored trace filter (the shared `traceFilterSchema`),
+ * a deterministic sampling rate, and one to four actions (send to an
+ * annotation queue, add to a dataset, a webhook to one subscription, extend
+ * retention). Actions run AS `author_user_id`; when the author is no longer an
+ * active admin the sweep pauses the rule (audited). The sweep reads traces
+ * that ENDED after the keyset cursor (`cursor_ended_at`, `cursor_trace_id`); a
+ * new rule's cursor is its creation time, so nothing older is matched unless
+ * an admin asks for a backfill (at most 7 days), which moves the cursor back
+ * and marks the matches it produces (`backfill_until`).
+ */
+export const automationRules = pgTable(
+  "automation_rules",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    filter: jsonb("filter").$type<Record<string, unknown>>().notNull().default({}),
+    samplingRate: doublePrecision("sampling_rate").notNull().default(1),
+    actions: jsonb("actions").$type<Array<Record<string, unknown>>>().notNull(),
+    status: text("status", { enum: AUTOMATION_RULE_STATUSES }).notNull().default("active"),
+    pausedReason: text("paused_reason"),
+    pausedAt: timestamp("paused_at", { withTimezone: true }),
+    authorUserId: uuid("author_user_id")
+      .notNull()
+      .references(() => users.id),
+    dailyActionCap: integer("daily_action_cap").notNull().default(500),
+    cursorEndedAt: timestamp("cursor_ended_at", { withTimezone: true }).notNull().defaultNow(),
+    cursorTraceId: uuid("cursor_trace_id"),
+    /** set by an explicit backfill: traces that ended at or before this are matched as backfill */
+    backfillUntil: timestamp("backfill_until", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("automation_rules_sampling_ck", sql`${t.samplingRate} >= 0 AND ${t.samplingRate} <= 1`),
+    check("automation_rules_status_ck", sql`${t.status} IN ('active', 'paused')`),
+    check("automation_rules_cap_ck", sql`${t.dailyActionCap} BETWEEN 1 AND 10000`),
+    check("automation_rules_actions_ck", sql`jsonb_array_length(${t.actions}) BETWEEN 1 AND 4`),
+    index("automation_rules_status_idx").on(t.status),
+  ],
+);
+export type AutomationRuleRow = typeof automationRules.$inferSelect;
+
+/**
+ * One row per (rule, trace): THE dedupe. A re-run pass, a backfill over the
+ * same window or a concurrent sweep never matches a trace twice, so no action
+ * runs twice for it. `action_results` holds each action's outcome (a fixed
+ * reason code, never error text); `status = 'retry'` marks a match whose
+ * failed actions the next pass retries (only those, up to 3 attempts).
+ */
+export const automationMatches = pgTable(
+  "automation_matches",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    ruleId: uuid("rule_id")
+      .notNull()
+      .references(() => automationRules.id, { onDelete: "cascade" }),
+    traceId: uuid("trace_id")
+      .notNull()
+      .references(() => traces.id, { onDelete: "cascade" }),
+    matchedAt: timestamp("matched_at", { withTimezone: true }).notNull().defaultNow(),
+    backfill: boolean("backfill").notNull().default(false),
+    status: text("status", { enum: AUTOMATION_MATCH_STATUSES }).notNull().default("done"),
+    attempts: integer("attempts").notNull().default(1),
+    actionResults: jsonb("action_results").$type<AutomationActionResult[]>().notNull().default([]),
+  },
+  (t) => [
+    uniqueIndex("automation_matches_rule_trace_uq").on(t.ruleId, t.traceId),
+    index("automation_matches_rule_at_idx").on(t.ruleId, t.matchedAt),
+    index("automation_matches_retry_idx").on(t.ruleId).where(sql`${t.status} = 'retry'`),
+    check("automation_matches_status_ck", sql`${t.status} IN ('done', 'retry', 'failed')`),
+  ],
+);
+export type AutomationMatchRow = typeof automationMatches.$inferSelect;
+
+/**
+ * A retention hold keeps one trace past the §8.3 floor until `hold_until`
+ * (at most 2x the floor and at most 3 years from the trace's start; the
+ * owner's decision of 2026-10-05). The prune skips a held trace and deletes it
+ * once the hold has expired. An erasure request ALWAYS releases the hold
+ * (`released_at`, `release_reason = 'erasure'`, audited), and a hold released
+ * for erasure is never re-applied. One row per trace; cascades with it.
+ */
+export const traceRetentionHolds = pgTable(
+  "trace_retention_holds",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    traceId: uuid("trace_id")
+      .notNull()
+      .references(() => traces.id, { onDelete: "cascade" }),
+    holdUntil: timestamp("hold_until", { withTimezone: true }).notNull(),
+    ruleId: uuid("rule_id").references(() => automationRules.id, { onDelete: "set null" }),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    releasedAt: timestamp("released_at", { withTimezone: true }),
+    releasedByUserId: uuid("released_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    releaseReason: text("release_reason"),
+  },
+  (t) => [
+    uniqueIndex("trace_retention_holds_trace_uq").on(t.traceId),
+    index("trace_retention_holds_active_idx").on(t.holdUntil).where(sql`${t.releasedAt} IS NULL`),
+    check(
+      "trace_retention_holds_reason_ck",
+      sql`${t.releaseReason} IS NULL OR ${t.releaseReason} IN ('erasure', 'admin')`,
+    ),
+  ],
+);
+export type TraceRetentionHoldRow = typeof traceRetentionHolds.$inferSelect;

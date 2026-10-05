@@ -81,6 +81,8 @@ import ChatOpsPage from "./views/admin/governance/ChatOpsPage";
 import LineagePage from "./views/admin/governance/LineagePage";
 import RegulAItLlmPage from "./views/admin/llm/RegulAItLlmPage";
 import TracesPage from "./views/admin/observability/TracesPage";
+// ADR-0173 batch 2c (K)
+import MonitoringPage from "./views/admin/observability/MonitoringPage";
 import WorkflowTemplatesPage from "./views/admin/governance/WorkflowTemplatesPage";
 import AgentsPage from "./views/admin/integrations/AgentsPage";
 import ModelCredentialsPage from "./views/admin/integrations/ModelCredentialsPage";
@@ -237,6 +239,7 @@ export default function App() {
                         <Route path="lineage" element={<LineagePage />} />
                         {/* ADR-0070 */}
                         <Route path="traces" element={<TracesPage />} />
+                        <Route path="monitoring" element={<MonitoringPage />} />
                         {/* ADR-0065 */}
                         <Route path="regulait-llm" element={<RegulAItLlmPage />} />
                         {/* ADR-0055 */}

@@ -109,6 +109,7 @@ const BY_ROUTE: Record<string, keyof typeof G> = {
   "/admin/posture": "gauge",
   "/admin/governance/trust": "shield",
   "/admin/governance/alerts": "bell",
+  "/admin/monitoring": "gauge",
   "/admin/reports": "report",
   "/admin/copilot": "spark",
   "/admin/approvals": "checklist",
