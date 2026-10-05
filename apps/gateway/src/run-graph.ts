@@ -635,7 +635,7 @@ export async function orchestrationGraph(db: Db, viewer: Viewer, runId: string):
     node({
       id: "run",
       type: "run",
-      label: "Run planned",
+      label: "Run created",
       status: RUN_STATUS[run.status] ?? "done",
       rawStatus: run.status,
       actor: person(run.initiatingUserId, names),
@@ -747,7 +747,7 @@ export async function orchestrationGraph(db: Db, viewer: Viewer, runId: string):
   return {
     ok: true,
     graph: summarise("orchestration", { id: run.id, label: run.name }, nodes, edges, [
-      "Edges follow the task graph's dependencies; a dashed edge is a lead delegating to a worker.",
+      "Edges follow each task's dependencies; a dashed edge is a lead delegating to a worker.",
       "A task's cost is the measured cost of every model turn and tool call under its node spans, across attempts.",
     ]),
   };
