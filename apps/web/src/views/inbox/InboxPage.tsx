@@ -67,6 +67,14 @@ export default function InboxPage() {
     queryKey: ["approvals"],
     queryFn: () => api.get<{ approvals: Approval[] }>("/v1/approvals"),
   });
+  // ADR-0173 batch 2c (Q): annotation items waiting on me as a named reviewer.
+  // Content-free; the card shows only when there is something to review.
+  const annotations = useQuery({
+    queryKey: ["annotation-inbox"],
+    queryFn: () => api.get<{ items?: AnnotationInboxItem[] }>("/v1/annotations/inbox"),
+    retry: false,
+  });
+  const annotationItems = Array.isArray(annotations.data?.items) ? annotations.data.items : [];
   const approvals = q.data?.approvals ?? [];
   const pending = approvals.filter((a) => a.status === "pending");
   const decided = approvals.filter((a) => a.status !== "pending").slice(0, 12);
@@ -165,7 +173,7 @@ export default function InboxPage() {
         <Card>
           {pending.length === 0 ? (
             <EmptyState
-              title="Nothing waiting on you"
+              title={annotationItems.length > 0 ? "No sign-offs waiting on you" : "Nothing waiting on you"}
               body="When a governed action needs your decision it appears here — and the requester is unblocked the moment you decide."
             />
           ) : (
@@ -246,6 +254,8 @@ export default function InboxPage() {
           )}
         </Card>
 
+        {annotationItems.length > 0 && <AnnotationsCard items={annotationItems} />}
+
         {decided.length > 0 && (
           <Card title="Recently decided">
             {decided.map((a) => (
@@ -269,6 +279,43 @@ export default function InboxPage() {
         )}
       </div>
     </>
+  );
+}
+
+/** ADR-0173 batch 2c (Q): one row of GET /v1/annotations/inbox */
+interface AnnotationInboxItem {
+  id: string;
+  queueName?: string;
+  subjectKind: "trace" | "span" | "eval_result";
+  requiredReviews: number;
+  submissionCount: number;
+  dueAt: string | null;
+  slaBreached: boolean;
+  createdAt: string;
+}
+const ANNOTATION_SUBJECT = { trace: "Trace", span: "Span", eval_result: "Eval result" } as const;
+
+/** annotation items where I am a named reviewer and have not reviewed yet */
+function AnnotationsCard(props: { items: AnnotationInboxItem[] }) {
+  return (
+    <Card title={`Annotations · ${props.items.length} to review`}>
+      {props.items.map((i) => (
+        <div key={i.id} className={v.listRow} style={{ alignItems: "center" }}>
+          <div className={v.grow}>
+            <div style={{ fontSize: "var(--text-sm)" }}>
+              <Link to={`/inbox/annotations/${i.id}`}>
+                {ANNOTATION_SUBJECT[i.subjectKind] ?? i.subjectKind} in {i.queueName ?? "a queue"}
+              </Link>
+            </div>
+            <div className={v.faint}>
+              {i.submissionCount} of {i.requiredReviews} review(s) · queued {ago(i.createdAt)}
+              {i.dueAt ? ` · due ${shortDate(i.dueAt)}` : ""}
+            </div>
+          </div>
+          {i.slaBreached && <Badge tone="danger">past deadline</Badge>}
+        </div>
+      ))}
+    </Card>
   );
 }
 

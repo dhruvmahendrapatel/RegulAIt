@@ -29,6 +29,9 @@ import RunDetailPage from "./views/runs/RunDetailPage";
 import WorkflowsPage from "./views/workflows/WorkflowsPage";
 import WorkflowDetailPage from "./views/workflows/WorkflowDetailPage";
 import InboxPage from "./views/inbox/InboxPage";
+// ADR-0173 batch 2c (Q): annotation queues (admin setup) and the reviewer view
+import AnnotationReviewPage from "./views/inbox/AnnotationReviewPage";
+import AnnotationQueuesPage from "./views/admin/governance/AnnotationQueuesPage";
 import ProjectsPage from "./views/projects/ProjectsPage";
 import ProjectDetailPage from "./views/projects/ProjectDetailPage";
 import ProjectContextPage from "./views/projects/ProjectContextPage";
@@ -176,6 +179,8 @@ export default function App() {
                 <Route path="/workflows" element={<WorkflowsPage />} />
                 <Route path="/workflows/:instanceId" element={<WorkflowDetailPage />} />
                 <Route path="/inbox" element={<InboxPage />} />
+                {/* ADR-0173 batch 2c (Q): outside RequireAdmin — a named reviewer works here; the server gates the read */}
+                <Route path="/inbox/annotations/:itemId" element={<AnnotationReviewPage />} />
                 <Route path="/projects" element={<ProjectsPage />} />
                 <Route path="/projects/:projectId" element={<ProjectDetailPage />} />
                 <Route path="/projects/:projectId/context" element={<ProjectContextPage />} />
@@ -206,6 +211,8 @@ export default function App() {
                         {/* ADR-0173 §3 */}
                         <Route path="model-policy" element={<ModelPolicyPage />} />
                         <Route path="evals" element={<EvalsPage />} />
+                        {/* ADR-0173 batch 2c (Q) */}
+                        <Route path="annotation-queues" element={<AnnotationQueuesPage />} />
                         <Route path="model-risk" element={<ModelRiskPage />} />
                         {/* ADR-0080 */}
                         <Route path="use-cases" element={<UseCasesPage />} />
