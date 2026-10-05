@@ -33,6 +33,7 @@ import {
   formatMetricValue,
   kriFormFrom,
   kriFormProblem,
+  kriIsWindowTotal,
   kriPayload,
   pivotSeries,
   seriesPath,
@@ -106,7 +107,10 @@ function KriTile(props: { kri: Kri; onEdit: () => void }) {
         {k.metricLabel} · {scope} · {k.windowDays} {k.windowDays === 1 ? "day" : "days"}
       </div>
       <div className={v.faint}>
-        Threshold: {k.comparator} {formatMetricValue(k.metric, k.threshold)} · {k.measurement?.samples ?? 0} of {k.minSamples} samples needed
+        Threshold: {k.comparator} {formatMetricValue(k.metric, k.threshold)} ·{" "}
+        {kriIsWindowTotal(k.metric)
+          ? "a total over the whole window, so no minimum sample count applies"
+          : `${k.measurement?.samples ?? 0} of ${k.minSamples} samples needed`}
       </div>
       <div className={v.row}>
         {k.alert ? (

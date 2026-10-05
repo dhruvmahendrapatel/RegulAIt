@@ -2,12 +2,14 @@
  * ADR-0173 batch 2c (K) — one series chart on recharts (MIT). Lazy-loaded by
  * MonitoringPage so recharts stays out of the main bundle. Series colours are
  * the validated categorical slots in monitoring.module.css (`.palette`, set
- * on the enclosing figure); axes, grid and tooltip use theme tokens. The
+ * on the enclosing figure), each with its own dash pattern (`SERIES_DASHES`,
+ * drawn in the legend too) so colour is never the only cue; axes, grid and
+ * tooltip use theme tokens. The
  * keyboard layer is off: the data table under every chart is the accessible
  * reading of the same values.
  */
 import { CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import { bucketLabel, formatMetricValue } from "./monitoringModel";
+import { SERIES_DASHES, bucketLabel, formatMetricValue } from "./monitoringModel";
 
 const SERIES_VARS = ["--mon-s1", "--mon-s2", "--mon-s3", "--mon-s4", "--mon-s5", "--mon-s6"];
 
@@ -36,6 +38,8 @@ export default function SeriesLineChart(props: {
             dataKey={g.key}
             name={g.label}
             stroke={`var(${SERIES_VARS[i]})`}
+            strokeDasharray={SERIES_DASHES[i] || undefined}
+            legendType="plainline"
             strokeWidth={2}
             dot={false}
             connectNulls

@@ -14,6 +14,7 @@ import { expectAxeClean, sentTo } from "./prompts-fixtures";
 type Json = any;
 const KRI_ERR = "77771111-0000-4000-8000-000000000001";
 const KRI_P99 = "77771111-0000-4000-8000-000000000002";
+const KRI_VOL = "77771111-0000-4000-8000-000000000003";
 const ALERT = "77772222-0000-4000-8000-000000000001";
 const DASH = "77773333-0000-4000-8000-000000000001";
 const RULE_A = "77774444-0000-4000-8000-000000000001";
@@ -88,6 +89,17 @@ async function installMonitoringMock(page: Page) {
         threshold: 4000,
         severity: "medium",
         measurement: { value: 5100, samples: 6, state: "insufficient" },
+        alert: null,
+      }),
+      // fix round B: a window total is measured even at 0 traces
+      kri(KRI_VOL, {
+        name: "Fleet volume",
+        metric: "trace_volume",
+        metricLabel: "Trace volume",
+        unit: "traces",
+        comparator: "below",
+        threshold: 10,
+        measurement: { value: 0, samples: 0, state: "breached" },
         alert: null,
       }),
     ] as Json[],
@@ -223,6 +235,8 @@ test.describe("ADR-0173 2c: monitoring and automations", () => {
     await expect(tiles.getByRole("listitem", { name: "KRI Error rate" })).toContainText("12.5%");
     await expect(tiles.getByRole("listitem", { name: "KRI Support p99" })).toContainText("Too few samples");
     await expect(tiles.getByRole("listitem", { name: "KRI Support p99" })).toContainText("6 of 20 samples needed");
+    await expect(tiles.getByRole("listitem", { name: "KRI Fleet volume" })).toContainText("Past threshold");
+    await expect(tiles.getByRole("listitem", { name: "KRI Fleet volume" })).toContainText("no minimum sample count applies");
     await expect(page.getByRole("figure", { name: /Trace volume over last 7 days/ })).toBeVisible();
     await expectAxeClean(page, "monitoring, tiles and series");
 
@@ -248,6 +262,11 @@ test.describe("ADR-0173 2c: monitoring and automations", () => {
     await page.getByLabel("Group by").selectOption("agent");
     await expect.poll(() => st.calls.some((c) => c.path.startsWith("/v1/monitoring/series?") && c.path.includes("groupBy=agent"))).toBe(true);
     await expect(page.getByText("The chart draws the first 6 of 8 groups; the table lists them all.")).toBeVisible();
+    // fix round B: colour is not the only cue — every drawn series has its own dash pattern
+    const curves = page.getByRole("figure", { name: /Trace volume over last 7 days/ }).locator("path.recharts-line-curve");
+    await expect(curves).toHaveCount(6);
+    const dashes = await curves.evaluateAll((els) => els.map((e) => e.getAttribute("stroke-dasharray") ?? ""));
+    expect(new Set(dashes).size).toBe(6);
     await page.getByRole("button", { name: "Show table" }).first().click();
     await expect(page.getByRole("cell", { name: "Other" }).first()).toBeVisible();
     await expectAxeClean(page, "monitoring, grouped series with table");
@@ -273,6 +292,8 @@ test.describe("ADR-0173 2c: monitoring and automations", () => {
     await expect(page.getByRole("cell", { name: /^Low helpfulness to review/ })).toBeVisible();
     await expect(page.getByRole("cell", { name: /author not admin/ })).toBeVisible();
     await expect(page.getByText("score helpfulness ≤ 2")).toBeVisible();
+    // fix round B: the late-arrival window is said out loud
+    await expect(page.getByText(/re-checks traces that finished\s+in the last 24 hours/)).toBeVisible();
     await expectAxeClean(page, "automations, rule list");
 
     // create: the tag-key shape and the hold bound are explained before sending
