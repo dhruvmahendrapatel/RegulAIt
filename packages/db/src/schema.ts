@@ -9013,6 +9013,20 @@ export const releaseSightings = pgTable(
   (t) => [primaryKey({ columns: [t.kind, t.subjectId, t.digest] })],
 );
 
+/**
+ * ADR-0176 (migration 0145) — ONE-TIME DATA BACKFILLS that SQL cannot do,
+ * run at boot and keyed by name: a row here means the named backfill finished
+ * and must never run again. `detail` records what it did (counts and subject
+ * ids, never secret material). First user: `mcp-manifest-digest-sha256`, the
+ * re-pin of stored MCP manifest digests from FNV-1a 64 to SHA-256
+ * (`apps/gateway/src/manifest-digest-repin.ts`).
+ */
+export const dataBackfills = pgTable("data_backfills", {
+  name: text("name").primaryKey(),
+  completedAt: timestamp("completed_at", { withTimezone: true }).notNull().defaultNow(),
+  detail: jsonb("detail"),
+});
+
 /** An admin's per-item override of the cooldown: ONE subject at ONE digest,
  * with a reason (audited). A new digest is a new release and is not covered. */
 export const releaseOverrides = pgTable(

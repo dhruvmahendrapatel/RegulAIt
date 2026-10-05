@@ -49,7 +49,9 @@ import {
 
 /** The scanner + ruleset version stamped on a scanned skill. Bump it when a
  * skill rule changes (the ADR-0097 rules carry their own version). */
-export const SKILL_ADMISSION_SCANNER_VERSION = "skill-admission/2";
+// `/3` (ADR-0176 security batch): the shared credential-material rules gained
+// the current provider token formats.
+export const SKILL_ADMISSION_SCANNER_VERSION = "skill-admission/3";
 
 /**
  * The persisted verdict on `builder_skills.admission_state` (and on each
