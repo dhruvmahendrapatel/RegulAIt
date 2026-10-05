@@ -306,7 +306,25 @@ function signAssertion(xml: string, key: SigningKey): string {
   sig.computeSignature(xml, {
     location: { reference: "//*[local-name(.)='Assertion']/*[local-name(.)='Issuer']", action: "after" },
   });
-  return sig.getSignedXml();
+  // ADR-0181: a provider requires the Response envelope signed as well
+  const envelope = new SignedXml({
+    privateKey: key.privateKey,
+    publicCert: key.certPem,
+    signatureAlgorithm: "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256",
+    canonicalizationAlgorithm: "http://www.w3.org/2001/10/xml-exc-c14n#",
+  });
+  envelope.addReference({
+    xpath: "/*[local-name(.)='Response']",
+    transforms: [
+      "http://www.w3.org/2000/09/xmldsig#enveloped-signature",
+      "http://www.w3.org/2001/10/xml-exc-c14n#",
+    ],
+    digestAlgorithm: "http://www.w3.org/2001/04/xmlenc#sha256",
+  });
+  envelope.computeSignature(sig.getSignedXml(), {
+    location: { reference: "/*[local-name(.)='Response']/*[local-name(.)='Issuer']", action: "after" },
+  });
+  return envelope.getSignedXml();
 }
 
 const samlLogin = async (

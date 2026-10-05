@@ -270,8 +270,8 @@ describe("/admin API key issuance", () => {
     expect(listed.statusCode).toBe(200);
     const mine = listed.json().keys.filter((k: { userId: string }) => k.userId === ninaId);
     expect(mine).toHaveLength(2);
-    // ADR-0098 added `expiresAt` (null = never, the shipped default) and the
-    // derived lifecycle `state` — still no token field of any kind.
+    // ADR-0098 added `expiresAt` and the derived lifecycle `state` — still no
+    // token field of any kind. ADR-0181: the shipped default is 90 days.
     expect(Object.keys(mine[0]).sort()).toEqual([
       "createdAt",
       "expiresAt",
@@ -282,7 +282,12 @@ describe("/admin API key issuance", () => {
       "state",
       "userId",
     ]);
-    expect(mine.every((k: { expiresAt: string | null }) => k.expiresAt === null)).toBe(true);
+    expect(
+      mine.every((k: { expiresAt: string | null }) => {
+        const days = (new Date(k.expiresAt!).getTime() - Date.now()) / 86_400_000;
+        return days > 89.9 && days <= 90;
+      }),
+    ).toBe(true);
     expect(mine.every((k: { state: string }) => k.state === "active")).toBe(true);
     expect(listed.body).not.toContain(secondToken);
     expect(listed.body).not.toContain(ninaToken);
