@@ -122,6 +122,7 @@ import { callerProjectIds, callerTeamIds, resolveScopeProjectIds } from "./repor
 // ADR-0089 (gap L21): the ONE granted computation and its never-blend note —
 // imported from the inventory, never reimplemented.
 import { buildAgentHolderIndex, INVENTORY_NOTES } from "./inventory.js";
+import { IDEMPOTENCY_WINDOW_MS, readIdempotencyKey } from "./request-idempotency.js";
 import {
   createWorkflowTemplateValidated,
   startWorkflowInstanceWithTemplates,
@@ -1257,7 +1258,7 @@ export function useCaseArtifactRefusal(
  * As long as a draft lives (use-case-drafts.ts, 30 days): the draft carries the
  * key, so a resume-and-retry after a lost response must still replay rather
  * than create a second use case. */
-export const USE_CASE_IDEMPOTENCY_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+export const USE_CASE_IDEMPOTENCY_WINDOW_MS = IDEMPOTENCY_WINDOW_MS;
 
 /** the stored original body for (caller, key), if claimed inside the window */
 async function idempotentReplayFor(db: Db, userId: string, key: string): Promise<Record<string, unknown> | null> {
@@ -1425,19 +1426,14 @@ export function registerUseCaseRoutes(
     if (!userId) return reply.status(403).send({ error: "bootstrap_cannot_propose" });
 
     // ADR-0171 / AER-050 — IDEMPOTENT CREATION. A retry carrying the same
-    // Idempotency-Key from the same caller within 24h gets the ORIGINAL 201
+    // Idempotency-Key from the same caller within 30 days gets the ORIGINAL 201
     // body back (200 + `Idempotent-Replay: true`) instead of a second use
     // case. Keys are per caller; no header = unchanged behaviour.
-    const rawKey = req.headers["idempotency-key"];
-    let idemKey: string | null = null;
-    if (rawKey !== undefined) {
-      if (typeof rawKey !== "string" || rawKey.length < 1 || rawKey.length > 200) {
-        return reply.status(400).send({
-          error: "invalid_idempotency_key",
-          detail: "Idempotency-Key must be a single value of 1 to 200 characters",
-        });
-      }
-      idemKey = rawKey;
+    // the header is read by the helper the risk and artifact writes share (ADR-0179)
+    const keyRead = readIdempotencyKey(req);
+    if (!keyRead.ok) return reply.status(400).send(keyRead.body);
+    const idemKey = keyRead.key;
+    if (idemKey) {
       const replay = await idempotentReplayFor(db, userId, idemKey);
       if (replay) return reply.status(200).header("Idempotent-Replay", "true").send(replay);
     }

@@ -10154,3 +10154,32 @@ export const traceRetentionHolds = pgTable(
   ],
 );
 export type TraceRetentionHoldRow = typeof traceRetentionHolds.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0179 / AER-050 (migration 0153) — IDEMPOTENCY KEYS for the intake's risk
+// and questionnaire-artifact writes (apps/gateway/src/request-idempotency.ts).
+// Claimed inside the transaction that writes the record; `scope` names the
+// route and its target, `requestDigest` the request the key was first used
+// with, `response` the original body replayed on a retry. Per caller.
+// ---------------------------------------------------------------------------
+
+export const requestIdempotencyKeys = pgTable(
+  "request_idempotency_keys",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    scope: text("scope").notNull(),
+    key: text("key").notNull(),
+    requestDigest: text("request_digest").notNull(),
+    response: jsonb("response").$type<Record<string, unknown>>(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("request_idempotency_keys_key_check", sql`length(${t.key}) BETWEEN 1 AND 200`),
+    uniqueIndex("request_idempotency_keys_user_scope_key_uq").on(t.userId, t.scope, t.key),
+    index("request_idempotency_keys_created_idx").on(t.createdAt),
+  ],
+);
+export type RequestIdempotencyKeyRow = typeof requestIdempotencyKeys.$inferSelect;

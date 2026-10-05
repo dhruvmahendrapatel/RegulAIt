@@ -55,7 +55,7 @@ import {
   questionId,
 } from "./intakeFields";
 import { IntakeResubmit } from "./IntakeResubmit";
-import { savedAtText, useIntakeDraft, type DraftStatus } from "./intakeDraft";
+import { durableForSubmit, savedAtText, useIntakeDraft, type DraftSaveOutcome, type DraftStatus } from "./intakeDraft";
 import { useLeaveGuard } from "./LeaveGuard";
 import {
   BOOLEAN_QUESTIONS,
@@ -95,6 +95,18 @@ import {
 interface VendorSummary { id: string; name: string; category: string; status: string }
 interface CreatedUseCase { id: string; instance: { id: string } | null }
 interface CreatedRisk { id: string }
+
+/** ADR-0179: the draft (with the next request's Idempotency-Key) could not be saved — that request was not sent */
+class DraftNotSaved extends Error {
+  constructor(readonly tooLarge: boolean) {
+    super(
+      tooLarge
+        ? "Your draft is too large to save, so the next step of your submission was not sent."
+        : "Your draft could not be saved, so the next step of your submission was not sent.",
+    );
+    this.name = "DraftNotSaved";
+  }
+}
 
 /** AER-046: a retry the earlier records cannot be brought in line with — nothing was sent */
 class RetryRefused extends Error {
@@ -162,6 +174,7 @@ function RegisterUseCase() {
   const attempt = useRef<SubmissionAttempt | null>(null);
   const [, setProgress] = useState(0);
   const [retryRefused, setRetryRefused] = useState<RetryRefused | null>(null);
+  const [draftNotSaved, setDraftNotSaved] = useState<DraftNotSaved | null>(null);
   // "Edit this section" on Review: the step to come back to
   const [returnTo, setReturnTo] = useState<number | null>(null);
   const submitAction = useAction();
@@ -403,15 +416,65 @@ function RegisterUseCase() {
   };
 
   /** keep the draft in step with the submission's progress (kept in refs, so outside a render) */
-  const saveProgress = () => {
+  const saveProgress = (): Promise<DraftSaveOutcome> => {
     setProgress((n) => n + 1);
-    if (draftKept(draft.status)) return draft.flush(snapshot());
-    return Promise.resolve();
+    // the hook decides: it sends nothing while drafts are off or a resume
+    // offer is open, and tries again after a refused save
+    return draft.flush(snapshot());
+  };
+
+  /**
+   * ADR-0179: a request carrying an Idempotency-Key is sent only once the
+   * draft holding that key is on the server. Otherwise a lost response and a
+   * reload would resume an older draft without the key, and the retry would
+   * create a second record. Nothing is sent when this refuses.
+   */
+  const saveBeforeKeyedRequest = async () => {
+    const outcome = await saveProgress();
+    if (!durableForSubmit(outcome)) {
+      const refused = new DraftNotSaved(outcome.kind === "failed" && outcome.tooLarge);
+      setDraftNotSaved(refused);
+      throw refused;
+    }
+  };
+
+  /** the keyed attempt to send: one a lost answer left in the draft, or a new one saved with the draft first */
+  const keyedAttempt = async <A,>(read: () => A | undefined, write: (next: A | undefined) => void, mint: () => A): Promise<A> => {
+    const pending = read();
+    if (pending) return pending;
+    const next = mint();
+    write(next);
+    try {
+      await saveBeforeKeyedRequest();
+    } catch (error) {
+      // nothing was sent: the key has nothing to honour
+      write(undefined);
+      throw error;
+    }
+    return next;
+  };
+
+  /**
+   * send a keyed request: a refusal wrote nothing and frees its key; an
+   * unknown outcome keeps it, so the retry first finishes this same request
+   * (same key, same content) and only then applies any edit made since
+   */
+  const sendKeyed = async <T,>(send: () => Promise<T>, release: () => void): Promise<T> => {
+    try {
+      return await send();
+    } catch (error) {
+      if (!outcomeUnknown(error)) {
+        release();
+        void saveProgress();
+      }
+      throw error;
+    }
   };
 
   const submit = async () => {
     if (!proposal) return;
     setRetryRefused(null);
+    setDraftNotSaved(null);
     const progress = checkpoint.current;
     const inputs = submissionInputs();
     // AER-046: decide every step BEFORE the first request — a retry whose
@@ -428,9 +491,16 @@ function RegisterUseCase() {
       // AER-050: the attempt (its key and exactly what it sends) is in the draft
       // BEFORE the request, so a retry after a lost response — from this page
       // or after a reload — sends the same key and gets the same use case back
+      const fresh = !attempt.current;
       if (!attempt.current) attempt.current = { key: newIdempotencyKey(), useCase: inputs.useCase };
       const sent = attempt.current;
-      await saveProgress();
+      try {
+        await saveBeforeKeyedRequest();
+      } catch (error) {
+        // nothing was sent: a key minted for this attempt has nothing to honour
+        if (fresh) attempt.current = null;
+        throw error;
+      }
       let created: CreatedUseCase;
       try {
         created = (await api.postWithHeaders<CreatedUseCase>("/v1/use-cases", sent.useCase, { "Idempotency-Key": sent.key })).body;
@@ -463,24 +533,56 @@ function RegisterUseCase() {
       await api.post(`/v1/workflows/instances/${useCase.instanceId}/advance`, { stageId: "plan" });
       progress.planningAdvanced = true;
     }
-    if (plan.questionnaire !== "reuse") {
-      // a resubmission is a NEW VERSION: the kernel re-opens the questionnaire
-      // stage and supersedes the sign-off that was waiting on the stale one
-      await api.post(`/v1/workflows/instances/${useCase.instanceId}/artifacts`, {
-        stageId: "questionnaire",
-        content: inputs.questionnaire,
-      });
-      progress.questionnaire = { digest: canonicalDigest(inputs.questionnaire) };
+    // a resubmission is a NEW VERSION: the kernel re-opens the questionnaire
+    // stage and supersedes the sign-off that was waiting on the stale one.
+    // ADR-0179: each version is sent with an Idempotency-Key kept in the
+    // draft first, so a retry after a lost response gets the same version
+    // back instead of a second one (and a second review round). A version
+    // whose answer was lost is finished with the content it was sent with;
+    // if the answers changed since, the current ones follow as a new version.
+    while (progress.questionnaire?.digest !== canonicalDigest(inputs.questionnaire)) {
+      const sent = await keyedAttempt(
+        () => progress.questionnaireAttempt,
+        (next) => { if (next) progress.questionnaireAttempt = next; else delete progress.questionnaireAttempt; },
+        () => ({ key: newIdempotencyKey(), content: inputs.questionnaire }),
+      );
+      await sendKeyed(
+        () => api.postWithHeaders(`/v1/workflows/instances/${useCase.instanceId}/artifacts`, { stageId: "questionnaire", content: sent.content }, { "Idempotency-Key": sent.key }),
+        () => { delete progress.questionnaireAttempt; },
+      );
+      progress.questionnaire = { digest: canonicalDigest(sent.content) };
+      delete progress.questionnaireAttempt;
       void saveProgress();
     }
 
-    for (const { key, step: riskStep, controlsToLink } of plan.risks) {
+    for (const planned of plan.risks) {
+      const { key } = planned;
+      let { step: riskStep, controlsToLink } = planned;
       const risk = inputs.risks.find((item) => item.key === key)!;
       if (riskStep.action === "create") {
-        const created = await api.post<CreatedRisk>("/v1/risks", { ...risk.inputs, useCaseId: useCase.id });
-        progress.risks[key] = { id: created.id, inputs: risk.inputs, digest: canonicalDigest(risk.inputs), linkedControls: [] };
+        // ADR-0179: the same keyed, saved-first attempt for each risk
+        const attempts = (progress.riskAttempts ??= {});
+        const sent = await keyedAttempt(
+          () => attempts[key],
+          (next) => { if (next) attempts[key] = next; else delete attempts[key]; },
+          () => ({ key: newIdempotencyKey(), inputs: risk.inputs }),
+        );
+        const created = await sendKeyed(
+          () => api.postWithHeaders<CreatedRisk>("/v1/risks", { ...sent.inputs, useCaseId: useCase.id }, { "Idempotency-Key": sent.key }),
+          () => { delete attempts[key]; },
+        );
+        progress.risks[key] = { id: created.body.id, inputs: sent.inputs, digest: canonicalDigest(sent.inputs), linkedControls: [] };
+        delete attempts[key];
         void saveProgress();
-      } else if (riskStep.action === "update") {
+        if (canonicalDigest(sent.inputs) !== canonicalDigest(risk.inputs)) {
+          // registered from what that attempt sent; bring it to the current
+          // answers like any retry, or refuse by name
+          const again = planSubmission(progress, inputs);
+          if (again.kind === "refuse") throw refuse(again);
+          ({ step: riskStep, controlsToLink } = again.risks.find((item) => item.key === key)!);
+        }
+      }
+      if (riskStep.action === "update") {
         await api.patch(`/v1/risks/${progress.risks[key]!.id}`, riskStep.patch);
         progress.risks[key] = { ...progress.risks[key]!, inputs: risk.inputs, digest: canonicalDigest(risk.inputs) };
       }
@@ -824,6 +926,18 @@ function RegisterUseCase() {
                     {startOverAction.error ? <p>The earlier record could not be withdrawn, so nothing was started: {startOverAction.error}</p> : null}
                     <Button size="sm" disabled={startOverAction.busy} onClick={() => void startOverAction.run(startOver, "Earlier record withdrawn")}>
                       {startOverAction.busy ? "Withdrawing…" : "Start over as a new use case"}
+                    </Button>
+                  </div>
+                ) : draftNotSaved ? (
+                  <div className={`${v.errLine} ${s.refusal}`} role="alert">
+                    <p>{draftNotSaved.message}</p>
+                    <p>
+                      {draftNotSaved.tooLarge
+                        ? "A draft holds at most 256 KiB. Shorten the longest answers, then retry."
+                        : "Each step is sent only after your draft is saved with it, so that a retry after a lost connection or a reload finishes the same records instead of creating new ones. This step was not sent; what was sent before it is kept. Check your connection, or sign in again if your session ended, then retry."}
+                    </p>
+                    <Button size="sm" disabled={submitting} onClick={() => void submitAction.run(submit, "Use case submitted for human review")}>
+                      {submitting ? "Retrying…" : "Retry"}
                     </Button>
                   </div>
                 ) : submitAction.error ? (
