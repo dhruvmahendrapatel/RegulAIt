@@ -390,6 +390,11 @@ export const toxicityDetector: GuardrailDetector = {
 // secret SHAPES, and the org's own configured terms. The scored-classifier path
 // is the `tier: "model"` registration that this deployment cannot make.
 
+/** Stripe's published documentation example secret keys (test mode), body
+ * only. Assembled from halves so this source file is not itself flagged by a
+ * secret scanner. See `dlp.secret.stripe_key`. */
+const STRIPE_DOC_EXAMPLE_BODIES: readonly string[] = ["4eC39HqLyjWD" + "arjtT1zdp7dc", "BQokikJOvBiI" + "2HlWgH4olfQ2"];
+
 const DLP_RULES: readonly Rule[] = [
   {
     id: "dlp.marker.classification",
@@ -418,6 +423,10 @@ const DLP_RULES: readonly Rule[] = [
     // (`(?<![A-Za-z0-9_-])`, not `\b`). With `\b`, "eyJ-eyJ-eyJ-…" offered a
     // start every four characters, each scanning to the end of the run: 1.5 s
     // on 50k characters, on the audit write path. One start per run is linear.
+    // ACCEPTED COST of linear time: a JWT glued to a preceding `-` or `_`
+    // (`session-eyJ…`, `token_eyJ…`) is no longer matched, because the run it
+    // starts in begins earlier. (`_` never matched under `\b` either.) A JWT
+    // after a space, `=`, `:`, a quote or `.` is still caught.
     re: /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g,
   },
   {
@@ -437,7 +446,8 @@ const DLP_RULES: readonly Rule[] = [
   },
   // ADR-0176 security fix 2 — current provider token formats. Each rule is
   // based on the gitleaks default ruleset (github.com/gitleaks/gitleaks,
-  // config/gitleaks.toml, MIT; rule ids cited per rule, read 2026-10-05) so
+  // config/gitleaks.toml at commit 09242ce9c8a60d9b051fc2d166f9e849b88c7ac0,
+  // MIT; rule ids cited per rule) so
   // vendoring that ruleset later is a mechanical swap. Where a rule here
   // differs from gitleaks the difference is stated, and is always one of:
   //   - gitleaks' trailing context `(?:[\x60'"\s;]|\\[nr]|$)` is dropped: it
@@ -474,9 +484,23 @@ const DLP_RULES: readonly Rule[] = [
   {
     // gitleaks `stripe-access-token`, verbatim body (secret and restricted
     // keys; live, test and prod). Publishable `pk_` keys are not secrets.
+    // Two exclusions (ADR-0176 review), because a match HOLDS an MCP server
+    // and permanently rewrites audit text:
+    //   - a placeholder whose body is ONE repeated character
+    //     (`sk_live_xxxxxxxxxx`, `sk_test_0000000000`), the documented
+    //     convention for "put your key here";
+    //   - Stripe's own published documentation example keys, test mode only,
+    //     matched EXACTLY (so the exclusion can never hide a real key). They
+    //     appear verbatim in Stripe's docs and in sample servers built from
+    //     them; a short exact list beats a release note nobody reads before
+    //     a clean server is held.
     id: "dlp.secret.stripe_key",
     category: "credential_material",
-    re: /\b(?:sk|rk)_(?:test|live|prod)_[A-Za-z0-9]{10,99}/g,
+    re: new RegExp(
+      String.raw`\b(?:sk|rk)_(?!test_(?:${STRIPE_DOC_EXAMPLE_BODIES.join("|")})(?![A-Za-z0-9]))(?:test|live|prod)_` +
+        String.raw`(?!([A-Za-z0-9])\1*(?![A-Za-z0-9]))[A-Za-z0-9]{10,99}`,
+      "g",
+    ),
   },
   {
     // gitleaks `gcp-api-key`, verbatim body; the trailing context becomes

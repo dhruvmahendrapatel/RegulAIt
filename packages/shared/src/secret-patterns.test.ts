@@ -61,6 +61,12 @@ const NEGATIVE: string[] = [
   `AIza${body("Sy09_-Kq", 36)}`, // one long: not a Google key
   "glpat-short",
   "the gl-pat-plan and AIza-Rodriguez are not credentials",
+  // ADR-0176 review: Stripe placeholders and Stripe's own docs example keys
+  `sk_live_${"x".repeat(24)}`,
+  `sk_test_${"0".repeat(10)}`,
+  `rk_live_${"X".repeat(32)}`,
+  `sk_test_${"4eC39HqLyjWD" + "arjtT1zdp7dc"}`,
+  `sk_test_${"BQokikJOvBiI" + "2HlWgH4olfQ2"}`,
 ];
 
 const ruleIdsMatching = (text: string): string[] =>
@@ -89,6 +95,14 @@ describe("current provider token formats are credential material", () => {
   it("the marker records the full length removed", () => {
     const key = POSITIVE["dlp.secret.anthropic_key"]![0]!;
     expect(scrubAuditText(`k=${key} end`)).toContain(`:${key.length}:`);
+  });
+});
+
+describe("the Stripe exclusions are narrow", () => {
+  it("a docs example body under the LIVE prefix, or extended by one character, is still a key", () => {
+    for (const s of [`sk_live_${"4eC39HqLyjWD" + "arjtT1zdp7dc"}`, `sk_test_${"4eC39HqLyjWD" + "arjtT1zdp7dc"}Z`, `sk_live_${"x".repeat(23)}y`]) {
+      expect(ruleIdsMatching(s), s).toContain("dlp.secret.stripe_key");
+    }
   });
 });
 
