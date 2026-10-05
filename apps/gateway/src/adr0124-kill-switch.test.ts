@@ -20,6 +20,9 @@ import {
 import { executionGate } from "@regulait/policy-kernel";
 import { buildApp } from "./app.js";
 import { executeGovernedToolCall } from "./mcp-proxy.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 /**
  * ADR-0124 — THE KILL SWITCH AND SAFE MODES, PROVED BY ATTACK.
@@ -165,6 +168,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "a".repeat(64) });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
 
   const u = await post("/v1/users", {
     email: `adr0124-${RUN}@example.com`,
@@ -208,6 +212,7 @@ afterAll(async () => {
   await setMode("normal", "adr0124 teardown — returning the shared database to normal");
   await upstreamClose?.();
   app.server.closeAllConnections();
+  await restoreSb2Gates();
   await app.close();
 });
 

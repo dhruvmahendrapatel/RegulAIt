@@ -1,11 +1,12 @@
 /**
- * Batch B3 — the three enforcement opt-ins in the real SPA, all DEFAULT-OFF:
+ * Batch B3 — the three enforcement controls in the real SPA (the first two
+ * are strict by default since ADR-0181):
  *
  *  1. the ADR-0080 use-case dispatch gate knob on Settings → Organization
- *     (renders 'off', saves 'warn' through the audited PUT, and is restored
- *     to 'off' so no later run inherits an armed gate);
+ *     (renders 'enforce', saves 'warn' through the audited PUT, and is
+ *     restored to 'enforce' so no later run inherits the relaxation);
  *  2. the ADR-0086 staleness-forces-recertification controls on Model risk
- *     (rendered OFF with threshold 1 — read-only assertions, no writes);
+ *     (rendered ON with threshold 1 — read-only assertions, no writes);
  *  3. the ADR-0089 intent-capture field on a use case's detail (editable
  *     while in flight, feeding the intendedAgentIds column the alignment
  *     comparison reads).
@@ -73,15 +74,15 @@ async function proposeUseCase(page: Page, f: { name: string; what: string; why: 
   expect(res.status(), await res.text()).toBe(201);
 }
 
-test("the use-case gate knob ships OFF, saves through the audited PUT, and is restored", async ({ page }) => {
+test("the use-case gate knob ships ENFORCE (ADR-0181), saves through the audited PUT, and is restored", async ({ page }) => {
   await signIn(page, "admin@regulait.local", [ADMIN_PASSWORD, state.passwords.admin], ADMIN_PASSWORD);
 
   await page.goto("/ui/admin/organization");
   await expect(page.getByRole("heading", { name: "Organization", exact: true })).toBeVisible();
   await expect(page.getByText("5b · AI use-case dispatch gate (ADR-0080)")).toBeVisible();
   const knob = page.getByLabel("Use-case dispatch gate");
-  // DEFAULT-OFF is the safety argument, asserted on the real form
-  await expect(knob).toHaveValue("off");
+  // ADR-0181: strict by default, asserted on the real form
+  await expect(knob).toHaveValue("enforce");
 
   // warn, saved through the audited PUT
   await knob.selectOption("warn");
@@ -92,22 +93,22 @@ test("the use-case gate knob ships OFF, saves through the audited PUT, and is re
   expect((await savedWarn).status()).toBe(200);
   await expect(page.getByText("Use-case gate saved (audited)").first()).toBeVisible();
 
-  // RESTORE (M-012 in e2e form): later runs must not inherit an armed gate
-  await knob.selectOption("off");
-  const savedOff = page.waitForResponse(
+  // RESTORE (M-012 in e2e form): later runs inherit the strict default, not this relaxation
+  await knob.selectOption("enforce");
+  const savedEnforce = page.waitForResponse(
     (r) => r.url().includes("/v1/org/settings") && r.request().method() === "PUT",
   );
   await page.getByRole("button", { name: "Save use-case gate" }).click();
-  expect((await savedOff).status()).toBe(200);
-  await expect(knob).toHaveValue("off");
+  expect((await savedEnforce).status()).toBe(200);
+  await expect(knob).toHaveValue("enforce");
 });
 
-test("the staleness-recertification controls render OFF with threshold 1 on Model risk", async ({ page }) => {
+test("the staleness-recertification controls render ON (ADR-0181) with threshold 1 on Model risk", async ({ page }) => {
   await signIn(page, "admin@regulait.local", [ADMIN_PASSWORD, state.passwords.admin], ADMIN_PASSWORD);
 
   await page.goto("/ui/admin/model-risk");
   await expect(page.getByRole("heading", { name: "Model risk", exact: true })).toBeVisible();
-  await expect(page.getByLabel("Staleness forces recertification")).toHaveValue("off");
+  await expect(page.getByLabel("Staleness forces recertification")).toHaveValue("on");
   await expect(
     page.getByLabel("Drift threshold (ledger changes since certification)"),
   ).toHaveValue("1");

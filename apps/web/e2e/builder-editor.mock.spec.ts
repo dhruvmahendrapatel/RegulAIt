@@ -99,7 +99,8 @@ test.describe("ADR-0172: agent editor", () => {
       ],
     });
     expect(puts[1].tools).toHaveLength(3);
-    expect(puts[1].tools[2]).toEqual({ kind: "connector", refId: CONN_DRIVE, requiresApproval: false });
+    // ADR-0181: every newly added tool asks first; the owner turns it off per tool
+    expect(puts[1].tools[2]).toEqual({ kind: "connector", refId: CONN_DRIVE, requiresApproval: true });
 
     const toolbox = conn.getByRole("list", { name: "Toolbox" });
     await expect(toolbox.getByRole("listitem")).toHaveCount(3);

@@ -121,11 +121,11 @@ gateway looks broken rather than governed. `demo:setup` repoints the rows at the
 ### 1.2 Approve the use case — **the step that is easy to skip and will cost you the demo**
 
 `demo:setup` ends by dispatching as a real user **before and after** applying the preset. On a
-first run the second one comes back **`409 use_case_approval_required`**, and that is the script's
+first run both come back **`409 use_case_approval_required`**, and that is the script's
 own doing: the setup script (`demo-setup.ts` §3b) creates the *Checkout assistant* use case and deliberately leaves it `proposed`,
 because driving it to `approved` means walking the pillar-2 intake sign-off and that walk is worth
-showing. With `useCaseGateMode=enforcing` a proposal legitimately blocks every dispatch attributed
-to its project.
+showing. `useCaseGateMode` is `enforce` by default (ADR-0181), so a proposal legitimately blocks
+every dispatch attributed to its project, before the preset as well as after it.
 
 So **as Avery, approve it before you present**, then re-run `demo:setup` and expect `200`. The
 script names this case explicitly rather than telling you to stop — the gate is working, and it is
@@ -249,7 +249,10 @@ and say why they cannot be switched on from a page.
 
 ### (b) Block a policy-violating tool call — *lead with this, it is the strongest*
 
-As **Dana**, against **repo-tools**, over the real MCP protocol:
+As **Dana**, against **repo-tools**, over the real MCP protocol, with the transport carrying
+`x-regulait-project-id: <demo-project's id>`. MCP attribution is required by default (ADR-0181):
+the same client without the header is refused at connect with **`400 mcp_attribution_required`**,
+audited, before any entitlement decision. That refusal is worth a sentence of its own.
 
 | tool | result | why |
 |---|---|---|
@@ -343,11 +346,11 @@ Two things to say out loud while it is on screen, because the payload says them:
 
 ## 4. Do not do these
 
-- **Do not claim hardening blocks unattributed calls everywhere.** It binds the native dispatch only.
-  There are three independent attribution switches and the preset sets one; the MCP proxy and the
-  compat edge have their own. The posture page says so in the attribution control's own text — read
-  it rather than talking past it. (A hardened environment will happily serve an unattributed MCP tool
-  call, and a technical buyer may well try exactly that.)
+- **Do not credit the hardening preset with blocking unattributed calls.** There are three
+  independent attribution switches (the native dispatch, the MCP proxy and the compat edge), and
+  since ADR-0181 all three are **on by default**; the preset sets only the native one. An admin can
+  relax each one separately, audited. If a technical buyer tries an unattributed MCP tool call, it
+  is refused with `mcp_attribution_required`.
 - **Do not demo the optimisation cache.** It is deliberately left off. A cached answer looks like a
   fast model and is not one, and being caught on that costs more than the feature is worth here.
 - **Do not present discovery as autonomous.** See (a).
