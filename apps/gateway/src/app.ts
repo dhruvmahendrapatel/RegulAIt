@@ -108,7 +108,7 @@ import {
   createDelegationSchema,
   deactivateUserSchema,
   conditionDueInstant,
-  decideApprovalSchema,
+  validateMetricParams,
   deleteRoleSchema,
   evaluateRequestSchema,
   ruleKindParamSchema,
@@ -438,7 +438,7 @@ import { registerCopilotRoutes } from "./copilot.js";
 import { registerBuilderRoutes } from "./builder.js";
 // ADR-0180 (D3) — continuous assurance: P0's gate-mode setting and each item owner's routes
 import { registerAssuranceSettingsRoutes } from "./assurance-settings.js";
-import { registerConditionMetricRoutes } from "./condition-metrics.js";
+import { decideApprovalWithMeasuredSchema, registerConditionMetricRoutes } from "./condition-metrics.js";
 import { registerRequiredTestRoutes } from "./required-tests.js";
 import { registerAutonomyRoutes } from "./autonomy.js";
 import { registerRiskToleranceRoutes } from "./risk-tolerance.js";
@@ -3349,7 +3349,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     approvalId: string;
     deciderUserId: string | null;
     isAdmin: boolean;
-    body: z.infer<typeof decideApprovalSchema>;
+    body: z.infer<typeof decideApprovalWithMeasuredSchema>;
   }): Promise<{ ok: true; body: Record<string, unknown> } | { ok: false; status: number; body: Record<string, unknown> }> {
     const fail = (status: number, payload: Record<string, unknown>) =>
       ({ ok: false as const, status, body: payload });
@@ -3505,6 +3505,21 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         return fail(422, {
           error: "conditions_only_on_intake_approval",
           detail: "conditions are imposed only by APPROVING an AI use-case intake sign-off",
+        });
+      }
+      // ADR-0180 A2: a MEASURED condition's params must fit its metric (a
+      // guardrail-mode condition names its detector, a pack condition its
+      // framework and control); refused by name, before anything is written.
+      const paramIssues = conditionInputs.flatMap((c, i) => {
+        if (c.kind === "manual") return [];
+        const checked = validateMetricParams(c.metric, c.params);
+        return checked.ok ? [] : checked.issues.map((issue) => ({ ...issue, path: ["conditions", i, ...issue.path] }));
+      });
+      if (paramIssues.length > 0) {
+        return fail(422, {
+          error: "invalid_conditions",
+          issues: paramIssues,
+          detail: "a measured condition's params do not fit its metric",
         });
       }
       const ownerIds = [
@@ -3756,17 +3771,43 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         }
         await syncUseCaseForInstance(tx as unknown as Db, updated.instanceId, deciderUserId);
         // ADR-0168: conditions commit or roll back WITH the approval.
+        // ADR-0180 A2: a measured condition carries its metric spec (stored
+        // kind `metric`/`test_class`/`autonomy_floor`); with no due date it is
+        // due one full window after the decision.
         if (body.decision === "approved" && intakeUseCase && conditionInputs.length > 0) {
+          const decidedAt = new Date();
           await imposeUseCaseConditions(
             tx as unknown as Db,
             intakeUseCase,
             updated.id,
-            conditionInputs.map((c) => ({
-              text: c.text,
-              ownerUserId: c.ownerUserId,
-              dueAt: conditionDueInstant(c.dueAt),
-              blocking: c.blocking,
-            })),
+            conditionInputs.map((c) =>
+              c.kind === "manual"
+                ? {
+                    text: c.text,
+                    ownerUserId: c.ownerUserId,
+                    dueAt: conditionDueInstant(c.dueAt),
+                    blocking: c.blocking,
+                  }
+                : {
+                    text: c.text,
+                    ownerUserId: c.ownerUserId,
+                    dueAt: c.dueAt
+                      ? conditionDueInstant(c.dueAt)
+                      : new Date(decidedAt.getTime() + c.windowDays * 86_400_000),
+                    blocking: c.blocking,
+                    measured: {
+                      kind: c.kind,
+                      metric: c.metric,
+                      params: c.params,
+                      operator: c.operator,
+                      threshold: c.threshold,
+                      windowDays: c.windowDays,
+                      minSamples: c.minSamples,
+                      cadence: c.cadence,
+                      onBreach: c.onBreach,
+                    },
+                  },
+            ),
             deciderUserId,
           );
         }
@@ -3990,7 +4031,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // ADR-0168: a malformed CONDITION is a 422 naming the field, like the
     // other condition refusals; every other shape error keeps the generic
     // 400 it always had (old bodies behave byte-identically).
-    const parsed = decideApprovalSchema.safeParse(req.body);
+    const parsed = decideApprovalWithMeasuredSchema.safeParse(req.body);
     if (!parsed.success) {
       if (parsed.error.issues.every((i) => i.path[0] === "conditions")) {
         return reply.status(422).send({ error: "invalid_conditions", issues: parsed.error.issues });

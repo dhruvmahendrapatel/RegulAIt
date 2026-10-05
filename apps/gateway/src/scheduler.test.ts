@@ -736,6 +736,10 @@ describe("every sweep is registered", () => {
         // their 30-day window. Driven end-to-end in
         // aer050-replay-retention.test.ts; this list pins registration.
         SCHEDULER_JOB_NAMES.idempotencyKeySweep,
+        // ADR-0180 A2: evaluates measured approval conditions on their
+        // cadence. Driven end-to-end in zz-adr0180-a2-conditions.test.ts;
+        // this list pins registration.
+        SCHEDULER_JOB_NAMES.conditionEvaluation,
       ].sort(),
     );
     for (const def of registry.values()) {

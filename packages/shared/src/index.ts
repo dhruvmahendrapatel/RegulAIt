@@ -4395,3 +4395,5 @@ export {
   type MonitorAssuranceInput,
   type MonitorAssuranceSubject,
 } from "./governance-monitor.js";
+// ADR-0180 A2 — measurable conditions: the state rule, metric params and help
+export * from "./condition-metrics.js";

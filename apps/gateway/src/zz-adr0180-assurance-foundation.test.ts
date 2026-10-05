@@ -214,8 +214,7 @@ describe("ADR-0180 migration 0155: the strict rules the database holds", () => {
 
 describe("ADR-0180 D3 route stubs", () => {
   const STUBS: Array<{ method: "GET" | "PUT" | "POST"; route: string; url: string; cls: "admin" | "user" }> = [
-    { method: "POST", route: "/v1/use-cases/:useCaseId/conditions/:conditionId/evaluate", url: "/v1/use-cases/00000000-0000-4000-8000-000000000001/conditions/00000000-0000-4000-8000-000000000002/evaluate", cls: "admin" },
-    { method: "POST", route: "/v1/use-cases/:useCaseId/conditions/:conditionId/waive", url: "/v1/use-cases/00000000-0000-4000-8000-000000000001/conditions/00000000-0000-4000-8000-000000000002/waive", cls: "admin" },
+    // A2's evaluate/waive routes have landed (zz-adr0180-a2-conditions.test.ts pins them)
     { method: "GET", route: "/v1/governance/review-policy/required-tests", url: "/v1/governance/review-policy/required-tests", cls: "user" },
     { method: "PUT", route: "/v1/governance/review-policy/required-tests", url: "/v1/governance/review-policy/required-tests", cls: "admin" },
     { method: "GET", route: "/v1/builder/agents/:id/autonomy", url: "/v1/builder/agents/00000000-0000-4000-8000-000000000003/autonomy", cls: "user" },

@@ -53,6 +53,7 @@ import { runWebhookDeliverySweep } from "./outbound-webhooks.js";
 import { runAnnotationSlaSweep } from "./annotations.js";
 import { productionAutomationActionDeps, runAutomationRuleSweep } from "./automation-rules.js";
 import { runIdempotencyKeySweep } from "./request-idempotency.js";
+import { runConditionEvaluationSweep } from "./condition-metrics.js";
 import { toRegistry, type SchedulerJobDefinition, type SchedulerJobRegistry } from "./scheduler.js";
 
 const HOUR = 3600;
@@ -90,6 +91,8 @@ export const SCHEDULER_JOB_NAMES = {
   automationRules: "automation-rule-sweep",
   // ADR-0179 security review, item 3
   idempotencyKeySweep: "idempotency-key-sweep",
+  // ADR-0180 A2: measured conditions of approval
+  conditionEvaluation: "condition-evaluation-sweep",
 } as const;
 
 export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): SchedulerJobDefinition[] {
@@ -637,6 +640,37 @@ export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): Schedu
         return { itemsProcessed: out.requestKeys + out.useCaseKeys, detail: { ...out } };
       },
     },
+    {
+      // ADR-0180 A2. Measures every measured approval condition whose cadence
+      // (hourly, daily or weekly) has come due, from the existing ledgers, and
+      // persists the result. An open condition is closed ONLY here (or by an
+      // admin's "evaluate now", the same function) on passing evidence; a
+      // reopen_review condition breached twice in a row re-opens review. The
+      // deploy gate measures live and does not depend on this having run.
+      name: SCHEDULER_JOB_NAMES.conditionEvaluation,
+      description:
+        "Evaluate measured approval conditions whose cadence has come due: measure the metric from the existing " +
+        "ledgers, record the value, samples, state and evidence, close an open condition on passing evidence (audited " +
+        "as the evaluator), and re-open review after two consecutive breaches where the condition asks for it. Too few " +
+        "samples is never a pass.",
+      adr: "ADR-0180",
+      defaultIntervalSeconds: 15 * 60,
+      run: async (ctx) => {
+        const out = await runConditionEvaluationSweep(ctx.db, { now: ctx.now, dataKey: opts.dataKey });
+        return {
+          itemsProcessed: out.evaluated,
+          detail: {
+            useCases: out.useCases,
+            evaluated: out.evaluated,
+            met: out.met,
+            breached: out.breached,
+            reopened: out.reopened,
+            skipped: out.skipped.length,
+          },
+        };
+      },
+    },
+    ...adr0180A10Jobs(opts),
   ];
 }
 
@@ -647,3 +681,14 @@ export function schedulerJobRegistry(opts: SchedulerJobsOptions = {}): Scheduler
 /** the type the `db` argument of a job body carries, re-exported so a test can
  * build a fake job without importing the whole registry */
 export type { Db };
+
+// ===========================================================================
+// ADR-0180 A10 — APPEND-ONLY BLOCK, OWNED BY A10 (risk-acceptance expiry sweep).
+// A2 reserved this block and does not edit below this line. A10 replaces the
+// body of `adr0180A10Jobs` with its job definition(s) (and may declare its job
+// name constant here); `schedulerJobDefinitions` already spreads the result.
+// ===========================================================================
+function adr0180A10Jobs(_opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
+  return [];
+}
+// ===== end of the ADR-0180 A10 block =======================================
