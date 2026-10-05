@@ -205,3 +205,51 @@ describe("evaluate mode", () => {
     );
   });
 });
+
+describe("hardening", () => {
+  it("a catastrophic `pattern` / `patternProperties` completes fast (linear-time engine), and a normal one still matches", () => {
+    // ^(a+)+$ against 26 a's and a bang backtracks for seconds in a native RegExp
+    const evil = `${"a".repeat(26)}!`;
+    const started = Date.now();
+    const byPattern = validateOutputAgainstSchema(
+      { type: "object", properties: { s: { type: "string", pattern: "^(a+)+$" } } },
+      JSON.stringify({ s: evil }),
+    );
+    const byProps = validateOutputAgainstSchema(
+      { type: "object", patternProperties: { "^(a+)+$": { type: "number" } } },
+      JSON.stringify({ [evil]: "x" }),
+    );
+    expect(Date.now() - started).toBeLessThan(500);
+    expect(byPattern.valid).toBe(false);
+    expect(byProps.valid).toBe(true); // the key does not match, so nothing applies
+    // the control: ordinary patterns behave as before
+    const digits = { type: "object", properties: { id: { type: "string", pattern: "^\\d{3}-[a-z]+$" } } };
+    expect(validateOutputAgainstSchema(digits, '{"id":"123-abc"}').valid).toBe(true);
+    expect(validateOutputAgainstSchema(digits, '{"id":"12-abc"}').valid).toBe(false);
+  });
+
+  it("refuses a pattern the linear-time engine cannot run (lookaround) before any call", async () => {
+    const before = await usage(tester.id, MODEL);
+    const r = await run(tester, { template: "x", outputSchema: { type: "string", pattern: "^(?=a)a+$" } });
+    expect(r.statusCode, r.body).toBe(422);
+    expect(r.json().error).toBe("invalid_json_schema");
+    expect(await usage(tester.id, MODEL)).toBe(before);
+  });
+
+  it("answers an unknown model id exactly as a model the caller may not use, in run and evaluate", async () => {
+    const unknown = crypto.randomUUID();
+    const a = await run(tester, { modelAgentId: unknown, template: "hi" });
+    const b = await run(tester, { modelAgentId: UNHELD, template: "hi" });
+    expect([a.statusCode, a.json()]).toEqual([b.statusCode, b.json()]);
+    expect(a.statusCode).toBe(403);
+    const evaluate = (modelAgentId: string) =>
+      k.req("POST", "/v1/playground/evaluate", tester.auth, { modelAgentId, template: "{{topic}}", rows: [{ inputs: { topic: "x" } }] });
+    const c = await evaluate(unknown);
+    const d = await evaluate(UNHELD);
+    expect([c.statusCode, c.json()]).toEqual([d.statusCode, d.json()]);
+    expect(c.statusCode).toBe(403);
+    // both refusals are audited
+    const audited = await k.db.select().from(auditLog).where(and(eq(auditLog.userId, tester.id), eq(auditLog.ruleId, "playground-refused")));
+    expect(audited.some((x) => (x.detail as { requestedModelAgentId?: string }).requestedModelAgentId === unknown)).toBe(true);
+  });
+});

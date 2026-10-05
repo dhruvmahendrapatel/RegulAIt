@@ -308,3 +308,127 @@ describe("tags", () => {
     expect(row!.archivedAt).not.toBeNull();
   });
 });
+
+describe("separation of duties covers every commit the promotion carries (no laundering through a child commit)", () => {
+  // alice is an admin who writes a commit on the owner's prompt; the owner
+  // then commits a child of it. Promoting the child carries alice's change too.
+  let alice: Person;
+  let pid = "";
+  let c1 = "";
+  let c2 = "";
+  let c3 = "";
+  beforeAll(async () => {
+    alice = await k.person("alice", { admin: true });
+    pid = await createPrompt(owner, "launder");
+    c1 = (await commit(admin, pid, "base {{x}}", null)).json().hash;
+    // prod holds c1 (written by `admin`), approved by the reviewer
+    const first = await k.req("PUT", `/v1/prompts/${pid}/tags/prod`, owner.auth, { commitHash: c1, approverUserId: reviewer.id });
+    expect(first.statusCode, first.body).toBe(202);
+    expect((await decide(reviewer, first.json().promotion.approvalId, "approved")).statusCode).toBe(200);
+    expect(await tagOf(pid, "prod")).toBe(c1);
+    const r2 = await commit(alice, pid, "base {{x}} MALICIOUS", c1);
+    expect(r2.statusCode, r2.body).toBe(201);
+    c2 = r2.json().hash;
+    c3 = (await commit(owner, pid, "base {{x}} MALICIOUS, tidied", c2)).json().hash;
+  });
+
+  it("refuses, at request time, an approver who wrote a commit between prod and the promoted one", async () => {
+    const r = await k.req("PUT", `/v1/prompts/${pid}/tags/prod`, owner.auth, { commitHash: c3, approverUserId: alice.id });
+    expect(r.statusCode, r.body).toBe(409);
+    expect(r.json().error).toBe("approver_is_author");
+    expect(await tagOf(pid, "prod")).toBe(c1);
+  });
+
+  it("refuses alice deciding it by admin override, and the walk stops at prod (prod's author may approve)", async () => {
+    // `admin` wrote c1 only, which prod already holds: outside the range
+    const req = await k.req("PUT", `/v1/prompts/${pid}/tags/prod`, owner.auth, { commitHash: c3, approverUserId: admin.id });
+    expect(req.statusCode, req.body).toBe(202);
+    const approvalId = req.json().promotion.approvalId as string;
+    const self = await decide(alice, approvalId, "approved", "admin override");
+    expect(self.statusCode, self.body).toBe(403);
+    expect(self.json().error).toBe("cannot_approve_own_prompt_commit");
+    expect(await tagOf(pid, "prod")).toBe(c1);
+    const ok = await decide(admin, approvalId, "approved");
+    expect(ok.statusCode, ok.body).toBe(200);
+    expect(await tagOf(pid, "prod")).toBe(c3);
+  });
+
+  it("holds inside the decide hook itself: a decider who wrote a commit in the range moves nothing", async () => {
+    const { applyPromptPromotionDecision } = await import("./prompt-registry.js");
+    const p = await createPrompt(owner, "launder-hook");
+    const h1 = (await commit(alice, p, "one {{x}}", null)).json().hash;
+    const h2 = (await commit(owner, p, "two {{x}}", h1)).json().hash;
+    const req = await k.req("PUT", `/v1/prompts/${p}/tags/prod`, owner.auth, { commitHash: h2, approverUserId: reviewer.id });
+    expect(req.statusCode, req.body).toBe(202);
+    const [ap] = await k.db.select().from(approvals).where(eq(approvals.id, req.json().promotion.approvalId));
+    // reach the hook directly, as a path that skipped the precheck would
+    await applyPromptPromotionDecision(k.db, ap!, "approved", alice.id, "a".repeat(64));
+    expect(await tagOf(p, "prod")).toBeNull();
+    const [after] = await k.db.select().from(promptPromotions).where(eq(promptPromotions.approvalId, ap!.id));
+    expect(after!.status).toBe("stale");
+    expect(after!.result).toMatchObject({ reason: "separation_of_duties" });
+  });
+
+  it("fails closed on a broken chain: refused at request time, and stale (nothing moves) at decide time", async () => {
+    const { promptCommits } = await import("@regulait/db");
+    const p = await createPrompt(owner, "launder-broken");
+    const h1 = (await commit(owner, p, "one {{x}}", null)).json().hash;
+    const h2 = (await commit(owner, p, "two {{x}}", h1)).json().hash;
+    const h3 = (await commit(owner, p, "three {{x}}", h2)).json().hash;
+    // a request made while the chain is whole
+    const req = await k.req("PUT", `/v1/prompts/${p}/tags/prod`, owner.auth, { commitHash: h3, approverUserId: reviewer.id });
+    expect(req.statusCode, req.body).toBe(202);
+    // h2's parent no longer resolves: who wrote what came before cannot be read
+    await k.db.update(promptCommits).set({ parentHash: "e".repeat(64) }).where(and(eq(promptCommits.promptId, p), eq(promptCommits.hash, h2)));
+    const ok = await decide(reviewer, req.json().promotion.approvalId, "approved");
+    expect(ok.statusCode, ok.body).toBe(200);
+    expect(await tagOf(p, "prod")).toBeNull();
+    const [after] = await k.db.select().from(promptPromotions).where(eq(promptPromotions.id, req.json().promotion.id));
+    expect(after!.result).toMatchObject({ reason: "chain_unverifiable", chain: "chain_broken" });
+    // and a new request over the broken chain is refused outright
+    const again = await k.req("PUT", `/v1/prompts/${p}/tags/prod`, owner.auth, { commitHash: h3, approverUserId: reviewer.id });
+    expect(again.statusCode, again.body).toBe(409);
+    expect(again.json().error).toBe("promotion_chain_unverifiable");
+  });
+});
+
+describe("prompt references", () => {
+  it("<promptId>@tag resolves the prompt by id, never a later prompt of the same name; name@tag only a live, visible one", async () => {
+    const name = `ref-${k.RUN}`;
+    const r = await k.req("POST", "/v1/prompts", owner.auth, { name, visibility: "workspace" });
+    expect(r.statusCode, r.body).toBe(201);
+    const oldId = r.json().prompt.id as string;
+    const o1 = (await commit(owner, oldId, "old {{x}}", null)).json().hash;
+    expect((await k.req("PUT", `/v1/prompts/${oldId}/tags/staging`, owner.auth, { commitHash: o1 })).statusCode).toBe(200);
+    const byId = await k.req("GET", `/v1/prompts/resolve?ref=${encodeURIComponent(`${oldId}@staging`)}`, outsider.auth);
+    expect(byId.statusCode, byId.body).toBe(200);
+    expect(byId.json()).toMatchObject({ promptId: oldId, tag: "staging", commit: { hash: o1 } });
+
+    // archive, then someone else creates a prompt with the same name
+    expect((await k.req("DELETE", `/v1/prompts/${oldId}`, owner.auth)).statusCode).toBe(200);
+    const again = await k.req("POST", "/v1/prompts", coworker.auth, { name, visibility: "workspace" });
+    expect(again.statusCode, again.body).toBe(201);
+    const newId = again.json().prompt.id as string;
+    const n1 = (await commit(coworker, newId, "new {{x}}", null)).json().hash;
+    expect((await k.req("PUT", `/v1/prompts/${newId}/tags/staging`, coworker.auth, { commitHash: n1 })).statusCode).toBe(200);
+
+    // the id form stops resolving with the archive; it never follows the name
+    const stale = await k.req("GET", `/v1/prompts/resolve?ref=${encodeURIComponent(`${oldId}@staging`)}`, outsider.auth);
+    expect(stale.statusCode).toBe(404);
+    // the name form names the one live prompt of that name
+    const byName = await k.req("GET", `/v1/prompts/resolve?ref=${encodeURIComponent(`${name}@staging`)}`, outsider.auth);
+    expect(byName.json()).toMatchObject({ promptId: newId, commit: { hash: n1 } });
+
+    // a private prompt resolves for nobody who may not see it, in either form
+    const priv = await createPrompt(owner, "ref-private");
+    const p1 = (await commit(owner, priv, "p {{x}}", null)).json().hash;
+    await k.req("PUT", `/v1/prompts/${priv}/tags/staging`, owner.auth, { commitHash: p1 });
+    expect((await k.req("GET", `/v1/prompts/resolve?ref=${encodeURIComponent(`${priv}@staging`)}`, outsider.auth)).statusCode).toBe(404);
+    expect((await k.req("GET", `/v1/prompts/resolve?ref=${encodeURIComponent(`ref-private-${k.RUN}@staging`)}`, outsider.auth)).statusCode).toBe(404);
+    expect((await k.req("GET", `/v1/prompts/resolve?ref=${encodeURIComponent(`${priv}@staging`)}`, owner.auth)).statusCode).toBe(200);
+
+    // a name can never take the form of an id, so the two forms cannot collide
+    const uuidName = await k.req("POST", "/v1/prompts", owner.auth, { name: crypto.randomUUID() });
+    expect(uuidName.statusCode).toBe(400);
+  });
+});

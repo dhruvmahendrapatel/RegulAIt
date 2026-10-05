@@ -38,6 +38,10 @@ export const PROMPT_LIMITS = {
   /** evaluate mode: each row is one governed call */
   rowsPerEvaluation: 50,
   maxTokens: 32_000,
+  /** a promotion's separation-of-duties walk (promoted commit back to the
+   * commit prod holds) covers at most this many commits; a longer or broken
+   * chain is refused, never partially checked */
+  promotionRangeCommits: 500,
 } as const;
 
 /** version tag of the hash input; changing the field set changes this */
@@ -104,7 +108,13 @@ export type PromptModelConfig = z.infer<typeof promptModelConfigSchema>;
 
 export const promptTemplateSchema = z.string().min(1).max(PROMPT_LIMITS.templateChars);
 
-export const promptNameSchema = z.string().trim().min(1).max(PROMPT_LIMITS.nameChars);
+/** a name never has the form of a prompt id (a uuid), so `<x>@tag` always means one thing */
+export const promptNameSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(PROMPT_LIMITS.nameChars)
+  .refine((v) => !z.string().uuid().safeParse(v).success, { message: "a prompt name may not have the form of a prompt id" });
 
 /** a tag name: lower-case, short, so `prod` / `staging` / `canary-2` read the same everywhere */
 export const promptTagNameSchema = z

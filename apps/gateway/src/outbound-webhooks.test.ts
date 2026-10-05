@@ -15,7 +15,11 @@
  *    `webhook-id` across retries, and is `failed` + audited after maxAttempts;
  *  - a deactivated subscription receives nothing;
  *  - the test notification is sent at once and logged;
- *  - a prompt commit reaches a `prompt.*` subscriber with ids/names/hashes only.
+ *  - a prompt commit reaches a `prompt.*` subscriber with ids/names/hashes only;
+ *  - the sweep's `now` only selects: each delivery is signed when sent, leased
+ *    from its claim (a stale pass cannot double-send with a concurrent one), and
+ *    an attempt that lost its lease writes nothing; a receiver that never
+ *    answers costs a pass one attempt; a manual sweep is audited.
  *
  * Shared state: the 127.0.0.1 allow entry this file adds is removed in
  * afterAll (M-068), and the subscriptions it creates are deleted there too.
@@ -27,7 +31,7 @@ import { and, auditLog, eq, egressAllowHosts, webhookDeliveries, webhookSubscrip
 import { WEBHOOK_LIMITS } from "@regulait/shared";
 import { builderKit, type BuilderKit, type Person } from "./testing/builder-fixture.js";
 import { drainBackgroundWork } from "./background-work.js";
-import { runWebhookDeliverySweep } from "./outbound-webhooks.js";
+import { attemptDelivery, runWebhookDeliverySweep } from "./outbound-webhooks.js";
 import { decryptSecret } from "./secrets.js";
 
 let k: BuilderKit;
@@ -42,6 +46,12 @@ const createdSubs: string[] = [];
 const hits: Array<{ path: string; headers: Record<string, string>; body: string }> = [];
 /** per-path status the receiver answers with */
 const statusFor = new Map<string, number>();
+/** per-path delay (ms) before the receiver answers */
+const delayFor = new Map<string, number>();
+/** per-path gate: the receiver answers only once this settles */
+const holdFor = new Map<string, Promise<void>>();
+/** paths whose receiver drops the connection without answering */
+const dropFor = new Set<string>();
 
 const url = (path: string) => `http://127.0.0.1:${port}${path}`;
 const DATA_KEY = "a".repeat(64);
@@ -56,9 +66,18 @@ beforeAll(async () => {
     req.on("end", () => {
       const headers: Record<string, string> = {};
       for (const [h, v] of Object.entries(req.headers)) if (typeof v === "string") headers[h] = v;
-      hits.push({ path: req.url ?? "", headers, body: raw });
-      res.writeHead(statusFor.get(req.url ?? "") ?? 204);
-      res.end();
+      const path = req.url ?? "";
+      hits.push({ path, headers, body: raw });
+      // a dead receiver: no HTTP answer at all
+      if (dropFor.has(path)) {
+        req.socket.destroy();
+        return;
+      }
+      const answer = () => {
+        res.writeHead(statusFor.get(path) ?? 204);
+        res.end();
+      };
+      void Promise.all([holdFor.get(path), new Promise((r) => setTimeout(r, delayFor.get(path) ?? 0))]).then(answer);
     });
   });
   await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
@@ -276,5 +295,125 @@ describe("retries", () => {
     const del = await k.req("DELETE", `/v1/webhooks/${sub.id}`, admin.auth);
     expect(del.statusCode).toBe(200);
     expect(await k.db.select().from(webhookSubscriptions).where(eq(webhookSubscriptions.id, sub.id))).toHaveLength(0);
+  });
+});
+
+describe("the sweep's clock, leases and fairness", () => {
+  /** a due delivery written straight into the log for `subscriptionId` */
+  async function dueDelivery(subscriptionId: string, dueAgoMs: number) {
+    const [row] = await k.db
+      .insert(webhookDeliveries)
+      .values({
+        subscriptionId,
+        event: "prompt.commit",
+        messageId: `msg_${crypto.randomUUID()}`,
+        payload: { promptId: crypto.randomUUID(), occurredAt: new Date().toISOString() },
+        maxAttempts: WEBHOOK_LIMITS.maxAttempts,
+        nextRetryAt: new Date(Date.now() - dueAgoMs),
+      })
+      .returning();
+    return row!;
+  }
+  const hitsOf = (messageId: string) => hits.filter((h) => h.headers["webhook-id"] === messageId);
+  async function untilHit(messageId: string) {
+    const deadline = Date.now() + 5000;
+    while (hitsOf(messageId).length === 0) {
+      if (Date.now() > deadline) throw new Error(`no request for ${messageId} within 5 s`);
+      await new Promise((r) => setTimeout(r, 10));
+    }
+  }
+
+  it("signs each delivery when it is sent: a healthy receiver after a slow one gets a fresh timestamp", async () => {
+    await allowLoopback();
+    delayFor.set("/slow", 2100);
+    const slow = await createSub("/slow", ["prompt.*"]);
+    const healthy = await createSub("/healthy", ["prompt.*"]);
+    // the slow one is due first, so the pass reaches the healthy one ~2 s in
+    const a = await dueDelivery(slow.id, 20_000);
+    const b = await dueDelivery(healthy.id, 10_000);
+    const passStart = Date.now();
+    const out = await runWebhookDeliverySweep(k.db, DATA_KEY, { now: new Date(passStart) });
+    expect(out.delivered).toBeGreaterThanOrEqual(2);
+    const sentSlow = hitsOf(a.messageId)[0]!;
+    const sentHealthy = hitsOf(b.messageId)[0]!;
+    expect(Number(sentSlow.headers["webhook-timestamp"])).toBeGreaterThanOrEqual(Math.floor(passStart / 1000));
+    // not the pass's start: the moment it was sent, after the slow receiver answered
+    expect(Number(sentHealthy.headers["webhook-timestamp"])).toBeGreaterThanOrEqual(Math.floor(passStart / 1000) + 2);
+    expect(() => new Webhook(healthy.secret).verify(sentHealthy.body, sentHealthy.headers)).not.toThrow();
+    const [row] = await k.db.select().from(webhookDeliveries).where(eq(webhookDeliveries.id, b.id));
+    expect(row!.lastAttemptAt!.getTime()).toBeGreaterThanOrEqual(passStart + 2000);
+  });
+
+  it("a pass that started long ago still leases from its claim, so a concurrent sweep does not send twice", async () => {
+    await allowLoopback();
+    let release!: () => void;
+    holdFor.set("/race", new Promise<void>((r) => (release = r)));
+    const sub = await createSub("/race", ["prompt.*"]);
+    const d = await dueDelivery(sub.id, 10 * 60_000);
+    // sweep A was selected two minutes ago (a pass held up by earlier receivers)
+    const sweepA = runWebhookDeliverySweep(k.db, DATA_KEY, { now: new Date(Date.now() - 2 * 60_000) });
+    await untilHit(d.messageId);
+    // while A's request is in flight, the scheduler's sweep B runs
+    await runWebhookDeliverySweep(k.db, DATA_KEY, { now: new Date() });
+    release();
+    await sweepA;
+    expect(hitsOf(d.messageId)).toHaveLength(1);
+    const [row] = await k.db.select().from(webhookDeliveries).where(eq(webhookDeliveries.id, d.id));
+    expect(row).toMatchObject({ status: "delivered", attempts: 1 });
+  });
+
+  it("an attempt whose lease was taken over writes nothing over the new holder's row", async () => {
+    await allowLoopback();
+    let release!: () => void;
+    holdFor.set("/lost", new Promise<void>((r) => (release = r)));
+    const sub = await createSub("/lost", ["prompt.*"]);
+    const d = await dueDelivery(sub.id, 1000);
+    const attempt = attemptDelivery(k.db, DATA_KEY, d.id);
+    await untilHit(d.messageId);
+    // another worker holds the row now (as after this attempt's lease ran out)
+    const takeover = new Date(Date.now() + 120_000);
+    await k.db.update(webhookDeliveries).set({ leaseUntil: takeover }).where(eq(webhookDeliveries.id, d.id));
+    release();
+    expect(await attempt).toBeNull();
+    const [row] = await k.db.select().from(webhookDeliveries).where(eq(webhookDeliveries.id, d.id));
+    expect(row).toMatchObject({ status: "pending", attempts: 0, deliveredAt: null });
+    expect(row!.leaseUntil!.getTime()).toBe(takeover.getTime());
+    await k.db.update(webhookDeliveries).set({ status: "failed", leaseUntil: null }).where(eq(webhookDeliveries.id, d.id));
+  });
+
+  it("a receiver that never answers costs the pass one attempt, not one per delivery; the rest wait", async () => {
+    await allowLoopback();
+    dropFor.add("/dead");
+    const dead = await createSub("/dead", ["prompt.*"]);
+    const alive = await createSub("/alive", ["prompt.*"]);
+    const d1 = await dueDelivery(dead.id, 30_000);
+    const d2 = await dueDelivery(dead.id, 29_000);
+    const ok = await dueDelivery(alive.id, 28_000);
+    const out = await runWebhookDeliverySweep(k.db, DATA_KEY, { now: new Date() });
+    expect(hits.filter((h) => h.path === "/dead")).toHaveLength(1);
+    expect(out.deferred).toBeGreaterThanOrEqual(1);
+    const [first] = await k.db.select().from(webhookDeliveries).where(eq(webhookDeliveries.id, d1.id));
+    const [second] = await k.db.select().from(webhookDeliveries).where(eq(webhookDeliveries.id, d2.id));
+    expect(first).toMatchObject({ status: "pending", attempts: 1, responseCode: null });
+    // deferred, still due and untouched
+    expect(second).toMatchObject({ status: "pending", attempts: 0 });
+    const [good] = await k.db.select().from(webhookDeliveries).where(eq(webhookDeliveries.id, ok.id));
+    expect(good!.status).toBe("delivered");
+    // and a spent time budget defers everything left
+    const late = await runWebhookDeliverySweep(k.db, DATA_KEY, { now: new Date(), budgetMs: 0 });
+    expect(late.delivered + late.retrying + late.failed).toBe(0);
+    expect(late.deferred).toBe(late.due);
+    await k.db.update(webhookSubscriptions).set({ active: false }).where(eq(webhookSubscriptions.id, dead.id));
+  });
+
+  it("a manual sweep is audited with the admin who ran it", async () => {
+    const r = await k.req("POST", "/v1/webhooks/sweep", admin.auth, {});
+    expect(r.statusCode, r.body).toBe(200);
+    const rows = await k.db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.userId, admin.id), eq(auditLog.ruleId, "webhook-sweep-run")));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.detail).toMatchObject({ due: r.json().due, delivered: r.json().delivered });
   });
 });

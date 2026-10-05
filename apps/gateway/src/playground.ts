@@ -29,6 +29,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { Ajv } from "ajv";
 import addFormats from "ajv-formats";
+import { RE2JS } from "re2js";
 import {
   agents,
   and,
@@ -67,8 +68,29 @@ export const PLAYGROUND_RULE_IDS = {
 export const TOOL_CALLS_NOT_EXECUTED =
   "Tool calls are shown as the model made them and are not executed in the playground.";
 
+/**
+ * A user's schema is untrusted, and so is the model output it is matched
+ * against. Ajv's default engine for `pattern`, `patternProperties` (and a
+ * `propertyNames` pattern) is the native backtracking RegExp, which runs on the
+ * event loop: `^(a+)+$` against a few dozen characters stalls the whole
+ * gateway (ReDoS). Every pattern here runs in RE2's linear-time engine instead
+ * (the `re2js` port: pure JavaScript, no native build, no runtime download).
+ * RE2 has no lookaround or backreferences, so a schema that uses them does not
+ * compile and is refused with 422 `invalid_json_schema` — at commit time in the
+ * registry and before any call in the playground. (`format: "regex"` only
+ * compiles the value, it never matches anything with it, so it is not a ReDoS
+ * vector.)
+ */
+export const re2RegExpEngine = Object.assign(
+  (pattern: string, _flags: string) => {
+    const re = RE2JS.compile(RE2JS.translateRegExp(pattern));
+    return { test: (s: string) => re.test(s) };
+  },
+  { code: "re2js" },
+);
+
 function newAjv() {
-  const ajv = new Ajv({ strict: false, allErrors: true, validateSchema: true });
+  const ajv = new Ajv({ strict: false, allErrors: true, validateSchema: true, code: { regExp: re2RegExpEngine } });
   addFormats.default(ajv);
   return ajv;
 }
@@ -122,6 +144,18 @@ function callerOf(req: FastifyRequest, reply: FastifyReply): Caller | null {
 
 type Refusal = { status: number; body: Record<string, unknown> };
 
+/**
+ * One answer for "no such model" and "a model you may not use": the same
+ * status, code and text, so the playground cannot be used to probe which model
+ * ids exist. (A model-policy refusal for the playground feature is decided only
+ * AFTER the entitlement allows, so it tells nothing to someone who does not
+ * hold the model.)
+ */
+const MODEL_REFUSAL: Refusal = {
+  status: 403,
+  body: { error: "model_not_entitled", detail: "you may not use this model, or there is no such model" },
+};
+
 /** the checks before any call: schemas compile, the project, the model exists */
 async function prepare(
   db: Db,
@@ -138,8 +172,20 @@ async function prepare(
     if (!r.ok) return { status: r.status, body: { error: r.error, field: "projectId" } };
   }
   const [agent] = await db.select().from(agents).where(eq(agents.id, body.modelAgentId));
-  // an unknown binding and one the caller may not use answer alike below
-  if (!agent) return { status: 404, body: { error: "unknown_model" } };
+  if (!agent) {
+    // audited like an entitlement refusal, and answered exactly like one
+    await db.insert(auditLog).values({
+      userId: caller.userId,
+      objectType: "agent",
+      objectId: null,
+      detail: { purpose: "playground", mode: "chat", requestedModelAgentId: body.modelAgentId },
+      effect: "deny",
+      ruleId: PLAYGROUND_RULE_IDS.refused,
+      ruleChain: [],
+      reason: "playground call refused: no such model",
+    });
+    return MODEL_REFUSAL;
+  }
   return { agent: agent as AgentRow };
 }
 
@@ -157,13 +203,12 @@ async function entitlementRefusal(db: Db, caller: Caller, agent: AgentRow, detai
     ruleChain: decision.ruleChain as typeof auditLog.$inferInsert.ruleChain,
     reason: decision.reason ?? `playground call to '${agent.name}' refused`,
   });
-  return {
-    status: 403,
-    body: {
-      error: decision.ruleId === MODEL_NOT_ALLOWED_FOR_FEATURE ? MODEL_NOT_ALLOWED_FOR_FEATURE : "model_not_entitled",
-      detail: decision.reason,
-    },
-  };
+  // the caller holds the model and the playground's own policy refuses it
+  if (decision.ruleId === MODEL_NOT_ALLOWED_FOR_FEATURE) {
+    return { status: 403, body: { error: MODEL_NOT_ALLOWED_FOR_FEATURE, detail: decision.reason } };
+  }
+  // otherwise the reason (which names the model) stays in the audit row
+  return MODEL_REFUSAL;
 }
 
 interface OneCall {
@@ -348,6 +393,11 @@ export function registerPlaygroundRoutes(app: FastifyInstance, db: Db, opts: { d
     if (!rows.length) return reply.status(422).send({ error: "no_rows" });
     const prep = await prepare(db, caller, body);
     if ("status" in prep) return reply.status(prep.status).send(prep.body);
+    // a model the caller may not use is refused for the run as a whole — the
+    // same answer as an unknown one; the per-row re-check below still stops a
+    // run that a revocation or the kill switch reaches midway
+    const upfront = await entitlementRefusal(db, caller, prep.agent, { phase: "evaluate", row: null });
+    if (upfront) return reply.status(upfront.status).send(upfront.body);
 
     const results: Array<Record<string, unknown>> = [];
     let stoppedBy: Refusal | null = null;
