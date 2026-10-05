@@ -23,6 +23,14 @@
  * KRI's `minSamples` the state is "insufficient": it neither breaches nor
  * resolves, so a quiet weekend never closes a real episode and one slow call
  * never opens one.
+ *
+ * WINDOW TOTALS ARE THE EXCEPTION (`kriMetricIsWindowTotal`). For a count or a
+ * sum over the window (trace volume, cost) the WINDOW is the sample: "no
+ * traces this week" is a measurement of 0, not too little data, so
+ * `minSamples` never suppresses those two. Otherwise "trace volume below 10"
+ * could never fire on the very outage it exists to catch. Cost is 0 when the
+ * window holds no traces at all; when it holds traces but none was priced the
+ * spend is unknown, so it is "no data" (value null) rather than an invented 0.
  */
 import { z } from "zod";
 
@@ -124,13 +132,23 @@ export type KriUpdate = z.infer<typeof kriUpdateSchema>;
 
 export type KriState = "breached" | "ok" | "insufficient";
 
+/** a count or a sum over the window: the window itself is the sample, so
+ * `minSamples` does not apply (see WINDOW TOTALS above) */
+export function kriMetricIsWindowTotal(metric: KriMetric): boolean {
+  return metric === "trace_volume" || metric === "cost_usd";
+}
+
 /** a KRI's verdict on one measurement. `value` null (nothing measured) is
- * insufficient however many samples are claimed. */
+ * insufficient however many samples are claimed. Below `minSamples` it is
+ * insufficient too, except for a window total (`kriMetricIsWindowTotal`),
+ * whose value — 0 included — is always a measurement. */
 export function evaluateKri(
-  kri: { comparator: KriComparator; threshold: number; minSamples: number },
+  kri: { metric?: KriMetric | undefined; comparator: KriComparator; threshold: number; minSamples: number },
   m: { value: number | null; samples: number },
 ): KriState {
-  if (m.value === null || !Number.isFinite(m.value) || m.samples < kri.minSamples) return "insufficient";
+  if (m.value === null || !Number.isFinite(m.value)) return "insufficient";
+  const windowTotal = kri.metric !== undefined && kriMetricIsWindowTotal(kri.metric);
+  if (!windowTotal && m.samples < kri.minSamples) return "insufficient";
   const breached = kri.comparator === "above" ? m.value > kri.threshold : m.value < kri.threshold;
   return breached ? "breached" : "ok";
 }

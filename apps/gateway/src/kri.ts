@@ -126,7 +126,9 @@ function traceMetricValue(metric: Exclude<KriMetric, "feedback_score">, a: Trace
     case "latency_p99":
       return { value: num(a.p99), samples: Number(a.timed) };
     case "cost_usd":
-      return { value: Number(a.priced) > 0 ? num(a.cost) : null, samples: Number(a.priced) };
+      // a window total: no traces at all is a spend of 0; traces none of
+      // which was priced is an unknown spend, never an invented 0
+      return { value: Number(a.priced) > 0 ? num(a.cost) : Number(a.n) === 0 ? 0 : null, samples: Number(a.priced) };
   }
 }
 
@@ -248,6 +250,32 @@ export async function resolveKriEpisode(db: Db, kriId: string, actorUserId: stri
 // series
 // ---------------------------------------------------------------------------
 
+/**
+ * (trace, agent) pairs for `groupBy=agent`, BOUNDED BY THE SERIES WINDOW: only
+ * spans of traces that started in [from, to] (and in the project, when one is
+ * named) are read, through `traces_started_idx` and the spans' trace index,
+ * never every span ever recorded. The bound is on the TRACE's start, exactly
+ * the predicate the outer query applies, so no pair the series counts is lost
+ * (a span's own `started_at` is caller-supplied and may precede its trace's).
+ */
+function agentPairs(db: Db, q: SeriesQuery) {
+  const windowTraces = db
+    .select({ id: traces.id })
+    .from(traces)
+    .where(
+      and(
+        gte(traces.startedAt, new Date(q.from)),
+        lte(traces.startedAt, new Date(q.to)),
+        q.projectId ? eq(traces.projectId, q.projectId) : undefined,
+      ),
+    );
+  return db
+    .selectDistinct({ traceId: traceSpans.traceId, agentId: traceSpans.agentId })
+    .from(traceSpans)
+    .where(and(isNotNull(traceSpans.agentId), inArray(traceSpans.traceId, windowTraces)))
+    .as("trace_agents");
+}
+
 /** the series query (exported so a test can read its SQL) */
 export function seriesTraceQuery(db: Db, q: SeriesQuery) {
   const unit = q.bucket;
@@ -259,11 +287,7 @@ export function seriesTraceQuery(db: Db, q: SeriesQuery) {
     q.agentId ? scopeCondition({ scope: "agent", scopeId: q.agentId }) : undefined,
   );
   if (q.groupBy === "agent") {
-    const pairs = db
-      .selectDistinct({ traceId: traceSpans.traceId, agentId: traceSpans.agentId })
-      .from(traceSpans)
-      .where(isNotNull(traceSpans.agentId))
-      .as("trace_agents");
+    const pairs = agentPairs(db, q);
     return db
       .select({ bucket, group: sql<string>`${pairs.agentId}::text`, ...traceAggregates() })
       .from(traces)
@@ -291,11 +315,7 @@ export function seriesFeedbackQuery(db: Db, q: SeriesQuery) {
   );
   const agg = { n: sql<number>`count(${traceScores.value})::int`, avg: sql<number | null>`avg(${traceScores.value})` };
   if (q.groupBy === "agent") {
-    const pairs = db
-      .selectDistinct({ traceId: traceSpans.traceId, agentId: traceSpans.agentId })
-      .from(traceSpans)
-      .where(isNotNull(traceSpans.agentId))
-      .as("trace_agents");
+    const pairs = agentPairs(db, q);
     return db
       .select({ bucket, group: sql<string>`${pairs.agentId}::text`, ...agg })
       .from(traceScores)

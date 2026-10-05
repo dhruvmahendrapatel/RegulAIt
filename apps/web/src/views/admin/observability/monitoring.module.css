@@ -45,16 +45,20 @@
   min-height: 240px;
 }
 
-/* The categorical series palette: six validated slots (adjacent-pair CVD and
-   normal-vision separation pass in both modes; light-mode contrast below 3:1
-   is relieved by the data table under every chart). The dark column is the
-   same hues stepped for the dark surface. */
+/* The categorical series palette: six slots, each at least 3:1 against its
+   chart surface in both modes (WCAG 1.4.11; light on #ffffff: 4.42, 3.88,
+   3.41, 3.76, 3.94, 4.95). Adjacent slots stay apart under protanopia,
+   deuteranopia and tritanopia; the non-adjacent pairs that converge under a
+   CVD (s4/s6 protan, s2/s4 and s3/s5 deutan) are told apart by each series'
+   own dash pattern (monitoringModel `SERIES_DASHES`), and the data table under
+   every chart carries the values. The dark block is the same hues stepped for
+   the dark surface. seriesPalette.test.ts checks the contrast. */
 .palette {
   --mon-s1: #2a78d6;
-  --mon-s2: #eb6834;
-  --mon-s3: #1baf7a;
-  --mon-s4: #eda100;
-  --mon-s5: #e87ba4;
+  --mon-s2: #d95926;
+  --mon-s3: #199e70;
+  --mon-s4: #b27800;
+  --mon-s5: #d55181;
   --mon-s6: #008300;
 }
 @media (prefers-color-scheme: dark) {

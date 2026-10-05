@@ -35,6 +35,11 @@ export const AUTOMATION_LIMITS = {
   tracesPerPass: 500,
   /** a pass stops starting new work after this */
   passBudgetMs: 45_000,
+  /** LATE ARRIVALS: a rule whose filter reads a tag, a score or the flag
+   * (`automationFilterIsPostHoc`) also re-reads traces that ended this many
+   * hours back (never before the rule existed), because those land after the
+   * trace ends. Past it, a late tag or score needs an explicit backfill. */
+  lateArrivalWindowHours: 24,
   /** attempts per failed action (the first try included) */
   maxAttempts: 3,
   defaultDailyActionCap: 500,
@@ -91,6 +96,18 @@ const actionsSchema = z
 
 /** a stored rule filter: the shared trace filter (unknown keys stripped) */
 export const automationFilterSchema = traceFilterBaseSchema.superRefine(refineTraceFilter);
+
+/**
+ * Does this filter read something that can land AFTER the trace ends — a tag
+ * (`tagKey`/`tagValue`), an annotation, evaluator or judge score
+ * (`scoreName`/`scoreMin`/`scoreMax`), or the ADR-0160 flag (`flagged: true`)?
+ * Such a rule also rescans the late-arrival window
+ * (`AUTOMATION_LIMITS.lateArrivalWindowHours`). `flagged: false` is not
+ * post-hoc: an unflagged trace matches it the moment it ends.
+ */
+export function automationFilterIsPostHoc(f: z.infer<typeof automationFilterSchema>): boolean {
+  return f.tagKey !== undefined || f.scoreName !== undefined || f.flagged === true;
+}
 
 export const automationRuleCreateSchema = z
   .object({

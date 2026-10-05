@@ -4299,3 +4299,6 @@ export {
   type CalibrationCriterionChoice,
   type CalibrationCriterionValue,
 } from "./judge-panels.js";
+// ADR-0173 batch 2c fix round B: a KRI over a window total ignores minSamples
+export { kriMetricIsWindowTotal } from "./kri.js";
+export { automationFilterIsPostHoc } from "./automation-rules.js";

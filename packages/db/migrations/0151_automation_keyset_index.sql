@@ -1,0 +1,12 @@
+-- ADR-0173 batch 2c fix round B — the automation sweep's keyset index.
+--
+-- The sweep (apps/gateway/src/automation-rules.ts) reads finished traces
+-- after each rule's cursor, ordered by (end time truncated to the millisecond,
+-- id). Without an index on exactly that expression every pass sorted every
+-- finished trace past the cursor. The expression is written with
+-- `AT TIME ZONE 'UTC'` because date_trunc over a timestamptz depends on the
+-- session time zone and so cannot be indexed; the query uses the identical
+-- expression, so the keyset compare and the ORDER BY ... LIMIT walk this
+-- index. Partial on ended_at IS NOT NULL: a running trace is never a
+-- candidate.
+CREATE INDEX IF NOT EXISTS "traces_ended_ms_id_idx" ON "traces" ((date_trunc('milliseconds', "ended_at" AT TIME ZONE 'UTC')), "id") WHERE "ended_at" IS NOT NULL;

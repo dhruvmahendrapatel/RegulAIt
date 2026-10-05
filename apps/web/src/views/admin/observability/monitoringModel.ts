@@ -24,6 +24,22 @@ export type KriMetric = (typeof KRI_METRIC_OPTIONS)[number]["id"];
 /** mirrors KRI_LIMITS / SERIES_LIMITS / DASHBOARD_LIMITS */
 export const MONITORING_LIMITS = { maxWindowDays: 90, maxBuckets: 500, maxPanels: 24 } as const;
 
+/** mirrors shared `kriMetricIsWindowTotal`: a count or a sum over the window,
+ * where the window itself is the sample, so `minSamples` does not apply */
+export function kriIsWindowTotal(metric: KriMetric): boolean {
+  return metric === "trace_volume" || metric === "cost_usd";
+}
+
+/**
+ * One dash pattern per series slot (`--mon-s1`..`--mon-s6` in
+ * monitoring.module.css), so colour is never the only cue (WCAG 1.4.11 /
+ * 1.4.1): slots that sit close under a colour-vision deficiency (s4/s6 for
+ * protanopia, s2/s4 and s3/s5 for deuteranopia) differ in pattern. Solid,
+ * dash, dot, dash-dot, dash-dot-dot, long dash. The legend draws the same
+ * pattern.
+ */
+export const SERIES_DASHES = ["", "8 4", "2 3", "12 3 3 3", "10 3 2 3 2 3", "18 5"] as const;
+
 export type KriState = "breached" | "ok" | "insufficient" | "disabled";
 
 export interface Kri {
@@ -218,7 +234,8 @@ export interface Dashboard {
 // ---------------------------------------------------------------------------
 
 /** mirrors AUTOMATION_LIMITS */
-export const AUTOMATION_UI_LIMITS = { maxBackfillDays: 7, maxDailyActionCap: 10_000, maxHoldDays: 1095 } as const;
+/** mirrors AUTOMATION_LIMITS (lateArrivalWindowHours: the rescan for a tag, score or flag that lands after the trace ended) */
+export const AUTOMATION_UI_LIMITS = { maxBackfillDays: 7, maxDailyActionCap: 10_000, maxHoldDays: 1095, lateArrivalWindowHours: 24 } as const;
 
 export interface AutomationRule {
   id: string;

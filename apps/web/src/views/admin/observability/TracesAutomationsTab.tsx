@@ -11,6 +11,9 @@
  *    the author;
  *  - a new rule only sees traces that finish after it is created; reaching
  *    back is a backfill you ask for, which is audited and marked in the log;
+ *  - a filter on a tag, a score or the flag (which land after a trace ends)
+ *    also catches traces that ended in the last 24 hours; older ones need a
+ *    backfill;
  *  - the retention bound (twice the floor, at most three years) is printed
  *    beside the field, and an erasure request always releases a hold.
  *
@@ -87,7 +90,10 @@ export default function TracesAutomationsTab() {
             <p className={v.faint}>
               A rule runs as its author on traces that finish after it is created, at most 500 traces and 45 seconds a
               pass and its daily cap. Reaching further back is an explicit backfill of at most{" "}
-              {AUTOMATION_UI_LIMITS.maxBackfillDays} days, audited and marked in the match log.
+              {AUTOMATION_UI_LIMITS.maxBackfillDays} days, audited and marked in the match log. Tags, scores and the
+              flag can land after a trace finishes, so a rule that filters on them also re-checks traces that finished
+              in the last {AUTOMATION_UI_LIMITS.lateArrivalWindowHours} hours; one that gains a tag, score or flag later
+              than that needs a backfill.
             </p>
             {list.length === 0 ? (
               <EmptyState title="No automation rules yet" body="A rule routes matching traces to a queue, a dataset, a webhook or a retention hold." />
