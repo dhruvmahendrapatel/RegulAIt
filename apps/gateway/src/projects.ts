@@ -744,7 +744,24 @@ export type ProjectGate =
  * reaches its budget, further attributed dispatches are blocked until the
  * named approver sanctions the overage — same first-crossing-allowed
  * semantics as run budgets, because measured cost is only knowable after the
- * call. Unattributed dispatches pass through untouched. */
+ * call. Unattributed dispatches pass through untouched.
+ *
+ * F03 (ADR-0179 §4) — THE OVERSHOOT BOUND, MEASURED. This gate reads measured
+ * spend and reserves nothing (a spend-hold ledger is future work), so:
+ *  - one caller at a time: the call that first crosses the cap is the last
+ *    one allowed, and spend ends above the block threshold by less than that
+ *    one call's cost;
+ *  - C calls in flight at once: every call whose gate read happened before any
+ *    of them billed sees the pre-crossing spend and is allowed. Spend ends
+ *    above the threshold by less than one call's cost PER CALL IN FLIGHT,
+ *    i.e. at most C x the largest per-call cost. `f03-project-budget-
+ *    concurrency.test.ts` measures it: 8 concurrent $0.05 calls one cent under
+ *    a $1 cap ran 5 to 7 of the 8 across four runs, ending $0.24-$0.34 over
+ *    (4.8-6.8 calls' cost). The count varies with timing; the bound (strictly
+ *    under 8 calls' cost) does not. For a model call "cost" is the measured cost of that call,
+ *    which is only known after it, so the bound is in calls, not dollars.
+ * The next dispatch after the burst lands is blocked: the overshoot never
+ * carries on past the calls already in flight. */
 export async function preDispatchProjectGate(
   db: Db,
   projectId: string | null | undefined,
