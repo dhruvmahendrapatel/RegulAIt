@@ -439,7 +439,7 @@ function SystemPromptCard(props: { agents: AdminAgent[] }) {
 }
 
 /** One rung of a chain, as the gateway reports it. */
-interface FallbackRow {
+export interface FallbackRow {
   position: number;
   agentId: string;
   name: string;
@@ -449,55 +449,85 @@ interface FallbackRow {
 }
 
 /**
+ * UX-AG-1 (ADR-0179): the chain is STAGED. Every other form on this page saves
+ * on an explicit button; this card used to PUT on every add, remove and
+ * reorder, so a two-step reorder briefly put a half-edited order in force on
+ * live traffic. These helpers are the whole of the staging logic, pure so they
+ * can be tested without a DOM.
+ */
+export function fallbackChainDirty(saved: readonly FallbackRow[], draft: readonly FallbackRow[]): boolean {
+  if (saved.length !== draft.length) return true;
+  return saved.some((r, i) => r.agentId !== draft[i]!.agentId);
+}
+
+/** swap rung `i` with its neighbour `i + delta`; out of range is a no-op */
+export function moveFallback(draft: readonly FallbackRow[], i: number, delta: number): FallbackRow[] {
+  const j = i + delta;
+  if (j < 0 || j >= draft.length || i < 0 || i >= draft.length) return [...draft];
+  const next = [...draft];
+  [next[i], next[j]] = [next[j]!, next[i]!];
+  return next;
+}
+
+/** the PUT body: the ordered ids, which is the whole of the chain's meaning */
+export function fallbackChainBody(draft: readonly FallbackRow[]): { fallbackAgentIds: string[] } {
+  return { fallbackAgentIds: draft.map((r) => r.agentId) };
+}
+
+/**
  * ADR-0066 fallback chains — shipped API-only until now, which meant the
  * ordering that decides what runs when a provider is down lived nowhere an
  * admin could read it.
  *
  * The chain is edited as a WHOLE (the endpoint is a PUT, and order is the
- * semantics), so this card loads the current chain on agent select and saves
- * the full ordered list. The gateway owns the refusals — self-fallback,
- * duplicates, unknown targets — and this form deliberately does not
- * re-implement them: a rejected save surfaces the gateway's own reason
- * verbatim, so the UI can never disagree with the rule that actually binds.
+ * semantics), so this card loads the current chain on agent select, stages
+ * every add, remove and reorder as a draft, and saves the full ordered list
+ * only on "Save chain" (UX-AG-1). "Cancel" restores the saved chain. While the
+ * draft differs from what is saved, the primary-agent picker is locked, so a
+ * pending edit cannot be dropped by switching agents. The gateway owns the
+ * refusals — self-fallback, duplicates, unknown targets — and this form
+ * deliberately does not re-implement them: a rejected save surfaces the
+ * gateway's own reason verbatim and keeps the draft, so the UI can never
+ * disagree with the rule that actually binds.
  */
 function FallbackChainCard(props: { agents: AdminAgent[] }) {
   const act = useAction();
   const [agentId, setAgentId] = useState("");
-  const [chain, setChain] = useState<FallbackRow[]>([]);
+  const [saved, setSaved] = useState<FallbackRow[]>([]);
+  const [draft, setDraft] = useState<FallbackRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [addId, setAddId] = useState("");
+  const dirty = fallbackChainDirty(saved, draft);
 
   const load = async (id: string) => {
-    setChain([]);
+    setSaved([]);
+    setDraft([]);
     if (!id) return;
     setLoading(true);
     try {
       const r = await api.get<{ fallbacks: FallbackRow[] }>(`/v1/agents/${id}/fallbacks`);
-      setChain(r.fallbacks ?? []);
+      setSaved(r.fallbacks ?? []);
+      setDraft(r.fallbacks ?? []);
     } finally {
       setLoading(false);
     }
   };
 
-  const save = (next: FallbackRow[], msg: string) =>
+  const save = () =>
     void act.run(async () => {
-      await api.put(`/v1/agents/${agentId}/fallbacks`, {
-        fallbackAgentIds: next.map((r) => r.agentId),
-      });
+      await api.put(`/v1/agents/${agentId}/fallbacks`, fallbackChainBody(draft));
       await load(agentId);
-    }, msg);
+    }, "Fallback chain saved");
 
-  const move = (i: number, delta: number) => {
-    const next = [...chain];
-    const j = i + delta;
-    if (j < 0 || j >= next.length) return;
-    [next[i], next[j]] = [next[j]!, next[i]!];
-    save(next, "Fallback order saved");
+  const cancel = () => {
+    setDraft(saved);
+    setAddId("");
+    act.setError(null);
   };
 
-  // candidates exclude the primary itself and anything already in the chain —
+  // candidates exclude the primary itself and anything already in the draft —
   // the two conditions the gateway refuses with self_fallback / duplicate_fallback
-  const inChain = new Set(chain.map((r) => r.agentId));
+  const inChain = new Set(draft.map((r) => r.agentId));
   const candidates = props.agents.filter((x) => x.id !== agentId && !inChain.has(x.id));
 
   return (
@@ -506,6 +536,8 @@ function FallbackChainCard(props: { agents: AdminAgent[] }) {
         <Field label="Primary agent" grow>
           <Select
             value={agentId}
+            disabled={dirty}
+            aria-describedby={dirty ? "fallback-chain-locked" : undefined}
             onChange={(e) => {
               setAgentId(e.target.value);
               setAddId("");
@@ -516,19 +548,24 @@ function FallbackChainCard(props: { agents: AdminAgent[] }) {
           </Select>
         </Field>
       </div>
+      {dirty && (
+        <p id="fallback-chain-locked" className={v.dim}>
+          Save or cancel the chain below before choosing another agent.
+        </p>
+      )}
 
       {agentId && (
         <>
           {loading ? (
             <span className={v.dim}>Loading chain…</span>
-          ) : chain.length === 0 ? (
+          ) : draft.length === 0 ? (
             <p className={v.dim}>
               No fallbacks. A dispatch that cannot reach this agent fails honestly rather than
               silently routing somewhere the admin never named.
             </p>
           ) : (
-            <ol className={v.stack} style={{ margin: 0, paddingLeft: "1.25rem" }}>
-              {chain.map((r, i) => (
+            <ol className={v.stack} style={{ margin: 0, paddingLeft: "1.25rem" }} aria-label="Fallback chain, in order">
+              {draft.map((r, i) => (
                 <li key={r.agentId}>
                   <span className={v.rowTight}>
                     <strong>{r.name}</strong>
@@ -542,21 +579,28 @@ function FallbackChainCard(props: { agents: AdminAgent[] }) {
                       </Badge>
                     )}
                     <span className={v.grow} />
-                    <Button size="sm" disabled={act.busy || i === 0} onClick={() => move(i, -1)}>
+                    <Button
+                      size="sm"
+                      aria-label={`Move ${r.name} up`}
+                      disabled={act.busy || i === 0}
+                      onClick={() => setDraft(moveFallback(draft, i, -1))}
+                    >
                       ↑
                     </Button>
                     <Button
                       size="sm"
-                      disabled={act.busy || i === chain.length - 1}
-                      onClick={() => move(i, 1)}
+                      aria-label={`Move ${r.name} down`}
+                      disabled={act.busy || i === draft.length - 1}
+                      onClick={() => setDraft(moveFallback(draft, i, 1))}
                     >
                       ↓
                     </Button>
                     <Button
                       size="sm"
                       variant="danger"
+                      aria-label={`Remove ${r.name} from the chain`}
                       disabled={act.busy}
-                      onClick={() => save(chain.filter((x) => x.agentId !== r.agentId), "Fallback removed")}
+                      onClick={() => setDraft(draft.filter((x) => x.agentId !== r.agentId))}
                     >
                       Remove
                     </Button>
@@ -577,26 +621,44 @@ function FallbackChainCard(props: { agents: AdminAgent[] }) {
               onClick={() => {
                 const picked = props.agents.find((x) => x.id === addId);
                 if (!picked) return;
-                save(
-                  [
-                    ...chain,
-                    {
-                      position: chain.length,
-                      agentId: picked.id,
-                      name: picked.name,
-                      provider: picked.provider,
-                      model: picked.model ?? null,
-                      enabled: picked.enabled ?? true,
-                    },
-                  ],
-                  "Fallback added",
-                );
+                setDraft([
+                  ...draft,
+                  {
+                    position: draft.length,
+                    agentId: picked.id,
+                    name: picked.name,
+                    provider: picked.provider,
+                    model: picked.model ?? null,
+                    enabled: picked.enabled ?? true,
+                  },
+                ]);
                 setAddId("");
               }}
             >
               Add
             </Button>
           </div>
+
+          <div className={v.rowTight} data-testid="fallback-chain-actions">
+            {dirty ? (
+              <Badge tone="warn">Unsaved changes</Badge>
+            ) : (
+              <span className={v.dim}>{loading ? "" : "Saved — this is the chain in force."}</span>
+            )}
+            <span className={v.grow} />
+            <Button disabled={act.busy || !dirty} onClick={cancel}>
+              Cancel
+            </Button>
+            <Button variant="primary" disabled={act.busy || !dirty} onClick={save}>
+              Save chain
+            </Button>
+          </div>
+          {dirty && (
+            <p className={v.faint}>
+              Nothing changes for live traffic until you save: the chain above is a draft, and the
+              chain in force is still the one saved before you started editing.
+            </p>
+          )}
         </>
       )}
 
@@ -728,6 +790,29 @@ function PolicyCard(props: { uOpts: Array<{ v: string; l: string }>; aOpts: Arra
   );
 }
 
+/** where a role-granted agent's grant is changed (UX-AG-5) */
+export const ROLES_PAGE_PATH = "/admin/roles";
+
+/** the sentence (and links) behind a role-granted agent's unavailable Remove */
+export function roleGrantReasonText(roles: readonly string[]): string {
+  const named = roles.length ? ` ${roles.join(", ")}` : "";
+  return `Granted by role${named}. Remove it from the role, or add a per-user revocation on the Users page.`;
+}
+
+// underlined: a link inside a sentence must not be told apart by colour alone
+const IN_TEXT_LINK = { textDecoration: "underline" } as const;
+
+function RoleGrantReason(props: { roles: readonly string[] }) {
+  return (
+    <>
+      {roleGrantReasonText(props.roles)}{" "}
+      <Link to={ROLES_PAGE_PATH} style={IN_TEXT_LINK}>Open the Roles page</Link>
+      {" · "}
+      <Link to="/admin/users" style={IN_TEXT_LINK}>Open the Users page</Link>
+    </>
+  );
+}
+
 function EntitlementCard(props: { uOpts: Array<{ v: string; l: string }>; agents: AdminAgent[] }) {
   const act = useAction();
   const [userId, setUserId] = useState("");
@@ -794,11 +879,9 @@ function EntitlementCard(props: { uOpts: Array<{ v: string; l: string }>; agents
                     // as a missing feature, and the admin would not learn that
                     // the lever they want is the role — or a per-user
                     // revocation, which subtracts without touching the role.
-                    disabledReason={
-                      x.source === "role"
-                        ? `granted by role ${(x.roles ?? []).join(", ")} — remove it there, or add a per-user revocation on the Users page`
-                        : undefined
-                    }
+                    // UX-AG-5 (ADR-0179): the reason carries the link to the
+                    // lever, rather than telling the admin to go and find it.
+                    disabledReason={x.source === "role" ? <RoleGrantReason roles={x.roles ?? []} /> : undefined}
                     consequence={
                       <p>
                         The direct grant is deleted, so the next call this user makes on{" "}

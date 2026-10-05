@@ -115,6 +115,15 @@ export interface SubmissionCheckpoint {
   planningAdvanced?: boolean;
   questionnaire?: { digest: string };
   risks: Record<string, { id: string; inputs: RiskInputs; digest: string; linkedControls: string[] }>;
+  /**
+   * ADR-0179: a questionnaire version whose request may have reached the
+   * gateway without its answer reaching the page: the Idempotency-Key and the
+   * exact content it carried. Saved with the draft BEFORE the request, so a
+   * retry (even after a reload) sends the same key and gets the same version.
+   */
+  questionnaireAttempt?: { key: string; content: string };
+  /** ADR-0179: the same for each risk being registered, by scenario key */
+  riskAttempts?: Record<string, { key: string; inputs: RiskInputs }>;
 }
 
 export const emptyCheckpoint = (): SubmissionCheckpoint => ({ risks: {} });

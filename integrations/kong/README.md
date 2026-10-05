@@ -22,6 +22,53 @@
 > DB-backed mode and other auth plugins are NOT covered — and the priority
 > ordering this plugin depends on is version-specific, so a different Kong is
 > unverified until the harness runs against it.
+>
+> **Not supported at the Kong edge (ADR-0179):**
+> - **Data-scope rules.** The plugin sends no tool arguments, so a data-scope
+>   rule on the governed tool **always denies** here. This is not parity with an
+>   in-line dispatch, and nothing in this directory claims it is. Because the
+>   plugin never sends arguments, every deny is decided without them, and says
+>   so: `"decidedWithout": ["args"]` in its body and a warning in Kong's error
+>   log. That tag states what the decision ran without, **not** that the
+>   arguments caused it; the rule id in `x-regulait-reason` tells you whether a
+>   data-scope rule refused.
+> - **A derived session origin for OIDC or SAML.** Only `key-auth` (`api_key`)
+>   and `basic-auth` (`password`) derive the origin from the credential. For
+>   OIDC, SAML, `jwt` and every other auth plugin the origin is the
+>   **operator's assertion** (`asserted_session_origin`) or absent.
+> - **Checking an assertion on a `jwt` route.** A `jwt` credential derives
+>   nothing, so a `jwt` route **accepts whatever is asserted** — `oidc`, `saml`
+>   or `password` — and the PDP receives it as `principal.asserted`. Nothing
+>   checks that the token's issuer is an OIDC or SAML identity provider. Set the
+>   field on a `jwt` route only when you know what issued its tokens.
+
+## Support matrix — what is claimed, and what proves it
+
+| Behaviour | Status | Proved by |
+| --- | --- | --- |
+| deny path, forged headers, identity refusals, fail-closed PDP failures | supported | `test/verify.mjs` against `kong:3.6` (see the list below) |
+| `projectId` sent from per-route config | supported | `verify.mjs` reads `contextApplied` back from the PDP ledger |
+| session origin derived for `key-auth` → `api_key` | supported | `verify.mjs` (ledger) and `test/handler_spec.lua` |
+| session origin derived for `basic-auth` → `password` | supported in the plugin; **not run in Kong** | `test/handler_spec.lua` only |
+| OIDC / SAML / `jwt` origin | **asserted by the operator, never derived**; a `jwt` route accepts any of `oidc`, `saml`, `password` unchecked | `test/handler_spec.lua`; the PDP labels it `principal.asserted` (`apps/gateway/src/aer036-mixed-auth-origin.test.ts`) |
+| an asserted origin that contradicts a derived one | refused, `session_origin_contradicts_credential`, PDP never asked | `verify.mjs` (key-auth + `oidc`) and `test/handler_spec.lua` (key-auth and basic-auth) |
+| data-scope rules | **not supported: always deny** | `test/handler_spec.lua` (no `args`; every deny tagged `decidedWithout`, and the note never claims the cause); `verify.mjs` asserts `args` is not claimed and (pending its first CI run) the tag; the PDP side in `aer036-mixed-auth-origin.test.ts` |
+| `mfaCompleted` | not sent: Kong cannot observe it | `test/handler_spec.lua` (no field in the question) |
+
+The unit spec runs on [busted](https://lunarmodules.github.io/busted/) (MIT) under LuaJIT, the Lua
+5.1 dialect Kong's OpenResty embeds. CI pins all of it in `.github/workflows/integrations.yml`
+(job `kong-plugin-spec`): LuaJIT and LuaRocks by exact Debian version on `ubuntu-24.04`, and busted
+with every rock it pulls in by `==` in `test/regulait-authz-spec-dev-1.rockspec`, then fails if the
+installed tree holds anything that file does not name. Locally, from `integrations/kong` (the
+rock tree lives outside the repository):
+
+```sh
+T=/tmp/regulait-kong-rocks
+luarocks --lua-version=5.1 --tree "$T" --only-server https://luarocks.org \
+  build --only-deps test/regulait-authz-spec-dev-1.rockspec LUA_INCDIR=/usr/include/luajit-2.1
+eval "$(luarocks --lua-version=5.1 --tree "$T" path)"
+luajit "$T/lib/luarocks/rocks-5.1/busted/2.3.0-1/bin/busted"    # reads ./.busted
+```
 
 `kong/plugins/regulait-authz/` is a custom Kong plugin: `handler.lua` and
 `schema.lua`.
@@ -232,16 +279,48 @@ What it does now:
   no longer be accepted in silence, and the ledger records the exact value under
   `assertedPrincipal.sessionOrigin` with `principal.asserted` in `contextApplied`.
 
-**The honest residue.** For OIDC and SAML the configured value is still an assertion this adapter
-cannot verify, because nothing in Kong's community plugin set gives an equally reliable per-request
-signal. Scope such a route to one auth mechanism and treat the field as the trusted assertion it is
-named after. Omitting it entirely is always safe: absent reads as `unknown`, the weakest input.
+**The honest residue: for OIDC and SAML the origin is operator-asserted (ADR-0179).** Only
+`key-auth` and `basic-auth` derive the origin. For OIDC and SAML the configured value is an
+assertion this adapter cannot verify, because nothing in Kong's community plugin set gives an
+equally reliable per-request signal. The same holds for `jwt`, `oauth2`, `hmac-auth`, `ldap-auth`
+and any other plugin: their credentials derive nothing. (A `jwt` credential also carries a `key`
+field; until plugin 0.4.0 that was misread as key-auth and labelled `api_key`, so an `oidc`
+assertion on a JWT route was refused. Only a credential with `key` and none of `secret`,
+`algorithm` or `rsa_public_key` is key-auth now.) The PDP cannot tell a derived origin from an
+asserted one either: on `/v1/authz/check` every origin is the caller's claim, which is why the
+response labels it `principal.asserted`. Scope such a route to one auth mechanism and treat the
+field as the trusted assertion it is named after. Omitting it entirely is always safe: absent reads
+as `unknown`, the weakest input.
+
+**What that means for a `jwt` route, concretely.** Since 0.4.0 a `jwt` route is no longer refused
+for asserting `oidc`, and it is not refused for asserting anything else either: `oidc`, `saml` and
+`password` are all accepted and forwarded as the operator's claim. The plugin does not look at the
+token's issuer, so it cannot tell a token minted by an OIDC identity provider from one minted by a
+service with a shared secret. If an ABAC policy distinguishes `oidc` from weaker origins, an
+assertion on a `jwt` route satisfies it on the operator's word alone. Assert on a `jwt` route only
+when every issuer configured for its consumers really is the identity provider you name, or leave
+the field unset.
+
+The mixed-auth cases are pinned by `test/handler_spec.lua`:
+
+| credential on the route | `asserted_session_origin` | result |
+| --- | --- | --- |
+| key-auth | none | `api_key` derived and sent |
+| key-auth | `oidc`, `saml` or `password` | **refused**, `session_origin_contradicts_credential`, PDP never asked |
+| basic-auth | none, or `password` | `password` derived and sent |
+| basic-auth | `oidc` or `saml` | **refused**, as above |
+| OIDC / SAML (credential names no mechanism) | `oidc` / `saml` | the assertion is sent; the PDP labels it `principal.asserted` |
+| `jwt` | `oidc`, `saml` or `password` | **any of them is accepted and sent unchecked** (a `jwt` credential is not key-auth, so nothing contradicts it); the PDP labels it `principal.asserted` |
+| anything underivable | none | no principal is sent; the PDP reads `unknown` |
 
 There is deliberately **no `mfa_completed`**. Kong cannot observe whether a second factor was
 completed, and a configured `true` would be an assertion nobody checked sitting in the trusted path.
 Absent reads as "unknown", which is the weakest input a policy can get — the safe direction.
 
-### Known limitation — this plugin sends no `args`
+### Not supported — data-scope rules at the Kong edge (this plugin sends no `args`)
+
+**Data-scope rules are not supported at the Kong edge.** This is a narrowed claim (ADR-0179), not
+a bug awaiting a fix: forwarding a projection of the arguments from Kong is future work.
 
 The plugin sends `userId`, `serverId`, `toolName` and the two fields above, and **not the call's
 arguments**. Kong would have to buffer and parse the request body to supply them, and then map that
@@ -259,3 +338,28 @@ rule. Either govern a route whose tool carries no data-scope rule, or extend the
 `["projectId","principal"]` — with `args` conspicuously absent — rather than as a mystery. The
 harness asserts exactly that against the PDP's own ledger, including that `args` is NOT claimed: a
 disclosure in a README is a promise, and this one is now measured.
+
+**What a refusal says, exactly (plugin 0.4.0).** The plugin cannot know in advance whether a
+data-scope rule applies — rules live in the PDP and change at runtime — so it does not pre-empt the
+PDP. It **tags** the answer instead: whenever the PDP returns `deny` and its `contextApplied` does
+not name `args`, the `403` body carries
+
+```json
+{ "message": "forbidden by policy", "decision": "deny",
+  "decidedWithout": ["args"],
+  "note": "decided without tool arguments, which this Kong adapter never sends; this does not say whether they were needed. Only if the rule in x-regulait-reason is a data-scope rule did their absence cause the deny, and such a rule always denies at the Kong edge" }
+```
+
+and Kong's error log gets a warning naming the rule id from `x-regulait-reason`.
+
+**The tag is a fact about the input, not a diagnosis.** Because this plugin never sends arguments,
+*every* deny it receives was decided without them — including one refused simply because the
+subject has no grant. The PDP's answer names what the decision was computed **on**
+(`contextApplied`); it does not say whether a rule **needed** something that was absent, so the tag
+cannot say that either. Before ADR-0179's review the field was named `notEvaluated` and its note
+asserted the data-scope consequence on every deny; both overstated it. To tell this limit from an
+ordinary refusal, look up the rule id from `x-regulait-reason` in the ledger: a data-scope rule
+there means this limit, anything else is an ordinary refusal. Tagging only the denies whose rule
+needed arguments would take a PDP response field that does not exist today. The tag is not a header,
+because the five protocol header names are a closed set refused on inbound requests.
+`approval_required` and `allow` are never tagged.

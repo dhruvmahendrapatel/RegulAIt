@@ -74,13 +74,44 @@ interface Gateway {
   dropNextCreateResponse: boolean;
   /** hold the create until released */
   holdCreate: Promise<void> | null;
+  // ---- ADR-0179 -----------------------------------------------------------
+  /** who the session belongs to; null = the session has ended (every call answers 401) */
+  user: "ada" | "bob" | null;
+  /** who the next sign-in is */
+  signInAs: "ada" | "bob";
+  /** Bob's drafts (Ada's are `drafts`) */
+  bobDrafts: Map<string, { scope: string; state: unknown; updatedAt: string }>;
+  /** refuse (500) a draft save whose state matches */
+  draftPutFails: ((state: Json) => boolean) | null;
+  /** the attempt key Ada's saved draft held when each create arrived */
+  draftKeyAtCreate: Array<string | undefined>;
+  /** every risk POST: its key, and whether it was answered as a replay */
+  riskPosts: Array<{ key: string | undefined; replay: boolean }>;
+  /** every questionnaire POST: its key, and whether it was answered as a replay */
+  artifactPosts: Array<{ key: string | undefined; replay: boolean }>;
+  /** drop the next risk / questionnaire response AFTER it is stored (a lost response) */
+  dropNextRiskResponse: boolean;
+  dropNextArtifactResponse: boolean;
+  // ---- ADR-0179 security review, item 6 -----------------------------------
+  /** hold a draft save whose state matches until released (a slow save still in flight) */
+  holdDraftPut: { when: (state: Json) => boolean; until: Promise<void> } | null;
+  /** draft writes refused because they named someone other than the signed-in person */
+  draftOwnerRefusals: number;
 }
 
 const json = (route: Route, body: unknown, status = 200, headers: Record<string, string> = {}) =>
   route.fulfill({ status, contentType: "application/json", headers, body: JSON.stringify(body) });
 
 async function mockGateway(page: Page, patch: Partial<Gateway> = {}): Promise<Gateway> {
-  const gw: Gateway = { drafts: new Map(), draftUnavailable: false, draftPutStatus: null, draftPuts: 0, assistCalls: [], creates: [], useCases: [], artifacts: [], risks: [], dropNextCreateResponse: false, holdCreate: null, ...patch };
+  const gw: Gateway = {
+    drafts: new Map(), draftUnavailable: false, draftPutStatus: null, draftPuts: 0, assistCalls: [], creates: [], useCases: [], artifacts: [], risks: [], dropNextCreateResponse: false, holdCreate: null,
+    user: "ada", signInAs: "ada", bobDrafts: new Map(), draftPutFails: null, draftKeyAtCreate: [], riskPosts: [], artifactPosts: [], dropNextRiskResponse: false, dropNextArtifactResponse: false,
+    holdDraftPut: null, draftOwnerRefusals: 0,
+    ...patch,
+  };
+  // the stored risks and questionnaire versions by Idempotency-Key: the gateway's replay contract
+  const riskByKey = new Map<string, Json>();
+  const versionByKey = new Map<string, number>();
   await page.route("**/*", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
@@ -89,19 +120,44 @@ async function mockGateway(page: Page, patch: Partial<Gateway> = {}): Promise<Ga
     const method = request.method();
     const body = (method === "GET" || method === "DELETE" ? {} : request.postDataJSON() ?? {}) as Json;
 
-    if (p === "/auth/me") return json(route, { userId: "u", isAdmin: true, via: "session", user: { id: "u", email: "ada@example.test", displayName: "Ada Owner" }, mustChangePassword: false, totpEnabled: true, passwordSet: true, mfaSetupRequired: false });
-    if (p === "/v1/me") return json(route, { userId: "u", isAdmin: true, user: { id: "u", email: "ada@example.test", displayName: "Ada Owner" } });
+    const person = gw.user === "bob"
+      ? { id: "b", email: "bob@example.test", displayName: "Bob Other" }
+      : { id: "u", email: "ada@example.test", displayName: "Ada Owner" };
+    if (p === "/auth/login") {
+      gw.user = gw.signInAs;
+      return json(route, {});
+    }
+    if (p === "/auth/logout") {
+      gw.user = null;
+      return json(route, { ok: true });
+    }
+    if (p === "/auth/sign-in-options") return json(route, {});
+    // an ended session: the gateway's preHandler refuses everything else
+    if (gw.user === null) return json(route, { error: "unauthenticated" }, 401);
+    if (p === "/auth/me") return json(route, { userId: person.id, isAdmin: true, via: "session", user: person, mustChangePassword: false, totpEnabled: true, passwordSet: true, mfaSetupRequired: false });
+    if (p === "/v1/me") return json(route, { userId: person.id, isAdmin: true, user: person });
     if (p === "/v1/use-cases/draft") {
       if (gw.draftUnavailable) return json(route, { error: "internal" }, 500);
+      // drafts are per signed-in person
+      const drafts = gw.user === "bob" ? gw.bobDrafts : gw.drafts;
       const scope = url.searchParams.get("scope") ?? "";
+      // the gateway's rule: a write naming someone other than the caller stores nothing
+      const named = request.headers()["x-regulait-draft-owner"];
+      if ((method === "PUT" || method === "DELETE") && named !== undefined && named !== person.id) {
+        gw.draftOwnerRefusals += 1;
+        return json(route, { error: "draft_owner_changed" }, 409);
+      }
+      // a slow save: the caller (and its cookie) was resolved when it arrived
+      if (method === "PUT" && gw.holdDraftPut?.when(body.state as Json)) await gw.holdDraftPut.until;
       if (method === "PUT") gw.draftPuts += 1;
-      if (method === "PUT" && gw.draftPutStatus) return json(route, { error: "draft_too_large" }, gw.draftPutStatus);
-      if (method === "PUT") gw.drafts.set(scope, { scope, state: body.state, updatedAt: new Date().toISOString() });
+      if (method === "PUT" && gw.draftPutStatus) return json(route, { error: gw.draftPutStatus === 413 ? "draft_too_large" : "internal" }, gw.draftPutStatus);
+      if (method === "PUT" && gw.draftPutFails?.(body.state as Json)) return json(route, { error: "internal" }, 500);
+      if (method === "PUT") drafts.set(scope, { scope, state: body.state, updatedAt: new Date().toISOString() });
       if (method === "DELETE") {
-        gw.drafts.delete(scope);
+        drafts.delete(scope);
         return route.fulfill({ status: 204 });
       }
-      return json(route, { draft: gw.drafts.get(scope) ?? null });
+      return json(route, { draft: drafts.get(scope) ?? null });
     }
     if (p === "/v1/agents") return json(route, { agents: [{ id: AGENT, name: "Credit assistant", provider: "mock", model: "mock-balanced", enabled: true, modes: ["chat"] }] });
     if (p === "/v1/vendors") return json(route, { vendors: [{ id: VENDOR, name: "Acme Model Services", category: "model_provider", status: "approved" }] });
@@ -118,6 +174,7 @@ async function mockGateway(page: Page, patch: Partial<Gateway> = {}): Promise<Ga
       // the gateway's contract: the same caller and key returns the ORIGINAL use case
       const earlier = key ? gw.useCases.find((u) => u.key === key) : undefined;
       gw.creates.push({ key, body, replay: Boolean(earlier) });
+      gw.draftKeyAtCreate.push((gw.drafts.get("new")?.state as Json | undefined)?.attempt?.key);
       if (earlier) return json(route, { id: earlier.id, instance: { id: `instance-${earlier.id}` } }, 200, { "Idempotent-Replay": "true" });
       const id = gw.useCases.length === 0 ? USE_CASE : `${gw.useCases.length}1111111-1111-4111-8111-111111111111`;
       gw.useCases.push({ id, key, body });
@@ -129,12 +186,30 @@ async function mockGateway(page: Page, patch: Partial<Gateway> = {}): Promise<Ga
     }
     if (/^\/v1\/workflows\/instances\/[^/]+\/advance$/.test(p)) return json(route, { status: "running" });
     if (/^\/v1\/workflows\/instances\/[^/]+\/artifacts$/.test(p)) {
+      const key = request.headers()["idempotency-key"];
+      const earlier = key ? versionByKey.get(key) : undefined;
+      gw.artifactPosts.push({ key, replay: earlier !== undefined });
+      if (earlier !== undefined) return json(route, { version: earlier, status: "awaiting_approval" }, 200, { "Idempotent-Replay": "true" });
       gw.artifacts.push(String(body.content));
+      if (key) versionByKey.set(key, gw.artifacts.length);
+      if (gw.dropNextArtifactResponse) {
+        gw.dropNextArtifactResponse = false;
+        return route.abort("connectionreset");
+      }
       return json(route, { version: gw.artifacts.length }, 201);
     }
     if (p === "/v1/risks" && method === "POST") {
+      const key = request.headers()["idempotency-key"];
+      const earlier = key ? riskByKey.get(key) : undefined;
+      gw.riskPosts.push({ key, replay: Boolean(earlier) });
+      if (earlier) return json(route, earlier, 200, { "Idempotent-Replay": "true" });
       const row = { ...body, id: `risk-${gw.risks.length + 1}`, controls: [] as string[] };
       gw.risks.push(row);
+      if (key) riskByKey.set(key, row);
+      if (gw.dropNextRiskResponse) {
+        gw.dropNextRiskResponse = false;
+        return route.abort("connectionreset");
+      }
       return json(route, row, 201);
     }
     const controls = p.match(/^\/v1\/risks\/([^/]+)\/controls$/);
@@ -515,5 +590,235 @@ test.describe("AER-052/053/054: explanations saved, plain-language screening, th
     await proposal.locator("summary", { hasText: "Questionnaire" }).click();
     await expect(proposal).toContainText("My own purpose answer.");
     await expect(proposal).toContainText("Credit assistant · mock/mock-balanced");
+  });
+});
+
+// ===========================================================================
+// ADR-0179 — the rest of AER-050: failed saves, browser Back, session loss,
+// another user, and lost risk / questionnaire responses
+// ===========================================================================
+
+const submitted = (page: Page) => page.getByRole("status").filter({ hasText: "Submitted for human review." });
+const notSaved = (page: Page) => page.getByRole("main").getByRole("alert").filter({ hasText: "Your draft could not be saved" });
+
+async function signIn(page: Page, email: string) {
+  await page.getByLabel("Email or username").fill(email);
+  await page.getByLabel("Password", { exact: true }).fill("synthetic-password-for-a-mock");
+  await page.getByRole("button", { name: "Sign in" }).click();
+}
+
+test.describe("ADR-0179: a create waits for a durable draft save", () => {
+  test("a refused save of the create's key sends no create; the error says so, and Retry creates once with the saved key", async ({ page }) => {
+    const gw = await mockGateway(page);
+    await walkWithEdits(page);
+    await expect.poll(() => draftStep(gw)).toBe(5);
+    // the save that carries the create's Idempotency-Key is refused
+    gw.draftPutFails = (state) => Boolean(state.attempt);
+    await page.getByRole("button", { name: "Submit for human review" }).click();
+    await expect(notSaved(page)).toContainText("the next step of your submission was not sent");
+    await expect(notSaved(page)).toContainText("This step was not sent");
+    expect(gw.creates, "no create without its key on the server").toHaveLength(0);
+    await expectNoAxeViolations(page, "draft not saved");
+
+    gw.draftPutFails = null;
+    await notSaved(page).getByRole("button", { name: "Retry" }).click();
+    await expect(submitted(page)).toBeVisible();
+    expect(gw.creates).toHaveLength(1);
+    // the server held the key before the create was sent
+    expect(gw.draftKeyAtCreate).toEqual([gw.creates[0]!.key]);
+    expect(gw.useCases).toHaveLength(1);
+    expect(gw.artifacts).toHaveLength(1);
+    expect(gw.risks).toHaveLength(1);
+  });
+
+  test("a refused save of a risk's key sends no risk; Retry registers it once", async ({ page }) => {
+    const gw = await mockGateway(page);
+    await walkWithEdits(page);
+    await expect.poll(() => draftStep(gw)).toBe(5);
+    gw.draftPutFails = (state) => Object.keys((state.checkpoint as Json | undefined)?.riskAttempts ?? {}).length > 0;
+    await page.getByRole("button", { name: "Submit for human review" }).click();
+    await expect(notSaved(page)).toBeVisible();
+    expect(gw.useCases).toHaveLength(1);
+    expect(gw.artifacts).toHaveLength(1);
+    expect(gw.riskPosts, "no risk without its key on the server").toHaveLength(0);
+
+    gw.draftPutFails = null;
+    await notSaved(page).getByRole("button", { name: "Retry" }).click();
+    await expect(submitted(page)).toBeVisible();
+    expect(gw.creates).toHaveLength(1);
+    expect(gw.risks).toHaveLength(1);
+    expect(gw.riskPosts.map((r) => r.replay)).toEqual([false]);
+  });
+
+  test("a questionnaire and then a risk whose responses are lost are finished after reloads with the same keys: one version, one risk", async ({ page }) => {
+    const gw = await mockGateway(page, { dropNextArtifactResponse: true });
+    await walkWithEdits(page);
+    await page.getByRole("button", { name: "Submit for human review" }).click();
+    await expect(page.getByRole("main").getByRole("alert").filter({ hasText: "retry to resume" })).toBeVisible();
+    expect(gw.artifacts).toHaveLength(1);
+
+    gw.dropNextRiskResponse = true;
+    await page.reload();
+    await page.getByRole("button", { name: "Resume your draft" }).click();
+    await page.getByRole("button", { name: "Submit for human review" }).click();
+    await expect(page.getByRole("main").getByRole("alert").filter({ hasText: "retry to resume" })).toBeVisible();
+    expect(gw.risks).toHaveLength(1);
+
+    await page.reload();
+    await page.getByRole("button", { name: "Resume your draft" }).click();
+    await page.getByRole("button", { name: "Submit for human review" }).click();
+    await expect(submitted(page)).toBeVisible();
+
+    expect(gw.useCases).toHaveLength(1);
+    expect(gw.artifacts, "one questionnaire version: no second review round").toHaveLength(1);
+    expect(gw.artifactPosts.map((a) => a.replay)).toEqual([false, true]);
+    expect(new Set(gw.artifactPosts.map((a) => a.key)).size).toBe(1);
+    expect(gw.risks.map((r) => [r.title, r.controls])).toEqual([[BIAS, ["eu-ai-act:art-14-human-oversight"]]]);
+    expect(gw.riskPosts.map((r) => r.replay)).toEqual([false, true]);
+    expect(new Set(gw.riskPosts.map((r) => r.key)).size).toBe(1);
+    await expect.poll(() => gw.drafts.has("new")).toBe(false);
+  });
+});
+
+test.describe("ADR-0179: browser Back and leaving the page keep the last edit", () => {
+  test("an edit followed at once by browser Back asks first; Stay keeps it; Leave saves it; Forward recovers it exactly", async ({ page }) => {
+    const gw = await mockGateway(page);
+    await page.goto("/ui/");
+    await page.goto("/ui/admin/governance/intake");
+    const name = page.getByLabel("Use-case name");
+    await name.fill("Typed just before Back");
+    await page.evaluate(() => history.back());
+    const leave = page.getByRole("dialog", { name: "Leave this registration?" });
+    await expect(leave).toBeVisible();
+    await expect(page).toHaveURL(/\/ui\/admin\/governance\/intake$/);
+    await expectNoAxeViolations(page, "Back asks first");
+    await leave.getByRole("button", { name: "Stay on this page" }).click();
+    await expect(leave).toHaveCount(0);
+    await expect(name).toHaveValue("Typed just before Back");
+
+    // again, and this time leave at once
+    await name.fill("Typed just before Back, then edited");
+    await page.evaluate(() => history.back());
+    await leave.getByRole("button", { name: "Leave", exact: true }).click();
+    await expect(page).toHaveURL(/\/ui\/?$/);
+    await expect.poll(() => ((gw.drafts.get("new")?.state as Json | undefined)?.form as Json | undefined)?.title).toBe("Typed just before Back, then edited");
+
+    await page.goForward();
+    await expect(page).toHaveURL(/\/ui\/admin\/governance\/intake$/);
+    await expect(page.getByText(/You have a saved draft of “Typed just before Back, then edited”/)).toBeVisible();
+    await page.getByRole("button", { name: "Resume your draft" }).click();
+    await expect(name).toHaveValue("Typed just before Back, then edited");
+  });
+
+  test("an edit made just before a navigation the guard does not see (the search palette) is saved as the page unmounts", async ({ page }) => {
+    const gw = await mockGateway(page);
+    await page.goto("/ui/admin/governance/intake");
+    await page.getByLabel("Use-case name").fill("Kept when the page unmounts");
+    expect(gw.draftPuts).toBe(0);
+    await page.keyboard.press("Control+k");
+    const dialog = page.getByRole("dialog", { name: "Search pages and your work" });
+    await dialog.getByRole("combobox", { name: "Search pages, agents, models and projects" }).fill("models");
+    await expect(dialog.getByRole("group", { name: "Pages" }).getByRole("option", { name: /^Models/ })).toBeVisible();
+    await page.keyboard.press("Enter");
+    await expect(page).toHaveURL(/\/ui\/models$/);
+    await expect.poll(() => ((gw.drafts.get("new")?.state as Json | undefined)?.form as Json | undefined)?.title).toBe("Kept when the page unmounts");
+  });
+
+  test("an edit made just before the page is closed or reloaded is saved on the way out", async ({ page }) => {
+    const gw = await mockGateway(page);
+    await page.goto("/ui/admin/governance/intake");
+    await page.getByLabel("Use-case name").fill("Kept when the page goes");
+    // inside the one-second debounce: nothing saved yet
+    expect(gw.draftPuts).toBe(0);
+    // the browser's `pagehide` as the page goes. Dispatched here rather than by
+    // a real unload: the test's request interception cannot see a keepalive
+    // request that outlives its page, though the browser still sends it.
+    await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: false })));
+    await expect.poll(() => ((gw.drafts.get("new")?.state as Json | undefined)?.form as Json | undefined)?.title, { timeout: 900 }).toBe("Kept when the page goes");
+    page.on("dialog", (dialog) => void dialog.accept());
+    await page.reload();
+    await expect(page.getByText(/You have a saved draft of “Kept when the page goes”/)).toBeVisible();
+  });
+});
+
+test.describe("ADR-0179: session loss and another user", () => {
+  test("an expired session mid-intake keeps the saved draft; signing in again returns to it and it submits once", async ({ page }) => {
+    const gw = await mockGateway(page);
+    await walkWithEdits(page);
+    await expect.poll(() => draftStep(gw)).toBe(5);
+    const saved = JSON.stringify(gw.drafts.get("new")!.state);
+
+    gw.user = null; // the session ends
+    await page.getByRole("button", { name: "Back" }).click();
+    await expect(page.getByLabel("Email or username")).toBeVisible();
+    // the save under the dead session was refused; the last durable draft is untouched
+    expect(JSON.stringify(gw.drafts.get("new")!.state)).toBe(saved);
+
+    await signIn(page, "ada@example.test");
+    await expect(page).toHaveURL(/\/ui\/admin\/governance\/intake$/);
+    await expect(page.getByText(/You have a saved draft of “Credit-limit-increase assistant”/)).toBeVisible();
+    await page.getByRole("button", { name: "Resume your draft" }).click();
+    await expect(stage(page)).toContainText("Review");
+    await expect(page.getByRole("group", { name: "Your proposal" })).toContainText("Edited bias text: outcomes are compared across groups monthly.");
+    await page.getByRole("button", { name: "Submit for human review" }).click();
+    await expect(submitted(page)).toBeVisible();
+    expect(gw.useCases).toHaveLength(1);
+    expect(gw.risks).toHaveLength(1);
+    await expect.poll(() => gw.drafts.has("new")).toBe(false);
+  });
+
+  test("user A signs out and user B signs in on the same browser: B never sees, resumes or removes A's draft", async ({ page }) => {
+    const gw = await mockGateway(page);
+    await page.goto("/ui/admin/governance/intake");
+    await page.getByLabel("Use-case name").fill("Ada's confidential idea");
+    await expect.poll(() => ((gw.drafts.get("new")?.state as Json | undefined)?.form as Json | undefined)?.title).toBe("Ada's confidential idea");
+
+    await page.locator("button[aria-haspopup=menu]").click();
+    await page.getByRole("menuitem", { name: "Sign out" }).click();
+    await expect(page).toHaveURL(/\/ui\/login/);
+    gw.signInAs = "bob";
+    await signIn(page, "bob@example.test");
+    await expect(page).toHaveURL(/\/ui\/admin\/governance\/intake$/);
+    await expect(page.getByLabel("Use-case name")).toHaveValue("");
+    await expect(page.getByText(/You have a saved draft/)).toHaveCount(0);
+    expect(await page.content()).not.toContain("Ada's confidential idea");
+    // B's page neither read nor removed A's draft
+    expect(gw.bobDrafts.size).toBe(0);
+    expect(((gw.drafts.get("new")?.state as Json | undefined)?.form as Json | undefined)?.title).toBe("Ada's confidential idea");
+  });
+
+  test("A's exit save, queued behind a slow save, lands after B signs in: it names A, so it never becomes B's draft", async ({ page }) => {
+    let release!: () => void;
+    let held = false;
+    const gw = await mockGateway(page, {
+      holdDraftPut: {
+        when: (state) => {
+          const hit = (state.form as Json | undefined)?.title === "Ada's confidential idea";
+          if (hit) held = true;
+          return hit;
+        },
+        until: new Promise<void>((resolve) => { release = resolve; }),
+      },
+    });
+    await page.goto("/ui/admin/governance/intake");
+    await page.getByLabel("Use-case name").fill("Ada's confidential idea");
+    // the debounced save is in flight and slow
+    await expect.poll(() => held, { message: "the slow save has arrived" }).toBe(true);
+    // a last edit the slow save does not hold; leaving queues it behind that save
+    await page.getByLabel("Use-case name").fill("Ada's confidential idea, second thoughts");
+
+    await page.locator("button[aria-haspopup=menu]").click();
+    await page.getByRole("menuitem", { name: "Sign out" }).click();
+    await expect(page).toHaveURL(/\/ui\/login/);
+    gw.signInAs = "bob";
+    await signIn(page, "bob@example.test");
+    await expect(page).toHaveURL(/\/ui\/admin\/governance\/intake$/);
+
+    // the slow save finishes; the exit save queued behind it goes now, under Bob's session
+    release();
+    await expect.poll(() => gw.draftOwnerRefusals, { message: "the late exit save is refused" }).toBe(1);
+    expect(gw.bobDrafts.size, "nothing of Ada's lands in Bob's drafts").toBe(0);
+    await expect(page.getByText(/You have a saved draft/)).toHaveCount(0);
+    expect(await page.content()).not.toContain("second thoughts");
   });
 });

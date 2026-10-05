@@ -11,6 +11,8 @@ import {
   CHATOPS_SEND_ONLY_PROVIDERS,
   chatOpsConnectionBody,
   chatOpsProviderLabel,
+  chatOpsProviderRegistrable,
+  chatOpsProviderUnavailableReason,
 } from "./ChatOpsPage";
 
 const base = { name: "n", connectorId: "c", signingSecret: "s3cret-value", defaultChannel: "d", allowFencedDecide: false };
@@ -30,14 +32,35 @@ describe("ChatOpsPage — the provider options", () => {
     expect(chatOpsProviderLabel("slack")).toBe("slack");
   });
 
-  it("labels outlook as send-only and says what the courier cannot do yet", () => {
+  it("labels outlook as send-only and says it is unavailable while the courier cannot post to it", () => {
     const label = chatOpsProviderLabel("outlook");
     expect(label).toMatch(/^outlook \(/);
     expect(label).toMatch(/send-only/);
     expect(label).toMatch(/no signing secret/);
     // derived from the outbound mirror, not hard-coded: it disappears the day
     // the gateway's outbound list gains outlook and the mirror follows
-    expect(label.includes("cannot post")).toBe(!CHATOPS_OUTBOUND_PROVIDERS.includes("outlook"));
+    expect(label.includes("no outbound sender")).toBe(!CHATOPS_OUTBOUND_PROVIDERS.includes("outlook"));
+  });
+});
+
+describe("ChatOpsPage — ADR-0179 (AER-015): a provider with no outbound sender cannot be picked", () => {
+  it("outlook is offered but not registrable, and the reason names the missing sender and the inbound refusal", () => {
+    expect(chatOpsProviderRegistrable("outlook")).toBe(false);
+    const reason = chatOpsProviderUnavailableReason("outlook");
+    expect(reason).toMatch(/can't be registered for approval cards yet/);
+    expect(reason).toMatch(/no outbound sender/);
+    expect(reason).toMatch(/Inbound outlook stays refused/);
+  });
+
+  it("slack and teams stay registrable, with no reason shown", () => {
+    for (const p of ["slack", "teams"]) {
+      expect(chatOpsProviderRegistrable(p)).toBe(true);
+      expect(chatOpsProviderUnavailableReason(p)).toBeNull();
+    }
+  });
+
+  it("registrable is exactly the outbound mirror, so the option returns when a sender lands", () => {
+    expect(CHATOPS_PROVIDERS.filter(chatOpsProviderRegistrable).sort()).toEqual([...CHATOPS_OUTBOUND_PROVIDERS].sort());
   });
 });
 

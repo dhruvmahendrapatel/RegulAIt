@@ -40,6 +40,15 @@ Adapter: [`integrations/kong/`](../../integrations/kong/) (a Kong plugin).
 > and other auth plugins are not covered, and the priority ordering this plugin depends on is
 > version-specific — so treat a different Kong as unverified until the harness runs against it.
 >
+> **Not supported at the Kong edge (ADR-0179):** **data-scope rules** — the plugin sends no tool
+> arguments, so a data-scope rule on the governed tool always denies, and every deny says it was
+> decided without them (`"decidedWithout": ["args"]` in the body, a fact about the input rather than
+> a diagnosis of the cause); and a **derived session origin for OIDC or SAML** —
+> only `key-auth` and `basic-auth` derive the origin, and for every other auth plugin it is the
+> operator's assertion. The Kong edge is therefore not at parity with an in-line dispatch for either
+> of these; [`integrations/kong/README.md`](../../integrations/kong/README.md) has the support
+> matrix and the test behind each row.
+>
 > **Envoy remains withdrawn.** The adapter shipped with ADR-0127 **failed open on `deny`**: its
 > `ext_authz` filter decides from the HTTP status code, and `/v1/authz/check` answers `200` for
 > every outcome with the decision in the body, so a refusal would have been admitted by a
@@ -138,19 +147,27 @@ the trusted path. Omitting `principal` can only ever narrow a decision — absen
 
 **What the Kong adapter sends, and what it deliberately does not.** `project_id` is per-route plugin
 config, because a governed route fronts one project context — static per route and true. The session
-origin is **derived from the credential Kong authenticated with** where it can be (key-auth →
-`api_key`, basic-auth → `password`), and taken from `asserted_session_origin` only for the values
-Kong cannot observe (`oidc`, `saml`). A declared origin that contradicts the credential is a
-**refusal**, not a substitution. Until 2026-09-28 this was an unchecked operator-set string in a
+origin is **derived from the credential Kong authenticated with** only for key-auth (→ `api_key`)
+and basic-auth (→ `password`). **For OIDC and SAML it is operator-asserted**: taken from
+`asserted_session_origin`, because Kong cannot observe it, and the same is true of `jwt` and every
+other auth plugin. So a `jwt` route accepts any asserted origin (`oidc`, `saml` or `password`)
+without checking the token's issuer; assert one there only when you know what issued its tokens. A
+declared origin that contradicts a derived one is a **refusal**, not a substitution. On `/v1/authz/check` itself every origin is the caller's claim — the PDP cannot tell a
+derived one from an asserted one — so `contextApplied` labels it `principal.asserted`. Until 2026-09-28 this was an unchecked operator-set string in a
 vocabulary the product does not use (`sso`), and this repository's own harness declared it on a
 key-auth route — see AER-036 and `integrations/kong/README.md`.
 There is **no `mfa_completed` field**: Kong cannot observe whether a second factor was completed,
 and a configured `true` would be an unchecked assertion sitting in the trusted path. **`args` are
 not sent at all**, and that is the adapter's real limit: mapping an HTTP body onto a tool's named
 arguments is a per-route projection, and a *wrong* mapping evaluates a data-scope rule against the
-wrong values — which is worse than the fail-closed deny that omitting them produces. **A route
-governed by a data-scope rule is therefore refused by this adapter until that mapping exists**, by
-design. The harness asserts all of this against the PDP's own ledger (`contextApplied`) rather than
+wrong values — which is worse than the fail-closed deny that omitting them produces. **Data-scope
+rules are therefore not supported at the Kong edge: a route governed by one is always refused by
+this adapter**, by design, until a projection of the arguments is forwarded (future work, ADR-0179).
+Because no deny is ever computed with arguments, every deny carries `"decidedWithout": ["args"]` in
+its body and a warning in Kong's error log. That tag says what the decision ran without, not why it
+denied: the PDP's answer does not report whether a rule needed the absent arguments. The rule id in
+`x-regulait-reason` tells this limit (a data-scope rule) from an ordinary policy refusal (anything
+else). The harness asserts all of this against the PDP's own ledger (`contextApplied`) rather than
 against the plugin's source, including that the adapter does *not* claim to send `args`.
 
 The response carries `contextApplied`: the **names** of the dimensions the decision was computed on,

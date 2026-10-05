@@ -1294,6 +1294,11 @@ export const auditLog = pgTable(
   (t) => [
     index("audit_log_user_at_idx").on(t.userId, t.at),
     uniqueIndex("audit_log_seq_uq").on(t.seq),
+    // migration 0154: the retention prune's meta rows only, so the replay's
+    // lookback horizon (`loadAuditLookbackHorizon`) never scans the trail
+    index("audit_log_prune_marker_at_idx")
+      .on(t.at)
+      .where(sql`${t.ruleId} = 'audit-log-pruned'`),
   ],
 );
 
@@ -8300,7 +8305,10 @@ export type AiUseCaseRow = typeof aiUseCases.$inferSelect;
 // `use_case_idempotency_keys`: an `Idempotency-Key` on POST /v1/use-cases is
 // CLAIMED here inside the create transaction — the unique (user_id, key)
 // index is what makes two concurrent duplicates unable to both create. The
-// stored `response` is the original 201 body, replayed for 24 hours.
+// stored `response` is a reference to the use case (`{ replayOf: id }`), the
+// replay rebuilt from it, for 30 days (ADR-0179); a claim stored before that
+// holds the original 201 body. Claims past 30 days are deleted by the
+// `idempotency-key-sweep` scheduler job.
 // ---------------------------------------------------------------------------
 
 export const useCaseDrafts = pgTable(
@@ -10154,3 +10162,34 @@ export const traceRetentionHolds = pgTable(
   ],
 );
 export type TraceRetentionHoldRow = typeof traceRetentionHolds.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0179 / AER-050 (migration 0153) — IDEMPOTENCY KEYS for the intake's risk
+// and questionnaire-artifact writes (apps/gateway/src/request-idempotency.ts).
+// Claimed inside the transaction that writes the record; `scope` names the
+// route and its target, `requestDigest` the request the key was first used
+// with, `response` what a retry's replay is built from (a reference to the
+// record, `{ replayOf: id }`, where the route wrote one; older claims hold the
+// full body). Per caller. Deleted after 30 days by `idempotency-key-sweep`.
+// ---------------------------------------------------------------------------
+
+export const requestIdempotencyKeys = pgTable(
+  "request_idempotency_keys",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    scope: text("scope").notNull(),
+    key: text("key").notNull(),
+    requestDigest: text("request_digest").notNull(),
+    response: jsonb("response").$type<Record<string, unknown>>(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("request_idempotency_keys_key_check", sql`length(${t.key}) BETWEEN 1 AND 200`),
+    uniqueIndex("request_idempotency_keys_user_scope_key_uq").on(t.userId, t.scope, t.key),
+    index("request_idempotency_keys_created_idx").on(t.createdAt),
+  ],
+);
+export type RequestIdempotencyKeyRow = typeof requestIdempotencyKeys.$inferSelect;

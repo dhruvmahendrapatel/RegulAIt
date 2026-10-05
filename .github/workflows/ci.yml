@@ -315,7 +315,10 @@ jobs:
   # rest of this workflow.
   spa-journeys:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 20, not 15: the serial mocked suite alone measured ~11.5 min on 2026-10-05
+    # (ADR-0179 added specs), on top of ~4 min of install, build and SPA journeys.
+    # Re-measure, or shard the mocked suite, before raising it again.
+    timeout-minutes: 20
 
     services:
       postgres:

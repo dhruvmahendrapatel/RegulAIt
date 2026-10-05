@@ -102,6 +102,10 @@ Current sequence heads, verified:
 | ADRs | `docs/decisions/` | `0096-entity-aware-copilot-planning.md` | **0097** | 96 files, no gaps |
 | ADR index | `docs/decisions/README.md` | 95 rows | — | **already drifted: 96 files, 95 rows — ADR-0078 has no row** |
 
+**Retired migration numbers (never reuse):** `0065`, `0147` (ADR-0173) and `0152` (ADR-0179). Each was skipped and the
+journal has no entry for it. A file with that number added now would carry a `when` below the database's watermark, so
+it would never apply (§4.1). Always take the number after the highest existing file.
+
 ### 4.3 `_journal.json` always conflicts on append
 
 Appending an entry requires rewriting the previous last entry's `}` into `},`, so two concurrent

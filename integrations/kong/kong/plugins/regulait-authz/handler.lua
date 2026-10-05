@@ -60,7 +60,15 @@ local RegulaitAuthz = {
   --        with the question so the ledger keeps it beside the subject
   --        (AER-026, AER-030). These cases are PENDING THEIR FIRST CI RUN —
   --        see the box at the top of this file.
-  VERSION = "0.3.0",
+  -- 0.4.0  (ADR-0179) a deny the PDP decided without arguments carries
+  --        `decidedWithout = ["args"]` and a note in its body: this adapter
+  --        never sends them, so data-scope rules are not supported at this
+  --        edge (AER-028). The tag states the input, not the cause. A `jwt`
+  --        credential no longer derives `api_key` — only key-auth and
+  --        basic-auth derive an origin, so a `jwt` route accepts any asserted
+  --        origin unchecked (AER-036). Pinned by test/handler_spec.lua (busted
+  --        on LuaJIT); verify.mjs checks the tag, pending its first CI run.
+  VERSION = "0.4.0",
   -- Below every common auth plugin and below ACL, so `kong.client.get_consumer()`
   -- is populated by the time access() runs. This number IS the fix for (1).
   PRIORITY = 900,
@@ -163,10 +171,14 @@ cannot:
   * `args` — NOT SENT, and this is the honest limit. Mapping an HTTP body to a
     tool's named arguments is a per-route projection, and a WRONG mapping
     evaluates a data-scope rule against the wrong values — which is worse than
-    the fail-closed deny that omitting them produces. So a route governed by a
-    data-scope rule is refused by this adapter, by design, until that mapping
-    exists. The response's `contextApplied` names what the decision really ran
-    on, so an operator can tell this from a policy refusal.
+    the fail-closed deny that omitting them produces. So DATA-SCOPE RULES ARE
+    NOT SUPPORTED AT THE KONG EDGE: a route whose tool carries one is always
+    refused by this adapter, by design, until that mapping exists (ADR-0179;
+    forwarding a projection of the arguments is future work). Every deny the
+    PDP decided without arguments is tagged `decidedWithout = ["args"]` (see
+    `refuse` below). The tag says what the decision ran without, NOT that the
+    arguments caused it: the rule id in `x-regulait-reason` says which rule
+    refused, and only a data-scope rule there means this limit.
 --]]
 --[[
 AER-036 — THE SESSION ORIGIN IS DERIVED WHERE IT CAN BE, AND ASSERTED ONLY WHERE
@@ -189,9 +201,23 @@ Returns the origin plus whether it was derived, or nil when Kong knows nothing �
 in which case NO principal is sent and the kernel reads `unknown`, the weakest
 input. Absent is always a safe answer here; a wrong one is not.
 --]]
+--
+-- ONLY THESE TWO SHAPES (AER-036, 2026-10-05). A `jwt` credential ALSO carries
+-- `key` — the lookup value for the token's issuer claim — beside its `secret`,
+-- `algorithm` and `rsa_public_key`. The first version of this function read
+-- any `key` as key-auth, so a JWT route was labelled `api_key` and an
+-- operator's `oidc` assertion on it was refused as a contradiction: a
+-- derivation the contract ("only key-auth and basic-auth derive") never made.
+-- A key-auth credential has `key` and none of those, so that is the test.
+-- Every other credential (jwt, oauth2, hmac-auth, ldap-auth, any OIDC or SAML
+-- plugin) derives NOTHING, and its origin is the operator's assertion or absent.
 local function derive_session_origin(credential)
   if not credential then return nil end
-  if credential.key ~= nil and credential.key ~= "" then return "api_key" end
+  if credential.key ~= nil and credential.key ~= ""
+    and credential.secret == nil and credential.algorithm == nil
+    and credential.rsa_public_key == nil then
+    return "api_key"
+  end
   if credential.username ~= nil and credential.password ~= nil then return "password" end
   return nil
 end
@@ -212,10 +238,61 @@ local function build_question(conf, consumer, subject, session_origin)
   return body
 end
 
-local function refuse(status, decision, reason)
+--[[
+AER-028 — DATA-SCOPE RULES ARE NOT SUPPORTED AT THE KONG EDGE, AND A DENY SAYS
+WHAT IT WAS DECIDED WITHOUT.
+
+`build_question` sends no `args`, so a data-scope rule on the governed tool
+ALWAYS denies here: the kernel fails closed on a rule whose argument is absent.
+The PDP's answer names the rule id, which reads exactly like any other policy
+refusal, so an operator asking "why is this denied?" was sent to a policy
+screen for a limit that lives in this adapter.
+
+TAGGED, NOT PRE-EMPTED. The plugin cannot know in advance whether a data-scope
+rule applies: rules live in the PDP and change at runtime, and a static "this
+route has a data-scope rule" switch in plugin config would drift from them in
+both directions (refusing routes that have none, or missing a rule added
+later). So the PDP stays the only decider, and every deny it computed WITHOUT
+arguments (its own `contextApplied` does not name `args`) carries that fact:
+
+  * the response body gets `decidedWithout = ["args"]` and a one-line `note`;
+  * the Kong error log gets a warning naming the rule id.
+
+EXACTLY THAT FACT, AND NO MORE (ADR-0179 review, finding 5). The PDP reports
+what a decision was computed ON (`contextApplied`); it does not report whether
+a rule NEEDED something that was absent. Since this plugin never sends `args`,
+every deny it sees was decided without them — a grant that is simply missing
+included. The tag therefore says "decided without", not "not evaluated", and
+the note puts the data-scope consequence under an "if": the rule id in
+`x-regulait-reason` is what tells the two apart. Tagging only the denies that
+needed arguments would take a PDP field that does not exist today.
+
+The tag is read from the PDP's answer, not assumed, so it stays true if a later
+version of this plugin forwards a projection of the arguments. It is not a
+header: the five protocol header names are a closed set refused on inbound
+requests, and a sixth would widen that contract for no gain.
+--]]
+local ARGS_NOT_SENT_NOTE =
+  "decided without tool arguments, which this Kong adapter never sends; this does not say whether they were needed. " ..
+  "Only if the rule in x-regulait-reason is a data-scope rule did their absence cause the deny, " ..
+  "and such a rule always denies at the Kong edge"
+
+local function context_names(list, name)
+  if type(list) ~= "table" then return false end
+  for _, v in ipairs(list) do
+    if v == name then return true end
+  end
+  return false
+end
+
+local function refuse(status, decision, reason, extra)
   kong.response.set_header("x-regulait-decision", decision)
   if reason then kong.response.set_header("x-regulait-reason", reason) end
-  return kong.response.exit(status, { message = "forbidden by policy", decision = decision })
+  local body = { message = "forbidden by policy", decision = decision }
+  if extra then
+    for k, v in pairs(extra) do body[k] = v end
+  end
+  return kong.response.exit(status, body)
 end
 
 function RegulaitAuthz:access(conf)
@@ -327,6 +404,10 @@ function RegulaitAuthz:access(conf)
     return refuse(403, "approval_required", body.reason)
   end
 
+  if not context_names(body.contextApplied, "args") then
+    kong.log.warn("regulait: deny (rule ", tostring(body.reason), ") ", ARGS_NOT_SENT_NOTE, " (AER-028)")
+    return refuse(403, "deny", body.reason, { decidedWithout = { "args" }, note = ARGS_NOT_SENT_NOTE })
+  end
   return refuse(403, "deny", body.reason)
 end
 

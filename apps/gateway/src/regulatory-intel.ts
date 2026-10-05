@@ -16,6 +16,7 @@ import { z } from "zod";
 import { aiUseCases, compliancePackControls, compliancePacks, eq, type Db } from "@regulait/db";
 import * as shared from "@regulait/shared";
 import {
+  REGULATORY_INSTRUMENT_KINDS,
   REGULATORY_INTEL_NOTES,
   REGULATORY_UPDATE_STATUSES,
   computeRegulatoryImpact,
@@ -78,16 +79,27 @@ export async function computeRegulatoryFeed(
     useCases: useCases.map((u) => ({ ...u, euAiActTier: (u.euAiActTier ?? null) as EuAiActTier | null })),
     today: now.toISOString().slice(0, 10),
   });
+  // ADR-0179 G14-FEED: a withdrawn entry is listed but is neither in force nor
+  // a call to action, so it never counts as having gaps or as next effective;
+  // a voluntary standard is "published", never counted as in force
+  const current = updates.filter((u) => u.status !== "withdrawn");
+  const count = (pred: (u: (typeof updates)[number]) => boolean) => updates.filter(pred).length;
   return {
     generatedAt: now.toISOString(),
     window: { days: POSTURE_WINDOW_DAYS },
     summary: {
       total: updates.length,
-      inForce: updates.filter((u) => u.status === "in_force").length,
-      upcoming: updates.filter((u) => u.status === "upcoming").length,
-      proposed: updates.filter((u) => u.status === "proposed").length,
-      withControlGaps: updates.filter((u) => u.impact.controlGaps > 0).length,
-      nextEffective: updates.find((u) => u.daysUntilEffective >= 0)?.key ?? null,
+      inForce: count((u) => u.status === "in_force"),
+      upcoming: count((u) => u.status === "upcoming"),
+      proposed: count((u) => u.status === "proposed"),
+      published: count((u) => u.status === "published"),
+      withdrawn: count((u) => u.status === "withdrawn"),
+      byKind: Object.fromEntries(REGULATORY_INSTRUMENT_KINDS.map((k) => [k, count((u) => u.instrumentKind === k)])) as Record<
+        (typeof REGULATORY_INSTRUMENT_KINDS)[number],
+        number
+      >,
+      withControlGaps: current.filter((u) => u.impact.controlGaps > 0).length,
+      nextEffective: current.find((u) => u.daysUntilEffective >= 0)?.key ?? null,
     },
     updates,
     notes: {
@@ -102,6 +114,7 @@ export async function computeRegulatoryFeed(
 
 const query = z.object({
   status: z.enum(REGULATORY_UPDATE_STATUSES).optional(),
+  kind: z.enum(REGULATORY_INSTRUMENT_KINDS).optional(),
   framework: z.string().min(1).max(64).optional(),
 });
 
@@ -110,8 +123,11 @@ export function registerRegulatoryIntelRoutes(app: FastifyInstance, db: Db): voi
     const q = query.parse(req.query);
     const out = await computeRegulatoryFeed(db);
     const updates = out.updates.filter(
-      (u) => (!q.status || u.status === q.status) && (!q.framework || u.frameworks.some((f) => f.framework === q.framework)),
+      (u) =>
+        (!q.status || u.status === q.status) &&
+        (!q.kind || u.instrumentKind === q.kind) &&
+        (!q.framework || u.frameworks.some((f) => f.framework === q.framework)),
     );
-    return { ...out, updates, filter: { status: q.status ?? null, framework: q.framework ?? null } };
+    return { ...out, updates, filter: { status: q.status ?? null, kind: q.kind ?? null, framework: q.framework ?? null } };
   });
 }

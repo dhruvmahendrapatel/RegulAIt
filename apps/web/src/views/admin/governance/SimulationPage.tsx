@@ -194,8 +194,18 @@ interface FlipRow {
   occurredAt: string;
 }
 
+/** AER-016: a run that hit its deadline. Not a preview: no counts, no names. */
+interface IncompleteRun {
+  status: "incomplete";
+  evaluated: number;
+  total: number;
+  deadlineMs: number;
+  detail: string;
+}
+
 function BlastRadiusPanel() {
   const act = useAction();
+  const [incomplete, setIncomplete] = useState<IncompleteRun | null>(null);
   const [versionId, setVersionId] = useState("");
   const [windowDays, setWindowDays] = useState("30");
   const [sim, setSim] = useState<{ simulation: SimulationRow; samples: FlipRow[]; fidelity: string; abacCannotGrant: string } | null>(
@@ -216,18 +226,30 @@ function BlastRadiusPanel() {
         onSubmit={(e) => {
           e.preventDefault();
           void act.run(async () => {
-            const r = await api.post<{
-              simulation: SimulationRow;
-              samples: FlipRow[];
-              fidelity: string;
-              abacCannotGrant: string;
-            }>("/v1/policy-simulations", {
+            const r = await api.post<
+              | {
+                  status?: "complete";
+                  simulation: SimulationRow;
+                  samples: FlipRow[];
+                  fidelity: string;
+                  abacCannotGrant: string;
+                }
+              | IncompleteRun
+            >("/v1/policy-simulations", {
               policyVersionId: versionId,
               windowDays: Number(windowDays) || 30,
             });
+            if (r.status === "incomplete") {
+              // never shown as a preview: the partial run has no counts to show
+              setSim(null);
+              setIncomplete(r);
+              return `Dry run incomplete — ${r.evaluated} of ${r.total} recorded calls evaluated before the deadline; nothing was stored`;
+            }
+            setIncomplete(null);
             setSim(r);
             await history.refetch();
-          }, "Dry run complete — nothing was executed and nothing was activated");
+            return "Dry run complete — nothing was executed and nothing was activated";
+          });
         }}
       >
         <Field label="Proposed policy version id" grow>
@@ -246,7 +268,16 @@ function BlastRadiusPanel() {
         </div>
       )}
 
-      {sim ? (
+      {incomplete ? (
+        <div role="status" data-testid="simulation-incomplete" style={{ marginTop: "var(--s2)" }}>
+          <Badge tone="warn">
+            Incomplete: {incomplete.evaluated} of {incomplete.total} recorded calls evaluated
+          </Badge>
+          <p className={v.faint} style={{ margin: "var(--s2) 0 0" }}>
+            {incomplete.detail}
+          </p>
+        </div>
+      ) : sim ? (
         <>
           <p style={{ margin: "var(--s2) 0 0", fontWeight: 650 }}>{sim.simulation.headline}</p>
           {sim.simulation.capped ? (

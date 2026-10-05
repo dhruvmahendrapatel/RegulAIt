@@ -188,14 +188,19 @@ export async function syncVendorForInstance(
   if (next === null || next === vendor.status) return;
 
   const decided = next === "approved" || next === "rejected";
-  await db
+  // compare-and-swap on the status this sync read: two syncs racing for the
+  // same move (an artifact submission and its idempotent replay, ADR-0179)
+  // move the vendor, and audit the move, once
+  const moved = await db
     .update(aiVendors)
     .set({
       status: next,
       updatedAt: new Date(),
       ...(decided ? { decidedAt: new Date() } : {}),
     })
-    .where(eq(aiVendors.id, vendor.id));
+    .where(and(eq(aiVendors.id, vendor.id), eq(aiVendors.status, vendor.status)))
+    .returning({ id: aiVendors.id });
+  if (moved.length === 0) return;
   await db.insert(auditLog).values({
     userId: actorUserId ?? vendor.ownerUserId,
     objectType: "ai_vendor",

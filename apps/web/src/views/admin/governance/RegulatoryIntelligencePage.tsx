@@ -9,7 +9,8 @@ import { QueryGate } from "../adminKit";
 import v from "../../views.module.css";
 import s from "./demoGovernance.module.css";
 
-type UpdateStatus = "in_force" | "upcoming" | "proposed";
+type UpdateStatus = "in_force" | "upcoming" | "proposed" | "published" | "withdrawn";
+type InstrumentKind = "law" | "guidance" | "voluntary_standard";
 type ControlStatus =
   | "satisfied"
   | "unsatisfied"
@@ -24,9 +25,14 @@ interface RegulatoryUpdate {
   instrument: string;
   title: string;
   summary: string;
+  /** absent from a pre-ADR-0179 gateway; read as unknown, never as law */
+  instrumentKind?: InstrumentKind;
   effectiveDate: string;
+  enforcementDate?: string | null;
+  withdrawnOn?: string | null;
   status: UpdateStatus;
   daysUntilEffective: number;
+  daysUntilEnforcement?: number | null;
   sourceUrl: string;
   verifiedOn: string;
   frameworks: Array<{ framework: string; packActive: boolean; activeVersion: number | null }>;
@@ -49,12 +55,14 @@ interface RegulatoryResponse {
     inForce: number;
     upcoming: number;
     proposed: number;
+    published?: number;
+    withdrawn?: number;
     withControlGaps: number;
     nextEffective: string | null;
   };
   updates: RegulatoryUpdate[];
-  filter: { status: UpdateStatus | null; framework: string | null };
-  notes: { source: string; evidence: string; scope: string; feed: string };
+  filter: { status: UpdateStatus | null; kind?: InstrumentKind | null; framework: string | null };
+  notes: { source: string; evidence: string; scope: string; feed: string; status?: string; applicability?: string };
 }
 
 const STATUS_OPTIONS: Array<{ value: "" | UpdateStatus; label: string }> = [
@@ -62,16 +70,39 @@ const STATUS_OPTIONS: Array<{ value: "" | UpdateStatus; label: string }> = [
   { value: "in_force", label: "In force" },
   { value: "upcoming", label: "Upcoming" },
   { value: "proposed", label: "Proposed" },
+  { value: "published", label: "Published (voluntary standard)" },
+  { value: "withdrawn", label: "Withdrawn" },
 ];
+
+const KIND_LABELS: Record<InstrumentKind, string> = {
+  law: "Law",
+  guidance: "Guidance",
+  voluntary_standard: "Voluntary standard",
+};
+const KIND_OPTIONS: Array<{ value: "" | InstrumentKind; label: string }> = [
+  { value: "", label: "All instrument kinds" },
+  { value: "law", label: KIND_LABELS.law },
+  { value: "guidance", label: KIND_LABELS.guidance },
+  { value: "voluntary_standard", label: KIND_LABELS.voluntary_standard },
+];
+const STATUS_LABELS: Record<UpdateStatus, string> = {
+  in_force: "In force",
+  upcoming: "Upcoming",
+  proposed: "Proposed",
+  published: "Published",
+  withdrawn: "Withdrawn",
+};
 
 export default function RegulatoryIntelligencePage() {
   const [status, setStatus] = useState<"" | UpdateStatus>("");
+  const [kind, setKind] = useState<"" | InstrumentKind>("");
   const [framework, setFramework] = useState("");
   const query = useQuery({
-    queryKey: ["regulatory", "updates", status, framework],
+    queryKey: ["regulatory", "updates", status, kind, framework],
     queryFn: () => {
       const params = new URLSearchParams();
       if (status) params.set("status", status);
+      if (kind) params.set("kind", kind);
       if (framework) params.set("framework", framework);
       const suffix = params.size ? `?${params.toString()}` : "";
       return api.get<RegulatoryResponse>(`/v1/regulatory/updates${suffix}`);
@@ -107,7 +138,10 @@ export default function RegulatoryIntelligencePage() {
                     <RegulatoryStat label="Feed entries" value={query.data.summary.total} />
                     <RegulatoryStat label="In force" value={query.data.summary.inForce} />
                     <RegulatoryStat label="Upcoming" value={query.data.summary.upcoming} />
-                    <RegulatoryStat label="Proposed" value={query.data.summary.proposed} />
+                    {/* six tiles fit one row; proposed shows only when the feed has any (the status filter still offers it) */}
+                    {query.data.summary.proposed > 0 ? <RegulatoryStat label="Proposed" value={query.data.summary.proposed} /> : null}
+                    <RegulatoryStat label="Voluntary standards" value={query.data.summary.published ?? 0} />
+                    <RegulatoryStat label="Withdrawn" value={query.data.summary.withdrawn ?? 0} />
                     <RegulatoryStat label="With control gaps" value={query.data.summary.withControlGaps} exception={query.data.summary.withControlGaps > 0} />
                   </div>
                   <p className={v.dim}>{query.data.summary.nextEffective
@@ -123,6 +157,11 @@ export default function RegulatoryIntelligencePage() {
                       {STATUS_OPTIONS.map((option) => <option key={option.value || "all"} value={option.value}>{option.label}</option>)}
                     </Select>
                   </Field>
+                  <Field label="Instrument kind">
+                    <Select value={kind} onChange={(event) => setKind(event.target.value as "" | InstrumentKind)}>
+                      {KIND_OPTIONS.map((option) => <option key={option.value || "all"} value={option.value}>{option.label}</option>)}
+                    </Select>
+                  </Field>
                   <Field label="Framework">
                     <Select value={framework} onChange={(event) => setFramework(event.target.value)}>
                       <option value="">All frameworks</option>
@@ -133,7 +172,7 @@ export default function RegulatoryIntelligencePage() {
               </div>
 
               {updates.length === 0 ? (
-                <EmptyState title={status || framework ? "No entries match these filters" : "No regulatory entries are available"} body={query.data.notes.feed} />
+                <EmptyState title={status || kind || framework ? "No entries match these filters" : "No regulatory entries are available"} body={query.data.notes.feed} />
               ) : (
                 <ol className={s.timeline} aria-label="Regulatory effective-date timeline">
                   {updates.map((update) => <RegulatoryTimelineEntry key={update.key} update={update} />)}
@@ -145,6 +184,8 @@ export default function RegulatoryIntelligencePage() {
                   <p className={v.dim}>{query.data.notes.source}</p>
                   <p className={v.dim}>{query.data.notes.evidence}</p>
                   <p className={v.dim}>{query.data.notes.scope}</p>
+                  {query.data.notes.status ? <p className={v.dim}>{query.data.notes.status}</p> : null}
+                  <p className={v.dim}>{query.data.notes.applicability ?? "Applicability to this organisation is pending legal review."}</p>
                   <p className={v.faint}>{query.data.notes.feed}</p>
                 </div>
               </Card>
@@ -157,6 +198,8 @@ export default function RegulatoryIntelligencePage() {
 }
 
 function RegulatoryTimelineEntry({ update }: { update: RegulatoryUpdate }) {
+  const withdrawn = update.status === "withdrawn";
+  const voluntary = update.instrumentKind === "voluntary_standard";
   return (
     <li className={s.timelineEntry}>
       <span className={s.timelineDot} aria-hidden />
@@ -164,11 +207,14 @@ function RegulatoryTimelineEntry({ update }: { update: RegulatoryUpdate }) {
         <div className={v.stack}>
           <div className={v.row}>
             <time className={s.timelineDate} dateTime={update.effectiveDate}>{formatDate(update.effectiveDate)}</time>
-            {/* status is a lifecycle state, not a rating: neutral */}
-            <Badge tone="neutral">{formatWords(update.status)}</Badge>
-            <span className={v.faint}>{relativeEffectiveDate(update.daysUntilEffective)}</span>
+            {/* status is a lifecycle state, not a rating: neutral; withdrawn is the one a reader must not miss */}
+            <Badge tone={withdrawn ? "warn" : "neutral"}>{STATUS_LABELS[update.status] ?? formatWords(update.status)}</Badge>
+            <Badge tone="neutral">{update.instrumentKind ? KIND_LABELS[update.instrumentKind] : "Instrument kind not stated"}</Badge>
+            <span className={v.faint}>{dateCaption(update)}</span>
             <span className={v.grow} />
-            {update.impact.controlGaps || update.impact.frameworkGaps ? (
+            {withdrawn ? (
+              <span className={v.faint}>Not counted: withdrawn</span>
+            ) : update.impact.controlGaps || update.impact.frameworkGaps ? (
               <Badge tone="danger">
                 {update.impact.controlGaps + update.impact.frameworkGaps} gap{update.impact.controlGaps + update.impact.frameworkGaps === 1 ? "" : "s"}
               </Badge>
@@ -180,6 +226,13 @@ function RegulatoryTimelineEntry({ update }: { update: RegulatoryUpdate }) {
             <strong>{update.title}</strong>
             <p className={v.faint}>{update.jurisdiction} · {update.instrument}</p>
           </div>
+          {withdrawn && update.withdrawnOn ? (
+            <p className={v.dim}><strong>Withdrawn on {formatDate(update.withdrawnOn)}.</strong> It no longer applies as issued; it is listed so earlier reliance on it can be reviewed.</p>
+          ) : null}
+          {voluntary ? <p className={v.dim}>Voluntary standard: published, not law in force.</p> : null}
+          {update.enforcementDate ? (
+            <p className={v.dim}>Effective {formatDate(update.effectiveDate)} · enforced from <time dateTime={update.enforcementDate}>{formatDate(update.enforcementDate)}</time></p>
+          ) : null}
           <p className={v.dim}>{update.summary}</p>
           <div className={v.row}>
             {update.frameworks.map((item) => (
@@ -244,8 +297,17 @@ function controlTone(status: ControlStatus): "ok" | "warn" | "danger" | "neutral
   return "neutral";
 }
 
+/** the date caption names what the date is: issued, published, or effective */
+function dateCaption(update: RegulatoryUpdate): string {
+  const when = relativeEffectiveDate(update.daysUntilEffective);
+  if (update.status === "withdrawn") return `issued ${when}`;
+  if (update.instrumentKind === "voluntary_standard") return `published ${when}`;
+  if (update.instrumentKind === "guidance") return `issued ${when}`;
+  return `effective ${when}`;
+}
+
 function relativeEffectiveDate(days: number): string {
-  if (days === 0) return "effective today";
+  if (days === 0) return "today";
   const n = Math.abs(days);
   // days for the near term, then months, then whole years — "1590 days ago" is not a date a reader can place
   const span =
