@@ -164,6 +164,19 @@ every agent prompt and every review.
 - Before ending a session or if context is running low, checklist: is `STATE.md` current? Any
   decision missing an ADR? Any open question uncaptured? Is everything committed?
 
+## Branch and PR flow — one PR per batch (owner, 2026-10-05)
+
+- **One short-lived PR per batch** (an ADR batch, a review-fix round, an open-source replacement slice): a branch from
+  `main`, a draft PR against `main`, merged once CI is green and the batch's review is done. Never let one PR collect
+  weeks of work (PR #117 reached 360 commits and 530 files, so security scans re-reported old code and no review could
+  cover it).
+- `dhruv/active` stays only as an integration branch where parallel agents' branches are combined before a batch PR. It is
+  fast-forwarded to `main` after each merge.
+- Merge with a merge commit (never squash or rebase merge-bearing history, M-067). The owner approved merging batch PRs
+  once CI is green. Anything production-related still needs explicit sign-off (standing guardrail above).
+- **Local checks are proportionate:** tests for the touched code plus `demo:prepare` locally, and CI runs the full suite.
+  Security-sensitive or migration-heavy batches still run the full local gate before the PR.
+
 ## Infrastructure conventions
 
 - **AWS**: two-account Organization (Management + Workload `regulait-dev`), IAM Identity Center
