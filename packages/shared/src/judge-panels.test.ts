@@ -8,14 +8,17 @@ import {
   JUDGE_PANEL_LIMITS,
   KAPPA_MIN_PAIRED_LABELS,
   bootstrapInterval,
+  chooseCalibrationCriterion,
   cohensKappa,
   combinePanelVerdicts,
   humanVerdict,
+  judgeCalibrationSchema,
   judgePanelSchema,
   judgementBudgetProblem,
   kappaReport,
   meanScoreInterval,
   measuredConfigHash,
+  normaliseRubricScore,
   runComparisonRefusal,
   seededRandom,
 } from "./judge-panels.js";
@@ -155,6 +158,51 @@ describe("calibration labels", () => {
     expect(humanVerdict({ label: null, value: 0.5 }, opts)).toBe("pass");
     expect(humanVerdict({ label: null, value: 0.49 }, opts)).toBe("fail");
     expect(humanVerdict({ label: "unsure", value: null }, opts)).toBeNull();
+  });
+
+  it("a 1-5 rubric score is normalised by its bounds: the worst rating fails, the best passes", () => {
+    expect(normaliseRubricScore(1, 1, 5)).toBe(0);
+    expect(normaliseRubricScore(5, 1, 5)).toBe(1);
+    expect(normaliseRubricScore(3, 1, 5)).toBe(0.5);
+    expect(normaliseRubricScore(3, 5, 5)).toBeNull();
+    const score = (v: number) => [{ name: "quality", kind: "score" as const, value: normaliseRubricScore(v, 1, 5)!, min: 1, max: 5 }];
+    const verdictOf = (v: number) => {
+      const c = chooseCalibrationCriterion(score(v), opts);
+      if (c.status !== "chosen") throw new Error(c.status);
+      return humanVerdict(c, opts);
+    };
+    expect(verdictOf(1)).toBe("fail");
+    expect(verdictOf(2)).toBe("fail");
+    expect(verdictOf(4)).toBe("pass");
+    expect(verdictOf(5)).toBe("pass");
+  });
+
+  it("picks the label criterion whose labels are in positive or negative, never the first by name", () => {
+    const criteria = [
+      // alphabetically first, but its labels say nothing about pass/fail
+      { name: "a_tone", kind: "label" as const, value: "formal", labels: ["formal", "casual"] },
+      { name: "z_verdict", kind: "label" as const, value: "fail", labels: ["pass", "fail"] },
+      { name: "quality", kind: "score" as const, value: 1, min: 1, max: 5 },
+    ];
+    expect(chooseCalibrationCriterion(criteria, opts)).toEqual({ status: "chosen", criterion: "z_verdict", label: "fail", value: null });
+    // two qualifying labels and none named: ambiguous, not a guess
+    const two = [...criteria, { name: "b_outcome", kind: "label" as const, value: "pass", labels: ["pass", "fail"] }];
+    expect(chooseCalibrationCriterion(two, opts)).toEqual({ status: "ambiguous", candidates: ["b_outcome", "z_verdict"] });
+    // naming one resolves it, and naming one the rubric lacks says so
+    expect(chooseCalibrationCriterion(two, { ...opts, criterion: "b_outcome" })).toMatchObject({ status: "chosen", label: "pass" });
+    expect(chooseCalibrationCriterion(two, { ...opts, criterion: "quality" })).toMatchObject({ status: "chosen", value: 1 });
+    expect(chooseCalibrationCriterion(two, { ...opts, criterion: "nope" })).toEqual({ status: "not_in_rubric" });
+    // no qualifying label: one score is chosen, two scores are ambiguous
+    const scores = [criteria[0]!, criteria[2]!];
+    expect(chooseCalibrationCriterion(scores, opts)).toMatchObject({ status: "chosen", criterion: "quality" });
+    expect(chooseCalibrationCriterion([...scores, { ...criteria[2]!, name: "accuracy" }], opts)).toEqual({
+      status: "ambiguous",
+      candidates: ["accuracy", "quality"],
+    });
+    expect(chooseCalibrationCriterion([criteria[0]!], opts)).toEqual({ status: "none" });
+    // the request validates the criterion's shape
+    expect(judgeCalibrationSchema.safeParse({ criterion: "Bad Name" }).success).toBe(false);
+    expect(judgeCalibrationSchema.parse({ criterion: "z_verdict" }).criterion).toBe("z_verdict");
   });
 });
 

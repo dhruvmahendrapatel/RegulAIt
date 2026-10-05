@@ -27,6 +27,7 @@
 import crypto from "node:crypto";
 import { z } from "zod";
 import { mean, quantile, sampleWithReplacement } from "simple-statistics";
+import { ANNOTATION_CRITERION_PATTERN } from "./annotations.js";
 
 export const JUDGE_PANEL_LIMITS = {
   minJudges: 2,
@@ -277,9 +278,70 @@ export const judgeCalibrationSchema = z
     positiveLabels: z.array(z.string().min(1).max(64)).max(20).default(["pass"]),
     negativeLabels: z.array(z.string().min(1).max(64)).max(20).default(["fail"]),
     valueThreshold: z.number().min(0).max(1).default(0.5),
+    /** the rubric criterion to read the human verdict from (validated against
+     * the rubrics the labels used). Absent: chosen only when exactly one
+     * criterion qualifies; several is "ambiguous", never a guess. */
+    criterion: z
+      .string()
+      .regex(ANNOTATION_CRITERION_PATTERN, "a criterion name is 1-64 of a-z, 0-9, '_', '.' or '-'")
+      .optional(),
   })
   .strict();
 export type JudgeCalibrationInput = z.infer<typeof judgeCalibrationSchema>;
+
+/**
+ * One criterion of one human review, as calibration sees it: a score already
+ * normalised onto 0..1 by its rubric's bounds (`normaliseRubricScore`, so the
+ * worst rating is 0 and the best is 1 whatever the scale), or a label with the
+ * rubric's allowed labels.
+ */
+export type CalibrationCriterionValue =
+  | { name: string; kind: "score"; value: number; min: number; max: number }
+  | { name: string; kind: "label"; value: string; labels: readonly string[] };
+
+/** a rubric score onto 0..1: (v − min) / (max − min), clamped */
+export function normaliseRubricScore(v: number, min: number, max: number): number | null {
+  if (![v, min, max].every(Number.isFinite) || !(max > min)) return null;
+  return Math.min(1, Math.max(0, (v - min) / (max - min)));
+}
+
+export type CalibrationCriterionChoice =
+  | { status: "chosen"; criterion: string; label: string | null; value: number | null }
+  /** several criteria qualify and the request named none */
+  | { status: "ambiguous"; candidates: string[] }
+  /** the request named a criterion this review's rubric does not have */
+  | { status: "not_in_rubric" }
+  /** nothing in this review can say pass or fail */
+  | { status: "none" };
+
+/**
+ * Which criterion of a review carries the human verdict. Named: that one, or
+ * `not_in_rubric`. Unnamed: a LABEL criterion whose rubric allows a label in
+ * positive ∪ negative is preferred (its allowed labels, not one reviewer's
+ * pick, decide, so every review against the same rubric version chooses the
+ * same criterion); with none of those, a score criterion. Exactly one
+ * candidate is chosen; more than one is "ambiguous". Never a guess by name
+ * order.
+ */
+export function chooseCalibrationCriterion(
+  criteria: readonly CalibrationCriterionValue[],
+  opts: { criterion?: string | undefined; positiveLabels: readonly string[]; negativeLabels: readonly string[] },
+): CalibrationCriterionChoice {
+  const pick = (c: CalibrationCriterionValue): CalibrationCriterionChoice =>
+    c.kind === "score"
+      ? { status: "chosen", criterion: c.name, label: null, value: c.value }
+      : { status: "chosen", criterion: c.name, label: c.value, value: null };
+  if (opts.criterion !== undefined) {
+    const named = criteria.find((c) => c.name === opts.criterion);
+    return named ? pick(named) : { status: "not_in_rubric" };
+  }
+  const known = new Set([...opts.positiveLabels, ...opts.negativeLabels].map((l) => l.trim().toLowerCase()));
+  const labels = criteria.filter((c) => c.kind === "label" && c.labels.some((l) => known.has(l.trim().toLowerCase())));
+  const candidates = labels.length ? labels : criteria.filter((c) => c.kind === "score");
+  if (candidates.length === 1) return pick(candidates[0]!);
+  if (candidates.length > 1) return { status: "ambiguous", candidates: candidates.map((c) => c.name).sort() };
+  return { status: "none" };
+}
 
 // ---------------------------------------------------------------------------
 // Configuration hash (automatic re-run) and run comparison

@@ -5,6 +5,7 @@ import {
   buildSpendSection,
   buildWorkflowSection,
   createReportDefinitionSchema,
+  csvRecord,
   defaultSectionsFor,
   evaluateReportAccess,
   parseReportCsv,
@@ -272,6 +273,34 @@ describe("ADR-0047 CSV export", () => {
     // the numbers in the CSV are the numbers in the payload — no second
     // computation that could disagree
     expect(Number(find("spend", "total", "cost_usd"))).toBe(payload.spend!.totalCostUsd);
+  });
+
+  it("neutralises a formula in any cell (CSV injection), but not a negative amount", () => {
+    const hostile: ReportPayload = {
+      ...payload,
+      definitionName: '=HYPERLINK("http://x.invalid")',
+      spend: buildSpendSection([
+        { projectId: ALPHA, projectName: "@SUM(A1)", costUsd: 1.5, events: 2, inputTokens: 10, outputTokens: 5, budgetUsd: 1 },
+      ]),
+    };
+    const csv = renderReportCsv(hostile);
+    const rows = parseReportCsv(csv);
+    for (const r of rows) {
+      for (const cell of [r.section, r.key, r.metric, r.value]) expect(cell).not.toMatch(/^[=+@\t\r]/);
+    }
+    const find = (s: string, k: string, m: string) => rows.find((r) => r.section === s && r.key === k && r.metric === m)?.value;
+    expect(find("meta", "report", "definition")).toBe(`'=HYPERLINK("http://x.invalid")`);
+    expect(find("spend", ALPHA, "project_name")).toBe("'@SUM(A1)");
+    // budget 1, spend 1.5: a negative variance is a number, not a formula
+    expect(find("spend", "total", "budget_variance_usd")).toBe("-0.5");
+  });
+
+  it("csvRecord: RFC 4180 quoting plus formula neutralisation; numbers stay numbers", () => {
+    expect(csvRecord(["=1+1", "@SUM(A1)", "+1", "-x", "\tx", "＝1"])).toBe("'=1+1,'@SUM(A1),'+1,'-x,'\tx,'＝1");
+    expect(csvRecord(['-2,"x"'])).toBe(`"'-2,""x"""`);
+    expect(csvRecord([-2, 0, 1.5, true, false, null, undefined, ""])).toBe("-2,0,1.5,true,false,,,");
+    expect(csvRecord([{ a: 1 }, new Date("2026-01-02T03:04:05.000Z")])).toBe(`"{""a"":1}",2026-01-02T03:04:05.000Z`);
+    expect(csvRecord(["a\nb", "plain"])).toBe(`"a\nb",plain`);
   });
 
   it("rejects a foreign CSV rather than mis-parsing it", () => {
