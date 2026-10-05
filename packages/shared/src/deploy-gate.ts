@@ -13,12 +13,19 @@
  *          ACKNOWLEDGED high alert (a person has it in hand) · an open
  *          medium alert
  *
+ *   ADR-0180 continuous assurance, as `assurance_gate_mode` says (enforce =
+ *   BLOCK, warn = WARN, off = skipped and labelled so): a measured condition
+ *   failing or without passing evidence · a required AI test class missing,
+ *   stale or failing · an unmet autonomy floor · residual risk above tolerance
+ *   with no valid acceptance · any of those checks not evaluated. A WAIVED
+ *   condition is always a WARN, never a pass.
+ *
  * The gate decides nothing a dispatch reads; dispatch enforcement (MRM,
  * halts, entitlements) is unchanged. It moves the same answer EARLIER, to the
  * pipeline, so a release that would be refused at runtime is refused at
  * build time with reasons a developer can act on.
  */
-import type { DeployGateAssuranceInput } from "./assurance.js";
+import type { AssuranceGateMode, ConditionVerdict, DeployGateAssuranceInput, RequiredTestStatus } from "./assurance.js";
 
 export const DEPLOY_GATE_REASON_CODES = [
   "use_case_not_approved",
@@ -31,16 +38,131 @@ export const DEPLOY_GATE_REASON_CODES = [
   "open_high_alert",
   "acknowledged_high_alert",
   "open_medium_alert",
+  // ADR-0180 — continuous assurance (governed by `assurance_gate_mode`)
+  "condition_failing",
+  "condition_not_measured",
+  "condition_waived",
+  "required_test_missing",
+  "required_test_stale",
+  "required_test_failing",
+  "autonomy_floor_unmet",
+  "residual_above_tolerance",
+  "assurance_check_unavailable",
 ] as const;
 export type DeployGateReasonCode = (typeof DEPLOY_GATE_REASON_CODES)[number];
+
+/** The plain-language meaning of every reason code: what it means and what a
+ * person does about it. The gate puts `explanation` on each reason; the web
+ * and the CLI show it. */
+export const DEPLOY_GATE_REASON_INFO: Readonly<Record<DeployGateReasonCode, { title: string; explanation: string }>> = {
+  use_case_not_approved: {
+    title: "Use case not approved",
+    explanation: "Only an approved use case may ship. Take it through review and sign-off first.",
+  },
+  approval_expired: {
+    title: "Approval expired",
+    explanation: "Every approval has a lifetime. This one has run out, so the use case needs re-review before it ships.",
+  },
+  open_blocking_condition: {
+    title: "Before-go-live condition open",
+    explanation: "The approval was given on a condition that must be met before go-live. Its owner marks it met when it is done.",
+  },
+  agent_not_in_approved_stack: {
+    title: "Agent outside the approved stack",
+    explanation: "The release ships an agent the approval did not cover. Amend the use case and have it re-approved.",
+  },
+  agent_unavailable: {
+    title: "Agent unavailable",
+    explanation: "An agent of the stack is halted, disabled, retired or deleted, so it would be refused at runtime.",
+  },
+  mrm_refused: {
+    title: "Model-risk gate refuses the agent",
+    explanation: "Model-risk management is enforced and this agent has no valid model-card approval, so dispatch would refuse it.",
+  },
+  model_card_unapproved: {
+    title: "Model card not approved",
+    explanation: "The agent has no unexpired model-card approval. Model-risk management is not enforced, so this is a warning.",
+  },
+  open_high_alert: {
+    title: "Open high-severity alert",
+    explanation: "A high-severity monitor alert on the use case or its agents is open. Acknowledge it (a person takes it in hand) or resolve it.",
+  },
+  acknowledged_high_alert: {
+    title: "Acknowledged high-severity alert",
+    explanation: "A person has this high-severity alert in hand. It no longer holds the release.",
+  },
+  open_medium_alert: {
+    title: "Open medium-severity alert",
+    explanation: "A medium-severity monitor alert is open. It does not hold the release.",
+  },
+  condition_failing: {
+    title: "Measured condition failing",
+    explanation: "A condition of approval is measured from the platform's own records, and the latest measurement does not meet its threshold.",
+  },
+  condition_not_measured: {
+    title: "Measured condition has no passing evidence",
+    explanation: "A measured condition has no passing evidence yet (too few samples, or nothing measured). Only passing evidence closes it.",
+  },
+  condition_waived: {
+    title: "Condition waived",
+    explanation: "An admin waived this measured condition, with a recorded reason. A waiver is a warning, never a pass.",
+  },
+  required_test_missing: {
+    title: "Required AI test missing",
+    explanation: "The use case's risk tier requires this OWASP test class, and no completed red-team or eval run measured it for this agent on its current configuration.",
+  },
+  required_test_stale: {
+    title: "Required AI test stale",
+    explanation: "The last run that measured this required class is older than the freshness limit, or the agent's configuration changed since. Run it again.",
+  },
+  required_test_failing: {
+    title: "Required AI test failing",
+    explanation: "The newest run of this required class, on the current configuration, is past its threshold (attack success rate too high, or score too low).",
+  },
+  autonomy_floor_unmet: {
+    title: "Autonomy floor unmet",
+    explanation: "The agent's autonomy class requires controls that are not in place.",
+  },
+  residual_above_tolerance: {
+    title: "Residual risk above tolerance",
+    explanation: "A risk's residual band is above the organisation's tolerance and has no valid, unexpired acceptance.",
+  },
+  assurance_check_unavailable: {
+    title: "Assurance check could not run",
+    explanation: "One of the continuous-assurance checks was not evaluated. A check that did not run is never a pass.",
+  },
+};
 
 export interface DeployGateReason {
   code: DeployGateReasonCode;
   severity: "block" | "warn";
   message: string;
+  /** the plain-language meaning of `code` (DEPLOY_GATE_REASON_INFO) */
+  explanation?: string;
   /** the record to open to fix it */
-  ref?: { type: "use_case" | "agent" | "alert"; id: string };
+  ref?: { type: "use_case" | "agent" | "alert" | "risk" | "condition"; id: string };
 }
+
+/** How the ADR-0180 checks were applied. `label` is the one-line answer the
+ * CLI prints after "assurance: ". */
+export interface DeployGateAssuranceSummary {
+  mode: AssuranceGateMode;
+  status: "enforced" | "warn_only" | "skipped";
+  label: string;
+}
+
+/** the D3 reason codes, the ones `assurance_gate_mode` governs */
+export const ASSURANCE_GATE_REASON_CODES: readonly DeployGateReasonCode[] = [
+  "condition_failing",
+  "condition_not_measured",
+  "condition_waived",
+  "required_test_missing",
+  "required_test_stale",
+  "required_test_failing",
+  "autonomy_floor_unmet",
+  "residual_above_tolerance",
+  "assurance_check_unavailable",
+];
 
 export interface DeployGateAgentInput {
   id: string;
@@ -87,7 +209,104 @@ export interface DeployGateDecision {
   decision: "allow" | "deny";
   reasons: DeployGateReason[];
   agentsChecked: string[];
+  /** present when `assuranceMode` was given (the route always gives it) */
+  assurance?: DeployGateAssuranceSummary;
 }
+
+/** a measured (non-manual) condition */
+const isMeasured = (v: ConditionVerdict) => v.kind !== "manual";
+
+function assuranceReasons(input: DeployGateInput, mode: Exclude<AssuranceGateMode, "off">): DeployGateReason[] {
+  const out: DeployGateReason[] = [];
+  const sev: "block" | "warn" = mode === "enforce" ? "block" : "warn";
+  const uc = input.useCase;
+  const notGathered = (what: string) =>
+    out.push({
+      code: "assurance_check_unavailable",
+      severity: sev,
+      message: `${what} were not evaluated for "${uc.name}"`,
+      ref: { type: "use_case", id: uc.id },
+    });
+
+  // 1. measured conditions (A2). Waived: always a warning, never a pass.
+  if (!input.conditionVerdicts) notGathered("measured conditions");
+  for (const v of (input.conditionVerdicts ?? []).filter(isMeasured)) {
+    const ref = { type: "condition" as const, id: v.conditionId };
+    if (v.status === "waived" || v.state === "waived") {
+      out.push({ code: "condition_waived", severity: "warn", message: `waived: ${v.text}`, ref });
+      continue;
+    }
+    if (v.state === "pass") continue;
+    if (v.state === "fail") {
+      const m = v.measurement;
+      out.push({
+        code: "condition_failing",
+        severity: sev,
+        message: `${v.text}${m && m.value !== null ? ` (measured ${m.value} over ${m.samples} sample(s))` : ""}`,
+        ref,
+      });
+      continue;
+    }
+    // insufficient / not_run: no passing evidence. A before-go-live condition
+    // holds; an ongoing one is reported.
+    out.push({
+      code: "condition_not_measured",
+      severity: v.blocking ? sev : "warn",
+      message: `${v.text} (${v.state === "insufficient" ? "too few samples" : "not measured yet"})`,
+      ref,
+    });
+  }
+
+  // 2. required AI test classes (A3)
+  if (!input.requiredTests) notGathered("required AI tests");
+  const testCode: Partial<Record<RequiredTestStatus["state"], DeployGateReasonCode>> = {
+    missing: "required_test_missing",
+    not_run: "required_test_missing",
+    stale: "required_test_stale",
+    failing: "required_test_failing",
+  };
+  for (const t of input.requiredTests ?? []) {
+    const code = testCode[t.state];
+    if (!code) continue;
+    const who = t.agentId ? `agent ${input.agents.get(t.agentId)?.name ?? t.agentId}` : `"${uc.name}"`;
+    out.push({
+      code,
+      severity: sev,
+      message: `${t.testClass} on ${who}: ${t.detail ?? t.state.replace(/_/g, " ")}`,
+      ref: t.agentId ? { type: "agent", id: t.agentId } : { type: "use_case", id: uc.id },
+    });
+  }
+
+  // 3. autonomy floor (A8). `undefined` = not gathered; `null` = no builder agent.
+  if (input.autonomy === undefined) notGathered("autonomy floors");
+  for (const c of input.autonomy?.unmet ?? []) {
+    out.push({
+      code: "autonomy_floor_unmet",
+      severity: sev,
+      message: `${input.autonomy?.derived ? `${input.autonomy.derived} autonomy: ` : ""}${c.text}`,
+      ref: { type: "use_case", id: uc.id },
+    });
+  }
+
+  // 4. residual risk above tolerance with no valid acceptance (A10)
+  if (!input.residualRisks) notGathered("residual risk positions");
+  for (const r of input.residualRisks ?? []) {
+    if (!r.aboveTolerance || r.acceptance) continue;
+    out.push({
+      code: "residual_above_tolerance",
+      severity: sev,
+      message: `risk ${r.riskId}: residual ${r.band ?? "unrated"} is above the ${r.tolerance.band} tolerance (${r.tolerance.source}) and has no valid acceptance`,
+      ref: { type: "risk", id: r.riskId },
+    });
+  }
+  return out;
+}
+
+const ASSURANCE_LABEL: Record<AssuranceGateMode, DeployGateAssuranceSummary> = {
+  enforce: { mode: "enforce", status: "enforced", label: "enforced (mode enforce)" },
+  warn: { mode: "warn", status: "warn_only", label: "reported as warnings (mode warn)" },
+  off: { mode: "off", status: "skipped", label: "skipped (mode off)" },
+};
 
 export function evaluateDeployGate(input: DeployGateInput): DeployGateDecision {
   const reasons: DeployGateReason[] = [];
@@ -173,11 +392,17 @@ export function evaluateDeployGate(input: DeployGateInput): DeployGateDecision {
       reasons.push({ code: "open_medium_alert", severity: "warn", message: al.title, ref: { type: "alert", id: al.id } });
     }
   }
+  // ADR-0180 — the continuous-assurance checks, as the org's mode says:
+  // enforce holds, warn reports, off skips (and the summary says so).
+  const mode = input.assuranceMode;
+  if (mode && mode !== "off") reasons.push(...assuranceReasons(input, mode));
+  for (const r of reasons) r.explanation = DEPLOY_GATE_REASON_INFO[r.code].explanation;
   const order = (r: DeployGateReason) => (r.severity === "block" ? 0 : 1);
   reasons.sort((a, b) => order(a) - order(b) || a.code.localeCompare(b.code));
   return {
     decision: reasons.some((r) => r.severity === "block") ? "deny" : "allow",
     reasons,
     agentsChecked: [...checked],
+    ...(mode ? { assurance: { ...ASSURANCE_LABEL[mode] } } : {}),
   };
 }

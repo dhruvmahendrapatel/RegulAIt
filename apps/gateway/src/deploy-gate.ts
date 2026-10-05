@@ -12,6 +12,20 @@
  * Callable by an admin or by the use case's OWNER (a pipeline runs as a
  * service account that owns the use cases it ships). Always 200 with a
  * decision on a known use case — the pipeline acts on `decision`.
+ *
+ * ADR-0180 — CONTINUOUS ASSURANCE (A3 owns the composition). The org's
+ * `assurance_gate_mode` (default `enforce`) governs four live checks, each
+ * read through its owner's interface function:
+ *   - measured conditions      `evaluateUseCaseConditions` (A2), persist false
+ *   - required AI test classes `requiredTestStatus` (A3)
+ *   - autonomy floors          `autonomyFloorFor` (A8)
+ *   - residual risk            `residualPosition` (A10)
+ * `enforce` holds on them, `warn` lists them as warnings, `off` skips them and
+ * the response says `assurance: skipped (mode off)`. A check that throws is
+ * reported (`assurance_check_unavailable`), never passed. Monitor alerts of the
+ * six assurance rules are NOT re-read as `open_high_alert`: the live checks
+ * above cover the same facts, and the mode — not the alert — decides whether
+ * they hold the release (otherwise `off` could never turn them off).
  */
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
@@ -32,9 +46,23 @@ import {
   useCaseConditions,
   type Db,
 } from "@regulait/db";
-import { evaluateDeployGate, evaluateMrmGate, type DeployGateAgentInput } from "@regulait/shared";
+import {
+  ASSURANCE_MONITOR_RULE_IDS,
+  evaluateDeployGate,
+  evaluateMrmGate,
+  type AutonomyFloorResult,
+  type ConditionVerdict,
+  type DeployGateAgentInput,
+  type RequiredTestStatus,
+  type ResidualPosition,
+} from "@regulait/shared";
 import { loadCardsForSubject } from "./mrm.js";
 import { loadOrgSettings } from "./org-settings.js";
+import { loadAssuranceGateMode } from "./assurance-settings.js";
+import { evaluateUseCaseConditions } from "./condition-metrics.js";
+import { requiredTestStatus } from "./required-tests.js";
+import { autonomyFloorFor } from "./autonomy.js";
+import { residualPosition } from "./risk-tolerance.js";
 
 export const DEPLOY_GATE_RULE_IDS = { allowed: "deploy-gate-allowed", denied: "deploy-gate-denied" } as const;
 
@@ -132,13 +160,17 @@ export function registerDeployGateRoutes(app: FastifyInstance, db: Db): void {
       .where(ne(governanceAlerts.status, "resolved"));
     const ucKey = `use_case:${uc.id}`;
     const agentKeys = new Set(checkIds.map((id) => `agent:${id}`));
+    const assuranceRules = new Set<string>(ASSURANCE_MONITOR_RULE_IDS);
     const alerts = alertRows.filter((a) => {
+      if (assuranceRules.has(a.ruleId)) return false;
       const parts = a.subjectKey.split(">");
       if (parts[0] === ucKey) return true;
       return parts.length === 1 && agentKeys.has(parts[0]!);
     });
 
-    // ADR-0168 — open BEFORE-go-live conditions the approval imposed
+    // ADR-0168 — open BEFORE-go-live conditions the approval imposed. Only the
+    // MANUAL ones here: a measured condition (ADR-0180) is closed by evidence
+    // and read through the assurance checks below, under the org's mode.
     const blockingConditions = await db
       .select({ id: useCaseConditions.id, text: useCaseConditions.text })
       .from(useCaseConditions)
@@ -147,9 +179,73 @@ export function registerDeployGateRoutes(app: FastifyInstance, db: Db): void {
           eq(useCaseConditions.useCaseId, uc.id),
           eq(useCaseConditions.status, "open"),
           eq(useCaseConditions.blocking, true),
+          eq(useCaseConditions.kind, "manual"),
         ),
       )
       .orderBy(useCaseConditions.dueAt, useCaseConditions.id);
+
+    // ADR-0180 — the continuous-assurance checks, live, as the mode says
+    const assuranceMode = await loadAssuranceGateMode(db);
+    const assurance: {
+      conditionVerdicts?: ConditionVerdict[];
+      requiredTests?: RequiredTestStatus[];
+      autonomy?: AutonomyFloorResult | null;
+      residualRisks?: ResidualPosition[];
+    } = {};
+    const assuranceErrors: Array<{ check: string; error: string }> = [];
+    const attempt = async <T>(check: string, f: () => Promise<T>): Promise<T | undefined> => {
+      try {
+        return await f();
+      } catch (e) {
+        assuranceErrors.push({ check, error: e instanceof Error ? e.message : String(e) });
+        return undefined; // reported as `assurance_check_unavailable`, never passed
+      }
+    };
+    if (assuranceMode !== "off") {
+      const verdicts = await attempt("conditions", () => evaluateUseCaseConditions(db, uc.id, now, { persist: false }));
+      if (verdicts) {
+        // a measured before-go-live condition with no verdict yet has no
+        // passing evidence: it reads `not_run`, never met
+        const measuredOpen = await db
+          .select()
+          .from(useCaseConditions)
+          .where(
+            and(
+              eq(useCaseConditions.useCaseId, uc.id),
+              eq(useCaseConditions.status, "open"),
+              eq(useCaseConditions.blocking, true),
+              ne(useCaseConditions.kind, "manual"),
+            ),
+          );
+        const seen = new Set(verdicts.map((v) => v.conditionId));
+        assurance.conditionVerdicts = [
+          ...verdicts,
+          ...measuredOpen
+            .filter((c) => !seen.has(c.id))
+            .map(
+              (c): ConditionVerdict => ({
+                conditionId: c.id,
+                useCaseId: uc.id,
+                kind: c.kind,
+                text: c.text,
+                blocking: c.blocking,
+                status: "open",
+                state: "not_run",
+                measurement: null,
+                onBreach: (c.onBreach ?? "alert") as ConditionVerdict["onBreach"],
+                consecutiveBreaches: c.consecutiveBreaches ?? 0,
+                evaluatedAt: null,
+              }),
+            ),
+        ];
+      }
+      assurance.requiredTests = await attempt("required_tests", () =>
+        requiredTestStatus(db, { id: uc.id, euAiActTier: uc.euAiActTier, intendedAgentIds: intended }, now),
+      );
+      const floor = await attempt("autonomy", () => autonomyFloorFor(db, { id: uc.id, projectId: uc.projectId }));
+      if (floor !== undefined) assurance.autonomy = floor;
+      assurance.residualRisks = await attempt("residual_risk", () => residualPosition(db, uc.id, now));
+    }
 
     const result = evaluateDeployGate({
       useCase: {
@@ -164,6 +260,8 @@ export function registerDeployGateRoutes(app: FastifyInstance, db: Db): void {
       alerts,
       openBlockingConditions: blockingConditions,
       now,
+      assuranceMode,
+      ...assurance,
     });
 
     await db.insert(auditLog).values({
@@ -180,6 +278,9 @@ export function registerDeployGateRoutes(app: FastifyInstance, db: Db): void {
         // ADR-0168: which conditions held the gate, and the lifetime it read
         ...(blockingConditions.length > 0 ? { openBlockingConditionIds: blockingConditions.map((c) => c.id) } : {}),
         approvedUntil: uc.approvedUntil ? uc.approvedUntil.toISOString() : null,
+        // ADR-0180: the mode the checks ran under, and any check that could not run
+        assurance: result.assurance ?? null,
+        ...(assuranceErrors.length ? { assuranceErrors } : {}),
       },
       effect: result.decision === "allow" ? "allow" : "deny",
       ruleId: result.decision === "allow" ? DEPLOY_GATE_RULE_IDS.allowed : DEPLOY_GATE_RULE_IDS.denied,
@@ -203,12 +304,16 @@ export function registerDeployGateRoutes(app: FastifyInstance, db: Db): void {
       agentsChecked: result.agentsChecked,
       agentsRequested: b.agentIds ?? null,
       reasons: result.reasons,
+      // ADR-0180: how the continuous-assurance checks were applied, e.g.
+      // { mode: "off", status: "skipped", label: "skipped (mode off)" }
+      assurance: result.assurance,
       environment: b.environment ?? null,
       ref: b.ref ?? null,
       evaluatedAt: now.toISOString(),
       note:
         "The pipeline enforces `decision`; a warning does not fail the gate. Dispatch enforcement (MRM incl. " +
-        "staleness recertification, halts, entitlements) is unchanged and still applies at runtime.",
+        "staleness recertification, halts, entitlements) is unchanged and still applies at runtime. " +
+        `Continuous-assurance checks: ${result.assurance?.label ?? "not evaluated"}.`,
     };
   });
 }

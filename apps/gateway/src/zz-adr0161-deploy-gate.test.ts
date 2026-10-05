@@ -14,6 +14,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { agents, aiUseCases, and, auditLog, createDb, eq, governanceAlerts, runMigrations, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { setAssuranceGateModeForTest } from "./testing/assurance-mode.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -107,4 +108,15 @@ describe("ADR-0161 deploy gate", () => {
     expect(rows.some((r) => (r.detail as any).ref === `build-${RUN}` && r.ruleId === "deploy-gate-allowed")).toBe(true);
     expect(rows.some((r) => r.ruleId === "deploy-gate-denied")).toBe(true);
   });
+});
+
+// ADR-0180: this file pins the gate rules above; the continuous-assurance checks
+// (strict `enforce` by default) are pinned in zz-adr0180-a3-required-tests.test.ts.
+// M-068: the strict default is restored before the file ends.
+let restoreAssuranceMode = async (): Promise<void> => {};
+beforeAll(async () => {
+  restoreAssuranceMode = await setAssuranceGateModeForTest(db, "off");
+});
+afterAll(async () => {
+  await restoreAssuranceMode();
 });

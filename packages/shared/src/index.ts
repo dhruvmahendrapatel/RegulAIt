@@ -4395,3 +4395,31 @@ export {
   type MonitorAssuranceInput,
   type MonitorAssuranceSubject,
 } from "./governance-monitor.js";
+// ADR-0180 A3 — required AI test classes per risk tier, and the gate's assurance vocabulary
+export {
+  ASSURANCE_GATE_REASON_CODES,
+  DEPLOY_GATE_REASON_INFO,
+  type DeployGateAssuranceSummary,
+} from "./deploy-gate.js";
+export {
+  DEFAULT_REQUIRED_MAX_ASR_PCT,
+  DEFAULT_REQUIRED_MIN_SCORE,
+  REQUIRED_TEST_DEFAULTS,
+  REQUIRED_TEST_DEFAULTS_NOTE,
+  UNMEASURABLE_EXPLANATION,
+  effectiveRequiredTests,
+  evaluateRequiredTests,
+  owaspMeasurability,
+  owaspTestClassInfo,
+  requiredTestClassSchema,
+  requiredTestConditionsFor,
+  requiredTestPolicyProblems,
+  requiredTestPolicySchema,
+  requiredTestThresholds,
+  requiredTestTierPolicySchema,
+  type OwaspMeasurability,
+  type RequiredTestAgent,
+  type RequiredTestPolicyProblem,
+  type RequiredTestRunEvidence,
+  type RequiredTestStatusRow,
+} from "./required-tests.js";
