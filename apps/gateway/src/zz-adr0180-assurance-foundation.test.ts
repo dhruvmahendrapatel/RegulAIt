@@ -218,8 +218,7 @@ describe("ADR-0180 D3 route stubs", () => {
     { method: "POST", route: "/v1/use-cases/:useCaseId/conditions/:conditionId/waive", url: "/v1/use-cases/00000000-0000-4000-8000-000000000001/conditions/00000000-0000-4000-8000-000000000002/waive", cls: "admin" },
     { method: "GET", route: "/v1/governance/review-policy/required-tests", url: "/v1/governance/review-policy/required-tests", cls: "user" },
     { method: "PUT", route: "/v1/governance/review-policy/required-tests", url: "/v1/governance/review-policy/required-tests", cls: "admin" },
-    { method: "GET", route: "/v1/builder/agents/:id/autonomy", url: "/v1/builder/agents/00000000-0000-4000-8000-000000000003/autonomy", cls: "user" },
-    { method: "PUT", route: "/v1/builder/agents/:id/autonomy", url: "/v1/builder/agents/00000000-0000-4000-8000-000000000003/autonomy", cls: "user" },
+    // A8 landed: its two routes leave this table (see "A8 autonomy routes" below)
     { method: "GET", route: "/v1/risk-tolerances", url: "/v1/risk-tolerances", cls: "admin" },
     { method: "PUT", route: "/v1/risk-tolerances", url: "/v1/risk-tolerances", cls: "admin" },
     { method: "GET", route: "/v1/risks/:riskId/acceptances", url: "/v1/risks/00000000-0000-4000-8000-000000000004/acceptances", cls: "user" },
@@ -233,6 +232,19 @@ describe("ADR-0180 D3 route stubs", () => {
     expect(r.json().error).toBe("not_implemented");
     const m = await inject(s.method, s.url, users.member.auth, s.method === "GET" ? undefined : {});
     expect(m.statusCode).toBe(s.cls === "admin" ? 403 : 501);
+  });
+
+  // ADR-0180 A8 landed (autonomy.test.ts covers the behaviour): still classed
+  // 'user', access checked in the handler, so an unknown agent is a 404
+  it.each([
+    { method: "GET" as const, route: "/v1/builder/agents/:id/autonomy" },
+    { method: "PUT" as const, route: "/v1/builder/agents/:id/autonomy" },
+  ])("A8 autonomy routes: $method $route is classed user and implemented", async (s) => {
+    expect(routeAuthClass(s.method, s.route)).toBe("user");
+    const url = "/v1/builder/agents/00000000-0000-4000-8000-000000000003/autonomy";
+    const r = await inject(s.method, url, users.member.auth, s.method === "GET" ? undefined : { class: null });
+    expect(r.statusCode, r.body).toBe(404);
+    expect(r.json().error).toBe("unknown_builder_agent");
   });
 });
 
