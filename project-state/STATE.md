@@ -21,6 +21,15 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-10-05 - PR #117 merged to `main` (6276f93); one PR per batch from now on.** The owner approved merging #117 (360
+commits: governance, agent builder 2a, enterprise sign-in, D1/D2, Docker demo) and switching to one short-lived PR per batch
+(CLAUDE.md "Branch and PR flow"). ADR-0176 makes open source first a universal rule (CLAUDE.md "Universal build rule").
+In flight: ADR-0173 batch 2b (prompt registry with Standard Webhooks and a playground; a run graph using React Flow and dagre;
+connector approvals, the Teams bot using jose, Slack buttons) and the open-source security batch (SHA-256 manifest digest
+with migration 0145, current secret patterns, IPv6 special ranges, one constant-time compare). Next: 2c, then the Codex
+feedback review, then D3/D4. Splitting the gateway suite across CI jobs is a later PR, after a local trial on separate
+databases.
+
 **2026-10-05 (early) - Owner's Windows Docker demo is up and prepared (18/18).** Two Docker defects surfaced on the owner's first
 Windows run and are fixed and pushed. (1) A CRLF checkout broke `docker-start.sh` (M-069): `.gitattributes` now pins `*.sh` to LF
 and the Dockerfile strips CR. (2) Docker ran only the seed, so compliance packs and demo content were missing: with
