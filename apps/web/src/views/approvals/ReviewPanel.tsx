@@ -44,6 +44,27 @@ import {
   type ReviewErrors,
   type ReviewOutcome,
 } from "./reviewDecision";
+import {
+  CADENCES,
+  GUARDRAIL_DETECTORS,
+  METRIC_HELP,
+  METRIC_IDS,
+  ON_BREACH,
+  ON_BREACH_LABEL,
+  OPERATORS,
+  OPERATOR_LABEL,
+  blankMetricCondition,
+  describeMetricDraft,
+  hasMetricErrors,
+  metricConditionBody,
+  validateMetricCondition,
+  type Cadence,
+  type MetricConditionDraft,
+  type MetricConditionErrors,
+  type MetricId,
+  type OnBreach,
+  type Operator,
+} from "./metricConditions";
 import r from "./review.module.css";
 import rr from "./reviewRound.module.css";
 
@@ -145,6 +166,11 @@ function ReviewDrawer(props: { approval: Approval; onClose: () => void; onDecide
   // --- the decision ----------------------------------------------------------------
   const [draft, setDraft] = useState<ReviewDraft>({ outcome: null, reason: "", conditions: [], acceptRisk: { on: false, riskIds: [], rationale: "" } });
   const [errors, setErrors] = useState<ReviewErrors | null>(null);
+  // ADR-0180 A2: measured conditions, closed only by passing evidence
+  const [metricConds, setMetricConds] = useState<MetricConditionDraft[]>([]);
+  const [metricErrors, setMetricErrors] = useState<Record<string, MetricConditionErrors>>({});
+  const patchMetric = (key: string, patch: Partial<MetricConditionDraft>) =>
+    setMetricConds((list) => list.map((m) => (m.key === key ? { ...m, ...patch } : m)));
   const [submitError, setSubmitError] = useState<{ text: string; aboutRiskAcceptance: boolean } | null>(null);
   const [busy, setBusy] = useState(false);
   const [showDoc, setShowDoc] = useState(false);
@@ -159,7 +185,18 @@ function ReviewDrawer(props: { approval: Approval; onClose: () => void; onDecide
 
   const submit = async () => {
     const found = validateReview(draft, reasonRequiredBecause);
-    if (hasErrors(found)) {
+    const withMeasured = draft.outcome === "approve_conditions" && metricConds.length > 0;
+    // measured conditions alone are conditions enough
+    if (withMeasured && draft.conditions.length === 0) delete found.conditions;
+    const foundMetric: Record<string, MetricConditionErrors> = {};
+    if (withMeasured) {
+      for (const m of metricConds) {
+        const e = validateMetricCondition(m);
+        if (hasMetricErrors(e)) foundMetric[m.key] = e;
+      }
+    }
+    setMetricErrors(foundMetric);
+    if (hasErrors(found) || Object.keys(foundMetric).length > 0) {
       setErrors(found);
       // land on the first problem, never on a silent no-op
       window.setTimeout(() => drawer.current?.querySelector<HTMLElement>('[aria-invalid="true"], [data-review-error]')?.focus(), 0);
@@ -169,7 +206,11 @@ function ReviewDrawer(props: { approval: Approval; onClose: () => void; onDecide
     setSubmitError(null);
     setBusy(true);
     try {
-      await api.post(`/v1/approvals/${a.id}/decide`, decisionBody(draft));
+      const body = decisionBody(draft);
+      await api.post(
+        `/v1/approvals/${a.id}/decide`,
+        withMeasured ? { ...body, conditions: [...(body.conditions ?? []), ...metricConds.map(metricConditionBody)] } : body,
+      );
       toast(outcomeToast[draft.outcome!], "success");
       void queryClient.invalidateQueries({ queryKey: ["approvals"] });
       void queryClient.invalidateQueries({ queryKey: ["governance"] });
@@ -423,7 +464,7 @@ function ReviewDrawer(props: { approval: Approval; onClose: () => void; onDecide
                       <div key={c.key} className={r.conditionRow} role="group" aria-label={`Condition ${i + 1}`}>
                         <div className={r.conditionHead}>
                           <span>Condition {i + 1}</span>
-                          {draft.conditions.length > 1 ? (
+                          {draft.conditions.length > 1 || metricConds.length > 0 ? (
                             <Button size="sm" variant="ghost" onClick={() => setDraft((d) => ({ ...d, conditions: d.conditions.filter((x) => x.key !== c.key) }))} aria-label={`Remove condition ${i + 1}`}>
                               Remove
                             </Button>
@@ -455,6 +496,25 @@ function ReviewDrawer(props: { approval: Approval; onClose: () => void; onDecide
                   {errors?.conditions ? <p className={r.error} role="alert" tabIndex={-1} data-review-error>{errors.conditions}</p> : null}
                   <div>
                     <Button size="sm" onClick={() => setDraft((d) => ({ ...d, conditions: [...d.conditions, blankCondition()] }))}>+ Add condition</Button>
+                  </div>
+
+                  <h3 className={r.sectionTitle}>Measured conditions</h3>
+                  <p className={r.muted}>
+                    A measured condition is checked from the platform's own records on a schedule. Only passing evidence closes it: nobody marks it met by hand, and too few samples never counts as a pass.
+                  </p>
+                  {metricConds.map((m, i) => (
+                    <MetricConditionEditor
+                      key={m.key}
+                      draft={m}
+                      index={i}
+                      idPrefix={`${titleId}-${m.key}`}
+                      errors={metricErrors[m.key] ?? {}}
+                      onChange={(patch) => patchMetric(m.key, patch)}
+                      onRemove={() => setMetricConds((list) => list.filter((x) => x.key !== m.key))}
+                    />
+                  ))}
+                  <div>
+                    <Button size="sm" onClick={() => setMetricConds((list) => [...list, blankMetricCondition()])}>+ Add measured condition</Button>
                   </div>
                 </div>
               ) : null}
@@ -513,6 +573,105 @@ function ReviewDrawer(props: { approval: Approval; onClose: () => void; onDecide
           ) : null}
         </div>
       </div>
+    </div>
+  );
+}
+
+/** ADR-0180 A2 — one measured condition: metric, operator, threshold, window,
+ * minimum samples, cadence and what a breach does, with what the metric means */
+function MetricConditionEditor(props: {
+  draft: MetricConditionDraft;
+  index: number;
+  idPrefix: string;
+  errors: MetricConditionErrors;
+  onChange: (patch: Partial<MetricConditionDraft>) => void;
+  onRemove: () => void;
+}) {
+  const { draft: m, errors: e, idPrefix } = props;
+  const help = METRIC_HELP[m.metric];
+  return (
+    <div className={r.conditionRow} role="group" aria-label={`Measured condition ${props.index + 1}`}>
+      <div className={r.conditionHead}>
+        <span>Measured condition {props.index + 1}</span>
+        <Button size="sm" variant="ghost" onClick={props.onRemove} aria-label={`Remove measured condition ${props.index + 1}`}>
+          Remove
+        </Button>
+      </div>
+      <div className={r.conditionText}>
+        <Field
+          label="Metric"
+          helpLabel="what this metric measures"
+          help={
+            <>
+              <p>{help.measures}</p>
+              <p>One sample is {help.sample}.</p>
+              <p>A sensible start: {help.example}.</p>
+            </>
+          }
+        >
+          <Select value={m.metric} aria-describedby={`${idPrefix}-measures`} onChange={(ev) => props.onChange({ metric: ev.target.value as MetricId })}>
+            {METRIC_IDS.map((id) => <option key={id} value={id}>{METRIC_HELP[id].label}</option>)}
+          </Select>
+        </Field>
+        <p id={`${idPrefix}-measures`} className={r.muted}>{help.measures} One sample is {help.sample}.</p>
+      </div>
+      {m.metric === "guardrail_mode" ? (
+        <div className={r.conditionText}>
+          <Field label="Detector">
+            <Select value={m.detector} onChange={(ev) => props.onChange({ detector: ev.target.value })}>
+              {GUARDRAIL_DETECTORS.map((d) => <option key={d.id} value={d.id}>{d.label}</option>)}
+            </Select>
+          </Field>
+        </div>
+      ) : null}
+      {m.metric === "pack_control_evidenced" ? (
+        <>
+          <Field label="Pack framework" error={e.framework ?? null}>
+            <Input value={m.framework} aria-invalid={e.framework ? true : undefined} onChange={(ev) => props.onChange({ framework: ev.target.value })} placeholder="The pack's framework name" />
+          </Field>
+          <Field label="Control reference" error={e.controlRef ?? null}>
+            <Input value={m.controlRef} aria-invalid={e.controlRef ? true : undefined} onChange={(ev) => props.onChange({ controlRef: ev.target.value })} placeholder="The control's reference" />
+          </Field>
+        </>
+      ) : null}
+      <Field label="Passes when the value is">
+        <Select value={m.operator} onChange={(ev) => props.onChange({ operator: ev.target.value as Operator })}>
+          {OPERATORS.map((op) => <option key={op} value={op}>{OPERATOR_LABEL[op]}</option>)}
+        </Select>
+      </Field>
+      <Field label={`Threshold (${help.unit})`} error={e.threshold ?? null}>
+        <Input inputMode="decimal" value={m.threshold} aria-invalid={e.threshold ? true : undefined} onChange={(ev) => props.onChange({ threshold: ev.target.value })} />
+      </Field>
+      <Field label="Window (days)" error={e.windowDays ?? null}>
+        <Input inputMode="numeric" value={m.windowDays} aria-invalid={e.windowDays ? true : undefined} onChange={(ev) => props.onChange({ windowDays: ev.target.value })} />
+      </Field>
+      <Field
+        label="Minimum samples"
+        error={e.minSamples ?? null}
+        helpLabel="minimum samples"
+        help={<p>Fewer samples than this reads “too few samples”, which never passes. One sample is {help.sample}.</p>}
+      >
+        <Input inputMode="numeric" value={m.minSamples} aria-invalid={e.minSamples ? true : undefined} onChange={(ev) => props.onChange({ minSamples: ev.target.value })} />
+      </Field>
+      <Field label="Checked">
+        <Select value={m.cadence} onChange={(ev) => props.onChange({ cadence: ev.target.value as Cadence })}>
+          {CADENCES.map((c) => <option key={c} value={c}>{c[0]!.toUpperCase() + c.slice(1)}</option>)}
+        </Select>
+      </Field>
+      <Field label="On a breach">
+        <Select value={m.onBreach} onChange={(ev) => props.onChange({ onBreach: ev.target.value as OnBreach })}>
+          {ON_BREACH.map((b) => <option key={b} value={b}>{ON_BREACH_LABEL[b]}</option>)}
+        </Select>
+      </Field>
+      <div className={r.conditionText}>
+        <Field label="Applies">
+          <Select value={m.blocking ? "before" : "after"} onChange={(ev) => props.onChange({ blocking: ev.target.value === "before" })}>
+            <option value="before">Before go-live (holds deployment until it passes)</option>
+            <option value="after">After go-live (monitored)</option>
+          </Select>
+        </Field>
+      </div>
+      <p className={`${r.muted} ${r.conditionText}`}>Recorded as: {describeMetricDraft(m)}</p>
     </div>
   );
 }

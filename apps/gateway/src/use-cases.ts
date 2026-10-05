@@ -54,6 +54,7 @@
  * And nothing auto-discovers use cases: every row here was proposed by a
  * person.
  */
+import { recordRiskAcceptance } from "./risk-tolerance.js";
 import type { FastifyInstance } from "fastify";
 import {
   agents,
@@ -104,6 +105,13 @@ import {
   evaluateReportAccess,
   markConditionMetSchema,
   type UseCaseConditionView,
+  describeMetricCondition,
+  type AssuranceMetricId,
+  type ConditionCadence,
+  type ConditionOnBreach,
+  type ConditionOperator,
+  type MeasuredConditionFields,
+  type MeasuredConditionKind,
   EU_AI_ACT_BOOLEAN_KEYS,
   INTAKE_BOOLEAN_QUESTION_KEYS,
   UNSURE_ANSWER_MUST_COUNT_AS_YES,
@@ -140,6 +148,8 @@ import {
   reviewRoleIdsFor,
   reviewsForInstance,
 } from "./review-policy.js";
+// ADR-0180 A2: a measured condition is closed only by passing evidence
+import { measureAssuranceMetric, specOf, useCaseScope } from "./condition-metrics.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 const useCaseIdParam = z.object({ useCaseId: z.string().uuid() });
@@ -518,7 +528,24 @@ export async function imposeUseCaseConditions(
   db: Db,
   useCase: { id: string; name: string },
   approvalId: string,
-  conditions: ReadonlyArray<{ text: string; ownerUserId?: string | undefined; dueAt: Date; blocking: boolean }>,
+  conditions: ReadonlyArray<{
+    text: string;
+    ownerUserId?: string | undefined;
+    dueAt: Date;
+    blocking: boolean;
+    /** ADR-0180 A2: absent = a manual (ADR-0168) condition */
+    measured?: {
+      kind: MeasuredConditionKind;
+      metric: AssuranceMetricId;
+      params: Record<string, unknown>;
+      operator: ConditionOperator;
+      threshold: number;
+      windowDays: number;
+      minSamples: number;
+      cadence: ConditionCadence;
+      onBreach: ConditionOnBreach;
+    };
+  }>,
   actorUserId: string,
 ): Promise<void> {
   if (conditions.length === 0) return;
@@ -532,10 +559,24 @@ export async function imposeUseCaseConditions(
         ownerUserId: c.ownerUserId ?? null,
         dueAt: c.dueAt,
         blocking: c.blocking,
+        ...(c.measured
+          ? {
+              kind: c.measured.kind,
+              metric: c.measured.metric,
+              params: c.measured.params,
+              operator: c.measured.operator,
+              threshold: c.measured.threshold,
+              windowDays: c.measured.windowDays,
+              minSamples: c.measured.minSamples,
+              cadence: c.measured.cadence,
+              onBreach: c.measured.onBreach,
+            }
+          : {}),
       })),
     )
-    .returning({ id: useCaseConditions.id, blocking: useCaseConditions.blocking });
+    .returning({ id: useCaseConditions.id, blocking: useCaseConditions.blocking, kind: useCaseConditions.kind });
   const blocking = rows.filter((r) => r.blocking).length;
+  const measured = rows.filter((r) => r.kind !== "manual").length;
   await db.insert(auditLog).values({
     userId: actorUserId,
     objectType: "ai_use_case",
@@ -546,6 +587,15 @@ export async function imposeUseCaseConditions(
       conditionIds: rows.map((r) => r.id),
       blocking,
       afterGoLive: rows.length - blocking,
+      // ADR-0180 A2: how many are measured (closed only by passing evidence)
+      ...(measured > 0
+        ? {
+            measured,
+            specs: conditions.flatMap((c, i) =>
+              c.measured ? [{ conditionId: rows[i]?.id, spec: describeMetricCondition(c.measured), onBreach: c.measured.onBreach }] : [],
+            ),
+          }
+        : {}),
     },
     effect: "allow",
     ruleId: "use-case-conditions-imposed",
@@ -627,6 +677,9 @@ export async function acceptUseCaseRisks(
     )
     .returning({ id: aiRisks.id, title: aiRisks.title, likelihood: aiRisks.likelihood, impact: aiRisks.impact });
   for (const r of rows) {
+    // ADR-0180 §6: a sign-off acceptance is a time-boxed acceptance record too
+    // (expiry = the longest the residual band allows), not only a status flip.
+    await recordRiskAcceptance(db, { riskId: r.id, rationale: input.rationale, actorUserId, now, origin: { kind: "sign_off", approvalId } });
     await db.insert(auditLog).values({
       userId: actorUserId,
       objectType: "ai_use_case",
@@ -747,13 +800,13 @@ async function conditionViewsFor(
   useCase: Pick<AiUseCaseRow, "id" | "ownerUserId" | "workflowInstanceId">,
   now: Date,
   auth: { isAdmin: boolean; userId: string | null | undefined },
-): Promise<UseCaseConditionView[]> {
+): Promise<UseCaseConditionRecordView[]> {
   const rows = await db
     .select()
     .from(useCaseConditions)
     .where(eq(useCaseConditions.useCaseId, useCase.id))
     .orderBy(useCaseConditions.dueAt, useCaseConditions.createdAt, useCaseConditions.id);
-  const ids = [...new Set(rows.flatMap((r) => [r.ownerUserId, r.metByUserId]).filter((x): x is string => !!x))];
+  const ids = [...new Set(rows.flatMap((r) => [r.ownerUserId, r.metByUserId, r.waivedBy]).filter((x): x is string => !!x))];
   const names = await userNames(db, ids);
   const ctx = rows.some((r) => r.status === "open") ? await conditionCloseContext(db, useCase, auth) : null;
   return rows.map((r) =>
@@ -770,12 +823,16 @@ async function userNames(db: Db, ids: string[]): Promise<Map<string, string>> {
   return new Map(rows.map((u) => [u.id, u.displayName || u.email]));
 }
 
+/** ADR-0168's condition view plus ADR-0180 A2's measured fields */
+export type UseCaseConditionRecordView = UseCaseConditionView & MeasuredConditionFields;
+
 function conditionView(
   r: UseCaseConditionRow,
   names: Map<string, string>,
   now: Date,
   canMarkMet: boolean,
-): UseCaseConditionView {
+): UseCaseConditionRecordView {
+  const spec = specOf(r);
   return {
     id: r.id,
     approvalId: r.approvalId,
@@ -789,7 +846,27 @@ function conditionView(
     metByName: r.metByUserId ? (names.get(r.metByUserId) ?? null) : null,
     note: r.note,
     overdue: r.status === "open" && r.dueAt.getTime() < now.getTime(),
-    canMarkMet,
+    // ADR-0180 A2: a measured condition is closed only by passing evidence
+    canMarkMet: canMarkMet && r.kind === "manual",
+    kind: r.kind,
+    metric: r.metric,
+    params: r.params ?? {},
+    operator: r.operator,
+    threshold: r.threshold,
+    windowDays: r.windowDays,
+    minSamples: r.minSamples,
+    cadence: r.cadence,
+    onBreach: r.onBreach,
+    spec: spec ? describeMetricCondition(spec) : null,
+    lastValue: r.lastValue,
+    lastSamples: r.lastSamples,
+    lastState: r.lastState,
+    lastEvaluatedAt: r.lastEvaluatedAt ? r.lastEvaluatedAt.toISOString() : null,
+    consecutiveBreaches: r.consecutiveBreaches,
+    evidence: r.evidence ?? [],
+    waivedAt: r.waivedAt ? r.waivedAt.toISOString() : null,
+    waivedByName: r.waivedBy ? (names.get(r.waivedBy) ?? null) : null,
+    waiveReason: r.waiveReason,
   };
 }
 
@@ -2163,6 +2240,33 @@ export function registerUseCaseRoutes(
     }
     if (cond.status !== "open") {
       return reply.status(409).send({ error: "condition_not_open", status: cond.status });
+    }
+    // ADR-0180 A2: ONLY PASSING EVIDENCE CLOSES A MEASURED CONDITION. A metric,
+    // test-class or autonomy-floor condition is never marked met by hand: while
+    // its evidence does not pass, the refusal says so; when it does, the
+    // evaluator (scheduled, or an admin's "evaluate now") closes it.
+    if (cond.kind !== "manual") {
+      const spec = specOf(cond);
+      const m = spec ? await measureAssuranceMetric(db, spec, useCaseScope(uc), new Date()) : null;
+      if (!m || m.state !== "pass") {
+        return reply.status(422).send({
+          error: "condition_evidence_failing",
+          kind: cond.kind,
+          state: m?.state ?? "not_run",
+          measurement: m,
+          detail:
+            "a measured condition is closed only by passing evidence, and its evidence does not pass " +
+            `(${m?.state.replace("_", " ") ?? "not run"}); it cannot be marked met by hand`,
+        });
+      }
+      return reply.status(422).send({
+        error: "condition_not_manual",
+        kind: cond.kind,
+        state: m.state,
+        detail:
+          "a measured condition is closed by the condition evaluator, not by hand; its evidence passes, so " +
+          "an administrator can run Evaluate now, or the next scheduled evaluation closes it",
+      });
     }
     if (verdict.noteRequired && !note) {
       return reply.status(422).send({
