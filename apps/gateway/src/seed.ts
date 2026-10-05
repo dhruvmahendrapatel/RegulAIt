@@ -241,6 +241,7 @@ await call("POST", `/v1/users/${averyId}/agent-policy`, {
 // Hostnames are deliberately unreachable (RFC 2606 `.invalid`): registering a
 // server and its tool inventory is a governance act and needs no live
 // upstream — nothing here proxies anywhere.
+await seedStrictAdmission(); // ADR-0181 (SC): demo admission + egress posture, block at the end of this file
 const serverList = (await call("GET", "/v1/servers")).servers ?? [];
 async function ensureServer(name: string, url: string): Promise<string> {
   const existing = serverList.find((s: Json) => s.name === name);
@@ -250,7 +251,7 @@ async function ensureServer(name: string, url: string): Promise<string> {
 // ADR-0043: demo registry rows are never connected to, but /v1/servers now
 // runs the egress guard at write time and RESOLVES every destination — a
 // `.invalid` hostname fails closed. The loopback dead port (discard) is
-// permitted with zero ceremony under the private-ranges-open default posture.
+// permitted by the demo allow-list entry seedStrictAdmission adds (ADR-0181).
 const repoServerId = await ensureServer("repo-tools", "http://127.0.0.1:9/repo-mcp");
 const warehouseServerId = await ensureServer("data-warehouse", "http://127.0.0.1:9/warehouse-mcp");
 
@@ -1496,3 +1497,87 @@ ${pmWebhookSecret ? `\n    demo-pm webhook secret (shown ONCE)  ${pmWebhookSecre
     search_code  deny (her per-user revocation beats the role)
     write_file   require_approval (named approver: Avery)
 `);
+
+// ===========================================================================
+// ADR-0181 (agent SC) — THE DEMO'S ADMISSION AND EGRESS POSTURE, configured
+// truthfully under the strict defaults. Called from ONE line, just before the
+// MCP section above. Nothing here relaxes a control:
+//
+//  - mcpPrivateRangesDefault is false, so the demo's local MCP hosts get an
+//    explicit, audited egress allow-list entry with the private-range and
+//    plaintext opt-ins (the demo MCP server listens on 127.0.0.1/127.0.0.2
+//    over http). Every other private address stays refused.
+//  - egressCompiledDefaultPolicy is strict, so the one vendor endpoint the demo
+//    story dispatches to (the seeded gemini-pro agent, when a key is supplied)
+//    gets its allow-list entry. The other seeded real-provider agents are not
+//    allow-listed: an admin adds their hosts when they add their keys.
+//  - minReleaseAgeDays is 7 and the two demo MCP servers are HISTORIC in the
+//    story (registered long before the meeting), so their registration is
+//    dated 60 days back. That is a dataset fact, written once, and recorded in
+//    the audit trail under its own rule id so nobody mistakes it for a
+//    real-time registration. A server registered during the demo still waits.
+//  - mcpAdmissionMode is enforce: the demo servers are scanned at their first
+//    sync and admitted on a clean manifest, like any other server.
+// ===========================================================================
+async function seedStrictAdmission(): Promise<void> {
+  const { auditLog: scAuditLog, mcpServers: scMcpServers, eq: scEq } = await import("@regulait/db");
+  const localHosts = [
+    ...new Set(
+      ["127.0.0.1", "127.0.0.2", process.env.REGULAIT_DEMO_MCP_HOST_REPO, process.env.REGULAIT_DEMO_MCP_HOST_WAREHOUSE].filter(
+        (h): h is string => !!h && h.trim() !== "",
+      ),
+    ),
+  ];
+  const allowed = new Set(
+    (((await call("GET", "/v1/egress-allow-hosts")).hosts ?? []) as Json[]).map((h) => h.host as string),
+  );
+  for (const host of localHosts) {
+    if (allowed.has(host)) continue;
+    await call("POST", "/v1/egress-allow-hosts", {
+      host,
+      allowPrivateRanges: true,
+      allowPlaintextHttp: true,
+      note: "demo: the local demo MCP server (loopback, http). ADR-0181 keeps every other private address refused.",
+    });
+  }
+  if (!allowed.has("generativelanguage.googleapis.com")) {
+    await call("POST", "/v1/egress-allow-hosts", {
+      host: "generativelanguage.googleapis.com",
+      note: "demo: the seeded gemini-pro agent's compiled endpoint (strict compiled-egress posture, ADR-0181)",
+    });
+  }
+
+  const historic: Array<[string, string]> = [
+    ["repo-tools", "http://127.0.0.1:9/repo-mcp"],
+    ["data-warehouse", "http://127.0.0.1:9/warehouse-mcp"],
+  ];
+  const registeredAt = new Date(Date.now() - 60 * 86_400_000);
+  const have = ((await call("GET", "/v1/servers")).servers ?? []) as Json[];
+  for (const [name, url] of historic) {
+    const id: string = have.find((s) => s.name === name)?.id ?? (await call("POST", "/v1/servers", { name, url })).id;
+    const [row] = await db
+      .select({ releaseDigest: scMcpServers.releaseDigest, releaseSeenAt: scMcpServers.releaseSeenAt })
+      .from(scMcpServers)
+      .where(scEq(scMcpServers.id, id));
+    // once only: a server that has synced a manifest, or is already dated, is left alone
+    if (!row || row.releaseDigest !== null || row.releaseSeenAt.getTime() <= registeredAt.getTime()) continue;
+    await db
+      .update(scMcpServers)
+      .set({ createdAt: registeredAt, releaseSeenAt: registeredAt })
+      .where(scEq(scMcpServers.id, id));
+    await db.insert(scAuditLog).values({
+      userId: "00000000-0000-0000-0000-000000000000",
+      serverId: id,
+      objectType: "mcp_server",
+      objectId: id,
+      detail: { phase: "demo-seed", registeredAt: registeredAt.toISOString(), minReleaseAgeDays: 7 },
+      effect: "allow",
+      ruleId: "demo-seed-historic-server-dated",
+      ruleChain: [],
+      reason:
+        `demo seed: MCP server '${name}' is a historic server in the demo story, so its registration is dated ` +
+        `${registeredAt.toISOString().slice(0, 10)}, past the 7-day release-age cooldown. A dataset fact, not a ` +
+        `cooldown override; a server registered during the demo still waits.`,
+    });
+  }
+}

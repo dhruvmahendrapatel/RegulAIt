@@ -108,6 +108,11 @@ jobs:
       REGULAIT_DATA_KEY: dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
       REGULAIT_EPHEMERAL_LICENSE: '1'
       E2E_BASE_URL: http://127.0.0.1:3105
+      # ADR-0181: the CI Postgres service has no TLS, so the demo relaxes the
+      # database hop EXPLICITLY, exactly as the local demo and docker-compose
+      # do (the default is `require`). The gateway prints a loud boot warning
+      # and GET /v1/org/posture reports `databaseTls: relaxed`.
+      REGULAIT_DATABASE_SSL: disable
 
     steps:
       - uses: actions/checkout@v4
@@ -192,6 +197,12 @@ jobs:
 
     env:
       E2E_PG: postgres://regulait:regulait@localhost:5432
+      # ADR-0181: the gateway's defaults are strict. CI's Postgres service has
+      # no TLS, so the database hop is relaxed EXPLICITLY here (the default is
+      # `require`), and the scheduler (ON by default) is switched off so no
+      # tick loop runs underneath a test.
+      REGULAIT_DATABASE_SSL: disable
+      REGULAIT_SCHEDULER: 'off'
 
     steps:
       - uses: actions/checkout@v4

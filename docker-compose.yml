@@ -193,6 +193,13 @@ services:
       # override every one of them anywhere shared. The installer refuses to
       # let the data key below reach a real deployment.
       DATABASE_URL: ${REGULAIT_DATABASE_URL:-postgres://regulait:regulait@db:5432/regulait}
+      # ADR-0181: the gateway REQUIRES TLS to Postgres by default. The bundled
+      # `db` service above is on this compose network and has no TLS, so this
+      # stack relaxes the hop EXPLICITLY; the gateway prints a loud boot warning
+      # and GET /v1/org/posture reports `databaseTls: relaxed`. Pointing
+      # REGULAIT_DATABASE_URL at a database across a network? Set
+      # REGULAIT_DATABASE_SSL=require (or no-verify for a self-signed one).
+      REGULAIT_DATABASE_SSL: ${REGULAIT_DATABASE_SSL:-disable}
       REGULAIT_DATA_KEY: ${REGULAIT_DATA_KEY:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
       REGULAIT_BOOTSTRAP_TOKEN: ${REGULAIT_BOOTSTRAP_TOKEN:-dev-bootstrap}
       SEED_DEMO: ${SEED_DEMO:-1}
