@@ -24,6 +24,8 @@ import {
   complianceProfiles,
   connectorRevocations,
   eq,
+  inArray,
+  isNotNull,
   isNull,
   lt,
   ne,
@@ -58,6 +60,7 @@ import { applyRuleEdit, currentEffectiveBody, isRuleEditRefusal } from "./rule-w
 import { recordSchedulerFailure, recordSchedulerSuccess } from "./scheduler-health.js";
 import { evaluateIpEnvelope, isValidCidr } from "./net-policy.js";
 import { countEnabledSsoProviders } from "./sso-providers.js";
+import { signInInvariantChecked, signInInvariantWritten, withSignInInvariant } from "./break-glass.js";
 
 export type { OrgSettingsRow };
 
@@ -508,6 +511,109 @@ function approvalTtlPosture(row: OrgSettingsRow): "bounded" | "nonexpiring_high_
   return row.approvalTtlHours == null ? "nonexpiring_high_risk" : "bounded";
 }
 
+/** true when a settings write can change who is able to sign in */
+function touchesSignIn(body: { ssoOnly?: unknown; localSignIn?: unknown; breakGlassUserIds?: unknown }): boolean {
+  return body.ssoOnly !== undefined || body.localSignIn !== undefined || body.breakGlassUserIds !== undefined;
+}
+
+/**
+ * The sign-in lockout guards on an org-settings write, over the row RE-READ
+ * under the sign-in invariant lock (`withSignInInvariant`, AER-056). Returns
+ * the refusal (status + body; nothing is saved) or null.
+ *
+ *  - ADR-0025/0036: sso_only without a single enabled SSO provider would
+ *    strand every human login behind a door that does not exist. OIDC and
+ *    SAML are co-equal federated paths, so the count covers both, through the
+ *    SAME helper the provider CRUD surfaces use — two copies would drift.
+ *  - ADR-0174 — break-glass local sign-in. Every named break-glass account
+ *    must be a real, ACTIVE ADMIN; and the mode may only engage when somebody
+ *    can still get in: at least one enabled SSO provider (the front door) and
+ *    at least one break-glass admin with a password (the spare key). Checked
+ *    over the MERGED values, like the API-key TTL dials.
+ */
+async function signInModeRefusal(
+  tx: Pick<Db, "select">,
+  locked: OrgSettingsRow,
+  body: { ssoOnly?: boolean; localSignIn?: OrgSettingsRow["localSignIn"]; breakGlassUserIds?: string[] | null },
+): Promise<{ status: 422; body: Record<string, unknown> } | null> {
+  if (body.ssoOnly === true) {
+    const enabled = await countEnabledSsoProviders(tx);
+    if (enabled.total === 0) {
+      return {
+        status: 422,
+        body: {
+          error: "sso_only_needs_a_provider",
+          detail:
+            "enable at least one SSO provider (OIDC or SAML) before turning sso_only on — otherwise nobody can sign in",
+        },
+      };
+    }
+  }
+  if (body.breakGlassUserIds && body.breakGlassUserIds.length > 0) {
+    const ids = [...new Set(body.breakGlassUserIds)];
+    const found = await tx
+      .select({ id: users.id, isAdmin: users.isAdmin, disabledAt: users.disabledAt })
+      .from(users)
+      .where(inArray(users.id, ids));
+    const bad = ids.filter((id) => {
+      const u = found.find((f) => f.id === id);
+      return !u || !u.isAdmin || u.disabledAt !== null;
+    });
+    if (bad.length > 0) {
+      return {
+        status: 422,
+        body: {
+          error: "invalid_break_glass_user",
+          detail: "every break-glass account must be an existing, active administrator — nothing was saved",
+          invalid: bad,
+        },
+      };
+    }
+  }
+  if (body.localSignIn !== undefined || body.breakGlassUserIds !== undefined) {
+    const nextMode = body.localSignIn ?? locked.localSignIn;
+    const nextIds = body.breakGlassUserIds !== undefined ? body.breakGlassUserIds : locked.breakGlassUserIds;
+    if (nextMode === "break_glass_only") {
+      const enabled = await countEnabledSsoProviders(tx);
+      if (enabled.total === 0) {
+        return {
+          status: 422,
+          body: {
+            error: "break_glass_needs_sso_provider",
+            detail:
+              "enable at least one SSO provider (OIDC or SAML) before restricting email sign-in to break-glass admins — otherwise only they could sign in",
+          },
+        };
+      }
+      const usable =
+        nextIds && nextIds.length > 0
+          ? await tx
+              .select({ id: users.id })
+              .from(users)
+              .where(
+                and(
+                  inArray(users.id, nextIds),
+                  eq(users.isAdmin, true),
+                  isNull(users.disabledAt),
+                  isNotNull(users.passwordHash),
+                ),
+              )
+          : [];
+      if (usable.length === 0) {
+        return {
+          status: 422,
+          body: {
+            error: "break_glass_needs_admin",
+            detail:
+              "name at least one active administrator who has a password as a break-glass account before restricting email sign-in",
+          },
+        };
+      }
+    }
+  }
+  return null;
+}
+
 export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { dataKey?: string } = {}) {
   app.get("/v1/org/settings", async () => {
     const settings = await loadOrgSettings(db);
@@ -534,22 +640,10 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { 
         });
       }
     }
-    // ADR-0025 lockout guard: sso_only without a single enabled SSO provider
-    // would strand every human login behind a door that does not exist.
-    // ADR-0036 GENERALIZED the count: OIDC and SAML are co-equal federated
-    // paths, so a SAML-only org can legitimately turn sso_only on and the
-    // guard must count both families through the SAME helper the provider
-    // CRUD surfaces use — two copies of this rule would drift.
-    if (body.ssoOnly === true) {
-      const enabled = await countEnabledSsoProviders(db);
-      if (enabled.total === 0) {
-        return reply.status(422).send({
-          error: "sso_only_needs_a_provider",
-          detail:
-            "enable at least one SSO provider (OIDC or SAML) before turning sso_only on — otherwise nobody can sign in",
-        });
-      }
-    }
+    // The sign-in lockout guards (ADR-0025/0036 sso_only, ADR-0174
+    // break-glass) run further down, INSIDE the sign-in invariant lock, over
+    // the row as re-read under that lock (AER-056). `before` here serves only
+    // the checks that do not count sign-in doors.
     const before = await loadOrgSettings(db);
     // ADR-0039: CIDR blocks are validated at WRITE time — a malformed block
     // would silently match nothing at evaluation time (fail closed per
@@ -637,43 +731,56 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { 
           "set REGULAIT_DATA_KEY before storing OTLP collector headers — they are a credential and are stored enveloped, never in the clear. Nothing was saved.",
       });
     }
-    const [row] = await db
-      .update(orgSettings)
-      .set({
+    // AER-056: the sign-in lockout guards, the write and its audit row are one
+    // transaction under the sign-in invariant lock, so engaging (or
+    // re-pointing) break-glass / sso_only cannot race a provider disable, a
+    // demotion or a SCIM deactivation that each passed their own count.
+    const out = await withSignInInvariant(db, async (tx, locked) => {
+      const refusal = await signInModeRefusal(tx, locked, body);
+      if (refusal) return refusal;
+      if (touchesSignIn(body)) await signInInvariantChecked("org-settings");
+      const [row] = await tx
+        .update(orgSettings)
+        .set({
+          ...body,
+          ...otlpWrite.columns,
+          updatedBy: req.authCtx.userId,
+          updatedAt: new Date(),
+        })
+        .where(eq(orgSettings.id, ORG_SETTINGS_ID))
+        .returning();
+      if (touchesSignIn(body)) await signInInvariantWritten("org-settings");
+      const after = row ?? locked;
+      // the audit row is hash-chained and admin-readable: the submitted header
+      // VALUES must not land in it, so the diff carries the marker map
+      const submitted: Record<string, unknown> = {
         ...body,
-        ...otlpWrite.columns,
-        updatedBy: req.authCtx.userId,
-        updatedAt: new Date(),
-      })
-      .where(eq(orgSettings.id, ORG_SETTINGS_ID))
-      .returning();
-    const after = row ?? before;
-    // the audit row is hash-chained and admin-readable: the submitted header
-    // VALUES must not land in it, so the diff carries the marker map
-    const submitted: Record<string, unknown> = {
-      ...body,
-      ...(body.tracingOtlpHeaders ? { tracingOtlpHeaders: otlpHeaderMarkers(body.tracingOtlpHeaders) } : {}),
-    };
-    const changed = Object.fromEntries(
-      Object.entries(submitted).filter(
-        ([k, v]) => JSON.stringify((before as Record<string, unknown>)[k]) !== JSON.stringify(v),
-      ),
-    );
-    await db.insert(auditLog).values({
-      // bootstrap has no user identity; the nil uuid marks a non-user actor,
-      // as elsewhere in the codebase, and `via` records which it was.
-      userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
-      objectType: "org_settings",
-      objectId: null,
-      detail: { via: req.authCtx.via, changed, after: redactSettings(after), approvalTtlPosture: approvalTtlPosture(after) },
-      effect: "allow",
-      ruleId: "org-settings-updated",
-      ruleChain: [],
-      reason:
-        Object.keys(changed).length > 0
-          ? `org settings updated: ${Object.keys(changed).join(", ")}`
-          : "org settings written with no effective change",
+        ...(body.tracingOtlpHeaders ? { tracingOtlpHeaders: otlpHeaderMarkers(body.tracingOtlpHeaders) } : {}),
+      };
+      const changed = Object.fromEntries(
+        Object.entries(submitted).filter(
+          ([k, v]) => JSON.stringify((locked as Record<string, unknown>)[k]) !== JSON.stringify(v),
+        ),
+      );
+      await tx.insert(auditLog).values({
+        // bootstrap has no user identity; the nil uuid marks a non-user actor,
+        // as elsewhere in the codebase, and `via` records which it was.
+        userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+        objectType: "org_settings",
+        objectId: null,
+        detail: { via: req.authCtx.via, changed, after: redactSettings(after), approvalTtlPosture: approvalTtlPosture(after) },
+        effect: "allow",
+        ruleId: "org-settings-updated",
+        ruleChain: [],
+        reason:
+          Object.keys(changed).length > 0
+            ? `org settings updated: ${Object.keys(changed).join(", ")}`
+            : "org settings written with no effective change",
+      });
+      return { after };
     });
+    if ("status" in out) return reply.status(out.status).send(out.body);
+    const { after } = out;
     return reply.send({ settings: redactSettings(after), approvalTtlPosture: approvalTtlPosture(after) });
   });
 

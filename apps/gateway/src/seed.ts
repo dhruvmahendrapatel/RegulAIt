@@ -17,13 +17,11 @@
  * context conflict to arbitrate, and both have a run they can drive further.
  */
 
-import { generateKeyPairSync, sign } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createDb, runMigrations, backupRuns, eq } from "@regulait/db";
 import { buildApp } from "./app.js";
-import { LICENSE_FEATURES, LICENSE_SCHEMA_ID, canonicalLicenseBytes } from "@regulait/shared";
+import { ensureEphemeralLicense } from "./ephemeral-license.js";
 import { dataKeyFormatError } from "./secrets.js";
 
 const connectionString =
@@ -57,6 +55,16 @@ if (DATA_KEY !== undefined && DATA_KEY.trim() !== "") {
     process.exit(1);
   }
 }
+
+// AER-047: the seeded demo drives check stages nobody reports (there is no CI
+// in the demo), and those templates opt in to the labelled offline auto-pass.
+// The opt-in FAILS CLOSED — a process must declare offline mode for it to be
+// honoured — so the seeder declares it for ITS OWN in-process app. It changes
+// nothing else: a box that shows a sign of being deployed still refuses the
+// opt-in (the seeded instances then wait at their check stage), an explicit
+// REGULAIT_OFFLINE_CHECKS=0 is respected, and the gateway the presenter starts
+// afterwards must declare it itself (DEMO_SCRIPT §0 exports it).
+process.env.REGULAIT_OFFLINE_CHECKS ??= "1";
 
 const db = createDb(connectionString);
 // An idle pooled connection killed out from under us (e.g. a scratch database
@@ -171,6 +179,42 @@ for (const spec of AGENTS) {
 for (const userId of [adminId, danaId, averyId]) {
   for (const agentId of Object.values(agentIds)) {
     await call("POST", "/v1/grants/agents", { userId, agentId }); // 409 dup = fine
+  }
+}
+
+// --- ADR-0168 item 6: agent stewardship ----------------------------------
+// Every seeded agent gets a named steward, a successor and a staggered next
+// review, through the REAL audited routes — except `grok`, deliberately left
+// with NO steward (only a successor) so the inventory shows one "Orphaned"
+// flag and the demo's unowned-agent alert (an approved use case runs on grok)
+// keeps its executable "assign an owner" remediation. Converges on re-seed:
+// an agent that already carries any stewardship record is left alone, so a
+// human's later decisions are never overwritten.
+{
+  const DAY = 86_400_000;
+  const STEWARDSHIP: Record<string, { steward: string | null; successor: string; reviewInDays: number | "record" }> = {
+    "fast-mock": { steward: adminId, successor: danaId, reviewInDays: 74 },
+    "balanced-mock": { steward: adminId, successor: danaId, reviewInDays: "record" },
+    "premium-mock": { steward: adminId, successor: averyId, reviewInDays: 131 },
+    "claude-opus": { steward: danaId, successor: adminId, reviewInDays: "record" },
+    "gpt-5": { steward: danaId, successor: adminId, reviewInDays: 46 },
+    "gemini-pro": { steward: averyId, successor: adminId, reviewInDays: 158 },
+    grok: { steward: null, successor: danaId, reviewInDays: 102 },
+  };
+  const rows: Json[] = (await call("GET", "/v1/agents")).agents ?? [];
+  const adaAuth = { authorization: `Bearer ${keys.admin}` };
+  for (const [name, plan] of Object.entries(STEWARDSHIP)) {
+    const row = rows.find((a) => a.name === name);
+    if (!row || row.ownerUserId || row.successorUserId || row.nextReviewAt || row.lastReviewedAt) continue;
+    await call("PATCH", `/v1/agents/${row.id}/stewardship`, {
+      ...(plan.steward ? { stewardUserId: plan.steward } : {}),
+      successorUserId: plan.successor,
+      ...(typeof plan.reviewInDays === "number"
+        ? { nextReviewAt: new Date(Date.now() + plan.reviewInDays * DAY).toISOString() }
+        : {}),
+    });
+    // a review recorded today (by Ada) schedules the next one by the cadence
+    if (plan.reviewInDays === "record") await call("POST", `/v1/agents/${row.id}/stewardship/review`, {}, adaAuth);
   }
 }
 
@@ -405,7 +449,9 @@ const sensitiveTpl = await ensureTemplate("sensitive-data", {
 
 // The complete-pipeline template (§2 end-to-end): intake → plan → requirements
 // artifact → Avery's sign-off → automated build as a NESTED RUN on the mock
-// agents → automated checks (mock check executor, recorded pass results) →
+// agents → automated checks (no CI in the demo: the stage opts in to the
+// labelled offline auto-pass, AER-047 — honoured only by a gateway started with
+// REGULAIT_OFFLINE_CHECKS=1) →
 // branch → PR → merge gate (Avery) → squash merge. Git stages run against the
 // MOCK git provider — the whole chain is drivable with zero external
 // credentials. The connection token below is an obvious dummy, encrypted at
@@ -440,7 +486,11 @@ const pipelineTpl = await ensureTemplate("complete-pipeline", {
         ],
       },
     },
-    { id: "checks", type: "automated_check", checks: ["unit_tests", "lint", "security_scan"] },
+    // AER-047: the demo has no CI posting results, so this stage opts in to
+    // the labelled offline auto-pass explicitly — every result reads
+    // "auto-passed — no report (offline mode)" on the rail and in the merge
+    // gate. Without the opt-in an unreported check is pending and waits.
+    { id: "checks", type: "automated_check", checks: ["unit_tests", "lint", "security_scan"], offlineAutoPass: true },
     { id: "branch", type: "git_operation", action: "create_branch", connection: "demo-git", repo: "acme/checkout" },
     { id: "open_pr", type: "git_operation", action: "open_pr", connection: "demo-git", repo: "acme/checkout" },
     { id: "merge_gate", type: "human_approval", approvers: [averyId] },
@@ -980,7 +1030,7 @@ if (!danaInstances.some((i: Json) => i.change?.description === DANA_CHANGE)) {
 
 // The complete-pipeline instance, parked at the SIGN-OFF gate so the demo can
 // drive the whole chain live: Avery approves in the Inbox → the nested build
-// run spawns (Dana auto-advances it from Runs) → checks record pass results →
+// run spawns (Dana auto-advances it from Runs) → checks auto-pass (labelled, offline opt-in) →
 // branch + PR open on the mock provider → the merge gate lands back in
 // Avery's Inbox → approve → squash-merged. Deliberately not pre-driven past
 // sign-off — everything after it happens on stage during the demo.
@@ -1109,12 +1159,15 @@ const CASCADE_CHANGE = "Redact and export the oncology cohort (PHI)";
       { id: "gate", type: "human_approval", approvers: [averyId] },
       // a pre-deploy gate check (default onFailure: block) — a failure here rests
       // the instance at blocked_on_check
-      { id: "precheck", type: "automated_check", checks: ["preflight"] },
+      // AER-047: instances 2 and 3 below reach the deploy without reporting
+      // 'preflight', so the demo opts in to the labelled offline auto-pass
+      // here (and on `verify`, which a deploy-override cascades into)
+      { id: "precheck", type: "automated_check", checks: ["preflight"], offlineAutoPass: true },
       // the governed deploy, conditioned on environment==production; a staging
       // change fails the condition and rests at blocked_on_deploy
       { id: "deploy", type: "deployment", connection: "demo-deploy", environment: "production", condition: { field: "environment", equals: "production" } },
       // the post-deploy verify: onFailure rollback routes straight to `undo`
-      { id: "verify", type: "automated_check", checks: ["smoke"], onFailure: "rollback", rollbackStageId: "undo" },
+      { id: "verify", type: "automated_check", checks: ["smoke"], onFailure: "rollback", rollbackStageId: "undo", offlineAutoPass: true },
       { id: "undo", type: "rollback", connection: "demo-deploy" },
       { id: "done", type: "human_approval", approvers: [averyId] },
     ],
@@ -1157,7 +1210,7 @@ const CASCADE_CHANGE = "Redact and export the oncology cohort (PHI)";
       await call(
         "POST",
         `/v1/workflows/instances/${id}/checks`,
-        { stageId: "precheck", results: [{ check: "preflight", status: "failed", severity: "high" }] },
+        { round: 0 /* a fresh instance is in round 0 (AER-048) */, stageId: "precheck", results: [{ check: "preflight", status: "failed", severity: "high" }] },
         danaAuth,
       );
     },
@@ -1178,7 +1231,7 @@ const CASCADE_CHANGE = "Redact and export the oncology cohort (PHI)";
       await call(
         "POST",
         `/v1/workflows/instances/${id}/checks`,
-        { stageId: "verify", results: [{ check: "smoke", status: "failed", severity: "critical" }] },
+        { round: 0 /* a fresh instance is in round 0 (AER-048) */, stageId: "verify", results: [{ check: "smoke", status: "failed", severity: "critical" }] },
         danaAuth,
       );
     },
@@ -1269,19 +1322,20 @@ if (DATA_KEY) {
 // environment could not demonstrate or TEST either, and two e2e specs failed
 // for a reason that looked like a product defect and was a licensing posture.
 //
-// THE KEY IS MINTED HERE AND THROWN AWAY, and that is the whole design. The
-// committed dev key's private half was destroyed on generation on purpose, so
-// nothing in this repository can mint a license the DEFAULT keyring accepts —
-// the correct fail-closed direction, and retaining a private half to make this
-// convenient would quietly undo it. Instead this generates a fresh keypair,
-// writes only the PUBLIC half into a scratch keyring outside the source tree,
-// signs one short-dated license, and never writes the private half anywhere.
+// THE KEY IS MINTED AND THROWN AWAY (see ./ephemeral-license.ts): only the
+// PUBLIC half is written, into a scratch keyring outside the source tree, and
+// the private half is never written anywhere.
 //
 // OPT-IN, because a seeder that silently licenses itself would make the
 // default-closed posture untestable — the thing being protected here is the
 // ability to observe the refusal. `infra/license-keys/` and
 // `infra/release-keys/` are untouched, and the license says on its face that
 // it is not production.
+//
+// RE-RUN SAFE: a valid licence that still verifies under this keyring (and has
+// more than a week left) is KEPT, not re-minted — under Docker this block runs
+// on every boot (the image's start command seeds when SEED_DEMO=1), and a
+// restart must not churn the licence a demo password was set under.
 if (process.env.REGULAIT_EPHEMERAL_LICENSE === "1") {
   const keyringDir = process.env.REGULAIT_LICENSE_KEYRING;
   if (!keyringDir) {
@@ -1290,48 +1344,13 @@ if (process.env.REGULAIT_EPHEMERAL_LICENSE === "1") {
         "The gateway process must read the SAME directory, or it will refuse the license this seeder installs.",
     );
   }
-  mkdirSync(keyringDir, { recursive: true });
-  const keyId = "regulait-seed-ephemeral";
-  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
-  writeFileSync(
-    path.join(keyringDir, `${keyId}.pub`),
-    publicKey.export({ type: "spki", format: "pem" }).toString(),
-    "utf8",
-  );
-  const nowIso = new Date().toISOString();
-  const doc = {
-    schema: LICENSE_SCHEMA_ID as "regulait.license/1",
-    licenseId: `seed-${Date.now()}`,
-    tenant: "regulAIt seeded environment — NOT A PRODUCTION DEPLOYMENT",
-    tier: "enterprise",
-    seatCap: 25,
-    features: [...LICENSE_FEATURES] as string[],
-    deploymentMode: "hosted" as const,
-    issuedAt: nowIso,
-    notBefore: nowIso,
-    expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
-    graceDays: 0,
-    hardStopOnExpiry: false,
-  };
-  // sign the EXACT BYTES delivered — the verifier checks the signature over
-  // what arrives, never over a re-parse
-  const bytes = Buffer.from(canonicalLicenseBytes(doc), "utf8");
-  const installed = await app.inject({
-    method: "POST",
-    url: "/v1/licenses",
+  const result = await ensureEphemeralLicense({
+    db,
+    inject: (opts) => app.inject(opts),
     headers: AUTH,
-    payload: {
-      documentBase64: bytes.toString("base64"),
-      signature: sign(null, bytes, privateKey).toString("base64"),
-      signingKeyId: keyId,
-    },
+    keyringDir,
   });
-  if (installed.statusCode !== 200 && installed.statusCode !== 201) {
-    throw new Error(
-      `ephemeral license install failed (${installed.statusCode}): ${installed.body.slice(0, 300)}`,
-    );
-  }
-  console.log(`  license  ephemeral (30d, all features), keyring ${keyringDir} — NOT production`);
+  console.log(result.line);
 }
 
 await app.close();
@@ -1465,8 +1484,10 @@ ${pmWebhookSecret ? `\n    demo-pm webhook secret (shown ONCE)  ${pmWebhookSecre
     1. avery  Inbox → approve the sign-off (reads the artifact inline)
     2. dana   the build stage spawns a nested run — open it from the
               workflow's 'watch the run' link (or Runs) and Auto-advance
-    3. (auto) checks record pass results; branch + PR open on the mock
-              provider — the PR URL appears under Delivery
+    3. (auto) checks auto-pass, labelled "no report (offline mode)" — only on a
+              gateway started with REGULAIT_OFFLINE_CHECKS=1; without it they wait
+              for a report — then branch + PR open on the mock provider, and the
+              PR URL appears under Delivery
     4. avery  Inbox → approve the merge gate → squash-merged, chain complete.
 
   Simulation / Access preview — pick Dana + the repo server from the selects

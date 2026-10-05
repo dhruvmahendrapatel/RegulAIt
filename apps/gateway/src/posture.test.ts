@@ -27,14 +27,20 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   aiUseCases,
+  and,
   auditLog,
+  count,
   createDb,
+  eq,
+  gte,
   evalDatasets,
   evalRuns,
   inArray,
+  lt,
   redteamLibraries,
   redteamRuns,
   runMigrations,
+  sql,
   usageEvents,
   type Db,
 } from "@regulait/db";
@@ -61,7 +67,7 @@ let projectId: string;
 const createdUsageIds: string[] = [];
 
 interface PostureDoc {
-  window: { days: number };
+  window: { days: number; start: string; end: string };
   packs: { active: Array<Record<string, unknown>>; note: string };
   risks: { open: number; mitigating: number; accepted: number; closed: number; total: number; attestationOnly: number; disclaimer: string };
   redteam: {
@@ -212,8 +218,30 @@ describe("EVERY NUMBER IS A SELECT AT REQUEST TIME (the differentiator)", () => 
       });
     }
     const after = await posture();
-    expect(after.body.governance.denials).toBe(before.body.governance.denials + 3);
-    expect(after.body.governance.piiBlocks).toBe(before.body.governance.piiBlocks + 2);
+    // The window is ROLLING: between the two reads its start moved forward too,
+    // so a deny row another file left near the 30-day edge can slide out of it
+    // (CI 37130757454 read 727 for an expected 728). Account for exactly the
+    // rows that left at the old start and arrived at the new end, from the
+    // ledger itself — and require this test's own rows to be among the arrivals.
+    const span = async (from: string, to: string, pii: boolean) => {
+      const [row] = await db
+        .select({ n: count() })
+        .from(auditLog)
+        .where(and(
+          gte(auditLog.at, new Date(from)),
+          lt(auditLog.at, new Date(to)),
+          eq(auditLog.effect, "deny"),
+          ...(pii ? [sql`${auditLog.ruleId} LIKE 'pii-%'`] : []),
+        ));
+      return row?.n ?? 0;
+    };
+    const w0 = before.body.window, w1 = after.body.window;
+    for (const [field, pii, own] of [["denials", false, 3], ["piiBlocks", true, 2]] as const) {
+      const left = await span(w0.start, w1.start, pii);
+      const arrived = await span(w0.end, w1.end, pii);
+      expect(arrived).toBeGreaterThanOrEqual(own);
+      expect(after.body.governance[field]).toBe(before.body.governance[field] + arrived - left);
+    }
   });
 
   it("risk-register counts move with the register, and the attestation-only count is NAMED", async () => {

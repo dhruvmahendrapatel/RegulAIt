@@ -1,0 +1,167 @@
+# ADR-0174: Enterprise sign-in through a brokered identity provider (Microsoft, Google, GitHub) with MFA
+
+- **Status**: Accepted (owner, 2026-10-04: "use one of the existing ones that allow auth into Microsoft SSO, Google SSO,
+  GitHub … then tie up with another for MFA … use the best one out there, without making any current flows break")
+- **Date**: 2026-10-04
+- **Builds on**: existing OIDC/SAML SSO (`sso-providers.ts`, `saml.ts`), SCIM (`scim.ts`), local TOTP, AUTHZ-04 (SSO state
+  bound to the browser)
+
+## Context
+
+RegulAIt already acts as an OIDC and SAML relying party and supports SCIM and TOTP for local accounts, but the sign-in page is
+home-built and offers no one-click Microsoft, Google or GitHub sign-in, and MFA for federated users depends on whatever each
+customer's IdP does. GitHub in particular offers OAuth, not OIDC sign-in, so it cannot be added as a plain OIDC provider. The
+product must also keep working in bring-your-own-cloud and air-gapped deployments (pillar 3), which rules out making a hosted
+identity SaaS mandatory.
+
+## Decision
+
+1. **Keycloak is the bundled identity broker.** Open source (CNCF), self-hostable and air-gap friendly, it brokers Microsoft
+   Entra ID, Google and GitHub (plus SAML/OIDC enterprise IdPs and LDAP/Active Directory), and provides MFA itself: one-time
+   codes (TOTP) and passkeys/WebAuthn, brute-force protection and step-up flows. It ships as an optional compose service with a
+   realm import; no client secret is ever committed (environment or secret files only).
+2. **RegulAIt stays a standard OIDC relying party** (PKCE, browser-bound state per AUTHZ-04). Keycloak is the default, not a
+   lock-in: any OIDC/SAML IdP — Entra ID, Okta, Auth0, Ping, WorkOS — can be configured directly, consistent with the
+   provider-agnostic principle.
+3. **Sign-in page**: "Continue with Microsoft / Google / GitHub" (provider logos; each button passes the broker an IdP hint) when
+   the broker is configured, "Single sign-on" for organisation-configured enterprise IdPs, and "Sign in with email" for local
+   accounts. Local accounts remain for break-glass and demo use; an admin may disable local sign-in organisation-wide once SSO
+   works, except for a designated break-glass admin.
+4. **MFA**: required at the broker for federated users by policy (code or passkey); local accounts keep RegulAIt's TOTP. When the
+   organisation requires MFA, RegulAIt refuses a federated session whose token does not assert MFA (`amr`/`acr`).
+5. **Account linking without takeover**: a federated identity links to an existing local account only when the IdP asserts a
+   verified email **and** the user proves the local account (password + TOTP) or an admin approves; otherwise JIT provisioning
+   creates a new account. SCIM is unchanged.
+6. **Demo accounts** keep working with a password set by a one-time command that reads it from the environment
+   (`REGULAIT_DEMO_USER_PASSWORD`) or a secret file — never from the repository, seed data, logs or audit detail — and refuses to
+   run outside a demo-licensed deployment.
+
+## Consequences
+- Existing local sign-in, one-time-password onboarding, TOTP and org-configured SSO keep working unchanged; the new paths are
+  additive and off until configured.
+- Operating Keycloak (upgrades, backups, admin hardening) becomes part of the deployment guide; hosted fast-start may use a
+  managed Keycloak or any OIDC IdP instead.
+
+## Amendment — security review fixes (2026-10-04)
+
+Rules as built (migration 0139 edited in place before first push):
+
+1. **SAML MFA.** When the org requires MFA for the person, a SAML login mints a session only if the *verified*
+   assertion's AuthnContextClassRef is one the provider lists in `mfa_authn_contexts` (the twin of OIDC
+   `mfa_acr_values`). Otherwise an account with TOTP steps up to it first (pending row with `origin = 'saml'`,
+   HttpOnly cookie, `POST /auth/mfa/verify` mints the `saml` session); an account without TOTP gets its session
+   and the MFA gate sends it to enrolment, as before.
+2. **Linking.** A verified email links without proof only an account that has **never signed in** (no session,
+   no `login-succeeded` row), has **no federated identity** and **no local credential**. An account already
+   federated, or ever signed in, needs proof (password + TOTP when enrolled) or admin approval. **Existing SSO
+   users:** pre-0139 sessions record only the origin, so the evidence is the pre-0139 `login-succeeded` audit row
+   (actor = the user, `method` oidc/saml, `provider` = the provider row's name, same email, not older than the
+   row, and no `providerId` key — every post-0139 row carries one). That user's next sign-in through the same
+   provider row links as `prior_sso`; no migration backfill is possible (pre-0139 rows never recorded the
+   subject). Bounded by audit retention: if those rows were pruned, proof or approval. Keycloak: `trustEmail` is
+   off for every upstream IdP; the stock first-broker-login flow stays; Google `hostedDomain` is a deployment
+   setting.
+3. **Break-glass.** Decided before the password result is trusted: everyone else gets the wrong-password 401
+   after the same scrypt cost, and a refused login neither resets nor advances the lockout counter. The org may
+   name **several** break-glass admins. While `break_glass_only` is on, demoting or deactivating the last usable
+   one (admin API and SCIM) and disabling or deleting the last enabled SSO provider are refused
+   (`break_glass_last_admin`, `break_glass_last_sso_provider`); a demoted admin is dropped from the list. Users are
+   never hard-deleted and no route clears a password, so those are the user-side events. `/auth/login-with-key`
+   is refused (as an unknown key) for anyone not break-glass; `apiKeyExchange` in sign-in options says so.
+4. **amr.** MFA is `mfa`, or two distinct factor classes (know / have / are). A single `otp`/`hwk`/`swk` counts
+   only from a provider flagged `broker_enforces_mfa` (set it for the bundled realm).
+5. **Anchors.** Links and link requests are keyed on (provider, issuer, subject format, subject): OIDC `iss`, SAML
+   entity id + NameID Format. A transient (or absent) NameID is never an anchor — the verified email under the
+   pinned entity id anchors instead, created only through the rules above. Changing a provider's issuer or entity
+   id deletes its links and pending requests (audited `federated-identities-reset`).
+6. **Email.** NFKC-normalised, trimmed, lower-cased; a claim that is not plain ASCII as sent never links (nor is
+   JIT-provisioned), and only all-ASCII stored addresses are compared.
+7. **Approvals.** Nobody approves a link to their own account; a link to an **admin** account needs two distinct
+   approvers (the bootstrap operator counts as one). `link/confirm` checks "identity already linked" before
+   spending the request.
+8. **Demo.** `demo:set-passwords` requires a valid demo licence (run it after `demo:setup` / `demo:prepare`).
+9. **Ops.** The unauthenticated `/auth/oidc/:id/login` is in the per-IP auth rate-limit tier and writes no audit row
+   for an unknown provider. Keycloak uses its own `keycloak` database role (password `REGULAIT_KC_DB_PASSWORD`, no
+   default) that owns only the `keycloak` database.
+
+## Amendment — concurrency (2026-10-04, AER-056)
+
+Rule 3's refusals were each a count taken before a separate write, so two concurrent writers could both pass and
+leave no usable break-glass admin or no enabled SSO provider. Rules as built:
+
+- **One lock.** Every writer that can reduce either door (OIDC and SAML provider disable/delete, admin-API demote and
+  deactivate, SCIM deactivation by PUT/PATCH `active:false` or DELETE) and every `PUT /v1/org/settings` (which
+  re-checks `localSignIn` / `breakGlassUserIds` / `ssoOnly` there) runs inside one transaction that first takes
+  `pg_advisory_xact_lock(6_000_000_174)` (`SIGN_IN_INVARIANT_LOCK_KEY`, `withSignInInvariant` in `break-glass.ts`).
+  An advisory lock was chosen over `SELECT … FOR UPDATE` on the org_settings row so that other org_settings writers
+  (execution control, for example) do not queue behind it, and so that no row has to exist first. Enabling a provider,
+  promoting a user and reactivating a user cannot reduce either door, so they do not take the lock.
+- **Re-read, check, write, audit — together.** Under the lock the writer re-reads org_settings and the target row,
+  re-runs the existing checks, writes, and inserts its audit row in the same transaction. The refusals keep their
+  names (`break_glass_last_admin`, `break_glass_last_sso_provider`, `break_glass_needs_sso_provider`,
+  `break_glass_needs_admin`, `invalid_break_glass_user`, `sso_only_needs_a_provider`, `last_active_admin`). The
+  ADR-0036 `sso_only` guard and the ADR-0022 last-active-admin guard share the lock. A failed audit insert rolls back
+  the mutation. The lock is released at commit or rollback.
+- **Lock order.** This lock is taken first. The audit-chain lock (6_000_000_060) is taken later, by the audit insert,
+  and never the other way round.
+- **Behaviour change.** In `PUT /v1/org/settings` the sign-in 422s are now checked after the CIDR, IP-lockout,
+  API-key-TTL, OTLP-egress and data-key checks, not before. A request that is invalid in more than one way may get a
+  different first error. Nothing is saved either way.
+- **Tests.** `zz-aer056-sign-in-invariant-race.test.ts` runs two apps on two connection pools. A barrier inside the
+  writers lets each race go ahead only when both checks have run, or when Postgres shows the second writer waiting on
+  the lock. The races covered: demote/deactivate of the two break-glass admins, OIDC and SAML disable/delete mixed,
+  SCIM against the admin API, and engaging the mode while the last provider is removed. Injected-failure cases check
+  that the audit row and the state stay consistent.
+
+## Amendment — the demo password under Docker Compose (2026-10-04)
+
+`docker compose up` seeded the demo but installed no licence, so `demo:set-passwords` (item 8) always refused
+under Docker. One opt-in switch now covers that: **`REGULAIT_DEMO_LICENSE=1`** in the `.env` next to
+`docker-compose.yml`. The image's start script (`apps/gateway/docker-start.sh`, now the Dockerfile `CMD`) then sets
+`REGULAIT_EPHEMERAL_LICENSE=1` and `REGULAIT_LICENSE_KEYRING=/app/demo-license-keys` for the seed and the gateway.
+That directory is a named volume (`demo_license_keys`), so the licence still verifies after a restart or `down` /
+`up`. The rules:
+
+- Only the exact value `1` counts, and only with `SEED_DEMO=1` and a `hosted` (or unset) `REGULAIT_DEPLOY_MODE`.
+  With any other value neither variable is set, the gateway reads its default keyring, and no licence is minted:
+  the old `CMD` exactly. `scripts/install.sh` refuses the switch and pins it to `"0"` in its override.
+- The licence is still the seeder's ephemeral one. Its private key is never written. It runs for 30 days, its
+  tenant says "NOT A PRODUCTION DEPLOYMENT", and `demo:set-passwords` still refuses with no licence, an expired
+  one, or a customer licence.
+- The seed runs on every boot. It now keeps a licence that is valid, has more than 7 days left and verifies under
+  the keyring, instead of minting a new one each time (`ephemeral-license.ts`). Persona passwords that are already
+  set are left alone, as before.
+- The password goes from the presenter's shell into one `docker compose exec -e REGULAIT_DEMO_USER_PASSWORD`
+  process (README, "Demo with your own password (Docker)").
+
+### Further amendment — the Docker demo is prepared like `demo:prepare` (2026-10-05)
+
+The switch above minted the licence but ran only the seed, so a Docker demo had no active compliance packs (AI
+intake refused "Unknown control ref … 'eu-ai-act:art-9-risk-management-system'"), no approved use cases, no
+hardening, no traffic or alerts, no export key and no demo MCP server. With the switch honoured (same rules as
+above), `apps/gateway/docker-start.sh` now builds the same environment as native `demo:prepare`:
+
+- `REGULAIT_OFFLINE_CHECKS=1` for every step and the gateway, in demo mode only. Off, it stays unset, so
+  `docs/deployment/INSTALL.md` ("Do not set `REGULAIT_OFFLINE_CHECKS` on an install") still holds: the installer
+  pins the switch off.
+- The export-signing key (beat 3E) is made by `demo-export-key.js --env` with `REGULAIT_DEMO_KEY_DIR` in the demo
+  volume (`/app/demo-license-keys/export-signing`, a directory, so the licence keyring, which reads `*.pub` at its
+  top level only, does not trust it). It is made once and reused; both variables are exported for the prep steps
+  and the gateway. The log carries its path and fingerprint (now on stderr in `--env` mode), never the key. This is
+  a demo key held on the demo box, exactly as `demo:export-key` does natively; `down -v` deletes it.
+- The demo MCP server runs in the background inside the gateway container, started before the seed, for the life
+  of the container (compose's `init: true` delivers SIGTERM to the gateway; the container's end stops the MCP
+  server with it).
+- After the seed, `demo-docker-prepared.js` decides whether to run `demo:setup → demo:intake → demo:traffic →
+  demo:check`. Its marker lives with the data: the API keys `demo:traffic` mints before sending traffic. A restart
+  or `down` / `up` keeping volumes therefore skips the steps (traffic adds alerts every run and must run once);
+  `down -v` prepares again; a prep that stopped before `demo:traffic` is retried on the next start. If the
+  database cannot be read, the steps are skipped with a loud message.
+- A failed step is logged as `*** DEMO PREP FAILED at step <name> (exit <n>)` and the gateway still starts, so the
+  container does not restart-loop and the UI and log stay reachable.
+- The prep blocks the gateway's start (it uses the same database in-process; running it beside a serving gateway
+  would race the migrations). Measured at about 13 s for the four steps on Linux. The health check is unchanged
+  (90 s start period); `unhealthy` only marks a container and `restart: unless-stopped` never restarts on it, so a
+  slower machine shows `starting` / `unhealthy` until the gateway listens and is never killed by the check.
+- Switch off: none of this runs, and the start script's calls and environment are exactly the old ones (pinned in
+  `docker-demo-license.test.ts`).

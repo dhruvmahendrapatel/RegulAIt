@@ -23,6 +23,8 @@ import {
   classifyEuAiActTier,
   euAiActAnswersSchema,
   renderEuAiActAnswersBlock,
+  unsureListSchema,
+  EU_AI_ACT_BOOLEAN_KEYS,
   type EuAiActAnswers,
 } from "./eu-ai-act.js";
 import {
@@ -52,28 +54,105 @@ export const INTAKE_DATA_CATEGORIES = [
 ] as const;
 export const INTAKE_DEPLOYMENTS = ["internal", "customer-facing", "public"] as const;
 
+/** the registration Classify step's context answers (beyond the EU AI Act set) */
+export const intakeContextShape = {
+  sectors: z.array(z.enum(INTAKE_SECTORS)).max(6).default([]),
+  dataCategories: z.array(z.enum(INTAKE_DATA_CATEGORIES)).max(7).default([]),
+  deployment: z.enum(INTAKE_DEPLOYMENTS),
+  /** placed on the EU market or affecting people in the EU */
+  euNexus: z.boolean(),
+  /** a third party's model or service is in the path */
+  usesExternalVendor: z.boolean(),
+  /** produces free-form text/images rather than a score or label */
+  generative: z.boolean(),
+  /** an agent takes actions through tools, not only answers */
+  autonomousActions: z.boolean(),
+  toolsUsed: z.array(z.string().min(1).max(200)).max(50).default([]),
+};
+export const intakeContextSchema = z.object(intakeContextShape).strict();
+
+/**
+ * ADR-0168 amendment — EVERY answer the registration Classify step collects,
+ * as ONE flat object: the EU AI Act screening answers plus the context
+ * answers. Stored with the use case at registration (`screeningAnswers` on
+ * `POST /v1/use-cases`, optional) so a sent-back use case can be resubmitted
+ * prefilled; `PATCH` in `needs_info` takes the same set and recomputes the
+ * tier (from the EU keys) and `dataSensitivity` (from `dataCategories`).
+ */
+export const intakeScreeningAnswersSchema = euAiActAnswersSchema
+  .extend(intakeContextShape)
+  /** ADR-0171 / AER-053 — the yes/no answers the owner marked "Not sure".
+   * Each must be a key of INTAKE_BOOLEAN_QUESTION_KEYS answered `true` (the
+   * conservative reading the tier is computed from); the gateway refuses
+   * anything else with 422 `unsure_answer_must_count_as_yes`. */
+  .extend({ unsure: unsureListSchema.optional() })
+  .strict();
+export type IntakeScreeningAnswers = z.infer<typeof intakeScreeningAnswersSchema>;
+
+/** PATCH form: the EU keys are required (the tier is recomputed from them);
+ * context keys may be omitted, and an omitted key keeps its stored value */
+export const intakeScreeningAnswersPatchSchema = euAiActAnswersSchema
+  .extend({
+    sectors: intakeContextShape.sectors.removeDefault().optional(),
+    dataCategories: intakeContextShape.dataCategories.removeDefault().optional(),
+    deployment: intakeContextShape.deployment.optional(),
+    euNexus: intakeContextShape.euNexus.optional(),
+    usesExternalVendor: intakeContextShape.usesExternalVendor.optional(),
+    generative: intakeContextShape.generative.optional(),
+    autonomousActions: intakeContextShape.autonomousActions.optional(),
+    toolsUsed: intakeContextShape.toolsUsed.removeDefault().optional(),
+    /** ADR-0171: the COMPLETE "Not sure" set for this resubmission —
+     * omitted means none (it replaces the stored set; it is never merged) */
+    unsure: unsureListSchema.optional(),
+  })
+  .strict();
+
+/** ADR-0171 / AER-053 — every yes/no question of the Classify step, i.e. the
+ * answers that may be marked "Not sure": the EU AI Act flags plus the
+ * context flags. */
+export const INTAKE_BOOLEAN_QUESTION_KEYS: readonly string[] = [
+  ...EU_AI_ACT_BOOLEAN_KEYS,
+  "euNexus",
+  "usesExternalVendor",
+  "generative",
+  "autonomousActions",
+];
+
+/**
+ * AER-042 — a use case's `dataSensitivity` from its declared data categories,
+ * the same rule the registration wizard applies. FAIL CLOSED: no categories
+ * (or an unknown one) is the strictest level.
+ */
+export function deriveDataSensitivityFromCategories(
+  categories: readonly string[],
+): "public" | "internal" | "confidential" | "regulated" {
+  const order = ["public", "internal", "confidential", "regulated"] as const;
+  const levelFor: Record<string, (typeof order)[number]> = {
+    health: "regulated",
+    "sensitive-personal": "regulated",
+    "payment-card": "regulated",
+    financial: "regulated",
+    personal: "confidential",
+    proprietary: "confidential",
+    public: "public",
+  };
+  if (categories.length === 0) return "regulated";
+  let worst = 0;
+  for (const c of categories) {
+    const level = levelFor[c];
+    if (!level) return "regulated";
+    worst = Math.max(worst, order.indexOf(level));
+  }
+  return order[worst]!;
+}
+
 export const intakeAssistRequestSchema = z
   .object({
     title: z.string().min(1).max(200),
     description: z.string().min(1).max(8000),
     /** the SAME strict answers ADR-0085 screens on — never a tier */
     euAiAct: euAiActAnswersSchema,
-    context: z
-      .object({
-        sectors: z.array(z.enum(INTAKE_SECTORS)).max(6).default([]),
-        dataCategories: z.array(z.enum(INTAKE_DATA_CATEGORIES)).max(7).default([]),
-        deployment: z.enum(INTAKE_DEPLOYMENTS),
-        /** placed on the EU market or affecting people in the EU */
-        euNexus: z.boolean(),
-        /** a third party's model or service is in the path */
-        usesExternalVendor: z.boolean(),
-        /** produces free-form text/images rather than a score or label */
-        generative: z.boolean(),
-        /** an agent takes actions through tools, not only answers */
-        autonomousActions: z.boolean(),
-        toolsUsed: z.array(z.string().min(1).max(200)).max(50).default([]),
-      })
-      .strict(),
+    context: intakeContextSchema,
     /** ask the governed model to rewrite the narrative sections (gateway) */
     draftNarrative: z.boolean().default(false),
     /** the registry agent to draft with — entitlement-checked like any invoke */
@@ -128,18 +207,22 @@ export const INTAKE_SECTIONS = [
  * Mitigating controls a risk category is suggested with, by stable pack
  * `controlRef`. Every ref is asserted to exist by the test; a suggestion is
  * then narrowed to the frameworks actually suggested for this use case.
+ *
+ * NIST ids follow NIST AI 100-1 (ADR-0175): fairness is MEASURE 2.11,
+ * deactivation MANAGE 2.4, roles and access GOVERN 2.1, validity MEASURE 2.5,
+ * inventory GOVERN 1.6. `nist-ai-rmf-refs.test.ts` checks every one.
  */
 export const CATEGORY_SUGGESTED_CONTROLS: Readonly<Record<AiRiskCategory, readonly string[]>> = {
-  bias_fairness: ["eu-ai-act:art-9-risk-management-system", "iso-42001:8.3-ai-system-impact-assessment", "nist-ai-rmf:MEASURE-2.7"],
+  bias_fairness: ["eu-ai-act:art-9-risk-management-system", "iso-42001:8.3-ai-system-impact-assessment", "nist-ai-rmf:MEASURE-2.11"],
   unsafe_output: ["soc-2:CC7.2-monitoring", "eu-ai-act:art-15-accuracy-robustness"],
   prompt_injection: ["soc-2:CC7.2-monitoring", "eu-ai-act:art-15-accuracy-robustness"],
   data_leakage_pii: ["iso-27001:A.8.12", "soc-2:CC6.7-data-movement", "hipaa:164.312(a)(1)-access-control"],
-  tool_misuse: ["nist-ai-rmf:MANAGE-2.2", "soc-2:CC6.1-logical-access", "eu-ai-act:art-14-human-oversight"],
-  over_permissioning: ["iso-27001:A.5.15", "nist-ai-rmf:GOVERN-1.2", "pci-dss:7.2.1-least-privilege"],
-  hallucination: ["eu-ai-act:art-15-accuracy-robustness", "nist-ai-rmf:MEASURE-2.7"],
+  tool_misuse: ["nist-ai-rmf:MANAGE-2.4", "soc-2:CC6.1-logical-access", "eu-ai-act:art-14-human-oversight"],
+  over_permissioning: ["iso-27001:A.5.15", "nist-ai-rmf:GOVERN-2.1", "pci-dss:7.2.1-least-privilege"],
+  hallucination: ["eu-ai-act:art-15-accuracy-robustness", "nist-ai-rmf:MEASURE-2.5"],
   scope_drift: ["eu-ai-act:art-72-post-market-monitoring", "iso-42001:9.1-monitoring-measurement"],
   budget_overrun: ["iso-42001:9.1-monitoring-measurement"],
-  shadow_ai: ["nist-ai-rmf:MAP-4.1", "iso-42001:A.6-ai-system-lifecycle"],
+  shadow_ai: ["nist-ai-rmf:GOVERN-1.6", "iso-42001:A.6-ai-system-lifecycle"],
   third_party_ai: ["soc-2:CC9.2-vendor-risk", "nist-ai-rmf:MAP-4.1"],
 };
 

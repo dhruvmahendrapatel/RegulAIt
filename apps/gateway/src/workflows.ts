@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import {
   and,
@@ -43,8 +44,8 @@ import {
   GitProviderError,
   IMPLEMENTED_GIT_PROVIDERS,
 } from "@regulait/git-provider";
-import { resolveDeployProvider, liveDeployClients, DeployProviderError } from "./deploy.js";
-import { ExternalEffectBlockedError, runExternalWrite } from "./external-effects.js";
+import { resolveDeployProvider, liveDeployClients, DeployProviderError, deploySeed } from "./deploy.js";
+import { ExternalEffectBlockedError, runExternalWrite, type ExternalWriteAudit } from "./external-effects.js";
 import { validateGraph } from "@regulait/orchestration-kernel";
 import { inTransaction, planRun, type ApprovalPostCommit, type DbOrTx } from "./orchestration.js";
 import {
@@ -63,6 +64,7 @@ import {
   loadCompiledEgressContext,
 } from "./compiled-egress.js";
 import { loadOrgSettings } from "./org-settings.js";
+import { networkFacingSignal } from "./dev-secrets.js";
 import { finishTrace, recordSpan, traceForRoot } from "./tracing.js";
 import { activeDelegatorsFor } from "./delegations.js";
 import {
@@ -102,6 +104,9 @@ type CheckReport = {
   reportedByUserId?: string | null;
   selfReported?: boolean;
   reason?: string | null;
+  /** AER-048: the workflow round (workflow_instances.round) the report was
+   * accepted into. Absent on rows written before the token existed. */
+  round?: number;
 };
 /** Defensive read of context[`reported:<stageId>`] — tolerate anything and keep
  * only well-formed pass/fail rows, so a malformed context value can never crash
@@ -130,7 +135,17 @@ async function applyEvent(
    * mode dimension are real. Only the deploy/rollback executors pass it; every
    * other event keeps null (= not a deploy-scoped action). */
   deployMode?: "hosted" | "byoc" | "air_gapped" | null,
-): Promise<{ state: InstanceState; effects: Effect[]; skipped?: boolean }> {
+  /** AER-048 (review item 6): `deferSpan` — the caller is inside its OWN
+   * transaction and records the `workflow_stage` span itself, AFTER that
+   * transaction commits (`recordDeferredSpan`), so a span failure can never
+   * roll back a result whose side effects already happened. */
+  opts?: {
+    deferSpan?: boolean;
+    /** AER-049 review: the system actor an event with no human actor (a
+     * sweep) is audited as — the rows name it instead of the initiator */
+    systemActor?: string;
+  },
+): Promise<{ state: InstanceState; effects: Effect[]; skipped?: boolean; deferredSpan?: DeferredSpan }> {
   // One transaction with the instance row locked: concurrent decisions,
   // re-opens, and aborts serialize instead of racing read-modify-write. When
   // the caller already holds a transaction (the decide endpoint), this nests
@@ -147,21 +162,115 @@ async function applyEvent(
     }
 
     const def = instance.definition as WorkflowDefinition;
-    const { state, effects } = transition(def, instance.state as InstanceState, event);
+    const prior = instance.state as InstanceState;
+    const { state, effects } = transition(def, prior, event);
+
+    // AER-047 (review): a check result belongs to the ROUND it was reported
+    // in. An artifact resubmitted after its stage completed re-opens the
+    // workflow (kernel §2 stage 4) and every downstream stage runs again on
+    // the NEW artifact — so every check result and report already stored for
+    // a downstream automated_check stage is stale and is cleared here, in the
+    // same locked transaction as the re-open. Without this the re-run check
+    // stage reused the previous round's CI green, unlabelled, and advanced
+    // without anything having run against the new artifact. (A report posted
+    // after the re-open — including one posted ahead of the stage while a
+    // gate is pending — belongs to the new round, exactly as in round one.)
+    // ADR-0168: a RETURNED sign-off re-opens from the artifact stage it went
+    // back to (the kernel parked the instance there) — the same staleness.
+    // AER-049: the generic `reopen` (recertification, or any caller of
+    // reopenWorkflowInstance) re-opens from the stage it names.
+    const reopenedFrom =
+      event.kind === "artifact_submitted" || event.kind === "reopen"
+        ? def.stages.findIndex((st) => st.id === event.stageId)
+        : event.kind === "approval_returned"
+          ? state.currentStageIndex
+          : -1;
+    const staleCheckStages: string[] = [];
+    const staleRunStages: string[] = [];
+    let archivedEffects: EffectHistoryEntry[] = [];
+    let context: Record<string, unknown> | undefined;
+    // AER-048 — THE ROUND TOKENS (migration 0130), bumped here because every
+    // state change goes through this one locked transaction. `round` moves on
+    // a RE-OPEN only: check reports bind to it, so a report produced for the
+    // previous artifact is refused instead of landing in the new round.
+    // `stage_entry` moves on a re-open AND on every entry into an executable
+    // stage (awaiting_execution at a new stage, or again after a recheck): an
+    // executor captured it with its claim, and its completion commits only
+    // while it is unchanged — so an executor still running from before the
+    // re-open (or from a previous entry) can neither restore the context it
+    // snapshotted nor advance the instance.
+    const isReopen = reopenedFrom >= 0 && reopenedFrom < prior.currentStageIndex;
+    const entersExecutable =
+      state.status === "awaiting_execution" &&
+      (prior.status !== "awaiting_execution" || prior.currentStageIndex !== state.currentStageIndex);
+    const bumpEntry = isReopen || entersExecutable;
+    if (isReopen || bumpEntry) {
+      const ctx = { ...(instance.context as Record<string, unknown>) };
+      let changed = false;
+      if (isReopen) {
+        // AER-049: every effect record of a stage that runs again — a deploy,
+        // a rollback, the branch / PR / merge, a planned nested run — moves to
+        // `effects:history` with the round that produced it. The new round
+        // merges and deploys afresh; an earlier round's record is never an
+        // idempotency key for it. (AER-048 review item 5, subsumed: a nested
+        // run planned in the OLD round no longer satisfies the new one — the
+        // old run row stays, and its late completion no longer matches runId.)
+        archivedEffects = archiveEffectRecords(def, ctx, reopenedFrom, instance.round, instance.round + 1, new Date().toISOString());
+        for (const entry of archivedEffects) {
+          for (const k of entry.keys) if (k.startsWith("runId:")) staleRunStages.push(k.slice("runId:".length));
+        }
+        def.stages.forEach((st, i) => {
+          if (i <= reopenedFrom) return;
+          if (st.type !== "automated_check") return;
+          const keys = [`reported:${st.id}`, `checks:${st.id}`, `evals:${st.id}`, `awaitingReport:${st.id}`];
+          if (keys.some((k) => k in ctx)) staleCheckStages.push(st.id);
+          for (const k of keys) delete ctx[k];
+        });
+        changed = staleCheckStages.length > 0 || archivedEffects.length > 0;
+      }
+      // a claim taken under an earlier entry belongs to an executor whose
+      // result will be discarded — it must not block this entry's executor
+      if (CLAIM_KEYS.some((k) => k in ctx)) {
+        for (const k of CLAIM_KEYS) delete ctx[k];
+        changed = true;
+      }
+      if (changed) context = ctx;
+    }
+    const round = instance.round + (isReopen ? 1 : 0);
+    const stageEntry = instance.stageEntry + (bumpEntry ? 1 : 0);
 
     await tx
       .update(workflowInstances)
-      .set({ state, status: state.status, updatedAt: new Date() })
+      .set({
+        state,
+        status: state.status,
+        round,
+        stageEntry,
+        updatedAt: new Date(),
+        ...(context ? { context } : {}),
+      })
       .where(eq(workflowInstances.id, instance.id));
     await tx.insert(workflowEvents).values({ instanceId: instance.id, event, actorUserId });
 
     const isDenial = event.kind === "approval_denied" || event.kind === "abort";
+    // ADR-0168: a returned sign-off is not terminal, but the gate did not let
+    // the change through — it audits as the refusal it is.
+    const isReturn = event.kind === "approval_returned";
+    const systemActor = actorUserId === null && opts?.systemActor ? opts.systemActor : null;
+    const auditUserId = actorUserId ?? (systemActor ? SYSTEM_IDENTITY : instance.initiatorUserId);
     await tx.insert(auditLog).values({
-      userId: actorUserId ?? instance.initiatorUserId,
+      userId: auditUserId,
       objectType: "workflow",
       objectId: instance.id,
-      detail: { event },
-      effect: isDenial ? "deny" : "allow",
+      detail: {
+        ...(systemActor ? { actor: systemActor } : {}),
+        event,
+        ...(staleCheckStages.length > 0 ? { staleCheckResultsCleared: staleCheckStages } : {}),
+        ...(staleRunStages.length > 0 ? { staleRunIdsCleared: staleRunStages } : {}),
+        ...(isReopen ? { round } : {}),
+        ...(bumpEntry ? { stageEntry } : {}),
+      },
+      effect: isDenial || isReturn ? "deny" : "allow",
       ruleId: `workflow:${event.kind}`,
       ruleChain: [],
       reason: `workflow instance event '${event.kind}' (status → ${state.status})`,
@@ -169,11 +278,34 @@ async function applyEvent(
       // stays null (unknown/not-applicable — honestly un-backfillable).
       deployMode: deployMode ?? null,
     });
+    // AER-049: the archive is on the trail with the values — what an earlier
+    // round shipped stays traceable from the audit alone.
+    if (archivedEffects.length > 0) {
+      await tx.insert(auditLog).values({
+        userId: auditUserId,
+        objectType: "workflow",
+        objectId: instance.id,
+        detail: {
+          ...(systemActor ? { actor: systemActor } : {}),
+          event: event.kind,
+          reopenedFrom: def.stages[reopenedFrom]?.id ?? null,
+          closedRound: instance.round,
+          round,
+          archived: archivedEffects.map((e) => ({ round: e.round, keys: e.keys, values: e.values })),
+        },
+        effect: "allow",
+        ruleId: "workflow:effects-archived",
+        ruleChain: [],
+        reason:
+          `re-open into round ${round}: the effect records of round(s) ${[...new Set(archivedEffects.map((e) => e.round))].join(", ")} ` +
+          `(${archivedEffects.flatMap((e) => e.keys).join(", ")}) moved to effects:history — the new round merges/deploys afresh`,
+      });
+    }
 
     // A re-open stales EVERY outstanding gate downstream, and a terminal
     // denial/abort must leave no live rows in the one inbox — supersede all
     // pending rows for the instance in each of these cases.
-    if (event.kind === "artifact_submitted" || isDenial) {
+    if (event.kind === "artifact_submitted" || event.kind === "reopen" || isDenial || isReturn) {
       await tx
         .update(approvals)
         .set({ status: "superseded" })
@@ -203,8 +335,30 @@ async function applyEvent(
       },
     };
   });
+  if (opts?.deferSpan) return { ...applied, deferredSpan: { instanceId, event, applied } };
   await recordWorkflowStageSpan(db, instanceId, event, applied);
   return applied;
+}
+
+/** the audit identity of a system actor (audit_log.user_id is NOT NULL) */
+const SYSTEM_IDENTITY = "00000000-0000-0000-0000-000000000000";
+
+/** a `workflow_stage` span whose write waits for the caller's commit */
+type DeferredSpan = {
+  instanceId: string;
+  event: WorkflowEvent;
+  applied: Parameters<typeof recordWorkflowStageSpan>[3];
+};
+
+/** AER-048: write a deferred span after the commit; a tracing failure is
+ * logged, never propagated — the transition it describes is already durable */
+async function recordDeferredSpan(db: Db, span: DeferredSpan | undefined): Promise<void> {
+  if (!span) return;
+  try {
+    await recordWorkflowStageSpan(db, span.instanceId, span.event, span.applied);
+  } catch (err) {
+    console.error(`workflow_stage span for ${span.instanceId} not recorded: ${(err as Error).message}`);
+  }
 }
 
 /**
@@ -250,6 +404,7 @@ async function recordWorkflowStageSpan(
   const stageId = "stageId" in event ? event.stageId : null;
   const decided: Record<string, string> = {
     approval_denied: "stage approval was DENIED by an approver",
+    approval_returned: "stage approval was RETURNED for more information by an approver",
     abort: "the workflow instance was aborted",
   };
   let status: "ok" | "denied" | "error" = "ok";
@@ -315,7 +470,7 @@ async function recordWorkflowStageSpan(
 export async function applyWorkflowApprovalDecision(
   dbx: DbOrTx,
   approvalRow: { instanceId: string | null; stageId: string | null },
-  decision: "approved" | "denied",
+  decision: "approved" | "denied" | "returned",
   deciderUserId: string,
   dataKey?: string,
 ): Promise<ApprovalPostCommit | null> {
@@ -325,6 +480,14 @@ export async function applyWorkflowApprovalDecision(
 
   if (decision === "denied") {
     await applyEvent(dbx, instanceId, { kind: "approval_denied", stageId }, deciderUserId);
+    return null;
+  }
+  // ADR-0168 — send back for information: ONE approver's return sends the
+  // instance back to its artifact stage whatever the quorum (a return is a
+  // request for a new version, and every other pending gate on the stage is
+  // superseded by applyEvent). The next artifact version re-requests sign-off.
+  if (decision === "returned") {
+    await applyEvent(dbx, instanceId, { kind: "approval_returned", stageId }, deciderUserId);
     return null;
   }
 
@@ -392,6 +555,61 @@ export async function applyWorkflowApprovalDecision(
   };
 }
 
+/**
+ * AER-049 — THE GENERIC RE-OPEN. Takes the instance back to `stageId` (a stage
+ * it already passed; a COMPLETED instance included — e.g. the recertification
+ * sweep re-opening an approved intake to its sign-off) through the kernel's
+ * `reopen` event, so it gets exactly what every other re-open gets under the
+ * one instance lock: the round moves on, the stage entry moves on, stale check
+ * results are cleared, outstanding gates are superseded, the effect records of
+ * every stage that runs again move to `effects:history` (audited
+ * `workflow:effects-archived`), and the gate(s) it runs forward into are
+ * requested again. May run on the caller's open transaction (it nests as a
+ * savepoint). Returns the post-commit step — executing any git/deploy/build
+ * stage the re-open runs straight into — for the caller to run once its
+ * transaction is durable. Throws WorkflowStateError when the instance cannot
+ * be re-opened there (aborted/denied/rolled back, or a stage not yet passed).
+ */
+export async function reopenWorkflowInstance(
+  dbx: DbOrTx,
+  instanceId: string,
+  opts: {
+    stageId: string;
+    reason: string;
+    actorUserId: string | null;
+    dataKey?: string;
+    /** who the audit rows name when `actorUserId` is null (default
+     * `system:reopen`), e.g. `system:recertification-sweep` */
+    systemActor?: string;
+  },
+): Promise<{ state: InstanceState; round: number; postCommit: ApprovalPostCommit }> {
+  // AUTHORISATION IS THE CALLER'S. This function checks no entitlement: it is
+  // an internal primitive for code that has already decided the re-open is
+  // allowed (the recertification sweep is admin/scheduler-only). The kernel
+  // refuses a target that is not a sign-off / artifact stage at or before the
+  // first PR / merge / deploy stage, so a re-open always runs review again.
+  const r = await applyEvent(
+    dbx,
+    instanceId,
+    { kind: "reopen", stageId: opts.stageId, reason: opts.reason },
+    opts.actorUserId,
+    undefined,
+    undefined,
+    { systemActor: opts.systemActor ?? "system:reopen" },
+  );
+  const [row] = await dbx
+    .select({ round: workflowInstances.round })
+    .from(workflowInstances)
+    .where(eq(workflowInstances.id, instanceId));
+  return {
+    state: r.state,
+    round: row?.round ?? 0,
+    postCommit: async (db) => {
+      await runGitExecutions(db, instanceId, r.effects, opts.actorUserId, opts.dataKey);
+    },
+  };
+}
+
 export interface WorkflowRouteOptions {
   /** hex AES-256 key for git-connection tokens; absent = git features refused */
   dataKey?: string;
@@ -402,6 +620,14 @@ export interface WorkflowRouteOptions {
    * approvals transaction in app.ts; this hook exists because those three
    * routes live here and app.ts composes the modules (no import cycle). */
   onInstanceTransition?: (db: Db, instanceId: string, actorUserId: string | null) => Promise<void>;
+  /** ADR-0171 / AER-053: a pre-check on an artifact submission, run BEFORE
+   * anything is stored or transitioned. A dependent object refuses content it
+   * can name a reason for (the use-case questionnaire's inconsistent "Not
+   * sure" answers); null lets the submission through unchanged. */
+  validateArtifact?: (
+    output: string,
+    content: string,
+  ) => { status: number; body: Record<string, unknown> } | null;
 }
 
 /** §8 nesting: called from the orchestration run-event funnel when a run
@@ -429,26 +655,94 @@ export async function handleNestedRunCompletion(
   const context = instance.context as Record<string, unknown>;
   if (context[`runId:${stage.id}`] !== run.id) return; // not the run this stage is waiting on
 
+  // AER-048 (review item 5): the read above is unlocked and only a filter.
+  // The transition applies only if, UNDER THE ROW LOCK, the instance is still
+  // waiting on THIS run at THIS stage — a re-open (which clears runId:<stage>)
+  // or a retry that planned a newer run committed in between makes this a
+  // stale notification, and it changes nothing.
+  const stillWaitingOnThisRun = async (tx: Parameters<Parameters<Db["transaction"]>[0]>[0]): Promise<boolean> => {
+    const [row] = await tx.select().from(workflowInstances).where(eq(workflowInstances.id, instance.id));
+    if (!row || row.status !== "awaiting_execution") return false;
+    const cur = (row.definition as WorkflowDefinition).stages[(row.state as InstanceState).currentStageIndex];
+    return cur?.id === stage.id && (row.context as Record<string, unknown>)[`runId:${stage.id}`] === run.id;
+  };
   if (run.status === "completed") {
     const r = await applyEvent(
       db,
       instance.id,
       { kind: "execution_succeeded", stageId: stage.id },
       actorUserId,
+      stillWaitingOnThisRun,
     );
+    if (r.skipped) return;
     // completion can flow straight into a downstream git stage
     await runGitExecutions(db, instance.id, r.effects, actorUserId, dataKey);
   } else {
-    const ctx = { ...context, lastError: `${stage.id}: nested run ${run.id} aborted` };
-    await db.update(workflowInstances).set({ context: ctx }).where(eq(workflowInstances.id, instance.id));
+    // AER-048: a key-level merge under the same lock, never a write-back of
+    // the (unlocked) context read above
+    const patch = JSON.stringify({ lastError: `${stage.id}: nested run ${run.id} aborted` });
     await applyEvent(
       db,
       instance.id,
       { kind: "execution_failed", stageId: stage.id, error: `nested run ${run.id} aborted` },
       actorUserId,
+      async (tx) => {
+        if (!(await stillWaitingOnThisRun(tx))) return false;
+        await tx
+          .update(workflowInstances)
+          .set({ context: sql`${workflowInstances.context} || ${patch}::jsonb` })
+          .where(eq(workflowInstances.id, instance.id));
+        return true;
+      },
     );
   }
 }
+
+/** AER-047: the detail every auto-passed (opt-in, offline) check carries */
+export const CHECK_AUTO_PASSED_DETAIL = "auto-passed — no report (offline mode)";
+/** AER-047: the detail a check with no reported result carries while it waits */
+export const CHECK_PENDING_DETAIL = "pending — no result has been reported for this check";
+
+/** AER-047: the env var a process sets (to exactly `1`) to DECLARE itself an
+ * offline/demo box on which a template's `offlineAutoPass` may be honoured */
+export const OFFLINE_CHECKS_ENV = "REGULAIT_OFFLINE_CHECKS";
+
+/**
+ * AER-047 — why THIS process will not honour a template's `offlineAutoPass`,
+ * or null when it will. FAIL CLOSED: the opt-in needs a POSITIVE declaration
+ * (`REGULAIT_OFFLINE_CHECKS=1`, which the demo seed and the demo's gateway
+ * terminal set), and is refused regardless whenever the process shows a sign
+ * of being deployed (ADR-0167's `networkFacingSignal`). Absence of a deployed
+ * signal is NOT proof of a laptop — a bare `docker compose --profile tls` on a
+ * public host sets neither REGULAIT_DEPLOY_MODE nor REGULAIT_HSTS — so the
+ * heuristic only ever narrows the opt-in, it never grants it.
+ */
+export function offlineAutoPassRefusal(
+  env: NodeJS.ProcessEnv,
+): { reason: string; deployedSignal?: string } | null {
+  const deployedSignal = networkFacingSignal(env);
+  if (deployedSignal !== null) return { reason: `this box is deployed: ${deployedSignal}`, deployedSignal };
+  if ((env[OFFLINE_CHECKS_ENV] ?? "").trim() !== "1") {
+    return { reason: `this process never declared offline mode (${OFFLINE_CHECKS_ENV}=1 is not set)` };
+  }
+  return null;
+}
+
+/** one evaluated check as it lands in context[`checks:<stageId>`] */
+type EvaluatedCheck = {
+  check: string;
+  /** "pending" (AER-047) = nobody reported it; the stage waits */
+  status: "passed" | "failed" | "pending";
+  severity: string | null;
+  detail: string;
+  /** AER-047: true ONLY when the template's offlineAutoPass opt-in passed a
+   * check nobody reported — every surface labels it */
+  autoPassed?: true;
+  selfReported?: true;
+  reportedByUserId?: string | null;
+  reason?: string | null;
+  eval?: Record<string, unknown>;
+};
 
 /** the shape one named check resolves to inside the check executor */
 interface CheckOutcome {
@@ -489,6 +783,10 @@ async function runStageEvalChecks(
   stage: WorkflowDefinition["stages"][number],
   dataKey: string | undefined,
 ): Promise<Map<string, CheckOutcome>> {
+  // AER-048: the barrier the round-token tests park an executor on, mid-eval
+  if (workflowTestHooks.duringStageEval) {
+    await workflowTestHooks.duringStageEval({ instanceId: instance.id, stageId: stage.id });
+  }
   const out = new Map<string, CheckOutcome>();
   const bindings = stage.evals ?? [];
   if (bindings.length === 0) return out;
@@ -594,6 +892,10 @@ async function runGitExecutions(
   effects: Effect[],
   actorUserId: string | null,
   dataKey: string | undefined,
+  /** AER-048 (review item 3): 1 inside the single follow-up evaluation a check
+   * executor that ended WITHOUT committing runs when reports arrived during
+   * its claim — never more than one level */
+  reevalDepth = 0,
 ): Promise<Effect[]> {
   let pending = effects.filter((e) => e.kind === "execute_stage");
   let lastEffects = effects;
@@ -616,22 +918,93 @@ async function runGitExecutions(
       const current = rowDef.stages[rowState.currentStageIndex];
       if (!current || current.id !== effect.stageId) return null;
       const ctx = { ...(row.context as Record<string, unknown>) };
-      const held = stageClaimState(ctx, effect.stageId);
-      if (held.heldLive) return null; // another executor holds it
+      const held = stageClaimState(ctx, effect.stageId, Date.now(), stageClaimTtlMs(), row.stageEntry);
+      if (held.heldLive) return "held" as const; // another executor holds it
+      // AER-048: the claim names the stage ENTRY it was taken under and carries
+      // a unique id, so this executor's completion can prove it is still the
+      // one the instance is waiting on (commitStageResult)
+      const claimId = randomUUID();
       ctx.executing = effect.stageId;
       ctx.executingSince = new Date().toISOString();
+      ctx.executingEntry = row.stageEntry;
+      ctx.executingClaim = claimId;
       await tx.update(workflowInstances).set({ context: ctx }).where(eq(workflowInstances.id, row.id));
-      return { instance: { ...row, context: ctx }, expiredClaimSince: held.expiredSince };
+      return {
+        instance: { ...row, context: ctx },
+        expiredClaimSince: held.expiredSince,
+        guard: { instanceId: row.id, stageId: effect.stageId, entry: row.stageEntry, round: row.round, claimId },
+      };
     });
+    if (claimed === "held") throw new StageClaimHeldError(effect.stageId);
     if (!claimed) {
       throw new WorkflowStateError(
         `stage '${effect.stageId}' is not currently executable for this instance`,
       );
     }
     const instance = claimed.instance;
+    const guard = claimed.guard;
     const def = instance.definition as WorkflowDefinition;
     const stage = def.stages.find((st) => st.id === effect.stageId)!;
     const context = { ...(instance.context as Record<string, unknown>) };
+    // AER-048: what the context looked like when the claim was taken. The
+    // executor OWNS exactly the keys it changes relative to this snapshot;
+    // completion merges only those into the row as it is THEN (re-read FOR
+    // UPDATE), so a report or re-open that committed meanwhile survives.
+    const snapshot = { ...(instance.context as Record<string, unknown>) };
+    const finish = async (
+      event: WorkflowEvent | null,
+      deployMode?: "hosted" | "byoc" | "air_gapped" | null,
+    ): Promise<StageCommit> => {
+      const owned = ownedKeyChanges(snapshot, context);
+      return commitStageResult(
+        db,
+        guard,
+        actorUserId,
+        (fresh) => {
+          for (const k of owned) {
+            if (k in context) fresh[k] = context[k];
+            else delete fresh[k];
+          }
+          return { event, deployMode: deployMode ?? null };
+        },
+        { discardedKeys: owned, ...(event ? { discardedEvent: event.kind } : {}) },
+        { snapshot, context },
+      );
+    };
+    // AER-048 (review item 3): a check executor that ends WITHOUT committing
+    // (its result discarded, or a throw) must not leave a report that arrived
+    // during its claim unevaluated until the claim TTL — the report route
+    // answered that report 202 "deferred to the running executor". So once,
+    // and only if the stored reports moved since the claim, the stage is
+    // evaluated again. If it is no longer executable (re-opened) or another
+    // executor holds it, that is fine: they own the reports now.
+    /** AER-048 (review item 1): every external effect this executor makes is
+     * an audit row of its own, whatever later happens to its result */
+    const effectAudit = <T,>(summarize: (r: T) => Record<string, unknown>): ExternalWriteAudit<T> => ({
+      userId: actorUserId ?? "00000000-0000-0000-0000-000000000000",
+      objectType: "workflow",
+      objectId: instance.id,
+      detail: { stageId: stage.id, stageEntry: guard.entry, round: guard.round },
+      summarize,
+    });
+    const reevaluateIfReportsArrived = async (): Promise<void> => {
+      if (stage.type !== "automated_check" || reevalDepth > 0) return;
+      const key = `reported:${stage.id}`;
+      const [now] = await db
+        .select({ context: workflowInstances.context })
+        .from(workflowInstances)
+        .where(eq(workflowInstances.id, instanceId));
+      if (!now) return;
+      const stored = (now.context as Record<string, unknown>)[key];
+      if (JSON.stringify(stored ?? null) === JSON.stringify(snapshot[key] ?? null)) return;
+      try {
+        await runGitExecutions(db, instanceId, [{ kind: "execute_stage", stageId: stage.id }], actorUserId, dataKey, 1);
+      } catch (err) {
+        if (!(err instanceof WorkflowStateError)) {
+          console.error(`re-evaluation of '${stage.id}' on ${instanceId} failed: ${(err as Error).message}`);
+        }
+      }
+    };
     if (claimed.expiredClaimSince !== null) {
       // REL-06: a claim nobody released — a process killed mid-stage — is
       // re-taken after its TTL rather than stranding the instance at
@@ -664,124 +1037,230 @@ async function runGitExecutions(
           .from(orchestrationRuns)
           .where(eq(orchestrationRuns.id, existingId));
         if (existing && existing.status !== "aborted") {
-          await db
-            .update(workflowInstances)
-            .set({ context })
-            .where(eq(workflowInstances.id, instance.id));
-          if (existing.status === "completed") {
-            // replay after a missed completion notification
-            const r = await applyEvent(
-              db,
-              instanceId,
-              { kind: "execution_succeeded", stageId: stage.id },
-              actorUserId,
-            );
+          // replay after a missed completion notification, or (planned/
+          // running) the stage simply waits for the run
+          const r = await finish(
+            existing.status === "completed" ? { kind: "execution_succeeded", stageId: stage.id } : null,
+          );
+          if (r.committed && existing.status === "completed") {
             lastEffects = r.effects;
             pending = r.effects.filter((e) => e.kind === "execute_stage");
             continue;
           }
-          break; // run is planned/running — the stage waits for it
+          break;
         }
       }
       const planned = await planRun(db, instance.initiatorUserId, stage.run, instance.id, instance.projectId ?? null, dataKey);
       if (!planned.ok) {
         const error = `nested run rejected: ${JSON.stringify(planned.body)}`;
         context.lastError = `${stage.id}: ${error}`;
-        await db
-          .update(workflowInstances)
-          .set({ context })
-          .where(eq(workflowInstances.id, instance.id));
-        await applyEvent(
-          db,
-          instanceId,
-          { kind: "execution_failed", stageId: stage.id, error },
-          actorUserId,
-        );
+        await finish({ kind: "execution_failed", stageId: stage.id, error });
         break;
       }
       context[`runId:${stage.id}`] = planned.run.id;
       delete context.lastError;
-      await db
-        .update(workflowInstances)
-        .set({ context })
-        .where(eq(workflowInstances.id, instance.id));
+      await finish(null);
       break; // stage stays awaiting_execution until the run completes
     }
 
     // §2 stage 8: the check executor. Each named check resolves to a result:
-    // if a result was REPORTED for it (via POST .../checks — a real CI posts
-    // here; the seed/tests post here for the demo) that result wins, PASS or
-    // FAIL; otherwise it falls back to the deterministic offline auto-pass
-    // (byte-identical to the pre-fail-routing contract, so existing templates
-    // still sail through). A required check that FAILED parks the instance at
-    // blocked_on_check instead of advancing — the failure path deploy/rollback
-    // build on. Every result lands in instance.context so the rail and audit
-    // trail show WHAT was checked and how it fared, not just that it advanced.
+    // an eval-bound check (ADR-0044) by RUNNING its dataset; otherwise a result
+    // REPORTED for it (via POST .../checks — a real CI posts here; the seed and
+    // tests post here for the demo) wins, PASS or FAIL. A check NOBODY reported
+    // is PENDING (AER-047 / PENDING L1): it never passes on silence. Before
+    // AER-047 it fell back to a deterministic offline auto-pass, so a gate
+    // approved before CI posted sailed through with every check "passed".
+    //
+    //   - any FAILED check → check_failed (blocked_on_check, or the stage's
+    //     rollback target) — a reported failure blocks even while others wait;
+    //   - otherwise any PENDING check → the instance WAITS at
+    //     awaiting_execution (the claim is released, nothing advances), with an
+    //     audit row naming the missing checks; the next report re-evaluates;
+    //   - otherwise → execution_succeeded.
+    //
+    // A template may opt back into the offline behaviour ONLY through the typed
+    // stage field `offlineAutoPass: true`, and every auto-passed result says so
+    // (`autoPassed: true`, "auto-passed — no report (offline mode)") in the
+    // context, the audit trail, the rail and the approval view. The opt-in
+    // FAILS CLOSED: it is honoured only in a process that positively declares
+    // offline mode (REGULAIT_OFFLINE_CHECKS=1 — the demo seed and the demo's
+    // gateway terminal) and never on a box that shows a sign of being deployed,
+    // so a production configuration cannot pass a check nobody ran
+    // (offlineAutoPassRefusal).
     if (stage.type === "automated_check") {
-      const artifacts = await db
-        .select()
-        .from(workflowArtifacts)
-        .where(eq(workflowArtifacts.instanceId, instance.id))
-        .orderBy(desc(workflowArtifacts.version));
-      const latestByOutput = new Map<string, (typeof artifacts)[number]>();
-      for (const a of artifacts) if (!latestByOutput.has(a.output)) latestByOutput.set(a.output, a);
-      const subjects = [...latestByOutput.values()].map((a) => `${a.output} v${a.version}`);
-      const against = subjects.length ? subjects.join(", ") : "the built change set";
-      const reported = normalizeCheckReports(context[`reported:${stage.id}`]);
-      const byName = new Map(reported.map((r) => [r.check, r]));
+      const declaredChecks = stage.checks ?? [];
       // ADR-0044: checks bound to an evaluation dataset are decided by RUNNING
       // it, here, under the instance initiator's entitlements — never by a
       // reported result (POST .../checks refuses to report against them) and
-      // never by the offline auto-pass. A regression produces status 'failed',
+      // never by an offline auto-pass. A regression produces status 'failed',
       // which then flows into the SAME check_failed event every other failing
       // check uses; there is no second failure path.
-      const evalOutcomes = await runStageEvalChecks(db, instance, stage, dataKey);
-      const results = (stage.checks ?? []).map((name) => {
-        const ev = evalOutcomes.get(name);
-        if (ev) return ev;
-        const rep = byName.get(name);
-        return rep
-          ? {
-              check: name,
-              status: rep.status,
-              severity: rep.severity ?? null,
-              detail: rep.detail ?? `reported ${rep.status}`,
-              // ADR-0167 (AUTHZ-06): the provenance rides into the evaluated
-              // result, so the rail and the approval view can say "the
-              // initiator reported this green" rather than showing CI's colour
-              ...(rep.selfReported
-                ? { selfReported: true, reportedByUserId: rep.reportedByUserId ?? null, reason: rep.reason ?? null }
-                : {}),
-            }
-          : { check: name, status: "passed" as const, severity: null, detail: `ran against ${against}` };
-      });
-      context[`checks:${stage.id}`] = results;
-      if (evalOutcomes.size > 0) {
-        context[`evals:${stage.id}`] = Object.fromEntries(
-          [...evalOutcomes].map(([name, r]) => [name, r.eval]),
-        );
+      const evalBound = new Set((stage.evals ?? []).map((e) => e.check));
+      const refusal = stage.offlineAutoPass === true ? offlineAutoPassRefusal(process.env) : null;
+      const autoPassHonoured = stage.offlineAutoPass === true && refusal === null;
+      // The evals run ONCE per stage entry, as they did before AER-047, not
+      // once per re-evaluation. While the stage WAITS on reported checks
+      // (context[awaitingReport:<id>] is set) every partial report and every
+      // retried /advance re-evaluates it; re-running the datasets each time
+      // would spend the initiator's and the project's budget only to wait
+      // again. So within one waiting episode the outcome recorded when the
+      // stage was entered is reused. A failing eval never waits (failures
+      // block at once), a recheck from blocked_on_check is not a waiting
+      // episode and re-runs them, and a re-open clears the episode.
+      const waitKey = `awaitingReport:${stage.id}`;
+      const episodeEvals = new Map<string, CheckOutcome>();
+      if (typeof context[waitKey] === "string" && Array.isArray(context[`checks:${stage.id}`])) {
+        for (const r of context[`checks:${stage.id}`] as EvaluatedCheck[]) {
+          if (r && evalBound.has(r.check) && r.status === "passed" && r.eval) {
+            episodeEvals.set(r.check, { check: r.check, status: "passed", severity: r.severity, detail: r.detail, eval: r.eval });
+          }
+        }
       }
-      releaseStageClaim(context);
-      delete context.lastError;
-      await db
-        .update(workflowInstances)
-        .set({ context })
-        .where(eq(workflowInstances.id, instance.id));
-      const failures = results.filter((r) => r.status === "failed").map((r) => r.check);
-      const r =
-        failures.length > 0
-          ? await applyEvent(
-              db,
-              instanceId,
-              { kind: "check_failed", stageId: stage.id, failures },
-              actorUserId,
-            )
-          : await applyEvent(
-              db,
-              instanceId,
-              { kind: "execution_succeeded", stageId: stage.id },
-              actorUserId,
+      const declaredEvals = declaredChecks.filter((n) => evalBound.has(n));
+      // the slow part — possibly seconds of eval dispatches — runs OUTSIDE any
+      // lock, on the claim alone
+      const evalOutcomes =
+        declaredEvals.length > 0 && declaredEvals.every((n) => episodeEvals.has(n))
+          ? episodeEvals
+          : await runStageEvalChecks(db, instance, stage, dataKey);
+
+      // AER-048 — the VERDICT is decided at commit, under the row lock, from
+      // the reports stored THEN (not the ones snapshotted at claim time). A
+      // report posted while the evals ran is therefore part of this verdict
+      // rather than overwritten by it, and a re-open or a re-taken claim
+      // discards the whole result (commitStageResult) instead of restoring the
+      // check keys the re-open cleared.
+      let waited = false;
+      const r = await commitStageResult(
+        db,
+        guard,
+        actorUserId,
+        (fresh, row) => {
+          // reports stamped with another round never count (a re-open clears
+          // them anyway; this is the belt to that brace)
+          const reported = normalizeCheckReports(fresh[`reported:${stage.id}`]).filter(
+            (rep) => rep.round === undefined || rep.round === row.round,
+          );
+          const byName = new Map(reported.map((rep) => [rep.check, rep]));
+          const results: EvaluatedCheck[] = declaredChecks.map((name): EvaluatedCheck => {
+            const ev = evalOutcomes.get(name);
+            if (ev) return ev;
+            // ADR-0044 property 3: an eval-bound check that produced no outcome
+            // could not run, so it FAILS — never reported, never auto-passed
+            if (evalBound.has(name)) {
+              return {
+                check: name,
+                status: "failed",
+                severity: "high",
+                detail: "the eval produced no outcome — the quality gate could not run, so it does not pass",
+              };
+            }
+            const rep = byName.get(name);
+            if (rep) {
+              return {
+                check: name,
+                status: rep.status,
+                severity: rep.severity ?? null,
+                detail: rep.detail ?? `reported ${rep.status}`,
+                // ADR-0167 (AUTHZ-06): the provenance rides into the evaluated
+                // result, so the rail and the approval view can say "the
+                // initiator reported this green" rather than showing CI's colour
+                ...(rep.selfReported
+                  ? { selfReported: true, reportedByUserId: rep.reportedByUserId ?? null, reason: rep.reason ?? null }
+                  : {}),
+              };
+            }
+            return autoPassHonoured
+              ? { check: name, status: "passed", severity: null, detail: CHECK_AUTO_PASSED_DETAIL, autoPassed: true }
+              : { check: name, status: "pending", severity: null, detail: CHECK_PENDING_DETAIL };
+          });
+          const failures = results.filter((x) => x.status === "failed").map((x) => x.check);
+          const missing = results.filter((x) => x.status === "pending").map((x) => x.check);
+          const autoPassed = results.filter((x) => x.autoPassed).map((x) => x.check);
+          const waiting = failures.length === 0 && missing.length > 0;
+          waited = waiting;
+          fresh[`checks:${stage.id}`] = results;
+          if (evalOutcomes.size > 0) {
+            fresh[`evals:${stage.id}`] = Object.fromEntries(
+              [...evalOutcomes].map(([name, x]) => [name, x.eval]),
             );
+          }
+          // One waiting audit row per DISTINCT waiting state, not per
+          // re-evaluation: an initiator retrying /advance, or a CI posting one
+          // check at a time, writes a row only when the set of missing checks (or
+          // why the opt-in was refused) actually changes.
+          const waitSignature = waiting
+            ? JSON.stringify({ missing, refused: refusal?.reason ?? null })
+            : null;
+          const sameWait = waiting && fresh[waitKey] === waitSignature;
+          if (waiting) fresh[waitKey] = waitSignature;
+          else delete fresh[waitKey];
+          delete fresh.lastError;
+          const audits: AuditInsert[] = [];
+          if (waiting && !sameWait) {
+            // WAIT. No kernel event: the instance stays awaiting_execution on
+            // THIS stage, which is exactly the state POST .../checks
+            // re-evaluates from, so the next reported result picks it up.
+            // Nothing advances on silence.
+            audits.push({
+              userId: actorUserId ?? "00000000-0000-0000-0000-000000000000",
+              objectType: "workflow",
+              objectId: instance.id,
+              detail: {
+                stageId: stage.id,
+                missingChecks: missing,
+                ...(refusal
+                  ? {
+                      offlineAutoPassRefused: true,
+                      refusedBecause: refusal.reason,
+                      ...(refusal.deployedSignal ? { deployedSignal: refusal.deployedSignal } : {}),
+                    }
+                  : {}),
+              },
+              effect: "allow",
+              ruleId: "workflow:checks-awaiting-report",
+              ruleChain: [],
+              reason:
+                `stage '${stage.id}' is waiting on ${missing.length} check(s) with no reported result: ${missing.join(", ")} — ` +
+                `a check nobody reported never passes; the stage re-evaluates when a result is posted` +
+                (refusal ? ` (the template opts into offlineAutoPass, ignored because ${refusal.reason})` : ""),
+            });
+          }
+          if (!waiting && failures.length === 0 && autoPassed.length > 0) {
+            audits.push({
+              userId: actorUserId ?? "00000000-0000-0000-0000-000000000000",
+              objectType: "workflow",
+              objectId: instance.id,
+              detail: { stageId: stage.id, autoPassedChecks: autoPassed, offlineAutoPass: true },
+              effect: "allow",
+              ruleId: "workflow:checks-auto-passed",
+              ruleChain: [],
+              reason:
+                `stage '${stage.id}': ${autoPassed.length} check(s) auto-passed — no report (offline mode): ${autoPassed.join(", ")} — ` +
+                `the template opts into offlineAutoPass; nothing ran these checks`,
+            });
+          }
+          return {
+            event: waiting
+              ? null
+              : failures.length > 0
+                ? { kind: "check_failed", stageId: stage.id, failures }
+                : { kind: "execution_succeeded", stageId: stage.id },
+            audits,
+          };
+        },
+        {
+          discardedKeys: [`checks:${stage.id}`, `evals:${stage.id}`, waitKey],
+          ...(evalOutcomes.size > 0
+            ? { discardedEvals: Object.fromEntries([...evalOutcomes].map(([name, x]) => [name, x.status])) }
+            : {}),
+        },
+      );
+      if (!r.committed) {
+        await reevaluateIfReportsArrived();
+        break;
+      }
+      if (waited) break;
       lastEffects = r.effects;
       pending = r.effects.filter((e) => e.kind === "execute_stage");
       continue;
@@ -812,16 +1291,12 @@ async function runGitExecutions(
           : null;
       if (handoff) {
         releaseStageClaim(context);
-        await db.update(workflowInstances).set({ context }).where(eq(workflowInstances.id, instance.id));
-        const r = await applyEvent(
-          db,
-          instanceId,
+        const r = await finish(
           { kind: "deploy_blocked", stageId: stage.id, reason: handoff },
-          actorUserId,
-          undefined,
           // A4: the target may be missing here (that IS one of the handoffs)
           target?.mode ?? null,
         );
+        if (!r.committed) break;
         lastEffects = r.effects;
         pending = [];
         continue;
@@ -851,8 +1326,14 @@ async function runGitExecutions(
           // transaction above and is released below after the provider call —
           // awaiting here holds no DB transaction or row lock open, and a
           // rejected promise lands in the same catch → deploy_blocked path.
-          const res = await runExternalWrite(db, "deploy.deploy", () =>
-            provider.deploy(target!.name, target!.environment, instance.id));
+          const res = await runExternalWrite(
+            db,
+            "deploy.deploy",
+            // AER-049: the seed carries the round (from round 1 on), so a new
+            // round's mock / dry-run deployment gets an id of its own
+            () => provider.deploy(target!.name, target!.environment, deploySeed(instance.id, instance.round)),
+            effectAudit((r) => ({ deployId: r.deployId, target: target!.name, environment: target!.environment, mode: target!.mode, dryRun: r.dryRun })),
+          );
           // §3 the control-plane / agent-execution-plane data boundary: in
           // AIR_GAPPED mode NOTHING that could carry execution-plane detail
           // (the deploy URL, the provider detail string) is retained in the
@@ -874,20 +1355,19 @@ async function runGitExecutions(
       releaseStageClaim(context);
       if (deployErr === null) delete context.lastError;
       else context.lastError = `${stage.id}: ${deployErr}`;
-      await db.update(workflowInstances).set({ context }).where(eq(workflowInstances.id, instance.id));
       // A deployment-wide stop is not a manual deploy handoff: leave the
       // claimed stage awaiting_execution so lifting the stop permits a retry.
-      if (executionControlRefused) break;
+      if (executionControlRefused) {
+        await finish(null);
+        break;
+      }
       // a provider that isn't integrated yet → manual handoff (not a hard fail)
       if (deployErr !== null) {
-        const r = await applyEvent(
-          db,
-          instanceId,
+        const r = await finish(
           { kind: "deploy_blocked", stageId: stage.id, reason: deployErr },
-          actorUserId,
-          undefined,
           target!.mode, // A4: the deploy-scoped audit row carries the target's mode
         );
+        if (!r.committed) break;
         lastEffects = r.effects;
         pending = [];
         continue;
@@ -905,28 +1385,21 @@ async function runGitExecutions(
         if (recorded?.dryRun === true && prodGate) {
           const reason = `dry-run deploy cannot satisfy a production deploy gate: the '${target!.provider}' adapter ran in dry-run mode (no live mutation happened) — wire a live deploy client, or confirm an out-of-band production deploy via deploy-override`;
           context.lastError = `${stage.id}: ${reason}`;
-          await db.update(workflowInstances).set({ context }).where(eq(workflowInstances.id, instance.id));
-          const r = await applyEvent(
-            db,
-            instanceId,
+          const r = await finish(
             { kind: "deploy_blocked", stageId: stage.id, reason },
-            actorUserId,
-            undefined,
             target!.mode, // A4
           );
+          if (!r.committed) break;
           lastEffects = r.effects;
           pending = [];
           continue;
         }
       }
-      const r = await applyEvent(
-        db,
-        instanceId,
+      const r = await finish(
         { kind: "execution_succeeded", stageId: stage.id },
-        actorUserId,
-        undefined,
         target!.mode, // A4: the successful deploy's audit row carries the mode
       );
+      if (!r.committed) break;
       lastEffects = r.effects;
       pending = r.effects.filter((e) => e.kind === "execute_stage");
       continue;
@@ -965,8 +1438,12 @@ async function runGitExecutions(
           // ASYNC-DEPLOY: awaited outside any transaction (same claim/release
           // semantics as the deploy executor); a rejection lands in this catch
           // and keeps the stage awaiting_execution (retryable), never terminal.
-          const res = await runExternalWrite(db, "deploy.rollback", () =>
-            provider.rollback(target.name, priorDeploy?.deployId ?? "unknown"));
+          const res = await runExternalWrite(
+            db,
+            "deploy.rollback",
+            () => provider.rollback(target.name, priorDeploy?.deployId ?? "unknown"),
+            effectAudit(() => ({ target: target.name, revertedDeployId: priorDeploy?.deployId ?? null })),
+          );
           // §3 air-gapped boundary: keep only which deploy was reversed, not the
           // provider detail string (which could carry execution-plane info).
           context[`rollback:${stage.id}`] =
@@ -980,18 +1457,13 @@ async function runGitExecutions(
       releaseStageClaim(context);
       if (rbErr === null) delete context.lastError;
       else context.lastError = `${stage.id}: ${rbErr}`;
-      await db.update(workflowInstances).set({ context }).where(eq(workflowInstances.id, instance.id));
       // a rollback that itself FAILS is a serious operator situation — it stays
       // awaiting_execution (retryable via /advance), never silently terminal.
-      if (rbErr !== null) break;
-      const r = await applyEvent(
-        db,
-        instanceId,
-        { kind: "rolled_back", stageId: stage.id },
-        actorUserId,
-        undefined,
+      const r = await finish(
+        rbErr !== null ? null : { kind: "rolled_back", stageId: stage.id },
         target?.mode ?? null, // A4
       );
+      if (rbErr !== null || !r.committed) break;
       lastEffects = r.effects;
       pending = r.effects.filter((e) => e.kind === "execute_stage");
       continue;
@@ -1079,17 +1551,45 @@ async function runGitExecutions(
 
       const change = instance.change as { description: string };
       if (stage.action === "create_branch") {
-        const branch = `${stage.branchPrefix ?? "regulait"}/${instance.id.slice(0, 8)}`;
-        // Idempotent replay (§2 re-open): if we already created this branch,
-        // re-execution succeeds without a provider call instead of 422ing forever.
+        // AER-049: a round after the first works on a FRESH branch named for
+        // its round (`<base>-r<round>`) — the earlier round's branch (and its
+        // PR, merged or not) is history, never reused. Round 0 keeps the
+        // original name.
+        const baseBranch = `${stage.branchPrefix ?? "regulait"}/${instance.id.slice(0, 8)}`;
+        const branch = instance.round > 0 ? `${baseBranch}-r${instance.round}` : baseBranch;
+        // Idempotent replay WITHIN the round: if we already created this
+        // branch, re-execution succeeds without a provider call instead of
+        // 422ing forever.
         if (context.branch !== branch) {
-          await runExternalWrite(db, "git.create_branch", () =>
-            provider.createBranch(stage.repo!, branch, stage.base ?? "main"));
+          await runExternalWrite(
+            db,
+            "git.create_branch",
+            () => provider.createBranch(stage.repo!, branch, stage.base ?? "main"),
+            effectAudit(() => ({ repo: stage.repo, branch })),
+          );
           context.branch = branch;
         }
       } else if (stage.action === "open_pr" && context.prId !== undefined) {
         // idempotent replay: PR already open for this instance
       } else if (stage.action === "open_pr") {
+        // AER-049 review: a PR is opened from THIS round's branch. When the
+        // round has none (a re-open archived it, or the create_branch stage
+        // sits before the re-open point and did not run again) — or the one
+        // on record is stamped with an earlier round — cut the round branch
+        // here, named exactly as create_branch would name it.
+        const branchStamp = effectStamps(context).branch;
+        if (context.branch === undefined || (branchStamp !== undefined && branchStamp.round < instance.round)) {
+          const creator = def.stages.find((st) => st.type === "git_operation" && st.action === "create_branch");
+          const baseBranch = `${creator?.branchPrefix ?? stage.branchPrefix ?? "regulait"}/${instance.id.slice(0, 8)}`;
+          const branch = instance.round > 0 ? `${baseBranch}-r${instance.round}` : baseBranch;
+          await runExternalWrite(
+            db,
+            "git.create_branch",
+            () => provider.createBranch(stage.repo!, branch, creator?.base ?? stage.base ?? "main"),
+            effectAudit(() => ({ repo: stage.repo, branch, cutBy: stage.id })),
+          );
+          context.branch = branch;
+        }
         // §2 stage 7: PR description auto-linked to the requirements artifact
         const [latestArtifact] = await db
           .select()
@@ -1097,28 +1597,75 @@ async function runGitExecutions(
           .where(eq(workflowArtifacts.instanceId, instance.id))
           .orderBy(desc(workflowArtifacts.version))
           .limit(1);
+        // AER-049: the newest earlier-round PR this one replaces (a re-open
+        // moved it to effects:history), named in the body for the reviewer
+        const superseded = effectHistory(context)
+          .filter((e) => e.round < instance.round && typeof e.values.prId === "string")
+          .sort((a, b) => b.round - a.round)[0];
         const pr = await runExternalWrite(db, "git.open_pull_request", () => provider.openPullRequest(stage.repo!, {
           head: String(context.branch ?? ""),
           base: stage.base ?? "main",
           title: change.description,
+          // AER-048 (review item 2): the two machine-readable lines a CI
+          // reads at run start to bind its check report — POST .../checks
+          // requires `round` from an API key. AER-049: a re-open past this
+          // stage opens a NEW pull request for the new round, so the round
+          // written here is the round of THIS pull request; CI may still
+          // re-read it from GET /v1/workflows/instances/:id, and a 409
+          // stale_check_report names the current one.
           body:
             `Workflow instance ${instance.id}
-
+regulait-instance: ${instance.id}
+regulait-round: ${instance.round}
+` +
+            (superseded
+              ? `regulait-supersedes: round ${superseded.round} pull request ${String(superseded.values.prUrl ?? superseded.values.prId)}
+`
+              : "") +
+            `
 ` +
             (latestArtifact
               ? `Signed-off ${latestArtifact.output} v${latestArtifact.version}:
 
 ${latestArtifact.content}`
               : "(no artifact)"),
-        }));
+        }), effectAudit((r) => ({ repo: stage.repo, prId: r.id, prUrl: r.url })));
         context.prId = pr.id;
         context.prUrl = pr.url;
       } else if (stage.action === "merge" && context.mergeSha === undefined) {
-        const result = await runExternalWrite(db, "git.merge_pull_request", () => provider.mergePullRequest(
-          stage.repo!,
-          String(context.prId ?? ""),
-          stage.strategy ?? "merge",
-        ));
+        // AER-049 review: merge only a PR THIS round opened. An earlier
+        // round's PR (already merged, or reviewed against another artifact) is
+        // refused by name and audited — never merged "again".
+        const prStamp = effectStamps(context).prId;
+        if (context.prId === undefined || (prStamp !== undefined && prStamp.round < instance.round)) {
+          const refusal = new StalePullRequestMergeError(
+            instance.round,
+            context.prId === undefined ? null : String(context.prId),
+            prStamp?.round ?? null,
+          );
+          await db.insert(auditLog).values({
+            userId: actorUserId ?? instance.initiatorUserId,
+            objectType: "workflow",
+            objectId: instance.id,
+            detail: {
+              stageId: stage.id,
+              round: instance.round,
+              prId: context.prId ?? null,
+              prRound: prStamp?.round ?? null,
+            },
+            effect: "deny",
+            ruleId: "workflow:merge-refused-stale-pr",
+            ruleChain: [],
+            reason: refusal.message,
+          });
+          throw refusal;
+        }
+        const result = await runExternalWrite(
+          db,
+          "git.merge_pull_request",
+          () => provider.mergePullRequest(stage.repo!, String(context.prId ?? ""), stage.strategy ?? "merge"),
+          effectAudit((r) => ({ repo: stage.repo, prId: String(context.prId ?? ""), mergeSha: r.sha })),
+        );
         context.mergeSha = result.sha;
       }
     } catch (err) {
@@ -1131,26 +1678,13 @@ ${latestArtifact.content}`
     releaseStageClaim(context);
     if (executionError === null) delete context.lastError;
     else context.lastError = `${stage.id}: ${executionError}`;
-    await db
-      .update(workflowInstances)
-      .set({ context })
-      .where(eq(workflowInstances.id, instance.id));
 
     if (executionError !== null) {
-      await applyEvent(
-        db,
-        instanceId,
-        { kind: "execution_failed", stageId: stage.id, error: executionError },
-        actorUserId,
-      );
+      await finish({ kind: "execution_failed", stageId: stage.id, error: executionError });
       break;
     }
-    const r = await applyEvent(
-      db,
-      instanceId,
-      { kind: "execution_succeeded", stageId: stage.id },
-      actorUserId,
-    );
+    const r = await finish({ kind: "execution_succeeded", stageId: stage.id });
+    if (!r.committed) break;
     lastEffects = r.effects;
     pending = r.effects.filter((e) => e.kind === "execute_stage");
     } catch (err) {
@@ -1158,7 +1692,8 @@ ${latestArtifact.content}`
       // nested-run lookup, an artifact read, a provider resolution) used to
       // leave `executing` set with nothing to clear it. Release it here —
       // only if this executor still holds it — and let the error propagate.
-      await releaseStageClaimIfHeld(db, instance.id, stage.id).catch(() => {});
+      await releaseStageClaimIfHeld(db, instance.id, stage.id, guard.claimId).catch(() => {});
+      await reevaluateIfReportsArrived().catch(() => {});
       throw err;
     }
   }
@@ -1189,26 +1724,426 @@ export function stageClaimState(
   stageId: string,
   now: number = Date.now(),
   ttlMs: number = stageClaimTtlMs(),
+  /** AER-048: the instance's current stage_entry. A claim taken under a
+   * different entry belongs to an executor whose result will be discarded,
+   * so it is never live (applyEvent also drops it on every entry bump). */
+  currentEntry?: number,
 ): { heldLive: boolean; expiredSince: string | null } {
   if (ctx.executing !== stageId) return { heldLive: false, expiredSince: null };
+  if (currentEntry !== undefined && typeof ctx.executingEntry === "number" && ctx.executingEntry !== currentEntry) {
+    return { heldLive: false, expiredSince: typeof ctx.executingSince === "string" ? ctx.executingSince : "unknown" };
+  }
   const since = typeof ctx.executingSince === "string" ? Date.parse(ctx.executingSince) : NaN;
   if (Number.isFinite(since) && now - since < ttlMs) return { heldLive: true, expiredSince: null };
   return { heldLive: false, expiredSince: typeof ctx.executingSince === "string" ? ctx.executingSince : "unknown" };
 }
 
+/** the context keys that make up a stage execution claim */
+const CLAIM_KEYS = ["executing", "executingSince", "executingEntry", "executingClaim"] as const;
+
 /** drop the claim from an in-memory context (the normal release path) */
 function releaseStageClaim(context: Record<string, unknown>): void {
-  delete context.executing;
-  delete context.executingSince;
+  for (const k of CLAIM_KEYS) delete context[k];
 }
 
-/** drop the claim from the STORED context, only if it still names `stageId` —
- * the error path, after an unexpected throw mid-stage */
-async function releaseStageClaimIfHeld(db: Db, instanceId: string, stageId: string): Promise<void> {
+/** drop the claim from the STORED context, only if it still names `stageId`
+ * (and, AER-048, is still THIS executor's claim) — the error path, after an
+ * unexpected throw mid-stage */
+async function releaseStageClaimIfHeld(db: Db, instanceId: string, stageId: string, claimId?: string): Promise<void> {
   await db
     .update(workflowInstances)
-    .set({ context: sql`${workflowInstances.context} - 'executing' - 'executingSince'` })
-    .where(and(eq(workflowInstances.id, instanceId), sql`${workflowInstances.context}->>'executing' = ${stageId}`));
+    .set({
+      context: sql`${workflowInstances.context} - 'executing' - 'executingSince' - 'executingEntry' - 'executingClaim'`,
+    })
+    .where(
+      and(
+        eq(workflowInstances.id, instanceId),
+        sql`${workflowInstances.context}->>'executing' = ${stageId}`,
+        ...(claimId ? [sql`${workflowInstances.context}->>'executingClaim' = ${claimId}`] : []),
+      ),
+    );
+}
+
+/** AER-048: thrown when another executor holds a LIVE claim on the stage — a
+ * WorkflowStateError (409 on /advance, as before), told apart so the check
+ * report route can rely on the holder folding the report in instead. */
+export class StageClaimHeldError extends WorkflowStateError {
+  constructor(stageId: string) {
+    super(`stage '${stageId}' is not currently executable for this instance (another executor holds it)`);
+  }
+}
+
+/**
+ * AER-048 — TEST-ONLY barrier. Production never sets it. A test parks a
+ * check executor inside `runStageEvalChecks` (the long, lock-free part of a
+ * check stage) to commit a report, a re-open or a second executor in the
+ * middle — deterministically, instead of racing a sleep.
+ */
+export const workflowTestHooks: {
+  duringStageEval?: (at: { instanceId: string; stageId: string }) => Promise<void>;
+  /** parks ANY executor after its work, just before its locked completion */
+  beforeStageCommit?: (at: { instanceId: string; stageId: string }) => Promise<void>;
+} = {};
+
+type AuditInsert = typeof auditLog.$inferInsert;
+
+/** what one executor iteration's claim was taken under */
+interface StageGuard {
+  instanceId: string;
+  stageId: string;
+  /** workflow_instances.stage_entry when the claim was taken */
+  entry: number;
+  /** workflow_instances.round when the claim was taken */
+  round: number;
+  /** context.executingClaim this executor wrote */
+  claimId: string;
+}
+
+type StageCommit = { committed: true; effects: Effect[] } | { committed: false; reason: string };
+
+/** AER-048 (review item 1): context keys that RECORD an external effect an
+ * executor performed — and that the executors read back to stay idempotent
+ * (a recorded deploy/branch/PR/merge/rollback/run is never performed again). */
+function isEffectRecordKey(k: string): boolean {
+  return (
+    ["branch", "prId", "prUrl", "mergeSha", "deployUrl"].includes(k) ||
+    k.startsWith("deploy:") ||
+    k.startsWith("rollback:") ||
+    k.startsWith("runId:")
+  );
+}
+
+/**
+ * AER-049 — EFFECT RECORDS BELONG TO THE ROUND THAT PRODUCED THEM.
+ *
+ * Owner decision (ADR-0168 afternoon amendment, item 1): "if something is
+ * changing then we need an additional review round". Every effect record an
+ * executor commits is STAMPED in `effects:stamps` with the round
+ * (workflow_instances.round) and the stage that produced it. A re-open that
+ * bumps the round (artifact resubmitted after its stage completed,
+ * approval_returned, the generic `reopen` — recertification) MOVES every live
+ * record of a stage that will run again into the append-only `effects:history`
+ * list, so the new round's merge/deploy run again against a FRESH branch / PR /
+ * deployment and never count an earlier round's as "already done". Records of
+ * stages BEFORE the re-open point (which do not run again) stay live, keeping
+ * their original stamp. Within one round the AER-048 salvage/idempotency
+ * holds: a discarded executor's records are kept live, so nothing is performed
+ * twice in the same round; a record salvaged from an executor of an EARLIER
+ * round goes straight to history.
+ */
+export const EFFECT_STAMPS_KEY = "effects:stamps";
+/** AER-049 review: archived together whenever any git stage runs again */
+const GIT_CHAIN_KEYS = ["branch", "prId", "prUrl", "mergeSha"] as const;
+export const EFFECT_HISTORY_KEY = "effects:history";
+
+/** AER-049 review: a merge stage found no pull request opened in its round */
+export class StalePullRequestMergeError extends Error {
+  constructor(round: number, prId: string | null, prRound: number | null) {
+    super(
+      prId === null
+        ? `merge refused: round ${round} has opened no pull request to merge`
+        : `merge refused: pull request ${prId} was opened in round ${prRound}, not this round (${round}) — an earlier round's PR is never merged again`,
+    );
+    this.name = "StalePullRequestMergeError";
+  }
+}
+
+/** one live record's stamp */
+export interface EffectStamp {
+  round: number;
+  stageId: string;
+}
+
+/** one append-only history entry: the records of ONE round that were archived */
+export interface EffectHistoryEntry {
+  round: number;
+  keys: string[];
+  values: Record<string, unknown>;
+  at: string;
+  /** why they left the live context */
+  source: "reopen" | "discarded-executor";
+  /** the round that replaced them */
+  archivedInRound: number;
+}
+
+function effectStamps(ctx: Record<string, unknown>): Record<string, EffectStamp> {
+  const v = ctx[EFFECT_STAMPS_KEY];
+  return v && typeof v === "object" && !Array.isArray(v) ? { ...(v as Record<string, EffectStamp>) } : {};
+}
+
+function effectHistory(ctx: Record<string, unknown>): EffectHistoryEntry[] {
+  const v = ctx[EFFECT_HISTORY_KEY];
+  return Array.isArray(v) ? [...(v as EffectHistoryEntry[])] : [];
+}
+
+/** the stage that produced an effect record: its stamp, else (a record written
+ * before stamps existed) the stage the key names or the git/deploy stage that
+ * writes it; null when nothing says (archived conservatively) */
+function effectRecordStageIndex(def: WorkflowDefinition, key: string, stamp: EffectStamp | undefined): number | null {
+  const byId = (id: string) => {
+    const i = def.stages.findIndex((st) => st.id === id);
+    return i >= 0 ? i : null;
+  };
+  if (stamp) return byId(stamp.stageId);
+  const colon = key.indexOf(":");
+  if (colon > 0) return byId(key.slice(colon + 1));
+  const gitAction = key === "branch" ? "create_branch" : key === "prId" || key === "prUrl" ? "open_pr" : key === "mergeSha" ? "merge" : null;
+  const i = def.stages.findIndex((st) =>
+    gitAction ? st.type === "git_operation" && st.action === gitAction : key === "deployUrl" && st.type === "deployment",
+  );
+  return i >= 0 ? i : null;
+}
+
+/**
+ * AER-049: archive (in place, on `ctx`) every live effect record of a stage at
+ * or after `fromIndex` — the stages a re-open runs again. Grouped by the round
+ * each record was produced in (an unstamped record belongs to `closingRound`).
+ * Returns what moved, for the `workflow:effects-archived` audit row.
+ */
+function archiveEffectRecords(
+  def: WorkflowDefinition,
+  ctx: Record<string, unknown>,
+  fromIndex: number,
+  closingRound: number,
+  newRound: number,
+  at: string,
+): EffectHistoryEntry[] {
+  const stamps = effectStamps(ctx);
+  const byRound = new Map<number, Record<string, unknown>>();
+  // AER-049 review: the git chain (branch → PR → merge) is ONE unit. If any
+  // git stage runs again, all four records go together — a live round-n
+  // branch or PR beside a round-n+1 merge would merge what an earlier round
+  // already shipped (the round's open_pr cuts its own branch when needed).
+  const gitChainReruns = def.stages.some((st, i) => i >= fromIndex && st.type === "git_operation");
+  for (const k of Object.keys(ctx)) {
+    if (!isEffectRecordKey(k)) continue;
+    const idx = effectRecordStageIndex(def, k, stamps[k]);
+    const chained = gitChainReruns && (GIT_CHAIN_KEYS as readonly string[]).includes(k);
+    if (!chained && idx !== null && idx < fromIndex) continue; // upstream: not re-run, stays live
+    const round = stamps[k]?.round ?? closingRound;
+    const values = byRound.get(round) ?? {};
+    values[k] = ctx[k];
+    byRound.set(round, values);
+    delete ctx[k];
+    delete stamps[k];
+  }
+  if (byRound.size === 0) return [];
+  const entries: EffectHistoryEntry[] = [...byRound.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([round, values]) => ({ round, keys: Object.keys(values), values, at, source: "reopen", archivedInRound: newRound }));
+  ctx[EFFECT_HISTORY_KEY] = [...effectHistory(ctx), ...entries];
+  if (Object.keys(stamps).length > 0) ctx[EFFECT_STAMPS_KEY] = stamps;
+  else delete ctx[EFFECT_STAMPS_KEY];
+  return entries;
+}
+
+/** the effect-record keys an executor set, with their values (for the audit) */
+function effectRecordsOf(snapshot: Record<string, unknown>, context: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(
+    ownedKeyChanges(snapshot, context)
+      .filter((k) => isEffectRecordKey(k) && k in context)
+      .map((k) => [k, context[k]]),
+  );
+}
+
+/** AER-048: the context keys an executor changed relative to its claim-time
+ * snapshot (set, changed or deleted) — the only keys it owns. The claim keys
+ * themselves are released separately. */
+function ownedKeyChanges(snapshot: Record<string, unknown>, context: Record<string, unknown>): string[] {
+  const keys = new Set([...Object.keys(snapshot), ...Object.keys(context)]);
+  return [...keys].filter(
+    (k) =>
+      !(CLAIM_KEYS as readonly string[]).includes(k) &&
+      (k in snapshot !== k in context || JSON.stringify(snapshot[k]) !== JSON.stringify(context[k])),
+  );
+}
+
+/** AER-048: why a stored row no longer accepts this executor's result, or null */
+function staleExecutorReason(row: InstanceRow, g: StageGuard): string | null {
+  if (row.stageEntry !== g.entry) {
+    return `the instance left the stage entry this executor started in (stage_entry ${g.entry} → ${row.stageEntry}: re-opened or re-entered meanwhile)`;
+  }
+  if (row.status !== "awaiting_execution") {
+    return `the instance is no longer awaiting execution (status '${row.status}')`;
+  }
+  const current = (row.definition as WorkflowDefinition).stages[(row.state as InstanceState).currentStageIndex];
+  if (current?.id !== g.stageId) return `stage '${g.stageId}' is no longer the current stage`;
+  const ctx = row.context as Record<string, unknown>;
+  if (ctx.executing !== g.stageId || ctx.executingClaim !== g.claimId) {
+    return "this executor no longer holds the stage claim (it lapsed and was re-taken)";
+  }
+  return null;
+}
+
+/**
+ * AER-048 — THE EXECUTOR'S COMPLETION. Re-reads the instance FOR UPDATE and
+ * commits only if the stage entry, the current stage and this executor's
+ * claim are all still what they were when the claim was taken. `decide`
+ * writes ONLY the executor's own keys into the row's context as it is now
+ * (so a report or re-open that committed meanwhile is never overwritten) and
+ * names the kernel event to apply, which applies in the SAME transaction —
+ * nothing can slip between the context merge and the state change. On a
+ * mismatch nothing is written: the result is discarded, the discard is
+ * audited (`workflow:executor-result-discarded`), and the claim is released
+ * if it is still this executor's.
+ */
+async function commitStageResult(
+  db: Db,
+  guard: StageGuard,
+  actorUserId: string | null,
+  decide: (
+    fresh: Record<string, unknown>,
+    row: InstanceRow,
+  ) => {
+    event: WorkflowEvent | null;
+    deployMode?: "hosted" | "byoc" | "air_gapped" | null;
+    audits?: AuditInsert[];
+  },
+  discardDetail: Record<string, unknown>,
+  /** the executor's claim-time snapshot and its working context — from which
+   * a DISCARD still salvages the external-effect records (review item 1) */
+  local?: { snapshot: Record<string, unknown>; context: Record<string, unknown> },
+): Promise<StageCommit> {
+  if (workflowTestHooks.beforeStageCommit) {
+    await workflowTestHooks.beforeStageCommit({ instanceId: guard.instanceId, stageId: guard.stageId });
+  }
+  const out = await db.transaction(async (tx): Promise<StageCommit & { span?: DeferredSpan }> => {
+    const [row] = await tx
+      .select()
+      .from(workflowInstances)
+      .where(eq(workflowInstances.id, guard.instanceId))
+      .for("update");
+    if (!row) return { committed: false, reason: "the instance no longer exists" };
+    const fresh = { ...(row.context as Record<string, unknown>) };
+    const stale = staleExecutorReason(row, guard);
+    if (stale) {
+      // DISCARD — the verdict and the transition are dropped, but an external
+      // effect this executor already PERFORMED (a deploy, a branch, a PR, a
+      // merge, a rollback, a planned run) is a fact, and its record is what
+      // makes the next entry idempotent and the effect traceable/reversible.
+      // It is merged when the row does not already say something else about
+      // it (absent, or unchanged since the claim); a run planned in a round
+      // that has since been re-opened is never carried into the new round.
+      //
+      // AER-049: that holds WITHIN the round the executor started in. If the
+      // instance has since been re-opened into a new round, the effect belongs
+      // to the round that is over: it goes straight to `effects:history`
+      // (never into the live context, where it would make the new round skip
+      // its own merge/deploy), and the archive is audited like a re-open's.
+      const salvaged: Record<string, unknown> = {};
+      const archived: Record<string, unknown> = {};
+      const crossRound = row.round !== guard.round;
+      if (local) {
+        const stamps = effectStamps(fresh);
+        for (const k of ownedKeyChanges(local.snapshot, local.context)) {
+          if (!isEffectRecordKey(k) || !(k in local.context)) continue;
+          if (crossRound) {
+            archived[k] = local.context[k];
+            continue;
+          }
+          const untouched = !(k in fresh) || JSON.stringify(fresh[k]) === JSON.stringify(local.snapshot[k]);
+          if (!untouched) continue;
+          fresh[k] = local.context[k];
+          stamps[k] = { round: guard.round, stageId: guard.stageId };
+          salvaged[k] = local.context[k];
+        }
+        if (Object.keys(salvaged).length > 0) fresh[EFFECT_STAMPS_KEY] = stamps;
+        if (Object.keys(archived).length > 0) {
+          const entry: EffectHistoryEntry = {
+            round: guard.round,
+            keys: Object.keys(archived),
+            values: archived,
+            at: new Date().toISOString(),
+            source: "discarded-executor",
+            archivedInRound: row.round,
+          };
+          fresh[EFFECT_HISTORY_KEY] = [...effectHistory(fresh), entry];
+        }
+      }
+      const ours = fresh.executing === guard.stageId && fresh.executingClaim === guard.claimId;
+      if (ours) releaseStageClaim(fresh);
+      if (ours || Object.keys(salvaged).length > 0 || Object.keys(archived).length > 0) {
+        await tx.update(workflowInstances).set({ context: fresh }).where(eq(workflowInstances.id, row.id));
+      }
+      if (Object.keys(archived).length > 0) {
+        await tx.insert(auditLog).values({
+          userId: actorUserId ?? "00000000-0000-0000-0000-000000000000",
+          objectType: "workflow",
+          objectId: guard.instanceId,
+          detail: {
+            event: "executor-result-discarded",
+            stageId: guard.stageId,
+            closedRound: guard.round,
+            round: row.round,
+            archived: [{ round: guard.round, keys: Object.keys(archived), values: archived }],
+          },
+          effect: "allow",
+          ruleId: "workflow:effects-archived",
+          ruleChain: [],
+          reason:
+            `stage '${guard.stageId}' executor of round ${guard.round} finished after the re-open into round ${row.round}: ` +
+            `its effect record(s) (${Object.keys(archived).join(", ")}) went to effects:history, not the live context — the new round merges/deploys afresh`,
+        });
+      }
+      await tx.insert(auditLog).values({
+        userId: actorUserId ?? "00000000-0000-0000-0000-000000000000",
+        objectType: "workflow",
+        objectId: guard.instanceId,
+        detail: {
+          stageId: guard.stageId,
+          claimedEntry: guard.entry,
+          currentEntry: row.stageEntry,
+          claimedRound: guard.round,
+          currentRound: row.round,
+          currentStatus: row.status,
+          ...discardDetail,
+          // the VALUES of every external-effect record this executor holds,
+          // salvaged into the row or not — the effect is traceable from here
+          ...(local ? { effectRecords: effectRecordsOf(local.snapshot, local.context) } : {}),
+          salvagedEffectRecords: Object.keys(salvaged),
+          archivedEffectRecords: Object.keys(archived),
+        },
+        effect: "deny",
+        ruleId: "workflow:executor-result-discarded",
+        ruleChain: [],
+        reason:
+          `stage '${guard.stageId}' executor result discarded: ${stale} — no verdict was written and no transition was applied` +
+          (Object.keys(salvaged).length > 0
+            ? `; the record of the external effect(s) it performed was kept (${Object.keys(salvaged).join(", ")})`
+            : "") +
+          (Object.keys(archived).length > 0
+            ? `; the record of the external effect(s) it performed in round ${guard.round} went to effects:history (${Object.keys(archived).join(", ")})`
+            : ""),
+      });
+      return { committed: false, reason: stale };
+    }
+    const decision = decide(fresh, row);
+    // AER-049: stamp every effect record this executor committed with the
+    // round (and stage) that produced it — the claim's round is the row's
+    // round here, since a re-open would have moved the stage entry on
+    if (local) {
+      const stamps = effectStamps(fresh);
+      let stamped = false;
+      for (const k of ownedKeyChanges(local.snapshot, local.context)) {
+        if (!isEffectRecordKey(k)) continue;
+        if (k in fresh) stamps[k] = { round: row.round, stageId: guard.stageId };
+        else delete stamps[k];
+        stamped = true;
+      }
+      if (stamped) fresh[EFFECT_STAMPS_KEY] = stamps;
+    }
+    releaseStageClaim(fresh);
+    await tx.update(workflowInstances).set({ context: fresh }).where(eq(workflowInstances.id, row.id));
+    for (const a of decision.audits ?? []) await tx.insert(auditLog).values(a);
+    if (!decision.event) return { committed: true, effects: [] };
+    const r = await applyEvent(tx, row.id, decision.event, actorUserId, undefined, decision.deployMode ?? null, {
+      deferSpan: true,
+    });
+    return { committed: true, effects: r.effects, ...(r.deferredSpan ? { span: r.deferredSpan } : {}) };
+  });
+  // review item 6: the span is written only once the result is durable
+  if (out.committed) await recordDeferredSpan(db, out.span);
+  return out.committed ? { committed: true, effects: out.effects } : { committed: false, reason: out.reason };
 }
 
 /**
@@ -1724,6 +2659,8 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     if (!stage) return reply.status(404).send({ error: "unknown_artifact_stage" });
 
     if (!req.authCtx.userId) return reply.status(403).send({ error: "bootstrap_cannot_drive" });
+    const refusal = opts.validateArtifact?.(stage.output!, body.content);
+    if (refusal) return reply.status(refusal.status).send(refusal.body);
     const { state, effects } = await applyEvent(
       db,
       instance.id,
@@ -1826,6 +2763,29 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     const accepted = body.results.filter((r) => declared.has(r.check));
     if (accepted.length === 0) return reply.status(422).send({ error: "no_declared_checks_reported" });
 
+    // AER-048 — ROUND BINDING FAILS CLOSED. A machine reporter (API key,
+    // virtual key, bootstrap token: what a CI uses) must say which round its
+    // results were produced for; one that does not is refused, so a result
+    // computed against a since-replaced artifact can never land in the new
+    // round by omission. Exempt: a person in the console (session auth) — they
+    // act on the instance as it is on their screen, and the console sends the
+    // round anyway — and an org that explicitly opts out
+    // (`checkReportsAllowUnbound`, default off), where an unbound report binds
+    // to the round current when it is applied (the pre-AER-048 behaviour).
+    if (body.round === undefined && req.authCtx.via !== "session") {
+      const org = await loadOrgSettings(db);
+      if (!org.checkReportsAllowUnbound) {
+        return reply.status(422).send({
+          error: "round_required",
+          detail:
+            `a check report must name the workflow round it was produced for (body.round) — this instance is in round ${loaded.instance.round}. ` +
+            "Read it at run start from GET /v1/workflows/instances/:id (instance.round) or the `regulait-round:` line of the PR body; " +
+            "an admin can allow unbound reports with the org setting checkReportsAllowUnbound",
+          currentRound: loaded.instance.round,
+        });
+      }
+    }
+
     // ADR-0167 (AUTHZ-06) — PROVENANCE, and the separation-of-duties rule the
     // deploy-override below already applies. This route admits the INITIATOR
     // (loadInstanceFor), so the person a check stage exists to gate could
@@ -1849,14 +2809,38 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     }
 
     // locked read-modify-write of context[reported:<stageId>] so a concurrent
-    // executor claim serializes with the report instead of racing it
-    await db.transaction(async (tx) => {
+    // executor claim serializes with the report instead of racing it.
+    // AER-048: the report binds to the instance's ROUND, decided under the same
+    // lock a re-open takes — a report naming a round that is no longer current
+    // was produced for a previous artifact and is refused (and audited) rather
+    // than stored into the new round. A report with no `round` is taken for the
+    // round current at this point (backward compatible: an existing CI
+    // integration that never sends one keeps working, for the current round).
+    const stale = await db.transaction(async (tx) => {
       const [row] = await tx
         .select()
         .from(workflowInstances)
         .where(eq(workflowInstances.id, instanceId))
         .for("update");
       if (!row) throw new WorkflowStateError("instance disappeared");
+      if (body.round !== undefined && body.round !== row.round) {
+        await tx.insert(auditLog).values({
+          userId: req.authCtx.userId!,
+          objectType: "workflow",
+          objectId: row.id,
+          detail: {
+            stageId: body.stageId,
+            reportedRound: body.round,
+            currentRound: row.round,
+            results: accepted.map((r) => ({ check: r.check, status: r.status })),
+          },
+          effect: "deny",
+          ruleId: "workflow:checks-report-stale-round",
+          ruleChain: [],
+          reason: `check report for stage '${body.stageId}' names round ${body.round}, but the workflow is in round ${row.round} (re-opened since) — refused, nothing stored`,
+        });
+        return { currentRound: row.round };
+      }
       const ctx = { ...(row.context as Record<string, unknown>) };
       const merged = new Map(
         normalizeCheckReports(ctx[`reported:${body.stageId}`]).map((r) => [r.check, r]),
@@ -1870,11 +2854,21 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
           reportedByUserId: req.authCtx.userId,
           selfReported,
           reason: reason || null,
+          round: row.round,
         });
       }
       ctx[`reported:${body.stageId}`] = [...merged.values()];
       await tx.update(workflowInstances).set({ context: ctx }).where(eq(workflowInstances.id, row.id));
+      return null;
     });
+    if (stale) {
+      return reply.status(409).send({
+        error: "stale_check_report",
+        detail: `these results were reported for round ${body.round}, but the workflow has been re-opened and is in round ${stale.currentRound}; results for a previous round are refused — re-run the checks against the current artifact and report them for round ${stale.currentRound}`,
+        reportedRound: body.round,
+        currentRound: stale.currentRound,
+      });
+    }
     if (selfReported) {
       const summary = accepted.map((r) => `${r.check}=${r.status}`).join(", ");
       await db.insert(auditLog).values({
@@ -1904,20 +2898,40 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     const cur = (afterWrite!.definition as WorkflowDefinition).stages[
       (afterWrite!.state as InstanceState).currentStageIndex
     ];
+    // AER-048: the response says what happened to the report, so a caller can
+    // tell "it was evaluated" from "it is waiting for someone else to"
+    let evaluation: "evaluated" | "stored_for_later" | "deferred_to_running_executor" = "stored_for_later";
     if (afterWrite!.status === "awaiting_execution" && cur?.id === body.stageId) {
-      await runGitExecutions(
-        db,
-        instanceId,
-        [{ kind: "execute_stage", stageId: body.stageId }],
-        req.authCtx.userId,
-        opts.dataKey,
-      );
+      try {
+        await runGitExecutions(
+          db,
+          instanceId,
+          [{ kind: "execute_stage", stageId: body.stageId }],
+          req.authCtx.userId,
+          opts.dataKey,
+        );
+        evaluation = "evaluated";
+      } catch (err) {
+        // AER-048: another executor is mid-evaluation of this very stage. The
+        // report is committed; that executor decides its verdict from the
+        // reports stored at ITS commit (under the row lock), and if it ends
+        // without committing it re-evaluates once because this report arrived
+        // during its claim. 202: accepted, not yet evaluated.
+        if (!(err instanceof StageClaimHeldError)) throw err;
+        evaluation = "deferred_to_running_executor";
+      }
     }
     const [fresh] = await db
       .select()
       .from(workflowInstances)
       .where(eq(workflowInstances.id, instanceId));
-    return { status: fresh!.status, state: fresh!.state, context: fresh!.context };
+    return reply.status(evaluation === "deferred_to_running_executor" ? 202 : 200).send({
+      status: fresh!.status,
+      state: fresh!.state,
+      context: fresh!.context,
+      round: fresh!.round,
+      evaluation,
+    });
   });
 
   // §2 re-run a check stage parked at blocked_on_check, after the failing checks

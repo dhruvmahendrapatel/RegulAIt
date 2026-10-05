@@ -29,6 +29,7 @@ import {
   ne,
   or,
   governanceAlerts,
+  useCaseConditions,
   type Db,
 } from "@regulait/db";
 import { evaluateDeployGate, evaluateMrmGate, type DeployGateAgentInput } from "@regulait/shared";
@@ -40,7 +41,12 @@ export const DEPLOY_GATE_RULE_IDS = { allowed: "deploy-gate-allowed", denied: "d
 const body = z
   .object({
     useCaseId: z.string().uuid(),
-    /** the agents this release ships; omit for the whole approved stack */
+    /**
+     * the agents this release ships. AER-044: a selection never narrows what
+     * the gate checks — the whole approved stack is always evaluated, so an
+     * omitted list, `[]` and a subset all check every intended agent (a halt or
+     * MRM refusal on any of them blocks); an agent outside the stack blocks.
+     */
     agentIds: z.array(z.string().uuid()).max(50).optional(),
     /** free text from the pipeline, e.g. "staging", "eu-west" — recorded, never interpreted */
     environment: z.string().trim().min(1).max(64).optional(),
@@ -63,7 +69,9 @@ export function registerDeployGateRoutes(app: FastifyInstance, db: Db): void {
     }
     const now = new Date();
     const intended = (uc.intendedAgentIds ?? []) as string[];
-    const checkIds = [...new Set([...(b.agentIds ?? intended)])];
+    // AER-044: the approved stack plus any requested extras (the same union the
+    // evaluator checks) — `[]` and a subset cannot drop an intended agent.
+    const checkIds = [...new Set([...intended, ...(b.agentIds ?? [])])];
 
     const agentRows = checkIds.length
       ? await db.select().from(agents).where(inArray(agents.id, checkIds))
@@ -130,11 +138,32 @@ export function registerDeployGateRoutes(app: FastifyInstance, db: Db): void {
       return parts.length === 1 && agentKeys.has(parts[0]!);
     });
 
+    // ADR-0168 — open BEFORE-go-live conditions the approval imposed
+    const blockingConditions = await db
+      .select({ id: useCaseConditions.id, text: useCaseConditions.text })
+      .from(useCaseConditions)
+      .where(
+        and(
+          eq(useCaseConditions.useCaseId, uc.id),
+          eq(useCaseConditions.status, "open"),
+          eq(useCaseConditions.blocking, true),
+        ),
+      )
+      .orderBy(useCaseConditions.dueAt, useCaseConditions.id);
+
     const result = evaluateDeployGate({
-      useCase: { id: uc.id, name: uc.name, status: uc.status, intendedAgentIds: intended },
+      useCase: {
+        id: uc.id,
+        name: uc.name,
+        status: uc.status,
+        intendedAgentIds: intended,
+        approvedUntil: uc.approvedUntil,
+      },
       requestedAgentIds: b.agentIds ?? null,
       agents: agentMap,
       alerts,
+      openBlockingConditions: blockingConditions,
+      now,
     });
 
     await db.insert(auditLog).values({
@@ -146,7 +175,11 @@ export function registerDeployGateRoutes(app: FastifyInstance, db: Db): void {
         environment: b.environment ?? null,
         ref: b.ref ?? null,
         agents: result.agentsChecked,
+        requestedAgents: b.agentIds ?? null,
         reasons: result.reasons.map((r) => ({ code: r.code, severity: r.severity, ref: r.ref ?? null })),
+        // ADR-0168: which conditions held the gate, and the lifetime it read
+        ...(blockingConditions.length > 0 ? { openBlockingConditionIds: blockingConditions.map((c) => c.id) } : {}),
+        approvedUntil: uc.approvedUntil ? uc.approvedUntil.toISOString() : null,
       },
       effect: result.decision === "allow" ? "allow" : "deny",
       ruleId: result.decision === "allow" ? DEPLOY_GATE_RULE_IDS.allowed : DEPLOY_GATE_RULE_IDS.denied,
@@ -160,8 +193,15 @@ export function registerDeployGateRoutes(app: FastifyInstance, db: Db): void {
 
     return {
       decision: result.decision,
-      useCase: { id: uc.id, name: uc.name, status: uc.status, euAiActTier: uc.euAiActTier },
+      useCase: {
+        id: uc.id,
+        name: uc.name,
+        status: uc.status,
+        euAiActTier: uc.euAiActTier,
+        approvedUntil: uc.approvedUntil ? uc.approvedUntil.toISOString() : null,
+      },
       agentsChecked: result.agentsChecked,
+      agentsRequested: b.agentIds ?? null,
       reasons: result.reasons,
       environment: b.environment ?? null,
       ref: b.ref ?? null,

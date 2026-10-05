@@ -1,0 +1,280 @@
+/* ADR-0172 — the model portal. ADR-0169 tokens; glass cards come from kit. */
+.layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+  gap: var(--s3);
+  align-items: start;
+}
+@media (max-width: 1100px) {
+  .layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.pickCard,
+.tryCard {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  min-width: 0;
+}
+.tryCard {
+  position: sticky;
+  top: var(--s2);
+}
+@media (max-width: 1100px) {
+  .tryCard {
+    position: static;
+  }
+}
+
+.sectionTitle {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 650;
+  color: var(--text);
+  text-align: left;
+}
+
+/* ---- provider chips ------------------------------------------------------ */
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: var(--rg-r-pill, 999px);
+  border: 1px solid var(--border);
+  background: var(--surface-1);
+  color: var(--text-dim);
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  cursor: pointer;
+}
+.chip:hover {
+  border-color: var(--border-strong);
+}
+.chip[aria-pressed="true"] {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+  color: var(--primary-soft-text);
+}
+.chip:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.chipLogo {
+  display: inline-flex;
+}
+.chipCount {
+  font-weight: 500;
+  color: inherit;
+  opacity: 0.85;
+}
+
+/* ---- tile grid ----------------------------------------------------------- */
+.grid {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(13.5rem, 1fr));
+  gap: var(--s1);
+}
+.tile {
+  display: block;
+  width: 100%;
+  height: 100%;
+  padding: 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: var(--surface-1);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--rg-dur-fast, 120ms) ease, box-shadow var(--rg-dur-fast, 120ms) ease,
+    transform var(--rg-dur-fast, 120ms) ease;
+}
+.tile:hover {
+  border-color: var(--border-strong);
+  box-shadow: var(--rg-shadow-sm, none);
+}
+.tile:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.tile[aria-pressed="true"] {
+  border-color: var(--primary);
+  box-shadow: inset 0 0 0 1px var(--primary);
+  background: var(--surface-2);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .tile:active {
+    transform: translateY(1px);
+  }
+}
+
+/* ADR-0173 §3 — the org's model policy forbids this binding in Chat */
+.tileNote {
+  display: block;
+  margin-top: 6px;
+  font-size: var(--text-xs);
+  color: var(--warn-soft-text);
+}
+.allowedIn {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--text-sm);
+  color: var(--text-dim);
+}
+
+/* ---- try it -------------------------------------------------------------- */
+.selected {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.selectedText {
+  flex: 1;
+  min-width: 0;
+}
+.selectedName {
+  font-size: var(--text-lg);
+  font-weight: 650;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.selectedMeta {
+  font-size: var(--text-sm);
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+.readiness {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text-dim);
+}
+/* in running text a link is underlined, not told apart by colour alone */
+.inlineLink {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  font-weight: 600;
+}
+.fieldBlock {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s0);
+}
+.label {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-dim);
+}
+.codeHead {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--s1);
+  flex-wrap: wrap;
+}
+.grow {
+  flex: 1;
+}
+.codePanel {
+  max-height: 20rem;
+  overflow: auto;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: var(--rg-code-bg, var(--surface-2));
+}
+.codePanel:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.code {
+  margin: 0;
+  padding: var(--s1) var(--s2);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+  color: var(--rg-code-ink, var(--text));
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.hint,
+.hintInline {
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--text-faint);
+}
+.mono {
+  font-family: var(--font-mono);
+}
+.runRow {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  flex-wrap: wrap;
+}
+
+.resultWrap:empty {
+  display: none;
+}
+.result {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+  padding: 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: var(--surface-1);
+}
+.resultRefused {
+  border-color: var(--danger);
+}
+.resultHead {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  flex-wrap: wrap;
+  font-size: var(--text-sm);
+}
+.stat {
+  font-size: var(--text-xs);
+  color: var(--text-dim);
+}
+.resultText {
+  margin: 0;
+  white-space: pre-wrap;
+  font-size: var(--text-md);
+  color: var(--text);
+}
+.facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 2px var(--s2);
+  margin: 0;
+  font-size: var(--text-xs);
+}
+.facts dt {
+  color: var(--text-faint);
+  font-weight: 600;
+}
+.facts dd {
+  margin: 0;
+  color: var(--text-dim);
+}

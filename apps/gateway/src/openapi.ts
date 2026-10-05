@@ -56,6 +56,7 @@ import {
   evaluateRequestSchema,
   invokeAgentSchema,
   invokeConnectorSchema,
+  reportChecksSchema,
 } from "@regulait/shared";
 import { routeAuthClass, type RouteAuthClass } from "./route-classes.js";
 import { COMPAT_SURFACES, ROUTE_STABILITY, ROUTE_TAGS, type Stability } from "./openapi-registry.js";
@@ -221,7 +222,18 @@ export const ROUTE_DOCS: Readonly<Record<string, RouteDoc>> = {
 
   "GET /v1/workflows/instances": { summary: "Workflow instances." },
   "POST /v1/workflows/instances": { summary: "Start a workflow instance from a template." },
-  "GET /v1/workflows/instances/:instanceId": { summary: "One workflow instance with its stage history." },
+  "GET /v1/workflows/instances/:instanceId": {
+    summary: "One workflow instance with its stage history.",
+    responseNote:
+      "`instance.round` is the workflow round (bumped by every re-open — artifact resubmitted, sign-off returned); a CI binds its check report to it. `instance.stageEntry` moves on every entry into an executable stage (AER-048).",
+  },
+  "POST /v1/workflows/instances/:instanceId/checks": {
+    summary:
+      "Report per-check results into an automated_check stage. AER-048: `round` binds the results to the workflow round they were produced for — a report for any other round is refused 409 `stale_check_report` (audited). A key-authenticated caller (CI) MUST send it (422 `round_required`) unless the org setting `checkReportsAllowUnbound` is on; a console session may omit it, binding to the current round.",
+    body: reportChecksSchema,
+    responseNote:
+      "200 with `evaluation: \"evaluated\"` (the stage re-evaluated on this report) or `\"stored_for_later\"` (the stage is not executing yet); 202 with `evaluation: \"deferred_to_running_executor\"` when another executor is mid-evaluation of the stage — it folds this report into its verdict, or re-evaluates once if it ends without committing. Always carries `round`.",
+  },
   "POST /v1/workflows/instances/:instanceId/advance": { summary: "Advance a workflow instance past its current stage, subject to that stage's gates." },
 
   "GET /v1/audit": { summary: "The audit log — every governed decision, paged, filterable by user, object type, effect and time window." },

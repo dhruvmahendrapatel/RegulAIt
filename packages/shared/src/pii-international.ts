@@ -240,7 +240,9 @@ function tfnValid(d: string): boolean {
  * BZSt uniqueness rule on the first ten — exactly one digit value repeats,
  * either twice or three times consecutively, every other value appearing once.
  * That rule is what separates an IdNr from an arbitrary 11-digit run, and it
- * is why this detector is safe to leave on by default. */
+ * is why this detector measures 0.23% where a lone check digit buys ~9%. It
+ * is still OFF by default, like every category in this module — see
+ * `DEFAULT_INTERNATIONAL_CATEGORIES`. */
 function steuerIdValid(d: string): boolean {
   if (d.length !== 11) return false;
   if (at(d, 0) === 0) return false;
@@ -328,24 +330,49 @@ const NINO_INVALID_PREFIXES = new Set(["BG", "GB", "NK", "KN", "TN", "NT", "ZZ"]
 // ---------------------------------------------------------------------------
 
 /**
+ * A scheme's published print grouping, spelled out: each digit is a group of
+ * that many digits, and every other character is the literal separator that
+ * must stand between two groups — `"4 4 4"` is Aadhaar's 4-4-4 spacing,
+ * `"3.3.3-2"` is CPF's 000.000.000-00. Where a separator may fall is never
+ * left to a character class.
+ */
+type DigitLayout = string;
+
+/**
  * Count validated matches of a DIGIT-RUN scheme of exactly `len` digits.
  *
- * `sepClass` lets a scheme accept its own published print grouping (Aadhaar's
- * 4-4-4 spaces, CPF's 000.000.000-00) without opening the detector up to any
- * arbitrary punctuation. The run is anchored so that a longer digit sequence
- * can never yield a shorter "match" out of its middle — a 16-digit card must
- * not read as a 12-digit Aadhaar.
+ * The bare `len`-digit run is always a candidate, and so is each of the
+ * scheme's `layouts` — ONLY those. An earlier draft took a separator
+ * CHARACTER CLASS and let one optional separator follow EVERY digit, so
+ * `2-3-4-5-6-7-8-9-0-1-2-4` read as an Aadhaar: twelve digits and eleven
+ * hyphens, a print form no issuing authority has ever used, and exactly the
+ * shape a structured reference, a serial or a dotted version string carries.
+ * The grammar is now the issuing authority's own grouping and nothing wider;
+ * `pii-vectors.ts` holds an every-digit negative per layout. The run is
+ * anchored so that a longer digit sequence can never yield a shorter "match"
+ * out of its middle — a 16-digit card must not read as a 12-digit Aadhaar.
  */
 function countDigitScheme(
   text: string,
   len: number,
-  sepClass: string,
+  layouts: readonly DigitLayout[],
   validate: (digits: string) => boolean,
   onMatch?: PiiMatchVisitor,
 ): number {
-  const sep = sepClass ? `[${sepClass}]?` : "";
-  const re = new RegExp(`(?<![0-9])(?:[0-9]${sep}){${len - 1}}[0-9](?![0-9])`, "g");
-  const sepSet = new Set(sepClass.split(""));
+  const alternatives = [`[0-9]{${len}}`];
+  const sepSet = new Set<string>();
+  for (const layout of layouts) {
+    let pattern = "";
+    for (const ch of layout) {
+      if (ch >= "1" && ch <= "9") pattern += `[0-9]{${ch}}`;
+      else {
+        pattern += ch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        sepSet.add(ch);
+      }
+    }
+    alternatives.push(pattern);
+  }
+  const re = new RegExp(`(?<![0-9])(?:${alternatives.join("|")})(?![0-9])`, "g");
   const isDigit = (c: string | undefined) => c !== undefined && c >= "0" && c <= "9";
   let n = 0;
   let m: RegExpExecArray | null;
@@ -370,26 +397,38 @@ function countDigitScheme(
   return n;
 }
 
+// Each scheme's layouts are the groupings its issuing authority prints and
+// nothing else; the bare run is implicit. One positive vector per layout and
+// one every-digit negative per layout pin them in `pii-vectors.ts`.
 function countAadhaar(text: string, onMatch?: PiiMatchVisitor): number {
-  return countDigitScheme(text, 12, " -", aadhaarValid, onMatch);
+  // UIDAI prints 4-4-4 with spaces; hyphens are the common informal copy.
+  return countDigitScheme(text, 12, ["4 4 4", "4-4-4"], aadhaarValid, onMatch);
 }
 function countCpf(text: string, onMatch?: PiiMatchVisitor): number {
-  return countDigitScheme(text, 11, ".-", cpfValid, onMatch);
+  // 000.000.000-00 — dots then a hyphen before the two check digits — and
+  // 000000000-00, the same hyphen with the dots left out, which is how a CPF
+  // is commonly keyed into forms and systems that strip punctuation.
+  return countDigitScheme(text, 11, ["3.3.3-2", "9-2"], cpfValid, onMatch);
 }
 function countBsn(text: string, onMatch?: PiiMatchVisitor): number {
-  return countDigitScheme(text, 9, ".", bsnValid, onMatch);
+  // 111.222.333, and 1234.56.789 — the 4.2.3 dotted form the Belastingdienst
+  // prints as a fiscal number, including at the head of its letter reference
+  // ("Ons kenmerk 1234.56.789.T.XX.jj.nnn" in the SBR taxonomy).
+  return countDigitScheme(text, 9, ["3.3.3", "4.2.3"], bsnValid, onMatch);
 }
 function countSin(text: string, onMatch?: PiiMatchVisitor): number {
-  return countDigitScheme(text, 9, " -", sinValid, onMatch);
+  return countDigitScheme(text, 9, ["3 3 3", "3-3-3"], sinValid, onMatch);
 }
 function countTfn(text: string, onMatch?: PiiMatchVisitor): number {
-  return countDigitScheme(text, 9, " ", tfnValid, onMatch);
+  return countDigitScheme(text, 9, ["3 3 3"], tfnValid, onMatch);
 }
 function countSteuerId(text: string, onMatch?: PiiMatchVisitor): number {
-  return countDigitScheme(text, 11, " ", steuerIdValid, onMatch);
+  // 2-3-3-3, the spacing German documents print.
+  return countDigitScheme(text, 11, ["2 3 3 3"], steuerIdValid, onMatch);
 }
 function countNir(text: string, onMatch?: PiiMatchVisitor): number {
-  return countDigitScheme(text, 15, " ", nirValid, onMatch);
+  // 1 85 03 69 123 045 32 — the carte vitale spacing.
+  return countDigitScheme(text, 15, ["1 2 2 2 3 3 2"], nirValid, onMatch);
 }
 
 const DNI_RE = /(?<![A-Za-z0-9])([XYZ]?)(\d{7,8})[ -]?([A-Za-z])(?![A-Za-z0-9])/g;
@@ -454,9 +493,11 @@ function countNino(text: string, onMatch?: PiiMatchVisitor): number {
 // ---------------------------------------------------------------------------
 
 /**
- * Every international detector, in a stable order. `checksum: true` members
- * are the DEFAULT-ON set (see `DEFAULT_INTERNATIONAL_CATEGORIES`); the
- * structure-only members are opt-in.
+ * Every international detector, in a stable order. NONE of them is on by
+ * default: `DEFAULT_INTERNATIONAL_CATEGORIES` is empty, and every member —
+ * checksum-backed or structure-only — is opt-in, per jurisdiction. `checksum`
+ * and `falsePositivePct` are what an administrator reads when choosing; they
+ * do not change the default.
  */
 export const INTERNATIONAL_DETECTORS: readonly InternationalDetector[] = [
   {
@@ -472,7 +513,7 @@ export const INTERNATIONAL_DETECTORS: readonly InternationalDetector[] = [
     jurisdiction: "BR",
     checksum: true,
     falsePositivePct: 1.02,
-    limits: "Two mod-11 check digits over 11 digits, bare or 000.000.000-00 formatted. Repdigits excluded. Does not cover CNPJ (a company, not a person).",
+    limits: "Two mod-11 check digits over 11 digits, bare, 000.000.000-00 or 000000000-00. Repdigits excluded. Does not cover CNPJ (a company, not a person).",
     count: countCpf,
   },
   {
@@ -480,7 +521,7 @@ export const INTERNATIONAL_DETECTORS: readonly InternationalDetector[] = [
     jurisdiction: "NL",
     checksum: true,
     falsePositivePct: 9.03,
-    limits: "11-proef over exactly 9 digits. A BSN written with its leading zero dropped (8 digits) is NOT detected — it is indistinguishable from any 8-digit number.",
+    limits: "11-proef over exactly 9 digits, bare, 111.222.333 or the Belastingdienst's 1234.56.789. A BSN written with its leading zero dropped (8 digits) is NOT detected — it is indistinguishable from any 8-digit number.",
     count: countBsn,
   },
   {
@@ -567,6 +608,6 @@ export const INTERNATIONAL_DETECTORS: readonly InternationalDetector[] = [
  */
 export const DEFAULT_INTERNATIONAL_CATEGORIES: readonly InternationalPiiCategory[] = [];
 
-/** Every category this module can detect, default-on or not. */
+/** Every category this module can detect — all of them opt-in. */
 export const ALL_INTERNATIONAL_CATEGORIES: readonly InternationalPiiCategory[] =
   INTERNATIONAL_DETECTORS.map((d) => d.category);

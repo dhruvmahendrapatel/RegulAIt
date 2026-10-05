@@ -5,16 +5,18 @@
  * ADR-0033 removed the legacy consoles entirely, so this shell is the whole
  * product surface — there are no outbound bridges left.
  */
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FocusEvent, type ReactNode } from "react";
 import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api/client";
 import type { Approval } from "../api/types";
 import { useSession } from "../session/SessionContext";
 import { useTheme } from "../ui/useTheme";
-import { Lockup, WORDMARK } from "../ui/Brand";
+import { Lockup } from "../ui/Brand";
 import { InfoButton } from "../ui/kit";
-import { ADMIN_GROUPS, SUITES, WORKSPACE, suiteHome, suiteOfPath, type NavEntry } from "./suites";
+import { ADMIN_GROUPS, SUITES, WORKSPACE, SuiteGlyph, suiteHome, suiteOfPath, type NavEntry } from "./suites";
+import { NavGlyph, RailGlyph } from "./navIcons";
+import { CommandPalette } from "./CommandPalette";
 import s from "./shell.module.css";
 
 
@@ -27,6 +29,39 @@ const GROUP_OF_PATH = new Map<string, string>(
   ADMIN_GROUPS.flatMap((g) => g.items.map((n) => [n.to, g.group] as const)),
 );
 
+/**
+ * ADR-0169 — the rail auto-hides to an icon strip; a pin keeps it open. The
+ * choice is per browser. Storage can be unavailable (private windows, blocked
+ * site data), so every access is guarded and the default — auto-hide — is what
+ * a failed read yields.
+ */
+export const RAIL_PIN_KEY = "regulait.rail.pinned";
+function readPinned(): boolean {
+  try {
+    return localStorage.getItem(RAIL_PIN_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+function writePinned(v: boolean) {
+  try {
+    localStorage.setItem(RAIL_PIN_KEY, v ? "1" : "0");
+  } catch {
+    /* the pin still works for this tab */
+  }
+}
+/** how long the pointer must rest on the strip before it opens — a pass across
+ *  it on the way to somewhere else must not throw a panel over the page */
+const HOVER_INTENT_MS = 160;
+
+function isKeyboardFocus(el: Element): boolean {
+  try {
+    return el.matches(":focus-visible");
+  } catch {
+    return true;
+  }
+}
+
 export default function AppShell(props: { children: ReactNode }) {
   const { auth, signOut } = useSession();
   const { theme, toggle } = useTheme();
@@ -36,6 +71,57 @@ export default function AppShell(props: { children: ReactNode }) {
   const [filter, setFilter] = useState("");
   const filterRef = useRef<HTMLInputElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+
+  /*
+   * ADR-0169 — rail state. Three independent reasons to show the full rail:
+   *  - pinned: the person chose it (remembered per browser); content makes room.
+   *  - focusOpen: KEYBOARD focus is inside the rail (`:focus-visible`, so a
+   *    mouse click on a link does not count). Content makes room too, so a
+   *    keyboard user never has the panel drawn over what they are reading.
+   *  - hoverOpen: the pointer has rested on the strip. The rail opens OVER
+   *    the content, near-opaque, and closes the moment the pointer leaves.
+   * Choosing a destination closes a hover/focus-opened rail, and the pointer
+   * that chose it must leave and come back before hover re-opens it.
+   */
+  const [pinned, setPinned] = useState<boolean>(readPinned);
+  const [hoverOpen, setHoverOpen] = useState(false);
+  const [focusOpen, setFocusOpen] = useState(false);
+  const hoverTimer = useRef<number | undefined>(undefined);
+  const hoverSuppressed = useRef(false);
+  const pointerInside = useRef(false);
+  const railRef = useRef<HTMLElement>(null);
+  const expanded = pinned || hoverOpen || focusOpen;
+  const railMode = pinned ? "pinned" : focusOpen ? "open" : hoverOpen ? "overlay" : "collapsed";
+
+  const clearHoverTimer = useCallback(() => {
+    window.clearTimeout(hoverTimer.current);
+    hoverTimer.current = undefined;
+  }, []);
+  const closeRail = useCallback(() => {
+    clearHoverTimer();
+    // only a pointer that is still ON the rail is held off; a keyboard choice
+    // must not make the next hover do nothing
+    hoverSuppressed.current = pointerInside.current;
+    setHoverOpen(false);
+    setFocusOpen(false);
+  }, [clearHoverTimer]);
+  useEffect(() => () => window.clearTimeout(hoverTimer.current), []);
+
+  // The topbar is clear over the field at the top of the page and frosts only
+  // once content scrolls under it — a band where one is needed, none otherwise.
+  const [scrolled, setScrolled] = useState(false);
+  useEffect(() => {
+    const onScroll = () => setScrolled(window.scrollY > 4);
+    onScroll();
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
+  }, []);
+  const togglePin = () => {
+    setPinned((p) => {
+      writePinned(!p);
+      return !p;
+    });
+  };
 
   // pending-inbox count for the nav badge (soft-refreshing, never blocking)
   const inbox = useQuery({
@@ -55,7 +141,23 @@ export default function AppShell(props: { children: ReactNode }) {
       }
       e.preventDefault();
       setSideOpen(true);
+      setFocusOpen(true);
       filterRef.current?.focus();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, []);
+
+  // ADR-0173 §4 — Ctrl/⌘-K opens (and closes) the command palette from
+  // anywhere, form fields included: it is the one global shortcut, and the
+  // browser's own Ctrl-K (focus the address bar's search) is what it replaces
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key.toLowerCase() !== "k" || !(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
+      e.preventDefault();
+      setMenuOpen(false);
+      setPaletteOpen((o) => !o);
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
@@ -121,9 +223,11 @@ export default function AppShell(props: { children: ReactNode }) {
       onClick={() => {
         setSideOpen(false);
         setFilter("");
+        closeRail();
       }}
     >
-      {n.label}
+      <NavGlyph to={n.to} label={n.label} className={s.navIcon} />
+      <span className={s.navLabel}>{n.label}</span>
       {n.to === "/inbox" && pendingCount > 0 && (
         <span className={s.navCount} aria-label={`${pendingCount} pending approvals`}>
           {pendingCount}
@@ -131,6 +235,14 @@ export default function AppShell(props: { children: ReactNode }) {
       )}
     </NavLink>
   );
+
+  const onRailFocus = (e: FocusEvent<HTMLElement>) => {
+    if (isKeyboardFocus(e.target)) setFocusOpen(true);
+  };
+  const onRailBlur = (e: FocusEvent<HTMLElement>) => {
+    const next = e.relatedTarget as Node | null;
+    if (!next || !railRef.current?.contains(next)) setFocusOpen(false);
+  };
 
   const displayName = auth?.user?.displayName ?? "Operator";
   const initials = displayName
@@ -141,7 +253,7 @@ export default function AppShell(props: { children: ReactNode }) {
     .toUpperCase();
 
   return (
-    <div className={s.shell}>
+    <div className={s.shell} data-rail={railMode}>
       {/* The first focusable element on the page — before the sidebar — so a
           keyboard user reaches content in one tab rather than tabbing through
           every nav item first. */}
@@ -149,32 +261,74 @@ export default function AppShell(props: { children: ReactNode }) {
         Skip to main content
       </a>
       <aside
-        className={[s.side, "rgRail", sideOpen ? s.sideOpen : ""].join(" ")}
+        ref={railRef}
+        className={[s.side, sideOpen ? s.sideOpen : ""].join(" ")}
         aria-label="Primary navigation"
+        data-expanded={expanded ? "true" : "false"}
+        data-testid="nav-rail"
+        onPointerEnter={() => {
+          pointerInside.current = true;
+        }}
+        // Armed by MOVEMENT, not by entering: a pointer that merely happens to
+        // rest where the rail renders (page load, a layout change) is not
+        // someone reaching for the navigation.
+        onPointerMove={(e) => {
+          pointerInside.current = true;
+          if (e.pointerType !== "mouse" || pinned || hoverOpen || hoverSuppressed.current) return;
+          if (e.movementX === 0 && e.movementY === 0) return;
+          if (hoverTimer.current !== undefined) return;
+          hoverTimer.current = window.setTimeout(() => {
+            hoverTimer.current = undefined;
+            setHoverOpen(true);
+          }, HOVER_INTENT_MS);
+        }}
+        onPointerLeave={() => {
+          pointerInside.current = false;
+          clearHoverTimer();
+          hoverSuppressed.current = false;
+          setHoverOpen(false);
+        }}
+        onPointerDown={clearHoverTimer}
+        onFocus={onRailFocus}
+        onBlur={onRailBlur}
+        onKeyDown={(e) => {
+          // Escape closes an auto-opened rail from anywhere inside it
+          if (e.key === "Escape" && !pinned) {
+            setHoverOpen(false);
+            setFocusOpen(false);
+          }
+        }}
       >
+        {/* The rail follows the theme now (ADR-0169), so the lockup does too:
+            "auto" tone takes the theme's ink for the anchor nodes. */}
         <div className={s.brand}>
-          <Lockup descriptor="governed" tone="onDark" />
+          <Lockup descriptor="governed" tone="auto" />
         </div>
-        <input
-          ref={filterRef}
-          className={s.navFilter}
-          placeholder="Filter nav — press /"
-          aria-label="Filter navigation"
-          value={filter}
-          onChange={(e) => setFilter(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Escape") {
-              setFilter("");
-              (e.target as HTMLInputElement).blur();
-            }
-          }}
-        />
+        <div className={s.filterWrap}>
+          <RailGlyph name="search" className={s.filterIcon} />
+          <input
+            ref={filterRef}
+            className={s.navFilter}
+            placeholder="Filter nav — press /"
+            aria-label="Filter navigation"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") {
+                setFilter("");
+                (e.target as HTMLInputElement).blur();
+              }
+            }}
+          />
+        </div>
         {q ? (
           /* the escape hatch: matches from EVERY suite, grouped by section */
           filterResults.length > 0 ? (
             filterResults.map((g) => (
               <div key={g.group}>
-                <div className={s.section}>{g.group}</div>
+                <div className={s.section}>
+                    <span className={s.sectionLabel}>{g.group}</span>
+                  </div>
                 {g.items.map(navEntry)}
               </div>
             ))
@@ -189,6 +343,9 @@ export default function AppShell(props: { children: ReactNode }) {
             {navEntry({ label: "Home", to: "/" })}
             {suites.length > 1 && (
               <div className={s.suiteHead}>
+                <span className={s.suiteGlyph} aria-hidden>
+                  <SuiteGlyph suiteId={activeSuite.id} />
+                </span>
                 <div className={s.suiteName}>{activeSuite.name}</div>
                 <select
                   className={s.suiteSwitch}
@@ -198,6 +355,7 @@ export default function AppShell(props: { children: ReactNode }) {
                     const target = suites.find((su) => su.id === e.target.value);
                     if (target && target.id !== activeSuite.id) {
                       setSideOpen(false);
+                      closeRail();
                       navigate(target.id === "workspace" ? "/" : suiteHome(target));
                     }
                   }}
@@ -216,23 +374,39 @@ export default function AppShell(props: { children: ReactNode }) {
                     suite that presents more than one ADR-0093 section, or the
                     plain Workspace list a non-admin sees */}
                 {(activeSuite.sections.length > 1 || suites.length === 1) && (
-                  <div className={s.section}>{g.group}</div>
+                  <div className={s.section}>
+                    <span className={s.sectionLabel}>{g.group}</span>
+                  </div>
                 )}
                 {g.items.map(navEntry)}
               </div>
             ))}
           </>
         )}
+        <div className={s.railFoot}>
+          {/* ADR-0169 — the pin. A toggle button (aria-pressed) with a constant
+              name, so its state is announced rather than its label changing. */}
+          <button
+            type="button"
+            className={s.pinBtn}
+            aria-pressed={pinned}
+            title={pinned ? "Unpin: let the navigation auto-hide" : "Pin: keep the navigation open"}
+            onClick={togglePin}
+          >
+            <RailGlyph name={pinned ? "pinOff" : "pin"} className={s.navIcon} />
+            <span className={s.navLabel}>Pin navigation</span>
+          </button>
+        </div>
         {/* The two "legacy ↗" bridges are gone: ADR-0033 deleted the
             single-file shells they pointed at, so a link here would be a dead
             end — the exact failure phase 1 refused to ship. */}
-        {/* No endorsement line here: the brand puts it in footers, sign-in
-            screens and legal surfaces — never in the app chrome. */}
-        <div className={s.sideFoot}>Governed AI delivery platform</div>
+        {/* No endorsement line and no tagline here: the brand puts those in
+            footers, sign-in screens and legal surfaces — never in the app
+            chrome, where they only add a fourth text style to the rail. */}
       </aside>
 
       <div className={s.mainCol}>
-        <header className={s.topbar}>
+        <header className={s.topbar} data-scrolled={scrolled ? "true" : "false"}>
           <button
             className={`${s.iconBtn} ${s.hamburger}`}
             aria-label="Toggle navigation"
@@ -241,8 +415,26 @@ export default function AppShell(props: { children: ReactNode }) {
           >
             ☰
           </button>
+          {/* No "regulAIt workspace" label: the lockup in the rail already
+              says whose product this is, and the topbar is part of the canvas.
+              ADR-0173 §4: the search sits at the START of the bar, where the
+              page beneath holds its title rather than its actions, so the
+              sticky bar never lays a control over a page's own buttons. */}
+          <button
+            type="button"
+            className={s.searchBtn}
+            aria-haspopup="dialog"
+            aria-expanded={paletteOpen}
+            aria-keyshortcuts="Control+K Meta+K"
+            onClick={() => setPaletteOpen(true)}
+          >
+            <RailGlyph name="search" className={s.searchBtnIcon} />
+            <span>Search</span>
+            <kbd className={s.kbd} aria-hidden>
+              {typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘K" : "Ctrl K"}
+            </kbd>
+          </button>
           <span className={s.topbarSpacer} />
-          <span className={s.orgName}>{WORDMARK} workspace</span>
           <button
             className={s.iconBtn}
             aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
@@ -322,6 +514,12 @@ export default function AppShell(props: { children: ReactNode }) {
           {props.children}
         </main>
       </div>
+      <CommandPalette
+        open={paletteOpen}
+        onClose={() => setPaletteOpen(false)}
+        isAdmin={Boolean(auth?.isAdmin)}
+        userId={auth?.userId ?? null}
+      />
     </div>
   );
 }

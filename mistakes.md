@@ -1390,3 +1390,72 @@ again after the last edit, per M-059). A test file that imports a workspace pack
 testing that package's dist, not its src — say so in the gate's log line, and when a batch
 touches `packages/*/src`, treat a red in the consuming app as "rebuild first, then believe it".
 
+### M-065 (2026-10-03) - A test harness generated a config its target refuses to load, and nothing caught it before CI
+
+The Kong harness for AER-026 declared the `anonymous` consumer with the same `custom_id` as the entitled
+consumer. Kong's declarative flatten enforces `consumers.custom_id` unique, so the first CI run would
+have ended at "Kong did not come up" and not one of the new assertions would have run — while the
+report said the cases were written and verified statically. The adversarial review caught it by reading
+Kong's source. Separately, after a usage-limit pause the local Postgres service was down and the first
+test run failed with ECONNREFUSED.
+
+Rule: a harness that generates configuration for a target it cannot run locally checks that
+configuration against the target's documented constraints (uniqueness, required fields, limits) as a
+plain unit step before starting the target, and says "pending first CI run", never "verified", until a
+green run id exists. After any pause, check `pg_lsclusters` before the first DB-backed test.
+
+
+### M-066 (2026-10-03) - The port-cleanup helper was a silent no-op for the whole session, and the abort guard could not see a sick gateway
+
+The local gate's `killports.sh` found listeners with `ss`, which this container does not have; every
+"kill whatever holds 3105/3107" step did nothing and printed nothing. A gateway from the previous gate
+run, still pointed at that run's dropped database, kept :3107. The guard meant to abort the run used
+`curl -sf`, and a gateway answering 503 (database gone) is "not listening" to `-f`, so the run went
+ahead, the new gateway died on EADDRINUSE, and the real demo journey failed against the stale one.
+The suite was green and the cause was harness-only, but it cost a full verification rerun.
+
+Rule: a cleanup helper verifies its own effect — after killing, it re-checks the port and says what
+it killed — and never depends on a binary it has not checked exists. A "something is still running"
+guard tests for ANY response (`curl -s -o /dev/null`), not a healthy one: a sick process holding the
+port is exactly what it exists to catch.
+
+### M-067 (2026-10-03) - `git pull --rebase` on a branch that carries merge commits tried to flatten them
+
+After fast-forwarding `dhruv/active` to a tested branch that contained three `--no-ff` merges, the
+standing "pull --rebase before push" step started an interactive rebase of 36 commits onto the remote
+and stopped on a conflict. Nothing reached the remote (the push sent the branch ref, which still
+pointed at the tested commit) and the rebase was aborted, but a slightly different sequence — resolve,
+continue, push — would have pushed an UNTESTED re-linearised history. The same command had already
+silently flattened the merges on the integration worktree earlier, which is what later made one merge
+re-apply duplicated commits and conflict.
+
+Rule: before pushing, `git fetch` and check whether the remote moved (`git rev-list HEAD..origin/<b>`).
+If it did not, push without pulling. If it did and the local branch carries merges, use
+`git pull --no-rebase` (merge) or rebuild the integration on the new base and RE-RUN the gate — never
+`--rebase` a merge-bearing branch, and never push anything but the exact commit the gate ran on.
+
+### M-068 (2026-10-04) - A spec was added to a CI step after running it alone, not in that step's order
+
+`phase6-builder-tools.spec.ts` was added to CI's spa-journeys step after it passed on its own (8/8). In CI it runs after
+`phase2.spec.ts` on the same database, and phase2 leaves a fleet-wide 50-calls-per-60s MCP rate limit behind. On CI's
+faster runner the builder spec landed inside that window, so its governed tool call was refused ("rate limit exhausted:
+75/50 calls … server-wide"). Locally the same order happened to pass because the window had expired. A local repro was
+first run on a stale build (the main checkout had not been rebuilt after a merge), which gave misleading failures. The
+first diagnostic did not fire either, because Playwright's `expect.poll` `message` option is a string, not a function.
+
+Rule: before adding a spec to a CI step, run the whole step's spec list in CI's order on a fresh `pnpm -r build`. A spec
+that creates global state (fleet-wide rules, org settings, kill switches) removes it before it ends. When CI and local
+runs disagree, make the failure message carry the server's recorded reason (the API's outcome code and detail) before
+guessing.
+
+### M-069 (2026-10-04) - A shell script added to the image was tested on Linux only, and a Windows checkout broke it
+
+The Docker demo-password work changed the image's CMD to run `apps/gateway/docker-start.sh`. The repo had no
+`.gitattributes`, so Git for Windows (`core.autocrlf=true`) checked the script out with CRLF. In the container, `sh`
+stopped at line 22 ("Syntax error: newline unexpected (expecting ")")") and the gateway restart-looped on the owner's
+first run. CRLF had been tested only for the `.env` value, not for the script file itself, even though the owner works
+on Windows and Codex had just reported other Windows-only failures.
+
+Rule: any file a Linux container or CI executes (shell scripts, entrypoints) is pinned to LF in `.gitattributes`, and
+the Dockerfile normalises line endings on anything it executes from the build context. When the owner runs on
+Windows, test the CRLF form of every executed text file, not only of its inputs.

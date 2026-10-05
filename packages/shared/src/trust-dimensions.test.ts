@@ -52,7 +52,8 @@ describe("ADR-0148 — control → trust dimension", () => {
       expect(v2.controls.length).toBeGreaterThan(v1.controls.length);
       expect(new Set(v2.controls.map((c) => c.controlRef)).size).toBe(v2.controls.length);
     }
-    const bias = allControls.filter((c) => dimensionForControl(c) === "bias").map((c) => c.controlRef);
+    // de-duplicated: NIST v3 (ADR-0175) carries MEASURE-2.11 forward from v2
+    const bias = [...new Set(allControls.filter((c) => dimensionForControl(c) === "bias").map((c) => c.controlRef))];
     expect(bias.sort()).toEqual(["eu-ai-act:art-10-bias-examination", "nist-ai-rmf:MEASURE-2.11"]);
   });
 });

@@ -196,6 +196,20 @@ services:
       REGULAIT_DATA_KEY: ${REGULAIT_DATA_KEY:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
       REGULAIT_BOOTSTRAP_TOKEN: ${REGULAIT_BOOTSTRAP_TOKEN:-dev-bootstrap}
       SEED_DEMO: ${SEED_DEMO:-1}
+      # ADR-0174 amendment — DEMO ONLY, OFF by default, never for an install.
+      # `REGULAIT_DEMO_LICENSE=1` in the .env next to this file lets the demo
+      # seed mint its EPHEMERAL demo licence (30 days, says "NOT A PRODUCTION
+      # DEPLOYMENT") so `demo:set-passwords` can give Ada, Dana and Avery one
+      # password you chose — see README "Demo with your own password (Docker)".
+      # It also prepares the demo exactly like `demo:prepare` (demo MCP server
+      # in the container, export-signing key, REGULAIT_OFFLINE_CHECKS=1,
+      # setup → intake → traffic → check once per database; demo:check's
+      # summary is in `docker compose logs gateway`).
+      # Only the exact value "1" does anything (apps/gateway/docker-start.sh);
+      # unset, the gateway reads its default keyring, no licence is minted and
+      # none of the demo prep runs, exactly as before. scripts/install.sh pins
+      # it to "0".
+      REGULAIT_DEMO_LICENSE: ${REGULAIT_DEMO_LICENSE:-}
       # ADR-0031 (narrowing ADR-0029): which peers may speak for the client via
       # X-Forwarded-*. `req.ip` is recorded on every auth_sessions row and is
       # the attribution pillar 1 sells, so this must name the proxy rather than
@@ -280,6 +294,15 @@ services:
       # is the documented local-dev entry point (README) and the on-box
       # SSM verification step (`curl -sf localhost:3000/...`) relies on it.
       - "127.0.0.1:3000:3000"
+    volumes:
+      # The DEMO licence keyring (the licence's public key only; its private
+      # half is never written) plus, under export-signing/, the demo's
+      # export-signing keypair for the signed audit export (a demo key, made
+      # once and reused). Read only when REGULAIT_DEMO_LICENSE=1; otherwise it stays
+      # empty and unused. Named, so the demo licence still verifies after
+      # `docker compose restart gateway` and `down` / `up`; `down -v` drops it
+      # together with the database that holds the licence.
+      - demo_license_keys:/app/demo-license-keys
     # ADR-0167 (CFG-07): see the note on `db`. The image carries the same
     # HEALTHCHECK; it is restated here so `depends_on: condition:
     # service_healthy` works for anything stacked on the gateway, and so a
@@ -309,6 +332,118 @@ services:
       options:
         max-size: "50m"
         max-file: "5"
+    networks: [regulait]
+
+  # --- Identity broker (profile: sso) — ADR-0174 ------------------------------
+  #
+  # OFF by default. Keycloak brokers Microsoft Entra ID, Google and GitHub and
+  # enforces MFA (one-time code or passkey) before handing the gateway an OIDC
+  # ID token that says so (`amr`). Turn it on with:
+  #
+  #   docker compose --profile sso up -d
+  #
+  # then register it in /ui/admin/sso as an OIDC provider with broker sign-in
+  # buttons — see docs/deployment/SSO_KEYCLOAK.md, which also covers the three
+  # app registrations, secrets and hardening. No secret has a default here: the
+  # broker refuses to start while REGULAIT_KC_GATEWAY_CLIENT_SECRET,
+  # REGULAIT_KC_ADMIN_PASSWORD or REGULAIT_KC_DB_PASSWORD is empty (checked in
+  # the entrypoints, because compose interpolates every service even when its
+  # profile is off, so a `${VAR:?}` here would break the default
+  # `docker compose up`).
+  #
+  # Keycloak gets its OWN database role (`keycloak`) that owns only the
+  # `keycloak` database — never the gateway's `regulait` role. The init job
+  # connects as the gateway's role once (it is the cluster's admin role in this
+  # compose file) to create that role and database; the gateway's role and
+  # database are not changed. Re-running it rotates the keycloak role's
+  # password to the current REGULAIT_KC_DB_PASSWORD.
+  keycloak-db-init:
+    image: postgres:16
+    profiles: ["sso"]
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${REGULAIT_DB_PASSWORD:-regulait}
+      KC_DB_ROLE_PASSWORD: ${REGULAIT_KC_DB_PASSWORD:-}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        if [ -z "$$KC_DB_ROLE_PASSWORD" ]; then
+          echo "keycloak-db-init refused: set REGULAIT_KC_DB_PASSWORD (see docs/deployment/SSO_KEYCLOAK.md)" >&2
+          exit 1
+        fi
+        # the password is read from the environment inside psql (\getenv) —
+        # never put on a command line
+        psql -h db -U regulait -d regulait -v ON_ERROR_STOP=1 <<'SQL'
+        \getenv kcpw KC_DB_ROLE_PASSWORD
+        SELECT format('CREATE ROLE keycloak LOGIN PASSWORD %L', :'kcpw')
+          WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'keycloak') \gexec
+        SELECT format('ALTER ROLE keycloak LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE PASSWORD %L', :'kcpw') \gexec
+        SELECT 'CREATE DATABASE keycloak OWNER keycloak'
+          WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'keycloak') \gexec
+        ALTER DATABASE keycloak OWNER TO keycloak;
+        REVOKE ALL ON DATABASE keycloak FROM PUBLIC;
+        GRANT CONNECT, TEMPORARY ON DATABASE keycloak TO keycloak;
+        SQL
+    restart: "no"
+    networks: [regulait]
+
+  keycloak:
+    # pinned: keycloak/keycloak:26.8.0 resolved against the registry on
+    # 2026-10-04 (index digest sha256:b0f60d489d51c5d113390bdf5461d4c06e6051be026c05549f2e1e10ec352bcc).
+    # Upgrade deliberately (docs/deployment/SSO_KEYCLOAK.md § Upgrades).
+    image: ${REGULAIT_KC_IMAGE:-keycloak/keycloak:26.8.0}
+    profiles: ["sso"]
+    depends_on:
+      keycloak-db-init:
+        condition: service_completed_successfully
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        if [ -z "$$REGULAIT_KC_GATEWAY_CLIENT_SECRET" ] || [ -z "$$KC_BOOTSTRAP_ADMIN_PASSWORD" ] || [ -z "$$KC_DB_PASSWORD" ]; then
+          echo "keycloak refused to start: set REGULAIT_KC_GATEWAY_CLIENT_SECRET, REGULAIT_KC_ADMIN_PASSWORD and REGULAIT_KC_DB_PASSWORD (see docs/deployment/SSO_KEYCLOAK.md)" >&2
+          exit 1
+        fi
+        exec /opt/keycloak/bin/kc.sh start --import-realm
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://db:5432/keycloak
+      # its own role, owner of the keycloak database only (keycloak-db-init)
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${REGULAIT_KC_DB_PASSWORD:-}
+      # the PUBLIC URL of the broker, as browsers reach it (TLS terminated in
+      # front of it — caddy or the customer's own proxy)
+      KC_HOSTNAME: ${REGULAIT_KC_HOSTNAME:-http://localhost:8080}
+      KC_HTTP_ENABLED: "true"
+      KC_PROXY_HEADERS: xforwarded
+      KC_HEALTH_ENABLED: "true"
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${REGULAIT_KC_ADMIN_USER:-kc-bootstrap-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${REGULAIT_KC_ADMIN_PASSWORD:-}
+      # realm-import placeholders (infra/keycloak/realm-regulait.json)
+      REGULAIT_PUBLIC_URL: ${REGULAIT_PUBLIC_URL:-http://localhost:3000}
+      REGULAIT_KC_GATEWAY_CLIENT_SECRET: ${REGULAIT_KC_GATEWAY_CLIENT_SECRET:-}
+      REGULAIT_KC_MICROSOFT_CLIENT_ID: ${REGULAIT_KC_MICROSOFT_CLIENT_ID:-unset}
+      REGULAIT_KC_MICROSOFT_CLIENT_SECRET: ${REGULAIT_KC_MICROSOFT_CLIENT_SECRET:-unset}
+      REGULAIT_KC_MICROSOFT_TENANT: ${REGULAIT_KC_MICROSOFT_TENANT:-organizations}
+      REGULAIT_KC_GOOGLE_CLIENT_ID: ${REGULAIT_KC_GOOGLE_CLIENT_ID:-unset}
+      REGULAIT_KC_GOOGLE_CLIENT_SECRET: ${REGULAIT_KC_GOOGLE_CLIENT_SECRET:-unset}
+      REGULAIT_KC_GOOGLE_HOSTED_DOMAIN: ${REGULAIT_KC_GOOGLE_HOSTED_DOMAIN:-}
+      REGULAIT_KC_GITHUB_CLIENT_ID: ${REGULAIT_KC_GITHUB_CLIENT_ID:-unset}
+      REGULAIT_KC_GITHUB_CLIENT_SECRET: ${REGULAIT_KC_GITHUB_CLIENT_SECRET:-unset}
+      REGULAIT_KC_SMTP_HOST: ${REGULAIT_KC_SMTP_HOST:-}
+      REGULAIT_KC_SMTP_PORT: ${REGULAIT_KC_SMTP_PORT:-587}
+      REGULAIT_KC_SMTP_FROM: ${REGULAIT_KC_SMTP_FROM:-no-reply@regulait.invalid}
+      REGULAIT_KC_SMTP_USER: ${REGULAIT_KC_SMTP_USER:-}
+      REGULAIT_KC_SMTP_PASSWORD: ${REGULAIT_KC_SMTP_PASSWORD:-}
+    volumes:
+      - ./infra/keycloak/realm-regulait.json:/opt/keycloak/data/import/realm-regulait.json:ro
+    # loopback only: the admin console must never face the internet. Publish
+    # /realms and /resources through the TLS proxy (docs § Hardening).
+    ports:
+      - "127.0.0.1:8080:8080"
+    restart: unless-stopped
     networks: [regulait]
 
   # --- TLS terminator (profile: tls) -----------------------------------------
@@ -388,5 +523,7 @@ volumes:
   # That is a different attack and a LOUD one — verification then reports the
   # anchor missing rather than matching.
   minio_data:
+  # ADR-0174 amendment: the demo licence keyring (see the gateway's volumes).
+  demo_license_keys:
   caddy_data:
   caddy_config:

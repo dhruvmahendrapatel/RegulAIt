@@ -176,14 +176,16 @@ const AUDITED_WRITERS: AuditedWriter[] = [
     file: "agents-connectors.ts",
     method: "update",
     expr: "agents",
-    count: 3,
+    count: 4,
     why:
       "POST /v1/agents/:id/enabled, /owner and /lifecycle — three audited governance routes that write ONLY " +
-      "`enabled`, `ownerUserId` and the three lifecycle columns. None of those is an agent_config versioned " +
-      "field (the batch-B1 scope line refuses them from version bodies for exactly this reason: they are " +
-      "governance gates and accountability records with their own routes, not dispatch config), so no " +
-      "read-model divergence is possible. A fourth `.update(agents)` writing model or a price column must go " +
-      "through `applyRuleEdit` and raises this count.",
+      "`enabled`, `ownerUserId` and the three lifecycle columns — and (ADR-0175 review fix) PUT " +
+      "/v1/agents/:id/expected-served-model, audited, which writes ONLY `expected_served_model`: the model id " +
+      "the governance monitor compares a provider's report with. It changes nothing about a dispatch. None of " +
+      "those is an agent_config versioned field (the batch-B1 scope line refuses them from version bodies for " +
+      "exactly this reason: they are governance gates and accountability records with their own routes, not " +
+      "dispatch config), so no read-model divergence is possible. A fifth `.update(agents)` writing model or a " +
+      "price column must go through `applyRuleEdit` and raises this count.",
   },
   {
     file: "remediation.ts",
@@ -191,9 +193,22 @@ const AUDITED_WRITERS: AuditedWriter[] = [
     expr: "agents",
     why:
       "ADR-0159 `assign_agent_owner`, executed inside the approval decision's transaction — writes ONLY " +
-      "`ownerUserId`, the same accountability column the audited POST /v1/agents/:id/owner route writes. Not an " +
+      "`ownerUserId` (plus clearing `successorUserId` when the successor is the one stepping up — ADR-0168 " +
+      "item 6), the same accountability columns the audited owner/stewardship routes write. Not an " +
       "agent_config versioned field, so no read-model divergence is possible. A remediation kind that wrote " +
       "model or a price column would have to go through applyRuleEdit and raise this count.",
+  },
+  {
+    file: "agent-stewardship.ts",
+    method: "update",
+    expr: "agents",
+    // TWO occurrences — PATCH /stewardship and POST /stewardship/review.
+    count: 2,
+    why:
+      "ADR-0168 amendment item 6 — the audited stewardship routes. They write ONLY `ownerUserId` (the " +
+      "steward), `successorUserId`, the three lifecycle columns and the review dates " +
+      "(`nextReviewAt`/`lastReviewedAt`/`lastReviewedByUserId`) — accountability and lifecycle records, none " +
+      "of them an agent_config versioned field, so no read-model divergence is possible.",
   },
   {
     file: "agents-connectors.ts",

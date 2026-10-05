@@ -201,6 +201,19 @@ async function runAs(
   return app.inject({ method: "POST", url: "/v1/evals/runs", headers: auth, payload });
 }
 
+// AER-047: this suite drives check stages whose templates opt in to the
+// labelled offline auto-pass (offlineAutoPass). The opt-in FAILS CLOSED unless
+// the process declares offline mode, so the suite declares it — and restores
+// the environment afterwards.
+const priorOfflineChecks = process.env.REGULAIT_OFFLINE_CHECKS;
+beforeAll(() => {
+  process.env.REGULAIT_OFFLINE_CHECKS = "1";
+});
+afterAll(() => {
+  if (priorOfflineChecks === undefined) delete process.env.REGULAIT_OFFLINE_CHECKS;
+  else process.env.REGULAIT_OFFLINE_CHECKS = priorOfflineChecks;
+});
+
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
@@ -896,6 +909,10 @@ describe("(7) block-on-regression at the workflow automated-check stage", () => 
               id: "checks",
               type: "automated_check",
               checks: ["unit_tests", "agent_quality"],
+              // AER-047: nothing reports unit_tests here, so the stage opts in
+              // to the labelled offline auto-pass. The opt-in never reaches an
+              // eval-bound check — that one is decided by running its dataset.
+              offlineAutoPass: true,
               evals: [
                 {
                   check: "agent_quality",
@@ -954,6 +971,10 @@ describe("(7) block-on-regression at the workflow automated-check stage", () => 
     expect(v.instance.status).toBe("blocked_on_approval"); // advanced to the final gate
     const checks = v.instance.context["checks:checks"] as Array<{ check: string; status: string }>;
     expect(checks.find((c) => c.check === "agent_quality")!.status).toBe("passed");
+    // AER-047: the eval-bound check was RUN, never auto-passed; the unreported
+    // one is labelled as the offline auto-pass it is
+    expect((checks.find((c) => c.check === "agent_quality") as { autoPassed?: boolean }).autoPassed).toBeUndefined();
+    expect((checks.find((c) => c.check === "unit_tests") as { autoPassed?: boolean }).autoPassed).toBe(true);
     const evals = v.instance.context["evals:checks"] as Record<string, { runId: string; regression: boolean }>;
     const quality = evals.agent_quality!;
     expect(quality.regression).toBe(false);
@@ -981,8 +1002,9 @@ describe("(7) block-on-regression at the workflow automated-check stage", () => 
     expect(quality.status).toBe("failed");
     expect(quality.severity).toBe("high");
     expect(quality.detail).toMatch(/REGRESSION/);
-    // the unbound check still auto-passes — the eval binding changed nothing else
-    expect(checks.find((c) => c.check === "unit_tests")!.status).toBe("passed");
+    // the unbound check still auto-passes under the template's AER-047 offline
+    // opt-in — the eval binding changed nothing else — and it is labelled
+    expect(checks.find((c) => c.check === "unit_tests")!).toMatchObject({ status: "passed", autoPassed: true });
 
     const evals = v.instance.context["evals:checks"] as Record<
       string,
@@ -1017,7 +1039,7 @@ describe("(7) block-on-regression at the workflow automated-check stage", () => 
       method: "POST",
       url: `/v1/workflows/instances/${instanceId}/checks`,
       headers: erinAuth,
-      payload: { stageId: "checks", results: [{ check: "agent_quality", status: "passed" }] },
+      payload: { round: 0, stageId: "checks", results: [{ check: "agent_quality", status: "passed" }] },
     });
     expect(res.statusCode).toBe(422);
     expect(res.json().error).toBe("eval_check_cannot_be_reported");
@@ -1072,5 +1094,102 @@ describe("(7) block-on-regression at the workflow automated-check stage", () => 
     expect(v.instance.status).toBe("blocked_on_check");
     const checks = v.instance.context["checks:checks"] as Array<{ check: string; detail: string }>;
     expect(checks[0]!.detail).toMatch(/does not exist/);
+  });
+
+  it("AER-047: while a reported check is still missing the stage WAITS — its eval runs ONCE on stage entry, retries and partial re-evaluations reuse it and write one waiting row", async () => {
+    await setSystemPrompt(subjectAgentId, null);
+    // the same shape as ev-quality-flow WITHOUT the offline opt-in: unit_tests
+    // must be reported, agent_quality is decided by running its dataset
+    const tpl = await app.inject({
+      method: "POST",
+      url: "/v1/workflows/templates",
+      headers: AUTH,
+      payload: {
+        name: "ev-defer-flow",
+        definition: {
+          workflow: "ev-defer-flow",
+          stages: [
+            { id: "intake", type: "trigger" },
+            { id: "gate", type: "human_approval", approvers: [noraId] },
+            {
+              id: "checks",
+              type: "automated_check",
+              checks: ["unit_tests", "agent_quality"],
+              evals: [{ check: "agent_quality", dataset: "ev-golden", version: 1, agent: "ev-subject", tolerance: 0.05 }],
+            },
+            { id: "done", type: "human_approval", approvers: [noraId] },
+          ],
+        },
+      },
+    });
+    expect(tpl.statusCode).toBe(201);
+    const rule = await app.inject({
+      method: "POST",
+      url: "/v1/workflows/assignment-rules",
+      headers: AUTH,
+      payload: { templateId: tpl.json().id, changeType: "ev-defer" },
+    });
+    expect(rule.statusCode).toBe(201);
+    const started = await app.inject({
+      method: "POST",
+      url: "/v1/workflows/instances",
+      headers: erinAuth,
+      payload: { change: { description: "ev defer", paths: ["src/z.ts"], changeType: "ev-defer", environment: "staging" } },
+    });
+    expect(started.statusCode).toBe(201);
+    const instanceId = started.json().id as string;
+    const evalRunsFor = async () =>
+      (await db.select().from(evalRuns).where(eq(evalRuns.workflowInstanceId, instanceId))).length;
+    const waitingRows = async () =>
+      (
+        await db
+          .select()
+          .from(auditLog)
+          .where(and(eq(auditLog.objectType, "workflow"), eq(auditLog.objectId, instanceId)))
+      ).filter((a) => a.ruleId === "workflow:checks-awaiting-report");
+
+    await approve(instanceId, "gate");
+    let v = await view(instanceId);
+    expect(v.instance.status).toBe("awaiting_execution");
+    const checks = v.instance.context["checks:checks"] as Array<{ check: string; status: string; autoPassed?: boolean }>;
+    expect(checks.find((c) => c.check === "unit_tests")).toMatchObject({ status: "pending" });
+    // the eval-bound check RAN on stage entry (once) and passed — it is not
+    // what the stage waits on, and it is never auto-passed
+    expect(checks.find((c) => c.check === "agent_quality")).toMatchObject({ status: "passed" });
+    expect(checks.some((c) => c.autoPassed)).toBe(false);
+    expect(await evalRunsFor()).toBe(1);
+
+    // the initiator retries the stage twice: still waiting, NO further eval
+    // spend, still exactly one waiting audit row
+    for (let i = 0; i < 2; i++) {
+      const retried = await app.inject({
+        method: "POST",
+        url: `/v1/workflows/instances/${instanceId}/advance`,
+        headers: erinAuth,
+        payload: { stageId: "checks" },
+      });
+      expect(retried.json().status).toBe("awaiting_execution");
+    }
+    expect(await evalRunsFor()).toBe(1);
+    const rows = await waitingRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.detail).toMatchObject({ missingChecks: ["unit_tests"] });
+
+    // unit_tests is reported → the stage decides on the report plus the eval
+    // outcome recorded at stage entry, and the pipeline advances (erin
+    // initiated, so her green carries a reason)
+    const report = await app.inject({
+      method: "POST",
+      url: `/v1/workflows/instances/${instanceId}/checks`,
+      headers: erinAuth,
+      payload: { round: 0, stageId: "checks", results: [{ check: "unit_tests", status: "passed" }], reason: "CI run #9 green" },
+    });
+    expect(report.statusCode).toBe(200);
+    expect(report.json().status).toBe("blocked_on_approval");
+    expect(await evalRunsFor()).toBe(1);
+    v = await view(instanceId);
+    const after = v.instance.context["checks:checks"] as Array<{ check: string; status: string }>;
+    expect(after.find((c) => c.check === "agent_quality")!.status).toBe("passed");
+    expect(after.find((c) => c.check === "unit_tests")!.status).toBe("passed");
   });
 });

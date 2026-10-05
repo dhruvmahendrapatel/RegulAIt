@@ -133,8 +133,12 @@ session lands its whole set before the other starts.
 ### 4.7 CI cannot catch any of this
 
 There is **no `push:` trigger**, and the `pull_request` workflow skips markdown and state paths.
-Every assertion in §4 is a **manual** merge-time check. (GitHub Actions minutes are also
-exhausted; local verification is the only gate.)
+Every assertion in §4 is a **manual** merge-time check. ~~(GitHub Actions minutes are also
+exhausted; local verification is the only gate.)~~ *Correction 2026-10-03: the parenthetical is
+stale — Actions runs again for this repo (`ci.yml`'s budget header was re-measured on 2026-10-02
+from runs 37050080219 / 37045578961 / 37042881890; run 37036782298 was green at exact head
+`21b3094`). The two structural facts in this subsection are unchanged: no `push:` trigger, and a
+docs-only or state-only diff never enters CI, so every §4 assertion is still checked by hand.*
 
 ## 5. Shared machine resources
 

@@ -120,6 +120,12 @@ export const EVIDENCE_COLLECTORS = [
    * records that an assessment was done and where its result lives; it does
    * not compute or grade fairness itself. */
   "model_card_fairness",
+  /** ADR-0175 A15: model calls on the usage ledger in the period (scoped by
+   * project) whose model has an admin-entered energy factor and whose token
+   * counts were recorded — the calls the energy and emissions ESTIMATE covers.
+   * Evidence that environmental impact is estimated (NIST AI RMF MEASURE
+   * 2.12), never a measurement of it. */
+  "energy_estimate_available",
   /** NOT AUTO-EVIDENCED. Pairs with attestationRequired. */
   "none",
 ] as const;
@@ -1263,6 +1269,315 @@ DEFAULT_COMPLIANCE_PACKS.push(
         attestationRequired: false,
         ownerNote: "Configuration evidence: a toxicity detector at block somewhere in the guardrail set.",
       },
+    ],
+  }),
+);
+
+/**
+ * ADR-0175 (A1) — THIRD VERSION of the NIST AI RMF pack: the subcategory ids
+ * corrected against NIST AI 100-1 Tables 1–4, and coverage widened to what the
+ * existing collectors genuinely evidence.
+ *
+ * v1 and v2 stay exactly as published (immutable rows, and their reports keep
+ * the version that produced them). v3 is a revision rather than v2-plus-
+ * additions, because two v2 controls were filed under the wrong id:
+ *
+ *  - "accountability — access is granted, not assumed" was GOVERN 1.2. In the
+ *    framework GOVERN 1.2 is trustworthy-AI characteristics in policy, and
+ *    roles and responsibilities are GOVERN 2.1. Re-keyed to GOVERN-2.1, and
+ *    GOVERN-1.2 now maps to the six trust dimensions (ADR-0147).
+ *  - "supersede, disengage or deactivate" was MANAGE 2.2. In the framework
+ *    MANAGE 2.2 is sustaining the value of deployed systems; deactivation is
+ *    MANAGE 2.4. Re-keyed to MANAGE-2.4 with the same evidence.
+ *
+ * MEASURE-2.7 (security and resilience) now counts red-team runs instead of
+ * every evaluation run, which measure quality rather than security. New
+ * controls use only collectors whose rows really are the evidence named; a
+ * subcategory nothing counts is attestation-required, never quietly green.
+ * Every id here is checked against `NIST_AI_RMF_SUBCATEGORIES` by a test.
+ */
+function reviseVersion(
+  framework: string,
+  fromVersion: number,
+  revision: {
+    version: number;
+    titleSuffix: string;
+    description: string;
+    note: string;
+    controls: CreateCompliancePackInput["controls"];
+  },
+): CreateCompliancePackInput {
+  const base = DEFAULT_COMPLIANCE_PACKS.find((p) => p.framework === framework && p.version === 1);
+  const prior = DEFAULT_COMPLIANCE_PACKS.find((p) => p.framework === framework && p.version === fromVersion);
+  if (!base || !prior) throw new Error(`no v1/v${fromVersion} '${framework}' pack to revise`);
+  return {
+    ...prior,
+    version: revision.version,
+    title: `${base.title} — ${revision.titleSuffix}`,
+    description: revision.description,
+    provenance: { ...base.provenance, note: `${base.provenance.note} v${revision.version}: ${revision.note}` },
+    controls: revision.controls,
+  };
+}
+
+type SeedControl = CreateCompliancePackInput["controls"][number];
+
+/** a NIST control evidenced by a collector */
+const nistEvidenced = (
+  id: string,
+  c: Pick<SeedControl, "title" | "coverage" | "collector"> &
+    Partial<Pick<SeedControl, "collectorParams" | "description" | "ownerNote">>,
+): SeedControl => ({
+  controlRef: `nist-ai-rmf:${id}`,
+  title: c.title,
+  ...(c.description ? { description: c.description } : {}),
+  coverage: c.coverage,
+  collector: c.collector,
+  collectorParams: c.collectorParams ?? {},
+  minEvidenceCount: 1,
+  attestationRequired: false,
+  ownerNote: c.ownerNote ?? null,
+});
+
+/** a NIST control no collector can observe: the customer attests it */
+const nistAttested = (id: string, title: string, ownerNote: string): SeedControl => ({
+  controlRef: `nist-ai-rmf:${id}`,
+  title,
+  coverage: "unaddressed",
+  collector: "none",
+  collectorParams: {},
+  minEvidenceCount: 1,
+  attestationRequired: true,
+  ownerNote,
+});
+
+DEFAULT_COMPLIANCE_PACKS.push(
+  reviseVersion("nist-ai-rmf", 2, {
+    version: 3,
+    titleSuffix: "v3 corrects subcategory IDs and widens coverage",
+    description:
+      "Maps NIST AI RMF 1.0 subcategories onto RegulAIt configuration and ledgers. v3 corrects two IDs " +
+      "that v1 and v2 got wrong (accountability is GOVERN 2.1, not 1.2; deactivation is MANAGE 2.4, not " +
+      "2.2), maps GOVERN 1.2 to the six trust dimensions, and adds the subcategories existing collectors " +
+      "evidence. Organisational subcategories are attestation-required.",
+    note:
+      "corrects subcategory IDs checked against NIST AI 100-1 Tables 1-4: the accountability control is " +
+      "re-keyed GOVERN 1.2 -> GOVERN 2.1 and the deactivation control MANAGE 2.2 -> MANAGE 2.4 (same " +
+      "evidence); GOVERN 1.2 now maps to the trust dimensions; MEASURE 2.7 counts red-team runs rather " +
+      "than all evaluation runs; adds controls only where an existing collector produces the evidence, and " +
+      "marks organisational subcategories attestation-required. v1 and v2 are unchanged.",
+    controls: [
+      // ---- GOVERN ----
+      nistAttested(
+        "GOVERN-1.1",
+        "Legal and regulatory requirements for AI are understood and documented",
+        "Organisational. Compliance packs and EU AI Act tier screening support this; understanding the law " +
+          "is the organisation's and its counsel's. Attest with a reference to the legal register.",
+      ),
+      nistEvidenced("GOVERN-1.2", {
+        title:
+          "Trustworthy-AI characteristics are applied in practice: every registered AI risk lands on a trust dimension",
+        description:
+          "Each risk category maps to one of six trust dimensions (bias, security, privacy, reliability, " +
+          "safety, compliance; ADR-0147) and the trust dashboard reports evidence per dimension. Counts AI " +
+          "risks registered in the period.",
+        coverage: "partial",
+        collector: "audit_decisions",
+        collectorParams: { objectType: "ai_risk", ruleIdPrefix: "risk-registered" },
+        ownerNote: "Written policy that names these characteristics is the organisation's.",
+      }),
+      nistEvidenced("GOVERN-1.5", {
+        title: "Periodic review happens: an approved AI use case returns to review when its approval lapses",
+        coverage: "evidenced",
+        collector: "audit_decisions",
+        collectorParams: { objectType: "ai_use_case", ruleIdPrefix: "use-case-recertification-started" },
+        ownerNote:
+          "Evidence appears only in a period in which an approval reached its review date. The review " +
+          "frequency is set per tier in the review policy.",
+      }),
+      nistEvidenced("GOVERN-1.6", {
+        title: "AI systems are inventoried: the use-case registry recorded activity in the period",
+        coverage: "evidenced",
+        collector: "audit_decisions",
+        collectorParams: { objectType: "ai_use_case" },
+      }),
+      nistEvidenced("GOVERN-1.7", {
+        title: "AI systems are decommissioned through a recorded retirement",
+        coverage: "evidenced",
+        collector: "audit_decisions",
+        collectorParams: { objectType: "ai_use_case", ruleIdPrefix: "use-case-retired" },
+      }),
+      nistEvidenced("GOVERN-2.1", {
+        title: "Roles and responsibilities for AI are documented: access is granted to named roles, not assumed",
+        coverage: "partial",
+        collector: "abac_policies_active",
+        ownerNote:
+          "Re-keyed from GOVERN 1.2 in v1 and v2. Evidences documented access roles; lines of communication " +
+          "about AI risk are the organisation's.",
+      }),
+      nistAttested(
+        "GOVERN-2.2",
+        "Personnel and partners receive AI risk-management training",
+        "Organisational. Attest with a reference to training records.",
+      ),
+      nistAttested(
+        "GOVERN-2.3",
+        "Executive leadership takes responsibility for AI risk decisions",
+        "Organisational. Risk acceptances and board reports support this; the responsibility is leadership's. " +
+          "Attest with a reference to the charter or delegation.",
+      ),
+      nistAttested(
+        "GOVERN-3.1",
+        "AI risk decisions are informed by a diverse, interdisciplinary team",
+        "Organisational. Multi-role review per tier supports this but says nothing about the team's diversity.",
+      ),
+      nistEvidenced("GOVERN-3.2", {
+        title: "Human oversight roles for AI agents are assigned: named stewards are set and review their agents",
+        coverage: "partial",
+        collector: "audit_decisions",
+        collectorParams: { objectType: "agent", ruleIdPrefix: "agent-stewardship-" },
+      }),
+      nistAttested(
+        "GOVERN-4.1",
+        "A critical-thinking, safety-first culture is fostered across AI design, deployment and use",
+        "Organisational. Attest with a reference to the policy set. Training is GOVERN 2.2.",
+      ),
+      nistEvidenced("GOVERN-6.1", {
+        title: "Third-party AI risk is governed: AI vendors are registered, assessed and attested",
+        coverage: "partial",
+        collector: "audit_decisions",
+        collectorParams: { objectType: "ai_vendor" },
+        ownerNote: "Intellectual-property risk of third-party models is not covered.",
+      }),
+      // ---- MAP ----
+      nistEvidenced("MAP-1.1", {
+        title: "Intended purpose, users and context are documented at intake for each new AI use case",
+        coverage: "evidenced",
+        collector: "audit_decisions",
+        collectorParams: { objectType: "ai_use_case", ruleIdPrefix: "use-case-proposed" },
+      }),
+      nistEvidenced("MAP-3.3", {
+        title: "Targeted application scope is fixed at approval: an approved use case carries its approved stack",
+        description: "The off-stack rule and the deploy gate hold the system to that scope after approval.",
+        coverage: "evidenced",
+        collector: "audit_decisions",
+        collectorParams: { objectType: "ai_use_case", ruleIdPrefix: "use-case-approved" },
+      }),
+      nistEvidenced("MAP-3.5", {
+        title: "Human oversight operates: governed actions were routed to a named human for approval",
+        coverage: "evidenced",
+        collector: "approvals",
+      }),
+      nistEvidenced("MAP-4.1", {
+        title: "AI system provenance and data lineage are recorded",
+        coverage: "evidenced",
+        collector: "lineage_edges",
+      }),
+      nistEvidenced("MAP-4.2", {
+        title: "Internal risk controls apply to third-party AI components: MCP servers pass an admission scan",
+        coverage: "evidenced",
+        collector: "audit_decisions",
+        collectorParams: { ruleIdPrefix: "mcp-admission-" },
+      }),
+      // ---- MEASURE ----
+      nistEvidenced("MEASURE-2.1", {
+        title: "Test sets and metrics are documented: evaluations run against versioned datasets",
+        coverage: "evidenced",
+        collector: "eval_runs",
+      }),
+      nistAttested(
+        "MEASURE-2.4",
+        "Functionality and behaviour are monitored in production",
+        "Traces and continuous trace evaluation support this, but no pack collector counts them yet, so it " +
+          "is attestation-only until one does. Attest with a reference to the monitoring plan.",
+      ),
+      nistEvidenced("MEASURE-2.5", {
+        title: "Validity and reliability are measured: evaluation runs in the period",
+        coverage: "partial",
+        collector: "eval_runs",
+        ownerNote: "Counts runs, not their scores; a failing run is still a run.",
+      }),
+      nistEvidenced("MEASURE-2.6", {
+        title: "The AI system is evaluated for safety risks — unsafe output is blocked",
+        coverage: "enforced",
+        collector: "guardrail_configs",
+        collectorParams: { detector: "toxicity", minMode: "block" },
+        ownerNote: "Configuration evidence: a toxicity detector at block somewhere in the guardrail set.",
+      }),
+      nistEvidenced("MEASURE-2.7", {
+        title: "AI system security and resilience are evaluated",
+        coverage: "evidenced",
+        collector: "audit_decisions",
+        collectorParams: { ruleIdPrefix: "redteam-run-" },
+        ownerNote:
+          "Counts red-team runs, passed or failed. v1 and v2 counted every evaluation run, which measures " +
+          "quality rather than security.",
+      }),
+      nistEvidenced("MEASURE-2.10", {
+        title: "Privacy risk is controlled: a compliance profile forces PII blocking",
+        coverage: "partial",
+        collector: "compliance_profile_cascade",
+        collectorParams: { cascadeAspect: "pii_block" },
+        ownerNote: "Configuration evidence. A privacy impact assessment is the organisation's.",
+      }),
+      nistEvidenced("MEASURE-2.11", {
+        title: "Fairness and bias are evaluated and results are documented",
+        coverage: "evidenced",
+        collector: "model_card_fairness",
+        ownerNote:
+          "Documentation evidence: counts model cards with a completed fairness assessment, not the " +
+          "assessment's result.",
+      }),
+      nistEvidenced("MEASURE-3.1", {
+        title: "Existing and emergent risks are tracked: the governance monitor ran in the period",
+        coverage: "evidenced",
+        collector: "audit_decisions",
+        collectorParams: { objectType: "governance_monitor", ruleIdPrefix: "governance-monitor-evaluated" },
+      }),
+      // ---- MANAGE ----
+      nistEvidenced("MANAGE-1.1", {
+        title: "A go/no-go decision is recorded before deployment: the deploy gate allowed or refused a release",
+        coverage: "evidenced",
+        collector: "audit_decisions",
+        collectorParams: { objectType: "deploy_gate", ruleIdPrefix: "deploy-gate-" },
+      }),
+      nistEvidenced("MANAGE-1.3", {
+        title: "Responses to risks are documented: mitigating controls are linked to registered risks",
+        coverage: "partial",
+        collector: "audit_decisions",
+        collectorParams: { objectType: "ai_risk", ruleIdPrefix: "risk-control-linked" },
+        ownerNote: "Transfer and avoid responses are not modelled.",
+      }),
+      nistEvidenced("MANAGE-1.4", {
+        title: "Residual risk is documented: a residual position was recorded for a registered risk",
+        coverage: "partial",
+        collector: "audit_decisions",
+        collectorParams: { objectType: "ai_risk", ruleIdPrefix: "risk-residual-set" },
+        ownerNote: "Disclosing residual risk to downstream acquirers and end users is not covered.",
+      }),
+      nistEvidenced("MANAGE-2.3", {
+        title: "Newly identified risks get a response: monitor alerts led to remediation proposals or actions",
+        coverage: "partial",
+        collector: "audit_decisions",
+        collectorParams: { ruleIdPrefix: "remediation-" },
+      }),
+      nistEvidenced("MANAGE-2.4", {
+        title: "Mechanisms are in place to supersede, disengage or deactivate an AI system",
+        coverage: "enforced",
+        collector: "audit_decisions",
+        collectorParams: { effect: "deny" },
+        ownerNote:
+          "Re-keyed from MANAGE 2.2 in v1 and v2. Evidenced by refusals actually occurring: a deny in the " +
+          "ledger shows the refusal path executes. It counts every deny (halts, revocations, retired-agent " +
+          "refusals and policy blocks alike), so it shows the mechanism works, not that a deactivation was decided.",
+      }),
+      nistEvidenced("MANAGE-3.1", {
+        title: "Third-party AI resources are monitored: admitted MCP servers are re-scanned on schedule",
+        coverage: "partial",
+        collector: "audit_decisions",
+        collectorParams: { ruleIdPrefix: "mcp-admission-rescan-swept" },
+        ownerNote: "Covers MCP servers; model vendors are covered by the vendor registry (GOVERN 6.1).",
+      }),
     ],
   }),
 );

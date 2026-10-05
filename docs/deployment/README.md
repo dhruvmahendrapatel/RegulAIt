@@ -15,6 +15,7 @@ pages are how.
 | **[UPGRADE.md](UPGRADE.md)** | signed update bundles, what the verifier refuses and why, key custody and rotation, rollback |
 | **[BACKUP_RESTORE.md](BACKUP_RESTORE.md)** | verified `pg_dump`, restore onto the same box and onto a new one, RPO/RTO, what is not covered |
 | **[GATEWAY_TOPOLOGY.md](GATEWAY_TOPOLOGY.md)** | running RegulAIt **behind** an existing L7 gateway as a decision point — **Kong only, container-verified; the Envoy adapter is WITHDRAWN** because its `ext_authz` filter decides from the HTTP status code and this endpoint answers `200` for a deny: the Kong plugin and what it does and does not send, what a callout costs, why the PDP credential is a subject-impersonation one (and why it is now a purpose-scoped virtual key rather than an admin API key), and what this topology deliberately does not buy |
+| **[SSO_KEYCLOAK.md](SSO_KEYCLOAK.md)** | the optional bundled identity broker (ADR-0174): “Continue with Microsoft / Google / GitHub”, MFA (code or passkey) enforced at the broker and checked by regulAIt, the three app registrations, secrets, hardening (admin console not public), upgrades and backups |
 | **[DATA_BOUNDARY.md](DATA_BOUNDARY.md)** | **the trust artifact** — every outbound surface in the product, per mode, verified against source, including the one gap between "air-gapped" as a word and as an enforced code property |
 
 ## The 60-second version

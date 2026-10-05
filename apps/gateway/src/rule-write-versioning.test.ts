@@ -376,6 +376,17 @@ describe("ADR-0074 — the compliance-profile UPSERT is an EDIT, and it is versi
   });
 
   it("the onboarding pack re-applied over a VERSIONED profile mints rather than silently overwriting", async () => {
+    // The suite shares one database, and other files apply the soc2 pack too
+    // and may leave its profile behind; this case needs a genuine CREATE, so
+    // it clears any leftover first rather than depending on file order.
+    for (const leftover of await db
+      .select({ id: complianceProfiles.id })
+      .from(complianceProfiles)
+      .where(eq(complianceProfiles.tag, "soc2"))) {
+      await db.delete(configActivationEvents).where(eq(configActivationEvents.artifactId, leftover.id));
+      await db.delete(configVersions).where(eq(configVersions.artifactId, leftover.id));
+      await db.delete(complianceProfiles).where(eq(complianceProfiles.id, leftover.id));
+    }
     const pack = await app.inject({
       method: "POST",
       headers: AUTH,

@@ -383,3 +383,19 @@ The product still never mints its own key. For the demo, `demo:export-key` is th
 README step made cross-platform: it writes a deployment-held key under `~/.regulait-demo-keys`
 and prints the two variables; `demo:check` gained a "3 Evidence" beat that FAILs with that fix
 when the key is missing, so a keyless rehearsal can no longer reach the audience.
+
+## Amendment 2026-10-03 — two more refusals in the offline verifier (AER-009)
+
+`scripts/verify-export-bundle.sh` adds two refusal classes, each with its own message so the suite's
+one-message-per-tamper invariant holds:
+
+- **NON-REGULAR ENTRY IN BUNDLE** — any symlink, FIFO or device anywhere in the extracted bundle, refused
+  right after extraction and before the signature or any name or listing check (`1358703`). Review found
+  that `01.payload -> 1.payload` and `abc.payload -> /etc/hostname` used to verify clean, and that
+  `--extract-to` copied the links into the "verified" tree. The listed-payload check also refuses a
+  symlink and the set comparisons list with `! -type d`, so each layer holds on its own.
+- **AUDIT PAYLOAD NAME MALFORMED** — a file under `audit/rows/` not named `<seq>.payload` exactly as
+  `chain.tsv` spells it, checked NUL-delimited so an embedded newline is shown, not swallowed
+  (`88e1bdf`). These names were already refused as "unlisted audit payloads"; what was missing was a
+  test and a distinct message. A listed payload removed with the chain intact reports AUDIT ROW MISSING,
+  not a sequence gap.

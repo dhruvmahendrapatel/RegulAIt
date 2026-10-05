@@ -340,6 +340,10 @@ export interface ApprovalCard {
   actions: ApprovalCardAction[];
   /** the sentence shown in place of the buttons when `actions` is empty */
   inAppOnlyNote: string | null;
+  /** ADR-0175 review fix: the body the Teams renderer shows, already made
+   * inert for Adaptive Card markdown. Absent = derived from `text` (approval
+   * cards, whose free-text fields are operator-supplied labels). */
+  teamsText?: string;
 }
 
 const IN_APP_ONLY_NOTE =
@@ -530,7 +534,7 @@ export function outlookMessageForCard(card: ApprovalCard): OutlookMessagePayload
 
 export function teamsActivityForCard(card: ApprovalCard): TeamsActivityPayload {
   const body: Array<Record<string, unknown>> = [
-    { type: "TextBlock", text: toAdaptiveMarkdown(card.text), wrap: true },
+    { type: "TextBlock", text: card.teamsText ?? toAdaptiveMarkdown(card.text), wrap: true },
     // The link is carried as TEXT as well as (when absolute) an action, so a
     // fenced card always still says WHERE to go even on a client that drops
     // the action bar. This is the "a link, not the content" half of the fence.
@@ -557,7 +561,7 @@ export function teamsActivityForCard(card: ApprovalCard): TeamsActivityPayload {
   }
 
   return {
-    text: card.text,
+    text: card.teamsText ?? card.text,
     attachments: [
       {
         contentType: TEAMS_ADAPTIVE_CARD_CONTENT_TYPE,
@@ -579,7 +583,33 @@ export function teamsActivityForCard(card: ApprovalCard): TeamsActivityPayload {
 // no actions, so no renderer can emit a button. The title is the alert's own
 // (names of use cases / agents / vendors — governance metadata, never prompt
 // or response content); the portal link is where a human acts.
+//
+// ADR-0175 review fix: AN ALERT TITLE IS FREE TEXT. It is built from names
+// people typed (a use case, an agent, a vendor, a risk), so it is made inert
+// for the channel that shows it: Slack's control characters (`& < >`) are
+// escaped, so a name cannot become a `<!channel>` broadcast, a `<@U…>`
+// mention or a `<https://evil|label>` link; Teams gets the same text with
+// Adaptive Card markdown escaped (Adaptive Cards render markdown and ignore
+// HTML, so markdown is the thing to neutralise there). Line breaks and
+// control characters in a free-text field are folded to spaces, so a name
+// cannot forge a second line of the card.
 // ---------------------------------------------------------------------------
+
+/** one line of free text: control characters (newlines included) → a space */
+function oneLine(text: string): string {
+  // eslint-disable-next-line no-control-regex
+  return text.replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, " ");
+}
+
+/**
+ * Make text INERT for an Adaptive Card TextBlock (Teams), which renders a
+ * markdown subset (emphasis, links, lists, headings) and shows HTML as plain
+ * text. Every markdown control character is backslash-escaped, so
+ * `[label](https://evil)` is shown literally rather than as a disguised link.
+ */
+export function escapeAdaptiveMarkdown(text: string): string {
+  return text.replace(/[\\`*_[\]()#|~<>]/g, (c) => `\\${c}`);
+}
 
 export function composeAlertCard(input: {
   alertId: string;
@@ -589,17 +619,25 @@ export function composeAlertCard(input: {
   portalUrl: string;
 }): ApprovalCard {
   const icon = input.severity === "high" ? "🔴" : input.severity === "medium" ? "🟠" : "⚪";
-  const text = `${icon} *Governance alert* — ${input.severity.toUpperCase()} — ${input.ruleLabel}\n${input.title}`;
+  const sev = input.severity.toUpperCase();
+  const label = oneLine(input.ruleLabel);
+  const title = oneLine(input.title);
+  const text = `${icon} *Governance alert* — ${sev} — ${escapeSlackText(label)}\n${escapeSlackText(title)}`;
+  const teamsText = `${icon} **Governance alert** — ${sev} — ${escapeAdaptiveMarkdown(label)}\n\n${escapeAdaptiveMarkdown(title)}`;
+  // the portal URL is ours (a path plus the alert's uuid); its Slack link
+  // syntax is still kept intact if it ever carried a control character
+  const href = input.portalUrl.replace(/[<>|]/g, encodeURIComponent);
   return {
     text,
     blocks: [
       { type: "section", text: { type: "mrkdwn", text } },
-      { type: "section", text: { type: "mrkdwn", text: `<${input.portalUrl}|Open in RegulAIt>` } },
+      { type: "section", text: { type: "mrkdwn", text: `<${href}|Open in RegulAIt>` } },
     ],
     redacted: false,
     portalUrl: input.portalUrl,
     actions: [],
     inAppOnlyNote: null,
+    teamsText,
   };
 }
 
@@ -608,4 +646,308 @@ export function alertMeetsThreshold(severity: string, threshold: "medium" | "hig
   if (!threshold) return false;
   const rank: Record<string, number> = { low: 0, medium: 1, high: 2 };
   return (rank[severity] ?? -1) >= rank[threshold]!;
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0173 §2 — INBOUND CONVERSATIONS: a chat message reaching a builder agent.
+//
+// THE SAME POSTURE AS THE INTERACTION PARSERS ABOVE. Everything here runs AFTER
+// `verifyChatSignature` proved the body came from the platform, and everything
+// it extracts is still an ASSERTION: the chat user id becomes a RegulAIt human
+// only through an admin-made `chat_identity_links` row, server-side. A message
+// we cannot read is refused (null), never guessed at.
+//
+// WHAT IS IGNORED, AND WHY IT IS NOT A REFUSAL. Bot messages (our own replies
+// included — answering them would loop), edits, deletions and every other
+// message subtype are acknowledged and dropped: they are not a person asking
+// the agent something, and a platform that is answered with an error retries.
+// ---------------------------------------------------------------------------
+
+/** the most text one inbound message may carry into a turn */
+export const CHANNEL_MESSAGE_MAX_CHARS = 8_000;
+
+/** Slack's de-duplication header: a redelivery of an event we may have seen */
+export const SLACK_RETRY_NUM_HEADER = "x-slack-retry-num";
+
+export interface InboundChatMessage {
+  provider: "slack" | "teams";
+  /** the platform's id for this delivery (Slack `event_id`, Teams activity `id`) */
+  eventId: string;
+  /** a second de-duplication key naming the MESSAGE, so the `message` and
+   * `app_mention` events Slack sends for one mention run one turn, not two */
+  messageKey: string;
+  /** the chat user who wrote it — an ASSERTION until mapped */
+  chatUserId: string;
+  /** the channel (Slack channel id; Teams conversation id without `;messageid=`) */
+  channelId: string;
+  /** the conversation within the channel this message belongs to */
+  threadId: string;
+  /** where the reply goes: Slack `thread_ts` (null = top level), Teams activity id */
+  replyThreadRef: string | null;
+  /** Teams: the full conversation id the reply is posted to; Slack: the channel */
+  replyTarget: string;
+  text: string;
+  /** the bot was spoken to directly: a mention or a direct message. A plain
+   * channel message is only answered where an agent is bound to that channel
+   * or the conversation is already one the agent is in. */
+  addressed: boolean;
+}
+
+export type SlackEventParse =
+  | { kind: "url_verification"; challenge: string }
+  | { kind: "message"; message: InboundChatMessage }
+  | { kind: "ignored"; eventId: string | null; reason: string };
+
+const nonEmpty = (v: unknown): string | null => (typeof v === "string" && v.length > 0 ? v : null);
+
+const isAsciiAlnum = (code: number): boolean =>
+  (code >= 48 && code <= 57) || (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
+
+/**
+ * `<@U123>` mentions (the bot's, usually at the start) are addressing, not content.
+ *
+ * Removes exactly what `/<@[A-Z0-9]+(\|[^>]*)?>/gi` matched (`<@ID>` or
+ * `<@ID|label>`), by an index scan instead: that regex is quadratic on inbound
+ * text such as `<@0|` repeated with no `>` (CodeQL js/polynomial-redos), and this
+ * text comes from anyone who can post in the channel. `chatops-redos.test.ts`
+ * checks the scan against the old regex.
+ */
+export function stripSlackMentions(text: string): string {
+  let out = "";
+  let copied = 0;
+  let from = 0;
+  for (;;) {
+    const open = text.indexOf("<@", from);
+    if (open < 0) break;
+    let k = open + 2;
+    while (k < text.length && isAsciiAlnum(text.charCodeAt(k))) k += 1;
+    let end = -1;
+    if (k > open + 2 && text[k] === ">") end = k + 1;
+    else if (k > open + 2 && text[k] === "|") {
+      const close = text.indexOf(">", k + 1);
+      // no `>` anywhere after here, so no later mention can close either
+      if (close < 0) break;
+      end = close + 1;
+    }
+    if (end < 0) {
+      // the ID run cannot contain `<@`, so the next candidate starts at or after k
+      from = k;
+      continue;
+    }
+    out += text.slice(copied, open) + " ";
+    copied = from = end;
+  }
+  return (out + text.slice(copied)).replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Parse a Slack Events API body. Returns null for anything we cannot read as
+ * one of: the URL-verification handshake, a person's message / app mention, or
+ * an event we deliberately ignore.
+ */
+export function parseSlackEvent(rawBody: string): SlackEventParse | null {
+  let json: unknown;
+  try {
+    json = JSON.parse(rawBody);
+  } catch {
+    return null;
+  }
+  if (typeof json !== "object" || json === null) return null;
+  const p = json as Record<string, unknown>;
+  if (p.type === "url_verification") {
+    const challenge = nonEmpty(p.challenge);
+    return challenge && challenge.length <= 500 ? { kind: "url_verification", challenge } : null;
+  }
+  if (p.type !== "event_callback") return null;
+  const eventId = nonEmpty(p.event_id);
+  const ev = p.event as Record<string, unknown> | undefined;
+  if (!eventId || typeof ev !== "object" || ev === null) return null;
+  const type = ev.type;
+  if (type !== "message" && type !== "app_mention") return { kind: "ignored", eventId, reason: "unsupported_event" };
+  if (ev.bot_id !== undefined || ev.subtype === "bot_message" || ev.bot_profile !== undefined) {
+    return { kind: "ignored", eventId, reason: "bot_message" };
+  }
+  if (ev.subtype === "message_changed" || ev.edited !== undefined) return { kind: "ignored", eventId, reason: "edit" };
+  if (ev.subtype !== undefined) return { kind: "ignored", eventId, reason: `subtype_${String(ev.subtype).slice(0, 40)}` };
+  const user = nonEmpty(ev.user);
+  const channel = nonEmpty(ev.channel);
+  const ts = nonEmpty(ev.ts);
+  const rawText = typeof ev.text === "string" ? ev.text : null;
+  if (!user || !channel || !ts || rawText === null) return null;
+  const text = stripSlackMentions(rawText).slice(0, CHANNEL_MESSAGE_MAX_CHARS);
+  if (!text) return { kind: "ignored", eventId, reason: "empty_message" };
+  const threadTs = nonEmpty(ev.thread_ts);
+  const isIm = ev.channel_type === "im";
+  return {
+    kind: "message",
+    message: {
+      provider: "slack",
+      eventId,
+      messageKey: `${channel}:${ts}`,
+      chatUserId: user,
+      channelId: channel,
+      // a direct message is ONE continuing conversation unless the person
+      // opened a thread; in a channel every top-level message starts one
+      threadId: threadTs ?? (isIm ? "im" : ts),
+      replyThreadRef: threadTs ?? (isIm ? null : ts),
+      replyTarget: channel,
+      text,
+      addressed: type === "app_mention" || isIm,
+    },
+  };
+}
+
+/**
+ * Make text INERT for Slack's `text` field (Slack's formatting rules: `&`, `<`
+ * and `>` are the control characters and must be sent as `&amp;`, `&lt;`,
+ * `&gt;`). Model output passed through this cannot produce a `<!channel>` /
+ * `<!here>` broadcast, a `<@U…>` mention, or a `<https://evil|looks-safe>`
+ * link whose label disguises its target — it is shown literally. Bare URLs
+ * stay clickable (Slack auto-links them, showing the real address).
+ */
+export function escapeSlackText(text: string): string {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+/** `html.replace(/<at>[\s\S]*?<\/at>/gi, " ")` without the quadratic rescan on
+ * `<at>` repeated: once no `</at>` follows, nothing later can match either. */
+function dropTeamsMentions(html: string): string {
+  const open = /<at>/gi;
+  const close = /<\/at>/gi;
+  let out = "";
+  let copied = 0;
+  for (;;) {
+    open.lastIndex = copied;
+    const o = open.exec(html);
+    if (!o) break;
+    close.lastIndex = o.index + o[0].length;
+    const c = close.exec(html);
+    if (!c) break;
+    out += html.slice(copied, o.index) + " ";
+    copied = c.index + c[0].length;
+  }
+  return out + html.slice(copied);
+}
+
+/** `text.replace(/<[^>]+>/g, " ")` without the quadratic rescan on `<` repeated:
+ * a tag runs from a `<` to the first `>` after it, and must not be empty. */
+function dropTags(text: string): string {
+  let out = "";
+  let copied = 0;
+  let from = 0;
+  for (;;) {
+    const open = text.indexOf("<", from);
+    if (open < 0) break;
+    const close = text.indexOf(">", open + 1);
+    if (close < 0) break;
+    if (close === open + 1) {
+      from = open + 1; // `<>` is not a tag
+      continue;
+    }
+    out += text.slice(copied, open) + " ";
+    copied = from = close + 1;
+  }
+  return out + text.slice(copied);
+}
+
+/**
+ * Teams sends HTML: drop the `<at>bot</at>` addressing and every tag.
+ *
+ * The text is attacker-controlled, and three of the original regexes
+ * (`<at>[\s\S]*?<\/at>`, `<[^>]+>`, `\s*\n\s*`) backtracked quadratically on an
+ * unclosed repeat (CodeQL js/polynomial-redos). Each is replaced by a scan with
+ * the same result; `chatops-redos.test.ts` checks them against the old
+ * implementation.
+ */
+export function teamsPlainText(html: string): string {
+  return dropTags(dropTeamsMentions(html).replace(/<br\s*\/?>/gi, "\n"))
+    .replace(/&nbsp;/g, " ")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, "&")
+    .replace(/[ \t]+/g, " ")
+    // a whitespace run that contains a line break becomes that one break
+    // (what `/\s*\n\s*/g` did, without rescanning break-free runs)
+    .replace(/\s+/g, (run) => (run.includes("\n") ? "\n" : run))
+    .trim();
+}
+
+export interface TeamsMessageParse {
+  message: InboundChatMessage;
+  /** the activity's own timestamp — INSIDE the HMAC'd body, so it is signed */
+  timestamp: string | null;
+}
+
+/**
+ * Parse a Teams outgoing-webhook Activity (a message that @-mentioned the
+ * webhook). null = not a readable person's message.
+ */
+export function parseTeamsMessage(rawBody: string): TeamsMessageParse | null {
+  let json: unknown;
+  try {
+    json = JSON.parse(rawBody);
+  } catch {
+    return null;
+  }
+  if (typeof json !== "object" || json === null) return null;
+  const p = json as Record<string, unknown>;
+  if (p.type !== "message") return null;
+  const id = nonEmpty(p.id);
+  const from = p.from as Record<string, unknown> | undefined;
+  // the SAME identity field the interaction parser reads, so one identity
+  // link serves both the approval buttons and the agent conversation
+  const chatUserId = nonEmpty(from?.aadObjectId) ?? nonEmpty(from?.id);
+  const conv = p.conversation as Record<string, unknown> | undefined;
+  const conversationId = nonEmpty(conv?.id);
+  const html = typeof p.text === "string" ? p.text : null;
+  if (!id || !chatUserId || !conversationId || html === null) return null;
+  const text = teamsPlainText(html).slice(0, CHANNEL_MESSAGE_MAX_CHARS);
+  if (!text) return null;
+  return {
+    timestamp: nonEmpty(p.timestamp),
+    message: {
+      provider: "teams",
+      eventId: id,
+      messageKey: `${conversationId}:${id}`,
+      chatUserId,
+      channelId: conversationId.split(";")[0]!,
+      threadId: conversationId,
+      replyThreadRef: id,
+      replyTarget: conversationId,
+      text,
+      // an outgoing webhook is only ever invoked by an @-mention
+      addressed: true,
+    },
+  };
+}
+
+export type ActivityFreshness =
+  | { ok: true }
+  | { ok: false; code: "missing_timestamp" | "malformed_timestamp" | "stale_timestamp" | "future_timestamp"; detail: string };
+
+/**
+ * ADR-0173 — the Teams REPLAY GUARD the interaction path never had. The
+ * outgoing-webhook HMAC covers the body only, but the Activity's `timestamp`
+ * is IN the body, so a verified body carries a signed time: a captured message
+ * re-sent later fails here, and one re-sent inside the window is caught by the
+ * activity-id de-duplication record.
+ */
+export function teamsActivityFreshness(
+  timestamp: string | null,
+  nowSeconds: number,
+  windowSeconds = CHATOPS_REPLAY_WINDOW_SECONDS,
+): ActivityFreshness {
+  if (!timestamp) return { ok: false, code: "missing_timestamp", detail: "the activity carries no timestamp to bound a replay against" };
+  const ms = Date.parse(timestamp);
+  if (!Number.isFinite(ms)) return { ok: false, code: "malformed_timestamp", detail: "the activity timestamp is not a date" };
+  const age = nowSeconds - Math.floor(ms / 1000);
+  if (age > windowSeconds) {
+    return { ok: false, code: "stale_timestamp", detail: `activity is ${age}s old, outside the ${windowSeconds}s replay window` };
+  }
+  if (age < -windowSeconds) {
+    return { ok: false, code: "future_timestamp", detail: `activity is ${-age}s in the future, outside the ${windowSeconds}s window` };
+  }
+  return { ok: true };
 }

@@ -8,6 +8,7 @@ import {
   validateDefinition,
   type AssignmentRule,
   type ChangeDescriptor,
+  type InstanceState,
   type WorkflowDefinition,
 } from "./index.js";
 
@@ -276,6 +277,136 @@ describe("instance state machine", () => {
     r = transition(standard, r.state, { kind: "approval_denied", stageId: "requirements_signoff" });
     expect(r.state.status).toBe("denied");
     expect(() => transition(standard, r.state, { kind: "approval_granted", stageId: "requirements_signoff" })).toThrow(/terminal/);
+  });
+
+  it("ADR-0168: a returned approval rests at the preceding artifact stage until a NEW version", () => {
+    let r = startedPastPlan();
+    r = transition(standard, r.state, { kind: "artifact_submitted", stageId: "requirements" });
+    expect(r.state.status).toBe("blocked_on_approval");
+    r = transition(standard, r.state, { kind: "approval_returned", stageId: "requirements_signoff" });
+    expect(r.state.status).toBe("blocked_on_artifact");
+    expect(r.state.currentStageIndex).toBe(2);
+    expect(r.state.stageStatuses[2]).toBe("active");
+    expect(r.state.stageStatuses[3]).toBe("reopened");
+    expect(r.effects).toEqual([{ kind: "await_artifact", stageId: "requirements", output: "requirements_file" }]);
+    // no decision on the returned gate is possible any more
+    expect(() =>
+      transition(standard, r.state, { kind: "approval_granted", stageId: "requirements_signoff" }),
+    ).toThrow(/not blocked on approval/);
+    // a new version re-requests the sign-off
+    r = transition(standard, r.state, { kind: "artifact_submitted", stageId: "requirements" });
+    expect(r.state.status).toBe("blocked_on_approval");
+    expect(r.state.artifactVersions.requirements_file).toBe(2);
+    expect(r.effects).toContainEqual({
+      kind: "request_approval",
+      stageId: "requirements_signoff",
+      approvers: ["requesting_user"],
+    });
+  });
+
+  it("ADR-0168: returning is refused off an approval gate, or with no artifact stage before it", () => {
+    let r = startedPastPlan();
+    expect(() =>
+      transition(standard, r.state, { kind: "approval_returned", stageId: "requirements_signoff" }),
+    ).toThrow(/not blocked on approval/);
+    const noArtifact = validateDefinition({
+      workflow: "no-artifact",
+      stages: [
+        { id: "t", type: "trigger" },
+        { id: "s", type: "human_approval", approvers: ["requesting_user"] },
+      ],
+    });
+    r = transition(noArtifact, initialState(noArtifact), { kind: "start" });
+    expect(() => transition(noArtifact, r.state, { kind: "approval_returned", stageId: "s" })).toThrow(
+      /no preceding artifact stage/,
+    );
+  });
+
+  it("AER-049: `reopen` takes a COMPLETED instance back to a stage it passed and runs forward from there", () => {
+    const intake = validateDefinition({
+      workflow: "intake-like",
+      stages: [
+        { id: "t", type: "trigger" },
+        { id: "q", type: "artifact_generation", output: "questionnaire" },
+        { id: "signoff", type: "human_approval", approvers: ["requesting_user"] },
+      ],
+    });
+    let r = transition(intake, initialState(intake), { kind: "start" });
+    r = transition(intake, r.state, { kind: "artifact_submitted", stageId: "q" });
+    r = transition(intake, r.state, { kind: "approval_granted", stageId: "signoff" });
+    expect(r.state.status).toBe("completed");
+    // every other event is still refused on a completed instance
+    expect(() => transition(intake, r.state, { kind: "artifact_submitted", stageId: "q" })).toThrow(/terminal/);
+    const back = transition(intake, r.state, { kind: "reopen", stageId: "signoff", reason: "recertification" });
+    expect(back.state.status).toBe("blocked_on_approval");
+    expect(back.state.currentStageIndex).toBe(2);
+    expect(back.state.stageStatuses[2]).toBe("active");
+    expect(back.state.artifactVersions.questionnaire).toBe(1); // no new artifact version
+    expect(back.effects).toEqual([{ kind: "request_approval", stageId: "signoff", approvers: ["requesting_user"] }]);
+    // re-opening to the artifact stage runs forward through the existing version into the gate
+    const fromQ = transition(intake, r.state, { kind: "reopen", stageId: "q", reason: "change" });
+    expect(fromQ.state.status).toBe("blocked_on_approval");
+    expect(fromQ.state.stageStatuses[1]).toBe("completed");
+  });
+
+  it("AER-049: `reopen` is refused on aborted/denied instances and for a stage not yet passed", () => {
+    let r = startedPastPlan();
+    expect(() => transition(standard, r.state, { kind: "reopen", stageId: "requirements_signoff", reason: "x" })).toThrow(
+      /not before the current stage/,
+    );
+    expect(() => transition(standard, r.state, { kind: "reopen", stageId: "nope", reason: "x" })).toThrow(/no stage/);
+    r = transition(standard, r.state, { kind: "abort" });
+    expect(() => transition(standard, r.state, { kind: "reopen", stageId: "requirements", reason: "x" })).toThrow(
+      /cannot be re-opened/,
+    );
+    // denied and rolled_back stay terminal too
+    let d = startedPastPlan();
+    d = transition(standard, d.state, { kind: "artifact_submitted", stageId: "requirements" });
+    d = transition(standard, d.state, { kind: "approval_denied", stageId: "requirements_signoff" });
+    expect(d.state.status).toBe("denied");
+    expect(() => transition(standard, d.state, { kind: "reopen", stageId: "requirements", reason: "x" })).toThrow(
+      /instance is terminal \(denied\) and cannot be re-opened/,
+    );
+    const rolledBack = { ...d.state, status: "rolled_back" as const };
+    expect(() => transition(standard, rolledBack, { kind: "reopen", stageId: "requirements", reason: "x" })).toThrow(
+      /instance is terminal \(rolled_back\) and cannot be re-opened/,
+    );
+  });
+
+  it("AER-049 review: `reopen` targets only a sign-off or artifact stage at or before the first PR / merge / deploy stage", () => {
+    const shipping = validateDefinition({
+      workflow: "ship",
+      stages: [
+        { id: "t", type: "trigger" },
+        { id: "branch", type: "git_operation", action: "create_branch", connection: "c", repo: "o/r" },
+        { id: "req", type: "artifact_generation", output: "requirements_file" },
+        { id: "gate", type: "human_approval", approvers: ["requesting_user"] },
+        { id: "open_pr", type: "git_operation", action: "open_pr", connection: "c", repo: "o/r" },
+        { id: "merge_gate", type: "human_approval", approvers: ["requesting_user"] },
+        { id: "merge", type: "git_operation", action: "merge", connection: "c", repo: "o/r" },
+      ],
+    });
+    // a completed instance (every stage passed)
+    const done: InstanceState = {
+      status: "completed",
+      currentStageIndex: shipping.stages.length,
+      stageStatuses: shipping.stages.map(() => "completed"),
+      artifactVersions: { requirements_file: 1 },
+    };
+    expect(() => transition(shipping, done, { kind: "reopen", stageId: "merge_gate", reason: "x" })).toThrow(
+      /comes after 'open_pr' \(git_operation\)/,
+    );
+    expect(() => transition(shipping, done, { kind: "reopen", stageId: "open_pr", reason: "x" })).toThrow(
+      /is a git_operation stage/,
+    );
+    expect(() => transition(shipping, done, { kind: "reopen", stageId: "t", reason: "x" })).toThrow(/is a trigger stage/);
+    // the positive control: the gate before the first git stage re-opens
+    const back = transition(shipping, done, { kind: "reopen", stageId: "gate", reason: "x" });
+    // (after a create_branch: that ships nothing, and open_pr cuts the round's branch)
+    expect(back.state).toMatchObject({ status: "blocked_on_approval", currentStageIndex: 3 });
+    expect(transition(shipping, done, { kind: "reopen", stageId: "req", reason: "x" }).state.status).toBe(
+      "blocked_on_approval",
+    );
   });
 
   it("a human trigger walks build to the check executor; check success completes", () => {
@@ -640,5 +771,59 @@ describe("automated_build with a nested run (§8)", () => {
     expect(started.state.status).toBe("awaiting_trigger");
     const done = transition(plain, started.state, { kind: "human_trigger", stageId: "build" });
     expect(done.state.status).toBe("completed");
+  });
+});
+
+describe("AER-047: offlineAutoPass is a typed, check-stage-only opt-in", () => {
+  const base = [{ id: "intake", type: "trigger" }] as const;
+
+  it("is kept (not stripped) on an automated_check stage with named checks", () => {
+    const def = validateDefinition({
+      workflow: "opt-in",
+      stages: [...base, { id: "checks", type: "automated_check", checks: ["unit_tests"], offlineAutoPass: true }],
+    });
+    expect(def.stages[1]!.offlineAutoPass).toBe(true);
+    const absent = validateDefinition({
+      workflow: "default",
+      stages: [...base, { id: "checks", type: "automated_check", checks: ["unit_tests"] }],
+    });
+    // the DEFAULT is no opt-in: an unreported check stays pending at the gateway
+    expect(absent.stages[1]!.offlineAutoPass).toBeUndefined();
+  });
+
+  it("must be a boolean — a stringly 'true' is refused, never coerced", () => {
+    expect(() =>
+      validateDefinition({
+        workflow: "bad",
+        stages: [...base, { id: "checks", type: "automated_check", checks: ["unit_tests"], offlineAutoPass: "true" }],
+      }),
+    ).toThrow();
+  });
+
+  it("is refused on any other stage type, and on a check stage with no named checks", () => {
+    expect(() =>
+      validateDefinition({
+        workflow: "bad",
+        stages: [...base, { id: "build", type: "automated_build", offlineAutoPass: true }],
+      }),
+    ).toThrow(/cannot carry offlineAutoPass/);
+    expect(() =>
+      validateDefinition({
+        workflow: "bad",
+        stages: [...base, { id: "checks", type: "automated_check", offlineAutoPass: true }],
+      }),
+    ).toThrow(/cannot carry offlineAutoPass/);
+  });
+
+  it("changes nothing in the state machine: the stage still awaits the check executor", () => {
+    const def = validateDefinition({
+      workflow: "opt-in",
+      stages: [...base, { id: "checks", type: "automated_check", checks: ["unit_tests"], offlineAutoPass: true }],
+    });
+    const started = transition(def, initialState(def), { kind: "start" });
+    expect(started.state.status).toBe("awaiting_execution");
+    expect(() =>
+      transition(def, started.state, { kind: "human_trigger", stageId: "checks" }),
+    ).toThrow(/cannot be human-triggered/);
   });
 });

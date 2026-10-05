@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 /**
  * AgentCoordination.md tooling — the ONE way agents check in, and the lint
  * that keeps the file small.
@@ -14,6 +13,14 @@
  *   pnpm coord:status   every agent's row with its age; STALE > 60 min,
  *                       OFFLINE > 90 min (owner directive: check in hourly)
  *   pnpm coord:lint     structural limits; exit 1 on violation (runs in CI)
+ *
+ * NO SHEBANG, ON PURPOSE. The file is not executable (mode 100644) and every
+ * caller runs `node scripts/coordination.mjs`, so a `#!` line bought nothing —
+ * and `coordination.test.mjs` imports this module under Vitest, whose module
+ * transform turned a `#!` line ending in CR (a Windows checkout with
+ * core.autocrlf) into "SyntaxError: Invalid or unexpected token" before a single
+ * assertion ran (codexInputs G10-G15-VERIFY). Reproduced on Linux by converting
+ * both files to CRLF; it passes with the line gone.
  *
  * WHY A SCRIPT. "Edit your row, don't append" is a rule people (and agents)
  * break under time pressure; a command that can only overwrite cannot. The
@@ -93,7 +100,9 @@ function taskBlocks(lines) {
 }
 
 export function lint(text, now = new Date()) {
-  const lines = text.split("\n");
+  // a Windows checkout (core.autocrlf) hands us CRLF; every rule below is
+  // written against "\n", so normalise once rather than let `\r` ride along
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
   const errors = [];
   if (lines.length > LIMITS.maxLines) {
     errors.push(`file is ${lines.length} lines (limit ${LIMITS.maxLines}) — collapse VERIFIED tasks, prune the Done log and handled messages`);

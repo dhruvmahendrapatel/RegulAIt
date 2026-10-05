@@ -1,0 +1,519 @@
+/**
+ * ADR-0171 (AER-050..054) — the registration wizard keeps a first-time
+ * proposer's work and tells them the truth about it:
+ *
+ *   050 the work is a server-side draft: it survives a reload and is offered
+ *       back; Cancel and the navigation ask first; Cancel and Back wait while a
+ *       submission is in flight; a create whose response is lost is retried
+ *       (even after a reload) with the same Idempotency-Key, so exactly one use
+ *       case with one risk set exists; nothing goes to browser storage;
+ *   051 returning to Classify unchanged keeps every edit and decision; changed
+ *       answers name the affected sections and regenerate only on consent;
+ *   052 an edited framework explanation is sent as `frameworkRationales`;
+ *   053 every yes/no question explains itself, "Not sure" counts as yes and is
+ *       recorded, and an incomplete step names what is missing and takes focus
+ *       to the first gap;
+ *   054 Review shows the proposal itself and "Edit this section" comes back.
+ *
+ * The gateway is an in-test mock that keeps the draft, the use cases, the
+ * questionnaire versions and the risks, so each test asserts the state the
+ * page's requests left behind, not only the requests.
+ */
+import { AxeBuilder } from "@axe-core/playwright";
+import { expect, test, type Page, type Route } from "@playwright/test";
+
+const AGENT = "22222222-2222-4222-8222-222222222222";
+const VENDOR = "99999999-1111-4111-8111-999999999999";
+const USE_CASE = "11111111-1111-4111-8111-111111111111";
+const BIAS = "Disparate credit recommendation outcomes";
+const INJECTION = "Prompt injection through customer-supplied text";
+const EMOTION = "Emotion inference used against customers";
+const HEADINGS = ["Purpose and business context", "Affected people", "Data", "Human oversight", "Operations", "Monitoring", "Security", "Accountability"];
+
+type Json = Record<string, any>;
+
+/** the assistant's answer: rules-based, so it follows the answers — emotion recognition adds a risk, drops a framework and redrafts section 2 */
+function assistFor(body: Json) {
+  const emotion = Boolean(body.euAiAct?.emotionRecognition);
+  return {
+    tier: { value: "high", reasons: [{ ruleId: "annex-iii", tier: "high", ref: "Annex III", reason: "Essential service" }], rulesetVersion: 1, source: "rules", disclaimer: "Screening, not legal advice." },
+    frameworks: [
+      { framework: "eu-ai-act", title: "EU AI Act", why: "EU nexus and high-risk purpose", source: "rules" },
+      ...(emotion ? [] : [{ framework: "nist-ai-rmf", title: "NIST AI RMF", why: "agentic financial workflow", source: "rules" }]),
+    ],
+    risks: [
+      { scenarioKey: "credit-bias", title: BIAS, description: "Profiling data may produce materially different recommendations across protected groups.", category: "bias_fairness", dimension: "bias", likelihood: "medium", impact: "high", suggestedControls: ["eu-ai-act:art-14-human-oversight"], why: "profiles natural persons", source: "rules" },
+      { scenarioKey: "prompt-injection", title: INJECTION, description: "Free-text input may steer the assistant away from its instructions.", category: "prompt_injection", dimension: "security", likelihood: "medium", impact: "medium", suggestedControls: [], why: "the system interacts directly with people", source: "mock" },
+      ...(emotion ? [{ scenarioKey: "emotion-misuse", title: EMOTION, description: "Inferred emotions may be used to pressure customers.", category: "manipulation", dimension: "safety", likelihood: "low", impact: "high", suggestedControls: [], why: "it infers emotions", source: "rules" }] : []),
+    ],
+    euAiActBlock: "```eu-ai-act-answers\n" + JSON.stringify(body.euAiAct, null, 2) + "\n```",
+    questionnaire: HEADINGS.map((heading, i) => ({
+      id: `q${i + 1}`,
+      heading: `${i + 1}. ${heading}`,
+      text: i === 1 && emotion ? "Revised draft 2: customers whose emotions are inferred." : `Draft answer ${i + 1}`,
+      source: "rules",
+    })),
+    blocking: null,
+    narrative: { status: "drafted", source: "mock" },
+    disclaimer: "Suggestions only.",
+  };
+}
+
+interface Gateway {
+  drafts: Map<string, { scope: string; state: unknown; updatedAt: string }>;
+  draftUnavailable: boolean;
+  /** answer every draft save with this status instead (e.g. 413 draft_too_large) */
+  draftPutStatus: number | null;
+  draftPuts: number;
+  assistCalls: Json[];
+  creates: Array<{ key: string | undefined; body: Json; replay: boolean }>;
+  useCases: Array<{ id: string; key: string | undefined; body: Json }>;
+  artifacts: string[];
+  risks: Array<Json & { id: string; controls: string[] }>;
+  /** drop the next create's response AFTER the use case is stored (a lost response) */
+  dropNextCreateResponse: boolean;
+  /** hold the create until released */
+  holdCreate: Promise<void> | null;
+}
+
+const json = (route: Route, body: unknown, status = 200, headers: Record<string, string> = {}) =>
+  route.fulfill({ status, contentType: "application/json", headers, body: JSON.stringify(body) });
+
+async function mockGateway(page: Page, patch: Partial<Gateway> = {}): Promise<Gateway> {
+  const gw: Gateway = { drafts: new Map(), draftUnavailable: false, draftPutStatus: null, draftPuts: 0, assistCalls: [], creates: [], useCases: [], artifacts: [], risks: [], dropNextCreateResponse: false, holdCreate: null, ...patch };
+  await page.route("**/*", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const p = url.pathname;
+    if (request.resourceType() === "document" || (!p.startsWith("/v1") && !p.startsWith("/auth"))) return route.continue();
+    const method = request.method();
+    const body = (method === "GET" || method === "DELETE" ? {} : request.postDataJSON() ?? {}) as Json;
+
+    if (p === "/auth/me") return json(route, { userId: "u", isAdmin: true, via: "session", user: { id: "u", email: "ada@example.test", displayName: "Ada Owner" }, mustChangePassword: false, totpEnabled: true, passwordSet: true, mfaSetupRequired: false });
+    if (p === "/v1/me") return json(route, { userId: "u", isAdmin: true, user: { id: "u", email: "ada@example.test", displayName: "Ada Owner" } });
+    if (p === "/v1/use-cases/draft") {
+      if (gw.draftUnavailable) return json(route, { error: "internal" }, 500);
+      const scope = url.searchParams.get("scope") ?? "";
+      if (method === "PUT") gw.draftPuts += 1;
+      if (method === "PUT" && gw.draftPutStatus) return json(route, { error: "draft_too_large" }, gw.draftPutStatus);
+      if (method === "PUT") gw.drafts.set(scope, { scope, state: body.state, updatedAt: new Date().toISOString() });
+      if (method === "DELETE") {
+        gw.drafts.delete(scope);
+        return route.fulfill({ status: 204 });
+      }
+      return json(route, { draft: gw.drafts.get(scope) ?? null });
+    }
+    if (p === "/v1/agents") return json(route, { agents: [{ id: AGENT, name: "Credit assistant", provider: "mock", model: "mock-balanced", enabled: true, modes: ["chat"] }] });
+    if (p === "/v1/vendors") return json(route, { vendors: [{ id: VENDOR, name: "Acme Model Services", category: "model_provider", status: "approved" }] });
+    if (p === "/v1/governance/review-policy") {
+      return json(route, { roles: [{ id: "privacy", name: "Privacy", memberUserIds: ["p"] }, { id: "security", name: "Security", memberUserIds: ["s"] }], tiers: { high: { roleIds: ["privacy", "security"], validityMonths: 6 } }, riskAcceptorUserIds: [], updatedAt: null, updatedByName: null });
+    }
+    if (p === "/v1/use-cases/intake/assist") {
+      gw.assistCalls.push(body);
+      return json(route, assistFor(body));
+    }
+    if (p === "/v1/use-cases" && method === "POST") {
+      const key = request.headers()["idempotency-key"];
+      if (gw.holdCreate) await gw.holdCreate;
+      // the gateway's contract: the same caller and key returns the ORIGINAL use case
+      const earlier = key ? gw.useCases.find((u) => u.key === key) : undefined;
+      gw.creates.push({ key, body, replay: Boolean(earlier) });
+      if (earlier) return json(route, { id: earlier.id, instance: { id: `instance-${earlier.id}` } }, 200, { "Idempotent-Replay": "true" });
+      const id = gw.useCases.length === 0 ? USE_CASE : `${gw.useCases.length}1111111-1111-4111-8111-111111111111`;
+      gw.useCases.push({ id, key, body });
+      if (gw.dropNextCreateResponse) {
+        gw.dropNextCreateResponse = false;
+        return route.abort("connectionreset");
+      }
+      return json(route, { id, instance: { id: `instance-${id}` } }, 201);
+    }
+    if (/^\/v1\/workflows\/instances\/[^/]+\/advance$/.test(p)) return json(route, { status: "running" });
+    if (/^\/v1\/workflows\/instances\/[^/]+\/artifacts$/.test(p)) {
+      gw.artifacts.push(String(body.content));
+      return json(route, { version: gw.artifacts.length }, 201);
+    }
+    if (p === "/v1/risks" && method === "POST") {
+      const row = { ...body, id: `risk-${gw.risks.length + 1}`, controls: [] as string[] };
+      gw.risks.push(row);
+      return json(route, row, 201);
+    }
+    const controls = p.match(/^\/v1\/risks\/([^/]+)\/controls$/);
+    if (controls && method === "POST") {
+      gw.risks.find((r) => r.id === controls[1])?.controls.push(String(body.controlRef));
+      return json(route, { linked: true }, 201);
+    }
+    return json(route, {});
+  });
+  return gw;
+}
+
+const stage = (page: Page) => page.locator('[aria-current="step"]');
+const card = (page: Page, title: string) => page.locator("section").filter({ has: page.getByText(title, { exact: true }) }).last();
+const nav = (page: Page) => page.getByRole("complementary", { name: "Primary navigation" });
+
+/** the worked example, through Describe and Classify, onto Suggestions */
+async function toSuggestions(page: Page) {
+  await page.goto("/ui/admin/governance/intake");
+  await page.getByRole("button", { name: "Fill in an example" }).click();
+  await page.getByRole("button", { name: "Continue" }).click();
+  await expect(stage(page)).toContainText("Classify");
+  await page.getByRole("button", { name: "Draft suggestions" }).click();
+  await expect(stage(page)).toContainText("Suggestions");
+}
+
+/** the proposer's own decisions and words at every stage, ending on Review */
+async function walkWithEdits(page: Page) {
+  await toSuggestions(page);
+  await card(page, "NIST AI RMF").getByRole("button", { name: "Reject", exact: true }).click();
+  await card(page, INJECTION).getByRole("button", { name: "Reject", exact: true }).click();
+  await card(page, "EU AI Act").getByRole("button", { name: "Edit", exact: true }).click();
+  await page.getByLabel("Edit EU AI Act").fill("Customers in Germany use it, and it decides on access to credit.");
+  await card(page, BIAS).getByRole("button", { name: "Edit", exact: true }).click();
+  await page.getByLabel(`Edit ${BIAS}`).fill("Edited bias text: outcomes are compared across groups monthly.");
+  await page.getByRole("button", { name: /Accept all remaining/ }).click();
+  await page.getByRole("button", { name: "Continue" }).click();
+  await expect(stage(page)).toContainText("Questionnaire");
+  await page.getByLabel("1. Purpose and business context answer").fill("My own purpose answer.");
+  await card(page, "3. Data").getByRole("button", { name: "Reject", exact: true }).click();
+  await page.getByRole("button", { name: "Continue" }).click();
+  await expect(stage(page)).toContainText("Link stack");
+  await page.getByLabel("Model / agent").selectOption(AGENT);
+  await page.getByLabel("Vendor").selectOption(VENDOR);
+  await page.getByRole("button", { name: "Continue" }).click();
+  await expect(stage(page)).toContainText("Review");
+}
+
+const draftStep = (gw: Gateway) => (gw.drafts.get("new")?.state as Json | undefined)?.step;
+/** is the browser's leave prompt armed? (a cancelable beforeunload that a listener prevents) */
+const unloadArmed = (page: Page) => page.evaluate(() => {
+  const event = new Event("beforeunload", { cancelable: true });
+  window.dispatchEvent(event);
+  return event.defaultPrevented;
+});
+
+async function expectNoAxeViolations(page: Page, label: string) {
+  for (const theme of ["light", "dark"] as const) {
+    await page.evaluate(async (next) => {
+      document.documentElement.dataset.theme = next;
+      await Promise.all(document.getAnimations().map((a) => a.finished.catch(() => undefined)));
+    }, theme);
+    const results = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"]).analyze();
+    expect(results.violations.map((v) => `${v.id}: ${v.nodes[0]?.target.join(" ")}`), `axe on "${label}" (${theme})`).toEqual([]);
+  }
+}
+
+test.describe("AER-050: the work is a server-side draft, leaving asks first, and a lost response never duplicates", () => {
+  test("every stage is saved as a draft (never in browser storage), survives a reload and resumes unchanged", async ({ page }) => {
+    const gw = await mockGateway(page);
+    await walkWithEdits(page);
+    await expect.poll(() => draftStep(gw), { message: "the Review step is saved" }).toBe(5);
+    await expect(page.getByText(/^Draft saved/)).toBeVisible();
+    // questionnaire text can be sensitive: none of it is in the browser's storage
+    const stored = await page.evaluate(() => JSON.stringify({ ...localStorage }) + JSON.stringify({ ...sessionStorage }));
+    expect(stored).not.toContain("My own purpose answer");
+    expect(stored).not.toContain("Customers in Germany");
+    // saved, so a reload needs no prompt
+    expect(await unloadArmed(page)).toBe(false);
+
+    await page.reload();
+    await expect(page.getByText(/You have a saved draft of “Credit-limit-increase assistant”/)).toBeVisible();
+    await expectNoAxeViolations(page, "resume offer");
+    await page.getByRole("button", { name: "Resume your draft" }).click();
+    await expect(stage(page)).toContainText("Review");
+    const proposal = page.getByRole("group", { name: "Your proposal" });
+    await expect(proposal).toContainText("Customers in Germany use it, and it decides on access to credit.");
+    await expect(proposal).toContainText("Edited bias text: outcomes are compared across groups monthly.");
+    await expect(proposal).toContainText("Credit assistant · mock/mock-balanced");
+    await page.getByRole("button", { name: "Back" }).click();
+    await page.getByRole("button", { name: "Back" }).click();
+    await expect(stage(page)).toContainText("Questionnaire");
+    await expect(page.getByLabel("1. Purpose and business context answer")).toHaveValue("My own purpose answer.");
+    await expect(card(page, "3. Data").getByText("rejected", { exact: true })).toBeVisible();
+    // the assistant was not asked again to restore any of it
+    expect(gw.assistCalls).toHaveLength(1);
+  });
+
+  test("Start fresh discards the saved draft and opens a blank form", async ({ page }) => {
+    const gw = await mockGateway(page);
+    gw.drafts.set("new", { scope: "new", state: { kind: "registration", version: 1, step: 1, form: { title: "Old idea", description: "Old purpose" } }, updatedAt: "2026-10-02T09:00:00Z" });
+    await page.goto("/ui/admin/governance/intake");
+    await expect(page.getByText(/You have a saved draft of “Old idea”/)).toBeVisible();
+    await page.getByRole("button", { name: "Start fresh" }).click();
+    await expect.poll(() => gw.drafts.has("new")).toBe(false);
+    await expect(page.getByLabel("Use-case name")).toHaveValue("");
+    await expect(stage(page)).toContainText("Describe");
+  });
+
+  test("a draft the gateway refuses (too large) is said plainly and not retried in a loop; the next change tries again", async ({ page }) => {
+    const gw = await mockGateway(page, { draftPutStatus: 413 });
+    await page.goto("/ui/admin/governance/intake");
+    await page.getByLabel("Use-case name").fill("Something new");
+    await expect(page.getByText("This draft is too large to save: your answers stay on this page until you submit.")).toBeVisible();
+    expect(gw.draftPuts).toBe(1);
+    await page.waitForTimeout(2500);
+    expect(gw.draftPuts, "no save loop while nothing changes").toBe(1);
+    expect(await unloadArmed(page)).toBe(true);
+    await page.getByLabel("Use-case name").fill("Something newer");
+    await expect.poll(() => gw.draftPuts).toBe(2);
+  });
+
+  test("Cancel and the navigation ask before leaving; Stay keeps the answers; an unsaved form arms the browser's prompt", async ({ page }) => {
+    await mockGateway(page, { draftUnavailable: true });
+    await page.goto("/ui/admin/governance/intake");
+    await page.getByLabel("Use-case name").fill("Something new");
+    await expect(page.getByText("Your draft can't be saved right now: your answers stay on this page until you submit.")).toBeVisible();
+    expect(await unloadArmed(page)).toBe(true);
+
+    await page.getByRole("link", { name: "Cancel" }).click();
+    const leave = page.getByRole("dialog", { name: "Leave this registration?" });
+    await expect(leave).toContainText("not saved anywhere else");
+    await expectNoAxeViolations(page, "leave dialog");
+    await leave.getByRole("button", { name: "Stay on this page" }).click();
+    await expect(leave).toHaveCount(0);
+    await expect(page).toHaveURL(/\/ui\/admin\/governance\/intake$/);
+    await expect(page.getByLabel("Use-case name")).toHaveValue("Something new");
+
+    // the navigation rail asks too, then goes where it was asked to
+    await nav(page).getByRole("link", { name: "Home", exact: true }).click();
+    await expect(leave).toBeVisible();
+    await leave.getByRole("button", { name: "Leave", exact: true }).click();
+    await expect(page).toHaveURL(/\/ui\/?$/);
+  });
+
+  test("Cancel and Back are disabled while a submission is in flight; leaving then says how to recover", async ({ page }) => {
+    let release: () => void = () => undefined;
+    const gw = await mockGateway(page, { holdCreate: new Promise<void>((resolve) => { release = resolve; }) });
+    await walkWithEdits(page);
+    await page.getByRole("button", { name: "Submit for human review" }).click();
+    await expect(page.getByRole("button", { name: "Submitting…" })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "Cancel" })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "Back" })).toBeDisabled();
+    expect(await unloadArmed(page)).toBe(true);
+    // the key the create carries is in the draft before the request is answered
+    await expect.poll(() => (gw.drafts.get("new")?.state as Json | undefined)?.attempt?.key).toBeTruthy();
+    const draftKey = (gw.drafts.get("new")!.state as Json).attempt.key as string;
+    await nav(page).getByRole("link", { name: "Home", exact: true }).click();
+    const leave = page.getByRole("dialog", { name: "Your submission is still being sent" });
+    await expect(leave).toContainText("will not create a second use case");
+    await leave.getByRole("button", { name: "Stay on this page" }).click();
+    release();
+    await expect(page.getByRole("status").filter({ hasText: "Submitted for human review." })).toBeVisible();
+    expect(gw.creates.map((c) => c.key)).toEqual([draftKey]);
+    // submitted: the draft is gone and nothing asks before leaving
+    await expect.poll(() => gw.drafts.has("new")).toBe(false);
+    expect(await unloadArmed(page)).toBe(false);
+  });
+
+  test("a create whose response is lost is finished after a reload with the same key: one use case, one risk set", async ({ page }) => {
+    const gw = await mockGateway(page, { dropNextCreateResponse: true });
+    await walkWithEdits(page);
+    await page.getByRole("button", { name: "Submit for human review" }).click();
+    await expect(page.getByRole("main").getByRole("alert").filter({ hasText: "retry to resume" })).toBeVisible();
+    // the gateway committed it; the page never heard back
+    expect(gw.useCases).toHaveLength(1);
+    const key = gw.creates[0]!.key!;
+    expect(key).toMatch(/^[0-9a-f-]{36}$/);
+    await expect.poll(() => (gw.drafts.get("new")?.state as Json | undefined)?.attempt?.key).toBe(key);
+
+    await page.reload();
+    await page.getByRole("button", { name: "Resume your draft" }).click();
+    await expect(stage(page)).toContainText("Review");
+    await expect(page.getByText(/A submission from these answers has already started/)).toBeVisible();
+    await page.getByRole("button", { name: "Submit for human review" }).click();
+    await expect(page.getByRole("status").filter({ hasText: "Submitted for human review." })).toBeVisible();
+
+    expect(gw.creates.map((c) => [c.key, c.replay])).toEqual([[key, false], [key, true]]);
+    expect(gw.creates[1]!.body).toEqual(gw.creates[0]!.body);
+    expect(gw.useCases).toHaveLength(1);
+    expect(gw.artifacts).toHaveLength(1);
+    expect(gw.risks.map((r) => [r.title, r.useCaseId, r.controls])).toEqual([[BIAS, USE_CASE, ["eu-ai-act:art-14-human-oversight"]]]);
+    await expect(page.getByRole("link", { name: "Open the use-case workspace" })).toHaveAttribute("href", `/ui/admin/governance/use-cases/${USE_CASE}`);
+    await expect.poll(() => gw.drafts.has("new")).toBe(false);
+  });
+
+  test("a retry on the same page after a lost response reuses the key too", async ({ page }) => {
+    const gw = await mockGateway(page, { dropNextCreateResponse: true });
+    await walkWithEdits(page);
+    await page.getByRole("button", { name: "Submit for human review" }).click();
+    await expect(page.getByRole("main").getByRole("alert").filter({ hasText: "retry to resume" })).toBeVisible();
+    await page.getByRole("button", { name: "Submit for human review" }).click();
+    await expect(page.getByRole("status").filter({ hasText: "Submitted for human review." })).toBeVisible();
+    expect(gw.creates.map((c) => c.replay)).toEqual([false, true]);
+    expect(new Set(gw.creates.map((c) => c.key)).size).toBe(1);
+    expect(gw.useCases).toHaveLength(1);
+    expect(gw.risks).toHaveLength(1);
+  });
+});
+
+test.describe("AER-051: returning to Classify never silently replaces edits", () => {
+  test("Back to Classify and on with unchanged answers keeps every edit and decision, and does not re-draft", async ({ page }) => {
+    const gw = await mockGateway(page);
+    await walkWithEdits(page);
+    for (const s of ["Link stack", "Questionnaire", "Suggestions", "Classify"]) {
+      await page.getByRole("button", { name: "Back" }).click();
+      await expect(stage(page)).toContainText(s);
+    }
+    await page.getByRole("button", { name: "Draft suggestions" }).click();
+    await expect(stage(page)).toContainText("Suggestions");
+    expect(gw.assistCalls).toHaveLength(1);
+    await expect(card(page, "NIST AI RMF").getByText("rejected", { exact: true })).toBeVisible();
+    await expect(card(page, BIAS)).toContainText("Edited bias text");
+    await expect(page.getByRole("button", { name: "Accept all remaining (0)" })).toBeDisabled();
+    await page.getByRole("button", { name: "Continue" }).click();
+    await expect(page.getByLabel("1. Purpose and business context answer")).toHaveValue("My own purpose answer.");
+    await expect(card(page, "3. Data").getByText("rejected", { exact: true })).toBeVisible();
+  });
+
+  test("changed answers name the affected sections; nothing changes until the proposer chooses, and Keep my edits keeps them", async ({ page }) => {
+    const gw = await mockGateway(page);
+    await walkWithEdits(page);
+    await page.getByRole("button", { name: "Back" }).click();
+    await page.getByRole("button", { name: "Back" }).click();
+    await page.getByLabel("2. Affected people answer").fill("My own words about affected people.");
+    for (let i = 0; i < 2; i += 1) await page.getByRole("button", { name: "Back" }).click();
+    await expect(stage(page)).toContainText("Classify");
+    await page.getByLabel("Emotion recognition").selectOption("yes");
+    await page.getByRole("button", { name: "Draft suggestions" }).click();
+
+    const choice = page.getByRole("region", { name: "Your answers changed since the suggestions were drafted" });
+    await expect(choice).toContainText("Frameworks: no longer suggests NIST AI RMF.");
+    await expect(choice).toContainText(`Risk scenarios: adds ${EMOTION}.`);
+    await expect(choice).toContainText("Questionnaire: a new draft for 2. Affected people (you edited it).");
+    // nothing has been replaced yet: still on Classify, the proposal untouched
+    await expect(stage(page)).toContainText("Classify");
+    expect(gw.assistCalls).toHaveLength(2);
+    await expectNoAxeViolations(page, "re-draft choice");
+
+    await choice.getByRole("button", { name: "Keep my edits" }).click();
+    await expect(stage(page)).toContainText("Suggestions");
+    await expect(card(page, "NIST AI RMF")).toContainText("No longer suggested by your answers");
+    await expect(card(page, "NIST AI RMF").getByText("rejected", { exact: true })).toBeVisible();
+    await expect(card(page, EMOTION).getByText("not reviewed", { exact: true })).toBeVisible();
+    await expect(card(page, BIAS)).toContainText("Edited bias text");
+    await card(page, EMOTION).getByRole("button", { name: "Accept", exact: true }).click();
+    await page.getByRole("button", { name: "Continue" }).click();
+    await expect(page.getByLabel("2. Affected people answer")).toHaveValue("My own words about affected people.");
+    await expect(page.getByLabel("1. Purpose and business context answer")).toHaveValue("My own purpose answer.");
+    // the screening section always follows the answers
+    await expect(page.getByLabel("9. EU AI Act risk screening")).toHaveValue(/"emotionRecognition": true/);
+  });
+
+  test("Regenerate affected sections replaces only those, with the proposer's consent, and drops stale suggestions with their edits", async ({ page }) => {
+    await mockGateway(page);
+    await walkWithEdits(page);
+    await page.getByRole("button", { name: "Back" }).click();
+    await page.getByRole("button", { name: "Back" }).click();
+    await page.getByLabel("2. Affected people answer").fill("My own words about affected people.");
+    for (let i = 0; i < 2; i += 1) await page.getByRole("button", { name: "Back" }).click();
+    await page.getByLabel("Emotion recognition").selectOption("yes");
+    await page.getByRole("button", { name: "Draft suggestions" }).click();
+    await page.getByRole("button", { name: "Regenerate affected sections" }).click();
+    await expect(stage(page)).toContainText("Suggestions");
+    await expect(page.getByText("NIST AI RMF", { exact: true })).toHaveCount(0);
+    await expect(card(page, BIAS)).toContainText("Edited bias text");
+    await expect(card(page, "EU AI Act")).toContainText("Customers in Germany");
+    await page.getByRole("button", { name: /Accept all remaining/ }).click();
+    await page.getByRole("button", { name: "Continue" }).click();
+    // the affected section takes the new draft; the unaffected one keeps the proposer's words
+    await expect(page.getByLabel("2. Affected people answer")).toHaveValue("Revised draft 2: customers whose emotions are inferred.");
+    await expect(page.getByLabel("1. Purpose and business context answer")).toHaveValue("My own purpose answer.");
+  });
+});
+
+test.describe("AER-052/053/054: explanations saved, plain-language screening, the proposal reviewed", () => {
+  test("AER-052: an edited framework explanation is sent with the use case; an unedited or rejected one is not", async ({ page }) => {
+    const gw = await mockGateway(page);
+    await walkWithEdits(page);
+    await page.getByRole("button", { name: "Submit for human review" }).click();
+    await expect(page.getByRole("status").filter({ hasText: "Submitted for human review." })).toBeVisible();
+    expect(gw.creates[0]!.body.complianceTags).toEqual(["eu-ai-act"]);
+    expect(gw.creates[0]!.body.frameworkRationales).toEqual({ "eu-ai-act": "Customers in Germany use it, and it decides on access to credit." });
+  });
+
+  test("AER-053: each yes/no question explains itself; a missing answer is named with its group and the first gap takes focus", async ({ page }) => {
+    await mockGateway(page);
+    await page.goto("/ui/admin/governance/intake");
+    await page.getByRole("button", { name: "Fill in an example" }).click();
+    await page.getByRole("button", { name: "Continue" }).click();
+    await expect(page.getByLabel("Has an EU nexus")).toHaveAccessibleDescription(/offered to people in the EU.*Example:/);
+    await expect(page.getByLabel("Safety component")).toHaveAccessibleDescription(/put health or safety at risk.*Example:/);
+    await expect(page.getByLabel("Manipulative techniques")).toHaveAccessibleDescription(/steer people's choices.*Example:/);
+    await expect(page.getByLabel("Profiles natural persons")).toHaveAccessibleDescription(/picture of individual people.*Example:/);
+
+    // one gap in each group
+    await page.getByLabel("People affected").selectOption("");
+    await page.getByLabel("Sectors: Financial services", { exact: true }).uncheck();
+    await page.getByLabel("Social scoring").selectOption("");
+    const missing = page.getByRole("region", { name: /3 questions still need an answer/ });
+    await expect(missing).toContainText("Purpose and people: People affected");
+    await expect(missing).toContainText("Data and sector: Sectors");
+    await expect(missing).toContainText("What it does in practice: Social scoring");
+    await expect(page.getByRole("button", { name: "Draft suggestions" })).toBeDisabled();
+    await expectNoAxeViolations(page, "Classify (missing answers)");
+    // the keyboard reaches the summary and lands on the first gap
+    await missing.getByRole("button", { name: "Go to the first unanswered question" }).focus();
+    await page.keyboard.press("Enter");
+    await expect(page.getByLabel("People affected")).toBeFocused();
+    await page.getByLabel("People affected").selectOption("customers");
+    await page.getByLabel("Sectors: Financial services", { exact: true }).check();
+    await page.getByLabel("Social scoring").selectOption("no");
+    await expect(missing).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Draft suggestions" })).toBeEnabled();
+  });
+
+  test("AER-053: Not sure counts as yes for the tier, is recorded in the questionnaire, and is shown on Review", async ({ page }) => {
+    const gw = await mockGateway(page);
+    await page.goto("/ui/admin/governance/intake");
+    await page.getByRole("button", { name: "Fill in an example" }).click();
+    await page.getByRole("button", { name: "Continue" }).click();
+    await page.getByLabel("Profiles natural persons").selectOption("unsure");
+    await page.getByLabel("Has an EU nexus").selectOption("unsure");
+    await page.getByLabel("Social scoring").selectOption("unsure");
+    await expect(page.getByLabel("Social scoring")).toHaveAccessibleDescription(/Not sure counts as yes until a reviewer confirms it/);
+    await expectNoAxeViolations(page, "Classify (not sure)");
+    await page.getByRole("button", { name: "Draft suggestions" }).click();
+    // uncertainty can never screen as a lower tier: each "not sure" is sent as yes
+    expect(gw.assistCalls[0]!.euAiAct).toMatchObject({ profilesNaturalPersons: true, socialScoring: true });
+    expect(gw.assistCalls[0]!.context).toMatchObject({ euNexus: true });
+    await page.getByRole("button", { name: /Accept all remaining/ }).click();
+    for (let i = 0; i < 3; i += 1) await page.getByRole("button", { name: "Continue" }).click();
+    const proposal = page.getByRole("group", { name: "Your proposal" });
+    await expect(proposal).toContainText("Your reviewers will see that you were not sure about: Profiles natural persons, Has an EU nexus, Social scoring.");
+    await page.getByRole("button", { name: "Submit for human review" }).click();
+    await expect(page.getByRole("status").filter({ hasText: "Submitted for human review." })).toBeVisible();
+    expect(gw.creates[0]!.body.screeningAnswers).toMatchObject({ profilesNaturalPersons: true, socialScoring: true, euNexus: true });
+    // the questionnaire version the reviewer decides on records the EU answers that were guesses
+    const block = /```eu-ai-act-answers\n([\s\S]*?)```/.exec(gw.artifacts[0]!)![1]!;
+    expect(JSON.parse(block)).toMatchObject({ profilesNaturalPersons: true, socialScoring: true, unsure: ["profilesNaturalPersons", "socialScoring"] });
+  });
+
+  test("AER-054: Review shows the proposal itself, who receives it and where to follow it; Edit this section comes back keeping the rest", async ({ page }) => {
+    await mockGateway(page);
+    await walkWithEdits(page);
+    const proposal = page.getByRole("group", { name: "Your proposal" });
+    await expect(proposal).toContainText("Customers in Germany use it, and it decides on access to credit.");
+    await expect(proposal).toContainText("NIST AI RMF — rejected, not included");
+    await expect(proposal).toContainText("Edited bias text: outcomes are compared across groups monthly.");
+    await expect(proposal).toContainText(`${INJECTION} — rejected, not included`);
+    await proposal.locator("summary", { hasText: "Questionnaire" }).click();
+    await expect(proposal).toContainText("My own purpose answer.");
+    await expect(proposal).toContainText("3. Data — rejected, not included");
+    await expect(proposal).toContainText("Credit assistant · mock/mock-balanced");
+    await expect(proposal).toContainText("Acme Model Services · approved");
+    await expect(proposal).toContainText("One review from each of these reviewer roles: Privacy, Security.");
+    await expect(proposal.getByRole("link", { name: "Follow it in the AI registry" })).toHaveAttribute("href", "/ui/admin/use-cases");
+    await expectNoAxeViolations(page, "Review (the proposal)");
+
+    await proposal.getByRole("button", { name: "Edit this section: Risks" }).click();
+    await expect(stage(page)).toContainText("Suggestions");
+    await card(page, INJECTION).getByRole("button", { name: "Accept", exact: true }).click();
+    await page.getByRole("button", { name: "Return to review" }).click();
+    await expect(stage(page)).toContainText("Review");
+    await expect(proposal).not.toContainText(`${INJECTION} — rejected`);
+    await expect(proposal).toContainText("Free-text input may steer the assistant");
+    await expect(proposal).toContainText("Customers in Germany use it");
+    await proposal.locator("summary", { hasText: "Questionnaire" }).click();
+    await expect(proposal).toContainText("My own purpose answer.");
+    await expect(proposal).toContainText("Credit assistant · mock/mock-balanced");
+  });
+});

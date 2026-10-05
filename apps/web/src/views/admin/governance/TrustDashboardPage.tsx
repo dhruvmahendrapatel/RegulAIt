@@ -1,10 +1,10 @@
-import { Fragment, useMemo, useState } from "react";
+import { Fragment, useMemo, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { plural } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Card, EmptyState } from "../../../ui/kit";
+import { Badge, Card, EmptyState, StatusDot } from "../../../ui/kit";
 import { QueryGate, Stat } from "../adminKit";
 import v from "../../views.module.css";
 import s from "./demoGovernance.module.css";
@@ -106,14 +106,27 @@ export default function TrustDashboardPage() {
         title="Trust & evidence"
         sub="Coverage by trust dimension, with measurement gaps left visible."
         info={
-          <p>
-            Evidence coverage is the share of applicable controls with current evidence. It is not a trust score,
-            certification, or compliance percentage. An unavailable measurement stays unmeasured rather than becoming zero.
-          </p>
+          <>
+            <p>
+              Evidence coverage is the share of applicable controls with current evidence. It is not a trust score,
+              certification, or compliance percentage. An unavailable measurement stays unmeasured rather than becoming zero.
+            </p>
+            {/* the reading guide lives here, one click away, instead of as a card at the foot of the page */}
+            {READING_GUIDE.map(([term, text]) => (
+              <p key={term}><strong>{term}.</strong> {text}</p>
+            ))}
+          </>
         }
       />
       <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
-        {q.data ? <><div className={v.row} style={{ marginBottom: "var(--s2)" }}><Link to="/admin/governance/alerts"><Badge tone={monitorTone}>{monitorLabel}</Badge></Link></div><TrustReportView report={q.data} active={active} onActive={setActive} /></> : null}
+        {q.data ? (
+          <TrustReportView
+            report={q.data}
+            active={active}
+            onActive={setActive}
+            monitor={<Link to="/admin/governance/alerts" className={s.monitorLink}><StatusDot tone={monitorTone} /><span>{monitorLabel}</span></Link>}
+          />
+        ) : null}
       </QueryGate>
     </>
   );
@@ -123,29 +136,40 @@ function TrustReportView(props: {
   report: TrustReport;
   active: DimensionKey;
   onActive: (key: DimensionKey) => void;
+  monitor: ReactNode;
 }) {
   const d = props.report;
   const current = d.dimensions.find((item) => item.key === props.active) ?? d.dimensions[0];
   return (
     <div className={v.stack}>
-      <div className={v.row}>
-        <Badge tone="info">{d.scope.label}</Badge>
-        <span className={v.faint}>Last {d.window.days} days · generated {new Date(d.generatedAt).toLocaleString()}</span>
+      {/* one meta line: scope, window, packs, generated, and the monitor state */}
+      <div className={`${v.row} ${s.metaLine}`}>
+        <span>{d.scope.label}</span>
+        <span aria-hidden>·</span>
+        <span>Last {d.window.days} days</span>
+        <span aria-hidden>·</span>
+        <span>{d.packsEvaluated.length} active pack{d.packsEvaluated.length === 1 ? "" : "s"} evaluated</span>
+        <span aria-hidden>·</span>
+        <span>generated {new Date(d.generatedAt).toLocaleString()}</span>
         <span className={v.grow} />
-        <span className={v.faint}>
-          {d.packsEvaluated.length} active pack{d.packsEvaluated.length === 1 ? "" : "s"} evaluated
-        </span>
+        {props.monitor}
       </div>
 
-      <div className={v.grid4}>
-        <Stat
-          value={d.totals.risksFound.toLocaleString()}
-          label={d.totals.risksAccepted > 0 ? `Risks found · ${d.totals.risksAccepted.toLocaleString()} accepted` : "Risks found"}
-        />
-        <Stat value={d.totals.risksMitigated.toLocaleString()} label="Mitigated" />
-        <Stat value={d.totals.risksUnmitigated.toLocaleString()} label="Not yet mitigated" />
-        <Stat value={formatCoverage(d.totals.evidenceCoveragePct)} label="Evidence coverage" />
-      </div>
+      <Card>
+        <div className={v.stack}>
+          <div className={v.kpiStrip}>
+            <div className={v.stat}>
+              <span className={v.statValue}>{d.totals.risksFound.toLocaleString()}</span>
+              <span className={v.statLabel}>Risks found</span>
+              {d.totals.risksAccepted > 0 ? <span className={v.faint}>{d.totals.risksAccepted.toLocaleString()} accepted</span> : null}
+            </div>
+            <div className={v.stat}><span className={v.statValue}>{d.totals.risksMitigated.toLocaleString()}</span><span className={v.statLabel}>Mitigated</span></div>
+            <div className={v.stat}><span className={v.statValue}>{d.totals.risksUnmitigated.toLocaleString()}</span><span className={v.statLabel}>Not yet mitigated</span></div>
+            <div className={v.stat}><span className={v.statValue}>{formatCoverage(d.totals.evidenceCoveragePct)}</span><span className={v.statLabel}>Evidence coverage</span></div>
+          </div>
+          <p className={v.faint}>Evidence coverage is not a compliance or trust score; unmeasured is a gap, not zero.</p>
+        </div>
+      </Card>
 
       <div className={s.dashboardGrid}>
         <Card title="Evidence coverage by dimension">
@@ -199,16 +223,6 @@ function TrustReportView(props: {
         <Heatmap cells={d.residualHeatmap} label="Residual risk" />
       </Card>
 
-      <Card title="How to read this dashboard">
-        <div className={v.stack}>
-          {READING_GUIDE.map(([term, text]) => (
-            <div key={term} className={v.listRow}>
-              <strong>{term}</strong>
-              <span className={v.dim}>{text}</span>
-            </div>
-          ))}
-        </div>
-      </Card>
     </div>
   );
 }
@@ -311,7 +325,6 @@ function Heatmap({ cells, label }: { cells: HeatCell[]; label: string }) {
                 title={`${value} ${label.toLowerCase()} item(s): ${likelihood} likelihood, ${impact} impact`}
               >
                 <strong>{value}</strong>
-                <span>risk{value === 1 ? "" : "s"}</span>
               </div>
             );
           })}

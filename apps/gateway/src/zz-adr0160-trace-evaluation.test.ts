@@ -12,9 +12,10 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { agents, aiUseCases, createDb, eq, inArray, runMigrations, traceEvaluations, traceSpans, traces, type Db } from "@regulait/db";
+import { agents, aiUseCases, createDb, eq, inArray, runMigrations, sql, traceEvaluations, traceSpans, traces, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { SCHEDULER_JOB_NAMES, schedulerJobRegistry } from "./scheduler-jobs.js";
+import { runTraceEvaluationSweep } from "./trace-evaluation.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -124,5 +125,151 @@ describe("ADR-0160 continuous trace evaluation", () => {
     expect((await call("GET", "/v1/governance/trace-evaluations", { authorization: `Bearer ${key}` })).statusCode).toBe(403);
     const job = schedulerJobRegistry().get(SCHEDULER_JOB_NAMES.traceEvaluation);
     expect(job?.defaultIntervalSeconds).toBe(900);
+  });
+});
+
+// AER-045 — the sweep used to page on `started_at >= max(evaluated
+// span_started_at) - 10 min`, so a model call that finished after a newer span
+// had been evaluated, and that started more than ten minutes before it, was
+// never evaluated at all. These spans carry no agent, so the per-agent summary
+// and monitor assertions above are unaffected.
+describe("AER-045 late-completing spans are evaluated exactly once", () => {
+  const evalRows = (ids: string[]) => db.select().from(traceEvaluations).where(inArray(traceEvaluations.spanId, ids));
+  let traceId = "";
+  let seq = 100;
+  const insertSpan = async (v: Partial<typeof traceSpans.$inferInsert> & { startedAt: Date }) => {
+    const [row] = await db
+      .insert(traceSpans)
+      .values({ traceId, seq: seq++, kind: "llm", name: "aer045", status: "ok", ...v })
+      .returning({ id: traceSpans.id });
+    return row!.id;
+  };
+
+  beforeAll(async () => {
+    const [t] = await db.insert(traces).values({ kind: "dispatch", name: "aer045", userId: admin.id }).returning({ id: traces.id });
+    traceId = t!.id;
+  });
+
+  it("a span that completes after a newer one was evaluated is evaluated on the next sweep, and only once", async () => {
+    const now = Date.now();
+    // started 11 minutes ago, still in flight (opened like `openSpan` does)
+    const lateStart = new Date(now - 11 * 60_000);
+    const late = await insertSpan({ status: "running", startedAt: lateStart, endedAt: lateStart, inputPreview: "q" });
+    const newer = await insertSpan({ startedAt: new Date(now), endedAt: new Date(now), inputPreview: "q", outputPreview: "fine" });
+    await sweepAll();
+    expect((await evalRows([newer])).length).toBe(1);
+    expect(await evalRows([late])).toEqual([]); // still running: not eligible yet
+
+    // the long call completes now; and a completed span three hours older than
+    // the newest evaluated one lands (a delayed commit / late writer)
+    await db
+      .update(traceSpans)
+      .set({ status: "ok", endedAt: new Date(), outputPreview: "Use AKIAIOSFODNN7EXAMPLE for the bucket." })
+      .where(eq(traceSpans.id, late));
+    const olderStart = new Date(now - 3 * 3_600_000);
+    const older = await insertSpan({ startedAt: olderStart, endedAt: new Date(), inputPreview: "q", outputPreview: "ok" });
+
+    const first = await call("POST", "/v1/governance/trace-evaluations/run", admin.auth);
+    expect(first.statusCode, first.body).toBe(200);
+    expect(first.json()).toMatchObject({ scanned: 2, evaluated: 2, flagged: 1, capped: false });
+    const rows = await evalRows([late, older]);
+    expect(rows).toHaveLength(2);
+    const by = new Map(rows.map((r) => [r.spanId, r]));
+    expect(by.get(late)).toMatchObject({ outcome: "evaluated", flagged: true });
+    expect(by.get(late)!.spanStartedAt.getTime()).toBe(lateStart.getTime());
+    expect(by.get(older)).toMatchObject({ outcome: "evaluated", flagged: false });
+
+    // a further sweep finds nothing and rewrites nothing
+    const again = await call("POST", "/v1/governance/trace-evaluations/run", admin.auth);
+    expect(again.json()).toMatchObject({ scanned: 0, evaluated: 0, flagged: 0 });
+    const after = await evalRows([late, older, newer]);
+    expect(after).toHaveLength(3);
+    for (const r of rows) {
+      const same = after.find((x) => x.spanId === r.spanId)!;
+      expect(same.id).toBe(r.id);
+      expect(same.evaluatedAt.getTime()).toBe(r.evaluatedAt.getTime());
+    }
+  });
+
+  it("the scan floor stays anchored on the first evaluation, so a span older than now-7d is still evaluated", async () => {
+    const DAY = 86_400_000;
+    const now = Date.now();
+    // the first evaluation ever written happened 30 days ago: evaluate a fresh
+    // span, then move its row's evaluated_at back. The floor is that anchor less
+    // the 7-day lookback (37 days ago) — not a sliding now-7d window, and not
+    // the newest evaluation.
+    const first = await insertSpan({ startedAt: new Date(now - 60_000), endedAt: new Date(now), inputPreview: "q", outputPreview: "ok" });
+    await sweepAll();
+    const [firstRow] = await evalRows([first]);
+    expect(firstRow).toBeDefined();
+    const anchorAt = new Date(now - 30 * DAY);
+    await db.update(traceEvaluations).set({ evaluatedAt: anchorAt }).where(eq(traceEvaluations.id, firstRow!.id));
+    try {
+      const [m] = (await db.execute(sql`select min(evaluated_at) as at from trace_evaluations`)).rows as Array<{ at: string | Date }>;
+      expect(new Date(m!.at).getTime(), "another row predates the anchor this test set").toBe(anchorAt.getTime());
+
+      // the scheduler was down / the writer was late: a completed span that
+      // started 10 days ago (older than now-7d, newer than the floor) lands now,
+      // beside one that started 40 days ago (older than the floor)
+      const stale = await insertSpan({ startedAt: new Date(now - 10 * DAY), endedAt: new Date(), inputPreview: "q", outputPreview: "Use AKIAIOSFODNN7EXAMPLE." });
+      const ancient = await insertSpan({ startedAt: new Date(now - 40 * DAY), endedAt: new Date(), inputPreview: "q", outputPreview: "ok" });
+      await sweepAll();
+      const rows = await evalRows([stale, ancient]);
+      expect(rows.map((r) => r.spanId)).toEqual([stale]);
+      expect(rows[0]).toMatchObject({ outcome: "evaluated", flagged: true });
+      expect(rows[0]!.spanStartedAt.getTime()).toBe(now - 10 * DAY);
+
+      // exactly once: a further pass leaves the row as it was
+      await sweepAll();
+      const after = await evalRows([stale, ancient]);
+      expect(after).toHaveLength(1);
+      expect(after[0]!.id).toBe(rows[0]!.id);
+      expect(after[0]!.evaluatedAt.getTime()).toBe(rows[0]!.evaluatedAt.getTime());
+    } finally {
+      // the database is shared: put the floor back where this file found it
+      await db.update(traceEvaluations).set({ evaluatedAt: firstRow!.evaluatedAt }).where(eq(traceEvaluations.id, firstRow!.id));
+    }
+  });
+
+  it("two overlapping passes write one row and report the span once between them", async () => {
+    const at = new Date();
+    const target = await insertSpan({ startedAt: at, endedAt: at, inputPreview: "q", outputPreview: "Use AKIAIOSFODNN7EXAMPLE." });
+    // Hold an uncommitted evaluation row for the span so both passes select it
+    // and then queue on the unique index; rolling it back lets them race the
+    // real insert. Exactly one may win, and only the winner may count it.
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    let markInserted!: () => void;
+    const inserted = new Promise<void>((r) => (markInserted = r));
+    const blocker = db
+      .transaction(async (tx) => {
+        await tx.insert(traceEvaluations).values({ spanId: target, traceId, spanStartedAt: at, outcome: "no_content" });
+        markInserted();
+        await held;
+        throw new Error("rollback");
+      })
+      .catch(() => undefined);
+    await inserted;
+    const passes = [runTraceEvaluationSweep(db), runTraceEvaluationSweep(db)];
+    const deadline = Date.now() + 15_000;
+    for (;;) {
+      const [w] = (
+        await db.execute(
+          sql`select count(*)::int as n from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock' and query ilike 'insert into "trace_evaluations"%'`,
+        )
+      ).rows as Array<{ n: number }>;
+      if ((w?.n ?? 0) >= 2) break;
+      if (Date.now() > deadline) throw new Error("passes never queued on the unique index");
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    release();
+    await blocker;
+    const results = await Promise.all(passes);
+    expect(results.map((r) => r.scanned)).toEqual([1, 1]);
+    expect(results.reduce((a, r) => a + r.evaluated + r.withheld + r.noContent, 0)).toBe(1);
+    expect(results.reduce((a, r) => a + r.flagged, 0)).toBe(1);
+    const rows = await evalRows([target]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ outcome: "evaluated", flagged: true });
   });
 });

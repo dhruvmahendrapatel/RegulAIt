@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ApiError, api } from "../../../api/client";
-import { Badge, Button, Card, EmptyState, Field, Input, Select } from "../../../ui/kit";
+import { Button, Card, EmptyState, Field, Input, Select } from "../../../ui/kit";
 import { QueryGate, optionEls, useAction } from "../adminKit";
 import v from "../../views.module.css";
 import s from "./demoGovernance.module.css";
@@ -85,11 +85,11 @@ export function RiskLibraryPicker(props: { useCaseId?: string; agentId?: string;
             <div className={s.libraryList}>
               {filtered.map((entry) => (
                 <article key={entry.key} className={s.libraryEntry}>
-                  <div className={v.row}><strong>{entry.title}</strong><span className={v.grow} /><Badge tone="info">{entry.dimension}</Badge><Badge tone="neutral">{entry.category.replace(/_/g, " ")}</Badge></div>
+                  <div className={v.row}><strong>{entry.title}</strong><span className={v.grow} /><span className={v.faint}>{entry.dimension} · {entry.category.replace(/_/g, " ")}</span></div>
                   <p className={v.dim}>{entry.description}</p>
-                  <p className={v.faint}>Domains: {entry.domains.join(", ")} · Suggested controls: {entry.suggestedControls?.length ? entry.suggestedControls.join(", ") : "not supplied by this catalog entry"}</p>
                   {selectedKey === entry.key ? (
                     <div className={s.libraryAssessment}>
+                      <p className={v.faint}>Domains: {entry.domains.join(", ")} · Suggested controls: {entry.suggestedControls?.length ? entry.suggestedControls.join(", ") : "not supplied by this catalog entry"}</p>
                       <p className={v.dim}>Assess this risk for the selected use case. The library does not assign likelihood or impact.</p>
                       <Field label="Likelihood">
                         <Select value={likelihood} onChange={(event) => setLikelihood(event.target.value as RiskRating | "")}>

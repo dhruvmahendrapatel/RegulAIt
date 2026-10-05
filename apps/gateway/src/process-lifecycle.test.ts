@@ -36,7 +36,16 @@ type PoolLike = {
   totalCount: number;
   ended?: boolean;
   end: () => Promise<void>;
+  connect: () => Promise<CheckedOutClient>;
 };
+type CheckedOutClient = {
+  query: (text: string) => Promise<{ rows: Array<Record<string, unknown>> }>;
+  listenerCount: (ev: string) => number;
+  release: (err?: Error) => void;
+};
+/** the postgres lines createDb prints — the only console.error calls these tests attribute to the pool */
+const pgLines = (spy: { mock: { calls: unknown[][] } }) =>
+  spy.mock.calls.map((c) => String(c[0])).filter((line) => line.startsWith("[regulait] postgres:"));
 const poolOf = (handle: Db) => (handle as unknown as { $client: PoolLike }).$client;
 
 async function freePort(): Promise<number> {
@@ -88,6 +97,16 @@ describe("REL-01: an idle pooled connection dying is logged, not fatal", () => {
       // the pool notices (the 'error' event fires) and discards the client
       await until(() => pool.totalCount === 0);
       await until(() => logged.mock.calls.some((c) => String(c[0]).includes("idle pooled connection was dropped")));
+      // EXACTLY ONE line for one idle drop, and it is the idle one. The durable
+      // per-connection listener (the checked-out guard below) is attached while
+      // the client idles too, and both listeners run in the same synchronous
+      // emit — so by the line above it has already had its chance to speak. A
+      // second, "lost mid-use … the in-flight query fails" line here would tell
+      // an operator a request failed when nothing was in flight.
+      const lines = pgLines(logged);
+      expect(lines, lines.join("\n")).toHaveLength(1);
+      expect(lines[0]).toContain("idle pooled connection was dropped");
+      expect(lines.some((l) => l.includes("mid-use"))).toBe(false);
 
       // the process is still here, and the pool dials a fresh client
       const again = await db.execute(sql`select pg_backend_pid()::int as pid`);
@@ -95,6 +114,71 @@ describe("REL-01: an idle pooled connection dying is logged, not fatal", () => {
       expect(pid2).not.toBe(pid);
       logged.mockRestore();
     } finally {
+      await pool.end();
+    }
+  }, 30_000);
+});
+
+describe("REL-01: a CHECKED-OUT connection dying is logged, not fatal", () => {
+  it("a backend killed under a held client fails the query, never reaches the process, and logs mid-use once", async () => {
+    const db = createDb(scratchUrl);
+    const pool = poolOf(db);
+    // what the fix exists to prevent, counted directly rather than left to the
+    // test runner's own unhandled-error reporting
+    const uncaught: unknown[] = [];
+    const onUncaught = (e: unknown) => uncaught.push(e);
+    process.on("uncaughtException", onUncaught);
+    process.on("unhandledRejection", onUncaught);
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    // released in `finally` if the test bails early, so `pool.end()` there can
+    // never wait behind a still-sleeping statement
+    let held: CheckedOutClient | undefined;
+    try {
+      // a client held the way a transaction holds one: pg-pool strips its idle
+      // listener for exactly this window, so createDb's own is the only guard
+      const client = await pool.connect();
+      held = client;
+      const durableListeners = client.listenerCount("error");
+      const pid = Number((await client.query("select pg_backend_pid()::int as pid")).rows[0]!.pid);
+      await client.query("begin");
+      const inFlight = client.query("select pg_sleep(30)").then(
+        () => null,
+        (e: Error) => e,
+      );
+      // wait until the statement is really running on that backend
+      for (let i = 0; ; i++) {
+        const r = await admin.execute(sql`select count(*)::int as n from pg_stat_activity where pid = ${pid} and query like 'select pg_sleep%'`);
+        if (Number((r as unknown as { rows: Array<{ n: number }> }).rows[0]!.n) === 1) break;
+        if (i > 200) throw new Error("the held client's statement never started");
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      await admin.execute(sql`select pg_terminate_backend(${pid})`);
+
+      // the failure surfaces where the caller awaits it
+      const err = await inFlight;
+      expect(err, "the in-flight query rejects").toBeInstanceOf(Error);
+      // the connection's own 'error' event follows; it lands either on
+      // createDb's listener (a log line) or, unguarded, on the process
+      await until(() => pgLines(logged).length > 0 || uncaught.length > 0);
+      expect(uncaught.map(String), "nothing reached the process").toEqual([]);
+      expect(durableListeners, "a durable listener survives checkout").toBeGreaterThanOrEqual(1);
+      client.release(err!);
+      held = undefined;
+
+      await until(() => pool.totalCount === 0);
+      // reported once, as what it was: a mid-use loss, not an idle drop
+      const lines = pgLines(logged);
+      expect(lines, lines.join("\n")).toHaveLength(1);
+      expect(lines[0]).toContain("lost mid-use");
+
+      // and the same pool serves the next query from a fresh backend
+      const again = await db.execute(sql`select pg_backend_pid()::int as pid`);
+      expect(Number((again as unknown as { rows: Array<{ pid: number }> }).rows[0]!.pid)).not.toBe(pid);
+    } finally {
+      held?.release(new Error("test teardown"));
+      logged.mockRestore();
+      process.off("uncaughtException", onUncaught);
+      process.off("unhandledRejection", onUncaught);
       await pool.end();
     }
   }, 30_000);

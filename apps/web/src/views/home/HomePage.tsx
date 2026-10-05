@@ -7,6 +7,7 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
+import { CardBoundary } from "../../ui/CardBoundary";
 import { api } from "../../api/client";
 import type {
   Approval,
@@ -41,21 +42,24 @@ export default function HomePage() {
     <>
       <PageHeader
         title={firstName ? `Welcome back, ${firstName}` : "Welcome back"}
-        sub="Your governed AI delivery workspace — everything below is live."
       />
       <div className={v.stack}>
-        {auth?.isAdmin && <OrientationCard />}
-        {auth?.isAdmin && <SuiteLauncher />}
-        {auth?.isAdmin && <SetupCard />}
-        {auth?.isAdmin && <TrustSnapshotCard />}
-        {auth?.isAdmin && <GovernanceAlertsSnapshot />}
+        {auth?.isAdmin && <CardBoundary title="Governance at a glance"><OrientationCard /></CardBoundary>}
+        {auth?.isAdmin && <CardBoundary title="Products"><SuiteLauncher /></CardBoundary>}
+        {auth?.isAdmin && <CardBoundary title="Setup"><SetupCard /></CardBoundary>}
+        {auth?.isAdmin && <CardBoundary title="Trust snapshot"><TrustSnapshotCard /></CardBoundary>}
+        {auth?.isAdmin && <CardBoundary title="Governance alerts"><GovernanceAlertsSnapshot /></CardBoundary>}
+        {/* an admin already sees pending decisions and attributed spend in the
+            at-a-glance card above; the cards would state them a second time */}
+        {!auth?.isAdmin && (
+          <div className={v.grid2}>
+            <CardBoundary title="Approvals"><ApprovalsCard /></CardBoundary>
+            <CardBoundary title="Spend"><SpendCard /></CardBoundary>
+          </div>
+        )}
         <div className={v.grid2}>
-          <ApprovalsCard />
-          <SpendCard />
-        </div>
-        <div className={v.grid2}>
-          <RecentRunsCard />
-          {auth?.isAdmin ? <AuditCard /> : <WorkflowNudgeCard />}
+          <CardBoundary title="Recent runs"><RecentRunsCard /></CardBoundary>
+          <CardBoundary title={auth?.isAdmin ? "Audit" : "Workflows"}>{auth?.isAdmin ? <AuditCard /> : <WorkflowNudgeCard />}</CardBoundary>
         </div>
       </div>
     </>
@@ -149,7 +153,7 @@ function OrientationCard() {
           <span className={v.faint} aria-hidden>
             ·
           </span>
-          <Link to="/admin/use-cases">Propose an AI use case</Link>
+          <Link to="/admin/governance/intake">Register an AI use case</Link>
           <span className={v.faint} aria-hidden>
             ·
           </span>
@@ -194,7 +198,9 @@ function SuiteLauncher() {
   const stat = (suiteId: string): { value: string; label: string } | null => {
     switch (suiteId) {
       case "workspace":
-        return runs.data ? { value: String(runs.data.runs.length), label: "runs" } : null;
+        // a tile metric is decoration: a malformed or partial response shows no
+        // number rather than taking the whole home page down with it
+        return Array.isArray(runs.data?.runs) ? { value: String(runs.data.runs.length), label: "runs" } : null;
       case "approvals-audit":
         return approvals.data ? { value: String(pending), label: "waiting on a human" } : null;
       case "cost-optimization":
@@ -221,11 +227,13 @@ function SuiteLauncher() {
               className={v.tile}
               data-testid={`suite-tile-${su.id}`}
             >
-              <span className={v.tileGlyph}>
-                <SuiteGlyph suiteId={su.id} />
+              <span className={v.tileHead}>
+                <span className={v.tileGlyph}>
+                  <SuiteGlyph suiteId={su.id} />
+                </span>
+                <span className={v.tileName}>{su.name}</span>
               </span>
-              <span className={v.tileName}>{su.name}</span>
-              <span className={v.tileDesc}>{su.purpose}</span>
+              <span className={v.tileDesc} title={su.purpose}>{su.purpose}</span>
               {n && (
                 <span className={v.tileStat}>
                   <span className={v.tileStatValue}>{n.value}</span>
@@ -274,33 +282,17 @@ function SetupCard() {
   }
   return (
     <Card
-      title={
-        <span className={v.row}>
-          Getting started
-          <Badge tone="primary">
-            {d.doneCount}/{d.totalCount} done
-          </Badge>
-        </span>
-      }
+      title="Getting started"
       actions={<Link to="/admin/setup">Open checklist</Link>}
     >
-      <div>
-        {d.steps.map((step) => (
-          <div key={step.key} className={v.listRow}>
-            <StatusDot tone={step.done ? "ok" : "neutral"} title={step.done ? "done" : "pending"} />
-            <span className={v.grow} style={{ fontSize: "var(--text-sm)" }}>
-              {step.title}
-            </span>
-            {step.done ? (
-              <Badge tone="ok">done</Badge>
-            ) : (
-              <Link className={v.faint} to="/admin/setup" title="Complete this step in Getting started">
-                Set up →
-              </Link>
-            )}
-          </div>
-        ))}
-      </div>
+      {/* one progress line; the steps themselves live on the checklist page */}
+      <p className={v.dim}>
+        {d.doneCount} of {d.totalCount} setup steps done
+        {(() => {
+          const next = d.steps.find((step) => !step.done);
+          return next ? <> · next: {next.title}</> : null;
+        })()}
+      </p>
     </Card>
   );
 }

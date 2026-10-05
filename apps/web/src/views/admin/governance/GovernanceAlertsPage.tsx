@@ -41,6 +41,8 @@ interface RemediationCandidate {
   rationale: string;
   params: Record<string, unknown>;
   steps: string[];
+  /** a guidance step that starts in an existing screen (ADR-0175 A9: the register flow, prefilled) */
+  href?: string;
 }
 interface RemediationProposal {
   id: string;
@@ -98,10 +100,10 @@ export default function GovernanceAlertsPage() {
       <div className={v.stack}>
         <Card>
           <div className={v.row}>
-            <div className={v.grid3} style={{ flex: 1 }}>
-              <AlertStat label="Open" value={alerts.data?.counts.open ?? 0} tone="danger" />
-              <AlertStat label="Acknowledged" value={alerts.data?.counts.acknowledged ?? 0} tone="warn" />
-              <AlertStat label="Resolved" value={alerts.data?.counts.resolved ?? 0} tone="ok" />
+            <div className={v.kpiStrip} style={{ flex: 1 }}>
+              <AlertStat label="Open" value={alerts.data?.counts.open ?? 0} alarm />
+              <AlertStat label="Acknowledged" value={alerts.data?.counts.acknowledged ?? 0} />
+              <AlertStat label="Resolved" value={alerts.data?.counts.resolved ?? 0} />
             </div>
             <Button
               variant="primary"
@@ -110,13 +112,13 @@ export default function GovernanceAlertsPage() {
                 const result = await api.post<EvaluationResult>("/v1/governance/monitor/evaluate");
                 setEvaluation(result);
                 await refresh();
-              }, "Governance monitor evaluation completed")}
+              }, null)}
             >
               Evaluate now
             </Button>
           </div>
           <p className={v.faint}>Last evaluated: {alerts.data?.lastEvaluatedAt ? ago(alerts.data.lastEvaluatedAt) : "not evaluated yet"}</p>
-          {evaluation ? <p className={s.callout} role="status">Evaluation raised {evaluation.raised}, refreshed {evaluation.refreshed}, resolved {evaluation.resolved}; {evaluation.active} remain active.</p> : null}
+          {evaluation ? <p className={s.statusLine} role="status">Evaluation raised {evaluation.raised}, refreshed {evaluation.refreshed}, resolved {evaluation.resolved}; {evaluation.active} remain active.</p> : null}
         </Card>
 
         <Tabs tabs={FILTERS} active={status} onChange={(next) => { setStatus(next); setSelectedId(null); }} />
@@ -135,7 +137,7 @@ export default function GovernanceAlertsPage() {
               <div className={s.alertList}>
                 {alerts.data?.alerts.map((alert) => (
                   <button key={alert.id} className={`${s.alertRow} ${selectedId === alert.id ? s.alertRowActive : ""}`} onClick={() => setSelectedId(alert.id)}>
-                    <span className={s.alertRowHead}><SeverityBadge severity={alert.severity} /><Badge tone={alert.status === "resolved" ? "ok" : alert.status === "acknowledged" ? "warn" : "danger"}>{alert.status}</Badge></span>
+                    <span className={s.alertRowHead}><SeverityBadge severity={alert.severity} />{alert.status === "open" ? null : <span className={v.faint}>{alert.status}</span>}</span>
                     <strong>{alert.title}</strong>
                     <span className={v.faint}>{alert.ruleLabel} · seen {ago(alert.lastDetectedAt)}</span>
                   </button>
@@ -145,23 +147,23 @@ export default function GovernanceAlertsPage() {
               {selected ? (
                 <Card title={selected.subject.label}>
                   <div className={v.stack}>
-                    <div className={v.row}><SeverityBadge severity={selected.severity} /><Badge tone="neutral">{selected.ruleLabel}</Badge></div>
+                    <div className={v.row}><SeverityBadge severity={selected.severity} />{selected.status === "open" ? null : <span className={v.dim}>{selected.status}</span>}<span className={v.faint}>{selected.ruleLabel}</span></div>
                     <p>{selected.title}</p>
                     <SubjectLinks alert={selected} />
                     <div className={v.row}>
-                      <Button size="sm" disabled={action.busy} onClick={() => void action.run(async () => {
+                      <Button size="sm" variant="ghost" disabled={action.busy} onClick={() => void action.run(async () => {
                         const posted = await api.post<{ posted: true; connection: string; channel: string }>(`/v1/governance/alerts/${selected.id}/post`);
                         setPostResult(`Posted to ${posted.connection} · ${posted.channel}`);
-                      }, "Governance alert posted to chat")}>Post to chat</Button>
+                      }, null)}>Post to chat</Button>
                       <span className={v.faint}>Uses the first enabled workspace unless the API is given an explicit connection.</span>
                     </div>
-                    {postResult ? <p className={s.callout} role="status">{postResult}</p> : null}
+                    {postResult ? <p className={s.statusLine} role="status">{postResult}</p> : null}
                     {action.error ? <p className={v.errLine} role="alert">{action.error}</p> : null}
                     {(selected.detail.pathLabels ?? selected.detail.path)?.length ? (
                       <div><strong>Inherited-risk path</strong><ol className={s.pathList}>{(selected.detail.pathLabels ?? selected.detail.path ?? []).map((part) => <li key={part}>{part}</li>)}</ol></div>
                     ) : null}
                     {selected.detail.sourceRiskId ? <Link to={`/admin/risks?riskId=${selected.detail.sourceRiskId}`}>Open source risk</Link> : null}
-                    {selected.ackNote ? <p className={s.callout}>Acknowledgement note: {selected.ackNote}</p> : null}
+                    {selected.ackNote ? <p className={v.dim}>Acknowledgement note: {selected.ackNote}</p> : null}
                     {selected.status === "open" ? (
                       <div className={v.stack}>
                         <Field label="Acknowledgement note — required and audited">
@@ -201,7 +203,7 @@ function RemediationPanel({ alertId }: { alertId: string }) {
 
   return (
     <div className={v.stack}>
-      <div className={v.sectionTitle}>Remediation</div>
+      <div className={v.sectionTitle} style={{ marginTop: 0 }}>Remediation</div>
       <QueryGate loading={remediation.isLoading} error={remediation.error} onRetry={() => void remediation.refetch()}>
         {remediation.data ? (
           <div className={v.stack}>
@@ -215,7 +217,7 @@ function RemediationPanel({ alertId }: { alertId: string }) {
                 <div className={s.remediationCandidate} key={candidateKey}>
                   <div className={v.row}>
                     <strong>{candidate.title}</strong>
-                    <Badge tone={candidate.executable ? "info" : "neutral"}>{candidate.executable ? "approval-gated action" : "operator guidance"}</Badge>
+                    <span className={v.faint}>{candidate.executable ? "approval-gated action" : "operator guidance"}</span>
                   </div>
                   <p className={v.dim}>{candidate.rationale}</p>
                   {candidate.executable ? (
@@ -228,7 +230,6 @@ function RemediationPanel({ alertId }: { alertId: string }) {
                       </Field>
                       <Button
                         size="sm"
-                        variant="primary"
                         disabled={action.busy || !approver}
                         onClick={() => void action.run(async () => {
                           await api.post(`/v1/governance/alerts/${alertId}/remediation`, {
@@ -244,14 +245,19 @@ function RemediationPanel({ alertId }: { alertId: string }) {
                       {approvers.length === 0 ? <span className={v.hint}>Another user is required; proposers cannot approve their own remediation.</span> : null}
                     </div>
                   ) : (
-                    <ol className={s.remediationSteps}>{candidate.steps.map((step) => <li key={step}>{step}</li>)}</ol>
+                    <>
+                      <ol className={s.remediationSteps}>{candidate.steps.map((step) => <li key={step}>{step}</li>)}</ol>
+                      {candidate.href && candidate.href.startsWith("/") ? (
+                        <div><Link to={candidate.href}>{candidate.kind === "register_use_case" ? "Register as use case" : candidate.kind === "review_credential" ? "Manage credential" : "Open"}</Link></div>
+                      ) : null}
+                    </>
                   )}
                 </div>
               );
             })}
+            {remediation.data.proposals.length ? (
             <div>
               <strong>Proposals</strong>
-              {remediation.data.proposals.length ? (
                 <div className={v.stackTight}>
                   {remediation.data.proposals.map((proposal) => (
                     <div className={s.proposalRow} key={proposal.id}>
@@ -261,8 +267,8 @@ function RemediationPanel({ alertId }: { alertId: string }) {
                     </div>
                   ))}
                 </div>
-              ) : <p className={v.faint}>No remediation has been proposed for this alert.</p>}
             </div>
+            ) : null}
             {action.error ? <p className={v.errLine} role="alert">{action.error}</p> : null}
           </div>
         ) : null}
@@ -278,8 +284,9 @@ function proposalTone(status: RemediationProposal["status"]): "ok" | "warn" | "d
   return "warn";
 }
 
-function AlertStat({ label, value, tone }: { label: string; value: number; tone: "danger" | "warn" | "ok" }) {
-  return <div className={v.stat}><span className={v.statValue}>{value}</span><span className={v.statLabel}><Badge tone={tone}>{label}</Badge></span></div>;
+/** a plain figure; colour only when there is something open to act on */
+function AlertStat({ label, value, alarm }: { label: string; value: number; alarm?: boolean }) {
+  return <div className={v.stat}><span className={v.statValue} style={alarm && value > 0 ? { color: "var(--danger)" } : undefined}>{value}</span><span className={v.statLabel}>{label}</span></div>;
 }
 
 function SubjectLinks({ alert }: { alert: GovernanceAlert }) {
@@ -292,10 +299,16 @@ function SubjectLinks({ alert }: { alert: GovernanceAlert }) {
       : subject.type === "agent" ? "/admin/agents"
       : subject.type === "vendor" ? `/admin/vendors${subject.id ? `?vendorId=${subject.id}` : ""}`
         : subject.type === "risk" ? `/admin/risks?riskId=${subject.id ?? ""}`
-          : null;
+          // ADR-0175 A9 subjects
+          : subject.type === "project" && subject.id ? `/projects/${subject.id}`
+            : subject.type === "virtual_key" ? "/admin/virtual-keys"
+              : subject.type === "caller" ? "/admin/users"
+                // ADR-0175 A7 — a flagged credential opens the inventory
+                : subject.type === "credential" ? "/admin/credentials"
+                  : null;
   return (
     <div className={v.row}>
-      {path ? <Link to={path}>Open {subject.type.replace("_", " ")}</Link> : <span>{subject.label}</span>}
+      {path ? <Link to={path}>Open {subject.type === "caller" ? "users" : subject.type.replace("_", " ")}</Link> : <span>{subject.label}</span>}
       {subject.context ? <Link to={`/admin/governance/use-cases/${subject.context.id}`}>Context: {subject.context.label}</Link> : null}
     </div>
   );
@@ -307,14 +320,21 @@ export function GovernanceAlertsSnapshot() {
     queryFn: () => api.get<AlertsResponse>("/v1/governance/alerts?status=active"),
   });
   const active = (alerts.data?.counts.open ?? 0) + (alerts.data?.counts.acknowledged ?? 0);
+  const open = alerts.data?.counts.open ?? 0;
   return (
     <Card title="Governance monitor" actions={<Link to="/admin/governance/alerts">Open alerts</Link>}>
-      {alerts.isLoading ? <p className={v.faint}>Loading active governance conditions…</p> : alerts.isError ? <p className={v.errLine}>Alerts could not be loaded.</p> : (
+      {alerts.isLoading ? <p className={v.faint}>Loading active governance conditions…</p> : alerts.isError ? <p className={v.errLine}>Alerts could not be loaded.</p> : !alerts.data?.lastEvaluatedAt ? (
+        // a monitor that has never run has not found "0 open" — it has found nothing yet
+        <div className={v.row}>
+          <span className={v.dim}>Governance monitor not evaluated</span>
+          <span className={v.faint}>· run Evaluate now on the alerts page before reading this as an all-clear</span>
+        </div>
+      ) : (
         <div className={v.row}>
           <span className={v.statValue}>{active}</span>
           <span className={v.dim}>active alert{active === 1 ? "" : "s"}</span>
-          <Badge tone={(alerts.data?.counts.open ?? 0) > 0 ? "danger" : "ok"}>{alerts.data?.counts.open ?? 0} open</Badge>
-          <Badge tone={(alerts.data?.counts.acknowledged ?? 0) > 0 ? "warn" : "neutral"}>{alerts.data?.counts.acknowledged ?? 0} acknowledged</Badge>
+          {open > 0 ? <Badge tone="danger">{open} open</Badge> : <span className={v.dim}>· 0 open</span>}
+          <span className={v.dim}>· {alerts.data.counts.acknowledged} acknowledged</span>
         </div>
       )}
     </Card>

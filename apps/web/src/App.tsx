@@ -9,6 +9,16 @@ import ForcedPasswordChange from "./views/auth/ForcedPasswordChange";
 import ForcedMfaEnroll from "./views/auth/ForcedMfaEnroll";
 import HomePage from "./views/home/HomePage";
 import ChatPage from "./views/chat/ChatPage";
+import BuilderChatPage from "./views/builder/BuilderChatPage";
+import BuilderInboxPage from "./views/builder/BuilderInboxPage";
+import BuilderAgentsPage from "./views/builder/BuilderAgentsPage";
+import BuilderAgentEditorPage from "./views/builder/BuilderAgentEditorPage";
+import BuilderTemplatesPage from "./views/builder/BuilderTemplatesPage";
+import BuilderTemplateDetailPage from "./views/builder/BuilderTemplateDetailPage";
+import BuilderIntegrationsPage from "./views/builder/BuilderIntegrationsPage";
+import BuilderSkillsPage from "./views/builder/BuilderSkillsPage";
+import BuilderUsagePage from "./views/builder/BuilderUsagePage";
+import ModelsPage from "./views/models/ModelsPage";
 import RunsPage from "./views/runs/RunsPage";
 import RunDetailPage from "./views/runs/RunDetailPage";
 import WorkflowsPage from "./views/workflows/WorkflowsPage";
@@ -28,16 +38,19 @@ import TeamsPage from "./views/admin/identity/TeamsPage";
 import ClientAccessPage from "./views/admin/identity/ClientAccessPage";
 import SsoPage from "./views/admin/identity/SsoPage";
 import ScimPage from "./views/admin/identity/ScimPage";
+import CredentialsPage from "./views/admin/identity/CredentialsPage";
 import GroupMappingsPage from "./views/admin/identity/GroupMappingsPage";
 import VirtualKeysPage from "./views/admin/identity/VirtualKeysPage";
 import RulesEnginePage from "./views/admin/governance/RulesEnginePage";
 import SimulationPage from "./views/admin/governance/SimulationPage";
 import AbacPoliciesPage from "./views/admin/governance/AbacPoliciesPage";
 import GuardrailsPage from "./views/admin/governance/GuardrailsPage";
+import ModelPolicyPage from "./views/admin/governance/ModelPolicyPage";
 import EvalsPage from "./views/admin/governance/EvalsPage";
 import ModelRiskPage from "./views/admin/governance/ModelRiskPage";
 import UseCasesPage from "./views/admin/governance/UseCasesPage";
 import IntakeWizardPage from "./views/admin/governance/IntakeWizardPage";
+import ReviewPolicyPage from "./views/admin/governance/ReviewPolicyPage";
 import TrustDashboardPage from "./views/admin/governance/TrustDashboardPage";
 import UseCaseOverviewPage from "./views/admin/governance/UseCaseOverviewPage";
 import GovernanceAlertsPage from "./views/admin/governance/GovernanceAlertsPage";
@@ -51,6 +64,7 @@ import RecommendationsPage from "./views/admin/governance/RecommendationsPage";
 import SodRulesPage from "./views/admin/governance/SodRulesPage";
 import PosturePage from "./views/admin/governance/PosturePage";
 import RedTeamPage from "./views/admin/governance/RedTeamPage";
+import AdmissionReviewPage from "./views/admin/governance/AdmissionReviewPage";
 import ReportsPage from "./views/admin/cost/ReportsPage";
 import PromptVersionsPage from "./views/admin/governance/PromptVersionsPage";
 import ApprovalsAdminPage from "./views/admin/governance/ApprovalsAdminPage";
@@ -139,6 +153,16 @@ export default function App() {
               <Route element={<Protected />}>
                 <Route path="/" element={<HomePage />} />
                 <Route path="/chat" element={<ChatPage />} />
+                <Route path="/models" element={<ModelsPage />} />
+                <Route path="/builder" element={<BuilderChatPage />} />
+                <Route path="/builder/inbox" element={<BuilderInboxPage />} />
+                <Route path="/builder/agents" element={<BuilderAgentsPage />} />
+                <Route path="/builder/agents/:agentId" element={<BuilderAgentEditorPage />} />
+                <Route path="/builder/templates" element={<BuilderTemplatesPage />} />
+                <Route path="/builder/templates/:templateId" element={<BuilderTemplateDetailPage />} />
+                <Route path="/builder/integrations" element={<BuilderIntegrationsPage />} />
+                <Route path="/builder/skills" element={<BuilderSkillsPage />} />
+                <Route path="/builder/usage" element={<BuilderUsagePage />} />
                 <Route path="/runs" element={<RunsPage />} />
                 <Route path="/runs/:runId" element={<RunDetailPage />} />
                 <Route path="/workflows" element={<WorkflowsPage />} />
@@ -165,15 +189,20 @@ export default function App() {
                         <Route path="group-mappings" element={<GroupMappingsPage />} />
                         {/* ADR-0066 */}
                         <Route path="virtual-keys" element={<VirtualKeysPage />} />
+                        {/* ADR-0175 A7 */}
+                        <Route path="credentials" element={<CredentialsPage />} />
                         <Route path="rules" element={<RulesEnginePage />} />
                         <Route path="simulation" element={<SimulationPage />} />
                         <Route path="abac-policies" element={<AbacPoliciesPage />} />
                         <Route path="guardrails" element={<GuardrailsPage />} />
+                        {/* ADR-0173 §3 */}
+                        <Route path="model-policy" element={<ModelPolicyPage />} />
                         <Route path="evals" element={<EvalsPage />} />
                         <Route path="model-risk" element={<ModelRiskPage />} />
                         {/* ADR-0080 */}
                         <Route path="use-cases" element={<UseCasesPage />} />
                         <Route path="governance/intake" element={<IntakeWizardPage />} />
+                        <Route path="governance/review-policy" element={<ReviewPolicyPage />} />
                         <Route path="governance/trust" element={<TrustDashboardPage />} />
                         <Route path="governance/use-cases/:id" element={<UseCaseOverviewPage />} />
                         <Route path="governance/use-cases" element={<Navigate to="/admin/use-cases" replace />} />
@@ -216,6 +245,7 @@ export default function App() {
                         <Route path="external-scorers" element={<ExternalScorersPage />} />
                         <Route path="connectors" element={<ConnectorsPage />} />
                         <Route path="mcp-servers" element={<McpServersPage />} />
+                        <Route path="admission" element={<AdmissionReviewPage />} />
                         <Route path="git-connections" element={<GitConnectionsPage />} />
                         <Route path="pm-connections" element={<PmConnectionsPage />} />
                         <Route path="deploy-targets" element={<DeployTargetsPage />} />

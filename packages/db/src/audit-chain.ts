@@ -78,7 +78,11 @@ import { auditLog } from "./schema.js";
  * The advisory-lock key every append serializes on. A single global key,
  * because there is a single global chain: `seq` is a total order over the whole
  * table, so there is nothing to shard on. Arbitrary but fixed — `0x60` is the
- * ADR number, and nothing else in this codebase takes an advisory lock.
+ * ADR number. The other advisory locks in production code are the gateway's
+ * health-probe claim (`HEALTH_PROBE_CLAIM_LOCK_KEY`, 6_000_000_037) and its
+ * sign-in invariant (`SIGN_IN_INVARIANT_LOCK_KEY`, 6_000_000_174, AER-056 —
+ * always taken BEFORE this one, never after); a new key must differ from all
+ * three.
  */
 export const AUDIT_CHAIN_LOCK_KEY = 6_000_000_060;
 

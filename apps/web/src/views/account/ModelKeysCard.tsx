@@ -44,6 +44,10 @@ import {
   Table,
 } from "../../ui/kit";
 import { useToast } from "../../ui/toast";
+import { ProviderMark } from "../../ui/ModelPicker";
+import { Logo } from "../../ui/logos/Logo";
+import { providerLogoKey } from "../../ui/logos/providerLogo";
+import { providerLabel } from "../models/modelBindings";
 import v from "../views.module.css";
 
 /** mirrors createModelCredentialSchema's provider enum in @regulait/shared */
@@ -187,7 +191,7 @@ export default function ModelKeysCard() {
       ) : (
         <Table<UserCredential>
           columns={[
-            { key: "provider", header: "Provider", render: (c) => c.provider },
+            { key: "provider", header: "Provider", render: (c) => <ProviderMark provider={c.provider} label={providerLabel(c.provider)} /> },
             {
               key: "state",
               header: "Key",
@@ -239,6 +243,9 @@ export default function ModelKeysCard() {
         <>
           <hr className={v.divider} />
           <form onSubmit={save} className={v.row} style={{ alignItems: "flex-end" }}>
+            <span aria-hidden="true" style={{ display: "inline-flex", paddingBottom: 4 }}>
+              <Logo name={providerLogoKey(provider)} label={providerLabel(provider)} size={26} />
+            </span>
             <Field label="Provider">
               <Select value={provider} onChange={(e) => setProvider(e.target.value)}>
                 {PROVIDERS.map((p) => (

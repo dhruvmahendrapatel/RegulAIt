@@ -98,6 +98,11 @@ exist; do not confuse them. `.env` says so in a comment.
 users `dana`/`avery`/`admin` with printed API keys) and **1** for `hosted`. Override with
 `--seed-demo` / `--no-seed-demo`.
 
+`REGULAIT_DEMO_LICENSE` is the laptop demo's switch for a self-minted, not-for-production demo
+licence (README, "Demo with your own password (Docker)"). It is **never** for an install. The
+installer refuses to run while it is set in the environment or the `.env`, and the generated
+`compose.install.yml` pins it to `"0"`.
+
 ---
 
 ## TLS
@@ -275,6 +280,12 @@ logging / scheduler`) is printed once at startup; `secrets: DEV-GRADE` lines mea
 published compose defaults are in use, and a deployment with `REGULAIT_DEPLOY_MODE` or
 `REGULAIT_HSTS` set **refuses to start** on them (override, if you really mean it, with
 `REGULAIT_ALLOW_DEV_SECRETS=1`).
+
+Do not set `REGULAIT_OFFLINE_CHECKS` on an install. It is the demo's declaration that a workflow
+check nobody reported may be auto-passed (labelled) where a template opts in; unset — and always
+on a box with `REGULAIT_DEPLOY_MODE` or `REGULAIT_HSTS` set — such checks stay pending until CI
+reports them (ADR-0167 amendment, AER-047). With `SEED_DEMO=1` (the compose default) the seeder
+declares it for its own run only, so the seeded *demo* pipelines show auto-passed checks.
 
 ---
 

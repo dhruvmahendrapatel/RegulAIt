@@ -1,17 +1,27 @@
 # Kong — RegulAIt as an authorization decision point (ADR-0127)
 
-> **VERIFIED against a pinned `kong:3.6`.** The deny path runs end to end with a
+> **VERIFIED against `kong:3.6`** — the deny path runs end to end with a
 > counting upstream on any change to `integrations/`, to the gateway's source,
-> or to the shared packages — the three places that can alter either side of
-> this contract. See
-> [`test/verify.mjs`](test/verify.mjs) and
+> to the shared packages, or to the lockfile — the places that can alter either
+> side of this contract. See [`test/verify.mjs`](test/verify.mjs) and
 > [`.github/workflows/integrations.yml`](../../.github/workflows/integrations.yml).
-> First green run 2026-09-27.
+> First green run 2026-09-27 (run 36300665525); the last green run of the
+> plugin and harness as they were before the AER-026/030/033/034 changes was
+> run 36930442969 at `3a91a93`.
 >
-> **Covered precisely:** Kong 3.6, DB-less, `key-auth`, one governed route. Other
-> Kong versions, DB-backed mode and other auth plugins are NOT covered — and the
-> priority ordering this plugin depends on is version-specific, so a different
-> Kong is unverified until the harness runs against it.
+> **The AER-026/030/033/034 cases are VERIFIED since run 37110038871 at
+> `8c0132b` (2026-10-03), their first green run — all 47 assertions passed:**
+> the five-name protocol-header refusal
+> (with other `x-regulait-*` headers passed through), the truncated-scan
+> refusal, the AER-026 identity refusals and ledger identity, the AER-030
+> second route and forged server/tool/decision headers, the AER-033 teardown
+> and key-location canary, and the AER-034 digest pins (Kong and the
+> `postgres:16` behind the PDP, both logged by the job).
+>
+> **Covered precisely:** Kong 3.6, DB-less, `key-auth`. Other Kong versions,
+> DB-backed mode and other auth plugins are NOT covered — and the priority
+> ordering this plugin depends on is version-specific, so a different Kong is
+> unverified until the harness runs against it.
 
 `kong/plugins/regulait-authz/` is a custom Kong plugin: `handler.lua` and
 `schema.lua`.
@@ -54,17 +64,61 @@ curl -X POST http://localhost:8001/routes/<route>/plugins \
 The route also needs an authentication plugin, and each Kong consumer needs its
 `custom_id` set to the matching **RegulAIt user UUID**. An unmapped consumer is
 refused rather than guessed at: a wrong mapping is an authorization decision
-about the wrong person.
+about the wrong person. So is a consumer whose `custom_id` is anything other
+than a user UUID (an email, a username) — that is not a mapping to *one* user —
+and so is a consumer Kong set **without a credential**, which is what an
+`anonymous` fallback on the auth plugin produces when authentication failed:
+nobody presented anything, so nobody is decided about, whatever that consumer
+is mapped to (AER-026).
+
+Two refusals come from the PDP rather than the plugin, because only it can
+know: a `custom_id` that is a well-formed UUID **nobody has** (`unknown_subject`),
+and a **deactivated** user whose grants survive deactivation by design
+(`subject_disabled`, ADR-0022). Offboarding that stops sign-in but not the
+gateway in front of the tools would not be offboarding.
+
+Every decision row the PDP writes for this plugin carries the **Kong consumer
+identity** (`detail.proxyConsumer`: the consumer's `id` and `username`) beside
+the RegulAIt subject it resolved to, so "which consumer was this?" is
+answerable from the ledger when a mapping turns out to be wrong.
+
+**The five protocol headers are refused on a request**, not stripped (`403`,
+`x-regulait-reason: forged_protocol_header`): `x-regulait-subject`,
+`x-regulait-server-id`, `x-regulait-tool`, `x-regulait-decision` and
+`x-regulait-reason`. The plugin sets the last two on its own refusals and reads
+none of them from a request; the previous behaviour of clearing them and
+carrying on made a forgery attempt invisible and was only as safe as every
+later line of code. Duplicates, case variants and underscore spellings are one
+check. **Only those five:** other `x-regulait-*` headers are client traffic and
+pass through untouched — `docs/product/IDE_INTEGRATION.md` tells clients to
+send `x-regulait-project-id` and `x-regulait-agent-id`, and the console sends
+`x-regulait-csrf`. A request with **more than 1000 headers** (Kong's ceiling
+for the plugin's header scan) is refused as `too_many_headers`, because a
+protocol header past the 1000th would never have been looked at.
 
 ## What is actually asserted
 
 Per `mistakes.md` M-043, nothing in `integrations/` is called supported until
 its **deny path** is exercised end to end against a **pinned Kong container**
 with an **upstream invocation counter**, asserting **zero upstream calls** for
-each refusal. That now runs on every change, and asserts exactly that for:
+each refusal. That now runs on every change, and asserts exactly that for the
+list below (every entry green since run 37110038871 — see the box at the top):
 
 - an unauthenticated request (`key-auth` refuses before this plugin runs);
 - a policy `deny`;
+- an allowed request carrying the documented client headers
+  (`x-regulait-project-id`, `x-regulait-agent-id`): it reaches the upstream,
+  those headers arrive unchanged, and none of the five protocol headers does;
+- a forged subject hidden after 1000 padding headers: refused as
+  `too_many_headers`, nothing proxied;
+- **two routes bound to distinct server/tool pairs** with crossed entitlements
+  (AER-030): the consumer entitled to tool A is allowed on route A and refused
+  on route B, a second consumer the reverse — and the ledger shows each route
+  asked about its own binding, which a plugin asking one question for every
+  route could not produce;
+- forged `x-regulait-server-id` / `x-regulait-tool` / `x-regulait-decision` /
+  `x-regulait-reason` headers, each sent by the consumer the claim would have
+  helped, each refused as `forged_protocol_header` with nothing proxied;
 - an **`approval_required`** — refused with a `403` AND carrying
   `x-regulait-decision: approval_required`, because a caller that treats every
   403 alike loses the distinction the approvals queue exists to make;
@@ -73,11 +127,27 @@ each refusal. That now runs on every change, and asserts exactly that for:
   route — a different plugin branch from the unreachable case);
 - a PDP whose answer is **unparseable** (a stub returning 200 with a body
   `cjson` cannot decode — the shape most likely to be mistaken for success);
-- a request with a forged `x-regulait-subject` (and its case variants), which
-  must be ignored entirely rather than merely overridden;
+- *(pending — the green runs asserted the earlier IGNORE behaviour)* a request
+  with a forged `x-regulait-subject` (each case variant, the header
+  twice in two spellings on one request, and from the very consumer it names),
+  each refused as `forged_protocol_header`;
+- the identities refused **before** anyone is asked (AER-026): a consumer with
+  no `custom_id` and one whose `custom_id` is an email (`consumer_not_mapped`);
+  a consumer mapped to a UUID nobody has (`unknown_subject`); a consumer mapped
+  to a **deactivated** user with a live grant (`subject_disabled`) — with the
+  control that reactivation lets the same consumer through;
+- a subject header on a request with **no credential**, on the
+  governed route (key-auth refuses first) and on a route whose key-auth has an
+  `anonymous` fallback mapped to a user of its own whom the PDP allows on the
+  tool (Kong requires `custom_id` to be unique across consumers, so it cannot
+  share the entitled user's) — the plugin refuses `unauthenticated`, which can
+  only be the credential check; the control shows a real credential proxies on
+  that route;
 - the **decision context** the plugin claims to send, read back from the PDP's
   own `contextApplied` ledger rather than from the plugin's source — including
-  that `args` is NOT claimed.
+  that `args` is NOT claimed — and the **Kong consumer identity**
+  on the same rows, beside the subject, for the allow and for the deactivated
+  refusal.
 
 **Correction (2026-09-27, AER-034):** the three middle entries above —
 `approval_required`, non-200 and unparseable — were listed here before the
@@ -91,6 +161,34 @@ Checking the client's status code would NOT be enough: a 403 rendered after the
 upstream already ran is indistinguishable from a refusal, from the client's
 side. That is exactly the shape of the Envoy bug, which is why the counter
 exists and why "the client got 403" is not the assertion.
+
+### Running it, and what it leaves behind (AER-033)
+
+Every run names what it creates after a **run id** (`KONG_E2E_RUN_ID`, else
+random): the database `regulait_kong_e2e_<id>`, the container
+`regulait-kong-e2e-<id>`, the three ports (derived from the id, then checked
+free; `GATEWAY_PORT` / `UPSTREAM_PORT` / `KONG_PROXY_PORT` pin them) and the
+gateway's bootstrap token. **Nothing is dropped or removed at start**: a
+database or container that already carries the name belongs to another run
+and the harness stops rather than destroying it. Teardown — from the normal
+exit, from a failure, and from `SIGINT`/`SIGTERM`, one shared teardown however
+many of those fire — first revokes the scratch PDP key while the gateway can
+still do it, then removes the container **by id and only if it carries this
+run's label** (plus any container carrying that label whose id was never
+recorded because `docker run` was interrupted),
+and drops the database **only if it still carries this run's comment**;
+anything else is refused aloud. Once teardown has begun, every creation step
+refuses to run, so a run interrupted mid-setup cannot start a container or a
+database after teardown has gone past it. Before Kong starts, the generated
+declarative config is checked for the values Kong requires to be unique
+(consumer `username`/`id`/`custom_id`, key-auth `key`, route names, one plugin
+instance per route), so a config Kong would refuse is named rather than
+surfacing as a container that never came up. The PDP key lives in a `0600` file in a
+`0700` directory handed to the container through `--env-file`, and the run
+proves it: a read as a non-runner user (`nobody`) must fail while the runner's
+own read succeeds, and the world-readable declarative config is checked to
+hold the vault reference and never the key. So two runs on one machine, or a
+cancelled job, no longer leave a live key or a stray database behind.
 
 That rule exists because the Envoy adapter shipped **failing open** on deny and
 was reviewed, not run. Review did not catch it. Running it would have — and on

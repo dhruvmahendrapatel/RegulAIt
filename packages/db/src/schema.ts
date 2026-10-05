@@ -176,6 +176,11 @@ export const authSessions = pgTable(
     lastSeenIp: text("last_seen_ip"),
     userAgent: text("user_agent"),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    /** ADR-0174 (migration 0139): the identity provider asserted MFA (RFC 8176
+     * `amr`, or a configured `acr`) for the login that minted this session.
+     * Such a session satisfies the org MFA requirement without a RegulAIt TOTP
+     * enrolment. false for every other origin and every pre-0139 row. */
+    idpMfa: boolean("idp_mfa").notNull().default(false),
   },
   (t) => [
     index("auth_sessions_user_idx").on(t.userId),
@@ -190,6 +195,7 @@ export const authSessions = pgTable(
   ],
 );
 
+export const MFA_PENDING_ORIGINS = ["password", "saml"] as const;
 /** short-lived password-accepted-awaiting-TOTP state (ADR-0025). Token hashed
  * like a session's; consumed on success; expires in minutes either way. */
 export const authMfaPending = pgTable("auth_mfa_pending", {
@@ -200,7 +206,14 @@ export const authMfaPending = pgTable("auth_mfa_pending", {
     .references(() => users.id, { onDelete: "cascade" }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
-});
+  /** ADR-0174 security review (migration 0139): the origin the session takes
+   * once the code verifies — `password`, or `saml` for a SAML login that had
+   * to step up to the account's own TOTP because the assertion did not carry
+   * a multi-factor AuthnContextClassRef. */
+  origin: text("origin", { enum: MFA_PENDING_ORIGINS }).notNull().default("password"),
+  /** the SAML provider a `saml` step-up came through (null for `password`) */
+  samlProviderId: uuid("saml_provider_id").references(() => samlProviders.id, { onDelete: "cascade" }),
+}, (t) => [check("auth_mfa_pending_origin_ck", sql`${t.origin} IN ('password', 'saml')`)]);
 
 // --- ADR-0025: OIDC SSO ------------------------------------------------------
 export const oidcProviders = pgTable("oidc_providers", {
@@ -210,6 +223,9 @@ export const oidcProviders = pgTable("oidc_providers", {
   clientId: text("client_id").notNull(),
   /** AES-256-GCM under REGULAIT_DATA_KEY; write-only at the API */
   clientSecretCiphertext: text("client_secret_ciphertext").notNull(),
+  /** ADR-0175 A7 (migration 0142): when the secret was last set, stamped by
+   * the `regulait_stamp_secret_set` trigger. NULL = set before 0142 (unknown). */
+  secretSetAt: timestamp("secret_set_at", { withTimezone: true }),
   enabled: boolean("enabled").notNull().default(true),
   /** NULL = any domain; else the verified email claim's domain must be listed */
   allowedEmailDomains: jsonb("allowed_email_domains").$type<string[]>(),
@@ -226,6 +242,19 @@ export const oidcProviders = pgTable("oidc_providers", {
    * attribute. Naming it does NOT grant anything: an asserted group still
    * confers nothing until an admin maps it (`group_role_mappings`). */
   groupsClaim: text("groups_claim"),
+  /** ADR-0174 (migration 0139): the upstream identity providers a BROKER
+   * (Keycloak) offers through this client — a subset of BROKER_IDPS. NULL =
+   * an ordinary enterprise IdP. Each entry becomes a "Continue with …" button
+   * that passes the broker an IdP hint (`kc_idp_hint`). */
+  brokerIdps: jsonb("broker_idps").$type<string[]>(),
+  /** ADR-0174: `acr` values that count as multi-factor for this provider, in
+   * addition to the RFC 8176 `amr` values. NULL = amr only. */
+  mfaAcrValues: jsonb("mfa_acr_values").$type<string[]>(),
+  /** ADR-0174 security review: this provider is a broker that itself enforces
+   * a second factor (the bundled Keycloak realm requires a code or passkey), so
+   * a single `otp`/`hwk`/`swk` amr from it counts as MFA. false = the amr must
+   * say `mfa` or name two distinct factor classes. */
+  brokerEnforcesMfa: boolean("broker_enforces_mfa").notNull().default(false),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
@@ -296,6 +325,9 @@ export const samlProviders = pgTable("saml_providers", {
    * AES-256-GCM under REGULAIT_DATA_KEY, WRITE-ONLY at the API — byte-identical
    * handling to oidc_providers.client_secret_ciphertext and the TOTP secret. */
   spPrivateKeyCiphertext: text("sp_private_key_ciphertext"),
+  /** ADR-0175 A7 (migration 0142): when the secret was last set, stamped by
+   * the `regulait_stamp_secret_set` trigger. NULL = set before 0142 (unknown). */
+  secretSetAt: timestamp("secret_set_at", { withTimezone: true }),
   /** the matching SP public certificate (PEM) — public by definition, it is
    * published in our SP metadata for the IdP admin to consume. */
   spCertificate: text("sp_certificate"),
@@ -307,6 +339,12 @@ export const samlProviders = pgTable("saml_providers", {
    * Naming it grants nothing on its own: an asserted group confers nothing
    * until an admin maps it (`group_role_mappings`). */
   groupsAttribute: text("groups_attribute"),
+  /** ADR-0174 security review (migration 0139): AuthnContextClassRef values
+   * that count as multi-factor for this IdP — the SAML twin of
+   * `oidc_providers.mfa_acr_values`. Read only from the VERIFIED assertion.
+   * NULL = no assertion from this IdP counts as MFA; when the org requires MFA
+   * the person steps up to their RegulAIt TOTP (or enrols one). */
+  mfaAuthnContexts: jsonb("mfa_authn_contexts").$type<string[]>(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
@@ -351,6 +389,121 @@ export const samlAssertionIds = pgTable("saml_assertion_ids", {
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
 });
 
+// --- ADR-0174: federated identity links (migration 0139) ---------------------
+/** the upstream identity providers the bundled broker can be hinted to */
+export const BROKER_IDPS = ["microsoft", "google", "github"] as const;
+export type BrokerIdp = (typeof BROKER_IDPS)[number];
+/** how a federated identity came to be linked to an account:
+ *  - preprovisioned — the account existed with NO local credential (an admin or
+ *    SCIM created it for exactly this person), so the verified email links it;
+ *  - jit            — the provider's JIT provisioning created the account;
+ *  - proof          — the person proved the existing local account (password,
+ *    plus TOTP when enrolled) in the same browser;
+ *  - admin          — an admin approved the link request (two distinct
+ *    admins when the account is an admin);
+ *  - prior_sso      — the account signed in through THIS provider row before
+ *    migration 0139 (its pre-0139 `login-succeeded` audit row names the
+ *    provider and the same verified email), so its first post-0139 sign-in
+ *    through that provider records the link. */
+export const FEDERATED_LINK_VIAS = ["preprovisioned", "jit", "proof", "admin", "prior_sso"] as const;
+export type FederatedLinkVia = (typeof FEDERATED_LINK_VIAS)[number];
+
+/** which (provider, subject) is linked to which user. Looked up BEFORE the
+ * email match on every federated login: the IdP's stable subject is the
+ * anchor once a link exists. Exactly one of the two provider columns is set. */
+export const federatedIdentities = pgTable(
+  "federated_identities",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    oidcProviderId: uuid("oidc_provider_id").references(() => oidcProviders.id, { onDelete: "cascade" }),
+    samlProviderId: uuid("saml_provider_id").references(() => samlProviders.id, { onDelete: "cascade" }),
+    /** the OIDC `iss` claim, or the SAML IdP entity id. Matched on every login;
+     * a provider whose issuer/entity id changes loses its links (audited). */
+    issuer: text("issuer").notNull(),
+    /** the SAML NameID Format ('' for OIDC). A transient NameID is never an
+     * anchor: such an IdP is anchored on its verified email (`email-anchor`). */
+    subjectFormat: text("subject_format").notNull().default(""),
+    /** OIDC `sub`, or the SAML NameID */
+    subject: text("subject").notNull(),
+    linkedVia: text("linked_via", { enum: FEDERATED_LINK_VIAS }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    lastLoginAt: timestamp("last_login_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("federated_identities_oidc_subject_uq")
+      .on(t.oidcProviderId, t.issuer, t.subject)
+      .where(sql`${t.oidcProviderId} IS NOT NULL`),
+    uniqueIndex("federated_identities_saml_subject_uq")
+      .on(t.samlProviderId, t.issuer, t.subjectFormat, t.subject)
+      .where(sql`${t.samlProviderId} IS NOT NULL`),
+    index("federated_identities_user_idx").on(t.userId),
+    check("federated_identities_one_provider_ck", sql`(${t.oidcProviderId} IS NULL) <> (${t.samlProviderId} IS NULL)`),
+    check(
+      "federated_identities_linked_via_ck",
+      sql`${t.linkedVia} IN ('preprovisioned', 'jit', 'proof', 'admin', 'prior_sso')`,
+    ),
+  ],
+);
+export type FederatedIdentityRow = typeof federatedIdentities.$inferSelect;
+
+export const FEDERATED_LINK_REQUEST_STATUSES = ["pending", "linked", "approved", "denied"] as const;
+export type FederatedLinkRequestStatus = (typeof FEDERATED_LINK_REQUEST_STATUSES)[number];
+
+/** a federated identity that matched an existing account holding a LOCAL
+ * credential (ADR-0174 §5). It never links silently: the person proves the
+ * local account in the same browser (the proof token, hashed, short-lived), or
+ * an admin approves. `linked` = proven by the person; `approved`/`denied` = an
+ * admin's decision. */
+export const federatedLinkRequests = pgTable(
+  "federated_link_requests",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    oidcProviderId: uuid("oidc_provider_id").references(() => oidcProviders.id, { onDelete: "cascade" }),
+    samlProviderId: uuid("saml_provider_id").references(() => samlProviders.id, { onDelete: "cascade" }),
+    /** see federatedIdentities.issuer / subjectFormat */
+    issuer: text("issuer").notNull(),
+    subjectFormat: text("subject_format").notNull().default(""),
+    subject: text("subject").notNull(),
+    /** the verified email the provider asserted */
+    email: text("email").notNull(),
+    /** the provider asserted MFA for the login that raised this request */
+    idpMfa: boolean("idp_mfa").notNull().default(false),
+    status: text("status", { enum: FEDERATED_LINK_REQUEST_STATUSES }).notNull().default("pending"),
+    /** sha256 of the browser-bound proof token (cookie); NULL once spent */
+    proofTokenHash: text("proof_token_hash"),
+    proofExpiresAt: timestamp("proof_expires_at", { withTimezone: true }),
+    /** how long an admin may still approve it */
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    /** admin approvals so far (one suffices for a member; an admin account
+     * needs two DISTINCT approvers). `userId` null = the bootstrap operator. */
+    approvals: jsonb("approvals").$type<Array<{ userId: string | null; at: string }>>().notNull().default([]),
+    decidedBy: uuid("decided_by").references(() => users.id, { onDelete: "set null" }),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("federated_link_requests_proof_token_uq")
+      .on(t.proofTokenHash)
+      .where(sql`${t.proofTokenHash} IS NOT NULL`),
+    index("federated_link_requests_status_idx").on(t.status),
+    check(
+      "federated_link_requests_one_provider_ck",
+      sql`(${t.oidcProviderId} IS NULL) <> (${t.samlProviderId} IS NULL)`,
+    ),
+    check(
+      "federated_link_requests_status_ck",
+      sql`${t.status} IN ('pending', 'linked', 'approved', 'denied')`,
+    ),
+  ],
+);
+export type FederatedLinkRequestRow = typeof federatedLinkRequests.$inferSelect;
+
 // --- ADR-0037: SCIM 2.0 provisioning (migration 0052) ------------------------
 // The IdP-machine-to-gateway plumbing an enterprise provisioning engine talks
 // to. Three tables and one column, and the most important thing about all of
@@ -380,6 +533,9 @@ export const scimTokens = pgTable("scim_tokens", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
   revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  /** ADR-0175 A7 (migration 0142): when the secret was last set, stamped by
+   * the `regulait_stamp_secret_set` trigger. NULL = set before 0142 (unknown). */
+  secretSetAt: timestamp("secret_set_at", { withTimezone: true }),
 });
 
 /**
@@ -519,6 +675,15 @@ export const mcpServers = pgTable("mcp_servers", {
   registryVersion: text("registry_version"),
   registryFirstSeenAt: timestamp("registry_first_seen_at", { withTimezone: true }),
   registryLastSyncedAt: timestamp("registry_last_synced_at", { withTimezone: true }),
+  /** ADR-0175 A5 (migration 0140) — THE RELEASE THIS SERVER IS ON, for the
+   * release-age cooldown. `releaseDigest` is the last manifest digest a sync
+   * observed (null until the first sync). `releaseSeenAt` is when this
+   * deployment first saw that release: registration time for a new server and
+   * its first manifest, the first sighting of the exact registry entry version
+   * for a federated import, and the first sighting of the exact digest for a
+   * changed manifest. Our own clock, never a publisher's date. */
+  releaseDigest: text("release_digest"),
+  releaseSeenAt: timestamp("release_seen_at", { withTimezone: true }).notNull().defaultNow(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -1047,6 +1212,17 @@ export const auditLog = pgTable(
         "remediation",
         // ADR-0161: one CI/CD deploy-gate evaluation (objectId = use case)
         "deploy_gate",
+        // ADR-0173 §3: an admin replacing the model allow-list matrix
+        // (objectId null — the policy is org-wide). Plain text column — no DDL.
+        "model_policy",
+        // ADR-0172: a builder agent created / changed / shared / run on a
+        // schedule / refused at its spend limit, and a builder skill change
+        // (objectId = the builder agent or skill). Plain text column — no DDL.
+        "builder_agent",
+        "builder_skill",
+        // ADR-0175 A15: an energy factor created / changed / removed
+        // (objectId = the factor row). Plain text column — no DDL.
+        "energy_factor",
       ],
     })
       .notNull()
@@ -1278,7 +1454,9 @@ export const approvals = pgTable(
     stageId: text("stage_id"),
     approverUserId: uuid("approver_user_id").notNull(),
     status: text("status", {
-      enum: ["pending", "approved", "denied", "consumed", "superseded"],
+      // ADR-0168: 'returned' — an intake sign-off sent back for information.
+      // No DB CHECK on this column (migration 0001), so a TS-only widening.
+      enum: ["pending", "approved", "denied", "returned", "consumed", "superseded"],
     })
       .notNull()
       .default("pending"),
@@ -1319,9 +1497,22 @@ export const approvals = pgTable(
      * row queued before 0107, or an org that has deliberately set the dial to
      * NULL. Never rewritten by a later dial change. */
     expiresAt: timestamp("expires_at", { withTimezone: true }),
+    // ADR-0168 amendment (migration 0131) — A REVIEW ROUND. An intake sign-off
+    // routed by the review policy is one row per required reviewer role: any
+    // member of the role may decide it (never the proposer). The name is a
+    // snapshot (a renamed or removed role still reads true on old rounds) and
+    // the round numbers the use case's review rounds. All three NULL on every
+    // other approval, including the single-named-approver intake path.
+    reviewRoleId: text("review_role_id"),
+    reviewRoleName: text("review_role_name"),
+    reviewRound: integer("review_round"),
   },
   (t) => [
     index("approvals_status_idx").on(t.status),
+    check(
+      "approvals_review_role_check",
+      sql`(${t.reviewRoleId} IS NULL) = (${t.reviewRoleName} IS NULL) AND (${t.reviewRoleId} IS NULL) = (${t.reviewRound} IS NULL)`,
+    ),
     check("approvals_preview_kind_check", sql`${t.argumentsPreviewKind} IN ('arguments_v1', 'mcp_redacted_v1')`),
     check("approvals_scope_check", sql`${t.approvalScope} IN ('action', 'tool')`),
     check("approvals_redacted_scope_check", sql`${t.argumentsPreviewKind} IS DISTINCT FROM 'mcp_redacted_v1' OR ${t.approvalScope} IS NOT DISTINCT FROM 'action'`),
@@ -1582,7 +1773,20 @@ export const revocations = pgTable(
  *                  refuses with a named 409 (`agent_retired`, the ADR-0045
  *                  gate idiom). Grants and history stay readable — rows are
  *                  never deleted; re-registering is a NEW agent. */
-export const AGENT_LIFECYCLE_STATUSES = ["active", "deprecated", "retired"] as const;
+/*
+ * ADR-0168 amendment item 6 (migration 0132) widens the vocabulary for agent
+ * stewardship: `proposed` (registered, not yet in service), `under_review`
+ * (a steward is reviewing it) and `suspended` (temporarily OUT OF SERVICE —
+ * dispatch refuses with a named 409 `agent_suspended`, exactly like retired
+ * but reversible). proposed / under_review warn only, like deprecated. */
+export const AGENT_LIFECYCLE_STATUSES = [
+  "proposed",
+  "active",
+  "under_review",
+  "suspended",
+  "deprecated",
+  "retired",
+] as const;
 export type AgentLifecycleStatus = (typeof AGENT_LIFECYCLE_STATUSES)[number];
 
 export const agents = pgTable("agents", {
@@ -1616,6 +1820,16 @@ export const agents = pgTable("agents", {
     .default("active"),
   lifecycleReason: text("lifecycle_reason"),
   lifecycleChangedAt: timestamp("lifecycle_changed_at", { withTimezone: true }),
+  // ADR-0168 amendment item 6 (migration 0132) — STEWARDSHIP. The steward is
+  // `ownerUserId` above (one accountable-human record, named `stewardUserId`
+  // in the API). The successor takes over when the steward leaves; a DB CHECK
+  // (agents_successor_not_steward_ck) keeps the two different people. FKs ON
+  // DELETE SET NULL in SQL. "Orphaned" and "review overdue" are computed at
+  // read time — no stored flag.
+  successorUserId: uuid("successor_user_id"),
+  nextReviewAt: timestamp("next_review_at", { withTimezone: true }),
+  lastReviewedAt: timestamp("last_reviewed_at", { withTimezone: true }),
+  lastReviewedByUserId: uuid("last_reviewed_by_user_id"),
   // OPTIMIZATION §7/§8: list price per million tokens; null = unpriced, the
   // optimizer will never route toward (or estimate savings against) it.
   costPerMTokIn: doublePrecision("cost_per_mtok_in"),
@@ -1642,6 +1856,10 @@ export const agents = pgTable("agents", {
   // through it would silently poison every one of those. ON DELETE RESTRICT:
   // an endpoint an agent still points at cannot be deleted out from under it.
   customProviderId: uuid("custom_provider_id"),
+  // ADR-0175 review fix (migration 0141): the model id the provider is
+  // EXPECTED to report serving, when it differs from `model` (an endpoint
+  // whose configured id is a deployment name). NULL = compare with `model`.
+  expectedServedModel: text("expected_served_model"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -1668,6 +1886,9 @@ export const customModelProviders = pgTable("custom_model_providers", {
    * local Ollama / LocalAI endpoint has no API key at all, and inventing a
    * placeholder would make "is this authenticated?" unanswerable. */
   keyCiphertext: text("key_ciphertext"),
+  /** ADR-0175 A7 (migration 0142): when the secret was last set, stamped by
+   * the `regulait_stamp_secret_set` trigger. NULL = set before 0142 (unknown). */
+  secretSetAt: timestamp("secret_set_at", { withTimezone: true }),
   /** the provider HALF of the plaintext-http opt-in. Both this AND the
    * matching egress_allow_hosts row must be true for an http:// baseUrl to be
    * reachable — one flag is a typo, two flags are a decision. */
@@ -1734,6 +1955,9 @@ export const externalScorers = pgTable("external_scorers", {
    * same discipline as custom_model_providers.key_ciphertext. NULLABLE: an
    * on-prem scorer that authenticates by network position has no secret. */
   keyCiphertext: text("key_ciphertext"),
+  /** ADR-0175 A7 (migration 0142): when the secret was last set, stamped by
+   * the `regulait_stamp_secret_set` trigger. NULL = set before 0142 (unknown). */
+  secretSetAt: timestamp("secret_set_at", { withTimezone: true }),
   /** which judge-backed scorer kinds this instrument CLAIMS to serve
    * (llm_as_judge / groundedness_judge / answer_relevance_judge). A claim,
    * not a verification — the gateway governs the call, it does not validate
@@ -1825,6 +2049,9 @@ export const connectorCredentials = pgTable("connector_credentials", {
     .unique()
     .references(() => connectors.id, { onDelete: "cascade" }),
   tokenCiphertext: text("token_ciphertext").notNull(),
+  /** ADR-0175 A7 (migration 0142): when the secret was last set, stamped by
+   * the `regulait_stamp_secret_set` trigger. NULL = set before 0142 (unknown). */
+  secretSetAt: timestamp("secret_set_at", { withTimezone: true }),
   baseUrl: text("base_url"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
@@ -1999,6 +2226,14 @@ export const workflowInstances = pgTable(
     /** outputs of executed stages (branch, prId, prUrl, mergeSha, lastError) */
     context: jsonb("context").$type<Record<string, unknown>>().notNull().default({}),
     status: text("status").notNull(),
+    /** AER-048 (migration 0130): bumped on every RE-OPEN (artifact resubmitted
+     * after its stage completed; sign-off returned). A check report binds to
+     * it — a report for a previous round is refused (409) and audited. */
+    round: integer("round").notNull().default(0),
+    /** AER-048: bumped on every entry into an executable stage and on every
+     * re-open. An executor captures it with its claim and commits its result
+     * only if it is still current. */
+    stageEntry: integer("stage_entry").notNull().default(0),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -2048,6 +2283,9 @@ export const gitConnections = pgTable("git_connections", {
   }).notNull(),
   baseUrl: text("base_url"),
   tokenCiphertext: text("token_ciphertext").notNull(),
+  /** ADR-0175 A7 (migration 0142): when the secret was last set, stamped by
+   * the `regulait_stamp_secret_set` trigger. NULL = set before 0142 (unknown). */
+  secretSetAt: timestamp("secret_set_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -2066,6 +2304,9 @@ export const deployTargets = pgTable("deploy_targets", {
   environment: text("environment"),
   baseUrl: text("base_url"),
   credentialCiphertext: text("credential_ciphertext"),
+  /** ADR-0175 A7 (migration 0142): when the secret was last set, stamped by
+   * the `regulait_stamp_secret_set` trigger. NULL = set before 0142 (unknown). */
+  secretSetAt: timestamp("secret_set_at", { withTimezone: true }),
   // §3 BYOC deployment mode: hosted (we run it), byoc (customer's own cloud
   // account/IAM), or air_gapped (customer-hosted, no execution-plane data ever
   // returns to the control plane — the deploy record we keep is metadata-only).
@@ -2222,6 +2463,9 @@ export const pmConnections = pgTable("pm_connections", {
   baseUrl: text("base_url"),
   project: text("project").notNull(),
   tokenCiphertext: text("token_ciphertext").notNull(),
+  /** ADR-0175 A7 (migration 0142): when the secret was last set, stamped by
+   * the `regulait_stamp_secret_set` trigger. NULL = set before 0142 (unknown). */
+  secretSetAt: timestamp("secret_set_at", { withTimezone: true }),
   mapping: jsonb("mapping"),
   /** jira only: REST API version (2 = legacy plain text, 3 = ADF rich text);
    * null = the provider default (v2) — connections minted before this column
@@ -2234,6 +2478,9 @@ export const pmConnections = pgTable("pm_connections", {
    * key — stored AES-256-GCM-encrypted like the connection token. Null on
    * connections minted before this column existed (legacy-header flows only). */
   webhookSecretCiphertext: text("webhook_secret_ciphertext"),
+  /** ADR-0175 A7 (migration 0142): when the webhook secret was last set (keyed
+   * on its hash, which a data-key re-encryption never rewrites). */
+  webhookSecretSetAt: timestamp("webhook_secret_set_at", { withTimezone: true }),
   /** O7 (migration 0045): what a detected drift does. 'manual' (default =
    * today) surfaces only; 'prefer_regulait' pushes RegulAIt's expected state
    * back to the PM tool; 'prefer_pm' adopts the PM tool's state on the link
@@ -2326,6 +2573,9 @@ export const modelCredentials = pgTable("model_credentials", {
   id: uuid("id").primaryKey().defaultRandom(),
   provider: text("provider").notNull().unique(),
   keyCiphertext: text("key_ciphertext").notNull(),
+  /** ADR-0175 A7 (migration 0142): when the secret was last set, stamped by
+   * the `regulait_stamp_secret_set` trigger. NULL = set before 0142 (unknown). */
+  secretSetAt: timestamp("secret_set_at", { withTimezone: true }),
   /** override for BYOC/air-gapped bridges; null = provider default endpoint */
   baseUrl: text("base_url"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -2355,6 +2605,12 @@ export const usageEvents = pgTable(
     /** null on connector rows (no provider/model/tokens) */
     provider: text("provider"),
     model: text("model"),
+    /** ADR-0175 A4 (migration 0141) — the model id the PROVIDER reported
+     * serving, verbatim (Anthropic/OpenAI `model`, Google `modelVersion`).
+     * `model` above is what we configured and asked for; this is what came
+     * back. NULL = the provider did not report one (and every pre-0141 row,
+     * every connector/MCP row, every semantic-cache hit) — never guessed. */
+    servedModel: text("served_model"),
     inputTokens: integer("input_tokens"),
     outputTokens: integer("output_tokens"),
     /** agent rows: measured tokens × list price. connector rows: the
@@ -2403,6 +2659,17 @@ export const usageEvents = pgTable(
     index("usage_events_user_idx").on(t.userId, t.at),
     index("usage_events_config_version_idx").on(t.configVersionId),
     index("usage_events_agent_config_version_idx").on(t.agentConfigVersionId),
+    // ADR-0175 A4/A9 — the governance monitor's window scans read the ledger
+    // by time; partial so it holds only agent rows that reported a served model
+    index("usage_events_served_model_idx").on(t.agentId, t.at).where(sql`${t.servedModel} IS NOT NULL`),
+    // ADR-0175 review fix (migration 0141): the A9 window scan
+    index("usage_events_object_type_at_idx").on(t.objectType, t.at),
+    // ADR-0066 (migration 0078): per-key reads; the A7 inventory's windowed
+    // virtual-key link query uses it too
+    index("usage_events_virtual_key_idx").on(t.virtualKeyId, t.at),
+    // ADR-0175 A7 review fix (migration 0142): the inventory's windowed
+    // connector reads; partial, since only connector rows carry one
+    index("usage_events_connector_at_idx").on(t.connectorId, t.at).where(sql`${t.connectorId} IS NOT NULL`),
   ],
 );
 
@@ -2419,6 +2686,9 @@ export const userModelCredentials = pgTable(
       .references(() => users.id, { onDelete: "cascade" }),
     provider: text("provider").notNull(),
     keyCiphertext: text("key_ciphertext").notNull(),
+    /** ADR-0175 A7 (migration 0142): when the secret was last set, stamped by
+     * the `regulait_stamp_secret_set` trigger. NULL = set before 0142 (unknown). */
+    secretSetAt: timestamp("secret_set_at", { withTimezone: true }),
     baseUrl: text("base_url"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -3127,6 +3397,9 @@ export const ORG_PII_MODES = ["none", "log", "warn", "block"] as const;
 /** ADR-0025: who must have TOTP enrolled before their session leaves the
  * auth self-service surface. off = today's behaviour. */
 export const MFA_REQUIREMENTS = ["off", "admins", "all"] as const;
+/** ADR-0174: may people sign in with a local (email + password) account? */
+export const LOCAL_SIGN_IN_MODES = ["enabled", "break_glass_only"] as const;
+export type LocalSignInMode = (typeof LOCAL_SIGN_IN_MODES)[number];
 export const BUDGET_ENFORCEMENTS = ["block", "warn_only"] as const;
 export const APPROVAL_QUORUMS = ["all", "any"] as const;
 /** ADR-0062: the org's TIGHTENING dial over the deployment-wide egress
@@ -3226,6 +3499,13 @@ export const orgSettings = pgTable(
      * approver must approve; 'any' = the first approval advances the stage and
      * supersedes the rest. */
     approvalQuorum: text("approval_quorum", { enum: APPROVAL_QUORUMS }).notNull().default("all"),
+    /** AER-048 (migration 0130): may a KEY-authenticated caller (CI) report
+     * workflow check results WITHOUT naming the round they were produced for?
+     * false (default) = fail closed: such a report is refused 422
+     * `round_required`. true = the pre-AER-048 behaviour — an unbound report
+     * is taken for whatever round is current when it is applied. A person in
+     * the console (session) may always omit it. */
+    checkReportsAllowUnbound: boolean("check_reports_allow_unbound").notNull().default(false),
     /** ADR-0022: master switch for approver delegation. ON (default) = active
      * delegation windows widen the delegate's inbox and let them decide
      * on-behalf-of. OFF = a strict separation-of-duties org: creating
@@ -3301,6 +3581,14 @@ export const orgSettings = pgTable(
     /** true = password login 403s (SSO or API-key exchange only). Refused
      * while zero ENABLED OIDC providers exist — no self-lockouts. */
     ssoOnly: boolean("sso_only").notNull().default(false),
+    /** ADR-0174 (migration 0139): 'enabled' (default) = today. 'break_glass_only'
+     * = password sign-in is refused for everyone except the admins listed in
+     * `breakGlassUserIds` (SSO is the door; the break-glass admin is the spare
+     * key). Distinct from `ssoOnly`, which refuses password login for all. */
+    localSignIn: text("local_sign_in", { enum: LOCAL_SIGN_IN_MODES }).notNull().default("enabled"),
+    /** ADR-0174: the designated break-glass admins (user ids). Each must be an
+     * active admin with a password when break-glass mode is engaged. */
+    breakGlassUserIds: jsonb("break_glass_user_ids").$type<string[]>(),
     /** failed password logins within the window before a temporary lockout */
     loginLockoutThreshold: integer("login_lockout_threshold").notNull().default(5),
     loginLockoutWindowMinutes: integer("login_lockout_window_minutes").notNull().default(15),
@@ -3339,6 +3627,19 @@ export const orgSettings = pgTable(
     mcpAdmissionMode: text("mcp_admission_mode", { enum: ["off", "log", "enforce"] })
       .notNull()
       .default("off"),
+    /** ADR-0175 A5 (migration 0140): the release-age cooldown in days. 0
+     * (DEFAULT) = off and byte-identical to pre-0140. Recommended: 7. */
+    minReleaseAgeDays: integer("min_release_age_days").notNull().default(0),
+    /** ADR-0175 A7 (migration 0142): a credential older than this many days
+     * with no use in that many days is flagged "unused" on the inventory. */
+    credentialUnusedDays: integer("credential_unused_days").notNull().default(90),
+    /** ADR-0175 A7: false (DEFAULT) = the `stale_credentials` rule only shows
+     * flags on the inventory page; true = it raises one alert episode per
+     * flagged credential. */
+    staleCredentialAlerts: boolean("stale_credential_alerts").notNull().default(false),
+    /** ADR-0175 A15: the grid region whose `energy_factors` intensity
+     * overrides the org default for the energy estimate. NULL = default. */
+    energyRegion: text("energy_region"),
     /** ADR-0039 (migration 0050): the org network envelope — CIDR blocks
      * (IPv4 + IPv6) interactive access must come from. NULL/empty = no
      * restriction (today; upgrade locks nobody out). Malformed entries are
@@ -3580,6 +3881,8 @@ export const orgSettings = pgTable(
      * envelope over the JSON map — a collector API key is a credential like
      * every other admin-registered endpoint secret */
     tracingOtlpHeadersCiphertext: text("tracing_otlp_headers_ciphertext"),
+    /** ADR-0175 A7 (migration 0142): when the collector headers were last set */
+    tracingOtlpHeadersSetAt: timestamp("tracing_otlp_headers_set_at", { withTimezone: true }),
     tracingOtlpServiceName: text("tracing_otlp_service_name").notNull().default("regulait-gateway"),
 
     updatedBy: uuid("updated_by"),
@@ -3629,6 +3932,43 @@ export const orgSettings = pgTable(
 );
 
 export type OrgSettingsRow = typeof orgSettings.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0173 §3 (migration 0138) — the model allow-list matrix
+// ---------------------------------------------------------------------------
+//
+// One row per (feature, data class). No rows = every entitled binding is
+// allowed everywhere. Enforced in the shared model-access decision
+// (copilot.ts `agentDecision` and the helper it calls, model-policy.ts).
+export const MODEL_POLICY_FEATURE_VALUES = [
+  "chat",
+  "builder",
+  "copilot",
+  "intake_assist",
+  "evals",
+  "orchestration",
+  "compat",
+] as const;
+export const MODEL_POLICY_DATA_CLASS_VALUES = ["public", "internal", "confidential", "regulated"] as const;
+
+export const modelPolicyRules = pgTable(
+  "model_policy_rules",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    feature: text("feature", { enum: MODEL_POLICY_FEATURE_VALUES }).notNull(),
+    /** NULL = the feature's base rule */
+    dataClass: text("data_class", { enum: MODEL_POLICY_DATA_CLASS_VALUES }),
+    /** false = the row only carries a default; every entitled binding is allowed */
+    restricted: boolean("restricted").notNull().default(true),
+    allowedAgentIds: jsonb("allowed_agent_ids").$type<string[]>().notNull().default([]),
+    allowedProviders: jsonb("allowed_providers").$type<string[]>().notNull().default([]),
+    defaultAgentId: uuid("default_agent_id").references(() => agents.id, { onDelete: "set null" }),
+    updatedBy: uuid("updated_by").references(() => users.id, { onDelete: "set null" }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("model_policy_rules_feature_class_uq").on(t.feature, sql`COALESCE(${t.dataClass}, '')`)],
+);
+export type ModelPolicyRuleRow = typeof modelPolicyRules.$inferSelect;
 
 // ---------------------------------------------------------------------------
 // ADR-0040 (migration 0054) — ABAC / policy-as-code
@@ -4145,6 +4485,12 @@ export const modelCards = pgTable(
      * can follow — never a claim that anything is CERTIFIED. */
     standardRefs: jsonb("standard_refs").$type<string[]>().notNull().default([]),
     note: text("note"),
+    /** ADR-0175 A4 (migration 0141) — OPTIONAL exact model version this card's
+     * risk position was taken on (e.g. a dated snapshot id). NULL = the card
+     * covers the agent's configured model id under the version-suffix
+     * matching rule. When set, ANY served model that is not exactly this id
+     * raises `served_model_drift` at high severity. */
+    pinnedModelVersion: text("pinned_model_version"),
     createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -5527,6 +5873,9 @@ export const chatopsConnections = pgTable("chatops_connections", {
    * hold. A DB check (migration 0112) requires one for slack/teams and forbids
    * one for outlook, so neither state can be created by any path. */
   signingSecretCiphertext: text("signing_secret_ciphertext"),
+  /** ADR-0175 A7 (migration 0142): when the secret was last set, stamped by
+   * the `regulait_stamp_secret_set` trigger. NULL = set before 0142 (unknown). */
+  secretSetAt: timestamp("secret_set_at", { withTimezone: true }),
   defaultChannel: text("default_channel").notNull(),
   /** ADR-0061's sensitivity dial. FALSE (the default) = an approval whose
    * project is in PII mode `block` posts a LINK with no buttons: a chat tap is
@@ -6806,6 +7155,9 @@ export const trainingBackendConfigs = pgTable(
     baseUrl: text("base_url"),
     /** AES-256-GCM under REGULAIT_DATA_KEY. Write-only; no route returns it. */
     keyCiphertext: text("key_ciphertext"),
+    /** ADR-0175 A7 (migration 0142): when the secret was last set, stamped by
+     * the `regulait_stamp_secret_set` trigger. NULL = set before 0142 (unknown). */
+    secretSetAt: timestamp("secret_set_at", { withTimezone: true }),
     allowPlaintextHttp: boolean("allow_plaintext_http").notNull().default(false),
     /** non-secret per-backend settings: a region, a project id, a namespace */
     settings: jsonb("settings").$type<Record<string, unknown>>().notNull().default({}),
@@ -7525,6 +7877,10 @@ export type TraceSpanRow = typeof traceSpans.$inferSelect;
 export const AI_USE_CASE_STATUSES = [
   "proposed",
   "under_review",
+  /** ADR-0168 (migration 0129): a reviewer SENT the intake back for
+   * information — the instance rests at its questionnaire stage until a new
+   * version is submitted, which re-requests the sign-off */
+  "needs_info",
   "approved",
   "rejected",
   "retired",
@@ -7578,6 +7934,28 @@ export const aiUseCases = pgTable(
     >(),
     euAiActRulesetVersion: integer("eu_ai_act_ruleset_version"),
     decidedAt: timestamp("decided_at", { withTimezone: true }),
+    /** ADR-0168 (migration 0129) — AN APPROVAL HAS A LIFETIME. Both set
+     * together by the approving sign-off (`syncUseCaseForInstance`):
+     * high/prohibited/unscreened tier → +6 months, minimal/limited → +12.
+     * Enforced at the deploy gate (`approval_expired`); not swept yet. */
+    approvedAt: timestamp("approved_at", { withTimezone: true }),
+    approvedUntil: timestamp("approved_until", { withTimezone: true }),
+    /** ADR-0168 amendment (migration 0131): true while an approval that
+     * EXPIRED is back in review — set by the recertification sweep, cleared
+     * by the next approve/reject decision. */
+    recertification: boolean("recertification").notNull().default(false),
+    /** ADR-0168 amendment (migration 0131): every Classify-step answer
+     * (flat: EU AI Act answers + intake context), kept for resubmission
+     * prefill. NULL = registered without them. Never an input to the tier. */
+    intakeAnswers: jsonb("intake_answers").$type<Record<string, unknown>>(),
+    /** ADR-0171 / AER-052 (migration 0134): the owner's "why it applies" per
+     * framework, keyed by compliance tag (every key is one of
+     * `complianceTags`). Shown to reviewers; never an input to any decision. */
+    frameworkRationales: jsonb("framework_rationales").$type<Record<string, string>>().notNull().default({}),
+    /** ADR-0171 / AER-053 (migration 0134): the yes/no screening answers the
+     * owner marked "Not sure". Every listed answer is stored (and screened)
+     * as `true`, the conservative reading; reviewers see the list. */
+    screeningUnsure: jsonb("screening_unsure").$type<string[]>().notNull().default([]),
     retiredReason: text("retired_reason"),
     retiredAt: timestamp("retired_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -7585,6 +7963,10 @@ export const aiUseCases = pgTable(
   },
   (t) => [
     check("ai_use_cases_name_check", sql`length(btrim(${t.name})) > 0`),
+    check(
+      "ai_use_cases_approval_lifetime_check",
+      sql`(${t.approvedAt} IS NULL) = (${t.approvedUntil} IS NULL)`,
+    ),
     check(
       "ai_use_cases_eu_tier_consistency_check",
       sql`(${t.euAiActTier} IS NULL) = (${t.euAiActRulesetVersion} IS NULL) AND (${t.euAiActTier} IS NULL) = (${t.euAiActReasons} IS NULL)`,
@@ -7608,6 +7990,140 @@ export const aiUseCases = pgTable(
 );
 
 export type AiUseCaseRow = typeof aiUseCases.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0171 / AER-050 (migration 0134) — INTAKE DRAFTS AND IDEMPOTENT CREATION.
+//
+// `use_case_drafts`: the intake wizard's work-in-progress, server-side and per
+// user (questionnaire text can be sensitive, so it never lives in browser
+// storage). One draft per (user, scope): scope `new` is the registration
+// wizard, a use-case id is that use case's resubmission. `state` is the
+// wizard's opaque JSON; the gateway never reads inside it.
+//
+// `use_case_idempotency_keys`: an `Idempotency-Key` on POST /v1/use-cases is
+// CLAIMED here inside the create transaction — the unique (user_id, key)
+// index is what makes two concurrent duplicates unable to both create. The
+// stored `response` is the original 201 body, replayed for 24 hours.
+// ---------------------------------------------------------------------------
+
+export const useCaseDrafts = pgTable(
+  "use_case_drafts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    scope: text("scope").notNull(),
+    state: jsonb("state").$type<Record<string, unknown>>().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("use_case_drafts_user_scope_uq").on(t.userId, t.scope),
+    index("use_case_drafts_updated_idx").on(t.updatedAt),
+  ],
+);
+
+export type UseCaseDraftRow = typeof useCaseDrafts.$inferSelect;
+
+export const useCaseIdempotencyKeys = pgTable(
+  "use_case_idempotency_keys",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    key: text("key").notNull(),
+    useCaseId: uuid("use_case_id").references(() => aiUseCases.id, { onDelete: "cascade" }),
+    /** the original 201 body, replayed verbatim on a retry */
+    response: jsonb("response").$type<Record<string, unknown>>(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("use_case_idempotency_keys_key_check", sql`length(${t.key}) BETWEEN 1 AND 200`),
+    uniqueIndex("use_case_idempotency_keys_user_key_uq").on(t.userId, t.key),
+    index("use_case_idempotency_keys_created_idx").on(t.createdAt),
+  ],
+);
+
+export type UseCaseIdempotencyKeyRow = typeof useCaseIdempotencyKeys.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0168 (migration 0129) — APPROVAL CONDITIONS ("approve with conditions").
+// Imposed by an intake sign-off, written in the decision's own transaction.
+// `blocking` = before go-live: the deploy gate refuses while it is open.
+// Not blocking = after go-live: tracked, shown overdue after `dueAt`, never
+// blocks. Marked met by the condition's owner, the use case's owner or an
+// admin (audited `use-case-condition-met`).
+// ---------------------------------------------------------------------------
+
+export const USE_CASE_CONDITION_STATUSES = ["open", "met", "waived"] as const;
+export type UseCaseConditionStatus = (typeof USE_CASE_CONDITION_STATUSES)[number];
+
+export const useCaseConditions = pgTable(
+  "use_case_conditions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    useCaseId: uuid("use_case_id")
+      .notNull()
+      .references(() => aiUseCases.id, { onDelete: "cascade" }),
+    /** the decision that imposed it */
+    approvalId: uuid("approval_id")
+      .notNull()
+      .references(() => approvals.id, { onDelete: "cascade" }),
+    text: text("text").notNull(),
+    ownerUserId: uuid("owner_user_id").references(() => users.id, { onDelete: "set null" }),
+    dueAt: timestamp("due_at", { withTimezone: true }).notNull(),
+    blocking: boolean("blocking").notNull(),
+    status: text("status", { enum: USE_CASE_CONDITION_STATUSES }).notNull().default("open"),
+    metAt: timestamp("met_at", { withTimezone: true }),
+    metByUserId: uuid("met_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    note: text("note"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("use_case_conditions_status_check", sql`${t.status} IN ('open', 'met', 'waived')`),
+    check("use_case_conditions_text_check", sql`length(btrim(${t.text})) BETWEEN 1 AND 500`),
+    check("use_case_conditions_met_check", sql`(${t.status} = 'open') = (${t.metAt} IS NULL)`),
+    index("use_case_conditions_use_case_idx").on(t.useCaseId, t.status),
+    index("use_case_conditions_approval_idx").on(t.approvalId),
+  ],
+);
+
+export type UseCaseConditionRow = typeof useCaseConditions.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0168 amendment (migration 0131) — THE REVIEW POLICY. One row (id
+// 'default'), admin-edited: reviewer roles with members, per EU AI Act tier
+// the roles that must sign (each role = one required review) and an optional
+// approval lifetime, and who may accept risk. No row, or a tier with no
+// roles, keeps the intake template's single named approver.
+// ---------------------------------------------------------------------------
+
+export interface ReviewPolicyRole {
+  id: string;
+  name: string;
+  memberUserIds: string[];
+}
+export interface ReviewPolicyTier {
+  roleIds: string[];
+  validityMonths?: number;
+}
+
+export const governanceReviewPolicy = pgTable(
+  "governance_review_policy",
+  {
+    id: text("id").primaryKey().default("default"),
+    roles: jsonb("roles").$type<ReviewPolicyRole[]>().notNull().default([]),
+    tiers: jsonb("tiers").$type<Record<string, ReviewPolicyTier>>().notNull().default({}),
+    riskAcceptorUserIds: jsonb("risk_acceptor_user_ids").$type<string[]>().notNull().default([]),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedByUserId: uuid("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
+  },
+  (t) => [check("governance_review_policy_singleton_check", sql`${t.id} = 'default'`)],
+);
+
+export type GovernanceReviewPolicyRow = typeof governanceReviewPolicy.$inferSelect;
 
 // ---------------------------------------------------------------------------
 // ADR-0084 (migration 0088) — the AI vendor registry (third-party AI risk).
@@ -8181,7 +8697,7 @@ export const sodRuleSides = pgTable(
     ),
     check(
       "sod_rule_sides_lifecycle_value_check",
-      sql`${t.patternDimension} <> 'lifecycle_status' OR ${t.patternValue} IN ('active', 'deprecated', 'retired')`,
+      sql`${t.patternDimension} <> 'lifecycle_status' OR ${t.patternValue} IN ('proposed', 'active', 'under_review', 'suspended', 'deprecated', 'retired')`,
     ),
     index("sod_rule_sides_rule_idx").on(t.ruleId),
   ],
@@ -8275,3 +8791,553 @@ export const rateLimitCounters = pgTable(
 );
 
 export type RateLimitCounterRow = typeof rateLimitCounters.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0172 (migration 0135) — THE AGENT BUILDER.
+//
+// A builder agent is a CONFIGURATION, never an identity with its own
+// authority: it names one governed model binding (`model_agent_id`, a row of
+// the agent registry above), a toolbox of connectors / MCP tools the editor
+// held grants for, sub-agents, skills, memory, schedules and channels. Every
+// run dispatches through the existing governed core AS THE PERSON USING IT
+// (or, for a schedule, as the agent's OWNER), so nothing here can widen what
+// a human may reach. Spend is recorded on `builder_messages.cost_usd` (the
+// value the governed core measured) and the per-agent monthly limit is summed
+// from those rows.
+// ---------------------------------------------------------------------------
+
+export const BUILDER_SHARING = ["private", "workspace", "people"] as const;
+export type BuilderSharing = (typeof BUILDER_SHARING)[number];
+export const BUILDER_CONNECTION_FORMATS = ["shared", "per_user"] as const;
+export const BUILDER_TOOL_KINDS = ["connector", "mcp_tool"] as const;
+export const BUILDER_SKILL_VISIBILITY = ["private", "workspace"] as const;
+/** ADR-0175 A6 — mirrors SKILL_ADMISSION_STATES in @regulait/shared */
+export const BUILDER_SKILL_ADMISSION_STATES = ["unscanned", "clean", "held", "refused", "admitted"] as const;
+export const BUILDER_CADENCES = ["hourly", "daily", "weekdays", "weekly"] as const;
+export type BuilderCadence = (typeof BUILDER_CADENCES)[number];
+export const BUILDER_CHANNEL_PROVIDERS = ["slack", "teams", "outlook", "email"] as const;
+export const BUILDER_THREAD_STATUSES = ["active", "needs_attention", "completed"] as const;
+export const BUILDER_THREAD_SOURCES = ["chat", "schedule", "channel"] as const;
+export const BUILDER_MESSAGE_ROLES = ["user", "agent", "system"] as const;
+
+export const builderAgents = pgTable(
+  "builder_agents",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    description: text("description").notNull().default(""),
+    color: text("color").notNull().default("#2563eb"),
+    ownerUserId: uuid("owner_user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "restrict" }),
+    sharing: text("sharing", { enum: BUILDER_SHARING }).notNull().default("private"),
+    /** the governed model binding; ON DELETE SET NULL — the agent survives a
+     * registry change and refuses to chat until a model is chosen again */
+    modelAgentId: uuid("model_agent_id").references(() => agents.id, { onDelete: "set null" }),
+    templateId: text("template_id"),
+    instructions: text("instructions").notNull().default(""),
+    /** fixed at creation (PATCH refuses it) */
+    connectionFormat: text("connection_format", { enum: BUILDER_CONNECTION_FORMATS }).notNull(),
+    computerUse: boolean("computer_use").notNull().default(false),
+    monthlyLimitUsd: doublePrecision("monthly_limit_usd"),
+    /** pillar 5 attribution: the project this agent's dispatches bill to
+     * (null = unattributed); ON DELETE SET NULL */
+    projectId: uuid("project_id").references(() => projects.id, { onDelete: "set null" }),
+    /** the monthly-limit LEASE: a limited agent runs one turn at a time, so a
+     * check -> dispatch -> record cannot interleave with another (expires so a
+     * crashed holder never wedges the agent) */
+    limitLeaseToken: uuid("limit_lease_token"),
+    limitLeaseUntil: timestamp("limit_lease_until", { withTimezone: true }),
+    /** soft delete: archived agents are hidden from every list and refuse chat */
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("builder_agents_owner_idx").on(t.ownerUserId),
+    check(
+      "builder_agents_limit_ck",
+      sql`${t.monthlyLimitUsd} IS NULL OR (${t.monthlyLimitUsd} >= 0.01 AND ${t.monthlyLimitUsd} <= 100000)`,
+    ),
+  ],
+);
+
+export const builderAgentShares = pgTable(
+  "builder_agent_shares",
+  {
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => builderAgents.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.agentId, t.userId] }), index("builder_agent_shares_user_idx").on(t.userId)],
+);
+
+export const builderAgentTools = pgTable(
+  "builder_agent_tools",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => builderAgents.id, { onDelete: "cascade" }),
+    kind: text("kind", { enum: BUILDER_TOOL_KINDS }).notNull(),
+    /** connectors.id for a connector, mcp_tools.id for an MCP tool. FK-free
+     * (two target tables); a dangling ref renders as an unavailable tool. */
+    refId: uuid("ref_id").notNull(),
+    requiresApproval: boolean("requires_approval").notNull().default(false),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("builder_agent_tools_uq").on(t.agentId, t.kind, t.refId)],
+);
+
+export const builderAgentSubagents = pgTable(
+  "builder_agent_subagents",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    parentId: uuid("parent_id")
+      .notNull()
+      .references(() => builderAgents.id, { onDelete: "cascade" }),
+    childId: uuid("child_id")
+      .notNull()
+      .references(() => builderAgents.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    description: text("description").notNull().default(""),
+    position: integer("position").notNull().default(0),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("builder_agent_subagents_uq").on(t.parentId, t.childId),
+    index("builder_agent_subagents_child_idx").on(t.childId),
+    check("builder_agent_subagents_not_self_ck", sql`${t.parentId} <> ${t.childId}`),
+  ],
+);
+
+export const builderSkills = pgTable(
+  "builder_skills",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    description: text("description").notNull().default(""),
+    body: text("body").notNull().default(""),
+    visibility: text("visibility", { enum: BUILDER_SKILL_VISIBILITY }).notNull().default("private"),
+    ownerUserId: uuid("owner_user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "restrict" }),
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    // ADR-0175 A6 (migration 0140) — admission and integrity.
+    /** sha256 (hex) of the prompt section: `skillPromptSection(name, body)`;
+     * backfilled by the migration */
+    contentDigest: text("content_digest").notNull().default(""),
+    /** goes up by one on every name or body change */
+    version: integer("version").notNull().default(1),
+    /** see SKILL_ADMISSION_STATES; 'unscanned' only for pre-0140 rows */
+    admissionState: text("admission_state", { enum: BUILDER_SKILL_ADMISSION_STATES }).notNull().default("unscanned"),
+    /** counts and locations only — never the matched text */
+    admissionFindings: jsonb("admission_findings"),
+    admissionSeverity: text("admission_severity", { enum: ["low", "medium", "high", "critical"] }),
+    admissionScannedAt: timestamp("admission_scanned_at", { withTimezone: true }),
+    admissionScannerVersion: text("admission_scanner_version"),
+    /** an admin's admission of a HELD skill, pinned to the digest admitted */
+    admittedBy: uuid("admitted_by"),
+    admittedAt: timestamp("admitted_at", { withTimezone: true }),
+    admitReason: text("admit_reason"),
+    admittedDigest: text("admitted_digest"),
+    /** a pending widening of visibility, waiting for an admin (null = none) */
+    requestedVisibility: text("requested_visibility", { enum: BUILDER_SKILL_VISIBILITY }),
+    visibilityRequestedAt: timestamp("visibility_requested_at", { withTimezone: true }),
+  },
+  (t) => [
+    index("builder_skills_owner_idx").on(t.ownerUserId),
+    index("builder_skills_admission_idx").on(t.admissionState),
+  ],
+);
+
+export const builderAgentSkills = pgTable(
+  "builder_agent_skills",
+  {
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => builderAgents.id, { onDelete: "cascade" }),
+    skillId: uuid("skill_id")
+      .notNull()
+      .references(() => builderSkills.id, { onDelete: "cascade" }),
+    /** the skill body PINNED at attach time — what the agent runs, so an edit
+     * by the skill's owner never silently changes someone else's agent */
+    bodySnapshot: text("body_snapshot").notNull().default(""),
+    /** the skill's updated_at when pinned; newer = "update available" */
+    skillUpdatedAt: timestamp("skill_updated_at", { withTimezone: true }).notNull().defaultNow(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    // ADR-0175 A6 (migration 0140) — the PINNED body is what runs, so it is
+    // what is scanned: its own digest, version and verdict.
+    snapshotDigest: text("snapshot_digest").notNull().default(""),
+    snapshotVersion: integer("snapshot_version").notNull().default(1),
+    snapshotAdmissionState: text("snapshot_admission_state", { enum: BUILDER_SKILL_ADMISSION_STATES })
+      .notNull()
+      .default("unscanned"),
+    /** the skill NAME pinned with the body: the prompt heading. A rename is a
+     * new version, taken only by a re-attach */
+    snapshotName: text("snapshot_name").notNull().default(""),
+    /** when the pinned copy was last scanned: the re-scan pass rotates by it */
+    snapshotScannedAt: timestamp("snapshot_scanned_at", { withTimezone: true }),
+  },
+  (t) => [
+    primaryKey({ columns: [t.agentId, t.skillId] }),
+    index("builder_agent_skills_skill_idx").on(t.skillId),
+    index("builder_agent_skills_scanned_idx").on(t.snapshotScannedAt),
+  ],
+);
+
+// ADR-0175 A5 (migration 0140) — RELEASE-AGE COOLDOWN.
+//
+// `release_sightings` is this deployment's own record of WHEN it first saw an
+// exact digest (a skill version, an MCP manifest, a registry entry version).
+// Age is always measured from here, never from a publisher's date. One row per
+// (kind, subject, digest), first writer wins. A skill's clock is its own
+// (subject_id = the skill); manifests and registry entries use the nil uuid,
+// so a digest seen on one server is not new on another.
+export const RELEASE_SIGHTING_KINDS = ["skill", "mcp_manifest", "registry_entry"] as const;
+export const NIL_SIGHTING_SUBJECT = "00000000-0000-0000-0000-000000000000";
+export const releaseSightings = pgTable(
+  "release_sightings",
+  {
+    kind: text("kind", { enum: RELEASE_SIGHTING_KINDS }).notNull(),
+    subjectId: uuid("subject_id").notNull().default(NIL_SIGHTING_SUBJECT),
+    digest: text("digest").notNull(),
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.kind, t.subjectId, t.digest] })],
+);
+
+/** An admin's per-item override of the cooldown: ONE subject at ONE digest,
+ * with a reason (audited). A new digest is a new release and is not covered. */
+export const releaseOverrides = pgTable(
+  "release_overrides",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    kind: text("kind", { enum: ["mcp_server", "skill"] }).notNull(),
+    subjectId: uuid("subject_id").notNull(),
+    digest: text("digest").notNull(),
+    overriddenBy: uuid("overridden_by"),
+    reason: text("reason").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("release_overrides_uq").on(t.kind, t.subjectId, t.digest)],
+);
+
+export const builderAgentMemory = pgTable(
+  "builder_agent_memory",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => builderAgents.id, { onDelete: "cascade" }),
+    content: text("content").notNull(),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("builder_agent_memory_agent_idx").on(t.agentId, t.createdAt)],
+);
+
+export const builderAgentSchedules = pgTable(
+  "builder_agent_schedules",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => builderAgents.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    cadence: text("cadence", { enum: BUILDER_CADENCES }).notNull(),
+    /** "HH:MM", UTC; for hourly only the minutes are used */
+    timeUtc: text("time_utc").notNull(),
+    prompt: text("prompt").notNull(),
+    enabled: boolean("enabled").notNull().default(true),
+    /** the claim column: the sweep advances it compare-and-swap, so two
+     * concurrent sweeps run a due schedule once */
+    nextRunAt: timestamp("next_run_at", { withTimezone: true }),
+    lastRunAt: timestamp("last_run_at", { withTimezone: true }),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    updatedByUserId: uuid("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    /** who turned it on; the sweep runs a schedule only when this is the
+     * agent's OWNER (it runs as them) */
+    enabledByUserId: uuid("enabled_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("builder_agent_schedules_agent_idx").on(t.agentId),
+    index("builder_agent_schedules_due_idx").on(t.enabled, t.nextRunAt),
+    check("builder_agent_schedules_time_ck", sql`${t.timeUtc} ~ '^([01][0-9]|2[0-3]):[0-5][0-9]$'`),
+  ],
+);
+
+export const builderAgentChannels = pgTable(
+  "builder_agent_channels",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => builderAgents.id, { onDelete: "cascade" }),
+    provider: text("provider", { enum: BUILDER_CHANNEL_PROVIDERS }).notNull(),
+    chatopsConnectionId: uuid("chatops_connection_id").references(() => chatopsConnections.id, {
+      onDelete: "set null",
+    }),
+    /** ADR-0173 (migration 0137) — the platform channel an ADMIN routes to this
+     * agent; null = connection-wide (answers mentions / DMs while it is the
+     * only connection-wide binding on its connection) */
+    externalChannelId: text("external_channel_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("builder_agent_channels_agent_idx").on(t.agentId),
+    uniqueIndex("builder_agent_channels_route_uq")
+      .on(t.chatopsConnectionId, t.externalChannelId)
+      .where(sql`${t.chatopsConnectionId} IS NOT NULL AND ${t.externalChannelId} IS NOT NULL`),
+  ],
+);
+
+export const builderThreads = pgTable(
+  "builder_threads",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => builderAgents.id, { onDelete: "cascade" }),
+    /** whose thread this is — the chatting user, or the agent OWNER for a
+     * schedule run (the identity the run dispatched as) */
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    title: text("title").notNull(),
+    status: text("status", { enum: BUILDER_THREAD_STATUSES }).notNull().default("active"),
+    source: text("source", { enum: BUILDER_THREAD_SOURCES }).notNull().default("chat"),
+    scheduleId: uuid("schedule_id").references(() => builderAgentSchedules.id, { onDelete: "set null" }),
+    /** ADR-0173 (migration 0136): a turn PAUSED on a tool step — its model
+     * conversation, encrypted with the data key (it carries the raw arguments
+     * a resume replays identically). Cleared when the turn finishes; never
+     * returned by the API. */
+    pendingTurnCiphertext: text("pending_turn_ciphertext"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("builder_threads_user_idx").on(t.userId, t.updatedAt),
+    index("builder_threads_agent_idx").on(t.agentId),
+  ],
+);
+
+export const builderMessages = pgTable(
+  "builder_messages",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    threadId: uuid("thread_id")
+      .notNull()
+      .references(() => builderThreads.id, { onDelete: "cascade" }),
+    /** denormalised from the thread so spend sums need no join */
+    agentId: uuid("agent_id").notNull(),
+    /** the human the dispatch ran as (and who was billed) */
+    userId: uuid("user_id").notNull(),
+    role: text("role", { enum: BUILDER_MESSAGE_ROLES }).notNull(),
+    content: text("content").notNull(),
+    /** agent rows: the served binding, as the governed core reported it */
+    modelAgentId: uuid("model_agent_id"),
+    provider: text("provider"),
+    model: text("model"),
+    costUsd: doublePrecision("cost_usd"),
+    latencyMs: integer("latency_ms"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("builder_messages_thread_idx").on(t.threadId, t.createdAt),
+    index("builder_messages_agent_idx").on(t.agentId, t.createdAt),
+    index("builder_messages_user_idx").on(t.userId, t.createdAt),
+  ],
+);
+
+export const BUILDER_TOOL_STEP_KINDS = ["mcp_tool", "connector", "unknown"] as const;
+export const BUILDER_TOOL_STEP_STATUSES = [
+  "pending_confirmation",
+  "pending_approval",
+  "running",
+  "done",
+  "denied",
+  "refused",
+  "error",
+] as const;
+export type BuilderToolStepStatus = (typeof BUILDER_TOOL_STEP_STATUSES)[number];
+
+/**
+ * ADR-0173 §1 (migration 0136) — one tool call a builder turn made, attached to
+ * the turn's agent message. The governed call keeps its own audit row and
+ * trace span; this row links them and holds what the thread shows (a REDACTED
+ * argument preview + the approval-binding digest, the outcome, a truncated
+ * result preview that is withheld when PII/guardrails withheld the result, the
+ * cost — which counts toward the agent's monthly limit — and the latency).
+ */
+export const builderToolSteps = pgTable(
+  "builder_tool_steps",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    threadId: uuid("thread_id")
+      .notNull()
+      .references(() => builderThreads.id, { onDelete: "cascade" }),
+    messageId: uuid("message_id")
+      .notNull()
+      .references(() => builderMessages.id, { onDelete: "cascade" }),
+    /** denormalised so the monthly-limit sum needs no join */
+    agentId: uuid("agent_id").notNull(),
+    /** the person the call ran as */
+    userId: uuid("user_id").notNull(),
+    /** the model step (1-based) within the turn that asked for this call */
+    turn: integer("turn").notNull(),
+    seq: integer("seq").notNull(),
+    kind: text("kind", { enum: BUILDER_TOOL_STEP_KINDS }).notNull(),
+    /** mcp_tools.id or connectors.id; null for a tool not in the toolbox */
+    refId: uuid("ref_id"),
+    /** the model-facing (namespaced) tool name */
+    name: text("name").notNull(),
+    displayName: text("display_name").notNull(),
+    /** connector provider kind or MCP server name (the web picks a logo) */
+    provider: text("provider"),
+    toolCallId: text("tool_call_id"),
+    /** REDACTED preview — never the raw payload */
+    arguments: jsonb("arguments"),
+    argumentsDigest: text("arguments_digest").notNull(),
+    requiresConfirmation: boolean("requires_confirmation").notNull().default(false),
+    status: text("status", { enum: BUILDER_TOOL_STEP_STATUSES }).notNull(),
+    approvalId: uuid("approval_id").references(() => approvals.id, { onDelete: "set null" }),
+    resultPreview: text("result_preview"),
+    resultWithheld: boolean("result_withheld").notNull().default(false),
+    outcomeCode: text("outcome_code"),
+    outcomeDetail: text("outcome_detail"),
+    costUsd: doublePrecision("cost_usd"),
+    latencyMs: integer("latency_ms"),
+    auditLogId: uuid("audit_log_id"),
+    traceId: uuid("trace_id"),
+    parentSpanId: uuid("parent_span_id"),
+    decidedByUserId: uuid("decided_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("builder_tool_steps_message_seq_uq").on(t.messageId, t.seq),
+    index("builder_tool_steps_thread_idx").on(t.threadId, t.createdAt),
+    index("builder_tool_steps_agent_idx").on(t.agentId, t.createdAt),
+    index("builder_tool_steps_approval_idx").on(t.approvalId).where(sql`${t.approvalId} IS NOT NULL`),
+  ],
+);
+
+export type BuilderAgentRow = typeof builderAgents.$inferSelect;
+export type BuilderToolStepRow = typeof builderToolSteps.$inferSelect;
+export type BuilderSkillRow = typeof builderSkills.$inferSelect;
+export type BuilderScheduleRow = typeof builderAgentSchedules.$inferSelect;
+export type BuilderThreadRow = typeof builderThreads.$inferSelect;
+export type BuilderMessageRow = typeof builderMessages.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0173 §2 (migration 0137) — inbound channels to builder agents.
+// ---------------------------------------------------------------------------
+
+/** (connection, platform channel, platform thread, PERSON) -> builder thread.
+ * Per person because a builder thread is personal: two people in one Slack
+ * thread each talk to the agent as themselves, with their own entitlements. */
+export const builderChannelThreads = pgTable(
+  "builder_channel_threads",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => chatopsConnections.id, { onDelete: "cascade" }),
+    externalChannelId: text("external_channel_id").notNull(),
+    externalThreadId: text("external_thread_id").notNull(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => builderAgents.id, { onDelete: "cascade" }),
+    builderThreadId: uuid("builder_thread_id")
+      .notNull()
+      .references(() => builderThreads.id, { onDelete: "cascade" }),
+    /** where a LATER reply goes (a paused turn resumed from the web app or an
+     * approval): Slack channel / Teams conversation id of the newest message */
+    replyTarget: text("reply_target"),
+    /** Slack thread_ts (null = top level, e.g. a DM) / Teams activity id */
+    replyThreadRef: text("reply_thread_ref"),
+    /** the gateway's public origin as the newest message reached it, so the
+     * links in a later reply are absolute */
+    linkOrigin: text("link_origin"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("builder_channel_threads_uq").on(t.connectionId, t.externalChannelId, t.externalThreadId, t.userId),
+    index("builder_channel_threads_thread_idx").on(t.builderThreadId),
+  ],
+);
+
+/** the de-duplication record: one row per platform delivery AND per message */
+export const builderChannelEvents = pgTable(
+  "builder_channel_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => chatopsConnections.id, { onDelete: "cascade" }),
+    externalEventId: text("external_event_id").notNull(),
+    messageKey: text("message_key").notNull(),
+    retryNum: integer("retry_num"),
+    receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("builder_channel_events_event_uq").on(t.connectionId, t.externalEventId),
+    uniqueIndex("builder_channel_events_message_uq").on(t.connectionId, t.messageKey),
+    index("builder_channel_events_received_idx").on(t.receivedAt),
+  ],
+);
+
+export type BuilderChannelThreadRow = typeof builderChannelThreads.$inferSelect;
+
+/**
+ * ADR-0175 A15 (migration 0142) — THE FACTORS BEHIND THE ENERGY ESTIMATE.
+ *
+ * Admin-entered, each with a source note and a version, because an estimate is
+ * only as honest as the number it multiplies by. A `model` row holds Wh per 1k
+ * input and per 1k output tokens for one model id (matched case-insensitively
+ * against `usage_events.model`); a `grid` row holds gCO2e per kWh for
+ * `default` or a named region (`org_settings.energy_region` picks the region).
+ *
+ * The product ships NO rows: no default factor for any real model and no
+ * default grid intensity. A model with no row is "unknown" in every estimate,
+ * never zero. `demo` marks a factor seeded for a mock model by the demo setup,
+ * which the UI labels as a demo value, not a measurement.
+ */
+export const ENERGY_FACTOR_KINDS = ["model", "grid"] as const;
+export const energyFactors = pgTable(
+  "energy_factors",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    kind: text("kind", { enum: ENERGY_FACTOR_KINDS }).notNull(),
+    subject: text("subject").notNull(),
+    whPer1kInput: doublePrecision("wh_per_1k_input"),
+    whPer1kOutput: doublePrecision("wh_per_1k_output"),
+    gCo2ePerKwh: doublePrecision("g_co2e_per_kwh"),
+    sourceNote: text("source_note").notNull(),
+    version: text("version").notNull(),
+    demo: boolean("demo").notNull().default(false),
+    updatedBy: uuid("updated_by"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("energy_factors_kind_subject_uq").on(t.kind, sql`lower(${t.subject})`),
+    check("energy_factors_kind_ck", sql`${t.kind} IN ('model', 'grid')`),
+  ],
+);
+
+export type EnergyFactorRow = typeof energyFactors.$inferSelect;

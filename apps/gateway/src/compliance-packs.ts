@@ -61,6 +61,7 @@ import {
   complianceProfiles,
   count,
   desc,
+  energyFactors,
   eq,
   evalRuns,
   guardrailConfigs,
@@ -300,6 +301,25 @@ export async function runCollector(
         gte(usageEvents.at, periodStart),
         lt(usageEvents.at, periodEnd),
         isNotNull(usageEvents.projectId),
+        ...(projectIds === null ? [] : [inArray(usageEvents.projectId, safeIds(projectIds))]),
+      );
+      const [row] = await db.select({ n: count() }).from(usageEvents).where(where);
+      return row?.n ?? 0;
+    }
+
+    case "energy_estimate_available": {
+      // ADR-0175 A15: the calls the energy estimate COVERS — model rows whose
+      // model has an admin-entered factor and whose tokens were recorded. A
+      // model with no factor is unknown, so its calls are not evidence; nor is
+      // a call covered only by a DEMO factor (review fix): a demo value
+      // describes the mock provider, never real environmental impact.
+      const where = and(
+        gte(usageEvents.at, periodStart),
+        lt(usageEvents.at, periodEnd),
+        eq(usageEvents.objectType, "agent"),
+        isNotNull(usageEvents.inputTokens),
+        isNotNull(usageEvents.outputTokens),
+        sql`EXISTS (SELECT 1 FROM ${energyFactors} WHERE ${energyFactors.kind} = 'model' AND NOT ${energyFactors.demo} AND lower(${energyFactors.subject}) = lower(${usageEvents.model}))`,
         ...(projectIds === null ? [] : [inArray(usageEvents.projectId, safeIds(projectIds))]),
       );
       const [row] = await db.select({ n: count() }).from(usageEvents).where(where);

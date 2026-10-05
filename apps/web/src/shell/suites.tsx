@@ -25,6 +25,8 @@ export interface NavEntry {
 export const WORKSPACE: NavEntry[] = [
   { label: "Home", to: "/" },
   { label: "Chat", to: "/chat" },
+  // ADR-0172: every model a person may use, as a portal — pick, try, copy the code
+  { label: "Models", to: "/models" },
   { label: "Runs", to: "/runs" },
   { label: "Workflows", to: "/workflows" },
   { label: "Inbox", to: "/inbox" },
@@ -104,6 +106,7 @@ export const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // enforces.
       { label: "Use cases", to: "/admin/use-cases", also: ["/admin/governance/use-cases"] },
       { label: "AI intake", to: "/admin/governance/intake" },
+      { label: "Review policy", to: "/admin/governance/review-policy" },
       { label: "Dependency graph", to: "/admin/governance/graph" },
       { label: "Regulatory intelligence", to: "/admin/governance/regulatory" },
       // ADR-0045 — the RISK-ACCEPTANCE gate beside the quality gate: "has a
@@ -169,6 +172,10 @@ export const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // point: what is in the payload vs. where the call may go vs. who may
       // make it under which attributes.
       { label: "Guardrails", to: "/admin/guardrails" },
+      // ADR-0173 §3 — the same question asked of the MODEL: which bindings each
+      // feature (chat, builder, copilot, …) may call, with a default per feature.
+      // It only subtracts from a person's grants, like ABAC beside it.
+      { label: "Model policy", to: "/admin/model-policy" },
       // ADR-0048 — the CHANGE-CONTROL layer under the gates. The gates decide
       // whether a call may proceed; this decides which VERSION of the
       // governing artifact it proceeds under, with a canary and a one-click
@@ -211,6 +218,10 @@ export const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // of the vendor key?". A virtual key is an entitlement ceiling, not an
       // integration setting, which is why it is here and not under Cost.
       { label: "Virtual keys", to: "/admin/virtual-keys" },
+      // ADR-0175 A7 — beside the keys it inventories: every stored non-human
+      // credential (keys, tokens, provider and integration secrets) with its
+      // owner, age, use and flags, read-only, linking to where each is managed.
+      { label: "Credentials", to: "/admin/credentials" },
       { label: "SSO & sessions", to: "/admin/sso" },
       { label: "Provisioning (SCIM)", to: "/admin/provisioning" },
       // ADR-0038: where an IdP group becomes a role — and where the ones that
@@ -234,6 +245,9 @@ export const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       { label: "regulAIt-LLM", to: "/admin/regulait-llm" },
       { label: "Connectors", to: "/admin/connectors" },
       { label: "MCP servers", to: "/admin/mcp-servers" },
+      // ADR-0175 A6/A5 — flagged builder skills, share requests and the
+      // release waiting period, beside the MCP servers they also cover.
+      { label: "Admission review", to: "/admin/admission" },
       { label: "Git connections", to: "/admin/git-connections" },
       { label: "PM connections", to: "/admin/pm-connections" },
       { label: "Deploy targets", to: "/admin/deploy-targets" },
@@ -329,6 +343,25 @@ export interface Suite {
 
 /** The workspace section, minus Home — Home is the launcher itself and renders
  *  as the sidebar's constant affordance, never as a suite entry. */
+/**
+ * ADR-0172 — the agent builder: a separate suite where people compose governed
+ * agents (instructions, tools, sub-agents, skills, memory, schedules, channels)
+ * without code. Every agent built here still runs through the gateway as the
+ * person using it — their entitlements, budgets and approvals apply.
+ */
+// labels are unique across every suite: the "/" filter searches them all
+export const BUILDER: NavEntry[] = [
+  { label: "Agent chat", to: "/builder" },
+  { label: "Agent inbox", to: "/builder/inbox" },
+  { label: "Your agents", to: "/builder/agents" },
+  { label: "Agent templates", to: "/builder/templates" },
+  { label: "Apps & tools", to: "/builder/integrations" },
+  { label: "Skills", to: "/builder/skills" },
+  { label: "Agent usage", to: "/builder/usage" },
+];
+
+const BUILDER_SECTION = { group: "Agent builder", items: BUILDER };
+
 const WORKSPACE_SECTION = {
   group: "Workspace",
   items: WORKSPACE.filter((n) => n.to !== "/"),
@@ -359,6 +392,13 @@ export const SUITES: Suite[] = [
     purpose: "Chat, runs, workflows, projects and your own spend.",
     admin: false,
     sections: [WORKSPACE_SECTION],
+  },
+  {
+    id: "agent-builder",
+    name: "Agent Builder",
+    purpose: "Build governed agents without code — instructions, tools, skills, memory and schedules.",
+    admin: false,
+    sections: [BUILDER_SECTION],
   },
   {
     id: "ai-governance",
@@ -494,6 +534,8 @@ export function SuiteGlyph(props: { suiteId: string }) {
   };
   const path = (() => {
     switch (props.suiteId) {
+      case "agent-builder": // a spark over a small agent — compose, then run
+        return <path {...p} d="M8 10h8a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2zm2.5 4h.01m3 0h.01M12 10V7m0 0l-1.5-1.5M12 7l1.5-1.5M17.5 4.5v2m-1-1h2" />;
       case "ai-governance": // shield — the governance posture over every call
         return <path {...p} d="M12 4l7 2.6v5.1c0 4.2-2.9 7.1-7 8.3-4.1-1.2-7-4.1-7-8.3V6.6L12 4zm-2.6 8.2l1.9 1.9 3.4-3.6" />;
       case "access-reviews": // rotating review loop

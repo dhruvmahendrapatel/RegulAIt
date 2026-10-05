@@ -45,8 +45,11 @@
 #    `res.status ~= 200 -> pdp_error` branch, so the two adapters and the route
 #    have to move together. It is a contract decision, not a config tweak.
 #  - Subject derivation from Envoy's own authenticated identity, never from a
-#    client-settable header — the same defect the Kong adapter carried and the
-#    header-stripping it now does.
+#    client-settable header — the same defect the Kong adapter carried. The Kong
+#    adapter now REFUSES a request that carries a client-sent subject or any
+#    other protocol header (403, `forged_protocol_header`) rather than ignoring
+#    or stripping it, because "ignored" cannot be told from "honoured" in an
+#    access log; a real Envoy adapter should refuse the same way.
 #  - Verification against a PINNED ENVOY CONTAINER with an upstream invocation
 #    counter, asserting ZERO upstream calls for every deny, every
 #    approval_required, and every PDP failure. A adapter whose deny path is not

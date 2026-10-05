@@ -262,7 +262,16 @@ export async function applyRemediationDecision(
     if (agent.ownerUserId && !agent.ownerDisabledAt && agent.ownerUserId !== ownerUserId) {
       return (await finish("failed", { error: "agent_already_owned", currentOwnerUserId: agent.ownerUserId }), false);
     }
-    await tx.update(agents).set({ ownerUserId: ownerUserId! }).where(eq(agents.id, agentId!));
+    // ADR-0168 item 6: if the new owner (steward) is the agent's successor,
+    // the successor stepped up — clear the slot, in the same statement, so the
+    // steward≠successor CHECK can never turn an approved fix into a 500
+    await tx
+      .update(agents)
+      .set({
+        ownerUserId: ownerUserId!,
+        successorUserId: sql`CASE WHEN ${agents.successorUserId} = ${ownerUserId!} THEN NULL ELSE ${agents.successorUserId} END`,
+      })
+      .where(eq(agents.id, agentId!));
     await tx.insert(auditLog).values({
       userId: deciderUserId,
       objectType: "agent",

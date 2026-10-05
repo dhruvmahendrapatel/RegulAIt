@@ -57,29 +57,36 @@
 import type { FastifyInstance } from "fastify";
 import {
   agents,
+  aiRisks,
   aiUseCases,
   and,
+  approvals,
   auditLog,
   compliancePackControls,
   compliancePacks,
   desc,
   eq,
   inArray,
+  lt,
   or,
   projectMembers,
   projects,
   sql,
   users,
+  useCaseConditions,
+  useCaseIdempotencyKeys,
   workflowArtifacts,
   workflowInstances,
   workflowTemplates,
   type AiUseCaseRow,
   type Db,
+  type UseCaseConditionRow,
 } from "@regulait/db";
 import type { InstanceState, WorkflowDefinition } from "@regulait/workflow-kernel";
 import {
   classifyEuAiActTier,
   createUseCaseSchema,
+  deriveDataSensitivityFromCategories,
   extractEuAiActAnswers,
   retireUseCaseSchema,
   updateUseCaseSchema,
@@ -95,14 +102,22 @@ import {
   REPORT_PERIODS,
   resolveReportPeriod,
   evaluateReportAccess,
+  markConditionMetSchema,
+  type UseCaseConditionView,
+  EU_AI_ACT_BOOLEAN_KEYS,
+  INTAKE_BOOLEAN_QUESTION_KEYS,
+  UNSURE_ANSWER_MUST_COUNT_AS_YES,
+  unsureAnswerViolations,
+  unsureViolationDetail,
 } from "@regulait/shared";
 import { z } from "zod";
 import { complianceProfilesForTags, effectiveCompliancePolicy } from "./projects.js";
+import { activeDelegatorsFor } from "./delegations.js";
 // ADR-0058's evaluator, reused rather than reimplemented: a second copy of the
 // collector logic would drift from the one that produces real pack reports.
 import { evaluatePack } from "./compliance-packs.js";
 import { executeGovernedDispatch } from "./agents-connectors.js";
-import { agentDecision } from "./copilot.js";
+import { agentDecision, featureDefaultModel } from "./copilot.js";
 import { callerProjectIds, callerTeamIds, resolveScopeProjectIds } from "./reporting.js";
 // ADR-0089 (gap L21): the ONE granted computation and its never-blend note —
 // imported from the inventory, never reimplemented.
@@ -115,6 +130,15 @@ import {
   AI_USE_CASE_INTAKE_TEMPLATE_NAME,
   aiUseCaseIntakeDefinition,
 } from "./template-gallery.js";
+import {
+  ensureReviewRound,
+  isRiskAcceptor,
+  loadReviewPolicy,
+  policyValidityMonths,
+  recertificationDueAt,
+  reviewRoleIdsFor,
+  reviewsForInstance,
+} from "./review-policy.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 const useCaseIdParam = z.object({ useCaseId: z.string().uuid() });
@@ -190,7 +214,8 @@ screened" — the platform never guesses a tier from prose.
  * decide path itself is untouched.
  *
  * The ONLY input is the answers block inside the artifact: no valid block →
- * all three columns null ("not screened" — never a guessed tier), and a
+ * all three columns null ("not screened" — never a guessed tier) unless the
+ * use case was already screened, which keeps its tier (ADR-0170 §5), and a
  * block smuggling a `tier` key is refused by the shared parser. Idempotent;
  * writes (and audits) only when the stored screening actually changes.
  */
@@ -214,6 +239,28 @@ async function recomputeEuTierForUseCase(
   if (!artifact) return; // nothing submitted yet — nothing to screen
 
   const extracted = extractEuAiActAnswers(artifact.content);
+  // ADR-0170 §5 — SCREENING NEVER SILENTLY DOWNGRADES. A later questionnaire
+  // version without an extractable answers block (missing or invalid) says
+  // nothing new about the tier, so a use case that was already screened keeps
+  // its last computed tier, reasons and rule set (no write, no new audit) —
+  // otherwise dropping the block would turn "high" into "unscreened" and route
+  // the review to whatever the unscreened tier requires.
+  if (extracted.status !== "ok" && useCase.euAiActTier !== null) return;
+
+  // ADR-0171 / AER-053: a block that carries an `unsure` list restates the
+  // EU answers' "Not sure" set; the context answers' entries (stored from the
+  // Classify step) are kept. A block without the key says nothing about it.
+  if (extracted.status === "ok" && extracted.unsure !== undefined) {
+    const euKeys: readonly string[] = EU_AI_ACT_BOOLEAN_KEYS;
+    const stored = useCase.screeningUnsure ?? [];
+    const next = [...stored.filter((k) => !euKeys.includes(k)), ...extracted.unsure];
+    if (JSON.stringify([...next].sort()) !== JSON.stringify([...stored].sort())) {
+      await db
+        .update(aiUseCases)
+        .set({ screeningUnsure: next, updatedAt: new Date() })
+        .where(eq(aiUseCases.id, useCase.id));
+    }
+  }
   let tier: AiUseCaseRow["euAiActTier"] = null;
   let reasons: EuAiActReason[] | null = null;
   let rulesetVersion: number | null = null;
@@ -271,6 +318,9 @@ function statusForInstance(instanceStatus: string): AiUseCaseRow["status"] | nul
       return "rejected";
     case "blocked_on_approval":
       return "under_review";
+    // NOTE (ADR-0168): blocked_on_artifact also follows a RETURNED sign-off;
+    // `syncUseCaseForInstance` keeps a use case at `needs_info` there rather
+    // than rewinding it to `proposed`.
     case "running":
     case "blocked_on_plan":
     case "blocked_on_artifact":
@@ -314,6 +364,18 @@ export async function syncUseCaseForInstance(
   // early return below, because a questionnaire re-submission (versioned
   // re-approval) changes the answers without changing the mapped status.
   await recomputeEuTierForUseCase(db, useCase, actorUserId);
+  // ADR-0168 amendment: a sign-off the instance just requested is routed by
+  // the review policy for the tier AS IT NOW STANDS (re-read: the screening
+  // above may have just recomputed it) — one required review per role.
+  // No policy, or no roles for the tier: nothing changes.
+  const policy = await loadReviewPolicy(db);
+  if (policy) {
+    const [screened] = await db
+      .select({ euAiActTier: aiUseCases.euAiActTier })
+      .from(aiUseCases)
+      .where(eq(aiUseCases.id, useCase.id));
+    await ensureReviewRound(db, { ...useCase, euAiActTier: screened?.euAiActTier ?? null }, actorUserId, policy);
+  }
   const [instance] = await db
     .select({ status: workflowInstances.status })
     .from(workflowInstances)
@@ -321,14 +383,33 @@ export async function syncUseCaseForInstance(
   if (!instance) return;
   const next = statusForInstance(instance.status);
   if (next === null || next === useCase.status) return;
+  // ADR-0168: sent back for information — the instance rests at its
+  // questionnaire stage (blocked_on_artifact) and the use case STAYS
+  // needs_info until a new version re-requests the sign-off (→ under_review).
+  if (useCase.status === "needs_info" && next === "proposed") return;
 
   const decided = next === "approved" || next === "rejected";
+  // ADR-0168 — an approval has a lifetime, from the tier as it stands at the
+  // decision (re-read: the screening above may just have recomputed it).
+  let lifetime: { approvedAt: Date; approvedUntil: Date; months: number; tier: string | null } | null = null;
+  if (next === "approved") {
+    const [fresh] = await db
+      .select({ tier: aiUseCases.euAiActTier })
+      .from(aiUseCases)
+      .where(eq(aiUseCases.id, useCase.id));
+    const approvedAt = new Date();
+    // ADR-0168 amendment: the review policy may set the tier's lifetime
+    const months = policyValidityMonths(policy, fresh?.tier ?? null) ?? approvalLifetimeMonths(fresh?.tier ?? null);
+    lifetime = { approvedAt, approvedUntil: addMonthsUtc(approvedAt, months), months, tier: fresh?.tier ?? null };
+  }
   await db
     .update(aiUseCases)
     .set({
       status: next,
       updatedAt: new Date(),
-      ...(decided ? { decidedAt: new Date() } : {}),
+      // a decision closes a recertification review (ADR-0168 amendment)
+      ...(decided ? { decidedAt: new Date(), recertification: false } : {}),
+      ...(lifetime ? { approvedAt: lifetime.approvedAt, approvedUntil: lifetime.approvedUntil } : {}),
     })
     .where(eq(aiUseCases.id, useCase.id));
   await db.insert(auditLog).values({
@@ -341,6 +422,15 @@ export async function syncUseCaseForInstance(
       to: next,
       workflowInstanceId: instanceId,
       instanceStatus: instance.status,
+      ...(useCase.recertification ? { recertification: true } : {}),
+      ...(lifetime
+        ? {
+            approvedAt: lifetime.approvedAt.toISOString(),
+            approvedUntil: lifetime.approvedUntil.toISOString(),
+            lifetimeMonths: lifetime.months,
+            lifetimeTier: lifetime.tier,
+          }
+        : {}),
     },
     effect: next === "rejected" ? "deny" : "allow",
     ruleId: `use-case-${next}`,
@@ -350,6 +440,473 @@ export async function syncUseCaseForInstance(
       : `AI use case '${useCase.name}' moved to ${next.replace(/_/g, " ")} — intake workflow is ` +
         (instance.status === "blocked_on_approval" ? "awaiting sign-off" : instance.status.replace(/_/g, " ")),
   });
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0168 — approval lifetime, conditions, send-back
+// ---------------------------------------------------------------------------
+
+/** 6 months for a high tier — and for prohibited or unscreened, which are no
+ * safer than high — and 12 for minimal and limited. */
+export function approvalLifetimeMonths(tier: AiUseCaseRow["euAiActTier"] | string | null): number {
+  return tier === "minimal" || tier === "limited" ? 12 : 6;
+}
+
+export function addMonthsUtc(from: Date, months: number): Date {
+  const d = new Date(from.getTime());
+  d.setUTCMonth(d.getUTCMonth() + months);
+  return d;
+}
+
+/** An approval is an INTAKE SIGN-OFF when it is a workflow gate on the
+ * instance that governs a use case (ADR-0109: at most one). */
+export async function useCaseForIntakeApproval(
+  db: Db,
+  approval: { objectType: string; instanceId: string | null },
+): Promise<AiUseCaseRow | null> {
+  if (approval.objectType !== "workflow" || !approval.instanceId) return null;
+  const [uc] = await db
+    .select()
+    .from(aiUseCases)
+    .where(eq(aiUseCases.workflowInstanceId, approval.instanceId));
+  return uc ?? null;
+}
+
+/** Inside the decide transaction, after the kernel has parked the instance
+ * back at its questionnaire stage: the use case becomes `needs_info`. */
+export async function markUseCaseReturned(
+  db: Db,
+  useCaseId: string,
+  approvalId: string,
+  reason: string,
+  actorUserId: string,
+): Promise<void> {
+  const [uc] = await db.select().from(aiUseCases).where(eq(aiUseCases.id, useCaseId));
+  if (!uc || uc.status === "approved" || uc.status === "rejected" || uc.status === "retired") return;
+  if (uc.status === "needs_info") return;
+  await db
+    .update(aiUseCases)
+    .set({ status: "needs_info", updatedAt: new Date() })
+    .where(eq(aiUseCases.id, uc.id));
+  await db.insert(auditLog).values({
+    userId: actorUserId,
+    objectType: "ai_use_case",
+    objectId: uc.id,
+    detail: {
+      phase: "lifecycle",
+      from: uc.status,
+      to: "needs_info",
+      approvalId,
+      workflowInstanceId: uc.workflowInstanceId,
+    },
+    effect: "deny",
+    ruleId: "use-case-returned-for-info",
+    ruleChain: [],
+    reason: `AI use case '${uc.name}' sent back for information — a new questionnaire version re-requests sign-off: ${reason}`,
+  });
+}
+
+/** Inside the decide transaction: persist the conditions an approving
+ * intake sign-off imposed, and audit them as one act. */
+export async function imposeUseCaseConditions(
+  db: Db,
+  useCase: { id: string; name: string },
+  approvalId: string,
+  conditions: ReadonlyArray<{ text: string; ownerUserId?: string | undefined; dueAt: Date; blocking: boolean }>,
+  actorUserId: string,
+): Promise<void> {
+  if (conditions.length === 0) return;
+  const rows = await db
+    .insert(useCaseConditions)
+    .values(
+      conditions.map((c) => ({
+        useCaseId: useCase.id,
+        approvalId,
+        text: c.text,
+        ownerUserId: c.ownerUserId ?? null,
+        dueAt: c.dueAt,
+        blocking: c.blocking,
+      })),
+    )
+    .returning({ id: useCaseConditions.id, blocking: useCaseConditions.blocking });
+  const blocking = rows.filter((r) => r.blocking).length;
+  await db.insert(auditLog).values({
+    userId: actorUserId,
+    objectType: "ai_use_case",
+    objectId: useCase.id,
+    detail: {
+      phase: "conditions-imposed",
+      approvalId,
+      conditionIds: rows.map((r) => r.id),
+      blocking,
+      afterGoLive: rows.length - blocking,
+    },
+    effect: "allow",
+    ruleId: "use-case-conditions-imposed",
+    ruleChain: [],
+    reason:
+      `AI use case '${useCase.name}' approved with ${rows.length} condition(s): ` +
+      `${blocking} before go-live (blocking deployment while open), ${rows.length - blocking} after go-live`,
+  });
+}
+
+/**
+ * ADR-0168 amendment — RISK ACCEPTANCE ON A SIGN-OFF, refused BY NAME before
+ * anything is written: only by a risk acceptor the review policy names (403
+ * `not_a_risk_acceptor`), only for risks of THIS use case (422
+ * `risk_not_on_use_case`), and only for a live risk (409 `risk_already_accepted`
+ * / `risk_terminal`). The decide path calls this before its transaction.
+ */
+export async function precheckRiskAcceptance(
+  db: Db,
+  useCase: { id: string },
+  deciderUserId: string,
+  riskIds: string[],
+): Promise<{ status: number; body: Record<string, unknown> } | null> {
+  if (!isRiskAcceptor(await loadReviewPolicy(db), deciderUserId)) {
+    return {
+      status: 403,
+      body: {
+        error: "not_a_risk_acceptor",
+        detail: "only a risk acceptor named in the review policy may accept risk on a sign-off",
+      },
+    };
+  }
+  const ids = [...new Set(riskIds)];
+  const rows = await db
+    .select({ id: aiRisks.id, useCaseId: aiRisks.useCaseId, status: aiRisks.status })
+    .from(aiRisks)
+    .where(inArray(aiRisks.id, ids));
+  const foreign = ids.filter((id) => rows.find((r) => r.id === id)?.useCaseId !== useCase.id);
+  if (foreign.length > 0) {
+    return {
+      status: 422,
+      body: {
+        error: "risk_not_on_use_case",
+        riskIds: foreign,
+        detail: "every accepted risk must be a risk recorded against the use case being decided",
+      },
+    };
+  }
+  const accepted = rows.filter((r) => r.status === "accepted").map((r) => r.id);
+  if (accepted.length > 0) {
+    return { status: 409, body: { error: "risk_already_accepted", riskIds: accepted } };
+  }
+  const closed = rows.filter((r) => r.status === "closed").map((r) => r.id);
+  if (closed.length > 0) {
+    return { status: 409, body: { error: "risk_terminal", riskIds: closed, detail: "a closed risk has nothing left to accept" } };
+  }
+  return null;
+}
+
+/** Inside the decide transaction: the listed risks move to `accepted` with the
+ * rationale, one audit row per risk (`use-case-risk-accepted`). */
+export async function acceptUseCaseRisks(
+  db: Db,
+  useCase: { id: string; name: string },
+  approvalId: string,
+  input: { riskIds: string[]; rationale: string },
+  actorUserId: string,
+): Promise<void> {
+  const now = new Date();
+  const rows = await db
+    .update(aiRisks)
+    .set({ status: "accepted", acceptedByUserId: actorUserId, acceptedAt: now, acceptanceNote: input.rationale, updatedAt: now })
+    .where(
+      and(
+        inArray(aiRisks.id, [...new Set(input.riskIds)]),
+        eq(aiRisks.useCaseId, useCase.id),
+        or(eq(aiRisks.status, "open"), eq(aiRisks.status, "mitigating")),
+      ),
+    )
+    .returning({ id: aiRisks.id, title: aiRisks.title, likelihood: aiRisks.likelihood, impact: aiRisks.impact });
+  for (const r of rows) {
+    await db.insert(auditLog).values({
+      userId: actorUserId,
+      objectType: "ai_use_case",
+      objectId: useCase.id,
+      detail: {
+        phase: "risk-accepted",
+        riskId: r.id,
+        approvalId,
+        declared: { likelihood: r.likelihood, impact: r.impact },
+      },
+      effect: "allow",
+      ruleId: "use-case-risk-accepted",
+      ruleChain: [],
+      reason:
+        `residual risk '${r.title}' on AI use case '${useCase.name}' ACCEPTED at sign-off: ${input.rationale} — ` +
+        "a recorded decision, not a control",
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0170 §3 — WHO MAY CLOSE A CONDITION (maker–checker for before-go-live)
+// ---------------------------------------------------------------------------
+
+/** the facts the closing rule reads, loaded once per use case */
+export interface ConditionCloseContext {
+  isAdmin: boolean;
+  callerId: string | null;
+  /** the use case's owner and the intake instance's initiator — "the proposer" */
+  proposerIds: Set<string>;
+  /** users who APPROVED a sign-off / review row of the use case's current approval */
+  approverIds: Set<string>;
+}
+
+export async function conditionCloseContext(
+  db: Db,
+  useCase: Pick<AiUseCaseRow, "ownerUserId" | "workflowInstanceId">,
+  auth: { isAdmin: boolean; userId: string | null | undefined },
+): Promise<ConditionCloseContext> {
+  const proposerIds = new Set<string>([useCase.ownerUserId]);
+  const approverIds = new Set<string>();
+  if (useCase.workflowInstanceId) {
+    const [inst] = await db
+      .select({ initiatorUserId: workflowInstances.initiatorUserId })
+      .from(workflowInstances)
+      .where(eq(workflowInstances.id, useCase.workflowInstanceId));
+    if (inst?.initiatorUserId) proposerIds.add(inst.initiatorUserId);
+    const rows = await db
+      .select({ decidedBy: approvals.decidedBy, reviewRound: approvals.reviewRound })
+      .from(approvals)
+      .where(
+        and(
+          eq(approvals.instanceId, useCase.workflowInstanceId),
+          eq(approvals.objectType, "workflow"),
+          inArray(approvals.status, ["approved", "consumed"]),
+        ),
+      );
+    // the CURRENT approval: on a review-policy path, the latest round's role
+    // reviews; on the single named-approver path, its approved sign-offs
+    const roleRounds = rows.map((r) => r.reviewRound).filter((r): r is number => r !== null);
+    const current =
+      roleRounds.length > 0
+        ? rows.filter((r) => r.reviewRound === Math.max(...roleRounds))
+        : rows.filter((r) => r.reviewRound === null);
+    for (const r of current) if (r.decidedBy) approverIds.add(r.decidedBy);
+  }
+  return { isAdmin: auth.isAdmin, callerId: auth.userId ?? null, proposerIds, approverIds };
+}
+
+export type ConditionCloseVerdict =
+  | { allowed: true; noteRequired: boolean }
+  | { allowed: false; error: "proposer_cannot_close_blocking_condition" | "forbidden"; detail: string };
+
+/**
+ * A BEFORE-go-live (blocking) condition is closed by someone other than the
+ * proposer: an admin; the condition's owner when that owner is neither the
+ * use case's owner nor the intake initiator; or a reviewer who approved the
+ * current approval — always with a note. An AFTER-go-live condition keeps the
+ * ADR-0168 rule: its owner, the use case's owner, or an admin.
+ */
+export function conditionCloseVerdict(
+  cond: Pick<UseCaseConditionRow, "blocking" | "ownerUserId">,
+  useCaseOwnerId: string,
+  ctx: ConditionCloseContext,
+): ConditionCloseVerdict {
+  const me = ctx.callerId;
+  if (!cond.blocking) {
+    if (ctx.isAdmin || (!!me && (me === cond.ownerUserId || me === useCaseOwnerId))) {
+      return { allowed: true, noteRequired: false };
+    }
+    return {
+      allowed: false,
+      error: "forbidden",
+      detail: "an after-go-live condition is marked met by its owner, the use case's owner, or an admin",
+    };
+  }
+  if (ctx.isAdmin) return { allowed: true, noteRequired: true };
+  if (me && ctx.proposerIds.has(me)) {
+    return {
+      allowed: false,
+      error: "proposer_cannot_close_blocking_condition",
+      detail:
+        "a before-go-live condition is confirmed by someone other than the person who proposed the use case — " +
+        "the condition's owner, a reviewer who approved it, or an admin",
+    };
+  }
+  if (me && (me === cond.ownerUserId || ctx.approverIds.has(me))) return { allowed: true, noteRequired: true };
+  return {
+    allowed: false,
+    error: "forbidden",
+    detail:
+      "a before-go-live condition is marked met by its owner, a reviewer who approved the use case, or an admin",
+  };
+}
+
+async function conditionViewsFor(
+  db: Db,
+  useCase: Pick<AiUseCaseRow, "id" | "ownerUserId" | "workflowInstanceId">,
+  now: Date,
+  auth: { isAdmin: boolean; userId: string | null | undefined },
+): Promise<UseCaseConditionView[]> {
+  const rows = await db
+    .select()
+    .from(useCaseConditions)
+    .where(eq(useCaseConditions.useCaseId, useCase.id))
+    .orderBy(useCaseConditions.dueAt, useCaseConditions.createdAt, useCaseConditions.id);
+  const ids = [...new Set(rows.flatMap((r) => [r.ownerUserId, r.metByUserId]).filter((x): x is string => !!x))];
+  const names = await userNames(db, ids);
+  const ctx = rows.some((r) => r.status === "open") ? await conditionCloseContext(db, useCase, auth) : null;
+  return rows.map((r) =>
+    conditionView(r, names, now, !!ctx && r.status === "open" && conditionCloseVerdict(r, useCase.ownerUserId, ctx).allowed),
+  );
+}
+
+async function userNames(db: Db, ids: string[]): Promise<Map<string, string>> {
+  if (ids.length === 0) return new Map();
+  const rows = await db
+    .select({ id: users.id, displayName: users.displayName, email: users.email })
+    .from(users)
+    .where(inArray(users.id, ids));
+  return new Map(rows.map((u) => [u.id, u.displayName || u.email]));
+}
+
+function conditionView(
+  r: UseCaseConditionRow,
+  names: Map<string, string>,
+  now: Date,
+  canMarkMet: boolean,
+): UseCaseConditionView {
+  return {
+    id: r.id,
+    approvalId: r.approvalId,
+    text: r.text,
+    ownerUserId: r.ownerUserId,
+    ownerName: r.ownerUserId ? (names.get(r.ownerUserId) ?? null) : null,
+    dueAt: r.dueAt.toISOString(),
+    blocking: r.blocking,
+    status: r.status,
+    metAt: r.metAt ? r.metAt.toISOString() : null,
+    metByName: r.metByUserId ? (names.get(r.metByUserId) ?? null) : null,
+    note: r.note,
+    overdue: r.status === "open" && r.dueAt.getTime() < now.getTime(),
+    canMarkMet,
+  };
+}
+
+/**
+ * ADR-0168 — WHO MAY READ ONE USE CASE: its owner, an admin, and the
+ * reviewer of its intake sign-off — the named approver of a PENDING sign-off
+ * on its intake instance, an active delegate of that approver (ADR-0022), or
+ * whoever DECIDED one. Read-only: every write route keeps its own owner/admin
+ * rule, and the list is not widened.
+ */
+export async function canReadUseCase(
+  db: Db,
+  useCase: Pick<AiUseCaseRow, "ownerUserId" | "workflowInstanceId">,
+  auth: { isAdmin: boolean; userId: string | null | undefined },
+): Promise<boolean> {
+  if (auth.isAdmin) return true;
+  const me = auth.userId;
+  if (!me) return false;
+  if (me === useCase.ownerUserId) return true;
+  return isIntakeReviewer(db, useCase, me);
+}
+
+export async function isIntakeReviewer(
+  db: Db,
+  useCase: Pick<AiUseCaseRow, "workflowInstanceId">,
+  userId: string,
+): Promise<boolean> {
+  if (!useCase.workflowInstanceId) return false;
+  const delegators = await activeDelegatorsFor(db, userId);
+  const named = delegators.length
+    ? or(eq(approvals.approverUserId, userId), inArray(approvals.approverUserId, delegators))
+    : eq(approvals.approverUserId, userId);
+  // ADR-0168 amendment: a member of a reviewer role this use case's review
+  // rounds were routed to is one of its reviewers, whoever the row names
+  const myRoles = reviewRoleIdsFor(await loadReviewPolicy(db), userId);
+  const [hit] = await db
+    .select({ id: approvals.id })
+    .from(approvals)
+    .where(
+      and(
+        eq(approvals.objectType, "workflow"),
+        eq(approvals.instanceId, useCase.workflowInstanceId),
+        or(
+          and(eq(approvals.status, "pending"), named),
+          eq(approvals.decidedBy, userId),
+          ...(myRoles.length ? [inArray(approvals.reviewRoleId, myRoles)] : []),
+        ),
+      ),
+    )
+    .limit(1);
+  return !!hit;
+}
+
+/** ADR-0168 amendment — what the wizard needs to resubmit a use case that was
+ * sent back: the structured answers and questionnaire last submitted, and who
+ * asked for what. `allowed` = it is `needs_info` and the caller may edit it. */
+async function resubmissionFor(
+  db: Db,
+  row: AiUseCaseRow,
+  questionnaire: { version: number; content: string } | null,
+  auth: { isAdmin: boolean; userId: string | null | undefined },
+) {
+  let returnReason: string | null = null;
+  let returnedByName: string | null = null;
+  if (row.workflowInstanceId) {
+    const [ret] = await db
+      .select({ reason: approvals.decisionReason, decidedBy: approvals.decidedBy })
+      .from(approvals)
+      .where(and(eq(approvals.instanceId, row.workflowInstanceId), eq(approvals.status, "returned")))
+      .orderBy(desc(approvals.decidedAt), desc(approvals.id))
+      .limit(1);
+    if (ret) {
+      returnReason = ret.reason;
+      returnedByName = ret.decidedBy ? ((await userNames(db, [ret.decidedBy])).get(ret.decidedBy) ?? null) : null;
+    }
+  }
+  // every Classify-step answer stored with the use case (registration, or a
+  // resubmission PATCH) over the EU answers of the latest questionnaire; a
+  // use case registered without them prefills the EU answers only
+  const extracted = questionnaire ? extractEuAiActAnswers(questionnaire.content) : null;
+  const fromQuestionnaire = extracted?.status === "ok" ? extracted.answers : null;
+  // ADR-0171: + the "Not sure" set, so a resubmission starts from it
+  const screeningAnswers =
+    fromQuestionnaire || row.intakeAnswers
+      ? { ...(fromQuestionnaire ?? {}), ...(row.intakeAnswers ?? {}), unsure: row.screeningUnsure ?? [] }
+      : null;
+  return {
+    allowed: row.status === "needs_info" && (auth.isAdmin || (!!auth.userId && auth.userId === row.ownerUserId)),
+    screeningAnswers,
+    questionnaire: questionnaire ? { version: questionnaire.version, content: questionnaire.content } : null,
+    returnReason,
+    returnedByName,
+  };
+}
+
+/** the use case's risks, with any acceptance (on a sign-off or the register) */
+async function riskViewsFor(db: Db, useCaseId: string) {
+  const rows = await db
+    .select()
+    .from(aiRisks)
+    .where(eq(aiRisks.useCaseId, useCaseId))
+    .orderBy(desc(aiRisks.createdAt), aiRisks.id);
+  const names = await userNames(
+    db,
+    [...new Set(rows.map((r) => r.acceptedByUserId).filter((x): x is string => !!x))],
+  );
+  return rows.map((r) => ({
+    id: r.id,
+    title: r.title,
+    category: r.category,
+    status: r.status,
+    likelihood: r.likelihood,
+    impact: r.impact,
+    residualLikelihood: r.residualLikelihood,
+    residualImpact: r.residualImpact,
+    acceptedByName: r.acceptedByUserId ? (names.get(r.acceptedByUserId) ?? null) : null,
+    acceptedAt: r.acceptedAt ? r.acceptedAt.toISOString() : null,
+    acceptanceRationale: r.status === "accepted" ? r.acceptanceNote : null,
+  }));
+}
+
+function approvalExpired(row: AiUseCaseRow, now: Date): boolean {
+  return row.status === "approved" && !!row.approvedUntil && row.approvedUntil.getTime() <= now.getTime();
 }
 
 // ---------------------------------------------------------------------------
@@ -636,6 +1193,91 @@ async function projectSummaryFor(db: Db, useCase: AiUseCaseRow) {
 }
 
 // ---------------------------------------------------------------------------
+// ADR-0171 — framework rationales, "Not sure" answers, idempotent creation
+// ---------------------------------------------------------------------------
+
+/** AER-052: a rationale explains why a framework THIS use case carries
+ * applies — one for a framework it does not carry has nothing to explain */
+function unlistedRationaleRefusal(
+  rationales: Record<string, string> | undefined,
+  complianceTags: readonly string[],
+): Record<string, unknown> | null {
+  if (!rationales) return null;
+  const unlisted = Object.keys(rationales).filter((k) => !complianceTags.includes(k));
+  if (unlisted.length === 0) return null;
+  return {
+    error: "rationale_for_unlisted_framework",
+    frameworks: unlisted,
+    detail:
+      `a framework rationale explains a framework this use case carries; ${unlisted.join(", ")} ` +
+      "is not among its compliance tags",
+  };
+}
+
+/** AER-053: the "Not sure" list split off the flat answers, deduplicated, and
+ * checked against the answers it qualifies (null = consistent) */
+function splitUnsure(answers: Record<string, unknown>): {
+  rest: Record<string, unknown>;
+  unsure: string[];
+  refusal: Record<string, unknown> | null;
+} {
+  const { unsure: raw, ...rest } = answers;
+  const unsure = [...new Set(Array.isArray(raw) ? (raw as string[]) : [])];
+  const bad = unsureAnswerViolations(rest, unsure, INTAKE_BOOLEAN_QUESTION_KEYS);
+  return {
+    rest,
+    unsure,
+    refusal: bad.length
+      ? { error: UNSURE_ANSWER_MUST_COUNT_AS_YES, answers: bad, detail: unsureViolationDetail(bad) }
+      : null,
+  };
+}
+
+/**
+ * AER-053 — the questionnaire artifact route's pre-check (wired through
+ * `WorkflowRouteOptions.validateArtifact`): an intake questionnaire whose
+ * answers block marks an answer "Not sure" without counting it as yes is
+ * refused by name BEFORE it is stored. Every other questionnaire — including
+ * one with no or an otherwise invalid block — is unchanged (stored, then
+ * screened as before).
+ */
+export function useCaseArtifactRefusal(
+  output: string,
+  content: string,
+): { status: number; body: Record<string, unknown> } | null {
+  if (output !== USE_CASE_QUESTIONNAIRE_OUTPUT) return null;
+  const extracted = extractEuAiActAnswers(content);
+  if (extracted.status === "invalid" && extracted.code === UNSURE_ANSWER_MUST_COUNT_AS_YES) {
+    return { status: 422, body: { error: UNSURE_ANSWER_MUST_COUNT_AS_YES, detail: extracted.error } };
+  }
+  return null;
+}
+
+/** AER-050: how long a claimed Idempotency-Key replays its original response.
+ * As long as a draft lives (use-case-drafts.ts, 30 days): the draft carries the
+ * key, so a resume-and-retry after a lost response must still replay rather
+ * than create a second use case. */
+export const USE_CASE_IDEMPOTENCY_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+
+/** the stored original body for (caller, key), if claimed inside the window */
+async function idempotentReplayFor(db: Db, userId: string, key: string): Promise<Record<string, unknown> | null> {
+  const [hit] = await db
+    .select({ response: useCaseIdempotencyKeys.response, createdAt: useCaseIdempotencyKeys.createdAt })
+    .from(useCaseIdempotencyKeys)
+    .where(and(eq(useCaseIdempotencyKeys.userId, userId), eq(useCaseIdempotencyKeys.key, key)));
+  if (!hit || !hit.response) return null;
+  if (Date.now() - hit.createdAt.getTime() >= USE_CASE_IDEMPOTENCY_WINDOW_MS) return null;
+  return hit.response;
+}
+
+/** thrown inside the create transaction to roll back the key claim with it */
+class CreateRefused extends Error {
+  constructor(readonly status: number, readonly body: Record<string, unknown>) {
+    super("use-case create refused");
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Routes
 // ---------------------------------------------------------------------------
 
@@ -677,12 +1319,34 @@ export function registerUseCaseRoutes(
     let narrative: Narrative = { status: "not_requested" };
     let questionnaire = suggestions.questionnaire;
     if (body.draftNarrative) {
-      const [agent] = body.agentId ? await db.select().from(agents).where(eq(agents.id, body.agentId)) : [];
+      // ADR-0173 §3 — the intake assistant is a feature of the model
+      // allow-list, and it KNOWS the data class of what it sends: the class the
+      // proposer's own data categories derive (the same derivation the use case
+      // is stored with), so a data-class rule applies here.
+      const intakeGate = {
+        feature: "intake_assist" as const,
+        dataClass: deriveDataSensitivityFromCategories(body.context.dataCategories),
+      };
+      const [named] = body.agentId ? await db.select().from(agents).where(eq(agents.id, body.agentId)) : [];
+      // no agent named: the policy's default for the intake assistant, when
+      // this person may use it (a default is a preference, never a grant)
+      const agent = named ?? (body.agentId ? undefined : await featureDefaultModel(db, userId, intakeGate));
       if (!agent) {
         narrative = { status: "skipped", reason: body.agentId ? "unknown agent" : "no agentId supplied" };
       } else {
-        const decision = await agentDecision(db, userId, agent);
+        const decision = await agentDecision(db, userId, agent, intakeGate);
         if (decision.effect !== "allow") {
+          // audited like every other governance refusal of a model use
+          await db.insert(auditLog).values({
+            userId,
+            objectType: "agent",
+            objectId: agent.id,
+            detail: { surface: "intake_assist", agentName: agent.name, dataClass: intakeGate.dataClass },
+            effect: "deny",
+            ruleId: decision.ruleId,
+            ruleChain: decision.ruleChain,
+            reason: decision.reason,
+          });
           narrative = { status: "refused", reason: decision.reason };
         } else {
           const outcome = await executeGovernedDispatch(db, opts.dataKey, {
@@ -693,6 +1357,7 @@ export function registerUseCaseRoutes(
             input: buildIntakeNarrativePrompt(body, suggestions.questionnaire),
             maxTokens: 4096,
             projectId: null,
+            modelFeature: intakeGate,
             detail: { purpose: "intake-assist" },
           });
           if (!outcome.ok) {
@@ -759,6 +1424,31 @@ export function registerUseCaseRoutes(
     const userId = req.authCtx.userId;
     if (!userId) return reply.status(403).send({ error: "bootstrap_cannot_propose" });
 
+    // ADR-0171 / AER-050 — IDEMPOTENT CREATION. A retry carrying the same
+    // Idempotency-Key from the same caller within 24h gets the ORIGINAL 201
+    // body back (200 + `Idempotent-Replay: true`) instead of a second use
+    // case. Keys are per caller; no header = unchanged behaviour.
+    const rawKey = req.headers["idempotency-key"];
+    let idemKey: string | null = null;
+    if (rawKey !== undefined) {
+      if (typeof rawKey !== "string" || rawKey.length < 1 || rawKey.length > 200) {
+        return reply.status(400).send({
+          error: "invalid_idempotency_key",
+          detail: "Idempotency-Key must be a single value of 1 to 200 characters",
+        });
+      }
+      idemKey = rawKey;
+      const replay = await idempotentReplayFor(db, userId, idemKey);
+      if (replay) return reply.status(200).header("Idempotent-Replay", "true").send(replay);
+    }
+
+    // ADR-0171 / AER-052 — rationales only for frameworks this use case carries
+    const unlisted = unlistedRationaleRefusal(body.frameworkRationales, body.complianceTags);
+    if (unlisted) return reply.status(422).send(unlisted);
+    // ADR-0171 / AER-053 — a "Not sure" answer counts as yes, never a silent no
+    const split = body.screeningAnswers ? splitUnsure(body.screeningAnswers) : null;
+    if (split?.refusal) return reply.status(422).send(split.refusal);
+
     if (body.projectId) {
       const [project] = await db
         .select({ id: projects.id })
@@ -779,69 +1469,136 @@ export function registerUseCaseRoutes(
     const template = await resolveIntakeTemplate(db);
     if (!template.ok) return reply.status(template.status).send(template.body);
 
-    // pillar-2 rails: the intake instance. It carries NO projectId — the
-    // proposal governs itself; the named project is a reference the cascade
-    // card reads, not an attribution target (ADR-0080 honest limits).
-    const started = await startWorkflowInstanceWithTemplates(db, opts.dataKey, {
-      templateIds: [template.templateId],
-      initiatorUserId: userId,
-      change: {
-        description: `AI use-case intake: ${body.name}`,
-        paths: [],
-        changeType: "ai-use-case-intake",
-        environment: "governance",
-      },
-    });
-    if (!started.ok) return reply.status(started.status).send(started.body);
+    // ONE transaction: the key claim, the intake instance, the registry row
+    // and its audit row commit together or not at all. The claim is
+    // INSERTED FIRST: a concurrent duplicate's insert waits on this
+    // transaction at the unique (user_id, key) index and, once it commits,
+    // conflicts and replays — two requests can never both create.
+    let outcome: { kind: "created"; body: Record<string, unknown> } | { kind: "replay"; body: Record<string, unknown> | null };
+    try {
+      outcome = await db.transaction(async (rawTx) => {
+        const tx = rawTx as unknown as Db;
+        if (idemKey) {
+          const expired = new Date(Date.now() - USE_CASE_IDEMPOTENCY_WINDOW_MS);
+          await tx
+            .delete(useCaseIdempotencyKeys)
+            .where(
+              and(
+                eq(useCaseIdempotencyKeys.userId, userId),
+                eq(useCaseIdempotencyKeys.key, idemKey),
+                lt(useCaseIdempotencyKeys.createdAt, expired),
+              ),
+            );
+          const claimed = await tx
+            .insert(useCaseIdempotencyKeys)
+            .values({ userId, key: idemKey })
+            .onConflictDoNothing({ target: [useCaseIdempotencyKeys.userId, useCaseIdempotencyKeys.key] })
+            .returning({ id: useCaseIdempotencyKeys.id });
+          if (claimed.length === 0) {
+            const [existing] = await tx
+              .select({ response: useCaseIdempotencyKeys.response })
+              .from(useCaseIdempotencyKeys)
+              .where(and(eq(useCaseIdempotencyKeys.userId, userId), eq(useCaseIdempotencyKeys.key, idemKey)));
+            return { kind: "replay" as const, body: existing?.response ?? null };
+          }
+        }
 
-    const [row] = await db
-      .insert(aiUseCases)
-      .values({
-        name: body.name,
-        description: body.description,
-        ownerUserId: userId,
-        businessContext: body.businessContext,
-        intendedAgentIds: body.intendedAgentIds,
-        dataSensitivity: body.dataSensitivity,
-        complianceTags: body.complianceTags,
-        projectId: body.projectId ?? null,
-        workflowInstanceId: started.instance.id,
-        status: "proposed",
-      })
-      .returning();
-    await db.insert(auditLog).values({
-      userId,
-      objectType: "ai_use_case",
-      objectId: row!.id,
-      detail: {
-        phase: "proposed",
-        name: body.name,
-        dataSensitivity: body.dataSensitivity,
-        complianceTags: body.complianceTags,
-        projectId: body.projectId ?? null,
-        workflowInstanceId: started.instance.id,
-      },
-      effect: "allow",
-      ruleId: "use-case-proposed",
-      ruleChain: [],
-      reason: `AI use case '${body.name}' proposed — intake workflow started`,
-    });
-    return reply.status(201).send({
-      ...row,
-      instance: started.instance,
-      questionnaireTemplate: USE_CASE_QUESTIONNAIRE_TEMPLATE,
-      note:
-        "fill the questionnaire and submit it as the intake instance's " +
-        `'${USE_CASE_QUESTIONNAIRE_OUTPUT}' artifact; the sign-off decision on the one approvals ` +
-        "queue is what approves this use case",
-    });
+        // pillar-2 rails: the intake instance. It carries NO projectId — the
+        // proposal governs itself; the named project is a reference the cascade
+        // card reads, not an attribution target (ADR-0080 honest limits).
+        const started = await startWorkflowInstanceWithTemplates(tx, opts.dataKey, {
+          templateIds: [template.templateId],
+          initiatorUserId: userId,
+          change: {
+            description: `AI use-case intake: ${body.name}`,
+            paths: [],
+            changeType: "ai-use-case-intake",
+            environment: "governance",
+          },
+        });
+        if (!started.ok) throw new CreateRefused(started.status, started.body);
+
+        const [row] = await tx
+          .insert(aiUseCases)
+          .values({
+            name: body.name,
+            description: body.description,
+            ownerUserId: userId,
+            businessContext: body.businessContext,
+            intendedAgentIds: body.intendedAgentIds,
+            dataSensitivity: body.dataSensitivity,
+            complianceTags: body.complianceTags,
+            projectId: body.projectId ?? null,
+            workflowInstanceId: started.instance.id,
+            status: "proposed",
+            // ADR-0168 amendment: kept for resubmission prefill — nothing else reads it
+            ...(split ? { intakeAnswers: split.rest, screeningUnsure: split.unsure } : {}),
+            ...(body.frameworkRationales ? { frameworkRationales: body.frameworkRationales } : {}),
+          })
+          .returning();
+        await tx.insert(auditLog).values({
+          userId,
+          objectType: "ai_use_case",
+          objectId: row!.id,
+          detail: {
+            phase: "proposed",
+            name: body.name,
+            dataSensitivity: body.dataSensitivity,
+            complianceTags: body.complianceTags,
+            projectId: body.projectId ?? null,
+            workflowInstanceId: started.instance.id,
+            ...(split?.unsure.length ? { screeningUnsure: split.unsure } : {}),
+            ...(body.frameworkRationales ? { rationaleFrameworks: Object.keys(body.frameworkRationales) } : {}),
+            ...(idemKey ? { idempotencyKey: true } : {}),
+          },
+          effect: "allow",
+          ruleId: "use-case-proposed",
+          ruleChain: [],
+          reason: `AI use case '${body.name}' proposed — intake workflow started`,
+        });
+        const created: Record<string, unknown> = {
+          ...row,
+          instance: started.instance,
+          questionnaireTemplate: USE_CASE_QUESTIONNAIRE_TEMPLATE,
+          note:
+            "fill the questionnaire and submit it as the intake instance's " +
+            `'${USE_CASE_QUESTIONNAIRE_OUTPUT}' artifact; the sign-off decision on the one approvals ` +
+            "queue is what approves this use case",
+        };
+        if (idemKey) {
+          // stored as the JSON the caller received, so a replay is byte-for-byte the same shape
+          await tx
+            .update(useCaseIdempotencyKeys)
+            .set({ useCaseId: row!.id, response: JSON.parse(JSON.stringify(created)) as Record<string, unknown> })
+            .where(and(eq(useCaseIdempotencyKeys.userId, userId), eq(useCaseIdempotencyKeys.key, idemKey)));
+        }
+        return { kind: "created" as const, body: created };
+      });
+    } catch (err) {
+      if (err instanceof CreateRefused) return reply.status(err.status).send(err.body);
+      throw err;
+    }
+    if (outcome.kind === "replay") {
+      if (!outcome.body) {
+        // unreachable while the claim and its response commit together; said
+        // plainly rather than creating a second use case
+        return reply.status(409).send({
+          error: "idempotency_key_in_flight",
+          detail: "a request with this Idempotency-Key has not finished — retry shortly",
+        });
+      }
+      return reply.status(200).header("Idempotent-Replay", "true").send(outcome.body);
+    }
+    return reply.status(201).send(outcome.body);
   });
 
   // List: fleet for admins, own proposals for everyone else — the same
   // scoping shape as GET /v1/workflows/instances.
   app.get("/v1/use-cases", async (req, reply) => {
     const { status } = z
-      .object({ status: z.enum(["proposed", "under_review", "approved", "rejected", "retired"]).optional() })
+      .object({
+        status: z.enum(["proposed", "under_review", "needs_info", "approved", "rejected", "retired"]).optional(),
+      })
       .parse(req.query);
     const conditions = [];
     if (status) conditions.push(eq(aiUseCases.status, status));
@@ -863,8 +1620,33 @@ export function registerUseCaseRoutes(
           .where(inArray(users.id, ownerIds))
       : [];
     const ownerName = new Map(ownerRows.map((u) => [u.id, u.displayName || u.email]));
+    // ADR-0168: open conditions per row (before- and after-go-live alike)
+    const openCounts = rows.length
+      ? await db
+          .select({ useCaseId: useCaseConditions.useCaseId, n: sql<number>`count(*)::int` })
+          .from(useCaseConditions)
+          .where(
+            and(
+              inArray(
+                useCaseConditions.useCaseId,
+                rows.map((r) => r.id),
+              ),
+              eq(useCaseConditions.status, "open"),
+            ),
+          )
+          .groupBy(useCaseConditions.useCaseId)
+      : [];
+    const openConditions = new Map(openCounts.map((c) => [c.useCaseId, Number(c.n)]));
+    const now = new Date();
     return {
-      useCases: rows.map((r) => ({ ...r, ownerName: ownerName.get(r.ownerUserId) ?? null })),
+      useCases: rows.map((r) => ({
+        ...r,
+        ownerName: ownerName.get(r.ownerUserId) ?? null,
+        openConditions: openConditions.get(r.id) ?? 0,
+        approvalExpired: approvalExpired(r, now),
+        // ADR-0168 amendment: `recertification` rides the row; when it is due
+        recertificationDueAt: recertificationDueAt(r),
+      })),
     };
   });
 
@@ -874,7 +1656,8 @@ export function registerUseCaseRoutes(
     const { useCaseId } = useCaseIdParam.parse(req.params);
     const [row] = await db.select().from(aiUseCases).where(eq(aiUseCases.id, useCaseId));
     if (!row) return reply.status(404).send({ error: "not_found" });
-    if (!req.authCtx.isAdmin && req.authCtx.userId !== row.ownerUserId) {
+    // ADR-0168: + the reviewer of its intake sign-off (read-only)
+    if (!(await canReadUseCase(db, row, req.authCtx))) {
       return reply.status(403).send({
         error: "forbidden",
         detail: "a use case is visible to its owner and to admins",
@@ -921,8 +1704,21 @@ export function registerUseCaseRoutes(
         }
       }
     }
+    const now = new Date();
     return {
-      useCase: row,
+      useCase: { ...row, approvalExpired: approvalExpired(row, now), recertificationDueAt: recertificationDueAt(row) },
+      // ADR-0171: the owner's per-framework "why it applies" (AER-052) and the
+      // answers they were unsure about, counted as yes (AER-053) — for reviewers
+      frameworkRationales: row.frameworkRationales ?? {},
+      screeningUnsure: row.screeningUnsure ?? [],
+      // ADR-0168: what the approval imposed — owner/met-by names resolved
+      conditions: await conditionViewsFor(db, row, now, req.authCtx),
+      // ADR-0168 amendment: the current round's required reviews ([] on the
+      // single-approver path), the resubmission state, and the use case's
+      // risks with any acceptance recorded on a sign-off
+      reviews: await reviewsForInstance(db, row.workflowInstanceId),
+      resubmission: await resubmissionFor(db, row, questionnaire, req.authCtx),
+      risks: await riskViewsFor(db, row.id),
       instance,
       questionnaire,
       questionnaireTemplate: questionnaire ? null : USE_CASE_QUESTIONNAIRE_TEMPLATE,
@@ -970,7 +1766,22 @@ export function registerUseCaseRoutes(
         detail: "a use case is editable by its owner and by admins",
       });
     }
-    if (row.status !== "proposed" && row.status !== "under_review") {
+    // ADR-0170 §4 — WHAT IS UNDER REVIEW CANNOT CHANGE UNDER THE REVIEWERS.
+    // Every field is material (the description, context, intended agents and
+    // project are what the reviewers are reading), so no PATCH lands while a
+    // round is open — for the owner or an admin. The honest path is a send-back
+    // for information, which opens a new round on the edited record.
+    if (row.status === "under_review") {
+      return reply.status(409).send({
+        error: "locked_under_review",
+        detail:
+          "this use case is with its reviewers, so it can't be changed until a reviewer sends it back " +
+          "for more information",
+      });
+    }
+    // ADR-0168: a use case sent back for information is editable — that is
+    // what the reviewer asked for.
+    if (row.status !== "proposed" && row.status !== "needs_info") {
       // ADR-0089 amendment (batch B3) — INTENT IS DECIDED WITH THE USE CASE.
       // The intended-agents list is part of what the sign-off approved (the
       // ADR-0089 alignment comparison stands on it), so a post-decision
@@ -991,6 +1802,19 @@ export function registerUseCaseRoutes(
         detail: `a ${row.status} use case is a decided record — editing it would change what was decided`,
       });
     }
+    // ADR-0168 amendment — RESUBMISSION. Screening answers are accepted only
+    // while the use case is sent back; the tier is COMPUTED from them here
+    // (and again from the resubmitted questionnaire's answers block).
+    if (body.screeningAnswers !== undefined && row.status !== "needs_info") {
+      return reply.status(409).send({
+        error: "screening_answers_only_when_returned",
+        detail:
+          `screening answers are edited by resubmitting a use case that was sent back for information; ` +
+          `this one is ${row.status} — submit a new questionnaire version instead`,
+      });
+    }
+    const unlisted = unlistedRationaleRefusal(body.frameworkRationales, row.complianceTags);
+    if (unlisted) return reply.status(422).send(unlisted);
     if (body.projectId) {
       const [project] = await db
         .select({ id: projects.id })
@@ -1007,9 +1831,54 @@ export function registerUseCaseRoutes(
         return reply.status(400).send({ error: "invalid_reference", field: "intendedAgentIds" });
       }
     }
+    // the EU keys screen; the whole set is stored (merged over what
+    // registration stored); `dataCategories`, when given, re-derives the
+    // data sensitivity by the wizard's own fail-closed rule
+    let screening: ReturnType<typeof classifyEuAiActTier> | null = null;
+    let intakeAnswers: Record<string, unknown> | null = null;
+    let dataSensitivity: AiUseCaseRow["dataSensitivity"] | null = null;
+    let screeningUnsure: string[] | null = null;
+    if (body.screeningAnswers) {
+      const a = body.screeningAnswers;
+      // ADR-0171 / AER-053: the "Not sure" set REPLACES the stored one (omitted
+      // = none) and is checked against the answers as they will be stored —
+      // an omitted context answer keeps its stored value
+      const { unsure: _unsure, ...answersOnly } = a;
+      const merged = { ...(row.intakeAnswers ?? {}), ...answersOnly };
+      delete (merged as Record<string, unknown>).unsure;
+      const split = splitUnsure({ ...merged, unsure: a.unsure ?? [] });
+      if (split.refusal) return reply.status(422).send(split.refusal);
+      screeningUnsure = split.unsure;
+      screening = classifyEuAiActTier({
+        purposeDomain: a.purposeDomain,
+        affectedPersons: a.affectedPersons,
+        decisionAutonomy: a.decisionAutonomy,
+        biometricUse: a.biometricUse,
+        emotionRecognition: a.emotionRecognition,
+        socialScoring: a.socialScoring,
+        manipulativeTechniques: a.manipulativeTechniques,
+        profilesNaturalPersons: a.profilesNaturalPersons,
+        safetyComponent: a.safetyComponent,
+        interactsWithHumans: a.interactsWithHumans,
+        generatesSyntheticContent: a.generatesSyntheticContent,
+      });
+      intakeAnswers = merged;
+      if (a.dataCategories !== undefined) dataSensitivity = deriveDataSensitivityFromCategories(a.dataCategories);
+    }
     const [updated] = await db
       .update(aiUseCases)
       .set({
+        ...(screening
+          ? {
+              euAiActTier: screening.tier,
+              euAiActReasons: screening.reasons,
+              euAiActRulesetVersion: screening.rulesetVersion,
+            }
+          : {}),
+        ...(intakeAnswers ? { intakeAnswers } : {}),
+        ...(screeningUnsure ? { screeningUnsure } : {}),
+        ...(body.frameworkRationales !== undefined ? { frameworkRationales: body.frameworkRationales } : {}),
+        ...(dataSensitivity ? { dataSensitivity } : {}),
         ...(body.description !== undefined ? { description: body.description } : {}),
         ...(body.businessContext !== undefined ? { businessContext: body.businessContext } : {}),
         ...(body.intendedAgentIds !== undefined ? { intendedAgentIds: body.intendedAgentIds } : {}),
@@ -1028,6 +1897,28 @@ export function registerUseCaseRoutes(
       ruleChain: [],
       reason: `AI use case '${row.name}' updated while ${row.status}`,
     });
+    if (screening) {
+      await db.insert(auditLog).values({
+        userId: req.authCtx.userId ?? NO_IDENTITY,
+        objectType: "ai_use_case",
+        objectId: useCaseId,
+        detail: {
+          phase: "eu-ai-act-screening",
+          source: "resubmission",
+          from: row.euAiActTier,
+          tier: screening.tier,
+          ...(dataSensitivity ? { dataSensitivityFrom: row.dataSensitivity, dataSensitivity } : {}),
+          rulesetVersion: screening.rulesetVersion,
+          firedRuleIds: screening.reasons.map((r) => r.ruleId),
+        },
+        effect: "allow",
+        ruleId: "use-case-eu-tier",
+        ruleChain: [],
+        reason:
+          `EU AI Act screening for '${row.name}' recomputed from resubmitted answers: ${screening.tier} ` +
+          `(rule set v${screening.rulesetVersion}) — a screening result that informs the sign-off, not legal advice and not a block`,
+      });
+    }
     return updated;
   });
 
@@ -1213,6 +2104,71 @@ export function registerUseCaseRoutes(
       /** the same clause every pack report carries — one sentence, one meaning */
       disclaimer: COMPLIANCE_PACK_DISCLAIMER,
     };
+  });
+
+  // ADR-0168 — mark an approval condition met. Met is final: a second call is
+  // a 409. Audited `use-case-condition-met`. ADR-0170 §3: a before-go-live
+  // condition is closed by someone other than the proposer, with a note
+  // (`conditionCloseVerdict`); an after-go-live one by its owner, the use
+  // case's owner, or an admin.
+  app.post("/v1/use-cases/:useCaseId/conditions/:conditionId/met", async (req, reply) => {
+    const { useCaseId, conditionId } = z
+      .object({ useCaseId: z.string().uuid(), conditionId: z.string().uuid() })
+      .parse(req.params);
+    const body = markConditionMetSchema.parse(req.body ?? {});
+    const note = body.note ? body.note : null; // whitespace-only trims to "" — no note
+    const callerId = req.authCtx.userId ?? null;
+    const [cond] = await db
+      .select()
+      .from(useCaseConditions)
+      .where(and(eq(useCaseConditions.id, conditionId), eq(useCaseConditions.useCaseId, useCaseId)));
+    if (!cond) return reply.status(404).send({ error: "not_found" });
+    const [uc] = await db.select().from(aiUseCases).where(eq(aiUseCases.id, useCaseId));
+    if (!uc) return reply.status(404).send({ error: "not_found" });
+    const verdict = conditionCloseVerdict(cond, uc.ownerUserId, await conditionCloseContext(db, uc, req.authCtx));
+    if (!verdict.allowed) {
+      return reply.status(403).send({ error: verdict.error, detail: verdict.detail });
+    }
+    if (cond.status !== "open") {
+      return reply.status(409).send({ error: "condition_not_open", status: cond.status });
+    }
+    if (verdict.noteRequired && !note) {
+      return reply.status(422).send({
+        error: "condition_note_required",
+        detail: "say what was done to meet a before-go-live condition (1 to 2000 characters)",
+      });
+    }
+    const metAt = new Date();
+    const [updated] = await db
+      .update(useCaseConditions)
+      .set({ status: "met", metAt, metByUserId: callerId, note })
+      .where(and(eq(useCaseConditions.id, cond.id), eq(useCaseConditions.status, "open")))
+      .returning();
+    if (!updated) return reply.status(409).send({ error: "condition_not_open" });
+    await db.insert(auditLog).values({
+      userId: callerId ?? NO_IDENTITY,
+      objectType: "ai_use_case",
+      objectId: uc.id,
+      detail: {
+        phase: "condition-met",
+        conditionId: cond.id,
+        approvalId: cond.approvalId,
+        blocking: cond.blocking,
+        dueAt: cond.dueAt.toISOString(),
+        overdue: cond.dueAt.getTime() < metAt.getTime(),
+      },
+      effect: "allow",
+      ruleId: "use-case-condition-met",
+      ruleChain: [],
+      reason:
+        `condition on AI use case '${uc.name}' marked met` +
+        `${cond.blocking ? " (before go-live — no longer blocks deployment)" : " (after go-live)"}: ${cond.text}`,
+    });
+    const names = await userNames(
+      db,
+      [updated.ownerUserId, updated.metByUserId].filter((x): x is string => !!x),
+    );
+    return conditionView(updated, names, metAt, false);
   });
 
   app.post("/v1/use-cases/:useCaseId/retire", async (req, reply) => {

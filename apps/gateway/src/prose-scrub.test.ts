@@ -470,6 +470,11 @@ describe("6. the covered / NOT-covered inventory", () => {
    */
   const COVERED = [
     "agent_revocations.reason",
+    // ADR-0175: a held skill's admission reason and a release-age override reason
+    "builder_skills.admit_reason",
+    "release_overrides.reason",
+    // ADR-0175 A15: where an energy factor came from
+    "energy_factors.source_note",
     "agents.halted_reason",
     "agents.lifecycle_reason",
     "ai_endpoint_signatures.replacement_note",
@@ -536,6 +541,7 @@ describe("6. the covered / NOT-covered inventory", () => {
     "trace_spans.output_preview",
     "trace_spans.status_reason",
     "training_datasets.note",
+    "use_case_conditions.note",
     "vendor_account_aliases.reason",
     "vendor_domain_rules.reason",
     "workflow_templates.retired_reason",

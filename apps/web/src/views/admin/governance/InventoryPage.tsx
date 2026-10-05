@@ -104,6 +104,8 @@ interface InventoryDetail {
     note: string;
     dispatchesInWindow: number;
     lastDispatchAt: string | null;
+    /** ADR-0175 A4 — what the provider last reported serving */
+    lastServedModel?: { servedModel: string; configuredModel: string | null; at: string } | null;
     mcpTools: Array<{ serverName: string | null; toolName: string; calls: number; lastSeenAt: string }>;
     connectors: Array<{ connectorName: string | null; calls: number; lastSeenAt: string }>;
     feeds: { out: FeedEdgeView[]; in: FeedEdgeView[]; note: string };
@@ -390,6 +392,15 @@ export default function InventoryPage() {
                         {d.observed.dispatchesInWindow} governed dispatch(es) in the last {d.window.days} days
                         {d.observed.lastDispatchAt ? `, last ${ago(d.observed.lastDispatchAt)}` : ""}
                       </div>
+                      {d.observed.lastServedModel ? (
+                        <div className={v.dim} data-testid="last-served-model">
+                          Provider last reported serving <code>{d.observed.lastServedModel.servedModel}</code>
+                          {d.observed.lastServedModel.configuredModel && d.observed.lastServedModel.configuredModel !== d.observed.lastServedModel.servedModel
+                            ? <> (configured <code>{d.observed.lastServedModel.configuredModel}</code>)</>
+                            : null}
+                          , {ago(d.observed.lastServedModel.at)}
+                        </div>
+                      ) : null}
                       <div>
                         <div className={v.sectionTitle}>MCP tools its dispatches actually touched</div>
                         {d.observed.mcpTools.length === 0 ? (

@@ -897,6 +897,104 @@
       "when": 1785063000000,
       "tag": "0128_tracing_otlp_headers_ciphertext",
       "breakpoints": true
+    },
+    {
+      "idx": 129,
+      "version": "7",
+      "when": 1785064000000,
+      "tag": "0129_use_case_conditions_lifetime",
+      "breakpoints": true
+    },
+    {
+      "idx": 130,
+      "version": "7",
+      "when": 1785065000000,
+      "tag": "0130_workflow_instance_round_tokens",
+      "breakpoints": true
+    },
+    {
+      "idx": 131,
+      "version": "7",
+      "when": 1785066000000,
+      "tag": "0131_governance_review_policy",
+        "breakpoints": true
+      },
+      {
+      "idx": 132,
+      "version": "7",
+      "when": 1785067000000,
+      "tag": "0132_agent_stewardship",
+      "breakpoints": true
+    },
+    {
+      "idx": 133,
+      "version": "7",
+      "when": 1785068000000,
+      "tag": "0133_use_case_lifetime_backfill",
+      "breakpoints": true
+    },
+    {
+      "idx": 134,
+      "version": "7",
+      "when": 1785069000000,
+      "tag": "0134_intake_drafts_idempotency",
+      "breakpoints": true
+    },
+    {
+      "idx": 135,
+      "version": "7",
+      "when": 1785070000000,
+      "tag": "0135_agent_builder",
+      "breakpoints": true
+    },
+    {
+      "idx": 136,
+      "version": "7",
+      "when": 1785071000000,
+      "tag": "0136_builder_tool_steps",
+      "breakpoints": true
+    },
+    {
+      "idx": 137,
+      "version": "7",
+      "when": 1785072000000,
+      "tag": "0137_builder_inbound_channels",
+      "breakpoints": true
+    },
+    {
+      "idx": 138,
+      "version": "7",
+      "when": 1785073000000,
+      "tag": "0138_model_policy",
+      "breakpoints": true
+    },
+    {
+      "idx": 139,
+      "version": "7",
+      "when": 1785074000000,
+      "tag": "0139_enterprise_sign_in",
+      "breakpoints": true
+    },
+    {
+      "idx": 140,
+      "version": "7",
+      "when": 1785075000000,
+      "tag": "0140_skill_admission_release_age",
+      "breakpoints": true
+    },
+    {
+      "idx": 141,
+      "version": "7",
+      "when": 1785076000000,
+      "tag": "0141_served_model",
+      "breakpoints": true
+    },
+    {
+      "idx": 142,
+      "version": "7",
+      "when": 1785077000000,
+      "tag": "0142_credential_inventory_energy",
+      "breakpoints": true
     }
   ]
 }

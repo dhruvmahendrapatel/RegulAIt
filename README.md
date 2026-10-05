@@ -41,6 +41,76 @@ Then open **http://localhost:3000/ui** and sign in with a username (not an email
 plus the one-time password from that log. Each persona is forced to set a real
 password on first sign-in.
 
+**Demo personas with a password you choose** (ADR-0174 §6). For a demo you
+would rather not start with the one-time-password dance, set one password for
+Ada, Dana and Avery (`admin@` / `dana@` / `avery@regulait.local`) from the
+environment or a secret file — never from the command line or the repository:
+
+```bash
+# read it without echoing, or point REGULAIT_DEMO_USER_PASSWORD_FILE at a 0600 file
+read -rs REGULAIT_DEMO_USER_PASSWORD && export REGULAIT_DEMO_USER_PASSWORD
+pnpm --filter @regulait/gateway demo:set-passwords      # Docker: see "Demo with your own password (Docker)" below
+unset REGULAIT_DEMO_USER_PASSWORD
+```
+
+It checks the password against the org password policy, clears the personas'
+one-time-password flag, revokes their live sessions, writes one audit row per
+persona (`demo-password-set`, naming the source — never the password), and
+never prints the password. It runs **only on a demo-licensed deployment**: run it
+after `demo:setup` (or `demo:prepare`, which runs it), which installs the ephemeral
+demo licence it requires — with no licence, an expired one, or a customer licence it
+refuses and changes nothing.
+
+**Demo with your own password (Docker), prepared for you.** Under Docker Compose the whole demo is
+one opt-in switch: `REGULAIT_DEMO_LICENSE=1` in the `.env` next to `docker-compose.yml`. On an
+empty stack the gateway container then prepares **exactly what `demo:prepare` prepares natively**,
+by itself: the 30-day ephemeral demo licence ("NOT A PRODUCTION DEPLOYMENT"), the compliance packs
+(EU AI Act, NIST AI RMF) installed and active, the approved use cases, the hardening gates, governed
+demo traffic and alerts, the export-signing key for the signed export, and the demo MCP server
+(running inside the container). It ends with `demo:check` in the log — `18 pass, 0 warn, 0 fail` —
+and then starts the gateway. This runs **once per database**: `docker compose restart` and
+`down` / `up` keep the prepared data, the licence, the key and a password you set, and skip the
+prep (the log says so); `down -v` deletes it all, and the next `up` prepares again. Details and
+what to do if a step fails: [docs/product/DEMO_RUNBOOK.md §1.3](docs/product/DEMO_RUNBOOK.md).
+**Demo only:** `scripts/install.sh` refuses the switch and pins it off. Without the switch,
+`docker compose up` behaves exactly as before.
+
+bash / zsh (macOS, Linux) — the password is typed without echo and never appears on a command
+line, in shell history, in compose files, in logs or in audit detail:
+
+```bash
+echo 'REGULAIT_DEMO_LICENSE=1' >> .env
+docker compose up -d --build --wait     # returns once the demo is prepared and the gateway is healthy
+docker compose logs gateway | grep -E "demo prep|pass, "    # expect: 18 pass, 0 warn, 0 fail
+printf 'Demo password: '; read -rs pw; echo
+REGULAIT_DEMO_USER_PASSWORD="$pw" docker compose exec -e REGULAIT_DEMO_USER_PASSWORD gateway node apps/gateway/dist/demo-set-passwords.js
+unset pw
+```
+
+Windows PowerShell (Docker Desktop):
+
+```powershell
+Add-Content -Path .env -Value 'REGULAIT_DEMO_LICENSE=1' -Encoding ascii
+docker compose up -d --build --wait     # returns once the demo is prepared and the gateway is healthy
+docker compose logs gateway | Select-String "demo prep|pass, "   # expect: 18 pass, 0 warn, 0 fail
+$sec = Read-Host -AsSecureString 'Demo password'
+try {
+  $env:REGULAIT_DEMO_USER_PASSWORD = [System.Net.NetworkCredential]::new('', $sec).Password
+  docker compose exec -e REGULAIT_DEMO_USER_PASSWORD gateway node apps/gateway/dist/demo-set-passwords.js
+} finally {
+  Remove-Item Env:REGULAIT_DEMO_USER_PASSWORD -ErrorAction SilentlyContinue; Remove-Variable sec
+}
+```
+
+Then sign in at **http://localhost:3000/ui** as `admin`, `dana` or `avery` with that password.
+`-e REGULAIT_DEMO_USER_PASSWORD` names the variable only, so `docker compose exec` copies its
+value from your shell into that one process. Use `-Encoding ascii` (not `>`, which writes UTF-16
+in Windows PowerShell 5.1 and compose cannot read). To drop the demo licence, remove the line
+and run `docker compose down -v`, which also deletes the demo data.
+
+Enterprise sign-in (Microsoft / Google / GitHub through the optional Keycloak
+broker, with MFA) is in [docs/deployment/SSO_KEYCLOAK.md](docs/deployment/SSO_KEYCLOAK.md).
+
 The headline is the **compliance cascade** (§8.3): one `hipaa` tag on a project forces a
 sign-off stage, blocks PII, and floors audit retention — nobody configured any of it per-change.
 
@@ -60,8 +130,10 @@ sign-off stage, blocks PII, and floors audit retention — nobody configured any
   env var instead (below).
 
 > **`/ui` is the whole product surface.** The single-file `/app` and `/admin` shells were
-> deleted by [ADR-0033](docs/decisions/0033-delete-legacy-template-literal-uis.md); those paths
-> now 404 rather than redirect, deliberately, so a stale bookmark fails loudly.
+> deleted by [ADR-0033](docs/decisions/0033-delete-legacy-template-literal-uis.md). *Corrected
+> 2026-10-03:* those two paths **302 into `/ui`** (`app.ts`, kept for SSO's `returnTo` whitelist
+> and old bookmarks) — an earlier revision of this note said they 404, which they never did. Only
+> `/legacy/*` is gone outright.
 
 Without Docker:
 
@@ -84,12 +156,41 @@ Tests (`pnpm -r test`) need `DATABASE_URL` pointing at a scratch database.
 
 ### Verifying a clean checkout
 
-Run this — verbatim — before trusting a fresh clone, a rebase, or a dependency
-change. It is the same sequence CI runs (`.github/workflows/ci.yml`) — build,
-test, then the unique-constraint pre-flight — plus a repo-wide `--noEmit`
-typecheck and an explicitly disposable database, and it is the only sequence
-whose result is meaningful: anything that skips a step below can go green on a
-tree that does not actually build.
+**One command** (AER-003 / R2):
+
+```bash
+scripts/verify-clean-checkout.sh                 # steps 0-7 below; step 7 asserts
+                                                 # `git status --short --untracked-files=all` is empty
+scripts/verify-clean-checkout.sh --prove-failure # the control, in a temp clone: the assertion must FIRE on a
+                                                 # modified tracked file and on an untracked one, and the script
+                                                 # itself must exit 2 on a pre-dirtied tree and 1 on a tree a
+                                                 # stage dirtied — a gate nobody has seen fail is a gate nobody
+                                                 # can trust
+scripts/verify-clean-checkout.sh --skip-tests    # steps 0-4 (the static pre-flight included) + step 7,
+                                                 # no database (NOT a verification)
+```
+
+It runs exactly the sequence below, refuses to start on a tree that is already
+dirty, and exits non-zero if any stage fails **or if the run itself changed the
+checkout** — a rewritten lockfile or a regenerated fixture is a failure, not a
+side effect. `VERIFY_PG` / `VERIFY_DB` pick the disposable database. The
+build-script policy it relies on is explicit in `package.json`:
+`pnpm.onlyBuiltDependencies` is empty (every dependency lifecycle script a
+fresh install reported — esbuild's binary check, protobufjs's version-scheme
+warning — was assessed as unnecessary; vite, vitest, drizzle-kit and the
+Google SDKs build and run without them) and those two are named in
+`pnpm.ignoredBuiltDependencies`, so an install is silent about them and loud
+about any newcomer that starts wanting a build script.
+
+The steps, for reading — run them by hand only if you cannot run the script.
+It is the same sequence CI's `build-and-test` job runs (`.github/workflows/ci.yml`)
+— build, test, and both pre-flights (the affordance census and the
+unique-constraint check) — plus a repo-wide `--noEmit` typecheck and an
+explicitly disposable database (the job's remaining step lints
+`AgentCoordination.md`, the agents' bookkeeping file, and is not part of
+verifying a checkout). It is the only sequence whose result is meaningful:
+anything that skips a step below can go green on a tree that does not actually
+build.
 
 ```bash
 # 0. Use the package manager this repo pins. package.json declares
@@ -100,20 +201,27 @@ tree that does not actually build.
 corepack enable
 corepack prepare --activate          # activates the pinned pnpm, no version to retype
 
-# 1. Install EXACTLY the locked tree. --frozen-lockfile fails rather than
+# 1. CI's affordance census (B9c): every DELETE route the gateway serves must
+#    be reachable from a view, or be listed in the script with a reason.
+#    STATIC — it reads route registrations and TSX sources; no install, no
+#    build, no database — so it needs nothing from the steps below. Exit 0
+#    clean, 1 a route no view can reach, 2 could not run.
+node scripts/preflight-ui-affordances.mjs
+
+# 2. Install EXACTLY the locked tree. --frozen-lockfile fails rather than
 #    silently rewriting pnpm-lock.yaml, so a verification run can never be the
 #    thing that changes what it is verifying. (CI installs the same way, via
 #    pnpm/action-setup@v4, which reads the packageManager field above.)
 pnpm install --frozen-lockfile
 
-# 2. Build every workspace. This also typechecks and bundles the React SPA.
+# 3. Build every workspace. This also typechecks and bundles the React SPA.
 pnpm -r build
 
-# 3. Typecheck every workspace against SOURCE, not dist/. Step 2 can pass on a
+# 4. Typecheck every workspace against SOURCE, not dist/. Step 3 can pass on a
 #    stale dist/; this cannot.
 pnpm -r exec tsc --noEmit
 
-# 4. Tests, against a database created for this run and thrown away after.
+# 5. Tests, against a database created for this run and thrown away after.
 #    The suites are NOT re-runnable against a populated database — a run
 #    reporting mass SKIPS is a dirty database, not a pass — so the drop is part
 #    of the procedure, not cleanup.
@@ -124,7 +232,7 @@ export DATABASE_URL="postgres://regulait:regulait@localhost:5432/$PGDATABASE_VER
 export REGULAIT_DATA_KEY=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 pnpm -r test
 
-# 5. Pre-flight the unique constraints, against the database step 4 just
+# 6. Pre-flight the unique constraints, against the database step 5 just
 #    migrated AND populated. It reports, per constraint, how many duplicate
 #    groups would block migration 0108 or 0109 from applying, with example
 #    keys. Exit 0 clean, 1 blocked, 2 could not run.
@@ -138,6 +246,11 @@ pnpm -r test
 node scripts/preflight-unique-constraints.mjs "$DATABASE_URL"
 
 dropdb --if-exists "$PGDATABASE_VERIFY"
+
+# 7. The run must leave the checkout exactly as it found it. Empty output is
+#    the pass; any path is a build or test writing into the tree.
+#    --untracked-files=all because plain --short obeys status.showUntrackedFiles.
+git status --short --untracked-files=all
 ```
 
 **The exit code is the result.** `pnpm -r test` exits non-zero for a failed
@@ -232,6 +345,7 @@ file, and a downgrade.
 | `REGULAIT_SHUTDOWN_GRACE_MS` | `15000` | On SIGTERM/SIGINT the gateway stops accepting, lets in-flight requests and the scheduler tick finish, ends the pool and exits 0 — within this budget, past which it exits 1. A second signal exits at once. Compose's `stop_grace_period` for the gateway is 30 s so the drain is never SIGKILLed. |
 | `REGULAIT_OUTBOUND_TIMEOUT_MS` | `60000` | The deadline a guarded outbound fetch gets when its caller supplied none (OTLP export, OIDC discovery/token, connectors). MCP, scorer and model calls carry their own deadlines, which always win. |
 | `REGULAIT_WORKFLOW_CLAIM_TTL_MS` | `900000` | How long a workflow stage's execution claim may go unreleased (a process killed mid-stage) before `/advance` may re-take it. The re-take is audited as `workflow-stage-claim-expired`. |
+| `REGULAIT_OFFLINE_CHECKS` | *unset* (refused) | Set to exactly `1` to declare an offline/demo box on which a workflow template's `offlineAutoPass` may pass a named check nobody reported (labelled and audited). Unset, or on a box with `REGULAIT_DEPLOY_MODE` or `REGULAIT_HSTS` set, unreported checks stay pending (ADR-0167 amendment, AER-047). Never set it where real CI should gate a change. |
 | `REGULAIT_RATE_LIMIT_MAX` / `REGULAIT_RATE_LIMIT_WINDOW_MS` | `1200` / `60000` | The general per-client-IP bucket. |
 | `REGULAIT_AUTH_RATE_LIMIT_MAX` / `REGULAIT_AUTH_RATE_LIMIT_WINDOW_MS` | `10` / `300000` | The stricter bucket on `/auth/login`, `/auth/mfa/verify` and `/auth/login-with-key`. |
 | `REGULAIT_API_KEY_RATE_LIMIT_MAX` | `6000` | Per-API-key allowance, so a busy service account is neither throttled by nor able to exhaust its neighbours'. |

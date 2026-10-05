@@ -196,6 +196,11 @@ export function isSessionLoss(path: string, payload: ApiErrorPayload | null): bo
 }
 
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  return (await send<T>(method, path, body)).body;
+}
+
+/** the request itself, with the response headers (an idempotent replay is told apart by one) */
+async function send<T>(method: string, path: string, body?: unknown, extraHeaders?: Record<string, string>): Promise<{ body: T; headers: Headers }> {
   let res: Response;
   try {
     res = await fetch(path, {
@@ -204,6 +209,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
       headers: {
         [CSRF_HEADER]: "1",
         ...(body !== undefined ? { "content-type": "application/json" } : {}),
+        ...(extraHeaders ?? {}),
       },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
@@ -218,7 +224,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   }
   const json = await parseBody(res);
   if (!res.ok) throw new ApiError(res.status, json ?? { error: "HTTP " + res.status });
-  return (json ?? {}) as T;
+  return { body: (json ?? {}) as T, headers: res.headers };
 }
 
 async function parseBody(res: Response): Promise<ApiErrorPayload | null> {
@@ -241,6 +247,8 @@ export const api = {
    * query string is a reason nobody can quote back. Omitting the body keeps the
    * request byte-identical to what every pre-existing caller sent. */
   del: <T>(path: string, body?: unknown) => request<T>("DELETE", path, body),
+  /** POST with extra request headers (e.g. `Idempotency-Key`), answering the body and the response headers */
+  postWithHeaders: <T>(path: string, body: unknown, headers: Record<string, string>) => send<T>("POST", path, body, headers),
 };
 
 /**

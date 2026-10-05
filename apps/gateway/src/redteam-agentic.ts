@@ -71,6 +71,10 @@ import {
   type RedTeamProbeTool,
 } from "@regulait/shared";
 import { executeGovernedDispatch, type AgentRow } from "./agents-connectors.js";
+import type { ModelPolicyGate } from "./model-policy.js";
+
+/** red-team sequence turns dispatch as the `evals` feature, like evals.ts */
+const REDTEAM_MODEL_FEATURE: ModelPolicyGate = { feature: "evals" };
 import { loadConnectorRevocations, loadRoleConnectorGrants } from "./entitlements.js";
 import { governedEvaluate } from "./governed-evaluate.js";
 
@@ -399,6 +403,9 @@ export async function runSequenceProbeTrial(
       ...(tools ? { tools } : {}),
       maxTokens: 2048,
       projectId: args.projectId ?? null,
+      // ADR-0173 §3: a red-team run is an EVALUATION, and the model allow-list
+      // matrix applies to it exactly as to the eval path (evals.ts)
+      modelFeature: REDTEAM_MODEL_FEATURE,
       detail: {
         purpose: RED_TEAM_ORIGIN_TAG,
         redteamLibrary: args.libraryName,

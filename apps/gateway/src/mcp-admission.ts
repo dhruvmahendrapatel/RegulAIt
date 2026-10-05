@@ -59,6 +59,7 @@ import {
   mcpAdmissionRuleIds,
   MCP_ADMISSION_HOLD_AT,
   MCP_ADMISSION_SCANNER_VERSION,
+  manifestDigest,
   nextAdmissionState,
   scanMcpManifest,
   type McpAdmissionFinding,
@@ -69,6 +70,16 @@ import {
 } from "@regulait/shared";
 import { z } from "zod";
 import { loadOrgSettings } from "./org-settings.js";
+import {
+  carryRegistrationOverride,
+  firstSighting,
+  quarantineDetail,
+  recordSighting,
+  registerReleaseAgeRoutes,
+  REGISTRATION_RELEASE,
+  serverReleaseStatus,
+} from "./release-age.js";
+import { registerSkillAdmissionRoutes } from "./skill-admission.js";
 
 const NIL_USER = "00000000-0000-0000-0000-000000000000";
 
@@ -89,6 +100,146 @@ export class McpAdmissionHeldError extends Error {
   }
 }
 
+/**
+ * ADR-0175 A5 — the release-age cooldown's refusal. A SUBCLASS of the held
+ * error on purpose: every caller already maps a held server to its ordinary
+ * pre-hijack 403 / "contributes zero tools" handling, and a quarantined server
+ * must be treated exactly the same way, with no new branch to forget.
+ */
+export class McpReleaseQuarantinedError extends McpAdmissionHeldError {
+  constructor(serverId: string, state: McpAdmissionState, detail: string, readonly readyAt: string | null) {
+    super(serverId, state, [], detail);
+    this.name = "McpReleaseQuarantinedError";
+  }
+}
+
+/**
+ * ADR-0175 A5 — the cooldown half of the connect gate. A server is in
+ * quarantine while the release it is on (its registration, its first
+ * manifest, or a changed manifest — see `releaseSeenAt`) is younger than
+ * `min_release_age_days`, unless an admin overrode the cooldown for it at that
+ * release. Audited and thrown with nothing having left the box, like a hold.
+ */
+async function assertReleaseAged(db: Db, serverId: string, minDays: number): Promise<void> {
+  const [row] = await db
+    .select({
+      id: mcpServers.id,
+      name: mcpServers.name,
+      admissionState: mcpServers.admissionState,
+      releaseDigest: mcpServers.releaseDigest,
+      releaseSeenAt: mcpServers.releaseSeenAt,
+    })
+    .from(mcpServers)
+    .where(eq(mcpServers.id, serverId));
+  if (!row) return;
+  const status = await serverReleaseStatus(db, row, minDays);
+  if (!status.quarantined) return;
+  const detail = quarantineDetail(`MCP server '${row.name}'`, minDays, status);
+  await db.insert(auditLog).values({
+    userId: NIL_USER,
+    serverId,
+    objectType: "mcp_server",
+    objectId: serverId,
+    detail: {
+      phase: "connect",
+      release: row.releaseDigest ?? REGISTRATION_RELEASE,
+      firstSeenAt: row.releaseSeenAt.toISOString(),
+      ageDays: status.ageDays,
+      minReleaseAgeDays: minDays,
+      readyAt: status.readyAt,
+    },
+    effect: "deny",
+    ruleId: "mcp-release-quarantined",
+    ruleChain: [],
+    reason: detail,
+  });
+  throw new McpReleaseQuarantinedError(serverId, row.admissionState, detail, status.readyAt);
+}
+
+/**
+ * ADR-0175 A5 — what a sync observed, for the cooldown. Only runs while the
+ * cooldown is on, so `0` stays byte-identical.
+ *
+ *  - same digest as recorded: nothing changes;
+ *  - FIRST manifest of a server: its age is the LATER of the registration's
+ *    (or, for a registry import, the entry's) and that manifest's own first
+ *    sighting. A manifest nobody had seen before counts as seen when the
+ *    server was registered: the registration and its first manifest are one
+ *    sighting, so an ordinary new server waits once, not twice. What this
+ *    closes is the import of a registry entry the sweep saw long ago whose
+ *    upstream now serves a manifest we have never seen — that manifest is new
+ *    and waits from the import;
+ *  - a CHANGED manifest: a new release, aged from the first time this
+ *    deployment saw that exact digest (anywhere), and audited.
+ */
+async function observeRelease(
+  db: Db,
+  serverId: string,
+  digest: string,
+  minDays: number,
+  trigger: McpAdmissionTrigger,
+): Promise<{ quarantined: boolean; detail: string; readyAt: string | null; state: McpAdmissionState } | null> {
+  const [row] = await db
+    .select({
+      id: mcpServers.id,
+      name: mcpServers.name,
+      admissionState: mcpServers.admissionState,
+      releaseDigest: mcpServers.releaseDigest,
+      releaseSeenAt: mcpServers.releaseSeenAt,
+      createdAt: mcpServers.createdAt,
+    })
+    .from(mcpServers)
+    .where(eq(mcpServers.id, serverId));
+  if (!row) return null;
+  let next = row;
+  if (row.releaseDigest === null) {
+    const before = await firstSighting(db, "mcp_manifest", digest);
+    await recordSighting(db, "mcp_manifest", digest);
+    // a never-seen manifest is one sighting with the registration
+    const manifestSeen = before ?? row.createdAt;
+    const releaseSeenAt = manifestSeen.getTime() > row.releaseSeenAt.getTime() ? manifestSeen : row.releaseSeenAt;
+    await db.update(mcpServers).set({ releaseDigest: digest, releaseSeenAt }).where(eq(mcpServers.id, serverId));
+    next = { ...row, releaseDigest: digest, releaseSeenAt };
+    // an admin's override of the registered release covers its first manifest
+    // (the same release, now with a digest); a later change is not covered
+    await carryRegistrationOverride(db, serverId, digest);
+  } else if (row.releaseDigest !== digest) {
+    const seen = await recordSighting(db, "mcp_manifest", digest);
+    await db.update(mcpServers).set({ releaseDigest: digest, releaseSeenAt: seen }).where(eq(mcpServers.id, serverId));
+    next = { ...row, releaseDigest: digest, releaseSeenAt: seen };
+    const status = await serverReleaseStatus(db, next, minDays);
+    await db.insert(auditLog).values({
+      userId: NIL_USER,
+      serverId,
+      objectType: "mcp_server",
+      objectId: serverId,
+      detail: {
+        phase: "manifest-release",
+        trigger,
+        previousDigest: row.releaseDigest,
+        digest,
+        firstSeenAt: seen.toISOString(),
+        minReleaseAgeDays: minDays,
+        quarantined: status.quarantined,
+        readyAt: status.readyAt,
+      },
+      effect: status.quarantined ? "deny" : "allow",
+      ruleId: "mcp-release-changed",
+      ruleChain: [],
+      reason: status.quarantined
+        ? `MCP server '${row.name}' changed its manifest: ${quarantineDetail("the new manifest", minDays, status)}`
+        : `MCP server '${row.name}' changed its manifest to one this deployment has known for ${status.ageDays} day(s) — past the cooldown.`,
+    });
+  }
+  const status = await serverReleaseStatus(db, next, minDays);
+  return {
+    quarantined: status.quarantined,
+    detail: quarantineDetail(`MCP server '${row.name}'`, minDays, status),
+    readyAt: status.readyAt,
+    state: row.admissionState,
+  };
+}
+
 export async function loadAdmissionMode(db: Db): Promise<McpAdmissionMode> {
   const org = await loadOrgSettings(db);
   return org.mcpAdmissionMode;
@@ -104,8 +255,13 @@ export async function loadAdmissionMode(db: Db): Promise<McpAdmissionMode> {
  * with NOTHING having left the box when it may not.
  */
 export async function assertAdmitted(db: Db, serverId: string): Promise<void> {
-  const mode = await loadAdmissionMode(db);
-  if (mode !== "enforce") return;
+  const org = await loadOrgSettings(db);
+  const mode = org.mcpAdmissionMode;
+  if (mode !== "enforce") {
+    // ADR-0175 A5: the cooldown is its own knob and applies in every mode
+    if (org.minReleaseAgeDays > 0) await assertReleaseAged(db, serverId, org.minReleaseAgeDays);
+    return;
+  }
   const [row] = await db
     .select({
       id: mcpServers.id,
@@ -117,7 +273,10 @@ export async function assertAdmitted(db: Db, serverId: string): Promise<void> {
     .from(mcpServers)
     .where(eq(mcpServers.id, serverId));
   if (!row) return; // an unknown server is the caller's own 404, not ours
-  if (row.admissionState !== "held") return;
+  if (row.admissionState !== "held") {
+    if (org.minReleaseAgeDays > 0) await assertReleaseAged(db, serverId, org.minReleaseAgeDays);
+    return;
+  }
   const findings = (row.admissionFindings as McpAdmissionFinding[] | null) ?? [];
   const detail =
     `MCP server '${row.name}' is HELD by admission scanning (severity ` +
@@ -173,6 +332,29 @@ export async function recordManifestScan(
   serverId: string,
   tools: readonly ScannableTool[],
   trigger: McpAdmissionTrigger = "sync",
+): Promise<{ mode: McpAdmissionMode; scan: McpAdmissionScan | null; state: McpAdmissionState | null }> {
+  const result = await scanAndPersistManifest(db, serverId, tools, trigger);
+  // ADR-0175 A5 — the cooldown sees the manifest too (only while it is on). A
+  // manifest that puts the server into quarantine is refused like a hold: not
+  // stored, no tool from it returned, the call that fetched it refused. A
+  // manifest the admission gate already refused under enforce is that gate's
+  // refusal, not this one's.
+  const minDays = (await loadOrgSettings(db)).minReleaseAgeDays;
+  if (minDays > 0) {
+    const rel = await observeRelease(db, serverId, manifestDigest(tools), minDays, trigger);
+    const alreadyRefused = result.mode === "enforce" && result.state === "held";
+    if (rel?.quarantined && !alreadyRefused) {
+      throw new McpReleaseQuarantinedError(serverId, result.state ?? rel.state, rel.detail, rel.readyAt);
+    }
+  }
+  return result;
+}
+
+async function scanAndPersistManifest(
+  db: Db,
+  serverId: string,
+  tools: readonly ScannableTool[],
+  trigger: McpAdmissionTrigger,
 ): Promise<{ mode: McpAdmissionMode; scan: McpAdmissionScan | null; state: McpAdmissionState | null }> {
   const mode = await loadAdmissionMode(db);
   if (mode === "off") return { mode, scan: null, state: null };
@@ -276,13 +458,22 @@ export const REGISTRATION_ADMISSION_STATE: McpAdmissionState = "unscanned";
  * tools, and not through the entitlement-preview read that never connects at
  * all and would otherwise still hand back the last synced inventory. */
 export async function admissionHidesTools(db: Db, serverId: string): Promise<boolean> {
-  const mode = await loadAdmissionMode(db);
-  if (mode !== "enforce") return false;
+  const org = await loadOrgSettings(db);
+  if (org.mcpAdmissionMode !== "enforce" && org.minReleaseAgeDays <= 0) return false;
   const [row] = await db
-    .select({ admissionState: mcpServers.admissionState })
+    .select({
+      id: mcpServers.id,
+      admissionState: mcpServers.admissionState,
+      releaseDigest: mcpServers.releaseDigest,
+      releaseSeenAt: mcpServers.releaseSeenAt,
+    })
     .from(mcpServers)
     .where(eq(mcpServers.id, serverId));
-  return row?.admissionState === "held";
+  if (!row) return false;
+  if (org.mcpAdmissionMode === "enforce" && row.admissionState === "held") return true;
+  // ADR-0175 A5: a server in release-age quarantine contributes no tools either
+  if (org.minReleaseAgeDays > 0) return (await serverReleaseStatus(db, row, org.minReleaseAgeDays)).quarantined;
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -290,6 +481,11 @@ export async function admissionHidesTools(db: Db, serverId: string): Promise<boo
 // ---------------------------------------------------------------------------
 
 export function registerMcpAdmissionRoutes(app: FastifyInstance, db: Db) {
+  // ADR-0175: the builder-skill review queue (A6) and the release-age
+  // cooldown's admin surface (A5) live beside the MCP review queue — one
+  // admission review page, one set of admin-only routes.
+  registerSkillAdmissionRoutes(app, db);
+  registerReleaseAgeRoutes(app, db);
   /**
    * THE REVIEW QUEUE. Admin-only via the default gate (deliberately absent
    * from NON_ADMIN_ROUTES), like every other MCP registry write. Returns every

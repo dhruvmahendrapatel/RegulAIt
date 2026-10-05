@@ -618,9 +618,9 @@ export async function reapplyReclassificationToInFlight(
   ).filter((i) => !O1_TERMINAL_STATUSES.includes(i.status));
   let applied = 0;
   let manual = 0;
-  const surfaceManual = async (instanceId: string, why: string) => {
+  const surfaceManual = async (dbx: DbOrTx, instanceId: string, why: string) => {
     manual++;
-    await db.insert(auditLog).values({
+    await dbx.insert(auditLog).values({
       userId: deciderUserId,
       objectType: "workflow",
       objectId: instanceId,
@@ -631,88 +631,106 @@ export async function reapplyReclassificationToInFlight(
       reason: `reclassification NOT auto-applied to in-flight instance: ${why} — the additive-only rule (ADR-0027) leaves this to a human, never silent`,
     });
   };
-  for (const instance of instances) {
-    const have = instance.templateIds as string[];
-    const missing = newRequired.filter((id) => !have.includes(id));
-    if (relaxed.length > 0) {
-      // a RELAXATION is never applied to a running instance — its already-
-      // merged (stricter) definition stands; surfaced once per instance.
-      await surfaceManual(
-        instance.id,
-        `the new classification no longer requires template(s) [${relaxed.join(", ")}] — relaxing a running instance's requirements is manual by design`,
-      );
-    }
-    if (missing.length === 0) continue;
-    const templates = await db
-      .select()
-      .from(workflowTemplates)
-      .where(inArray(workflowTemplates.id, missing));
-    const retired = templates.filter((t) => t.retiredAt !== null);
-    if (retired.length > 0 || templates.length !== missing.length) {
-      await surfaceManual(
-        instance.id,
-        `newly required template(s) ${retired.length ? `[${retired.map((t) => t.name).join(", ")}] are retired` : "are missing"} — cannot be auto-merged`,
-      );
-      continue;
-    }
-    let merged: WorkflowDefinition;
-    try {
-      merged = mergeDefinitions([
-        instance.definition as WorkflowDefinition,
-        ...templates.map((t) => t.definition as WorkflowDefinition),
-      ]);
-    } catch (err) {
-      if (err instanceof MergeConflictError) {
-        await surfaceManual(instance.id, `merge conflict: ${err.message}`);
-        continue;
+  for (const listed of instances) {
+    // AER-048 (review item 4): the recompute and the write happen under the
+    // instance's row lock, on the row AS IT IS NOW — never on the unlocked
+    // list read above. A concurrent transition (an executor advancing, a
+    // re-open) can no longer be overwritten with a stale state/definition.
+    await db.transaction(async (tx) => {
+      const [instance] = await tx
+        .select()
+        .from(workflowInstances)
+        .where(eq(workflowInstances.id, listed.id))
+        .for("update");
+      if (!instance || O1_TERMINAL_STATUSES.includes(instance.status)) return;
+      const surface = (why: string) => surfaceManual(tx, instance.id, why);
+      const have = instance.templateIds as string[];
+      const missing = newRequired.filter((id) => !have.includes(id));
+      if (relaxed.length > 0) {
+        // a RELAXATION is never applied to a running instance — its already-
+        // merged (stricter) definition stands; surfaced once per instance.
+        await surface(
+          `the new classification no longer requires template(s) [${relaxed.join(", ")}] — relaxing a running instance's requirements is manual by design`,
+        );
       }
-      throw err;
-    }
-    // THE ADDITIVE-ONLY CHECK: every existing stage must survive byte-
-    // identical, in order — the merge may only APPEND. Anything else is a
-    // restructure and stays manual.
-    const before = (instance.definition as WorkflowDefinition).stages;
-    const strictlyAdditive =
-      merged.stages.length > before.length &&
-      before.every((s, i) => JSON.stringify(merged.stages[i]) === JSON.stringify(s));
-    if (!strictlyAdditive) {
-      await surfaceManual(
-        instance.id,
-        "the recomputed definition would restructure existing stages (not strictly additive)",
-      );
-      continue;
-    }
-    const addedStages = merged.stages.slice(before.length);
-    const state = instance.state as InstanceState;
-    const newState: InstanceState = {
-      ...state,
-      stageStatuses: [...state.stageStatuses, ...addedStages.map(() => "pending" as const)],
-    };
-    await db
-      .update(workflowInstances)
-      .set({
-        templateIds: [...have, ...missing],
-        definition: merged,
-        state: newState,
-        updatedAt: new Date(),
-      })
-      .where(eq(workflowInstances.id, instance.id));
-    applied++;
-    await db.insert(auditLog).values({
-      userId: deciderUserId,
-      objectType: "workflow",
-      objectId: instance.id,
-      detail: {
-        phase: "reclassification-reapply",
-        outcome: "applied",
-        projectId,
-        addedTemplateIds: missing,
-        addedStageIds: addedStages.map((s) => s.id),
-      },
-      effect: "allow",
-      ruleId: "reclassification-reapply-applied",
-      ruleChain: [],
-      reason: `reclassification auto-applied to in-flight instance: strictly-additive stage(s) [${addedStages.map((s) => s.id).join(", ")}] appended from newly required template(s) — no executed stage was touched`,
+      if (missing.length === 0) return;
+      const templates = await tx
+        .select()
+        .from(workflowTemplates)
+        .where(inArray(workflowTemplates.id, missing));
+      const retired = templates.filter((t) => t.retiredAt !== null);
+      if (retired.length > 0 || templates.length !== missing.length) {
+        await surface(
+          `newly required template(s) ${retired.length ? `[${retired.map((t) => t.name).join(", ")}] are retired` : "are missing"} — cannot be auto-merged`,
+        );
+        return;
+      }
+      let merged: WorkflowDefinition;
+      try {
+        merged = mergeDefinitions([
+          instance.definition as WorkflowDefinition,
+          ...templates.map((t) => t.definition as WorkflowDefinition),
+        ]);
+      } catch (err) {
+        if (err instanceof MergeConflictError) {
+          await surface(`merge conflict: ${err.message}`);
+          return;
+        }
+        throw err;
+      }
+      // THE ADDITIVE-ONLY CHECK: every existing stage must survive byte-
+      // identical, in order — the merge may only APPEND. Anything else is a
+      // restructure and stays manual.
+      const before = (instance.definition as WorkflowDefinition).stages;
+      const strictlyAdditive =
+        merged.stages.length > before.length &&
+        before.every((s, i) => JSON.stringify(merged.stages[i]) === JSON.stringify(s));
+      if (!strictlyAdditive) {
+        await surface(
+          "the recomputed definition would restructure existing stages (not strictly additive)",
+        );
+        return;
+      }
+      const addedStages = merged.stages.slice(before.length);
+      const state = instance.state as InstanceState;
+      const newState: InstanceState = {
+        ...state,
+        stageStatuses: [...state.stageStatuses, ...addedStages.map(() => "pending" as const)],
+      };
+      // AER-048: an executor holding a claim compares stage_entry at its
+      // completion. Under the additive-only rule the appended stages all come
+      // AFTER the current one, so the current stage and status never change
+      // here and a running executor's result stays valid; were either ever to
+      // change, the entry moves and that executor's result is discarded.
+      const executableChanged =
+        newState.status !== state.status || newState.currentStageIndex !== state.currentStageIndex;
+      await tx
+        .update(workflowInstances)
+        .set({
+          templateIds: [...have, ...missing],
+          definition: merged,
+          state: newState,
+          ...(executableChanged ? { stageEntry: instance.stageEntry + 1 } : {}),
+          updatedAt: new Date(),
+        })
+        .where(eq(workflowInstances.id, instance.id));
+      applied++;
+      await tx.insert(auditLog).values({
+        userId: deciderUserId,
+        objectType: "workflow",
+        objectId: instance.id,
+        detail: {
+          phase: "reclassification-reapply",
+          outcome: "applied",
+          projectId,
+          addedTemplateIds: missing,
+          addedStageIds: addedStages.map((s) => s.id),
+        },
+        effect: "allow",
+        ruleId: "reclassification-reapply-applied",
+        ruleChain: [],
+        reason: `reclassification auto-applied to in-flight instance: strictly-additive stage(s) [${addedStages.map((s) => s.id).join(", ")}] appended from newly required template(s) — no executed stage was touched`,
+      });
     });
   }
   return { applied, manual };

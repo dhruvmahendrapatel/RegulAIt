@@ -12,6 +12,11 @@
 import { createServer } from "node:http";
 
 let count = 0;
+// AER-026: the headers of the LAST request that was really proxied, so the
+// harness can assert what reached the upstream and not only whether anything
+// did. A forged protocol header that is "stripped" is a claim about this
+// side of the proxy, and only this side can check it.
+let last = null;
 const port = Number(process.env.UPSTREAM_PORT ?? 8099);
 
 createServer((req, res) => {
@@ -20,8 +25,14 @@ createServer((req, res) => {
     res.end(JSON.stringify({ count }));
     return;
   }
+  if (req.url === "/__last") {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ last }));
+    return;
+  }
   if (req.url === "/__reset") {
     count = 0;
+    last = null;
     res.writeHead(200).end("{}");
     return;
   }
@@ -50,6 +61,7 @@ createServer((req, res) => {
 
   // Anything else is a real proxied request and is what we are counting.
   count += 1;
+  last = { url: req.url, headers: req.headers };
   res.writeHead(200, { "content-type": "application/json" });
   res.end(JSON.stringify({ reached: true, n: count }));
 }).listen(port, () => console.log(`upstream counting on :${port}`));

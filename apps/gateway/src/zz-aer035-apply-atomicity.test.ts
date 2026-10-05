@@ -57,7 +57,7 @@ import {
 import { buildApp } from "./app.js";
 import { COPILOT_RULE_IDS } from "./copilot.js";
 import { fileURLToPath } from "node:url";
-import { randomUUID } from "node:crypto";
+import { randomInt, randomUUID } from "node:crypto";
 import path from "node:path";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -378,16 +378,15 @@ describe("AER-035 — a refusal after the lock rolls everything back, and is sti
 // and after `applied_at`. Nothing in the shipped code changes, there is no
 // failpoint to leave behind, and the timing is deterministic rather than raced.
 //
-// ABOUT ACCEPTANCE ITEM 4 (process crash / recovery), stated rather than faked:
-// an uncommitted transaction discarded when a backend dies is a Postgres
-// guarantee, not a path in this repository's code. What this repository has to
-// prove is that all three writes are INSIDE one transaction — because if they
-// are, a crash cannot leave two of them behind, and if they are not, no amount of
-// crash testing makes them safe. That is exactly what this test observes. The
-// retry below uses a newly built application instance after the failed write;
-// it is not an OS process-kill simulation. A harness that killed the process
-// would mainly test Postgres's durability, and would pass whether or not our
-// application transaction boundary was drawn correctly.
+// ABOUT ACCEPTANCE ITEM 4 (process crash / recovery): an uncommitted
+// transaction discarded when a backend dies is a Postgres guarantee, not a path
+// in this repository's code, and what THIS test observes is the premise that
+// guarantee needs — that all three writes are INSIDE one transaction. The retry
+// below uses a newly built application instance after the failed write. The
+// crash itself is no longer argued: the LAST test in this file terminates the
+// applier's backend mid-transaction from a second connection, watches the
+// gateway's pool drop the dead client, and re-applies once through the SAME
+// instance.
 
 describe("AER-035 — a fault at the LAST write undoes the mutation and the marker", () => {
   it("an injected failure on the success audit leaves no rule, no marker, and no audit row", async () => {
@@ -494,3 +493,250 @@ describe("AER-035 — a fault at the LAST write undoes the mutation and the mark
     expect(after!.appliedAt).not.toBeNull();
   }, 60_000);
 });
+
+// ===========================================================================
+// AER-035 acceptance item 4 — the backend is KILLED mid-transaction, and the
+// same process recovers with one re-apply.
+// ===========================================================================
+//
+// The fault test above injects an ERROR, which Postgres turns into a rollback
+// on a connection the gateway still holds. This test takes the connection away
+// instead: the applier's backend is terminated with `pg_terminate_backend` from
+// a SECOND connection while its transaction holds the new approval rule and the
+// applied marker un-committed. That is what a crashed backend, a failover or a
+// load balancer resetting a connection under a live request looks like from
+// inside the gateway — a FATAL on a checked-out client, not an error the
+// application code gets to catch and roll back.
+//
+// WHERE THE KILL LANDS is deterministic, the same way the fault above is: a
+// `before insert` trigger on `audit_log`, scoped to this one proposal's success
+// row — the last write of the transaction. Instead of raising, it parks on an
+// advisory lock the second connection holds, so the applier's backend waits
+// INSIDE its transaction, strictly after the mutation and the marker. Before
+// parking, the trigger looks for both of those writes in its own transaction
+// and, if it sees them, takes a second advisory lock as a WITNESS: advisory
+// locks are visible in `pg_locks` to every session regardless of MVCC, so the
+// second connection can read "this backend holds the rule and the marker,
+// uncommitted" from outside before it terminates exactly that pid.
+//
+// WHAT HAS TO HOLD, in order: the apply fails as a 500 (an infrastructure
+// fault, not a governance refusal); the world holds no rule, no marker and no
+// success row — the writes the witness just saw are gone; the terminated
+// backend is gone and the gateway's pool answers the next query from a live
+// one; and ONE re-apply, through the SAME application instance and pool with
+// nothing rebuilt, leaves exactly one rule, one marker, one success row and no
+// refusal row. The success row's `seq` is the pre-kill tip plus one: the
+// rolled-back attempt burned no number, which is what `max(seq)+1` under the
+// chain lock buys over a sequence, and what makes a gap in the ledger mean
+// something.
+
+describe("AER-035 — a backend killed mid-transaction, and one re-apply through the same pool", () => {
+  it("pg_terminate_backend from a second connection rolls the partial write back; a single re-apply succeeds", async () => {
+    const toolName = `aer035_kill_${randomUUID().slice(0, 8)}`;
+    await db.insert(mcpTools).values({ serverId, name: toolName, kind: "read" });
+    const sourceId = await sourceRateLimit(toolName);
+    const proposalId = await approvedProposal("rule_to_approval", {
+      sourceRuleKind: "rate-limits",
+      sourceRuleId: sourceId,
+      create: { scope: "fleet", serverScope: "server", serverId, toolName, approverUserId: adminId },
+    });
+    // `seq` is a bigint column, which pg hands back as a string; the cast is
+    // what makes the arithmetic below a number comparison rather than a
+    // string one
+    const [tip] = await db.select({ seq: sql<number | null>`max(${auditLog.seq})::int` }).from(auditLog);
+    const tipBefore = tip!.seq;
+    expect(tipBefore, "the chain has a tip before the apply").not.toBeNull();
+
+    // THE SECOND CONNECTION: its own pool, so nothing it does rides the
+    // gateway's — it plays the operator (or the failover) that takes the
+    // backend away.
+    const other = createDb(DATABASE_URL);
+    // THE GATE and THE WITNESS: two-key advisory locks, keyed per run so no
+    // other test, and no other run of this one, can collide. The two-int form
+    // shows in pg_locks with objsubid 2, which keeps it apart from the audit
+    // chain's own single-key lock.
+    const K1 = 35_035;
+    const gate = randomInt(1, 2_147_483_647);
+    const witness = randomInt(1, 2_147_483_647);
+    const fnName = `zz_aer035_kill_${proposalId.replace(/-/g, "")}`;
+    // Inlined rather than bound, for the reason the fault test gives: the body
+    // is a dollar-quoted string to Postgres. Every value is this test's own.
+    expect(proposalId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(toolName).toMatch(/^aer035_kill_[0-9a-f]{8}$/);
+    await db.execute(
+      sql.raw(`
+      create or replace function ${fnName}() returns trigger as $$
+      begin
+        if new.rule_id = '${COPILOT_RULE_IDS.proposalApplied}' and new.object_id = '${proposalId}'::uuid then
+          if exists (select 1 from approval_rules where tool_name = '${toolName}')
+             and exists (select 1 from copilot_proposals where id = '${proposalId}'::uuid and applied_at is not null) then
+            perform pg_advisory_xact_lock(${K1}, ${witness});
+          end if;
+          perform pg_advisory_xact_lock(${K1}, ${gate});
+        end if;
+        return new;
+      end $$ language plpgsql;
+    `),
+    );
+    await db.execute(
+      sql`create trigger ${sql.raw(fnName)} before insert on audit_log for each row execute function ${sql.raw(fnName)}()`,
+    );
+
+    // WHAT KILLED THE PROCESS BEFORE createDb's per-connection listener: the
+    // terminated backend emits 'error' on a CHECKED-OUT client, which pg-pool
+    // leaves listener-less, and Node throws it. Counted here directly, so this
+    // test fails on its own assertion rather than relying on the runner to
+    // fail the run over an unhandled error (a runner configured to ignore
+    // those, or a harness that swallows them, would otherwise stay green).
+    const uncaught: unknown[] = [];
+    const onUncaught = (e: unknown) => uncaught.push(e);
+    process.on("uncaughtException", onUncaught);
+    process.on("unhandledRejection", onUncaught);
+
+    type Waiter = { pid: number; witnessed: boolean };
+    let killedPid = 0;
+    let apply: Promise<{ statusCode: number; body: string }> | undefined;
+    try {
+      const res = await other.transaction(async (holder) => {
+        await holder.execute(sql`select pg_advisory_xact_lock(${K1}, ${gate})`);
+        // NOT awaited: it is about to park inside Postgres, on the gate
+        apply = app.inject({
+          method: "POST",
+          url: `/v1/copilot/proposals/${proposalId}/apply`,
+          headers: AUTH,
+          payload: {},
+        });
+
+        // FIND THE APPLIER'S BACKEND from outside: the one session waiting on
+        // the gate. The WITNESS lock beside the gate is the proof that matters —
+        // the trigger takes it only when `approval_rules` holds the new rule AND
+        // `copilot_proposals.applied_at` is set, both inside the applier's own
+        // uncommitted transaction. Reading "this backend holds the witness and
+        // is blocked on the gate" from a SECOND connection is reading, across
+        // MVCC, that the partial write exists in the backend about to die —
+        // which is what makes the post-kill emptiness below a proven ROLLBACK
+        // rather than a write that never happened.
+        //
+        // (`pg_stat_activity.backend_xid` is deliberately NOT used as the proof:
+        // for a backend parked in `pg_advisory_xact_lock` inside a trigger it
+        // reads null, so it would be a false negative. The advisory lock a
+        // backend holds is visible regardless of its reported state, which is
+        // exactly why the witness is the right instrument.)
+        const waiter = await pollFor<Waiter>(async () => {
+          const r = (await holder.execute(sql`
+            select w.pid::int as "pid",
+                   exists (
+                     select 1 from pg_locks s
+                     where s.pid = w.pid and s.locktype = 'advisory'
+                       and s.classid = ${K1} and s.objid = ${witness} and s.objsubid = 2 and s.granted
+                   ) as "witnessed"
+            from pg_locks w
+            where w.locktype = 'advisory' and w.classid = ${K1} and w.objid = ${gate}
+              and w.objsubid = 2 and not w.granted
+          `)) as unknown as { rows: Waiter[] };
+          return r.rows[0] ?? null;
+        }, 15_000);
+        expect(waiter.witnessed, "the rule and the marker exist, uncommitted, in the backend about to die").toBe(true);
+        killedPid = waiter.pid;
+
+        // THE KILL, from the second connection.
+        const killed = (await holder.execute(sql`select pg_terminate_backend(${killedPid}) as "ok"`)) as unknown as {
+          rows: Array<{ ok: boolean }>;
+        };
+        expect(killed.rows[0]?.ok).toBe(true);
+        return await apply;
+      });
+
+      // (1) THE APPLY FAILED, and as an infrastructure fault rather than a
+      // governance refusal: no refusal has this shape, and none is audited
+      // for it below.
+      expect(res.statusCode, res.body).toBe(500);
+
+      // (2) THE PARTIAL WRITE IS GONE — the rule and the marker the witness saw
+      // inside the dead backend's transaction never reached the world.
+      const rules = await db
+        .select()
+        .from(approvalRules)
+        .where(and(eq(approvalRules.serverId, serverId), eq(approvalRules.toolName, toolName)));
+      expect(rules, "the rule died with the backend").toHaveLength(0);
+      const [row] = await db.select().from(copilotProposals).where(eq(copilotProposals.id, proposalId));
+      expect(row!.appliedAt, "no marker without the change").toBeNull();
+      expect(row!.appliedResult).toBeNull();
+      const applied = await db
+        .select()
+        .from(auditLog)
+        .where(and(eq(auditLog.ruleId, COPILOT_RULE_IDS.proposalApplied), eq(auditLog.objectId, proposalId)));
+      expect(applied).toHaveLength(0);
+
+      // (3) THE DEAD BACKEND IS GONE, and the gateway's pool answers from a
+      // live one — it dropped the client whose backend died rather than
+      // handing it out again.
+      const gone = (await other.execute(
+        sql`select count(*)::int as "n" from pg_stat_activity where pid = ${killedPid}`,
+      )) as unknown as { rows: Array<{ n: number }> };
+      expect(gone.rows[0]?.n).toBe(0);
+      const live = (await db.execute(sql`select pg_backend_pid()::int as "pid"`)) as unknown as {
+        rows: Array<{ pid: number }>;
+      };
+      expect(live.rows[0]?.pid).not.toBe(killedPid);
+
+      // (3b) AND THE KILL NEVER REACHED THE PROCESS as an uncaught error.
+      expect(uncaught.map(String), "the lost connection did not surface as an uncaught error").toEqual([]);
+    } finally {
+      process.off("uncaughtException", onUncaught);
+      process.off("unhandledRejection", onUncaught);
+      // the gate is released with the holder's transaction, so a still-parked
+      // applier (a failed poll) proceeds and the drops below cannot wait on it
+      await apply?.catch(() => undefined);
+      await db.execute(sql`drop trigger if exists ${sql.raw(fnName)} on audit_log`);
+      await db.execute(sql`drop function if exists ${sql.raw(fnName)}()`);
+      await other.$client.end();
+    }
+
+    // (4) RECOVERY — one re-apply, the SAME application instance, the SAME
+    // pool. Nothing is rebuilt: the point is that the process that lost a
+    // connection under a live request carries on.
+    const again = await app.inject({
+      method: "POST",
+      url: `/v1/copilot/proposals/${proposalId}/apply`,
+      headers: AUTH,
+      payload: {},
+    });
+    expect(again.statusCode, again.body).toBe(200);
+
+    const rulesNow = await db
+      .select()
+      .from(approvalRules)
+      .where(and(eq(approvalRules.serverId, serverId), eq(approvalRules.toolName, toolName)));
+    expect(rulesNow, "exactly one rule — not zero, not two").toHaveLength(1);
+    const [after] = await db.select().from(copilotProposals).where(eq(copilotProposals.id, proposalId));
+    expect(after!.appliedAt).not.toBeNull();
+    expect((after!.appliedResult as { approvalRuleId?: string }).approvalRuleId).toBe(rulesNow[0]!.id);
+
+    // ONE AUDIT SEQUENCE: one success row, no refusal row (a dead backend is
+    // not a refusal, and nothing pretended it was), and the success row's seq
+    // is the pre-kill tip plus one — the attempt that died burned no number.
+    const appliedNow = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.ruleId, COPILOT_RULE_IDS.proposalApplied), eq(auditLog.objectId, proposalId)));
+    expect(appliedNow).toHaveLength(1);
+    const refused = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.ruleId, COPILOT_RULE_IDS.proposalApplyRefused), eq(auditLog.objectId, proposalId)));
+    expect(refused).toHaveLength(0);
+    expect(appliedNow[0]!.seq).toBe(tipBefore! + 1);
+  }, 60_000);
+});
+
+/** poll a probe until it returns something, bounded — silence is never progress (M-013) */
+async function pollFor<T>(probe: () => Promise<T | null>, ms: number): Promise<T> {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    const found = await probe();
+    if (found !== null) return found;
+    if (Date.now() > deadline) throw new Error("the applier never parked on the gate");
+    await new Promise((r) => setTimeout(r, 25));
+  }
+}

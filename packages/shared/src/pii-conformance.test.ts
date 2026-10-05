@@ -127,12 +127,15 @@ describe(`ADR-0117 PII conformance — vector set ${PII_VECTOR_SET_VERSION}`, ()
       const negSilent = NEGATIVE_VECTORS.filter((v) => measure(v).fired === 0).length;
       const missesStillMissed = DOCUMENTED_MISSES.filter((v) => measure(v).fired === 0).length;
 
-      // Measured 2026-09-19 against vector set 2026-09-19.2.
-      expect(POSITIVE_VECTORS.length).toBe(36);
-      expect(NEGATIVE_VECTORS.length).toBe(39);
+      // Measured 2026-10-03 against vector set 2026-10-03.2: the 2026-09-19.2
+      // set, plus the nine every-digit separator negatives of AER-006, plus
+      // the three positives and two every-digit negatives of the BSN 4.2.3
+      // and CPF 9-2 layouts that the AER-006 review restored.
+      expect(POSITIVE_VECTORS.length).toBe(39);
+      expect(NEGATIVE_VECTORS.length).toBe(50);
       expect(DOCUMENTED_MISSES.length).toBe(9);
-      expect(posDetected).toBe(36);
-      expect(negSilent).toBe(39);
+      expect(posDetected).toBe(39);
+      expect(negSilent).toBe(50);
       expect(missesStillMissed).toBe(9);
     });
   });
@@ -269,7 +272,7 @@ describe(`ADR-0117 PII conformance — vector set ${PII_VECTOR_SET_VERSION}`, ()
         expect(pct).toBeGreaterThan(row.pct * 0.8);
         expect(pct).toBeLessThan(row.pct * 1.2);
       }
-    });
+    }, 60_000); // 100k draws per shape: CPU-bound, so the default 5 s limit flakes on a loaded runner
 
     it("enabling all three 9-digit jurisdictions COMPOUNDS — the combined rate exceeds any one of them", () => {
       const combined = REALISTIC_CORPUS_RATES.find((x) => x.id === "r.order9_any")!;

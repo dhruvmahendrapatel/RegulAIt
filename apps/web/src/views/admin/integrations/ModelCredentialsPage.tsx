@@ -12,6 +12,10 @@ import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Input, Select, Table } from "../../../ui/kit";
 import { optionEls, useAction, useAgents, useUsers, userOpts } from "../adminKit";
+import { ProviderMark } from "../../../ui/ModelPicker";
+import { Logo } from "../../../ui/logos/Logo";
+import { providerLogoKey } from "../../../ui/logos/providerLogo";
+import { providerLabel } from "../../models/modelBindings";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -76,6 +80,9 @@ export default function ModelCredentialsPage() {
                 });
             }}
           >
+            <span aria-hidden="true" style={{ display: "inline-flex", paddingBottom: 4 }}>
+              <Logo name={providerLogoKey(provider)} label={providerLabel(provider)} size={26} />
+            </span>
             <Field label="Provider">
               <Select value={provider} onChange={(e) => setProvider(e.target.value)}>
                 {PROVIDERS.map((p) => (
@@ -116,7 +123,7 @@ export default function ModelCredentialsPage() {
         <Card title="Configured providers">
           <Table<ModelCredential>
             columns={[
-              { key: "provider", header: "Provider", render: (c) => c.provider },
+              { key: "provider", header: "Provider", render: (c) => <ProviderMark provider={c.provider} label={providerLabel(c.provider)} /> },
               { key: "baseUrl", header: "Base URL", render: (c) => c.baseUrl ?? "provider default" },
               { key: "configured", header: "Configured", render: (c) => ago(c.createdAt) },
               {
@@ -147,7 +154,7 @@ export default function ModelCredentialsPage() {
         <Card title="Env keys present on this server">
           <Table
             columns={[
-              { key: "provider", header: "Provider", render: (k: NonNullable<OrgSettingsResponse["envKeys"]>[number]) => k.provider },
+              { key: "provider", header: "Provider", render: (k: NonNullable<OrgSettingsResponse["envKeys"]>[number]) => <ProviderMark provider={k.provider} label={providerLabel(k.provider)} /> },
               { key: "envVar", header: "Env var", render: (k) => <span className={v.mono}>{k.envVar}</span> },
               {
                 key: "present",
@@ -187,7 +194,7 @@ export default function ModelCredentialsPage() {
             <Table
               columns={[
                 { key: "agent", header: "Agent", render: (x: (typeof waiting)[number]) => x.name },
-                { key: "provider", header: "Provider", render: (x) => x.provider },
+                { key: "provider", header: "Provider", render: (x) => <ProviderMark provider={x.provider} label={providerLabel(x.provider)} /> },
                 { key: "model", header: "Model", render: (x) => x.model ?? "—" },
                 {
                   key: "status",
@@ -269,7 +276,7 @@ function ByoKeysCard() {
         ) : (
           <Table<ModelCredential>
             columns={[
-              { key: "provider", header: "Provider", render: (c) => c.provider },
+              { key: "provider", header: "Provider", render: (c) => <ProviderMark provider={c.provider} label={providerLabel(c.provider)} /> },
               { key: "baseUrl", header: "Base URL", render: (c) => c.baseUrl ?? "provider default" },
               { key: "added", header: "Added", render: (c) => ago(c.createdAt) },
               {

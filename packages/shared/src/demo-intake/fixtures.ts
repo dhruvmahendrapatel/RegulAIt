@@ -615,7 +615,7 @@ export const DEMO_INTAKE_FIXTURES: DemoIntakeFixtures = {
         "Connector grant narrowed to read-only; write operations require explicit user confirmation and a separate approval step.",
       controls: [
         "eu-ai-act:art-14-human-oversight",
-        "nist-ai-rmf:GOVERN-1.2",
+        "nist-ai-rmf:GOVERN-2.1",
         "iso-27001:A.5.15",
       ],
       residual: { likelihood: "low", impact: "low" },
@@ -637,7 +637,7 @@ export const DEMO_INTAKE_FIXTURES: DemoIntakeFixtures = {
       controls: [
         "eu-ai-act:art-14-human-oversight",
         "eu-ai-act:art-15-accuracy-robustness",
-        "nist-ai-rmf:MANAGE-2.2",
+        "nist-ai-rmf:MANAGE-2.4",
       ],
       residual: { likelihood: "low", impact: "medium" },
     },
@@ -653,7 +653,7 @@ export const DEMO_INTAKE_FIXTURES: DemoIntakeFixtures = {
       likelihood: "low",
       impact: "medium",
       targetStatus: "accepted",
-      controls: ["eu-ai-act:art-14-human-oversight", "nist-ai-rmf:GOVERN-1.2"],
+      controls: ["eu-ai-act:art-14-human-oversight", "nist-ai-rmf:GOVERN-2.1"],
       acceptanceNote:
         "Residual risk accepted after legal sign-off: the write token is scoped to a sandbox " +
         "environment only; production contracts remain read-only for the agent.",
@@ -755,7 +755,7 @@ export const DEMO_INTAKE_FIXTURES: DemoIntakeFixtures = {
       targetStatus: "closed",
       controls: [
         "iso-27001:A.5.15",
-        "nist-ai-rmf:GOVERN-1.2",
+        "nist-ai-rmf:GOVERN-2.1",
       ],
       closeReason:
         "Admin grants revoked; new least-privilege grant set documented and verified in the grant audit trail.",
@@ -776,7 +776,7 @@ export const DEMO_INTAKE_FIXTURES: DemoIntakeFixtures = {
         "Schema-scoped read grant issued; access bounded to the payments schema only via row-level security.",
       controls: [
         "iso-27001:A.5.15",
-        "nist-ai-rmf:GOVERN-1.2",
+        "nist-ai-rmf:GOVERN-2.1",
         "pci-dss:7.2.1-least-privilege",
       ],
       residual: { likelihood: "low", impact: "medium" },
@@ -815,7 +815,7 @@ export const DEMO_INTAKE_FIXTURES: DemoIntakeFixtures = {
       mitigation:
         "Orchestration run-cap set at 50 LLM calls per invocation; exponential back-off with a hard abort at 3 retries.",
       controls: [
-        "nist-ai-rmf:MANAGE-2.2",
+        "nist-ai-rmf:MANAGE-2.4",
         "eu-ai-act:art-14-human-oversight",
       ],
       residual: { likelihood: "low", impact: "low" },
@@ -833,7 +833,7 @@ export const DEMO_INTAKE_FIXTURES: DemoIntakeFixtures = {
       impact: "low",
       targetStatus: "accepted",
       controls: [
-        "nist-ai-rmf:MANAGE-2.2",
+        "nist-ai-rmf:MANAGE-2.4",
       ],
       acceptanceNote:
         "Cost optimisation deferred to v2; current volume is below the approved annual budget threshold. " +
@@ -852,7 +852,7 @@ export const DEMO_INTAKE_FIXTURES: DemoIntakeFixtures = {
       impact: "medium",
       targetStatus: "open",
       controls: [
-        "nist-ai-rmf:MANAGE-2.2",
+        "nist-ai-rmf:MANAGE-2.4",
         "eu-ai-act:art-12-record-keeping",
       ],
     },
@@ -876,7 +876,7 @@ export const DEMO_INTAKE_FIXTURES: DemoIntakeFixtures = {
       controls: [
         "eu-ai-act:art-15-accuracy-robustness",
         "eu-ai-act:art-12-record-keeping",
-        "nist-ai-rmf:MEASURE-2.7",
+        "nist-ai-rmf:MEASURE-2.5",
       ],
       residual: { likelihood: "low", impact: "medium" },
     },
@@ -917,7 +917,7 @@ export const DEMO_INTAKE_FIXTURES: DemoIntakeFixtures = {
         "Knowledge base refreshed daily; metadata freshness displayed inline in bot responses.",
       controls: [
         "eu-ai-act:art-15-accuracy-robustness",
-        "nist-ai-rmf:MEASURE-2.6",
+        "nist-ai-rmf:MEASURE-2.5",
       ],
       residual: { likelihood: "low", impact: "low" },
     },
@@ -937,7 +937,7 @@ export const DEMO_INTAKE_FIXTURES: DemoIntakeFixtures = {
       targetStatus: "closed",
       controls: [
         "eu-ai-act:art-9-risk-management-system",
-        "nist-ai-rmf:GOVERN-4.1",
+        "nist-ai-rmf:GOVERN-1.6",
       ],
       closeReason:
         "Acceptable-use policy updated; DLP rule blocks upload of marketing-classified documents to external AI services.",
@@ -959,7 +959,7 @@ export const DEMO_INTAKE_FIXTURES: DemoIntakeFixtures = {
         "free-tier browser extensions blocked at proxy.",
       controls: [
         "eu-ai-act:art-9-risk-management-system",
-        "nist-ai-rmf:GOVERN-4.1",
+        "nist-ai-rmf:GOVERN-1.6",
         "iso-27001:A.8.12",
       ],
       residual: { likelihood: "low", impact: "medium" },
@@ -977,7 +977,7 @@ export const DEMO_INTAKE_FIXTURES: DemoIntakeFixtures = {
       impact: "high",
       targetStatus: "open",
       controls: [
-        "nist-ai-rmf:GOVERN-4.1",
+        "nist-ai-rmf:GOVERN-1.6",
         "eu-ai-act:art-9-risk-management-system",
       ],
     },
@@ -1095,7 +1095,7 @@ export const DEMO_INTAKE_FIXTURES: DemoIntakeFixtures = {
       impact: "medium",
       targetStatus: "open",
       controls: [
-        "nist-ai-rmf:GOVERN-4.1",
+        "nist-ai-rmf:MAP-3.3",
         "eu-ai-act:art-9-risk-management-system",
       ],
     },

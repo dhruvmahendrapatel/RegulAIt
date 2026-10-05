@@ -30,7 +30,7 @@ export const SCENARIO_LIBRARY: ScenarioLibraryEntry[] = [
     category: "tool_misuse",
     dimension: "security",
     domains: ["public-sector"],
-    suggestedControls: ["nist-ai-rmf:GOVERN-1.2", "iso-27001:A.5.15"],
+    suggestedControls: ["nist-ai-rmf:GOVERN-2.1", "iso-27001:A.5.15"],
   },
   {
     key: "workflow-automation-deletes-records",
@@ -48,7 +48,7 @@ export const SCENARIO_LIBRARY: ScenarioLibraryEntry[] = [
     category: "scope_drift",
     dimension: "reliability",
     domains: ["general"],
-    suggestedControls: ["eu-ai-act:art-9-risk-management-system", "nist-ai-rmf:GOVERN-4.1"],
+    suggestedControls: ["eu-ai-act:art-9-risk-management-system", "nist-ai-rmf:MAP-3.3"],
   },
   {
     key: "marketing-copy-generator-legal",
@@ -57,7 +57,7 @@ export const SCENARIO_LIBRARY: ScenarioLibraryEntry[] = [
     category: "scope_drift",
     dimension: "reliability",
     domains: ["financial-services"],
-    suggestedControls: ["eu-ai-act:art-9-risk-management-system", "nist-ai-rmf:GOVERN-4.1"],
+    suggestedControls: ["eu-ai-act:art-9-risk-management-system", "nist-ai-rmf:MAP-3.3"],
   },
   {
     key: "hr-assistant-screens-invoices",
@@ -66,7 +66,7 @@ export const SCENARIO_LIBRARY: ScenarioLibraryEntry[] = [
     category: "scope_drift",
     dimension: "reliability",
     domains: ["payments"],
-    suggestedControls: ["eu-ai-act:art-9-risk-management-system", "nist-ai-rmf:GOVERN-4.1"],
+    suggestedControls: ["eu-ai-act:art-9-risk-management-system", "nist-ai-rmf:MAP-3.3"],
   },
   {
     key: "indirect-injection-tool-arguments",
@@ -84,7 +84,7 @@ export const SCENARIO_LIBRARY: ScenarioLibraryEntry[] = [
     category: "prompt_injection",
     dimension: "security",
     domains: ["public-sector"],
-    suggestedControls: ["nist-ai-rmf:GOVERN-1.2", "eu-ai-act:art-15-accuracy-robustness"],
+    suggestedControls: ["nist-ai-rmf:GOVERN-2.1", "eu-ai-act:art-15-accuracy-robustness"],
   },
   {
     key: "embedded-hidden-text-resume-hire",
@@ -111,7 +111,7 @@ export const SCENARIO_LIBRARY: ScenarioLibraryEntry[] = [
     category: "data_leakage_pii",
     dimension: "privacy",
     domains: ["healthcare"],
-    suggestedControls: ["iso-27001:A.8.12", "nist-ai-rmf:MEASURE-2.7"],
+    suggestedControls: ["iso-27001:A.8.12", "nist-ai-rmf:MEASURE-2.10"],
   },
   {
     key: "log-aggregator-exports-sensitive-prompts",
@@ -129,7 +129,7 @@ export const SCENARIO_LIBRARY: ScenarioLibraryEntry[] = [
     category: "over_permissioning",
     dimension: "security",
     domains: ["general"],
-    suggestedControls: ["nist-ai-rmf:GOVERN-1.2", "iso-27001:A.5.15"],
+    suggestedControls: ["nist-ai-rmf:GOVERN-2.1", "iso-27001:A.5.15"],
   },
   {
     key: "connector-retains-offboarded-access",
@@ -138,7 +138,7 @@ export const SCENARIO_LIBRARY: ScenarioLibraryEntry[] = [
     category: "over_permissioning",
     dimension: "security",
     domains: ["general"],
-    suggestedControls: ["iso-27001:A.5.15", "nist-ai-rmf:GOVERN-1.2"],
+    suggestedControls: ["iso-27001:A.5.15", "nist-ai-rmf:GOVERN-2.1"],
   },
   {
     key: "broad-iam-role-cross-department",
@@ -147,7 +147,7 @@ export const SCENARIO_LIBRARY: ScenarioLibraryEntry[] = [
     category: "over_permissioning",
     dimension: "security",
     domains: ["financial-services"],
-    suggestedControls: ["iso-27001:A.5.15", "nist-ai-rmf:GOVERN-1.2"],
+    suggestedControls: ["iso-27001:A.5.15", "nist-ai-rmf:GOVERN-2.1"],
   },
   {
     key: "runaway-agent-loop-exhausts-budget",
@@ -156,7 +156,7 @@ export const SCENARIO_LIBRARY: ScenarioLibraryEntry[] = [
     category: "budget_overrun",
     dimension: "compliance",
     domains: ["general"],
-    suggestedControls: ["nist-ai-rmf:MANAGE-2.2", "eu-ai-act:art-14-human-oversight"],
+    suggestedControls: ["nist-ai-rmf:MANAGE-2.4", "eu-ai-act:art-14-human-oversight"],
   },
   {
     key: "infinite-recursive-tool-calls",
@@ -165,7 +165,7 @@ export const SCENARIO_LIBRARY: ScenarioLibraryEntry[] = [
     category: "budget_overrun",
     dimension: "compliance",
     domains: ["securities-broker-dealer"],
-    suggestedControls: ["nist-ai-rmf:MANAGE-2.2", "eu-ai-act:art-15-accuracy-robustness"],
+    suggestedControls: ["nist-ai-rmf:MANAGE-2.4", "eu-ai-act:art-15-accuracy-robustness"],
   },
   {
     key: "uncapped-token-generation-spike",
@@ -174,7 +174,7 @@ export const SCENARIO_LIBRARY: ScenarioLibraryEntry[] = [
     category: "budget_overrun",
     dimension: "compliance",
     domains: ["public-sector"],
-    suggestedControls: ["nist-ai-rmf:MANAGE-2.2", "eu-ai-act:art-12-record-keeping"],
+    suggestedControls: ["nist-ai-rmf:MANAGE-2.4", "eu-ai-act:art-12-record-keeping"],
   },
   {
     key: "legal-advisor-fake-caselaw",
@@ -210,7 +210,7 @@ export const SCENARIO_LIBRARY: ScenarioLibraryEntry[] = [
     category: "shadow_ai",
     dimension: "compliance",
     domains: ["general"],
-    suggestedControls: ["eu-ai-act:art-9-risk-management-system", "nist-ai-rmf:GOVERN-4.1"],
+    suggestedControls: ["eu-ai-act:art-9-risk-management-system", "nist-ai-rmf:GOVERN-1.6"],
   },
   {
     key: "marketing-uploads-roadmap-public-ai",
@@ -219,7 +219,7 @@ export const SCENARIO_LIBRARY: ScenarioLibraryEntry[] = [
     category: "shadow_ai",
     dimension: "compliance",
     domains: ["general"],
-    suggestedControls: ["eu-ai-act:art-9-risk-management-system", "nist-ai-rmf:GOVERN-4.1"],
+    suggestedControls: ["eu-ai-act:art-9-risk-management-system", "nist-ai-rmf:GOVERN-1.6"],
   },
   {
     key: "finance-uses-personal-chatgpt",
@@ -228,7 +228,7 @@ export const SCENARIO_LIBRARY: ScenarioLibraryEntry[] = [
     category: "shadow_ai",
     dimension: "compliance",
     domains: ["payments"],
-    suggestedControls: ["eu-ai-act:art-9-risk-management-system", "nist-ai-rmf:GOVERN-4.1"],
+    suggestedControls: ["eu-ai-act:art-9-risk-management-system", "nist-ai-rmf:GOVERN-1.6"],
   },
   {
     key: "mcp-server-rug-pull",
@@ -255,7 +255,7 @@ export const SCENARIO_LIBRARY: ScenarioLibraryEntry[] = [
     category: "third_party_ai",
     dimension: "compliance",
     domains: ["securities-broker-dealer"],
-    suggestedControls: ["nist-ai-rmf:MANAGE-2.2", "eu-ai-act:art-9-risk-management-system"],
+    suggestedControls: ["nist-ai-rmf:MANAGE-3.1", "eu-ai-act:art-9-risk-management-system"],
   },
   {
     key: "credit-model-disparate-impact",
@@ -300,7 +300,7 @@ export const SCENARIO_LIBRARY: ScenarioLibraryEntry[] = [
     category: "unsafe_output",
     dimension: "safety",
     domains: ["securities-broker-dealer"],
-    suggestedControls: ["nist-ai-rmf:MANAGE-2.2", "eu-ai-act:art-14-human-oversight"],
+    suggestedControls: ["nist-ai-rmf:MANAGE-2.4", "eu-ai-act:art-14-human-oversight"],
   },
   {
     key: "coding-assistant-vulnerable-contracts",

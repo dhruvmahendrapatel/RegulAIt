@@ -1143,11 +1143,66 @@
                     "type": "string",
                     "enum": [
                       "approved",
-                      "denied"
+                      "denied",
+                      "returned"
                     ]
                   },
                   "reason": {
                     "type": "string"
+                  },
+                  "conditions": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "text": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 500
+                        },
+                        "ownerUserId": {
+                          "type": "string",
+                          "format": "uuid"
+                        },
+                        "dueAt": {
+                          "type": "string"
+                        },
+                        "blocking": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "text",
+                        "dueAt",
+                        "blocking"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "maxItems": 20
+                  },
+                  "acceptRisks": {
+                    "type": "object",
+                    "properties": {
+                      "riskIds": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "format": "uuid"
+                        },
+                        "minItems": 1,
+                        "maxItems": 50
+                      },
+                      "rationale": {
+                        "type": "string",
+                        "minLength": 10,
+                        "maxLength": 2000
+                      }
+                    },
+                    "required": [
+                      "riskIds",
+                      "rationale"
+                    ],
+                    "additionalProperties": false
                   }
                 },
                 "required": [
@@ -2465,7 +2520,7 @@
             "description": "Rate limited. Retry after the `retry-after` header."
           },
           "2XX": {
-            "description": "Success."
+            "description": "`instance.round` is the workflow round (bumped by every re-open — artifact resubmitted, sign-off returned); a CI binds its check report to it. `instance.stageEntry` moves on every entry into an executable stage (AER-048)."
           }
         }
       }

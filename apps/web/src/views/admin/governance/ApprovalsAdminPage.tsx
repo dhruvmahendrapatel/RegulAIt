@@ -30,10 +30,12 @@ import {
 import { OutcomePanel, RemoveButton, optionEls, useAction, useApiAction, useUsers, userOpts } from "../adminKit";
 import { McpActionReview } from "../../approvals/McpActionReview";
 import { inspectApprovalAction } from "../../approvals/approvalReview";
+import { ReviewPanel } from "../../approvals/ReviewPanel";
+import { intakeUseCaseName, isIntakeSignoff } from "../../approvals/reviewDecision";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
-const labelOf = (r: Approval) => r.objectType === "mcp_tool" ? r.toolName ?? "MCP action" : approvalStageLabel(r) ?? r.stageId ?? r.objectType;
+const labelOf = (r: Approval) => isIntakeSignoff(r) ? "AI use case sign-off" : r.objectType === "mcp_tool" ? r.toolName ?? "MCP action" : approvalStageLabel(r) ?? r.stageId ?? r.objectType;
 
 /**
  * Mirrors `APPROVAL_OBJECT_TYPES` in @regulait/shared — the eleven kinds THE ONE
@@ -175,7 +177,7 @@ export default function ApprovalsAdminPage() {
             columns={[
               { key: "type", header: "Type", sort: (r) => r.objectType, render: (r) => r.objectType },
               { key: "stage", header: "Stage", render: (r) => labelOf(r) },
-              { key: "governs", header: "Governs", render: (r) => r.objectLabel ?? "—" },
+              { key: "governs", header: "Governs", render: (r) => (isIntakeSignoff(r) ? intakeUseCaseName(r) : r.objectLabel) ?? "—" },
               { key: "requestedBy", header: "Requested by", render: (r) => r.requestedByName ?? "—" },
               {
                 key: "approver",
@@ -207,6 +209,8 @@ export default function ApprovalsAdminPage() {
                       </span>
                     ) : null;
                   }
+                  // an AI use-case sign-off is decided as a task, with its evidence beside it
+                  if (isIntakeSignoff(r)) return <ReviewPanel approval={r} onDecided={() => void q.refetch()} />;
                   const override = me !== r.approverUserId && !r.delegatedFrom;
                   const controls = (blockedReason: string | null) => (
                     <span className={v.rowTight} style={{ justifyContent: "flex-end", flexWrap: "wrap" }}>
@@ -219,10 +223,10 @@ export default function ApprovalsAdminPage() {
                         value={reasons[r.id] ?? ""}
                         onChange={(e) => setReasons((s) => ({ ...s, [r.id]: e.target.value }))}
                       />
-                      <Button size="sm" variant="primary" disabled={act.busy || !!blockedReason} onClick={() => void decide(r, "approved")}>
+                      <Button size="sm" disabled={act.busy || !!blockedReason} onClick={() => void decide(r, "approved")}>
                         approve
                       </Button>
-                      <Button size="sm" variant="danger" disabled={act.busy} onClick={() => void decide(r, "denied")}>
+                      <Button size="sm" variant="ghost" disabled={act.busy} onClick={() => void decide(r, "denied")}>
                         deny
                       </Button>
                       {rowErrors[r.id] && (

@@ -47,6 +47,8 @@ import { runMcpRegistrySync } from "./mcp-registry.js";
 import { runMcpHealthProbeSweep } from "./mcp-health-probe.js";
 import { runGovernanceMonitor } from "./governance-monitor.js";
 import { runTraceEvaluationSweep } from "./trace-evaluation.js";
+import { runUseCaseRecertificationSweep } from "./review-policy.js";
+import { runBuilderScheduleSweep } from "./builder-runtime.js";
 import { toRegistry, type SchedulerJobDefinition, type SchedulerJobRegistry } from "./scheduler.js";
 
 const HOUR = 3600;
@@ -76,6 +78,8 @@ export const SCHEDULER_JOB_NAMES = {
   mcpHealthProbe: "mcp-health-probe-sweep",
   governanceMonitor: "governance-monitor-sweep",
   traceEvaluation: "trace-evaluation-sweep",
+  useCaseRecertification: "use-case-recertification",
+  builderAgentSchedules: "builder-agent-schedules",
 } as const;
 
 export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): SchedulerJobDefinition[] {
@@ -507,6 +511,48 @@ export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): Schedu
       run: async (ctx) => {
         const out = await runTraceEvaluationSweep(ctx.db, { now: ctx.now });
         return { itemsProcessed: out.scanned, detail: { ...out } };
+      },
+    },
+    {
+      // ADR-0168 amendment. Moves approved use cases whose approval expired
+      // back into review (a new sign-off round per the review policy). Not the
+      // control: the deploy gate refuses an expired approval whether or not
+      // this has run; this makes the registry and the review queue say so.
+      name: SCHEDULER_JOB_NAMES.useCaseRecertification,
+      description:
+        "Move approved AI use cases whose approval has expired back into review for recertification, " +
+        "re-opening the intake sign-off with the reviews the review policy requires. Enforcement does not " +
+        "depend on it: the deploy gate refuses an expired approval on every call.",
+      adr: "ADR-0168",
+      defaultIntervalSeconds: HOUR,
+      run: async (ctx) => {
+        const out = await runUseCaseRecertificationSweep(ctx.db, { now: ctx.now, actorUserId: ctx.actorUserId });
+        return {
+          itemsProcessed: out.movedToReview,
+          detail: { evaluated: out.evaluated, movedToReview: out.movedToReview, skipped: out.skipped.length },
+        };
+      },
+    },
+    {
+      // ADR-0172. Runs every due builder-agent schedule AS THE AGENT'S OWNER
+      // (never as the scheduler, which has no identity): the run is an
+      // ordinary governed dispatch with the owner's entitlements, budgets and
+      // the agent's monthly limit, and lands in the owner's inbox as a thread
+      // that needs attention. Each schedule is claimed compare-and-swap, so a
+      // manual sweep racing this job runs it once.
+      name: SCHEDULER_JOB_NAMES.builderAgentSchedules,
+      description:
+        "Run every agent-builder schedule the agent's owner turned on that has come due, as that owner, through the " +
+        "governed dispatch path (owner entitlements, budgets and the agent's monthly limit apply), at most 10 per " +
+        "owner per pass. Each run lands in the owner's inbox as a thread that needs attention.",
+      adr: "ADR-0172",
+      defaultIntervalSeconds: 5 * 60,
+      run: async (ctx) => {
+        const out = await runBuilderScheduleSweep(ctx.db, opts.dataKey, { now: ctx.now });
+        return {
+          itemsProcessed: out.ran + out.refused,
+          detail: { due: out.due, ran: out.ran, refused: out.refused, skipped: out.skipped.length, deferred: out.deferred },
+        };
       },
     },
   ];

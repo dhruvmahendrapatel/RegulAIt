@@ -159,10 +159,15 @@ describe("provider failure → rotation_failed (reasoned, re-proposable), findin
     const findings = (await getJson("/v1/infra/findings")).findings;
     const f = findings.find((x: { resourceName: string; kind: string }) => x.resourceName === "o6-fail-cert" && x.kind === "cert_expiring");
     expect(f.status).toBe("open");
-    const [audit] = await db
+    // Scoped to THIS cert: other files (the AER-018 barrier matrix) legitimately
+    // write their own infra-cert-rotation-failed rows to the shared database, so
+    // "the first such row" was whichever file ran first, not this rotation.
+    const audits = (await db
       .select()
       .from(auditLog)
-      .where(eq(auditLog.ruleId, "infra-cert-rotation-failed"));
+      .where(eq(auditLog.ruleId, "infra-cert-rotation-failed"))).filter((row) => (row.reason ?? "").includes("o6-fail-cert"));
+    expect(audits).toHaveLength(1);
+    const audit = audits[0];
     expect(audit).toBeTruthy();
     expect(audit!.reason).toContain("simulated CA outage");
 

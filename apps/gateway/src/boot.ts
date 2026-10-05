@@ -262,8 +262,10 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   }
 
   log(`regulait gateway listening on ${address}`);
-  log(`  app UI:    ${address}/app`);
-  log(`  admin UI:  ${address}/admin`);
+  // ADR-0033: /ui is the whole product surface; /app and /admin are only
+  // 302s into it (app.ts), kept for SSO's returnTo whitelist and bookmarks.
+  // The banner names the surface, not the redirects (F08).
+  log(`  UI:        ${address}/ui`);
   // ADR-0031: say out loud whose X-Forwarded-* this deployment believes —
   // getting this wrong silently corrupts every client IP in the audit trail.
   log(`  proxy:     ${describeTrustProxy(resolveTrustProxy())}`);

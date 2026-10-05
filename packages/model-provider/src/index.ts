@@ -20,6 +20,7 @@
 
 import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
+import { findSentinel, stripSentinels, trimTrailingPunctuation } from "./sentinels.js";
 
 export const MODEL_PROVIDER_KINDS = [
   "anthropic",
@@ -220,6 +221,20 @@ export interface ModelDispatchResult {
   usage: { inputTokens: number; outputTokens: number; reasoningTokens?: number };
   /** provider-side message/request identifier for cross-system audit joins */
   providerMessageId: string | null;
+  /** ADR-0175 A4 — THE MODEL THE PROVIDER SAYS IT SERVED, verbatim from the
+   * response (Anthropic / OpenAI / OpenAI-compatible `model`, Google
+   * `modelVersion`). It can differ from the requested id: an alias resolves
+   * to a dated snapshot, or a provider swaps what an alias means. Null (or
+   * absent, for adapters outside this package) when the response does not
+   * say — NEVER filled in from the request, because a guess here would hide
+   * exactly the change this field exists to show. */
+  servedModel?: string | null;
+}
+
+/** the provider-reported model id, or null — a blank or non-string value is
+ * "not reported", never coerced */
+function reportedModel(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
 export interface ModelProvider {
@@ -393,6 +408,7 @@ export class AnthropicProvider implements ModelProvider {
         outputTokens: msg.usage.output_tokens,
       },
       providerMessageId: msg.id ?? null,
+      servedModel: reportedModel(msg.model),
     };
   }
 }
@@ -629,11 +645,13 @@ async function dispatchChatCompletions(
         let refusalText = "";
         let finishReason: string | null = null;
         let id: string | null = null;
+        let servedModel: string | null = null;
         let usage = { inputTokens: 0, outputTokens: 0 };
         // tool_calls arrive fragmented across deltas, keyed by index
         const toolAcc = new Map<number, { id: string; name: string; args: string }>();
         for await (const chunk of stream) {
           id = id ?? chunk.id ?? null;
+          servedModel = servedModel ?? reportedModel(chunk.model);
           const choice = chunk.choices?.[0];
           if (choice?.delta?.content) {
             text += choice.delta.content;
@@ -668,6 +686,7 @@ async function dispatchChatCompletions(
           ...(toolCalls.length > 0 ? { toolCalls } : {}),
           usage,
           providerMessageId: id,
+          servedModel,
         };
       }
 
@@ -698,6 +717,7 @@ async function dispatchChatCompletions(
           outputTokens: res.usage?.completion_tokens ?? 0,
         },
         providerMessageId: res.id ?? null,
+        servedModel: reportedModel(res.model),
       };
   } catch (err) {
     if (err instanceof OpenAI.APIError) {
@@ -838,6 +858,7 @@ function normalizeOpenAiResponse(res: OpenAI.Responses.Response): ModelDispatchR
       ...(reasoningTokens > 0 ? { reasoningTokens } : {}),
     },
     providerMessageId: res.id ?? null,
+    servedModel: reportedModel(res.model),
   };
 }
 
@@ -1101,6 +1122,8 @@ interface GeminiPart {
 }
 interface GeminiChunk {
   responseId?: string;
+  /** ADR-0175 A4: the model version that served, as Gemini reports it */
+  modelVersion?: string;
   candidates?: Array<{
     content?: { parts?: GeminiPart[] };
     finishReason?: string;
@@ -1375,10 +1398,12 @@ export class GoogleProvider implements ModelProvider {
     let finishReason: string | null = null;
     let blockReason: string | null = null;
     let id: string | null = null;
+    let servedModel: string | null = null;
     let usage = { inputTokens: 0, outputTokens: 0 };
     const toolCalls: Array<{ id: string; name: string; arguments: unknown }> = [];
     const absorb = (chunk: GeminiChunk) => {
       id = id ?? chunk.responseId ?? null;
+      servedModel = servedModel ?? reportedModel(chunk.modelVersion);
       blockReason = blockReason ?? chunk.promptFeedback?.blockReason ?? null;
       const candidate = chunk.candidates?.[0];
       const delta = candidate?.content?.parts?.map((p) => p.text ?? "").join("") ?? "";
@@ -1463,6 +1488,7 @@ export class GoogleProvider implements ModelProvider {
       ...(toolCalls.length > 0 ? { toolCalls } : {}),
       usage,
       providerMessageId: id,
+      servedModel,
     };
   }
 }
@@ -1531,7 +1557,7 @@ function mockTopic(input: string): string {
     "",
   );
   t = t.replace(/^(the|a|an|this|these|that|those|my|our)\s+/i, "");
-  t = t.replace(/[.?!,;:\s]+$/, "");
+  t = trimTrailingPunctuation(t);
   const words = t.split(" ").filter(Boolean).slice(0, 8).join(" ");
   const capped = words.length > 60 ? `${words.slice(0, 60)}…` : words;
   return capped || "the request";
@@ -1942,8 +1968,7 @@ const PLAN_STOPWORDS = new Set([
 /** two distinct topic words lifted from the goal so the parallel middle
  * tasks read as goal-specific, never boilerplate */
 function planKeywords(goal: string): [string, string] {
-  const words = goal
-    .replace(/<<[^>]*>>/g, " ")
+  const words = stripSentinels(goal)
     .toLowerCase()
     .replace(/[^a-z0-9\s-]/g, " ")
     .split(/\s+/)
@@ -1983,7 +2008,7 @@ function mockDecompositionReply(goal: string, system: string, tier: MockTier): s
   const cheap = roster[0]?.name ?? "unknown-agent";
   const mid = roster[Math.floor((roster.length - 1) / 2)]?.name ?? cheap;
   const [kw1, kw2] = planKeywords(goal);
-  const topic = mockTopic(goal.replace(/<<[^>]*>>/g, " ").trim());
+  const topic = mockTopic(stripSentinels(goal).trim());
   const slug1 = planSlug(kw1);
   let slug2 = planSlug(kw2);
   if (slug2 === slug1) slug2 = `${slug2}-2`;
@@ -2154,12 +2179,31 @@ function mockToolResults(turns: ModelChatMessage[]): string[] {
   );
 }
 
+/** ADR-0175 A4 test/demo affordance: `<<serve-as:NAME>>` anywhere in the
+ * conversation makes the mock REPORT that it served NAME instead of the
+ * requested model — a provider silently swapping the model behind an id,
+ * reproducible without a network. Same sentinel discipline as `<<refuse>>`.
+ * NAME is the run of non-space, non-`>` characters before `>>` (the old
+ * `/<<serve-as:([^>\s]+)>>/`, scanned in linear time — see `./sentinels.ts`). */
+export function mockServeAsSentinel(text: string): string | null {
+  return findSentinel(text, "<<serve-as:", (c) => c !== ">" && !/\s/.test(c));
+}
+
 export class MockModelProvider implements ModelProvider {
   readonly kind = "mock" as const;
   readonly dispatches: MockDispatch[] = [];
   private seq = 0;
 
+  /** The mock reports a served model the way a real provider does: the
+   * requested id, unless the `<<serve-as:NAME>>` sentinel asks it to report
+   * a different one. */
   async dispatch(req: ModelDispatchRequest): Promise<ModelDispatchResult> {
+    const result = await this.cannedDispatch(req);
+    const swap = mockServeAsSentinel(chatTurns(req).map((m) => mockBlockText(m.content)).join("\n"));
+    return { ...result, servedModel: swap ?? req.model };
+  }
+
+  private async cannedDispatch(req: ModelDispatchRequest): Promise<ModelDispatchResult> {
     const seq = ++this.seq;
     this.dispatches.push({ ...req, seq });
     // Multi-turn: intent/tier/refusal dispatch on the LAST user turn (input
@@ -2193,8 +2237,9 @@ export class MockModelProvider implements ModelProvider {
     // verbatim, which is itself the correct behaviour):
     //   `<<upstream-error>>`            — every model fails (chain exhaustion)
     //   `<<upstream-error:some-model>>` — only that model id fails
-    const scopedFailure = /<<upstream-error:([^>]+)>>/.exec(lastUser);
-    if (scopedFailure ? scopedFailure[1]!.trim() === req.model : lastUser.includes("<<upstream-error>>")) {
+    // (the old `/<<upstream-error:([^>]+)>>/`, scanned in linear time — `./sentinels.ts`)
+    const scopedFailure = findSentinel(lastUser, "<<upstream-error:", (c) => c !== ">");
+    if (scopedFailure !== null ? scopedFailure.trim() === req.model : lastUser.includes("<<upstream-error>>")) {
       throw new ModelProviderError(`mock: simulated upstream failure for model '${req.model}'`, 503);
     }
 

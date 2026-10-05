@@ -1,10 +1,10 @@
 ---
-phase: p1-security-in-progress
+phase: adr0168-amendment-review-policy-stewardship-aer049-built-on-wt-g2-int-gate-pending-demo-2026-10-05-next
 last_updated: 2026-10-03
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
-last_session: sessions/2026-10-03-session-01.md
+last_session: sessions/2026-10-03-session-02.md
 roadmap: ../docs/product/ROADMAP.md
 ---
 
@@ -21,7 +21,145 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-10-05 (early) - Owner's Windows Docker demo is up and prepared (18/18).** Two Docker defects surfaced on the owner's first
+Windows run and are fixed and pushed. (1) A CRLF checkout broke `docker-start.sh` (M-069): `.gitattributes` now pins `*.sh` to LF
+and the Dockerfile strips CR. (2) Docker ran only the seed, so compliance packs and demo content were missing: with
+`REGULAIT_DEMO_LICENSE=1` the start script now runs demo-mcp in the background plus setup, intake, traffic and check once per
+fresh database (the marker is the demo-traffic key; a restart skips it), creates the export-signing key in the demo volume and
+sets `REGULAIT_OFFLINE_CHECKS=1`. All of this applies in demo mode only. Also seen: a second checkout in a same-named folder
+reuses the `regulait` compose project's volumes and trips the data-key mismatch guard. `down -v` (owner's choice) or a distinct
+`COMPOSE_PROJECT_NAME` resolves it; worth a README hint. CI green on d0cb405. Next: ADR-0173 batch 2c, then ADR-0175 D3/D4.
+
+**2026-10-04 (night) - ADR-0175 D2 remainder, AER-056, Windows portability and the Docker demo password pushed.** A7: the
+Credentials admin page (18 stored credential types, flags, windowed and indexed ledger reads, paging). The `stale_credentials`
+alerts are off by default and roll up per type and flag. A15: energy and emissions estimates (admin-entered factors with no
+defaults shipped; unknown is never zero; demo factors apply to mock models only). Migration 0142 records when each secret was
+last set. Review: 8 findings, all fixed; alert cards are escaped for Slack and Teams. AER-056: an advisory-lock invariant
+serialises every writer that could remove the last sign-in path, with barrier race tests. Windows: two case-colliding file
+pairs renamed, plus a basename-collision guard in CI, a path-normalised NIST guard and a CRLF-safe coordination script. Docker:
+`REGULAIT_DEMO_LICENSE=1` in `.env` lets `demo:set-passwords` run under compose (ephemeral licence, keyring volume; a CRLF
+value is accepted). It was tested end to end in real containers: off is refused; on gives three 200 logins; it survives
+restart and down/up; no password in logs or audit. Gate: gateway 3720 + 3 test-helper fixes (proven on a crowded DB), demo
+18/18, mocked 188, spa 47, review 4/4. Container restarts kept killing long runs today. Next: ADR-0173 batch 2c, then
+ADR-0175 D3/D4.
+
+**2026-10-04 (evening) - ADR-0175 batch D2 pushed.** Migrations 0140 and 0141. Builder skills are admission-scanned with the
+ADR-0097 rules, in the form the prompt will show them (NFKC, invisible characters removed, look-alikes folded). Skills now
+have a digest and version and a pinned name. A held skill is withheld until an admin admits that exact digest, and widening
+a skill's visibility is a pending request. A shared agent's private skills run only for their owner and admins. Pre-0140
+skills are scanned lazily. The release-age cooldown (`min_release_age_days`, off by default, 7 recommended) holds new MCP
+servers, changed manifests, registry imports and skill versions, aged from our own first sighting; an admin can override
+one item, tied to its digest. Every call now records the model the provider served, and the new `served_model_drift` rule
+watches it: a pinned card version is high severity and holds the deploy gate. A per-binding expected served model avoids
+false alerts. `unregistered_ai_traffic` uses only unexpired approvals. Review: 12 findings, all fixed. Gate: gateway 3659
+passed, demo:prepare 18/18, mocked 183, spa 47. The demo shows one new alert (hipaa-project, a true finding); beat 3B is
+updated. Next: D2 remainder (A7 credential inventory, A15 energy estimate), then ADR-0173 batch 2c.
+
+**2026-10-04 (late afternoon) - ADR-0174 enterprise sign-in pushed; CI green on batch 2a.** Keycloak (optional `sso` compose profile)
+brokers Microsoft/Google/GitHub with OTP or passkey MFA. The sign-in page shows provider buttons, enterprise SSO and email.
+Break-glass-only local sign-in is available. Account linking needs a verified email plus proof or approval. `demo:set-passwords`
+reads REGULAIT_DEMO_USER_PASSWORD(_FILE) and needs the demo licence. A security review found 12 issues; all are fixed (see the
+ADR-0174 amendment). Gate: gateway 3611 passed, demo:prepare 18/18, mocked 176, spa 47. CI's builder tool-use failure was
+phase2 leaving a fleet-wide rate limit behind (M-068). Not yet proven: a real Entra/Google/GitHub round trip through the
+bundled Keycloak. Next: ADR-0175 batch D2, then ADR-0173 batch 2c.
+
+**2026-10-04 (afternoon) - ADR-0173 batch 2a and NIST AI RMF pack v3 pushed.** Batch 2a (migrations 0136-0138) ships a governed
+tool loop in builder agents ("Ask first" confirmations, approval-queue pauses that resume on their own, pinned tool
+identity, cancel), inbound Slack/Teams, the model allow-list matrix, the Ctrl/K palette, and the owner rule that every
+builder agent bills to a project. An adversarial review found 7 issues; all are fixed with tests. Gate: gateway 3562
+passed, demo:prepare 18/18, mocked 163, spa 44 (CI also runs phase6-builder-tools now). ADR-0175 D1 is pushed too
+(`nist-ai-rmf@3`, a guard test over the 72 IDs; demo beat 3A re-figured: security 20 %, privacy 100 %, compliance 70 %).
+ADR-0174 sign-in is built, with fixes for its security review (SAML MFA, relinking by email alone, break-glass leaks) in
+progress; migration 0139. Postgres was OOM-killed once today with several agents running: run one heavy suite at a time.
+
+**2026-10-04 (day) - Document study done; ADR-0175 decided; ADR-0173 batch 2a and ADR-0174 sign-in being built.** Owner shared six
+documents (NIST AI 100-1 plus vendor/teardown material, never named in the repo). ADR-0175 lists build-now batches D1-D4
+and PathForward.md gains PF-15..PF-22 plus extensions to PF-02..PF-14. Urgent finding: the NIST AI RMF pack and the demo
+content cite wrong subcategory IDs (GOVERN 1.2 used for GOVERN 2.1, MANAGE 2.2 for MANAGE 2.4, MEASURE 2.7 for MEASURE 2.11).
+Batch D1 (pack v3 plus a guard test) is being built now. Batch 2a (builder tool loop, inbound Slack/Teams, model allow-list,
+Ctrl/K palette; migrations 0136-0138) is being integrated. Sign-in (Keycloak broker, migration 0139) is in progress. New owner
+rule: every builder agent must be billed to a project. Next free migration: 0140.
+
+**2026-10-04 (early) - ADR-0172 phase 1: Agent Builder suite + model portal built.** Owner shared a product teardown (kept out of the repo)
+and asked for a separate no-code agent builder and a logo-rich model portal. Built on three parallel branches (backend: 33+ `/v1/builder/*`
+routes, migration 0135, 7 templates, apps catalog, owner-run schedules; web: Agent chat/inbox, Your agents + editor, templates, Apps & tools,
+Skills, Usage; model portal `/models` + ModelPicker), a wiring pass (toolbox-options route, palette colours, real-gateway phase6 journey in CI)
+and an independent review: no governance bypass (chat runs as the caller, schedules as the owner, both via executeGovernedDispatch); 11
+findings fixed (limit race via per-agent lease + priced-model rule, export authz, skill-name squatting, pinned skill snapshots + 48 KB
+prompt cap, project attribution, admin-only channel binding, owner-must-enable schedules, sub-agent name leak, caps + sweep fairness,
+integrations scoping, portal error labels). 72 vendored logos (MIT/CC0). Full gate green: suite 3494, prepare 18/18, real 2/2, mocked
+147/147, spa 44/44, review 4/4. Phase 1 limits per ADR-0172 (no autonomous tool calls, no inbound channels, computer use not provisioned).
+Gemini research G10-G15 delivered, Codex review requested changes, owner reassigned repairs to Codex; Claude validation pending.
+
+**2026-10-03 (night) - AER-050..055 intake UX built (ADR-0171); CI flakes from the router upgrade fixed.** Server-side drafts
+(one per user/scope, never browser storage), leave guard, Idempotency-Key on use-case create (window = 30-day draft life),
+kept edits on re-draft, framework rationales saved and shown, "Not sure" answers (count as yes, shown to reviewers), Review shows
+the proposal itself, unknown lifecycle detail never read as "no conditions". Migration 0134. Two builders + wiring pass + an
+independent review (4 findings fixed before merge, incl. a real-journey break). Also: CI Playwright annotations (logs unreachable
+here), phase1 workflow-detail wait under React Router 7, and CardBoundary so one malformed response cannot blank the home page.
+Full gate green: suite 3440, prepare 18/18, real 2/2, mocked 109/109, spa 39/39, review 4/4. AER-050..055 marked reported
+implemented pending codex-confirm; demo script gained an optional talking point (Not sure / drafts), click path unchanged.
+
+**2026-10-03 (late evening) - Dependabot advisories cleared; stronger light-mode colour.** react-router-dom 7.18.4, vitest 4.1.11
+(every package now `vitest run --dir src`: v4 stopped excluding dist/), overrides for uuid (Azure SDK) and esbuild (drizzle-kit);
+`pnpm audit` clean. One order-dependent test fixed (rule-write-versioning, red/green with a planted leftover). ADR-0169 amended:
+pastel edge glows, muted/link inks one notch deeper (worst point 4.99:1). Full gate green on the combined tree (suite 3426,
+prepare 18/18, real 2/2, mocked 88/88, spa 39/39, review 4/4, brand-contract 15/15); pushed dd5a481 (merged the owner's
+feedback-file audit e96b654, which opens AER-050..055 — intake UX, all MEDIUM).
+
+**2026-10-03 (evening) - Owner-requested adversarial security review of the governance flow; ADR-0170 decided and built.**
+Three reviewers (authz, tenant isolation, lifecycle/gates). Tenant isolation N/A by design (ADR-0041). ADR-0170 records the
+separation-of-duties and lifecycle fixes (distinct decider per review, live role membership, maker-checker on before-go-live
+conditions, edit lock under review, no silent screening downgrade, migration 0133 lifetime backfill + runtime expiry, steward
+tightens-only, plus a routing bypass closed: a request for a suspended agent down-routed to an active one is refused).
+Built on three file-disjoint branches, integrated on `wt-sec-int`, full gate green (suite 3426 passed / 9 skipped,
+demo:prepare 18/18, real journeys 2/2, mocked 88/88, phase1+2 39/39, approval-review 4/4), pushed 68c47e6.
+Remaining limits in ADR-0170 (orchestration re-plan lifecycle check, suspension-reason edits, review-record CAS).
+
+**2026-10-03 (afternoon) - ADR-0168 amendment built (review policy, resubmission, recertification, agent stewardship), AER-049 closed, ADR-0169 shaded theme.**
+On the integration branch `wt-g2-int` (from `dhruv/active` d9abbe2; tip f49abb2; full gate green (suite 3401, demo:prepare 18/18, real journeys 2/2, mocked 86/86, phase1+2 39/39); pushed as d005957). The owner moved ADR-0168 items 7-8 before the demo and decided AER-049. Built: a review policy (migration
+0131; one or more role reviews per tier, any member decides, the proposer never; risk acceptors; `acceptRisks` on
+approve; resubmission with every Classify answer stored; the `use-case-recertification` sweep + admin endpoint);
+agent stewardship (migration 0132; steward = the owner column, successor, lifecycle incl. `suspended` → 409
+`agent_suspended`, prohibited counts as high for the 6-month cadence; seed leaves grok Orphaned with successor
+Dana); AER-049 (effect records per round, archived to `effects:history`; a new round opens a `-r<round>` branch and
+a NEW PR and ships again; merge refuses an earlier round's PR; the kernel `reopen` targets only a review at or
+before the first PR/merge/deploy stage; two adversarial reviews, should-fixes fixed in a1b679e); ADR-0169 shaded
+theme and auto-hiding rail (worst-point muted contrast 4.81:1 light / 5.47:1 dark). Reported: gateway 3401,
+kernel 50/50, web 156/156, mocked 86/86, new real-gateway `demo-review-policy.spec.ts` green with the Monday
+journey. Docs: ADR-0168/0169 implementation sections, demo script optional beat 2B+, AER-049 CLOSED for Codex
+to confirm (OPEN now AER-014/016). Limits in ADR-0168. Pushed to `dhruv/active` after the full gate on the integrated tree (wt-g2-int) green: suite 3401 passed / 9 skipped, demo:prepare 18/18, real journeys 2/2 (Monday demo + review-policy), mocked UI 86/86, phase1+phase2 39/39 after one test-locator fix, approval-review 4/4.
+
+**2026-10-03 (day) - Codex batch closed, calm UI pass, ADR-0168 governance flow shipped for the demo, AER-048 fixed.**
+All on `dhruv/active` (local merge tip `7a40d77`; demo Monday 2026-10-05 11:00 UTC). The Codex
+batch (AER-003/006/009/010/011/015/018/026/029/030/033/034/035/037, F01, F08, HANDOFF) was
+integrated at 5ee205c, Kong rows verified by Integrations run 37110038871 (47/47); AER-044..047
+followed (ec68ebc..89061ee, docs bbbeb61), and Codex's 07:02 run confirmed AER-044, 045 and 047
+RESOLVED/DONE at dbbb642 (AER-029 and 046 stayed PARTIAL: CI never executed their browser
+tests). The calm UI pass (8e1d83f..04a9100: one primary per view, graphite tones, sentence case,
+plain KPI strips) is integrated. ADR-0168 (dbbb642) items 1-6 shipped (048f557..c981eab, gateway
+merge a1d5937 with migration 0129, tip 40f7f2c): one entry point — the full-page "Register AI
+use case" wizard with a similar-use-cases rail, the Propose form and questionnaire drawer
+deleted; the "AI registry"; a use-case record with header band, lifecycle tracker and
+conditions; a review panel with Approve / Approve with conditions (before-go-live blocks the
+deploy gate as `open_blocking_condition`) / Send back (`needs_info`, kernel `approval_returned`) /
+Reject; `approvedUntil` (6 months high/unscreened/prohibited, 12 minimal/limited) refused at the
+deploy gate as `approval_expired`. Gate: gateway 3356, demo:prepare 18/18, real journey (Avery
+approves with a before-go-live condition), mocked 54/54, approval-review 4/4; CI 37125215948 at
+40f7f2c green, now including a "Mocked UI suite" step (6da2627) that executes the AER-029/046
+browser tests. AER-048 (HIGH) is fixed and merged at 7a40d77 (migration 0130: `round` /
+`stage_entry`; locked compare-and-set executor completion; round-bound check reports that fail
+closed for CI; `workflow-check-round` 10/10; two adversarial reviews, the second "ship"; full gate
+on 7a40d77 green: suite 3367, demo:prepare 18/18, real journey, mocked 54/54, phase1+2 39/39,
+approval-review 4/4; ADR-0167 amendment). New owner decision AER-049: effect records survive a re-open, so a re-open past
+merge/deploy can complete on v1's merge/deploy (PENDING; recommendation: scope them per round).
+ADR-0168 limits: no in-UI resubmission for `needs_info`, no expiry sweep, role/team-routed
+reviewers cannot read the use case, items 7-8 deferred. Mistakes M-066, M-067. Still open:
+AER-014/016 and the standing owner items, P23 LICENSE/SECURITY.md.
+
 **2026-10-03 (overnight) - Full product review closed out: security, reliability, deps, UI; Codex backlog cut.**
+**Merged to `main`:** PR #114 (294 commits) merged at b4348d1 on 2026-10-03 after CI went green on
+2d288fd; `dhruv/active` continues from the merge commit under draft PR #117.
 The owner's full review (150 findings over 9 areas; 111 confirmed, 33 downgraded, 6 refuted,
 `docs/reviews/2026-10-02-full-review.md`) is now actioned. Security 16 fixed (ADR-0167),
 reliability 19, dependency HIGHs 32 → 0, and the UI work landed in two adversarially reviewed
@@ -3742,8 +3880,12 @@ orchestration depth, pillar 3 infra-ops.
 `blocked_on_check` state (kernel: `check_failed`/`recheck` events + surfacing effect, guarded)
 instead of advancing; a remediate-then-recheck loop resumes it. The gateway check executor resolves
 each named check from reported results (`POST .../checks` — a real CI posts them, seed/tests too),
-falling back to the deterministic auto-pass when none are reported (existing templates byte-
-identical); a failure is audited `workflow:check_failed`. `POST .../recheck` re-runs a parked stage.
+~~falling back to the deterministic auto-pass when none are reported (existing templates byte-
+identical)~~ **[corrected 2026-10-03, AER-047: no longer true — an unreported check is now
+`pending` and the instance waits at `awaiting_execution`; auto-pass survives only as the typed,
+labelled `offlineAutoPass` stage opt-in, honoured only with `REGULAIT_OFFLINE_CHECKS=1` declared
+on a box with no deployed signal; see the ADR-0167 amendment (AER-047)]**; a failure is audited
+`workflow:check_failed`. `POST .../recheck` re-runs a parked stage.
 The /app workflow detail surfaces the block, per-check severity, "mark passing", and "Re-run checks".
 No migration (free-text status; results in JSONB context). Gateway 318 → 322, kernel 26 → 29. This
 is the failure primitive the conditional deploy + post-deploy rollback stages (next slice) build on.

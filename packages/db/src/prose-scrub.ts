@@ -103,6 +103,12 @@ export const PROSE_SCRUB: (text: string) => string = scrubAuditText;
 const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   // --- the S5 reproduction itself ---
   [s.mcpServers, ["admissionClearReason"]],
+  // ADR-0175 — the same kind of admin override, for a held builder skill and
+  // for the release-age cooldown: free prose typed beside a review decision
+  [s.builderSkills, ["admitReason"]],
+  [s.releaseOverrides, ["reason"]],
+  // ADR-0175 A15 — the admin's note on where an energy factor came from
+  [s.energyFactors, ["sourceNote"]],
   // --- governance decisions and overrides (pillar 1) ---
   [s.approvals, ["decisionReason"]],
   [s.approvalDelegations, ["reason"]],
@@ -184,6 +190,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   // ADR-0157 / ADR-0159 — an alert acknowledgement is operator prose; a
   // remediation's rationale embeds risk and agent titles a person typed.
   [s.governanceAlerts, ["ackNote"]],
+  // ADR-0168 — a condition-met note is operator prose.
+  [s.useCaseConditions, ["note"]],
   [s.remediationProposals, ["rationale"]],
   // --- machine-written free text that quotes an error, and ADR-0111's
   //     EXPORTED OBSERVABILITY COPY ---

@@ -226,3 +226,173 @@ Docker-shaped rebuild (tracked files only, `.dockerignore` applied by hand, froz
   red before the fix was restored byte-for-byte; the rotated-bearer, credential-derived-host,
   list-scoping, parser-error, envelope, dev-secrets, browser-binding, self-report, pool and
   logging proofs all have one.
+
+**Amendment 2026-10-03 (REL-01 widened, AER-035/037).** REL-01 guarded only IDLE pooled clients; a backend
+dying under a CHECKED-OUT client was still an unhandled `error` that crashed the serving process. `createDb`
+now attaches a per-connection `error` listener on `connect` that speaks only while the client is checked out
+(tracked through the pool's `acquire`/`release`), so an idle drop logs exactly one line, the idle one
+(`e5982a2`, `f3b4211`; process-lifecycle test "a CHECKED-OUT connection dying is logged, not fatal"). The MCP
+health-probe claim is now serialized by `pg_advisory_xact_lock(6_000_000_037)` in a short transaction before
+its `FOR UPDATE SKIP LOCKED … RETURNING` claim — `skip locked` alone let a claim whose snapshot predated
+another claim's commit re-claim its rows (`79b0d3d`). Advisory-lock keys in use: 6_000_000_037 (health-probe
+claim), 6_000_000_060 (audit chain).
+
+## Amendment 2026-10-03 — a check nobody reported is pending, never passed (AER-047, PENDING L1)
+
+**Why here.** §6 (AUTHZ-06) made a *self-reported* check result stamped, reasoned, audited and
+badged. It said nothing about *absence*, and absence was the bigger hole: the check executor
+(`apps/gateway/src/workflows.ts`) fell back to a deterministic offline auto-pass whenever a named
+check had neither an eval outcome nor a reported result, and `workflow-checks.test.ts` pinned that
+as the contract. A merge gate approved before CI posted advanced with every check "passed"; a
+`failed` security scan posted afterwards was refused as late. Same rule as the rest of this ADR —
+the stage now reports the thing the caller cannot choose: what was actually reported. Codex raised
+it as AER-047 (HIGH); the owner's recorded recommendation (b) in PENDING L1 is what shipped. This
+supersedes the 2026-07-28 "workflow depth" behaviour recorded in `STATE.md` ("falling back to the
+deterministic auto-pass when none are reported").
+
+**1. The default is pending** (`6477266`). A named check with no eval outcome and no report is
+`pending`. A reported failure still blocks at once (`check_failed` → `blocked_on_check`) even while
+other checks are missing. Otherwise any pending check leaves the instance at
+**`awaiting_execution` on that check stage**, claim released, and writes a
+`workflow:checks-awaiting-report` audit row naming `missingChecks`. A retried `/advance` (the
+lost-callback or timeout case) re-evaluates and waits again; the kernel refuses a `human_trigger`
+on a stage with named checks ("runs named checks and cannot be human-triggered").
+*Why `awaiting_execution` and not `blocked_on_check`:* `POST .../checks` already re-evaluates a
+stage that is `awaiting_execution`, so CI's next report picks it up with no human step;
+`blocked_on_check` means a check *failed* and needs a manual recheck, which would both misdescribe
+silence and add a click to the normal CI path.
+
+**2. The only way back to auto-pass is a typed, fail-closed opt-in.**
+- `offlineAutoPass: boolean` on an `automated_check` stage (`f734abd`, `packages/workflow-kernel`),
+  refused on any other stage type and on a check stage with no named checks; a non-boolean is
+  rejected, not coerced. (The stage schema used to strip the key silently.) No migration —
+  templates are stored JSON.
+- It is honoured only when the process **positively declares** `REGULAIT_OFFLINE_CHECKS=1`
+  (exactly `1`) **and** shows no deployed signal — §5's `networkFacingSignal`,
+  `REGULAIT_DEPLOY_MODE` or `REGULAIT_HSTS` set (`offlineAutoPassRefusal`, `6079d47`). The first
+  cut honoured it whenever no deployed signal was present; review showed that fails open, because a
+  bare `docker compose --profile tls up` on a public host sets neither signal (§5 says the same).
+  Absence of a signal never grants the opt-in; it only narrows it. A refused opt-in leaves the
+  checks pending and the `checks-awaiting-report` row carries `offlineAutoPassRefused`,
+  `refusedBecause` and, when that is the reason, `deployedSignal`.
+- The demo declares it explicitly: the seeded `complete-pipeline` and `deploy-verify-pipeline`
+  check stages set `offlineAutoPass: true`; `seed.ts` sets `REGULAIT_OFFLINE_CHECKS ??= "1"` for
+  its own in-process app only (an explicit `0` is respected); the presenter's gateway exports it
+  per DEMO_SCRIPT §0 and DEMO_RUNBOOK §1 (`d9b01fc`). Gallery and admin-starter templates get the
+  pending default.
+
+**3. Labelled and audited wherever surfaced.** Each auto-passed result carries `autoPassed: true`
+and the detail "auto-passed — no report (offline mode)", and gets a `workflow:checks-auto-passed`
+audit row. The workflow rail shows an "auto-passed · no report" badge; the Inbox merge-gate view
+colours auto-passed and pending checks as warnings, never CI's green, and says how many checks had
+no reported result; a stage waiting at `awaiting_execution` names the missing checks instead of
+claiming a run is in flight (`2542ae2`).
+
+**4. Results belong to their round** (`6079d47`). When a resubmitted artifact re-opens the flow,
+the `reported:`, `checks:`, `evals:` and `awaitingReport:` context keys of every downstream
+`automated_check` stage are cleared in the same locked transaction, and the
+`workflow:artifact_submitted` row lists `staleCheckResultsCleared` — a re-run check stage never
+reuses the previous round's green. Reports posted before the stage runs are still accepted within
+a round (the seed and suites rely on it).
+
+**5. Evals.** Eval-bound checks run once per stage entry and the outcome is reused while the stage
+waits; a recheck from `blocked_on_check` and a re-open re-run them; a failing eval still blocks at
+once. An eval-bound check that produces no outcome is `failed` — a gate that could not run does not
+pass (ADR-0044) — and is never auto-passed, even under the opt-in. One `checks-awaiting-report`
+row is written per distinct waiting state (missing set plus refusal reason), not per
+re-evaluation.
+
+**Evidence.** `workflow-checks.test.ts` 13 (no-report wait with one row after two retries, partial
+report, explicit pass, explicit fail under and without the opt-in, never-declared, `DEPLOY_MODE`
+and `HSTS` refusals, re-open), `eval-harness.test.ts` 23 (incl. eval reuse while waiting), kernel
+45 (4 new), `seed.test.ts` 8; 45 workflow-related gateway files 657/657 on a fresh database.
+Negative controls: `workflows.ts` reverted fails 13 of 36 across workflow-checks and eval-harness;
+removing the declaration requirement, the re-open clearing, the waiting-row dedupe, the eval
+reuse, the kernel `human_trigger` guard or the seed's declaration each turns a named test red.
+`e137fdf` makes the opt-in tests clear `REGULAIT_OFFLINE_CHECKS` up front, so the suite also
+passes from the demo terminal that exports it.
+
+**Honest limits.**
+- No wall-clock timeout: a missing report stays pending indefinitely.
+- The seed declares `REGULAIT_OFFLINE_CHECKS` for its own in-process app, and the container runs
+  `seed.js` first when `SEED_DEMO=1` (the compose default). On a bare `docker compose` deploy the
+  seeded demo `deploy-verify` instances are therefore auto-passed, labelled — demo fixtures and
+  mock providers only; the serving gateway still refuses every template's opt-in unless declared.
+- Narrow race, plausible, not reproduced: the check executor holds the context in memory across
+  eval calls and writes it back unlocked, so a resubmission that re-opens the flow during a
+  running eval could restore stale round-1 check keys (the same lost-update shape can drop a
+  concurrent `POST .../checks` report).
+- A previous-round CI report that arrives after a re-open counts for the new round; the report
+  API carries no artifact version.
+- Pre-existing, outside AER-047: a re-open does not drop the build stage's `runId`, so a
+  re-entered build replays v1's nested run — the checks are bound to the round, the build they
+  gate is not.
+
+## Amendment 2026-10-03 — a check result belongs to the round it was produced in (AER-048)
+
+**Why here.** The AER-047 amendment's honest limits named two holes it did not close: the check
+executor held the instance context in memory across eval calls and wrote it back unlocked (a
+concurrent `POST .../checks` report could be dropped, and a re-open during a running eval could be
+rolled back to round-1 check keys), and a previous-round CI report that arrived after a re-open
+counted for the new round. Codex raised the first as AER-048 (HIGH, direct source observation at
+`dbbb642`). Same rule as the rest of this ADR: the stage commits only what the database says is
+still current, not what the executor remembers. Fixed on `wt-aer48`, merged at `7a40d77`.
+
+**1. Two durable tokens** (`a0f0d85`, migration 0130). `workflow_instances.round` is bumped on every
+re-open (an artifact resubmitted after its stage completed; a sign-off returned via the kernel event
+`approval_returned`, ADR-0168). `workflow_instances.stage_entry` is bumped on every entry into an
+executable stage — including a recheck — and on every re-open. They are columns, not context keys,
+so no context write, stale or otherwise, can roll a token back. Existing instances start at 0.
+
+**2. Executor completion is a locked compare-and-set** (`be1f3d9`). The executor captures the
+stage entry with its claim; completion goes through `commitStageResult`, which re-reads the row
+`FOR UPDATE` and commits only if the stage entry, the stage, `awaiting_execution` and its own claim
+id are all still current, merging only the context keys the executor itself changed. Otherwise the
+result is discarded and audited `workflow:executor-result-discarded`; effect records the discarded
+run produced are salvaged under the same lock and their values are carried in the audit detail
+(`26bfb09`). The stage span is written after the commit. Nested-run completion has the same
+precondition, and a re-open clears `runId:<stage>` for build stages after the re-opened one, so a
+run planned in an old round never satisfies the new one (closing the AER-047 "pre-existing"
+limit). Every workflow external provider write is its own `external-effect:<operation>` audit
+row. The reclassification reapply path takes the same instance row lock (`f54f0a0`).
+
+**3. Reports bind to the round, and fail closed** (`be1f3d9`, `26bfb09`). `POST .../checks` takes
+a `round`. A key-authenticated caller (API key, virtual key, bootstrap — i.e. CI) that omits it is
+refused `422 round_required`, unless the org setting `checkReportsAllowUnbound` is on (default
+false, admin-only, its change audited). A session-authenticated caller (a person in the console)
+may omit it and binds to the round current when the report is applied. A report naming any other
+round is `409 stale_check_report`, audited `workflow:checks-report-stale-round`. A report that
+lands while another executor holds the claim is stored and answered `202
+deferred_to_running_executor`; the claim holder re-evaluates once if reports changed during its
+run and it did not commit. The PR body carries `regulait-instance:` and `regulait-round:` lines
+naming the round the PR was opened in (see the limits: it goes stale after a re-open). *Fail closed was the dispatcher's choice over "omitted means
+current"*: an unbound CI report is exactly the stale-round case this amendment exists to stop.
+
+**Evidence.** `workflow-check-round.test.ts` 10/10: (1) a report posted while the executor is
+mid-eval is retained and decides the verdict; (2) a re-open during the eval can neither restore
+the cleared keys nor advance the instance; (3) a previous-round report is 409 and audited, the
+current round (explicit or, from a session, omitted) is accepted; (3b) a CI report naming no round
+is 422 unless the org opts out; (4) a lapsed executor's late result is discarded — the kernel
+outcome is applied once and the context is not rolled back; a no-race control; (5)/(6) a
+discarded deploy/merge keeps its effect record; (7) an executor that throws after a report arrived
+re-evaluates once; (8) a re-open clears a later build's `runId`. A negative control per fix. Full
+suite 3367 passed on the implementer's run, and the dispatcher's full gate on the merged tree (`7a40d77`) then passed: fresh-database suite 3367 passed / 9 skipped, demo:prepare 18/18, real demo journey 1/1, mocked UI suite 54/54, phase1+phase2 journeys 39/39, approval-review 4/4, fallback deck built. Two independent adversarial reviews: round 1 fix-first (8 findings, fixed in
+`f54f0a0` and `26bfb09`), round 2 ship.
+
+**Honest limits.**
+- Round tokens make the stage's kernel outcome apply once and keep the context from rolling back;
+  they cannot un-perform an external effect a lapsed executor makes after a TTL re-take — that
+  effect may be repeated, visibly, as a second `external-effect:*` row (pre-existing).
+- **AER-049 (owner decision, PENDING):** effect records (`deploy:<stage>`, `mergeSha`, `prId`,
+  `branch`) survive a re-open, so after a re-open past merge or deploy the new round re-runs the
+  build but skips merge and deploy, and the instance can complete as merged/deployed when only v1
+  shipped. Tests (5) and (6) currently assert that skip.
+- The echoed `currentRound` is a plain integer, so a naive CI can resend it and pass the binding;
+  an opaque per-round token would stop that.
+- The PR body's `regulait-round:` goes stale after a re-open; CI should `GET` the instance's
+  `round` at run start rather than trust the PR body.
+- A live old-round nested run is not aborted on re-open (its completion is refused, its work is
+  not stopped).
+- A hard crash after a `202 deferred_to_running_executor` still waits out the claim TTL before the
+  stage is re-taken.
+- An `applyEvent` precondition-write hazard was noted in review; safe with today's callers.

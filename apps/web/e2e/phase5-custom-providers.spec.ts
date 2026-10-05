@@ -331,7 +331,7 @@ test.describe("ADR-0034 custom LLM providers — the admin surface", () => {
     await page.getByLabel("Filter navigation").fill("Agents");
     await page.getByRole("link", { name: "Agents", exact: true }).click();
     await expect(page.getByRole("heading", { name: "Agents", exact: true })).toBeVisible();
-    await page.getByTestId("agent-provider").selectOption("custom");
+    await page.getByTestId("agent-provider").getByRole("radio", { name: "Custom endpoint" }).check(); // ADR-0172 provider tiles
     const endpoints = page.getByTestId("agent-custom-endpoint");
     await expect(endpoints).toBeVisible();
     await expect(endpoints.locator("option")).toHaveCount(1); // the placeholder only
@@ -369,7 +369,7 @@ test.describe("ADR-0034 custom LLM providers — the admin surface", () => {
     // now — and only now — it can be bound to an agent
     await page.getByLabel("Filter navigation").fill("Agents");
     await page.getByRole("link", { name: "Agents", exact: true }).click();
-    await page.getByTestId("agent-provider").selectOption("custom");
+    await page.getByTestId("agent-provider").getByRole("radio", { name: "Custom endpoint" }).check(); // ADR-0172 provider tiles
     const endpoints = page.getByTestId("agent-custom-endpoint");
     await expect(endpoints.locator("option")).toHaveCount(2);
     await expect(endpoints.locator("option").nth(1)).toContainText(PROVIDER);
@@ -391,8 +391,11 @@ test.describe("ADR-0034 custom LLM providers — the admin surface", () => {
     expect(body.costPerMTokIn).toBeUndefined();
     expect(body.costPerMTokOut).toBeUndefined();
 
-    await expect(page.getByRole("row", { name: /e2e-local-agent/ })).toContainText(`custom · ${PROVIDER}`);
-    await expect(page.getByRole("row", { name: /e2e-local-agent/ })).toContainText("unpriced");
+    // scoped to the Catalog card: the stewardship table above lists the same agent
+    const catalog = page.locator("section[data-rg-card]").filter({ has: page.getByText("Catalog", { exact: true }) });
+    const row = catalog.getByRole("row", { name: /e2e-local-agent/ });
+    await expect(row).toContainText(`custom · ${PROVIDER}`);
+    await expect(row).toContainText("unpriced");
     await shot(page, "phase5-10-agent-bound-to-custom-endpoint");
 
     track.assertClean("test, enable, bind");

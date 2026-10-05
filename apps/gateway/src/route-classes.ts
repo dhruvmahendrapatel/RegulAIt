@@ -35,6 +35,14 @@ export const AUTH_EXEMPT_ROUTES = new Set([
   // id is then mapped to a real human and the ONE decide path re-checks
   // entitlement server-side.
   "/v1/chatops/:connectionName/interactions",
+  // ADR-0173 §2 — inbound conversations to builder agents (Slack Events API,
+  // Teams outgoing webhook). Same posture as the interaction callback: the
+  // platform holds no RegulAIt credential, so the route authenticates IN-ROUTE
+  // on the workspace signing secret over the raw body (+ a replay guard)
+  // before anything else, and the sender then becomes a person only through
+  // an admin-made identity link; the turn runs as that person.
+  "/v1/chatops/:connectionName/events",
+  "/v1/chatops/:connectionName/messages",
   // /admin and /app are 302s to /ui (ADR-0026 phase-2 swap) — a browser
   // hits a bookmark before it has any credential, so the redirect itself
   // must not require one. The legacy shells they used to serve are GONE
@@ -50,6 +58,13 @@ export const AUTH_EXEMPT_ROUTES = new Set([
   "/auth/oidc/providers",
   "/auth/oidc/:providerId/start",
   "/auth/oidc/callback",
+  // ADR-0174 — the sign-in page's options (no configuration, no secrets), the
+  // broker-hinted start, and the link proof (authenticated in-route by the
+  // browser-bound proof cookie plus the account's own password/TOTP).
+  "/auth/sign-in-options",
+  "/auth/oidc/:providerId/login",
+  "/auth/link/pending",
+  "/auth/link/confirm",
   // ADR-0036 — the SAML twin. The provider list and /start are pre-credential
   // by definition; the ACS is called by the IdP (or by the user's browser
   // carrying the IdP's POST), which likewise holds no RegulAIt credential —
@@ -95,6 +110,54 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /v1/users/:userId/servers/:serverId/tools",
   "POST /mcp/:serverId",
   "POST /v1/agents/:agentId/invoke",
+  // ADR-0168 amendment item 6 — agent stewardship. The gate is "an admin OR
+  // this agent's CURRENT steward", checked inside the handler (403
+  // not_agent_steward for anyone else): a steward who is not an admin must be
+  // able to hand the agent over, name a successor and record its review.
+  "PATCH /v1/agents/:agentId/stewardship",
+  "POST /v1/agents/:agentId/stewardship/review",
+  // ADR-0172 — the agent builder. Every route is a signed-in person's own
+  // workspace: visibility (owner / workspace / named people / admin) and edit
+  // (owner or admin) are checked in-handler, an identity-less token is refused
+  // (403 builder_requires_identity), tools are bounded by the EDITOR's own
+  // grants, and chat dispatches through the governed core as the caller. The
+  // manual schedule sweep (`POST /v1/builder/schedules/sweep`) is deliberately
+  // NOT here: running every due schedule is an operator act.
+  "GET /v1/builder/agents",
+  "POST /v1/builder/agents",
+  "POST /v1/builder/agents/import",
+  "GET /v1/builder/agents/:id",
+  "PATCH /v1/builder/agents/:id",
+  "DELETE /v1/builder/agents/:id",
+  "PUT /v1/builder/agents/:id/tools",
+  "PUT /v1/builder/agents/:id/subagents",
+  "PUT /v1/builder/agents/:id/skills",
+  "POST /v1/builder/agents/:id/skills/:skillId/reattach",
+  "POST /v1/builder/agents/:id/memory",
+  "DELETE /v1/builder/agents/:id/memory/:memoryId",
+  "POST /v1/builder/agents/:id/schedules",
+  "PATCH /v1/builder/agents/:id/schedules/:scheduleId",
+  "DELETE /v1/builder/agents/:id/schedules/:scheduleId",
+  "POST /v1/builder/agents/:id/channels",
+  "DELETE /v1/builder/agents/:id/channels/:channelId",
+  "GET /v1/builder/agents/:id/export",
+  "POST /v1/builder/agents/:id/chat",
+  "GET /v1/builder/threads",
+  "GET /v1/builder/threads/:id",
+  "PATCH /v1/builder/threads/:id",
+  "POST /v1/builder/threads/:id/steps/:stepId/confirm",
+  "POST /v1/builder/threads/:id/steps/:stepId/cancel",
+  "GET /v1/builder/skills",
+  "POST /v1/builder/skills",
+  "POST /v1/builder/skills/import",
+  "GET /v1/builder/skills/:id",
+  "PATCH /v1/builder/skills/:id",
+  "DELETE /v1/builder/skills/:id",
+  "GET /v1/builder/templates",
+  "GET /v1/builder/templates/:id",
+  "GET /v1/builder/integrations",
+  "GET /v1/builder/toolbox-options",
+  "GET /v1/builder/usage",
   // ADR-0065 — creating a training job. Its gate is the caller's OWN
   // entitlement to the base agent the customisation is anchored to, checked
   // inside the handler by the same `evaluateAgent` path an invoke takes: a
@@ -162,7 +225,25 @@ export const NON_ADMIN_ROUTES = new Set([
   // deployment is halted" is a far better answer than a silent denial that
   // looks like lost access. It exposes no secret and no other user's data.
   "GET /v1/execution",
+  // ADR-0173 §3 — the model allow-list as it applies to the caller: the model
+  // picker shows "Not allowed here" from it. Non-admins see binding ids only
+  // for bindings they hold a grant on. The PUT stays admin-only.
+  "GET /v1/model-policy",
   "PATCH /v1/use-cases/:useCaseId",
+  // ADR-0171 / AER-050: the intake wizard's own drafts. Any signed-in user
+  // keeps their OWN draft (the handler refuses a token with no user identity,
+  // never reads another user's draft, and allows a use-case scope only to
+  // someone who may edit that use case — owner or admin).
+  "GET /v1/use-cases/draft",
+  "PUT /v1/use-cases/draft",
+  "DELETE /v1/use-cases/draft",
+  // ADR-0168: a condition's OWNER may mark it met without being an admin or
+  // the use case's owner — the handler enforces owner / use-case owner / admin
+  "POST /v1/use-cases/:useCaseId/conditions/:conditionId/met",
+  // ADR-0168 amendment: any signed-in user may READ the review policy — a
+  // reviewer needs to know which roles they hold. Editing it (PUT) and the
+  // recertification sweep stay admin through the default gate.
+  "GET /v1/governance/review-policy",
   // ADR-0081 — the AI risk register, the same shape as the use-case routes
   // above: naming a risk is a front-door act, and list/detail/edit/transition
   // are owner-or-admin INSIDE the handler. Conspicuously NOT here: the ACCEPT
@@ -384,6 +465,11 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /auth/oidc/providers",
   "GET /auth/oidc/:providerId/start",
   "GET /auth/oidc/callback",
+  // ADR-0174 — pre-credential by definition, like the three above
+  "GET /auth/sign-in-options",
+  "GET /auth/oidc/:providerId/login",
+  "GET /auth/link/pending",
+  "POST /auth/link/confirm",
   // ADR-0036 — the SAML twin of the three above. Auth-exempt AND non-admin:
   // a browser at the login screen has no credential, and the IdP posting an
   // assertion to the ACS has no RegulAIt identity at all — the assertion is
@@ -420,6 +506,10 @@ export const NON_ADMIN_ROUTES = new Set([
   // and cannot be, the gate here. The gate that applies is the signature check
   // plus the identity mapping plus the one decide path.
   "POST /v1/chatops/:connectionName/interactions",
+  // ADR-0173 §2 — see the AUTH_EXEMPT note: signature + identity link, not
+  // admin-ness, is the gate on the two inbound conversation routes
+  "POST /v1/chatops/:connectionName/events",
+  "POST /v1/chatops/:connectionName/messages",
 ]);
 
 /**

@@ -9,7 +9,14 @@ credential it mints is printed once and dies with the database.
 ## 1. Stand it up (about three minutes)
 
 Four terminals, in this order. Steps 2–4 all need the same `DATABASE_URL`,
-`REGULAIT_BOOTSTRAP_TOKEN` and `REGULAIT_DATA_KEY`.
+`REGULAIT_BOOTSTRAP_TOKEN` and `REGULAIT_DATA_KEY`. The gateway (step 5) also needs
+`REGULAIT_OFFLINE_CHECKS=1`: there is no CI in the demo, and since AER-047 a workflow check nobody
+reports waits for a report unless the gateway declares offline mode — the seeded pipeline templates
+then auto-pass their checks, labelled "auto-passed · no report". A database seeded before
+2026-10-03 predates that opt-in and must be recreated.
+
+**Whole stack in Docker, no pnpm?** §1.3 does steps 1–5 below (and `demo:intake`, `demo:traffic`,
+`demo:check`, the export key) inside the containers with one `.env` switch.
 
 **No docker on the demo box?** Skip to §1.1 and come back. Everything from §3 onwards is
 identical — the only thing you lose is the WORM anchor, and §2 says exactly what that costs.
@@ -30,9 +37,18 @@ pnpm --filter @regulait/gateway demo:mcp
 #     the NIST and EU packs, and creates the use case (d) is about.
 pnpm --filter @regulait/gateway demo:setup
 
+# (4b) OPTIONAL (ADR-0174) — one password you chose for Ada, Dana and Avery instead of the
+#     one-time passwords from (2). Read from the environment or a 0600 secret file, checked
+#     against the password policy, never printed, audited without the password. Runs only
+#     AFTER (4): it requires the ephemeral demo licence (4) installs, and refuses with no
+#     licence, an expired one, or a customer licence. (demo:prepare runs (4) for you.)
+#     Whole stack in docker instead? See §1.3 (REGULAIT_DEMO_LICENSE=1).
+read -rs REGULAIT_DEMO_USER_PASSWORD && export REGULAIT_DEMO_USER_PASSWORD
+pnpm --filter @regulait/gateway demo:set-passwords && unset REGULAIT_DEMO_USER_PASSWORD
+
 # (5) The gateway itself. HOST=127.0.0.1 binds loopback only — a laptop on a shared
 #     network must not expose the plaintext gateway and its bootstrap token (DEMO-01).
-HOST=127.0.0.1 pnpm --filter @regulait/gateway start
+HOST=127.0.0.1 REGULAIT_OFFLINE_CHECKS=1 pnpm --filter @regulait/gateway start
 ```
 
 ### 1.1 Without docker — a native Postgres path
@@ -68,6 +84,7 @@ export DATABASE_URL="postgres://regulait:regulait@127.0.0.1:5432/regulait"
 export REGULAIT_BOOTSTRAP_TOKEN="dev-bootstrap"
 export REGULAIT_DATA_KEY="<the value you just minted>"
 export REGULAIT_SCHEDULER=on
+export REGULAIT_OFFLINE_CHECKS=1
 ```
 
 Do **not** put `$(openssl rand -hex 32)` in each terminal's export — that mints a different key
@@ -117,6 +134,68 @@ the only refusal in the run that is not one you meant to show.
 Any *other* non-`200` on that second dispatch is a real problem: **do not present until it is
 green**, because every refusal you then demo will name the first unmet gate rather than the one you
 were aiming at.
+
+### 1.3 Everything in Docker — the whole demo, prepared, in one switch (ADR-0174 amendment)
+
+When the whole stack runs under `docker compose` (no pnpm on the box), one switch gives you the
+**same prepared demo as §1 / `demo:prepare`**, with nothing else to run but the password step:
+
+1. In the `.env` next to `docker-compose.yml`, add `REGULAIT_DEMO_LICENSE=1`. Only the exact value
+   `1` does anything (a Windows CRLF line ending is fine).
+2. `docker compose up -d --build --wait` on an empty stack (first time, or after `down -v`). The
+   gateway container then does, in order, and prints each step to `docker compose logs gateway`:
+   - **export-signing key** for the signed export (beat 3E): made once in the `demo_license_keys`
+     volume (`/app/demo-license-keys/export-signing`) and reused; the log shows its path and
+     **fingerprint** (what you hand an auditor for `verify-export-bundle.sh --fingerprint`), never
+     the key;
+   - **demo MCP server** (§1 step 3) in the background inside the container, on 127.0.0.1 and
+     127.0.0.2 port 8931, for the life of the container;
+   - **seed** — mints (or keeps) the 30-day ephemeral licence that says "NOT A PRODUCTION
+     DEPLOYMENT"; only its public key is written, to the same volume;
+   - **demo:setup → demo:intake → demo:traffic → demo:check** — packs installed and activated,
+     use cases, hardening, governed traffic and alerts, then the dry run. The log ends the prep
+     with `18 pass, 0 warn, 0 fail` and `demo prep: complete in …s`;
+   - the **gateway**, with `REGULAIT_OFFLINE_CHECKS=1` and the export key set (as §1 step 5).
+
+   `--wait` returns once the gateway answers its health check, i.e. after the prep (about
+   30–60 s on a laptop; the first build takes longer). Check it with
+   `docker compose logs gateway | grep -E "demo prep|pass, "` (PowerShell:
+   `docker compose logs gateway | Select-String "demo prep|pass, "`).
+3. Set the password with the bash or PowerShell commands in the README ("Demo with your own
+   password (Docker)"). The value goes from your shell into one `docker compose exec` process via
+   `-e REGULAIT_DEMO_USER_PASSWORD`. It is never on a command line or in a file.
+4. Sign in at `http://localhost:3000/ui` as `admin`, `dana` or `avery`, and go to §1.2.
+
+**Once per database.** The prep steps run only when the database has not been prepared yet: the
+marker is the API key `demo:traffic` mints (a row in the database, so it goes with the data).
+`docker compose restart gateway`, or `down` / `up` keeping the volumes, logs
+`demo prep: this database was already prepared … — prep steps skipped`: no new traffic, no new
+alerts, the licence, export key and your password are kept. The demo MCP server, the seed (which
+keeps everything) and the gateway run on every start. To prepare from scratch:
+`docker compose down -v`, then `up` again (this deletes the demo data and the demo password).
+
+**If a step fails** the log says `*** DEMO PREP FAILED at step <name> (exit <n>)` after that
+step's own output, and the gateway **still starts**, so the UI and the log stay reachable. A
+failure in demo:setup or demo:intake is retried on the next start (`docker compose restart
+gateway`); from demo:traffic on, use `down -v` and `up`. You can re-run the dry run any time
+without changing anything: `docker compose exec gateway node apps/gateway/dist/demo-check.js`.
+
+Without the switch nothing changes: no licence is minted, the gateway reads its default keyring,
+no MCP server, export key, offline checks or prep step runs, and `demo:set-passwords` refuses as
+before. **The switch is demo-only.** `scripts/install.sh` refuses it from the environment or a
+`.env`, and its rendered override pins it to `"0"`. The image's start script
+(`apps/gateway/docker-start.sh`) also ignores it on a `byoc` / `air_gapped`
+`REGULAIT_DEPLOY_MODE` and without `SEED_DEMO=1`.
+
+Verified on 2026-10-05 in real containers (Linux, Docker 29, compose 5.1) with a CRLF `.env`: a
+fresh stack prepared itself (18 pass, 0 warn, 0 fail; eu-ai-act and nist-ai-rmf active; the AI
+intake linked its EU AI Act controls; a signed audit bundle verified offline against the logged
+fingerprint; Dana's `read_file` through the demo MCP was allowed, `search_code` denied and
+`write_file` queued for Avery); `restart gateway` and `down` / `up` skipped the prep with the alert
+count unchanged and sign-in working; `down -v` / `up` prepared again; the switch off ran none of
+it; and an image built from a context with every text file in CRLF (docker-start.sh included)
+booted and prepared the same way. The PowerShell commands are written for Docker Desktop but have
+**not yet been run on Windows**. Run them once before relying on them.
 
 ---
 
@@ -236,12 +315,13 @@ deliberate act by a named operator, which is the right default and still a real 
 GET /v1/use-cases/<id>/frameworks?framework=nist-ai-rmf
 ```
 
-Five NIST AI RMF controls with **live evidence counts**, in one call, for any framework we ship.
-No longer a two-hop narration.
+The active NIST AI RMF pack (v3, subcategory IDs checked against NIST AI 100-1; ADR-0175) with **live
+evidence counts**, in one call, for any framework we ship. No longer a two-hop narration.
 
 **The moment worth setting up.** Keep the same screen from (b). The refusal you just demonstrated
-*is* the evidence for `nist-ai-rmf:MANAGE-2.2` — "mechanisms are in place to supersede, disengage
-or deactivate an AI system". It moves from `unsatisfied` to `satisfied` because a deny landed in
+*is* the evidence for `nist-ai-rmf:MANAGE-2.4` — "mechanisms are in place to supersede, disengage
+or deactivate an AI system". (Packs v1 and v2 filed this under MANAGE-2.2, which in the framework is
+sustaining the value of deployed systems; v3 corrects it.) It moves from `unsatisfied` to `satisfied` because a deny landed in
 the ledger attributed to this project. So: read the control as unsatisfied, make the refused call,
 re-read, watch it go green.
 
@@ -254,8 +334,9 @@ Two things to say out loud while it is on screen, because the payload says them:
 - **Evidence is collected per project.** The counts cover everything governed in that project, not
   this use case alone. A use case attributed to no project returns nulls, not zeros — "not
   measured" and "measured as none" are different claims.
-- **The attestation-required control stays outstanding.** `GOVERN-4.1` is organisational and the
-  platform will never count it as satisfied on its own say-so. A tool that marked it green would be
+- **The attestation-required controls stay outstanding.** `GOVERN-4.1` (and GOVERN 2.3, 3.1 and the
+  other organisational ones) cannot be observed, and the platform will never count them as satisfied
+  on its own say-so. A tool that marked them green would be
   the tick-box exercise this product exists to replace.
 
 ---
@@ -295,9 +376,10 @@ Two things to say out loud while it is on screen, because the payload says them:
 | posture reads fewer controls than expected | the gateway was restarted without the env | re-export and restart; the page is reading the truth |
 | a tool that should be a write behaves as a read | the upstream lost its `readOnlyHint` and the live manifest overwrote the inventory | check `demo-mcp-server.ts`; the hint *is* the classification |
 | activating a pack answers `license_feature_not_licensed` | the ephemeral demo licence is missing, or the gateway cannot see the keyring | re-run `demo:setup`, and start the gateway with `REGULAIT_LICENSE_KEYRING=<repo>/demo-license-keys` |
+| `demo:set-passwords` under docker: `no valid demo licence is installed` | `REGULAIT_DEMO_LICENSE=1` is not in the `.env` next to `docker-compose.yml`, or the stack was not re-upped after adding it | add it, `docker compose up -d`, re-run the command (§1.3) |
 | every MCP call returns `502 mcp_upstream_unreachable` | the demo MCP server is not running | restart `demo:mcp`. Since ADR-0126 this is a NAMED, audited refusal naming the server and its URL — it used to be an opaque 500 |
 | every MCP call returns `503 mcp_upstream_circuit_open` | five consecutive failures opened the breaker; it is refusing without contacting the upstream | start `demo:mcp`, then wait out the 30s cooldown — the next call probes and closes the circuit by itself. Nothing to reset by hand |
-| `MANAGE-2.2` stays `unsatisfied` after a refusal | the refused call carried no `x-regulait-project-id` | repeat it with the header; an unattributed refusal is correctly not counted |
+| `MANAGE-2.4` stays `unsatisfied` after a refusal | the refused call carried no `x-regulait-project-id` | repeat it with the header; an unattributed refusal is correctly not counted |
 | `docker compose up` fails / no docker daemon | the box has no container runtime | use the §1.1 native-Postgres path; you lose only the WORM anchor |
 | `no_data_key`, or stored credentials stop decrypting after a restart | `REGULAIT_DATA_KEY` was unset or regenerated between runs | export the SAME key in every terminal; on the native path a new key means re-seeding, not re-entering credentials |
 | posture reads 6 of 7 with the anchor row on a local destination | expected on the §1.1 path — no Object Lock bucket to grade | nothing to fix; present it as §2 describes |

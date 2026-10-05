@@ -39,8 +39,10 @@ import {
   or,
   gt,
   sql,
+  projects,
   usageEvents,
   users,
+  virtualKeys,
   gte,
   isNotNull,
   type Db,
@@ -52,6 +54,10 @@ import {
   evaluateMonitorRules,
   reconcileAlerts,
   type MonitorAgentInput,
+  type MonitorCredentialInput,
+  type MonitorRuleId,
+  type MonitorServedModelInput,
+  type MonitorTrafficInput,
   type MonitorVendorInput,
   type OffStackServing,
 } from "@regulait/shared";
@@ -60,6 +66,8 @@ import { computeTrustDashboard } from "./trust-dashboard.js";
 import { ownershipFlagFor } from "./inventory.js";
 import { TRACE_EVAL_WINDOW_DAYS, traceSummaryForAgents } from "./trace-evaluation.js";
 import { notifyGovernanceAlerts } from "./chatops.js";
+import { computeCredentialInventory } from "./credential-inventory.js";
+import { loadOrgSettings } from "./org-settings.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 
@@ -68,6 +76,8 @@ export const MONITOR_AUDIT_RULE_IDS = {
   resolved: "governance-alert-resolved",
   acknowledged: "governance-alert-acknowledged",
   evaluated: "governance-monitor-evaluated",
+  /** review fix: an optional rule input failed; that rule was not evaluated */
+  inputFailed: "governance-monitor-input-failed",
 } as const;
 
 export interface MonitorRunResult {
@@ -78,7 +88,23 @@ export interface MonitorRunResult {
   refreshed: number;
   resolved: number;
   active: number;
+  /** rules whose optional input failed this pass: not evaluated, so their
+   * open episodes were left as they were (review fix) */
+  notEvaluated: string[];
 }
+
+/** the optional rule inputs: each feeds exactly one rule, and a failure to
+ * load it skips that rule for the pass instead of failing every rule */
+export interface MonitorOptionalInputs {
+  servedModels: (db: Db, now: Date) => Promise<MonitorServedModelInput[]>;
+  traffic: (db: Db, now: Date) => Promise<MonitorTrafficInput>;
+  credentials: (db: Db, now: Date) => Promise<MonitorCredentialInput>;
+}
+const OPTIONAL_INPUT_RULE: Record<keyof MonitorOptionalInputs, MonitorRuleId> = {
+  servedModels: "served_model_drift",
+  traffic: "unregistered_ai_traffic",
+  credentials: "stale_credentials",
+};
 
 export async function runGovernanceMonitor(
   db: Db,
@@ -89,10 +115,34 @@ export async function runGovernanceMonitor(
      *  before any write — lets a test hold this pass while a concurrent one
      *  commits. Absent in production (never passed). */
     afterPlan?: (plan: ReturnType<typeof reconcileAlerts>) => Promise<void>;
+    /** TEST SEAM: replace an optional input's loader (e.g. one that throws).
+     *  Absent in production. */
+    optionalInputs?: Partial<MonitorOptionalInputs>;
   } = {},
 ): Promise<MonitorRunResult> {
   const now = opts.now ?? new Date();
   const actor = opts.actorUserId ?? NO_IDENTITY;
+
+  // Review fix: an OPTIONAL input (one rule's own ledger read) that fails
+  // leaves that rule unevaluated for this pass — its open episodes are neither
+  // refreshed nor resolved — and is audited; every other rule still runs.
+  const loaders: MonitorOptionalInputs = {
+    servedModels: servedModelsByAgent,
+    traffic: unregisteredTrafficInput,
+    credentials: (d, n) => staleCredentialsInput(d, n),
+    ...opts.optionalInputs,
+  };
+  const failedInputs: Array<{ input: keyof MonitorOptionalInputs; ruleId: MonitorRuleId; error: string }> = [];
+  const optional = async <K extends keyof MonitorOptionalInputs>(
+    input: K,
+  ): Promise<Awaited<ReturnType<MonitorOptionalInputs[K]>> | undefined> => {
+    try {
+      return (await loaders[input](db, now)) as Awaited<ReturnType<MonitorOptionalInputs[K]>>;
+    } catch (err) {
+      failedInputs.push({ input, ruleId: OPTIONAL_INPUT_RULE[input], error: (err instanceof Error ? err.message : String(err)).slice(0, 500) });
+      return undefined;
+    }
+  };
 
   // -- inputs ----------------------------------------------------------------
   const graph = await computeDependencyGraph(db, { includeObserved: true, now });
@@ -209,14 +259,33 @@ export async function runGovernanceMonitor(
     risks,
     dimensions: trust.dimensions,
     labels,
+    // ADR-0175 A4 / A9 — read from the usage ledger; both observe only
+    servedModels: await optional("servedModels"),
+    traffic: await optional("traffic"),
+    // ADR-0175 A7 — always evaluated (an explicit "not alerting" input when
+    // the org has it off), so turning alerting off resolves the open episodes
+    credentials: await optional("credentials"),
   });
+  const notEvaluated = new Set<string>(failedInputs.map((f) => f.ruleId));
+  for (const f of failedInputs) {
+    await db.insert(auditLog).values({
+      userId: actor,
+      objectType: "governance_monitor",
+      objectId: null,
+      detail: { ruleId: f.ruleId, input: f.input, error: f.error },
+      effect: "deny",
+      ruleId: MONITOR_AUDIT_RULE_IDS.inputFailed,
+      ruleChain: [],
+      reason: `governance monitor: rule ${f.ruleId} NOT evaluated this pass — its input (${f.input}) failed: ${f.error}`,
+    });
+  }
 
   // -- reconcile -------------------------------------------------------------
   const active = await db
     .select({ id: governanceAlerts.id, ruleId: governanceAlerts.ruleId, subjectKey: governanceAlerts.subjectKey, title: governanceAlerts.title })
     .from(governanceAlerts)
     .where(ne(governanceAlerts.status, "resolved"));
-  const plan = reconcileAlerts(active, findings, new Set(MONITOR_RULE_IDS));
+  const plan = reconcileAlerts(active, findings, new Set(MONITOR_RULE_IDS.filter((r) => !notEvaluated.has(r))));
   if (opts.afterPlan) await opts.afterPlan(plan);
 
   const raisedIds: string[] = [];
@@ -293,7 +362,7 @@ export async function runGovernanceMonitor(
     userId: actor,
     objectType: "governance_monitor",
     objectId: null,
-    detail: { raised: raisedIds.length, refreshed: refreshedCount, resolved: resolvedCount, active: n },
+    detail: { raised: raisedIds.length, refreshed: refreshedCount, resolved: resolvedCount, active: n, notEvaluated: [...notEvaluated] },
     effect: "allow",
     ruleId: MONITOR_AUDIT_RULE_IDS.evaluated,
     ruleChain: [],
@@ -317,6 +386,37 @@ export async function runGovernanceMonitor(
     refreshed: refreshedCount,
     resolved: resolvedCount,
     active: n,
+    notEvaluated: [...notEvaluated],
+  };
+}
+
+/**
+ * ADR-0175 A7 — the credential inventory's flagged credentials. With the org's
+ * `stale_credential_alerts` off (the default) the rule is observe-only: the
+ * flags are on the inventory page and no episode is raised.
+ */
+export async function staleCredentialsInput(
+  db: Db,
+  now: Date,
+  compute: typeof computeCredentialInventory = computeCredentialInventory,
+): Promise<MonitorCredentialInput> {
+  // review fix: observe-only costs nothing. With alerting off the inventory
+  // is not computed; the explicit "not alerting" input still lets the rule
+  // run, so any open episode resolves cleanly instead of being stranded.
+  if (!(await loadOrgSettings(db)).staleCredentialAlerts) return { alerting: false, credentials: [] };
+  const inv = await compute(db, { now });
+  return {
+    alerting: inv.alerting,
+    credentials: inv.credentials
+      .filter((c) => c.flags.length > 0)
+      .map((c) => ({
+        id: c.id,
+        typeLabel: c.typeLabel,
+        name: c.name,
+        flags: c.flags,
+        reasons: c.flagReasons as Record<string, string>,
+        manageAt: c.manageAt,
+      })),
   };
 }
 
@@ -390,6 +490,183 @@ export async function offStackServingByUseCase(db: Db, now: Date): Promise<Map<s
   return out;
 }
 
+/**
+ * ADR-0175 A4 — what the providers SAID they served, per agent, over the
+ * monitor window: ledger rows that carry a provider-reported model, grouped by
+ * (configured id, served id). Each row is compared with the configured id it
+ * was dispatched under (`usage_events.model`), not the agent's current one, so
+ * a config change inside the window is not mistaken for drift. Rows where the
+ * provider reported nothing are skipped — never guessed. The pins come from
+ * APPROVED, unexpired model cards (`pinned_model_version`).
+ */
+export async function servedModelsByAgent(db: Db, now: Date): Promise<MonitorServedModelInput[]> {
+  const since = new Date(now.getTime() - TRACE_EVAL_WINDOW_DAYS * 86_400_000);
+  const rows = await db
+    .select({
+      agentId: usageEvents.agentId,
+      configured: usageEvents.model,
+      served: usageEvents.servedModel,
+      calls: count(),
+      last: sql<Date>`max(${usageEvents.at})`,
+    })
+    .from(usageEvents)
+    .where(
+      and(
+        eq(usageEvents.objectType, "agent"),
+        isNotNull(usageEvents.agentId),
+        isNotNull(usageEvents.model),
+        isNotNull(usageEvents.servedModel),
+        gte(usageEvents.at, since),
+      ),
+    )
+    .groupBy(usageEvents.agentId, usageEvents.model, usageEvents.servedModel);
+  if (rows.length === 0) return [];
+  const agentIds = [...new Set(rows.map((r) => r.agentId!))];
+  const agentRows = await db
+    .select({ id: agents.id, name: agents.name, expected: agents.expectedServedModel })
+    .from(agents)
+    .where(inArray(agents.id, agentIds));
+  const names = new Map(agentRows.map((a) => [a.id, a.name]));
+  const expected = new Map(agentRows.map((a) => [a.id, a.expected]));
+  const pins = new Map<string, string[]>();
+  for (const p of await db
+    .selectDistinct({ agentId: modelCards.agentId, pin: modelCards.pinnedModelVersion })
+    .from(modelCardApprovals)
+    .innerJoin(modelCards, eq(modelCards.id, modelCardApprovals.cardId))
+    .where(
+      and(
+        inArray(modelCards.agentId, agentIds),
+        isNotNull(modelCards.pinnedModelVersion),
+        eq(modelCardApprovals.status, "approved"),
+        or(isNull(modelCardApprovals.validUntil), gt(modelCardApprovals.validUntil, now)),
+      ),
+    )) {
+    if (p.agentId && p.pin) pins.set(p.agentId, [...(pins.get(p.agentId) ?? []), p.pin]);
+  }
+  const byAgent = new Map<string, MonitorServedModelInput>();
+  for (const r of rows) {
+    const id = r.agentId!;
+    const entry = byAgent.get(id) ?? {
+      agentId: id,
+      agentName: names.get(id) ?? id,
+      expectedServedModel: expected.get(id) ?? null,
+      pinnedModelVersions: pins.get(id) ?? [],
+      windowDays: TRACE_EVAL_WINDOW_DAYS,
+      observations: [],
+    };
+    entry.observations.push({
+      configuredModel: r.configured!,
+      servedModel: r.served!,
+      calls: Number(r.calls),
+      lastServedAt: new Date(r.last).toISOString(),
+    });
+    byAgent.set(id, entry);
+  }
+  return [...byAgent.values()];
+}
+
+/**
+ * ADR-0175 A9 — model (`agent`) and MCP (`mcp_tool`) ledger rows over the
+ * monitor window, grouped by attribution, plus the projects an APPROVED use
+ * case links. The link is `ai_use_cases.project_id` — the ONLY join between
+ * the register and dispatch attribution (see use-case-gate.ts's header), so
+ * the rule reports spend outside that join; it cannot prove a call ungoverned.
+ * The ledger records the calling user and the virtual key, not which of a
+ * user's API keys was used, so key-less projectless traffic is grouped by
+ * caller. Observe-only: nothing here, or downstream of the alert, blocks.
+ *
+ * COVERAGE matches the use-case gate (use-case-gate.ts): a use case covers its
+ * project only while it is `approved` AND its approval has not run out
+ * (`approved_until` NULL or in the future). The window scan is served by
+ * `usage_events_object_type_at_idx` (object_type, at).
+ */
+/** the A9 window scan over model and MCP ledger rows (exported so a test can
+ * EXPLAIN exactly this query against `usage_events_object_type_at_idx`) */
+export function unregisteredTrafficQuery(db: Db, since: Date) {
+  return db
+    .select({
+      projectId: usageEvents.projectId,
+      virtualKeyId: usageEvents.virtualKeyId,
+      userId: usageEvents.userId,
+      objectType: usageEvents.objectType,
+      calls: count(),
+      cost: sql<number | null>`sum(${usageEvents.costUsd})`,
+      last: sql<Date>`max(${usageEvents.at})`,
+    })
+    .from(usageEvents)
+    .where(and(inArray(usageEvents.objectType, ["agent", "mcp_tool"]), gte(usageEvents.at, since)))
+    .groupBy(usageEvents.projectId, usageEvents.virtualKeyId, usageEvents.userId, usageEvents.objectType);
+}
+
+export async function unregisteredTrafficInput(db: Db, now: Date): Promise<MonitorTrafficInput> {
+  const since = new Date(now.getTime() - TRACE_EVAL_WINDOW_DAYS * 86_400_000);
+  const grouped = await unregisteredTrafficQuery(db, since);
+  const linked = await db
+    .select({
+      id: aiUseCases.id,
+      name: aiUseCases.name,
+      status: aiUseCases.status,
+      projectId: aiUseCases.projectId,
+      approvedUntil: aiUseCases.approvedUntil,
+    })
+    .from(aiUseCases)
+    .where(isNotNull(aiUseCases.projectId));
+  // the gate's rule: approved and not past its approval's lifetime
+  const lapsed = (u: (typeof linked)[number]) =>
+    u.status === "approved" && u.approvedUntil !== null && u.approvedUntil.getTime() <= now.getTime();
+  const covering = (u: (typeof linked)[number]) => u.status === "approved" && !lapsed(u);
+  const covered = new Set(linked.filter(covering).map((u) => u.projectId!));
+  const linkedNotApproved = new Map<string, Array<{ id: string; name: string; status: string; approvalExpired?: true }>>();
+  for (const u of linked) {
+    if (covering(u)) continue;
+    linkedNotApproved.set(u.projectId!, [
+      ...(linkedNotApproved.get(u.projectId!) ?? []),
+      { id: u.id, name: u.name, status: u.status, ...(lapsed(u) ? { approvalExpired: true as const } : {}) },
+    ]);
+  }
+  const rows = grouped.map((r) => ({
+    projectId: r.projectId,
+    virtualKeyId: r.virtualKeyId,
+    userId: r.userId,
+    kind: r.objectType === "mcp_tool" ? ("mcp" as const) : ("model" as const),
+    calls: Number(r.calls),
+    costUsd: r.cost === null ? null : Number(r.cost),
+    lastAt: new Date(r.last).toISOString(),
+  }));
+  const uncovered = rows.filter((r) => !(r.projectId && covered.has(r.projectId)));
+  const projectIds = [...new Set(uncovered.flatMap((r) => (r.projectId ? [r.projectId] : [])))];
+  const keyIds = [...new Set(uncovered.flatMap((r) => (r.virtualKeyId ? [r.virtualKeyId] : [])))];
+  const userIds = [...new Set(uncovered.map((r) => r.userId))].filter((id) => id !== NO_IDENTITY);
+  const projectNames = new Map(
+    projectIds.length
+      ? (await db.select({ id: projects.id, name: projects.name }).from(projects).where(inArray(projects.id, projectIds))).map((p) => [p.id, p.name])
+      : [],
+  );
+  const virtualKeyNames = new Map(
+    keyIds.length
+      ? (await db.select({ id: virtualKeys.id, name: virtualKeys.name }).from(virtualKeys).where(inArray(virtualKeys.id, keyIds))).map((k) => [k.id, k.name])
+      : [],
+  );
+  const userNames = new Map<string, string>([[NO_IDENTITY, "Platform (no user identity)"]]);
+  if (userIds.length) {
+    for (const u of await db
+      .select({ id: users.id, name: users.displayName, email: users.email })
+      .from(users)
+      .where(inArray(users.id, userIds))) {
+      userNames.set(u.id, u.name || u.email);
+    }
+  }
+  return {
+    windowDays: TRACE_EVAL_WINDOW_DAYS,
+    rows: uncovered,
+    coveredProjectIds: covered,
+    linkedNotApproved,
+    projectNames,
+    virtualKeyNames,
+    userNames,
+  };
+}
+
 /** `use_case:<id>>agent:<id>` → the dependency is the subject; the use case is context */
 function describeSubject(subjectKey: string, labels: Map<string, string>) {
   const parts = subjectKey.split(">");
@@ -461,6 +738,28 @@ export function registerGovernanceMonitorRoutes(app: FastifyInstance, db: Db): v
       if (riskIds.length) {
         for (const r of await db.select({ id: aiRisks.id, title: aiRisks.title }).from(aiRisks).where(inArray(aiRisks.id, riskIds))) {
           labels.set(`risk:${r.id}`, r.title);
+        }
+      }
+      // ADR-0175 A9 subjects: projects, virtual keys and callers
+      const idsOf = (prefix: string) =>
+        [...new Set(rows.flatMap((r) => (r.a.subjectKey.startsWith(prefix) ? [r.a.subjectKey.slice(prefix.length)] : [])))];
+      const projectIds = idsOf("project:");
+      if (projectIds.length) {
+        for (const p of await db.select({ id: projects.id, name: projects.name }).from(projects).where(inArray(projects.id, projectIds))) {
+          labels.set(`project:${p.id}`, p.name);
+        }
+      }
+      const keyIds = idsOf("virtual_key:");
+      if (keyIds.length) {
+        for (const k of await db.select({ id: virtualKeys.id, name: virtualKeys.name }).from(virtualKeys).where(inArray(virtualKeys.id, keyIds))) {
+          labels.set(`virtual_key:${k.id}`, k.name);
+        }
+      }
+      const callerIds = idsOf("caller:").filter((id) => id !== NO_IDENTITY);
+      if (idsOf("caller:").includes(NO_IDENTITY)) labels.set(`caller:${NO_IDENTITY}`, "Platform (no user identity)");
+      if (callerIds.length) {
+        for (const u of await db.select({ id: users.id, name: users.displayName, email: users.email }).from(users).where(inArray(users.id, callerIds))) {
+          labels.set(`caller:${u.id}`, u.name || u.email);
         }
       }
     }

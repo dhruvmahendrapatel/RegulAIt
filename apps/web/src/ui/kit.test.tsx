@@ -5,7 +5,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { ApiError } from "../api/client";
-import { EmptyState, Field, Input, RecordError, Table } from "./kit";
+import { EmptyState, Field, Fieldset, Input, RecordError, Table } from "./kit";
 
 type Row = { id: string; name: string };
 const columns = [{ key: "name", header: "Name", render: (r: Row) => r.name }];
@@ -94,5 +94,43 @@ describe("Field grow — a real flex basis, so the field wraps before it shrinks
     expect(html).not.toContain("style=\"flex:1\"");
     const plain = renderToStaticMarkup(<Field label="Title"><Input /></Field>);
     expect(plain).not.toContain("fieldGrow");
+  });
+});
+
+describe("Field help — explanatory controls keep the input label intact", () => {
+  it("renders a labelled information button beside, never inside, the label", () => {
+    const html = renderToStaticMarkup(
+      <Field label="Use-case name" helpLabel="the inventory identifier created here" help={<p>This becomes the inventory name.</p>}>
+        <Input />
+      </Field>,
+    );
+
+    expect(html).toContain("What is the inventory identifier created here?");
+    expect(html).toContain("for=\"");
+    expect(html).toContain("id=\"");
+    expect(html).not.toMatch(/<label[^>]*>[^<]*<button/);
+  });
+});
+
+describe("Fieldset — a group of boxes is named as a group, not by a label (AER-029)", () => {
+  const html = renderToStaticMarkup(
+    <Fieldset legend="Sectors — select all that apply">
+      <label><input type="checkbox" aria-label="Sectors: Healthcare" /><span>Healthcare</span></label>
+      <label><input type="checkbox" aria-label="Sectors: Payments" /><span>Payments</span></label>
+    </Fieldset>,
+  );
+
+  it("renders a fieldset whose FIRST child is the legend carrying the caption", () => {
+    expect(html).toMatch(/^<fieldset[^>]*><legend[^>]*>Sectors — select all that apply<\/legend>/);
+    expect(html).toMatch(/<\/fieldset>$/);
+  });
+
+  it("never wraps the group in a <label> — a label names one control, and each option is a label already", () => {
+    expect(html.startsWith("<label")).toBe(false);
+    expect(html).not.toMatch(/<label[^>]*>(?:(?!<\/label>).)*<label/);
+    // each option keeps its own name
+    expect(html.match(/type="checkbox"/g)).toHaveLength(2);
+    expect(html).toContain("aria-label=\"Sectors: Healthcare\"");
+    expect(html).toContain("aria-label=\"Sectors: Payments\"");
   });
 });

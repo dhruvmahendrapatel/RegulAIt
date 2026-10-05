@@ -41,7 +41,7 @@
 }
 .railTitle {
   font-size: var(--text-sm);
-  font-weight: 550;
+  font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -92,7 +92,7 @@
 }
 .who {
   font-size: var(--text-xs);
-  font-weight: 650;
+  font-weight: 600;
   color: var(--text-faint);
 }
 .bubble {

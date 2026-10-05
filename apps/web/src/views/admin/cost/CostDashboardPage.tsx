@@ -26,6 +26,7 @@ import {
   useUsers,
   userOpts,
 } from "../adminKit";
+import { EnergyEstimatePanel, EnergyFactorsCard } from "./EnergyEstimate";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -131,6 +132,8 @@ export default function CostDashboardPage() {
         )}
 
         <UnattributedCard />
+        {/* ADR-0175 A15 — the factors behind the energy estimate */}
+        <EnergyFactorsCard />
         <CreateProjectCard />
         <EditProjectCard
           projects={projects.data?.projects ?? []}
@@ -296,6 +299,8 @@ function ProjectRollup(props: { projectId: string; projectName: string }) {
               />
             </div>
           </div>
+          {/* ADR-0175 A15 — labelled an estimate, unknown never zero */}
+          <EnergyEstimatePanel projectId={props.projectId} />
         </div>
       )}
     </Card>

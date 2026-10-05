@@ -1,0 +1,56 @@
+/* The review round in the review task (ADR-0168 amendment): the other
+   required reviews' status and the risk acceptor's residual-risk choice. */
+
+.otherReviews {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.otherReviews li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.acceptance {
+  display: grid;
+  gap: var(--s1);
+  padding: var(--s2);
+  border: 1px solid var(--rg-line);
+  border-radius: var(--rg-r-md);
+  background: var(--surface-2);
+}
+.acceptToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  color: var(--rg-ink);
+}
+.riskChoices {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+.riskChoices legend {
+  padding: 0;
+  margin-bottom: 4px;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--rg-ink-label);
+}
+.riskChoice {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--rg-ink);
+}
+.riskChoice input {
+  margin-top: 3px;
+}

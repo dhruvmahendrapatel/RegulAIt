@@ -120,6 +120,8 @@ async function mock(route: Route) {
 async function shotBoth(page: Page, name: string) {
   for (const theme of ["light", "dark"] as const) {
     await page.evaluate((next) => { document.documentElement.dataset.theme = next; localStorage.setItem("regulait.theme", next); window.scrollTo(0, 0); }, theme);
+    // let colour transitions (button fills, theme switch) settle so a review shot never shows a mid-transition slab
+    await page.waitForTimeout(300);
     await page.screenshot({ path: path.join(SHOTS, `${name}-${theme}.png`), fullPage: true });
   }
 }
@@ -130,13 +132,15 @@ test("enterprise governance demo surfaces render and complete their core actions
   await page.goto("/ui/admin/governance/intake");
   // UXJ-06: the page opens blank; the worked example is loaded on request
   await page.getByRole("button", { name: "Fill in an example" }).click();
+  // ADR-0168: Describe and Classify are separate steps
+  await page.getByRole("button", { name: "Continue" }).click();
   const assistRequest = page.waitForRequest((request) => new URL(request.url()).pathname === "/v1/use-cases/intake/assist" && request.method() === "POST");
   await page.getByRole("button", { name: "Draft suggestions" }).click();
   expect((await assistRequest).postDataJSON().context).toMatchObject({
     sectors: ["financial-services"],
     dataCategories: ["personal", "financial"],
   });
-  await expect(page.getByText("Review assistant suggestions", { exact: true })).toBeVisible();
+  await expect(page.getByText("Review suggestions", { exact: true })).toBeVisible();
   await shotBoth(page, "01-intake-suggestions");
   // nothing is accepted until the proposer decides (ADR-0149)
   await expect(page.getByText("not reviewed").first()).toBeVisible();
@@ -275,6 +279,9 @@ test("shadow-AI registration prefills evidence only and requires proposer answer
   await expect(page).toHaveURL(/source=shadow-ai/);
   await expect(page.getByLabel("Use-case name")).toHaveValue("Govern team-17");
   await expect(page.getByLabel("What will the system do?")).toHaveValue(/Evidence: Egress logs/);
+  await shotBoth(page, "08-shadow-ai-intake-prefill");
+  // the finding supplied the name and purpose only; the classification is the proposer's
+  await page.getByRole("button", { name: "Continue" }).click();
   const draft = page.getByRole("button", { name: "Draft suggestions" });
   await expect(draft).toBeDisabled();
   await expect(page.getByLabel("Primary purpose domain")).toHaveValue("");
@@ -283,14 +290,13 @@ test("shadow-AI registration prefills evidence only and requires proposer answer
   ]);
   await expect(page.getByLabel("Decision autonomy")).toHaveValue("");
   await expect(page.getByLabel("Profiles natural persons")).toHaveValue("");
-  await shotBoth(page, "08-shadow-ai-intake-prefill");
 
   await page.getByLabel("Primary purpose domain").selectOption("general-business");
   await page.getByLabel("People affected").selectOption("employees");
   await page.getByLabel("Decision autonomy").selectOption("narrow-procedural");
   await page.getByLabel("Biometric use").selectOption("verification");
-  await page.getByLabel("Sectors: healthcare").check();
-  await page.getByLabel("Data categories: health").check();
+  await page.getByLabel("Sectors: Healthcare", { exact: true }).check();
+  await page.getByLabel("Data categories: Health", { exact: true }).check();
   await page.getByLabel("Deployment audience").selectOption("internal");
   for (const label of [
     "Emotion recognition", "Social scoring", "Manipulative techniques", "Profiles natural persons",
@@ -347,6 +353,7 @@ test("prohibited screening remains reviewable and can be submitted for an indepe
   await page.goto("/ui/admin/governance/intake");
   // UXJ-06: the page opens blank; the worked example is loaded on request
   await page.getByRole("button", { name: "Fill in an example" }).click();
+  await page.getByRole("button", { name: "Continue" }).click();
   await page.getByLabel("Social scoring").selectOption("yes");
   await page.getByRole("button", { name: "Draft suggestions" }).click();
   await expect(page.getByRole("alert")).toContainText("Screened PROHIBITED (Art. 5) — a reviewer must refuse it at sign-off; it cannot go live.");
@@ -356,7 +363,16 @@ test("prohibited screening remains reviewable and can be submitted for an indepe
   await expect(submit).toBeEnabled();
   const created = page.waitForRequest((request) => new URL(request.url()).pathname === "/v1/use-cases" && request.method() === "POST");
   await submit.click();
-  expect((await created).postDataJSON().dataSensitivity).toBe("regulated"); // personal + financial → strictest
+  const body = (await created).postDataJSON();
+  expect(body.dataSensitivity).toBe("regulated"); // personal + financial → strictest
+  // every Classify answer is stored with the use case, in the gateway's keys
+  expect(Object.keys(body.screeningAnswers).sort()).toEqual([
+    "affectedPersons", "autonomousActions", "biometricUse", "dataCategories", "decisionAutonomy", "deployment",
+    "emotionRecognition", "euNexus", "generatesSyntheticContent", "generative", "interactsWithHumans",
+    "manipulativeTechniques", "profilesNaturalPersons", "purposeDomain", "safetyComponent", "sectors",
+    "socialScoring", "toolsUsed", "usesExternalVendor",
+  ]);
+  expect(body.screeningAnswers).toMatchObject({ socialScoring: true, dataCategories: expect.arrayContaining(["personal", "financial"]) });
   await expect(page.getByText("Submitted for human review.")).toBeVisible();
 });
 
@@ -373,7 +389,11 @@ test("zero live risks and unmeasured residual ratings do not imply assurance or 
     });
   });
   await page.goto(`/ui/admin/governance/use-cases/${ID}`);
-  await expect(page.getByText("No live risks recorded", { exact: true })).toBeVisible();
+  // ADR-0168: the lifecycle tracker derives the risks activity — an unrated residual is never "Complete"
+  const risksActivity = page.getByRole("row").filter({ hasText: "Risks and safeguards" });
+  await expect(risksActivity).toContainText("residual rated for 0 of 1");
+  await expect(risksActivity).toContainText("In progress");
+  await expect(risksActivity).not.toContainText("Complete");
   await expect(page.getByText("Live risks have controls", { exact: true })).toHaveCount(0);
   await page.getByRole("tab", { name: "Risks" }).click();
   await expect(page.getByLabel("Residual likelihood")).toHaveValue("");

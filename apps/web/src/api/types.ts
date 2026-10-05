@@ -70,6 +70,26 @@ export interface SamlProvidersResponse {
   providers: Array<{ id: string; name: string }>;
 }
 
+/** ADR-0174 — what the sign-in page offers (`GET /auth/sign-in-options`).
+ * Public and configuration-free: ids, display names and switches only. */
+export type BrokerIdp = "microsoft" | "google" | "github";
+export interface SignInOptionsResponse {
+  broker: { providerId: string; name: string; idps: BrokerIdp[] } | null;
+  enterprise: Array<{ id: string; name: string; protocol: "oidc" | "saml" }>;
+  local: { mode: "enabled" | "break_glass_only" | "sso_only"; emailForm: boolean };
+  apiKeyExchange: boolean;
+}
+
+/** ADR-0174 §5 — a federated identity waiting for the person to prove the
+ * existing account it matched (`GET /auth/link/pending`). */
+export interface LinkPendingResponse {
+  pending: true;
+  provider: string;
+  protocol: "oidc" | "saml";
+  email: string;
+  expiresAt: string;
+}
+
 // ---- agents / chat -------------------------------------------------------
 
 export interface GrantedAgent {
@@ -340,6 +360,10 @@ export interface CheckResult {
   selfReported?: boolean;
   reportedByUserId?: string | null;
   reason?: string | null;
+  /** AER-047: true when NOTHING reported this check and the template's
+   * offlineAutoPass opt-in passed it anyway — never CI's green. A check with no
+   * report and no opt-in has status "pending" and holds the stage. */
+  autoPassed?: boolean;
 }
 
 export interface WorkflowDetailResponse {
@@ -349,6 +373,9 @@ export interface WorkflowDetailResponse {
     createdAt: string;
     projectId?: string | null;
     initiatorUserId?: string | null;
+    /** AER-048: the workflow round (bumped by every re-open) a check report
+     * binds to */
+    round?: number;
     change?: { description?: string; changeType?: string; environment?: string };
     definition: { stages: WorkflowStage[] };
     state: { currentStageIndex: number; stageStatuses: Record<number, string> };
@@ -374,7 +401,8 @@ export interface WorkflowListResponse {
 
 export interface Approval {
   id: string;
-  status: "pending" | "approved" | "denied" | "consumed" | "superseded";
+  /** `returned` = sent back for information (an intake sign-off only, ADR-0168) */
+  status: "pending" | "approved" | "denied" | "returned" | "consumed" | "superseded";
   objectType: string;
   stageId: string | null;
   requestedAt: string;
@@ -404,6 +432,19 @@ export interface Approval {
   decidedByName?: string | null;
   objectLabel?: string | null;
   delegatedFrom?: string;
+  /** the AI use case an intake sign-off decides, when the gateway names it (not yet in the ADR-0168
+   * contract — the review panel falls back to matching the use-case list by workflow instance) */
+  useCaseId?: string | null;
+  /** ADR-0168 amendment: the reviewer role this intake review is for (one review per role the
+   * review policy requires for the tier); absent on the single named-approver path */
+  reviewRole?: { id: string; name: string } | null;
+  /** ADR-0046 routing + SLA sidecar — absent when no routing rule is enabled */
+  assignment?: {
+    assigneeKind?: string;
+    slaState?: string | null;
+    dueAt?: string | null;
+    [key: string]: unknown;
+  };
   contextConflict?: {
     key: string;
     conflicting: ConflictSide;
@@ -626,4 +667,477 @@ export interface AuditEntry {
    * as a mode; render it as "unknown". */
   deployMode?: "hosted" | "byoc" | "air_gapped" | null;
   reason?: string | null;
+}
+
+// ---- AI use-case lifecycle (ADR-0168) ------------------------------------
+
+export type UseCaseStatus = "proposed" | "under_review" | "needs_info" | "approved" | "rejected" | "retired";
+
+/** a condition attached to an intake approval — `blocking` = before go-live (the deploy gate refuses while open) */
+export interface UseCaseCondition {
+  id: string;
+  approvalId: string;
+  text: string;
+  ownerUserId: string | null;
+  ownerName: string | null;
+  dueAt: string;
+  blocking: boolean;
+  status: "open" | "met" | "waived";
+  metAt: string | null;
+  metByName: string | null;
+  overdue: boolean;
+  /** whether the signed-in viewer may mark it met (the server's rule, computed
+   * for them; absent from an older gateway — treated as "no") */
+  canMarkMet?: boolean;
+}
+
+/** the fields GET /v1/use-cases/:id adds for the approval lifetime and its conditions */
+export interface UseCaseLifecycleDetail {
+  useCase: {
+    id: string;
+    status: UseCaseStatus;
+    approvedAt?: string | null;
+    approvedUntil?: string | null;
+    approvalExpired?: boolean;
+    /** an expired approval moved back into review by the recertification sweep */
+    recertification?: boolean;
+    /** the approval's end (= approvedUntil) that started the re-review */
+    recertificationDueAt?: string | null;
+    [key: string]: unknown;
+  };
+  conditions?: UseCaseCondition[];
+  /** one per required review in the current round; [] on the single named-approver path */
+  reviews?: UseCaseReview[];
+  /** risk rows with their acceptance, when a risk acceptor accepted residual risk */
+  risks?: UseCaseRiskAcceptance[];
+  /** what the registration screen needs to update and resubmit a use case sent back for information */
+  resubmission?: UseCaseResubmission;
+  /** ADR-0171: the owner's own words for why each accepted framework applies ({} when none) */
+  frameworkRationales?: Record<string, string>;
+  /** ADR-0171: the yes/no screening answers the owner was not sure about (each counted as yes) */
+  screeningUnsure?: string[];
+}
+
+export interface ApprovalConditionInput {
+  text: string;
+  ownerUserId?: string;
+  dueAt: string;
+  blocking: boolean;
+}
+
+/** POST /v1/approvals/:id/decide — `returned` needs a reason; conditions ride only on an approved intake sign-off */
+export interface DecideApprovalBody {
+  decision: "approved" | "denied" | "returned";
+  reason?: string;
+  conditions?: ApprovalConditionInput[];
+  /** only with `approved`, only from a risk acceptor named in the review policy */
+  acceptRisks?: AcceptRisksInput;
+}
+
+export interface AcceptRisksInput {
+  riskIds: string[];
+  /** 10..2000 characters */
+  rationale: string;
+}
+
+// ---- review policy and the review round (ADR-0168 amendment, afternoon) ----
+
+export type ReviewTier = "minimal" | "limited" | "high" | "prohibited" | "unscreened";
+
+/** a reviewer role: any member may decide that role's review */
+export interface ReviewerRole {
+  /** slug, [a-z0-9-]{2,40} */
+  id: string;
+  name: string;
+  memberUserIds: string[];
+}
+
+export interface ReviewTierPolicy {
+  /** each role listed is ONE required review */
+  roleIds: string[];
+  /** 1..36 — overrides the default approval lifetime for the tier */
+  validityMonths: number;
+}
+
+/** GET /v1/governance/review-policy (any signed-in user) */
+export interface ReviewPolicy {
+  roles: ReviewerRole[];
+  tiers: Partial<Record<ReviewTier, ReviewTierPolicy>>;
+  riskAcceptorUserIds: string[];
+  updatedAt: string | null;
+  updatedByName: string | null;
+}
+
+/** PUT /v1/governance/review-policy (admin) */
+export interface ReviewPolicyInput {
+  roles: ReviewerRole[];
+  tiers: Partial<Record<ReviewTier, ReviewTierPolicy>>;
+  riskAcceptorUserIds: string[];
+}
+
+/** `superseded`: the round was closed by another role's denial or send-back
+ * before this review was decided */
+export type UseCaseReviewStatus = "pending" | "approved" | "returned" | "denied" | "superseded";
+
+export interface UseCaseReview {
+  roleId: string;
+  roleName: string;
+  status: UseCaseReviewStatus;
+  deciderName: string | null;
+  decidedAt: string | null;
+  approvalId: string;
+}
+
+export interface UseCaseRiskAcceptance {
+  id: string;
+  title?: string;
+  status?: string;
+  acceptedByName?: string | null;
+  acceptedAt?: string | null;
+  acceptanceRationale?: string | null;
+}
+
+/** the structured EU AI Act screening answers (the shared euAiActAnswersSchema) */
+export interface EuAiActScreeningAnswers {
+  purposeDomain: string;
+  affectedPersons: string[];
+  decisionAutonomy: string;
+  biometricUse: string;
+  emotionRecognition: boolean;
+  socialScoring: boolean;
+  manipulativeTechniques: boolean;
+  profilesNaturalPersons: boolean;
+  safetyComponent: boolean;
+  interactsWithHumans: boolean;
+  generatesSyntheticContent: boolean;
+}
+
+/** the registration Classify step's context answers beyond the EU AI Act set
+ * (the shared intakeContextSchema) */
+export interface IntakeContextAnswers {
+  sectors: string[];
+  dataCategories: string[];
+  deployment: string;
+  euNexus: boolean;
+  usesExternalVendor: boolean;
+  generative: boolean;
+  autonomousActions: boolean;
+  toolsUsed: string[];
+}
+
+/** EVERY Classify-step answer, flat — `screeningAnswers` on POST /v1/use-cases
+ * and on the resubmission PATCH (the shared intakeScreeningAnswersSchema) */
+export type IntakeScreeningAnswers = EuAiActScreeningAnswers & IntakeContextAnswers;
+
+export interface UseCaseResubmission {
+  allowed: boolean;
+  /** the stored Classify answers; a use case registered before they were
+   * stored carries the EU answers of its questionnaire only */
+  screeningAnswers: (EuAiActScreeningAnswers & Partial<IntakeContextAnswers> & { unsure?: string[] }) | null;
+  questionnaire: { version: number; content: string } | null;
+  returnReason: string | null;
+  returnedByName: string | null;
+}
+
+/** GET /v1/users/directory — ids, names and teams only; readable by every signed-in user */
+export interface DirectoryUser {
+  id: string;
+  name: string | null;
+  teams?: Array<{ id: string; name: string }>;
+}
+
+// ---- ADR-0172: the agent builder (/v1/builder/*) ---------------------------
+
+export type BuilderSharing = "private" | "workspace" | "people";
+export type BuilderConnectionFormat = "shared" | "per_user";
+export type BuilderCadence = "hourly" | "daily" | "weekdays" | "weekly";
+export type BuilderThreadStatus = "active" | "needs_attention" | "completed";
+export type BuilderChannelProvider = "slack" | "teams" | "outlook" | "email";
+
+export interface BuilderModelRef {
+  id: string;
+  name: string;
+  provider: string;
+  model: string | null;
+}
+
+export interface BuilderAgentSummary {
+  id: string;
+  name: string;
+  description: string;
+  color: string;
+  ownerUserId: string;
+  ownerName: string | null;
+  sharing: BuilderSharing;
+  modelAgent: BuilderModelRef | null;
+  templateId: string | null;
+  monthlyLimitUsd: number | null;
+  spentThisMonthUsd: number;
+  toolCount: number;
+  skillCount: number;
+  scheduleCount: number;
+  updatedAt: string;
+  canEdit: boolean;
+}
+
+export interface BuilderTool {
+  kind: "connector" | "mcp_tool";
+  refId: string;
+  name: string;
+  /** connector kind or MCP server name, for a logo */
+  provider: string | null;
+  requiresApproval: boolean;
+  entitledForYou: boolean;
+}
+
+export interface BuilderSubagent {
+  childId: string;
+  name: string;
+  description: string;
+  childName: string;
+}
+
+export interface BuilderMemoryItem {
+  id: string;
+  content: string;
+  createdByName: string | null;
+  createdAt: string;
+}
+
+export interface BuilderSchedule {
+  id: string;
+  name: string;
+  cadence: BuilderCadence;
+  timeUtc: string;
+  prompt: string;
+  enabled: boolean;
+  /** written or changed by someone other than the owner: off until the OWNER
+   * turns it on (it runs, and spends, as them) */
+  awaitingOwner: boolean;
+  lastEditedByName: string | null;
+  nextRunAt: string | null;
+  lastRunAt: string | null;
+}
+
+export interface BuilderChannel {
+  id: string;
+  provider: BuilderChannelProvider;
+  status: "connected" | "needs_setup";
+  connectionName: string | null;
+}
+
+export interface BuilderAgentDetail extends BuilderAgentSummary {
+  instructions: string;
+  connectionFormat: BuilderConnectionFormat;
+  computerUse: boolean;
+  /** the project this agent's spend bills to */
+  project: { id: string; name: string } | null;
+  sharedUserIds: string[];
+  sharedUsers: Array<{ id: string; name: string | null }>;
+  tools: BuilderTool[];
+  subagents: BuilderSubagent[];
+  /** skills are PINNED at attach: `updateAvailable` = the library copy changed
+   * since (re-attach to take it); `unavailable` = the owner can no longer see
+   * it, so it is left out of the agent's prompt */
+  skills: Array<{
+    id: string;
+    name: string;
+    description: string;
+    updateAvailable: boolean;
+    unavailable: boolean;
+    /** ADR-0175: why the pinned body is kept out of the prompt (absent when it runs) */
+    withheld?: "held" | "refused" | "quarantined";
+    pinnedVersion?: number;
+    /** the name the agent runs with (pinned with the body; a rename is a new version) */
+    pinnedName?: string;
+    /** ADR-0175 review fix: a skill private to its owner on an agent shared
+     * beyond them — only its owner's (and admins') turns carry it */
+    withheldFromOthers?: boolean;
+    /** the owner has asked an admin to share the skill with the workspace */
+    visibilityRequested?: boolean;
+  }>;
+  memory: BuilderMemoryItem[];
+  schedules: BuilderSchedule[];
+  channels: BuilderChannel[];
+}
+
+export interface BuilderThreadSummary {
+  id: string;
+  agentId: string;
+  agentName: string;
+  agentColor: string;
+  title: string;
+  status: BuilderThreadStatus;
+  source: "chat" | "schedule" | "channel";
+  lastMessagePreview: string;
+  /** ADR-0173: the tool step the thread is paused on, if any */
+  pendingStep?: { id: string; status: BuilderToolStepStatus; displayName: string } | null;
+  updatedAt: string;
+}
+
+/** ADR-0173 — a tool step's lifecycle. "pending_confirmation" is the agent's
+ * own "Ask first" (the person in the thread decides); "pending_approval" is an
+ * organisation approval in the approvals queue. */
+export type BuilderToolStepStatus =
+  | "pending_confirmation"
+  | "pending_approval"
+  | "running"
+  | "done"
+  | "denied"
+  | "refused"
+  | "error";
+
+/** one governed tool call a turn made — arguments are a REDACTED preview */
+export interface BuilderToolStep {
+  id: string;
+  messageId: string;
+  turn: number;
+  seq: number;
+  kind: "mcp_tool" | "connector" | "unknown";
+  refId: string | null;
+  name: string;
+  displayName: string;
+  provider: string | null;
+  arguments: unknown;
+  argumentsDigest: string;
+  requiresConfirmation: boolean;
+  status: BuilderToolStepStatus;
+  approvalId: string | null;
+  /** null when withheld by PII / guardrail policy (see resultWithheld) */
+  resultPreview: string | null;
+  resultWithheld: boolean;
+  outcomeCode: string | null;
+  outcomeDetail: string | null;
+  costUsd: number | null;
+  latencyMs: number | null;
+  auditLogId: string | null;
+  traceId: string | null;
+  createdAt: string;
+  finishedAt: string | null;
+}
+
+/** the pause a turn stopped on */
+export interface BuilderPendingStep {
+  stepId: string;
+  status: "pending_confirmation" | "pending_approval";
+  toolName: string;
+  displayName: string;
+  approvalId: string | null;
+  approverName: string | null;
+  /** present on the thread detail: the step itself (with its arguments) */
+  step?: BuilderToolStep;
+}
+
+export interface BuilderMessage {
+  id: string;
+  role: "user" | "agent" | "system";
+  content: string;
+  model: string | null;
+  costUsd: number | null;
+  latencyMs: number | null;
+  createdAt: string;
+  /** ADR-0173: the tool calls this (agent) message made, in order */
+  steps?: BuilderToolStep[];
+}
+
+/** ADR-0175 A6 — a skill's admission verdict */
+export type SkillAdmissionState = "unscanned" | "clean" | "held" | "refused" | "admitted";
+/** counts and locations only — never the matched text */
+export interface AdmissionFindingCount {
+  rule: string;
+  severity: "low" | "medium" | "high" | "critical";
+  where: string;
+  count: number;
+}
+export interface BuilderSkillSummary {
+  id: string;
+  name: string;
+  description: string;
+  visibility: "private" | "workspace";
+  ownerName: string | null;
+  usedBy: number;
+  updatedAt: string;
+  canEdit: boolean;
+  /** ADR-0175 A6: goes up on every body change */
+  version: number;
+  contentDigest: string;
+  admissionState: SkillAdmissionState;
+  /** a widening waiting for an admin */
+  requestedVisibility: "private" | "workspace" | null;
+  /** owner and admins only */
+  admissionSeverity?: AdmissionFindingCount["severity"] | null;
+  admissionFindings?: AdmissionFindingCount[];
+  /** ADR-0175 A5: null while the cooldown is off */
+  release: { quarantined: boolean; readyAt: string | null; ageDays: number } | null;
+}
+export interface BuilderSkillDetail extends BuilderSkillSummary {
+  body: string;
+}
+
+export interface BuilderTemplate {
+  id: string;
+  name: string;
+  tagline: string;
+  description: string;
+  category: string;
+  /** logo keys */
+  integrations: string[];
+  instructions: string;
+  skills: Array<{ name: string; description: string; body: string }>;
+  subagents: Array<{ name: string; description: string }>;
+  schedules: Array<{ name: string; cadence: BuilderCadence; timeUtc: string; prompt: string }>;
+  steps: string[];
+}
+
+export type BuilderIntegrationCategory = "productivity" | "developer" | "communication" | "data" | "security" | "ai";
+export interface BuilderIntegrationItem {
+  /** a logo key */
+  key: string;
+  name: string;
+  description: string;
+  category: BuilderIntegrationCategory;
+  status: "connected" | "available";
+  /** the admin page that connects it */
+  connectHref: string;
+  kind: "connector" | "mcp" | "chatops";
+}
+export interface BuilderIntegrationsResponse {
+  groups: Array<{ name: string; items: BuilderIntegrationItem[] }>;
+  custom: { mcpServers: Array<{ id: string; name: string; toolCount: number }> };
+}
+
+export interface BuilderUsage {
+  totals: { spendUsd: number; messages: number; agents: number; activeUsers: number };
+  byAgent: Array<{ agentId: string; name: string; spendUsd: number; messages: number; limitUsd: number | null }>;
+  byUser: Array<{ userId: string; name: string; spendUsd: number; messages: number }>;
+  byModel: Array<{ provider: string; model: string; spendUsd: number; messages: number }>;
+  daily: Array<{ date: string; spendUsd: number; messages: number }>;
+}
+
+/** GET /builder/toolbox-options — something the caller may add to a toolbox */
+export interface BuilderToolboxOption {
+  kind: "connector" | "mcp_tool";
+  /** the id PUT …/tools takes: a connector id, or the MCP tool's own id */
+  refId: string;
+  name: string;
+  /** connector provider kind, or MCP server name (for a logo) */
+  provider: string | null;
+  description?: string;
+  /** MCP tools only */
+  access?: "read" | "write";
+}
+
+/** POST /builder/agents/import — a bundled tool the importer did not get */
+export interface BuilderImportDropped {
+  kind: "connector" | "mcp_tool";
+  /** connector name, or "server/tool" */
+  name: string;
+  reason: "not_found" | "not_entitled";
+}
+
+/** GET /builder/agents/:id/export — portable: no ids, no owners */
+export interface BuilderBundle {
+  version: 1;
+  agent: { name: string; [k: string]: unknown };
+  skills: Array<Record<string, unknown>>;
 }

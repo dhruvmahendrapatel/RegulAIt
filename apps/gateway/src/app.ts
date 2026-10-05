@@ -12,6 +12,7 @@ import {
   lte,
   agentRevocations,
   agents,
+  aiUseCases,
   approvalAssignments,
   apiKeys,
   approvalDelegations,
@@ -33,6 +34,7 @@ import {
   mcpServers,
   mcpTools,
   modelCards,
+  ne,
   or,
   orchestrationRuns,
   projectContextItems,
@@ -105,6 +107,7 @@ import {
   createUserSchema,
   createDelegationSchema,
   deactivateUserSchema,
+  conditionDueInstant,
   decideApprovalSchema,
   deleteRoleSchema,
   evaluateRequestSchema,
@@ -154,9 +157,12 @@ import { registerReportingRoutes } from "./reporting.js";
 import { registerPostureRoutes } from "./posture.js";
 import { registerTrustDashboardRoutes } from "./trust-dashboard.js";
 import { registerUseCaseOverviewRoutes } from "./use-case-overview.js";
+import { registerUseCaseDraftRoutes } from "./use-case-drafts.js";
 import { registerAgentCardRoutes } from "./agent-card.js";
 import { registerDependencyGraphRoutes } from "./dependency-graph.js";
 import { registerGovernanceMonitorRoutes } from "./governance-monitor.js";
+import { registerCredentialInventoryRoutes } from "./credential-inventory.js";
+import { registerEnergyRoutes } from "./energy.js";
 import { registerRegulatoryIntelRoutes } from "./regulatory-intel.js";
 import {
   REMEDIATION_PREFIX as GOVERNANCE_REMEDIATION_PREFIX,
@@ -329,6 +335,7 @@ import { registerAnthropicCompat } from "./compat-anthropic.js";
 import { registerOpenAiCompat } from "./compat-openai.js";
 import { registerModelsDiscovery } from "./compat-models.js";
 import { registerVirtualKeyRoutes, routesForPurpose } from "./virtual-keys.js";
+import { registerModelPolicyRoutes } from "./model-policy.js";
 // ADR-0097 — the tool-poisoning admission gate (part A) and the RFC 9728
 // protected-resource metadata + WWW-Authenticate challenge (part B).
 import {
@@ -355,7 +362,24 @@ import { RunStateError } from "@regulait/orchestration-kernel";
 import { applyWorkflowApprovalDecision, registerWorkflowRoutes } from "./workflows.js";
 import { registerTemplateGalleryRoutes } from "./template-gallery.js";
 // ADR-0080 — the AI use-case registry (L1 front-door) and its lifecycle join.
-import { registerUseCaseRoutes, syncUseCaseForInstance } from "./use-cases.js";
+import {
+  acceptUseCaseRisks,
+  imposeUseCaseConditions,
+  markUseCaseReturned,
+  precheckRiskAcceptance,
+  registerUseCaseRoutes,
+  syncUseCaseForInstance,
+  useCaseArtifactRefusal,
+  useCaseForIntakeApproval,
+} from "./use-cases.js";
+// ADR-0168 amendment — the review policy (reviewer roles per tier, risk
+// acceptors), multi-role review rounds and the recertification sweep.
+import {
+  isReviewRoleMember,
+  loadReviewPolicy,
+  registerReviewPolicyRoutes,
+  reviewRoleIdsFor,
+} from "./review-policy.js";
 import { registerVendorRoutes, syncVendorForInstance } from "./vendors.js";
 // ADR-0081 — the AI risk register (gap L2): evidence computed from the real
 // ledgers at read time; acceptance is an audited record.
@@ -369,6 +393,13 @@ import {
   registerOrgSettingsRoutes,
   startAuditPruneScheduler,
 } from "./org-settings.js";
+import {
+  breakGlassLockoutRefusal,
+  dropBreakGlassUser,
+  signInInvariantChecked,
+  signInInvariantWritten,
+  withSignInInvariant,
+} from "./break-glass.js";
 import { registerSetupStatusRoutes } from "./setup-status.js";
 import { registerSchedulerRoutes } from "./scheduler-api.js";
 import { schedulerJobRegistry } from "./scheduler-jobs.js";
@@ -387,6 +418,9 @@ import { registerCostReconciliationRoutes } from "./cost-reconcile.js";
 import { registerTracingRoutes } from "./tracing.js";
 import { registerCompliancePackRoutes } from "./compliance-packs.js";
 import { registerCopilotRoutes } from "./copilot.js";
+import { registerBuilderRoutes } from "./builder.js";
+import { builderStepsAwaitingApproval, resumeBuilderAfterApproval } from "./builder-runtime.js";
+import { drainBackgroundWork, scheduleBackgroundWork } from "./background-work.js";
 import type { CopilotNarrator, RecommendationJudge } from "@regulait/shared";
 import { registerChatOpsRoutes } from "./chatops.js";
 import path from "node:path";
@@ -1051,7 +1085,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
             });
           }
           // gate 2: org-mandated MFA enrollment (off|admins|all)
-          if (!session.totpEnabled && !AUTH_SELF_SERVICE_ROUTES.has(route) && session.ctx.userId) {
+          // ADR-0174: a federated session whose identity provider ASSERTED
+          // MFA (amr/acr, checked at the callback) already satisfies the dial.
+          if (!session.totpEnabled && !session.idpMfa && !AUTH_SELF_SERVICE_ROUTES.has(route) && session.ctx.userId) {
             const mustEnroll =
               org.mfaRequired === "all" || (org.mfaRequired === "admins" && session.ctx.isAdmin);
             if (mustEnroll) {
@@ -1269,13 +1305,13 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // hard-delete route.
 
   const userIdParam = z.object({ userId: z.string().uuid() });
-  const loadUser = async (userId: string) => {
-    const [row] = await db.select().from(users).where(eq(users.id, userId));
+  const loadUser = async (userId: string, x: Pick<Db, "select"> = db) => {
+    const [row] = await x.select().from(users).where(eq(users.id, userId));
     return row ?? null;
   };
   /** lockout guard: true when the org would be left with NO active admin */
-  const wouldOrphanAdmins = async (exceptUserId: string): Promise<boolean> => {
-    const admins = await db
+  const wouldOrphanAdmins = async (exceptUserId: string, x: Pick<Db, "select"> = db): Promise<boolean> => {
+    const admins = await x
       .select({ id: users.id })
       .from(users)
       .where(and(eq(users.isAdmin, true), isNull(users.disabledAt)));
@@ -1287,8 +1323,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     ruleId: string,
     reason: string,
     detail: Record<string, unknown>,
+    x: Pick<Db, "insert"> = db,
   ) =>
-    db.insert(auditLog).values({
+    x.insert(auditLog).values({
       userId: actorId ?? "00000000-0000-0000-0000-000000000000",
       objectType: "user",
       objectId: targetId,
@@ -1313,25 +1350,46 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         detail: "deactivating your own account would lock you out — another admin must do it",
       });
     }
-    if (target.isAdmin && (await wouldOrphanAdmins(userId))) {
-      return reply.status(409).send({
-        error: "last_active_admin",
-        detail: "this is the last active admin — promote another admin before deactivating them",
-      });
-    }
-    const [row] = await db
-      .update(users)
-      .set({ disabledAt: new Date() })
-      .where(eq(users.id, userId))
-      .returning({ id: users.id, disabledAt: users.disabledAt });
-    await auditUserAct(
-      req.authCtx.userId,
-      userId,
-      "user-deactivated",
-      `user '${target.email}' deactivated${body.reason ? `: ${body.reason}` : ""}`,
-      { phase: "deactivate", email: target.email, ...(body.reason ? { reason: body.reason } : {}) },
-    );
-    return row;
+    // AER-056: the two lockout guards re-read the user and count what remains
+    // under the sign-in invariant lock, and the write and its audit row commit
+    // in the same transaction — two concurrent deactivations cannot both pass
+    // a count that only one of them can afford.
+    const out = await withSignInInvariant(db, async (tx, org) => {
+      const current = await loadUser(userId, tx);
+      if (!current) return { status: 404, body: { error: "unknown_user" } } as const;
+      if (current.disabledAt) return { status: 409, body: { error: "already_disabled" } } as const;
+      if (current.isAdmin && (await wouldOrphanAdmins(userId, tx))) {
+        return {
+          status: 409,
+          body: {
+            error: "last_active_admin",
+            detail: "this is the last active admin — promote another admin before deactivating them",
+          },
+        } as const;
+      }
+      // ADR-0174 (finding 5): nor the last usable break-glass admin while email
+      // sign-in is break-glass only
+      const glass = await breakGlassLockoutRefusal(tx, org, { kind: "user", userId });
+      if (glass) return { status: 409, body: glass } as const;
+      await signInInvariantChecked("user-deactivate");
+      const [row] = await tx
+        .update(users)
+        .set({ disabledAt: new Date() })
+        .where(eq(users.id, userId))
+        .returning({ id: users.id, disabledAt: users.disabledAt });
+      await signInInvariantWritten("user-deactivate");
+      await auditUserAct(
+        req.authCtx.userId,
+        userId,
+        "user-deactivated",
+        `user '${current.email}' deactivated${body.reason ? `: ${body.reason}` : ""}`,
+        { phase: "deactivate", email: current.email, ...(body.reason ? { reason: body.reason } : {}) },
+        tx,
+      );
+      return { row: row! };
+    });
+    if (out.status !== undefined) return reply.status(out.status).send(out.body);
+    return out.row;
   });
 
   app.post("/v1/users/:userId/reactivate", async (req, reply) => {
@@ -1380,25 +1438,51 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     const target = await loadUser(userId);
     if (!target) return reply.status(404).send({ error: "unknown_user" });
     if (target.isAdmin === body.isAdmin) return reply.status(409).send({ error: "no_change" });
-    if (!body.isAdmin && target.isAdmin && !target.disabledAt && (await wouldOrphanAdmins(userId))) {
-      return reply.status(409).send({
-        error: "last_active_admin",
-        detail: "this is the last active admin — promote another admin before demoting them",
-      });
-    }
-    const [row] = await db
-      .update(users)
-      .set({ isAdmin: body.isAdmin })
-      .where(eq(users.id, userId))
-      .returning({ id: users.id, isAdmin: users.isAdmin });
-    await auditUserAct(
-      req.authCtx.userId,
-      userId,
-      body.isAdmin ? "user-promoted-admin" : "user-demoted-admin",
-      `user '${target.email}' ${body.isAdmin ? "promoted to" : "demoted from"} admin${body.reason ? `: ${body.reason}` : ""}`,
-      { phase: "admin-flag", isAdmin: body.isAdmin, ...(body.reason ? { reason: body.reason } : {}) },
-    );
-    return row;
+    /** the flag write, the break-glass list clean-up and the audit row */
+    const apply = async (x: Pick<Db, "update" | "insert">, email: string) => {
+      const [row] = await x
+        .update(users)
+        .set({ isAdmin: body.isAdmin })
+        .where(eq(users.id, userId))
+        .returning({ id: users.id, isAdmin: users.isAdmin });
+      // a demoted user is no longer a break-glass admin: drop them from the list
+      const droppedFromBreakGlass = !body.isAdmin && (await dropBreakGlassUser(x, userId));
+      if (!body.isAdmin) await signInInvariantWritten("user-demote");
+      await auditUserAct(
+        req.authCtx.userId,
+        userId,
+        body.isAdmin ? "user-promoted-admin" : "user-demoted-admin",
+        `user '${email}' ${body.isAdmin ? "promoted to" : "demoted from"} admin${body.reason ? `: ${body.reason}` : ""}`,
+        { phase: "admin-flag", isAdmin: body.isAdmin, ...(body.reason ? { reason: body.reason } : {}), ...(droppedFromBreakGlass ? { droppedFromBreakGlass: true } : {}) },
+        x,
+      );
+      return row!;
+    };
+    if (body.isAdmin) return apply(db, target.email);
+    // AER-056: a demotion re-reads the user and both counts under the sign-in
+    // invariant lock, and writes and audits in the same transaction
+    const out = await withSignInInvariant(db, async (tx, org) => {
+      const current = await loadUser(userId, tx);
+      if (!current) return { status: 404, body: { error: "unknown_user" } } as const;
+      if (!current.isAdmin) return { status: 409, body: { error: "no_change" } } as const;
+      if (!current.disabledAt && (await wouldOrphanAdmins(userId, tx))) {
+        return {
+          status: 409,
+          body: {
+            error: "last_active_admin",
+            detail: "this is the last active admin — promote another admin before demoting them",
+          },
+        } as const;
+      }
+      // ADR-0174 (finding 5): nor the last usable break-glass admin while email
+      // sign-in is break-glass only
+      const glass = await breakGlassLockoutRefusal(tx, org, { kind: "user", userId });
+      if (glass) return { status: 409, body: glass } as const;
+      await signInInvariantChecked("user-demote");
+      return { row: await apply(tx, current.email) };
+    });
+    if (out.status !== undefined) return reply.status(out.status).send(out.body);
+    return out.row;
   });
 
   // Names-only directory for the /app pickers (add a project member, name an
@@ -2285,6 +2369,81 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       });
     }
 
+    // AER-026 — WHO ASKED, AND WHO THE PROXY SAYS THIS IS. Every row this
+    // route writes carries the same provenance, including the refusal below,
+    // so a deactivated subject's attempted access is attributable to the Kong
+    // consumer that presented it. `proxyConsumer` is the identity the proxy
+    // mapped FROM; `userId` on the row is what it mapped TO. Both, always:
+    // "which consumer was this?" is the first question asked when a mapping
+    // turns out to be wrong, and the row is the only place it can be answered.
+    const calloutProvenance = {
+      askedByUserId: req.authCtx.userId ?? null,
+      via: "authz_check",
+      // AER-027: which credential asked. A pdp virtual key is a distinct
+      // audit principal from an administrator doing the same thing by hand,
+      // and the ledger should not blur them.
+      credential: req.authCtx.via,
+      ...(req.authCtx.virtualKeyId ? { virtualKeyId: req.authCtx.virtualKeyId } : {}),
+      ...(body.proxyConsumer
+        ? { proxyConsumer: { id: body.proxyConsumer.id, username: body.proxyConsumer.username ?? null } }
+        : {}),
+    };
+
+    // AER-026 — THE SUBJECT MUST EXIST AND BE ACTIVE.
+    //
+    // The kernel decides from grants, roles and rules; it does not ask whether
+    // the user is still a user. On the dispatch path that question is answered
+    // before the kernel runs, at authentication: a deactivated user gets 401
+    // `user_disabled` and never reaches it. On THIS route the subject arrives
+    // in the body and is believed (ADR-0127 §3), so nothing had asked — and a
+    // deactivated user whose grants survive (ADR-0022: deactivate is not
+    // delete, every grant stays) was still `allow` to a proxy. Offboarding
+    // that stops sign-in but not the gateway in front of the tools is not
+    // offboarding. Same shape for a subject nobody has: an unknown tool is a
+    // deny rather than a 404 so a proxy has an answer it can route on, and an
+    // unknown subject is the same deny for the same reason.
+    const [subject] = await db
+      .select({ id: users.id, disabledAt: users.disabledAt })
+      .from(users)
+      .where(eq(users.id, body.userId));
+    if (!subject) {
+      // ON THE LEDGER, like the deactivated case below. A consumer left
+      // pointing at a UUID nobody has is a mapping error the operator has to
+      // find, and the row is the only place that names the Kong consumer
+      // which presented it. `user_id` carries no foreign key, so the row
+      // records the subject exactly as it was asserted.
+      await db.insert(auditLog).values({
+        userId: body.userId,
+        serverId: body.serverId,
+        toolName: body.toolName,
+        effect: "deny",
+        ruleId: "unknown_subject",
+        ruleChain: [],
+        reason: "no user has this id: the callout refuses a subject it cannot name",
+        detail: advisoryDetail({ ...calloutProvenance, contextApplied: [] }),
+      });
+      return reply.status(200).send({
+        decision: "deny" satisfies AuthzDecision,
+        reason: "unknown_subject",
+      });
+    }
+    if (subject.disabledAt) {
+      await db.insert(auditLog).values({
+        userId: body.userId,
+        serverId: body.serverId,
+        toolName: body.toolName,
+        effect: "deny",
+        ruleId: "subject_disabled",
+        ruleChain: [],
+        reason: `subject deactivated at ${subject.disabledAt.toISOString()}: the callout refuses what sign-in refuses`,
+        detail: advisoryDetail({ ...calloutProvenance, contextApplied: [] }),
+      });
+      return reply.status(200).send({
+        decision: "deny" satisfies AuthzDecision,
+        reason: "subject_disabled",
+      });
+    }
+
     // AER-028 — THE SAME QUESTION THE DISPATCH WOULD ASK.
     //
     // These four were `undefined, null, null, undefined`, and the consequence
@@ -2362,13 +2521,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       ruleChain: decision.ruleChain,
       reason: decision.reason,
       detail: advisoryDetail({
-        askedByUserId: req.authCtx.userId ?? null,
-        via: "authz_check",
-        // AER-027: which credential asked. A pdp virtual key is a distinct
-        // audit principal from an administrator doing the same thing by hand,
-        // and the ledger should not blur them.
-        credential: req.authCtx.via,
-        ...(req.authCtx.virtualKeyId ? { virtualKeyId: req.authCtx.virtualKeyId } : {}),
+        ...calloutProvenance,
         contextApplied,
         // AER-036: the VALUE the decision ran on, not just that a field was
         // present. `contextApplied` is what crosses into a data plane and stays
@@ -2694,7 +2847,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // id sees only the rows they could already see.
     const { status, objectType, approverUserId } = z
       .object({
-        status: z.enum(["pending", "approved", "denied", "consumed", "superseded"]).optional(),
+        status: z.enum(["pending", "approved", "denied", "returned", "consumed", "superseded"]).optional(),
         objectType: z.enum(APPROVAL_OBJECT_TYPES).optional(),
         approverUserId: z.string().uuid().optional(),
       })
@@ -2735,6 +2888,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // they belong to — still not a widening of who may DECIDE, which the decide
     // path re-checks against `approverUserId` independently.
     const assignedIds = workbenchOn && !req.authCtx.isAdmin && me ? await assignedApprovalIdsFor(db, me) : [];
+    // ADR-0168 amendment: a review-role row is in the queue of EVERY member of
+    // the role (any of them may decide it) — never the proposer's — and stays
+    // visible to whoever decided it.
+    const myReviewRoles = !req.authCtx.isAdmin && me ? reviewRoleIdsFor(await loadReviewPolicy(db), me) : [];
     const scopeCondition = req.authCtx.isAdmin
       ? undefined
       : or(
@@ -2744,6 +2901,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
               ? [and(inArray(approvals.approverUserId, delegators), eq(approvals.status, "pending"))]
               : []),
             ...(assignedIds.length ? [inArray(approvals.id, assignedIds)] : []),
+            ...(myReviewRoles.length
+              ? [and(inArray(approvals.reviewRoleId, myReviewRoles), sql`${approvals.userId} <> ${me}`)]
+              : []),
+            ...(me ? [and(sql`${approvals.reviewRoleId} IS NOT NULL`, eq(approvals.decidedBy, me))] : []),
           ],
         );
     const conditions = [
@@ -2821,6 +2982,16 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     const runIds = ids(rows.map((r) => r.runId));
     const projectIds = ids(rows.map((r) => r.projectId));
     const approvalServerIds = ids(rows.map((r) => r.serverId));
+    // ADR-0168: an intake sign-off row names the use case it decides, so the
+    // reviewer can open the record (null for every other approval kind)
+    const workflowInstanceIds = ids(rows.map((r) => (r.objectType === "workflow" ? r.instanceId : null)));
+    const intakeUseCaseRows = workflowInstanceIds.length
+      ? await db
+          .select({ id: aiUseCases.id, instanceId: aiUseCases.workflowInstanceId })
+          .from(aiUseCases)
+          .where(inArray(aiUseCases.workflowInstanceId, workflowInstanceIds))
+      : [];
+    const useCaseForInstance = new Map(intakeUseCaseRows.map((u) => [u.instanceId, u.id]));
     const [userRows, instanceRows, runRows, projectRows, approvalServerRows, boundTargetFor] = await Promise.all([
       userIds.length
         ? db
@@ -3063,6 +3234,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         ...r,
         serverName: r.serverId ? approvalServerLabel.get(r.serverId) ?? null : null,
         projectName: r.projectId ? projectLabel.get(r.projectId) ?? null : null,
+        useCaseId:
+          r.objectType === "workflow" && r.instanceId ? (useCaseForInstance.get(r.instanceId) ?? null) : null,
+        // ADR-0168 amendment: the reviewer role this row is the required review of
+        reviewRole: r.reviewRoleId ? { id: r.reviewRoleId, name: r.reviewRoleName } : null,
         // AER-039: host + posture + manifest digest only — never the URL
         ...(r.objectType === "mcp_tool" ? { boundTarget: boundTargetFor.get(r.id) ?? null } : {}),
         // Finding-6 separation-of-duties surface: the person who would sign
@@ -3162,8 +3337,24 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     const { approvalId, isAdmin } = input;
     const body = input.body;
 
-    const [row] = await db.select().from(approvals).where(eq(approvals.id, approvalId));
+    let [row] = await db.select().from(approvals).where(eq(approvals.id, approvalId));
     if (!row) return fail(404, { error: "unknown_approval" });
+    // ADR-0168 amendment: a single-approver row on an intake sign-off whose
+    // tier the review policy routes to roles is replaced by the round's role
+    // rows BEFORE anyone can decide it — this closes the moment between the
+    // kernel writing the template's rows and the use-case sync replacing them.
+    // Without a policy routing any tier, nothing here runs a write.
+    if (row.objectType === "workflow" && row.status === "pending" && row.reviewRoleId === null && row.instanceId) {
+      const policy = await loadReviewPolicy(db);
+      if (policy && Object.values(policy.tiers).some((t) => (t?.roleIds.length ?? 0) > 0)) {
+        // ADR-0170 §8: this sync runs BEFORE the caller is authorized, so
+        // what it writes is attributed to the system (null), never to a
+        // caller who may yet be refused.
+        await syncUseCaseForInstance(db, row.instanceId, null);
+        [row] = await db.select().from(approvals).where(eq(approvals.id, approvalId));
+        if (!row) return fail(404, { error: "unknown_approval" });
+      }
+    }
     // ADR-0046: the OTHER lazy evaluation point. Deciding an approval that came
     // due while nobody was looking must still record the breach — otherwise a
     // queue that is only ever touched by a decision would never register one.
@@ -3188,11 +3379,46 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // decider acting on-behalf-of; (b) an org ADMIN may decide in the
     // approver's place to unblock a stuck queue, but only with a recorded
     // reason, audit-marked as the override it is.
-    const delegation =
-      row.approverUserId !== deciderUserId
-        ? await activeDelegationFrom(db, row.approverUserId, deciderUserId)
-        : null;
-    const adminOverride = row.approverUserId !== deciderUserId && !delegation;
+    // ADR-0168 amendment — A REVIEW ROLE ROW: any member of the role decides
+    // it as its named approver (membership read live from the policy), and the
+    // PROPOSER never may — not as a member, a delegate or an admin override.
+    //
+    // ADR-0170 §2 — on a review role row, being the row's STORED approver is
+    // not a decision right: routing, claims, SLA reassignment or a member
+    // later removed from the role would otherwise decide without live
+    // membership. Only a live member decides; a delegation is honoured only
+    // from a delegator who is a live member and not the proposer; anyone
+    // else is an admin override (admin + reason) or refused.
+    let roleMember = false;
+    let delegation: Awaited<ReturnType<typeof activeDelegationFrom>> = null;
+    let adminOverride: boolean;
+    if (row.reviewRoleId !== null) {
+      const reviewed = await useCaseForIntakeApproval(db, row);
+      const proposerIds = new Set([row.userId, ...(reviewed ? [reviewed.ownerUserId] : [])]);
+      if (proposerIds.has(deciderUserId)) {
+        return fail(403, {
+          error: "proposer_cannot_review",
+          detail: "the proposer of a use case can never decide one of its required reviews",
+        });
+      }
+      const reviewPolicy = await loadReviewPolicy(db);
+      roleMember = isReviewRoleMember(reviewPolicy, row.reviewRoleId, deciderUserId);
+      if (
+        !roleMember &&
+        row.approverUserId !== deciderUserId &&
+        !proposerIds.has(row.approverUserId) &&
+        isReviewRoleMember(reviewPolicy, row.reviewRoleId, row.approverUserId)
+      ) {
+        delegation = await activeDelegationFrom(db, row.approverUserId, deciderUserId);
+      }
+      adminOverride = !roleMember && !delegation;
+    } else {
+      delegation =
+        row.approverUserId !== deciderUserId
+          ? await activeDelegationFrom(db, row.approverUserId, deciderUserId)
+          : null;
+      adminOverride = row.approverUserId !== deciderUserId && !delegation;
+    }
     if (adminOverride) {
       if (!isAdmin) {
         return fail(403, { error: "not_the_named_approver" });
@@ -3204,6 +3430,89 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         });
       }
     }
+    // ADR-0168 — the two new outcomes, refused BY NAME before anything is
+    // written. Both exist only on an INTAKE SIGN-OFF (a workflow gate on the
+    // instance that governs an AI use case): "send back for information"
+    // needs a questionnaire to go back to, and a condition needs a use case
+    // to bind to and a deploy gate to enforce it. A body of approved/denied
+    // with no conditions never reaches the lookup — byte-identical to before.
+    const conditionInputs = body.conditions ?? [];
+    const acceptRisks = body.acceptRisks ?? null;
+    const intakeUseCase =
+      body.decision === "returned" || conditionInputs.length > 0 || acceptRisks
+        ? await useCaseForIntakeApproval(db, row)
+        : null;
+    // ADR-0168 amendment — risk acceptance rides an APPROVING intake review,
+    // by a risk acceptor, for this use case's own live risks; refused by name.
+    if (acceptRisks) {
+      if (body.decision !== "approved" || !intakeUseCase) {
+        return fail(422, {
+          error: "risk_acceptance_only_on_intake_approval",
+          detail: "risk is accepted only by APPROVING an AI use-case intake sign-off",
+        });
+      }
+      // ADR-0170 §8: accepting risk on one's own use case is not an
+      // arm's-length acceptance — the owner and the intake initiator are
+      // refused whatever else they are (acceptor, approver, admin).
+      if (deciderUserId === intakeUseCase.ownerUserId || deciderUserId === row.userId) {
+        return fail(403, {
+          error: "proposer_cannot_accept_risk",
+          detail: "the proposer of a use case cannot accept risks on it; another risk acceptor must",
+        });
+      }
+      const refusal = await precheckRiskAcceptance(db, intakeUseCase, deciderUserId, acceptRisks.riskIds);
+      if (refusal) return fail(refusal.status, refusal.body);
+    }
+    if (body.decision === "returned") {
+      if (!intakeUseCase) {
+        return fail(422, {
+          error: "returned_only_on_intake_approval",
+          detail: "send back for information applies to an AI use-case intake sign-off only",
+        });
+      }
+      if (!body.reason?.trim()) {
+        return fail(422, {
+          error: "return_reason_required",
+          detail: "sending a use case back for information requires a reason saying what is needed",
+        });
+      }
+    }
+    if (conditionInputs.length > 0) {
+      if (body.decision !== "approved" || !intakeUseCase) {
+        return fail(422, {
+          error: "conditions_only_on_intake_approval",
+          detail: "conditions are imposed only by APPROVING an AI use-case intake sign-off",
+        });
+      }
+      const ownerIds = [
+        ...new Set(conditionInputs.map((c) => c.ownerUserId).filter((x): x is string => !!x)),
+      ];
+      if (ownerIds.length > 0) {
+        const found = await db
+          .select({ id: users.id, disabledAt: users.disabledAt })
+          .from(users)
+          .where(inArray(users.id, ownerIds));
+        if (found.length !== ownerIds.length) {
+          return fail(422, {
+            error: "unknown_condition_owner",
+            detail: "every condition ownerUserId must name an existing user",
+          });
+        }
+        // ADR-0170 §8: a deactivated user can never close the condition
+        const deactivated = found.filter((u) => u.disabledAt !== null).map((u) => u.id);
+        if (deactivated.length > 0) {
+          return fail(422, {
+            error: "user_deactivated",
+            field: "conditions.ownerUserId",
+            userIds: deactivated,
+            detail: "a condition owner must be an active user; this user has been deactivated",
+          });
+        }
+      }
+    }
+    // Every kind below the intake sign-off decides approve-or-deny only;
+    // `returned` was refused above for anything that is not an intake gate.
+    const binaryDecision: "approved" | "denied" = body.decision === "approved" ? "approved" : "denied";
     // ADR-0090 — grant certification guards, refused BY NAME before anything
     // is written: `campaign_expired` (a past-due campaign's undecided items
     // stay undecided forever — expiry is a visible posture fact, never a
@@ -3224,7 +3533,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // a second conflict needs its own escalation). Sitting in the one decide
     // path means bulk and ChatOps inherit both.
     if (row.objectType === "sod_override") {
-      const refusal = await precheckSodOverrideDecision(db, row, deciderUserId, body.decision);
+      const refusal = await precheckSodOverrideDecision(db, row, deciderUserId, binaryDecision);
       if (refusal) return fail(refusal.status, refusal.body);
     }
     // ADR-0159 — `cannot_approve_own_remediation`, keyed on the DECIDER so the
@@ -3259,6 +3568,43 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // execution (git stages, nested-run completion) and the PM mirror run
     // only after the decision is durable.
     const outcome = await db.transaction(async (tx) => {
+      // ADR-0170 §1 — each required review in a round is decided by a
+      // DIFFERENT person: one person in two roles (or an admin overriding
+      // twice) must not satisfy every review alone. Checked under the
+      // instance lock — the same lock the sibling hold below and the review
+      // round writer take — so two decisions by one person racing on two rows
+      // of the round serialize and the second sees the first. Keyed on the
+      // DECIDER, so it binds members, delegates and admin overrides alike.
+      if (row.reviewRoleId !== null && row.instanceId) {
+        await tx
+          .select({ id: workflowInstances.id })
+          .from(workflowInstances)
+          .where(eq(workflowInstances.id, row.instanceId))
+          .for("update");
+        const [already] = await tx
+          .select({ id: approvals.id, reviewRoleName: approvals.reviewRoleName })
+          .from(approvals)
+          .where(
+            and(
+              eq(approvals.instanceId, row.instanceId),
+              eq(approvals.reviewRound, row.reviewRound ?? 0),
+              ne(approvals.id, row.id),
+              eq(approvals.decidedBy, deciderUserId),
+              inArray(approvals.status, ["approved", "denied", "returned", "consumed"]),
+            ),
+          )
+          .limit(1);
+        if (already) {
+          return {
+            updated: null,
+            postCommit: null,
+            refusal: {
+              error: "reviewer_already_decided_round",
+              detail: `you already decided the ${already.reviewRoleName ?? "other"} review in this round; each required review must be decided by a different person`,
+            },
+          };
+        }
+      }
       const [updated] = await tx
         .update(approvals)
         .set({
@@ -3269,7 +3615,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         })
         .where(and(eq(approvals.id, approvalId), eq(approvals.status, "pending")))
         .returning();
-      if (!updated) return { updated: null, postCommit: null };
+      if (!updated) return { updated: null, postCommit: null, refusal: null };
       if (adminOverride) {
         await tx.insert(auditLog).values({
           userId: deciderUserId,
@@ -3336,13 +3682,68 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       let postCommit: ((d: Db) => Promise<void>) | null = null;
       // Workflow sign-offs advance their instance through the same one inbox (§5).
       if (updated.objectType === "workflow") {
-        postCommit = await applyWorkflowApprovalDecision(tx, updated, body.decision, deciderUserId, opts.dataKey);
+        // ADR-0168 amendment: each role of a review round is ONE REQUIRED
+        // review. While a sibling role is still pending the stage holds —
+        // whatever the org's quorum dial says. Checked under the instance
+        // lock so two reviewers approving at once cannot both hold.
+        let holdForSiblings = false;
+        if (updated.reviewRoleId !== null && body.decision === "approved" && updated.instanceId) {
+          await tx
+            .select({ id: workflowInstances.id })
+            .from(workflowInstances)
+            .where(eq(workflowInstances.id, updated.instanceId))
+            .for("update");
+          const siblings = await tx
+            .select({ id: approvals.id })
+            .from(approvals)
+            .where(
+              and(
+                eq(approvals.instanceId, updated.instanceId),
+                eq(approvals.stageId, updated.stageId ?? ""),
+                eq(approvals.status, "pending"),
+              ),
+            );
+          holdForSiblings = siblings.length > 0;
+        }
+        postCommit = holdForSiblings
+          ? null
+          : await applyWorkflowApprovalDecision(tx, updated, body.decision, deciderUserId, opts.dataKey);
         // ADR-0080: if this instance governs an AI use case, its terminal
         // decision flips the use case (completed -> approved, denied ->
         // rejected) HERE, inside the decision's own transaction — so
         // "approval registers the use case" commits or rolls back with the
         // decision, and inherits every separation-of-duties guard above.
+        // ADR-0168: a RETURNED intake sign-off parks the use case at
+        // needs_info BEFORE the sync (which then leaves it there).
+        if (body.decision === "returned" && intakeUseCase) {
+          await markUseCaseReturned(
+            tx as unknown as Db,
+            intakeUseCase.id,
+            updated.id,
+            body.reason ?? "",
+            deciderUserId,
+          );
+        }
         await syncUseCaseForInstance(tx as unknown as Db, updated.instanceId, deciderUserId);
+        // ADR-0168: conditions commit or roll back WITH the approval.
+        if (body.decision === "approved" && intakeUseCase && conditionInputs.length > 0) {
+          await imposeUseCaseConditions(
+            tx as unknown as Db,
+            intakeUseCase,
+            updated.id,
+            conditionInputs.map((c) => ({
+              text: c.text,
+              ownerUserId: c.ownerUserId,
+              dueAt: conditionDueInstant(c.dueAt),
+              blocking: c.blocking,
+            })),
+            deciderUserId,
+          );
+        }
+        // ADR-0168 amendment: accepted risks commit or roll back WITH the approval.
+        if (body.decision === "approved" && intakeUseCase && acceptRisks) {
+          await acceptUseCaseRisks(tx as unknown as Db, intakeUseCase, updated.id, acceptRisks, deciderUserId);
+        }
         // ADR-0084: same discipline for a vendor whose ASSESSMENT this
         // instance governs — the terminal decision flips the vendor inside
         // the decision's own transaction. Approving records a sign-off on
@@ -3351,17 +3752,55 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       }
       // Orchestration escalations (§3): approve = another attempt, deny = abort.
       if (updated.objectType === "run") {
-        postCommit = await applyRunApprovalDecision(tx, updated, body.decision, deciderUserId, opts.dataKey);
+        postCommit = await applyRunApprovalDecision(tx, updated, binaryDecision, deciderUserId, opts.dataKey);
+      }
+      // ADR-0173 §1: an MCP tool approval a builder agent's turn is paused on.
+      // Nothing is decided here — the decision is the approval row above. The
+      // turn RESUMES after commit (approved -> the identical call, which the
+      // governed path matches to this approval by its argument digest; denied
+      // -> the model is told who denied it and why), as the thread's person —
+      // and AFTER THE RESPONSE (review): the approver's request never carries
+      // the resumed turn (model steps, tool calls), so the decide answers at
+      // once. Tracked background work: a closing app and a test drain it. A
+      // failure is audited (the resume records its own outcome on the step).
+      if (updated.objectType === "mcp_tool" && !postCommit) {
+        const waiting = await builderStepsAwaitingApproval(tx as unknown as Db, updated.id);
+        if (waiting.length) {
+          postCommit = async (d: Db) => {
+            scheduleBackgroundWork(d, async () => {
+              try {
+                await resumeBuilderAfterApproval(d, opts.dataKey, updated, binaryDecision, deciderUserId);
+              } catch (err) {
+                await d.insert(auditLog).values({
+                  userId: deciderUserId,
+                  objectType: "mcp_tool",
+                  objectId: null,
+                  serverId: updated.serverId,
+                  toolName: updated.toolName,
+                  detail: { approvalId: updated.id, phase: "builder-resume" },
+                  effect: "deny",
+                  ruleId: "builder-tool-step-resume-failed",
+                  ruleChain: [],
+                  reason: `the builder turn waiting on approval ${updated.id} could not resume: ${
+                    err instanceof Error ? (err.cause instanceof Error ? err.cause.message : err.message) : String(err)
+                  }`
+                    .replace(/\s+/g, " ")
+                    .slice(0, 1000),
+                });
+              }
+            }, app.log);
+          };
+        }
       }
       // Pillar 5 budget escalations + §9 context-conflict resolutions.
       if (updated.objectType === "project") {
-        await applyProjectApprovalDecision(tx as unknown as Db, updated, body.decision, deciderUserId);
+        await applyProjectApprovalDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);
       }
       // Pillar 3 §8.2 governed remediations: approve -> provider.remediate +
       // finding 'remediated'; deny -> 'accepted_risk'. Both audited. SoD guards
       // (named-approver, admin-override-reason, self-review-reason) apply above.
       if (updated.objectType === "infra_operation") {
-        await applyInfraApprovalDecision(tx as unknown as Db, updated, body.decision, deciderUserId);
+        await applyInfraApprovalDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);
       }
       // ADR-0045 MRM sign-offs: the risk acceptance is recorded on the model
       // card chain HERE, inside the one decide path, so it inherits every
@@ -3371,7 +3810,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         await applyModelCardApprovalDecision(
           tx as unknown as Db,
           updated,
-          body.decision,
+          binaryDecision,
           deciderUserId,
         );
       }
@@ -3388,7 +3827,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         postCommit = await applyTrainingJobApprovalDecision(
           tx as unknown as Db,
           updated,
-          body.decision,
+          binaryDecision,
           deciderUserId,
         );
       }
@@ -3401,7 +3840,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         await applyGrantCertificationDecision(
           tx as unknown as Db,
           updated,
-          body.decision,
+          binaryDecision,
           deciderUserId,
         );
       }
@@ -3411,21 +3850,22 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       // approvalId}`); denied = nothing minted, the request records the
       // denial. Never a second mint endpoint.
       if (updated.objectType === "sod_override") {
-        await applySodOverrideDecision(tx as unknown as Db, updated, body.decision, deciderUserId);
+        await applySodOverrideDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);
       }
       // ADR-0159 remediation: approved = the STORED kind+params execute HERE,
       // inside the decision's transaction; the monitor re-evaluates after
       // commit so a cleared condition resolves its alert straight away.
       if (updated.objectType === "remediation") {
-        const applied = await applyRemediationDecision(tx as unknown as Db, updated, body.decision, deciderUserId);
+        const applied = await applyRemediationDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);
         if (applied) {
           postCommit = async (d: Db) => {
             await runGovernanceMonitor(d, { actorUserId: deciderUserId });
           };
         }
       }
-      return { updated, postCommit };
+      return { updated, postCommit, refusal: null };
     });
+    if (outcome.refusal) return fail(409, outcome.refusal);
     if (!outcome.updated) {
       // raced: re-read so the refusal names what actually happened
       const [current] = await db
@@ -3471,7 +3911,21 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
 
   app.post("/v1/approvals/:approvalId/decide", async (req, reply) => {
     const { approvalId } = z.object({ approvalId: z.string().uuid() }).parse(req.params);
-    const body = decideApprovalSchema.parse(req.body);
+    // ADR-0168: a malformed CONDITION is a 422 naming the field, like the
+    // other condition refusals; every other shape error keeps the generic
+    // 400 it always had (old bodies behave byte-identically).
+    const parsed = decideApprovalSchema.safeParse(req.body);
+    if (!parsed.success) {
+      if (parsed.error.issues.every((i) => i.path[0] === "conditions")) {
+        return reply.status(422).send({ error: "invalid_conditions", issues: parsed.error.issues });
+      }
+      // ADR-0168 amendment: a malformed risk acceptance is a 422 by name too
+      if (parsed.error.issues.every((i) => i.path[0] === "acceptRisks")) {
+        return reply.status(422).send({ error: "invalid_risk_acceptance", issues: parsed.error.issues });
+      }
+      throw parsed.error;
+    }
+    const body = parsed.data;
     const outcome = await decideOneApproval({
       approvalId,
       deciderUserId: req.authCtx.userId,
@@ -3803,10 +4257,17 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       await syncUseCaseForInstance(d, instanceId, actorUserId);
       await syncVendorForInstance(d, instanceId, actorUserId);
     },
+    // ADR-0171 / AER-053: an intake questionnaire with an inconsistent
+    // "Not sure" answer is refused before it is stored
+    validateArtifact: useCaseArtifactRefusal,
   });
   // ADR-0077 — the cascade-annotated template gallery (admin-gated by default)
   registerTemplateGalleryRoutes(app, db);
   registerUseCaseRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0171 / AER-050 — the intake wizard's server-side drafts
+  registerUseCaseDraftRoutes(app, db);
+  // ADR-0168 amendment — the review policy and the recertification sweep
+  registerReviewPolicyRoutes(app, db);
   // demo task C3 — the use-case 360 read
   registerUseCaseOverviewRoutes(app, db);
   // demo task C5 — the agent card
@@ -3815,6 +4276,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerDependencyGraphRoutes(app, db);
   // ADR-0157 — governance monitor alerts (Monitor & Respond)
   registerGovernanceMonitorRoutes(app, db);
+  // ADR-0175 A7 — the non-human credential inventory (admin, read-only)
+  registerCredentialInventoryRoutes(app, db);
+  // ADR-0175 A15 — energy factors and the energy/emissions estimate (admin)
+  registerEnergyRoutes(app, db);
   // ADR-0158 — regulatory intelligence joined to our packs and use cases
   registerRegulatoryIntelRoutes(app, db);
   // ADR-0159 — remediation proposals for monitor alerts
@@ -3938,6 +4403,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     dataKey: opts.dataKey,
     narrator: opts.copilotNarrator ?? null,
   });
+  // ADR-0172 — the agent builder. Non-admin (owner/sharing checks in-handler);
+  // chat dispatches through the governed core AS THE CALLER, so a builder
+  // agent never reaches more than the person using it holds.
+  registerBuilderRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0053 — the published contract: the OpenAPI document, the versioning /
   // deprecation policy, and the RFC-8594 Deprecation/Sunset headers. Registered
   // here (rather than first) only for readability; the inventory hook at the top
@@ -3953,6 +4422,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerSchedulerRoutes(app, db, { registry: schedulerJobRegistry({ dataKey: opts.dataKey }) });
   const stopAuditPruneScheduler = startAuditPruneScheduler(db);
   app.addHook("onClose", async () => stopAuditPruneScheduler());
+  // after-the-response work (a resumed builder turn, a channel reply) finishes first
+  app.addHook("onClose", async () => drainBackgroundWork(db));
   registerAnthropicCompat(app, db, { dataKey: opts.dataKey });
   registerOpenAiCompat(app, db, { dataKey: opts.dataKey });
   // ADR-0066 §1 — `GET /v1/models`. Gated by the same onRequest hook as the two
@@ -3964,6 +4435,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // (a strict narrowing of their own entitlements); the handlers enforce
   // owner-or-admin per row, and the admin-only fields refuse in-handler.
   registerVirtualKeyRoutes(app, db);
+  // ADR-0173 §3 — the model allow-list matrix. GET is any signed-in person's
+  // read of the policy as it applies to them (NON_ADMIN_ROUTES); PUT is admin.
+  // Enforcement is NOT here: it is the shared model-access decision's.
+  registerModelPolicyRoutes(app, db);
 
   // ADR-0031 item 2: the audit read surface used to be hard-capped at 100 rows
   // with a userId filter (plus PR #79's deployMode) and nothing else — for a

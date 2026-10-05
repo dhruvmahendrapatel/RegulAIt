@@ -42,7 +42,10 @@ import {
   SkeletonBlock,
   Textarea,
 } from "../../ui/kit";
+import { ModelPicker } from "../../ui/ModelPicker";
 import { useToast } from "../../ui/toast";
+import { bindingsFromGranted } from "../models/modelBindings";
+import { modelPolicyDefault, modelPolicyVerdict, useModelPolicy } from "../models/modelPolicy";
 import v from "../views.module.css";
 import s from "./chat.module.css";
 
@@ -137,16 +140,37 @@ export default function ChatPage() {
   const providerStatus = providerStatusQ.data?.providers ?? {};
   const conversations = convosQ.data?.conversations ?? [];
 
+  // ADR-0172: the picker's tiles (logo, model id, tier, readiness)
+  const pickerAgents = useMemo(
+    () =>
+      bindingsFromGranted(agents, {
+        providerStatus: providerStatusQ.data?.providers ?? {},
+        myProviders: (credsQ.data?.credentials ?? []).map((c) => c.provider),
+      }),
+    [agents, providerStatusQ.data, credsQ.data],
+  );
+
   const providerConfigured = useCallback(
     (provider: string) => provider === "mock" || Boolean(providerStatus[provider]?.configured),
     [providerStatus],
   );
 
-  // fresh chats open on the best LIVE real provider (Claude first), mirroring
-  // the legacy pickDefaultAgentId
+  // ADR-0173 §3 — the org's model allow-list for Chat: its default wins, and a
+  // binding it forbids is never picked by default (the picker shows it disabled)
+  const policyQ = useModelPolicy();
+  const policy = policyQ.data ?? null;
+
+  // fresh chats open on the policy's Chat default when there is one, else the
+  // best LIVE real provider (Claude first), mirroring the legacy pickDefaultAgentId
   const defaultAgentId = useMemo(() => {
     if (!agents.length) return "";
-    const live = agents.filter((a) => a.provider !== "mock" && providerConfigured(a.provider));
+    const chatAllowed = (a: { agentId: string; provider: string }) =>
+      modelPolicyVerdict(policy, "chat", { id: a.agentId, provider: a.provider }).allowed;
+    const policyDefault = modelPolicyDefault(policy, "chat");
+    if (policyDefault && agents.some((a) => a.agentId === policyDefault && chatAllowed(a))) return policyDefault;
+    const usable = agents.filter(chatAllowed);
+    if (!usable.length) return agents[0]!.agentId;
+    const live = usable.filter((a) => a.provider !== "mock" && providerConfigured(a.provider));
     if (live.length) {
       const best = [...live].sort((a, b) => {
         const ap = a.provider === "anthropic" ? 1 : 0;
@@ -157,9 +181,9 @@ export default function ChatPage() {
       return best.agentId;
     }
     const def = agentsQ.data?.defaultAgentId;
-    if (def && agents.some((a) => a.agentId === def)) return def;
-    return agents[0]!.agentId;
-  }, [agents, agentsQ.data?.defaultAgentId, providerConfigured]);
+    if (def && usable.some((a) => a.agentId === def)) return def;
+    return usable[0]!.agentId;
+  }, [agents, agentsQ.data?.defaultAgentId, providerConfigured, policy]);
 
   // ---- chat state ---------------------------------------------------------
   const [agentId, setAgentId] = useState("");
@@ -593,15 +617,15 @@ export default function ChatPage() {
                   No agents are granted to your account — ask an admin to grant you one.
                 </span>
               ) : (
-                <Field label="Agent">
-                  <Select value={agentId} onChange={(e) => setAgentId(e.target.value)} aria-label="Agent">
-                    {agents.map((a) => (
-                      <option key={a.agentId} value={a.agentId}>
-                        {a.name} · {a.provider} · tier {a.tier}
-                      </option>
-                    ))}
-                  </Select>
-                </Field>
+                <ModelPicker
+                  label="Agent"
+                  agents={pickerAgents}
+                  value={agentId}
+                  onChange={setAgentId}
+                  testId="chat-agent"
+                  feature="chat"
+                  policy={policy}
+                />
               )}
               <Field label="Bill to">
                 <Select value={projectId} onChange={(e) => setProjectId(e.target.value)} aria-label="Bill to project">

@@ -60,6 +60,20 @@ const stageSchema = z.object({
    * via the gateway's check executor, never via a human trigger; absent = the
    * stage awaits an explicit human trigger (nothing to run). */
   checks: z.array(z.string().min(1)).optional(),
+  /** automated_check (AER-047 / PENDING L1): what a named check with NO
+   * reported result means. Absent/false — the default — it is PENDING: the
+   * instance waits at awaiting_execution until a result is reported (a real
+   * CI posts to POST .../checks), and never advances on silence. `true` is the
+   * explicit, per-template opt-in to the old offline behaviour: an unreported
+   * check passes, but the result is labelled `autoPassed: true` ("auto-passed —
+   * no report (offline mode)") in the instance context, the audit trail, the
+   * stage rail and the approval view. The gateway honours the opt-in only in a
+   * process that positively declares offline mode (REGULAIT_OFFLINE_CHECKS=1)
+   * and never on a box that shows a sign of being deployed (REGULAIT_DEPLOY_MODE
+   * / REGULAIT_HSTS) — it FAILS CLOSED, so a production configuration cannot
+   * pass a check nobody ran. Only valid on an automated_check stage with named
+   * checks — refused loudly elsewhere. */
+  offlineAutoPass: z.boolean().optional(),
   /** git_operation: which operation this stage performs */
   action: z.enum(GIT_ACTIONS).optional(),
   /** git_operation: name of the registered git connection to use */
@@ -164,6 +178,19 @@ export const workflowDefinitionSchema = z
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           message: `stage '${s.id}' (${s.type}) cannot carry a quorum — only a human_approval stage can`,
+        });
+      }
+      // AER-047: the auto-pass opt-in is a check-executor concern only. On any
+      // other stage — or a check stage with nothing for the executor to run —
+      // it would read as a promise the engine never keeps, so it is refused
+      // loudly rather than silently ignored.
+      if (
+        s.offlineAutoPass !== undefined &&
+        (s.type !== "automated_check" || (s.checks?.length ?? 0) === 0)
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `stage '${s.id}' (${s.type}) cannot carry offlineAutoPass — only an automated_check stage with named checks can`,
         });
       }
       if (s.type === "artifact_generation" && !s.output) {
@@ -467,6 +494,11 @@ export type WorkflowEvent =
   | { kind: "artifact_submitted"; stageId: string }
   | { kind: "approval_granted"; stageId: string }
   | { kind: "approval_denied"; stageId: string }
+  // ADR-0168 — "send back for information": the approver neither approves nor
+  // denies; the instance returns to the NEAREST PRECEDING artifact_generation
+  // stage and rests there until a NEW version of that artifact is submitted.
+  // Not terminal (the denial is) — the resubmission re-requests the sign-off.
+  | { kind: "approval_returned"; stageId: string }
   | { kind: "human_trigger"; stageId: string }
   | { kind: "stage_completed"; stageId: string }
   | { kind: "execution_succeeded"; stageId: string }
@@ -484,6 +516,15 @@ export type WorkflowEvent =
   | { kind: "deploy_override"; stageId: string }
   // §2 a rollback stage finished reversing the deployment → terminal rolled_back.
   | { kind: "rolled_back"; stageId: string }
+  // AER-049 — a GENERIC re-open: the instance goes back to `stageId` (a
+  // human_approval or artifact_generation stage before the current one and at
+  // or before the first git / deploy stage, so review always runs again
+  // before anything ships) and runs forward from there, every stage
+  // from it on marked reopened. Unlike every other event it is accepted on a
+  // COMPLETED instance (a recertification re-opens an approved intake to its
+  // sign-off); aborted / denied / rolled_back stay terminal. `reason` says why
+  // (it is stored with the event).
+  | { kind: "reopen"; stageId: string; reason: string }
   | { kind: "abort" };
 
 /** side effects the caller (gateway) must perform after a transition */
@@ -654,6 +695,57 @@ export function transition(
   state: InstanceState,
   event: WorkflowEvent,
 ): TransitionResult {
+  // AER-049: the one event a COMPLETED instance accepts — checked before the
+  // terminal refusal below. Aborted / denied / rolled_back stay terminal.
+  if (event.kind === "reopen") {
+    if (state.status === "aborted" || state.status === "denied" || state.status === "rolled_back") {
+      throw new WorkflowStateError(`instance is terminal (${state.status}) and cannot be re-opened`);
+    }
+    const targetIndex = def.stages.findIndex((st) => st.id === event.stageId);
+    if (targetIndex < 0) throw new WorkflowStateError(`no stage '${event.stageId}'`);
+    // AER-049 review: a re-open always runs REVIEW again before anything
+    // ships. The target must be a human sign-off or an artifact stage, and it
+    // must sit at or before the first git (PR / merge) or deploy stage — re-opening between
+    // a PR and its merge (or past a deploy) would re-run the merge or deploy
+    // with no new review, on the PR an earlier round already merged.
+    const target = def.stages[targetIndex]!;
+    if (target.type !== "human_approval" && target.type !== "artifact_generation") {
+      throw new WorkflowStateError(
+        `stage '${event.stageId}' is a ${target.type} stage — a re-open targets a sign-off or an artifact stage, so review runs again`,
+      );
+    }
+    // `create_branch` does not ship anything (and the round's `open_pr` cuts a
+    // fresh round branch itself), so a review AFTER it is still a valid target
+    const firstShipping = def.stages.findIndex(
+      (st) =>
+        (st.type === "git_operation" && st.action !== "create_branch") ||
+        st.type === "deployment" ||
+        st.type === "rollback",
+    );
+    if (firstShipping >= 0 && targetIndex > firstShipping) {
+      throw new WorkflowStateError(
+        `stage '${event.stageId}' comes after '${def.stages[firstShipping]!.id}' (${def.stages[firstShipping]!.type}) — ` +
+          "a re-open must go back to a review at or before the first git / deploy stage",
+      );
+    }
+    if (targetIndex >= state.currentStageIndex) {
+      throw new WorkflowStateError(
+        `stage '${event.stageId}' is not before the current stage — only a stage already passed can be re-opened`,
+      );
+    }
+    const s: InstanceState = {
+      ...state,
+      status: "running",
+      stageStatuses: [...state.stageStatuses],
+      artifactVersions: { ...state.artifactVersions },
+    };
+    for (let i = targetIndex; i < s.stageStatuses.length; i++) {
+      if (s.stageStatuses[i] !== "pending") s.stageStatuses[i] = "reopened";
+    }
+    s.currentStageIndex = targetIndex;
+    return runForward(def, s);
+  }
+
   if (
     state.status === "completed" ||
     state.status === "aborted" ||
@@ -729,6 +821,47 @@ export function transition(
     }
     const s = { ...state, status: "denied" as const };
     return { state: s, effects: [{ kind: "instance_denied" }] };
+  }
+
+  if (event.kind === "approval_returned") {
+    if (current?.type !== "human_approval" || current.id !== event.stageId) {
+      throw new WorkflowStateError(
+        `instance is not blocked on approval stage '${event.stageId}'`,
+      );
+    }
+    // ADR-0168: back to the nearest artifact stage BEFORE this gate. It is
+    // NOT re-run forward (the artifact already has a version, so runForward
+    // would auto-complete it straight back into this gate): the instance RESTS
+    // at blocked_on_artifact, and only a new `artifact_submitted` on that
+    // stage moves it on — which runs forward into the sign-off again.
+    let producerIndex = -1;
+    for (let i = state.currentStageIndex - 1; i >= 0; i--) {
+      if (def.stages[i]!.type === "artifact_generation") {
+        producerIndex = i;
+        break;
+      }
+    }
+    if (producerIndex < 0) {
+      throw new WorkflowStateError(
+        `approval stage '${event.stageId}' has no preceding artifact stage to return to`,
+      );
+    }
+    const producer = def.stages[producerIndex]!;
+    const s: InstanceState = {
+      ...state,
+      status: "blocked_on_artifact",
+      stageStatuses: [...state.stageStatuses],
+      artifactVersions: { ...state.artifactVersions },
+    };
+    for (let i = producerIndex; i < s.stageStatuses.length; i++) {
+      if (s.stageStatuses[i] !== "pending") s.stageStatuses[i] = "reopened";
+    }
+    s.stageStatuses[producerIndex] = "active";
+    s.currentStageIndex = producerIndex;
+    return {
+      state: s,
+      effects: [{ kind: "await_artifact", stageId: producer.id, output: producer.output! }],
+    };
   }
 
   if (event.kind === "execution_succeeded" || event.kind === "execution_failed") {

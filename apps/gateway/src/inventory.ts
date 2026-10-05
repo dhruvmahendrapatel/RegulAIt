@@ -594,6 +594,12 @@ export function registerInventoryRoutes(app: FastifyInstance, db: Db): void {
             ...(a.lifecycleStatus === "retired"
               ? { note: "retired — dispatch refuses with 409 agent_retired; grants and history remain readable" }
               : {}),
+            ...(a.lifecycleStatus === "suspended"
+              ? { note: "suspended — dispatch refuses with 409 agent_suspended until an admin returns it to service" }
+              : {}),
+            ...(a.lifecycleStatus === "proposed" || a.lifecycleStatus === "under_review"
+              ? { warning: `${a.lifecycleStatus.replace("_", " ")} — dispatch still allowed; a stewardship state, not a control` }
+              : {}),
           },
           // -- ADR-0089 L21: grants vs approved intent, never traffic -------
           alignment: alignmentIndex.get(a.id) ?? null,
@@ -871,6 +877,14 @@ export function registerInventoryRoutes(app: FastifyInstance, db: Db): void {
           .from(aiRisks)
           .where(eq(aiRisks.agentId, agentId)),
       ]);
+    // ADR-0175 A4 — the latest model the PROVIDER reported serving for this
+    // agent (any time, not only the window); null when none ever reported one
+    const [lastServed] = await db
+      .select({ servedModel: usageEvents.servedModel, configuredModel: usageEvents.model, at: usageEvents.at })
+      .from(usageEvents)
+      .where(and(eq(usageEvents.agentId, agentId), isNotNull(usageEvents.servedModel)))
+      .orderBy(desc(usageEvents.at))
+      .limit(1);
     const userName = new Map(userRows.map((u) => [u.id, u.displayName || u.email]));
     const agentName = new Map(agentNameRows.map((a) => [a.id, a.name]));
     const serverName = new Map(serverRows.map((s) => [s.id, s.name]));
@@ -900,6 +914,12 @@ export function registerInventoryRoutes(app: FastifyInstance, db: Db): void {
             : {}),
           ...(agent.lifecycleStatus === "retired"
             ? { note: "retired — dispatch refuses with 409 agent_retired; grants and history remain readable" }
+            : {}),
+          ...(agent.lifecycleStatus === "suspended"
+            ? { note: "suspended — dispatch refuses with 409 agent_suspended until an admin returns it to service" }
+            : {}),
+          ...(agent.lifecycleStatus === "proposed" || agent.lifecycleStatus === "under_review"
+            ? { warning: `${agent.lifecycleStatus.replace("_", " ")} — dispatch still allowed; a stewardship state, not a control` }
             : {}),
         },
       },
@@ -944,6 +964,9 @@ export function registerInventoryRoutes(app: FastifyInstance, db: Db): void {
         dispatchesInWindow: dispatchAgg[0]?.n ?? 0,
         costUsdInWindow: dispatchAgg[0]?.costUsd ?? 0,
         lastDispatchAt: dispatchAgg[0]?.lastAt ?? null,
+        lastServedModel: lastServed
+          ? { servedModel: lastServed.servedModel!, configuredModel: lastServed.configuredModel, at: lastServed.at.toISOString() }
+          : null,
         mcpTools: [...observedTools.values()]
           .map((t) => ({
             serverId: t.serverId,

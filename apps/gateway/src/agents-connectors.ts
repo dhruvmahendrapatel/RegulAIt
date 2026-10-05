@@ -28,11 +28,13 @@ import {
 } from "@regulait/db";
 import { createHash } from "node:crypto";
 import { ConnectorPolicyChangedError, prepareConnectorPiiAction } from "./connector-pii.js";
+import { executeGovernedConnectorCall } from "./connector-call.js";
 import { redactPiiPayload } from "@regulait/shared";
 import { deleteAgentGrantById, deleteConnectorGrantById } from "./grant-revocation.js";
 // ADR-0091 — toxic-combination SoD: the mint-time gate on the two direct
 // agent/connector grant endpoints (the other seven mint paths live in app.ts).
 import { refuseSodMint } from "./sod.js";
+import { refuseLifecycleChangedConcurrently, registerAgentStewardshipRoutes, withStewardship } from "./agent-stewardship.js";
 import { evaluateAgent, evaluateConnector } from "@regulait/policy-kernel";
 import { agentHaltOf, loadExecutionMode, postureOf } from "./execution-posture.js";
 import {
@@ -87,6 +89,7 @@ import {
   setAgentPolicySchema,
   setAgentSystemPromptSchema,
   updateAgentConfigSchema,
+  setExpectedServedModelSchema,
 } from "@regulait/shared";
 import type { PiiHit } from "@regulait/shared";
 import { guardrailWithheldMarker, guardrailCategoryList } from "@regulait/shared";
@@ -103,6 +106,7 @@ import {
   type GuardrailPolicy,
 } from "./guardrails.js";
 import { mrmDispatchGate } from "./mrm.js";
+import { loadModelPolicy, modelPolicyDispatchRefusal, withModelPolicy, type ModelPolicyGate } from "./model-policy.js";
 // ADR-0080 amendment (batch B3): the use-case dispatch gate — org opt-in,
 // default off (byte-identical), the ADR-0045 gate shape beside the MRM rung.
 import {
@@ -342,6 +346,10 @@ export type DispatchOutcome =
       result: {
         servedAgentId: string;
         model: string;
+        /** ADR-0175 A4: the model id the PROVIDER reported serving (may differ
+         * from `model`, the configured id). null when the provider did not
+         * say, and on a semantic-cache hit (no provider served this call). */
+        servedModel?: string | null;
         outputText: string;
         stopReason: string;
         refusal: boolean;
@@ -465,6 +473,13 @@ export interface GovernedDispatchArgs {
    * them; absent/null on every ordinary path, where every check below is a
    * no-op and the behaviour is byte-identical to pre-0066. */
   virtualKey?: VirtualKeyContext | null | undefined;
+  /** ADR-0173 §3 — the product feature this dispatch serves (and the data
+   * class, where the caller knows it). When set, the org's model allow-list is
+   * applied to the SERVED binding inside the core and to every fallback hop, so
+   * neither a routing choice nor a fallback reaches a model the matrix forbids
+   * for that feature. Absent = no matrix check here (the caller's own decision
+   * already applied it, or the call is not a feature use). */
+  modelFeature?: ModelPolicyGate | undefined;
   /** ADR-0066 §4 — the mode a FALLBACK HOP is re-evaluated under. Only the
    * chain driver reads it; a hop must be entitlement-checked in the same mode
    * the primary was, or a `plan`-only grant could serve an `execute` call. */
@@ -638,7 +653,10 @@ export async function executeGovernedDispatch(
       await recordSkippedHop(label, reason, "fallback-hop-unavailable");
       continue;
     }
-    // RULE 2 — re-evaluate, never inherit.
+    // RULE 2 — re-evaluate, never inherit. (ADR-0173 §3: the org's model
+    // allow-list is applied to the hop by `dispatchOnce` below — the same
+    // served-binding check every attempt takes when the caller names its
+    // feature — and a refusal there is recorded as a DENIED hop.)
     const hopExecutionMode = await loadExecutionMode(db);
     const decision = evaluateAgent({
       userId: args.userId,
@@ -1204,35 +1222,79 @@ async function dispatchAttempt(
   // which keeps the entitlement history readable and the retirement
   // reversible as a record, never as a dispatch. `deprecated` deliberately
   // does NOT appear here: deprecation only WARNS in the ADR-0082 inventory.
-  if (served.lifecycleStatus === "retired") {
+  //
+  // ADR-0168 amendment item 6: `suspended` refuses through the same gate with
+  // its own name (409 agent_suspended) — out of service like retired, but
+  // reversible by an admin (ADR-0170 item 7: a steward may suspend, only an
+  // admin returns the agent to service). proposed / under_review warn only.
+  //
+  // ADR-0170 item 7 (review finding): the gate judges the agent the request
+  // NAMED as well as the one that serves. Model routing (invoke, compat
+  // router_decides) may downroute a request for agent A onto agent B; if A is
+  // suspended or retired the request is refused under A's name instead of
+  // being quietly served by B. Fallback hops carry the same requestedAgentId,
+  // so a hop never serves a request for an out-of-service agent either.
+  const lifecycleSubjects: Array<{
+    agent: Pick<AgentRow, "id" | "name" | "model" | "lifecycleStatus" | "lifecycleReason">;
+    requested: boolean;
+  }> = [];
+  if (requestedAgentId && requestedAgentId !== served.id) {
+    const [requestedRow] = await db
+      .select({
+        id: agents.id,
+        name: agents.name,
+        model: agents.model,
+        lifecycleStatus: agents.lifecycleStatus,
+        lifecycleReason: agents.lifecycleReason,
+      })
+      .from(agents)
+      .where(eq(agents.id, requestedAgentId));
+    if (requestedRow) lifecycleSubjects.push({ agent: requestedRow, requested: true });
+  }
+  lifecycleSubjects.push({ agent: served, requested: false });
+  for (const { agent: subject, requested } of lifecycleSubjects) {
+    const status = subject.lifecycleStatus;
+    if (status !== "suspended" && status !== "retired") continue;
+    const why = subject.lifecycleReason;
     const [lcRow] = await db
       .insert(auditLog)
       .values({
         userId,
         objectType: "agent",
-        objectId: served.id,
+        objectId: subject.id,
         detail: {
           phase: "dispatch",
-          agentId: served.id,
-          agentName: served.name,
-          model: served.model,
-          lifecycleStatus: "retired",
-          lifecycleReason: served.lifecycleReason,
+          agentId: subject.id,
+          agentName: subject.name,
+          model: subject.model,
+          lifecycleStatus: status,
+          lifecycleReason: why,
+          ...(requested ? { requestedAgent: true, servedAgentId: served.id, servedAgentName: served.name } : {}),
           ...(args.projectId ? { projectId: args.projectId } : {}),
         },
         effect: "deny",
-        ruleId: "agent-retired-dispatch-refused",
+        ruleId: status === "suspended" ? "agent-suspended-dispatch-refused" : "agent-retired-dispatch-refused",
         ruleChain: [],
-        reason: `agent '${served.name}' is retired${served.lifecycleReason ? ` (${served.lifecycleReason})` : ""} — a retired agent refuses dispatch; its grants and history remain readable`,
+        reason:
+          status === "suspended"
+            ? `agent '${subject.name}' is suspended${why ? ` (${why})` : ""} — a suspended agent refuses dispatch until an admin returns it to service`
+            : `agent '${subject.name}' is retired${why ? ` (${why})` : ""} — a retired agent refuses dispatch; its grants and history remain readable`,
       })
       .returning({ id: auditLog.id });
     sink.auditLogId = lcRow?.id ?? null;
-    return {
-      ok: false,
-      status: 409,
-      error: "agent_retired",
-      detail: `agent '${served.name}' is retired${served.lifecycleReason ? `: ${served.lifecycleReason}` : ""} — retirement is terminal; re-registering is a new agent`,
-    };
+    return status === "suspended"
+      ? {
+          ok: false,
+          status: 409,
+          error: "agent_suspended",
+          detail: `agent '${subject.name}' is suspended${why ? `: ${why}` : ""} — an admin can return it to service`,
+        }
+      : {
+          ok: false,
+          status: 409,
+          error: "agent_retired",
+          detail: `agent '${subject.name}' is retired${why ? `: ${why}` : ""} — retirement is terminal; re-registering is a new agent`,
+        };
   }
 
   // ADR-0066 §2/§3 — THE VIRTUAL-KEY CEILING. Placed FIRST, before the MRM
@@ -1269,6 +1331,41 @@ async function dispatchAttempt(
         reason: refusal.detail,
       }).returning({ id: auditLog.id });
       sink.auditLogId = vkRow?.id ?? null;
+      return { ok: false, status: refusal.status, error: refusal.error, detail: refusal.detail };
+    }
+  }
+
+  // ADR-0173 §3 — THE MODEL ALLOW-LIST, on the SERVED binding. Same placement
+  // and the same "can only subtract" shape as the key ceiling above: the
+  // caller's decision named the REQUESTED binding; this is what stops a
+  // routing choice or a fallback hop from serving one the org's matrix forbids
+  // for the caller's feature. One small read, only when a feature is named.
+  if (args.modelFeature) {
+    const refusal = modelPolicyDispatchRefusal(await loadModelPolicy(db), args.modelFeature, served);
+    if (refusal) {
+      const [mpRow] = await db
+        .insert(auditLog)
+        .values({
+          userId,
+          objectType: "agent",
+          objectId: served.id,
+          detail: {
+            phase: "dispatch",
+            agentId: served.id,
+            agentName: served.name,
+            model: served.model,
+            feature: args.modelFeature.feature,
+            ...(args.modelFeature.dataClass ? { dataClass: args.modelFeature.dataClass } : {}),
+            ...(served.id !== requestedAgentId ? { requestedAgentId } : {}),
+            ...(args.projectId ? { projectId: args.projectId } : {}),
+          },
+          effect: "deny",
+          ruleId: refusal.ruleId,
+          ruleChain: [],
+          reason: refusal.detail,
+        })
+        .returning({ id: auditLog.id });
+      sink.auditLogId = mpRow?.id ?? null;
       return { ok: false, status: refusal.status, error: refusal.error, detail: refusal.detail };
     }
   }
@@ -1562,6 +1659,8 @@ async function dispatchAttempt(
       result: {
         servedAgentId: served.id,
         model: cached.model ?? served.model,
+        // nothing was served by a provider on a cache hit — no claim to record
+        servedModel: null,
         outputText: cached.outputText,
         stopReason: "cached",
         refusal: false,
@@ -2145,6 +2244,9 @@ async function dispatchAttempt(
     baselineAgentId: baseline?.id ?? null,
     provider: served.provider,
     model: served.model,
+    // ADR-0175 A4 — what the provider SAID it served, beside what we asked
+    // for. NULL when the provider did not report one: never guessed.
+    servedModel: result.servedModel ?? null,
     inputTokens: result.usage.inputTokens,
     outputTokens: result.usage.outputTokens,
     costUsd,
@@ -2291,6 +2393,7 @@ async function dispatchAttempt(
     result: {
       servedAgentId: served.id,
       model: served.model,
+      servedModel: result.servedModel ?? null,
       outputText,
       stopReason: result.stopReason,
       refusal: result.refusal,
@@ -2370,9 +2473,16 @@ async function performDispatch(
     // was entitled under — a `plan`-only grant must not serve an `execute` call
     // just because it appears in a chain.
     mode: body.mode,
+    // ADR-0173 §3: the native invoke path is the "chat" feature; the core
+    // re-applies the matrix to routing's choice and to every fallback hop
+    modelFeature: CHAT_FEATURE,
     detail: { mode: body.mode, ...(body.conversationId ? { conversationId: body.conversationId } : {}) },
   });
 }
+
+/** ADR-0173 §3 — the native invoke path (the console's chat, the Try-it panel,
+ * SDK callers of /v1/agents/:id/invoke) is the "chat" feature of the matrix */
+const CHAT_FEATURE: ModelPolicyGate = { feature: "chat" };
 
 /**
  * Platform credential via environment. A self-hosted / single-tenant deploy can
@@ -2503,39 +2613,6 @@ export async function configuredProviders(
   return set;
 }
 
-/**
- * ADR-0070 amendment (2026-08-15) — what the governed connector body answers
- * into instead of the Fastify reply, so that ONE wrapper can see EVERY exit and
- * write the `connector` span from it.
- *
- * It is deliberately not a Fastify reply and is deliberately not named `reply`:
- * it sends nothing, it decides nothing, it only captures the status and payload
- * the attempt chose so the wrapper can classify them and then send them on
- * unchanged. The shape mirrors `reply.status(n).send(body)` exactly so the body
- * it wraps reads the same as every other route in this file.
- */
-interface ConnectorAttemptResult {
-  status: number;
-  body: Record<string, unknown>;
-}
-interface ConnectorReplyRecorder {
-  status(code: number): ConnectorReplyRecorder;
-  send(body: Record<string, unknown>): ConnectorAttemptResult;
-}
-function connectorReplyRecorder(): ConnectorReplyRecorder {
-  let code = 200;
-  const api: ConnectorReplyRecorder = {
-    status(c) {
-      code = c;
-      return api;
-    },
-    send(body) {
-      return { status: code, body };
-    },
-  };
-  return api;
-}
-
 /** §2/§4: agent registry + entitlements, connector catalog + grants, and the
  * governed invoke endpoints — decision, routing, and (dispatch=true) real
  * model execution. */
@@ -2544,6 +2621,9 @@ export function registerAgentConnectorRoutes(
   db: Db,
   opts: { dataKey?: string } = {},
 ) {
+  // ADR-0168 amendment item 6 — steward / successor / lifecycle / review.
+  registerAgentStewardshipRoutes(app, db);
+
   /**
    * ADR-0034 amendment — WRITE-TIME EGRESS CHECK for a credential `baseUrl`.
    *
@@ -2651,9 +2731,44 @@ export function registerAgentConnectorRoutes(
         model: body.model ?? null,
         systemPrompt: body.systemPrompt ?? null,
         customProviderId: body.customProviderId ?? null,
+        expectedServedModel: body.expectedServedModel ?? null,
       })
       .returning();
     return reply.status(201).send(row);
+  });
+
+  // ADR-0175 review fix — the binding's EXPECTED served model. An endpoint
+  // whose configured id is a deployment name reports the model behind it, so
+  // without this every call would read as served-model drift. Not dispatch
+  // config (nothing about the call changes), so not a versioned agent_config
+  // field: its own admin-only route (the global gate), audited with both values.
+  app.put("/v1/agents/:agentId/expected-served-model", async (req, reply) => {
+    const { agentId } = agentIdParam.parse(req.params);
+    const body = setExpectedServedModelSchema.parse(req.body ?? {});
+    const [existing] = await db
+      .select({ id: agents.id, name: agents.name, expected: agents.expectedServedModel })
+      .from(agents)
+      .where(eq(agents.id, agentId));
+    if (!existing) return reply.status(404).send({ error: "unknown_agent" });
+    const [row] = await db
+      .update(agents)
+      .set({ expectedServedModel: body.expectedServedModel })
+      .where(eq(agents.id, agentId))
+      .returning();
+    await db.insert(auditLog).values({
+      userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+      objectType: "agent",
+      objectId: agentId,
+      detail: { phase: "expected-served-model", from: existing.expected, to: body.expectedServedModel },
+      effect: "allow",
+      ruleId: "agent-expected-served-model-set",
+      ruleChain: [],
+      reason:
+        body.expectedServedModel === null
+          ? `expected served model of agent '${existing.name}' cleared — drift is measured against its configured model`
+          : `expected served model of agent '${existing.name}' set to '${body.expectedServedModel}'`,
+    });
+    return reply.send(row);
   });
 
   // B1.5 F2 (LIVE_VERIFICATION_2026-08) — edit an agent's DISPATCH-EXECUTION
@@ -2988,7 +3103,10 @@ export function registerAgentConnectorRoutes(
   // REL-10: bounded — `limit` (default LIST_DEFAULT_LIMIT, max LIST_MAX_LIMIT)
   app.get("/v1/agents", async (req) => {
     const { limit } = listLimitQuery.parse(req.query);
-    return { agents: await db.select().from(agents).orderBy(agents.name).limit(limit) };
+    // ADR-0168 amendment item 6: each row carries its stewardship view
+    // (stewardName, successorName, orphaned, reviewOverdue, cadence) computed
+    // at read time — no stored flag.
+    return { agents: await withStewardship(db, await db.select().from(agents).orderBy(agents.name).limit(limit)) };
   });
 
   // -------------------------------------------------------------------------
@@ -3176,9 +3294,12 @@ export function registerAgentConnectorRoutes(
       }
       ownerEmail = owner.email;
     }
+    // ADR-0168 item 6: the successor stepping up leaves the successor slot
+    // empty (the DB CHECK keeps steward and successor two different people)
+    const promotesSuccessor = !!body.ownerUserId && body.ownerUserId === agent.successorUserId;
     const [row] = await db
       .update(agents)
-      .set({ ownerUserId: body.ownerUserId })
+      .set({ ownerUserId: body.ownerUserId, ...(promotesSuccessor ? { successorUserId: null } : {}) })
       .where(eq(agents.id, agentId))
       .returning();
     await db.insert(auditLog).values({
@@ -3190,6 +3311,7 @@ export function registerAgentConnectorRoutes(
         from: agent.ownerUserId,
         to: body.ownerUserId,
         ...(ownerEmail ? { ownerEmail } : {}),
+        ...(promotesSuccessor ? { promotedSuccessor: true } : {}),
       },
       effect: "allow",
       ruleId: body.ownerUserId ? "agent-owner-set" : "agent-owner-cleared",
@@ -3235,8 +3357,11 @@ export function registerAgentConnectorRoutes(
         lifecycleReason: body.status === "active" ? null : (body.reason ?? null),
         lifecycleChangedAt: new Date(),
       })
-      .where(eq(agents.id, agentId))
+      // ADR-0170 item 7: compare-and-swap on the status read above — a
+      // concurrent retire + set-active must not un-retire the agent
+      .where(and(eq(agents.id, agentId), eq(agents.lifecycleStatus, agent.lifecycleStatus)))
       .returning();
+    if (!row) return refuseLifecycleChangedConcurrently(reply, agent.lifecycleStatus);
     await db.insert(auditLog).values({
       userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
       objectType: "agent",
@@ -3255,7 +3380,11 @@ export function registerAgentConnectorRoutes(
           ? `agent '${agent.name}' retired: ${body.reason} — dispatch now refuses with 409 agent_retired; grants and history remain readable`
           : body.status === "deprecated"
             ? `agent '${agent.name}' deprecated: ${body.reason} — a WARNING in the inventory; dispatch is not blocked`
-            : `agent '${agent.name}' returned to active (was ${agent.lifecycleStatus})`,
+            : body.status === "suspended"
+              ? `agent '${agent.name}' suspended: ${body.reason} — dispatch now refuses with 409 agent_suspended until it returns to service`
+              : body.status === "active"
+                ? `agent '${agent.name}' returned to active (was ${agent.lifecycleStatus})`
+                : `agent '${agent.name}' moved to ${body.status}: ${body.reason} — a WARNING in the inventory; dispatch is not blocked`,
     });
     return row;
   });
@@ -3602,7 +3731,10 @@ export function registerAgentConnectorRoutes(
       ceilingTier = ceiling?.tier ?? null;
     }
 
-    const decision = evaluateAgent({
+    // ADR-0173 §3 — the org's model allow-list for the "chat" feature, applied
+    // to the kernel's allow below and to every routing candidate.
+    const invokeModelPolicy = await loadModelPolicy(db);
+    const kernelDecision = evaluateAgent({
       userId,
       // ADR-0124 — the kill switch on the native dispatch path.
       execution: postureOf(await loadExecutionMode(db), agentHaltOf(agent)),
@@ -3621,6 +3753,7 @@ export function registerAgentConnectorRoutes(
       agentRevocations: agentRevocationsForUser,
       ceilingTier,
     });
+    const decision = withModelPolicy(kernelDecision, invokeModelPolicy, CHAT_FEATURE, agent);
 
     // OPTIMIZATION §8: routing runs strictly after — and inside — governance.
     // The candidate set starts as exactly the agents evaluateAgent would allow
@@ -3738,6 +3871,7 @@ export function registerAgentConnectorRoutes(
             virtualKey: invokeVirtualKey,
             mode: body.mode,
             cachedResponse: hit,
+            modelFeature: CHAT_FEATURE,
             detail: { surface: "invoke_cache", mode: body.mode },
           });
           if (!governed.ok) {
@@ -3851,19 +3985,25 @@ export function registerAgentConnectorRoutes(
       const routingExecutionMode = await loadExecutionMode(db);
       const entitled = registry.filter(
         (a) =>
-          evaluateAgent({
-            userId,
-            execution: postureOf(routingExecutionMode, agentHaltOf(a)),
-            agent: { id: a.id, name: a.name, tier: a.tier, enabled: a.enabled, modes: a.modes ?? null },
-            mode: body.mode,
-            agentGrants: grants,
-            roleAgentGrants: roleAgentGrantsForUser,
-            // ADR-0019: the routing roster is exactly what evaluateAgent would
-            // allow, so a revoked agent must not be a routing candidate either
-            // — otherwise the optimizer could serve an agent governance denies.
-            agentRevocations: agentRevocationsForUser,
-            ceilingTier,
-          }).effect === "allow",
+          withModelPolicy(
+            evaluateAgent({
+              userId,
+              execution: postureOf(routingExecutionMode, agentHaltOf(a)),
+              agent: { id: a.id, name: a.name, tier: a.tier, enabled: a.enabled, modes: a.modes ?? null },
+              mode: body.mode,
+              agentGrants: grants,
+              roleAgentGrants: roleAgentGrantsForUser,
+              // ADR-0019: the routing roster is exactly what evaluateAgent would
+              // allow, so a revoked agent must not be a routing candidate either
+              // — otherwise the optimizer could serve an agent governance denies.
+              agentRevocations: agentRevocationsForUser,
+              ceilingTier,
+            }),
+            // ADR-0173 §3: nor one the org's model allow-list forbids for chat
+            invokeModelPolicy,
+            CHAT_FEATURE,
+            a,
+          ).effect === "allow",
       );
 
       // A request that will really execute may only be routed onto an agent
@@ -4860,771 +5000,17 @@ export function registerAgentConnectorRoutes(
     const body = invokeConnectorSchema.parse(req.body);
     const userId = req.authCtx.userId;
     if (!userId) return reply.status(403).send({ error: "bootstrap_cannot_invoke" });
-
-    const [admissionGeneration] = await db.select().from(governancePolicyEpoch);
-    const generationCurrent = async () => {
-      const [current] = await db.select().from(governancePolicyEpoch);
-      return !!admissionGeneration && current?.epoch === admissionGeneration.epoch;
-    };
-    let externalRequests = 0;
-    const beforeConnectorSend = async () => {
-      if (!await generationCurrent()) throw new ConnectorPolicyChangedError();
-      externalRequests++;
-    };
-    const [connector] = await db.select().from(connectors).where(eq(connectors.id, connectorId));
-    if (!connector) return reply.status(404).send({ error: "unknown_connector" });
-
-    // ─────────────────────────────────────────────────────────────────────
-    // ADR-0070 amendment (2026-08-15) — THE CONNECTOR SPAN.
-    //
-    // `connector` was a DECLARED span kind with no writer, which made the
-    // vocabulary promise coverage the product did not have. It is emitted here,
-    // and it is emitted by a WRAPPER for exactly the reason the dispatch core's
-    // span is: this handler has FOURTEEN exits and eleven of them are refusals.
-    // A recorder sprinkled through the branches would trace the successes and
-    // miss the denials — "a trace of only the successes" is failure mode 2 in
-    // the ADR, and on a connector it is the worst one available, because a
-    // connector call is where customer data actually moves.
-    //
-    // So the whole governed body answers into a RECORDER instead of the Fastify
-    // reply, and the one span is written from whatever came back. Adding a
-    // fifteenth refusal below cannot forget to be traced, because nothing below
-    // mentions tracing.
-    //
-    // WHAT COUNTS AS A REFUSAL, and why the split is where it is: every 4xx this
-    // route produces is a DECISION (the entitlement kernel, §8.4 PII, an
-    // ADR-0042 guardrail, the ADR-0034/0062 egress guard, a missing credential,
-    // an unrecognised provider). Only a 5xx is a fault — a 502 from the upstream
-    // connector or a 503 for a missing data key. That is the same line
-    // `dispatchOnce` draws when it calls `model_dispatch_failed` the one
-    // non-decision, and it is the line ADR-0072 exists to protect: a defence
-    // working must never be scored as a defence failing.
-    // ─────────────────────────────────────────────────────────────────────
-    const projectId = body.projectId ?? null;
-    const piiMode = await projectPiiMode(db, projectId);
-    const piiIntl = await piiInternationalCategories(db);
-    const originalInvocation = { operation: body.operation, object: body.object ?? null, payload: body.payload ?? null };
-    let effectiveInvocation = originalInvocation;
-    let preparedPii: ReturnType<typeof prepareConnectorPiiAction>["prepared"] | null = null;
-    let preparationFailed = false;
-    if (piiMode === "redact") {
-      try {
-        const prepared = prepareConnectorPiiAction(projectId, originalInvocation, piiIntl);
-        preparedPii = prepared.prepared;
-        effectiveInvocation = prepared.invocation as typeof originalInvocation;
-      } catch { preparationFailed = true; }
-    }
-    let policyChanged = false;
-    const policyChangedBody = () => ({ error: "connector_policy_changed", detail: "Connector policy changed; result withheld. Review external effects before retrying.",
-      externalRequests, mayHaveExecuted: externalRequests > 0, retrySafe: externalRequests === 0,
-      costUsd: sink.costUsd ?? null, withheld: true });
-    /** filled at the ONE place the ledger row is written, so the span
-     * REFERENCES that row rather than recomputing its figures (rule 1). */
-    const sink: { usageEventId?: string | null; costUsd?: number | null } = {};
-    const attempt = async (out: ConnectorReplyRecorder): Promise<ConnectorAttemptResult> => {
-      // pillar 5 + ADR-0011: attribution must point at a real project the caller
-      // may bill to — mirror the model invoke path. Checked up front, before any
-      // execution or metering can happen.
-      if (projectId) {
-        const attribution = await assertProjectAttribution(db, projectId, userId, req.authCtx.isAdmin);
-        if (!attribution.ok) return out.status(attribution.status).send({ error: attribution.error });
-      }
-
-      if (preparationFailed) {
-        await db.insert(auditLog).values({ userId, objectType: "connector", objectId: connectorId,
-          detail: { phase: "input", operation: body.operation, projectId }, effect: "deny",
-          ruleId: "pii-transform-refused", ruleChain: [], reason: "Connector payload or routing identity cannot be safely transformed" });
-        return out.status(403).send({ error: "pii_transform_refused", detail: "Connector payload or routing identity cannot be safely transformed." });
-      }
-
-      const [grants, roleConnectorGrantsForUser, connectorRevocationsForUser] = await Promise.all([
-        db.select().from(connectorGrants).where(eq(connectorGrants.userId, userId)),
-        // §5 role-bundled grants (ADR-0014): unioned in the kernel so a narrow
-        // direct grant cannot mask a broader role grant.
-        loadRoleConnectorGrants(db, userId),
-        // ADR-0019: the subtractive bound on that union.
-        loadConnectorRevocations(db, userId),
-      ]);
-
-      const decision = evaluateConnector({
-        userId,
-        // ADR-0124 — the kill switch on the connector path. A connector has no
-        // per-subject halt of its own; the dial governs it.
-        execution: postureOf(await loadExecutionMode(db), null),
-        connectorId,
-        connectorName: connector.name,
-        operation: body.operation,
-        object: body.object ?? null,
-        connectorGrants: grants,
-        roleConnectorGrants: roleConnectorGrantsForUser,
-        connectorRevocations: connectorRevocationsForUser,
-      });
-
-      // Order evidence containing routing identity against policy activation.
-      const audited = await db.transaction(async (tx) => {
-        const [current] = await tx.select().from(governancePolicyEpoch).for("share");
-        if (!admissionGeneration || current?.epoch !== admissionGeneration.epoch) return false;
-        await tx.insert(auditLog).values({
-          userId,
-          objectType: "connector",
-          objectId: connectorId,
-          // ADR-0058 SCOPE, same reason as the MCP tool path: a pack's
-          // `audit_decisions` collector reaches a decision only through
-          // `detail->>'projectId'`. The PII-block rows on this same path already
-          // carried it; the DECISION row did not, so a project-scoped count of
-          // connector refusals was structurally zero. Null when unattributed.
-          detail: {
-            operation: body.operation,
-            ...(body.object ? { object: body.object } : {}),
-            projectId: projectId ?? null,
-          },
-          effect: decision.effect,
-          ruleId: decision.ruleId,
-          ruleChain: decision.ruleChain,
-          reason: decision.reason,
-        });
-        return true;
-      });
-      if (!audited) { policyChanged = true; return out.status(409).send(policyChangedBody()); }
-
-      // A DENIED call bills nothing and executes nothing (mirror the model path).
-      if (decision.effect !== "allow") {
-        return out.status(403).send({ decision });
-      }
-
-      // PILLAR 5 enforcement, connector path (F02 / ADR-0103 amendment
-      // 2026-10-03). An attributed invoke is gated on the project's MEASURED
-      // budget here — after the categorical entitlement decision (no budget
-      // makes a forbidden call permissible), and strictly BEFORE the credential
-      // is read, before PII/guardrail work, before the egress guard, and before
-      // the provider is ever contacted — so a budget-blocked call executes
-      // nothing, consumes nothing and bills nothing. The gate itself is REUSED
-      // from the model and MCP paths, not reimplemented: the compliance
-      // ceiling, sanctioned overage, budgetHardBlockPct, warn_only vs block
-      // with strictest-wins, and the escalation into the one approvals queue
-      // all carry over unchanged. Unattributed calls (projectId null) pass
-      // straight through and meter into the disclosed Unattributed bucket.
-      const projectBudget = await preDispatchProjectGate(db, projectId, userId);
-      if (!projectBudget.ok) {
-        await db.insert(auditLog).values({
-          userId,
-          objectType: "connector",
-          objectId: connectorId,
-          detail: {
-            phase: "project-budget",
-            projectId,
-            operation: body.operation,
-            ...(body.object ? { object: body.object } : {}),
-            pricePerCallUsd: connector.pricePerCallUsd ?? null,
-          },
-          effect: "deny",
-          ruleId: "project-budget-cap",
-          ruleChain: [],
-          reason: `connector '${connector.name}' blocked: ${projectBudget.error} — ${projectBudget.detail ?? "project budget exhausted"}`,
-        });
-        return out.status(projectBudget.status).send({
-          decision,
-          error: projectBudget.error,
-          ...(projectBudget.detail ? { detail: projectBudget.detail } : {}),
-        });
-      }
-
-      // EXECUTION runs strictly INSIDE the allow branch, after the audit insert.
-      // A connector with no providerKind keeps TODAY'S behaviour exactly:
-      // governance-only, no execution, no cost, no usage row.
-      if (!connector.providerKind) {
-        return out.send({ decision });
-      }
-      if (!isConnectorProviderKind(connector.providerKind)) {
-        return out.status(409).send({
-          decision,
-          error: "unknown_connector_provider",
-          detail: `connector '${connector.name}' has an unrecognized provider_kind '${connector.providerKind}'`,
-        });
-      }
-
-      // Resolve the platform credential (connector_credentials → decrypt with the
-      // data key). Keyless kinds (mock, unauthenticated generic) skip it; a keyed
-      // kind with no stored credential fails explicit like the model path. A
-      // credential.baseUrl overrides the connector's, mirroring model_credentials.
-      const keylessKinds = new Set(["mock", "generic", "http", "webhook"]);
-      let token: string | null = null;
-      let baseUrl: string | null = connector.baseUrl ?? null;
-      const [cred] = await db
-        .select()
-        .from(connectorCredentials)
-        .where(eq(connectorCredentials.connectorId, connectorId));
-      if (cred) {
-        if (!opts.dataKey) {
-          return out.status(503).send({ error: "no_data_key", detail: "set REGULAIT_DATA_KEY" });
-        }
-        token = decryptSecret(opts.dataKey, cred.tokenCiphertext);
-        if (cred.baseUrl) baseUrl = cred.baseUrl;
-      } else if (!keylessKinds.has(connector.providerKind)) {
-        return out.status(409).send({
-          decision,
-          error: "no_connector_credential",
-          detail: `connector '${connector.name}' (${connector.providerKind}) has no stored credential`,
-        });
-      }
-
-      // §8.4 PII ENFORCEMENT (pillar 3), connector path. The effective piiMode
-      // comes from the attributed project's cascade; an unattributed or
-      // unclassified call falls to the ORG FLOOR (ADR-0021 defaultPiiMode, null
-      // when unset). The resolver is called unconditionally — the old
-      // `projectId ? … : null` ternary here was exactly the one-keystroke
-      // attribution dodge the floor exists to close. The INPUT check runs BEFORE
-      // provider.invoke, so a block executes nothing and bills nothing.
-      let inputHits: PiiHit[] = [...(preparedPii?.hits ?? [])];
-      if (piiMode && piiMode !== "redact") {
-        const chk = enforcePII(
-          piiMode,
-          { input: JSON.stringify({ object: body.object ?? null, payload: body.payload ?? null }) },
-          piiIntl,
-        );
-        inputHits = chk.hits;
-        if (chk.action === "block") {
-          const reason = `input contains PII: ${piiCategoryList(chk.hits)}`;
-          await db.insert(auditLog).values({
-            userId,
-            objectType: "connector",
-            objectId: connectorId,
-            detail: {
-              phase: "pii",
-              pii: { mode: piiMode, action: "block", phase: "input", inputHits: chk.hits, outputHits: [] },
-              operation: body.operation,
-              ...(projectId ? { projectId } : {}),
-            },
-            effect: "deny",
-            ruleId: "pii-blocked",
-            ruleChain: [],
-            reason,
-          });
-          return out.status(403).send({
-            decision,
-            error: "pii_blocked",
-            detail: reason,
-            pii: { mode: piiMode, action: "block", inputHits: chk.hits, outputHits: [], withheld: false },
-          });
-        }
-      }
-
-      // ADR-0042 GUARDRAIL ENGINE, connector path — the same two phases, the same
-      // exclusion of PII (enforced on its own path above), the same audit rules.
-      // Scoped to this connector's override (or the org default), MAX-composed
-      // with the attributed project's compliance floor.
-      const connectorGuardrails: GuardrailPolicy = await resolveGuardrailPolicy(db, {
-        projectId,
-        connectorId,
-      });
-      let cgInput: ReturnType<typeof runGuardrails> | null = null;
-      if (connectorGuardrails.active) {
-        cgInput = runGuardrails(
-          connectorGuardrails,
-          "input",
-          JSON.stringify({ object: body.object ?? null, payload: body.payload ?? null }),
-        );
-        const outcome = guardrailOutcome(cgInput);
-        if (outcome) {
-          await recordGuardrailDecision(db, {
-            userId,
-            objectType: "connector",
-            objectId: connectorId,
-            projectId,
-            evaluation: cgInput,
-            outcome,
-            detail: { operation: body.operation, connectorKind: connector.providerKind },
-          });
-        }
-        if (cgInput.action === "block") {
-          const reason = `input blocked by guardrail: ${guardrailCategoryList(cgInput.blocking)}`;
-          return out.status(403).send({
-            decision,
-            error: "guardrail_blocked",
-            detail: reason,
-            guardrails: {
-              action: "block",
-              phase: "input",
-              findings: flattenFindings(cgInput.findings),
-              withheld: false,
-            },
-          });
-        }
-        if (preparedPii) {
-          const effectiveCheck = runGuardrails(connectorGuardrails, "input", JSON.stringify(effectiveInvocation));
-          if (effectiveCheck.action === "block") {
-            await recordGuardrailDecision(db, { userId, objectType: "connector", objectId: connectorId, projectId,
-              evaluation: effectiveCheck, outcome: "blocked", detail: { phase: "effective_input", operation: body.operation } });
-            return out.status(403).send({ decision, error: "guardrail_blocked", detail: "Effective connector input blocked by guardrail." });
-          }
-        }
-      }
-
-      // ADR-0034 amendment #2 — THE CONNECTOR `baseUrl`, BEHIND THE EGRESS GUARD.
-      //
-      // This is the surface both earlier amendments named as the highest-priority
-      // one still open, and it is worse than the model paths in one specific way:
-      // the `webhook` kind does not READ the URL, it **POSTs `body.payload` to
-      // it**. A governed connector call is exactly where customer data lives, so
-      // an admin-typed `baseUrl` here is an exfiltration pipe, not merely an SSRF
-      // primitive. It is checked HERE, on every invoke — not only at write time —
-      // because a write-time verdict is not a fact about the future and because
-      // rows written before this guard existed are in the live database now.
-      //
-      // NO OVERRIDE MEANS NO CHECK: with `baseUrl` null the adapter uses its
-      // compiled vendor endpoint (slack/github/jira/... defaults), which nobody
-      // can type, so a non-overriding connector behaves byte-identically — the
-      // global fetch, no allow-list entry required.
-      //
-      // ── AMENDED BY ADR-0062 (2026-08-03) ────────────────────────────────────
-      // Still true as an SSRF argument, still not an egress policy. A connector
-      // is the surface that carries CUSTOMER DATA by construction, so a Slack or
-      // GitHub connector running on its compiled endpoint inside an air-gapped
-      // install is the exact thing that mode promises does not happen. Under a
-      // strict posture the compiled destination is adjudicated against the same
-      // `egress_allow_hosts` table; under `hosted` this is byte-identical.
-      let connectorFetch: typeof fetch | undefined;
-      if (baseUrl) {
-        let guarded;
-        try {
-          guarded = await guardConnectionCall(db, {
-            surface: "connector",
-            deps: { beforeSend: beforeConnectorSend },
-            baseUrl,
-            userId,
-            objectId: connectorId,
-            label: `connector '${connector.name}' (${connector.providerKind})`,
-            detail: {
-              connectorKind: connector.providerKind,
-              operation: body.operation,
-              source: cred?.baseUrl ? "connector_credential" : "connector",
-              ...(projectId ? { projectId } : {}),
-            },
-          });
-        } catch (err) {
-          if (err instanceof ConnectionEgressBlockedError) {
-            return out.status(403).send({
-              decision,
-              error: "egress_blocked",
-              code: err.decision.code,
-              detail:
-                `connector '${connector.name}' (${connector.providerKind}): ${err.decision.reason}` +
-                ` (an admin adds permitted destinations under Egress Allow Hosts)`,
-            });
-          }
-          throw err;
-        }
-        connectorFetch = guarded.fetchImpl;
-      } else if (CREDENTIAL_HOST_CONNECTOR_KINDS.has(connector.providerKind)) {
-        // ADR-0167 (SEC-01) — a destination NAMED BY THE CREDENTIAL. With no
-        // baseUrl these three kinds used to fall into the compiled-default
-        // branch below, which (under the default posture) checks nothing and
-        // hands the adapter the GLOBAL fetch — so an admin-typed `loginBaseUrl`
-        // or snowflake `account` reached the network with no allow-list, no
-        // private-range/IMDS check, no DNS pin, redirects followed and no audit
-        // row, and the upstream body came back to the non-admin invoker. The
-        // typed host is now adjudicated like a typed baseUrl, the vendor's
-        // compiled hosts follow the posture exactly as below, and the adapter
-        // gets the guarded fetch — which re-checks every URL it is handed.
-        let hosts: { typed: string | null; compiled: string[] };
-        try {
-          hosts = connectorCredentialHosts(connector.providerKind, token);
-        } catch (err) {
-          if (err instanceof ConnectorProviderError) {
-            return out
-              .status(400)
-              .send({ decision, error: "invalid_connector_credential", detail: err.message });
-          }
-          throw err;
-        }
-        const guarded = await guardCredentialDerivedCall(db, {
-          surface: "connector",
-          kind: connector.providerKind,
-          typedBaseUrl: hosts.typed,
-          compiledBaseUrls: hosts.compiled,
-          userId,
-          objectId: connectorId,
-          label: `connector '${connector.name}' (${connector.providerKind})`,
-          detail: {
-            connectorKind: connector.providerKind,
-            operation: body.operation,
-            source: "connector_credential",
-            ...(projectId ? { projectId } : {}),
-          },
-          deps: { beforeSend: beforeConnectorSend },
-        });
-        if (!guarded.ok) {
-          const alsoReaches =
-            connector.providerKind === "snowflake"
-              ? ""
-              : " (this kind reaches the Microsoft Entra login host as well as the service host — a typed login host needs an Egress Allow Hosts entry)";
-          // `guarded.reason` already names the connector (the label above)
-          return out.status(403).send({
-            decision,
-            error: "egress_blocked",
-            code: guarded.code,
-            detail: `${guarded.reason}${alsoReaches} (an admin adds permitted destinations under Egress Allow Hosts)`,
-          });
-        }
-        connectorFetch = guarded.fetchImpl;
-      } else {
-        // ADR-0062 — the compiled connector endpoint. Every kind that cannot
-        // exist without an explicit baseUrl resolves to "nothing to
-        // adjudicate"; a kind whose default this registry cannot name is
-        // REFUSED under a strict posture rather than assumed safe. (The
-        // credential-derived kinds take the branch above, ADR-0167.)
-        const { posture, allowList } = await loadCompiledEgressContext(db);
-        const compiled = decideCompiledDefault({
-          posture,
-          surface: "connector",
-          kind: connector.providerKind,
-          defaultBaseUrl: connectorDefaultBaseUrl(connector.providerKind),
-          allowList,
-        });
-        if (!compiled.ok) {
-          await auditCompiledDefaultDenied(db, {
-            userId,
-            surface: "connector",
-            objectId: connectorId,
-            kind: connector.providerKind,
-            decision: compiled,
-            posture,
-            detail: {
-              connectorKind: connector.providerKind,
-              operation: body.operation,
-              ...(projectId ? { projectId } : {}),
-            },
-          });
-          return out.status(403).send({
-            decision,
-            error: "egress_blocked",
-            code: compiled.code,
-            detail: `connector '${connector.name}': ${compiled.reason}`,
-          });
-        }
-      }
-
-      // Execute. A FAILED call (ConnectorProviderError) bills NOTHING and
-      // surfaces as 502 — the same discipline as a failed model dispatch.
-      let result;
-      try {
-        if (!await generationCurrent()) throw new ConnectorPolicyChangedError();
-        const admittedFetch: typeof fetch = connectorFetch ?? (async (input, init) => {
-          await beforeConnectorSend();
-          return fetch(input, init);
-        });
-        const provider = resolveConnectorProvider(
-          { kind: connector.providerKind, baseUrl, token },
-          admittedFetch as unknown as Parameters<typeof resolveConnectorProvider>[1],
-        );
-        result = await provider.invoke(effectiveInvocation);
-      } catch (err) {
-        if (err instanceof ConnectorPolicyChangedError || !await generationCurrent()) {
-          policyChanged = true;
-          return out.status(409).send(policyChangedBody());
-        }
-        // ADR-0034 amendment #2 — a refusal raised by the GUARDED FETCH itself
-        // (the allow-list withdrawn between the pre-check and the request, or an
-        // approved endpoint answering 302 -> IMDS) is a GOVERNANCE decision, not
-        // an upstream failure. Without this it would surface as an opaque 500 or
-        // be laundered into a 502 "the connector broke", hiding the one fact an
-        // operator needs. `egressRefusal` digs it out of whatever the adapter
-        // wrapped it in, exactly as the model paths do.
-        const refusal = egressRefusal(err);
-        if (refusal) {
-          const reason = piiMode === "redact" ? "Connector destination refused by egress policy; upstream details withheld"
-            : `connector '${connector.name}': ${refusal}`;
-          await db.insert(auditLog).values({
-            userId,
-            objectType: "connector",
-            objectId: connectorId,
-            detail: {
-              phase: "call",
-              baseUrl,
-              connectorKind: connector.providerKind,
-              operation: body.operation,
-              ...(projectId ? { projectId } : {}),
-            },
-            effect: "deny",
-            ruleId: "connector-egress-blocked",
-            ruleChain: [],
-            reason,
-          });
-          return out.status(403).send({
-            decision,
-            error: "egress_blocked",
-            detail: reason,
-          });
-        }
-        if (piiMode === "redact") {
-          return out.status(502).send({ error: "connector_invoke_failed", detail: "Connector call failed; upstream details withheld.",
-            externalRequests, mayHaveExecuted: externalRequests > 0, retrySafe: externalRequests === 0 });
-        }
-        if (err instanceof ConnectorProviderError) {
-          return out
-            .status(502)
-            .send({ decision, error: "connector_invoke_failed", detail: err.message });
-        }
-        throw err;
-      }
-
-      return db.transaction(async (evidenceDb) => {
-        const [outputGeneration] = await evidenceDb.select().from(governancePolicyEpoch).for("share");
-        // §8.4 OUTPUT check: the call ran, so a block is BILL-AND-WITHHOLD — the
-        // usage row records honest spend, but result.body is replaced by the
-        // withheld marker and the response is denial-shaped.
-        let outputHits: PiiHit[] = [];
-        let respBody = result.body;
-        let withheld = false;
-        let transformRefused = false;
-        policyChanged = !admissionGeneration || outputGeneration?.epoch !== admissionGeneration.epoch;
-        if (policyChanged) {
-          withheld = true;
-          respBody = "[WITHHELD: connector policy changed]";
-        } else if (piiMode === "redact") {
-          try {
-            const transformed = redactPiiPayload(result.body ?? null, piiIntl);
-            respBody = transformed.value;
-            outputHits = transformed.hits;
-          } catch {
-            transformRefused = withheld = true;
-            respBody = "[WITHHELD: connector output cannot be safely transformed]";
-          }
-        } else if (piiMode) {
-          const chk = enforcePII(piiMode, { output: JSON.stringify(result.body ?? null) }, piiIntl);
-          outputHits = chk.hits;
-          if (chk.action === "block") {
-            withheld = true;
-            respBody = piiWithheldMarker(chk.hits);
-          }
-        }
-        const anyHits = inputHits.length > 0 || outputHits.length > 0;
-        const piiAction: "block" | "warn" | "log" | "redact" = withheld
-          ? "block"
-          : piiMode === "redact" ? "redact"
-          : piiMode === "warn"
-            ? "warn"
-            : "log";
-        const pii =
-          piiMode && (anyHits || transformRefused)
-            ? { mode: piiMode, action: piiAction, inputHits, outputHits, withheld }
-            : null;
-
-        // ADR-0042 OUTPUT phase, connector path — bill-and-withhold, same as PII.
-        let cgOutput: ReturnType<typeof runGuardrails> | null = null;
-        let cgWithheld = false;
-        if (!policyChanged && !transformRefused && connectorGuardrails.active) {
-          cgOutput = runGuardrails(connectorGuardrails, "output", JSON.stringify(result.body ?? null));
-          if (piiMode === "redact") {
-            const effectiveCheck = runGuardrails(connectorGuardrails, "output", JSON.stringify(respBody));
-            const rank = { allow: 0, log: 1, warn: 2, block: 3 };
-            if (rank[effectiveCheck.action] > rank[cgOutput.action]) cgOutput = effectiveCheck;
-          }
-          if (cgOutput.action === "block") {
-            cgWithheld = true;
-            respBody = guardrailWithheldMarker(cgOutput.blocking);
-          }
-        }
-        const cgFindings = [...(cgInput?.findings ?? []), ...(cgOutput?.findings ?? [])];
-        const connectorGuardrailView: DispatchGuardrails | null = cgFindings.length
-          ? {
-              action: cgWithheld ? "block" : cgFindings.some((f) => f.action === "warn") ? "warn" : "log",
-              phase: cgWithheld ? "output" : cgInput?.findings.length ? "input" : "output",
-              findings: flattenFindings(cgFindings),
-              withheld: cgWithheld,
-            }
-          : null;
-
-        // pillar 5 actuals: an allowed, executed call bills the connector's flat
-        // list price. Unpriced → null, never an invented figure (agents' rule).
-        const costUsd = connector.pricePerCallUsd ?? null;
-        const [connectorUsageRow] = await evidenceDb.insert(usageEvents).values({
-          userId,
-          objectType: "connector",
-          connectorId,
-          operation: body.operation,
-          costUsd,
-          projectId,
-          detail: {
-            status: result.status,
-            ...(!policyChanged && body.object ? { object: body.object } : {}),
-            providerKind: connector.providerKind,
-            ...(policyChanged ? { withheld: true, reason: "policy_changed" } : {}),
-            ...(preparedPii ? { transformation: preparedPii.transformation, argumentsDigest: preparedPii.argumentsDigest,
-              originalArgumentsDigest: preparedPii.originalArgumentsDigest, effectiveArgumentsDigest: preparedPii.effectiveArgumentsDigest } : {}),
-            // §8.4 COUNTS ONLY — never the matched substrings
-            ...(pii ? { pii: { mode: pii.mode, action: pii.action, inputHits, outputHits } } : {}),
-            // ADR-0042 COUNTS ONLY, same contract
-            ...(connectorGuardrailView
-              ? {
-                  guardrails: {
-                    action: connectorGuardrailView.action,
-                    findings: connectorGuardrailView.findings,
-                    withheld: cgWithheld,
-                  },
-                }
-              : {}),
-          },
-        }).returning({ id: usageEvents.id });
-        // ADR-0070 — the span REFERENCES this row and copies its figure from it,
-        // in the same call that inserted it. Never a recomputed price.
-        sink.usageEventId = connectorUsageRow?.id ?? null;
-        sink.costUsd = costUsd;
-        if (cgOutput) {
-          const outcome = guardrailOutcome(cgOutput);
-          if (outcome) {
-            await recordGuardrailDecision(evidenceDb, {
-              userId,
-              objectType: "connector",
-              objectId: connectorId,
-              projectId,
-              evaluation: cgOutput,
-              outcome,
-              detail: { operation: body.operation, connectorKind: connector.providerKind },
-            });
-          }
-        }
-        // §8.4 audit rows for a PII event (never for a clean payload): an OUTPUT
-        // block is a deny; a warn is an allow with 'pii-warned'; log is silent
-        // (counts already recorded in the usage detail above).
-        if (withheld) {
-          await evidenceDb.insert(auditLog).values({
-            userId,
-            objectType: "connector",
-            objectId: connectorId,
-            detail: {
-              phase: "pii",
-              pii: { mode: piiMode, action: "block", phase: "output", inputHits, outputHits },
-              operation: body.operation,
-              ...(projectId ? { projectId } : {}),
-            },
-            effect: "deny",
-            ruleId: policyChanged ? "connector-policy-changed" : transformRefused ? "pii-transform-refused" : "pii-blocked",
-            ruleChain: [],
-            reason: policyChanged ? "Connector policy changed; billed and withheld" : transformRefused
-              ? "Connector output transformation refused; billed and withheld"
-              : `output contains PII: ${piiCategoryList(outputHits)} — billed and withheld`,
-          });
-        } else if (piiMode === "warn" && anyHits) {
-          await evidenceDb.insert(auditLog).values({
-            userId,
-            objectType: "connector",
-            objectId: connectorId,
-            detail: {
-              phase: "pii",
-              pii: { mode: piiMode, action: "warn", inputHits, outputHits },
-              operation: body.operation,
-              ...(projectId ? { projectId } : {}),
-            },
-            effect: "allow",
-            ruleId: "pii-warned",
-            ruleChain: [],
-            reason: `PII detected (${piiCategoryList([...inputHits, ...outputHits])}) — warned, invoke proceeded`,
-          });
-        }
-
-        if (policyChanged) return out.status(409).send(policyChangedBody());
-        return out.send({
-          decision,
-          result: { status: result.status, body: respBody },
-          costUsd,
-          ...(pii ? { pii } : {}),
-          ...(connectorGuardrailView ? { guardrails: connectorGuardrailView } : {}),
-        });
-      });
-    };
-
-    const traceCtx = await beginTrace(db, {
-      // a direct connector call is its own one-span trace, grouped by the
-      // CONNECTOR as the session — the same idiom the MCP proxy uses for
-      // `mcp:<serverId>`.
-      kind: "tool",
-      name: `connector ${connector.name}.${body.operation}`,
+    // ADR-0173 — the governed body lives in connector-call.ts so the builder's
+    // tool loop runs the SAME code in-process; this route is a thin wrapper.
+    const out = await executeGovernedConnectorCall(db, opts.dataKey, {
       userId,
-      projectId,
-      sessionId: `connector:${connectorId}`,
-      rootRefId: connectorId,
+      isAdmin: req.authCtx.isAdmin,
+      connectorId,
+      operation: body.operation,
+      object: body.object,
+      payload: body.payload,
+      projectId: body.projectId ?? null,
     });
-    const spanStartedAt = new Date();
-    let outcome: ConnectorAttemptResult;
-    try {
-      outcome = await attempt(connectorReplyRecorder());
-    } catch (err) {
-      // An unexpected throw is still a thing that happened to a governed call.
-      await recordSpan(db, traceCtx, {
-        kind: "connector",
-        name: `${connector.name}.${body.operation}`,
-        status: "error",
-        statusReason: "Connector call failed; details withheld",
-        startedAt: spanStartedAt,
-        connectorId,
-        attributes: { operation: body.operation, ...(projectId ? { projectId } : {}) },
-      });
-      await finishTrace(db, traceCtx, "error", spanStartedAt);
-      if (piiMode === "redact") return reply.status(502).send({ error: "connector_invoke_failed", detail: "Connector call failed; details withheld." });
-      throw new Error("Connector call failed; details withheld");
-    }
-
-    await db.transaction(async (tx) => {
-      // No network is inside this lock. Policy activation and content persistence
-      // are ordered so a tightened policy cannot race a stale trace write.
-      const [traceGeneration] = await tx.select().from(governancePolicyEpoch).for("share");
-      if (!admissionGeneration || traceGeneration?.epoch !== admissionGeneration.epoch) {
-        policyChanged = true;
-        outcome = { status: 409, body: policyChangedBody() };
-      }
-      const errCode =
-        typeof outcome.body["error"] === "string" ? (outcome.body["error"] as string) : null;
-      const outDetail =
-        typeof outcome.body["detail"] === "string" ? (outcome.body["detail"] as string) : null;
-      const outDecision = outcome.body["decision"] as
-        | { reason?: string; ruleId?: string }
-        | undefined;
-      const spanStatus: "ok" | "denied" | "error" =
-        outcome.status < 400 ? "ok" : outcome.status >= 500 ? "error" : "denied";
-      // A refusal ABOUT the input does not store the input — storing the very
-      // payload a block refused would defeat the block (ADR-0070 rule 3).
-      const inputRefused = errCode === "pii_blocked" || errCode === "guardrail_blocked" || errCode === "pii_transform_refused";
-      const resultBody = (outcome.body["result"] as { body?: unknown } | undefined)?.body;
-      const withheld =
-        inputRefused || policyChanged ||
-        !!(outcome.body["pii"] as { withheld?: boolean } | undefined)?.withheld ||
-        !!(outcome.body["guardrails"] as { withheld?: boolean } | undefined)?.withheld;
-      await recordSpan(tx, traceCtx, {
-        kind: "connector",
-        name: `${connector.name}.${body.operation}`,
-        status: spanStatus,
-        statusReason: spanStatus === "ok" ? null : (outDetail ?? outDecision?.reason ?? errCode),
-        startedAt: spanStartedAt,
-        connectorId,
-        // THE REFERENCE, and the figure copied from it in the same call.
-        usageEventId: sink.usageEventId ?? null,
-        costUsd: sink.costUsd ?? null,
-        inputText: policyChanged ? null : inputRefused
-          ? outDetail
-          : JSON.stringify({ object: effectiveInvocation.object, payload: effectiveInvocation.payload }),
-        // ALREADY-ADJUDICATED text: the withheld marker is already substituted.
-        outputText: resultBody === undefined ? null : JSON.stringify(resultBody),
-        contentWithheld: withheld,
-        attributes: {
-          operation: body.operation,
-          httpStatus: outcome.status,
-          ...(!policyChanged && !preparationFailed && body.object ? { object: body.object } : {}),
-          ...(connector.providerKind ? { providerKind: connector.providerKind } : {}),
-          ...(projectId ? { projectId } : {}),
-          ...(errCode ? { error: errCode } : {}),
-          ...(outDecision?.ruleId ? { ruleId: outDecision.ruleId } : {}),
-        },
-      });
-      await finishTrace(tx, traceCtx, spanStatus, spanStartedAt);
-    });
-    if (!await generationCurrent()) {
-      await recordSpan(db, traceCtx, { kind: "connector", name: `${connector.name}.response-policy`,
-        status: "denied", statusReason: "Connector policy changed before response release", startedAt: spanStartedAt,
-        connectorId, contentWithheld: true, attributes: { operation: body.operation, error: "connector_policy_changed" } });
-      await finishTrace(db, traceCtx, "denied", spanStartedAt);
-      return reply.status(409).send(policyChangedBody());
-    }
-    return reply.status(outcome.status).send(outcome.body);
+    return reply.status(out.status).send(out.body);
   });
 }

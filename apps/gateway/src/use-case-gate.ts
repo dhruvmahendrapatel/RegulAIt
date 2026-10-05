@@ -159,7 +159,7 @@ export interface UseCaseGateContext {
 export interface DispatchUseCaseGate {
   mode: "warn";
   projectId: string;
-  linkedUseCases: Array<{ id: string; name: string; status: string }>;
+  linkedUseCases: Array<{ id: string; name: string; status: string; approvalExpired?: true }>;
   note: string;
 }
 
@@ -190,18 +190,38 @@ export async function useCaseDispatchGate(
   const org = await loadOrgSettings(db);
   if (org.useCaseGateMode === "off") return null;
 
-  const linked = await db
-    .select({ id: aiUseCases.id, name: aiUseCases.name, status: aiUseCases.status })
+  const rows = await db
+    .select({
+      id: aiUseCases.id,
+      name: aiUseCases.name,
+      status: aiUseCases.status,
+      approvedUntil: aiUseCases.approvedUntil,
+    })
     .from(aiUseCases)
     .where(eq(aiUseCases.projectId, ctx.projectId));
   // the honest join: the gate applies only where a link EXISTS
-  if (linked.length === 0) return null;
+  if (rows.length === 0) return null;
   // 'approved' is a decided, un-retired status — a retired use case reads
-  // 'retired' and does not satisfy the gate
-  if (linked.some((u) => u.status === "approved")) return null;
+  // 'retired' and does not satisfy the gate. ADR-0170 §6: nor does an approval
+  // whose lifetime has run out (the deploy gate's `approval_expired`), without
+  // waiting for the recertification sweep to move it back into review. A NULL
+  // `approvedUntil` (only a row migration 0133 could not backfill) is not
+  // treated as expired.
+  const nowMs = Date.now();
+  const expired = (u: (typeof rows)[number]) =>
+    u.status === "approved" && u.approvedUntil !== null && u.approvedUntil.getTime() <= nowMs;
+  if (rows.some((u) => u.status === "approved" && !expired(u))) return null;
+  const linked: DispatchUseCaseGate["linkedUseCases"] = rows.map((u) => ({
+    id: u.id,
+    name: u.name,
+    status: u.status,
+    ...(expired(u) ? { approvalExpired: true as const } : {}),
+  }));
 
   const enforce = org.useCaseGateMode === "enforce";
-  const roster = linked.map((u) => `'${u.name}' (${u.status})`).join(", ");
+  const roster = linked
+    .map((u) => `'${u.name}' (${u.approvalExpired ? "approved, but the approval has expired" : u.status})`)
+    .join(", ");
   const detail =
     `project ${ctx.projectId} is linked to ${linked.length} AI use case(s) — ${roster} — and ` +
     `none is approved. With useCaseGateMode=${org.useCaseGateMode}, a governed dispatch ` +

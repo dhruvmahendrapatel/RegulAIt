@@ -352,6 +352,18 @@ if [ -f "$ENV_FILE" ]; then
   [ -n "$ACME_EMAIL" ] || ACME_EMAIL="${PRIOR_EMAIL#email }"
 fi
 
+# ADR-0174 amendment: REGULAIT_DEMO_LICENSE=1 is the laptop demo's switch for
+# an EPHEMERAL, self-minted demo licence. It has no place on an installed
+# deployment, so it is refused here (from the environment or a demo .env this
+# installer would otherwise overwrite), and the rendered override below pins it
+# to "0" so a stray shell export cannot turn it on later either.
+DEMO_LICENSE_ENV="${REGULAIT_DEMO_LICENSE:-}"
+DEMO_LICENSE_PRIOR="$(env_get "$ENV_FILE" REGULAIT_DEMO_LICENSE)"
+if { [ -n "$DEMO_LICENSE_ENV" ] && [ "$DEMO_LICENSE_ENV" != "0" ]; } \
+  || { [ -n "$DEMO_LICENSE_PRIOR" ] && [ "$DEMO_LICENSE_PRIOR" != "0" ]; }; then
+  die "REGULAIT_DEMO_LICENSE is set (environment or $ENV_FILE). That switch is for the laptop demo only (it mints a self-signed, NOT-production demo licence) and is never used on an install. Unset it — and remove it from that .env — then re-run."
+fi
+
 [ -n "$MODE" ] || prompt MODE "Deployment mode (hosted|byoc|air_gapped)" "byoc"
 case "$MODE" in
   hosted|byoc|air_gapped) ;;
@@ -731,9 +743,14 @@ render_override() {
 # READ docs/deployment/DATA_BOUNDARY.md §4 before setting any of them on an
 # air-gapped deployment: a built-in provider with no baseUrl override is not
 # behind the egress guard.
+#
+# REGULAIT_DEMO_LICENSE is pinned to "0": the laptop demo's self-minted licence
+# (ADR-0174 amendment) is never switched on for an installed deployment, not
+# even by a stray shell export at `docker compose up` time.
 services:
   gateway:
     environment:
+      REGULAIT_DEMO_LICENSE: "0"
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}

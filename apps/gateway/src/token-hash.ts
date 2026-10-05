@@ -13,6 +13,23 @@
  * a password: these tokens are 192+ bits of `randomBytes` entropy, so there is
  * no dictionary to attack and no cost parameter worth paying on every request.
  * Passwords go through scrypt in `auth.ts`; the two must not be confused.
+ *
+ * Every caller, as of the PR #117 CodeQL triage (js/insufficient-password-hash
+ * on this function is a false positive for each of them):
+ *   - API keys `rgl_` (`generateToken`, auth.ts): randomBytes(24), 192 bits;
+ *     looked up from `x-api-key` / `Authorization: Bearer`.
+ *   - virtual keys `rglv_` (`generateVirtualKeyToken`): randomBytes(24), 192 bits.
+ *   - sessions and pending-MFA handles `rgls_` (`generateSessionToken`):
+ *     randomBytes(32), 256 bits; looked up from the session cookie, the
+ *     pending-MFA cookie or the `pendingToken` body field.
+ *   - SCIM bearer tokens `rglscim_` (`generateScimToken`): randomBytes(32), 256 bits.
+ *   - federated-link proof tokens (`raiseLinkRequest`): randomBytes(32), 256 bits.
+ * A low-entropy secret (a password, a one-time password, a short code someone
+ * types) must NEVER be passed here: use `hashPassword` / `verifyPassword`.
+ * `token-hash.test.ts` pins the generators' entropy.
+ *
+ * No server-side pepper (HMAC): it would add nothing against 192+ bits of
+ * randomness, and it would invalidate every stored hash.
  */
 import { createHash } from "node:crypto";
 

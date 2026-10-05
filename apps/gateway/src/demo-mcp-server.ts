@@ -35,9 +35,10 @@
  *   pnpm --filter @regulait/gateway demo:mcp   [-- --port 8931]
  *
  * Under `docker compose`, the gateway's own 127.0.0.1 is the container, not
- * your host, so a host-run copy of this is unreachable from it. Run the
- * gateway on the host for the demo, or put this on the compose network and
- * point the server rows at its service name.
+ * your host, so a host-run copy of this is unreachable from it. With
+ * REGULAIT_DEMO_LICENSE=1 the image's start script (apps/gateway/docker-start.sh)
+ * therefore runs this INSIDE the gateway container, in the background, for the
+ * life of the container — the same loopback addresses the native demo uses.
  */
 import http from "node:http";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";

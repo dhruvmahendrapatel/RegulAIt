@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { acceptRisksSchema } from "./review-policy.js";
+import { intakeScreeningAnswersPatchSchema, intakeScreeningAnswersSchema } from "./intake-assist.js";
 // ADR-0068 §5: the attack-class vocabulary is needed IN SCOPE here (not merely
 // re-exported below) so the compliance-profile schema validates a framework's
 // red-team gating classes against the one authoritative list.
@@ -532,12 +534,17 @@ export {
   MCP_ADMISSION_HOLD_AT,
   MCP_ADMISSION_SCANNER_VERSION,
   scanMcpManifest,
+  scanAdmissionUnits,
+  maxSeverity,
+  severityAtLeast,
   scanUnitsForTool,
   manifestDigest,
   nextAdmissionState,
   admissionFindingSummary,
   mcpAdmissionRuleIds,
   strictestSeverity,
+  normalizeForScan,
+  foldConfusables,
   type McpAdmissionSeverity,
   type McpAdmissionMode,
   type McpAdmissionState,
@@ -545,6 +552,40 @@ export {
   type McpAdmissionScan,
   type ScannableTool,
 } from "./mcp-admission.js";
+
+// ADR-0175 A6 — admission scanning for builder skills (the ADR-0097 rule set
+// through `scanAdmissionUnits`, plus confusable and exfiltration-URL detectors).
+export {
+  SKILL_ADMISSION_SCANNER_VERSION,
+  SKILL_ADMISSION_STATES,
+  SKILL_USABLE_STATES,
+  SKILL_ADMISSION_REFUSE_AT,
+  SKILL_ADMISSION_HOLD_AT,
+  SKILL_SKIPPED_MCP_RULES,
+  scanSkill,
+  skillPromptSection,
+  skillNameProblem,
+  nextSkillState,
+  skillStateUsable,
+  skillFindingCounts,
+  skillAdmissionRuleIds,
+  type SkillAdmissionState,
+  type SkillAdmissionScan,
+  type SkillScanInput,
+} from "./skill-admission.js";
+// ADR-0175 A5 — release-age cooldown (pure status + admin write shapes).
+export {
+  RELEASE_AGE_RECOMMENDED_DAYS,
+  RELEASE_AGE_MAX_DAYS,
+  RELEASE_AGE_KINDS,
+  releaseAgeStatus,
+  releaseOverrideSchema,
+  admitSkillSchema,
+  skillVisibilityDecisionSchema,
+  type ReleaseAgeKind,
+  type ReleaseAgeStatus,
+  type ReleaseOverride,
+} from "./release-age.js";
 
 // ADR-0101 — FEDERATED MCP REGISTRY, the pure half: the v0.1 `ServerListResponse`
 // wire schema, the remote-vs-package classification that decides what can become
@@ -800,11 +841,83 @@ export const createRateLimitSchema = z
   })
   .superRefine(refineRuleScope);
 
+/** ADR-0168 — a condition's due date: a calendar date (`YYYY-MM-DD`, due at
+ * the END of that day, UTC) or a full ISO-8601 timestamp. */
+const conditionDueAt = z
+  .string()
+  .refine(
+    (v) =>
+      /^\d{4}-\d{2}-\d{2}$/.test(v)
+        ? !Number.isNaN(Date.parse(`${v}T00:00:00Z`)) && new Date(`${v}T00:00:00Z`).toISOString().startsWith(v)
+        : z.string().datetime({ offset: true }).safeParse(v).success,
+    { message: "dueAt must be a date (YYYY-MM-DD) or an ISO-8601 timestamp" },
+  );
+
+/** Resolve a validated `dueAt` to the instant it falls due. */
+export function conditionDueInstant(dueAt: string): Date {
+  return /^\d{4}-\d{2}-\d{2}$/.test(dueAt) ? new Date(`${dueAt}T23:59:59.999Z`) : new Date(dueAt);
+}
+
+export const USE_CASE_CONDITION_TEXT_MAX = 500;
+
+/** ADR-0168 — one condition an intake approval imposes. `blocking: true` =
+ * BEFORE go-live (the deploy gate refuses while it is open); `false` = AFTER
+ * go-live (tracked, shown overdue after `dueAt`, never blocks). */
+export const approvalConditionSchema = z
+  .object({
+    text: z.string().trim().min(1).max(USE_CASE_CONDITION_TEXT_MAX),
+    ownerUserId: z.string().uuid().optional(),
+    dueAt: conditionDueAt,
+    blocking: z.boolean(),
+  })
+  .strict();
+export type ApprovalConditionInput = z.infer<typeof approvalConditionSchema>;
+
 // The decider is the authenticated caller — never a body field.
+// ADR-0168 widens it, never narrows it: `returned` (send back for
+// information; `reason` REQUIRED — refused 422 `return_reason_required`) and
+// `conditions` (only with `approved`, only on an intake sign-off — the
+// decide path refuses everything else BY NAME with a 422). A body of only
+// `decision: approved|denied` + optional `reason` parses exactly as before;
+// an empty `conditions: []` is the same as none.
 export const decideApprovalSchema = z.object({
-  decision: z.enum(["approved", "denied"]),
+  decision: z.enum(["approved", "denied", "returned"]),
   reason: z.string().optional(),
+  conditions: z.array(approvalConditionSchema).max(20).optional(),
+  // ADR-0168 amendment: only with `approved` on an intake review, only by a
+  // risk acceptor the review policy names (else 403 `not_a_risk_acceptor`);
+  // every risk must belong to the use case (else 422 `risk_not_on_use_case`).
+  acceptRisks: acceptRisksSchema.optional(),
 });
+
+/** ADR-0168 — `POST /v1/use-cases/:id/conditions/:conditionId/met`. ADR-0170
+ * §3: a before-go-live (blocking) condition REQUIRES the note — a missing or
+ * whitespace-only note is refused 422 `condition_note_required` by the route,
+ * so the schema accepts an empty note and lets the route name the refusal. */
+export const markConditionMetSchema = z
+  .object({ note: z.string().trim().max(2000).optional() })
+  .strict();
+
+/** ADR-0168 — a condition as `GET /v1/use-cases/:id` returns it. */
+export interface UseCaseConditionView {
+  id: string;
+  approvalId: string;
+  text: string;
+  ownerUserId: string | null;
+  ownerName: string | null;
+  dueAt: string;
+  blocking: boolean;
+  status: "open" | "met" | "waived";
+  metAt: string | null;
+  metByName: string | null;
+  note: string | null;
+  /** open, and `dueAt` has passed */
+  overdue: boolean;
+  /** ADR-0170 §3: whether the VIEWER may mark this condition met right now
+   * (open, and the server's closing rule allows them). A before-go-live
+   * condition also needs a note. */
+  canMarkMet: boolean;
+}
 
 export const createApiKeySchema = z.object({
   name: z.string().min(1),
@@ -948,7 +1061,16 @@ export const createAgentSchema = z.object({
    * discriminated union, so provider 'custom' demands an id and any other
    * provider forbids one. Validated here too so the 400 says WHY. */
   customProviderId: z.string().uuid().nullable().optional(),
+  /** ADR-0175 review fix: the model id the provider is EXPECTED to report
+   * serving, when it differs from `model` (an endpoint whose configured id is
+   * a deployment name). The served-model drift rule compares with it. */
+  expectedServedModel: z.string().trim().min(1).max(200).nullable().optional(),
 });
+
+/** `PUT /v1/agents/:agentId/expected-served-model` — admin, audited; null clears */
+export const setExpectedServedModelSchema = z
+  .object({ expectedServedModel: z.string().trim().min(1).max(200).nullable() })
+  .strict();
 
 /** the discriminated-union rule shared by agent create and agent update */
 export function agentCustomProviderPairValid(v: {
@@ -990,10 +1112,39 @@ export const setAgentOwnerSchema = z.object({ ownerUserId: z.string().uuid().nul
  * non-active target (enforced with a named 422 in the gateway so the refusal
  * is self-explaining); retired is terminal — the gateway refuses transitions
  * OUT of it by name. */
+export const AGENT_LIFECYCLE_STATUS_VALUES = [
+  "proposed",
+  "active",
+  "under_review",
+  "suspended",
+  "deprecated",
+  "retired",
+] as const;
 export const setAgentLifecycleSchema = z.object({
-  status: z.enum(["active", "deprecated", "retired"]),
+  status: z.enum(AGENT_LIFECYCLE_STATUS_VALUES),
   reason: z.string().min(1).max(2000).optional(),
 });
+
+/** ADR-0168 amendment item 6: agent STEWARDSHIP — steward (the ADR-0089
+ * accountable owner), successor, lifecycle status and the next review date, in
+ * one audited write. Every field is optional; a field left out keeps its value,
+ * null clears it. The gateway refuses a successor equal to the steward, a
+ * deactivated steward/successor, a non-active status without a reason, a next
+ * review in the past, and any move out of `retired` (terminal). Callable by an
+ * admin or the agent's CURRENT steward. */
+export const setAgentStewardshipSchema = z
+  .object({
+    stewardUserId: z.string().uuid().nullable().optional(),
+    successorUserId: z.string().uuid().nullable().optional(),
+    lifecycleStatus: z.enum(AGENT_LIFECYCLE_STATUS_VALUES).optional(),
+    lifecycleReason: z.string().trim().min(1).max(2000).optional(),
+    nextReviewAt: z.string().datetime({ offset: true }).nullable().optional(),
+  })
+  .strict()
+  .refine((b) => Object.values(b).some((v) => v !== undefined), {
+    message: "name at least one stewardship field to change",
+  });
+export type SetAgentStewardship = z.infer<typeof setAgentStewardshipSchema>;
 
 /** ADR-0023: set/clear an existing agent's admin base system prompt (null
  * clears — an explicit choice, mirroring the agent-policy clear semantics) */
@@ -1393,6 +1544,14 @@ export const reportChecksSchema = z.object({
    * initiator and any result is `passed` — reporting your own check green is
    * a self-attestation, and the reason is what the approver reads. */
   reason: z.string().max(2000).optional(),
+  /** AER-048: the workflow ROUND these results were produced for — the
+   * instance's `round` (GET /v1/workflows/instances/:id → instance.round),
+   * which a re-open (artifact resubmitted, sign-off returned) bumps. A report
+   * naming a round that is no longer current is refused with 409
+   * `stale_check_report` and audited. OMITTED = "the current round": the
+   * report is taken for whatever round is current when it is applied (the
+   * pre-AER-048 behaviour, kept for existing CI integrations). */
+  round: z.number().int().min(0).optional(),
 });
 
 /** §2 re-run a check stage that is parked at blocked_on_check, after the failing
@@ -1953,6 +2112,13 @@ export const orgPiiModeSchema = z.enum(["none", "log", "warn", "block"]);
 export const budgetEnforcementSchema = z.enum(["block", "warn_only"]);
 export const approvalQuorumSchema = z.enum(["all", "any"]);
 export const mfaRequirementSchema = z.enum(["off", "admins", "all"]);
+/** ADR-0174: may people sign in with a local account? 'break_glass_only' keeps
+ * the door open only for the designated break-glass admins. */
+export const localSignInSchema = z.enum(["enabled", "break_glass_only"]);
+/** ADR-0174: the upstream identity providers the bundled broker can be hinted
+ * to — the allow-list `GET /auth/oidc/:id/login?idp=` is validated against. */
+export const BROKER_IDP_VALUES = ["microsoft", "google", "github"] as const;
+export const brokerIdpSchema = z.enum(BROKER_IDP_VALUES);
 /** ADR-0039: the shared level set of both IP-policy knobs. */
 export const ipPolicySchema = z.enum(["off", "enforce_at_login", "enforce_continuous"]);
 /** ADR-0062: tighten-only. See `egressCompiledDefaultPolicy` below. */
@@ -2020,6 +2186,22 @@ export const updateOrgSettingsSchema = z
      * contributes no tools to discovery, until an admin clears it with a
      * reason. Recommended production setting: 'enforce'. */
     mcpAdmissionMode: z.enum(MCP_ADMISSION_MODES).optional(),
+    /** ADR-0175 A5: the release-age cooldown in days. 0 (default) = off. While
+     * on, a newly registered MCP server, a changed manifest, a federated import
+     * and a new skill version stay in quarantine until this deployment has
+     * known that exact digest this many days (and it is admitted), unless an
+     * admin overrides one item with a reason. Recommended: 7. */
+    minReleaseAgeDays: z.number().int().min(0).max(365).optional(),
+    /** ADR-0175 A7: the credential inventory's "unused" threshold in days
+     * (default 90). */
+    credentialUnusedDays: z.number().int().min(1).max(3650).optional(),
+    /** ADR-0175 A7: false (default) = the `stale_credentials` rule shows flags
+     * on the inventory page only; true = one alert episode per flagged
+     * credential. */
+    staleCredentialAlerts: z.boolean().optional(),
+    /** ADR-0175 A15: the grid region whose energy factor overrides the org
+     * default intensity. null = the default. */
+    energyRegion: z.string().trim().min(1).max(64).nullable().optional(),
     /** ADR-0062: the org's TIGHTENING dial over the deployment-wide egress
      * posture. 'inherit' (default) defers to the env-derived deploy mode;
      * 'strict' adjudicates compiled vendor endpoints against the egress
@@ -2055,6 +2237,9 @@ export const updateOrgSettingsSchema = z
     budgetHardBlockPct: z.number().int().min(1).max(100).optional(),
     // approvals
     approvalQuorum: approvalQuorumSchema.optional(),
+    /** AER-048 (migration 0130): allow key-authenticated workflow check
+     * reports that name no `round` (false = refused 422 round_required). */
+    checkReportsAllowUnbound: z.boolean().optional(),
     // ADR-0022: approver-delegation master switch + persisted default
     // infra-remediation approver (null clears it)
     approvalDelegationEnabled: z.boolean().optional(),
@@ -2119,6 +2304,11 @@ export const updateOrgSettingsSchema = z
     sessionIdleMinutes: z.number().int().min(5).max(24 * 60).optional(),
     mfaRequired: mfaRequirementSchema.optional(),
     ssoOnly: z.boolean().optional(),
+    /** ADR-0174: 'break_glass_only' refuses password sign-in for everyone but
+     * the break-glass admins below. Needs an enabled SSO provider and at least
+     * one break-glass admin (active, admin, password set). */
+    localSignIn: localSignInSchema.optional(),
+    breakGlassUserIds: z.array(z.string().uuid()).max(10).nullable().optional(),
     loginLockoutThreshold: z.number().int().min(3).max(100).optional(),
     loginLockoutWindowMinutes: z.number().int().min(1).max(24 * 60).optional(),
     loginLockoutMinutes: z.number().int().min(1).max(24 * 60).optional(),
@@ -2289,7 +2479,9 @@ export type SetUsernameRequest = z.infer<typeof setUsernameSchema>;
 /** step 2 of a TOTP-enabled login: the pending token from step 1 + a code */
 export const mfaVerifySchema = z
   .object({
-    pendingToken: z.string().min(1).max(512),
+    /** ADR-0174: optional — a SAML login that stepped up to TOTP carries its
+     * pending token in an HttpOnly cookie instead of the body */
+    pendingToken: z.string().min(1).max(512).optional(),
     code: z.string().regex(/^\d{6}$/, "a TOTP code is 6 digits"),
   })
   .strict();
@@ -2371,6 +2563,14 @@ export const createOidcProviderSchema = z
      * reconciles group-derived roles. Naming it grants nothing on its own — an
      * asserted group confers nothing until an admin maps it to a role. */
     groupsClaim: groupsClaimSchema.optional(),
+    /** ADR-0174: the upstream IdPs a BROKER (Keycloak) offers through this
+     * client. null/absent = an ordinary enterprise IdP. */
+    brokerIdps: z.array(brokerIdpSchema).min(1).max(3).nullable().optional(),
+    /** ADR-0174: `acr` values that count as multi-factor, besides RFC 8176 amr */
+    mfaAcrValues: z.array(z.string().trim().min(1).max(256)).min(1).max(10).nullable().optional(),
+    /** ADR-0174 (security review): this provider is a broker that itself
+     * enforces a second factor, so one otp/hwk/swk amr counts as MFA */
+    brokerEnforcesMfa: z.boolean().optional(),
   })
   .strict();
 export type CreateOidcProvider = z.infer<typeof createOidcProviderSchema>;
@@ -2387,9 +2587,30 @@ export const updateOidcProviderSchema = z
     defaultRoleId: z.string().uuid().nullable().optional(),
     jitProvisioning: z.boolean().optional(),
     groupsClaim: groupsClaimSchema.optional(),
+    /** ADR-0174: the upstream IdPs a BROKER (Keycloak) offers through this
+     * client. null/absent = an ordinary enterprise IdP. */
+    brokerIdps: z.array(brokerIdpSchema).min(1).max(3).nullable().optional(),
+    /** ADR-0174: `acr` values that count as multi-factor, besides RFC 8176 amr */
+    mfaAcrValues: z.array(z.string().trim().min(1).max(256)).min(1).max(10).nullable().optional(),
+    /** ADR-0174 (security review): this provider is a broker that itself
+     * enforces a second factor, so one otp/hwk/swk amr counts as MFA */
+    brokerEnforcesMfa: z.boolean().optional(),
   })
   .strict();
 export type UpdateOidcProvider = z.infer<typeof updateOidcProviderSchema>;
+
+/** ADR-0174 §5: prove the existing local account to link a federated identity.
+ * The link request itself rides the browser-bound cookie, never the body. */
+export const linkConfirmSchema = z
+  .object({
+    password: z.string().min(1).max(512),
+    code: z.string().regex(/^[0-9]{6}$/).optional(),
+  })
+  .strict();
+/** ADR-0174 §5: an admin's decision on a link request */
+export const linkDecisionSchema = z
+  .object({ reason: z.string().trim().min(1).max(500).optional() })
+  .strict();
 
 // --- ADR-0036: SAML 2.0 providers (the OIDC twin) ---------------------------
 
@@ -2428,6 +2649,9 @@ const samlProviderFields = {
   /** ADR-0038: the SAML attribute carrying group membership (`groups`,
    * `memberOf`, …). null = no group signal from this provider. */
   groupsAttribute: groupsClaimSchema,
+  /** ADR-0174 (security review): AuthnContextClassRef values that count as
+   * multi-factor for this IdP (the twin of OIDC `mfaAcrValues`) */
+  mfaAuthnContexts: z.array(z.string().trim().min(1).max(512)).min(1).max(10).nullable(),
   /** OPTIONAL SP private key (PEM) for request signing / encrypted assertions.
    * WRITE-ONLY: stored AES-256-GCM under REGULAIT_DATA_KEY and never returned. */
   spPrivateKey: z.string().min(1).max(16384),
@@ -2470,6 +2694,7 @@ export const createSamlProviderSchema = z
     allowIdpInitiated: samlProviderFields.allowIdpInitiated.optional(),
     emailAttribute: samlProviderFields.emailAttribute.optional(),
     groupsAttribute: samlProviderFields.groupsAttribute.optional(),
+    mfaAuthnContexts: samlProviderFields.mfaAuthnContexts.optional(),
     spPrivateKey: samlProviderFields.spPrivateKey.optional(),
     spCertificate: samlProviderFields.spCertificate.optional(),
   })
@@ -2493,6 +2718,7 @@ export const updateSamlProviderSchema = z
     allowIdpInitiated: samlProviderFields.allowIdpInitiated.optional(),
     emailAttribute: samlProviderFields.emailAttribute.optional(),
     groupsAttribute: samlProviderFields.groupsAttribute.optional(),
+    mfaAuthnContexts: samlProviderFields.mfaAuthnContexts.optional(),
     spPrivateKey: samlProviderFields.spPrivateKey.optional(),
     spCertificate: samlProviderFields.spCertificate.optional(),
   })
@@ -2896,6 +3122,7 @@ export {
   chatDecidable,
   alertMeetsThreshold,
   composeAlertCard,
+  escapeAdaptiveMarkdown,
   composeApprovalCard,
   composeDecidedCard,
   parseChatInteraction,
@@ -2906,6 +3133,19 @@ export {
   teamsActivityForCard,
   teamsSignature,
   verifyChatSignature,
+  // ADR-0173 §2 — inbound conversations to builder agents
+  CHANNEL_MESSAGE_MAX_CHARS,
+  SLACK_RETRY_NUM_HEADER,
+  parseSlackEvent,
+  parseTeamsMessage,
+  stripSlackMentions,
+  escapeSlackText,
+  teamsActivityFreshness,
+  teamsPlainText,
+  type ActivityFreshness,
+  type InboundChatMessage,
+  type SlackEventParse,
+  type TeamsMessageParse,
   type ApprovalCard,
   type ApprovalCardAction,
   type ApprovalCardInput,
@@ -3199,6 +3439,12 @@ export const AI_USE_CASE_DATA_SENSITIVITIES = [
   "regulated",
 ] as const;
 
+/** ADR-0171 / AER-052 — per-framework rationale, keyed by compliance tag */
+export const frameworkRationalesSchema = z.record(
+  z.string().min(1).max(200),
+  z.string().trim().min(1).max(2000),
+);
+
 export const createUseCaseSchema = z.object({
   name: z.string().min(1).max(200),
   description: z.string().min(1).max(4000),
@@ -3209,6 +3455,15 @@ export const createUseCaseSchema = z.object({
   /** agent REFERENCES the proposer intends to use — validated server-side */
   intendedAgentIds: z.array(z.string().uuid()).max(20).default([]),
   projectId: z.string().uuid().optional(),
+  /** ADR-0168 amendment — every Classify-step answer (flat), STORED so a
+   * sent-back use case can be resubmitted prefilled. Optional; it changes
+   * nothing else at registration (the tier is still computed from the
+   * submitted questionnaire). */
+  screeningAnswers: intakeScreeningAnswersSchema.optional(),
+  /** ADR-0171 / AER-052 — the owner's own "why it applies" per framework.
+   * Every key must be one of `complianceTags` (422
+   * `rationale_for_unlisted_framework` otherwise); shown to reviewers. */
+  frameworkRationales: frameworkRationalesSchema.optional(),
 });
 
 /** editable while the intake is in flight; `status` is NOT here on purpose —
@@ -3219,7 +3474,31 @@ export const updateUseCaseSchema = z.object({
   businessContext: z.string().min(1).max(4000).optional(),
   intendedAgentIds: z.array(z.string().uuid()).max(20).optional(),
   projectId: z.string().uuid().nullable().optional(),
+  /** ADR-0168 amendment — RESUBMISSION: accepted only while the use case is
+   * `needs_info`. Every Classify-step answer (flat): the EU AI Act tier is
+   * recomputed from the EU keys (never accepted as a tier) and
+   * `dataSensitivity` from `dataCategories` when given. The resubmitted
+   * questionnaire version carries the same answers block and is screened
+   * again on submission. */
+  screeningAnswers: intakeScreeningAnswersPatchSchema.optional(),
+  /** ADR-0171 / AER-052 — replaces the stored rationales; keys must be among
+   * the use case's complianceTags */
+  frameworkRationales: frameworkRationalesSchema.optional(),
 });
+
+/**
+ * ADR-0171 / AER-050 — the intake wizard's server-side draft. `state` is the
+ * wizard's own opaque JSON object; the gateway stores it for the signed-in
+ * user only and never reads inside it. Size is checked in bytes at the route
+ * (413 `draft_too_large` above USE_CASE_DRAFT_MAX_BYTES).
+ */
+export const USE_CASE_DRAFT_MAX_BYTES = 256 * 1024;
+export const useCaseDraftScopeSchema = z.object({
+  scope: z.union([z.literal("new"), z.string().uuid()]),
+});
+export const putUseCaseDraftSchema = z
+  .object({ state: z.record(z.string(), z.unknown()) })
+  .strict();
 
 export const retireUseCaseSchema = z.object({
   reason: z.string().min(1).max(2000),
@@ -3261,6 +3540,16 @@ export {
   type TransitionRiskInput,
   type UpdateRiskInput,
 } from "./risks.js";
+// ADR-0175 — the 72 NIST AI RMF 1.0 subcategories (NIST AI 100-1 Tables 1–4)
+export {
+  NIST_AI_RMF_SUBCATEGORIES,
+  isNistAiRmfSubcategory,
+  nistAiRmfLabel,
+  nistAiRmfSubcategory,
+  normaliseNistAiRmfId,
+  type NistAiRmfFunction,
+  type NistAiRmfSubcategory,
+} from "./nist-ai-rmf-subcategories.js";
 // ADR-0148 — trust-dimension classification for compliance controls
 export {
   CONTROL_DIMENSION_OVERRIDES,
@@ -3277,6 +3566,12 @@ export {
   buildIntakeNarrativePrompt,
   composeQuestionnaireDraft,
   intakeAssistRequestSchema,
+  intakeContextSchema,
+  intakeScreeningAnswersSchema,
+  intakeScreeningAnswersPatchSchema,
+  INTAKE_BOOLEAN_QUESTION_KEYS,
+  deriveDataSensitivityFromCategories,
+  type IntakeScreeningAnswers,
   parseIntakeNarrative,
   renderQuestionnaireMarkdown,
   suggestIntake,
@@ -3334,8 +3629,15 @@ export {
   MONITOR_SEVERITIES,
   evaluateMonitorRules,
   reconcileAlerts,
+  servedModelMatches,
+  servedModelMatchesPin,
+  splitModelVersion,
+  pinnedVersionProblem,
   type ActiveAlertRef,
   type MonitorAgentInput,
+  type MonitorServedModelInput,
+  type MonitorTrafficInput,
+  type MonitorTrafficRow,
   type MonitorDimensionInput,
   type MonitorFinding,
   type MonitorInput,
@@ -3345,7 +3647,38 @@ export {
   type MonitorUseCaseInput,
   type MonitorVendorInput,
   type OffStackServing,
+  type MonitorCredentialInput,
+  type StaleCredentialEpisode,
+  STALE_CREDENTIAL_DETAIL_IDS,
+  staleCredentialEpisodes,
 } from "./governance-monitor.js";
+
+// ADR-0175 A7 — the non-human credential inventory: types, flags (pure).
+export {
+  CREDENTIAL_FLAGS,
+  CREDENTIAL_FLAG_LABELS,
+  CREDENTIAL_TYPES,
+  CREDENTIAL_TYPE_IDS,
+  CREDENTIALS_NOT_STORED,
+  credentialFlags,
+  rotationAgeDays,
+  type CredentialFlag,
+  type CredentialFlagResult,
+  type CredentialRecord,
+  type CredentialType,
+  type CredentialTypeInfo,
+  type LastUsedSignal,
+} from "./credential-inventory.js";
+
+// ADR-0175 A15 — the energy and emissions estimate (pure).
+export {
+  ENERGY_ESTIMATE_LABEL,
+  estimateEnergy,
+  type EnergyEstimate,
+  type EnergyFactorInput,
+  type EnergyGridInput,
+  type EnergyUsageRow,
+} from "./energy-estimate.js";
 
 // ADR-0158 — regulatory intelligence: the feed shape (G4 authors the data) and
 // the pure join to this organisation's packs, controls and use cases.
@@ -3367,6 +3700,7 @@ export {
   GUIDANCE_REMEDIATION_KINDS,
   REMEDIATION_KINDS,
   REMEDIATION_STATUSES,
+  USE_CASE_REGISTER_PATH,
   isExecutableRemediation,
   proposeRemediations,
   type ExecutableRemediationKind,
@@ -3437,6 +3771,11 @@ export {
   euAiActAnswersSchema,
   extractEuAiActAnswers,
   renderEuAiActAnswersBlock,
+  unsureAnswerViolations,
+  unsureListSchema,
+  unsureViolationDetail,
+  EU_AI_ACT_BOOLEAN_KEYS,
+  UNSURE_ANSWER_MUST_COUNT_AS_YES,
   EU_AI_ACT_ANNEX_III_DOMAINS,
   EU_AI_ACT_ANSWERS_FENCE,
   EU_AI_ACT_AFFECTED_PERSONS,
@@ -3584,7 +3923,118 @@ export const authzCheckRequestSchema = z.object({
       mfaCompleted: z.boolean().nullish(),
     })
     .optional(),
+
+  /**
+   * AER-026 — THE PROXY'S OWN NAME FOR THE SUBJECT, kept beside the subject.
+   *
+   * `userId` is the RegulAIt user the proxy RESOLVED its authenticated identity
+   * to (for Kong: the consumer's `custom_id`). A ledger that records only the
+   * result of that mapping cannot answer "which Kong consumer was this?" when
+   * a mapping turns out to be wrong — and a wrong mapping is an authorization
+   * decision about the wrong person, which is the first question an auditor
+   * asks. So the proxy also sends the identity it mapped FROM, and the row
+   * keeps both.
+   *
+   * PROVENANCE ONLY. It is never a decision input, never appears in
+   * `contextApplied`, and never crosses back into the response. Bounded so the
+   * ledger cannot be used as a dumping ground by whoever holds the PDP key.
+   */
+  proxyConsumer: z
+    .object({
+      id: z.string().min(1).max(128),
+      username: z.string().min(1).max(256).nullish(),
+    })
+    .optional(),
 });
 export type AuthzCheckRequest = z.infer<typeof authzCheckRequestSchema>;
 
 export { REGULATORY_UPDATES } from "./demo-intake/regulatory-updates.js";
+
+// ---------------------------------------------------------------------------
+// ADR-0168 amendment — the review policy (reviewer roles per tier, risk
+// acceptors), the risk-acceptance body and the recertification sweep body.
+// ---------------------------------------------------------------------------
+export {
+  acceptRisksSchema,
+  recertificationSweepSchema,
+  reviewPolicyInputSchema,
+  reviewPolicyRoleSchema,
+  reviewPolicyTierSchema,
+  REVIEW_POLICY_TIER_KEYS,
+  REVIEW_ROLE_ID_RE,
+  type AcceptRisksInput,
+  type ReviewPolicyInput,
+  type ReviewPolicyTierKey,
+  type ReviewPolicyView,
+  type UseCaseReviewView,
+} from "./review-policy.js";
+
+// ADR-0173 §3 — the model allow-list matrix (feature × binding, per data class)
+export {
+  MODEL_NOT_ALLOWED_FOR_FEATURE,
+  MODEL_POLICY_DATA_CLASSES,
+  MODEL_POLICY_FEATURE_LABELS,
+  MODEL_POLICY_FEATURES,
+  MODEL_POLICY_LIMITS,
+  modelPolicyDefault,
+  modelPolicyPutSchema,
+  modelPolicyRuleFor,
+  modelPolicyRuleSchema,
+  modelPolicyVerdict,
+  type ModelPolicy,
+  type ModelPolicyBinding,
+  type ModelPolicyDataClass,
+  type ModelPolicyFeature,
+  type ModelPolicyPut,
+  type ModelPolicyRule,
+  type ModelPolicyVerdict,
+} from "./model-policy.js";
+
+// ---------------------------------------------------------------------------
+// ADR-0172 — the agent builder's request vocabulary, bundle format, SKILL.md
+// parser and schedule cadence arithmetic.
+// ---------------------------------------------------------------------------
+export {
+  BUILDER_AGENT_COLORS,
+  BUILDER_LIMITS,
+  BUILDER_CADENCE_VALUES,
+  BUILDER_CHANNEL_PROVIDER_VALUES,
+  BUILDER_CONNECTION_FORMAT_VALUES,
+  BUILDER_SHARING_VALUES,
+  BUILDER_THREAD_STATUS_VALUES,
+  builderAddMemorySchema,
+  builderBundleSchema,
+  builderChatSchema,
+  builderColorFor,
+  builderCreateAgentSchema,
+  builderCreateChannelSchema,
+  builderCreateScheduleSchema,
+  builderCreateSkillSchema,
+  builderImportAgentSchema,
+  builderImportSkillSchema,
+  builderSetSkillsSchema,
+  builderSetSubagentsSchema,
+  builderSetToolsSchema,
+  builderThreadListQuerySchema,
+  builderToolInputSchema,
+  builderUpdateAgentSchema,
+  builderUpdateScheduleSchema,
+  builderUpdateSkillSchema,
+  builderUpdateThreadSchema,
+  builderUsageQuerySchema,
+  nextScheduleRun,
+  parseSkillMarkdown,
+  type BuilderAgentColor,
+  type BuilderBundle,
+  type BuilderCadenceValue,
+  type BuilderCreateAgent,
+  type BuilderUpdateAgent,
+} from "./builder.js";
+// ADR-0173 — governed tool use in builder agents: the tool-step lifecycle and
+// the thread owner's answer to an "Ask first" pause.
+export {
+  BUILDER_TOOL_STEP_STATUS_VALUES,
+  builderConfirmStepSchema,
+  type BuilderConfirmStep,
+  type BuilderToolStepStatusValue,
+} from "./builder.js";
