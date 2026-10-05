@@ -284,34 +284,46 @@ export async function runAuditPruneOnce(
   }
   // A4: prune under the COMPOSED floor — the global cutoff, minus rows a
   // longer per-mode override still retains (MAX-only: never shortens).
-  const deleted = await db
-    .delete(auditLog)
-    .where(prunableWhere(f.cutoff, f.modeOverrides))
-    .returning({ id: auditLog.id });
-  await db.insert(auditLog).values({
-    userId: actorUserId ?? "00000000-0000-0000-0000-000000000000",
-    objectType: "project",
-    objectId: null,
-    detail: {
-      phase: "audit-retention-prune",
-      deleted: deleted.length,
-      retainedDays: f.retainedDays,
-      floorSource: f.floorSource,
-      cutoff: f.cutoff,
-      ...(f.modeOverrides.length
-        ? {
-            modeOverrides: f.modeOverrides.map((o) => ({
-              mode: o.mode,
-              retainedDays: o.retainedDays,
-            })),
-          }
-        : {}),
-      ...(auto ? { auto: true } : {}),
-    },
-    effect: "allow",
-    ruleId: "audit-log-pruned",
-    ruleChain: [],
-    reason: `pruned ${deleted.length} audit row(s) older than ${f.retainedDays}d (floor from [${f.floorSource.join(", ")}])${auto ? " — scheduled auto-prune" : ""}`,
+  //
+  // ADR-0179 review, finding 4 — THE DELETE AND ITS META ROW ARE ONE
+  // TRANSACTION. The meta row is the only record that rows were removed, and
+  // its cutoff is the replay's lookback horizon (`loadAuditLookbackHorizon`),
+  // so a delete committed without it would leave history silently missing and
+  // a replay counting a truncated window as complete. Both land or neither.
+  const cutoff = f.cutoff;
+  const retainedDays = f.retainedDays;
+  const deleted = await db.transaction(async (rawTx) => {
+    const tx = rawTx as unknown as Db;
+    const removed = await tx
+      .delete(auditLog)
+      .where(prunableWhere(cutoff, f.modeOverrides))
+      .returning({ id: auditLog.id });
+    await tx.insert(auditLog).values({
+      userId: actorUserId ?? "00000000-0000-0000-0000-000000000000",
+      objectType: "project",
+      objectId: null,
+      detail: {
+        phase: "audit-retention-prune",
+        deleted: removed.length,
+        retainedDays,
+        floorSource: f.floorSource,
+        cutoff,
+        ...(f.modeOverrides.length
+          ? {
+              modeOverrides: f.modeOverrides.map((o) => ({
+                mode: o.mode,
+                retainedDays: o.retainedDays,
+              })),
+            }
+          : {}),
+        ...(auto ? { auto: true } : {}),
+      },
+      effect: "allow",
+      ruleId: "audit-log-pruned",
+      ruleChain: [],
+      reason: `pruned ${removed.length} audit row(s) older than ${retainedDays}d (floor from [${f.floorSource.join(", ")}])${auto ? " — scheduled auto-prune" : ""}`,
+    });
+    return removed;
   });
   // ADR-0070 — TRACES PRUNE ON THE SAME FLOOR, IN THE SAME PASS.
   //

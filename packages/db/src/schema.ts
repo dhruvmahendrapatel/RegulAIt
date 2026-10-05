@@ -1294,6 +1294,11 @@ export const auditLog = pgTable(
   (t) => [
     index("audit_log_user_at_idx").on(t.userId, t.at),
     uniqueIndex("audit_log_seq_uq").on(t.seq),
+    // migration 0154: the retention prune's meta rows only, so the replay's
+    // lookback horizon (`loadAuditLookbackHorizon`) never scans the trail
+    index("audit_log_prune_marker_at_idx")
+      .on(t.at)
+      .where(sql`${t.ruleId} = 'audit-log-pruned'`),
   ],
 );
 
