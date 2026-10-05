@@ -155,6 +155,7 @@ vi.mock("@regulait/model-provider", async (importOriginal) => {
 // the dispatch core is imported AFTER the mock declaration (vi.mock is hoisted)
 const { executeGovernedDispatch } = await import("./agents-connectors.js");
 const { buildApp } = await import("./app.js");
+const { relaxDataPostureForTest } = await import("./testing/strict-data-posture.js");
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -263,9 +264,20 @@ async function startUpstream() {
   };
 }
 
+let restoreDataPosture: () => Promise<void>;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0181: this file pins the GUARDRAIL engine. The strict PII floor
+  // ('block' on every unclassified project) would buffer every stream and
+  // decide its PII-coexistence case, and the strict 'reject' would turn its
+  // disclosed stream suppression into a 400 — so both are set explicitly here
+  // (classified projects keep their own PII mode) and restored in afterAll.
+  restoreDataPosture = await relaxDataPostureForTest(db, {
+    org: { defaultPiiMode: "none" },
+    interception: { streamingOnBlockMode: "suppress" },
+    guardrails: false,
+  });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   gwUrl = await app.listen({ port: 0, host: "127.0.0.1" });
 
@@ -395,6 +407,7 @@ afterAll(async () => {
   // goes, so a suite running after it sees the shipped default posture again
   // and cannot fail because of an org-wide `block` this file left behind.
   await db.delete(guardrailConfigs);
+  await restoreDataPosture();
   app.server.closeAllConnections();
   await app.close();
   await mcpUpstream.close();

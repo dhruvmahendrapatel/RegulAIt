@@ -50,7 +50,13 @@ actually saw — and is labelled as an attestation where it cannot be.
   resolve (ADR-0157).
 - **Continuous trace evaluation** re-runs the shipped detectors over stored responses every 15
   minutes and reports **counts only** — it found a credential the inline guardrail let through
-  (ADR-0160).
+  (ADR-0160). Say it accurately: semantic DLP ships at `warn` (ADR-0181), so the inline layer
+  flagged the call and let it proceed; storing previews is an opt-in the demo seed turns on, audited
+  (content capture ships off).
+- **Strict by default (ADR-0181):** a fresh install blocks prompt injection and jailbreak, blocks
+  detected PII on every call, stores no prompt or output, and reads no provider key from the
+  environment. The demo's prompt-injection attempt is **refused** by the guardrail, not merely
+  logged. Every relaxation is an admin act, audited old → new.
 - **Routing outside the approved stack**: when cost optimization serves an approved use case's
   traffic from an agent its approval never named, the monitor says so, with the measured call
   count. It changes no routing; a person decides (ADR-0164).

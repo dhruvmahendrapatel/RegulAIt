@@ -207,7 +207,7 @@ afterAll(async () => {
 });
 
 describe("settings endpoint — admin-only, partial update, audited", () => {
-  it("GET returns the behaviour-preserving defaults plus env-key presence (names only)", async () => {
+  it("GET returns the shipped defaults (ADR-0181: strict where it is a security choice) plus env-key presence (names only)", async () => {
     const r = await app.inject({ method: "GET", headers: AUTH, url: "/v1/org/settings" });
     expect(r.statusCode).toBe(200);
     const s = r.json().settings;
@@ -227,13 +227,13 @@ describe("settings endpoint — admin-only, partial update, audited", () => {
       minEditableBaselineTokens: 200,
       batchOverheadTokens: 200,
       minPreprocessTokens: 200,
-      semanticCachePolicy: "opt_in",
+      semanticCachePolicy: "off",
       semanticCacheTtlSeconds: 3600,
-      compactionFailureMode: "fail_open",
+      compactionFailureMode: "fail_closed",
       summarizerSelection: "cheapest",
       summarizerAgentId: null,
-      defaultPiiMode: "none",
-      envKeyFallbackEnabled: true,
+      defaultPiiMode: "block",
+      envKeyFallbackEnabled: false,
       envFallbackProviders: ["anthropic", "openai", "google", "xai"],
       budgetEnforcement: "block",
       budgetHardBlockPct: 100,
@@ -345,8 +345,16 @@ describe("optimizer governance — the ceiling model", () => {
     expect(b2.json().dispatch.stopReason).toBe("cached");
   });
 
-  it("opt_in (the default) still works exactly as before — the regression guard", async () => {
+  it("off is the default (ADR-0181); opt_in, once an admin picks it, works exactly as before", async () => {
     const input = "orgset semantic cache default probe";
+    // the strict default: even a caller that asks is not served from cache
+    const o1 = await invoke(umaAuth, cheapAgentId, { input: input + " strict", semanticCache: true });
+    expect(o1.statusCode).toBe(200);
+    const o2 = await invoke(umaAuth, cheapAgentId, { input: input + " strict", semanticCache: true });
+    expect(o2.statusCode).toBe(200);
+    expect(o2.json().cached).toBeUndefined();
+
+    await putOrg({ semanticCachePolicy: "opt_in" });
     const c1 = await invoke(umaAuth, cheapAgentId, { input, semanticCache: true });
     expect(c1.statusCode).toBe(200);
     const c2 = await invoke(umaAuth, cheapAgentId, { input, semanticCache: true });
@@ -360,7 +368,7 @@ describe("optimizer governance — the ceiling model", () => {
 });
 
 describe("compliance defaults", () => {
-  it("default_pii_mode 'block' applies to an UNCLASSIFIED project; 'none' (default) leaves it unenforced", async () => {
+  it("default_pii_mode 'block' (the default, ADR-0181) applies to an UNCLASSIFIED project; 'none' leaves it unenforced", async () => {
     const proj = await app.inject({
       method: "POST",
       headers: AUTH,
@@ -370,11 +378,7 @@ describe("compliance defaults", () => {
     const projectId = proj.json().id as string;
     const ssnInput = "the ssn is 123-45-6789";
 
-    // default: an unclassified project has NO PII policy — the call runs
-    const ok = await invoke(umaAuth, cheapAgentId, { input: ssnInput, projectId });
-    expect(ok.statusCode).toBe(200);
-
-    await putOrg({ defaultPiiMode: "block" });
+    // default 'block': the floor reaches an unclassified project
     const blocked = await invoke(umaAuth, cheapAgentId, { input: ssnInput, projectId });
     expect(blocked.statusCode).toBe(403);
     expect(blocked.json().error).toBe("pii_blocked");
@@ -384,12 +388,11 @@ describe("compliance defaults", () => {
     const clean = await invoke(umaAuth, cheapAgentId, { input: "no personal data here", projectId });
     expect(clean.statusCode).toBe(200);
 
-    // RESET — org_settings is a process-wide singleton and the files after
-    // this one share the database. Before the ADR-0021 floor amendment a
-    // leaked 'block' was invisible (unattributed calls ignored the default);
-    // now it would 403 every later PII-looking unattributed dispatch, which is
-    // exactly the order-dependency disease task #119 cured once already.
+    // an admin relaxation to 'none': an unclassified project has NO PII
+    // policy and the call runs (afterEach puts the strict default back)
     await putOrg({ defaultPiiMode: "none" });
+    const ok = await invoke(umaAuth, cheapAgentId, { input: ssnInput, projectId });
+    expect(ok.statusCode).toBe(200);
   });
 
   it("env-key fallback off => provider honestly unconfigured and dispatch 409s (no env-var hint)", async () => {
@@ -414,11 +417,7 @@ describe("compliance defaults", () => {
     // not downroute onto a mock agent and mask the credential-gate signal
     const qs = { input: "ping", costSensitivity: "quality-sensitive" as const };
 
-    // default: the env fallback engages (past the credential gate)
-    const on = await invoke(umaAuth, claudeId, qs);
-    expect(on.json().error).toBe("model_dispatch_failed"); // reached the provider, not the gate
-
-    await putOrg({ envKeyFallbackEnabled: false });
+    // default (ADR-0181): the fallback is OFF — honestly unconfigured, 409
     const status = await app.inject({ method: "GET", headers: umaAuth, url: "/v1/model-providers/status" });
     expect(status.json().providers.anthropic.configured).toBe(false);
     const off = await invoke(umaAuth, claudeId, qs);
@@ -426,6 +425,11 @@ describe("compliance defaults", () => {
     expect(off.json().error).toBe("no_model_credential");
     // a disabled path is not advertised as a remedy
     expect(off.json().detail).not.toContain("ANTHROPIC_API_KEY");
+
+    // an admin turns it on: the env key engages (past the credential gate)
+    await putOrg({ envKeyFallbackEnabled: true });
+    const on = await invoke(umaAuth, claudeId, qs);
+    expect(on.json().error).toBe("model_dispatch_failed"); // reached the provider, not the gate
 
     // the per-provider allow-list narrows the same way
     await putOrg({ envKeyFallbackEnabled: true, envFallbackProviders: ["openai"] });
@@ -606,19 +610,9 @@ describe("interception posture additions (fold into interception_settings)", () 
     return r.json().settings;
   };
 
-  it("strict_field_rejection: temperature is accepted-and-disclosed by default, a 400 when strict", async () => {
+  it("strict_field_rejection: temperature is a 400 by default (ADR-0181), accepted-and-disclosed when relaxed", async () => {
     const s = await setPosture({ anthropicCompatEnabled: true });
-    expect(s.strictFieldRejection).toBe(false); // migration default
-    const lax = await app.inject({
-      method: "POST",
-      headers: umaAuth,
-      url: "/v1/messages",
-      payload: anthropicBody({ temperature: 0.2 }),
-    });
-    expect(lax.statusCode).toBe(200);
-    expect(lax.headers["x-regulait-ignored-fields"]).toBe("temperature");
-
-    await setPosture({ strictFieldRejection: true });
+    expect(s.strictFieldRejection).toBe(true); // migration default (ADR-0181)
     const strict = await app.inject({
       method: "POST",
       headers: umaAuth,
@@ -635,9 +629,20 @@ describe("interception posture additions (fold into interception_settings)", () 
       payload: anthropicBody(),
     });
     expect(clean.statusCode).toBe(200);
+
+    // an admin relaxes it: accepted, not honoured, and disclosed
+    await setPosture({ strictFieldRejection: false });
+    const lax = await app.inject({
+      method: "POST",
+      headers: umaAuth,
+      url: "/v1/messages",
+      payload: anthropicBody({ temperature: 0.2 }),
+    });
+    expect(lax.statusCode).toBe(200);
+    expect(lax.headers["x-regulait-ignored-fields"]).toBe("temperature");
   });
 
-  it("streaming_on_block_mode 'reject' 400s a stream request to a block-mode project (default suppresses)", async () => {
+  it("streaming_on_block_mode 'reject' (the default, ADR-0181) 400s a stream request to a block-mode project; 'suppress' buffers", async () => {
     await db
       .insert(complianceProfiles)
       .values({ tag: "orgset-block", piiMode: "block", mcpDefaultMode: "read_write" })
@@ -650,16 +655,7 @@ describe("interception posture additions (fold into interception_settings)", () 
     });
     const projectId = proj.json().id as string;
 
-    // default 'suppress': the governed dispatch runs buffered + disclosed
-    const suppressed = await invoke(umaAuth, cheapAgentId, {
-      input: "clean text",
-      projectId,
-      stream: true,
-    });
-    expect(suppressed.statusCode).toBe(200);
-    expect(suppressed.json().streamingSuppressed).toBe(true);
-
-    await setPosture({ streamingOnBlockMode: "reject" });
+    // default 'reject': refused before anything is dispatched
     const rejected = await invoke(umaAuth, cheapAgentId, {
       input: "clean text",
       projectId,
@@ -667,6 +663,16 @@ describe("interception posture additions (fold into interception_settings)", () 
     });
     expect(rejected.statusCode).toBe(400);
     expect(rejected.json().error).toBe("streaming_rejected_on_block_project");
+
+    // relaxed to 'suppress': the governed dispatch runs buffered + disclosed
+    await setPosture({ streamingOnBlockMode: "suppress" });
+    const suppressed = await invoke(umaAuth, cheapAgentId, {
+      input: "clean text",
+      projectId,
+      stream: true,
+    });
+    expect(suppressed.statusCode).toBe(200);
+    expect(suppressed.json().streamingSuppressed).toBe(true);
     // without stream the same call is fine
     const plain = await invoke(umaAuth, cheapAgentId, { input: "clean text", projectId });
     expect(plain.statusCode).toBe(200);

@@ -1408,16 +1408,16 @@ ${pmWebhookSecret ? `\n    demo-pm webhook secret (shown ONCE)  ${pmWebhookSecre
   $0.002; jira-cloud stays governance-only), 7 agents
   (3 mock = usable with no external keys; anthropic/openai/google/xai go live
   once you add a model credential in /admin → Model Credentials (which also
-  lists exactly which agents are still waiting on one), OR set the provider's
-  API-key env var — e.g. ANTHROPIC_API_KEY (optionally ANTHROPIC_BASE_URL) — to
-  activate Claude platform-wide with no admin-UI paste and no key in the DB;
-  likewise OPENAI_API_KEY / GOOGLE_API_KEY (or GEMINI_API_KEY) / XAI_API_KEY),
+  lists exactly which agents are still waiting on one). Provider env vars
+  (ANTHROPIC_API_KEY, …) are NOT read at dispatch: the env-key fallback ships
+  off (ADR-0181) and an admin turns it on in /admin → Organization, audited.
+  The one exception is this seed: GOOGLE_API_KEY, when set, is imported once
+  into the encrypted store — see the "provider key:" line at the top),
   and per-user agent policies with a per-run budget cap (/admin → Agents).
 
-  No provider credential is seeded, deliberately — a placeholder key would
-  make routing believe those four providers work and turn a clean 409 into a
-  failed dispatch. Add a real one (stored credential or the *_API_KEY env var),
-  or stay on the mock agents.
+  No placeholder provider credential is seeded, deliberately — it would make
+  routing believe those providers work and turn a clean 409 into a failed
+  dispatch. Add a real one in Model Credentials, or stay on the mock agents.
 
   Onboarding anyone else (ADR-0025): create them in /admin → Users, hit
   'set one-time pw' for their browser sign-in (shown once, must-change on

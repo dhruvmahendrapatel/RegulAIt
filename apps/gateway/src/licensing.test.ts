@@ -27,6 +27,7 @@ import {
 } from "@regulait/db";
 import { LICENSE_SCHEMA_ID, canonicalLicenseBytes, licenseDocumentSchema } from "@regulait/shared";
 import { verifyLicenseArtifact } from "./licensing.js";
+import { setOrgSettingsForTest } from "./testing/strict-data-posture.js";
 
 /**
  * ADR-0052 — LICENSING & SEATS, proved by attack.
@@ -808,9 +809,13 @@ describe("ADR-0052 §4 (B7b) — the remaining four tier flags are ENFORCED at t
     // provider registration passes the LICENSE gate: the next gate (egress
     // preflight of a non-allow-listed loopback URL) answers instead. The full
     // 201 lives in custom-providers.test.ts under its license fixture.
-    const prov = await app.inject({
-      method: "POST", url: "/v1/custom-model-providers", headers: AUTH, payload: providerPayload("lic-flag-prov"),
-    });
+    // ADR-0181: the capability ships OFF, so it is switched on for this call.
+    const restoreCustom = await setOrgSettingsForTest(db, { customModelProvidersEnabled: true });
+    const prov = await Promise.resolve(
+      app.inject({
+        method: "POST", url: "/v1/custom-model-providers", headers: AUTH, payload: providerPayload("lic-flag-prov"),
+      }),
+    ).finally(restoreCustom);
     expect(prov.statusCode, prov.body).toBe(400);
     expect(prov.json().error).toBe("egress_blocked");
   });

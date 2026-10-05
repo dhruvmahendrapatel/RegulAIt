@@ -240,6 +240,10 @@ beforeAll(async () => {
 
   const [prior] = await db.select().from(orgSettings).where(eq(orgSettings.id, ORG_SETTINGS_ID));
   priorOrg = prior ? { ...prior } : null;
+  // ADR-0181: content capture ships OFF. This file pins what a CAPTURED
+  // preview looks like, so it opts in explicitly; afterAll restores the prior
+  // value (the strict default on a fresh database).
+  await db.update(orgSettings).set({ tracingCaptureContent: true }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
 
   const ana = await makeUser("tr-ana@example.com");
   anaId = ana.id;

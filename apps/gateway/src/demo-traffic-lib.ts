@@ -12,12 +12,16 @@
  *              reports exactly that (ADR-0164)
  *   leak       a prompt carrying AWS's documented EXAMPLE key (synthetic); a
  *              credential is not PII so the inline PII check passes it, the
- *              mock echoes it into the response, and continuous trace
- *              evaluation flags the response (ADR-0160)
+ *              semantic-DLP guardrail (at `warn` by default, ADR-0181) flags it
+ *              and lets it proceed, the mock echoes it into the response, and
+ *              continuous trace evaluation flags the response (ADR-0160) — over
+ *              the preview the seed's audited content-capture opt-in stores
  *   blocked    an SSN-shaped prompt in `hipaa-project` (PII mode `block`): a
  *              governed refusal — the runtime-block beat
- *   attempt    a prompt-injection string — counted as an ATTEMPT, never held
- *              against the agent
+ *   attempt    a prompt-injection string — REFUSED at the input by the
+ *              guardrail (prompt injection blocks by default, ADR-0181), a 403
+ *              `guardrail_blocked`; counted as an attempt, never held against
+ *              the agent
  *
  * Then it runs trace evaluation and a monitor pass. Every outcome is reported
  * as it happened (status code and refusal), never assumed — a scenario that

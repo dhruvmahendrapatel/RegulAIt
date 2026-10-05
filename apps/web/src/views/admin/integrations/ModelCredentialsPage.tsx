@@ -183,7 +183,7 @@ export default function ModelCredentialsPage() {
           <p className={v.faint}>
             Names and presence only — a key's value is never read back by any endpoint. “Fallback blocked”
             means the var may exist but dispatches will not use it (Settings → Organization owns the
-            toggle).
+            toggle, which is off by default: every key goes through the encrypted store above).
           </p>
         </Card>
 

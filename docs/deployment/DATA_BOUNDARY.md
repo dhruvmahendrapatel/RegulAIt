@@ -152,8 +152,9 @@ That reasoning is sound **as an SSRF argument** — you cannot smuggle `169.254.
 constant. It is not the same thing as an egress *policy*. The consequence, stated plainly:
 
 > **On an air-gapped deployment, if an operator configures a built-in provider (`anthropic`,
-> `openai`, `google`, `xai`) — by storing a platform credential, a per-user credential, or simply
-> by setting `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GOOGLE_API_KEY` / `GEMINI_API_KEY` /
+> `openai`, `google`, `xai`) — by storing a platform credential, a per-user credential, or (only
+> once an admin has turned the env-key fallback on; it ships off since ADR-0181) by setting
+> `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GOOGLE_API_KEY` / `GEMINI_API_KEY` /
 > `XAI_API_KEY` in the environment — then invoking an agent on that provider will attempt an
 > outbound HTTPS connection to that vendor's public API, carrying the prompt. Nothing in the
 > application refuses it. The connection fails only because the network has nowhere to send it.**

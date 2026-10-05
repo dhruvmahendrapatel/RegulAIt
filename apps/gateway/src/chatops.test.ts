@@ -59,6 +59,7 @@ import {
 } from "@regulait/db";
 import { CHATOPS_REPLAY_WINDOW_SECONDS, slackSignature } from "@regulait/shared";
 import { CHATOPS_RULE_IDS } from "./chatops.js";
+import { setOrgSettingsForTest } from "./testing/strict-data-posture.js";
 
 const { buildApp } = await import("./app.js");
 
@@ -161,9 +162,15 @@ async function auditRows(ruleId: string) {
   return rows.map((r) => ({ ...r, detail: (r.detail ?? {}) as Record<string, unknown> }));
 }
 
+let restorePiiFloor: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0181: the org PII floor ships at 'block', which fences EVERY approval
+  // (chatContentFenced) — link-only cards, in-app decisions. This file pins
+  // the courier for both an unfenced and a fenced approval, so the floor is
+  // set off explicitly; the fenced cases keep their own block-mode project.
+  restorePiiFloor = await setOrgSettingsForTest(db, { defaultPiiMode: "none" });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
 
   // A REAL local Slack: the guarded fetch really connects to it, so "the post
@@ -313,6 +320,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restorePiiFloor?.();
   await db.delete(chatopsInteractions);
   await db.delete(chatopsMessages);
   await db.delete(chatIdentityLinks);

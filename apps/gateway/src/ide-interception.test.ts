@@ -15,6 +15,7 @@ import {
   type Db,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
 import { AGENT_HEADER, PROJECT_HEADER } from "./compat-core.js";
 
 /**
@@ -138,9 +139,19 @@ const openaiBody = (model: string, text = "ide probe", extra: Record<string, unk
   ...extra,
 });
 
+let restoreDataPosture: () => Promise<void>;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0181: this file pins the IDE compat surfaces as written against the
+  // lax posture — temperature accepted-and-disclosed, a block-mode project's
+  // stream suppressed-and-disclosed, no PII floor on the plain project. Each
+  // is a strict default now, so it is set explicitly and restored in afterAll.
+  restoreDataPosture = await relaxDataPostureForTest(db, {
+    org: { defaultPiiMode: "none" },
+    interception: { streamingOnBlockMode: "suppress", strictFieldRejection: false },
+    guardrails: false,
+  });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
 
   const dev = await makeUser("ide-dev@example.com");
@@ -211,6 +222,7 @@ afterAll(async () => {
       requireProjectAttribution: false,
     })
     .where(eq(interceptionSettings.id, INTERCEPTION_SETTINGS_ID));
+  await restoreDataPosture();
   app.server.closeAllConnections();
   await app.close();
 });

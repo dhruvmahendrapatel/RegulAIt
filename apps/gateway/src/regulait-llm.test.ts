@@ -71,6 +71,7 @@ import {
   type Db,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { setOrgSettingsForTest } from "./testing/strict-data-posture.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -500,12 +501,15 @@ describe("the ingest scan", () => {
   });
 
   it("FLAGS the same corpus under a warn mode, and records the verdict on the version", async () => {
+    // ADR-0181: the org PII floor ships at 'block' and a requested mode can
+    // never go below it, so this case sets the floor it pins explicitly
+    const restoreFloor = await setOrgSettingsForTest(db, { defaultPiiMode: "none" });
     const res = await createDataset({
       name: "llm-leaky-flagged",
       format: "prompt_completion",
       rows: LEAKY_ROWS,
       piiMode: "warn",
-    });
+    }).finally(restoreFloor);
     expect(res.json().dataset.piiVerdict).toBe("flagged");
     expect(res.json().dataset.piiMode).toBe("warn");
     const [stored] = await db
