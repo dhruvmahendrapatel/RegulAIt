@@ -6,7 +6,7 @@
  * DENIED, and only an empty/null allow-list means "no restriction".
  */
 import { describe, expect, it } from "vitest";
-import { cidrContains, evaluateIpEnvelope, ipToBytes, isValidCidr, parseCidr } from "./net-policy.js";
+import { cidrContains, evaluateIpEnvelope, isValidCidr, parseCidr } from "./net-policy.js";
 import { deviceLabel } from "./device-label.js";
 
 describe("ADR-0039: IPv4 CIDR matching", () => {
@@ -47,6 +47,19 @@ describe("ADR-0039: IPv6 CIDR matching", () => {
     expect(cidrContains("10.0.0.0/8", "::ffff:11.0.0.1")).toBe(false);
   });
 
+  it("ADR-0176: only the IPv4-MAPPED form is unwrapped — this is an allow-list, so the other v4-carrying forms are not", () => {
+    // a dual-stack socket reports a v4 peer as ::ffff:a.b.c.d and nothing else;
+    // unwrapping 6to4 / IPv4-compatible / NAT64 would WIDEN the envelope
+    expect(cidrContains("10.0.0.0/8", "::a00:1")).toBe(false);
+    expect(cidrContains("10.0.0.0/8", "::10.0.0.1")).toBe(false);
+    expect(cidrContains("10.0.0.0/8", "2002:a00:1::")).toBe(false);
+    expect(cidrContains("10.0.0.0/8", "64:ff9b::a00:1")).toBe(false);
+    expect(cidrContains("10.0.0.0/8", "::ffff:10.0.0.1")).toBe(true);
+    // and an IPv6 CIDR never admits a plain IPv4 client
+    expect(cidrContains("::ffff:0:0/96", "10.0.0.1")).toBe(false);
+    expect(cidrContains("::/0", "10.0.0.1")).toBe(false);
+  });
+
   it("never matches across address families on a plain (unmapped) address", () => {
     expect(cidrContains("10.0.0.0/8", "2001:db8::1")).toBe(false);
     expect(cidrContains("2001:db8::/32", "10.1.2.3")).toBe(false);
@@ -75,7 +88,8 @@ describe("ADR-0039: malformed input fails CLOSED (matches nothing)", () => {
 
   it("an unparseable client IP matches nothing either (never a throw)", () => {
     expect(cidrContains("10.0.0.0/8", "not-an-ip")).toBe(false);
-    expect(ipToBytes("not-an-ip")).toBeNull();
+    expect(cidrContains("::/0", "not-an-ip")).toBe(false);
+    expect(cidrContains("10.0.0.0/8", "[::ffff:10.0.0.1]")).toBe(false);
   });
 
   it("valid syntax is accepted for both families", () => {

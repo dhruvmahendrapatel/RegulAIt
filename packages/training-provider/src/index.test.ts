@@ -78,7 +78,19 @@ describe("tokenisation and the content digest", () => {
     const b = datasetChecksum([...SUPPORT_CORPUS].reverse());
     expect(a).not.toBe(b);
     expect(datasetChecksum(SUPPORT_CORPUS)).toBe(a);
-    expect(a.startsWith("fnv1a32:")).toBe(true);
+  });
+
+  it("the checksum is SHA-256 (ADR-0176), not a 32-bit FNV a different corpus can match", () => {
+    const a = datasetChecksum(SUPPORT_CORPUS);
+    expect(a).toMatch(new RegExp(`^sha256:[0-9a-f]{64}:${SUPPORT_CORPUS.length}$`));
+  });
+
+  it("the row framing is unambiguous: moving text across the input/output boundary changes it", () => {
+    // under the old NUL/SOH-joined framing these two corpora were the same bytes
+    const one = datasetChecksum([{ input: "a\u0000b", output: "c" }]);
+    const two = datasetChecksum([{ input: "a", output: "b\u0000c" }]);
+    expect(one).not.toBe(two);
+    expect(datasetChecksum([{ input: "x", output: null }])).toBe(datasetChecksum([{ input: "x", output: "" }]));
   });
 
   it("the split is DETERMINISTIC — the same row count always yields the same split", () => {

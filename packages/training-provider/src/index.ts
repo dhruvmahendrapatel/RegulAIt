@@ -56,7 +56,7 @@ import type { ModelDispatchRequest, ModelDispatchResult, ModelProvider } from "@
 // ADR-0067: the ONE tokenizer + TF-IDF vector primitives, hoisted into the leaf
 // package so this file, the groundedness metrics and any future consumer cannot
 // acquire three different opinions about what a word is. Re-exported below.
-import { tokenize, weightedVector, STOPWORDS } from "@regulait/shared";
+import { sha256Hex, tokenize, weightedVector, STOPWORDS } from "@regulait/shared";
 
 // ---------------------------------------------------------------------------
 // Vocabularies
@@ -153,7 +153,7 @@ export interface DatasetValidation {
   ok: boolean;
   rowCount: number;
   charCount: number;
-  /** sha-free, dependency-free content digest — see `datasetChecksum` */
+  /** content digest of this corpus version — see `datasetChecksum` (`sha256:`; pre-ADR-0176 rows `fnv1a32:`) */
   checksum: string;
   /** FATAL. A dataset with any of these cannot train. */
   errors: string[];
@@ -265,9 +265,9 @@ export interface TrainingBackend {
  */
 export { tokenize, weightedVector, STOPWORDS };
 
-/** FNV-1a, 32-bit. A dependency-free content digest — this is a CHANGE
- * DETECTOR for dataset versions, not a security primitive, and it is labelled
- * `fnv1a32:` so nobody mistakes it for a cryptographic hash. */
+/** FNV-1a, 32-bit. Used ONLY to bucket row indexes for the deterministic
+ * train/eval split (`splitDataset`), where it is a mixing function and nothing
+ * trusts it. It is no longer the dataset digest (ADR-0176, see below). */
 export function fnv1a32(input: string): string {
   let h = 0x811c9dc5;
   for (let i = 0; i < input.length; i++) {
@@ -277,12 +277,27 @@ export function fnv1a32(input: string): string {
   return h.toString(16).padStart(8, "0");
 }
 
-/** The canonical digest of a corpus VERSION. Order-sensitive on purpose: two
- * datasets with the same rows in a different order are different training
- * inputs for a method that consumes them in order. */
+/**
+ * The content digest of a corpus VERSION: `sha256:<64 hex>:<row count>`.
+ * Order-sensitive on purpose: two datasets with the same rows in a different
+ * order are different training inputs for a method that consumes them in order.
+ *
+ * ADR-0176 security fix 1 moved this off 32-bit FNV-1a: the checksum is
+ * recorded on the training job's approval/audit row and in the artifact's
+ * evidence as WHICH corpus was trained on, and a 32-bit value can be matched
+ * by a different corpus with a few thousand tries. SHA-256 comes from
+ * `node:crypto` through `@regulait/shared`. The rows are framed as JSON
+ * (`[input, output]` pairs), so no choice of row text can make two different
+ * corpora serialise to the same bytes (the old NUL/SOH separators could).
+ *
+ * Stored pre-0176 values keep their self-describing `fnv1a32:` prefix. Nothing
+ * recomputes and compares a stored checksum (it is shown and recorded, never
+ * re-verified), so no tolerance code is needed; a reader that wants to verify
+ * one must dispatch on the prefix.
+ */
 export function datasetChecksum(rows: TrainingRow[]): string {
-  const canon = rows.map((r) => `${r.input} ${r.output ?? ""}`).join("");
-  return `fnv1a32:${fnv1a32(canon)}:${rows.length}`;
+  const canon = JSON.stringify(rows.map((r) => [r.input, r.output ?? ""]));
+  return `sha256:${sha256Hex(canon)}:${rows.length}`;
 }
 
 // ---------------------------------------------------------------------------

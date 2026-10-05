@@ -66,6 +66,7 @@
  * rather than a threshold somebody tunes until the alerts stop.
  */
 
+import { sha256Hex } from "./audit-chain.js";
 import { promptInjectionDetector, semanticDlpDetector } from "./guardrails.js";
 
 // ---------------------------------------------------------------------------
@@ -143,7 +144,12 @@ export type McpAdmissionState = (typeof MCP_ADMISSION_STATES)[number];
  * this server cleared under the ruleset we ship today?" without guessing, and
  * what a future re-scan-everything migration would key on.
  */
-export const MCP_ADMISSION_SCANNER_VERSION = "mcp-admission/2";
+//
+// `/3` (ADR-0176 security batch): the credential-material rules gained the
+// current provider token formats (Anthropic, OpenAI project/service-account,
+// GitHub fine-grained, Stripe, Google API, GitLab), and the manifest digest
+// moved from FNV-1a 64 to SHA-256.
+export const MCP_ADMISSION_SCANNER_VERSION = "mcp-admission/3";
 
 // ---------------------------------------------------------------------------
 // Findings
@@ -368,21 +374,16 @@ export function scanUnitsForTool(tool: ScannableTool): ScanUnit[] {
 // ---------------------------------------------------------------------------
 
 /**
- * A stable, order-independent digest of the manifest's SCANNED SURFACE: for
- * every tool, its name, description and canonicalized input schema. Nothing
+ * The canonical text of the manifest's SCANNED SURFACE: for every tool, its
+ * name, description and canonicalized input schema, sorted by name. Nothing
  * else — `annotations.readOnlyHint` changing is a governance-relevant fact the
  * kind column already tracks, but it is not a re-scan trigger, and letting an
  * irrelevant field churn the digest would re-hold cleared servers for no
- * reason.
- *
- * FNV-1a, 64-bit, in pure TypeScript. Deliberately NOT `node:crypto`: this
- * module is shared, must run in a browser bundle, and the digest is a CHANGE
- * DETECTOR, not a security primitive — nothing trusts it to resist a
- * second-preimage attack, because an attacker who can craft a colliding
- * manifest can simply serve a clean one and be scanned clean anyway. Said out
- * loud so nobody later mistakes it for an integrity check.
+ * reason. Order-independent (tools sorted by name, object keys sorted at every
+ * depth). Exported so the one-time digest re-pin can recompute a stored
+ * manifest under both the old and the new hash from the SAME canonical form.
  */
-export function manifestDigest(tools: readonly ScannableTool[]): string {
+export function manifestCanonicalJson(tools: readonly ScannableTool[]): string {
   const canonical = [...tools]
     .map((t) => ({
       name: t.name ?? "",
@@ -390,27 +391,70 @@ export function manifestDigest(tools: readonly ScannableTool[]): string {
       inputSchema: canonicalize(t.inputSchema),
     }))
     .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-  return fnv1a64(JSON.stringify(canonical));
+  return JSON.stringify(canonical);
 }
 
-/** Key-sorted deep copy, so `{a,b}` and `{b,a}` digest identically. */
+/** The digest algorithm the clearance and the release-age cooldown pin to. */
+export const MANIFEST_DIGEST_ALGORITHM = "sha256" as const;
+
+/**
+ * The manifest digest — THE DRIFT KEY. An admin's clearance and the release-age
+ * cooldown are both pinned to it, so it IS an integrity check and is treated as
+ * one: SHA-256 (hex, 64 characters) over `manifestCanonicalJson`.
+ *
+ * ADR-0176 security fix 1. This was FNV-1a 64-bit, on the reasoning that the
+ * digest was "only a change detector". It is more than that:
+ * `nextAdmissionState` keeps a server `cleared` while the digest matches, so a
+ * server that serves a second manifest with the same FNV value keeps an admin's
+ * clearance for a manifest the admin never saw. FNV-1a 64 collisions are cheap
+ * (a generic collision search found a pair for a fixed poisoned prefix in
+ * minutes on four cores; the test suite carries it). SHA-256 comes from
+ * `node:crypto`, which this package already uses (`audit-chain.ts`). Stored
+ * FNV digests are re-pinned once at boot (`apps/gateway/src/
+ * manifest-digest-repin.ts`; migration 0145 adds its marker).
+ */
+export function manifestDigest(tools: readonly ScannableTool[]): string {
+  return sha256Hex(manifestCanonicalJson(tools));
+}
+
+/**
+ * Key-sorted deep copy, so `{a,b}` and `{b,a}` digest identically.
+ *
+ * The copy is a NULL-PROTOTYPE object. Into a plain `{}`, assigning the key
+ * `"__proto__"` (which `JSON.parse` and jsonb both hand back as an ordinary
+ * own key) sets the copy's prototype instead, and `JSON.stringify` then drops
+ * it: a manifest could carry a poisoned `__proto__` member that the scanner
+ * reads but the digest never sees, so a cleared server kept its clearance and
+ * skipped the release cooldown. On a null-prototype object every key,
+ * `__proto__`, `constructor` and `prototype` included, is an ordinary key.
+ */
 function canonicalize(value: unknown, depth = 0): unknown {
   if (depth > 24 || value === null || typeof value !== "object") return value ?? null;
   if (Array.isArray(value)) return value.map((v) => canonicalize(v, depth + 1));
   const obj = value as Record<string, unknown>;
-  const out: Record<string, unknown> = {};
+  const out = Object.create(null) as Record<string, unknown>;
   for (const key of Object.keys(obj).sort()) out[key] = canonicalize(obj[key], depth + 1);
   return out;
 }
 
-function fnv1a64(input: string): string {
-  // 64-bit FNV-1a with BigInt — exact, and a manifest is small enough that the
-  // BigInt cost is irrelevant beside the HTTP round-trip that fetched it.
+/** A pre-ADR-0176 digest: 16 lowercase hex characters (FNV-1a 64). A SHA-256
+ * digest is 64. The length is the per-row marker the re-pin keys on. */
+export function isLegacyManifestDigest(digest: string | null | undefined): digest is string {
+  return typeof digest === "string" && /^[0-9a-f]{16}$/.test(digest);
+}
+
+/**
+ * @deprecated The pre-ADR-0176 manifest digest: FNV-1a 64-bit over the same
+ * canonical form. Kept for ONE purpose, the one-time re-pin, which must prove
+ * that a stored manifest is the one a stored FNV digest was computed over
+ * before it moves that row's clearance and cooldown clock to SHA-256. Nothing
+ * may compare a live manifest with it.
+ */
+export function legacyManifestDigestFnv1a64(tools: readonly ScannableTool[]): string {
   const PRIME = 1099511628211n;
   const MASK = (1n << 64n) - 1n;
   let hash = 14695981039346656037n;
-  const bytes = new TextEncoder().encode(input);
-  for (const byte of bytes) {
+  for (const byte of new TextEncoder().encode(manifestCanonicalJson(tools))) {
     hash ^= BigInt(byte);
     hash = (hash * PRIME) & MASK;
   }

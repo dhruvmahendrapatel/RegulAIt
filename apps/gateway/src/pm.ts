@@ -34,6 +34,7 @@ import { runExternalWrite } from "./external-effects.js";
 import type { RunState, TaskGraph } from "@regulait/orchestration-kernel";
 import type { WorkflowDefinition } from "@regulait/workflow-kernel";
 import {
+  constantTimeEqual,
   createDecisionSchema,
   createPmConnectionSchema,
   pmSyncSchema,
@@ -52,7 +53,7 @@ import {
   decideCompiledDefault,
   loadCompiledEgressContext,
 } from "./compiled-egress.js";
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { z } from "zod";
 
 const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
@@ -994,7 +995,7 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
         if (typeof presented === "string") {
           const presentedHash = Buffer.from(sha256(presented), "hex");
           const storedHash = Buffer.from(conn.webhookSecretHash, "hex");
-          if (presentedHash.length === storedHash.length && timingSafeEqual(presentedHash, storedHash)) {
+          if (constantTimeEqual(presentedHash, storedHash)) {
             secret = presented;
           }
         }

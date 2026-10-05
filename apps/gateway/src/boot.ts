@@ -42,6 +42,7 @@ import { Scheduler, resolveSchedulerConfig, syncSchedulerJobs } from "./schedule
 import { schedulerJobRegistry } from "./scheduler-jobs.js";
 import { captureAnchor, flushPendingAnchors, resolveAnchorSink } from "./audit-chain.js";
 import { backfillOtlpHeaderCiphertext } from "./org-settings.js";
+import { ManifestDigestRepinBootError, repinManifestDigests, type ManifestDigestRepinResult } from "./manifest-digest-repin.js";
 import { DevSecretsBootError, assessDevSecrets, realAdminExists } from "./dev-secrets.js";
 import { describeGatewayLogger, resolveGatewayLogger } from "./gateway-logger.js";
 import { describeDbPool, resolveDbPoolConfig } from "@regulait/db";
@@ -92,6 +93,22 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
 
   // migrations are idempotent — booting always converges the schema
   await runMigrations(db, migrationsFolder);
+
+  // ADR-0176 (migration 0145): the one-time re-pin of stored MCP manifest
+  // digests from FNV-1a 64 to SHA-256, before listen and before the scheduler,
+  // so no manifest sync can compare a SHA-256 digest with an un-pinned FNV
+  // one first. FATAL on failure, like the data-key gate below: serving without
+  // it would re-hold every cleared server on its first sync, and the next boot
+  // would then find nothing left to re-pin. The pass is one transaction, so a
+  // refused boot changed nothing and the restart runs it again. (One bad ROW
+  // does not abort it; that row is left unverified and fails closed.)
+  let digestRepin: ManifestDigestRepinResult;
+  try {
+    digestRepin = await repinManifestDigests(db);
+  } catch (err) {
+    await app.close().catch(() => {});
+    throw new ManifestDigestRepinBootError(err);
+  }
 
   // ADR-0063 — the restore gate. Before this line a deployment restored onto a
   // box without its key came up healthy and failed every decryption silently.
@@ -285,6 +302,19 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   log(`  data key:  ${describeDataKey(dataKey)}`);
   if (dataKey.code === "recorded" || dataKey.code === "rotation_accepted") {
     log(`             ${dataKey.message}`);
+  }
+  if (digestRepin.status === "repinned" && digestRepin.repinned.length + digestRepin.unverified.length > 0) {
+    log(
+      `  mcp:       manifest digests re-pinned to SHA-256 (ADR-0176): ${digestRepin.repinned.length} server(s); ` +
+        `${digestRepin.unverified.length} could not be proven from the stored manifest and will be re-adjudicated on next sync`,
+    );
+    if (digestRepin.clearedRepinned.length > 0) {
+      log(
+        `             ${digestRepin.clearedRepinned.length} CLEARED server(s) kept their clearance — re-review them ` +
+          `(audit rule 'mcp-manifest-digest-repinned'): ${digestRepin.clearedRepinned.map((s) => s.name).join(", ")}`,
+      );
+    }
+    log("             upgrade note: stop every older gateway replica before the first upgraded one boots (migration 0145)");
   }
   if (otlpBackfill === "enveloped") {
     log("             OTLP collector headers found in the clear were enveloped under this key (ADR-0167)");

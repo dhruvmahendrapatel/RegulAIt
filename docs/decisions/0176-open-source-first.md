@@ -151,3 +151,35 @@ carries no conditions. We already ship CC0 logos (ADR-0172).
 **Decision (owner: "yes, allow public-domain licences too"):** the allowed licences are MIT, Apache-2.0, BSD and ISC, plus
 public-domain dedications: the Unlicense, CC0-1.0 and 0BSD. Every other admission rule is unchanged: maintained, pinned,
 works air-gapped, and recorded in `THIRD_PARTY.md`. CLAUDE.md's universal build rule is updated to match.
+
+## Amendment — the security items are done (2026-10-05)
+
+Audit items 1–3 and 11 are built (migration 0145). An independent verification review found one high issue, two medium
+issues and four low issues; all are fixed, each with a test that fails without its fix.
+
+- **MCP manifest digest: FNV-1a 64 → SHA-256** (Node's crypto).
+  - A real FNV collision pair is now a test.
+  - **The re-pin:** existing pins are re-pinned once at boot, before the gateway listens, under an advisory lock.
+    - It applies only where the stored tools reproduce the stored FNV digest. Anything unproven fails closed: it is
+      re-held on its next sync.
+    - Each row is a compare-and-set, so a concurrent writer is never overwritten.
+    - If the re-pin fails, the gateway refuses to start rather than losing clearances.
+    - Every re-pinned cleared server gets an audit row asking for re-review, because a collision exploited before the
+      upgrade can't be detected.
+  - **Upgrade note:** stop every older replica before the first upgraded one boots.
+  - The review found that a `__proto__` key was invisible to the canonical JSON behind the digest (and behind two other
+    helpers and a web checkpoint digest). Canonical objects now have a null prototype.
+- **Secret patterns:** six current provider formats, derived from the gitleaks default rules (MIT, pinned to commit
+  09242ce9c8a60d9b051fc2d166f9e849b88c7ac0). Stripe placeholders and its two published docs example keys are excluded.
+  The JWT rule had a quadratic ReDoS on the audit write path and is now linear. Its accepted cost: a JWT directly after
+  a `-` is not matched.
+- **IP classification:** this replaces the "own ADR" planned above. We swapped to Node's built-in `net.BlockList` /
+  `SocketAddress` rather than a library, because it parses addresses exactly as the socket does. `ipaddr.js` was
+  rejected: it reads `::a.b.c.d` as IPv4-mapped and accepts octal and short IPv4 forms.
+  - IPv4-compatible, 6to4 and IPv4-translated addresses are now classified by the IPv4 address they carry.
+  - `64:ff9b:1::/48`, `fec0::/10` and `100::/64` are refused outright.
+  - **Parity:** the only behaviour change is allowed→blocked inside those ranges (differential fuzz over 400k addresses).
+    The `net-policy` allow-list is unchanged over 18.1M pairs.
+  - Not covered: Teredo (`2001::/32`).
+- **Constant-time compare:** one helper on `crypto.timingSafeEqual` (both sides hashed first) replaces five hand-written
+  copies. An inventory test keeps it that way.

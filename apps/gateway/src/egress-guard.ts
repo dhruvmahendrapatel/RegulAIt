@@ -32,7 +32,7 @@
  * suite in `egress-guard.test.ts` runs with no database and no network.
  */
 
-import { isIP } from "node:net";
+import { BlockList, isIP, SocketAddress } from "node:net";
 import { lookup as dnsLookup } from "node:dns/promises";
 import { pinnedFetch } from "./pinned-fetch.js";
 import { timeouts } from "./timeouts.js";
@@ -162,31 +162,30 @@ export function hasBlockedHostSuffix(host: string): boolean {
 // ---------------------------------------------------------------------------
 // address classification
 // ---------------------------------------------------------------------------
+//
+// ADR-0176 security fix 3. Addresses are no longer parsed here: every check
+// is Node's own `net.BlockList` (standard library), which reads an address
+// with the same `inet_pton` the socket connects with, so the classifier and
+// the connection can never disagree about which address a string names (the
+// classic SSRF parser differential). What stays ours is the POLICY: the range
+// lists below, how an IPv4 address embedded in IPv6 is treated, and the
+// labels. The previous hand-written IPv6 parser also missed five special
+// ranges, all now classified:
+//   - IPv4-compatible `::a.b.c.d` (deprecated, RFC 4291) — embedded v4 classified;
+//   - 6to4 `2002::/16` (RFC 3056) — embedded v4 classified;
+//   - IPv4-translated `::ffff:0:a.b.c.d` (RFC 6145) — embedded v4 classified;
+//   - local-use NAT64 `64:ff9b:1::/48` (RFC 8215) — the v4's position depends
+//     on a locally chosen prefix length, so the whole /48 is refused;
+//   - site-local `fec0::/10` (deprecated, RFC 3879) and discard-only
+//     `100::/64` (RFC 6666) — refused.
+// The well-known NAT64 prefix `64:ff9b::/96` (RFC 6052) and IPv4-mapped
+// `::ffff:0:0/96` keep their embedded-v4 handling.
 
-function ipv4ToInt(ip: string): number | null {
-  const parts = ip.split(".");
-  if (parts.length !== 4) return null;
-  let n = 0;
-  for (const p of parts) {
-    if (!/^\d{1,3}$/.test(p)) return null;
-    const v = Number(p);
-    if (v > 255) return null;
-    n = n * 256 + v;
-  }
-  return n >>> 0;
-}
-
-interface Cidr4 {
-  base: number;
+interface V4Range {
+  /** dotted-quad network, our own constant */
+  net: string;
   bits: number;
   label: string;
-}
-
-function cidr4(cidr: string, label: string): Cidr4 {
-  const [addr, bitsRaw] = cidr.split("/");
-  const base = ipv4ToInt(addr ?? "");
-  if (base === null) throw new Error(`bad CIDR ${cidr}`);
-  return { base, bits: Number(bitsRaw), label };
 }
 
 /**
@@ -202,100 +201,130 @@ function cidr4(cidr: string, label: string): Cidr4 {
  *     (IMDS/link-local above all). On the private-LAN-aware path these are
  *     refused unconditionally — no flag or allow entry opens them.
  */
-const PRIVATE_LAN_V4: Cidr4[] = [
-  cidr4("10.0.0.0/8", "RFC1918 private"),
-  cidr4("127.0.0.0/8", "loopback"),
-  cidr4("172.16.0.0/12", "RFC1918 private"),
-  cidr4("192.168.0.0/16", "RFC1918 private"),
+const PRIVATE_LAN_V4: readonly V4Range[] = [
+  { net: "10.0.0.0", bits: 8, label: "RFC1918 private" },
+  { net: "127.0.0.0", bits: 8, label: "loopback" },
+  { net: "172.16.0.0", bits: 12, label: "RFC1918 private" },
+  { net: "192.168.0.0", bits: 16, label: "RFC1918 private" },
 ];
 
-const NEVER_V4: Cidr4[] = [
-  cidr4("0.0.0.0/8", "unspecified / this-network"),
-  cidr4("100.64.0.0/10", "CGNAT (RFC6598)"),
-  cidr4("169.254.0.0/16", "link-local — cloud instance metadata (IMDS)"),
-  cidr4("192.0.0.0/24", "IETF protocol assignments"),
-  cidr4("198.18.0.0/15", "benchmarking (RFC2544)"),
-  cidr4("224.0.0.0/4", "multicast"),
-  cidr4("240.0.0.0/4", "reserved / broadcast"),
+const NEVER_V4: readonly V4Range[] = [
+  { net: "0.0.0.0", bits: 8, label: "unspecified / this-network" },
+  { net: "100.64.0.0", bits: 10, label: "CGNAT (RFC6598)" },
+  { net: "169.254.0.0", bits: 16, label: "link-local — cloud instance metadata (IMDS)" },
+  { net: "192.0.0.0", bits: 24, label: "IETF protocol assignments" },
+  { net: "198.18.0.0", bits: 15, label: "benchmarking (RFC2544)" },
+  { net: "224.0.0.0", bits: 4, label: "multicast" },
+  { net: "240.0.0.0", bits: 4, label: "reserved / broadcast" },
 ];
 
-const BLOCKED_V4: Cidr4[] = [...PRIVATE_LAN_V4, ...NEVER_V4];
+/**
+ * The IPv6 forms that CARRY an IPv4 address, and where. Each turns a v4 range
+ * `a.b.c.d/n` into the v6 range holding exactly those embedded addresses, so
+ * one BlockList per policy range answers for every form. IPv4-mapped is not
+ * listed: `BlockList` already matches `::ffff:a.b.c.d` against v4 rules.
+ */
+const V4_EMBEDDINGS: ReadonlyArray<{ network: string; bits: number; label: string; at: (hi: string, lo: string) => string; offset: number }> = [
+  { network: "::ffff:0:0:0", bits: 96, label: "IPv4-translated (::ffff:0:0:0/96)", at: (hi, lo) => `::ffff:0:${hi}:${lo}`, offset: 96 },
+  { network: "::", bits: 96, label: "IPv4-compatible (::/96)", at: (hi, lo) => `::${hi}:${lo}`, offset: 96 },
+  { network: "64:ff9b::", bits: 96, label: "NAT64-embedded (64:ff9b::/96)", at: (hi, lo) => `64:ff9b::${hi}:${lo}`, offset: 96 },
+  { network: "2002::", bits: 16, label: "6to4-embedded (2002::/16)", at: (hi, lo) => `2002:${hi}:${lo}::`, offset: 16 },
+];
 
-function matchV4(n: number, list: Cidr4[]): string | null {
-  for (const c of list) {
-    const mask = c.bits === 0 ? 0 : (0xffffffff << (32 - c.bits)) >>> 0;
-    if ((n & mask) >>> 0 === (c.base & mask) >>> 0) return c.label;
-  }
-  return null;
+/** a dotted quad of OUR OWN constants as two hex groups (never user input) */
+function v4HexGroups(dotted: string): [string, string] {
+  if (isIP(dotted) !== 4) throw new Error(`bad policy constant ${dotted}`);
+  const [a, b, c, d] = dotted.split(".").map(Number) as [number, number, number, number];
+  return [((a << 8) | b).toString(16), ((c << 8) | d).toString(16)];
 }
 
-function classifyV4(ip: string): string | null {
-  const n = ipv4ToInt(ip);
-  if (n === null) return "unparseable IPv4 address";
-  return matchV4(n, BLOCKED_V4);
+type RangeClass = "never" | "privateLan";
+
+interface RangeRule {
+  list: BlockList;
+  label: string;
+  cls: RangeClass;
+  /** true when the rule is an IPv4 range (its v6 matches are embeddings) */
+  v4: boolean;
 }
 
-/** expand an IPv6 literal to its 8 groups of 16 bits */
-function ipv6Groups(ip: string): number[] | null {
-  let s = ip.toLowerCase();
-  if (s.startsWith("[") && s.endsWith("]")) s = s.slice(1, -1);
-  const zone = s.indexOf("%");
-  if (zone >= 0) s = s.slice(0, zone);
-  // an embedded IPv4 tail (::ffff:1.2.3.4) becomes two hex groups
-  const v4m = s.match(/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
-  if (v4m) {
-    const n = ipv4ToInt(v4m[1]!);
-    if (n === null) return null;
-    s = s.slice(0, s.length - v4m[1]!.length) + `${(n >>> 16).toString(16)}:${(n & 0xffff).toString(16)}`;
-  }
-  const halves = s.split("::");
-  if (halves.length > 2) return null;
-  const head = halves[0] ? halves[0].split(":").filter((x) => x !== "") : [];
-  const tail = halves.length === 2 && halves[1] ? halves[1].split(":").filter((x) => x !== "") : [];
-  const fill = 8 - head.length - tail.length;
-  if (halves.length === 1) {
-    if (head.length !== 8) return null;
-  } else if (fill < 0) {
-    return null;
-  }
-  const groups = [
-    ...head,
-    ...(halves.length === 2 ? Array(fill).fill("0") : []),
-    ...tail,
-  ].map((g) => parseInt(g, 16));
-  if (groups.length !== 8 || groups.some((g) => Number.isNaN(g) || g < 0 || g > 0xffff)) return null;
-  return groups;
+function v4Rule(r: V4Range, cls: RangeClass): RangeRule {
+  const list = new BlockList();
+  list.addSubnet(r.net, r.bits, "ipv4");
+  const [hi, lo] = v4HexGroups(r.net);
+  for (const e of V4_EMBEDDINGS) list.addSubnet(e.at(hi, lo), e.offset + r.bits, "ipv6");
+  return { list, label: r.label, cls, v4: true };
 }
 
-function classifyV6(ip: string): string | null {
-  const g = ipv6Groups(ip);
-  if (!g) return "unparseable IPv6 address";
-  const isZeroPrefix = (n: number) => g.slice(0, n).every((x) => x === 0);
-  // ::  and  ::1
-  if (isZeroPrefix(7) && g[7] === 0) return "IPv6 unspecified (::)";
-  if (isZeroPrefix(7) && g[7] === 1) return "IPv6 loopback (::1)";
-  // ::ffff:0:0/96 — IPv4-MAPPED. The classic `[::ffff:169.254.169.254]` bypass:
-  // unwrap to the embedded v4 address and apply the v4 rules to it.
-  if (isZeroPrefix(5) && g[5] === 0xffff) {
-    const v4 = `${g[6]! >>> 8}.${g[6]! & 0xff}.${g[7]! >>> 8}.${g[7]! & 0xff}`;
-    const why = classifyV4(v4);
-    return why ? `IPv4-mapped ${v4}: ${why}` : null;
-  }
-  // 64:ff9b::/96 — NAT64, same unwrap
-  if (g[0] === 0x64 && g[1] === 0xff9b && isZeroPrefixFrom(g, 2, 6)) {
-    const v4 = `${g[6]! >>> 8}.${g[6]! & 0xff}.${g[7]! >>> 8}.${g[7]! & 0xff}`;
-    const why = classifyV4(v4);
-    return why ? `NAT64-embedded ${v4}: ${why}` : null;
-  }
-  if ((g[0]! & 0xffc0) === 0xfe80) return "IPv6 link-local (fe80::/10)";
-  if ((g[0]! & 0xfe00) === 0xfc00) return "IPv6 unique-local (fc00::/7)";
-  if ((g[0]! & 0xff00) === 0xff00) return "IPv6 multicast (ff00::/8)";
-  return null;
+function v6Rule(network: string, bits: number, label: string, cls: RangeClass): RangeRule {
+  const list = new BlockList();
+  list.addSubnet(network, bits, "ipv6");
+  return { list, label, cls, v4: false };
 }
 
-function isZeroPrefixFrom(g: number[], from: number, to: number): boolean {
-  for (let i = from; i < to; i++) if (g[i] !== 0) return false;
-  return true;
+/** ORDERED: the first rule that contains the address decides it. */
+const RANGE_RULES: readonly RangeRule[] = [
+  // before the v4-derived rules: ::/96 (IPv4-compatible) contains both
+  v6Rule("::", 128, "IPv6 unspecified (::)", "never"),
+  // ::1 is loopback — the v6 twin of 127.0.0.1, i.e. ordinary private LAN
+  v6Rule("::1", 128, "IPv6 loopback (::1)", "privateLan"),
+  ...NEVER_V4.map((r) => v4Rule(r, "never")),
+  ...PRIVATE_LAN_V4.map((r) => v4Rule(r, "privateLan")),
+  v6Rule("64:ff9b:1::", 48, "IPv6 local-use NAT64 (64:ff9b:1::/48, RFC 8215)", "never"),
+  // ULA is legitimate internal v6 LAN space — EXCEPT AWS's reserved
+  // fd00:ec2::/32, where the IPv6 instance-metadata endpoint (fd00:ec2::254)
+  // lives. The IMDS carve-out must hold in v6 too; tested before fc00::/7.
+  v6Rule("fd00:ec2::", 32, "IPv6 unique-local fd00:ec2::/32 — AWS instance metadata (IMDS)", "never"),
+  // fe80::/10 link-local is the v6 twin of 169.254/16 — never openable
+  v6Rule("fe80::", 10, "IPv6 link-local (fe80::/10)", "never"),
+  v6Rule("fec0::", 10, "IPv6 site-local (fec0::/10, deprecated)", "never"),
+  v6Rule("fc00::", 7, "IPv6 unique-local (fc00::/7)", "privateLan"),
+  v6Rule("ff00::", 8, "IPv6 multicast (ff00::/8)", "never"),
+  v6Rule("100::", 64, "IPv6 discard-only (100::/64)", "never"),
+];
+
+/** which IPv6 form carried a v4-range match, for the reason text */
+const EMBEDDING_FAMILIES: ReadonlyArray<{ list: BlockList; label: string }> = [
+  (() => {
+    const list = new BlockList();
+    list.addSubnet("::ffff:0:0", 96, "ipv6");
+    return { list, label: "IPv4-mapped (::ffff:0:0/96)" };
+  })(),
+  ...V4_EMBEDDINGS.map((e) => {
+    const list = new BlockList();
+    list.addSubnet(e.network, e.bits, "ipv6");
+    return { list, label: e.label };
+  }),
+];
+
+interface AddressVerdict {
+  /** null = in no listed range */
+  label: string | null;
+  cls: RangeClass | null;
+}
+
+/**
+ * The one classification both paths share. Fail-closed: anything that is not
+ * an IP literal Node itself accepts is reported as such, never as "fine".
+ */
+function classify(ip: string): AddressVerdict | { unparseable: string } {
+  const fam = isIP(ip);
+  if (fam !== 4 && fam !== 6) return { unparseable: `unrecognised address form '${ip}'` };
+  let addr: SocketAddress;
+  try {
+    addr = new SocketAddress({ address: ip, family: fam === 4 ? "ipv4" : "ipv6" });
+  } catch {
+    return { unparseable: `unparseable IPv${fam} address` };
+  }
+  for (const rule of RANGE_RULES) {
+    if (!rule.list.check(addr)) continue;
+    if (fam === 6 && rule.v4) {
+      const family = EMBEDDING_FAMILIES.find((f) => f.list.check(addr))?.label ?? "IPv4-embedding IPv6";
+      return { label: `${family} ${ip}: ${rule.label}`, cls: rule.cls };
+    }
+    return { label: rule.label, cls: rule.cls };
+  }
+  return { label: null, cls: null };
 }
 
 /**
@@ -304,12 +333,11 @@ function isZeroPrefixFrom(g: number[], from: number, to: number): boolean {
  * adversarial suite hammers directly.
  */
 export function classifyAddress(ip: string): string | null {
-  const fam = isIP(ip);
-  if (fam === 4) return classifyV4(ip);
-  if (fam === 6) return classifyV6(ip);
+  const v = classify(ip);
   // Not a literal at all — a resolver handed us something we cannot reason
   // about. Fail CLOSED: an unclassifiable address is a blocked address.
-  return `unrecognised address form '${ip}'`;
+  if ("unparseable" in v) return v.unparseable;
+  return v.label;
 }
 
 // ---------------------------------------------------------------------------
@@ -328,56 +356,16 @@ export interface LanAddressClass {
   privateLan: boolean;
 }
 
-function classifyV4Lan(ip: string): LanAddressClass {
-  const n = ipv4ToInt(ip);
-  if (n === null) return { never: "unparseable IPv4 address", privateLan: false };
-  const never = matchV4(n, NEVER_V4);
-  if (never) return { never, privateLan: false };
-  return { never: null, privateLan: matchV4(n, PRIVATE_LAN_V4) !== null };
-}
-
-function classifyV6Lan(ip: string): LanAddressClass {
-  const g = ipv6Groups(ip);
-  if (!g) return { never: "unparseable IPv6 address", privateLan: false };
-  const isZeroPrefix = (n: number) => g.slice(0, n).every((x) => x === 0);
-  if (isZeroPrefix(7) && g[7] === 0) return { never: "IPv6 unspecified (::)", privateLan: false };
-  // ::1 is loopback — the v6 twin of 127.0.0.1, i.e. ordinary private LAN
-  if (isZeroPrefix(7) && g[7] === 1) return { never: null, privateLan: true };
-  // IPv4-mapped and NAT64: unwrap and apply the v4 split (the
-  // `[::ffff:169.254.169.254]` bypass must stay closed here too)
-  const embedsV4 =
-    (isZeroPrefix(5) && g[5] === 0xffff) ||
-    (g[0] === 0x64 && g[1] === 0xff9b && isZeroPrefixFrom(g, 2, 6));
-  if (embedsV4) {
-    const v4 = `${g[6]! >>> 8}.${g[6]! & 0xff}.${g[7]! >>> 8}.${g[7]! & 0xff}`;
-    const inner = classifyV4Lan(v4);
-    return inner.never
-      ? { never: `embedded IPv4 ${v4}: ${inner.never}`, privateLan: false }
-      : { never: null, privateLan: inner.privateLan };
-  }
-  // fe80::/10 link-local is the v6 twin of 169.254/16 — never openable
-  if ((g[0]! & 0xffc0) === 0xfe80) return { never: "IPv6 link-local (fe80::/10)", privateLan: false };
-  if ((g[0]! & 0xfe00) === 0xfc00) {
-    // ULA is legitimate internal v6 LAN space — EXCEPT AWS's reserved
-    // fd00:ec2::/32, where the IPv6 instance-metadata endpoint
-    // (fd00:ec2::254) lives. The IMDS carve-out must hold in v6 too.
-    if (g[0] === 0xfd00 && g[1] === 0x0ec2) {
-      return { never: "IPv6 unique-local fd00:ec2::/32 — AWS instance metadata (IMDS)", privateLan: false };
-    }
-    return { never: null, privateLan: true };
-  }
-  if ((g[0]! & 0xff00) === 0xff00) return { never: "IPv6 multicast (ff00::/8)", privateLan: false };
-  return { never: null, privateLan: false };
-}
-
 /** ADR-0043: the fine-grained single-address decision the private-LAN-aware
  * path uses. Fail-closed exactly like classifyAddress: an address that cannot
- * be classified is never-openable. */
+ * be classified is never-openable. An IPv4 address embedded in IPv6 (mapped,
+ * compatible, translated, NAT64, 6to4) takes its v4 range's split, so the
+ * `[::ffff:169.254.169.254]` bypass stays closed here too. */
 export function classifyAddressLan(ip: string): LanAddressClass {
-  const fam = isIP(ip);
-  if (fam === 4) return classifyV4Lan(ip);
-  if (fam === 6) return classifyV6Lan(ip);
-  return { never: `unrecognised address form '${ip}'`, privateLan: false };
+  const v = classify(ip);
+  if ("unparseable" in v) return { never: v.unparseable, privateLan: false };
+  if (v.cls === "never") return { never: v.label, privateLan: false };
+  return { never: null, privateLan: v.cls === "privateLan" };
 }
 
 // ---------------------------------------------------------------------------

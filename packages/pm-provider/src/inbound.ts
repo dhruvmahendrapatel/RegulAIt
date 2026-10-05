@@ -23,9 +23,9 @@
  * traffic gets auto-disabled by the sender.
  */
 
-import { createHash, createHmac, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { z } from "zod";
-import { pmWebhookSchema } from "@regulait/shared";
+import { constantTimeEqual, pmWebhookSchema } from "@regulait/shared";
 import { PmProviderError, type PmProviderKind } from "./index.js";
 
 /** ADR-0010's normalized inbound event — reused, never re-invented. */
@@ -61,14 +61,10 @@ export type InboundWebhookResult =
 // Verification helpers
 // ---------------------------------------------------------------------------
 
-/** Constant-time string equality. Comparing sha256 digests (fixed length)
- * keeps timingSafeEqual applicable to inputs of differing lengths without
- * leaking the length mismatch through an early return. */
-export function constantTimeEqual(a: string, b: string): boolean {
-  const da = createHash("sha256").update(a).digest();
-  const db = createHash("sha256").update(b).digest();
-  return timingSafeEqual(da, db);
-}
+/** Constant-time string equality: the ONE shared helper (ADR-0176), which
+ * hashes both sides first so inputs of different lengths compare without a
+ * throw or a length leak. Re-exported so this package's API is unchanged. */
+export { constantTimeEqual };
 
 const hmacHex = (secret: string, rawBody: string): string =>
   createHmac("sha256", secret).update(rawBody).digest("hex");

@@ -323,7 +323,7 @@ describe("the local backend really trains and the artifact really answers", () =
     expect(res.json().dataset.rowCount).toBe(SUPPORT_ROWS.length);
     expect(res.json().scan.verdict).toBe("clean");
     // the checksum is a real content digest, not a placeholder
-    expect(res.json().dataset.checksum).toMatch(/^fnv1a32:[0-9a-f]{8}:6$/);
+    expect(res.json().dataset.checksum).toMatch(/^sha256:[0-9a-f]{64}:6$/);
   });
 
   it("runs a retrieval-index job to completion, with MEASURED metrics", async () => {
@@ -1178,7 +1178,7 @@ describe("registering an artifact makes it a governed, dispatchable model", () =
     expect(claims["datasetName"]).toBe("llm-served");
     expect(claims["datasetVersion"]).toBe(1);
     expect(claims["ingestScanVerdict"]).toBe("clean");
-    expect(String(claims["checksum"])).toMatch(/^fnv1a32:/);
+    expect(String(claims["checksum"])).toMatch(/^sha256:[0-9a-f]{64}:/);
   });
 
   it("refuses to register the same artifact twice", async () => {

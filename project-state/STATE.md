@@ -21,6 +21,20 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-10-05 - Open-source security items done (ADR-0176 amendment; migration 0145).**
+- **MCP manifest digest** moved from FNV-1a 64 to SHA-256, with a one-time boot re-pin:
+  - it applies only where the stored FNV digest is proven;
+  - each row is a compare-and-set;
+  - a failed re-pin stops the gateway from starting;
+  - re-pinned cleared servers are listed for re-review.
+- **`__proto__` canonicalization gap** closed in four helpers.
+- **Secret rules:** six current provider formats (from gitleaks, MIT, pinned), plus a linear-time JWT rule.
+- **Egress IP classification** uses `net.BlockList`, covering the IPv4-compatible, 6to4, translated and other special IPv6
+  ranges.
+- **Constant-time compare:** one helper.
+
+An independent review found 1 high, 2 medium and 4 low issues; all are fixed with red proofs.
+
 **2026-10-05 - ADR-0173 batch 2b built and reviewed (migrations 0143, 0144).**
 - **Shipped:** a governed prompt registry (prod promotion through the approvals queue, with separation of duties over the
   whole commit range), outbound webhooks (Standard Webhooks signing), a playground under its own model-policy feature, a

@@ -4,6 +4,7 @@ import { createDb } from "@regulait/db";
 import { installShutdownHandlers, startGateway } from "./boot.js";
 import { DataKeyBootError } from "./data-key.js";
 import { DevSecretsBootError } from "./dev-secrets.js";
+import { ManifestDigestRepinBootError } from "./manifest-digest-repin.js";
 
 const connectionString =
   process.env.DATABASE_URL ?? "postgres://regulait:regulait@localhost:5432/regulait";
@@ -38,7 +39,7 @@ try {
   // rejection or exception leaves a trace and a clean pool before exit 1.
   installShutdownHandlers(started, db);
 } catch (err) {
-  if (err instanceof DataKeyBootError || err instanceof DevSecretsBootError) {
+  if (err instanceof DataKeyBootError || err instanceof DevSecretsBootError || err instanceof ManifestDigestRepinBootError) {
     // Not a stack trace. This is the message an operator reads at 3am in the
     // middle of a restore, and it is the only signal that arrives while the
     // correct key may still be recoverable from the source box. (ADR-0167: the

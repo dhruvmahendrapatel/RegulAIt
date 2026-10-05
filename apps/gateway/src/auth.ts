@@ -2,7 +2,6 @@ import {
   createHmac,
   randomBytes,
   scryptSync,
-  timingSafeEqual,
 } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import {
@@ -46,6 +45,7 @@ import {
   totpActivateSchema,
   totpDisableSchema,
   updateOidcProviderSchema,
+  constantTimeEqual,
 } from "@regulait/shared";
 import { z } from "zod";
 import * as oidc from "openid-client";
@@ -162,11 +162,6 @@ export function generateToken(): { token: string; tokenHash: string } {
   return { token, tokenHash: hashToken(token) };
 }
 
-function safeEqual(a: string, b: string): boolean {
-  const ab = Buffer.from(a);
-  const bb = Buffer.from(b);
-  return ab.length === bb.length && timingSafeEqual(ab, bb);
-}
 
 /**
  * Resolve a Bearer token to an auth context. The bootstrap token (deploy-time
@@ -185,7 +180,7 @@ export async function authenticate(
   const token = authorizationHeader.slice("Bearer ".length).trim();
   if (token.length === 0) return null;
 
-  if (bootstrapToken && safeEqual(token, bootstrapToken)) {
+  if (bootstrapToken && constantTimeEqual(token, bootstrapToken)) {
     return { userId: null, isAdmin: true, via: "bootstrap" };
   }
 
@@ -358,7 +353,7 @@ export function verifyPassword(password: string, stored: string | null | undefin
     p,
     maxmem: 128 * N * r * 2,
   });
-  return actual.length === expected.length && timingSafeEqual(actual, expected);
+  return constantTimeEqual(actual, expected);
 }
 
 /** org-policy check; returns a human reason or null when the password passes */
@@ -499,7 +494,7 @@ export function ssoBrowserBinding(dataKeyHex: string | undefined, state: string)
 }
 
 export function ssoBindingMatches(presented: string | null, expected: string): boolean {
-  return presented !== null && safeEqual(presented, expected);
+  return presented !== null && constantTimeEqual(presented, expected);
 }
 
 export function ssoBindingCookie(
@@ -784,7 +779,7 @@ export function verifyTotp(
   const now = totpStep(atMs);
   for (const step of [now, now - 1, now + 1]) {
     if (lastUsedStep !== null && step <= lastUsedStep) continue;
-    if (safeEqual(totpCode(secretBase32, step), code)) return step;
+    if (constantTimeEqual(totpCode(secretBase32, step), code)) return step;
   }
   return null;
 }

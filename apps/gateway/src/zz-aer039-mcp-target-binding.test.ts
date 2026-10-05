@@ -383,7 +383,7 @@ describe("AER-039 — a consent names its MCP target", () => {
     try {
       await resyncManifest(serverId);
       const admitted = await manifestDigestOf(serverId);
-      expect(admitted).toMatch(/^[0-9a-f]{16}$/);
+      expect(admitted).toMatch(/^[0-9a-f]{64}$/);
       const signed = await queueAndApprove(serverId, text);
       expect((await reviewRow(signed)).boundTarget).toMatchObject({ admissionManifestDigest: admitted });
 
@@ -397,7 +397,7 @@ describe("AER-039 — a consent names its MCP target", () => {
       driftA = true;
       await resyncManifest(serverId);
       const drifted = await manifestDigestOf(serverId);
-      expect(drifted).toMatch(/^[0-9a-f]{16}$/);
+      expect(drifted).toMatch(/^[0-9a-f]{64}$/);
       expect(drifted).not.toBe(admitted);
 
       await expectRefusedWithoutContact(serverId, signed, text);

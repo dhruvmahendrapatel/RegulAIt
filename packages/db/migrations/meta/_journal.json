@@ -1009,6 +1009,13 @@
       "when": 1785079000000,
       "tag": "0144_connector_approvals_chat_bots",
       "breakpoints": true
+    },
+    {
+      "idx": 145,
+      "version": "7",
+      "when": 1785080000000,
+      "tag": "0145_manifest_digest_sha256",
+      "breakpoints": true
     }
   ]
 }

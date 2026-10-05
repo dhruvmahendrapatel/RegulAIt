@@ -713,7 +713,9 @@ function canonical(v: unknown): unknown {
   if (Array.isArray(v)) return v.map(canonical);
   if (v && typeof v === "object") {
     const o = v as Record<string, unknown>;
-    const out: Record<string, unknown> = {};
+    // null prototype: a `__proto__` key must stay an ordinary key, not be
+    // swallowed as the copy's prototype (and so ignored by the comparison)
+    const out = Object.create(null) as Record<string, unknown>;
     for (const k of Object.keys(o).sort()) out[k] = canonical(o[k]);
     return out;
   }

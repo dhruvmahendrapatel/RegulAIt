@@ -138,7 +138,7 @@
  * "nobody has ever said they have this key" stops being invisible.
  */
 
-import { timingSafeEqual } from "node:crypto";
+import { constantTimeEqual } from "@regulait/shared";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import {
@@ -210,12 +210,10 @@ export function fingerprintOrNull(dataKeyHex: string | undefined | null): string
 }
 
 /** constant-time compare of two fingerprints. They are not secret; this is
- * hygiene, not a requirement, and it also normalizes the length check. */
+ * hygiene, not a requirement (the shared helper is length-safe). */
 export function fingerprintsMatch(a: string | null, b: string | null): boolean {
   if (a === null || b === null) return false;
-  const ab = Buffer.from(a, "utf8");
-  const bb = Buffer.from(b, "utf8");
-  return ab.length === bb.length && timingSafeEqual(ab, bb);
+  return constantTimeEqual(a, b);
 }
 
 // ---------------------------------------------------------------------------
