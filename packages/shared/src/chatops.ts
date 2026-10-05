@@ -700,9 +700,44 @@ export type SlackEventParse =
 
 const nonEmpty = (v: unknown): string | null => (typeof v === "string" && v.length > 0 ? v : null);
 
-/** `<@U123>` mentions (the bot's, usually at the start) are addressing, not content */
+const isAsciiAlnum = (code: number): boolean =>
+  (code >= 48 && code <= 57) || (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
+
+/**
+ * `<@U123>` mentions (the bot's, usually at the start) are addressing, not content.
+ *
+ * Removes exactly what `/<@[A-Z0-9]+(\|[^>]*)?>/gi` matched (`<@ID>` or
+ * `<@ID|label>`), by an index scan instead: that regex is quadratic on inbound
+ * text such as `<@0|` repeated with no `>` (CodeQL js/polynomial-redos), and this
+ * text comes from anyone who can post in the channel. `chatops-redos.test.ts`
+ * checks the scan against the old regex.
+ */
 export function stripSlackMentions(text: string): string {
-  return text.replace(/<@[A-Z0-9]+(\|[^>]*)?>/gi, " ").replace(/\s+/g, " ").trim();
+  let out = "";
+  let copied = 0;
+  let from = 0;
+  for (;;) {
+    const open = text.indexOf("<@", from);
+    if (open < 0) break;
+    let k = open + 2;
+    while (k < text.length && isAsciiAlnum(text.charCodeAt(k))) k += 1;
+    let end = -1;
+    if (k > open + 2 && text[k] === ">") end = k + 1;
+    else if (k > open + 2 && text[k] === "|") {
+      const close = text.indexOf(">", k + 1);
+      // no `>` anywhere after here, so no later mention can close either
+      if (close < 0) break;
+      end = close + 1;
+    }
+    if (end < 0) {
+      // the ID run cannot contain `<@`, so the next candidate starts at or after k
+      from = k;
+      continue;
+    }
+    out += text.slice(copied, open) + " ";
+    copied = from = end;
+  }
+  return (out + text.slice(copied)).replace(/\s+/g, " ").trim();
 }
 
 /**
@@ -774,12 +809,58 @@ export function escapeSlackText(text: string): string {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-/** Teams sends HTML: drop the `<at>bot</at>` addressing and every tag */
+/** `html.replace(/<at>[\s\S]*?<\/at>/gi, " ")` without the quadratic rescan on
+ * `<at>` repeated: once no `</at>` follows, nothing later can match either. */
+function dropTeamsMentions(html: string): string {
+  const open = /<at>/gi;
+  const close = /<\/at>/gi;
+  let out = "";
+  let copied = 0;
+  for (;;) {
+    open.lastIndex = copied;
+    const o = open.exec(html);
+    if (!o) break;
+    close.lastIndex = o.index + o[0].length;
+    const c = close.exec(html);
+    if (!c) break;
+    out += html.slice(copied, o.index) + " ";
+    copied = c.index + c[0].length;
+  }
+  return out + html.slice(copied);
+}
+
+/** `text.replace(/<[^>]+>/g, " ")` without the quadratic rescan on `<` repeated:
+ * a tag runs from a `<` to the first `>` after it, and must not be empty. */
+function dropTags(text: string): string {
+  let out = "";
+  let copied = 0;
+  let from = 0;
+  for (;;) {
+    const open = text.indexOf("<", from);
+    if (open < 0) break;
+    const close = text.indexOf(">", open + 1);
+    if (close < 0) break;
+    if (close === open + 1) {
+      from = open + 1; // `<>` is not a tag
+      continue;
+    }
+    out += text.slice(copied, open) + " ";
+    copied = from = close + 1;
+  }
+  return out + text.slice(copied);
+}
+
+/**
+ * Teams sends HTML: drop the `<at>bot</at>` addressing and every tag.
+ *
+ * The text is attacker-controlled, and three of the original regexes
+ * (`<at>[\s\S]*?<\/at>`, `<[^>]+>`, `\s*\n\s*`) backtracked quadratically on an
+ * unclosed repeat (CodeQL js/polynomial-redos). Each is replaced by a scan with
+ * the same result; `chatops-redos.test.ts` checks them against the old
+ * implementation.
+ */
 export function teamsPlainText(html: string): string {
-  return html
-    .replace(/<at>[\s\S]*?<\/at>/gi, " ")
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<[^>]+>/g, " ")
+  return dropTags(dropTeamsMentions(html).replace(/<br\s*\/?>/gi, "\n"))
     .replace(/&nbsp;/g, " ")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
@@ -787,7 +868,9 @@ export function teamsPlainText(html: string): string {
     .replace(/&#39;/g, "'")
     .replace(/&amp;/g, "&")
     .replace(/[ \t]+/g, " ")
-    .replace(/\s*\n\s*/g, "\n")
+    // a whitespace run that contains a line break becomes that one break
+    // (what `/\s*\n\s*/g` did, without rescanning break-free runs)
+    .replace(/\s+/g, (run) => (run.includes("\n") ? "\n" : run))
     .trim();
 }
 

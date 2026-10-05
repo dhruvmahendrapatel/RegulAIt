@@ -20,6 +20,7 @@
 
 import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
+import { findSentinel, stripSentinels, trimTrailingPunctuation } from "./sentinels.js";
 
 export const MODEL_PROVIDER_KINDS = [
   "anthropic",
@@ -1556,7 +1557,7 @@ function mockTopic(input: string): string {
     "",
   );
   t = t.replace(/^(the|a|an|this|these|that|those|my|our)\s+/i, "");
-  t = t.replace(/[.?!,;:\s]+$/, "");
+  t = trimTrailingPunctuation(t);
   const words = t.split(" ").filter(Boolean).slice(0, 8).join(" ");
   const capped = words.length > 60 ? `${words.slice(0, 60)}…` : words;
   return capped || "the request";
@@ -1967,8 +1968,7 @@ const PLAN_STOPWORDS = new Set([
 /** two distinct topic words lifted from the goal so the parallel middle
  * tasks read as goal-specific, never boilerplate */
 function planKeywords(goal: string): [string, string] {
-  const words = goal
-    .replace(/<<[^>]*>>/g, " ")
+  const words = stripSentinels(goal)
     .toLowerCase()
     .replace(/[^a-z0-9\s-]/g, " ")
     .split(/\s+/)
@@ -2008,7 +2008,7 @@ function mockDecompositionReply(goal: string, system: string, tier: MockTier): s
   const cheap = roster[0]?.name ?? "unknown-agent";
   const mid = roster[Math.floor((roster.length - 1) / 2)]?.name ?? cheap;
   const [kw1, kw2] = planKeywords(goal);
-  const topic = mockTopic(goal.replace(/<<[^>]*>>/g, " ").trim());
+  const topic = mockTopic(stripSentinels(goal).trim());
   const slug1 = planSlug(kw1);
   let slug2 = planSlug(kw2);
   if (slug2 === slug1) slug2 = `${slug2}-2`;
@@ -2182,8 +2182,12 @@ function mockToolResults(turns: ModelChatMessage[]): string[] {
 /** ADR-0175 A4 test/demo affordance: `<<serve-as:NAME>>` anywhere in the
  * conversation makes the mock REPORT that it served NAME instead of the
  * requested model — a provider silently swapping the model behind an id,
- * reproducible without a network. Same sentinel discipline as `<<refuse>>`. */
-export const MOCK_SERVE_AS_SENTINEL = /<<serve-as:([^>\s]+)>>/;
+ * reproducible without a network. Same sentinel discipline as `<<refuse>>`.
+ * NAME is the run of non-space, non-`>` characters before `>>` (the old
+ * `/<<serve-as:([^>\s]+)>>/`, scanned in linear time — see `./sentinels.ts`). */
+export function mockServeAsSentinel(text: string): string | null {
+  return findSentinel(text, "<<serve-as:", (c) => c !== ">" && !/\s/.test(c));
+}
 
 export class MockModelProvider implements ModelProvider {
   readonly kind = "mock" as const;
@@ -2195,8 +2199,8 @@ export class MockModelProvider implements ModelProvider {
    * a different one. */
   async dispatch(req: ModelDispatchRequest): Promise<ModelDispatchResult> {
     const result = await this.cannedDispatch(req);
-    const swap = MOCK_SERVE_AS_SENTINEL.exec(chatTurns(req).map((m) => mockBlockText(m.content)).join("\n"));
-    return { ...result, servedModel: swap ? swap[1]! : req.model };
+    const swap = mockServeAsSentinel(chatTurns(req).map((m) => mockBlockText(m.content)).join("\n"));
+    return { ...result, servedModel: swap ?? req.model };
   }
 
   private async cannedDispatch(req: ModelDispatchRequest): Promise<ModelDispatchResult> {
@@ -2233,8 +2237,9 @@ export class MockModelProvider implements ModelProvider {
     // verbatim, which is itself the correct behaviour):
     //   `<<upstream-error>>`            — every model fails (chain exhaustion)
     //   `<<upstream-error:some-model>>` — only that model id fails
-    const scopedFailure = /<<upstream-error:([^>]+)>>/.exec(lastUser);
-    if (scopedFailure ? scopedFailure[1]!.trim() === req.model : lastUser.includes("<<upstream-error>>")) {
+    // (the old `/<<upstream-error:([^>]+)>>/`, scanned in linear time — `./sentinels.ts`)
+    const scopedFailure = findSentinel(lastUser, "<<upstream-error:", (c) => c !== ">");
+    if (scopedFailure !== null ? scopedFailure.trim() === req.model : lastUser.includes("<<upstream-error>>")) {
       throw new ModelProviderError(`mock: simulated upstream failure for model '${req.model}'`, 503);
     }
 

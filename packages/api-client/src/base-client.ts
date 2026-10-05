@@ -87,7 +87,12 @@ export class BaseClient {
   constructor(options: RegulAItClientOptions) {
     if (!options.baseUrl) throw new Error("baseUrl is required");
     if (!options.apiKey) throw new Error("apiKey is required");
-    this.baseUrl = options.baseUrl.replace(/\/+$/, "");
+    // drop trailing slashes by a backwards scan, not `/\/+$/`: that regex
+    // rescans every slash run that is NOT at the end, O(n²) on a URL with many
+    // `/` (CodeQL js/polynomial-redos)
+    let end = options.baseUrl.length;
+    while (end > 0 && options.baseUrl.charCodeAt(end - 1) === 0x2f) end -= 1;
+    this.baseUrl = options.baseUrl.slice(0, end);
     this.apiKey = options.apiKey;
     const injected = options.fetch ?? globalThis.fetch;
     if (typeof injected !== "function") {
