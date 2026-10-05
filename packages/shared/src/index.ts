@@ -4107,3 +4107,16 @@ export {
   type WebhookEventName,
   type WebhookSubscriptionCreate,
 } from "./outbound-webhooks.js";
+// ADR-0173 batch 2c (F): the shared trace filter
+export {
+  TRACE_FILTER_KINDS,
+  TRACE_FILTER_STATUSES,
+  TRACE_SCORE_NAME_MAX_CHARS,
+  TRACE_TAG_KEY_PATTERN,
+  TRACE_TAG_LIMITS,
+  refineTraceFilter,
+  resolveTraceScope,
+  traceFilterBaseSchema,
+  traceFilterSchema,
+  type TraceFilter,
+} from "./trace-filters.js";

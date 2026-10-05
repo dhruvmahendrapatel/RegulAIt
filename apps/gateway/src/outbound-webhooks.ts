@@ -109,8 +109,22 @@ export function newWebhookSecret(): string {
 // emitting
 // ---------------------------------------------------------------------------
 
+export interface EnqueueWebhookOptions {
+  /**
+   * ADR-0173 batch 2c — deliver to THIS subscription only (an automation
+   * rule's "webhook" action names its target). Every other subscription is
+   * skipped, including ones that select the event. The target must still be
+   * ACTIVE (a deactivated or deleted target gets nothing, and `[]` comes back
+   * so the caller can record the action as failed); it does NOT need to list
+   * the event in its selectors, because the admin who wrote the rule chose it
+   * explicitly. Absent = the normal fan-out to every matching subscription.
+   */
+  onlySubscriptionId?: string | undefined;
+}
+
 /**
- * Write one delivery per active subscription that selects `event`. Runs on
+ * Write one delivery per active subscription that selects `event` (or, with
+ * `opts.onlySubscriptionId`, to that one active subscription only). Runs on
  * whatever handle it is given — inside the emitting transaction, so the event
  * commits or rolls back with what it reports. Returns the delivery ids; the
  * caller kicks them AFTER commit (`kickWebhookDeliveries`).
@@ -120,9 +134,20 @@ export async function enqueueWebhookEvent(
   event: WebhookEventName,
   data: Record<string, unknown>,
   now: Date = new Date(),
+  opts: EnqueueWebhookOptions = {},
 ): Promise<string[]> {
-  const subs = await db.select().from(webhookSubscriptions).where(eq(webhookSubscriptions.active, true));
-  const matching = subs.filter((s) => webhookSelectorMatches(s.events ?? [], event));
+  const only = opts.onlySubscriptionId;
+  // a malformed id names no subscription (and must not abort the caller's transaction)
+  if (only !== undefined && !z.string().uuid().safeParse(only).success) return [];
+  const subs = await db
+    .select()
+    .from(webhookSubscriptions)
+    .where(
+      only !== undefined
+        ? and(eq(webhookSubscriptions.active, true), eq(webhookSubscriptions.id, only))
+        : eq(webhookSubscriptions.active, true),
+    );
+  const matching = only !== undefined ? subs : subs.filter((s) => webhookSelectorMatches(s.events ?? [], event));
   if (!matching.length) return [];
   const payload = { ...webhookPayloadFor(event, data), occurredAt: now.toISOString() };
   const messageId = `msg_${crypto.randomUUID()}`;

@@ -27,11 +27,11 @@
 import http from "node:http";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Webhook } from "standardwebhooks";
-import { and, auditLog, eq, egressAllowHosts, webhookDeliveries, webhookSubscriptions } from "@regulait/db";
+import { and, auditLog, eq, egressAllowHosts, inArray, webhookDeliveries, webhookSubscriptions } from "@regulait/db";
 import { WEBHOOK_LIMITS } from "@regulait/shared";
 import { builderKit, type BuilderKit, type Person } from "./testing/builder-fixture.js";
 import { drainBackgroundWork } from "./background-work.js";
-import { attemptDelivery, runWebhookDeliverySweep } from "./outbound-webhooks.js";
+import { attemptDelivery, enqueueWebhookEvent, runWebhookDeliverySweep } from "./outbound-webhooks.js";
 import { decryptSecret } from "./secrets.js";
 
 let k: BuilderKit;
@@ -415,5 +415,41 @@ describe("the sweep's clock, leases and fairness", () => {
       .where(and(eq(auditLog.userId, admin.id), eq(auditLog.ruleId, "webhook-sweep-run")));
     expect(rows).toHaveLength(1);
     expect(rows[0]!.detail).toMatchObject({ due: r.json().due, delivered: r.json().delivered });
+  });
+});
+
+// ADR-0173 batch 2c (F): an automation rule's "webhook" action targets ONE subscription
+describe("enqueueWebhookEvent onlySubscriptionId", () => {
+  it("delivers to that one active subscription only, whatever the others select", async () => {
+    const a = await createSub("/only-a", ["automation.*"]);
+    const b = await createSub("/only-b", ["automation.matched"]);
+    // the target need not list the event: the rule's author chose it explicitly
+    const target = await createSub("/only-target", ["prompt.commit"]);
+    const ours = [a.id, b.id, target.id];
+    const data = { ruleId: "r1", ruleName: "n", matchId: "m1", traceId: "t1", actions: ["webhook"] };
+    const written: string[] = [];
+    try {
+      const only = await enqueueWebhookEvent(k.db, "automation.matched", data, new Date(), { onlySubscriptionId: target.id });
+      written.push(...only);
+      expect(only).toHaveLength(1);
+      const [row] = await k.db.select().from(webhookDeliveries).where(eq(webhookDeliveries.id, only[0]!));
+      expect(row!.subscriptionId).toBe(target.id);
+      expect(row!.event).toBe("automation.matched");
+
+      // control: without the option the same event fans out to a and b, not the target
+      const all = await enqueueWebhookEvent(k.db, "automation.matched", data);
+      written.push(...all);
+      const fanned = await k.db.select().from(webhookDeliveries).where(inArray(webhookDeliveries.id, all));
+      expect(fanned.map((d) => d.subscriptionId).filter((s) => ours.includes(s)).sort()).toEqual([a.id, b.id].sort());
+
+      // an inactive target, or an id that names nothing, gets nothing
+      await k.db.update(webhookSubscriptions).set({ active: false }).where(eq(webhookSubscriptions.id, target.id));
+      expect(await enqueueWebhookEvent(k.db, "automation.matched", data, new Date(), { onlySubscriptionId: target.id })).toEqual([]);
+      expect(await enqueueWebhookEvent(k.db, "automation.matched", data, new Date(), { onlySubscriptionId: "not-a-uuid" })).toEqual([]);
+    } finally {
+      // never left pending for a later sweep to send
+      if (written.length) await k.db.delete(webhookDeliveries).where(inArray(webhookDeliveries.id, written));
+      await k.db.update(webhookSubscriptions).set({ active: false }).where(inArray(webhookSubscriptions.id, ours));
+    }
   });
 });

@@ -8083,6 +8083,10 @@ export const traceSpans = pgTable(
     index("trace_spans_parent_idx").on(t.parentSpanId),
     index("trace_spans_usage_idx").on(t.usageEventId),
     index("trace_spans_run_idx").on(t.runId),
+    /** ADR-0173 batch 2c (migration 0146): the `agentId` and `model` trace
+     * filters are EXISTS over a trace's spans (traceFilterConditions). */
+    index("trace_spans_agent_started_idx").on(t.agentId, t.startedAt),
+    index("trace_spans_model_idx").on(t.model),
     /** ADR-0109 (migration 0108) — and note this table appears in BOTH of
      * ADR-0107's tables without contradiction, because the two sites have
      * different predicates. `closeRunSpan` reads `(trace_id, kind='run')` with
@@ -8681,6 +8685,8 @@ export const traceEvaluations = pgTable(
   (t) => [
     uniqueIndex("trace_evaluations_span_uq").on(t.spanId),
     index("trace_evaluations_agent_started_idx").on(t.agentId, t.spanStartedAt),
+    /** ADR-0173 batch 2c (migration 0146): the `flagged` trace filter */
+    index("trace_evaluations_trace_flagged_idx").on(t.traceId).where(sql`${t.flagged}`),
   ],
 );
 
@@ -9622,3 +9628,76 @@ export const energyFactors = pgTable(
 );
 
 export type EnergyFactorRow = typeof energyFactors.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0173 batch 2c — F (migration 0146): trace tags and trace scores.
+// ---------------------------------------------------------------------------
+
+/**
+ * Key=value labels on a trace, one value per (trace, key). Written only by the
+ * trace's owner or an admin (the tag routes enforce that); the key shape and
+ * the value length are also CHECKed here so no write path can bypass them.
+ * `regulait.*` keys are reserved for the system (an API rule, not a DB rule).
+ * Cascades from `traces`, so the §8.3 prune removes a trace's tags with it.
+ */
+export const traceTags = pgTable(
+  "trace_tags",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    traceId: uuid("trace_id")
+      .notNull()
+      .references(() => traces.id, { onDelete: "cascade" }),
+    key: text("key").notNull(),
+    value: text("value").notNull().default(""),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("trace_tags_trace_key_uq").on(t.traceId, t.key),
+    index("trace_tags_key_value_idx").on(t.key, t.value),
+    check("trace_tags_key_ck", sql`${t.key} ~ '^[a-z0-9_.-]{1,64}$'`),
+    check("trace_tags_value_ck", sql`char_length(${t.value}) <= 256`),
+  ],
+);
+export type TraceTagRow = typeof traceTags.$inferSelect;
+
+/** where a trace score came from; `source_ref_id` is the id of the row in that
+ * source (an annotation submission, an eval result, a judge verdict, a trace
+ * evaluation) */
+export const TRACE_SCORE_SOURCES = ["annotation", "evaluator", "judge", "trace_eval"] as const;
+export type TraceScoreSource = (typeof TRACE_SCORE_SOURCES)[number];
+
+/**
+ * One score per (source, source_ref_id, name), written ONLY through
+ * `recordTraceScore` (apps/gateway/src/trace-scores.ts), which is idempotent on
+ * that key: a replayed submission or a retried sweep never adds a second row
+ * and never changes the first. A numeric `value`, a categorical `label`, or
+ * both; never a comment or any other content (the OTel export reads this
+ * table for `gen_ai.evaluation.*`). Cascades from the trace and the span.
+ */
+export const traceScores = pgTable(
+  "trace_scores",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    traceId: uuid("trace_id")
+      .notNull()
+      .references(() => traces.id, { onDelete: "cascade" }),
+    /** null = a score on the whole trace */
+    spanId: uuid("span_id").references(() => traceSpans.id, { onDelete: "cascade" }),
+    source: text("source", { enum: TRACE_SCORE_SOURCES }).notNull(),
+    name: text("name").notNull(),
+    value: doublePrecision("value"),
+    label: text("label"),
+    sourceRefId: text("source_ref_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("trace_scores_source_ref_name_uq").on(t.source, t.sourceRefId, t.name),
+    index("trace_scores_trace_idx").on(t.traceId),
+    index("trace_scores_name_value_idx").on(t.name, t.value),
+    check("trace_scores_source_ck", sql`${t.source} IN ('annotation', 'evaluator', 'judge', 'trace_eval')`),
+    check("trace_scores_value_or_label_ck", sql`${t.value} IS NOT NULL OR ${t.label} IS NOT NULL`),
+  ],
+);
+export type TraceScoreRow = typeof traceScores.$inferSelect;
