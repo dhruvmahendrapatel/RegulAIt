@@ -367,6 +367,15 @@ async function applyRuleEditLocked<T>(
       changed: plan.changed,
       beforeBody: plan.before,
       afterBody: plan.body,
+      // ADR-0181: an UNVERSIONED rule is a plain row write with no before
+      // body, so the row's previous values of the written columns ride here —
+      // every relaxation is audited old -> new
+      ...(plan.kind === "row"
+        ? {
+            beforeRow: Object.fromEntries(Object.keys(plan.rowPatch).map((k) => [k, (row as Record<string, unknown>)[k] ?? null])),
+            afterRow: plan.rowPatch,
+          }
+        : {}),
       mintedVersion,
     },
     effect: "allow",
