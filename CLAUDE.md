@@ -92,6 +92,28 @@ direct, explicit sign-off in that session.** No `prod`/`production` account, tag
 gets created or used without that explicit go-ahead. This applies regardless of what any
 individual task seems to imply — always ask before crossing that line.
 
+## Universal build rule — open source first (owner, 2026-10-05; ADR-0176)
+
+**Before writing any new code, check whether a validated, actively maintained open-source solution already exists, and use
+it.** We do not spend time re-solving problems the ecosystem has already solved and hardened. This binds every session,
+every agent prompt and every review.
+
+1. **Search first.** Before implementing a capability, look for an existing library, standard or tool (npm, the standard
+   library, the frameworks we already use). Record what you found in the commit or ADR, including "none fits, because …".
+2. **Existing hand-written code is replaced.** Where we already wrote something an open-source module solves, replacing ours
+   with the validated module is the default, not an option. The replacement keeps or extends our tests.
+3. **"Validated" means all of these:**
+   - the licence is MIT, Apache-2.0, BSD or ISC (no GPL, AGPL, EPL, SSPL or BSL in shipped code);
+   - it is actively maintained (a release in about the last 12 months, responsive issues, no unpatched critical advisory);
+   - the exact version is pinned through the lockfile;
+   - it works air-gapped (no runtime downloads or CDNs);
+   - it is listed in the package's `THIRD_PARTY.md`.
+4. **We write our own code only for what is genuinely RegulAIt:** governance decisions, policy semantics, evidence and audit
+   formats, and the product UI. A narrow exception applies where no validated module meets a hard requirement (multi-replica
+   state, an exact-byte evidence format, air-gapped operation, or a stricter security posture). That exception is written down
+   with the specific unmet requirement and re-checked when the ecosystem changes.
+5. **Reviews enforce it.** A hand-written solution to a solved problem is a review finding, the same as a bug.
+
 ## Session bootstrap sequence (do this first, every time, before taking any action)
 
 1. Read this file (you just did).

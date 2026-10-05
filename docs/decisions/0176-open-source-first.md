@@ -108,3 +108,36 @@ each "replace" ships under this ADR with its own tests, and the larger ones get 
 Admission notes:
 - `dompurify` would be admitted only under its Apache-2.0 option, recorded explicitly;
 - `react-markdown` fails the maintenance rule. If chat ever renders markdown, use `markdown-it` or `marked`.
+
+## Amendment — the universal rule (owner, 2026-10-05)
+
+> "if some program is available open source we will use it … First we will check if solution is available before trying to
+> write new code for it … we need to replace our code with open source and validated modules/sections relevant to us."
+
+This supersedes §5's "case by case":
+- **Search before writing.** Every build checks for a validated, maintained open-source solution first and records the
+  result.
+- **Replacing existing hand-written code is the default.** Keeping our own code is a narrow exception. It is written down
+  with the specific hard requirement no validated module meets, and re-checked when the ecosystem changes.
+
+The rule is in `CLAUDE.md` ("Universal build rule") so it binds every session and agent.
+
+**The audit's "keep" list, re-classified under the rule:**
+
+| Component | Decision | Module, or the unmet requirement |
+|---|---|---|
+| Retry/backoff (`upstream-retry.ts`) | **Replace** | `cockatiel` (MIT) as the engine. Our policy stays as configuration: one budget per sequence, never retry our own refusals, never retry `tools/call`. |
+| OTLP/JSON encoder (`shared/tracing.ts`) | **Replace** | `@opentelemetry/otlp-transformer` (Apache-2.0) to serialise stored rows; pure encoding, so it works air-gapped. |
+| TOTP and base32 (`auth.ts`) | **Replace** | `otpauth` (MIT); our replay protection (`lastUsedStep`) stays in the wrapper; RFC 6238 test vectors added. |
+| Scheduler (`scheduler.ts`) | **Replace (own ADR)** | A Postgres-backed queue (`pg-boss` or `graphile-worker`, MIT) for leasing, retries and multiple replicas; our "skipped, and why" governance records layered on top. |
+| Constant-time compares (5 copies) | **Replace** | `crypto.timingSafeEqual` behind one shared helper. |
+| Canonical JSON (6 non-audit copies) | **Replace** | One implementation conforming to RFC 8785 (JCS), differential-tested against `canonicalize` (Apache-2.0). |
+| Circuit breaker (`upstream-breaker.ts`) | **Keep (exception)** | Unmet: breaker state shared across replicas in Postgres, with a single elected half-open probe and audited transitions; library breakers are per process. Re-check yearly. |
+| Rate-limit store | **Keep (exception)** | Already `@fastify/rate-limit`. Only the store is ours. Unmet: local-first, so a request flood never becomes a database flood. |
+| Audit chain canonical form, licence format, export-bundle bytes | **Keep (exception)** | Unmet: exact-byte, versioned evidence formats that customers verify with openssl alone (ADR-0116); changing them breaks verification of existing evidence. |
+| Chat/PM webhook HMAC checks | **Keep (exception)** | Unmet: vendor-exact checks of a few lines; the vendor SDKs are heavy frameworks. They use `crypto.timingSafeEqual`. |
+| PII detectors, MCP admission scanner | **Keep core (exception), add adapters** | Unmet: no maintained, deterministic, offline JS library; the validated tools are Python services. Integrated as optional adapters (ADR-0176 §4). |
+| Token estimates | **Keep (exception)** | Unmet: vendor tokenizers are not all public; billing uses provider-reported usage. |
+
+All "replace now" and "replace with ADR" rows from the audit stand. The work is scheduled as an open-source replacement
+programme beside the roadmap. The security rows (manifest digest, secret patterns, IP ranges) go first.
