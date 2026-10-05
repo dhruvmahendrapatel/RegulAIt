@@ -21,6 +21,23 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-10-05 - ADR-0176 amended: public-domain dedications (Unlicense, CC0-1.0, 0BSD) are allowed licences** (owner),
+prompted by `fast-sha256` (Unlicense) under `standardwebhooks` in batch 2b. CLAUDE.md's universal build rule updated.
+
+**2026-10-05 - ADR-0177 amended: clean-room study of the rejected projects.** Fifteen features learned from what the
+rejected or limited projects do (never their code), each mapped to a PathForward item with a permissive library where one
+exists; two Phoenix patents flagged for a legal check before any PF-20 error-times-volume segment ranking.
+
+**2026-10-05 - ADR-0177: plan for 22 open-source AI security, evaluation and observability projects (docs only).** The
+owner supplied 22 projects and asked to document how they fit, without building yet. Licences were verified from the
+repositories. The owner's assumption ("all open source, keep the licence") doesn't hold for every project: Elastic (asqav,
+the Phoenix server, pipelock's `enterprise/`, the Guardrails AI server), BSL (trylonai), AGPL (Langtrace), LGPL (fickling),
+the Llama licence (Guard models), langfuse's commercial `ee/` directories; whylogs, Langtrace, the Adversarial Robustness
+Toolbox and trylonai are unmaintained. ADR-0177 sets five modes of use with licence bars, a UI rule (no new nav group;
+one "Engines" page) and an order for what to build next. PathForward gains ADR-0177 extensions and PF-23 (sidecar engine
+contract). Owner questions: fickling's LGPL exception, offensive tooling (Strix/PentestGPT), and the false-positive policy
+for vendored detection patterns.
+
 **2026-10-05 - PR #117 merged to `main` (6276f93); one PR per batch from now on.** The owner approved merging #117 (360
 commits: governance, agent builder 2a, enterprise sign-in, D1/D2, Docker demo) and switching to one short-lived PR per batch
 (CLAUDE.md "Branch and PR flow"). ADR-0176 makes open source first a universal rule (CLAUDE.md "Universal build rule").
