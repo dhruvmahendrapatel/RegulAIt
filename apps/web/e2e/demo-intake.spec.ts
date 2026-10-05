@@ -204,7 +204,7 @@ test("seeded credit-assistant journey: discover, register, assess, approve, moni
 
   await page.goto("/ui/admin/governance/regulatory");
   await expect(page.getByRole("heading", { name: "Regulatory & policy intelligence" })).toBeVisible();
-  await expect(page.getByText("in force", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("In force", { exact: true }).first()).toBeVisible();
   await shotBoth(page, "real-10-regulatory-intelligence");
 
   await page.goto("/ui/admin/audit");
