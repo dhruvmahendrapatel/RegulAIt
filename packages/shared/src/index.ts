@@ -4479,3 +4479,5 @@ export {
   type RequiredTestRunEvidence,
   type RequiredTestStatusRow,
 } from "./required-tests.js";
+// ADR-0180 FA3: the evidence bar a run must meet to count for a required test
+export { REQUIRED_TEST_EVIDENCE_BAR, evidenceShortfall } from "./required-tests.js";
