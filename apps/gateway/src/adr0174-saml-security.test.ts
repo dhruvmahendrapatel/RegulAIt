@@ -124,7 +124,9 @@ function buildResponse(o: Shape): string {
     `</saml:Assertion>${o.outside ?? ""}</samlp:Response>`
   );
 }
-function signAssertion(xml: string): string {
+/** an assertion-only signature: what an IdP sends when an admin has relaxed
+ * `wantAuthnResponseSigned` for it (ADR-0181) */
+function signAssertionOnly(xml: string): string {
   const sig = new SignedXml({
     privateKey: key.privateKey,
     publicCert: key.certPem,
@@ -137,6 +139,22 @@ function signAssertion(xml: string): string {
     digestAlgorithm: "http://www.w3.org/2001/04/xmlenc#sha256",
   });
   sig.computeSignature(xml, { location: { reference: "//*[local-name(.)='Assertion']/*[local-name(.)='Issuer']", action: "after" } });
+  return sig.getSignedXml();
+}
+/** the strict default (ADR-0181): the Response envelope signed as well */
+function signAssertion(xml: string): string {
+  const sig = new SignedXml({
+    privateKey: key.privateKey,
+    publicCert: key.certPem,
+    signatureAlgorithm: "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256",
+    canonicalizationAlgorithm: "http://www.w3.org/2001/10/xml-exc-c14n#",
+  });
+  sig.addReference({
+    xpath: "/*[local-name(.)='Response']",
+    transforms: ["http://www.w3.org/2000/09/xmldsig#enveloped-signature", "http://www.w3.org/2001/10/xml-exc-c14n#"],
+    digestAlgorithm: "http://www.w3.org/2001/04/xmlenc#sha256",
+  });
+  sig.computeSignature(signAssertionOnly(xml), { location: { reference: "/*[local-name(.)='Response']/*[local-name(.)='Issuer']", action: "after" } });
   return sig.getSignedXml();
 }
 
@@ -167,7 +185,10 @@ const roundTrip = async (providerId: string, o: Omit<Shape, "providerId" | "inRe
   expect(s.statusCode).toBe(302);
   const relayState = new URL(s.headers.location as string).searchParams.get("RelayState")!;
   const [row] = await db.select().from(samlLoginStates).where(eq(samlLoginStates.relayState, relayState));
-  let signed = signAssertion(buildResponse({ providerId, inResponseTo: row!.requestId, ...o, outside: undefined }));
+  // content smuggled outside the assertion is only possible where the
+  // envelope is unsigned, i.e. on a provider an admin relaxed (ADR-0181)
+  const sign = o.outside ? signAssertionOnly : signAssertion;
+  let signed = sign(buildResponse({ providerId, inResponseTo: row!.requestId, ...o, outside: undefined }));
   if (o.outside) signed = signed.replace("</samlp:Response>", `${o.outside}</samlp:Response>`);
   return app.inject({
     method: "POST", url: `/auth/saml/${providerId}/acs`, headers: FORM,
@@ -242,7 +263,7 @@ describe("finding 1: SAML sessions answer to the org MFA requirement", () => {
       expect((await app.inject({ method: "GET", url: "/v1/me", cookies: { regulait_session: session } })).statusCode).toBe(200);
       expect((await latestAudit("login-succeeded"))?.detail).toMatchObject({ method: "saml", mfa: "totp-step-up", providerId: p.id });
     } finally {
-      await putSettings({ mfaRequired: orgSnapshot?.mfaRequired ?? "off" });
+      await putSettings({ mfaRequired: orgSnapshot?.mfaRequired ?? "admins" });
     }
   });
 
@@ -262,7 +283,7 @@ describe("finding 1: SAML sessions answer to the org MFA requirement", () => {
       expect(row?.userId).toBe(uid);
       expect((await app.inject({ method: "GET", url: "/v1/me", cookies: { regulait_session: session } })).statusCode).toBe(200);
     } finally {
-      await putSettings({ mfaRequired: orgSnapshot?.mfaRequired ?? "off" });
+      await putSettings({ mfaRequired: orgSnapshot?.mfaRequired ?? "admins" });
     }
   });
 
@@ -278,12 +299,13 @@ describe("finding 1: SAML sessions answer to the org MFA requirement", () => {
       expect(me.statusCode).toBe(403);
       expect(me.json().error).toBe("mfa_enrollment_required");
     } finally {
-      await putSettings({ mfaRequired: orgSnapshot?.mfaRequired ?? "off" });
+      await putSettings({ mfaRequired: orgSnapshot?.mfaRequired ?? "admins" });
     }
   });
 
   it("a multi-factor context smuggled OUTSIDE the signed assertion counts for nothing", async () => {
-    const p = await mkProvider({ mfaAuthnContexts: [MFA_CTX] });
+    // the envelope signature off, so the smuggled statement reaches the parser
+    const p = await mkProvider({ mfaAuthnContexts: [MFA_CTX], wantAuthnResponseSigned: false });
     const address = `smuggle-${tag}@adr0174-saml.example`;
     await userWithTotp(address, p.id);
     expect((await putSettings({ mfaRequired: "all" })).statusCode).toBe(200);
@@ -293,7 +315,7 @@ describe("finding 1: SAML sessions answer to the org MFA requirement", () => {
       expect(cookieOf(acs)).toBeNull();
       expect(acs.headers.location === "/ui/login?mfa=pending" || acs.statusCode >= 400, `${acs.statusCode} ${acs.headers.location ?? acs.body}`).toBe(true);
     } finally {
-      await putSettings({ mfaRequired: orgSnapshot?.mfaRequired ?? "off" });
+      await putSettings({ mfaRequired: orgSnapshot?.mfaRequired ?? "admins" });
     }
   });
 
@@ -307,7 +329,7 @@ describe("finding 1: SAML sessions answer to the org MFA requirement", () => {
       expect(acs.headers.location).toBe("/app");
       expect(cookieOf(acs)).toBeTruthy();
     } finally {
-      await putSettings({ mfaRequired: orgSnapshot?.mfaRequired ?? "off" });
+      await putSettings({ mfaRequired: orgSnapshot?.mfaRequired ?? "admins" });
     }
   });
 });

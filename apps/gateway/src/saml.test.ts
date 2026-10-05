@@ -191,8 +191,10 @@ function buildResponse(o: AssertionOptions): { xml: string; assertionId: string 
 
 /** a genuine enveloped XML-DSig over the Assertion element (exclusive c14n,
  * RSA-SHA256) — the exact shape a real IdP emits and the exact shape
- * node-saml verifies. */
-function signAssertion(xml: string, key: SigningKey): string {
+ * node-saml verifies. On its own it is what an IdP that signs ONLY the
+ * assertion sends, which ADR-0181 refuses unless an admin relaxes
+ * `wantAuthnResponseSigned` for that provider. */
+function signAssertionOnly(xml: string, key: SigningKey): string {
   const sig = new SignedXml({
     privateKey: key.privateKey,
     publicCert: key.certPem,
@@ -211,6 +213,34 @@ function signAssertion(xml: string, key: SigningKey): string {
     location: { reference: "//*[local-name(.)='Assertion']/*[local-name(.)='Issuer']", action: "after" },
   });
   return sig.getSignedXml();
+}
+
+/** the Response envelope signed too, over the already-signed assertion */
+function signResponseEnvelope(xml: string, key: SigningKey): string {
+  const sig = new SignedXml({
+    privateKey: key.privateKey,
+    publicCert: key.certPem,
+    signatureAlgorithm: "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256",
+    canonicalizationAlgorithm: "http://www.w3.org/2001/10/xml-exc-c14n#",
+  });
+  sig.addReference({
+    xpath: "/*[local-name(.)='Response']",
+    transforms: [
+      "http://www.w3.org/2000/09/xmldsig#enveloped-signature",
+      "http://www.w3.org/2001/10/xml-exc-c14n#",
+    ],
+    digestAlgorithm: "http://www.w3.org/2001/04/xmlenc#sha256",
+  });
+  sig.computeSignature(xml, {
+    location: { reference: "/*[local-name(.)='Response']/*[local-name(.)='Issuer']", action: "after" },
+  });
+  return sig.getSignedXml();
+}
+
+/** what the strict default (ADR-0181) expects: the assertion AND the Response
+ * signed, the way most enterprise IdPs can be configured to send it */
+function signAssertion(xml: string, key: SigningKey): string {
+  return signResponseEnvelope(signAssertionOnly(xml, key), key);
 }
 
 const postAcs = (providerId: string, signedXml: string, relayState?: string) =>
@@ -412,6 +442,56 @@ describe("ADR-0036 — the happy path", () => {
     expect(names).toContain(p.id);
     // names only — no cert, no entity id, no config
     expect(JSON.stringify(res.json())).not.toContain("BEGIN CERTIFICATE");
+  });
+});
+
+describe("ADR-0181 — a signed Response by default", () => {
+  it("a new provider requires the Response signature, and an assertion-only response is refused", async () => {
+    const p = await mkProvider();
+    expect(p.wantAuthnResponseSigned).toBe(true);
+    expect(p.wantAssertionsSigned).toBe(true);
+    const email = `sam.envelope.${randomBytes(3).toString("hex")}@corp.example`;
+    await mkUser(email, "Sam Envelope");
+    const s = await start(p.id);
+    const { xml } = buildResponse({ providerId: p.id, email, inResponseTo: s.requestId });
+    const res = await postAcs(p.id, signAssertionOnly(xml, keyA), s.relayState);
+    expect(res.statusCode).toBe(401);
+    expect(res.json().error).toBe("saml_validation_failed");
+    expect(res.cookies.find((c) => c.name === "regulait_session")).toBeUndefined();
+  });
+
+  it("an admin may relax it for an IdP that signs only the assertion; the change is audited old -> new", async () => {
+    const p = await mkProvider();
+    const since = new Date(Date.now() - 1000);
+    const relaxed = await app.inject({
+      method: "PATCH", headers: AUTH, url: `/v1/auth/saml-providers/${p.id}`,
+      payload: { wantAuthnResponseSigned: false },
+    });
+    expect(relaxed.statusCode).toBe(200);
+    expect(relaxed.json().wantAuthnResponseSigned).toBe(false);
+    const audit = await latestAudit("saml-provider-updated");
+    expect(audit!.at.getTime()).toBeGreaterThanOrEqual(since.getTime());
+    expect((audit!.detail as { transitions: unknown }).transitions).toEqual({
+      wantAuthnResponseSigned: { from: true, to: false },
+    });
+    const email = `sam.assertion.${randomBytes(3).toString("hex")}@corp.example`;
+    await mkUser(email, "Sam Assertion");
+    const s = await start(p.id);
+    const { xml } = buildResponse({ providerId: p.id, email, inResponseTo: s.requestId });
+    const res = await postAcs(p.id, signAssertionOnly(xml, keyA), s.relayState);
+    expect(res.statusCode, res.body).toBe(302);
+    // ...and the assertion signature alone still carries the whole model there
+    const victim = `sam.victim2.${randomBytes(3).toString("hex")}@corp.example`;
+    const attacker = `sam.attacker2.${randomBytes(3).toString("hex")}@corp.example`;
+    await mkUser(victim, "Victim Two");
+    await mkUser(attacker, "Attacker Two");
+    const s2 = await start(p.id);
+    const forged = signAssertionOnly(
+      buildResponse({ providerId: p.id, email: attacker, inResponseTo: s2.requestId }).xml,
+      keyA,
+    ).replace(attacker, victim);
+    const refused = await postAcs(p.id, forged, s2.relayState);
+    expect(refused.statusCode).toBe(401);
   });
 });
 
@@ -724,8 +804,15 @@ describe("ADR-0036 — admin CRUD, secrets and the generalized lockout guard", (
       },
     });
     expect(bad.statusCode).toBe(400);
-    // ...and the same combination cannot be reached in two PATCH steps either
+    // ...and the same combination cannot be reached in two PATCH steps either:
+    // relax the response signature first (ADR-0181 default on), then try to
+    // drop the assertion signature
     const p = await mkProvider();
+    const relaxed = await app.inject({
+      method: "PATCH", headers: AUTH, url: `/v1/auth/saml-providers/${p.id}`,
+      payload: { wantAuthnResponseSigned: false },
+    });
+    expect(relaxed.statusCode).toBe(200);
     const step = await app.inject({
       method: "PATCH", headers: AUTH, url: `/v1/auth/saml-providers/${p.id}`,
       payload: { wantAssertionsSigned: false },

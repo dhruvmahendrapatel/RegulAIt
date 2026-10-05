@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { and, auditLog, createDb, eq, orgSettings, runMigrations, sql, workflowInstances, type Db } from "@regulait/db";
 import { resolveProvider, type MockGitProvider } from "@regulait/git-provider";
 import { buildApp } from "./app.js";
+import { enrolTotpForTest } from "./testing/identity-posture.js";
 import {
   applyWorkflowApprovalDecision,
   CHECK_PENDING_DETAIL,
@@ -301,6 +302,8 @@ async function consoleCookie(userId: string, email: string): Promise<string> {
     payload: { currentPassword: oneTime, newPassword: "Wr-console-Passw0rd!x" },
   });
   expect(changed.statusCode).toBe(200);
+  // ADR-0181: an admin session enrols TOTP before it reaches the app
+  await enrolTotpForTest(app, cookie);
   return cookie;
 }
 
