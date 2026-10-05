@@ -149,3 +149,11 @@ reason the row flipped, and that is what a blast-radius preview is read for.
 
 Recorded as **M-039** in [`mistakes.md`](../../mistakes.md): a column's type is a claim about every
 producer, not the one in front of you, and the fixture belongs on the branch that differs.
+
+## Qualification, 2026-10-05 (ADR-0179, AER-014 and AER-016)
+
+The deck line keeps "exactly", with one qualification for rate limits. A proposed rate limit is replayed against the
+calls recorded strictly before each sampled call, inside the limit's window. That replay is exact while the window lies
+inside the retained audit trail. Where retention has pruned part of the window, the call is reported as
+**indeterminate** and never counted as allowed or denied. A run that reaches its deadline says **incomplete**, gives
+how many calls it evaluated, and is not stored as a preview.

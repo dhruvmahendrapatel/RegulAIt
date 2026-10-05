@@ -64,3 +64,58 @@ AER-056 and the G10–G15 portability fixes are already merged and only need Cod
 - F06/F07 (real-provider journeys, the restore drill, the signing keyring) and the carried-over AER-006 and AER-011 still
   depend on the owner: a credential, a key custodian, and a UI-versus-API decision. Production stays gated by the
   standing guardrail.
+
+## Implementation (2026-10-05)
+
+Built on four branches (A feed, B intake, C simulation and budget, D claims and UX), integrated on `cdx-int`. A security
+review of the integrated branch found two medium-severity issues and eight low or informational ones; one fix round
+closed them.
+
+- **Simulation (C, plus review fixes 1, 4, 8).**
+  - `governedEvaluate` takes `simulate.replay = { asOf, lookbackHorizon, countAllowed }`. A rate-limit rule is
+    replayed against the calls recorded strictly before each sampled call. Where audit retention has pruned part of the
+    window, the call is `indeterminate`, never counted as allowed.
+  - Each count has one computation path: the batched database query.
+  - The run is limited per caller and globally (`REGULAIT_POLICY_SIMULATION_MAX_PER_CALLER`, `_MAX_GLOBAL`; a refused
+    run gets 429 `simulation_busy`).
+  - The deadline (`REGULAIT_POLICY_SIMULATION_DEADLINE_MS`) is armed when the request arrives and also bounds database
+    work. A run's reads share one transaction under `SET LOCAL statement_timeout`, set to the time left, and the
+    deadline is checked between count chunks.
+  - When the deadline hits, the run returns 200 `{status:"incomplete"}`, and the incomplete result is not stored.
+  - Migration **0154** adds a partial index on the retention prune's marker rows, so finding the lookback horizon
+    never scans the audit trail.
+  - The audit prune deletes rows and writes its marker in one transaction.
+  - ADR-0120's "exactly which recorded calls" now holds for rate-limit rules inside the retained audit window. Outside
+    it, the result says indeterminate.
+- **Budget cap (C).** A concurrent boundary test proves the documented bound: per cap, the overshoot is less than one
+  call's cost for each call in flight when the cap is crossed. The bound is documented above `preDispatchProjectGate`.
+- **Kong and SSO origin (D, plus review fixes 5, 7, 9).**
+  - Kong plugin 0.4.0 tags every deny with `decidedWithout: ["args"]`, because the edge never forwards call
+    arguments. The tag says the decision ran without them, not that their absence caused it; the rule id identifies a
+    data-scope refusal.
+  - jwt and key-auth credentials are detected correctly. A `jwt` credential accepts an asserted `oidc`, `saml` or
+    `password` origin without checking the token issuer; the README and `GATEWAY_TOPOLOGY.md` say so.
+  - The Lua spec runs under busted 2.3.0 on LuaJIT. The apt and rock versions are pinned, and the rockspec acts as
+    the lockfile. luarocks cannot pin by hash, so the pins fix the versions but not the content.
+  - Mixed-auth origin tests pin the existing behaviour.
+- **Outlook ChatOps (D).** Registration returns 422 `outbound_provider_unavailable`. The channel list reports
+  `outboundSupported`.
+- **Feed (A).**
+  - New `withdrawn` and `published` statuses, and the `law | guidance | voluntary_standard` instrument kinds.
+  - Effective and enforcement dates are separate, and the feed takes a `?kind=` filter.
+  - Corrected entries: CFPB withdrawn on 2025-05-12; NYC LL144 effective 2023-01-01 and enforced 2023-07-05; NIST and
+    ISO marked voluntary.
+- **Intake (B, plus review fixes 2, 3, 6).**
+  - Creating an intake waits for a durable draft save.
+  - A Back guard is added, and drafts are flushed with keepalive on unmount and on pagehide.
+  - The risk and workflow-artifact posts take idempotency keys (`request_idempotency_keys`, migration 0153).
+  - The artifact transition and the artifact commit in one transaction.
+  - A replayed artifact request re-runs the use-case and vendor mirror. The mirror is compare-and-swap, so two racing
+    syncs move and audit once. A replay does not re-run git executions; `/advance` retries a stuck stage.
+  - New idempotency claims store only `{replayOf}`, and a replay is rebuilt under the record's read rule. Older claims
+    that hold full bodies still replay exactly as stored.
+  - The hourly `idempotency-key-sweep` job deletes claims older than 30 days from both idempotency tables.
+  - Draft writes carry `x-regulait-draft-owner`. The gateway refuses a write naming a different user with 409
+    `draft_owner_changed`, so an exit save queued before a sign-out never lands in the next user's account.
+- **Migration numbering.** **0152 was never used and is retired**, like 0147 (ADR-0173). The journal skips it. Never add
+  a migration numbered 0152, or one whose `when` is at or below 1785089000000 (0154's). The next migration is **0155**.
