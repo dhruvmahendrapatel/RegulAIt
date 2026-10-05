@@ -4,6 +4,9 @@
  * Act tier requires (each role is one required review) with the approval's
  * lifetime for that tier, and who may accept residual risk. A tier with no
  * roles keeps the single named approver.
+ *
+ * ADR-0180 A3: below it, the required AI test classes per tier
+ * (RequiredTestsEditor), saved through their own admin-only, audited route.
  */
 import { useEffect, useId, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -30,6 +33,7 @@ import {
   type RoleDraft,
 } from "./reviewPolicy";
 import p from "./reviewPolicy.module.css";
+import { RequiredTestsEditor } from "./RequiredTestsEditor";
 
 export default function ReviewPolicyPage() {
   const policy = useQuery({ queryKey: REVIEW_POLICY_KEY, queryFn: () => api.get<ReviewPolicy>("/v1/governance/review-policy") });
@@ -41,9 +45,12 @@ export default function ReviewPolicyPage() {
         sub="Who reviews AI use cases, how many reviews each tier needs, and who may accept risk."
         info={<p>Each role a tier lists is one required review, and any member of that role can complete it. Nobody reviews a use case they proposed. A tier with no roles keeps a single named approver.</p>}
       />
-      <QueryGate loading={policy.isLoading || directory.isLoading} error={policy.error ?? directory.error} onRetry={() => { void policy.refetch(); void directory.refetch(); }}>
-        {policy.data ? <PolicyForm key={policy.data.updatedAt ?? "new"} policy={policy.data} people={directory.data?.users ?? []} /> : null}
-      </QueryGate>
+      <div className={v.stack}>
+        <QueryGate loading={policy.isLoading || directory.isLoading} error={policy.error ?? directory.error} onRetry={() => { void policy.refetch(); void directory.refetch(); }}>
+          {policy.data ? <PolicyForm key={policy.data.updatedAt ?? "new"} policy={policy.data} people={directory.data?.users ?? []} /> : null}
+        </QueryGate>
+        <RequiredTestsEditor />
+      </div>
     </>
   );
 }

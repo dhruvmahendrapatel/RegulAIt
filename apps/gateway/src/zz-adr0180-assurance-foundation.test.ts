@@ -212,35 +212,26 @@ describe("ADR-0180 migration 0155: the strict rules the database holds", () => {
   });
 });
 
-describe("ADR-0180 D3 route stubs", () => {
-  const STUBS: Array<{ method: "GET" | "PUT" | "POST"; route: string; url: string; cls: "admin" | "user" }> = [
-    // A2's evaluate/waive routes have landed (zz-adr0180-a2-conditions.test.ts pins them)
-    { method: "GET", route: "/v1/governance/review-policy/required-tests", url: "/v1/governance/review-policy/required-tests", cls: "user" },
-    { method: "PUT", route: "/v1/governance/review-policy/required-tests", url: "/v1/governance/review-policy/required-tests", cls: "admin" },
-    // A8 landed: its two routes leave this table (see "A8 autonomy routes" below)
-    // A10's four routes are built: zz-adr0180-a10-risk-tolerance.test.ts pins them
+describe("ADR-0180 D3 routes: every stub has landed", () => {
+  // P0 shipped these as 501 stubs; each owner's own test pins its behaviour.
+  // This only proves no stub is left behind (A2 zz-adr0180-a2-conditions,
+  // A3 zz-adr0180-a3-required-tests, A8 autonomy.test, A10 zz-adr0180-a10-risk-tolerance).
+  const ROUTES: Array<{ method: "GET" | "PUT" | "POST"; url: string }> = [
+    { method: "POST", url: "/v1/use-cases/00000000-0000-4000-8000-000000000001/conditions/00000000-0000-4000-8000-000000000002/evaluate" },
+    { method: "POST", url: "/v1/use-cases/00000000-0000-4000-8000-000000000001/conditions/00000000-0000-4000-8000-000000000002/waive" },
+    { method: "GET", url: "/v1/governance/review-policy/required-tests" },
+    { method: "PUT", url: "/v1/governance/review-policy/required-tests" },
+    { method: "GET", url: "/v1/builder/agents/00000000-0000-4000-8000-000000000003/autonomy" },
+    { method: "PUT", url: "/v1/builder/agents/00000000-0000-4000-8000-000000000003/autonomy" },
+    { method: "GET", url: "/v1/risk-tolerances" },
+    { method: "PUT", url: "/v1/risk-tolerances" },
+    { method: "GET", url: "/v1/risks/00000000-0000-4000-8000-000000000004/acceptances" },
+    { method: "POST", url: "/v1/risks/00000000-0000-4000-8000-000000000004/acceptances" },
   ];
 
-  it.each(STUBS)("$method $route: classed $cls, 501 not_implemented until its owner lands", async (s) => {
-    expect(routeAuthClass(s.method, s.route)).toBe(s.cls);
+  it.each(ROUTES)("$method $url no longer answers 501", async (s) => {
     const r = await inject(s.method, s.url, users.admin.auth, s.method === "GET" ? undefined : {});
-    expect(r.statusCode, r.body).toBe(501);
-    expect(r.json().error).toBe("not_implemented");
-    const m = await inject(s.method, s.url, users.member.auth, s.method === "GET" ? undefined : {});
-    expect(m.statusCode).toBe(s.cls === "admin" ? 403 : 501);
-  });
-
-  // ADR-0180 A8 landed (autonomy.test.ts covers the behaviour): still classed
-  // 'user', access checked in the handler, so an unknown agent is a 404
-  it.each([
-    { method: "GET" as const, route: "/v1/builder/agents/:id/autonomy" },
-    { method: "PUT" as const, route: "/v1/builder/agents/:id/autonomy" },
-  ])("A8 autonomy routes: $method $route is classed user and implemented", async (s) => {
-    expect(routeAuthClass(s.method, s.route)).toBe("user");
-    const url = "/v1/builder/agents/00000000-0000-4000-8000-000000000003/autonomy";
-    const r = await inject(s.method, url, users.member.auth, s.method === "GET" ? undefined : { class: null });
-    expect(r.statusCode, r.body).toBe(404);
-    expect(r.json().error).toBe("unknown_builder_agent");
+    expect(r.statusCode, r.body).not.toBe(501);
   });
 });
 

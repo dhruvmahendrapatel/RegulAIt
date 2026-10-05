@@ -205,12 +205,18 @@ export async function runDemoCheck(
     if (g.status !== 200) add("2 Deploy gate", "FAIL", `gate ${g.status} ${g.body.error ?? ""}`);
     else {
       const blocks = (g.body.reasons ?? []).filter((r: Json) => r.severity === "block");
+      // ADR-0180: the story's showcase is READY apart from its alerts — the seeded
+      // red-team runs must satisfy its required AI tests under the strict defaults
+      const tests = (g.body.reasons ?? []).filter((r: Json) => String(r.code).startsWith("required_test_"));
       add(
         "2 Deploy gate",
-        "PASS",
+        tests.length ? "WARN" : "PASS",
         `"${showcase.name}": ${g.body.decision}` +
           (blocks.length ? ` — ${blocks.map((r: Json) => r.code).join(", ")}` : "") +
-          ` (${(g.body.reasons ?? []).length - blocks.length} warning(s))`,
+          ` (${(g.body.reasons ?? []).length - blocks.length} warning(s)); assurance ${g.body.assurance?.label ?? "not evaluated"}`,
+        tests.length
+          ? `required AI tests not satisfied (${tests.map((r: Json) => r.message).join("; ")}) — re-run \`demo:intake\` (it runs the demo assurance suite)`
+          : undefined,
       );
     }
   }

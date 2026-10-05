@@ -32,6 +32,7 @@ import {
   type Db,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { setAssuranceGateModeForTest } from "./testing/assurance-mode.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -192,4 +193,15 @@ describe("AER-044 — the deploy gate's agent selection cannot skip an intended 
     expect(body.reasons.map((x: any) => [x.code, x.ref.id])).toEqual([["agent_not_in_approved_stack", ag.refused]]);
     expect(audit).toMatchObject({ ruleId: "deploy-gate-denied" });
   });
+});
+
+// ADR-0180: this file pins the gate rules above; the continuous-assurance checks
+// (strict `enforce` by default) are pinned in zz-adr0180-a3-required-tests.test.ts.
+// M-068: the strict default is restored before the file ends.
+let restoreAssuranceMode = async (): Promise<void> => {};
+beforeAll(async () => {
+  restoreAssuranceMode = await setAssuranceGateModeForTest(db, "off");
+});
+afterAll(async () => {
+  await restoreAssuranceMode();
 });

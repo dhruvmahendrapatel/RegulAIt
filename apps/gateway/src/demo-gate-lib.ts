@@ -4,6 +4,10 @@
  * every reason the way a CI log shows them, and exit 1 on DENY. It goes
  * through the same route a pipeline calls, as Ada (an admin; a pipeline would
  * use the use case owner's service account) — nothing here decides anything.
+ *
+ * ADR-0180: it also prints the `assurance:` line (the org's gate mode: enforced,
+ * reported as warnings, or skipped) and the plain-language meaning of every
+ * reason code that appears.
  */
 import type { FastifyInstance } from "fastify";
 
@@ -55,6 +59,12 @@ export async function runDemoGate(
     `${r.body.decision === "allow" ? "ALLOW" : "DENY"}  "${uc.name}" (${uc.status}, EU AI Act tier ${uc.euAiActTier ?? "unscreened"}) → ${environment}`,
     ...reasons.map((x) => `  ${String(x.severity).toUpperCase().padEnd(5)} ${String(x.code).padEnd(24)} ${x.message}`),
     ...(reasons.length === 0 ? ["  (no reasons — every check clear)"] : []),
+    // ADR-0180: how the continuous-assurance checks ran (enforced / warnings / skipped)
+    `  assurance: ${r.body.assurance?.label ?? "not evaluated"}`,
+    // the plain-language meaning of each code that appears, once
+    ...[...new Map(reasons.map((x) => [String(x.code), String(x.explanation ?? "")])).entries()]
+      .filter(([, e]) => e)
+      .map(([c, e]) => `  - ${c}: ${e}`),
     "",
     r.body.decision === "allow"
       ? "pipeline continues (warnings do not fail the gate)"

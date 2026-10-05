@@ -42,6 +42,7 @@ import {
 } from "@regulait/db";
 import { renderEuAiActAnswersBlock, type EuAiActAnswers } from "@regulait/shared";
 import { buildApp } from "./app.js";
+import { setAssuranceGateModeForTest } from "./testing/assurance-mode.js";
 import { schedulerJobRegistry, SCHEDULER_JOB_NAMES } from "./scheduler-jobs.js";
 import { RECERTIFICATION_SYSTEM_ACTOR, runUseCaseRecertificationSweep } from "./review-policy.js";
 
@@ -688,4 +689,15 @@ describe("recertification sweep", () => {
     expect(job?.name).toBe("use-case-recertification");
     expect(job?.adr).toBe("ADR-0168");
   });
+});
+
+// ADR-0180: this file pins the gate rules above; the continuous-assurance checks
+// (strict `enforce` by default) are pinned in zz-adr0180-a3-required-tests.test.ts.
+// M-068: the strict default is restored before the file ends.
+let restoreAssuranceMode = async (): Promise<void> => {};
+beforeAll(async () => {
+  restoreAssuranceMode = await setAssuranceGateModeForTest(db, "off");
+});
+afterAll(async () => {
+  await restoreAssuranceMode();
 });
