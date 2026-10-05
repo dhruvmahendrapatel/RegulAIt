@@ -33,6 +33,7 @@ import type {
   MyAgentsResponse,
   ProviderStatusResponse,
 } from "../../api/types";
+import type { AutonomyClass, BuilderAgentAutonomyView } from "./autonomyModel";
 import { bindingsFromGranted } from "../models/modelBindings";
 
 export const bk = {
@@ -47,6 +48,7 @@ export const bk = {
   integrations: ["builder", "integrations"] as const,
   toolboxOptions: ["builder", "toolbox-options"] as const,
   usage: (days: number) => ["builder", "usage", days] as const,
+  autonomy: (id: string) => ["builder", "autonomy", id] as const,
 };
 
 export interface CreateAgentBody {
@@ -150,6 +152,10 @@ export const builderApi = {
   getTemplate: (id: string) => api.get<{ template: BuilderTemplate }>(`/v1/builder/templates/${id}`),
   integrations: () => api.get<BuilderIntegrationsResponse>(`/v1/builder/integrations`),
   usage: (days: 7 | 30) => api.get<BuilderUsage>(`/v1/builder/usage?days=${days}`),
+  /** ADR-0180 A8 — the agent's steward (owner) or an admin */
+  getAutonomy: (id: string) => api.get<{ autonomy: BuilderAgentAutonomyView }>(`/v1/builder/agents/${id}/autonomy`),
+  declareAutonomy: (id: string, body: { class: AutonomyClass | null; note?: string }) =>
+    api.put<{ autonomy: BuilderAgentAutonomyView; flag?: { code: "declared_below_observed"; detail: string } }>(`/v1/builder/agents/${id}/autonomy`, body),
 };
 
 /**
