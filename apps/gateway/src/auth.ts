@@ -1025,7 +1025,13 @@ export function linkCookie(value: string, secure: boolean, maxAgeSeconds: number
 }
 
 /** ADR-0174 (finding 1): the pending-MFA token of a SAML login that must step
- * up to the account's TOTP. HttpOnly, scoped to /auth/mfa, minutes-long. */
+ * up to the account's TOTP. HttpOnly, scoped to /auth/mfa, minutes-long.
+ *
+ * The value is an opaque 256-bit handle from `generateSessionToken` (or "" when
+ * clearing). It carries no user id, no origin and no TOTP state: those live in
+ * the `auth_mfa_pending` row, which stores only sha256(handle), and the TOTP
+ * secret stays encrypted on `users`. Secure is set whenever the request came
+ * over TLS. `token-hash.test.ts` pins these attributes. */
 export const MFA_PENDING_COOKIE = "regulait_mfa_pending";
 export function mfaPendingCookie(value: string, secure: boolean, maxAgeSeconds: number): string {
   return `${MFA_PENDING_COOKIE}=${value}; Path=/auth/mfa; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSeconds}` + (secure ? "; Secure" : "");
