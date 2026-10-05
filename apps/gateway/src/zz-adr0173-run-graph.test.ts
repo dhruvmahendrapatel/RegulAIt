@@ -26,6 +26,7 @@ import {
   approvals,
   asc,
   auditLog,
+  builderMessages,
   builderToolSteps,
   eq,
   orchestrationRuns,
@@ -49,6 +50,7 @@ type GraphNode = {
   type: string;
   label: string;
   status: string;
+  statusDetail: string | null;
   actor: { kind: string; id: string | null; name: string | null } | null;
   costUsd: number | null;
   links: { auditLogId: string | null; traceId: string | null; spanId: string | null; approvalId: string | null };
@@ -81,6 +83,7 @@ describe("builder turn graph", () => {
   const SECRET_MSG = `person-secret-${Math.random().toString(36).slice(2)}`;
   const WITHHELD = `withheld-result-${Math.random().toString(36).slice(2)}`;
   const VISIBLE = `visible-result-${Math.random().toString(36).slice(2)}`;
+  const NOTE_TEXT = `system-note-${Math.random().toString(36).slice(2)}`;
   let approvalId = "";
 
   beforeAll(async () => {
@@ -125,6 +128,10 @@ describe("builder turn graph", () => {
         displayName: "Send", argumentsDigest: "d3", requiresConfirmation: true, status: "pending_approval", approvalId,
       },
     ]);
+    // a system note in turn 1 (the loop writes these, e.g. a stop notice)
+    await k.db.insert(builderMessages).values({
+      threadId, agentId, userId: owner.id, role: "system", content: NOTE_TEXT, createdAt: new Date(new Date(agentMsg.createdAt).getTime() + 1),
+    });
     // a second turn, so the window of turn 1 is closed
     const t2 = await k.req("POST", `/v1/builder/agents/${agentId}/chat`, owner.auth, { message: "second turn", threadId });
     expect(t2.statusCode, t2.body).toBe(200);
@@ -180,6 +187,22 @@ describe("builder turn graph", () => {
     // positive control: a result the thread shows is shown here too
     const read = g.nodes.find((n) => n.label === "Read")!;
     expect(read.facts).toContainEqual({ label: "Result preview", value: VISIBLE });
+    expect(g.nodes.find((n) => n.type === "note")?.statusDetail).toBe(NOTE_TEXT);
+  });
+
+  it("shows an admin reading someone else's turn the path, never a result preview or note text", async () => {
+    const r = await graph(`/v1/run-graph/builder-turn/${threadId}/1`, admin.auth);
+    expect(r.statusCode, r.body).toBe(200);
+    expect(r.body).not.toContain(VISIBLE);
+    expect(r.body).not.toContain(NOTE_TEXT);
+    expect(r.body).not.toContain(WITHHELD);
+    const g = r.json() as Graph;
+    // the structure is all there
+    expect(g.nodes.filter((n) => n.type === "tool_call").map((t) => t.label)).toEqual(["Lookup", "Read", "Send"]);
+    const read = g.nodes.find((n) => n.label === "Read")!;
+    expect(read.facts).toContainEqual({ label: "Result", value: "shown only to the person whose thread this is" });
+    const note = g.nodes.find((n) => n.type === "note")!;
+    expect(note.statusDetail).toBeNull();
   });
 
   it("holds only its own turn", async () => {
@@ -205,13 +228,16 @@ describe("builder turn graph", () => {
     const unknown = await graph(`/v1/run-graph/builder-turn/00000000-0000-0000-0000-000000000000/1`, owner.auth);
     expect(unknown.statusCode).toBe(404);
 
+    const crossReads = () =>
+      k.db
+        .select()
+        .from(auditLog)
+        .where(and(eq(auditLog.userId, admin.id), eq(auditLog.objectId, agentId), eq(auditLog.ruleId, RUN_GRAPH_RULE_IDS.crossUser)));
+    const crossBefore = (await crossReads()).length;
     const asAdmin = await graph(`/v1/run-graph/builder-turn/${threadId}/1`, admin.auth);
     expect(asAdmin.statusCode, asAdmin.body).toBe(200);
-    const cross = await k.db
-      .select()
-      .from(auditLog)
-      .where(and(eq(auditLog.userId, admin.id), eq(auditLog.objectId, agentId), eq(auditLog.ruleId, RUN_GRAPH_RULE_IDS.crossUser)));
-    expect(cross).toHaveLength(1);
+    // each cross-user read is one audit row (an earlier test in this file read once already)
+    expect(await crossReads()).toHaveLength(crossBefore + 1);
     // the person reading their own turn is not a cross-user read
     const own = await k.db
       .select()

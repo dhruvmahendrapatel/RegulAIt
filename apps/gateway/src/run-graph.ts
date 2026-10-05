@@ -31,7 +31,9 @@
  *
  * WHAT IS NEVER SHOWN. No message text, no tool arguments, no span previews.
  * A tool result appears only as the thread shows it: its truncated preview,
- * and never when the call's result was withheld by PII/guardrail policy. A
+ * and never when the call's result was withheld by PII/guardrail policy; an
+ * admin reading someone else's turn sees neither result previews nor the text
+ * of system notes (the thread view showing them is the person's own). A
  * resubmission draft is shown only to the person whose draft it is, and then
  * only that it exists.
  *
@@ -300,6 +302,12 @@ export async function builderTurnGraph(db: Db, viewer: Viewer, threadId: string,
   const nodes: RunGraphNode[] = [];
   const edges: RunGraphEdge[] = [];
   const thePerson = person(thread.userId, names);
+  // An admin reading someone else's turn sees the path, never its content:
+  // the thread view that shows a result preview or a system note is the
+  // person's own, and traces withhold content unless capture is on. The
+  // stricter of the two is taken: no result preview and no note text at all
+  // on a cross-user read, whatever the capture setting.
+  const crossUser = viewer.userId !== thread.userId;
 
   nodes.push(
     node({
@@ -437,6 +445,7 @@ export async function builderTurnGraph(db: Db, viewer: Viewer, threadId: string,
     if (st.latencyMs != null) facts.push({ label: "Latency", value: `${st.latencyMs} ms` });
     // the thread's own rule: a withheld result is never shown, only that it was withheld
     if (st.resultWithheld) facts.push({ label: "Result", value: "withheld by policy" });
+    else if (st.resultPreview && crossUser) facts.push({ label: "Result", value: "shown only to the person whose thread this is" });
     else if (st.resultPreview) facts.push({ label: "Result preview", value: clip(st.resultPreview)! });
     chain.push(
       node({
@@ -499,7 +508,7 @@ export async function builderTurnGraph(db: Db, viewer: Viewer, threadId: string,
           type: "note",
           label: "Note",
           status: "done",
-          statusDetail: clip(m.content, 300),
+          statusDetail: crossUser ? null : clip(m.content, 300),
           actor: { kind: "system", id: null, name: null },
           at: iso(m.createdAt),
         }),
@@ -542,7 +551,7 @@ export async function builderTurnGraph(db: Db, viewer: Viewer, threadId: string,
         "Cost is the measured cost of each model step and tool call; a blank cost was not priced.",
       ],
     ),
-    ...(viewer.userId !== thread.userId
+    ...(crossUser
       ? { crossUser: { objectType: "builder_agent" as const, objectId: thread.agentId, detail: { builderThreadId: thread.id, turn, threadUserId: thread.userId } } }
       : {}),
   };
