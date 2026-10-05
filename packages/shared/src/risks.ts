@@ -85,7 +85,8 @@ export const AI_RISK_CATEGORIES = [
    * disparity; the evidence is the model cards' documented bias/fairness
    * assessments (ADR-0063 MRM) — a DOCUMENTATION record, labelled as one */
   "bias_fairness",
-  /** ADR-0147: the system emits harmful, toxic or jailbreak-induced content —
+  /** ADR-0147: the system emits harmful or toxic content, including output an
+   * attacker steers it into —
    * evidenced by the output-safety guardrail configuration (toxicity /
    * jailbreak at block) and the guardrail block trail (ADR-0042) */
   "unsafe_output",
@@ -533,7 +534,10 @@ export const DEFAULT_RISK_LIBRARY: RiskLibraryEntry[] = [
   },
   {
     key: "unsafe-or-toxic-output",
-    title: "The system emits harmful, toxic or jailbreak-induced content",
+    // ADR-0181: worded so the platform's own catalogue text does not read as a
+    // jailbreak attempt to the input guardrail (which blocks by default) when
+    // the intake assistant sends a risk list to a model
+    title: "The system emits harmful or toxic content, including output an attacker steers it into",
     description:
       "A user or an injected document steers the model into producing abusive, dangerous or " +
       "policy-violating output that reaches a person or a downstream system.",

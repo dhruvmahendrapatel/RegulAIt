@@ -33,7 +33,7 @@ import {
   sql,
   type Db,
 } from "@regulait/db";
-import { GUARDRAIL_DEFAULT_MODES, GUARDRAIL_FALLBACK_MODE } from "@regulait/shared";
+import { DEFAULT_RISK_LIBRARY, GUARDRAIL_DEFAULT_MODES, GUARDRAIL_FALLBACK_MODE, evaluateGuardrails } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { decryptSecret } from "./secrets.js";
 import { openAssuranceGuardrailWindow, seedStrictData } from "./seed-strict-data.js";
@@ -245,6 +245,20 @@ describe("ADR-0181 SB1 — the strict posture bites on the dispatch path", () =>
     expect(String(r.json().detail)).not.toContain("GOOGLE_API_KEY");
     const status = (await app.inject({ method: "GET", url: "/v1/model-providers/status", headers: userAuth })).json();
     expect(status.providers.google.configured).toBe(false);
+  });
+
+  it("the platform's own risk-catalogue text is not refused by the strict input guardrail", () => {
+    // the intake assistant sends these titles to a model; one that read as a
+    // jailbreak attempt made every model draft for a generative use case fail
+    const blocked: string[] = [];
+    for (const entry of DEFAULT_RISK_LIBRARY) {
+      for (const [field, text] of Object.entries(entry)) {
+        if (typeof text !== "string") continue;
+        const r = evaluateGuardrails({ text, phase: "input", modes: GUARDRAIL_DEFAULT_MODES, terms: {} });
+        if (r.findings.some((f) => f.action === "block")) blocked.push(`${entry.key}.${field}`);
+      }
+    }
+    expect(blocked).toEqual([]);
   });
 
   it("conversation compaction still works under the strict guardrail and fail-closed defaults", async () => {
