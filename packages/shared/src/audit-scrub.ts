@@ -153,10 +153,19 @@ function marker(rules: readonly string[], removed: string): string {
  * the string if the block is truncated. Extending a span the shared rule found
  * is not a second copy of the rule — there is still exactly one definition of
  * "this looks like a private key", and it is in `guardrails.ts`.
+ *
+ * The END pattern was `-----END\s+[A-Z0-9 ]*?PRIVATE…`, in which `\s+` and the
+ * label class both match a space, so `-----END ` followed by a long run of
+ * spaces backtracked in O(n²) (CodeQL js/polynomial-redos). Here the label must
+ * start with a non-space when present; any leading spaces it had are taken by
+ * `\s+` instead, so the language and every match are unchanged
+ * (`audit-scrub-redos.test.ts` checks against the old pattern) and each space
+ * is claimed by one quantifier only.
  */
-const PEM_END = /-----END\s+[A-Z0-9 ]*?PRIVATE\s+KEY(?:\s+BLOCK)?-----/g;
+const PEM_END = /-----END\s+(?:[A-Z0-9][A-Z0-9 ]*?)?PRIVATE\s+KEY(?:\s+BLOCK)?-----/g;
 
-function extendPemSpan(text: string, headerEnd: number): number {
+/** Exported for `audit-scrub-redos.test.ts`; not part of the package API. */
+export function extendPemSpan(text: string, headerEnd: number): number {
   PEM_END.lastIndex = headerEnd;
   const m = PEM_END.exec(text);
   return m ? m.index + m[0].length : text.length;
