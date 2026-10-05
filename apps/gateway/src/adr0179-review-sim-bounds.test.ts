@@ -262,6 +262,21 @@ describe("F1: the deadline bounds database work", () => {
       expect(res.statusCode, res.body).toBe(200);
       const body = res.json();
       expect(body.status).toBe("incomplete");
+      // the statement-timeout path answers the SAME shape as a deadline seen
+      // between rows (pinned in profile-shadow-history.test.ts as well)
+      expect(Object.keys(body).sort()).toEqual([
+        "capped",
+        "deadlineMs",
+        "detail",
+        "dryRun",
+        "evaluated",
+        "fidelity",
+        "scope",
+        "status",
+        "total",
+        "windowEnd",
+        "windowStart",
+      ]);
       expect(body.deadlineMs).toBe(400);
       expect(body.total).toBe(6);
       expect(body.evaluated).toBe(0);
