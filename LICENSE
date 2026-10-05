@@ -1,0 +1,41 @@
+RegulAIt — Proprietary License
+
+Copyright (c) 2026 the owner of the "dhruvmahendrapatel" GitHub account. All rights reserved.
+
+This repository and everything in it that is not third-party material (the "Software") — source code,
+documentation, designs, architecture decision records, product specifications, compliance content,
+tests, images and any other files — is proprietary and confidential to the copyright holder.
+
+NO LICENSE IS GRANTED. The Software is published for viewing only. Except where the copyright holder
+has given you separate, prior written permission, you may NOT, in whole or in part:
+
+  1. copy, reproduce, download for reuse, or mirror the Software;
+  2. modify, adapt, translate, or create derivative works based on the Software;
+  3. use, run, deploy, host, or offer the Software, or any derivative of it, for any purpose,
+     including internal, evaluation, commercial, or non-commercial use, or as a hosted or managed
+     service;
+  4. distribute, sublicense, sell, lease, lend, or otherwise make the Software available to others;
+  5. use the Software, its documentation, or its designs to build, train, or benchmark a competing
+     product or service, or as training data for any machine-learning model;
+  6. remove, obscure, or alter any copyright, trademark, or proprietary notice.
+
+Viewing or forking this repository on GitHub, where GitHub's Terms of Service permit it, grants no
+right to use, copy, modify, or distribute the Software beyond what those terms strictly require.
+
+"RegulAIt" and the RegulAIt logo are trademarks of the copyright holder; no right to use them is
+granted.
+
+Third-party components. Files and packages that originate from third parties remain under their own
+licenses. They are listed in the THIRD_PARTY.md files beside the code that uses them and in the
+package manifests and lockfile. This license does not restrict any right those licenses grant in
+the third-party material itself.
+
+Contributions. Nothing is accepted into this repository except from the copyright holder or from
+people working under a written agreement with the copyright holder. Any contribution submitted is
+assigned to, or exclusively licensed to, the copyright holder.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED. IN NO EVENT SHALL
+THE COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM, OUT OF, OR IN
+CONNECTION WITH THE SOFTWARE OR ANY UNAUTHORIZED USE OF IT.
+
+For permission or licensing enquiries, contact the copyright holder through the GitHub account above.
