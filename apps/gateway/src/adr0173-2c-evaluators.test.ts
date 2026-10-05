@@ -17,6 +17,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
+import Fastify from "fastify";
 import {
   and,
   auditLog,
@@ -87,11 +88,11 @@ vi.mock("@regulait/model-provider", async (importOriginal) => {
 });
 
 const { buildApp } = await import("./app.js");
-const { runEvalSuite, configChangeRerun } = await import("./evals.js");
+const { runEvalSuite, configChangeRerun, registerEvalRoutes } = await import("./evals.js");
 const { addTracesToDataset } = await import("./eval-dataset-sources.js");
 const { countTestedEvaluators, testedByForControls } = await import("./eval-catalog.js");
 const { runCollector } = await import("./compliance-packs.js");
-const { calibrateRunJudges } = await import("./eval-judge-calibration.js");
+const { calibrateRunJudges, calibrationLabelsFromAnnotations } = await import("./eval-judge-calibration.js");
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -654,6 +655,34 @@ describe("automatic re-run on a configuration change", () => {
     expect(await configRuns(base)).toHaveLength(2);
   });
 
+  it("a LEGACY pin (no stored config_hash) adopts today's hash on the first sweep without a run, then re-runs on a real change", async () => {
+    const agentId = await makeAgent(`e2c-cc-legacy-${tag}`);
+    const pinned = await pinnedBaseline(agentId);
+    // a pin made before migration 0149: no stored hash, and a snapshot that
+    // does not re-derive to today's hash (the burst this guards against)
+    await db.update(evalRuns).set({ configHash: null, systemPromptHash: "legacy-snapshot" }).where(eq(evalRuns.id, pinned.id));
+    const [legacy] = await db.select().from(evalRuns).where(eq(evalRuns.id, pinned.id));
+    expect(legacy!.configHash).toBeNull();
+    expect((await configChangeRerun(db, DATA_KEY, legacy!)).kind).toBe("none");
+    expect(await configRuns(legacy!)).toHaveLength(0);
+    const [adopted] = await db.select().from(evalRuns).where(eq(evalRuns.id, pinned.id));
+    expect(adopted!.configHash).toBe(pinned.configHash);
+    const audits = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.objectId, pinned.id), eq(auditLog.ruleId, "eval-config-hash-adopted")));
+    expect(audits).toHaveLength(1);
+    // a second sweep neither runs nor re-audits
+    expect((await configChangeRerun(db, DATA_KEY, adopted!)).kind).toBe("none");
+    expect(
+      await db.select().from(auditLog).where(and(eq(auditLog.objectId, pinned.id), eq(auditLog.ruleId, "eval-config-hash-adopted"))),
+    ).toHaveLength(1);
+    // a real change after adoption re-runs, once
+    await app.inject({ method: "POST", url: `/v1/agents/${agentId}/system-prompt`, headers: AUTH, payload: { systemPrompt: "legacy changed" } });
+    expect((await configChangeRerun(db, DATA_KEY, adopted!)).kind).toBe("ran");
+    expect(await configRuns(adopted!)).toHaveLength(1);
+  });
+
   it("is skipped, saying so, when the person who pinned the baseline is gone", async () => {
     const agentId = await makeAgent(`e2c-cc-gone-${tag}`);
     const pinner = await makeUser(`e2c-pinner-${tag}@example.com`, true);
@@ -899,7 +928,11 @@ describe("judge calibration", () => {
       return ids.slice(0, count).map((id, i) => {
         const even = judgePass(inputs.get(id)!);
         const human = i < flip ? !even : even;
-        return { subjectId: id, label: human ? "pass" : "fail", value: null, completed: true };
+        return {
+          subjectId: id,
+          criteria: [{ name: "verdict", kind: "label" as const, value: human ? "pass" : "fail", labels: ["pass", "fail"] }],
+          completed: true,
+        };
       });
     };
   }
@@ -907,8 +940,20 @@ describe("judge calibration", () => {
   let labelledIds: string[] = [];
 
   it("is 503 when no annotation-label source is wired (never invented agreement)", async () => {
-    const res = await app.inject({ method: "POST", url: `/v1/evals/runs/${runId}/calibration`, headers: adminAuth, payload: {} });
+    // the deployed app wires the annotation queues; a bare registration does not
+    const bare = Fastify();
+    bare.decorateRequest("authCtx");
+    bare.addHook("onRequest", async (req) => {
+      (req as unknown as { authCtx: unknown }).authCtx = { userId: adminId, isAdmin: true };
+    });
+    registerEvalRoutes(bare, db, { dataKey: DATA_KEY });
+    const res = await bare.inject({ method: "POST", url: `/v1/evals/runs/${runId}/calibration`, payload: {} });
     expect(res.statusCode).toBe(503);
+    await bare.close();
+    // wired, with no reviews yet: an honest "insufficient", not agreement
+    const wired = await app.inject({ method: "POST", url: `/v1/evals/runs/${runId}/calibration`, headers: adminAuth, payload: {} });
+    expect(wired.statusCode, wired.body).toBe(200);
+    expect(wired.json()).toMatchObject({ labelledResults: 0, combined: { status: "insufficient", kappa: null } });
   });
 
   it(`reports "insufficient" below 20 completed paired labels`, async () => {
@@ -952,6 +997,59 @@ describe("judge calibration", () => {
     // the always-yes judge agrees with chance only
     const yes = out.judges.find((j) => j.judge === "cal-yes")!.report;
     expect(yes.kappa === null || yes.kappa < even.kappa!).toBe(true);
+  });
+
+  /** the same humans as `labels(24)`, rating on a 1-5 rubric (5 = their pass,
+   * 1 = their fail) beside a tone label, through the REAL app.ts adapter */
+  function rubricReviews(extra: Array<{ name: string; kind: "label"; labels: string[] }> = []) {
+    const inputs = (globalThis as Record<string, unknown>).__e2cInputs as Map<string, string>;
+    return async (_kind: string, ids: string[]) =>
+      calibrationLabelsFromAnnotations(
+        ids.map((id) => ({
+          subjectId: id,
+          itemStatus: "completed" as const,
+          values: {
+            quality: judgePass(inputs.get(id)!) ? 5 : 1,
+            a_tone: "formal",
+            ...Object.fromEntries(extra.map((c) => [c.name, "pass"])),
+          },
+          criteria: [
+            { name: "a_tone", kind: "label" as const, labels: ["formal", "casual"] },
+            { name: "quality", kind: "score" as const, min: 1, max: 5 },
+            ...extra,
+          ],
+        })),
+      );
+  }
+  const calInput = { positiveLabels: ["pass"], negativeLabels: ["fail"], valueThreshold: 0.5 };
+
+  it("reads a 1-5 rubric score on its own scale: the worst rating is a fail and the best a pass", async () => {
+    const out = await calibrateRunJudges(db, { runId, labelsFor: rubricReviews(), input: calInput, actorUserId: adminId });
+    if (!out.ok) throw new Error(`${out.error}: ${out.detail}`);
+    // the humans agree with the even judge on every case: kappa 1, not inverted
+    const even = out.judges.find((j) => j.judge === "cal-even")!.report;
+    expect(even.status).toBe("reported");
+    expect(even.pairs).toBe(24);
+    expect(even.kappa).toBe(1);
+    expect(even.agreement).toBe(1);
+    expect(out.labelledResults).toBe(24);
+  });
+
+  it("with several candidate criteria and none named, answers ambiguous; a named criterion resolves it", async () => {
+    const two = rubricReviews([{ name: "verdict", kind: "label", labels: ["pass", "fail"] }, { name: "outcome", kind: "label", labels: ["pass", "fail"] }]);
+    const amb = await calibrateRunJudges(db, { runId, labelsFor: two, input: calInput, actorUserId: adminId });
+    expect(amb).toMatchObject({ ok: false, status: 422, error: "ambiguous_criterion" });
+    expect(!amb.ok && amb.detail).toMatch(/outcome, verdict/);
+    // naming the score criterion reads it, and it is the humans' real verdict
+    const named = await calibrateRunJudges(db, { runId, labelsFor: two, input: { ...calInput, criterion: "quality" }, actorUserId: adminId });
+    if (!named.ok) throw new Error(named.error);
+    expect(named.judges.find((j) => j.judge === "cal-even")!.report.kappa).toBe(1);
+    // a criterion no rubric has is refused, not silently empty
+    const unknown = await calibrateRunJudges(db, { runId, labelsFor: two, input: { ...calInput, criterion: "nope" }, actorUserId: adminId });
+    expect(unknown).toMatchObject({ ok: false, status: 422, error: "unknown_criterion" });
+    // and the route validates the name's shape
+    const bad = await app.inject({ method: "POST", url: `/v1/evals/runs/${runId}/calibration`, headers: adminAuth, payload: { criterion: "Not A Name" } });
+    expect(bad.statusCode).toBe(400);
   });
 
   it("is observe-only: the run, its results and its gate do not change", async () => {

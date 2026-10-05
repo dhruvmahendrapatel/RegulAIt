@@ -41,12 +41,16 @@ import {
   evalResults,
   evalRuns,
   inArray,
+  ORG_SETTINGS_ID,
+  orgSettings,
   traceScores,
   traceSpans,
   traces,
   webhookDeliveries,
   webhookSubscriptions,
 } from "@regulait/db";
+import { loadOrgSettings } from "./org-settings.js";
+import { calibrationLabelsFromAnnotations } from "./eval-judge-calibration.js";
 import { ANNOTATION_LIMITS, ANNOTATION_NOT_RETAINED, ANNOTATION_WITHHELD_MARKER } from "@regulait/shared";
 import { builderKit, type BuilderKit, type Person } from "./testing/builder-fixture.js";
 import { drainBackgroundWork } from "./background-work.js";
@@ -353,6 +357,99 @@ describe("no self-review", () => {
   });
 });
 
+describe("eval-result items (fix round A)", () => {
+  /** a dataset, one case (optionally built from a trace), a completed run and its result */
+  async function evalResultFixture(opts: { sourceTraceId?: string; initiator: string }) {
+    const [ds] = await k.db.insert(evalDatasets).values({ name: `annq-fa-${k.RUN}-${Math.random().toString(36).slice(2, 8)}` }).returning();
+    const [c] = await k.db
+      .insert(evalCases)
+      .values({ datasetId: ds!.id, datasetVersion: 1, input: `fix-a prompt ${LONG}`, sourceTraceId: opts.sourceTraceId ?? null })
+      .returning();
+    const [run] = await k.db
+      .insert(evalRuns)
+      .values({ datasetId: ds!.id, datasetVersion: 1, agentName: "a", trigger: "manual", status: "completed", initiatedByUserId: opts.initiator })
+      .returning();
+    const [res] = await k.db
+      .insert(evalResults)
+      .values({ runId: run!.id, caseId: c!.id, scorerKind: "contains", score: 1, passed: true, outputText: "fix-a output" })
+      .returning();
+    return {
+      resultId: res!.id,
+      cleanup: async () => {
+        await k.db.delete(evalRuns).where(eq(evalRuns.id, run!.id));
+        await k.db.delete(evalDatasets).where(eq(evalDatasets.id, ds!.id));
+      },
+    };
+  }
+
+  it("a case built from a trace makes that trace's person a subject user: they cannot review their own prompt", async () => {
+    const q = await mkQueue({});
+    const t = await mkTrace(rev1.id);
+    const f = await evalResultFixture({ sourceTraceId: t.traceId, initiator: admin.id });
+    try {
+      await enqueue(q.id, [{ kind: "eval_result", id: f.resultId }]);
+      const item = await itemOf(q.id, f.resultId);
+      expect([...item.subjectUserIds].sort()).toEqual([admin.id, rev1.id].sort());
+      const own = await submit(rev1, item.id, { values: { helpfulness: 5, verdict: "good" } });
+      expect(own.statusCode).toBe(403);
+      expect(own.json().error).toBe("self_review");
+      const inbox = (await k.req("GET", "/v1/annotations/inbox", rev1.auth)).json().items.map((i: { id: string }) => i.id);
+      expect(inbox).not.toContain(item.id);
+      expect((await submit(rev2, item.id, { values: { helpfulness: 5, verdict: "good" } })).statusCode).toBe(201);
+    } finally {
+      await f.cleanup();
+    }
+  });
+
+  it("with the org's content capture off, a non-admin reviewer sees the withheld marker for the case input and output", async () => {
+    const q = await mkQueue({});
+    const f = await evalResultFixture({ initiator: owner.id });
+    const prior = await loadOrgSettings(k.db);
+    try {
+      await enqueue(q.id, [{ kind: "eval_result", id: f.resultId }]);
+      const item = await itemOf(q.id, f.resultId);
+      // capture on: the cut preview
+      const on = (await k.req("GET", `/v1/annotations/items/${item.id}`, rev1.auth)).json().preview.evalResult;
+      expect(on.input.startsWith("fix-a prompt")).toBe(true);
+      expect(on.withheld).toBe(false);
+      await k.db.update(orgSettings).set({ tracingCaptureContent: false }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+      const off = await k.req("GET", `/v1/annotations/items/${item.id}`, rev1.auth);
+      expect(off.json().preview.evalResult).toMatchObject({ input: ANNOTATION_WITHHELD_MARKER, output: ANNOTATION_WITHHELD_MARKER, withheld: true });
+      expect(off.body).not.toContain("fix-a prompt");
+      expect(off.body).not.toContain("fix-a output");
+      // an admin keeps full access
+      const adm = (await k.req("GET", `/v1/annotations/items/${item.id}`, admin.auth)).json().preview.evalResult;
+      expect(adm.input.startsWith("fix-a prompt")).toBe(true);
+      expect(adm.output).toBe("fix-a output");
+    } finally {
+      await k.db.update(orgSettings).set({ tracingCaptureContent: prior.tracingCaptureContent }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+      await f.cleanup();
+    }
+  });
+
+  it("labels carry each criterion's bounds or allowed labels from the rubric version the review used", async () => {
+    const q = await mkQueue({});
+    const t = await mkTrace(owner.id);
+    await enqueue(q.id, [{ kind: "trace", id: t.traceId }]);
+    const item = await itemOf(q.id, t.traceId);
+    expect((await submit(rev1, item.id, { values: { helpfulness: 1, verdict: "bad" } })).statusCode).toBe(201);
+    // a later rubric version on another scale does not rewrite the earlier review's scale
+    const v2 = { criteria: [{ name: "helpfulness", kind: "score", min: 0, max: 10 }, { name: "verdict", kind: "label", labels: ["good", "bad", "meh"] }] };
+    expect((await k.req("PATCH", `/v1/annotation-queues/${q.id}`, admin.auth, { rubric: v2 })).statusCode).toBe(200);
+    const [l] = await annotationLabelsFor(k.db, { kind: "trace", ids: [t.traceId] });
+    expect(l!.criteria).toEqual([
+      { name: "helpfulness", kind: "score", min: 1, max: 5 },
+      { name: "verdict", kind: "label", labels: ["good", "bad"] },
+    ]);
+    // through the calibration adapter, a 1 on 1-5 is the bottom of the scale
+    const [cal] = calibrationLabelsFromAnnotations([l!]);
+    expect(cal!.criteria).toEqual([
+      { name: "helpfulness", kind: "score", value: 0, min: 1, max: 5 },
+      { name: "verdict", kind: "label", value: "bad", labels: ["good", "bad"] },
+    ]);
+  });
+});
+
 describe("N-person review", () => {
   it("needs distinct reviewers, completes only at N, records disagreement, and then is immutable", async () => {
     const q = await mkQueue({ requiredReviews: 2 });
@@ -462,6 +559,9 @@ describe("export", () => {
     expect(annotationCsvCell("@SUM(A1)")).toBe("'@SUM(A1)");
     expect(annotationCsvCell('-2,"x"')).toBe(`"'-2,""x"""`);
     expect(annotationCsvCell(-2)).toBe("-2");
+    // fix round A (csv-stringify): the full-width forms a spreadsheet also evaluates
+    expect(annotationCsvCell("＝1+1")).toBe("'＝1+1");
+    expect(annotationCsvCell(true)).toBe("true");
 
     const q = await mkQueue({});
     const t = await mkTrace(owner.id);

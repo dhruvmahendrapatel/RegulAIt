@@ -23,8 +23,9 @@
  * rationale, each text cut to ANNOTATION_LIMITS.previewChars) — and every read
  * is audited. Anyone else who is not an admin gets 403 and a deny audit row.
  * Admins keep full access (the stored previews and attributes). Nobody reviews
- * their own work: the trace's person and the run's initiator (captured at
- * enqueue in `subject_user_ids`) are refused at submit.
+ * their own work: the trace's person, the run's initiator and, for an eval
+ * case built from a trace, that source trace's person (captured at enqueue in
+ * `subject_user_ids`) are refused at submit.
  *
  * N-PERSON REVIEW. An item needs `required_reviews` DISTINCT reviewers and
  * completes exactly when the last one submits; a completed item is immutable.
@@ -38,16 +39,17 @@
  * comment. An eval result whose run was not traced has no trace to score.
  *
  * WITHHELD AND PRUNED. Content a block or the capture setting withheld shows
- * ANNOTATION_WITHHELD_MARKER, never the stored text. Items reference their
+ * ANNOTATION_WITHHELD_MARKER, never the stored text; with the org's capture
+ * setting off, a non-admin reviewer of an eval result sees the marker for the
+ * case input and output too, as a trace preview would hold no text. Items reference their
  * subject FK-free, so once the §8.3 prune or an erasure removes it the item
  * reads ANNOTATION_NOT_RETAINED and can no longer be reviewed.
  *
  * Open source first: zod (parsing), drizzle (SQL), the repo's csv-export.ts
  * streaming loop (reused for the export). The access rule, the rubric bounds,
  * N-person completion and the SLA sweep are governance logic, so none fits.
- * The CSV cell escape adds formula neutralisation (OWASP "CSV injection") to
- * the RFC 4180 quoting the other exports use; no CSV library is an approved
- * dependency for this batch, so none fits, because adding one is out of scope.
+ * CSV cells: `csv-stringify` (MIT) through the shared `csvRecord`, with
+ * formula neutralisation (OWASP "CSV injection").
  */
 import crypto from "node:crypto";
 import type { FastifyInstance } from "fastify";
@@ -95,6 +97,7 @@ import {
   annotationRubricSchema,
   annotationSubmissionSchema,
   checkSubmission,
+  csvRecord,
   tracePreview,
   type AnnotationRubric,
   type AnnotationSkipReason,
@@ -105,6 +108,7 @@ import { recordTraceScore } from "./trace-scores.js";
 import { enqueueWebhookEvent, kickWebhookDeliveries } from "./outbound-webhooks.js";
 import { csvBatchRows, csvMaxRows, resolveCsvWindow, streamCsv, type CsvStreamSpec } from "./csv-export.js";
 import { afterCursorDesc, atTextSql } from "./pagination.js";
+import { loadOrgSettings } from "./org-settings.js";
 
 const NIL_USER = "00000000-0000-0000-0000-000000000000";
 /** items one SLA pass marks breached */
@@ -234,6 +238,19 @@ async function resolveSubjects(db: Writer, subjects: readonly AnnotationSubject[
     ? await db.select({ id: evalRuns.id, initiator: evalRuns.initiatedByUserId }).from(evalRuns).where(inArray(evalRuns.id, evalRunIds))
     : [];
   const evalInitiatorById = new Map(evalInitiators.map((r) => [r.id, r.initiator]));
+  // an eval case built from a trace (`source_trace_id`) is that person's
+  // prompt, so they are a subject user of every result of it. A source trace
+  // the §8.3 prune or an erasure has already removed names nobody: the case
+  // row is FK-free and keeps no owner of its own.
+  const caseIds = uniq(resultRows.map((r) => r.caseId).filter((id): id is string => !!id));
+  const sourceRows = caseIds.length
+    ? await db
+        .select({ caseId: evalCases.id, userId: traces.userId })
+        .from(evalCases)
+        .innerJoin(traces, eq(traces.id, evalCases.sourceTraceId))
+        .where(inArray(evalCases.id, caseIds))
+    : [];
+  const sourceUserByCase = new Map(sourceRows.map((r) => [r.caseId, r.userId]));
 
   // orchestration runs under a trace -> their initiators
   const runRows = traceIds.length
@@ -278,7 +295,9 @@ async function resolveSubjects(db: Writer, subjects: readonly AnnotationSubject[
     out.set(subjectKey("eval_result", r.id), {
       traceId: t?.id ?? null,
       spanId: t && r.caseId ? (caseSpan.get(`${t.id}:${r.caseId}`) ?? null) : null,
-      userIds: uniq([r.initiator, t?.userId].filter((u): u is string => !!u)),
+      userIds: uniq(
+        [r.initiator, t?.userId, r.caseId ? sourceUserByCase.get(r.caseId) : null].filter((u): u is string => !!u),
+      ),
     });
   }
   return out;
@@ -439,8 +458,20 @@ export interface AnnotationLabel {
   reviewerUserId: string;
   /** criterion -> score or label; never the comment */
   values: Record<string, number | string>;
+  /**
+   * The criteria of the rubric version THIS review was made against: a score
+   * criterion's bounds, a label criterion's allowed labels. A consumer reads a
+   * score on its own scale (on a 1-5 rubric, 1 is the worst rating) and never
+   * has to guess which criterion means what. Empty only if that rubric version
+   * is missing.
+   */
+  criteria: AnnotationLabelCriterion[];
   submittedAt: string;
 }
+
+export type AnnotationLabelCriterion =
+  | { name: string; kind: "score"; min: number; max: number }
+  | { name: string; kind: "label"; labels: string[] };
 
 /**
  * Every recorded review of these subjects, oldest first. Comments are not
@@ -462,13 +493,28 @@ export async function annotationLabelsFor(
       rubricVersion: annotationSubmissions.rubricVersion,
       reviewerUserId: annotationSubmissions.reviewerUserId,
       values: annotationSubmissions.values,
+      rubric: annotationRubricVersions.rubric,
       createdAt: annotationSubmissions.createdAt,
     })
     .from(annotationSubmissions)
     .innerJoin(annotationItems, eq(annotationItems.id, annotationSubmissions.itemId))
+    .leftJoin(
+      annotationRubricVersions,
+      and(
+        eq(annotationRubricVersions.queueId, annotationItems.queueId),
+        eq(annotationRubricVersions.version, annotationSubmissions.rubricVersion),
+      ),
+    )
     .where(and(eq(annotationItems.subjectKind, input.kind), inArray(annotationItems.subjectId, ids)))
     .orderBy(asc(annotationSubmissions.createdAt), asc(annotationSubmissions.id));
-  return rows.map(({ createdAt, ...r }) => ({ ...r, submittedAt: createdAt.toISOString() }));
+  return rows.map(({ createdAt, rubric, ...r }) => ({
+    ...r,
+    criteria: ((rubric as AnnotationRubric | null)?.criteria ?? []).map(
+      (c): AnnotationLabelCriterion =>
+        c.kind === "score" ? { name: c.name, kind: "score", min: c.min, max: c.max } : { name: c.name, kind: "label", labels: [...c.labels] },
+    ),
+    submittedAt: createdAt.toISOString(),
+  }));
 }
 
 // ---------------------------------------------------------------------------
@@ -652,6 +698,13 @@ async function loadPreview(db: Db, item: AnnotationItemRow, full: boolean): Prom
       .where(and(eq(traceSpans.parentSpanId, item.spanId), eq(traceSpans.contentWithheld, true)));
     withheld = (w?.n ?? 0) > 0;
   }
+  // The org's tracing content capture is OFF: a trace preview of this case
+  // would hold no prompt text at all (the span never stored it), so a
+  // non-admin reviewer does not get the same text through the eval tables
+  // either. The case input and the stored output both read as withheld.
+  // Admins keep full access, as they do for everything else here.
+  const captureOff = !full && (await loadOrgSettings(db)).tracingCaptureContent === false;
+  if (captureOff) withheld = true;
   return {
     retained: true,
     note: null,
@@ -665,7 +718,7 @@ async function loadPreview(db: Db, item: AnnotationItemRow, full: boolean): Prom
       scorerKind: r.result.scorerKind,
       score: r.result.score,
       passed: r.result.passed,
-      input: cut(r.caseInput),
+      input: captureOff ? ANNOTATION_WITHHELD_MARKER : cut(r.caseInput),
       output: withheld ? ANNOTATION_WITHHELD_MARKER : cut(r.result.outputText),
       withheld,
       ...(full ? { judgeRationale: r.result.judgeRationale } : {}),
@@ -678,16 +731,12 @@ async function loadPreview(db: Db, item: AnnotationItemRow, full: boolean): Prom
 // ---------------------------------------------------------------------------
 
 /**
- * One CSV cell: RFC 4180 quoting, and a string that a spreadsheet would read
- * as a formula (leading = + - @ tab or CR) is prefixed with a single quote so
- * it opens as text (OWASP CSV injection). Numbers are written as numbers.
+ * One CSV cell: the shared `csvRecord` formatter (csv-stringify with
+ * `escape_formulas`: RFC 4180 quoting, and a string a spreadsheet would read
+ * as a formula opens as text; numbers are written as numbers).
  */
 export function annotationCsvCell(v: unknown): string {
-  if (v === null || v === undefined) return "";
-  if (typeof v === "number" || typeof v === "boolean") return String(v);
-  let s = typeof v === "object" ? JSON.stringify(v) : String(v);
-  if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
-  return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  return csvRecord([v]);
 }
 
 export const ANNOTATION_CSV_HEADER = [
@@ -1084,7 +1133,8 @@ export function registerAnnotationRoutes(app: FastifyInstance, db: Db, opts: { d
    * EXPORT. Ids, scores, labels and comments only — never a preview — one row
    * per (review, criterion), newest review first, through the repo's streaming
    * CSV loop (window and row ceiling disclosed). Every cell is escaped by
-   * `annotationCsvCell`, so a comment cannot become a spreadsheet formula.
+   * the shared `csvRecord` (csv-stringify, `escape_formulas`), so a comment
+   * cannot become a spreadsheet formula.
    * Audited before the first byte, so a broken download is still on record.
    */
   app.get("/v1/annotation-queues/:queueId/export", async (req, reply) => {
@@ -1153,9 +1203,9 @@ export function registerAnnotationRoutes(app: FastifyInstance, db: Db, opts: { d
           .filter((c) => r.sub.values[c.name] !== undefined)
           .map((c) => {
             const v = r.sub.values[c.name];
-            return [...base, c.name, c.kind === "score" ? v : null, c.kind === "label" ? v : null, r.sub.comment].map(annotationCsvCell).join(",");
+            return csvRecord([...base, c.name, c.kind === "score" ? v : null, c.kind === "label" ? v : null, r.sub.comment]);
           });
-        return lines.length ? lines.join("\r\n") : [...base, null, null, null, r.sub.comment].map(annotationCsvCell).join(",");
+        return lines.length ? lines.join("\r\n") : csvRecord([...base, null, null, null, r.sub.comment]);
       },
       hasRowsOutsideWindow: async () => {
         if (!win.from) return false;

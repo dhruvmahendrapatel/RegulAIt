@@ -1790,7 +1790,42 @@ export async function configChangeRerun(
   const [agent] = await db.select().from(agents).where(eq(agents.id, base.agentId));
   if (!agent) return { kind: "none" };
   const current = await agentConfigHash(db, agent as AgentRow);
-  if (current === runConfigHash(base)) return { kind: "none" };
+  // A LEGACY PIN (made before migration 0149 stored `config_hash`) has an
+  // UNKNOWN configuration hash, not a different one. Its snapshot columns do
+  // not say which ADR-0048 prompt version (or canary) it measured, so a hash
+  // re-derived from them would differ from today's for every such pin and
+  // re-run them all on the first sweep after deploy: a one-time burst of
+  // model calls reporting changes nobody made. Instead the first sweep ADOPTS
+  // the current hash as the pin's baseline hash, without a run, and audits
+  // that it did; a real change after that re-runs as usual. Why not a
+  // migration backfill: the hash needs the active/canary prompt version
+  // resolved in TypeScript and the same canonical JSON as `measuredConfigHash`,
+  // which SQL would have to re-implement, and it would record the same "now"
+  // anyway. The residual is disclosed in the audit row: a change made to a
+  // legacy-pinned agent BEFORE this sweep is not detected.
+  if (base.configHash === null) {
+    const adopted = await db
+      .update(evalRuns)
+      .set({ configHash: current })
+      .where(and(eq(evalRuns.id, base.id), isNull(evalRuns.configHash)))
+      .returning({ id: evalRuns.id });
+    if (adopted.length) {
+      await db.insert(auditLog).values({
+        userId: base.baselinePinnedByUserId ?? base.initiatedByUserId ?? "00000000-0000-0000-0000-000000000000",
+        objectType: "eval_run",
+        objectId: base.id,
+        detail: { phase: "config-hash-adopted", agentId: base.agentId, datasetId: base.datasetId, configHash: current },
+        effect: "allow",
+        ruleId: "eval-config-hash-adopted",
+        ruleChain: [],
+        reason:
+          `the pinned baseline ${base.id} predates stored configuration hashes, so its configuration was unknown; ` +
+          "the current configuration was adopted as its baseline without a re-run. A change made before this sweep is not detected.",
+      });
+    }
+    return { kind: "none" };
+  }
+  if (current === base.configHash) return { kind: "none" };
   const [already] = await db
     .select({ id: evalRuns.id })
     .from(evalRuns)

@@ -215,6 +215,28 @@ describe("ADR-0031: /v1/audit.csv streams in keyset batches", () => {
     expect(res.body.endsWith("\n")).toBe(true);
   });
 
+  it("neutralises a spreadsheet formula in any cell (CSV injection; ADR-0173 batch 2c fix round A)", async () => {
+    const marker = randomUUID().slice(0, 8);
+    await db.insert(auditLog).values({
+      ...auditRow(new Date()),
+      toolName: `=HYPERLINK("http://x.invalid/${marker}")`,
+      ruleId: `@csv-inject-${marker}`,
+      reason: `+cmd|' /C calc'!A0 ${marker}`,
+      detail: { note: "-not a formula inside JSON" },
+    });
+    const res = await app.inject({ method: "GET", headers: AUTH, url: `/v1/audit.csv?userId=${userId}` });
+    expect(res.statusCode).toBe(200);
+    const line = res.body.split("\n").find((l) => l.includes(`csv-inject-${marker}`))!;
+    expect(line).toBeDefined();
+    expect(line).toContain(`,"'=HYPERLINK(""http://x.invalid/${marker}"")",`);
+    expect(line).toContain(`,'@csv-inject-${marker},`);
+    expect(line).toContain(`,'+cmd|' /C calc'!A0 ${marker},`);
+    // no cell of the row starts with a formula trigger
+    expect(line.split(",").some((c) => /^"?[=+@]/.test(c))).toBe(false);
+    // an object is still its JSON, quoted
+    expect(line.endsWith(`"{""note"":""-not a formula inside JSON""}"`)).toBe(true);
+  });
+
   it("stays admin-only", async () => {
     const anon = await app.inject({ method: "GET", url: "/v1/audit.csv" });
     expect(anon.statusCode).toBe(401);

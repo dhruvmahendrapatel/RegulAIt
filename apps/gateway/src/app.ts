@@ -125,6 +125,8 @@ import {
   /** B9b — the ten kinds the one queue holds; the `objectType` filter's enum */
   APPROVAL_OBJECT_TYPES,
   type AuthzDecision,
+  // ADR-0173 batch 2c fix round A: the audit-log CSV row formatter
+  csvRecord,
 } from "@regulait/shared";
 import { governedEvaluate } from "./governed-evaluate.js";
 import { refuseMcpServerWrite } from "./mcp-egress.js";
@@ -345,6 +347,7 @@ import {
 } from "./prompt-registry.js";
 import { registerOutboundWebhookRoutes } from "./outbound-webhooks.js";
 import { annotationLabelsFor, registerAnnotationRoutes } from "./annotations.js";
+import { calibrationLabelsFromAnnotations } from "./eval-judge-calibration.js";
 // ADR-0173 batch 2c (K)
 import { registerKriRoutes } from "./kri.js";
 import { registerDashboardRoutes } from "./dashboards.js";
@@ -4121,27 +4124,16 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // caller's own agent entitlement, checked inside the runner exactly as an
   // invoke would check it.
   // ADR-0173 batch 2c: judge calibration reads human labels from annotation
-  // queues (eval-result items). One reviewer's submission becomes one label:
-  // its first label-criterion value (by criterion name) and its first score
-  // that is already on a 0..1 scale. Calibration's own positive / negative
-  // label lists and threshold decide pass or fail; a score on another scale is
-  // not guessed at.
+  // queues (eval-result items). One reviewer's submission becomes one label
+  // carrying every criterion they answered, read against the rubric version
+  // they used: a score is normalised onto 0..1 by THAT rubric's bounds
+  // ((v - min) / (max - min), so on a 1-5 rubric a 1 is 0 and fails), and a
+  // label keeps the rubric's allowed labels. Which criterion carries the
+  // verdict is calibration's decision (the one the request names, else the
+  // single qualifying one, else "ambiguous"), never this adapter's.
   registerEvalRoutes(app, db, {
     dataKey: opts.dataKey,
-    labelsFor: async (kind, ids) => {
-      const labels = await annotationLabelsFor(db, { kind, ids });
-      return labels.map((l) => {
-        const entries = Object.entries(l.values).sort(([a], [b]) => a.localeCompare(b));
-        const label = entries.find(([, v]) => typeof v === "string")?.[1];
-        const value = entries.find(([, v]) => typeof v === "number" && v >= 0 && v <= 1)?.[1];
-        return {
-          subjectId: l.subjectId,
-          label: typeof label === "string" ? label : null,
-          value: typeof value === "number" ? value : null,
-          completed: l.itemStatus === "completed",
-        };
-      });
-    },
+    labelsFor: async (kind, ids) => calibrationLabelsFromAnnotations(await annotationLabelsFor(db, { kind, ids })),
   });
   // ADR-0045 — the model risk management registry: model cards, the
   // recertification chain, evidence links onto ADR-0044 eval runs, the expiry
@@ -4646,11 +4638,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       for (const id of missing) if (!nameOf.has(id)) nameOf.set(id, "");
     };
 
-    const csvCell = (v: unknown): string => {
-      if (v === null || v === undefined) return "";
-      const s = typeof v === "object" ? JSON.stringify(v) : String(v);
-      return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-    };
+    // ADR-0173 batch 2c fix round A: rows are formatted by the shared
+    // `csvRecord` (csv-stringify, `escape_formulas`), so a reason or detail
+    // that starts with = + - @ opens as text, never as a spreadsheet formula.
 
     // filename names every filter that shaped the file, so two downloads taken
     // with different filters never collide in a downloads folder
@@ -4683,7 +4673,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       },
       cursorOf: (r) => ({ at: r.atText, id: r.id }),
       renderRow: (r) =>
-        [
+        csvRecord([
           r.at.toISOString(),
           r.userId,
           nameOf.get(r.userId) ?? "",
@@ -4696,9 +4686,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           r.deployMode ?? "unknown",
           r.reason,
           r.detail,
-        ]
-          .map(csvCell)
-          .join(","),
+        ]),
       hasRowsOutsideWindow: async () => {
         if (!win.from) return false;
         // the SAME filters with the window inverted — the disclosure must speak

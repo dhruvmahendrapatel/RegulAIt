@@ -13,6 +13,15 @@
  * integrator wires to Q's `annotationLabelsFor`, and tests pass a fake. With
  * nothing wired, the route answers 503 rather than inventing agreement.
  *
+ * WHICH CRITERION. A rubric can have several criteria on different scales. Each
+ * label carries its review's criteria (a score already normalised by its
+ * rubric's bounds, a label with the rubric's allowed labels), and
+ * `chooseCalibrationCriterion` picks the one that says pass or fail: the one
+ * the request names, else the single label criterion whose labels are in the
+ * request's positive or negative lists, else the single score criterion.
+ * Several candidates with none named is 422 `ambiguous_criterion`, never a
+ * guess; a named criterion no labelled rubric has is 422 `unknown_criterion`.
+ *
  * OBSERVE-ONLY. Calibration reads; it never writes a run, a result or a gate.
  * The response carries the run's gate verdict unchanged so a reader can see it
  * did not move, and the only write is the audit row of the read.
@@ -29,9 +38,12 @@ import {
   type Db,
 } from "@regulait/db";
 import {
+  chooseCalibrationCriterion,
   humanVerdict,
   isJudgeBackedScorer,
   kappaReport,
+  normaliseRubricScore,
+  type CalibrationCriterionValue,
   type JudgeCalibrationInput,
   type KappaReport,
 } from "@regulait/shared";
@@ -39,19 +51,50 @@ import {
 /** the subjects an annotation can be about (Q's item kinds) */
 export type AnnotationSubjectKind = "trace" | "span" | "eval_result";
 
-/** one human label on one subject */
+/** one human review of one subject */
 export interface AnnotationLabel {
   subjectId: string;
-  /** the rubric label, when the rubric has labels */
-  label: string | null;
-  /** the rubric score, when the rubric has scores (0..1) */
-  value: number | null;
+  /** every criterion the reviewer answered, from the rubric version they used:
+   * scores normalised onto 0..1 by that rubric's bounds, labels with the
+   * rubric's allowed labels */
+  criteria: CalibrationCriterionValue[];
   /** only a COMPLETED annotation item counts as a paired label */
   completed: boolean;
 }
 
 /** injected; the integrator wires it to Q's `annotationLabelsFor` */
 export type AnnotationLabelsFor = (kind: AnnotationSubjectKind, ids: string[]) => Promise<AnnotationLabel[]>;
+
+/** the part of Q's `AnnotationLabel` the adapter reads (structural, so this
+ * module still does not import the annotation queues) */
+export interface ReviewedAnnotation {
+  subjectId: string;
+  itemStatus: "open" | "completed";
+  values: Record<string, number | string>;
+  criteria: Array<{ name: string; kind: "score"; min: number; max: number } | { name: string; kind: "label"; labels: string[] }>;
+}
+
+/**
+ * THE ADAPTER app.ts wires between Q's `annotationLabelsFor` and calibration.
+ * Each answered criterion is read against the rubric version the review used:
+ * a score is normalised by that rubric's bounds, (v − min) / (max − min), so
+ * on a 1–5 rubric the worst rating is 0 and the best is 1; a label keeps the
+ * rubric's allowed labels. It does not choose a criterion; calibration does.
+ */
+export function calibrationLabelsFromAnnotations(reviews: readonly ReviewedAnnotation[]): AnnotationLabel[] {
+  return reviews.map((l) => ({
+    subjectId: l.subjectId,
+    completed: l.itemStatus === "completed",
+    criteria: l.criteria.flatMap((c): CalibrationCriterionValue[] => {
+      const v = l.values[c.name];
+      if (c.kind === "score") {
+        const value = typeof v === "number" ? normaliseRubricScore(v, c.min, c.max) : null;
+        return value === null ? [] : [{ name: c.name, kind: "score", value, min: c.min, max: c.max }];
+      }
+      return typeof v === "string" ? [{ name: c.name, kind: "label", value: v, labels: c.labels }] : [];
+    }),
+  }));
+}
 
 export interface JudgeCalibration {
   judge: string;
@@ -78,23 +121,53 @@ export type CalibrationOutcome =
 /**
  * One human verdict per subject: the majority of its completed labels. A tie
  * is a disagreement between reviewers, so the subject has no single human
- * verdict and is not paired.
+ * verdict and is not paired. Refuses (rather than guesses) when the criterion
+ * to read is ambiguous or the named one is in no labelled rubric.
  */
-function consolidate(labels: AnnotationLabel[], opts: JudgeCalibrationInput): Map<string, "pass" | "fail"> {
+function consolidate(
+  labels: AnnotationLabel[],
+  opts: JudgeCalibrationInput,
+): { ok: true; human: Map<string, "pass" | "fail"> } | { ok: false; status: number; error: string; detail: string } {
   const votes = new Map<string, { pass: number; fail: number }>();
-  for (const l of labels) {
-    if (!l.completed) continue;
-    const v = humanVerdict(l, opts);
+  const ambiguous = new Set<string>();
+  const completed = labels.filter((l) => l.completed);
+  if (opts.criterion !== undefined && completed.length > 0 && !completed.some((l) => l.criteria.some((c) => c.name === opts.criterion))) {
+    const known = [...new Set(completed.flatMap((l) => l.criteria.map((c) => c.name)))].sort();
+    return {
+      ok: false,
+      status: 422,
+      error: "unknown_criterion",
+      detail: `no rubric these labels were made against has a criterion "${opts.criterion}"; its criteria are: ${known.join(", ") || "(none)"}`,
+    };
+  }
+  for (const l of completed) {
+    const choice = chooseCalibrationCriterion(l.criteria, opts);
+    if (choice.status === "ambiguous") {
+      for (const c of choice.candidates) ambiguous.add(c);
+      continue;
+    }
+    if (choice.status !== "chosen") continue;
+    const v = humanVerdict(choice, opts);
     if (!v) continue;
     const t = votes.get(l.subjectId) ?? { pass: 0, fail: 0 };
     t[v] += 1;
     votes.set(l.subjectId, t);
   }
+  if (ambiguous.size > 0) {
+    return {
+      ok: false,
+      status: 422,
+      error: "ambiguous_criterion",
+      detail:
+        `more than one rubric criterion could carry the human verdict (${[...ambiguous].sort().join(", ")}); ` +
+        "name one with `criterion` rather than have calibration guess",
+    };
+  }
   const out = new Map<string, "pass" | "fail">();
   for (const [id, t] of votes) {
     if (t.pass !== t.fail) out.set(id, t.pass > t.fail ? "pass" : "fail");
   }
-  return out;
+  return { ok: true, human: out };
 }
 
 export async function calibrateRunJudges(
@@ -137,10 +210,12 @@ export async function calibrateRunJudges(
     "eval_result",
     results.map((r) => r.id),
   );
-  const human = consolidate(
+  const consolidated = consolidate(
     labels.filter((l) => results.some((r) => r.id === l.subjectId)),
     args.input,
   );
+  if (!consolidated.ok) return consolidated;
+  const human = consolidated.human;
 
   // per judge: its pass/fail per case — the majority over repetitions (a tie,
   // or every repetition failing to produce a verdict, is no verdict)
@@ -209,6 +284,7 @@ export async function calibrateRunJudges(
       labelledResults: human.size,
       judges: judges.map((j) => ({ judge: j.judge, status: j.report.status, pairs: j.report.pairs, kappa: j.report.kappa })),
       combined: { status: combined.status, pairs: combined.pairs, kappa: combined.kappa },
+      criterion: args.input.criterion ?? null,
       observeOnly: true,
     },
     effect: "allow",

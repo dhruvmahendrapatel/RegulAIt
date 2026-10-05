@@ -4290,3 +4290,12 @@ export {
   type AutomationRuleCreate,
   type AutomationRuleUpdate,
 } from "./automation-rules.js";
+// ADR-0173 batch 2c fix round A: the one CSV record formatter (csv-stringify, escape_formulas)
+export { csvRecord } from "./reporting.js";
+// ADR-0173 batch 2c fix round A: calibration reads the right rubric criterion on its own scale
+export {
+  chooseCalibrationCriterion,
+  normaliseRubricScore,
+  type CalibrationCriterionChoice,
+  type CalibrationCriterionValue,
+} from "./judge-panels.js";
