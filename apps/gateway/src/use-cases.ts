@@ -149,7 +149,7 @@ import {
   reviewsForInstance,
 } from "./review-policy.js";
 // ADR-0180 A2: a measured condition is closed only by passing evidence
-import { measureAssuranceMetric, specOf, useCaseScope } from "./condition-metrics.js";
+import { specOf, storedMeasurement } from "./condition-metrics.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 const useCaseIdParam = z.object({ useCaseId: z.string().uuid() });
@@ -2244,18 +2244,20 @@ export function registerUseCaseRoutes(
     // ADR-0180 A2: ONLY PASSING EVIDENCE CLOSES A MEASURED CONDITION. A metric,
     // test-class or autonomy-floor condition is never marked met by hand: while
     // its evidence does not pass, the refusal says so; when it does, the
-    // evaluator (scheduled, or an admin's "evaluate now") closes it.
+    // evaluator (scheduled, or an admin's "evaluate now") closes it. The
+    // refusal reads the STORED evaluation and measures nothing: a refusal is
+    // never a way to make the gateway scan the ledgers on demand.
     if (cond.kind !== "manual") {
-      const spec = specOf(cond);
-      const m = spec ? await measureAssuranceMetric(db, spec, useCaseScope(uc), new Date()) : null;
+      const m = storedMeasurement(cond);
       if (!m || m.state !== "pass") {
         return reply.status(422).send({
           error: "condition_evidence_failing",
           kind: cond.kind,
           state: m?.state ?? "not_run",
           measurement: m,
+          evaluatedAt: cond.lastEvaluatedAt ? cond.lastEvaluatedAt.toISOString() : null,
           detail:
-            "a measured condition is closed only by passing evidence, and its evidence does not pass " +
+            "a measured condition is closed only by passing evidence, and its last evaluation does not pass " +
             `(${m?.state.replace("_", " ") ?? "not run"}); it cannot be marked met by hand`,
         });
       }

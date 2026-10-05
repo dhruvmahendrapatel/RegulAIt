@@ -13,6 +13,20 @@
  *    `condition_not_manual` once it passes; nothing is written.
  *  - TWO BREACHES BEFORE REOPEN: `on_breach = reopen_review` re-opens review on
  *    the SECOND consecutive breach, not the first.
+ *  - REOPEN AT OR PAST THE THRESHOLD (FA2 finding 1): a successful reopen
+ *    resets the streak, so a re-approved use case that keeps failing re-opens
+ *    again; a streak reached while the use case is not approved is audited
+ *    once and kept, and the first breach after re-approval re-opens it.
+ *  - ONE COUNT PER CADENCE WINDOW (FA2 finding 5): two evaluations inside one
+ *    window add one breach, not two, and do not move the window anchor.
+ *  - NO PARTIAL PASS (FA2 finding 2): red-team and eval metrics read only the
+ *    use case's own agents, judged on the WEAKEST agent (worst value, smallest
+ *    sample count), and an in-scope agent that measured nothing makes the
+ *    result insufficient.
+ *  - STORED READS (FA2 finding 6): the monitor and the manual `/met` refusal
+ *    read the persisted evaluation; neither measures the ledgers live.
+ *  - SCRUB GROWTH (FA2 finding 7a): a waiver reason that the credential scrub
+ *    lengthens past the store's limit is a 422, not a 500.
  *  - WAIVER: admin-only, reason required and prose-scrubbed, stamps met_at and
  *    waived_*, audited; the verdict reads `waived`, never a pass.
  *  - SPEND READS usage_events, not trace cost.
@@ -27,15 +41,20 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  agents,
   aiUseCases,
   and,
   approvals,
   auditLog,
   createDb,
   eq,
+  evalDatasets,
+  evalRuns,
   governanceAlerts,
   inArray,
   projects,
+  redteamLibraries,
+  redteamRuns,
   runMigrations,
   sql,
   traceEvaluations,
@@ -49,6 +68,7 @@ import { measurementStateFor, renderEuAiActAnswersBlock, type EuAiActAnswers } f
 import { buildApp } from "./app.js";
 import {
   conditionMetricsMonitorInput,
+  evaluateConditionsDetailed,
   evaluateUseCaseConditions,
   measureAssuranceMetric,
   runConditionEvaluationSweep,
@@ -69,6 +89,10 @@ let db: Db;
 let app: ReturnType<typeof buildApp>;
 const useCaseIds: string[] = [];
 const projectIds: string[] = [];
+const agentIds: string[] = [];
+const datasetIds: string[] = [];
+const libraryIds: string[] = [];
+const DATA_KEY = "a".repeat(64);
 
 const answers: EuAiActAnswers = {
   purposeDomain: "general-business",
@@ -178,10 +202,15 @@ async function conditionsOf(useCaseId: string) {
 const evaluateNow = (useCaseId: string, conditionId: string, who: Who = "admin") =>
   post(`/v1/use-cases/${useCaseId}/conditions/${conditionId}/evaluate`, users[who].auth, {});
 
+/** a persisted evaluation at a chosen moment (what the route and the sweep do, with the clock moved) */
+const evaluateAt = (useCaseId: string, at: Date) =>
+  evaluateConditionsDetailed(db, useCaseId, at, { persist: true, dataKey: DATA_KEY });
+const HOUR = 3600_000;
+
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
-  app = buildApp(db, { bootstrapToken: BOOT, dataKey: "a".repeat(64) });
+  app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   for (const [k, isAdmin] of [["admin", true], ["owner", false], ["member", false]] as const) {
     const name = `a2c ${k} ${RUN}`;
     const u = await post("/v1/users", AUTH, { email: `a2c-${k}-${RUN}@example.com`, displayName: name, isAdmin });
@@ -201,6 +230,13 @@ afterAll(async () => {
       .where(sql`${governanceAlerts.ruleId} = 'condition_metric_breached' and (${sql.join(useCaseIds.map((id) => sql`${governanceAlerts.subjectKey} like ${`use_case:${id}>%`}`), sql` or `)})`);
     await db.update(aiUseCases).set({ projectId: null }).where(inArray(aiUseCases.id, useCaseIds));
   }
+  if (agentIds.length) {
+    await db.delete(redteamRuns).where(inArray(redteamRuns.agentId, agentIds));
+    await db.delete(evalRuns).where(inArray(evalRuns.agentId, agentIds));
+    await db.delete(agents).where(inArray(agents.id, agentIds));
+  }
+  if (libraryIds.length) await db.delete(redteamLibraries).where(inArray(redteamLibraries.id, libraryIds));
+  if (datasetIds.length) await db.delete(evalDatasets).where(inArray(evalDatasets.id, datasetIds));
   if (projectIds.length) {
     await db.delete(traces).where(inArray(traces.projectId, projectIds));
     await db.delete(usageEvents).where(inArray(usageEvents.projectId, projectIds));
@@ -315,11 +351,26 @@ describe("a manual /met on a measured condition is refused", () => {
     expect(r.statusCode, r.body).toBe(422);
     expect(r.json()).toMatchObject({ error: "condition_evidence_failing", state: "not_run" });
 
+    // FA2 finding 6: the refusal reads the STORED evaluation and measures
+    // nothing — new traffic is invisible to it until an evaluation runs
     await addTraces(uc.projectId, 1, 2);
     r = await met({ note: "errors are fine really" });
+    expect(r.json()).toMatchObject({ error: "condition_evidence_failing", state: "not_run", measurement: null });
+    await evaluateNow(uc.id, cond!.id);
+    r = await met({ note: "errors are fine really" });
+    expect(r.json()).toMatchObject({ error: "condition_evidence_failing", state: "insufficient", measurement: { samples: 3 } });
+
+    // passing traffic the evaluator has not read yet does not change the answer
+    await addTraces(uc.projectId, 200, 0);
+    r = await met({ note: "now it passes" });
     expect(r.json()).toMatchObject({ error: "condition_evidence_failing", state: "insufficient" });
 
-    await addTraces(uc.projectId, 200, 0);
+    // a stored pass on a still-open condition (as a non-metric owner may
+    // record it): the evaluator closes it, never a person
+    await db
+      .update(useCaseConditions)
+      .set({ lastState: "pass", lastValue: 1, lastSamples: 203, lastEvaluatedAt: new Date() })
+      .where(eq(useCaseConditions.id, cond!.id));
     r = await met({ note: "now it passes" });
     expect(r.statusCode).toBe(422);
     expect(r.json()).toMatchObject({ error: "condition_not_manual", state: "pass" });
@@ -343,14 +394,17 @@ describe("on_breach = reopen_review: two consecutive breaches, not one", () => {
     expect((await ucRow(uc.id)).status).toBe("approved");
     expect(await auditFor(uc.id, "use-case-condition-breach-reopened")).toHaveLength(0);
 
-    const second = await evaluateNow(uc.id, cond!.id);
-    expect(second.json()).toMatchObject({ verdict: { state: "fail" }, reopened: true });
-    expect((await condRow(cond!.id)).consecutiveBreaches).toBe(2);
+    // the next cadence window (hourly)
+    const second = await evaluateAt(uc.id, new Date(Date.now() + HOUR));
+    expect(second).toMatchObject({ reopened: true, reopenSkipped: null });
+    expect(second.verdicts[0]).toMatchObject({ state: "fail", consecutiveBreaches: 2 });
+    // the reopen answers the streak: it starts again (FA2 finding 1)
+    expect((await condRow(cond!.id)).consecutiveBreaches).toBe(0);
     const after = await ucRow(uc.id);
     expect(after).toMatchObject({ status: "under_review", recertification: false });
     const reopened = await auditFor(uc.id, "use-case-condition-breach-reopened");
     expect(reopened).toHaveLength(1);
-    expect(reopened[0]!.detail).toMatchObject({ conditionId: cond!.id, consecutiveBreaches: 2, from: "approved", to: "under_review" });
+    expect(reopened[0]!.detail).toMatchObject({ conditionId: cond!.id, consecutiveBreaches: 2, streakReset: true, from: "approved", to: "under_review" });
     // the intake instance is waiting on a new sign-off
     expect((await pendingSignoffs(uc.instanceId)).length).toBeGreaterThan(0);
   }, 120_000);
@@ -359,14 +413,15 @@ describe("on_breach = reopen_review: two consecutive breaches, not one", () => {
     const uc = await propose("streak");
     await approveWith(uc.instanceId, [errorRateCondition({ blocking: false, minSamples: 5, onBreach: "reopen_review", cadence: "hourly" })]);
     const [cond] = await conditionsOf(uc.id);
+    const t0 = Date.now();
     await addTraces(uc.projectId, 5, 5);
-    await evaluateNow(uc.id, cond!.id);
+    await evaluateAt(uc.id, new Date(t0));
     expect((await condRow(cond!.id)).consecutiveBreaches).toBe(1);
     await addTraces(uc.projectId, 500, 0); // 5 errors over 510: below 5 %
-    await evaluateNow(uc.id, cond!.id);
+    await evaluateAt(uc.id, new Date(t0 + HOUR));
     expect((await condRow(cond!.id)).consecutiveBreaches).toBe(0);
     await addTraces(uc.projectId, 0, 100);
-    await evaluateNow(uc.id, cond!.id);
+    await evaluateAt(uc.id, new Date(t0 + 2 * HOUR));
     expect((await condRow(cond!.id)).consecutiveBreaches).toBe(1);
     expect((await ucRow(uc.id)).status).toBe("approved");
   }, 120_000);
@@ -385,7 +440,9 @@ describe("after go-live: a met condition that breaches keeps its history and rai
     await addTraces(uc.projectId, 0, 10);
     const r = await evaluateNow(uc.id, cond!.id);
     expect(r.json().verdict).toMatchObject({ state: "fail", status: "met" });
-    expect(await condRow(cond!.id)).toMatchObject({ status: "met", metAt, lastState: "fail", consecutiveBreaches: 1 });
+    // a forced re-evaluation inside the daily window refreshes the reading
+    // (the monitor raises it) but does not count toward the streak
+    expect(await condRow(cond!.id)).toMatchObject({ status: "met", metAt, lastState: "fail", consecutiveBreaches: 0 });
     expect((await auditFor(uc.id, "use-case-condition-evaluated")).some((a) => (a.detail as { to?: string }).to === "fail")).toBe(true);
 
     const input = await conditionMetricsMonitorInput(db, new Date());
@@ -534,5 +591,272 @@ describe("the scheduler job", () => {
     // a day later it is, and the evaluator closes it
     await runConditionEvaluationSweep(db, { now: new Date(now.getTime() + 86_400_000) });
     expect(await condRow(cond!.id)).toMatchObject({ status: "met", lastState: "pass" });
+  }, 120_000);
+});
+
+// ---------------------------------------------------------------------------
+// FA2 review fixes (ADR-0180 D3 security review, findings 1, 2, 5, 6, 7a)
+// ---------------------------------------------------------------------------
+
+describe("FA2 finding 1: reopen fires at OR past the threshold, and again after re-approval", () => {
+  it("resets the streak on reopen; a streak reached while not approved is audited once and kept; the next breach after re-approval re-opens", async () => {
+    const uc = await propose("re-reopen");
+    await approveWith(uc.instanceId, [errorRateCondition({ blocking: false, minSamples: 5, onBreach: "reopen_review", cadence: "hourly" })]);
+    const [cond] = await conditionsOf(uc.id);
+    await addTraces(uc.projectId, 5, 5); // 50 % errors, and they stay
+    const t0 = Date.now();
+    const at = (h: number) => new Date(t0 + h * HOUR);
+
+    expect((await evaluateAt(uc.id, at(0))).reopened).toBe(false);
+    expect((await evaluateAt(uc.id, at(1))).reopened).toBe(true);
+    expect(await condRow(cond!.id)).toMatchObject({ consecutiveBreaches: 0 });
+    expect((await ucRow(uc.id)).status).toBe("under_review");
+
+    // still breaching while back in review: the streak builds, and reaching
+    // the threshold with no approval to re-open is audited — once per streak
+    expect((await evaluateAt(uc.id, at(2))).reopenSkipped).toBeNull();
+    const reached = await evaluateAt(uc.id, at(3));
+    expect(reached).toMatchObject({ reopened: false, reopenSkipped: "use_case_not_approved" });
+    await evaluateAt(uc.id, at(4));
+    expect(await condRow(cond!.id)).toMatchObject({ consecutiveBreaches: 3 });
+    const skipped = (await auditFor(uc.id, "use-case-condition-reopen-skipped")).filter(
+      (a) => (a.detail as { conditionId?: string }).conditionId === cond!.id,
+    );
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]!.detail).toMatchObject({
+      actor: "system:condition-evaluator",
+      reason: "use_case_not_approved",
+      useCaseStatus: "under_review",
+      consecutiveBreaches: 2,
+    });
+
+    // re-approved with the metric still failing: the very next breach re-opens
+    await approveWith(uc.instanceId, []);
+    expect((await ucRow(uc.id)).status).toBe("approved");
+    const again = await evaluateAt(uc.id, at(5));
+    expect(again).toMatchObject({ reopened: true, reopenSkipped: null });
+    expect((await ucRow(uc.id)).status).toBe("under_review");
+    expect(await auditFor(uc.id, "use-case-condition-breach-reopened")).toHaveLength(2);
+    expect(await condRow(cond!.id)).toMatchObject({ consecutiveBreaches: 0 });
+  }, 180_000);
+});
+
+describe("FA2 finding 5: one breach per cadence window", () => {
+  it("two quick evaluations of one data window add ONE breach, keep the window anchor, and do not re-open review", async () => {
+    const uc = await propose("idempotent");
+    await approveWith(uc.instanceId, [errorRateCondition({ blocking: false, minSamples: 5, onBreach: "reopen_review", cadence: "hourly" })]);
+    const [cond] = await conditionsOf(uc.id);
+    await addTraces(uc.projectId, 5, 5);
+
+    const first = await evaluateNow(uc.id, cond!.id);
+    expect(first.json()).toMatchObject({ verdict: { state: "fail" }, reopened: false });
+    const anchor = (await condRow(cond!.id)).lastEvaluatedAt;
+    expect(anchor).not.toBeNull();
+
+    // more breaching traffic, evaluated again inside the same hour
+    await addTraces(uc.projectId, 0, 10);
+    const second = await evaluateNow(uc.id, cond!.id);
+    expect(second.json()).toMatchObject({ verdict: { state: "fail" }, reopened: false });
+    const row = await condRow(cond!.id);
+    expect(row.consecutiveBreaches).toBe(1);
+    expect(row.lastEvaluatedAt?.toISOString()).toBe(anchor!.toISOString());
+    // the reading itself is refreshed: 15 errors over 20 traces
+    expect(row).toMatchObject({ lastState: "fail", lastSamples: 20, lastValue: 75 });
+    expect((await ucRow(uc.id)).status).toBe("approved");
+
+    // the next window counts: the second breach, and the reopen
+    const next = await evaluateAt(uc.id, new Date(anchor!.getTime() + HOUR));
+    expect(next.verdicts[0]).toMatchObject({ state: "fail", consecutiveBreaches: 2 });
+    expect(next.reopened).toBe(true);
+  }, 120_000);
+});
+
+describe("FA2 finding 2: partial evidence never passes", () => {
+  const ago = (ms: number) => new Date(Date.now() - ms);
+  async function agent(label: string) {
+    const [a] = await db.insert(agents).values({ name: `a2c-agent-${label}-${RUN}`, provider: "synthetic", tier: 1 }).returning({ id: agents.id });
+    agentIds.push(a!.id);
+    return a!.id;
+  }
+  async function dataset() {
+    const [ds] = await db.insert(evalDatasets).values({ name: `a2c-ds-${RUN}-${datasetIds.length}` }).returning({ id: evalDatasets.id });
+    datasetIds.push(ds!.id);
+    return ds!.id;
+  }
+  async function redteam(projectId: string, agentId: string, classSummary: unknown[], ds: string, lib: { id: string; name: string }) {
+    const [ev] = await db
+      .insert(evalRuns)
+      .values({ datasetId: ds, datasetVersion: 1, agentId, agentName: "a2c", trigger: "manual", projectId })
+      .returning({ id: evalRuns.id });
+    await db.insert(redteamRuns).values({
+      libraryId: lib.id,
+      libraryName: lib.name,
+      libraryVersion: 1,
+      evalRunId: ev!.id,
+      agentId,
+      agentName: "a2c",
+      projectId,
+      classSummary,
+      finishedAt: ago(HOUR),
+    });
+  }
+  const asrSpec = { metric: "redteam_asr" as const, params: { attackClass: "tool_abuse" }, operator: "lt" as const, threshold: 5, windowDays: 30, minSamples: 4 };
+
+  it("red team: a sibling agent outside the stack never dilutes the stack's result", async () => {
+    const uc = await propose("rt-pool");
+    const ds = await dataset();
+    const [lib] = await db.insert(redteamLibraries).values({ name: `a2c-lib-pool-${RUN}` }).returning();
+    libraryIds.push(lib!.id);
+    const mine = await agent("rt-mine");
+    const sibling = await agent("rt-sibling");
+    // the stack's agent is defeated on every probe; a sibling in the same project resists 200
+    await redteam(uc.projectId, mine, [{ attackClass: "tool_abuse", probes: 4, resisted: 0, defeated: 4 }], ds, lib!);
+    await redteam(uc.projectId, sibling, [{ attackClass: "tool_abuse", probes: 200, resisted: 200, defeated: 0 }], ds, lib!);
+    const m = await measureAssuranceMetric(db, asrSpec, { projectId: uc.projectId, agentIds: [mine] }, new Date());
+    expect(m).toMatchObject({ state: "fail", samples: 4, value: 100 });
+  }, 120_000);
+
+  it("red team: an in-scope agent whose newest run did not probe the class makes the result insufficient", async () => {
+    const uc = await propose("rt-silent");
+    const ds = await dataset();
+    const [lib] = await db.insert(redteamLibraries).values({ name: `a2c-lib-silent-${RUN}` }).returning();
+    libraryIds.push(lib!.id);
+    const probed = await agent("rt-probed");
+    const unprobed = await agent("rt-unprobed");
+    await redteam(uc.projectId, probed, [{ attackClass: "tool_abuse", probes: 40, resisted: 40, defeated: 0 }], ds, lib!);
+    await redteam(uc.projectId, unprobed, [{ attackClass: "jailbreak", probes: 40, resisted: 40, defeated: 0 }], ds, lib!);
+    const m = await measureAssuranceMetric(db, asrSpec, { projectId: uc.projectId, agentIds: [probed, unprobed] }, new Date());
+    expect(m.state).toBe("insufficient");
+    // the probed agent alone does pass
+    expect((await measureAssuranceMetric(db, asrSpec, { projectId: uc.projectId, agentIds: [probed] }, new Date())).state).toBe("pass");
+  }, 120_000);
+
+  it("red team: judged on the WEAKEST agent — a strong agent never masks a weak one", async () => {
+    const uc = await propose("rt-worst");
+    const ds = await dataset();
+    const [lib] = await db.insert(redteamLibraries).values({ name: `a2c-lib-worst-${RUN}` }).returning();
+    libraryIds.push(lib!.id);
+    const strong = await agent("rt-strong");
+    const weak = await agent("rt-weak");
+    // 0 % over 200 probes and 50 % over 10: pooled 5/210 = 2.4 % would pass a 10 % ceiling
+    await redteam(uc.projectId, strong, [{ attackClass: "tool_abuse", probes: 200, resisted: 200, defeated: 0 }], ds, lib!);
+    await redteam(uc.projectId, weak, [{ attackClass: "tool_abuse", probes: 10, resisted: 5, defeated: 5 }], ds, lib!);
+    const spec = { ...asrSpec, operator: "lte" as const, threshold: 10, minSamples: 10 };
+    const m = await measureAssuranceMetric(db, spec, { projectId: uc.projectId, agentIds: [strong, weak] }, new Date());
+    expect(m).toMatchObject({ state: "fail", value: 50, samples: 10 });
+    // the evidence cites every agent's run
+    expect(m.evidence.filter((e) => e.type === "redteam_run")).toHaveLength(2);
+    // a thin agent makes the whole result insufficient: the smallest count is the sample count
+    expect((await measureAssuranceMetric(db, { ...spec, minSamples: 20 }, { projectId: uc.projectId, agentIds: [strong, weak] }, new Date())).state).toBe(
+      "insufficient",
+    );
+  }, 120_000);
+
+  it("evals: judged on the WEAKEST agent's score", async () => {
+    const uc = await propose("eval-worst");
+    const ds = await dataset();
+    const strong = await agent("ev-strong");
+    const weak = await agent("ev-weak");
+    for (const [agentId, meanScore, cases, passedCases] of [
+      [strong, 0.95, 100, 100],
+      [weak, 0.5, 10, 5],
+    ] as const) {
+      await db.insert(evalRuns).values({
+        datasetId: ds,
+        datasetVersion: 1,
+        agentId,
+        agentName: "a2c",
+        trigger: "manual",
+        status: "completed",
+        projectId: uc.projectId,
+        cases,
+        passedCases,
+        meanScore,
+        finishedAt: ago(HOUR),
+      });
+    }
+    const scope = { projectId: uc.projectId, agentIds: [strong, weak] };
+    // pooled (95 + 5) / 110 = 0.91 would pass at least 0.8
+    const score = { metric: "eval_mean_score" as const, params: {}, operator: "gte" as const, threshold: 0.8, windowDays: 30, minSamples: 10 };
+    expect(await measureAssuranceMetric(db, score, scope, new Date())).toMatchObject({ state: "fail", value: 0.5, samples: 10 });
+    // pooled 105 / 110 = 95 % would pass at least 90 %
+    const rate = { ...score, metric: "eval_pass_rate" as const, threshold: 90 };
+    expect(await measureAssuranceMetric(db, rate, scope, new Date())).toMatchObject({ state: "fail", value: 50, samples: 10 });
+  }, 120_000);
+
+  it("evals: an in-scope agent whose newest run has no score makes a score condition insufficient", async () => {
+    const uc = await propose("eval-silent");
+    const ds = await dataset();
+    const scored = await agent("ev-scored");
+    const unscored = await agent("ev-unscored");
+    const run = (agentId: string, meanScore: number | null, cases: number) =>
+      db.insert(evalRuns).values({
+        datasetId: ds,
+        datasetVersion: 1,
+        agentId,
+        agentName: "a2c",
+        trigger: "manual",
+        status: "completed",
+        projectId: uc.projectId,
+        cases,
+        passedCases: cases,
+        meanScore,
+        finishedAt: ago(HOUR),
+      });
+    await run(scored, 0.95, 30);
+    await run(unscored, null, 30);
+    const spec = { metric: "eval_mean_score" as const, params: {}, operator: "gte" as const, threshold: 0.8, windowDays: 30, minSamples: 10 };
+    expect((await measureAssuranceMetric(db, spec, { projectId: uc.projectId, agentIds: [scored] }, new Date())).state).toBe("pass");
+    const both = await measureAssuranceMetric(db, spec, { projectId: uc.projectId, agentIds: [scored, unscored] }, new Date());
+    expect(both).toMatchObject({ state: "insufficient", samples: 30 });
+    // an empty newest run (no cases) is as silent for a pass-rate condition
+    const empty = await agent("ev-empty");
+    await run(empty, null, 0);
+    const rate = { ...spec, metric: "eval_pass_rate" as const, threshold: 90 };
+    expect((await measureAssuranceMetric(db, rate, { projectId: uc.projectId, agentIds: [scored, empty] }, new Date())).state).toBe("insufficient");
+  }, 120_000);
+});
+
+describe("FA2 finding 6: the monitor reads the stored evaluation, it never measures", () => {
+  it("live traffic the sweep has not evaluated raises nothing; a stale stored pass holds instead of resolving", async () => {
+    const uc = await propose("monitor-stored");
+    await approveWith(uc.instanceId, [errorRateCondition({ blocking: false, minSamples: 5, cadence: "hourly" })]);
+    const [cond] = await conditionsOf(uc.id);
+    const key = `use_case:${uc.id}>condition:${cond!.id}`;
+    await addTraces(uc.projectId, 10, 0);
+    await evaluateNow(uc.id, cond!.id);
+    expect(await condRow(cond!.id)).toMatchObject({ status: "met", lastState: "pass" });
+
+    // the ledger now breaches, but nothing has evaluated it
+    await addTraces(uc.projectId, 0, 50);
+    let input = (await conditionMetricsMonitorInput(db, new Date())).condition_metric_breached!;
+    expect(input.breaches.some((b) => b.subjectKey === key)).toBe(false);
+    expect(input.heldSubjectKeys ?? []).not.toContain(key); // a fresh stored pass resolves
+
+    // a stored pass two cadence periods old is stale: held, never resolved
+    input = (await conditionMetricsMonitorInput(db, new Date(Date.now() + 3 * HOUR))).condition_metric_breached!;
+    expect(input.heldSubjectKeys ?? []).toContain(key);
+
+    // once the evaluator reads the breach, the monitor raises it
+    await evaluateAt(uc.id, new Date(Date.now() + HOUR));
+    input = (await conditionMetricsMonitorInput(db, new Date())).condition_metric_breached!;
+    expect(input.breaches.filter((b) => b.subjectKey === key)).toHaveLength(1);
+  }, 120_000);
+});
+
+describe("FA2 finding 7a: a waiver reason the scrub lengthens past the limit", () => {
+  it("is a 422 waive_reason_too_long, not a 500, and writes nothing", async () => {
+    const uc = await propose("waive-long");
+    await approveWith(uc.instanceId, [errorRateCondition()]);
+    const [cond] = await conditionsOf(uc.id);
+    // 2000 characters as sent; each synthetic access key id becomes a longer marker
+    const keys = Array.from({ length: 20 }, () => "AKIAIOSFODNN7EXAMPLE").join(" ");
+    const reason = `${keys} ${"x".repeat(2000 - keys.length - 1)}`;
+    expect(reason.length).toBe(2000);
+    const r = await post(`/v1/use-cases/${uc.id}/conditions/${cond!.id}/waive`, users.admin.auth, { reason });
+    expect(r.statusCode, r.body).toBe(422);
+    expect(r.json().error).toBe("waive_reason_too_long");
+    expect(await condRow(cond!.id)).toMatchObject({ status: "open", waivedAt: null });
+    expect(await auditFor(uc.id, "use-case-condition-waived")).toHaveLength(0);
   }, 120_000);
 });

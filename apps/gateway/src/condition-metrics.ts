@@ -26,8 +26,25 @@
  *     (`condition_evidence_failing` / `condition_not_manual`, use-cases.ts);
  *   - a met condition whose evidence later breaches keeps its met history and
  *     raises the monitor finding (`condition_metric_breached`);
- *   - `on_breach = reopen_review` reopens review only on the SECOND consecutive
- *     breached evaluation, through `reopenUseCaseReview` (review-policy.ts);
+ *   - `on_breach = reopen_review` reopens review once the streak reaches
+ *     `CONDITION_REOPEN_AFTER` (2) consecutive breached evaluations — at OR
+ *     past it, while the use case is approved — through `reopenUseCaseReview`
+ *     (review-policy.ts). A successful reopen resets the streak, so a
+ *     re-approved use case whose metric keeps failing re-opens again; a streak
+ *     that reaches the threshold while the use case is NOT approved is
+ *     audited (`use-case-condition-reopen-skipped`) and kept, so the first
+ *     breach after re-approval re-opens it;
+ *   - the streak counts CADENCE WINDOWS, not calls: only an evaluation that is
+ *     due by the cadence (checked under the row lock) moves the streak and the
+ *     `last_evaluated_at` anchor; a forced re-evaluation inside the window
+ *     refreshes `last_value`/`last_state` but never double-counts;
+ *   - red-team and evaluation metrics read ONLY the use case's own agents when
+ *     it names them, judge each agent separately and report the WEAKEST one
+ *     (`weakestAgent`: the worst per-agent value, the smallest per-agent
+ *     sample count), and an in-scope agent that contributed no measured trial
+ *     makes the result insufficient, never a pass;
+ *   - the monitor and the manual `/met` refusal read the PERSISTED `last_*`
+ *     columns — the scheduled sweep owns measurement;
  *   - an admin waiver needs a reason (prose-scrubbed by the DB wrapper), stamps
  *     `met_at` and the `waived_*` columns, is audited, and the verdict reads
  *     `waived` — a gate warning, never a pass.
@@ -67,6 +84,7 @@ import {
   type UseCaseConditionRow,
 } from "@regulait/db";
 import {
+  CONDITION_CADENCE_SECONDS,
   CONDITION_EVALUATOR_ACTOR,
   CONDITION_METRIC_HELP,
   CONDITION_REOPEN_AFTER,
@@ -130,6 +148,18 @@ function agentOrProject(agentCol: SQL, projectCol: SQL, scope: AssuranceScope): 
   if (scope.projectId) parts.push(sql`${projectCol} = ${scope.projectId}::uuid`);
   if (parts.length === 0) return sql`false`;
   return parts.length === 1 ? parts[0]! : sql`(${sql.join(parts, sql` or `)})`;
+}
+
+/**
+ * The per-agent ledgers (red-team runs, evaluation runs) are about ONE agent's
+ * configuration. When the use case names its agents, only THOSE agents' runs
+ * count: a sibling agent in the same project never speaks for this stack. The
+ * project is the scope only when the use case names no agent.
+ */
+function agentsElseProject(agentCol: SQL, projectCol: SQL, scope: AssuranceScope): SQL {
+  if (scope.agentIds.length > 0) return sql`${agentCol} in (${sql.join(scope.agentIds.map((a) => sql`${a}::uuid`), sql`, `)})`;
+  if (scope.projectId) return sql`${projectCol} = ${scope.projectId}::uuid`;
+  return sql`false`;
 }
 
 async function measureTraceEvalFlagRate(db: Db, spec: MetricSpec, scope: AssuranceScope, since: Date, now: Date, params: Record<string, unknown>) {
@@ -215,6 +245,34 @@ async function measureGuardrailMode(db: Db, spec: MetricSpec, scope: AssuranceSc
   return finish(spec, weakest, targets.length, ref("guardrail_policy", targets.map((t) => t.evidence)));
 }
 
+/**
+ * THE WEAKEST AGENT DECIDES. A per-agent ledger (red team, evals) is judged
+ * agent by agent: the value is the per-agent reading that most fails the
+ * condition (the highest attack success rate, the lowest score or pass rate,
+ * the farthest from an `eq` threshold), and the sample count is the SMALLEST
+ * per-agent count, so one thinly measured agent makes the whole result
+ * insufficient. A strong agent with many trials can never mask a weak one,
+ * as a pooled rate would.
+ */
+function weakestAgent(spec: Pick<MetricSpec, "operator" | "threshold">, perAgent: Array<{ value: number; samples: number }>): { value: number | null; samples: number } {
+  if (perAgent.length === 0) return { value: null, samples: 0 };
+  const badness = (v: number) => {
+    switch (spec.operator) {
+      case "lt":
+      case "lte":
+        return v;
+      case "gt":
+      case "gte":
+        return -v;
+      case "eq":
+        return Math.abs(v - spec.threshold);
+    }
+  };
+  let worst = perAgent[0]!;
+  for (const a of perAgent) if (badness(a.value) > badness(worst.value)) worst = a;
+  return { value: worst.value, samples: Math.min(...perAgent.map((a) => a.samples)) };
+}
+
 async function measureRedTeamAsr(db: Db, spec: MetricSpec, scope: AssuranceScope, since: Date, now: Date, params: Record<string, unknown>) {
   const rows = await db
     .select({
@@ -230,7 +288,7 @@ async function measureRedTeamAsr(db: Db, spec: MetricSpec, scope: AssuranceScope
         isNotNull(redteamRuns.finishedAt),
         gte(redteamRuns.finishedAt, since),
         lte(redteamRuns.finishedAt, now),
-        agentOrProject(sql`${redteamRuns.agentId}`, sql`${redteamRuns.projectId}`, scope),
+        agentsElseProject(sql`${redteamRuns.agentId}`, sql`${redteamRuns.projectId}`, scope),
       ),
     )
     .orderBy(desc(redteamRuns.finishedAt), desc(redteamRuns.id));
@@ -241,23 +299,30 @@ async function measureRedTeamAsr(db: Db, spec: MetricSpec, scope: AssuranceScope
     if (!newest.has(key)) newest.set(key, r);
   }
   const attackClass = typeof params.attackClass === "string" ? params.attackClass : null;
-  let defeats = 0;
-  let trials = 0;
+  const perAgent: Array<{ value: number; samples: number }> = [];
+  // an agent whose newest run measured nothing (it did not probe the class,
+  // or it has no attack success rate) is as absent as an agent with no run
+  let silent = 0;
   for (const r of newest.values()) {
+    let probes = 0;
+    let defeated = 0;
     if (attackClass) {
       const c = (r.classSummary as Array<{ attackClass?: string; probes?: number; defeated?: number }>).find((x) => x.attackClass === attackClass);
       if (c && Number(c.probes) > 0) {
-        trials += Number(c.probes);
-        defeats += Number(c.defeated ?? 0);
+        probes = Number(c.probes);
+        defeated = Number(c.defeated ?? 0);
       }
     } else if (r.asr !== null && r.asrTrials > 0) {
-      trials += r.asrTrials;
-      defeats += r.asr * r.asrTrials;
+      probes = r.asrTrials;
+      defeated = r.asr * r.asrTrials;
     }
+    if (probes > 0) perAgent.push({ value: (defeated / probes) * 100, samples: probes });
+    else silent += 1;
   }
   const missing = scope.agentIds.filter((a) => !newest.has(a));
-  return finish(spec, trials > 0 ? (defeats / trials) * 100 : null, trials, ref("redteam_run", [...newest.values()].map((r) => r.id)), {
-    incomplete: missing.length > 0,
+  const w = weakestAgent(spec, perAgent);
+  return finish(spec, w.value, w.samples, ref("redteam_run", [...newest.values()].map((r) => r.id)), {
+    incomplete: missing.length > 0 || silent > 0,
   });
 }
 
@@ -280,7 +345,7 @@ async function measureEval(db: Db, spec: MetricSpec, scope: AssuranceScope, sinc
         lte(evalRuns.finishedAt, now),
         sql`${evalRuns.id} not in ${redteamEvalIds}`,
         typeof params.datasetId === "string" ? eq(evalRuns.datasetId, params.datasetId) : undefined,
-        agentOrProject(sql`${evalRuns.agentId}`, sql`${evalRuns.projectId}`, scope),
+        agentsElseProject(sql`${evalRuns.agentId}`, sql`${evalRuns.projectId}`, scope),
       ),
     )
     .orderBy(desc(evalRuns.finishedAt), desc(evalRuns.id));
@@ -289,24 +354,24 @@ async function measureEval(db: Db, spec: MetricSpec, scope: AssuranceScope, sinc
     const key = r.agentId ?? `run:${r.id}`;
     if (!newest.has(key)) newest.set(key, r);
   }
-  let cases = 0;
-  let passed = 0;
-  let scoreSum = 0;
-  let scored = 0;
+  const perAgent: Array<{ value: number; samples: number }> = [];
+  // an agent whose newest run measured nothing for THIS metric (no cases, or
+  // no mean score for a score condition) is as absent as an agent with no run
+  let silent = 0;
   for (const r of newest.values()) {
-    if (r.cases <= 0) continue;
-    cases += r.cases;
-    passed += r.passedCases;
-    if (r.meanScore !== null) {
-      scoreSum += r.meanScore * r.cases;
-      scored += r.cases;
+    if (r.cases <= 0 || (spec.metric === "eval_mean_score" && r.meanScore === null)) {
+      silent += 1;
+      continue;
     }
+    perAgent.push({
+      value: spec.metric === "eval_mean_score" ? r.meanScore! : (r.passedCases / r.cases) * 100,
+      samples: r.cases,
+    });
   }
   const missing = scope.agentIds.filter((a) => !newest.has(a));
-  const value =
-    spec.metric === "eval_mean_score" ? (scored > 0 ? scoreSum / scored : null) : cases > 0 ? (passed / cases) * 100 : null;
-  return finish(spec, value, spec.metric === "eval_mean_score" ? scored : cases, ref("eval_run", [...newest.values()].map((r) => r.id)), {
-    incomplete: missing.length > 0,
+  const w = weakestAgent(spec, perAgent);
+  return finish(spec, w.value, w.samples, ref("eval_run", [...newest.values()].map((r) => r.id)), {
+    incomplete: missing.length > 0 || silent > 0,
   });
 }
 
@@ -455,6 +520,8 @@ export interface ConditionEvaluationOutcome {
   met: string[];
   breached: string[];
   reopened: boolean;
+  /** why a reached streak did not re-open review (the use case is not approved, or the reopen was refused) */
+  reopenSkipped: string | null;
   skipped: Array<{ conditionId: string; reason: string }>;
 }
 
@@ -472,7 +539,7 @@ export async function evaluateConditionsDetailed(
   now: Date,
   opts: EvaluateConditionsOptions,
 ): Promise<ConditionEvaluationOutcome> {
-  const out: ConditionEvaluationOutcome = { verdicts: [], met: [], breached: [], reopened: false, skipped: [] };
+  const out: ConditionEvaluationOutcome = { verdicts: [], met: [], breached: [], reopened: false, reopenSkipped: null, skipped: [] };
   const [uc] = await db.select().from(aiUseCases).where(eq(aiUseCases.id, useCaseId));
   if (!uc) return out;
   const rows = await db
@@ -486,7 +553,7 @@ export async function evaluateConditionsDetailed(
     )
     .orderBy(useCaseConditions.dueAt, useCaseConditions.createdAt, useCaseConditions.id);
   const scope = useCaseScope(uc);
-  let reopenFor: UseCaseConditionRow | null = null;
+  let reopenFor: { row: UseCaseConditionRow; counted: boolean } | null = null;
   for (const c of rows) {
     const spec = specOf(c);
     if (!spec || c.status === "waived") {
@@ -496,10 +563,7 @@ export async function evaluateConditionsDetailed(
     const due = !opts.onlyDue || conditionEvaluationDue(c.lastEvaluatedAt, c.cadence, now);
     if (!due) {
       // not due: the verdict is the stored evaluation, unchanged
-      const stored: Measurement | null = c.lastState
-        ? { value: c.lastValue, samples: c.lastSamples ?? 0, state: c.lastState, evidence: c.evidence ?? [] }
-        : null;
-      out.verdicts.push(verdictOf(c, stored, c.lastEvaluatedAt));
+      out.verdicts.push(verdictOf(c, storedMeasurement(c), c.lastEvaluatedAt));
       continue;
     }
     const m = await measureAssuranceMetric(db, spec, scope, now);
@@ -512,20 +576,26 @@ export async function evaluateConditionsDetailed(
       out.verdicts.push(verdictOf(written.row, m, now));
       if (written.closed) out.met.push(c.id);
       if (m.state === "fail") out.breached.push(c.id);
+      // AT OR PAST the threshold: a streak that reached it while the use case
+      // was not approved still re-opens once it is approved again
       if (
         m.state === "fail" &&
         written.row.onBreach === "reopen_review" &&
-        written.row.consecutiveBreaches === CONDITION_REOPEN_AFTER &&
+        written.row.consecutiveBreaches >= CONDITION_REOPEN_AFTER &&
         !reopenFor
       ) {
-        reopenFor = written.row;
+        reopenFor = { row: written.row, counted: written.counted };
       }
     } catch (err) {
       out.skipped.push({ conditionId: c.id, reason: (err instanceof Error ? err.message : String(err)).slice(0, 300) });
       out.verdicts.push(verdictOf(c, m, now));
     }
   }
-  if (reopenFor) out.reopened = await reopenForBreach(db, uc.id, reopenFor, now, opts);
+  if (reopenFor) {
+    const r = await reopenForBreach(db, uc.id, reopenFor.row, reopenFor.counted, now, opts);
+    out.reopened = r.reopened;
+    out.reopenSkipped = r.skipped;
+  }
   return out;
 }
 
@@ -537,11 +607,17 @@ async function persistEvaluation(
   m: Measurement,
   now: Date,
   requestedBy: string | null,
-): Promise<{ row: UseCaseConditionRow; closed: boolean }> {
+): Promise<{ row: UseCaseConditionRow; closed: boolean; counted: boolean }> {
   return db.transaction(async (tx) => {
     const [cur] = await tx.select().from(useCaseConditions).where(eq(useCaseConditions.id, c.id)).for("update");
-    if (!cur || cur.status === "waived") return { row: cur ?? c, closed: false };
-    const breaches = nextConsecutiveBreaches(cur.consecutiveBreaches, m.state);
+    if (!cur || cur.status === "waived") return { row: cur ?? c, closed: false, counted: false };
+    // ONE COUNT PER CADENCE WINDOW, decided under the row lock: an evaluation
+    // inside the window of the last counted one (a forced "evaluate now", or a
+    // concurrent sweep) refreshes the reading but neither moves the streak nor
+    // the window anchor, so repeated forced evaluations can neither add two
+    // breaches from one data window nor postpone the next counted one
+    const counted = conditionEvaluationDue(cur.lastEvaluatedAt, cur.cadence, now);
+    const breaches = counted ? nextConsecutiveBreaches(cur.consecutiveBreaches, m.state) : cur.consecutiveBreaches;
     // ONLY the evaluator closes a measured condition, and only on a pass
     const close = cur.status === "open" && m.state === "pass";
     const [row] = await tx
@@ -550,7 +626,7 @@ async function persistEvaluation(
         lastValue: m.value,
         lastSamples: m.samples,
         lastState: m.state,
-        lastEvaluatedAt: now,
+        lastEvaluatedAt: counted ? now : cur.lastEvaluatedAt,
         consecutiveBreaches: breaches,
         evidence: m.evidence,
         ...(close
@@ -604,6 +680,7 @@ async function persistEvaluation(
           to: m.state,
           status: cur.status,
           consecutiveBreaches: breaches,
+          counted,
           spec,
           measurement,
           ...(requestedBy ? { requestedBy } : {}),
@@ -617,19 +694,57 @@ async function persistEvaluation(
           `${describeMetricCondition(spec)}; measured ${formatValue(spec, m.value)} over ${m.samples} sample(s)`,
       });
     }
-    return { row: row ?? cur, closed: close };
+    return { row: row ?? cur, closed: close, counted };
   });
 }
 
-async function reopenForBreach(db: Db, useCaseId: string, cond: UseCaseConditionRow, now: Date, opts: EvaluateConditionsOptions): Promise<boolean> {
+async function reopenForBreach(
+  db: Db,
+  useCaseId: string,
+  cond: UseCaseConditionRow,
+  counted: boolean,
+  now: Date,
+  opts: EvaluateConditionsOptions,
+): Promise<{ reopened: boolean; skipped: string | null }> {
   const spec = specOf(cond)!;
   let postCommit: ((d: Db) => Promise<void>) | null = null;
-  const done = await db.transaction(async (tx) => {
+  const done = await db.transaction(async (tx): Promise<{ reopened: boolean; skipped: string | null }> => {
     const [uc] = await tx.select().from(aiUseCases).where(eq(aiUseCases.id, useCaseId)).for("update");
-    // only a LIVE approval is re-opened; one already back in review is left alone
-    if (!uc || uc.status !== "approved") return false;
+    if (!uc) return { reopened: false, skipped: "use_case_not_found" };
+    // only a LIVE approval is re-opened. One that is not approved keeps the
+    // streak (so the first breach after re-approval re-opens it), and the
+    // skip is audited once per streak: when a counted evaluation first takes
+    // the streak to the threshold
+    if (uc.status !== "approved") {
+      if (counted && cond.consecutiveBreaches === CONDITION_REOPEN_AFTER) {
+        await tx.insert(auditLog).values({
+          userId: NO_IDENTITY,
+          objectType: "ai_use_case",
+          objectId: uc.id,
+          detail: {
+            actor: CONDITION_EVALUATOR_ACTOR,
+            phase: "condition-reopen-skipped",
+            conditionId: cond.id,
+            reason: "use_case_not_approved",
+            useCaseStatus: uc.status,
+            consecutiveBreaches: cond.consecutiveBreaches,
+            spec,
+            ...(opts.requestedBy ? { requestedBy: opts.requestedBy } : {}),
+          },
+          effect: "deny",
+          ruleId: "use-case-condition-reopen-skipped",
+          ruleChain: [],
+          reason:
+            `measured condition on AI use case '${uc.name}' breached ${cond.consecutiveBreaches} consecutive evaluations, ` +
+            `but the use case is ${uc.status.replace("_", " ")}, not approved, so there is no approval to re-open; ` +
+            `the breach streak is kept, and the first breach after it is approved again re-opens its review: ` +
+            describeMetricCondition(spec),
+        });
+      }
+      return { reopened: false, skipped: "use_case_not_approved" };
+    }
     const reason =
-      `measured condition breached ${CONDITION_REOPEN_AFTER} consecutive evaluations on AI use case '${uc.name}': ` +
+      `measured condition breached ${cond.consecutiveBreaches} consecutive evaluations on AI use case '${uc.name}': ` +
       describeMetricCondition(spec);
     const r = await reopenUseCaseReview(tx as Tx, uc, reason, {
       actorUserId: opts.requestedBy ?? null,
@@ -646,11 +761,16 @@ async function reopenForBreach(db: Db, useCaseId: string, cond: UseCaseCondition
         effect: "deny",
         ruleId: "use-case-condition-reopen-skipped",
         ruleChain: [],
-        reason: `measured condition on AI use case '${uc.name}' breached twice, but its review could not be re-opened: ${r.reason}`,
+        reason:
+          `measured condition on AI use case '${uc.name}' breached ${cond.consecutiveBreaches} consecutive evaluations, ` +
+          `but its review could not be re-opened: ${r.reason}`,
       });
-      return false;
+      return { reopened: false, skipped: String(r.reason) };
     }
     postCommit = r.postCommit;
+    // the reopen ANSWERS this streak: it starts again, so a re-approved use
+    // case whose metric keeps failing re-opens again after the same streak
+    await tx.update(useCaseConditions).set({ consecutiveBreaches: 0 }).where(eq(useCaseConditions.id, cond.id));
     await tx.insert(auditLog).values({
       userId: opts.requestedBy ?? NO_IDENTITY,
       objectType: "ai_use_case",
@@ -662,6 +782,7 @@ async function reopenForBreach(db: Db, useCaseId: string, cond: UseCaseCondition
         to: "under_review",
         conditionId: cond.id,
         consecutiveBreaches: cond.consecutiveBreaches,
+        streakReset: true,
         spec,
         measurement: { value: cond.lastValue, samples: cond.lastSamples, state: cond.lastState, evidence: cond.evidence },
         workflowInstanceId: r.instanceId,
@@ -676,7 +797,7 @@ async function reopenForBreach(db: Db, useCaseId: string, cond: UseCaseCondition
       ruleChain: [],
       reason: `${reason} — back in review; deployment is refused until it is re-approved`,
     });
-    return true;
+    return { reopened: true, skipped: null };
   });
   if (postCommit) await (postCommit as (d: Db) => Promise<void>)(db);
   return done;
@@ -758,12 +879,29 @@ export async function runConditionEvaluationSweep(
 // The monitor
 // ---------------------------------------------------------------------------
 
+/** the stored evaluation of a condition, as a measurement (null = never evaluated) */
+export function storedMeasurement(c: UseCaseConditionRow): Measurement | null {
+  return c.lastState ? { value: c.lastValue, samples: c.lastSamples ?? 0, state: c.lastState, evidence: c.evidence ?? [] } : null;
+}
+
+/** a stored reading older than two cadence periods is stale: the sweep has not
+ * re-measured it, so it can still RAISE a breach but never resolve one */
+export function storedEvaluationStale(c: Pick<UseCaseConditionRow, "lastEvaluatedAt" | "cadence">, now: Date): boolean {
+  if (!c.lastEvaluatedAt) return true;
+  return now.getTime() - c.lastEvaluatedAt.getTime() > 2 * CONDITION_CADENCE_SECONDS[c.cadence ?? "daily"] * 1000;
+}
+
 /**
  * The monitor's loader for `condition_metric_breached`: one finding per
  * breached condition that is LIVE after go-live — a met condition whose
  * evidence now breaches (its met history stands), or an after-go-live one.
- * Measured with `persist: false`, so the monitor never moves a breach streak.
- * Too few samples or no data HOLDS an open episode (neither raised nor resolved).
+ *
+ * It reads the PERSISTED `last_*` columns and measures nothing: the scheduled
+ * sweep owns measurement (by cadence), so a monitor pass costs one query
+ * however many conditions there are, and never moves a breach streak. Too
+ * few samples, no data, never evaluated, or a stale reading HOLDS an open
+ * episode (neither raised nor resolved). A row that cannot be read is held,
+ * so one bad row never blinds the rule for the rest of the fleet.
  */
 export async function conditionMetricsMonitorInput(
   db: Db,
@@ -771,34 +909,47 @@ export async function conditionMetricsMonitorInput(
 ): Promise<Partial<Record<AssuranceMonitorRuleId, MonitorAssuranceInput>>> {
   const breaches: MonitorAssuranceSubject[] = [];
   const held: string[] = [];
-  for (const id of await useCasesWithMeasuredConditions(db)) {
-    const [uc] = await db.select({ name: aiUseCases.name }).from(aiUseCases).where(eq(aiUseCases.id, id));
-    const verdicts = await evaluateUseCaseConditions(db, id, now, { persist: false });
-    for (const v of verdicts) {
-      if (v.kind === "manual" || v.status === "waived" || !v.measurement) continue;
-      const live = v.status === "met" || !v.blocking;
+  const rows = await db
+    .select({ c: useCaseConditions, name: aiUseCases.name })
+    .from(useCaseConditions)
+    .innerJoin(aiUseCases, eq(aiUseCases.id, useCaseConditions.useCaseId))
+    .where(
+      and(
+        ne(useCaseConditions.kind, "manual"),
+        ne(useCaseConditions.status, "waived"),
+        notInArray(aiUseCases.status, ["rejected", "retired"]),
+      ),
+    );
+  for (const { c, name } of rows) {
+    const key = conditionSubjectKey(c.useCaseId, c.id);
+    try {
+      if (!specOf(c)) continue;
+      const live = c.status === "met" || !c.blocking;
       if (!live) continue;
-      const key = conditionSubjectKey(id, v.conditionId);
-      if (v.state === "fail") {
+      const m = storedMeasurement(c);
+      if (m?.state === "fail") {
         breaches.push({
           subjectKey: key,
-          title: `Measured condition breached on use case '${uc?.name ?? id}'`,
+          title: `Measured condition breached on use case '${name}'`,
           detail: {
-            useCaseId: id,
-            conditionId: v.conditionId,
-            kind: v.kind,
-            status: v.status,
-            blocking: v.blocking,
-            value: v.measurement.value,
-            samples: v.measurement.samples,
-            consecutiveBreaches: v.consecutiveBreaches,
-            onBreach: v.onBreach,
-            evidence: v.measurement.evidence.slice(0, 5),
+            useCaseId: c.useCaseId,
+            conditionId: c.id,
+            kind: c.kind,
+            status: c.status,
+            blocking: c.blocking,
+            value: m.value,
+            samples: m.samples,
+            consecutiveBreaches: c.consecutiveBreaches,
+            onBreach: c.onBreach,
+            evaluatedAt: c.lastEvaluatedAt ? c.lastEvaluatedAt.toISOString() : null,
+            evidence: m.evidence.slice(0, 5),
           },
         });
-      } else if (v.state === "insufficient" || v.state === "not_run") {
+      } else if (!m || m.state !== "pass" || storedEvaluationStale(c, now)) {
         held.push(key);
       }
+    } catch {
+      held.push(key);
     }
   }
   return { condition_metric_breached: { breaches, heldSubjectKeys: held } };
@@ -824,6 +975,12 @@ export const decideApprovalWithMeasuredSchema = decideApprovalSchema.extend({
 // ---------------------------------------------------------------------------
 // Routes
 // ---------------------------------------------------------------------------
+
+/** a Postgres CHECK violation (23514) of one named constraint, through the driver's wrapping */
+function isCheckViolation(e: unknown, constraint: string): boolean {
+  const err = e as { code?: string; constraint?: string; cause?: { code?: string; constraint?: string } };
+  return (err?.code ?? err?.cause?.code) === "23514" && (err?.constraint ?? err?.cause?.constraint) === constraint;
+}
 
 const conditionParams = z.object({ useCaseId: z.string().uuid(), conditionId: z.string().uuid() });
 
@@ -913,44 +1070,58 @@ export function registerConditionMetricRoutes(app: FastifyInstance, db: Db, opts
     if (cond.status === "waived") return reply.status(409).send({ error: "condition_already_waived" });
     const [uc] = await db.select({ name: aiUseCases.name }).from(aiUseCases).where(eq(aiUseCases.id, useCaseId));
     const now = new Date();
-    const updated = await db.transaction(async (tx) => {
-      const [row] = await tx
-        .update(useCaseConditions)
-        .set({
-          status: "waived",
-          // the ADR-0168 check needs met_at on any non-open status; a met
-          // condition keeps the moment it was met
-          metAt: cond.metAt ?? now,
-          waivedAt: now,
-          waivedBy: callerId,
-          waiveReason: parsed.data.reason,
-        })
-        .where(and(eq(useCaseConditions.id, cond.id), eq(useCaseConditions.status, cond.status)))
-        .returning();
-      if (!row) return null;
-      await tx.insert(auditLog).values({
-        userId: callerId,
-        objectType: "ai_use_case",
-        objectId: useCaseId,
-        detail: {
-          phase: "condition-waived",
-          conditionId: cond.id,
-          approvalId: cond.approvalId,
-          kind: cond.kind,
-          blocking: cond.blocking,
-          from: cond.status,
-          lastState: cond.lastState,
-        },
-        effect: "allow",
-        ruleId: "use-case-condition-waived",
-        ruleChain: [],
-        reason:
-          `condition on AI use case '${uc?.name ?? useCaseId}' WAIVED by an administrator` +
-          `${cond.blocking ? " (before go-live — the deploy gate reports it as a warning, not a pass)" : " (after go-live)"}: ` +
-          parsed.data.reason,
+    let updated: UseCaseConditionRow | null;
+    try {
+      updated = await db.transaction(async (tx) => {
+        const [row] = await tx
+          .update(useCaseConditions)
+          .set({
+            status: "waived",
+            // the ADR-0168 check needs met_at on any non-open status; a met
+            // condition keeps the moment it was met
+            metAt: cond.metAt ?? now,
+            waivedAt: now,
+            waivedBy: callerId,
+            waiveReason: parsed.data.reason,
+          })
+          .where(and(eq(useCaseConditions.id, cond.id), eq(useCaseConditions.status, cond.status)))
+          .returning();
+        if (!row) return null;
+        await tx.insert(auditLog).values({
+          userId: callerId,
+          objectType: "ai_use_case",
+          objectId: useCaseId,
+          detail: {
+            phase: "condition-waived",
+            conditionId: cond.id,
+            approvalId: cond.approvalId,
+            kind: cond.kind,
+            blocking: cond.blocking,
+            from: cond.status,
+            lastState: cond.lastState,
+          },
+          effect: "allow",
+          ruleId: "use-case-condition-waived",
+          ruleChain: [],
+          reason:
+            `condition on AI use case '${uc?.name ?? useCaseId}' WAIVED by an administrator` +
+            `${cond.blocking ? " (before go-live — the deploy gate reports it as a warning, not a pass)" : " (after go-live)"}: ` +
+            parsed.data.reason,
+        });
+        return row;
       });
-      return row;
-    });
+    } catch (e) {
+      // the credential scrub replaces a secret with a longer marker, so a
+      // reason that fits the 2000-character limit can outgrow the store's
+      // check once scrubbed: a refusal the caller can act on, not a 500
+      if (isCheckViolation(e, "use_case_conditions_waived_check")) {
+        return reply.status(422).send({
+          error: "waive_reason_too_long",
+          detail: "the reason is longer than 2000 characters once credentials in it are redacted; shorten it",
+        });
+      }
+      throw e;
+    }
     if (!updated) return reply.status(409).send({ error: "condition_changed", detail: "the condition changed while it was being waived; reload and try again" });
     const names = await waiverNames(db, [updated.waivedBy]);
     return {
