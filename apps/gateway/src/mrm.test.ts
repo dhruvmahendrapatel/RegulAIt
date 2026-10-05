@@ -547,7 +547,11 @@ describe("the dispatch gate — relaxed off (ADR-0181 ships it on), then ENFORCE
     expect(providerCalls().length).toBe(0);
     const rows = await audits("mrm-approval-required");
     expect(rows.length).toBeGreaterThanOrEqual(1);
-    expect((rows[0]!.detail as { modelCardId?: string }).modelCardId).toBe(made.json().card.id);
+    // ADR-0181: MRM ships enforced, so earlier suites leave rows of this kind
+    // too — find THIS card's refusal rather than assuming it is the only one
+    expect(
+      rows.some((r) => (r.detail as { modelCardId?: string }).modelCardId === made.json().card.id),
+    ).toBe(true);
   });
 
   it("turning enforcement back OFF restores dispatch with the card data untouched (reversible)", async () => {

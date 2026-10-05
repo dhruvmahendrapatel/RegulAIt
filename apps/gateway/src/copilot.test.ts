@@ -67,6 +67,9 @@ import {
 } from "@regulait/db";
 import { planCopilotQuery, type CopilotNarration, type CopilotNarrator } from "@regulait/shared";
 import { COPILOT_RULE_IDS } from "./copilot.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 /**
  * The most recent row by `at`.
@@ -140,6 +143,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
   await app.ready();
 
   const [tA] = await db.insert(teams).values({ name: `${PREFIX}-team-a` }).returning();
@@ -222,6 +226,7 @@ afterAll(async () => {
   if (priorGuardrail) {
     await db.insert(guardrailConfigs).values(priorGuardrail);
   }
+  await restoreSb2Gates();
   await app.close();
 });
 

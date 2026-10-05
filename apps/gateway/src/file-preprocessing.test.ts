@@ -1,9 +1,12 @@
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, afterAll } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { costEvents, createDb, eq, runMigrations, type Db } from "@regulait/db";
 import { resolveModelProvider, type MockModelProvider } from "@regulait/model-provider";
 import { buildApp } from "./app.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 /**
  * PILLAR 6 §8 — file preprocessing, end to end: a dispatch carrying large
@@ -117,6 +120,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
   mock = resolveModelProvider({ provider: "mock" }) as MockModelProvider;
 
   agentId = await makeAgent("fpp-agent");
@@ -204,4 +208,8 @@ describe("file preprocessing estimate row + reduced-reference threading", () => 
     expect(wire.input).toContain(REFERENCE_DELIMITER);
     expect(wire.input).toContain(REDUNDANT_LINE); // raw form survives untouched
   });
+});
+
+afterAll(async () => {
+  await restoreSb2Gates();
 });

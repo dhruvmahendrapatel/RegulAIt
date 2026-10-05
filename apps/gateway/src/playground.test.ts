@@ -20,6 +20,9 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { and, auditLog, eq, modelPolicyRules, usageEvents } from "@regulait/db";
 import { builderKit, type BuilderKit, type Person } from "./testing/builder-fixture.js";
 import { validateOutputAgainstSchema } from "./playground.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 let k: BuilderKit;
 let admin: Person;
@@ -35,6 +38,7 @@ const run = (who: Person, body: Record<string, unknown>) =>
 
 beforeAll(async () => {
   k = await builderKit("pgnd");
+  restoreSb2Gates = await relaxGovernanceGatesForTest(k.db, { mrmEnforced: false, dispatchAttributionRequired: false });
   admin = await k.person("admin", { admin: true });
   tester = await k.person("tester");
   MODEL = await k.model("model", { price: 3 });
@@ -44,6 +48,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreSb2Gates();
   await k.close();
 });
 

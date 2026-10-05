@@ -11,6 +11,9 @@ import { builderKit, type BuilderKit, type Person } from "./testing/builder-fixt
 import { buildSystemPrompt } from "./builder-runtime.js";
 import { runSkillAdmissionRescan, skillDigest } from "./skill-admission.js";
 import { runMcpAdmissionRescan } from "./mcp-admission-rescan.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 let k: BuilderKit;
 let owner: Person;
@@ -48,6 +51,7 @@ const skillRow = async (id: string) => (await k.db.select().from(builderSkills).
 
 beforeAll(async () => {
   k = await builderKit("bld-adm");
+  restoreSb2Gates = await relaxGovernanceGatesForTest(k.db, { mrmEnforced: false, dispatchAttributionRequired: false });
   owner = await k.person("owner");
   colleague = await k.person("colleague");
   admin = await k.person("admin", { admin: true });
@@ -55,7 +59,10 @@ beforeAll(async () => {
   await k.grantModel(owner.id, model);
 }, 120_000);
 
-afterAll(async () => k.close());
+afterAll(async () => {
+  await restoreSb2Gates();
+  await k.close();
+});
 
 describe("scan at create, import and update", () => {
   it("refuses a high-severity body with 422 skill_admission_refused and counts-only findings; nothing is stored", async () => {

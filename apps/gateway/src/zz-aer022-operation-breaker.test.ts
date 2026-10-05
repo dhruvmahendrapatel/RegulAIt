@@ -7,6 +7,9 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { and, auditLog, createDb, eq, mcpServers, runMigrations, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { executeGovernedToolCall, resolveNodeToolContext } from "./mcp-proxy.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 const databaseUrl = process.env.DATABASE_URL;
 if (!databaseUrl) throw new Error("DATABASE_URL must name a disposable test database");
@@ -26,6 +29,7 @@ beforeAll(async () => {
     retry: { maxAttempts: 1 },
     timeouts: { mcpConnectMs: 2000, mcpListToolsMs: 2000, mcpCallToolMs: 2000 },
   });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { requireMcpAttribution: false, mrmEnforced: false, dispatchAttributionRequired: false });
   gatewayUrl = await app.listen({ host: "127.0.0.1", port: 0 });
   const user = await app.inject({ method: "POST", url: "/v1/users", headers: admin,
     payload: { email: `aer022-${Date.now()}@example.test`, displayName: "Breaker test" } });
@@ -36,7 +40,7 @@ beforeAll(async () => {
   auth = { authorization: `Bearer ${key.json().token}` };
 }, 120_000);
 
-afterAll(async () => { app.server.closeAllConnections(); await app.close(); });
+afterAll(async () => { app.server.closeAllConnections(); await restoreSb2Gates(); await app.close(); });
 
 async function fixture() {
   let fail: "tools/list" | "tools/call" | null = null;

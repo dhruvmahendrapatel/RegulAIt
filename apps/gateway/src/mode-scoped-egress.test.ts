@@ -57,6 +57,9 @@ import {
 import { buildApp } from "./app.js";
 import { COMPILED_DEFAULT_RULE_ID } from "./compiled-egress.js";
 import { DEPLOY_MODE_ENV, type DeployMode } from "./deploy-posture.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -225,6 +228,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, keyCustodyEnforced: false });
 
   savedMode = process.env[DEPLOY_MODE_ENV];
   realFetch = globalThis.fetch;
@@ -444,6 +448,7 @@ afterAll(async () => {
   await db.delete(modelCredentials).where(eq(modelCredentials.provider, "openai"));
   selfHosted.closeAllConnections();
   await new Promise<void>((r) => selfHosted.close(() => r()));
+  await restoreSb2Gates();
   await app.close();
 });
 

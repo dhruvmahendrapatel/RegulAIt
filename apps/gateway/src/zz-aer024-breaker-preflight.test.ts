@@ -9,6 +9,9 @@ import { buildApp } from "./app.js";
 import { executeGovernedToolCall } from "./mcp-proxy.js";
 import { McpAdmissionHeldError } from "./mcp-admission.js";
 import { McpEgressBlockedError } from "./mcp-egress.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 /**
  * AER-024 — AN OPEN BREAKER MUST NOT HIDE AN ADMISSION HOLD OR AN EGRESS REFUSAL.
@@ -50,6 +53,7 @@ beforeAll(async () => {
     retry: { maxAttempts: 1 },
     timeouts: { mcpConnectMs: 2000, mcpListToolsMs: 2000, mcpCallToolMs: 2000 },
   });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { requireMcpAttribution: false });
   gatewayUrl = await app.listen({ host: "127.0.0.1", port: 0 });
   const user = await app.inject({ method: "POST", url: "/v1/users", headers: admin,
     payload: { email: `aer024-${Date.now()}@example.test`, displayName: "Preflight test" } });
@@ -63,6 +67,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await setAdmissionMode("off");
   app.server.closeAllConnections();
+  await restoreSb2Gates();
   await app.close();
 });
 

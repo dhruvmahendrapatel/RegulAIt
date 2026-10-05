@@ -5,6 +5,9 @@ import { auditLog, createDb, eq, runMigrations, usageEvents, type Db } from "@re
 import { resolveModelProvider, type MockModelProvider } from "@regulait/model-provider";
 import { buildApp } from "./app.js";
 import { installLicenseFixture, removeLicenseFixture } from "./testing/license-fixture.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 /**
  * PILLAR 7 agent-driven task decomposition end to end: POST /v1/runs/decompose
@@ -67,6 +70,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
   // ADR-0052 §4: POST /v1/runs/decompose is tier-gated on
   // `advanced_orchestration` (the flag the ADR names "advanced orchestration
   // fan-out") and now ENFORCED at the route, so this suite runs under a real
@@ -128,6 +132,7 @@ beforeAll(async () => {
 afterAll(async () => {
   // `licenses` is an org singleton — leave the deployment UNLICENSED
   await removeLicenseFixture(db);
+  await restoreSb2Gates();
 });
 
 describe("POST /v1/runs/decompose — happy path", () => {

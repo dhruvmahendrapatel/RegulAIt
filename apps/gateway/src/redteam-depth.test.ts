@@ -59,6 +59,9 @@ import {
   type RedTeamProbeAsr,
 } from "@regulait/shared";
 import { buildApp } from "./app.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -110,6 +113,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
 
   const anna = await makeUser("rtd-anna@example.com");
   annaId = anna.id;
@@ -209,6 +213,7 @@ afterAll(async () => {
   // this file's compliance profile sits under its own `rtd-hipaa` tag and its
   // classified project is its own, so there is nothing shared to restore.
 
+  await restoreSb2Gates();
 });
 
 // ===========================================================================

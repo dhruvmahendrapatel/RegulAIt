@@ -1,8 +1,11 @@
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, afterAll } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createDb, runMigrations, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 /**
  * Slice 4 — the create-affordances the two UIs grew, driven exactly as they
@@ -45,6 +48,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
 
   const pat = await app.inject({
     method: "POST",
@@ -528,4 +532,8 @@ describe("slice 4: the /admin Teams surface", () => {
     expect(res.statusCode).toBe(403);
     expect(res.json().error).toBe("admin_only");
   });
+});
+
+afterAll(async () => {
+  await restoreSb2Gates();
 });

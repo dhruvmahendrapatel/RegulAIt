@@ -12,6 +12,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createDb, runMigrations, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -77,6 +80,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "a".repeat(64) });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
 
   const pia = await app.inject({
     method: "POST",
@@ -120,6 +124,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreSb2Gates();
   await app.close();
 });
 

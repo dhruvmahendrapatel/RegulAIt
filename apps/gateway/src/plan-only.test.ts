@@ -1,8 +1,11 @@
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, afterAll } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { and, auditLog, createDb, eq, runMigrations, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 /**
  * ADR-0079 — PILLAR 2 §2 STAGE 2: "forced planning-only reasoning first, no
@@ -126,6 +129,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "f".repeat(64) });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
 
   const pia = await makeUser("po-pia@example.com");
   piaId = pia.id;
@@ -377,4 +381,8 @@ describe("the plan-only gate on the run-plan path", () => {
     expect(res.statusCode).toBe(400);
     expect(res.json().error).toBe("invalid_reference");
   });
+});
+
+afterAll(async () => {
+  await restoreSb2Gates();
 });

@@ -37,6 +37,9 @@ import {
 import { renderEuAiActAnswersBlock, type EuAiActAnswers } from "@regulait/shared";
 import { builderKit, type BuilderKit, type Person } from "./testing/builder-fixture.js";
 import { RUN_GRAPH_RULE_IDS } from "./run-graph.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 let k: BuilderKit;
 let owner: Person;
@@ -67,6 +70,7 @@ const refusals = (userId: string, objectId: string) =>
 
 beforeAll(async () => {
   k = await builderKit("rgraph");
+  restoreSb2Gates = await relaxGovernanceGatesForTest(k.db, { mrmEnforced: false, dispatchAttributionRequired: false, useCaseGateMode: "off" });
   owner = await k.person("owner");
   stranger = await k.person("stranger");
   admin = await k.person("admin", { admin: true });
@@ -75,7 +79,10 @@ beforeAll(async () => {
   await k.grantModel(owner.id, model);
 }, 120_000);
 
-afterAll(async () => k.close());
+afterAll(async () => {
+  await restoreSb2Gates();
+  await k.close();
+});
 
 describe("builder turn graph", () => {
   let threadId = "";

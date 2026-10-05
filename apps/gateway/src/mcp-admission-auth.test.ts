@@ -62,6 +62,9 @@ import {
   manifestDigest,
 } from "@regulait/shared";
 import { buildApp } from "./app.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -259,6 +262,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { requireMcpAttribution: false });
   await app.ready();
   cleanUpstream = await startUpstream("clean");
   poisonUpstream = await startUpstream("poisoned");
@@ -297,6 +301,7 @@ afterAll(async () => {
   // `app.listen()`, every request goes through `app.inject()`, so there is no
   // listening socket to close and reaching for one trips the test runner's own
   // http shim.
+  await restoreSb2Gates();
   await app.close();
   await cleanUpstream.close();
   await poisonUpstream.close();

@@ -19,6 +19,9 @@ import { runSequenceProbeTrial } from "./redteam-agentic.js";
 import { prepareCompatCall, AGENT_HEADER, COMPAT_MODE } from "./compat-core.js";
 import { listEntitledModels } from "./compat-models.js";
 import type { FastifyRequest } from "fastify";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 let k: BuilderKit;
 let admin: Person;
@@ -72,6 +75,7 @@ async function mkModel(label: string) {
 
 beforeAll(async () => {
   k = await builderKit("mpol");
+  restoreSb2Gates = await relaxGovernanceGatesForTest(k.db, { mrmEnforced: false, dispatchAttributionRequired: false, useCaseGateMode: "off", requireProjectAttribution: false });
   // a clean slate: an earlier crashed run of this file must not leave a policy behind
   await k.db.delete(modelPolicyRules);
   admin = await k.person("admin", { admin: true });
@@ -86,6 +90,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await k.db.delete(modelPolicyRules);
+  await restoreSb2Gates();
   await k.close();
 });
 

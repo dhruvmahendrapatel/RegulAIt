@@ -43,6 +43,9 @@ import {
 } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { closeAll, dropScratchDatabase } from "./testing/scratch-db.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -162,6 +165,7 @@ beforeAll(async () => {
   // no expected error left to swallow — and a real one is loud again.
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "b".repeat(64) });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
 
   const agent = await app.inject({
     method: "POST", headers: AUTH, url: "/v1/agents",
@@ -184,6 +188,7 @@ beforeAll(async () => {
 afterAll(async () => {
   // Reverse order of construction, every step attempted even if an earlier one
   // throws, and the drop gated on Postgres reporting zero backends rather than
+  await restoreSb2Gates();
   // on `pool.end()` having resolved — which is NOT that guarantee.
   await closeAll([
     () => app.close(),
