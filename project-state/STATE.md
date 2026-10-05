@@ -21,6 +21,16 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-10-05 - PR #125 (ADR-0179) merged as c8bfc6d. ADR-0180: D3 continuous assurance; secure by default is now a standing rule.**
+- Owner rule: every setting defaults to strict, and an admin may relax it. Build as for a first load: no grandfathering.
+- D3 decisions:
+  - `assurance_gate_mode` defaults to enforce;
+  - measurable conditions close only on evidence, and a breach alerts;
+  - required test classes must be 30 days fresh against the current stack;
+  - autonomy floors apply, with builder agents linked by project;
+  - risk tolerance is strict, and acceptances last at most 6 or 12 months.
+- Next: the D3 build (migration 0155), then a strict-defaults audit, then D4.
+
 **2026-10-05 - ADR-0179 Codex feedback batch built, reviewed and fixed (branch `cdx-int`).**
 - Shipped:
   - policy-simulation rate-limit replay, with concurrency and deadline bounds; the deadline also bounds database work

@@ -92,6 +92,12 @@ direct, explicit sign-off in that session.** No `prod`/`production` account, tag
 gets created or used without that explicit go-ahead. This applies regardless of what any
 individual task seems to imply — always ask before crossing that line.
 
+## Universal build rule — secure by default (owner, 2026-10-05; ADR-0180)
+
+**Every setting defaults to its strict, secure value; an admin may relax or turn it off, and doing so is audited.** The
+product is not live, so build every feature as for a first load: no grandfathering of existing records and no warn-only
+introduction, unless an ADR records the reason. A review finding of "insecure by default" is a bug.
+
 ## Universal build rule — open source first (owner, 2026-10-05; ADR-0176)
 
 **Before writing any new code, check whether a validated, actively maintained open-source solution already exists, and use
