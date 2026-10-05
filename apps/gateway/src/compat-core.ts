@@ -1314,7 +1314,16 @@ export function registerInterceptionRoutes(app: FastifyInstance, db: Db) {
       userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
       objectType: "interception_settings",
       objectId: null,
-      detail: { via: req.authCtx.via, changed, after },
+      // ADR-0181: old -> new, so a relaxed attribution or custody switch is
+      // legible from the audit row alone
+      detail: {
+        via: req.authCtx.via,
+        changed,
+        previous: Object.fromEntries(
+          Object.keys(changed).map((k) => [k, (before as Record<string, unknown>)[k] ?? null]),
+        ),
+        after,
+      },
       effect: "allow",
       ruleId: "interception-settings-updated",
       ruleChain: [],

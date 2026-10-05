@@ -868,7 +868,7 @@ export async function postDispatchProjectAlert(
   const now = new Date();
   const periodKey = currentPeriodKey(now);
   const monthly = isMonthly(project);
-  const pct = project.alertThresholdPct ?? 100;
+  const pct = project.alertThresholdPct ?? 80;
   const newSpent = gate.spentUsd + (costUsd ?? 0);
   const signal: ProjectBudgetSignal = {
     escalated: false,
@@ -1101,7 +1101,15 @@ export async function applyProjectPatch(
     userId: args.actorUserId ?? project.budgetApproverUserId ?? projectId,
     objectType: "project",
     objectId: projectId,
-    detail: { phase: "update", changed, ...(args.auditDetail ?? {}) },
+    // ADR-0181: old -> new (e.g. a relaxed alertThresholdPct)
+    detail: {
+      phase: "update",
+      changed,
+      previous: Object.fromEntries(
+        Object.keys(changed).map((k) => [k, (project as Record<string, unknown>)[k] ?? null]),
+      ),
+      ...(args.auditDetail ?? {}),
+    },
     effect: "allow",
     ruleId: "project-updated",
     ruleChain: [],
@@ -1196,7 +1204,7 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
         budgetUsd: body.budgetUsd ?? null,
         budgetApproverUserId: body.budgetApproverUserId ?? null,
         budgetPeriod: body.budgetPeriod ?? "none",
-        alertThresholdPct: body.alertThresholdPct ?? 100,
+        alertThresholdPct: body.alertThresholdPct ?? 80,
         arbiterUserId: body.arbiterUserId ?? null,
         classifications: body.classifications ?? null,
         initiativeId: body.initiativeId ?? null,
@@ -2481,7 +2489,7 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
         .where(and(where, gte(usageEvents.at, periodStart(now))));
       windowedSpentUsd = w?.costUsd ?? 0;
     }
-    const pct = project.alertThresholdPct ?? 100;
+    const pct = project.alertThresholdPct ?? 80;
     const thresholdUsd =
       project.budgetUsd == null ? null : Number(((project.budgetUsd * pct) / 100).toFixed(6));
     // simple run-rate forecast, labeled as such: last-7-days daily rate

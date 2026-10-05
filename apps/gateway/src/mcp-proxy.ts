@@ -1613,13 +1613,14 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
       // entirely — the exact mirror of the compat surfaces'
       // require_project_attribution. Rejected HERE, pre-dispatch and before
       // the reply is hijacked into an MCP transport, with a plain HTTP error
-      // naming the header, and audited. Off (default) = the call runs and is
-      // metered into the Unattributed bucket.
+      // naming the header, and audited. ON by default (ADR-0181), and a
+      // missing settings row reads as ON; off (an audited admin relaxation) =
+      // the call runs and is metered into the Unattributed bucket.
       const [interception] = await db
         .select({ requireMcpAttribution: interceptionSettings.requireMcpAttribution })
         .from(interceptionSettings)
         .where(eq(interceptionSettings.id, INTERCEPTION_SETTINGS_ID));
-      if (interception?.requireMcpAttribution) {
+      if (interception?.requireMcpAttribution ?? true) {
         await db.insert(auditLog).values({
           userId,
           serverId,

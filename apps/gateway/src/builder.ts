@@ -910,6 +910,12 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
       seen.add(k);
       return true;
     });
+    // ADR-0181: ask-first is on by default, so turning it off for a tool is a
+    // relaxation — the audit row carries the previous toolbox (old -> new)
+    const previousTools = await db
+      .select({ kind: builderAgentTools.kind, refId: builderAgentTools.refId, requiresApproval: builderAgentTools.requiresApproval })
+      .from(builderAgentTools)
+      .where(eq(builderAgentTools.agentId, agent.id));
     await db.transaction(async (tx) => {
       await tx.delete(builderAgentTools).where(eq(builderAgentTools.agentId, agent.id));
       if (rows.length) {
@@ -921,7 +927,10 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     await touch(agent.id);
     await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-tools-changed",
       `toolbox of '${agent.name}' set to ${rows.length} tool(s)`,
-      { tools: rows.map((t) => ({ kind: t.kind, refId: t.refId, requiresApproval: t.requiresApproval })) });
+      {
+        tools: rows.map((t) => ({ kind: t.kind, refId: t.refId, requiresApproval: t.requiresApproval })),
+        previousTools,
+      });
     return { agent: await agentDetail(db, (await loadVisibleAgent(db, agent.id, viewer))!, viewer) };
   });
 

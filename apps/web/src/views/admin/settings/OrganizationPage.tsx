@@ -165,7 +165,7 @@ function Loaded(props: { settings: Record<string, unknown> }) {
 
   // --- 5b. Use-case dispatch gate (ADR-0080 B3 amendment) ------------------
   const useCaseGate = useSection({
-    useCaseGateMode: str(s, "useCaseGateMode") || "off",
+    useCaseGateMode: str(s, "useCaseGateMode") || "enforce",
   });
 
   // --- 5b1. Continuous-assurance gate (ADR-0180) ---------------------------
@@ -176,7 +176,7 @@ function Loaded(props: { settings: Record<string, unknown> }) {
 
   // --- 5b2. Attribution mandate (ADR-0080 B6b amendment) -------------------
   const attribution = useSection({
-    dispatchAttributionRequired: str(s, "dispatchAttributionRequired") || "false",
+    dispatchAttributionRequired: str(s, "dispatchAttributionRequired") || "true",
   });
 
   // --- 5b3. Workflow check-report round binding (AER-048) ------------------
@@ -586,16 +586,16 @@ function Loaded(props: { settings: Record<string, unknown> }) {
               "Use-case gate saved (audited)",
             )
           }
-          help="The AI use-case registry's approval used to register intent and gate nothing — that honest limit is now a choice. This applies to a governed dispatch ATTRIBUTED TO A PROJECT THAT AT LEAST ONE USE CASE NAMES (the use case's optional project link is the only join there is): 'off' (default) keeps today's behaviour exactly; 'warn' lets such a dispatch run when no linked use case is approved, but audits the fact and annotates the response, so you can see what enforce would refuse before arming it; 'enforce' refuses it with a named 409 before any provider work until a linked use case is approved on the Approvals queue. A project no use case links — and a dispatch attributed to no project — is untouched in every mode: this gate holds registered intent to its approval, it does not require every call to have a use case. A retired use case no longer satisfies it. Fully reversible."
+          help="The AI use-case registry's approval used to register intent and gate nothing — that honest limit is now a choice. This applies to a governed dispatch ATTRIBUTED TO A PROJECT THAT AT LEAST ONE USE CASE NAMES (the use case's optional project link is the only join there is): 'enforce' (the strict default) refuses it with a named 409 before any provider work until a linked use case is approved on the Approvals queue; 'off' lets approval register intent and gate nothing; 'warn' lets such a dispatch run when no linked use case is approved, but audits the fact and annotates the response, so you can see what enforce would refuse. A project no use case links — and a dispatch attributed to no project — is untouched in every mode: this gate holds registered intent to its approval, it does not require every call to have a use case. A retired use case no longer satisfies it. Every change is audited with the old and the new value."
         >
           <Field label="Use-case dispatch gate">
             <Select
               value={useCaseGate.f.useCaseGateMode}
               onChange={(e) => useCaseGate.set("useCaseGateMode", e.target.value)}
             >
-              <option value="off">off — approval registers intent, nothing is refused (default)</option>
+              <option value="enforce">enforce — 409 for use-case-linked projects with no approved use case (strict default)</option>
               <option value="warn">warn — record + annotate what enforce would refuse</option>
-              <option value="enforce">enforce — 409 for use-case-linked projects with no approved use case</option>
+              <option value="off">off — approval registers intent, nothing is refused</option>
             </Select>
           </Field>
         </SectionShell>
@@ -648,18 +648,18 @@ function Loaded(props: { settings: Record<string, unknown> }) {
               "Attribution mandate saved (audited)",
             )
           }
-          help="Attribution is normally optional: a call that names no project still runs, and its cost lands in the explicit 'Unattributed' bucket on the cost dashboard rather than disappearing. Turn this on and a governed model dispatch that names no project is refused instead — a named 409 (attribution_required), audited, before anything reaches a provider and before anything is billed. Turn it on when you need chargeback to be complete, or when you are arming the use-case gate above: that gate can only see a dispatch that NAMES a project, so without this a caller can walk past it by omitting the project. The two settings are independent — either can be on without the other — and this one only ever looks at calls naming NO project, so it never changes what happens to an attributed one. Two related settings live elsewhere and are not replaced by this: 'Require project attribution (compat)' on Client Access refuses a header-less IDE/compat call at that edge, and its MCP twin does the same for tool calls. Fully reversible."
+          help="Attribution is required by default: a governed model dispatch that names no project is refused — a named 409 (attribution_required), audited, before anything reaches a provider and before anything is billed. That keeps chargeback complete and keeps the use-case gate above honest: that gate can only see a dispatch that NAMES a project, so without this a caller can walk past it by omitting the project. Relax it to 'optional' and a call that names no project runs, and its cost lands in the explicit 'Unattributed' bucket on the cost dashboard rather than disappearing. The two settings are independent — either can be on without the other — and this one only ever looks at calls naming NO project, so it never changes what happens to an attributed one. Two related settings live elsewhere and are not replaced by this: 'Require project attribution (compat)' on Client Access refuses a header-less IDE/compat call at that edge, and its MCP twin does the same for tool calls. Every change is audited with the old and the new value."
         >
           <Field label="Require project attribution (governed dispatch)">
             <Select
               value={attribution.f.dispatchAttributionRequired}
               onChange={(e) => attribution.set("dispatchAttributionRequired", e.target.value)}
             >
-              <option value="false">
-                optional (default) — an unattributed dispatch runs, cost lands in Unattributed
-              </option>
               <option value="true">
-                required — refuse a dispatch that names no project (409 attribution_required)
+                required (strict default) — refuse a dispatch that names no project (409 attribution_required)
+              </option>
+              <option value="false">
+                optional — an unattributed dispatch runs, cost lands in Unattributed
               </option>
             </Select>
           </Field>

@@ -107,8 +107,8 @@ import {
 } from "./guardrails.js";
 import { mrmDispatchGate } from "./mrm.js";
 import { loadModelPolicy, modelPolicyDispatchRefusal, withModelPolicy, type ModelPolicyGate } from "./model-policy.js";
-// ADR-0080 amendment (batch B3): the use-case dispatch gate — org opt-in,
-// default off (byte-identical), the ADR-0045 gate shape beside the MRM rung.
+// ADR-0080 amendment (batch B3): the use-case dispatch gate — default
+// 'enforce' since ADR-0181, the ADR-0045 gate shape beside the MRM rung.
 import {
   attributionDispatchGate,
   useCaseDispatchGate,
@@ -1388,8 +1388,8 @@ async function dispatchAttempt(
   // entitlement decision (every caller of this function has already run
   // evaluateAgent) and before ANY provider work, cost, or content processing.
   //
-  // Default-OFF (`org_settings.mrm_enforced`), so with the toggle untouched
-  // this is one settings read and byte-identical behaviour. When ON it refuses
+  // Default ON since ADR-0181 (`org_settings.mrm_enforced`); an admin may
+  // relax it (audited), and then this is one settings read. When ON it refuses
   // a model that carries no model card with an UNEXPIRED approved risk
   // sign-off — 409 `mrm_approval_required`, audited with a ruleId that
   // distinguishes "never reviewed" from "review lapsed". The gate recomputes
@@ -1414,10 +1414,10 @@ async function dispatchAttempt(
   }
 
   // ADR-0080 amendment (batch B6b) — THE ATTRIBUTION MANDATE, one rung above
-  // the use-case gate and with the same placement discipline. Default-OFF
-  // (`org_settings.dispatch_attribution_required`), so an ATTRIBUTED dispatch
-  // never even reads the settings row here and an unattributed one is
-  // byte-identical until an admin flips the knob. When ON, a dispatch naming
+  // the use-case gate and with the same placement discipline. Default ON
+  // since ADR-0181 (`org_settings.dispatch_attribution_required`); an
+  // ATTRIBUTED dispatch never even reads the settings row here, and an admin
+  // may relax the knob (audited). When ON, a dispatch naming
   // no project is refused 409 `attribution_required`, audited, before any
   // provider work — which is what closes B3a's own recorded hole: the
   // use-case gate below can only bind dispatches that NAME a project, so
@@ -1445,8 +1445,8 @@ async function dispatchAttempt(
   // ADR-0080 amendment (batch B3) — THE USE-CASE DISPATCH GATE, beside the
   // MRM rung and with the same placement discipline: after the caller's
   // entitlement decision, before ANY provider work, so a refusal costs
-  // nothing. Default-off (`org_settings.use_case_gate_mode = 'off'`) is
-  // byte-identical — an unattributed dispatch does not even read settings
+  // nothing. Default 'enforce' since ADR-0181 (`org_settings.use_case_gate_mode`;
+  // 'off' is an audited relaxation) — an unattributed dispatch does not even read settings
   // here. The join is honest and narrow: the gate fires only for a dispatch
   // attributed to a project that at least one AI use case LINKS
   // (`ai_use_cases.project_id`, the only join the schema holds); under

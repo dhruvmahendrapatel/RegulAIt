@@ -2790,9 +2790,10 @@ export const projects = pgTable("projects", {
    * 'monthly' = only spend within the current calendar month (UTC) counts. */
   budgetPeriod: text("budget_period").notNull().default("none"),
   /** warn (non-blocking) when windowed spend crosses budget*pct/100; the hard
-   * block + escalation always stays at 100%. Default 100 = warn only at the cap
-   * (byte-identical to the pre-threshold behaviour). */
-  alertThresholdPct: integer("alert_threshold_pct").notNull().default(100),
+   * block + escalation always stays at 100%. ADR-0181 (migration 0158): the
+   * default is 80, so a budgeted project warns before it reaches the cap; an
+   * admin may set 100 (warn only at the cap) on the audited project PATCH. */
+  alertThresholdPct: integer("alert_threshold_pct").notNull().default(80),
   /** a decided __project_budget__ approval lifts enforcement for this project */
   overageApproved: boolean("overage_approved").notNull().default(false),
   /** the period key (e.g. '2026-07') an overage was approved for; the latch
@@ -3337,24 +3338,29 @@ export const interceptionSettings = pgTable(
     resolutionMode: text("resolution_mode", { enum: RESOLUTION_MODES })
       .notNull()
       .default("map_by_model"),
+    // ADR-0181 (migration 0158): 'managed' by default — a label, the rung the
+    // deployment declares (the portal shows its real status beside it).
     enforcementPosture: text("enforcement_posture", { enum: ENFORCEMENT_POSTURES })
       .notNull()
-      .default("voluntary"),
+      .default("managed"),
     // The admin's lever to guarantee pillar-5 coverage: when true a compat
     // call with no x-regulait-project-id is REJECTED rather than run
-    // unattributed.
-    requireProjectAttribution: boolean("require_project_attribution").notNull().default(false),
-    // ADR-0024 (O11): the MCP twin of requireProjectAttribution. FALSE
-    // (default) = an unattributed MCP tool call runs, metered with a NULL
-    // project (the explicit "Unattributed" bucket); TRUE = it is rejected
-    // pre-dispatch with an error naming the x-regulait-project-id header.
-    requireMcpAttribution: boolean("require_mcp_attribution").notNull().default(false),
+    // unattributed. ADR-0181: TRUE by default; an admin may relax it (audited,
+    // old -> new) for a client that cannot send the header.
+    requireProjectAttribution: boolean("require_project_attribution").notNull().default(true),
+    // ADR-0024 (O11): the MCP twin of requireProjectAttribution. TRUE (the
+    // ADR-0181 default) = an unattributed MCP tool call is rejected
+    // pre-dispatch with an error naming the x-regulait-project-id header;
+    // FALSE (an audited admin relaxation) = it runs, metered with a NULL
+    // project (the explicit "Unattributed" bucket).
+    requireMcpAttribution: boolean("require_mcp_attribution").notNull().default(true),
     // ADR-0024 (O15): the key_custody rung as an ENFORCED mechanism, not a
-    // declaration. TRUE = per-user BYO model credentials stop working —
-    // creation/update is a 409 and dispatch resolution skips stored user
-    // credentials entirely (org/platform only). Rows are never deleted by the
-    // flip; they are inert while enforced, so it is reversible.
-    keyCustodyEnforced: boolean("key_custody_enforced").notNull().default(false),
+    // declaration. TRUE (the ADR-0181 default) = per-user BYO model
+    // credentials stop working — creation/update is a 409 and dispatch
+    // resolution skips stored user credentials entirely (org/platform only).
+    // Rows are never deleted by the flip; they are inert while enforced, so
+    // an admin can relax it (audited).
+    keyCustodyEnforced: boolean("key_custody_enforced").notNull().default(true),
     // ADR-0021 (migration 0038): what a stream=true call on a block-mode PII
     // project gets. 'suppress' (default, today's ADR-0019 behaviour) runs the
     // same governed dispatch fully buffered and answers plain JSON with a
@@ -3748,37 +3754,36 @@ export const orgSettings = pgTable(
     approvalTtlHours: integer("approval_ttl_hours").default(72),
 
     // --- ADR-0045 (migration 0057): model risk management -------------------
-    /** THE DISPATCH GATE. false (default) = today's behaviour, byte-identical:
-     * cards are documentation. true = `executeGovernedDispatch` refuses any
-     * agent whose model has no model card carrying an UNEXPIRED approved
-     * sign-off (409 `mrm_approval_required`, audited, effect deny).
+    /** THE DISPATCH GATE. true (the ADR-0181 default) = `executeGovernedDispatch`
+     * refuses any agent whose model has no model card carrying an UNEXPIRED
+     * approved sign-off (409 `mrm_approval_required`, audited, effect deny).
+     * false (an audited admin relaxation) = cards are documentation.
      *
      * Deliberately the exact shape of `keyCustodyEnforced` above (ADR-0024):
      * one org toggle, refuse-with-a-named-reason, fully reversible — turning
-     * it off restores dispatch and destroys no card data. Default-off means no
-     * deployment acquires a production hard-stop by accident. */
-    mrmEnforced: boolean("mrm_enforced").notNull().default(false),
+     * it off restores dispatch and destroys no card data. */
+    mrmEnforced: boolean("mrm_enforced").notNull().default(true),
     /** how many days before `valid_until` a signed-off card counts as
      * "expiring soon" — the window the registry surfaces lapses in as WORK
      * ahead of time rather than as an outage on the day. */
     mrmExpiryWarnDays: integer("mrm_expiry_warn_days").notNull().default(30),
     /** ADR-0086 §3's named follow-up (migration 0098, batch B3):
-     * staleness-forces-recertification. false (default) = ADR-0086's shipped
-     * posture, byte-identical — staleness informs and gates nothing. true =
+     * staleness-forces-recertification. false (an audited admin relaxation) =
+     * staleness informs and gates nothing. true (the ADR-0181 default) =
      * the ADR-0045 dispatch gate (and ONLY while `mrmEnforced` is on — this
      * knob deepens the one gate, it creates no gate of its own) additionally
      * refuses a card whose ledger drift since the last granting decision has
      * reached the threshold below, on the SAME 409 path expiry uses. Fully
      * reversible; recertifying (a new superseding sign-off) resets the clock. */
-    mrmStalenessRecertEnabled: boolean("mrm_staleness_recert_enabled").notNull().default(false),
+    mrmStalenessRecertEnabled: boolean("mrm_staleness_recert_enabled").notNull().default(true),
     /** how many ledger changes since certification (the `computeCardStaleness`
      * counts, summed) it takes before an armed staleness gate refuses. 1 =
      * any drift at all forces recertification. */
     mrmStalenessRecertThreshold: integer("mrm_staleness_recert_threshold").notNull().default(1),
 
     // --- ADR-0080 amendment (migration 0098): use-case dispatch gate --------
-    /** 'off' (default) = the ADR-0080 honest limit exactly as shipped:
-     * approval registers intent and gates nothing — byte-identical behaviour.
+    /** 'enforce' is the ADR-0181 default (see below); 'off' (an audited admin
+     * relaxation) = approval registers intent and gates nothing.
      * 'warn' = a governed dispatch attributed to a use-case-LINKED project
      * with no approved linked use case proceeds, but the refusal-shaped fact
      * is audited and annotated on the response. 'enforce' = the same dispatch
@@ -3788,7 +3793,7 @@ export const orgSettings = pgTable(
      * in every mode. */
     useCaseGateMode: text("use_case_gate_mode", { enum: USE_CASE_GATE_MODES })
       .notNull()
-      .default("off"),
+      .default("enforce"),
 
     // --- ADR-0180 (migration 0155): the continuous-assurance gate ----------
     /** Secure by default: 'enforce' — the deploy gate HOLDS on the D3 checks
@@ -3802,11 +3807,10 @@ export const orgSettings = pgTable(
       .default("enforce"),
 
     // --- B6b / ADR-0080 amendment (migration 0101): the attribution mandate --
-    /** FALSE (default) = today, byte-identical: a governed dispatch that names
-     * no `projectId` runs and lands in the explicit "Unattributed" cost bucket
-     * (GET /v1/costs/unattributed), which is pillar 5's deliberate opt-in
-     * posture. TRUE = such a dispatch is refused 409 `attribution_required`,
-     * audited, before any provider work.
+    /** TRUE (the ADR-0181 default) = a governed dispatch that names no
+     * `projectId` is refused 409 `attribution_required`, audited, before any
+     * provider work. FALSE (an audited admin relaxation) = it runs and lands
+     * in the explicit "Unattributed" cost bucket (GET /v1/costs/unattributed).
      *
      * This is the hole B3a recorded and could not close from inside itself:
      * `use_case_gate_mode` binds only dispatches that NAME a project, so a
@@ -3822,7 +3826,7 @@ export const orgSettings = pgTable(
      * neither of them touches. */
     dispatchAttributionRequired: boolean("dispatch_attribution_required")
       .notNull()
-      .default(false),
+      .default(true),
 
     // --- ADR-0124: the kill switch and safe modes ------------------------
     /**
@@ -7037,15 +7041,15 @@ export const policySimulationFlips = pgTable(
 
 /**
  * The singleton that turns ADR-0040's honest-risks note ("activating without
- * previewing should be friction") into an enforceable posture. OFF by default:
- * an existing deployment activates exactly as it did before. ON, activating a
- * version that no completed simulation has previewed is REFUSED — and either
- * way the activation audit row records whether a preview existed, so the
- * omission is a permanent record rather than a missing one.
+ * previewing should be friction") into an enforceable posture. ON by default
+ * (ADR-0181): activating a version that no completed simulation has previewed
+ * is REFUSED. An admin may turn it off (audited, old -> new); either way the
+ * activation audit row records whether a preview existed, so the omission is
+ * a permanent record rather than a missing one.
  */
 export const policySimulationSettings = pgTable("policy_simulation_settings", {
   id: text("id").primaryKey().default("singleton"),
-  requirePreviewBeforeActivate: boolean("require_preview_before_activate").notNull().default(false),
+  requirePreviewBeforeActivate: boolean("require_preview_before_activate").notNull().default(true),
   defaultWindowDays: integer("default_window_days").notNull().default(30),
   defaultRowCap: integer("default_row_cap").notNull().default(5000),
   updatedByUserId: uuid("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
@@ -9314,7 +9318,9 @@ export const builderAgentTools = pgTable(
     /** connectors.id for a connector, mcp_tools.id for an MCP tool. FK-free
      * (two target tables); a dangling ref renders as an unavailable tool. */
     refId: uuid("ref_id").notNull(),
-    requiresApproval: boolean("requires_approval").notNull().default(false),
+    /** Ask-first. ADR-0181: on by default; the agent's owner may turn it off
+     * per tool (the audited PUT /v1/builder/agents/:id/tools). */
+    requiresApproval: boolean("requires_approval").notNull().default(true),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [uniqueIndex("builder_agent_tools_uq").on(t.agentId, t.kind, t.refId)],

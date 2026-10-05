@@ -175,8 +175,8 @@ export interface MrmGateContext {
  * proceed; a refusal object (already audited) when it may not.
  *
  * The org toggle is read FIRST and short-circuits: with `mrmEnforced` false
- * this costs one settings read and nothing else changes — the byte-identical
- * default ADR-0045 §4 promises.
+ * (an audited admin relaxation; ADR-0181 made true the default) this costs
+ * one settings read and nothing else changes.
  */
 export async function mrmDispatchGate(
   db: Db,
@@ -204,8 +204,8 @@ export async function mrmDispatchGate(
   if (decision.allowed) {
     // ADR-0086 §3's named follow-up (batch B3) — STALENESS FORCES
     // RECERTIFICATION, as an org opt-in DEEPENING this same gate rather than
-    // forking a second one. Default off = ADR-0086 exactly as shipped
-    // (staleness informs, gates nothing), and the knob is meaningful only
+    // forking a second one. On by default (ADR-0181); off = ADR-0086 as first
+    // shipped (staleness informs, gates nothing), and the knob is meaningful only
     // here, inside the mrmEnforced gate — with enforcement off there is no
     // gate to deepen. When armed: the live card's ledger drift since its
     // last granting decision (computeCardStaleness — the ONE staleness
@@ -568,7 +568,7 @@ export function registerMrmRoutes(app: FastifyInstance, db: Db) {
     return {
       enforced: org.mrmEnforced,
       warnDays: org.mrmExpiryWarnDays,
-      /** ADR-0086 §3's follow-up (batch B3): off by default; deepens the
+      /** ADR-0086 §3's follow-up (batch B3): ON by default (ADR-0181); deepens the
        * dispatch gate (mrmEnforced) — with enforcement off it gates nothing */
       stalenessRecertEnabled: org.mrmStalenessRecertEnabled,
       stalenessRecertThreshold: org.mrmStalenessRecertThreshold,
@@ -1057,7 +1057,7 @@ export function registerMrmRoutes(app: FastifyInstance, db: Db) {
         enforced: z.boolean(),
         warnDays: z.number().int().min(0).max(3650).optional(),
         /** ADR-0086 §3's follow-up (batch B3): staleness-forces-
-         * recertification. Per-org, default off, meaningful only while
+         * recertification. Per-org, default ON (ADR-0181), meaningful only while
          * `enforced` is on (it deepens this gate; it creates none). */
         stalenessRecertEnabled: z.boolean().optional(),
         stalenessRecertThreshold: z.number().int().min(1).max(100000).optional(),

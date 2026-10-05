@@ -223,7 +223,7 @@ export const builderBundleSchema = z
             kind: z.enum(["connector", "mcp_tool"]),
             name: z.string().min(1).max(200),
             server: z.string().max(200).nullable().default(null),
-            requiresApproval: z.boolean().default(false),
+            requiresApproval: z.boolean().default(true),
           }),
         )
         .max(100)

@@ -97,7 +97,7 @@ interface StatusView {
   enforced: boolean;
   warnDays: number;
   /** ADR-0086 §3's follow-up (batch B3): staleness-forces-recertification —
-   * off by default; deepens the dispatch gate and only bites while enforced */
+   * on by default (ADR-0181); deepens the dispatch gate and only bites while enforced */
   stalenessRecertEnabled: boolean;
   stalenessRecertThreshold: number;
   posture: "enforced" | "declared" | "absent";
@@ -286,8 +286,8 @@ export default function ModelRiskPage() {
                       }, "Model-risk enforcement updated")
                     }
                   >
+                    <option value="on">on — 409 at dispatch without a live sign-off (strict default)</option>
                     <option value="off">off — cards are recorded, nothing is refused</option>
-                    <option value="on">on — 409 at dispatch without a live sign-off</option>
                   </Select>
                 </Field>
                 <Field label={`Warn window (days before validUntil)`}>
@@ -309,8 +309,8 @@ export default function ModelRiskPage() {
               </div>
               {/* ADR-0086 §3's follow-up (batch B3) — staleness forces
                   recertification: a per-org opt-in DEEPENING the dispatch
-                  gate above. Off (default) = staleness informs and gates
-                  nothing, exactly as ADR-0086 shipped. */}
+                  gate above. On by default (ADR-0181); off = staleness
+                  informs and gates nothing, as ADR-0086 first shipped. */}
               <div className={a.formRow}>
                 <Field label="Staleness forces recertification">
                   <Select
@@ -318,15 +318,15 @@ export default function ModelRiskPage() {
                     onChange={(e) =>
                       void act.run(async () => {
                         await api.post("/v1/mrm/enforcement", {
-                          enforced: status.data?.enforced ?? false,
+                          enforced: status.data?.enforced ?? true,
                           stalenessRecertEnabled: e.target.value === "on",
                         });
                         await refreshAll();
                       }, "Staleness-recertification setting updated")
                     }
                   >
-                    <option value="off">off — drift informs, nothing more (default)</option>
-                    <option value="on">on — a certified card that drifted past the threshold refuses dispatch</option>
+                    <option value="on">on — a certified card that drifted past the threshold refuses dispatch (strict default)</option>
+                    <option value="off">off — drift informs, nothing more</option>
                   </Select>
                 </Field>
                 <Field label="Drift threshold (ledger changes since certification)">
@@ -345,7 +345,7 @@ export default function ModelRiskPage() {
                     onClick={() =>
                       void act.run(async () => {
                         await api.post("/v1/mrm/enforcement", {
-                          enforced: status.data?.enforced ?? false,
+                          enforced: status.data?.enforced ?? true,
                           stalenessRecertThreshold: Number(stalenessThreshold),
                         });
                         setStalenessThreshold(null);
