@@ -417,12 +417,22 @@ export function manifestDigest(tools: readonly ScannableTool[]): string {
   return sha256Hex(manifestCanonicalJson(tools));
 }
 
-/** Key-sorted deep copy, so `{a,b}` and `{b,a}` digest identically. */
+/**
+ * Key-sorted deep copy, so `{a,b}` and `{b,a}` digest identically.
+ *
+ * The copy is a NULL-PROTOTYPE object. Into a plain `{}`, assigning the key
+ * `"__proto__"` (which `JSON.parse` and jsonb both hand back as an ordinary
+ * own key) sets the copy's prototype instead, and `JSON.stringify` then drops
+ * it: a manifest could carry a poisoned `__proto__` member that the scanner
+ * reads but the digest never sees, so a cleared server kept its clearance and
+ * skipped the release cooldown. On a null-prototype object every key,
+ * `__proto__`, `constructor` and `prototype` included, is an ordinary key.
+ */
 function canonicalize(value: unknown, depth = 0): unknown {
   if (depth > 24 || value === null || typeof value !== "object") return value ?? null;
   if (Array.isArray(value)) return value.map((v) => canonicalize(v, depth + 1));
   const obj = value as Record<string, unknown>;
-  const out: Record<string, unknown> = {};
+  const out = Object.create(null) as Record<string, unknown>;
   for (const key of Object.keys(obj).sort()) out[key] = canonicalize(obj[key], depth + 1);
   return out;
 }

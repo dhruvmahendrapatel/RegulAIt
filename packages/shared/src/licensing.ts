@@ -198,7 +198,9 @@ export type LicenseDocument = z.infer<typeof licenseDocumentSchema>;
  * that simply does not exist here.
  */
 export function canonicalLicenseBytes(doc: LicenseDocument): string {
-  const ordered: Record<string, unknown> = {};
+  // null prototype: a `__proto__` key is serialised like any other, never
+  // swallowed as the prototype (byte-identical for every legitimate document)
+  const ordered = Object.create(null) as Record<string, unknown>;
   for (const k of Object.keys(doc).sort()) ordered[k] = (doc as Record<string, unknown>)[k];
   if (Array.isArray(ordered.features)) ordered.features = [...(ordered.features as string[])].sort();
   return JSON.stringify(ordered);
