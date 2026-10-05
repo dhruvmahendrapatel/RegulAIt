@@ -154,9 +154,26 @@ describe("ADR-0180 §6 (A10): tolerance and the acceptance cap, pure", () => {
       { scopeKind: "category" as const, scopeKey: "hallucination", maxBand: "high" as const },
       { scopeKind: "tier" as const, scopeKey: "high", maxBand: "none" as const },
     ];
-    expect(resolveRiskTolerance(rows, { category: "hallucination", tier: "minimal" })).toEqual({ band: "high", source: "category" });
+    // the minimal tier has no row, so it sits at the strict default: the relaxed category does not reach it
+    expect(resolveRiskTolerance(rows, { category: "hallucination", tier: "minimal" })).toEqual({ band: "medium", source: "default" });
     expect(resolveRiskTolerance(rows, { category: "hallucination", tier: "high" })).toEqual({ band: "none", source: "tier" });
     expect(resolveRiskTolerance(rows, { category: "shadow_ai", tier: "high" })).toEqual({ band: "none", source: "tier" });
+  });
+
+  it("FA10 finding 3: relaxing one scope never relaxes another; an unconfigured scope counts at the strict default", () => {
+    const catOnly = [{ scopeKind: "category" as const, scopeKey: "hallucination", maxBand: "high" as const }];
+    // only category:hallucination = high is configured; the high tier is not relaxed, so it stays medium
+    expect(resolveRiskTolerance(catOnly, { category: "hallucination", tier: "high" })).toEqual({ band: "medium", source: "default" });
+    // no tier at all (a risk with no use case) is the default on that side too: fail closed
+    expect(resolveRiskTolerance(catOnly, { category: "hallucination", tier: null })).toEqual({ band: "medium", source: "default" });
+    const tierOnly = [{ scopeKind: "tier" as const, scopeKey: "minimal", maxBand: "high" as const }];
+    expect(resolveRiskTolerance(tierOnly, { category: "hallucination", tier: "minimal" })).toEqual({ band: "medium", source: "default" });
+    // relaxing both scopes relaxes the risk; the category is named on a tie
+    const both = [...catOnly, ...tierOnly];
+    expect(resolveRiskTolerance(both, { category: "hallucination", tier: "minimal" })).toEqual({ band: "high", source: "category" });
+    // tightening one scope always applies, and a configured row is named over the default on a tie
+    expect(resolveRiskTolerance([{ scopeKind: "category", scopeKey: "hallucination", maxBand: "low" }], { category: "hallucination", tier: "high" })).toEqual({ band: "low", source: "category" });
+    expect(resolveRiskTolerance([{ scopeKind: "tier", scopeKey: "high", maxBand: "medium" }], { category: "hallucination", tier: "high" })).toEqual({ band: "medium", source: "tier" });
   });
 
   it("compares bands strictly: equal to the tolerance is within it", () => {

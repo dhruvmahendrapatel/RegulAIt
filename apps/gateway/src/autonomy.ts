@@ -108,6 +108,14 @@ const CLOSED_USE_CASE_STATUSES = ["rejected", "retired"] as const;
 // Facts
 // ---------------------------------------------------------------------------
 
+/** a Postgres CHECK violation (23514) of `constraint`, raw or wrapped by the
+ * driver. Local on purpose: importing risk-tolerance's twin would add an edge
+ * to the governance-monitor import cycle. */
+const isCheckViolation = (e: unknown, constraint: string): boolean => {
+  const err = e as { code?: string; constraint?: string; cause?: { code?: string; constraint?: string } };
+  return (err?.code ?? err?.cause?.code) === "23514" && (err?.constraint ?? err?.cause?.constraint) === constraint;
+};
+
 const zeroFacts = (): AutonomyObservedFacts => ({ ...NO_AUTONOMY_FACTS, ...NO_AUTONOMY_OBSERVATION });
 
 /** the facts of each agent, by id (every id gets an entry) */
@@ -546,35 +554,52 @@ export function registerAutonomyRoutes(app: FastifyInstance, db: Db): void {
     const body = parsed.data;
     const now = new Date();
     const declaring = body.class !== null;
-    const [updated] = await db
-      .update(builderAgents)
-      .set({
-        declaredAutonomyClass: body.class,
-        autonomyDeclaredBy: declaring ? viewer.userId : null,
-        autonomyDeclaredAt: declaring ? now : null,
-        autonomyNote: declaring ? body.note! : null,
-        updatedAt: now,
-      })
-      .where(eq(builderAgents.id, agent.id))
-      .returning();
-    const view = await autonomyView(db, updated!, now);
-    await db.insert(auditLog).values({
-      userId: viewer.userId,
-      objectType: "builder_agent",
-      objectId: agent.id,
-      detail: {
-        from: { class: agent.declaredAutonomyClass ?? null, note: agent.autonomyNote ?? null },
-        to: { class: body.class, note: declaring ? body.note! : null },
-        observed: view.observed.class,
-        declaredBelowObserved: view.declaredBelowObserved,
-      },
-      effect: "allow",
-      ruleId: AUTONOMY_DECLARED_RULE_ID,
-      ruleChain: [],
-      reason: declaring
-        ? `autonomy class of builder agent '${agent.name}' declared ${body.class} (was ${agent.declaredAutonomyClass ?? "undeclared"}; observed ${view.observed.class})`
-        : `autonomy declaration of builder agent '${agent.name}' withdrawn (was ${agent.declaredAutonomyClass ?? "undeclared"}; observed ${view.observed.class} applies)`,
-    });
+    // the declaration and its audit row commit together or not at all
+    let view: BuilderAgentAutonomyView;
+    try {
+      view = await db.transaction(async (tx) => {
+        const [updated] = await tx
+          .update(builderAgents)
+          .set({
+            declaredAutonomyClass: body.class,
+            autonomyDeclaredBy: declaring ? viewer.userId : null,
+            autonomyDeclaredAt: declaring ? now : null,
+            autonomyNote: declaring ? body.note! : null,
+            updatedAt: now,
+          })
+          .where(eq(builderAgents.id, agent.id))
+          .returning();
+        const v = await autonomyView(tx as unknown as Db, updated!, now);
+        await tx.insert(auditLog).values({
+          userId: viewer.userId,
+          objectType: "builder_agent",
+          objectId: agent.id,
+          detail: {
+            // the stored (scrubbed) note, never the raw request text
+            from: { class: agent.declaredAutonomyClass ?? null, note: agent.autonomyNote ?? null },
+            to: { class: body.class, note: updated!.autonomyNote ?? null },
+            observed: v.observed.class,
+            declaredBelowObserved: v.declaredBelowObserved,
+          },
+          effect: "allow",
+          ruleId: AUTONOMY_DECLARED_RULE_ID,
+          ruleChain: [],
+          reason: declaring
+            ? `autonomy class of builder agent '${agent.name}' declared ${body.class} (was ${agent.declaredAutonomyClass ?? "undeclared"}; observed ${v.observed.class})`
+            : `autonomy declaration of builder agent '${agent.name}' withdrawn (was ${agent.declaredAutonomyClass ?? "undeclared"}; observed ${v.observed.class} applies)`,
+        });
+        return v;
+      });
+    } catch (e) {
+      // the credential scrub can lengthen a note past the store's limit
+      if (isCheckViolation(e, "builder_agents_autonomy_declared_ck")) {
+        return reply.status(422).send({
+          error: "autonomy_note_too_long",
+          detail: "the note is longer than 2000 characters once credentials in it are redacted; shorten it",
+        });
+      }
+      throw e;
+    }
     return {
       autonomy: view,
       ...(view.declaredBelowObserved

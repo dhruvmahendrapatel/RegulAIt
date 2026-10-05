@@ -15,7 +15,9 @@
  *  1. STRICT BY DEFAULT. With no `risk_tolerances` row, residual risk above
  *     `ASSURANCE_DEFAULTS.toleranceMaxBand` (medium) needs a valid acceptance.
  *     An admin may relax a category or a tier; the change is audited with the
- *     set it replaced and the set it wrote.
+ *     set it replaced and the set it wrote. A risk's tolerance is the stricter
+ *     of its category's and its tier's, an unconfigured scope counting at the
+ *     strict default: relaxing one scope never relaxes another.
  *  2. AN ACCEPTANCE IS TIME-BOXED. At most 6 calendar months for high or
  *     critical residual risk, 12 otherwise (`maxAcceptanceMonths`). An expiry
  *     beyond the cap is refused (422), never clamped; none given = the cap.
@@ -46,6 +48,7 @@ import {
   and,
   asc,
   auditLog,
+  compliancePackControls,
   desc,
   eq,
   governanceAlerts,
@@ -89,8 +92,16 @@ import {
   type ToleranceRowInput,
 } from "@regulait/shared";
 import { z } from "zod";
-import { isRiskAcceptor, loadReviewPolicy, tierKeyFor } from "./review-policy.js";
-import { MONITOR_AUDIT_RULE_IDS } from "./governance-monitor.js";
+// IMPORT-CYCLE RULE: this file has NO module-level import of another gateway
+// module. `risks.ts` imports it, and `inventory.ts` imports `risks.ts`; a
+// static edge from here to ./review-policy.js (→ workflows → evals → … → mrm
+// → mrm-autofill) or ./governance-monitor.js (→ inventory, autonomy, mrm …)
+// closes an ESM cycle that evaluates `mrm-autofill` before `inventory` has
+// initialised `INVENTORY_WINDOW_DAYS`, and `demo:prepare` dies at load with a
+// ReferenceError. Both are loaded lazily, on first use, inside the async
+// functions that need them (`reviewPolicyModule`, `monitorAuditRuleIds`).
+// `import-cycles.test.ts` loads the built modules in fresh processes.
+const reviewPolicyModule = () => import("./review-policy.js");
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 const riskIdParam = z.object({ riskId: z.string().uuid() });
@@ -106,6 +117,7 @@ export const RISK_ACCEPTANCE_RULE_IDS = {
   tolerancesSet: "risk-tolerances-set",
   historyRead: "risk-acceptances-read",
   refused: "risk-acceptance-refused",
+  expiryFailed: "risk-acceptance-expiry-failed",
 } as const;
 
 /** a refusal by name, raised before anything is written */
@@ -207,6 +219,7 @@ export const residualPosition: ResidualPositionFn<Db> = async (db, useCaseId, no
     .orderBy(asc(aiRisks.createdAt), asc(aiRisks.id));
   const tolerances = await loadToleranceRows(db);
   const live = await validAcceptances(db, risks.map((r) => r.id), now);
+  const { tierKeyFor } = await reviewPolicyModule();
   const tier = tierKeyFor(uc.euAiActTier);
   return risks.map((r) => positionOf(r, tier, tolerances, live.get(r.id)));
 };
@@ -273,6 +286,32 @@ export async function recordRiskAcceptance(
       error: "acceptance_expiry_not_in_future",
       detail: "an acceptance must expire after the moment it is recorded",
     });
+  }
+  // a control ref names a control a seeded compliance pack defines (the
+  // ADR-0147 link rule), never free text: an unknown one is refused before
+  // anything is written, and is not echoed into the audit trail
+  const refs = [
+    ...new Set((input.compensatingControls ?? []).map((c) => c.controlRef).filter((r): r is string => !!r)),
+  ];
+  if (refs.length > 0) {
+    const known = new Set(
+      (
+        await db
+          .selectDistinct({ controlRef: compliancePackControls.controlRef })
+          .from(compliancePackControls)
+          .where(inArray(compliancePackControls.controlRef, refs))
+      ).map((k) => k.controlRef),
+    );
+    const unknown = refs.filter((r) => !known.has(r)).length;
+    if (unknown > 0) {
+      throw new RiskAcceptanceRefusal(422, {
+        error: "unknown_control_ref",
+        unknown,
+        detail:
+          `${unknown} compensating control ref(s) name no control a compliance pack defines; pick a pack control ` +
+          "or leave the ref empty and describe the control in prose",
+      });
+    }
   }
   // jsonb is outside the prose-scrub registry: scrub each description here
   const controls = (input.compensatingControls ?? []).map((c) => ({
@@ -385,6 +424,7 @@ export async function acceptorRefusal(
   risk: Pick<AiRiskRow, "useCaseId">,
 ): Promise<{ status: number; body: Record<string, unknown> } | null> {
   if (!auth.isAdmin) {
+    const { isRiskAcceptor, loadReviewPolicy } = await reviewPolicyModule();
     if (!auth.userId || !isRiskAcceptor(await loadReviewPolicy(db as Db), auth.userId)) {
       return {
         status: 403,
@@ -441,103 +481,172 @@ export interface RiskAcceptanceExpirySweepResult {
   expired: number;
   reopened: number;
   raised: number;
+  /** items whose own transaction failed (each audited; the pass went on) */
+  failed: number;
+}
+
+/** who the sweep's audit rows name: the deployment, never a person (rule 4).
+ * `userId` is the all-zero identity and `detail.actor` is this string; an admin
+ * who started a manual run is recorded only as `detail.requestedBy`. */
+export const RISK_ACCEPTANCE_SWEEP_ACTOR = "system:risk-acceptance-expiry-sweep";
+
+/** the monitor's audit rule ids, loaded on first use (keeps the import graph acyclic) */
+async function monitorAuditRuleIds(): Promise<{ raised: string }> {
+  return (await import("./governance-monitor.js")).MONITOR_AUDIT_RULE_IDS;
 }
 
 /**
- * Stamp every live acceptance past its expiry as expired (compare-and-swap, so
- * a racing pass expires each once), reopen its risk (clearing the accepted
- * state; audited as the deployment) and raise `risk_acceptance_expired`. The
- * monitor keeps reporting the episode until a new acceptance covers the risk
- * or the risk is closed. At most 500 per pass, oldest expiry first.
+ * Stamp every live acceptance past its expiry as expired, reopen its risk
+ * (clearing the accepted state; audited as the deployment) and raise
+ * `risk_acceptance_expired`. The monitor keeps reporting the episode until a
+ * new acceptance covers the risk or the risk is closed. At most 500 per pass,
+ * oldest expiry first.
+ *
+ * LOCK ORDER: the risk row FOR UPDATE first, then a compare-and-swap on the
+ * acceptance — the order `recordRiskAcceptance` takes (the risk, then its
+ * acceptances) — so a sweep racing a new acceptance never deadlocks. If the new
+ * acceptance won, the CAS finds nothing live and past due and the item is a
+ * no-op. Each item runs in its own transaction with its own try/catch: a
+ * failing item is audited and counted, and the pass goes on to the rest.
  */
 export async function runRiskAcceptanceExpirySweep(
   db: Db,
-  opts: { now?: Date; actorUserId?: string | null } = {},
+  opts: { now?: Date; requestedByUserId?: string | null } = {},
 ): Promise<RiskAcceptanceExpirySweepResult> {
   const now = opts.now ?? new Date();
-  const actor = opts.actorUserId ?? NO_IDENTITY;
+  const alertRaisedRuleId = (await monitorAuditRuleIds()).raised;
+  const requestedBy = opts.requestedByUserId ?? null;
+  const actorDetail = { actor: RISK_ACCEPTANCE_SWEEP_ACTOR, ...(requestedBy ? { requestedBy } : {}) };
   const due = await db
-    .select({ id: riskAcceptances.id })
+    .select({ id: riskAcceptances.id, riskId: riskAcceptances.riskId })
     .from(riskAcceptances)
     .where(and(liveAcceptance, lte(riskAcceptances.expiresAt, now)))
     .orderBy(asc(riskAcceptances.expiresAt))
     .limit(500);
-  const out: RiskAcceptanceExpirySweepResult = { due: due.length, expired: 0, reopened: 0, raised: 0 };
-  for (const { id } of due) {
-    const done = await db.transaction(async (tx) => {
-      const [acc] = await tx
-        .update(riskAcceptances)
-        .set({ expiredAt: now })
-        .where(and(eq(riskAcceptances.id, id), liveAcceptance, lte(riskAcceptances.expiresAt, now)))
-        .returning();
-      if (!acc) return null;
-      const [risk] = await tx.select().from(aiRisks).where(eq(aiRisks.id, acc.riskId)).for("update");
-      if (!risk) return null;
-      // the unique live index means this was the risk's only live acceptance
-      const reopen = risk.status === "accepted";
-      if (reopen) {
-        await tx
-          .update(aiRisks)
-          .set({ status: "open", acceptedByUserId: null, acceptedAt: null, acceptanceNote: null, updatedAt: now })
-          .where(eq(aiRisks.id, risk.id));
-      }
-      await tx.insert(auditLog).values({
-        userId: actor,
-        objectType: "ai_risk",
-        objectId: risk.id,
-        detail: {
-          phase: "acceptance-expired",
-          acceptanceId: acc.id,
-          residualBand: acc.residualBand,
-          expiresAt: acc.expiresAt.toISOString(),
-          from: risk.status,
-          to: reopen ? "open" : risk.status,
-          reopened: reopen,
-          useCaseId: risk.useCaseId,
-        },
-        effect: "allow",
-        ruleId: RISK_ACCEPTANCE_RULE_IDS.expired,
-        ruleChain: [],
-        reason:
-          `the acceptance of residual risk '${risk.title}' expired on ${acc.expiresAt.toISOString().slice(0, 10)}` +
-          (reopen ? "; the risk is REOPENED and needs a new decision" : `; the risk stays ${risk.status}`),
-      });
-      if (risk.status === "closed") return { reopened: false, raised: false };
-      const subject = expiredSubject(acc, risk);
-      const severity = MONITOR_RULES.risk_acceptance_expired.severity;
-      const [alert] = await tx
-        .insert(governanceAlerts)
-        .values({
-          ruleId: "risk_acceptance_expired",
-          subjectKey: subject.subjectKey,
-          severity,
-          title: subject.title,
-          detail: subject.detail ?? {},
-          firstDetectedAt: now,
-          lastDetectedAt: now,
-        })
-        .onConflictDoNothing()
-        .returning({ id: governanceAlerts.id });
-      if (alert) {
-        await tx.insert(auditLog).values({
-          userId: actor,
-          objectType: "governance_alert",
-          objectId: alert.id,
-          detail: { ruleId: "risk_acceptance_expired", subjectKey: subject.subjectKey, severity },
-          effect: "allow",
-          ruleId: MONITOR_AUDIT_RULE_IDS.raised,
+  const out: RiskAcceptanceExpirySweepResult = { due: due.length, expired: 0, reopened: 0, raised: 0, failed: 0 };
+  for (const { id, riskId } of due) {
+    let done: { reopened: boolean; raised: boolean } | null;
+    try {
+      done = await expireOne(db, { id, riskId }, now, actorDetail, alertRaisedRuleId);
+    } catch (e) {
+      // this item rolled back on its own; record it and carry on with the rest
+      out.failed += 1;
+      try {
+        await db.insert(auditLog).values({
+          userId: NO_IDENTITY,
+          objectType: "ai_risk",
+          objectId: riskId,
+          detail: {
+            phase: "acceptance-expiry-failed",
+            acceptanceId: id,
+            error: String((e as Error)?.message ?? e).slice(0, 500),
+            ...actorDetail,
+          },
+          effect: "deny",
+          ruleId: RISK_ACCEPTANCE_RULE_IDS.expiryFailed,
           ruleChain: [],
-          reason: `governance alert raised (${severity}): ${subject.title}`,
+          reason: `expiring acceptance ${id} failed and is retried on the next pass; the gate already treats it as lapsed`,
         });
+      } catch {
+        // an audit write that fails must not end the pass either
       }
-      return { reopened: reopen, raised: !!alert };
-    });
+      continue;
+    }
     if (!done) continue;
     out.expired += 1;
     if (done.reopened) out.reopened += 1;
     if (done.raised) out.raised += 1;
   }
   return out;
+}
+
+/** one item of the sweep, in its own transaction: the risk FOR UPDATE, then
+ * the acceptance CAS */
+async function expireOne(
+  db: Db,
+  item: { id: string; riskId: string },
+  now: Date,
+  actorDetail: Record<string, unknown>,
+  alertRaisedRuleId: string,
+): Promise<{ reopened: boolean; raised: boolean } | null> {
+  return db.transaction(async (tx) => {
+    // 1. the risk first (the order recordRiskAcceptance takes)
+    const [risk] = await tx.select().from(aiRisks).where(eq(aiRisks.id, item.riskId)).for("update");
+    if (!risk) return null;
+    // 2. then compare-and-swap the acceptance: still this risk's, still live, still past due
+    const [acc] = await tx
+      .update(riskAcceptances)
+      .set({ expiredAt: now })
+      .where(
+        and(
+          eq(riskAcceptances.id, item.id),
+          eq(riskAcceptances.riskId, item.riskId),
+          liveAcceptance,
+          lte(riskAcceptances.expiresAt, now),
+        ),
+      )
+      .returning();
+    if (!acc) return null;
+    // the unique live index means this was the risk's only live acceptance
+    const reopen = risk.status === "accepted";
+    if (reopen) {
+      await tx
+        .update(aiRisks)
+        .set({ status: "open", acceptedByUserId: null, acceptedAt: null, acceptanceNote: null, updatedAt: now })
+        .where(eq(aiRisks.id, risk.id));
+    }
+    await tx.insert(auditLog).values({
+      userId: NO_IDENTITY,
+      objectType: "ai_risk",
+      objectId: risk.id,
+      detail: {
+        phase: "acceptance-expired",
+        acceptanceId: acc.id,
+        residualBand: acc.residualBand,
+        expiresAt: acc.expiresAt.toISOString(),
+        from: risk.status,
+        to: reopen ? "open" : risk.status,
+        reopened: reopen,
+        useCaseId: risk.useCaseId,
+        ...actorDetail,
+      },
+      effect: "allow",
+      ruleId: RISK_ACCEPTANCE_RULE_IDS.expired,
+      ruleChain: [],
+      reason:
+        `the acceptance of residual risk '${risk.title}' expired on ${acc.expiresAt.toISOString().slice(0, 10)}` +
+        (reopen ? "; the risk is REOPENED and needs a new decision" : `; the risk stays ${risk.status}`),
+    });
+    if (risk.status === "closed") return { reopened: false, raised: false };
+    const subject = expiredSubject(acc, risk);
+    const severity = MONITOR_RULES.risk_acceptance_expired.severity;
+    const [alert] = await tx
+      .insert(governanceAlerts)
+      .values({
+        ruleId: "risk_acceptance_expired",
+        subjectKey: subject.subjectKey,
+        severity,
+        title: subject.title,
+        detail: subject.detail ?? {},
+        firstDetectedAt: now,
+        lastDetectedAt: now,
+      })
+      .onConflictDoNothing()
+      .returning({ id: governanceAlerts.id });
+    if (alert) {
+      await tx.insert(auditLog).values({
+        userId: NO_IDENTITY,
+        objectType: "governance_alert",
+        objectId: alert.id,
+        detail: { ruleId: "risk_acceptance_expired", subjectKey: subject.subjectKey, severity, ...actorDetail },
+        effect: "allow",
+        ruleId: alertRaisedRuleId,
+        ruleChain: [],
+        reason: `governance alert raised (${severity}): ${subject.title}`,
+      });
+    }
+    return { reopened: reopen, raised: !!alert };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -566,6 +675,7 @@ export async function residualRiskMonitorInput(
     .where(and(ne(aiRisks.status, "closed"), notInArray(aiUseCases.status, ["rejected", "retired"])));
   const tolerances = await loadToleranceRows(db);
   const live = await validAcceptances(db, rows.map((r) => r.risk.id), now);
+  const { tierKeyFor } = await reviewPolicyModule();
   const above: MonitorAssuranceSubject[] = [];
   for (const { risk, useCaseName, euAiActTier } of rows) {
     const p = positionOf(risk, tierKeyFor(euAiActTier), tolerances, live.get(risk.id));
@@ -658,8 +768,9 @@ async function tolerancesView(db: Db) {
       other: ASSURANCE_DEFAULTS.acceptanceMaxMonthsOther,
     },
     note:
-      "With no configured row, residual risk above medium needs a valid, time-boxed acceptance. Where a category " +
-      "and a tier both apply, the stricter tolerance wins.",
+      "With no configured row, residual risk above medium needs a valid, time-boxed acceptance. A risk's tolerance " +
+      "is the stricter of its category's and its tier's, and a scope with no row counts at the strict default, so " +
+      "relaxing a risk needs both its category and its tier relaxed.",
   };
 }
 
@@ -744,7 +855,7 @@ export function registerRiskToleranceRoutes(app: FastifyInstance, db: Db): void 
         .select({ euAiActTier: aiUseCases.euAiActTier })
         .from(aiUseCases)
         .where(eq(aiUseCases.id, risk.useCaseId));
-      tier = uc ? tierKeyFor(uc.euAiActTier) : null;
+      tier = uc ? (await reviewPolicyModule()).tierKeyFor(uc.euAiActTier) : null;
     }
     const live = rows.find((r) => stateOf(r, now) === "live");
     const position = positionOf(risk, tier, await loadToleranceRows(db), live);

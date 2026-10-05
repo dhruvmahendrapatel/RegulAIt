@@ -3,8 +3,9 @@
  *
  * Strict by default: with nothing configured, residual risk above medium
  * needs a valid, time-limited acceptance. An admin may set a different
- * tolerance per risk category or per review tier; where both apply, the
- * stricter one wins. Saving replaces the whole configured set and is audited
+ * tolerance per risk category or per review tier. A risk's tolerance is the
+ * stricter of its category's and its tier's, and a scope with no row counts at
+ * the strict default, so relaxing one scope never relaxes another. Saving replaces the whole configured set and is audited
  * with the old and new values (`PUT /v1/risk-tolerances`).
  */
 import { useEffect, useState } from "react";
@@ -91,8 +92,10 @@ export function RiskTolerancePanel() {
           <div className={v.stack}>
             <p className={v.hint}>
               With nothing configured, any residual risk above {d.strictDefault.maxBand} needs a valid, time-limited
-              acceptance. You can set a different tolerance for a risk category or a review tier. Where both apply, the
-              stricter one wins. Relaxing a tolerance is recorded in the audit trail.
+              acceptance. You can set a different tolerance for a risk category or a review tier. A risk gets the
+              stricter of its category&apos;s and its tier&apos;s tolerance, and one you have not set counts as{" "}
+              {d.strictDefault.maxBand}, so relaxing a risk needs both its category and its tier relaxed. Relaxing a
+              tolerance is recorded in the audit trail.
             </p>
             <Table
               rows={rows}
