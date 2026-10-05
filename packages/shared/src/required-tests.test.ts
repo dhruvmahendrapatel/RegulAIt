@@ -7,13 +7,19 @@
  *   - a stale run fails; a config-hash mismatch fails; one agent missing a run
  *     fails; `not_run` is never a pass;
  *   - enforce holds, warn does not, off is labelled skipped;
- *   - the strict defaults apply when the stored policy is empty.
+ *   - the strict defaults apply when the stored policy is empty;
+ *   - the evidence bar (FA3): a single-trial run, a run that missed a mapped
+ *     attack class, or one with too few reached trials is not evidence, and a
+ *     newer, thinner run never masks an older failing one; an eval run needs
+ *     enough results of every mapped scorer;
+ *   - the gate passes ONLY `satisfied` (an unknown state holds).
  */
 import { describe, expect, it } from "vitest";
 import { OWASP_AGENTIC_TOP_10_MAPPING, OWASP_LLM_TOP_10_MAPPING } from "./owasp-framework-mappings.js";
 import {
   DEFAULT_REQUIRED_MAX_ASR_PCT,
   REQUIRED_TEST_DEFAULTS,
+  REQUIRED_TEST_EVIDENCE_BAR,
   effectiveRequiredTests,
   evaluateRequiredTests,
   owaspMeasurability,
@@ -30,16 +36,19 @@ const NOW = new Date("2026-10-05T12:00:00Z");
 const daysAgo = (n: number) => new Date(NOW.getTime() - n * 86_400_000);
 const PI = "owasp:llm:01";
 const piPolicy = { classes: [{ testClass: PI, maxAsr: 0 }], freshnessDays: 30 };
+/** every red-team class the catalog maps to LLM01, each reached by 1 probe x 3 trials */
+const LLM01_CLASSES = ["prompt_injection", "jailbreak", "indirect_prompt_injection", "encoding_evasion"];
+const covering = (over: Record<string, Partial<{ probes: number; trials: number; defeated: number }>> = {}) =>
+  LLM01_CLASSES.map((attackClass) => ({ attackClass, probes: 1, trials: 3, defeated: 0, ...over[attackClass] }));
 const rt = (over: Partial<RequiredTestRunEvidence> = {}): RequiredTestRunEvidence => ({
   kind: "redteam",
   runId: "run-1",
   agentId: "a",
   configHash: "h-a",
   completedAt: daysAgo(2),
-  redteamClasses: [
-    { attackClass: "prompt_injection", probes: 2, defeated: 0 },
-    { attackClass: "jailbreak", probes: 2, defeated: 0 },
-  ],
+  trialsPerProbe: 3,
+  measurementQuality: "low-power",
+  redteamClasses: covering(),
   ...over,
 });
 const agentA = { id: "a", name: "Agent A", configHash: "h-a" };
@@ -152,17 +161,66 @@ describe("ADR-0180 A3 evaluator", () => {
   });
 
   it("not_run is never a pass: a current run that did not measure the class", () => {
-    const [r] = run([agentA], [rt({ redteamClasses: [{ attackClass: "bias", probes: 3, defeated: 0 }] })]);
+    const [r] = run([agentA], [rt({ redteamClasses: [{ attackClass: "bias", probes: 3, trials: 9, defeated: 0 }] })]);
     expect(r!.state).toBe("not_run");
     // nor a class with zero measured probes
-    const [z] = run([agentA], [rt({ redteamClasses: [{ attackClass: "prompt_injection", probes: 0, defeated: 0 }] })]);
+    const [z] = run([agentA], [rt({ redteamClasses: [{ attackClass: "prompt_injection", probes: 0, trials: 0, defeated: 0 }] })]);
     expect(z!.state).toBe("not_run");
   });
 
   it("a defeated probe past the threshold fails; the NEWEST current run decides", () => {
-    const failing = rt({ runId: "run-2", completedAt: daysAgo(1), redteamClasses: [{ attackClass: "jailbreak", probes: 4, defeated: 1 }] });
+    const failing = rt({ runId: "run-2", completedAt: daysAgo(1), redteamClasses: covering({ jailbreak: { probes: 4, trials: 12, defeated: 1 } }) });
     const [r] = run([agentA], [rt(), failing]);
-    expect(r).toMatchObject({ state: "failing", runId: "run-2", value: 25 });
+    expect(r).toMatchObject({ state: "failing", runId: "run-2", value: 14.29 });
+  });
+
+  // ---- FA3: the evidence bar -------------------------------------------------
+  it("a single-trial run is not evidence (smoke test, not a measurement)", () => {
+    const [r] = run([agentA], [rt({ trialsPerProbe: 1, measurementQuality: "single-trial" })]);
+    expect(r).toMatchObject({ state: "not_run" });
+    expect(r!.detail).toMatch(/single-trial at 1 trial/);
+    // the label is an allow-list: an unlabelled run never counts, whatever its N
+    expect(run([agentA], [rt({ measurementQuality: null })])[0]!.state).toBe("not_run");
+    expect(run([agentA], [rt({ trialsPerProbe: REQUIRED_TEST_EVIDENCE_BAR.minTrialsPerProbe - 1 })])[0]!.state).toBe("not_run");
+  });
+
+  it("a run that skipped one attack class mapped to the id is not evidence (1 probe in 1 class is not LLM01)", () => {
+    const thin = rt({ redteamClasses: [{ attackClass: "prompt_injection", probes: 1, trials: 3, defeated: 0 }] });
+    const [r] = run([agentA], [thin]);
+    expect(r!.state).toBe("not_run");
+    expect(r!.detail).toMatch(/short on jailbreak .*indirect_prompt_injection .*encoding_evasion/);
+    const noEncoding = rt({ redteamClasses: covering().filter((c) => c.attackClass !== "encoding_evasion") });
+    expect(run([agentA], [noEncoding])[0]!.state).toBe("not_run");
+  });
+
+  it("a class with too few REACHED trials is not evidence (platform-held and errored trials are not counted upstream)", () => {
+    const [r] = run([agentA], [rt({ redteamClasses: covering({ encoding_evasion: { trials: REQUIRED_TEST_EVIDENCE_BAR.minTrialsPerClass - 1 } }) })]);
+    expect(r!.state).toBe("not_run");
+    expect(r!.detail).toMatch(/encoding_evasion \(1 probe\(s\), 2 trial\(s\)\)/);
+  });
+
+  it("the newest COVERING run decides: a newer, thinner run cannot mask an older failing one", () => {
+    const olderFailing = rt({ runId: "run-old", completedAt: daysAgo(5), redteamClasses: covering({ jailbreak: { defeated: 1 } }) });
+    const newerThin = rt({ runId: "run-new", completedAt: daysAgo(1), redteamClasses: [{ attackClass: "prompt_injection", probes: 1, trials: 3, defeated: 0 }] });
+    const [r] = run([agentA], [newerThin, olderFailing]);
+    expect(r).toMatchObject({ state: "failing", runId: "run-old" });
+    // and a newer single-trial pass does not mask it either
+    const newerSmoke = rt({ runId: "run-smoke", completedAt: daysAgo(1), trialsPerProbe: 1, measurementQuality: "single-trial" });
+    expect(run([agentA], [newerSmoke, olderFailing])[0]).toMatchObject({ state: "failing", runId: "run-old" });
+  });
+
+  it("an eval run needs enough results of EVERY scorer mapped to the id", () => {
+    const misinformation = { classes: [{ testClass: "owasp:llm:09", minScore: 0.8 }], freshnessDays: 30 };
+    const ev = (scorers: Array<{ scorerKind: string; results: number; meanScore: number }>): RequiredTestRunEvidence => ({
+      kind: "eval", runId: "ev-1", agentId: "a", configHash: "h-a", completedAt: daysAgo(1), scorers,
+    });
+    const evalOf = (runs: RequiredTestRunEvidence[]) => evaluateRequiredTests({ tierPolicy: misinformation, agents: [agentA], runs, now: NOW })[0]!;
+    const n = REQUIRED_TEST_EVIDENCE_BAR.minResultsPerScorer;
+    expect(evalOf([ev([{ scorerKind: "claim_support", results: 1, meanScore: 1 }])]).state).toBe("not_run");
+    expect(evalOf([ev([{ scorerKind: "claim_support", results: n, meanScore: 1 }])]).state).toBe("not_run");
+    expect(
+      evalOf([ev([{ scorerKind: "claim_support", results: n, meanScore: 1 }, { scorerKind: "groundedness_judge", results: n, meanScore: 0.9 }])]).state,
+    ).toBe("satisfied");
   });
 
   it("a use case with no agent in its stack is missing, never satisfied", () => {
@@ -217,6 +275,19 @@ describe("ADR-0180 A3 deploy-gate composition", () => {
       }),
     );
     expect(d.reasons.map((r) => r.code).sort()).toEqual(["required_test_failing", "required_test_missing", "required_test_stale"]);
+  });
+
+  it("only `satisfied` passes: a state this build does not know holds as missing (allow-list, fail closed)", () => {
+    for (const state of ["pass", "insufficient", "waived", "", undefined]) {
+      const d = evaluateDeployGate(
+        base({
+          assuranceMode: "enforce",
+          requiredTests: [{ testClass: PI, agentId: "a", state: state as never, runId: "r", completedAt: null, value: 0 }],
+        }),
+      );
+      expect(d.decision, String(state)).toBe("deny");
+      expect(d.reasons.map((r) => [r.code, r.severity])).toEqual([["required_test_missing", "block"]]);
+    }
   });
 
   it("a check that was not gathered is reported, never passed", () => {

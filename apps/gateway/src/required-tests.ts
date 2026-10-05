@@ -15,13 +15,24 @@
  * the strict default in code (`REQUIRED_TEST_DEFAULTS`): nothing is
  * grandfathered, so an empty column is the strictest policy, not "no policy".
  *
- * EVIDENCE. A red-team run is evidence for an OWASP id when its per-class
- * summary measured at least one probe of a red-team class the evaluator
- * catalog maps to that id; its configuration hash is that of the eval run it
- * reads (`runConfigHash`), so "which configuration was probed" has the same
- * answer as everywhere else. An eval run (not one of a red-team run's trials)
- * is evidence when it has scored results of a scorer the catalog maps to the
- * id. Only COMPLETED runs count.
+ * EVIDENCE. A red-team run's per-class counts are RECOMPUTED from its
+ * probe-trial ledger (`redteam_probe_trials`), never read from the stored
+ * `class_summary`: that summary scores a probe the PLATFORM held (budget,
+ * entitlement, key custody: ADR-0072 `governance_stop`) as resisted, which is
+ * right for the platform's own red-team gate and wrong here, where the claim
+ * is about the agent. Only trials that reached the agent count: a trial whose
+ * adjudication says `platformHeld`, or that errored, is excluded. A run with no
+ * probe-trial rows (pre-ADR-0068) therefore measures nothing. The shared
+ * evaluator then applies the evidence bar (trials per probe, every mapped
+ * class, minimum probes and trials per class). The configuration hash is that
+ * of the eval run it reads (`runConfigHash`), so "which configuration was
+ * probed" has the same answer as everywhere else. An eval run (not one of a
+ * red-team run's trials) is evidence when it has scored results of a scorer
+ * the catalog maps to the id. Only COMPLETED runs count, and a run whose
+ * configuration hash was ADOPTED by the legacy-pin sweep (`evals.ts`,
+ * audit rule `eval-config-hash-adopted`) rather than computed when it ran is
+ * never evidence: its hash records the configuration at the sweep, not the
+ * configuration it measured.
  */
 import type { FastifyInstance } from "fastify";
 import {
@@ -36,6 +47,7 @@ import {
   governanceReviewPolicy,
   inArray,
   isNotNull,
+  redteamProbeTrials,
   redteamRuns,
   redteamTrials,
   sql,
@@ -72,8 +84,10 @@ const POLICY_ID = "default";
 export const REQUIRED_TESTS_PATH = "/v1/governance/review-policy/required-tests";
 export const REQUIRED_TESTS_RULE_ID = "review-policy-required-tests-set";
 
-/** The conditions a tier's policy requires; called when conditions are
- * imposed and by the gate. Pure; the implementation is in shared. */
+/** The conditions a tier's policy requires, in the condition engine's terms.
+ * An interface export of the ADR-0180 contract; nothing calls it yet (the gate
+ * evaluates `requiredTestStatus` live, and imposing these conditions at
+ * approval belongs to the decide path). Pure; the implementation is in shared. */
 export const requiredTestConditionsFor: RequiredTestConditionsForFn = sharedRequiredTestConditionsFor;
 
 /** the stored policy (`{}` when the row or the column is empty = all strict defaults) */
@@ -92,6 +106,20 @@ export async function loadRequiredTestPolicy(db: Db): Promise<RequiredTestPolicy
 /** how far back evidence is read: past the longest freshness an admin may
  * set, so a run that aged out still reads as `stale` rather than `missing` */
 const EVIDENCE_LOOKBACK_DAYS = 2 * ASSURANCE_DEFAULTS.requiredTestFreshnessMaxDays;
+
+/** the audit rule `evals.ts` writes when its legacy-pin sweep ADOPTS the
+ * current configuration hash onto a run made before migration 0149 */
+export const CONFIG_HASH_ADOPTED_RULE_ID = "eval-config-hash-adopted";
+
+/** the eval runs among `ids` whose configuration hash was adopted, not computed */
+async function adoptedHashRuns(db: Db, ids: string[]): Promise<Set<string>> {
+  if (ids.length === 0) return new Set();
+  const rows = await db
+    .select({ id: auditLog.objectId })
+    .from(auditLog)
+    .where(and(eq(auditLog.ruleId, CONFIG_HASH_ADOPTED_RULE_ID), eq(auditLog.objectType, "eval_run"), inArray(auditLog.objectId, ids)));
+  return new Set(rows.map((r) => r.id).filter((x): x is string => !!x));
+}
 
 async function loadRunEvidence(db: Db, agentIds: string[], now: Date): Promise<RequiredTestRunEvidence[]> {
   if (agentIds.length === 0) return [];
@@ -112,21 +140,48 @@ async function loadRunEvidence(db: Db, agentIds: string[], now: Date): Promise<R
     )
     .orderBy(desc(redteamRuns.finishedAt))
     .limit(500);
+  // per (run, class, probe): the usable trials that REACHED the agent, and how
+  // many of those were defeated. A platform-held trial (any adjudication with
+  // platformHeld true) and an errored trial are not measurements of the agent.
+  const reached = sql`${redteamProbeTrials.error} IS NULL AND COALESCE(${redteamProbeTrials.adjudication}->>'platformHeld', 'false') <> 'true'`;
+  const perProbe = rt.length
+    ? await db
+        .select({
+          runId: redteamProbeTrials.runId,
+          attackClass: redteamProbeTrials.attackClass,
+          probeKey: redteamProbeTrials.probeKey,
+          trials: sql<number>`(count(*) FILTER (WHERE ${reached}))::int`,
+          defeats: sql<number>`(count(*) FILTER (WHERE ${reached} AND ${redteamProbeTrials.defeated}))::int`,
+        })
+        .from(redteamProbeTrials)
+        .where(inArray(redteamProbeTrials.runId, rt.map((x) => x.run.id)))
+        .groupBy(redteamProbeTrials.runId, redteamProbeTrials.attackClass, redteamProbeTrials.probeKey)
+    : [];
+  const classesOf = new Map<string, Map<string, { attackClass: string; probes: number; trials: number; defeated: number }>>();
+  for (const p of perProbe) {
+    const trials = Number(p.trials);
+    if (trials <= 0) continue;
+    const byClass = classesOf.get(p.runId) ?? new Map();
+    classesOf.set(p.runId, byClass);
+    const c = byClass.get(p.attackClass) ?? { attackClass: p.attackClass, probes: 0, trials: 0, defeated: 0 };
+    c.probes += 1;
+    c.trials += trials;
+    if (Number(p.defeats) > 0) c.defeated += 1;
+    byClass.set(p.attackClass, c);
+  }
+
+  const adopted = await adoptedHashRuns(db, [...rt.map((x) => x.evalRun.id)]);
   for (const { run, evalRun } of rt) {
-    const classes = (Array.isArray(run.classSummary) ? run.classSummary : []) as Array<{
-      attackClass?: unknown;
-      probes?: unknown;
-      defeated?: unknown;
-    }>;
+    if (adopted.has(evalRun.id)) continue;
     out.push({
       kind: "redteam",
       runId: run.id,
       agentId: run.agentId!,
       configHash: runConfigHash(evalRun as EvalRunRow),
       completedAt: run.finishedAt!,
-      redteamClasses: classes
-        .filter((c) => typeof c.attackClass === "string")
-        .map((c) => ({ attackClass: String(c.attackClass), probes: Number(c.probes ?? 0), defeated: Number(c.defeated ?? 0) })),
+      trialsPerProbe: run.trials,
+      measurementQuality: run.measurementQuality,
+      redteamClasses: [...(classesOf.get(run.id)?.values() ?? [])],
     });
   }
 
@@ -146,6 +201,7 @@ async function loadRunEvidence(db: Db, agentIds: string[], now: Date): Promise<R
     )
     .orderBy(desc(evalRuns.finishedAt))
     .limit(500);
+  const adoptedEval = await adoptedHashRuns(db, ev.map((r) => r.id));
   if (ev.length > 0) {
     const scored = await db
       .select({
@@ -158,6 +214,7 @@ async function loadRunEvidence(db: Db, agentIds: string[], now: Date): Promise<R
       .where(inArray(evalResults.runId, ev.map((r) => r.id)))
       .groupBy(evalResults.runId, evalResults.scorerKind);
     for (const r of ev) {
+      if (adoptedEval.has(r.id)) continue;
       out.push({
         kind: "eval",
         runId: r.id,
@@ -322,37 +379,50 @@ export function registerRequiredTestRoutes(app: FastifyInstance, db: Db): void {
         problems,
       });
     }
-    const before = await loadRequiredTestPolicy(db);
-    await db
-      .insert(governanceReviewPolicy)
-      .values({ id: POLICY_ID, requiredTests: next })
-      .onConflictDoUpdate({ target: governanceReviewPolicy.id, set: { requiredTests: next } });
-    // a tier is RELAXED when a class it required is gone, a threshold loosened,
-    // or its freshness lengthened — named in the audit row
-    const relaxed = REVIEW_POLICY_TIER_KEYS.filter((t) => {
-      const was = effectiveRequiredTests(t, before);
-      const now = effectiveRequiredTests(t, next);
-      if (now.freshnessDays > was.freshnessDays) return true;
-      return was.classes.some((w) => {
-        const n = now.classes.find((c) => c.testClass === w.testClass);
-        if (!n) return true;
-        const a = requiredTestThresholds(w);
-        const b = requiredTestThresholds(n);
-        return (a.maxAsr !== null && b.maxAsr !== null && b.maxAsr > a.maxAsr) || (a.minScore !== null && b.minScore !== null && b.minScore < a.minScore);
-      });
-    });
-    await db.insert(auditLog).values({
-      userId: req.authCtx.userId ?? NO_IDENTITY,
-      objectType: "org_settings",
-      objectId: null,
-      detail: { setting: "requiredTests", from: before, to: next, relaxedTiers: relaxed },
-      effect: "allow",
-      ruleId: REQUIRED_TESTS_RULE_ID,
-      ruleChain: [],
-      reason:
-        `required AI tests per tier set: ${REVIEW_POLICY_TIER_KEYS.map((t) => `${t} ${effectiveRequiredTests(t, next).classes.length}`).join(", ")}` +
-        (relaxed.length ? `; RELAXED for ${relaxed.join(", ")}` : ""),
+    // ONE transaction: the row is locked while `before` is read, so two admins
+    // writing at once each audit the value they actually replaced, and the
+    // policy never changes without its audit row (or the reverse)
+    await db.transaction(async (tx) => {
+      await tx.insert(governanceReviewPolicy).values({ id: POLICY_ID }).onConflictDoNothing({ target: governanceReviewPolicy.id });
+      const [locked] = await tx
+        .select({ requiredTests: governanceReviewPolicy.requiredTests })
+        .from(governanceReviewPolicy)
+        .where(eq(governanceReviewPolicy.id, POLICY_ID))
+        .for("update");
+      const before = (locked?.requiredTests ?? {}) as RequiredTestPolicy;
+      await tx.update(governanceReviewPolicy).set({ requiredTests: next }).where(eq(governanceReviewPolicy.id, POLICY_ID));
+      await tx.insert(auditLog).values(requiredTestsAuditRow(req.authCtx.userId ?? NO_IDENTITY, before, next));
     });
     return view(db);
   });
+}
+
+/** the audit row of a required-tests change, naming every RELAXED tier: one
+ * where a class it required is gone, a threshold loosened, or its freshness
+ * lengthened */
+function requiredTestsAuditRow(userId: string, before: RequiredTestPolicy, next: RequiredTestPolicy) {
+  const relaxed = REVIEW_POLICY_TIER_KEYS.filter((t) => {
+    const was = effectiveRequiredTests(t, before);
+    const now = effectiveRequiredTests(t, next);
+    if (now.freshnessDays > was.freshnessDays) return true;
+    return was.classes.some((w) => {
+      const n = now.classes.find((c) => c.testClass === w.testClass);
+      if (!n) return true;
+      const a = requiredTestThresholds(w);
+      const b = requiredTestThresholds(n);
+      return (a.maxAsr !== null && b.maxAsr !== null && b.maxAsr > a.maxAsr) || (a.minScore !== null && b.minScore !== null && b.minScore < a.minScore);
+    });
+  });
+  return {
+    userId,
+    objectType: "org_settings" as const,
+    objectId: null,
+    detail: { setting: "requiredTests", from: before, to: next, relaxedTiers: relaxed },
+    effect: "allow" as const,
+    ruleId: REQUIRED_TESTS_RULE_ID,
+    ruleChain: [],
+    reason:
+      `required AI tests per tier set: ${REVIEW_POLICY_TIER_KEYS.map((t) => `${t} ${effectiveRequiredTests(t, next).classes.length}`).join(", ")}` +
+      (relaxed.length ? `; RELAXED for ${relaxed.join(", ")}` : ""),
+  };
 }
