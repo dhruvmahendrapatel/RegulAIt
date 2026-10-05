@@ -4,6 +4,9 @@ import { fileURLToPath } from "node:url";
 import { auditLog, createDb, eq, runMigrations, sql, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { loadOrgSettings } from "./org-settings.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the preset is measured from a relaxed (pre-hardening) posture; the strict defaults are restored after
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 /**
  * AER-013 — THE HARDENED PRESET IS ONE DURABLE FACT (the ADR-0132 pattern).
@@ -71,6 +74,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "f".repeat(64), auditAnchorSink: null });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { useCaseGateMode: "off", dispatchAttributionRequired: false, mrmEnforced: false });
   await restoreShippedDefaults();
 });
 
@@ -78,6 +82,7 @@ afterAll(async () => {
   await db.execute(sql.raw("DROP TRIGGER IF EXISTS aer013_test_reject_audit ON audit_log"));
   await db.execute(sql.raw("DROP FUNCTION IF EXISTS aer013_test_reject_audit()"));
   await restoreShippedDefaults();
+  await restoreSb2Gates();
   await app.close();
 });
 

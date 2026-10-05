@@ -15,6 +15,9 @@ import {
   sql,
   type Db,
 } from "@regulait/db";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 /**
  * ADR-0045 — THE MODEL RISK MANAGEMENT REGISTRY, proved by attack.
@@ -181,6 +184,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
 
   const [org] = await db.select().from(orgSettings);
   priorOrg = org
@@ -256,11 +260,12 @@ afterAll(async () => {
       .set({ mrmEnforced: priorOrg.mrmEnforced, mrmExpiryWarnDays: priorOrg.mrmExpiryWarnDays })
       .where(eq(orgSettings.id, "singleton"));
   } else {
-    await db.update(orgSettings).set({ mrmEnforced: false, mrmExpiryWarnDays: 30 });
+    await db.update(orgSettings).set({ mrmEnforced: true, mrmExpiryWarnDays: 30 });
   }
   await db.delete(modelCardEvidence);
   await db.delete(modelCardApprovals);
   await db.delete(modelCards);
+  await restoreSb2Gates();
 });
 
 // ---------------------------------------------------------------------------
@@ -487,7 +492,7 @@ describe("sign-off rides the ONE Approvals Queue — there is no second inbox", 
   });
 });
 
-describe("the dispatch gate — default off, then ENFORCED, then reversible", () => {
+describe("the dispatch gate — relaxed off (ADR-0181 ships it on), then ENFORCED, then reversible", () => {
   it("with the toggle off, an UNCARDED agent dispatches exactly as before", async () => {
     resetProviderCalls();
     const res = await invoke(rikaAuth, otherAgentId);

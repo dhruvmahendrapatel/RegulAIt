@@ -62,6 +62,9 @@ import {
   type Db,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 /**
  * The most recent row by `at`.
@@ -222,6 +225,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, requireProjectAttribution: false });
   await app.ready();
 
   const [prior] = await db
@@ -288,6 +292,7 @@ afterAll(async () => {
     await db.delete(users).where(inArray(users.id, createdUserIds));
   }
   app.server.closeAllConnections();
+  await restoreSb2Gates();
   await app.close();
 });
 

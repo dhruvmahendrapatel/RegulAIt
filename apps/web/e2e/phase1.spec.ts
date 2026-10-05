@@ -294,14 +294,25 @@ test("spend & savings: a non-admin sees their OWN spend and the optimizer's savi
   track.assertClean("spend & savings");
 });
 
+/** ADR-0181: key custody is ON by default; this test is about the BYO-key card
+ * itself, so it relaxes custody through the real admin route and restores it */
+async function setKeyCustody(enforced: boolean) {
+  const res = await fetch(`${state.baseUrl}/v1/interception/settings`, {
+    method: "PUT",
+    headers: { authorization: "Bearer e2e-bootstrap-token", "content-type": "application/json" },
+    body: JSON.stringify({ keyCustodyEnforced: enforced }),
+  });
+  expect(res.status, await res.text()).toBe(200);
+}
+
 test("my model keys: add, listed as present-but-never-revealed, remove", async () => {
   const SECRET = "sk-e2e-never-echoed-0123456789";
+  await setKeyCustody(false);
   await page.getByRole("button", { name: /Dana Developer/ }).click();
   await page.getByRole("menuitem", { name: "Your model keys" }).click();
   await expect(page.getByRole("heading", { name: "Account", exact: true })).toBeVisible();
   await expect(page.getByText("Your model keys", { exact: true })).toBeVisible();
-  // nothing stored yet — and no custody notice, since the seed leaves the
-  // key-custody toggle off
+  // nothing stored yet — and no custody notice, since custody was relaxed above
   await expect(page.getByText("No keys of your own")).toBeVisible();
   await expect(page.getByText("This deployment enforces key custody.")).toHaveCount(0);
   await shot(page, "13c-model-keys-empty");
@@ -326,6 +337,7 @@ test("my model keys: add, listed as present-but-never-revealed, remove", async (
   await expect(page.getByText("No keys of your own")).toBeVisible();
   await shot(page, "13e-model-keys-removed");
 
+  await setKeyCustody(true);
   track.assertClean("model keys add/list/remove");
 });
 

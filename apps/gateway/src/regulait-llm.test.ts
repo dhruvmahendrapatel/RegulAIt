@@ -71,6 +71,9 @@ import {
   type Db,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -188,6 +191,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
   await app.ready();
 
   const [org] = await db.select().from(orgSettings);
@@ -299,6 +303,7 @@ afterAll(async () => {
     .where(inArray(auditLog.objectType, ["training_dataset", "training_job", "training_artifact"]));
   if (projectId) await db.delete(projects).where(eq(projects.id, projectId));
   if (createdUserIds.length) await db.delete(users).where(inArray(users.id, createdUserIds));
+  await restoreSb2Gates();
   await app?.close();
 });
 

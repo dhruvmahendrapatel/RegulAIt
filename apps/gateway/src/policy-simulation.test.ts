@@ -284,10 +284,11 @@ beforeAll(async () => {
 afterAll(async () => {
   // the ABAC policy set is GLOBAL: nothing this file authored may survive
   await db.delete(abacPolicies);
-  // and the friction dial is a singleton every later activation would read
+  // and the friction dial is a singleton every later activation would read:
+  // back to its strict default (ADR-0181)
   await db
     .update(policySimulationSettings)
-    .set({ requirePreviewBeforeActivate: false })
+    .set({ requirePreviewBeforeActivate: true })
     .where(eq(policySimulationSettings.id, "singleton"));
   await app?.close();
 });
@@ -711,11 +712,24 @@ describe("(5) friction on activation (ADR-0040's honest-risks note, made operabl
       method: "PUT",
       url: "/v1/policy-simulations/settings",
       headers: AUTH,
-      payload: { requirePreviewBeforeActivate: false },
+      payload: { requirePreviewBeforeActivate: true },
     });
   });
 
-  it("with the dial OFF (the default) activation succeeds but the omission is RECORDED", async () => {
+  it("the dial ships ON (ADR-0181)", async () => {
+    const res = await app.inject({ method: "GET", url: "/v1/policy-simulations/settings", headers: AUTH });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().settings.requirePreviewBeforeActivate).toBe(true);
+  });
+
+  it("with the dial relaxed OFF activation succeeds but the omission is RECORDED", async () => {
+    const off = await app.inject({
+      method: "PUT",
+      url: "/v1/policy-simulations/settings",
+      headers: AUTH,
+      payload: { requirePreviewBeforeActivate: false },
+    });
+    expect(off.statusCode, off.body).toBe(200);
     const res = await app.inject({
       method: "POST",
       url: `/v1/abac/policies/${unpreviewedPolicyId}/activate`,

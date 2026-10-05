@@ -21,6 +21,9 @@ import { DEFAULT_APPROVAL_TTL_HOURS } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { governedEvaluate } from "./governed-evaluate.js";
 import { consumeBoundApproval, executeGovernedToolCall } from "./mcp-proxy.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 /**
  * F14 / ADR-0105 — A CONSENT IS BOUND TO THE POLICY THAT DEMANDED IT, AND IT
@@ -212,6 +215,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "f".repeat(64) });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { requirePreviewBeforeActivate: false });
   await app.listen({ port: 0, host: "127.0.0.1" });
   const up = await startUpstream();
   upstreamClose = up.close;
@@ -265,6 +269,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   app.server.closeAllConnections();
+  await restoreSb2Gates();
   await app.close();
   await upstreamClose();
 });

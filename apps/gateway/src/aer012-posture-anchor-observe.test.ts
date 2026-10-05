@@ -5,6 +5,9 @@ import { GetObjectLockConfigurationCommand } from "@aws-sdk/client-s3";
 import { createDb, runMigrations, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { S3ObjectLockSink, type S3SendClient } from "./audit-chain.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the preset is measured from a relaxed (pre-hardening) posture; the strict defaults are restored after
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 /**
  * AER-012 — THE POSTURE READ ASKS THE BUCKET, THROUGH THE LONG-LIVED SINK.
@@ -90,6 +93,7 @@ async function restoreShippedDefaults(app: ReturnType<typeof buildApp>) {
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { useCaseGateMode: "off", dispatchAttributionRequired: false, mrmEnforced: false });
   for (const { mode } of MODES) {
     const fake = fakeFor(mode);
     const sink = fake ? new S3ObjectLockSink(S3_CONFIG, fake) : null;
@@ -98,6 +102,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreSb2Gates();
   for (const { app } of apps.values()) await app.close();
 });
 

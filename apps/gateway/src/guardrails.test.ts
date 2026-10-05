@@ -25,6 +25,9 @@ import {
   GUARDRAIL_DETECTOR_IDS,
   type GuardrailModes,
 } from "@regulait/shared";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 /**
  * The most recent row by `at`.
@@ -267,6 +270,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, requireMcpAttribution: false });
   gwUrl = await app.listen({ port: 0, host: "127.0.0.1" });
 
   await app.inject({
@@ -396,6 +400,7 @@ afterAll(async () => {
   // and cannot fail because of an org-wide `block` this file left behind.
   await db.delete(guardrailConfigs);
   app.server.closeAllConnections();
+  await restoreSb2Gates();
   await app.close();
   await mcpUpstream.close();
 });

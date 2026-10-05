@@ -27,6 +27,9 @@ import { buildApp } from "./app.js";
 import { TIMEOUT_DEFAULTS, resolveTimeoutConfig } from "./timeouts.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -72,6 +75,7 @@ beforeAll(async () => {
     bootstrapToken: BOOT,
     timeouts: { mcpConnectMs: 400 },
   });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { requireMcpAttribution: false });
 
   // accepts the TCP connection, then never writes a byte — the failure mode a
   // connect-refused test does NOT cover, and the one that used to hang forever
@@ -106,6 +110,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   app.server.closeAllConnections();
+  await restoreSb2Gates();
   await app.close();
   for (const sock of blackHoleSockets) sock.destroy();
   blackHoleSockets.clear();

@@ -181,7 +181,7 @@ afterAll(async () => {
   // org singletons: put back exactly what was there
   await db.delete(governanceReviewPolicy);
   if (originalPolicy) await db.insert(governanceReviewPolicy).values(originalPolicy);
-  await db.update(orgSettings).set({ useCaseGateMode: originalGateMode ?? "off" });
+  await db.update(orgSettings).set({ useCaseGateMode: originalGateMode ?? "enforce" });
   app.server.closeAllConnections();
   await app.close();
 });
@@ -380,7 +380,7 @@ describe("§6 an approval without an end date is not an approval without end", (
     // NULL (only a row the backfill could not reach) is not treated as expired
     await db.update(aiUseCases).set({ approvedAt: null, approvedUntil: null }).where(eq(aiUseCases.id, uc.id));
     expect(await useCaseDispatchGate(db, ctx)).toBeNull();
-    await db.update(orgSettings).set({ useCaseGateMode: originalGateMode ?? "off" });
+    await db.update(orgSettings).set({ useCaseGateMode: originalGateMode ?? "enforce" });
   });
 });
 

@@ -3,10 +3,10 @@
  * attack, the mrm.test.ts way (the ADR-0045 gate shape this deliberately
  * copies):
  *
- *  1. DEFAULT-OFF IS BYTE-IDENTICAL. With `useCaseGateMode` untouched, the
- *     exact dispatch that refuses under enforce succeeds, reaches the
- *     provider, carries NO `useCaseGate` annotation, and writes ZERO rows
- *     under either gate ruleId (deltas, M-008).
+ *  1. SHIPS ENFORCE (ADR-0181); RELAXED OFF IS BYTE-IDENTICAL. With
+ *     `useCaseGateMode` relaxed to off, the exact dispatch that refuses under
+ *     enforce succeeds, reaches the provider, carries NO `useCaseGate`
+ *     annotation, and writes ZERO rows under either gate ruleId (deltas, M-008).
  *  2. WARN RECORDS, NEVER BLOCKS. The dispatch proceeds (provider called),
  *     the refusal-shaped fact rides the result as `dispatch.useCaseGate`,
  *     and one `use-case-gate-warned` allow row lands on the trail.
@@ -26,6 +26,9 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { auditLog, count, createDb, eq, orgSettings, runMigrations, type Db } from "@regulait/db";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 declare global {
   // eslint-disable-next-line no-var
@@ -111,6 +114,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false });
 
   const [org] = await db.select().from(orgSettings);
   priorGateMode = org?.useCaseGateMode ?? null;
@@ -184,20 +188,22 @@ afterAll(async () => {
   // every later suite's attributed dispatch to a use-case-linked project
   await db
     .update(orgSettings)
-    .set({ useCaseGateMode: (priorGateMode ?? "off") as "off" | "warn" | "enforce" })
+    .set({ useCaseGateMode: (priorGateMode ?? "enforce") as "off" | "warn" | "enforce" })
     .where(eq(orgSettings.id, "singleton"));
+  await restoreSb2Gates();
   await app.close();
   await db.$client.end();
 });
 
-describe("default off — byte-identical (the entire safety argument)", () => {
-  it("ships off: the settings read reports useCaseGateMode 'off'", async () => {
+describe("ships enforce (ADR-0181); relaxed off — byte-identical", () => {
+  it("ships enforce: the settings read reports useCaseGateMode 'enforce'", async () => {
     const res = await app.inject({ method: "GET", url: "/v1/org/settings", headers: AUTH });
     expect(res.statusCode).toBe(200);
-    expect(res.json().settings.useCaseGateMode).toBe("off");
+    expect(res.json().settings.useCaseGateMode).toBe("enforce");
   });
 
-  it("the dispatch that would refuse under enforce passes untouched: 200, provider called, no annotation, zero gate audit rows", async () => {
+  it("relaxed off, the dispatch that would refuse under enforce passes untouched: 200, provider called, no annotation, zero gate audit rows", async () => {
+    await setGateMode("off");
     const warnedBefore = await auditCount("use-case-gate-warned");
     const refusedBefore = await auditCount("use-case-gate-refused");
     resetProviderCalls();
