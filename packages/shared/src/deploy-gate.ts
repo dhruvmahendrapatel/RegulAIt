@@ -266,13 +266,15 @@ function assuranceReasons(input: DeployGateInput, mode: Exclude<AssuranceGateMod
     failing: "required_test_failing",
   };
   for (const t of input.requiredTests ?? []) {
-    const code = testCode[t.state];
-    if (!code) continue;
+    // allow-list: only `satisfied` passes. Any other state, including one this
+    // build does not know, holds as missing evidence (fail closed).
+    if (t.state === "satisfied") continue;
+    const code = testCode[t.state] ?? "required_test_missing";
     const who = t.agentId ? `agent ${input.agents.get(t.agentId)?.name ?? t.agentId}` : `"${uc.name}"`;
     out.push({
       code,
       severity: sev,
-      message: `${t.testClass} on ${who}: ${t.detail ?? t.state.replace(/_/g, " ")}`,
+      message: `${t.testClass} on ${who}: ${t.detail ?? String(t.state ?? "unknown state").replace(/_/g, " ")}`,
       ref: t.agentId ? { type: "agent", id: t.agentId } : { type: "use_case", id: uc.id },
     });
   }
