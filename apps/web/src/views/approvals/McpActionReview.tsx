@@ -49,7 +49,7 @@ export function McpActionReview(props: {
     <span ref={trigger}><Button size="sm" onClick={() => setOpen(true)} aria-label={`Review action ${approval.toolName ?? approval.id}`}>
       Review action
     </Button></span>
-    {open && view && <Modal open wide className={s.dialog} title="Review MCP action" onClose={close} actions={<>
+    {open && view && <Modal open wide className={s.dialog} title={approval.objectType === "connector_call" ? "Review connector write" : "Review MCP action"} onClose={close} actions={<>
       {props.controls && <div className={s.controls}>{props.controls(view.blockedReason, close)}</div>}
       <Button onClick={close}>Close</Button>
     </>}>

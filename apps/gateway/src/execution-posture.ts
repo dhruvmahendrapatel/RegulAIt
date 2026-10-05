@@ -210,9 +210,9 @@ export const EXECUTION_MODE_NOTES: Record<ExecutionMode, string> = {
     "Reads are served; anything that writes is refused — a write MCP tool, a connector write, " +
     "or a dispatch in a mutating mode (plan, review, chat, ask and read still run).",
   require_approval:
-    "Nothing runs unattended. An MCP tool call is QUEUED for human sign-off; model dispatch and " +
-    "connector calls are REFUSED instead, because those paths have no per-call approval queue — " +
-    "use read-only if reads should keep flowing.",
+    "Nothing runs unattended. An MCP tool call or a connector write is QUEUED for human sign-off; " +
+    "model dispatch and connector reads are REFUSED instead, because those paths have no per-call " +
+    "approval queue — use read-only if reads should keep flowing.",
   halted:
     "The kill switch: every governed call is refused. Reading the audit trail, the approvals " +
     "queue and this page is unaffected, so the halt can be investigated and lifted.",

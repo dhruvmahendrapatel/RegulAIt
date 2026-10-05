@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Approval } from "../../api/types";
-import { approvalReviewKey, describeBoundTarget, inspectApprovalAction } from "./approvalReview";
+import { approvalReviewKey, describeBoundTarget, inspectApprovalAction, isBoundAction } from "./approvalReview";
 
 const hash = "a".repeat(64);
 const raw = (overrides: Partial<Approval> = {}): Approval => ({
@@ -34,6 +34,15 @@ describe("approval action review", () => {
     expect(view.payload).toBe(fake);
     expect(view.transformation).toBeUndefined();
     expect(view.blockedReason).toBeNull();
+  });
+
+  it("a held connector write is a bound action, reviewed like an MCP call (ADR-0173 2b)", () => {
+    expect(isBoundAction({ objectType: "connector_call" })).toBe(true);
+    expect(isBoundAction({ objectType: "mcp_tool" })).toBe(true);
+    expect(isBoundAction({ objectType: "workflow" })).toBe(false);
+    // the redacted connector preview (the gateway's {prepared, schemaDigest}) is readable
+    const view = inspectApprovalAction(transformed({ objectType: "connector_call" }));
+    expect(view).toMatchObject({ kind: "redacted", blockedReason: null });
   });
 
   it("an empty argument bag is a real preview", () => {

@@ -18,6 +18,7 @@ import { RiskLibraryPicker } from "./RiskLibraryPicker";
 import { AgentStewardshipLine } from "../integrations/AgentStewardship";
 import type { AgentStewardship } from "../integrations/agentStewardshipModel";
 import { EnergyEstimatePanel } from "../cost/EnergyEstimate";
+import { RunGraph } from "../../../ui/runGraph/RunGraph";
 import {
   ACTIVITY_STATUS,
   PHASES,
@@ -53,7 +54,11 @@ interface AgentCardResponse {
   oversight: { modelCards: number; modelCardApproved: boolean; note: string };
 }
 
-const TABS = ["overview", "frameworks", "risks", "stack", "dependencies", "approvals", "audit"].map((id) => ({ id, label: id[0]!.toUpperCase() + id.slice(1) }));
+const TABS = [
+  ...["overview", "frameworks", "risks", "stack", "dependencies", "approvals", "audit"].map((id) => ({ id, label: id[0]!.toUpperCase() + id.slice(1) })),
+  // ADR-0173 batch 2b: the use case's path from registration to its decision, as a graph
+  { id: "path", label: "Decision path" },
+];
 
 export default function UseCaseOverviewPage() {
   const { id = "" } = useParams();
@@ -151,6 +156,11 @@ export default function UseCaseOverviewPage() {
             {tab === "dependencies" ? <Card title="Dependencies and inherited risk"><DependencyGraphPanel useCaseId={id} /></Card> : null}
             {tab === "approvals" ? <ApprovalsTab approvals={data.approvals} userName={userName} /> : null}
             {tab === "audit" ? <AuditTab rows={data.audit} /> : null}
+            {tab === "path" ? (
+              <Card title="Decision path">
+                <RunGraph source={{ kind: "use_case", useCaseId: id }} label={`Decision path of ${data.useCase.name}`} refreshKey={status} />
+              </Card>
+            ) : null}
           </div>
         </>
       ) : null}

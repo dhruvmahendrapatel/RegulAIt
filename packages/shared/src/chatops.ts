@@ -951,3 +951,160 @@ export function teamsActivityFreshness(
   }
   return { ok: true };
 }
+
+// ---------------------------------------------------------------------------
+// ADR-0173 batch 2b — SLACK "ASK FIRST" BUTTONS
+//
+// A builder turn that pauses on a tool marked "Ask first" in a Slack thread
+// carries Approve / Deny buttons. The button value is the OPAQUE id of the
+// prompt record (`builder_step_chat_prompts`), bound to the workspace that
+// posted it. Like an approval button, a click carries no authority: the
+// gateway verifies the signature, maps the clicking chat user through the
+// identity link, requires them to be the thread's own person, and then calls
+// the same confirm logic as the web route.
+//
+// Plain Block Kit JSON (no SDK): a message is a list of blocks.
+// ---------------------------------------------------------------------------
+
+export const SLACK_STEP_ACTION_IDS = { approve: "regulait_step_approve", deny: "regulait_step_deny" } as const;
+export type StepAnswer = keyof typeof SLACK_STEP_ACTION_IDS;
+
+export interface SlackStepInteraction {
+  /** the Slack user who clicked — an ASSERTION until mapped */
+  chatUserId: string;
+  /** the opaque prompt id the button carried */
+  promptId: string;
+  answer: StepAnswer;
+  messageRef: string | null;
+  channel: string | null;
+  // The clicked message's own blocks are deliberately NOT read (ADR-0173
+  // batch 2b review): the answered message is rebuilt from what RegulAIt
+  // stored, never from content the click carries back.
+}
+
+/**
+ * Parse a Slack `block_actions` interaction on one of the step buttons. null
+ * for anything else — an approval-card click included, which
+ * `parseSlackInteraction` reads instead.
+ */
+export function parseSlackStepInteraction(rawBody: string): SlackStepInteraction | null {
+  let json: unknown;
+  try {
+    const raw = new URLSearchParams(rawBody).get("payload");
+    if (!raw) return null;
+    json = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (typeof json !== "object" || json === null) return null;
+  const p = json as Record<string, unknown>;
+  if (p.type !== "block_actions") return null;
+  const user = p.user as Record<string, unknown> | undefined;
+  const chatUserId = nonEmpty(user?.id);
+  const actions = Array.isArray(p.actions) ? (p.actions as Array<Record<string, unknown>>) : [];
+  if (actions.length !== 1) return null;
+  const actionId = nonEmpty(actions[0]?.action_id);
+  const value = nonEmpty(actions[0]?.value);
+  const answer: StepAnswer | null =
+    actionId === SLACK_STEP_ACTION_IDS.approve ? "approve" : actionId === SLACK_STEP_ACTION_IDS.deny ? "deny" : null;
+  if (!chatUserId || !answer || !value || !UUID_RE.test(value)) return null;
+  const container = p.container as Record<string, unknown> | undefined;
+  const channelObj = p.channel as Record<string, unknown> | undefined;
+  return { chatUserId, promptId: value, answer, messageRef: nonEmpty(container?.message_ts), channel: nonEmpty(channelObj?.id) };
+}
+
+/** Slack caps one section's text at 3000 characters */
+const SLACK_SECTION_MAX = 2_900;
+
+/** the reply as inert `mrkdwn` sections: escaped, split under Slack's cap */
+function replySections(text: string): Array<Record<string, unknown>> {
+  const inert = escapeSlackText(text);
+  const out: Array<Record<string, unknown>> = [];
+  for (let i = 0; i < inert.length; i += SLACK_SECTION_MAX) {
+    out.push({ type: "section", text: { type: "mrkdwn", text: inert.slice(i, i + SLACK_SECTION_MAX) } });
+  }
+  return out;
+}
+
+/** a one-line `plain_text` context note: never parsed for links or mentions */
+const plainContext = (text: string) => ({ type: "context", elements: [{ type: "plain_text", text: oneLine(text).slice(0, 2_000) }] });
+
+/**
+ * The pause message with its two buttons. `text` is the reply composed for the
+ * thread (model output included) and `toolLabel` names the tool; both are made
+ * inert here. The buttons carry ONLY the prompt id.
+ */
+export function composeStepConfirmBlocks(input: { text: string; toolLabel: string; promptId: string }): Array<Record<string, unknown>> {
+  return [
+    ...replySections(input.text),
+    plainContext(`Use "${input.toolLabel}"? Only the person this conversation runs as can answer.`),
+    {
+      type: "actions",
+      block_id: "regulait_step",
+      elements: [
+        { type: "button", action_id: SLACK_STEP_ACTION_IDS.approve, style: "primary", text: { type: "plain_text", text: "Approve" }, value: input.promptId },
+        { type: "button", action_id: SLACK_STEP_ACTION_IDS.deny, style: "danger", text: { type: "plain_text", text: "Deny" }, value: input.promptId },
+      ],
+    },
+  ];
+}
+
+/**
+ * The same message once answered (or no longer answerable), rebuilt from what
+ * RegulAIt stored — never from the blocks a click carries back (ADR-0173 batch
+ * 2b review): `text` is the reply as composed for the thread, made inert here
+ * exactly as the pause message's was; then the outcome, and no buttons.
+ */
+export function composeStepAnsweredBlocks(input: { text: string; outcome: string }): Array<Record<string, unknown>> {
+  return [...replySections(input.text), plainContext(input.outcome)];
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0173 batch 2b — THE TEAMS BOT FRAMEWORK ENDPOINT, the pure half
+//
+// A registered bot receives Activities from the Bot Framework service with a
+// Bearer JWT, which the gateway verifies against the JWKS named by the
+// configured OpenID metadata. The Activity schema is the one the outgoing
+// webhook delivers, so the message parse is shared; the bot path also needs
+// the `serviceUrl` the token must name and the tenant the activity came from.
+// ---------------------------------------------------------------------------
+
+export type TeamsBotActivityParse =
+  | {
+      kind: "message";
+      message: InboundChatMessage;
+      timestamp: string | null;
+      /** where the activity came from; the token's `serviceUrl` claim must match it */
+      serviceUrl: string | null;
+      /** `channelData.tenant.id` (else `conversation.tenantId`) */
+      tenantId: string | null;
+      /** the platform channel (`msteams`); a signing key may be endorsed for named channels only */
+      channelId: string | null;
+    }
+  | { kind: "ignored"; reason: string; serviceUrl: string | null; tenantId: string | null; channelId: string | null };
+
+/** Parse a Bot Framework Activity. null = not a readable Activity at all. */
+export function parseTeamsBotActivity(rawBody: string): TeamsBotActivityParse | null {
+  let json: unknown;
+  try {
+    json = JSON.parse(rawBody);
+  } catch {
+    return null;
+  }
+  if (typeof json !== "object" || json === null || Array.isArray(json)) return null;
+  const p = json as Record<string, unknown>;
+  const type = nonEmpty(p.type);
+  if (!type) return null;
+  const serviceUrl = nonEmpty(p.serviceUrl);
+  const channelData = p.channelData as Record<string, unknown> | undefined;
+  const tenant = channelData?.tenant as Record<string, unknown> | undefined;
+  const conv = p.conversation as Record<string, unknown> | undefined;
+  const tenantId = nonEmpty(tenant?.id) ?? nonEmpty(conv?.tenantId);
+  const channelId = nonEmpty(p.channelId);
+  // conversationUpdate, installationUpdate, typing, invoke …: acknowledged,
+  // never a turn (Teams keeps the link-to-web confirmation in 2b)
+  if (type !== "message") return { kind: "ignored", reason: `activity_${oneLine(type).slice(0, 40)}`, serviceUrl, tenantId, channelId };
+  const parsed = parseTeamsMessage(rawBody);
+  if (!parsed) return { kind: "ignored", reason: "unreadable_message", serviceUrl, tenantId, channelId };
+  return { kind: "message", message: parsed.message, timestamp: parsed.timestamp, serviceUrl, tenantId, channelId };
+}

@@ -220,8 +220,8 @@ export function executionGate(
         ruleId: EXECUTION_RULE_IDS.requireApproval,
         reason:
           `this deployment requires human approval for every governed call, and ${subjectLabel} ` +
-          "is on a path with NO per-call approval queue — model dispatch and connector calls " +
-          "cannot be queued for sign-off the way an MCP tool call can. It is therefore REFUSED " +
+          "is on a path with NO per-call approval queue — model dispatch and connector reads " +
+          "cannot be queued for sign-off the way an MCP tool call or a connector write can. It is therefore REFUSED " +
           "rather than queued. Use read-only mode instead if reads should keep flowing.",
       };
     case "normal":
@@ -1470,6 +1470,16 @@ export interface EvaluateConnectorInput {
   /** ADR-0019 per-user revocations, pre-filtered by the gateway to this user.
    * Consulted ONLY after a candidate grant was found, so it can only deny. */
   connectorRevocations?: readonly ConnectorRevocation[];
+  /**
+   * ADR-0173 batch 2b — the caller CAN queue a connector WRITE for sign-off.
+   * Absent (every evaluation-only caller): the pre-2b contract, under which
+   * the execution dial's `require_approval` mode REFUSES every connector call.
+   * Present: a WRITE is resolved for entitlement first and only then held for
+   * approval (AER-017's order, the same as the MCP path), and
+   * `approvedApprovalId` names a bound, fresh consent the caller already found
+   * for this exact call. A READ keeps the refusal either way.
+   */
+  writeApprovalQueue?: { approvedApprovalId: string | null };
 }
 
 export type ConnectorRuleName =
@@ -1490,16 +1500,20 @@ export type ConnectorRuleName =
 
 export interface ConnectorRuleTrace {
   rule: ConnectorRuleName;
-  outcome: "allow" | "deny" | "no-match";
-  /** the matched grant id — or, for a "connector-revoked" deny, the revocation id */
+  outcome: "allow" | "deny" | "no-match" | "require-approval" | "satisfied-by-approval";
+  /** the matched grant id — or, for a "connector-revoked" deny, the revocation id
+   * — or, for a write released by a consent, the approval id */
   grantId?: string;
 }
 
 export interface ConnectorDecision {
-  effect: "allow" | "deny";
+  /** `require_approval` only when the caller passed `writeApprovalQueue` */
+  effect: "allow" | "deny" | "require_approval";
   ruleId: string;
   ruleChain: ConnectorRuleTrace[];
   reason: string;
+  /** set when effect is require_approval: who must sign off */
+  approverUserId?: string;
 }
 
 /**
@@ -1510,11 +1524,16 @@ export function evaluateConnector(input: EvaluateConnectorInput): ConnectorDecis
   // ADR-0124 — the connector path's own copy of the same first question. The
   // read/write classification is already on the wire here (`operation`), so a
   // read-only deployment keeps serving reads through connectors too.
+  // ADR-0173 batch 2b: a caller that can queue a WRITE resolves entitlement
+  // first and consults the hold afterwards (`stopsOnly`), exactly as the MCP
+  // path does since AER-017 — so an approval can never manufacture a grant.
+  const queueable = !!input.writeApprovalQueue && input.operation === "write";
   const gatedConnector = executionGate(
     input.execution,
     input.operation === "write",
     `connector ${refLabel(input.connectorId, input.connectorName)} (${input.operation})`,
-    false,
+    queueable,
+    queueable,
   );
   if (gatedConnector) {
     return {
@@ -1657,6 +1676,42 @@ export function evaluateConnector(input: EvaluateConnectorInput): ConnectorDecis
     chain.push({ rule: "connector-object-scope", outcome: "allow", grantId: grant.id });
   } else {
     chain.push({ rule: "connector-object-scope", outcome: "no-match" });
+  }
+
+  // ADR-0173 batch 2b — THE DEPLOYMENT-WIDE HOLD on a queueable WRITE, after
+  // every denial above (an ungranted, read-only, revoked or out-of-scope write
+  // is denied and never offered a queue). Fails closed with no approver.
+  if (queueable) {
+    const hold = executionApprovalHold(input.execution);
+    if (hold) {
+      if ("unusable" in hold) {
+        chain.push({ rule: "execution-require-approval", outcome: "deny" });
+        return {
+          effect: "deny",
+          ruleId: EXECUTION_RULE_IDS.requireApproval,
+          ruleChain: chain,
+          reason:
+            "this deployment requires human approval for every governed call but names no " +
+            "approver, so there is nobody to route the queue entry to — failing closed. Set an " +
+            "approver on the execution dial, or use read-only mode.",
+        };
+      }
+      const approvedId = input.writeApprovalQueue!.approvedApprovalId;
+      if (approvedId) {
+        chain.push({ rule: "execution-require-approval", outcome: "satisfied-by-approval", grantId: approvedId });
+      } else {
+        chain.push({ rule: "execution-require-approval", outcome: "require-approval" });
+        return {
+          effect: "require_approval",
+          ruleId: EXECUTION_RULE_IDS.requireApproval,
+          ruleChain: chain,
+          approverUserId: hold.approverUserId,
+          reason:
+            `this deployment requires human approval for every governed call; the write to connector ` +
+            `${connectorRef} is QUEUED for sign-off, bound to its exact arguments — nothing ran.`,
+        };
+      }
+    }
   }
 
   return {

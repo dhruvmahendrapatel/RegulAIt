@@ -21,6 +21,16 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-10-05 - ADR-0173 batch 2b built and reviewed (migrations 0143, 0144).**
+- **Shipped:** a governed prompt registry (prod promotion through the approvals queue, with separation of duties over the
+  whole commit range), outbound webhooks (Standard Webhooks signing), a playground under its own model-policy feature, a
+  read-only run graph, connector-write approvals, Slack "Ask first" buttons, and a Teams Bot Framework endpoint (`jose`).
+- **Review:** an adversarial review found 4 medium, 1 low-medium and 6 low findings, all fixed with red-without-fix proofs.
+  The fixes include reserved chat controls, a linear-time regex engine for user schemas (`re2js`) and a lease-safe
+  webhook sweep.
+- **Checks:** the full local suite was green on the combined tree before the fixes (gateway 277 files and 3811 tests;
+  web 269 tests), then re-run after the fixes. Batch PR from `main`.
+
 **2026-10-05 - ADR-0178: RegulAIt is proprietary, all rights reserved (owner).** The public repository gains a root
 `LICENSE` (viewing only; no copying, use, hosting, distribution or competing use without written permission) and
 `"license": "UNLICENSED"` in every package manifest. Third-party code keeps its own licences. Making the repository private

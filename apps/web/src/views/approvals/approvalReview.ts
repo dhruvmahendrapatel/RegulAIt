@@ -17,6 +17,14 @@ export interface ActionReview {
   };
 }
 
+/**
+ * The queue kinds whose consent is bound to one action's arguments: an MCP
+ * tool call, and (ADR-0173 batch 2b) a connector write held by the execution
+ * dial. Both are reviewed and gated the same way before approving.
+ */
+export const isBoundAction = (approval: Pick<Approval, "objectType">): boolean =>
+  approval.objectType === "mcp_tool" || approval.objectType === "connector_call";
+
 /** Provenance comes from queue metadata, never from shapes inside a payload. */
 export function inspectApprovalAction(approval: Approval, now = Date.now()): ActionReview {
   const preview = approval.argumentsPreview;

@@ -23,6 +23,7 @@ import {
   parseSnowflakeCredential,
   parseTeamsCredential,
   resolveConnectorProvider,
+  reservedChatControl,
 } from "./index.js";
 
 // one RSA key pair for every snowflake test (2048-bit keeps the suite fast);
@@ -338,6 +339,35 @@ describe("slack adapter (fake upstream)", () => {
         expect(body.channel).toBe("C_OK"); // object wins, always
         expect(body.text).toBe("deployed");
         expect(res.body).toMatchObject({ ok: true, ts: "12.34" });
+      },
+    );
+  });
+
+  it("chat.update is internal-only: invoke() refuses it with no upstream call; updateOwnMessage rewrites one message (ADR-0173 2b)", async () => {
+    await withUpstream(
+      (_req, res) => reply(res, 200, { ok: true, ts: "12.34", channel: "C_OK" }),
+      async (up) => {
+        const slack = new SlackConnectorProvider({ token: "xoxb-abc", baseUrl: up.url });
+        // the governed surface: a write grant (or an agent) cannot rewrite a message
+        const viaInvoke = (await slack
+          .invoke({ operation: "write", object: "C_OK", payload: { op: "chat.update", ts: "12.34", text: "Approved" } })
+          .catch((e: unknown) => e)) as ConnectorProviderError;
+        expect(viaInvoke).toBeInstanceOf(ConnectorProviderError);
+        expect(viaInvoke.status).toBe(400);
+        expect(viaInvoke.message).toContain("internal-only");
+        const other = (await slack
+          .invoke({ operation: "write", object: "C_OK", payload: { op: "chat.delete", ts: "1" } })
+          .catch((e: unknown) => e)) as ConnectorProviderError;
+        expect(other.status).toBe(400);
+        expect(up.requests.length).toBe(0);
+        // the courier's own method
+        await slack.updateOwnMessage({ channel: "C_OK", ts: "12.34", text: "answered" });
+        const sent = up.requests[0]!;
+        expect(sent.url).toBe("/chat.update");
+        expect(JSON.parse(sent.body)).toEqual({ channel: "C_OK", ts: "12.34", text: "answered" });
+        const noTs = (await slack.updateOwnMessage({ channel: "C_OK", ts: "", text: "x" }).catch((e: unknown) => e)) as ConnectorProviderError;
+        expect(noTs.status).toBe(400);
+        expect(up.requests.length).toBe(1);
       },
     );
   });
@@ -1543,5 +1573,47 @@ describe("outlook adapter (fake upstream: Entra login + Microsoft Graph)", () =>
         expect(JSON.stringify(res.body)).not.toMatch(/delivered/i);
       },
     );
+  });
+});
+
+// ADR-0173 batch 2b review — the product's own chat controls are not a
+// connector write's to use (the gateway refuses on this before the kernel)
+describe("reservedChatControl", () => {
+  const card = (actionId: string) => ({
+    text: "Approval needed",
+    blocks: [{ type: "actions", elements: [{ type: "button", action_id: actionId, value: "00000000-0000-4000-8000-000000000001" }] }],
+  });
+
+  it("slack: chat.update is internal-only", () => {
+    expect(reservedChatControl("slack", "write", { op: "chat.update", ts: "1.2", text: "Approved" })?.code).toBe("chat_update_internal_only");
+  });
+
+  it("slack: a reserved action/block/callback id anywhere is refused — nested, in attachments, as a JSON string, any case", () => {
+    for (const id of ["regulait_approve", "regulait_reject", "regulait_step_approve", "regulait_step_deny", "REGULAIT_anything", " regulait_x"]) {
+      expect(reservedChatControl("slack", "write", card(id))?.code, id).toBe("reserved_chat_control");
+    }
+    expect(reservedChatControl("slack", "write", { attachments: [{ callback_id: "regulait_approve" }] })?.code).toBe("reserved_chat_control");
+    expect(reservedChatControl("slack", "write", { blocks: [{ type: "actions", block_id: "regulait_step", elements: [] }] })?.code).toBe("reserved_chat_control");
+    expect(reservedChatControl("slack", "write", { blocks: JSON.stringify(card("regulait_step_approve").blocks) })?.code).toBe("reserved_chat_control");
+  });
+
+  it("slack: ordinary messages and interactive blocks with other ids pass; reads are not checked", () => {
+    expect(reservedChatControl("slack", "write", { text: "deployed regulait_approve is just words" })).toBeNull();
+    expect(reservedChatControl("slack", "write", card("my_app_button"))).toBeNull();
+    expect(reservedChatControl("slack", "read", { op: "conversations.history" })).toBeNull();
+    expect(reservedChatControl("slack", "write", null)).toBeNull();
+  });
+
+  it("teams: a submit action carrying approvalId is refused; other kinds are untouched", () => {
+    const adaptive = { attachments: [{ content: { actions: [{ type: "Action.Submit", data: { approvalId: "x", action: "approve" } }] } }] };
+    expect(reservedChatControl("teams", "write", adaptive)?.code).toBe("reserved_chat_control");
+    expect(reservedChatControl("teams", "write", { text: "hello" })).toBeNull();
+    expect(reservedChatControl("webhook", "write", card("regulait_approve"))).toBeNull();
+  });
+
+  it("past its depth bound nothing is assumed safe", () => {
+    let deep: unknown = { text: "x" };
+    for (let i = 0; i < 40; i++) deep = { nested: deep };
+    expect(reservedChatControl("slack", "write", deep)?.code).toBe("reserved_chat_control");
   });
 });

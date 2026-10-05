@@ -329,6 +329,104 @@ export interface SlackAdapterOptions {
   fetchImpl?: FetchLike;
 }
 
+// ---------------------------------------------------------------------------
+// ADR-0173 batch 2b review — OUR CONTROLS ARE OURS ALONE
+//
+// The interaction routes act on a click by its action id (Slack) or its
+// submit data (Teams): `regulait_approve` + an approval id decides that
+// approval; `regulait_step_*` + a prompt id answers that "Ask first" step. A
+// governed connector write (a user with a chat write grant, or a builder
+// agent the model steers) must therefore never be able to post a message
+// carrying those controls — a look-alike card whose button answers SOMEONE
+// ELSE's pending item, worded to mislead the person who clicks — nor rewrite
+// one of the product's own messages.
+//
+// REFUSED, NOT STRIPPED: stripping would post something other than what the
+// caller sent (and what an approval, if one was needed, was bound to by its
+// argument digest), silently. A legitimate caller never needs our reserved
+// ids, so a payload carrying one is either a mistake or an attempt; either
+// way the answer is a clear, audited refusal and nothing is posted.
+// ---------------------------------------------------------------------------
+
+/** the prefix every interactive control id the product posts begins with */
+export const RESERVED_CHAT_CONTROL_PREFIX = "regulait_";
+
+export type ReservedChatControl =
+  | { code: "chat_update_internal_only"; detail: string }
+  | { code: "reserved_chat_control"; detail: string };
+
+const SLACK_CONTROL_KEYS = new Set(["action_id", "block_id", "callback_id"]);
+
+/**
+ * Why a connector write must not be sent, or null when it may. Pure. Looks
+ * through the whole payload (blocks and attachments may also arrive as a JSON
+ * string, which is parsed and searched too), bounded in depth and size.
+ */
+export function reservedChatControl(
+  providerKind: string,
+  operation: "read" | "write",
+  payload: unknown,
+): ReservedChatControl | null {
+  if (operation !== "write" || (providerKind !== "slack" && providerKind !== "teams")) return null;
+  if (providerKind === "slack" && payload && typeof payload === "object" && (payload as Record<string, unknown>).op === "chat.update") {
+    return {
+      code: "chat_update_internal_only",
+      detail: "rewriting a message is internal-only: the product retires its own approval and confirmation messages, nothing else may",
+    };
+  }
+  let budget = 20_000;
+  let found: string | null = null;
+  let overflow = false;
+  const visit = (node: unknown, depth: number): void => {
+    if (found || overflow) return;
+    // past the bounds nothing is assumed safe: the write is refused
+    if (budget-- <= 0 || depth > 32) {
+      overflow = true;
+      return;
+    }
+    if (typeof node === "string") {
+      const t = node.trimStart();
+      if ((t.startsWith("[") || t.startsWith("{")) && node.length <= 1_000_000) {
+        try {
+          visit(JSON.parse(node), depth + 1);
+        } catch {
+          /* plain text */
+        }
+      }
+      return;
+    }
+    if (Array.isArray(node)) {
+      for (const v of node) visit(v, depth + 1);
+      return;
+    }
+    if (!node || typeof node !== "object") return;
+    for (const [key, v] of Object.entries(node as Record<string, unknown>)) {
+      const k = key.toLowerCase();
+      if (providerKind === "slack" && SLACK_CONTROL_KEYS.has(k) && typeof v === "string" && v.trim().toLowerCase().startsWith(RESERVED_CHAT_CONTROL_PREFIX)) {
+        found = `${key} '${v.slice(0, 80)}'`;
+        return;
+      }
+      // a Teams Action.Submit's data comes back as the activity's `value`;
+      // `approvalId` there is what the interaction route decides on
+      if (providerKind === "teams" && k === "approvalid") {
+        found = "a submit action carrying 'approvalId'";
+        return;
+      }
+      visit(v, depth + 1);
+    }
+  };
+  visit(payload, 0);
+  if (overflow && !found) {
+    return { code: "reserved_chat_control", detail: "the message is too deeply structured to check for reserved controls" };
+  }
+  return found
+    ? {
+        code: "reserved_chat_control",
+        detail: `the message carries ${found}, a control reserved for RegulAIt's own approval and confirmation messages`,
+      }
+    : null;
+}
+
 /** Slack `ok:false` error code → conventional HTTP status for the typed error */
 const SLACK_ERROR_STATUS: Record<string, number> = {
   invalid_auth: 401,
@@ -383,6 +481,20 @@ export class SlackConnectorProvider implements ConnectorProvider {
       // the ONLY mutating op on this surface — a read-mode grant can never
       // reach it because the kernel's mode rule runs before we do, and we never
       // mutate on operation:"read"
+      //
+      // `chat.update` is NOT an invoke() op (ADR-0173 batch 2b review).
+      // Rewriting a message is how the product retires its own approval and
+      // "Ask first" messages, so any caller that reached it here — a user with
+      // a Slack write grant, or a prompt-injected agent — could rewrite those
+      // to mislead the person answering, or hide them. It is
+      // `updateOwnMessage`, which only the ChatOps courier calls; invoke()
+      // refuses it by name.
+      if (op === "chat.update") {
+        throw new ConnectorProviderError(
+          "slack 'chat.update' is internal-only: it is not available through a connector call",
+          400,
+        );
+      }
       if (op !== null && op !== "chat.postMessage") {
         throw new ConnectorProviderError(
           `slack write supports only 'chat.postMessage' (got op '${op}')`,
@@ -434,7 +546,35 @@ export class SlackConnectorProvider implements ConnectorProvider {
         types: typeof payload.types === "string" ? payload.types : undefined,
       });
     }
+    return this.send(method, apiCall, qs, body);
+  }
 
+  /**
+   * INTERNAL-ONLY (ADR-0173 batch 2b): rewrite one message this bot posted —
+   * how the ChatOps courier retires an answered "Ask first" message. Not an
+   * `invoke()` op, so no governed connector call (a user's or an agent's) can
+   * reach it. The channel and ts are the courier's own record of what it
+   * posted, never caller input.
+   */
+  async updateOwnMessage(input: {
+    channel: string;
+    ts: string;
+    text: string;
+    blocks?: Array<Record<string, unknown>>;
+  }): Promise<ConnectorInvokeResult> {
+    if (!input.channel || !input.ts) {
+      throw new ConnectorProviderError("slack chat.update requires the channel and ts of the message to update", 400);
+    }
+    const body = JSON.stringify({
+      channel: input.channel,
+      ts: input.ts,
+      text: input.text,
+      ...(input.blocks ? { blocks: input.blocks } : {}),
+    });
+    return this.send("POST", "chat.update", "", body);
+  }
+
+  private async send(method: string, apiCall: string, qs: string, body: string | undefined): Promise<ConnectorInvokeResult> {
     const url = `${this.base}/${apiCall}${qs}`;
     const res = await this.fetchImpl(url, {
       method,

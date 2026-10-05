@@ -49,6 +49,7 @@ import { runGovernanceMonitor } from "./governance-monitor.js";
 import { runTraceEvaluationSweep } from "./trace-evaluation.js";
 import { runUseCaseRecertificationSweep } from "./review-policy.js";
 import { runBuilderScheduleSweep } from "./builder-runtime.js";
+import { runWebhookDeliverySweep } from "./outbound-webhooks.js";
 import { toRegistry, type SchedulerJobDefinition, type SchedulerJobRegistry } from "./scheduler.js";
 
 const HOUR = 3600;
@@ -80,6 +81,7 @@ export const SCHEDULER_JOB_NAMES = {
   traceEvaluation: "trace-evaluation-sweep",
   useCaseRecertification: "use-case-recertification",
   builderAgentSchedules: "builder-agent-schedules",
+  webhookDeliveries: "webhook-delivery-retry",
 } as const;
 
 export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): SchedulerJobDefinition[] {
@@ -553,6 +555,23 @@ export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): Schedu
           itemsProcessed: out.ran + out.refused,
           detail: { due: out.due, ran: out.ran, refused: out.refused, skipped: out.skipped.length, deferred: out.deferred },
         };
+      },
+    },
+    {
+      // ADR-0173 batch 2b. Retries every outbound webhook delivery whose
+      // backoff has come due. The first attempt happens right after the event;
+      // this is only the retry path. Each delivery is claimed with a lease, so
+      // the manual sweep racing this job sends once.
+      name: SCHEDULER_JOB_NAMES.webhookDeliveries,
+      description:
+        "Retry outbound webhook deliveries whose backoff has come due (up to 100 per pass), signed with the " +
+        "subscription's secret and sent through the egress guard; a delivery that runs out of attempts is marked " +
+        "failed and audited.",
+      adr: "ADR-0173",
+      defaultIntervalSeconds: 60,
+      run: async (ctx) => {
+        const out = await runWebhookDeliverySweep(ctx.db, opts.dataKey, { now: ctx.now });
+        return { itemsProcessed: out.due, detail: { ...out } };
       },
     },
   ];

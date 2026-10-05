@@ -199,8 +199,8 @@ export function registerExecutionControlRoutes(app: FastifyInstance, db: Db) {
         error: "approver_required",
         detail:
           "require_approval mode queues work for human sign-off, so it must name the human. " +
-          "Pass approverUserId. (Only the MCP tool path can queue; model dispatch and connector " +
-          "calls are refused under this mode, because they have no per-call approval queue.)",
+          "Pass approverUserId. (MCP tool calls and connector writes queue; model dispatch and " +
+          "connector reads are refused under this mode, because they have no per-call approval queue.)",
       });
     }
     if (body.approverUserId) {
