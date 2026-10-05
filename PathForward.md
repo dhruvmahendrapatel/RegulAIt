@@ -402,6 +402,59 @@ review); a single connector-health surface; near-duplicate use-case detection at
 **Out of scope:** cross-tenant benchmarks (ADR-0041 is single-tenant); rebuilding observability
 backends, scanners or evaluator models (integrate instead); product tours and videos.
 
+### Additions from the October 2026 open-source project review (ADR-0177)
+
+The owner supplied 22 open-source AI security, evaluation and observability projects. ADR-0177 records, for each one, the
+verified licence, how it may be used (library, sidecar engine, vendored content, standard or interop, or not at all), where
+it appears in the UI, and its phase. Not every project is usable as shipped code: some carry Elastic, BSL, AGPL, LGPL or
+Llama Community licences, and some are no longer maintained. In summary:
+- **Usable in some form (13):** promptfoo, garak, PurpleLlama's CyberSecEval, modelscan, OpenShell, NeMo Guardrails,
+  pipelock (Apache core), the agent governance toolkit, Sentinel content, langfuse, Phoenix and obot (interop only), and
+  Evidently.
+- **Need an owner decision or limited to importing results (4):** fickling, Strix, PentestGPT, Guardrails AI.
+- **Rejected (5):** asqav, trylonai/gateway, Langtrace and whylogs; the Adversarial Robustness Toolbox until it releases
+  again.
+
+**Extensions to existing items**
+
+| Item | Addition (ADR-0177) | Prerequisite |
+|---|---|---|
+| PF-04 | Every sidecar engine image pinned by digest, in the SBOM, with usage-data switches verified off by an egress test | PF-23 |
+| PF-06 | NVIDIA OpenShell as the first real isolation backend: RegulAIt is its policy interceptor, and changes its prover flags as risky become approvals. Later, pipelock's Apache core as an egress-containment option | PF-06 execution-profile contract ADR |
+| PF-07 | Port the agent governance toolkit's MCP tool-poisoning, typosquat and rug-pull heuristics (MIT) | None; next batch |
+| PF-08 | Match the wire contract to the toolkit's Agent Control Specification intervention points; OTel GenAI conventions plus an optional OpenInference profile for ingest and export, with a pinned version and a conformance test; read and publish the MCP Registry API format | Wire contract ADR |
+| PF-09 | asqav's Apache-2.0 conformance vectors as test inspiration if portable per-action receipts are ever built (the SDK itself is ELv2 and rejected) | Decision BOM |
+| PF-10 | promptfoo as the first engine (framework mappings vendored; cloud-only plugins reported as not run; the AGPL `pliny` plugin excluded), then garak with an allow-listed probe set and no copyrighted data; CyberSecEval datasets in the eval library; Strix and PentestGPT results import only | PF-23 |
+| PF-11 | NeMo Guardrails' YARA injection rules and jailbreak heuristics as vendored data now; a NeMo classifier sidecar and customer-supplied Llama Guard / Prompt Guard later (Llama licence: we never bundle weights) | Classifier provider interface |
+| PF-12 | modelscan as the first model scanner; fickling only with a licence decision (LGPL-3.0) | Scanner contract |
+| PF-14 | Monitor rules ported from Sentinel's AI-agent hunting content (MCP-server baseline drift, sharing-scope expansion, instruction change after approval, jailbreak correlation); later, a RegulAIt rule pack for Sentinel users as an ADR-0135 export target | None for the rules |
+| PF-15 | SARIF import covers Strix output | Finding schema |
+| PF-17 | Pull langfuse evaluation scores into measurable conditions; langfuse and Phoenix stay customer-run OTLP destinations, never bundled | Connector health surface |
+| PF-20 | Evidently (Apache-2.0) as an optional drift sidecar; Apache DataSketches if privacy-preserving sketches are needed (whylogs is unmaintained) | PF-23, model telemetry |
+
+### PF-23 — P2 — Sidecar engine contract and the Engines page
+
+One contract for every external engine that runs as its own process: red-team and eval engines, model scanners,
+classifiers, drift monitors and isolation backends.
+- The image is pinned by digest and listed in the SBOM.
+- Every usage-data and remote-fetch switch is set off, and an egress test proves it.
+- Egress is deny-by-default except to our gateway.
+- It has a killable timeout and a budget.
+- Output is normalised into our existing records.
+- An engine error is reported as `unknown` or `not_run`, never clean.
+- Model calls go through the governed gateway as the person who started the run.
+
+One admin page, **Engines** (Integrations group), lists each engine and vendored content set with:
+- version and digest;
+- licence;
+- maintainer count;
+- verified usage-data posture;
+- health and last run;
+- the pages that use it.
+
+It doubles as the single connector-health surface listed under "Ready but deprioritised". *Prerequisite:* a short contract
+ADR; promptfoo is the first engine built against it.
+
 ## What to build, integrate, and defer
 
 | Treatment | Capabilities |
