@@ -703,7 +703,8 @@ export function riskAcceptanceExpiryJobDefinition(): SchedulerJobDefinition {
     adr: "ADR-0180",
     defaultIntervalSeconds: HOUR,
     run: async (ctx) => {
-      const out = await runRiskAcceptanceExpirySweep(ctx.db, { now: ctx.now, actorUserId: ctx.actorUserId });
+      // audited as the deployment; an admin who ran it by hand is only `requestedBy`
+      const out = await runRiskAcceptanceExpirySweep(ctx.db, { now: ctx.now, requestedByUserId: ctx.actorUserId });
       return { itemsProcessed: out.expired, detail: { ...out } };
     },
   };

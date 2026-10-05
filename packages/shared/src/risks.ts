@@ -659,21 +659,28 @@ export interface ToleranceRowInput {
 }
 
 /**
- * The tolerance that applies to one risk. With no configured row for its
- * category or its use case's tier, the STRICT DEFAULT in code applies
- * (`ASSURANCE_DEFAULTS.toleranceMaxBand`, medium). With rows for both, the
- * STRICTER wins (secure by default: relaxing one scope never relaxes another);
- * on a tie the category row is named.
+ * The tolerance that applies to one risk: the STRICTER of its category's and
+ * its use case's tier's tolerance, where a scope with no configured row counts
+ * at the STRICT DEFAULT in code (`ASSURANCE_DEFAULTS.toleranceMaxBand`,
+ * medium). So relaxing one scope never relaxes another: a category relaxed to
+ * high stays at medium for a tier nobody relaxed, and a risk with no tier (no
+ * use case) has the default on that side (secure by default, fail closed).
+ * Tightening either scope always applies. On a tie a configured row is named
+ * over the default, and the category over the tier.
  */
 export function resolveRiskTolerance(
   rows: readonly ToleranceRowInput[],
   risk: { category: string; tier: string | null },
 ): { band: ToleranceBand; source: "default" | "category" | "tier" } {
-  const matches: Array<{ band: ToleranceBand; source: "category" | "tier" }> = [];
+  const strict = ASSURANCE_DEFAULTS.toleranceMaxBand;
   const cat = rows.find((r) => r.scopeKind === "category" && r.scopeKey === risk.category);
-  if (cat) matches.push({ band: cat.maxBand, source: "category" });
   const tier = risk.tier !== null ? rows.find((r) => r.scopeKind === "tier" && r.scopeKey === risk.tier) : undefined;
-  if (tier) matches.push({ band: tier.maxBand, source: "tier" });
-  if (matches.length === 0) return { band: ASSURANCE_DEFAULTS.toleranceMaxBand, source: "default" };
-  return matches.reduce((a, b) => (TOLERANCE_BANDS.indexOf(b.band) < TOLERANCE_BANDS.indexOf(a.band) ? b : a));
+  // in tie-break order: the first of the strictest is named
+  const candidates: Array<{ band: ToleranceBand; source: "default" | "category" | "tier" }> = [
+    ...(cat ? [{ band: cat.maxBand, source: "category" as const }] : []),
+    ...(tier ? [{ band: tier.maxBand, source: "tier" as const }] : []),
+    // an unconfigured scope sits at the strict default
+    ...(!cat || !tier ? [{ band: strict, source: "default" as const }] : []),
+  ];
+  return candidates.reduce((a, b) => (TOLERANCE_BANDS.indexOf(b.band) < TOLERANCE_BANDS.indexOf(a.band) ? b : a));
 }

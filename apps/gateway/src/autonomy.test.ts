@@ -31,6 +31,7 @@ import {
   modelCards,
   redteamLibraries,
   redteamRuns,
+  sql,
 } from "@regulait/db";
 import { builderKit, type BuilderKit, type Person } from "./testing/builder-fixture.js";
 import { AUTONOMY_DECLARED_RULE_ID, AUTONOMY_READ_RULE_ID, autonomyFloorFor, autonomyMonitorInput } from "./autonomy.js";
@@ -316,6 +317,47 @@ describe("the declaration (PUT)", () => {
     const [row] = await k.db.select().from(builderAgents).where(eq(builderAgents.id, a.id));
     expect(row!.autonomyNote).not.toContain("AKIAIOSFODNN7EXAMPLE");
     expect(row!.autonomyNote).toContain("[redacted:");
+  });
+
+  it("FA10 finding 7b: a note the scrub lengthens past the limit is a 422, not a 500, and nothing changes", async () => {
+    const a = await newAgent(owner);
+    // 2000 characters as typed; the redaction marker is longer than the key it replaces
+    const note = `${"x".repeat(1979)} AKIAIOSFODNN7EXAMPLE`;
+    expect(note).toHaveLength(2000);
+    const r = await k.req("PUT", `/v1/builder/agents/${a.id}/autonomy`, owner.auth, { class: "assist", note });
+    expect(r.statusCode, r.body).toBe(422);
+    expect(r.json().error).toBe("autonomy_note_too_long");
+    const [row] = await k.db.select().from(builderAgents).where(eq(builderAgents.id, a.id));
+    expect(row!.declaredAutonomyClass).toBeNull();
+    const audits = await k.db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.objectId, a.id), eq(auditLog.ruleId, AUTONOMY_DECLARED_RULE_ID)));
+    expect(audits).toHaveLength(0);
+  });
+
+  it("FA10 finding 7b: the declaration and its audit row commit together (a failed audit leaves no declaration)", async () => {
+    const a = await newAgent(owner);
+    await k.db.execute(sql.raw(`
+      CREATE OR REPLACE FUNCTION fa10_test_reject_autonomy_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF NEW.rule_id = '${AUTONOMY_DECLARED_RULE_ID}' AND NEW.object_id = '${a.id}' THEN
+          RAISE EXCEPTION 'fa10 injected audit failure';
+        END IF;
+        RETURN NEW;
+      END $$;
+      CREATE TRIGGER fa10_test_reject_autonomy_audit BEFORE INSERT ON audit_log
+      FOR EACH ROW EXECUTE FUNCTION fa10_test_reject_autonomy_audit();
+    `));
+    try {
+      const r = await k.req("PUT", `/v1/builder/agents/${a.id}/autonomy`, owner.auth, { class: "supervised", note: "unaudited?" });
+      expect(r.statusCode).toBe(500);
+    } finally {
+      await k.db.execute(sql.raw("DROP TRIGGER IF EXISTS fa10_test_reject_autonomy_audit ON audit_log"));
+      await k.db.execute(sql.raw("DROP FUNCTION IF EXISTS fa10_test_reject_autonomy_audit()"));
+    }
+    const [row] = await k.db.select().from(builderAgents).where(eq(builderAgents.id, a.id));
+    expect(row).toMatchObject({ declaredAutonomyClass: null, autonomyNote: null, autonomyDeclaredAt: null });
   });
 });
 

@@ -15,7 +15,13 @@
  *  - each compensating-control description is credential-scrubbed;
  *  - only an admin or a named risk acceptor may accept, never the use case's
  *    owner;
- *  - the legacy `POST /v1/risks/:riskId/accept` writes the same acceptance row.
+ *  - the legacy `POST /v1/risks/:riskId/accept` writes the same acceptance row;
+ *  - (FA10) an unconfigured scope counts at the strict default, so relaxing a
+ *    category alone never relaxes a tier nobody relaxed;
+ *  - (FA10) the sweep locks the risk before the acceptance, so it never
+ *    deadlocks with a new acceptance; a failing item does not end the pass;
+ *    it audits as the deployment, an admin's manual run only as `requestedBy`;
+ *  - (FA10) a compensating control ref must name a pack control.
  *
  * Global state (M-068): risk tolerances, the review policy's acceptor list and
  * the alert episodes this file raises are restored/removed before it ends.
@@ -36,6 +42,7 @@ import {
   riskAcceptances,
   riskTolerances,
   runMigrations,
+  sql,
   type Db,
 } from "@regulait/db";
 import { addCalendarMonthsUtc, maxAcceptanceExpiry, resolveRiskTolerance } from "@regulait/shared";
@@ -43,6 +50,8 @@ import { buildApp } from "./app.js";
 import { routeAuthClass } from "./route-classes.js";
 import {
   RISK_ACCEPTANCE_RULE_IDS,
+  RISK_ACCEPTANCE_SWEEP_ACTOR,
+  recordRiskAcceptance,
   residualPosition,
   residualRiskMonitorInput,
   runRiskAcceptanceExpirySweep,
@@ -121,6 +130,8 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "a".repeat(64) });
+  // idempotent (the ADR-0147 precedent): the pack catalogue a compensating control ref must name
+  expect((await inject("POST", "/v1/compliance/packs/seed", AUTH, {})).statusCode).toBe(201);
   for (const [k, isAdmin] of [["admin", true], ["member", false], ["acceptor", false], ["owner", false]] as const) {
     const u = await inject("POST", "/v1/users", AUTH, {
       email: `a10-${k}-${RUN}@example.com`,
@@ -365,7 +376,19 @@ describe("A10: tolerance", () => {
         changed: true,
       });
       expect(row!.reason).toContain("RELAXED");
+      // FA10 finding 3: the limited tier has no row, so it sits at the strict
+      // default and the relaxed category alone does not relax this risk
       let p = (await residualPosition(db, ucId, new Date())).find((x) => x.riskId === id)!;
+      expect(p).toMatchObject({ tolerance: { band: "medium", source: "default" }, aboveTolerance: true });
+
+      // relaxing the tier as well relaxes the risk (the category is named on a tie)
+      await inject("PUT", "/v1/risk-tolerances", users.admin.auth, {
+        tolerances: [
+          { scopeKind: "category", scopeKey: "prompt_injection", maxBand: "high" },
+          { scopeKind: "tier", scopeKey: "limited", maxBand: "high" },
+        ],
+      });
+      p = (await residualPosition(db, ucId, new Date())).find((x) => x.riskId === id)!;
       expect(p).toMatchObject({ tolerance: { band: "high", source: "category" }, aboveTolerance: false });
 
       // a stricter tier row wins over the relaxed category
@@ -380,6 +403,26 @@ describe("A10: tolerance", () => {
     } finally {
       const reset = await inject("PUT", "/v1/risk-tolerances", users.admin.auth, { tolerances: [] });
       expect(reset.json().source).toBe("default");
+    }
+  });
+
+  it("FA10 finding 3: relaxing only a category does not relax a high-tier use case's risk in it", async () => {
+    const ucId = await mkUseCase("high");
+    const id = await mkRisk("high", { useCaseId: ucId, category: "tool_misuse" });
+    const subjectKey = `use_case:${ucId}>risk:${id}`;
+    try {
+      const put = await inject("PUT", "/v1/risk-tolerances", users.admin.auth, {
+        tolerances: [{ scopeKind: "category", scopeKey: "tool_misuse", maxBand: "high" }],
+      });
+      expect(put.statusCode, put.body).toBe(200);
+      // the view says the high tier is at the default; the resolution agrees
+      expect(put.json().effective.tiers.high).toEqual({ maxBand: "medium", source: "default" });
+      const p = (await residualPosition(db, ucId, new Date())).find((x) => x.riskId === id)!;
+      expect(p).toMatchObject({ band: "high", tolerance: { band: "medium", source: "default" }, aboveTolerance: true });
+      const m = await residualRiskMonitorInput(db, new Date());
+      expect(m.residual_above_tolerance!.breaches.map((b) => b.subjectKey)).toContain(subjectKey);
+    } finally {
+      await inject("PUT", "/v1/risk-tolerances", users.admin.auth, { tolerances: [] });
     }
   });
 
@@ -422,6 +465,141 @@ describe("A10: compensating controls", () => {
     expect(row!.compensatingControls[0]!.description).toContain("[redacted:aws_key");
     expect(row!.compensatingControls[0]!.controlRef).toBe("eu-ai-act:art-14-human-oversight");
     expect(row!.compensatingControls[1]).toEqual({ controlRef: null, description: "insurance policy covers the residual exposure" });
+  });
+
+  it("FA10 finding 8: refuses a control ref no compliance pack defines (free text, a pasted credential) before writing", async () => {
+    const id = await mkRisk("medium");
+    for (const controlRef of [`vault ${AWS_KEY}`, "made-up:control"]) {
+      const res = await accept(id, {
+        compensatingControls: [
+          { controlRef: "eu-ai-act:art-14-human-oversight", description: "manual review of each output" },
+          { controlRef, description: "a second control" },
+        ],
+      });
+      expect(res.statusCode, res.body).toBe(422);
+      expect(res.json()).toMatchObject({ error: "unknown_control_ref", unknown: 1 });
+      expect(res.body).not.toContain(AWS_KEY);
+    }
+    expect(await acceptances(id)).toHaveLength(0);
+    expect((await riskRow(id)).status).not.toBe("accepted");
+  });
+});
+
+/** make a recorded acceptance lapse (the DB keeps expires_at after accepted_at) */
+async function lapse(acceptanceId: string, daysAgo: number): Promise<void> {
+  await db
+    .update(riskAcceptances)
+    .set({ acceptedAt: new Date(Date.now() - 40 * 86_400_000), expiresAt: new Date(Date.now() - daysAgo * 86_400_000) })
+    .where(eq(riskAcceptances.id, acceptanceId));
+}
+
+async function lapsedAcceptance(daysAgo: number): Promise<{ riskId: string; acceptanceId: string }> {
+  const riskId = await mkRisk("high");
+  const res = await accept(riskId, {});
+  expect(res.statusCode, res.body).toBe(201);
+  const acceptanceId = res.json().acceptance.id as string;
+  await lapse(acceptanceId, daysAgo);
+  return { riskId, acceptanceId };
+}
+
+describe("FA10: the expiry sweep under contention and failure", () => {
+  it("finding 4: a sweep racing a new acceptance of the same risk deadlocks neither, and completes the other items", async () => {
+    // r1's acceptance lapsed first, so the sweep reaches it first; r2 only the sweep touches
+    const r1 = await lapsedAcceptance(3);
+    const r2 = await lapsedAcceptance(2);
+    let sweep: ReturnType<typeof runRiskAcceptanceExpirySweep> | undefined;
+    const accepting = db.transaction(async (tx) => {
+      // the new acceptance's first lock is the risk row (recordRiskAcceptance takes it again below)
+      await tx.select().from(aiRisks).where(eq(aiRisks.id, r1.riskId)).for("update");
+      const pid = Number(((await tx.execute(sql`select pg_backend_pid()::int as pid`)) as { rows: Array<{ pid: number }> }).rows[0]!.pid);
+      sweep = runRiskAcceptanceExpirySweep(db);
+      // wait until the sweep is queued behind this transaction (on whichever lock it takes first)
+      const deadline = Date.now() + 10_000;
+      for (;;) {
+        const r = (await db.execute(
+          sql`select count(*)::int as n from pg_stat_activity where datname = current_database() and ${pid}::int = any(pg_blocking_pids(pid))`,
+        )) as { rows: Array<{ n: number }> };
+        if (Number(r.rows[0]!.n) > 0) break;
+        if (Date.now() > deadline) throw new Error("the sweep never queued behind the acceptance");
+        await new Promise((res) => setTimeout(res, 25));
+      }
+      // now the acceptance touches the live acceptance row (the supersede)
+      return recordRiskAcceptance(tx, {
+        riskId: r1.riskId,
+        rationale: "renewed while the sweep was running",
+        actorUserId: users.admin.id,
+      });
+    });
+    const [rec, swept] = await Promise.allSettled([accepting, accepting.then(() => sweep!, () => sweep!)]);
+    expect(rec.status, rec.status === "rejected" ? String(rec.reason) : "").toBe("fulfilled");
+    expect(swept.status, swept.status === "rejected" ? String(swept.reason) : "").toBe("fulfilled");
+    const out = (swept as PromiseFulfilledResult<Awaited<ReturnType<typeof runRiskAcceptanceExpirySweep>>>).value;
+    expect(out.failed).toBe(0);
+
+    // the new acceptance won r1: the old row is superseded (not expired) and the risk stays accepted
+    const rows1 = await acceptances(r1.riskId);
+    const old1 = rows1.find((r) => r.id === r1.acceptanceId)!;
+    expect(old1.supersededAt).not.toBeNull();
+    expect(old1.expiredAt).toBeNull();
+    expect(rows1.find((r) => r.id !== r1.acceptanceId)).toMatchObject({ supersededAt: null, expiredAt: null });
+    expect((await riskRow(r1.riskId)).status).toBe("accepted");
+    // the pass went on and expired r2
+    const [a2] = await db.select().from(riskAcceptances).where(eq(riskAcceptances.id, r2.acceptanceId));
+    expect(a2!.expiredAt).not.toBeNull();
+    expect((await riskRow(r2.riskId)).status).toBe("open");
+  });
+
+  it("one failing item is audited and the pass completes the others", async () => {
+    const bad = await lapsedAcceptance(3);
+    const good = await lapsedAcceptance(2);
+    await db.execute(sql.raw(`
+      CREATE OR REPLACE FUNCTION fa10_test_reject_expiry_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF NEW.rule_id = '${RISK_ACCEPTANCE_RULE_IDS.expired}' AND NEW.detail->>'acceptanceId' = '${bad.acceptanceId}' THEN
+          RAISE EXCEPTION 'fa10 injected audit failure';
+        END IF;
+        RETURN NEW;
+      END $$;
+      CREATE TRIGGER fa10_test_reject_expiry_audit BEFORE INSERT ON audit_log
+      FOR EACH ROW EXECUTE FUNCTION fa10_test_reject_expiry_audit();
+    `));
+    let out: Awaited<ReturnType<typeof runRiskAcceptanceExpirySweep>>;
+    try {
+      out = await runRiskAcceptanceExpirySweep(db);
+    } finally {
+      await db.execute(sql.raw("DROP TRIGGER IF EXISTS fa10_test_reject_expiry_audit ON audit_log"));
+      await db.execute(sql.raw("DROP FUNCTION IF EXISTS fa10_test_reject_expiry_audit()"));
+    }
+    expect(out).toMatchObject({ failed: 1 });
+    expect(out.expired).toBeGreaterThanOrEqual(1);
+    // the failed item rolled back whole: still live, the risk still accepted
+    const [b] = await db.select().from(riskAcceptances).where(eq(riskAcceptances.id, bad.acceptanceId));
+    expect(b!.expiredAt).toBeNull();
+    expect((await riskRow(bad.riskId)).status).toBe("accepted");
+    const [failure] = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.objectId, bad.riskId), eq(auditLog.ruleId, RISK_ACCEPTANCE_RULE_IDS.expiryFailed)));
+    expect(failure).toMatchObject({ userId: NO_IDENTITY, effect: "deny" });
+    expect(failure!.detail).toMatchObject({ acceptanceId: bad.acceptanceId, actor: RISK_ACCEPTANCE_SWEEP_ACTOR });
+    // the good item was expired in the same pass
+    const [g] = await db.select().from(riskAcceptances).where(eq(riskAcceptances.id, good.acceptanceId));
+    expect(g!.expiredAt).not.toBeNull();
+    // the next pass picks the failed item up
+    expect((await runRiskAcceptanceExpirySweep(db)).expired).toBeGreaterThanOrEqual(1);
+    expect((await riskRow(bad.riskId)).status).toBe("open");
+  });
+
+  it("INFO: a manual run is audited as the deployment, naming the requesting admin only as requestedBy", async () => {
+    const { riskId, acceptanceId } = await lapsedAcceptance(1);
+    const job = riskAcceptanceExpiryJobDefinition();
+    await job.run({ db, actorUserId: users.admin.id, now: new Date(), runId: `a10-manual-${RUN}` });
+    const [audit] = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.objectId, riskId), eq(auditLog.ruleId, RISK_ACCEPTANCE_RULE_IDS.expired)));
+    expect(audit!.userId).toBe(NO_IDENTITY);
+    expect(audit!.detail).toMatchObject({ acceptanceId, actor: RISK_ACCEPTANCE_SWEEP_ACTOR, requestedBy: users.admin.id });
   });
 });
 
