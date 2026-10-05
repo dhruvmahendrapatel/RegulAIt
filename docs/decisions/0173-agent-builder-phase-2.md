@@ -92,3 +92,40 @@ Migrations 0136 (tool steps, encrypted paused turn), 0137 (inbound channel threa
   `model_not_allowed_for_feature`. Builder model pickers show what the policy allows there.
 - **Disclosure.** The agent's system prompt gives only a count of the toolbox tools the person may not use, never their
   names.
+
+## Amendment — batch 2b defined (owner, 2026-10-05: "Both")
+
+Batch 2b was never written down. The owner chose to cover both the teardown's **Build** modules and the batch-2a leftovers.
+Outbound webhooks move from 2c into 2b, because the prompt registry needs them, and 2c's automation rules reuse them.
+Migrations 0143+ in order.
+
+- **Governed prompt registry.**
+  - Prompts are versioned as commits (template, model configuration, variables, parent, author).
+  - Named tags (`staging`, `prod`) point at commits.
+  - Moving the `prod` tag goes through the approvals queue, with separation of duties: the promoter is not the commit's
+    author, and the binding is the commit hash.
+  - Commits are diffed and the promotion is audited.
+  - Every commit and tag move emits an outbound webhook event.
+- **Outbound webhooks** (from 2c item 9).
+  - Admin-managed subscriptions to named events, signed with HMAC under a per-subscription secret encrypted with the data
+    key.
+  - The egress guard applies, there is a delivery log, and retries use backoff on the scheduler.
+  - A test notification can be sent.
+  - The payload carries no secrets and no content beyond what the event names.
+- **Playground ("policy sandbox").**
+  - Edit a prompt with `{variables}`, an output schema and tools, and pick a model through the governed picker.
+  - Each run goes through the governed dispatch as the caller, under its own model-policy feature.
+  - Run the prompt over a dataset (the evaluate mode) and save the result as a new commit.
+- **Run graph.** A read-only graph of one run's decision path:
+  - a builder turn (model steps, tool calls, pauses, approvals);
+  - an orchestration run (its task graph);
+  - a use case's path (intake, classification, rules, review, decision).
+
+  Each node links to its audit row and trace span.
+- **2a leftovers.**
+  - Connector writes under the `require_approval` execution posture pause in the approvals queue, bound to the argument
+    digest, and resume like MCP calls (today they are refused).
+  - A Microsoft Teams Bot Framework endpoint with JWT validation against configurable OpenID metadata, beside the
+    outgoing-webhook path.
+  - Slack interactive confirmations: "Ask first" answered from the chat with Approve/Deny buttons. The interaction payload
+    is signature-verified, and only the thread's own linked person may answer.
