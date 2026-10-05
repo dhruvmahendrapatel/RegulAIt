@@ -44,6 +44,7 @@ import {
 import {
   GUARDRAIL_DETECTOR_IDS,
   GUARDRAIL_DEFAULT_MODES,
+  GUARDRAIL_FALLBACK_MODE,
   composeGuardrailModes,
   composeGuardrailTerms,
   evaluateGuardrails,
@@ -92,6 +93,22 @@ function rowModes(row: GuardrailConfigRow | undefined | null): Partial<Guardrail
   return out;
 }
 
+/** ADR-0181: the modes in force BEFORE a write, for the audit row's old -> new.
+ * No row = the shipped defaults (which is what was in force). */
+function previousModes(row: GuardrailConfigRow | undefined | null): Partial<GuardrailModes> {
+  if (row) return rowModes(row);
+  const out: Partial<GuardrailModes> = {};
+  for (const id of CONFIGURABLE_DETECTORS) out[id] = GUARDRAIL_DEFAULT_MODES[id];
+  return out;
+}
+
+/** "detector=old->new" for every detector, in one line of audit prose */
+function modeTransitions(before: Partial<GuardrailModes>, after: Partial<GuardrailModes>): string {
+  return CONFIGURABLE_DETECTORS.map((d) =>
+    before[d] === after[d] ? `${d}=${after[d]}` : `${d}=${before[d]}->${after[d]}`,
+  ).join(", ");
+}
+
 // ---------------------------------------------------------------------------
 // Resolution
 // ---------------------------------------------------------------------------
@@ -118,18 +135,10 @@ export interface GuardrailPolicy {
   blocksOutput: boolean;
 }
 
-const INERT: GuardrailPolicy = {
-  modes: Object.fromEntries(GUARDRAIL_DETECTOR_IDS.map((id) => [id, "off"])) as GuardrailModes,
-  terms: {},
-  provenance: [],
-  active: false,
-  blocksInput: false,
-  blocksOutput: false,
-};
-
 /** The org-default row, or undefined when an admin has never touched the
- * settings (in which case `GUARDRAIL_DEFAULT_MODES` — the ADR's conservative
- * shipped posture — applies). */
+ * settings (in which case `GUARDRAIL_DEFAULT_MODES` — ADR-0181's strict
+ * shipped posture: block prompt injection and jailbreak, warn on the rest —
+ * applies). */
 export async function loadOrgGuardrailConfig(db: Db): Promise<GuardrailConfigRow | undefined> {
   const [row] = await db
     .select()
@@ -142,9 +151,9 @@ export async function loadOrgGuardrailConfig(db: Db): Promise<GuardrailConfigRow
  * Resolve the modes and term lists in force for ONE call.
  *
  * Precedence, and why it is this way round:
- *   - `orgDefault` is the deployment's baseline. Absent = the ADR's shipped
- *     posture (heuristic-only, every added layer at `log`), so switching this
- *     engine on cannot silently start refusing traffic.
+ *   - `orgDefault` is the deployment's baseline. Absent = the shipped posture
+ *     (ADR-0181: block prompt injection and jailbreak, warn on the other
+ *     layers); an admin relaxes it through PUT /v1/guardrails/config.
  *   - an `agent`/`connector` override REPLACES the org default for that object
  *     (an admin tuning one noisy agent should not have to restate the org's
  *     other three layers) …
@@ -208,7 +217,7 @@ export async function resolveGuardrailPolicy(
 
   const provenance: GuardrailProvenance[] = CONFIGURABLE_DETECTORS.map((id) => ({
     detector: id,
-    orgDefault: (orgModes[id] ?? "off") as GuardrailMode,
+    orgDefault: (orgModes[id] ?? GUARDRAIL_FALLBACK_MODE) as GuardrailMode,
     override: (overrideModes?.[id] ?? null) as GuardrailMode | null,
     complianceFloor: (floor?.[id] ?? null) as GuardrailMode | null,
     effective: modes[id],
@@ -470,7 +479,7 @@ export function registerGuardrailRoutes(app: FastifyInstance, db: Db): void {
     const base = existing ? rowModes(existing) : { ...GUARDRAIL_DEFAULT_MODES };
     const next: Record<string, unknown> = {};
     for (const id of CONFIGURABLE_DETECTORS) {
-      next[MODE_COLUMN[id]] = body.modes?.[id] ?? base[id] ?? "log";
+      next[MODE_COLUMN[id]] = body.modes?.[id] ?? base[id] ?? GUARDRAIL_FALLBACK_MODE;
     }
     const values = {
       scope,
@@ -493,13 +502,14 @@ export function registerGuardrailRoutes(app: FastifyInstance, db: Db): void {
   app.put("/v1/guardrails/config", async (req, reply) => {
     const body = putGuardrailConfigSchema.parse(req.body);
     const actor = req.authCtx.userId ?? null;
+    const before = previousModes(await loadOrgGuardrailConfig(db));
     const row = await upsert("org", null, body, actor);
     await audit(
       actor,
       row.id,
       "guardrail-config-updated",
-      `org guardrail defaults set — ${CONFIGURABLE_DETECTORS.map((d) => `${d}=${rowModes(row)[d]}`).join(", ")}. A compliance profile can still RAISE any of these for a classified project; nothing here can lower a framework floor.`,
-      { scope: "org", modes: rowModes(row) },
+      `org guardrail defaults set — ${modeTransitions(before, rowModes(row))}. A compliance profile can still RAISE any of these for a classified project; nothing here can lower a framework floor.`,
+      { scope: "org", modes: rowModes(row), previousModes: before },
     );
     return reply.status(200).send({ config: row, modes: rowModes(row) });
   });
@@ -518,13 +528,19 @@ export function registerGuardrailRoutes(app: FastifyInstance, db: Db): void {
             .where(eq(connectors.id, scopeId));
     if (!target) return reply.status(404).send({ error: `unknown_${scope}` });
     const actor = req.authCtx.userId ?? null;
+    // the override's previous modes; with no override yet, the org default was in force
+    const [existingOverride] = await db
+      .select()
+      .from(guardrailConfigs)
+      .where(and(eq(guardrailConfigs.scope, scope), eq(guardrailConfigs.scopeId, scopeId)));
+    const before = previousModes(existingOverride ?? (await loadOrgGuardrailConfig(db)));
     const row = await upsert(scope, scopeId, body, actor);
     await audit(
       actor,
       row.id,
       "guardrail-config-updated",
-      `guardrail override for ${scope} '${target.name}' — ${CONFIGURABLE_DETECTORS.map((d) => `${d}=${rowModes(row)[d]}`).join(", ")}. It replaces the org default for this object and is still MAX-composed with any compliance floor.`,
-      { scope, scopeId, targetName: target.name, modes: rowModes(row) },
+      `guardrail override for ${scope} '${target.name}' — ${modeTransitions(before, rowModes(row))}. It replaces the org default for this object and is still MAX-composed with any compliance floor.`,
+      { scope, scopeId, targetName: target.name, modes: rowModes(row), previousModes: before },
     );
     return reply.status(200).send({ config: row, modes: rowModes(row) });
   });

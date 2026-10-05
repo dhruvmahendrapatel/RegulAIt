@@ -23,6 +23,7 @@ import { createDb, runMigrations, backupRuns, eq } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { ensureEphemeralLicense } from "./ephemeral-license.js";
 import { dataKeyFormatError } from "./secrets.js";
+import { seedStrictData } from "./seed-strict-data.js";
 
 const connectionString =
   process.env.DATABASE_URL ?? "postgres://regulait:regulait@localhost:5432/regulait";
@@ -93,6 +94,9 @@ async function call(method: string, url: string, payload?: unknown, headers = AU
     return {};
   }
 }
+
+// ADR-0181 (SB1): the guardrails / data / runtime strict-default configuration the demo needs
+for (const line of (await seedStrictData(app, { bootstrapToken: BOOT })).lines) console.log(line);
 
 // --- users ---------------------------------------------------------------
 async function ensureUser(email: string, displayName: string, isAdmin = false): Promise<string> {

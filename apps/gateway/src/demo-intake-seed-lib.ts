@@ -29,6 +29,7 @@ import {
   type DemoUseCase,
 } from "@regulait/shared";
 import { VENDOR_QUESTIONNAIRE_TEMPLATE } from "./vendors.js";
+import { openAssuranceGuardrailWindow } from "./seed-strict-data.js";
 
 type Json = Record<string, any>;
 type Headers = Record<string, string>;
@@ -518,55 +519,63 @@ async function seedRequiredTestRuns(
     lib = { id: created.body.id };
     report.created.push("red-team library " + DEMO_ASSURANCE_LIBRARY);
   }
-  for (const name of names) {
-    // idempotent within a day: a clean run of this library from the last 24 h
-    // that meets the evidence bar stands (a later re-seed refreshes it)
-    const prior: Json[] =
-      (await call("GET", `/v1/redteam/runs?agentId=${agentId.get(name)}&libraryId=${lib.id}&limit=1`, undefined, auth)).body.runs ?? [];
-    const last = prior[0];
-    if (
-      last &&
-      last.finishedAt &&
-      Date.now() - Date.parse(String(last.finishedAt)) < 86_400_000 &&
-      Number(last.probes) > 0 &&
-      Number(last.defeated) === 0 &&
-      Number(last.notRunProbes) === 0 &&
-      Number(last.platformHeld) === 0 &&
-      Number(last.trials) >= REQUIRED_TEST_EVIDENCE_BAR.minTrialsPerProbe
-    ) {
-      report.skipped.push(`required-test red-team run on ${name}`);
-      continue;
-    }
-    // Ada runs the suite: she needs the agent like anyone else (default-deny;
-    // a duplicate grant answers 409, which is fine)
-    await call("POST", "/v1/grants/agents", { userId: ada.id, agentId: agentId.get(name) });
-    const r = await call(
-      "POST",
-      "/v1/redteam/runs",
-      {
-        libraryId: lib.id,
-        agentId: agentId.get(name),
-        projectId,
-        mode: modeOf(name),
-        // a single-trial run is a smoke test, not evidence: run at the bar
-        trials: REQUIRED_TEST_EVIDENCE_BAR.minTrialsPerProbe,
-        note: "ADR-0180 required AI tests (demo seed)",
-      },
-      auth,
-    );
-    if (!ok(r.status)) {
-      report.failed.push(`required-test run on ${name}: ${r.status} ${String(r.body.error ?? "")} ${String(r.body.detail ?? "").slice(0, 160)}`.trim());
-      continue;
-    }
-    const run = r.body.run as Json;
-    report.created.push(
-      `required-test red-team run on ${name}: ${run.probes} probe(s) x ${run.trials} trial(s), ${run.defeated} defeated, ${run.notRunProbes} not run, ${run.platformHeld} platform-held`,
-    );
-    if (Number(run.defeated) > 0 || Number(run.notRunProbes) > 0 || Number(run.platformHeld) > 0) {
-      report.notes.push(
-        `required-test run on ${name} is not clean (${run.defeated} defeated, ${run.notRunProbes} not run, ${run.platformHeld} platform-held): the deploy gate will say so`,
+  // ADR-0181: the strict guardrail default holds injection/jailbreak probes before they reach
+  // the agent; open an audited, time-boxed window so the run measures the agent itself
+  const guardrailWindow = await openAssuranceGuardrailWindow(call, auth, names.map((n) => agentId.get(n)!));
+  report.notes.push(...guardrailWindow.notes);
+  try {
+    for (const name of names) {
+      // idempotent within a day: a clean run of this library from the last 24 h
+      // that meets the evidence bar stands (a later re-seed refreshes it)
+      const prior: Json[] =
+        (await call("GET", `/v1/redteam/runs?agentId=${agentId.get(name)}&libraryId=${lib.id}&limit=1`, undefined, auth)).body.runs ?? [];
+      const last = prior[0];
+      if (
+        last &&
+        last.finishedAt &&
+        Date.now() - Date.parse(String(last.finishedAt)) < 86_400_000 &&
+        Number(last.probes) > 0 &&
+        Number(last.defeated) === 0 &&
+        Number(last.notRunProbes) === 0 &&
+        Number(last.platformHeld) === 0 &&
+        Number(last.trials) >= REQUIRED_TEST_EVIDENCE_BAR.minTrialsPerProbe
+      ) {
+        report.skipped.push(`required-test red-team run on ${name}`);
+        continue;
+      }
+      // Ada runs the suite: she needs the agent like anyone else (default-deny;
+      // a duplicate grant answers 409, which is fine)
+      await call("POST", "/v1/grants/agents", { userId: ada.id, agentId: agentId.get(name) });
+      const r = await call(
+        "POST",
+        "/v1/redteam/runs",
+        {
+          libraryId: lib.id,
+          agentId: agentId.get(name),
+          projectId,
+          mode: modeOf(name),
+          // a single-trial run is a smoke test, not evidence: run at the bar
+          trials: REQUIRED_TEST_EVIDENCE_BAR.minTrialsPerProbe,
+          note: "ADR-0180 required AI tests (demo seed)",
+        },
+        auth,
       );
+      if (!ok(r.status)) {
+        report.failed.push(`required-test run on ${name}: ${r.status} ${String(r.body.error ?? "")} ${String(r.body.detail ?? "").slice(0, 160)}`.trim());
+        continue;
+      }
+      const run = r.body.run as Json;
+      report.created.push(
+        `required-test red-team run on ${name}: ${run.probes} probe(s) x ${run.trials} trial(s), ${run.defeated} defeated, ${run.notRunProbes} not run, ${run.platformHeld} platform-held`,
+      );
+      if (Number(run.defeated) > 0 || Number(run.notRunProbes) > 0 || Number(run.platformHeld) > 0) {
+        report.notes.push(
+          `required-test run on ${name} is not clean (${run.defeated} defeated, ${run.notRunProbes} not run, ${run.platformHeld} platform-held): the deploy gate will say so`,
+        );
+      }
     }
+  } finally {
+    report.notes.push(...(await guardrailWindow.restore()));
   }
 }
 

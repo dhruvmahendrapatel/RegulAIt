@@ -2055,10 +2055,12 @@ export const updateInterceptionSettingsSchema = z
      * never deleted. */
     keyCustodyEnforced: z.boolean().optional(),
     /** ADR-0021: a stream=true call on a block-mode PII project — 'suppress'
-     * (default) buffers and answers JSON with a disclosure; 'reject' 400s. */
+     * buffers and answers JSON with a disclosure; 'reject' (ADR-0181: the
+     * default) 400s. */
     streamingOnBlockMode: z.enum(["suppress", "reject"]).optional(),
     /** ADR-0021: true disables the COMPAT_IGNORED_FIELDS accept-and-disclose
-     * tier — an ignorable field (temperature) is a 400 again. */
+     * tier — an ignorable field (temperature) is a 400 again. ADR-0181: true
+     * by default. */
     strictFieldRejection: z.boolean().optional(),
   })
   .strict();
@@ -4481,3 +4483,6 @@ export {
 } from "./required-tests.js";
 // ADR-0180 FA3: the evidence bar a run must meet to count for a required test
 export { REQUIRED_TEST_EVIDENCE_BAR, evidenceShortfall } from "./required-tests.js";
+
+// ADR-0181 (strict defaults, SB1): the guardrail no-row fallback mode (warn, never off).
+export { GUARDRAIL_FALLBACK_MODE } from "./guardrails.js";

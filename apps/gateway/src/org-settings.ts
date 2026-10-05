@@ -11,9 +11,10 @@
  * setting here only ever narrows what happens below it), and the audit-log
  * auto-prune scheduler.
  *
- * INVARIANT (held by migration 0038's defaults): a fresh org_settings row
- * changes NOTHING. Every default equals the pre-0038 behaviour, so the
- * migration is invisible until an admin acts.
+ * ADR-0181 reversed ADR-0021's "a fresh row changes nothing" rule for
+ * security settings: a fresh org_settings row now carries the STRICT value of
+ * each one, and an admin relaxes a setting through PUT /v1/org/settings,
+ * which audits every change old -> new.
  */
 
 import type { FastifyInstance } from "fastify";
@@ -109,8 +110,8 @@ export function effectiveTechniqueMode(
 }
 
 /** ADR-0021: the org default piiMode an UNCLASSIFIED (or profile-less)
- * project falls back to. 'none' (default) maps to null = today's
- * no-enforcement. */
+ * project falls back to. ADR-0181: 'block' by default; 'none' (an audited
+ * admin relaxation) maps to null = no enforcement. */
 export function orgDefaultPiiMode(org: OrgSettingsRow): "block" | "warn" | "log" | null {
   return org.defaultPiiMode === "none" ? null : org.defaultPiiMode;
 }
@@ -798,13 +799,18 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { 
           ([k, v]) => JSON.stringify((locked as Record<string, unknown>)[k]) !== JSON.stringify(v),
         ),
       );
+      // ADR-0181: every relaxation is audited old -> new. `before` carries the
+      // previous value of each changed key, from the same redacted view as
+      // `after` (no credential material in either).
+      const lockedRedacted = redactSettings(locked) as unknown as Record<string, unknown>;
+      const before = Object.fromEntries(Object.keys(changed).map((k) => [k, lockedRedacted[k] ?? null]));
       await tx.insert(auditLog).values({
         // bootstrap has no user identity; the nil uuid marks a non-user actor,
         // as elsewhere in the codebase, and `via` records which it was.
         userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
         objectType: "org_settings",
         objectId: null,
-        detail: { via: req.authCtx.via, changed, after: redactSettings(after), approvalTtlPosture: approvalTtlPosture(after) },
+        detail: { via: req.authCtx.via, changed, before, after: redactSettings(after), approvalTtlPosture: approvalTtlPosture(after) },
         effect: "allow",
         ruleId: "org-settings-updated",
         ruleChain: [],

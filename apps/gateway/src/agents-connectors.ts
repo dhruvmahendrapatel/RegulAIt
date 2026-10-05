@@ -2892,6 +2892,10 @@ export function registerAgentConnectorRoutes(
       keyCiphertext: encryptSecret(opts.dataKey, body.apiKey),
       baseUrl: body.baseUrl ?? null,
     };
+    const [existing] = await db
+      .select({ id: modelCredentials.id, baseUrl: modelCredentials.baseUrl })
+      .from(modelCredentials)
+      .where(eq(modelCredentials.provider, body.provider));
     const [row] = await db
       .insert(modelCredentials)
       .values(values)
@@ -2902,6 +2906,28 @@ export function registerAgentConnectorRoutes(
         baseUrl: modelCredentials.baseUrl,
         createdAt: modelCredentials.createdAt,
       });
+    // ADR-0181: with the env-key fallback off by default, the encrypted store
+    // is THE way a provider goes live, so storing or rotating a platform key is
+    // an audited admin act. The row names the provider and whether a base URL
+    // is set — never the key, a fragment of it, or its ciphertext.
+    await db.insert(auditLog).values({
+      userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+      objectType: "model_credential",
+      objectId: row!.id,
+      detail: {
+        via: req.authCtx.via,
+        provider: body.provider,
+        rotated: Boolean(existing),
+        baseUrlSet: values.baseUrl !== null,
+        ...(existing ? { previousBaseUrlSet: existing.baseUrl !== null } : {}),
+      },
+      effect: "allow",
+      ruleId: existing ? "model-credential-rotated" : "model-credential-stored",
+      ruleChain: [],
+      reason: existing
+        ? `platform credential for provider '${body.provider}' rotated (key material never recorded)`
+        : `platform credential for provider '${body.provider}' stored, encrypted at rest (key material never recorded)`,
+    });
     return reply.status(201).send(row);
   });
 
@@ -3015,6 +3041,16 @@ export function registerAgentConnectorRoutes(
       .where(eq(modelCredentials.provider, provider))
       .returning({ id: modelCredentials.id });
     if (deleted.length === 0) return reply.status(404).send({ error: "unknown_credential" });
+    await db.insert(auditLog).values({
+      userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+      objectType: "model_credential",
+      objectId: deleted[0]!.id,
+      detail: { via: req.authCtx.via, provider },
+      effect: "allow",
+      ruleId: "model-credential-removed",
+      ruleChain: [],
+      reason: `platform credential for provider '${provider}' removed`,
+    });
     return { removed: true };
   });
 

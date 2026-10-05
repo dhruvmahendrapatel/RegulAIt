@@ -328,8 +328,8 @@ function Loaded(props: { settings: Record<string, unknown> }) {
           </Field>
           <Field label="Semantic cache">
             <Select value={opt.f.semanticCachePolicy} onChange={(e) => opt.set("semanticCachePolicy", e.target.value)}>
-              <option value="opt_in">opt-in (caller asks — default)</option>
-              <option value="off">off (even if the caller asks)</option>
+              <option value="opt_in">opt-in (caller asks)</option>
+              <option value="off">off (even if the caller asks — default)</option>
               <option value="always">always (every eligible dispatch)</option>
             </Select>
           </Field>
@@ -337,7 +337,7 @@ function Loaded(props: { settings: Record<string, unknown> }) {
           <Field label="Compaction failure">
             <Select value={opt.f.compactionFailureMode} onChange={(e) => opt.set("compactionFailureMode", e.target.value)}>
               <option value="fail_open">fail open (turn proceeds, full history)</option>
-              <option value="fail_closed">fail closed (turn is refused)</option>
+              <option value="fail_closed">fail closed (turn is refused — default)</option>
             </Select>
           </Field>
           <Field label="Summarizer">
@@ -382,14 +382,14 @@ function Loaded(props: { settings: Record<string, unknown> }) {
               "Compliance defaults saved (audited)",
             )
           }
-          help="Default PII mode is the DEPLOYMENT-WIDE FLOOR: it applies wherever no compliance framework governs — an unclassified project, tags matching no profile, and calls attributed to NO project at all (model, connector, MCP, cached replays, streams and training ingest alike), so omitting the project is not an exit from enforcement. A classified project's own cascade always wins — the floor fills gaps under the frameworks, it never overrides one. The env-var fallback lets a dispatch use ANTHROPIC_API_KEY-style server env vars when no credential is stored; regulated orgs can turn it off to force every key through the encrypted store, or narrow which providers may use it."
+          help="Default PII mode is the DEPLOYMENT-WIDE FLOOR: it applies wherever no compliance framework governs — an unclassified project, tags matching no profile, and calls attributed to NO project at all (model, connector, MCP, cached replays, streams and training ingest alike), so omitting the project is not an exit from enforcement. A classified project's own cascade always wins — the floor fills gaps under the frameworks, it never overrides one. The env-var fallback lets a dispatch use ANTHROPIC_API_KEY-style server env vars when no credential is stored. It is OFF by default, so every key goes through the encrypted store (Model Credentials); turning it on is an audited relaxation, and you can narrow which providers may use it."
         >
           <Field label="Default PII mode (the floor: unclassified projects + unattributed calls)">
             <Select value={comp.f.defaultPiiMode} onChange={(e) => comp.set("defaultPiiMode", e.target.value)}>
-              <option value="none">none — no enforcement (default)</option>
+              <option value="none">none — no enforcement</option>
               <option value="log">log — record category counts</option>
               <option value="warn">warn — proceed with warning</option>
-              <option value="block">block — deny / withhold</option>
+              <option value="block">block — deny / withhold (default)</option>
             </Select>
           </Field>
           <Field label="Env-var key fallback">
@@ -433,8 +433,8 @@ function Loaded(props: { settings: Record<string, unknown> }) {
               value={custom.f.customModelProvidersEnabled}
               onChange={(e) => custom.set("customModelProvidersEnabled", e.target.value)}
             >
-              <option value="true">enabled (default — admins may register endpoints)</option>
-              <option value="false">disabled (capability removed org-wide)</option>
+              <option value="true">enabled (admins may register endpoints)</option>
+              <option value="false">disabled (capability removed org-wide — default)</option>
             </Select>
           </Field>
         </SectionShell>

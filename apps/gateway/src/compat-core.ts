@@ -1308,13 +1308,17 @@ export function registerInterceptionRoutes(app: FastifyInstance, db: Db) {
         ([k, v]) => (before as Record<string, unknown>)[k] !== v,
       ),
     );
+    // ADR-0181: every relaxation is audited old -> new
+    const previous = Object.fromEntries(
+      Object.keys(changed).map((k) => [k, (before as Record<string, unknown>)[k] ?? null]),
+    );
     await db.insert(auditLog).values({
       // bootstrap has no user identity; the nil uuid marks a non-user actor,
       // as elsewhere in the codebase, and `via` records which it was.
       userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
       objectType: "interception_settings",
       objectId: null,
-      detail: { via: req.authCtx.via, changed, after },
+      detail: { via: req.authCtx.via, changed, before: previous, after },
       effect: "allow",
       ruleId: "interception-settings-updated",
       ruleChain: [],

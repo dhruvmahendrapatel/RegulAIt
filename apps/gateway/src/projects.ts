@@ -454,10 +454,10 @@ export type PiiMode = "block" | "warn" | "log" | "redact";
  * the original call. A dangling id falls to the floor too, because a made-up
  * project must never be WEAKER than no project.
  *
- * 'none' (the shipped default) maps to null, so a deployment that never set
- * the org default keeps the old no-enforcement behaviour byte-identical. And
- * the org default still never overrides a matched compliance framework — it
- * is the floor under the frameworks, not a ceiling over them. */
+ * ADR-0181: the shipped default is 'block'; 'none' (an audited admin
+ * relaxation) maps to null = no enforcement. And the org default still never
+ * overrides a matched compliance framework — it is the floor under the
+ * frameworks, not a ceiling over them. */
 export async function projectPiiMode(
   db: Db,
   projectId: string | null | undefined,
@@ -2080,9 +2080,10 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
     const values = {
       tag: body.tag,
       requiredTemplateIds: body.requiredTemplateIds ?? null,
-      mcpDefaultMode: body.mcpDefaultMode ?? ("read_write" as const),
+      // ADR-0181: an unspecified mode takes the STRICT default (read_only, block)
+      mcpDefaultMode: body.mcpDefaultMode ?? ("read_only" as const),
       auditRetentionDays: body.auditRetentionDays ?? null,
-      piiMode: body.piiMode ?? ("log" as const),
+      piiMode: body.piiMode ?? ("block" as const),
       backupRetentionDays: body.backupRetentionDays ?? null,
       patchCadenceDays: body.patchCadenceDays ?? null,
       // O2 (ADR-0027): per-framework cost dimensions — null = no opinion

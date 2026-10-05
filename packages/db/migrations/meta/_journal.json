@@ -1072,6 +1072,13 @@
       "when": 1785090000000,
       "tag": "0155_continuous_assurance",
       "breakpoints": true
+    },
+    {
+      "idx": 157,
+      "version": "7",
+      "when": 1785092000000,
+      "tag": "0157_strict_guardrails_data_runtime",
+      "breakpoints": true
     }
   ]
 }

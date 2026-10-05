@@ -259,15 +259,42 @@ export const api = {
  * Returns the raw Response — callers check the content-type and either walk
  * the stream via readSse() or fall back to buffered JSON.
  */
-export function ssePost(path: string, body: unknown, signal?: AbortSignal): Promise<Response> {
-  return fetch(path, {
-    method: "POST",
-    credentials: "include",
-    headers: { [CSRF_HEADER]: "1", "content-type": "application/json" },
-    body: JSON.stringify(body),
-    ...(signal ? { signal } : {}),
-  });
+export async function ssePost(path: string, body: unknown, signal?: AbortSignal): Promise<Response> {
+  const post = (payload: unknown) =>
+    fetch(path, {
+      method: "POST",
+      credentials: "include",
+      headers: { [CSRF_HEADER]: "1", "content-type": "application/json" },
+      body: JSON.stringify(payload),
+      ...(signal ? { signal } : {}),
+    });
+  const res = await post(body);
+  // ADR-0181: `streamingOnBlockMode` defaults to 'reject', so when an output
+  // control is in block mode (the PII floor, or a guardrail detector) the
+  // gateway refuses a stream request BEFORE dispatching anything and says
+  // "retry without stream:true". This client does exactly that, once, and
+  // marks the buffered answer so the page can say why it did not stream.
+  if (res.status !== 400 || !body || typeof body !== "object" || (body as { stream?: unknown }).stream !== true) {
+    return res;
+  }
+  const text = await res.clone().text();
+  let error: unknown;
+  try {
+    error = (JSON.parse(text) as { error?: unknown }).error;
+  } catch {
+    error = undefined;
+  }
+  if (error !== STREAM_REJECTED_ERROR) return res;
+  const retried = await post({ ...(body as Record<string, unknown>), stream: false });
+  const headers = new Headers(retried.headers);
+  headers.set(STREAM_REJECTED_HEADER, "1");
+  return new Response(retried.body, { status: retried.status, statusText: retried.statusText, headers });
 }
+
+/** the gateway's refusal of a stream request under `streamingOnBlockMode: 'reject'` */
+export const STREAM_REJECTED_ERROR = "streaming_rejected_on_block_project";
+/** set (client-side) on a response that `ssePost` re-requested without streaming */
+export const STREAM_REJECTED_HEADER = "x-regulait-stream-rejected";
 
 /** Walk a text/event-stream body, invoking onEvent(name, parsedData) per event. */
 export async function readSse(
