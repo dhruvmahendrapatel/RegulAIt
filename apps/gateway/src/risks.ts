@@ -43,6 +43,7 @@
  * was registered by a person.
  */
 import type { FastifyInstance } from "fastify";
+import { idempotentReplay, readIdempotencyKey, requestDigestOf, withIdempotencyKey } from "./request-idempotency.js";
 import {
   agentGrants,
   agents,
@@ -748,50 +749,80 @@ export function registerRiskRoutes(app: FastifyInstance, db: Db): void {
     }
     const [owner] = await db.select({ id: users.id }).from(users).where(eq(users.id, ownerUserId));
     if (!owner) return reply.status(400).send({ error: "invalid_reference", field: "ownerUserId" });
+    // ADR-0179 / AER-050 — an Idempotency-Key makes a retried register safe:
+    // the intake wizard sends one per risk and keeps it in its draft, so a
+    // retry after a lost response (even after a reload) gets the ORIGINAL
+    // risk back instead of registering a second one. Checked before the
+    // references, so a retry is answered even if they have changed since.
+    const keyRead = readIdempotencyKey(req);
+    if (!keyRead.ok) return reply.status(400).send(keyRead.body);
+    const claim =
+      keyRead.key && callerId
+        ? { userId: callerId, scope: "risk", key: keyRead.key, requestDigest: requestDigestOf(body) }
+        : null;
+    if (keyRead.key && !callerId) {
+      return reply.status(400).send({
+        error: "invalid_idempotency_key",
+        detail: "an Idempotency-Key belongs to a person; the bootstrap token has no identity to keep one under",
+      });
+    }
+    if (claim) {
+      const prior = await idempotentReplay(db, claim);
+      if (prior?.kind === "replay") return reply.status(200).header("Idempotent-Replay", "true").send(prior.body);
+      if (prior?.kind === "conflict") return reply.status(prior.status).send(prior.body);
+    }
     const refs = await validateReferences(body);
     if (!refs.ok) return reply.status(400).send({ error: "invalid_reference", field: refs.field });
 
-    const [row] = await db
-      .insert(aiRisks)
-      .values({
-        title: body.title,
-        description: body.description,
-        category: body.category,
-        ownerUserId,
-        likelihood: body.likelihood,
-        impact: body.impact,
-        mitigation: body.mitigation ?? null,
-        projectId: body.projectId ?? null,
-        agentId: body.agentId ?? null,
-        useCaseId: body.useCaseId ?? null,
-        vendorId: body.vendorId ?? null,
-        status: "open",
-      })
-      .returning();
-    await db.insert(auditLog).values({
-      userId: callerId ?? NO_IDENTITY,
-      objectType: "ai_risk",
-      objectId: row!.id,
-      detail: {
-        phase: "registered",
-        title: body.title,
-        category: body.category,
-        likelihood: body.likelihood,
-        impact: body.impact,
-        ownerUserId,
-        projectId: body.projectId ?? null,
-        agentId: body.agentId ?? null,
-        useCaseId: body.useCaseId ?? null,
-        vendorId: body.vendorId ?? null,
-      },
-      effect: "allow",
-      ruleId: RISK_RULE_IDS.registered,
-      ruleChain: [],
-      reason:
-        `AI risk '${body.title}' registered (category ${body.category}) — likelihood/impact are ` +
-        `the owner's DECLARED judgments; evidence is computed from the ledgers at read time`,
-    });
-    return reply.status(201).send(row);
+    const register = async (tx: Db) => {
+      const [row] = await tx
+        .insert(aiRisks)
+        .values({
+          title: body.title,
+          description: body.description,
+          category: body.category,
+          ownerUserId,
+          likelihood: body.likelihood,
+          impact: body.impact,
+          mitigation: body.mitigation ?? null,
+          projectId: body.projectId ?? null,
+          agentId: body.agentId ?? null,
+          useCaseId: body.useCaseId ?? null,
+          vendorId: body.vendorId ?? null,
+          status: "open",
+        })
+        .returning();
+      await tx.insert(auditLog).values({
+        userId: callerId ?? NO_IDENTITY,
+        objectType: "ai_risk",
+        objectId: row!.id,
+        detail: {
+          phase: "registered",
+          ...(claim ? { idempotencyKey: true } : {}),
+          title: body.title,
+          category: body.category,
+          likelihood: body.likelihood,
+          impact: body.impact,
+          ownerUserId,
+          projectId: body.projectId ?? null,
+          agentId: body.agentId ?? null,
+          useCaseId: body.useCaseId ?? null,
+          vendorId: body.vendorId ?? null,
+        },
+        effect: "allow",
+        ruleId: RISK_RULE_IDS.registered,
+        ruleChain: [],
+        reason:
+          `AI risk '${body.title}' registered (category ${body.category}) — likelihood/impact are ` +
+          `the owner's DECLARED judgments; evidence is computed from the ledgers at read time`,
+      });
+      return row!;
+    };
+    if (!claim) return reply.status(201).send(await db.transaction((tx) => register(tx as unknown as Db)));
+    const outcome = await withIdempotencyKey(db, claim, register);
+    if (outcome.kind === "fresh") return reply.status(201).send(outcome.body);
+    if (outcome.kind === "replay") return reply.status(200).header("Idempotent-Replay", "true").send(outcome.body);
+    return reply.status(outcome.status).send(outcome.body);
   });
 
   // List: fleet for admins, own risks for everyone else — the same scoping

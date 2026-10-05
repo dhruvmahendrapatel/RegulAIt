@@ -134,6 +134,8 @@ interface State {
   decideReply: { status: number; body: unknown } | null;
   patches: unknown[];
   artifacts: unknown[];
+  /** ADR-0179: the Idempotency-Key each questionnaire post carried */
+  artifactKeys: Array<string | undefined>;
   artifactFailures: number;
   /** the resubmission's server-side draft (ADR-0171) */
   draft: { scope: string; state: unknown; updatedAt: string } | null;
@@ -180,7 +182,7 @@ function detail(state: State) {
 async function mockGateway(page: Page, patch: Partial<State> = {}): Promise<State> {
   const state: State = {
     persona: RILEY, status: "under_review", reviews: reviews(), acceptedRisk: false, recertification: false, resubmission: false, policy: savedPolicy(),
-    approvals: [roleApproval()], calls: [], puts: [], putReply: null, decides: [], decideReply: null, patches: [], artifacts: [], artifactFailures: 0, draft: null, resubmitUnsure: null, ...patch,
+    approvals: [roleApproval()], calls: [], puts: [], putReply: null, decides: [], decideReply: null, patches: [], artifacts: [], artifactKeys: [], artifactFailures: 0, draft: null, resubmitUnsure: null, ...patch,
   };
   await page.route("**/*", async (route) => {
     const p = new URL(route.request().url()).pathname;
@@ -213,6 +215,7 @@ async function mockGateway(page: Page, patch: Partial<State> = {}): Promise<Stat
     }
     if (p === `/v1/workflows/instances/${INST}/artifacts` && method === "POST") {
       state.artifacts.push(route.request().postDataJSON());
+      state.artifactKeys.push(route.request().headers()["idempotency-key"]);
       if (state.artifactFailures > 0) {
         state.artifactFailures -= 1;
         return json(route, { error: "unavailable", detail: "the workflow store is briefly unavailable" }, 503);
@@ -639,6 +642,10 @@ test.describe("update and resubmit", () => {
     expect(state.artifacts).toHaveLength(2);
     // nothing edited: the new version is the old document, byte for byte
     expect(state.artifacts[1]).toEqual({ stageId: "questionnaire", content: QUESTIONNAIRE });
+    // ADR-0179: the retry carries the first post's Idempotency-Key, so a post
+    // that was stored before its error cannot become a second review round
+    expect(state.artifactKeys[0]).toMatch(/^[0-9a-f-]{36}$/);
+    expect(state.artifactKeys[1]).toBe(state.artifactKeys[0]);
   });
 
   test("ADR-0171: edits are kept as a draft for this use case, leaving asks first, and Not sure answers come back and go out as yes", async ({ page }) => {

@@ -148,6 +148,9 @@ describe("ADR-0171 registration model", () => {
     expect(outcomeUnknown({ status: 408 })).toBe(true);
     expect(outcomeUnknown({ status: 422 })).toBe(false);
     expect(outcomeUnknown({ status: 409 })).toBe(false);
+    // ADR-0179: a key whose first request has not finished may still create — keep it
+    expect(outcomeUnknown({ status: 409, payload: { error: "idempotency_key_in_flight" } })).toBe(true);
+    expect(outcomeUnknown({ status: 422, payload: { error: "idempotency_key_reused" } })).toBe(false);
     const key = newIdempotencyKey();
     expect(key).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
     expect(newIdempotencyKey()).not.toBe(key);

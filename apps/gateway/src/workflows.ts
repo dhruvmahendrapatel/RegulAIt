@@ -67,6 +67,7 @@ import { loadOrgSettings } from "./org-settings.js";
 import { networkFacingSignal } from "./dev-secrets.js";
 import { finishTrace, recordSpan, traceForRoot } from "./tracing.js";
 import { activeDelegatorsFor } from "./delegations.js";
+import { idempotentReplay, readIdempotencyKey, requestDigestOf, withIdempotencyKey } from "./request-idempotency.js";
 import {
   advanceStageSchema,
   createAssignmentRuleSchema,
@@ -2659,32 +2660,82 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     if (!stage) return reply.status(404).send({ error: "unknown_artifact_stage" });
 
     if (!req.authCtx.userId) return reply.status(403).send({ error: "bootstrap_cannot_drive" });
+    const actorUserId = req.authCtx.userId;
+    const currentStatus = async () => {
+      const [fresh] = await db
+        .select({ status: workflowInstances.status })
+        .from(workflowInstances)
+        .where(eq(workflowInstances.id, instance.id));
+      return fresh!.status;
+    };
+    // ADR-0179 / AER-050 — an Idempotency-Key makes a retried submission
+    // safe: a retry after a lost response gets the ORIGINAL version back (with
+    // the instance's status now) instead of storing a second version, which
+    // would re-open the stage and start an unintended review round. Keys are
+    // per caller and per instance, bound to the stage and the content.
+    const keyRead = readIdempotencyKey(req);
+    if (!keyRead.ok) return reply.status(400).send(keyRead.body);
+    const claim = keyRead.key
+      ? {
+          userId: actorUserId,
+          scope: `workflow-artifact:${instance.id}`,
+          key: keyRead.key,
+          requestDigest: requestDigestOf({ stageId: body.stageId, content: body.content }),
+        }
+      : null;
+    if (claim) {
+      const prior = await idempotentReplay(db, claim);
+      if (prior?.kind === "replay") {
+        return reply.status(200).header("Idempotent-Replay", "true").send({ ...prior.body, status: await currentStatus() });
+      }
+      if (prior?.kind === "conflict") return reply.status(prior.status).send(prior.body);
+    }
     const refusal = opts.validateArtifact?.(stage.output!, body.content);
     if (refusal) return reply.status(refusal.status).send(refusal.body);
-    const { state, effects } = await applyEvent(
-      db,
-      instance.id,
-      { kind: "artifact_submitted", stageId: body.stageId },
-      req.authCtx.userId,
-    );
-    const version = state.artifactVersions[stage.output!]!;
-    // The artifact row must exist BEFORE any git stage runs — an open_pr
-    // directly downstream links this very version into the PR body.
-    await db.insert(workflowArtifacts).values({
-      instanceId,
-      stageId: stage.id,
-      output: stage.output!,
-      version,
-      content: body.content,
-      createdBy: req.authCtx.userId!,
-    });
-    await runGitExecutions(db, instance.id, effects, req.authCtx.userId, opts.dataKey);
-    await opts.onInstanceTransition?.(db, instance.id, req.authCtx.userId);
-    const [fresh] = await db
-      .select({ status: workflowInstances.status })
-      .from(workflowInstances)
-      .where(eq(workflowInstances.id, instance.id));
-    return reply.status(201).send({ version, status: fresh!.status });
+    // The transition and the artifact row commit together (with the key's
+    // claim, when there is one); the span is written once that is durable.
+    const submit = async (tx: DbOrTx) => {
+      const { state, effects, deferredSpan } = await applyEvent(
+        tx,
+        instance.id,
+        { kind: "artifact_submitted", stageId: body.stageId },
+        actorUserId,
+        undefined,
+        undefined,
+        { deferSpan: true },
+      );
+      const version = state.artifactVersions[stage.output!]!;
+      // The artifact row must exist BEFORE any git stage runs — an open_pr
+      // directly downstream links this very version into the PR body.
+      await tx.insert(workflowArtifacts).values({
+        instanceId,
+        stageId: stage.id,
+        output: stage.output!,
+        version,
+        content: body.content,
+        createdBy: actorUserId,
+      });
+      return { version, effects, deferredSpan };
+    };
+    let written: Awaited<ReturnType<typeof submit>>;
+    if (claim) {
+      let done: Awaited<ReturnType<typeof submit>> | undefined;
+      const outcome = await withIdempotencyKey(db, claim, async (tx) => {
+        done = await submit(tx);
+        return { version: done.version };
+      });
+      if (outcome.kind === "replay") {
+        return reply.status(200).header("Idempotent-Replay", "true").send({ ...outcome.body, status: await currentStatus() });
+      }
+      if (outcome.kind === "conflict") return reply.status(outcome.status).send(outcome.body);
+      written = done!;
+    } else {
+      written = await inTransaction(db, (tx) => submit(tx));
+    }
+    await recordDeferredSpan(db, written.deferredSpan);
+    await runGitExecutions(db, instance.id, written.effects, actorUserId, opts.dataKey);
+    await opts.onInstanceTransition?.(db, instance.id, actorUserId);
+    return reply.status(201).send({ version: written.version, status: await currentStatus() });
   });
 
   app.post("/v1/workflows/instances/:instanceId/advance", async (req, reply) => {

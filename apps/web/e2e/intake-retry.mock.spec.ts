@@ -213,13 +213,18 @@ test.describe("AER-046: an intake retry after edits never mixes old records with
     expect(retry.filter((item) => item.method === "POST" && item.path === "/v1/use-cases")).toEqual([]);
     expect(retry.filter((item) => item.path.endsWith("/advance"))).toEqual([]);
     expect(retry.filter((item) => item.path.endsWith("/controls"))).toEqual([]);
+    // ADR-0179: the injection risk's first request ended in a server error, so
+    // it may have been registered: the retry first finishes THAT request (same
+    // Idempotency-Key, same text), then applies the edit made since
     expect(retry.map((item) => `${item.method} ${item.path}`)).toEqual([
       `POST /v1/workflows/instances/instance-${USE_CASE}/artifacts`,
       "PATCH /v1/risks/risk-1",
       "POST /v1/risks",
+      "PATCH /v1/risks/risk-2",
     ]);
     expect(retry[1]!.body).toEqual({ description: "Edited bias text." });
-    expect(retry[2]!.body).toMatchObject({ title: INJECTION_TITLE, description: "Edited injection text.", useCaseId: USE_CASE });
+    expect(retry[2]!.body).toMatchObject({ title: INJECTION_TITLE, description: "Free-text input may steer the assistant away from its instructions.", useCaseId: USE_CASE });
+    expect(retry[3]!.body).toEqual({ description: "Edited injection text." });
 
     // the state the gateway holds is entirely the edited inputs
     expect(store.useCases).toHaveLength(1);

@@ -454,9 +454,12 @@ export function newIdempotencyKey(): string {
 /**
  * Was the create's outcome unknown? A dropped connection or a server error may
  * have come after the record was committed, so the attempt's key must be
- * reused. A refusal (4xx) created nothing, so the next attempt may start fresh.
+ * reused. A refusal (4xx) created nothing, so the next attempt may start fresh
+ * — except `idempotency_key_in_flight` (ADR-0179): the request with that key
+ * has not finished, so it may still create, and the key must be kept.
  */
 export function outcomeUnknown(error: unknown): boolean {
   const status = (error as { status?: unknown } | null)?.status;
-  return typeof status !== "number" || status >= 500 || status === 408;
+  const code = (error as { payload?: { error?: unknown } } | null)?.payload?.error;
+  return typeof status !== "number" || status >= 500 || status === 408 || (status === 409 && code === "idempotency_key_in_flight");
 }

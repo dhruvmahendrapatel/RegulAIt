@@ -52,7 +52,7 @@ import {
 import { canonicalDigest } from "./intakeCheckpoint";
 import { savedAtText, useIntakeDraft, type DraftStatus } from "./intakeDraft";
 import { useLeaveGuard } from "./LeaveGuard";
-import { missingFrom, questionLabel } from "./registrationModel";
+import { missingFrom, newIdempotencyKey, outcomeUnknown, questionLabel } from "./registrationModel";
 import { deriveDataSensitivity } from "./dataSensitivity";
 import {
   answersBlock,
@@ -168,6 +168,11 @@ function ResubmitForm(props: { useCaseId: string; detail: Detail; record: string
   const [error, setError] = useState<string | null>(null);
   // a retry after a failed questionnaire post does not PATCH the same body twice
   const patched = useRef<string | null>(null);
+  // ADR-0179: a retry after a lost response sends the same Idempotency-Key, so
+  // it gets the same questionnaire version back instead of a second review
+  // round. Page memory is enough here: once the version is stored the use case
+  // is no longer sent back, so a reload cannot resubmit it again.
+  const artifactAttempt = useRef<{ key: string; content: string } | null>(null);
 
   // ---- the draft for this use case (AER-050) ------------------------------
   const initial = useRef(canonicalDigest({ description, businessContext, form, affected, sections }));
@@ -252,10 +257,16 @@ function ResubmitForm(props: { useCaseId: string; detail: Detail; record: string
         await api.patch(`/v1/use-cases/${props.useCaseId}`, body);
         patched.current = digest;
       }
-      await api.post(`/v1/workflows/instances/${instanceId}/artifacts`, {
-        stageId: "questionnaire",
-        content: rebuildQuestionnaire(parsed.current.preamble, sections, answers),
-      });
+      const content = rebuildQuestionnaire(parsed.current.preamble, sections, answers);
+      if (artifactAttempt.current?.content !== content) artifactAttempt.current = { key: newIdempotencyKey(), content };
+      const sent = artifactAttempt.current!;
+      try {
+        await api.postWithHeaders(`/v1/workflows/instances/${instanceId}/artifacts`, { stageId: "questionnaire", content }, { "Idempotency-Key": sent.key });
+      } catch (error) {
+        // a refusal stored nothing: the next attempt starts with a new key
+        if (!outcomeUnknown(error)) artifactAttempt.current = null;
+        throw error;
+      }
       setDone(true);
       // resubmitted: the draft has done its job
       void draft.discard();

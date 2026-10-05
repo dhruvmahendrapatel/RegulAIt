@@ -17,17 +17,28 @@
  *           is computed from the `true`; the detail read lists the unsure keys
  *           and the resubmission prefill carries them back.
  *
+ *  ADR-0179 (AER-050, rest) POST /v1/risks and POST /v1/workflows/instances/
+ *           :id/artifacts honour an Idempotency-Key the same way (a retry
+ *           replays, concurrent duplicates write once, the same key with a
+ *           different request is refused); a draft survives an expired session
+ *           and is resumed after signing in again; user B never reads user A's.
+ *
  * Shared-database discipline: every fixture carries a run-unique token and is
  * resolved by id; nothing asserts a global count.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { randomBytes } from "node:crypto";
 import {
+  aiRisks,
   aiUseCases,
   and,
+  auditLog,
+  authSessions,
   createDb,
   eq,
+  requestIdempotencyKeys,
   runMigrations,
   useCaseDrafts,
   useCaseIdempotencyKeys,
@@ -432,5 +443,226 @@ describe("AER-053 a 'Not sure' answer counts as yes and is shown to reviewers", 
     const cleared = await inject("PATCH", `/v1/use-cases/${id}`, users.owner.auth, { screeningAnswers: minimal });
     expect(cleared.statusCode, cleared.body).toBe(200);
     expect((await detail(id)).json().screeningUnsure).toEqual([]);
+  });
+});
+
+// ===========================================================================
+// ADR-0179 / AER-050 — idempotent risk and questionnaire writes
+// ===========================================================================
+
+describe("ADR-0179 AER-050 idempotent POST /v1/risks", () => {
+  const riskBody = (useCaseId: string, extra: Record<string, unknown> = {}) => ({
+    title: `a050 risk ${RUN}`,
+    description: "synthetic ADR-0179 risk",
+    category: "bias_fairness",
+    likelihood: "medium",
+    impact: "high",
+    useCaseId,
+    ...extra,
+  });
+  const postRisk = (body: unknown, who: Who = "owner", headers: Record<string, string> = {}) =>
+    inject("POST", "/v1/risks", { ...users[who].auth, ...headers }, body);
+  const risksOf = (useCaseId: string) => db.select().from(aiRisks).where(eq(aiRisks.useCaseId, useCaseId));
+
+  it("a retry after a lost response returns the original risk instead of registering a second one", async () => {
+    const uc = (await create("risk-retry")).json().id as string;
+    const key = { "idempotency-key": `risk-retry-${RUN}` };
+    const first = await postRisk(riskBody(uc), "owner", key);
+    expect(first.statusCode, first.body).toBe(201);
+    const again = await postRisk(riskBody(uc), "owner", key);
+    expect(again.statusCode, again.body).toBe(200);
+    expect(again.headers["idempotent-replay"]).toBe("true");
+    expect(again.json()).toEqual(first.json());
+    expect(await risksOf(uc)).toHaveLength(1);
+    // the register is audited once, and says a key guarded it
+    const audits = await db.select().from(auditLog).where(eq(auditLog.objectId, first.json().id as string));
+    expect(audits).toHaveLength(1);
+    expect(audits[0]!.detail).toMatchObject({ phase: "registered", idempotencyKey: true });
+
+    // the same key with a DIFFERENT request is refused, never answered with the first risk
+    const changed = await postRisk(riskBody(uc, { impact: "low" }), "owner", key);
+    expect(changed.statusCode, changed.body).toBe(422);
+    expect(changed.json().error).toBe("idempotency_key_reused");
+    expect(await risksOf(uc)).toHaveLength(1);
+
+    // no key: unchanged behaviour — every call registers
+    expect((await postRisk(riskBody(uc))).statusCode).toBe(201);
+    expect(await risksOf(uc)).toHaveLength(2);
+  });
+
+  it("keys are per caller, and concurrent duplicates register once", async () => {
+    const uc = (await create("risk-race")).json().id as string;
+    const key = { "idempotency-key": `risk-race-${RUN}` };
+    const results = await Promise.all(Array.from({ length: 5 }, () => postRisk(riskBody(uc), "owner", key)));
+    expect(results.map((r) => r.statusCode).sort(), results.map((r) => r.body).join("\n")).toEqual([200, 200, 200, 200, 201]);
+    expect(new Set(results.map((r) => r.json().id as string)).size).toBe(1);
+    expect(await risksOf(uc)).toHaveLength(1);
+    const claims = await db
+      .select()
+      .from(requestIdempotencyKeys)
+      .where(and(eq(requestIdempotencyKeys.userId, users.owner.id), eq(requestIdempotencyKeys.key, `risk-race-${RUN}`)));
+    expect(claims).toHaveLength(1);
+    expect(claims[0]!.scope).toBe("risk");
+
+    // an admin's own risk under the same key is a different key
+    const theirs = await postRisk(riskBody(uc), "admin", key);
+    expect(theirs.statusCode, theirs.body).toBe(201);
+    expect(await risksOf(uc)).toHaveLength(2);
+  });
+
+  it("refuses a malformed key, and a refused register claims nothing", async () => {
+    const uc = (await create("risk-bad")).json().id as string;
+    const long = await postRisk(riskBody(uc), "owner", { "idempotency-key": "k".repeat(201) });
+    expect(long.statusCode).toBe(400);
+    expect(long.json().error).toBe("invalid_idempotency_key");
+    const key = { "idempotency-key": `risk-refused-${RUN}` };
+    const refused = await postRisk(riskBody(uc, { agentId: "00000000-0000-4000-8000-000000000000" }), "owner", key);
+    expect(refused.statusCode).toBe(400);
+    expect(refused.json().error).toBe("invalid_reference");
+    expect(await risksOf(uc)).toHaveLength(0);
+    const fixed = await postRisk(riskBody(uc), "owner", key);
+    expect(fixed.statusCode, fixed.body).toBe(201);
+  });
+});
+
+describe("ADR-0179 AER-050 idempotent questionnaire artifact", () => {
+  const questionnaire = (label: string) =>
+    `# AI use-case intake questionnaire\n\n## 1. Purpose\n\n${label} ${RUN}\n\n## 9. EU AI Act risk screening\n\n` +
+    "```eu-ai-act-answers\n" + JSON.stringify(minimal, null, 2) + "\n```";
+  const started = async (label: string) => {
+    const c = await create(label, { screeningAnswers: { ...minimal, ...context } });
+    expect(c.statusCode, c.body).toBe(201);
+    const instanceId = c.json().instance.id as string;
+    const adv = await inject("POST", `/v1/workflows/instances/${instanceId}/advance`, users.owner.auth, { stageId: "plan" });
+    expect(adv.statusCode, adv.body).toBe(200);
+    return instanceId;
+  };
+  const submit = (instanceId: string, content: string, headers: Record<string, string> = {}) =>
+    inject("POST", `/v1/workflows/instances/${instanceId}/artifacts`, { ...users.owner.auth, ...headers }, { stageId: "questionnaire", content });
+  const versions = (instanceId: string) =>
+    db.select().from(workflowArtifacts).where(eq(workflowArtifacts.instanceId, instanceId));
+  const roundOf = async (instanceId: string) =>
+    (await inject("GET", `/v1/workflows/instances/${instanceId}`, users.owner.auth)).json().instance.round as number;
+
+  it("a retry after a lost response returns the original version — no second version, no new review round", async () => {
+    const instanceId = await started("artifact-retry");
+    const key = { "idempotency-key": `artifact-retry-${RUN}` };
+    const first = await submit(instanceId, questionnaire("first"), key);
+    expect(first.statusCode, first.body).toBe(201);
+    expect(first.json().version).toBe(1);
+    const round = await roundOf(instanceId);
+    const again = await submit(instanceId, questionnaire("first"), key);
+    expect(again.statusCode, again.body).toBe(200);
+    expect(again.headers["idempotent-replay"]).toBe("true");
+    expect(again.json()).toEqual(first.json());
+    expect(await versions(instanceId)).toHaveLength(1);
+    expect(await roundOf(instanceId)).toBe(round);
+
+    // the same key with different content is refused
+    const changed = await submit(instanceId, questionnaire("changed"), key);
+    expect(changed.statusCode, changed.body).toBe(422);
+    expect(changed.json().error).toBe("idempotency_key_reused");
+    expect(await versions(instanceId)).toHaveLength(1);
+
+    // a deliberate new version (a new key) is still a new version
+    const next = await submit(instanceId, questionnaire("second"), { "idempotency-key": `artifact-next-${RUN}` });
+    expect(next.statusCode, next.body).toBe(201);
+    expect(next.json().version).toBe(2);
+    expect(await versions(instanceId)).toHaveLength(2);
+  });
+
+  it("concurrent duplicates store one version, and a key is bound to its instance", async () => {
+    const instanceId = await started("artifact-race");
+    const key = { "idempotency-key": `artifact-race-${RUN}` };
+    const results = await Promise.all(Array.from({ length: 4 }, () => submit(instanceId, questionnaire("race"), key)));
+    expect(results.map((r) => r.statusCode).sort(), results.map((r) => r.body).join("\n")).toEqual([200, 200, 200, 201]);
+    expect(await versions(instanceId)).toHaveLength(1);
+
+    // the same key against another instance is a different key
+    const other = await started("artifact-race-other");
+    const there = await submit(other, questionnaire("race"), key);
+    expect(there.statusCode, there.body).toBe(201);
+    expect(await versions(other)).toHaveLength(1);
+  });
+});
+
+// ===========================================================================
+// ADR-0179 / AER-050 — session loss, and another user in the same browser
+// ===========================================================================
+
+describe("ADR-0179 AER-050 drafts across sign-out and sign-in", () => {
+  const CSRF = { "x-regulait-csrf": "1" };
+  const synthetic = () => `Syn-${randomBytes(12).toString("base64url")}-9a`;
+  const people = {} as Record<"a" | "b", { email: string; password: string; id: string }>;
+  const cookieOf = (res: { cookies: Array<{ name: string; value: string }> }) =>
+    res.cookies.find((c) => c.name === "regulait_session")?.value ?? null;
+  const signIn = async (who: "a" | "b") => {
+    const r = await app.inject({ method: "POST", url: "/auth/login", headers: CSRF, payload: { email: people[who].email, password: people[who].password } });
+    expect(r.statusCode, r.body).toBe(200);
+    const cookie = cookieOf(r);
+    expect(cookie).toBeTruthy();
+    return cookie!;
+  };
+  const asSession = (method: "GET" | "PUT" | "DELETE", url: string, cookie: string, payload?: unknown) =>
+    app.inject({ method, url, headers: CSRF, cookies: { regulait_session: cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
+
+  beforeAll(async () => {
+    for (const who of ["a", "b"] as const) {
+      const email = `a050-session-${who}-${RUN}@example.com`;
+      const u = await inject("POST", "/v1/users", AUTH, { email, displayName: `a050 session ${who}`, isAdmin: false });
+      expect(u.statusCode, u.body).toBe(201);
+      const id = u.json().id as string;
+      const once = await inject("POST", `/v1/users/${id}/set-initial-password`, AUTH, {});
+      expect(once.statusCode, once.body).toBe(200);
+      const first = await app.inject({ method: "POST", url: "/auth/login", headers: CSRF, payload: { email, password: once.json().password } });
+      expect(first.statusCode, first.body).toBe(200);
+      const password = synthetic();
+      const change = await app.inject({
+        method: "POST", url: "/auth/change-password", headers: CSRF,
+        cookies: { regulait_session: cookieOf(first)! },
+        payload: { currentPassword: once.json().password, newPassword: password },
+      });
+      expect(change.statusCode, change.body).toBe(200);
+      people[who] = { email, password, id };
+    }
+  });
+
+  it("an expired session keeps the saved draft; a save under it is refused; signing in again resumes it", async () => {
+    const cookie = await signIn("a");
+    const state = { kind: "registration", step: 3, form: { title: `expiry ${RUN}` } };
+    expect((await asSession("PUT", "/v1/use-cases/draft?scope=new", cookie, { state })).statusCode).toBe(200);
+
+    // the session expires mid-intake (its idle wall passes)
+    await db.update(authSessions).set({ idleExpiresAt: new Date(Date.now() - 60_000) }).where(eq(authSessions.userId, people.a.id));
+    const late = await asSession("PUT", "/v1/use-cases/draft?scope=new", cookie, { state: { ...state, step: 4 } });
+    expect(late.statusCode, late.body).toBe(401);
+    expect(late.json().error).toBe("unauthenticated");
+
+    // signed in again: the last durable save is offered back, unchanged
+    const again = await signIn("a");
+    const got = await asSession("GET", "/v1/use-cases/draft?scope=new", again);
+    expect(got.statusCode, got.body).toBe(200);
+    expect(got.json().draft.state).toEqual(state);
+  });
+
+  it("user A signs out and user B signs in: B never reads, replaces or deletes A's draft", async () => {
+    const a = await signIn("a");
+    const mine = { kind: "registration", step: 2, form: { title: `A private draft ${RUN}` } };
+    expect((await asSession("PUT", "/v1/use-cases/draft?scope=new", a, { state: mine })).statusCode).toBe(200);
+    expect((await app.inject({ method: "POST", url: "/auth/logout", headers: CSRF, cookies: { regulait_session: a } })).statusCode).toBe(200);
+    // A's signed-out cookie reads nothing any more
+    expect((await asSession("GET", "/v1/use-cases/draft?scope=new", a)).statusCode).toBe(401);
+
+    const b = await signIn("b");
+    const seen = await asSession("GET", "/v1/use-cases/draft?scope=new", b);
+    expect(seen.statusCode, seen.body).toBe(200);
+    expect(seen.json()).toEqual({ draft: null });
+    expect(seen.body).not.toContain("A private draft");
+    // B's own save and delete touch only B's row
+    expect((await asSession("PUT", "/v1/use-cases/draft?scope=new", b, { state: { kind: "registration", step: 0 } })).statusCode).toBe(200);
+    expect((await asSession("DELETE", "/v1/use-cases/draft?scope=new", b)).statusCode).toBe(204);
+
+    const aAgain = await signIn("a");
+    expect((await asSession("GET", "/v1/use-cases/draft?scope=new", aAgain)).json().draft.state).toEqual(mine);
   });
 });
