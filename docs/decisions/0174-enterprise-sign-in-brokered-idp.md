@@ -133,3 +133,35 @@ That directory is a named volume (`demo_license_keys`), so the licence still ver
   set are left alone, as before.
 - The password goes from the presenter's shell into one `docker compose exec -e REGULAIT_DEMO_USER_PASSWORD`
   process (README, "Demo with your own password (Docker)").
+
+### Further amendment — the Docker demo is prepared like `demo:prepare` (2026-10-05)
+
+The switch above minted the licence but ran only the seed, so a Docker demo had no active compliance packs (AI
+intake refused "Unknown control ref … 'eu-ai-act:art-9-risk-management-system'"), no approved use cases, no
+hardening, no traffic or alerts, no export key and no demo MCP server. With the switch honoured (same rules as
+above), `apps/gateway/docker-start.sh` now builds the same environment as native `demo:prepare`:
+
+- `REGULAIT_OFFLINE_CHECKS=1` for every step and the gateway, in demo mode only. Off, it stays unset, so
+  `docs/deployment/INSTALL.md` ("Do not set `REGULAIT_OFFLINE_CHECKS` on an install") still holds: the installer
+  pins the switch off.
+- The export-signing key (beat 3E) is made by `demo-export-key.js --env` with `REGULAIT_DEMO_KEY_DIR` in the demo
+  volume (`/app/demo-license-keys/export-signing`, a directory, so the licence keyring, which reads `*.pub` at its
+  top level only, does not trust it). It is made once and reused; both variables are exported for the prep steps
+  and the gateway. The log carries its path and fingerprint (now on stderr in `--env` mode), never the key. This is
+  a demo key held on the demo box, exactly as `demo:export-key` does natively; `down -v` deletes it.
+- The demo MCP server runs in the background inside the gateway container, started before the seed, for the life
+  of the container (compose's `init: true` delivers SIGTERM to the gateway; the container's end stops the MCP
+  server with it).
+- After the seed, `demo-docker-prepared.js` decides whether to run `demo:setup → demo:intake → demo:traffic →
+  demo:check`. Its marker lives with the data: the API keys `demo:traffic` mints before sending traffic. A restart
+  or `down` / `up` keeping volumes therefore skips the steps (traffic adds alerts every run and must run once);
+  `down -v` prepares again; a prep that stopped before `demo:traffic` is retried on the next start. If the
+  database cannot be read, the steps are skipped with a loud message.
+- A failed step is logged as `*** DEMO PREP FAILED at step <name> (exit <n>)` and the gateway still starts, so the
+  container does not restart-loop and the UI and log stay reachable.
+- The prep blocks the gateway's start (it uses the same database in-process; running it beside a serving gateway
+  would race the migrations). Measured at about 13 s for the four steps on Linux. The health check is unchanged
+  (90 s start period); `unhealthy` only marks a container and `restart: unless-stopped` never restarts on it, so a
+  slower machine shows `starting` / `unhealthy` until the gateway listens and is never killed by the check.
+- Switch off: none of this runs, and the start script's calls and environment are exactly the old ones (pinned in
+  `docker-demo-license.test.ts`).

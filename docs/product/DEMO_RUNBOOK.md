@@ -15,6 +15,9 @@ reports waits for a report unless the gateway declares offline mode — the seed
 then auto-pass their checks, labelled "auto-passed · no report". A database seeded before
 2026-10-03 predates that opt-in and must be recreated.
 
+**Whole stack in Docker, no pnpm?** §1.3 does steps 1–5 below (and `demo:intake`, `demo:traffic`,
+`demo:check`, the export key) inside the containers with one `.env` switch.
+
 **No docker on the demo box?** Skip to §1.1 and come back. Everything from §3 onwards is
 identical — the only thing you lose is the WORM anchor, and §2 says exactly what that costs.
 
@@ -132,35 +135,67 @@ Any *other* non-`200` on that second dispatch is a real problem: **do not presen
 green**, because every refusal you then demo will name the first unmet gate rather than the one you
 were aiming at.
 
-### 1.3 Everything in Docker — one password you chose (ADR-0174 amendment)
+### 1.3 Everything in Docker — the whole demo, prepared, in one switch (ADR-0174 amendment)
 
-When the whole stack runs under `docker compose` (no pnpm on the box), `demo:set-passwords` needs
-the demo licence that §1 step (4) would install. One switch provides it:
+When the whole stack runs under `docker compose` (no pnpm on the box), one switch gives you the
+**same prepared demo as §1 / `demo:prepare`**, with nothing else to run but the password step:
 
 1. In the `.env` next to `docker-compose.yml`, add `REGULAIT_DEMO_LICENSE=1`. Only the exact value
-   `1` does anything. The seed then mints a 30-day ephemeral licence that says "NOT A PRODUCTION
-   DEPLOYMENT". Only its public key is written, to the `demo_license_keys` named volume
-   (`/app/demo-license-keys`); the private key is never written anywhere. The gateway reads the
-   same keyring.
-2. `docker compose up -d --build`. The seed runs on every boot. It keeps a licence that is still
-   valid and still verifies (more than 7 days left) and mints a new one otherwise. A demo password
-   you already set is never reset, and nobody is forced to change it.
+   `1` does anything (a Windows CRLF line ending is fine).
+2. `docker compose up -d --build --wait` on an empty stack (first time, or after `down -v`). The
+   gateway container then does, in order, and prints each step to `docker compose logs gateway`:
+   - **export-signing key** for the signed export (beat 3E): made once in the `demo_license_keys`
+     volume (`/app/demo-license-keys/export-signing`) and reused; the log shows its path and
+     **fingerprint** (what you hand an auditor for `verify-export-bundle.sh --fingerprint`), never
+     the key;
+   - **demo MCP server** (§1 step 3) in the background inside the container, on 127.0.0.1 and
+     127.0.0.2 port 8931, for the life of the container;
+   - **seed** — mints (or keeps) the 30-day ephemeral licence that says "NOT A PRODUCTION
+     DEPLOYMENT"; only its public key is written, to the same volume;
+   - **demo:setup → demo:intake → demo:traffic → demo:check** — packs installed and activated,
+     use cases, hardening, governed traffic and alerts, then the dry run. The log ends the prep
+     with `18 pass, 0 warn, 0 fail` and `demo prep: complete in …s`;
+   - the **gateway**, with `REGULAIT_OFFLINE_CHECKS=1` and the export key set (as §1 step 5).
+
+   `--wait` returns once the gateway answers its health check, i.e. after the prep (about
+   30–60 s on a laptop; the first build takes longer). Check it with
+   `docker compose logs gateway | grep -E "demo prep|pass, "` (PowerShell:
+   `docker compose logs gateway | Select-String "demo prep|pass, "`).
 3. Set the password with the bash or PowerShell commands in the README ("Demo with your own
    password (Docker)"). The value goes from your shell into one `docker compose exec` process via
    `-e REGULAIT_DEMO_USER_PASSWORD`. It is never on a command line or in a file.
-4. Sign in at `http://localhost:3000/ui` as `admin`, `dana` or `avery`.
+4. Sign in at `http://localhost:3000/ui` as `admin`, `dana` or `avery`, and go to §1.2.
+
+**Once per database.** The prep steps run only when the database has not been prepared yet: the
+marker is the API key `demo:traffic` mints (a row in the database, so it goes with the data).
+`docker compose restart gateway`, or `down` / `up` keeping the volumes, logs
+`demo prep: this database was already prepared … — prep steps skipped`: no new traffic, no new
+alerts, the licence, export key and your password are kept. The demo MCP server, the seed (which
+keeps everything) and the gateway run on every start. To prepare from scratch:
+`docker compose down -v`, then `up` again (this deletes the demo data and the demo password).
+
+**If a step fails** the log says `*** DEMO PREP FAILED at step <name> (exit <n>)` after that
+step's own output, and the gateway **still starts**, so the UI and the log stay reachable. A
+failure in demo:setup or demo:intake is retried on the next start (`docker compose restart
+gateway`); from demo:traffic on, use `down -v` and `up`. You can re-run the dry run any time
+without changing anything: `docker compose exec gateway node apps/gateway/dist/demo-check.js`.
 
 Without the switch nothing changes: no licence is minted, the gateway reads its default keyring,
-and `demo:set-passwords` refuses as before. **The switch is demo-only.** `scripts/install.sh`
-refuses it from the environment or a `.env`, and its rendered override pins it to `"0"`. The
-image's start script (`apps/gateway/docker-start.sh`) also ignores it on a `byoc` / `air_gapped`
+no MCP server, export key, offline checks or prep step runs, and `demo:set-passwords` refuses as
+before. **The switch is demo-only.** `scripts/install.sh` refuses it from the environment or a
+`.env`, and its rendered override pins it to `"0"`. The image's start script
+(`apps/gateway/docker-start.sh`) also ignores it on a `byoc` / `air_gapped`
 `REGULAIT_DEPLOY_MODE` and without `SEED_DEMO=1`.
 
-Verified on 2026-10-04 in real containers (Linux, bash flow). The run covered the switch off
-(refused, no licence), the switch on (licence minted, password set, all three personas signed in),
-`docker compose restart gateway` and `down` / `up` (licence kept and re-verified, sign-in still
-works), and found no password in the container logs or `audit_log`. The PowerShell flow is
-written but has **not yet been run on Windows**. Run it once before relying on it.
+Verified on 2026-10-05 in real containers (Linux, Docker 29, compose 5.1) with a CRLF `.env`: a
+fresh stack prepared itself (18 pass, 0 warn, 0 fail; eu-ai-act and nist-ai-rmf active; the AI
+intake linked its EU AI Act controls; a signed audit bundle verified offline against the logged
+fingerprint; Dana's `read_file` through the demo MCP was allowed, `search_code` denied and
+`write_file` queued for Avery); `restart gateway` and `down` / `up` skipped the prep with the alert
+count unchanged and sign-in working; `down -v` / `up` prepared again; the switch off ran none of
+it; and an image built from a context with every text file in CRLF (docker-start.sh included)
+booted and prepared the same way. The PowerShell commands are written for Docker Desktop but have
+**not yet been run on Windows**. Run them once before relying on them.
 
 ---
 

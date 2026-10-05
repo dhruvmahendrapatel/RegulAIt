@@ -61,11 +61,17 @@ after `demo:setup` (or `demo:prepare`, which runs it), which installs the epheme
 demo licence it requires — with no licence, an expired one, or a customer licence it
 refuses and changes nothing.
 
-**Demo with your own password (Docker).** Under Docker Compose the demo licence is one opt-in
-switch: `REGULAIT_DEMO_LICENSE=1` in the `.env` next to `docker-compose.yml`. The seed then
-mints a 30-day ephemeral demo licence ("NOT A PRODUCTION DEPLOYMENT") into a named volume the
-gateway also reads, so it survives
-`docker compose restart` and `down` / `up`, and a password you set is not reset on restart.
+**Demo with your own password (Docker), prepared for you.** Under Docker Compose the whole demo is
+one opt-in switch: `REGULAIT_DEMO_LICENSE=1` in the `.env` next to `docker-compose.yml`. On an
+empty stack the gateway container then prepares **exactly what `demo:prepare` prepares natively**,
+by itself: the 30-day ephemeral demo licence ("NOT A PRODUCTION DEPLOYMENT"), the compliance packs
+(EU AI Act, NIST AI RMF) installed and active, the approved use cases, the hardening gates, governed
+demo traffic and alerts, the export-signing key for the signed export, and the demo MCP server
+(running inside the container). It ends with `demo:check` in the log — `18 pass, 0 warn, 0 fail` —
+and then starts the gateway. This runs **once per database**: `docker compose restart` and
+`down` / `up` keep the prepared data, the licence, the key and a password you set, and skip the
+prep (the log says so); `down -v` deletes it all, and the next `up` prepares again. Details and
+what to do if a step fails: [docs/product/DEMO_RUNBOOK.md §1.3](docs/product/DEMO_RUNBOOK.md).
 **Demo only:** `scripts/install.sh` refuses the switch and pins it off. Without the switch,
 `docker compose up` behaves exactly as before.
 
@@ -74,7 +80,8 @@ line, in shell history, in compose files, in logs or in audit detail:
 
 ```bash
 echo 'REGULAIT_DEMO_LICENSE=1' >> .env
-docker compose up -d --build
+docker compose up -d --build --wait     # returns once the demo is prepared and the gateway is healthy
+docker compose logs gateway | grep -E "demo prep|pass, "    # expect: 18 pass, 0 warn, 0 fail
 printf 'Demo password: '; read -rs pw; echo
 REGULAIT_DEMO_USER_PASSWORD="$pw" docker compose exec -e REGULAIT_DEMO_USER_PASSWORD gateway node apps/gateway/dist/demo-set-passwords.js
 unset pw
@@ -84,7 +91,8 @@ Windows PowerShell (Docker Desktop):
 
 ```powershell
 Add-Content -Path .env -Value 'REGULAIT_DEMO_LICENSE=1' -Encoding ascii
-docker compose up -d --build
+docker compose up -d --build --wait     # returns once the demo is prepared and the gateway is healthy
+docker compose logs gateway | Select-String "demo prep|pass, "   # expect: 18 pass, 0 warn, 0 fail
 $sec = Read-Host -AsSecureString 'Demo password'
 try {
   $env:REGULAIT_DEMO_USER_PASSWORD = [System.Net.NetworkCredential]::new('', $sec).Password
