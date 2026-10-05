@@ -23,6 +23,8 @@ import { ModelPicker } from "../../ui/ModelPicker";
 import { Logo, hasLogo } from "../../ui/logos/Logo";
 import { providerLogoKey } from "../../ui/logos/providerLogo";
 import { useToast } from "../../ui/toast";
+import { RunGraph } from "../../ui/runGraph/RunGraph";
+import rg from "../../ui/runGraph/runGraph.module.css";
 import { bk, builderApi, chatRefusal, useMyModelTiles, useMyProjects, type ChatResponse } from "./builderApi";
 import { agentInitials, importMessage, parseBundleText, safeAgentColor } from "./builderLogic";
 import s from "./builder.module.css";
@@ -531,6 +533,40 @@ export function PauseCard(props: { waiting: BuilderPendingStep; threadId: string
   );
 }
 
+/**
+ * ADR-0173 batch 2b — "View graph" for one turn of a thread: the run graph of
+ * that turn (its model steps, tool calls, pauses and approvals) in a drawer.
+ * A turn is the person's Nth message and everything up to their next one,
+ * the same window the gateway's GET /v1/run-graph/builder-turn reads.
+ */
+export function TurnGraphAction(props: { threadId: string; turn: number }) {
+  const [open, setOpen] = useState(false);
+  const close = useCallback(() => setOpen(false), []);
+  return (
+    <div className={rg.turnAction}>
+      <Button size="sm" variant="ghost" onClick={() => setOpen(true)} aria-label={`View graph of turn ${props.turn}`}>
+        {Icon.tree(14)} View graph
+      </Button>
+      <Drawer open={open} title={`Turn ${props.turn}: decision path`} onClose={close}>
+        {open && <RunGraph source={{ kind: "builder_turn", threadId: props.threadId, turn: props.turn }} label={`Graph of turn ${props.turn}`} height={320} />}
+      </Drawer>
+    </div>
+  );
+}
+
+/** for each message, the turn it belongs to (0 before the person's first message) and whether it ends that turn */
+export function turnsOf(messages: Array<Pick<BuilderMessage, "role">>): Array<{ turn: number; endsTurn: boolean }> {
+  let turn = 0;
+  const out = messages.map((m) => {
+    if (m.role === "user") turn += 1;
+    return { turn, endsTurn: false };
+  });
+  out.forEach((o, i) => {
+    o.endsTurn = o.turn > 0 && (i === messages.length - 1 || messages[i + 1]!.role === "user");
+  });
+  return out;
+}
+
 export function MessageList(props: {
   messages: BuilderMessage[];
   agentName: string;
@@ -540,9 +576,11 @@ export function MessageList(props: {
   waiting?: BuilderPendingStep | null;
   threadId?: string | null;
 }) {
+  const turns = turnsOf(props.messages);
+  const threadId = props.threadId;
   return (
     <div className={s.messages} aria-live="polite">
-      {props.messages.map((m) =>
+      {props.messages.map((m, i) => [
         m.role === "user" ? (
           <div key={m.id} className={s.msgUser}>
             <span className={s.srOnly}>You: </span>
@@ -575,7 +613,9 @@ export function MessageList(props: {
             </div>
           </div>
         ),
-      )}
+        // ADR-0173 batch 2b: the graph of the turn this message ends
+        threadId && turns[i]!.endsTurn ? <TurnGraphAction key={`${m.id}-graph`} threadId={threadId} turn={turns[i]!.turn} /> : null,
+      ])}
       {props.waiting && props.threadId && (
         <PauseCard
           waiting={{

@@ -42,6 +42,7 @@ import {
 } from "../../ui/kit";
 import { useToast } from "../../ui/toast";
 import { DecisionLedgerCard, PmLinksCard } from "../pm/PmAndDecisions";
+import { RunGraph } from "../../ui/runGraph/RunGraph";
 import v from "../views.module.css";
 import s from "./runs.module.css";
 
@@ -419,9 +420,12 @@ export default function RunDetailPage() {
 
       <div className={v.stack}>
         <Card title="Task graph">
-          <div className={s.dagWrap}>
-            <DagSvg nodes={graph.nodes} statuses={state.nodeStatuses} />
-          </div>
+          {/* ADR-0173 batch 2b: the run graph (task DAG, approvals, per-node cost, audit and trace references) */}
+          <RunGraph
+            source={{ kind: "orchestration", runId: run.id }}
+            label="Run task graph"
+            refreshKey={`${run.status}:${events.length}:${pendingApprovals?.length ?? 0}`}
+          />
         </Card>
 
         {livePanes.length > 0 && (
@@ -674,77 +678,3 @@ function nodeTimings(events: RunDetailResponse["events"]) {
   return w;
 }
 
-/** dependency-depth column layout, curved edges, tokens-only colouring */
-function DagSvg(props: { nodes: RunGraphNode[]; statuses: Record<string, NodeStatus> }) {
-  const { nodes, statuses } = props;
-  const depth: Record<string, number> = {};
-  const depthOf = (id: string): number => {
-    if (id in depth) return depth[id]!;
-    depth[id] = 0; // cycle guard (the kernel rejects cycles)
-    const n = nodes.find((x) => x.id === id);
-    depth[id] = (n?.dependsOn ?? []).reduce((m, dep) => Math.max(m, depthOf(dep) + 1), 0);
-    return depth[id]!;
-  };
-  nodes.forEach((n) => depthOf(n.id));
-  const rows: Record<number, number> = {};
-  const pos: Record<string, { x: number; y: number }> = {};
-  for (const n of nodes) {
-    const c = depth[n.id]!;
-    const r = rows[c] ?? 0;
-    rows[c] = r + 1;
-    pos[n.id] = { x: 70 + c * 170, y: 34 + r * 56 };
-  }
-  const maxC = Math.max(...nodes.map((n) => depth[n.id]!), 0);
-  const maxR = Math.max(...Object.values(rows), 1);
-  const w = 70 + maxC * 170 + 110;
-  const h = 34 + (maxR - 1) * 56 + 40;
-  const color: Record<NodeStatus, string> = {
-    not_started: "var(--text-faint)",
-    in_progress: "var(--info)",
-    blocked: "var(--danger)",
-    in_review: "var(--warn)",
-    done: "var(--ok)",
-  };
-  return (
-    <svg viewBox={`0 0 ${w} ${h}`} style={{ maxWidth: w, display: "block" }} role="img" aria-label="Run task graph">
-      {nodes.flatMap((n) =>
-        (n.dependsOn ?? []).map((dep) => {
-          const a = pos[dep];
-          const b = pos[n.id];
-          if (!a || !b) return null;
-          const mx = (a.x + b.x) / 2;
-          return (
-            <path
-              key={`${dep}-${n.id}`}
-              d={`M${a.x + 10} ${a.y} C ${mx} ${a.y}, ${mx} ${b.y}, ${b.x - 10} ${b.y}`}
-              fill="none"
-              stroke="var(--border-strong)"
-              strokeWidth="1.5"
-            />
-          );
-        }),
-      )}
-      {nodes.map((n) => {
-        const p = pos[n.id]!;
-        const st = statuses[n.id] ?? "not_started";
-        const short = n.id.length > 16 ? n.id.slice(0, 15) + "…" : n.id;
-        return (
-          <g key={n.id}>
-            {st === "in_progress" && <circle cx={p.x} cy={p.y} r="12" fill="var(--info)" opacity="0.18" />}
-            <circle cx={p.x} cy={p.y} r="7" fill={color[st]} />
-            <text
-              x={p.x}
-              y={p.y + 23}
-              textAnchor="middle"
-              fill="var(--text-dim)"
-              fontSize="10.5"
-              fontFamily="var(--font-mono)"
-            >
-              {short}
-            </text>
-          </g>
-        );
-      })}
-    </svg>
-  );
-}

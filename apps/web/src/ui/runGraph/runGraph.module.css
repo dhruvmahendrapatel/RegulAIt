@@ -1,0 +1,265 @@
+/* ADR-0173 batch 2b — the run graph. Tokens only, so both themes follow. */
+
+.wrap {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  min-width: 0;
+}
+.summary {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: var(--text-sm);
+}
+.summary strong {
+  color: var(--text);
+}
+.dim,
+.hint {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: var(--text-xs);
+}
+
+/* ---- the drawing ---- */
+.canvas,
+.canvasLoading {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  overflow: hidden;
+}
+.canvasLoading {
+  display: grid;
+  place-items: center;
+  color: var(--text-dim);
+  font-size: var(--text-sm);
+}
+/* the library's own surface takes ours, in both themes */
+.canvas :global(.react-flow) {
+  --xy-background-color: var(--surface-1);
+  --xy-edge-stroke: var(--border-strong);
+  --xy-controls-button-background-color: var(--surface-2);
+  --xy-controls-button-background-color-hover: var(--surface-3);
+  --xy-controls-button-color: var(--text);
+  --xy-controls-button-color-hover: var(--text);
+  --xy-controls-button-border-color: var(--border);
+  --xy-attribution-background-color: var(--surface-1);
+}
+.canvas :global(.react-flow__attribution a) {
+  color: var(--text-dim);
+}
+.canvas :global(.react-flow__arrowhead polyline) {
+  stroke: var(--text-dim);
+  fill: var(--text-dim);
+}
+.canvas :global(.react-flow__node) {
+  border-radius: var(--radius-md);
+}
+.canvas :global(.react-flow__node:focus-visible) {
+  outline: 2px solid var(--focus-ring, var(--primary));
+  outline-offset: 3px;
+}
+.edge :global(.react-flow__edge-path) {
+  stroke: var(--text-dim);
+  stroke-width: 1.5;
+}
+.edgeDashed :global(.react-flow__edge-path) {
+  stroke-dasharray: 6 4;
+}
+
+.step {
+  box-sizing: border-box;
+  width: 220px;
+  height: 72px;
+  padding: 7px 10px 6px 12px;
+  border: 1px solid var(--border-strong);
+  border-left-width: 4px;
+  border-radius: var(--radius-md);
+  background: var(--surface-0, var(--surface-1));
+  color: var(--text);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  cursor: pointer;
+}
+.stepOpen {
+  box-shadow: 0 0 0 2px var(--primary);
+}
+.stepStatus {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.stepDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.stepLabel {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.stepMeta {
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tone-ok {
+  border-left-color: var(--ok);
+}
+.tone-ok .stepDot {
+  color: var(--ok);
+}
+.tone-info {
+  border-left-color: var(--info);
+}
+.tone-info .stepDot {
+  color: var(--info);
+}
+.tone-warn {
+  border-left-color: var(--warn);
+}
+.tone-warn .stepDot {
+  color: var(--warn);
+}
+.tone-danger {
+  border-left-color: var(--danger);
+}
+.tone-danger .stepDot {
+  color: var(--danger);
+}
+.tone-neutral,
+.tone-primary {
+  border-left-color: var(--border-strong);
+}
+.handle {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* ---- one step's details ---- */
+.details {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--s2);
+  background: var(--surface-2);
+}
+.detailsHead {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s1);
+  margin-bottom: var(--s1);
+}
+.detailsTitle {
+  margin: 0;
+  flex: 1;
+  min-width: 0;
+  font-size: var(--text-md);
+  overflow-wrap: anywhere;
+}
+.detailsTitle:focus {
+  outline: none;
+}
+.detailsTitle:focus-visible {
+  outline: 2px solid var(--focus-ring, var(--primary));
+  outline-offset: 2px;
+}
+.facts {
+  margin: 0 0 var(--s1);
+  display: grid;
+  gap: 4px;
+}
+.fact {
+  display: grid;
+  grid-template-columns: minmax(110px, 160px) 1fr;
+  gap: var(--s1);
+  font-size: var(--text-sm);
+}
+.fact dt {
+  color: var(--text-dim);
+}
+.fact dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+/* an id chip is a copy button: a full-size target (WCAG 2.5.8) */
+.fact dd button {
+  min-height: 24px;
+}
+.refs {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+}
+
+/* ---- the text alternative ---- */
+.listBlock {
+  min-width: 0;
+}
+.listTitle {
+  margin: 0 0 var(--s1);
+  font-size: var(--text-sm);
+}
+.list {
+  margin: 0;
+  padding-left: 1.6em;
+  display: grid;
+  gap: 6px;
+  font-size: var(--text-sm);
+}
+.listItem {
+  padding-left: 2px;
+}
+.listButton {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  font-weight: 600;
+  color: var(--primary-strong, var(--text));
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+  text-align: left;
+}
+.listButton[aria-current="true"] {
+  text-decoration-thickness: 2px;
+}
+.listMeta {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  margin-left: 10px;
+  color: var(--text-dim);
+}
+.listDetail {
+  display: block;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+.notes {
+  margin: 0;
+  padding-left: 1.2em;
+  color: var(--text-dim);
+  font-size: var(--text-xs);
+}
+
+/* the builder thread's "View graph", under the message that ends a turn */
+.turnAction {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: -4px;
+}

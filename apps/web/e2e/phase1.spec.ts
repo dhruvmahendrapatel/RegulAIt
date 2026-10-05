@@ -123,7 +123,7 @@ test("runs: list and open a seeded run (DAG + nodes)", async () => {
   await firstRow.click();
 
   await expect(page.getByText("Task graph")).toBeVisible();
-  await expect(page.getByRole("img", { name: "Run task graph" })).toBeVisible();
+  await expect(page.getByRole("application", { name: "Run task graph" })).toBeVisible();
   await expect(page.getByText("Nodes")).toBeVisible();
   await shot(page, "06-run-detail");
   track.assertClean("runs list + detail");
@@ -221,7 +221,8 @@ test("runs: goal decomposition drafts a reviewable, editable plan (pillar 7)", a
   await page.getByRole("button", { name: "Plan run" }).click();
   await expect(page.getByText(/Run planned/).first()).toBeVisible();
   await expect(page.getByText("Task graph")).toBeVisible();
-  await expect(page.getByText(editedTitle)).toBeVisible();
+  // the run graph lists each task by its title: the edited one is there
+  await expect(page.getByRole("list", { name: "Steps in order" }).getByRole("button", { name: editedTitle })).toBeVisible();
   await shot(page, "06e-run-from-proposal");
   track.assertClean("goal decomposition");
 });
