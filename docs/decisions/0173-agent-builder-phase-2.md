@@ -244,3 +244,78 @@ ADR-0177 fit here and are included:
   - Compliance packs show "tested by";
   - Overview gains "Monitoring".
 
+## Amendment — batch 2c built and reviewed (2026-10-05)
+
+**Migrations:** 0146 (trace tags and scores), 0148 (annotation queues), 0149 (evaluator catalog, judge panels), 0150
+(KRIs, dashboards, automation rules, retention holds) and 0151 (the automation sweep's keyset index).
+- **0147 was reserved and never used.** It is retired: never add a migration numbered 0147 or with a `when` below
+  1785086000000. The journal skips it, and a later 0147 would never be applied to a database that already has 0150
+  (CONTRIBUTING_PARALLEL_SESSIONS §4).
+- The next migration is **0152**.
+
+**Open source first (ADR-0176):**
+- the OTel semantic conventions and the OpenInference converter for the trace standards;
+- `simple-statistics` for bootstrap intervals and as the percentile test oracle;
+- `recharts` for the new Monitoring charts;
+- `csv-stringify` (`escape_formulas`), which replaces three hand-written CSV escapers;
+- promptfoo's MIT framework tables as vendored OWASP references.
+
+Cohen's kappa is about ten lines of our own code (no maintained package exists), tested against published worked
+examples.
+
+**What shipped:**
+- **Traces:**
+  - filters by agent, model, cost, latency, score, flag and tag;
+  - key/value tags;
+  - "add to dataset" and "send to annotation queue";
+  - an export profile: OTel GenAI (now reporting the served model, `finish_reasons` as an array, structured message
+    parts, agent, cache and evaluation fields) or OpenInference.
+  - The conformance test checks every emitted key against the pinned conventions.
+- **Annotation queues:**
+  - named reviewers work from the Inbox, seeing previews only, with every read audited;
+  - no self-review, including a dataset case that came from the reviewer's own trace;
+  - N-person review with disagreement recorded;
+  - versioned rubrics;
+  - an SLA;
+  - a formula-safe CSV export.
+- **Evaluators:**
+  - a catalog over scorers, detectors and red-team classes, mapped to NIST AI RMF, ISO/IEC 42001, the EU AI Act and OWASP;
+  - a "tested by" chip on each pack control, which counts only a completed run that passed;
+  - datasets from traces;
+  - comparing two runs;
+  - an automatic re-run when an agent's model or prompt changes. A legacy baseline adopts its first hash without
+    running.
+  - Judge panels of 2–5 weighted judges, with every verdict kept.
+  - Calibration against annotation labels, read on each rubric's own scale, with one named or unambiguous criterion.
+    It is observe-only.
+- **Monitoring and automation:**
+  - KRIs on the governance monitor. Volume and cost KRIs use the window itself as the sample.
+  - Series and dashboards.
+  - Automation rules: filter, deterministic sampling, then queue, dataset, webhook or retention hold, run as the rule's
+    author.
+  - Rules that read a tag, score or flag also re-check the last 24 hours for late arrivals.
+  - Retention holds are capped at the smaller of 2× the floor or 3 years. An erasure release, by person, is permanent.
+- **Prose scrub:** reviewer comments, judge rationales and rule pause reasons join the ADR-0102 credential scrub.
+
+**Review.** An adversarial review found no critical or high issues. It found 10 medium and low ones, all fixed with
+red-without-fix proofs:
+- calibration read human labels on the wrong scale;
+- automation missed late tags, scores and flags;
+- a low-volume KRI could never fire;
+- the sweep and series queries did full scans;
+- rule provenance and signing were missing from actions;
+- eval-result previews and self-review gaps;
+- a burst of config-change re-runs at deploy;
+- CSV escapers;
+- chart contrast;
+- the retired 0147.
+
+The full local gate also caught four new free-text columns missing from the credential-scrub inventory.
+
+**Still to do:**
+- Erasure: there is still no end-to-end data-subject erasure workflow. Holds release through an admin route, scoped to a
+  person.
+- Pairwise and tool-use evaluators.
+- Three more hand-written CSV writers (projects, cost import, billing statement) for the open-source replacement
+  programme.
+

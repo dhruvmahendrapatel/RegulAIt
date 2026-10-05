@@ -21,6 +21,21 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-10-05 - ADR-0173 batch 2c built and reviewed** (migrations 0146 and 0148–0151; 0147 retired, next is 0152).
+- **Traces:** filters, tags, and actions to add to a dataset or send to a queue. The OTel GenAI and OpenInference
+  export profiles have a conformance test.
+- **Annotation queues:** named reviewers see previews only, there is no self-review, review can need N people, and the
+  rubric is versioned.
+- **Evaluator catalog:** mapped to controls; packs show "tested by"; datasets can be built from traces; two runs can be
+  compared; a config change triggers an automatic re-run.
+- **Judge panels and calibration:** observe-only.
+- **Monitoring and automation:** KRIs, dashboards, automation rules, and retention holds that an erasure request
+  releases.
+- **Review:** no critical or high issues; 10 medium and low issues fixed. The full gate caught four free-text columns
+  missing from the credential scrub, now fixed.
+- Owner decisions are recorded in ADR-0173: named reviewers may read previews; holds are capped at 2× the floor or 3
+  years, and erasure always wins.
+
 **2026-10-05 - Open-source security items done (ADR-0176 amendment; migration 0145).**
 - **MCP manifest digest** moved from FNV-1a 64 to SHA-256, with a one-time boot re-pin:
   - it applies only where the stored FNV digest is proven;
