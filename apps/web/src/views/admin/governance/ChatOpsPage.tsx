@@ -54,7 +54,10 @@ export function chatOpsProviderLabel(provider: string): string {
 }
 
 /** the POST /v1/chatops/connections body: a send-only provider carries no
- * signing secret (the API answers 400 signing_secret_not_applicable if it does) */
+ * signing secret (the API answers 400 signing_secret_not_applicable if it does).
+ * ADR-0173 batch 2b: a teams workspace may register its Bot Framework bot (app
+ * id, optional tenant and OpenID metadata URL); one reached only through its
+ * bot needs no signing secret. */
 export function chatOpsConnectionBody(input: {
   name: string;
   provider: string;
@@ -62,9 +65,21 @@ export function chatOpsConnectionBody(input: {
   signingSecret: string;
   defaultChannel: string;
   allowFencedDecide: boolean;
+  botAppId?: string;
+  botTenantId?: string;
+  botOpenidMetadataUrl?: string;
 }): Record<string, unknown> {
-  const { signingSecret, ...rest } = input;
-  return CHATOPS_SEND_ONLY_PROVIDERS.includes(input.provider) ? rest : { ...rest, signingSecret };
+  const { signingSecret, botAppId, botTenantId, botOpenidMetadataUrl, ...rest } = input;
+  if (CHATOPS_SEND_ONLY_PROVIDERS.includes(input.provider)) return rest;
+  const appId = input.provider === "teams" ? botAppId?.trim() ?? "" : "";
+  const bot: Record<string, string> = appId
+    ? {
+        botAppId: appId,
+        ...(botTenantId?.trim() ? { botTenantId: botTenantId.trim() } : {}),
+        ...(botOpenidMetadataUrl?.trim() ? { botOpenidMetadataUrl: botOpenidMetadataUrl.trim() } : {}),
+      }
+    : {};
+  return { ...rest, ...(signingSecret || !appId ? { signingSecret } : {}), ...bot };
 }
 
 interface Connection {
@@ -77,6 +92,10 @@ interface Connection {
   notifyAlertMinSeverity?: "medium" | "high" | null;
   enabled: boolean;
   createdAt: string;
+  /** ADR-0173 batch 2b — the Teams Bot Framework endpoint, when a bot is registered */
+  botAppId?: string | null;
+  botTenantId?: string | null;
+  botEndpoint?: string | null;
 }
 interface ConnectionsResponse {
   connections: Connection[];
@@ -112,6 +131,9 @@ export default function ChatOpsPage() {
   const [signingSecret, setSigningSecret] = useState("");
   const [defaultChannel, setDefaultChannel] = useState("");
   const [allowFencedDecide, setAllowFencedDecide] = useState(false);
+  const [botAppId, setBotAppId] = useState("");
+  const [botTenantId, setBotTenantId] = useState("");
+  const [botOpenidMetadataUrl, setBotOpenidMetadataUrl] = useState("");
   const sendOnly = CHATOPS_SEND_ONLY_PROVIDERS.includes(provider);
 
   const [linkConnection, setLinkConnection] = useState("");
@@ -185,6 +207,16 @@ export default function ChatOpsPage() {
                       <Badge tone="ok">in-app only</Badge>
                     ),
                 },
+                {
+                  key: "bot",
+                  header: "Bot endpoint",
+                  render: (r) =>
+                    r.botEndpoint ? (
+                      <span title={r.botTenantId ? `tenant ${r.botTenantId}` : "any tenant"}><code>{r.botEndpoint}</code></span>
+                    ) : (
+                      <span className={v.faint}>—</span>
+                    ),
+                },
                 { key: "enabled", header: "Enabled", render: (r) => <Badge tone={r.enabled ? "ok" : "neutral"}>{r.enabled ? "yes" : "no"}</Badge> },
                 { key: "created", header: "Created", render: (r) => ago(r.createdAt) },
                 {
@@ -243,6 +275,23 @@ export default function ChatOpsPage() {
             <Input type="password" value={signingSecret} onChange={(e) => setSigningSecret(e.target.value)} />
           </Field>
         )}
+        {provider === "teams" ? (
+          <>
+            <p className={v.faint}>
+              Optional: register the workspace's Bot Framework bot. Its activities are verified against the platform's
+              signed tokens (audience = the app id), so a workspace reached only through its bot needs no signing secret.
+            </p>
+            <Field label="Bot app id (turns on the bot endpoint)">
+              <Input value={botAppId} onChange={(e) => setBotAppId(e.target.value)} />
+            </Field>
+            <Field label="Bot tenant id (optional — accept this tenant only)">
+              <Input value={botTenantId} onChange={(e) => setBotTenantId(e.target.value)} />
+            </Field>
+            <Field label="OpenID metadata URL (optional — the platform's published document by default)">
+              <Input value={botOpenidMetadataUrl} onChange={(e) => setBotOpenidMetadataUrl(e.target.value)} />
+            </Field>
+          </>
+        ) : null}
         <Field label={sendOnly ? "Default recipient mailbox" : "Default channel"}>
           <Input
             value={defaultChannel}
@@ -267,7 +316,10 @@ export default function ChatOpsPage() {
                   () =>
                     api.post(
                       "/v1/chatops/connections",
-                      chatOpsConnectionBody({ name, provider, connectorId, signingSecret, defaultChannel, allowFencedDecide }),
+                      chatOpsConnectionBody({
+                        name, provider, connectorId, signingSecret, defaultChannel, allowFencedDecide,
+                        botAppId, botTenantId, botOpenidMetadataUrl,
+                      }),
                     ),
                   "Workspace connected",
                 )

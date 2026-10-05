@@ -142,6 +142,16 @@ The rule is in `CLAUDE.md` ("Universal build rule") so it binds every session an
 All "replace now" and "replace with ADR" rows from the audit stand. The work is scheduled as an open-source replacement
 programme beside the roadmap. The security rows (manifest digest, secret patterns, IP ranges) go first.
 
+## Amendment — public-domain dedications are allowed (owner, 2026-10-05)
+
+The batch 2b review found that `standardwebhooks` depends on `fast-sha256` 1.3.0, which is released under the Unlicense.
+The admission rule listed only MIT, Apache-2.0, BSD and ISC. A public-domain dedication grants more than any of those and
+carries no conditions. We already ship CC0 logos (ADR-0172).
+
+**Decision (owner: "yes, allow public-domain licences too"):** the allowed licences are MIT, Apache-2.0, BSD and ISC, plus
+public-domain dedications: the Unlicense, CC0-1.0 and 0BSD. Every other admission rule is unchanged: maintained, pinned,
+works air-gapped, and recorded in `THIRD_PARTY.md`. CLAUDE.md's universal build rule is updated to match.
+
 ## Amendment — the security items are done (2026-10-05)
 
 Audit items 1–3 and 11 are built (migration 0145). An independent verification review found one high issue, two medium

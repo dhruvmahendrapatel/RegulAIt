@@ -1934,3 +1934,46 @@ describe("AER-017 — require_approval is a restriction on an allowed call, not 
     expect(d.ruleId).toBe("execution-read-only");
   });
 });
+
+describe("evaluateConnector — a queueable write under the require_approval dial (ADR-0173 batch 2b)", () => {
+  const HOLD = { mode: "require_approval" as const, approverUserId: "approver-1" };
+  const rw = () => [connectorGrant({ mode: "readwrite" })];
+  it("holds a GRANTED write for the named approver", () => {
+    const d = evaluateConnector({
+      execution: HOLD, userId: USER, connectorId: CONNECTOR, operation: "write", connectorGrants: rw(),
+      writeApprovalQueue: { approvedApprovalId: null },
+    });
+    expect(d).toMatchObject({ effect: "require_approval", ruleId: "execution-require-approval", approverUserId: "approver-1" });
+  });
+  it("releases it with a bound consent, and records which", () => {
+    const d = evaluateConnector({
+      execution: HOLD, userId: USER, connectorId: CONNECTOR, operation: "write", connectorGrants: rw(),
+      writeApprovalQueue: { approvedApprovalId: "ap-1" },
+    });
+    expect(d.effect).toBe("allow");
+    expect(d.ruleChain.at(-1)).toEqual({ rule: "execution-require-approval", outcome: "satisfied-by-approval", grantId: "ap-1" });
+  });
+  it("never offers the queue to an ungranted or read-only-granted write", () => {
+    for (const grants of [[], [connectorGrant()]]) {
+      const d = evaluateConnector({
+        execution: HOLD, userId: USER, connectorId: CONNECTOR, operation: "write", connectorGrants: grants,
+        writeApprovalQueue: { approvedApprovalId: "ap-1" },
+      });
+      expect(d.effect).toBe("deny");
+    }
+  });
+  it("fails closed with no approver, refuses a READ, and leaves callers that cannot queue unchanged", () => {
+    const noApprover = evaluateConnector({
+      execution: { mode: "require_approval" }, userId: USER, connectorId: CONNECTOR, operation: "write", connectorGrants: rw(),
+      writeApprovalQueue: { approvedApprovalId: null },
+    });
+    expect(noApprover).toMatchObject({ effect: "deny", ruleId: "execution-require-approval" });
+    const read = evaluateConnector({
+      execution: HOLD, userId: USER, connectorId: CONNECTOR, operation: "read", connectorGrants: rw(),
+      writeApprovalQueue: { approvedApprovalId: null },
+    });
+    expect(read).toMatchObject({ effect: "deny", ruleId: "execution-require-approval" });
+    const legacy = evaluateConnector({ execution: HOLD, userId: USER, connectorId: CONNECTOR, operation: "write", connectorGrants: rw() });
+    expect(legacy).toMatchObject({ effect: "deny", ruleId: "execution-require-approval" });
+  });
+});

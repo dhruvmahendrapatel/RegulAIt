@@ -18,6 +18,11 @@ import BuilderTemplateDetailPage from "./views/builder/BuilderTemplateDetailPage
 import BuilderIntegrationsPage from "./views/builder/BuilderIntegrationsPage";
 import BuilderSkillsPage from "./views/builder/BuilderSkillsPage";
 import BuilderUsagePage from "./views/builder/BuilderUsagePage";
+// ADR-0173 batch 2b — the governed prompt registry, the playground and outbound webhooks
+import BuilderPromptsPage from "./views/builder/BuilderPromptsPage";
+import BuilderPromptDetailPage from "./views/builder/BuilderPromptDetailPage";
+import BuilderPlaygroundPage from "./views/builder/BuilderPlaygroundPage";
+import WebhooksPage from "./views/admin/integrations/WebhooksPage";
 import ModelsPage from "./views/models/ModelsPage";
 import RunsPage from "./views/runs/RunsPage";
 import RunDetailPage from "./views/runs/RunDetailPage";
@@ -163,6 +168,9 @@ export default function App() {
                 <Route path="/builder/integrations" element={<BuilderIntegrationsPage />} />
                 <Route path="/builder/skills" element={<BuilderSkillsPage />} />
                 <Route path="/builder/usage" element={<BuilderUsagePage />} />
+                <Route path="/builder/prompts" element={<BuilderPromptsPage />} />
+                <Route path="/builder/prompts/:promptId" element={<BuilderPromptDetailPage />} />
+                <Route path="/builder/playground" element={<BuilderPlaygroundPage />} />
                 <Route path="/runs" element={<RunsPage />} />
                 <Route path="/runs/:runId" element={<RunDetailPage />} />
                 <Route path="/workflows" element={<WorkflowsPage />} />
@@ -245,6 +253,8 @@ export default function App() {
                         <Route path="external-scorers" element={<ExternalScorersPage />} />
                         <Route path="connectors" element={<ConnectorsPage />} />
                         <Route path="mcp-servers" element={<McpServersPage />} />
+                        {/* ADR-0173 batch 2b */}
+                        <Route path="webhooks" element={<WebhooksPage />} />
                         <Route path="admission" element={<AdmissionReviewPage />} />
                         <Route path="git-connections" element={<GitConnectionsPage />} />
                         <Route path="pm-connections" element={<PmConnectionsPage />} />

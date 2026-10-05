@@ -29,6 +29,7 @@
  */
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { useSearchParams } from "react-router-dom";
 import { api } from "../../../api/client";
 import { ago, fmtDur, fmtUsd, shortId } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
@@ -189,7 +190,9 @@ export default function TracesPage() {
   const [deniedOnly, setDeniedOnly] = useState(false);
   const [kind, setKind] = useState("");
   const [sessionId, setSessionId] = useState("");
-  const [selected, setSelected] = useState<string | null>(null);
+  // ADR-0173 batch 2b: the run graph links a step to its trace (?trace=<id>)
+  const [params] = useSearchParams();
+  const [selected, setSelected] = useState<string | null>(() => params.get("trace"));
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
 
   const qs = new URLSearchParams();

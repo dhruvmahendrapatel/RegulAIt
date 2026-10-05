@@ -27,7 +27,7 @@ import {
 } from "../../ui/kit";
 import { useToast } from "../../ui/toast";
 import { McpActionReview } from "../approvals/McpActionReview";
-import { inspectApprovalAction } from "../approvals/approvalReview";
+import { inspectApprovalAction, isBoundAction } from "../approvals/approvalReview";
 import { ReviewPanel } from "../approvals/ReviewPanel";
 import { intakeUseCaseName, isIntakeSignoff } from "../approvals/reviewDecision";
 import { shortDate } from "../admin/governance/useCaseLifecycle";
@@ -36,6 +36,7 @@ import v from "../views.module.css";
 const approvalLabel = (a: Approval): string => {
   if (isIntakeSignoff(a)) return "AI use case sign-off";
   if (a.objectType === "mcp_tool") return `MCP action: ${a.toolName ?? "unknown tool"}`;
+  if (a.objectType === "connector_call") return `Connector write: ${a.toolName ?? "unknown connector"}`;
   const sentinel = approvalStageLabel(a);
   if (sentinel) return sentinel;
   if (a.objectType === "infra_operation")
@@ -96,7 +97,7 @@ export default function InboxPage() {
   });
 
   const decide = async (a: Approval, decision: "approved" | "denied") => {
-    if (decision === "approved" && a.objectType === "mcp_tool") {
+    if (decision === "approved" && isBoundAction(a)) {
       const blocked = inspectApprovalAction(a).blockedReason;
       if (blocked) { setRowErrors((errors) => ({ ...errors, [a.id]: blocked })); return; }
     }
@@ -231,10 +232,10 @@ export default function InboxPage() {
                   {inst && <MergeGateEvidence inst={inst} />}
                   {a.contextConflict && <ConflictPreview conflict={a.contextConflict} />}
                   {canDecide ? (
-                    a.objectType === "mcp_tool" ? <McpActionReview approval={a} controls={controls} /> : controls(null)
+                    isBoundAction(a) ? <McpActionReview approval={a} controls={controls} /> : controls(null)
                   ) : (
                     <>
-                      {a.objectType === "mcp_tool" && <McpActionReview approval={a} />}
+                      {isBoundAction(a) && <McpActionReview approval={a} />}
                       <span className={v.faint}>awaiting {a.approverName ?? "the named approver"}</span>
                     </>
                   )}
@@ -261,7 +262,7 @@ export default function InboxPage() {
                   </div>
                 </div>
                 {a.status === "returned" ? <Badge tone="warn">sent back</Badge> : <StatusBadge status={a.status} />}
-                {a.objectType === "mcp_tool" && <McpActionReview approval={a} />}
+                {isBoundAction(a) && <McpActionReview approval={a} />}
               </div>
             ))}
           </Card>

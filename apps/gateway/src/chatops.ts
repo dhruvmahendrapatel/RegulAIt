@@ -98,7 +98,10 @@ import {
   escapeSlackText,
   parseChatInteraction,
   parseSlackEvent,
+  parseSlackStepInteraction,
+  parseTeamsBotActivity,
   parseTeamsMessage,
+  CHATOPS_MAX_BODY_BYTES,
   SLACK_RETRY_NUM_HEADER,
   teamsActivityForCard,
   teamsActivityFreshness,
@@ -108,6 +111,7 @@ import {
 } from "@regulait/shared";
 import {
   acceptInboundMessage,
+  acceptStepInteraction,
   drainChannelWork,
   registerBuilderChannelRoutes,
   scheduleChannelWork,
@@ -117,6 +121,7 @@ import {
 } from "./builder-channels.js";
 import {
   resolveConnectorProvider,
+  SlackConnectorProvider,
   SLACK_DEFAULT_BASE_URL,
   TEAMS_DEFAULT_BASE_URL,
 } from "@regulait/connector-provider";
@@ -125,8 +130,14 @@ import { EgressBlockedError } from "./egress-guard.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { projectPiiMode } from "./projects.js";
 import { baseUrlFor } from "./mcp-auth-metadata.js";
+import { verifyTeamsBotToken } from "./teams-bot-auth.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
+
+/** the courier's request to rewrite one of ITS OWN Slack messages: a symbol
+ * key, so no JSON payload (a user's or an agent's) can ever carry one */
+const OWN_MESSAGE_UPDATE: unique symbol = Symbol("own-message-update");
+type OwnMessageUpdate = { [OWN_MESSAGE_UPDATE]: { ts: string; text: string; blocks?: Array<Record<string, unknown>> } };
 
 /**
  * ADR-0113 — the chat providers this gateway can POST to. Deliberately a
@@ -156,7 +167,32 @@ export const CHATOPS_RULE_IDS = {
   alertPosted: "chatops-alert-posted",
   alertPostFailed: "chatops-alert-post-failed",
   alertSettingsChanged: "chatops-alert-settings-changed",
+  /** ADR-0173 batch 2b — the Teams Bot Framework endpoint */
+  botSettingsChanged: "chatops-bot-settings-changed",
+  botRefusedTenant: "chatops-bot-refused-tenant",
+  /** ADR-0173 batch 2b review — the Slack workspace pin */
+  slackTeamChanged: "chatops-slack-team-changed",
+  slackRefusedTeam: "chatops-slack-refused-team",
 } as const;
+
+/** ADR-0173 batch 2b review — the Slack workspace (team) a signed body came
+ * from: `team_id` on an Events API envelope, `team.id` on an interaction
+ * payload (form-encoded `payload=`). null when it names none. Pure. */
+export function slackTeamIdOf(rawBody: string): string | null {
+  const nonEmpty = (v: unknown) => (typeof v === "string" && v.trim() ? v : null);
+  try {
+    const formPayload = rawBody.trimStart().startsWith("{") ? null : new URLSearchParams(rawBody).get("payload");
+    const json = JSON.parse(formPayload ?? rawBody) as Record<string, unknown> | null;
+    if (!json || typeof json !== "object") return null;
+    const team = json.team as Record<string, unknown> | undefined;
+    return nonEmpty(json.team_id) ?? nonEmpty(team && typeof team === "object" ? team.id : null);
+  } catch {
+    return null;
+  }
+}
+
+/** a Slack team id as Slack writes one (T… / E… for an org) */
+const slackTeamIdField = z.string().trim().regex(/^[A-Z0-9]{2,40}$/, "a Slack team id, e.g. T0123ABCD").nullable().optional();
 
 /**
  * ADR-0162 — the governance monitor reaches chat through the ONE guarded
@@ -186,6 +222,31 @@ export interface ChatOpsRouteOptions {
   dataKey?: string;
 }
 
+/** ADR-0173 batch 2b — a Teams workspace's registered bot */
+const botFields = {
+  /** the bot's app id: the audience its Bot Framework tokens must carry */
+  botAppId: z.string().trim().min(1).max(200).nullable().optional(),
+  /** optional: the one tenant whose activities are accepted */
+  botTenantId: z.string().trim().min(1).max(200).nullable().optional(),
+  /** optional: OpenID metadata naming the token issuer and JWKS (default: the platform's published document) */
+  botOpenidMetadataUrl: z.string().trim().url().max(2000).nullable().optional(),
+};
+
+/** the bot settings must hang together: Teams only, and nothing without an app id */
+function botSettingsProblem(
+  provider: string,
+  bot: { botAppId?: string | null | undefined; botTenantId?: string | null | undefined; botOpenidMetadataUrl?: string | null | undefined },
+): { error: string; detail: string } | null {
+  const any = !!(bot.botAppId || bot.botTenantId || bot.botOpenidMetadataUrl);
+  if (any && provider !== "teams") {
+    return { error: "bot_fields_teams_only", detail: "a Bot Framework app id, tenant and metadata URL apply to a teams workspace only" };
+  }
+  if ((bot.botTenantId || bot.botOpenidMetadataUrl) && !bot.botAppId) {
+    return { error: "bot_app_id_required", detail: "the bot endpoint is off until an app id is set; set botAppId with the tenant or metadata URL" };
+  }
+  return null;
+}
+
 const createConnectionSchema = z
   .object({
     name: z.string().min(1).max(200),
@@ -201,6 +262,9 @@ const createConnectionSchema = z
     /** ADR-0162 — opt-in; null/absent = governance alerts are not posted here */
     notifyAlertMinSeverity: z.enum(["medium", "high"]).nullable().optional(),
     enabled: z.boolean().default(true),
+    ...botFields,
+    /** ADR-0173 batch 2b review — optional, slack only: the one workspace accepted */
+    slackTeamId: slackTeamIdField,
   })
   .strict();
 
@@ -241,6 +305,29 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
       reason,
     });
 
+  /**
+   * ADR-0173 batch 2b review — THE SLACK WORKSPACE PIN. A signing secret
+   * belongs to a Slack APP, and one app can be installed in several
+   * workspaces, so a valid signature proves "Slack sent this for our app", not
+   * "from the workspace this connection serves". When an admin pinned a team,
+   * a signed body naming another team (or none) is refused here — after the
+   * signature (so only Slack itself can cause the audit row), before anything
+   * is acted on.
+   */
+  const slackTeamRefusal = async (
+    conn: typeof chatopsConnections.$inferSelect,
+    rawBody: string,
+    kind: "event" | "interaction",
+  ): Promise<{ status: number; body: Record<string, unknown> } | null> => {
+    if (conn.provider !== "slack" || !conn.slackTeamId) return null;
+    const teamId = slackTeamIdOf(rawBody);
+    if (teamId === conn.slackTeamId) return null;
+    await audit(null, "chatops_connection", conn.id, CHATOPS_RULE_IDS.slackRefusedTeam, "deny",
+      `a signed Slack ${kind} on '${conn.name}' came from team '${teamId ?? "none"}', not the workspace's pinned team — nothing ran`,
+      { teamId, expectedTeamId: conn.slackTeamId, kind });
+    return { status: 403, body: { error: "team_not_allowed", detail: "this workspace accepts events and interactions from its pinned Slack team only" } };
+  };
+
   const portalUrl = (approvalId: string) => `/admin/review-workbench?approval=${approvalId}`;
 
   // =======================================================================
@@ -267,6 +354,12 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
         // outlook connection legitimately holds none, and reporting `true`
         // for it would assert a control that does not exist.
         signingSecretSet: r.signingSecretCiphertext !== null,
+        // ADR-0173 batch 2b — the Teams bot (identifiers, not secrets)
+        botAppId: r.botAppId,
+        botTenantId: r.botTenantId,
+        botOpenidMetadataUrl: r.botOpenidMetadataUrl,
+        botEndpoint: r.botAppId ? `/v1/chatops/${encodeURIComponent(r.name)}/bot` : null,
+        slackTeamId: r.slackTeamId,
       })),
       posture:
         "The chat surface is a COURIER. Every decision goes through the same decide function the portal calls, " +
@@ -310,7 +403,14 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
           "no signing secret; approvals are decided from the portal link the message carries.",
       });
     }
-    if (body.provider !== "outlook" && body.signingSecret === undefined) {
+    const botProblem = botSettingsProblem(body.provider, body);
+    if (botProblem) return reply.status(400).send(botProblem);
+    if (body.slackTeamId && body.provider !== "slack") {
+      return reply.status(400).send({ error: "slack_team_slack_only", detail: "a Slack team id applies to a slack workspace only" });
+    }
+    // ADR-0173 batch 2b: a teams workspace reached only through its registered
+    // bot verifies inbound tokens against the platform's keys, not a secret
+    if (body.provider !== "outlook" && body.signingSecret === undefined && !(body.provider === "teams" && body.botAppId)) {
       return reply.status(400).send({
         error: "signing_secret_required",
         detail: `${body.provider} callbacks are HMAC-verified against this secret — registering without one would create a workspace that can post and can never be answered`,
@@ -329,12 +429,22 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
         allowFencedDecide: body.allowFencedDecide,
         notifyAlertMinSeverity: body.notifyAlertMinSeverity ?? null,
         enabled: body.enabled,
+        botAppId: body.botAppId ?? null,
+        botTenantId: body.botTenantId ?? null,
+        botOpenidMetadataUrl: body.botOpenidMetadataUrl ?? null,
+        slackTeamId: body.slackTeamId ?? null,
         createdByUserId: req.authCtx.userId ?? null,
       })
       .returning();
     await audit(req.authCtx.userId, "chatops_connection", row!.id, CHATOPS_RULE_IDS.connectionRegistered, "allow",
-      `registered ${body.provider} ChatOps workspace '${body.name}' on connector '${connector.name}'${body.allowFencedDecide ? " WITH fenced-approval chat decide enabled" : ""}`,
-      { provider: body.provider, connectorId: body.connectorId, allowFencedDecide: body.allowFencedDecide });
+      `registered ${body.provider} ChatOps workspace '${body.name}' on connector '${connector.name}'${body.allowFencedDecide ? " WITH fenced-approval chat decide enabled" : ""}${body.botAppId ? " with its Bot Framework endpoint on" : ""}${body.slackTeamId ? ` pinned to Slack team ${body.slackTeamId}` : ""}`,
+      {
+        provider: body.provider,
+        connectorId: body.connectorId,
+        allowFencedDecide: body.allowFencedDecide,
+        ...(body.botAppId ? { botAppId: body.botAppId, botTenantId: body.botTenantId ?? null, botOpenidMetadataUrl: body.botOpenidMetadataUrl ?? null } : {}),
+        ...(body.slackTeamId ? { slackTeamId: body.slackTeamId } : {}),
+      });
     return reply.status(201).send({ id: row!.id, name: row!.name, provider: row!.provider });
   });
 
@@ -479,7 +589,7 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
   async function postToChat(
     conn: typeof chatopsConnections.$inferSelect,
     channel: string,
-    payloadFor: (provider: "slack" | "teams") => Record<string, unknown>,
+    payloadFor: (provider: "slack" | "teams") => Record<string, unknown> | OwnMessageUpdate,
     actorUserId: string | null,
     label: string,
   ): Promise<{ ok: true; messageRef: string | null } | { ok: false; status: number; body: Record<string, unknown> }> {
@@ -554,7 +664,18 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
 
     let result;
     try {
-      result = await provider.invoke({ operation: "write", object: channel, payload });
+      // ADR-0173 batch 2b review: rewriting one of OUR messages is not an
+      // invoke() op (no governed connector call can reach it); the courier asks
+      // for it with a symbol key no JSON payload can carry
+      const own = (payload as Partial<OwnMessageUpdate>)[OWN_MESSAGE_UPDATE];
+      if (own) {
+        if (!(provider instanceof SlackConnectorProvider)) {
+          return { ok: false, status: 501, body: { error: "message_update_unsupported", detail: `${conn.provider} messages are not rewritten in place` } };
+        }
+        result = await provider.updateOwnMessage({ channel, ...own });
+      } else {
+        result = await provider.invoke({ operation: "write", object: channel, payload: payload as Record<string, unknown> });
+      }
     } catch (err) {
       // ADR-0113: a Teams post touches TWO hosts — the Entra login host and the
       // Bot Connector service host — and `guarded.fetchImpl` re-adjudicates
@@ -706,18 +827,69 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
   /** opt a workspace in or out of alert delivery (admin) */
   app.patch("/v1/chatops/connections/:connectionId", async (req, reply) => {
     const { connectionId } = z.object({ connectionId: z.string().uuid() }).parse(req.params);
-    const body = z.object({ notifyAlertMinSeverity: z.enum(["medium", "high"]).nullable() }).strict().parse(req.body);
+    const body = z
+      .object({ notifyAlertMinSeverity: z.enum(["medium", "high"]).nullable().optional(), ...botFields, slackTeamId: slackTeamIdField })
+      .strict()
+      .refine((b) => Object.keys(b).length > 0, { message: "nothing to change" })
+      .parse(req.body);
     const [before] = await db.select().from(chatopsConnections).where(eq(chatopsConnections.id, connectionId));
     if (!before) return reply.status(404).send({ error: "not_found" });
+    if (body.slackTeamId && before.provider !== "slack") {
+      return reply.status(400).send({ error: "slack_team_slack_only", detail: "a Slack team id applies to a slack workspace only" });
+    }
+    const botChange = body.botAppId !== undefined || body.botTenantId !== undefined || body.botOpenidMetadataUrl !== undefined;
+    const bot = {
+      botAppId: body.botAppId !== undefined ? body.botAppId : before.botAppId,
+      botTenantId: body.botTenantId !== undefined ? body.botTenantId : before.botTenantId,
+      botOpenidMetadataUrl: body.botOpenidMetadataUrl !== undefined ? body.botOpenidMetadataUrl : before.botOpenidMetadataUrl,
+    };
+    if (botChange) {
+      const problem = botSettingsProblem(before.provider, bot);
+      if (problem) return reply.status(400).send(problem);
+      // switching the bot off must not leave a workspace that can be answered by nothing
+      if (!bot.botAppId && before.signingSecretCiphertext === null && before.provider === "teams") {
+        return reply.status(400).send({
+          error: "signing_secret_required",
+          detail: "this workspace has no signing secret, so its bot is its only inbound path; register a new workspace to change that",
+        });
+      }
+    }
     const [after] = await db
       .update(chatopsConnections)
-      .set({ notifyAlertMinSeverity: body.notifyAlertMinSeverity })
+      .set({
+        ...(body.notifyAlertMinSeverity !== undefined ? { notifyAlertMinSeverity: body.notifyAlertMinSeverity } : {}),
+        ...(botChange ? bot : {}),
+        ...(body.slackTeamId !== undefined ? { slackTeamId: body.slackTeamId } : {}),
+      })
       .where(eq(chatopsConnections.id, connectionId))
       .returning();
-    await audit(req.authCtx.userId, "chatops_connection", connectionId, CHATOPS_RULE_IDS.alertSettingsChanged, "allow",
-      `governance alerts to '${before.name}': ${before.notifyAlertMinSeverity ?? "off"} → ${body.notifyAlertMinSeverity ?? "off"}`,
-      { from: before.notifyAlertMinSeverity, to: body.notifyAlertMinSeverity });
-    return { id: after!.id, name: after!.name, notifyAlertMinSeverity: after!.notifyAlertMinSeverity };
+    if (body.slackTeamId !== undefined) {
+      await audit(req.authCtx.userId, "chatops_connection", connectionId, CHATOPS_RULE_IDS.slackTeamChanged, "allow",
+        `Slack workspace pin on '${before.name}': ${before.slackTeamId ?? "any team"} → ${body.slackTeamId ?? "any team"}`,
+        { from: before.slackTeamId, to: body.slackTeamId });
+    }
+    if (body.notifyAlertMinSeverity !== undefined) {
+      await audit(req.authCtx.userId, "chatops_connection", connectionId, CHATOPS_RULE_IDS.alertSettingsChanged, "allow",
+        `governance alerts to '${before.name}': ${before.notifyAlertMinSeverity ?? "off"} → ${body.notifyAlertMinSeverity ?? "off"}`,
+        { from: before.notifyAlertMinSeverity, to: body.notifyAlertMinSeverity });
+    }
+    if (botChange) {
+      await audit(req.authCtx.userId, "chatops_connection", connectionId, CHATOPS_RULE_IDS.botSettingsChanged, "allow",
+        `Teams bot endpoint on '${before.name}': ${before.botAppId ? "on" : "off"} → ${bot.botAppId ? "on" : "off"}`,
+        {
+          from: { botAppId: before.botAppId, botTenantId: before.botTenantId, botOpenidMetadataUrl: before.botOpenidMetadataUrl },
+          to: bot,
+        });
+    }
+    return {
+      id: after!.id,
+      name: after!.name,
+      notifyAlertMinSeverity: after!.notifyAlertMinSeverity,
+      botAppId: after!.botAppId,
+      botTenantId: after!.botTenantId,
+      botOpenidMetadataUrl: after!.botOpenidMetadataUrl,
+      slackTeamId: after!.slackTeamId,
+    };
   });
 
   /** post one alert now, regardless of the threshold (admin) */
@@ -760,7 +932,24 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
           ? input.threadRef
             ? { op: "conversations.replyToActivity", text: input.text, textFormat: "plain", replyToId: input.threadRef }
             : { op: "conversations.sendToConversation", text: input.text, textFormat: "plain" }
-          : { op: "chat.postMessage", text: escapeSlackText(input.text), ...(input.threadRef ? { thread_ts: input.threadRef } : {}) },
+          : input.updateRef
+            ? // ADR-0173 batch 2b: an answered "Ask first" message is
+              // rewritten in place, through the courier-only update
+              ({
+                [OWN_MESSAGE_UPDATE]: {
+                  ts: input.updateRef,
+                  text: escapeSlackText(input.text),
+                  ...(input.blocks ? { blocks: input.blocks } : {}),
+                },
+              } satisfies OwnMessageUpdate)
+            : {
+                // an "Ask first" pause carries Block Kit buttons (composed
+                // inert in shared)
+                op: "chat.postMessage",
+                text: escapeSlackText(input.text),
+                ...(input.blocks ? { blocks: input.blocks } : {}),
+                ...(input.threadRef ? { thread_ts: input.threadRef } : {}),
+              },
       actorUserId,
       label,
     );
@@ -828,6 +1017,24 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
         // is still visible — it is an HTTP 401 on a public route behind the
         // ordinary rate limiter (ADR-0031).
         return reply.status(401).send({ error: "unauthenticated", code: sig.code });
+      }
+
+      // ---- the workspace pin (batch 2b review), before anything is acted on
+      const offTeam = await slackTeamRefusal(conn, rawBody, "interaction");
+      if (offTeam) return reply.status(offTeam.status).send(offTeam.body);
+
+      // ---- ADR-0173 batch 2b: an "Ask first" button, not an approval card --
+      // The same first walls (above) proved the platform. A step click is NOT
+      // an approval decision: it is answered by the thread's own person, and
+      // builder-channels.ts runs the rest (identity link, thread person,
+      // fence, claim once, then the web route's confirm logic).
+      if (conn.provider === "slack") {
+        const click = parseSlackStepInteraction(rawBody);
+        if (click) {
+          const answered = await acceptStepInteraction(db, channelDeps, conn, click);
+          if (answered.work) scheduleChannelWork(db, answered.work, app.log);
+          return reply.status(answered.ack.status).send(answered.ack.body);
+        }
       }
 
       // ---- WALL 2: parse. An unreadable payload is refused, never guessed ---
@@ -1022,6 +1229,10 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
       if (!parsed) return reply.status(400).send({ error: "unreadable_event" });
       // Slack's handshake when the Events URL is saved — signed like any event
       if (parsed.kind === "url_verification") return reply.status(200).send({ challenge: parsed.challenge });
+      // the workspace pin (batch 2b review): the handshake above names no
+      // team and runs nothing; every event after it must be the pinned team's
+      const offTeam = await slackTeamRefusal(conn, rawBody, "event");
+      if (offTeam) return reply.status(offTeam.status).send(offTeam.body);
       if (parsed.kind === "ignored") return reply.status(200).send({ ok: true, ignored: parsed.reason });
 
       const retryRaw = headers[SLACK_RETRY_NUM_HEADER];
@@ -1046,6 +1257,58 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
       if (!fresh.ok) return reply.status(401).send({ error: "unauthenticated", code: fresh.code });
 
       const ack = run(await acceptInboundMessage(db, channelDeps, conn, parsed.message, null, baseUrlFor(req)));
+      return reply.status(ack.status).send(ack.body);
+    });
+
+    // =====================================================================
+    // ADR-0173 batch 2b — THE TEAMS BOT FRAMEWORK ENDPOINT.
+    //
+    // A registered bot (the workspace's `bot_app_id`) beside the outgoing
+    // webhook. The platform is proved by the Bearer JWT the Bot Framework
+    // sends — issuer and keys from the configured OpenID metadata, audience =
+    // the app id, expiry, and the token's `serviceUrl` = the activity's
+    // (teams-bot-auth.ts, on `jose`). Every refusal up to there is a bare 401
+    // with no write and no audit row, the same cheapness rule as the HMAC
+    // routes. After it, the tenant pin, then routing and identity exactly as
+    // for an outgoing-webhook message; the reply goes out through the courier
+    // (the Bot Framework ignores a response body).
+    // =====================================================================
+    scope.post("/v1/chatops/:connectionName/bot", async (req, reply) => {
+      const { connectionName } = z.object({ connectionName: z.string().min(1).max(200) }).parse(req.params);
+      const [conn] = await db.select().from(chatopsConnections).where(eq(chatopsConnections.name, connectionName));
+      // unknown, disabled, not teams, no bot registered, no data key: one 401
+      if (!conn || !conn.enabled || conn.provider !== "teams" || !conn.botAppId || !opts.dataKey) {
+        return reply.status(401).send({ error: "unauthenticated" });
+      }
+      const authorization = typeof req.headers.authorization === "string" ? req.headers.authorization : undefined;
+      if (!authorization) return reply.status(401).send({ error: "unauthenticated", code: "missing_token" });
+      const rawBody = typeof req.body === "string" ? req.body : "";
+      if (Buffer.byteLength(rawBody, "utf8") > CHATOPS_MAX_BODY_BYTES) {
+        return reply.status(401).send({ error: "unauthenticated", code: "body_too_large" });
+      }
+      // the token is bound to the activity (its serviceUrl), so the body is
+      // read first — but an unreadable one is refused like a bad token
+      const activity = parseTeamsBotActivity(rawBody);
+      if (!activity) return reply.status(401).send({ error: "unauthenticated", code: "unreadable_activity" });
+      const verified = await verifyTeamsBotToken(db, {
+        authorization,
+        appId: conn.botAppId,
+        metadataUrl: conn.botOpenidMetadataUrl,
+        connectorId: conn.connectorId,
+        connectionName: conn.name,
+        activity: { serviceUrl: activity.serviceUrl, channelId: activity.channelId },
+      });
+      if (!verified.ok) return reply.status(401).send({ error: "unauthenticated", code: verified.code });
+
+      // the platform is proved: from here on a refusal is audited
+      if (conn.botTenantId && activity.tenantId !== conn.botTenantId) {
+        await audit(null, "chatops_connection", conn.id, CHATOPS_RULE_IDS.botRefusedTenant, "deny",
+          `a Teams bot activity on '${conn.name}' came from tenant '${activity.tenantId ?? "none"}', not the workspace's pinned tenant — nothing ran`,
+          { tenantId: activity.tenantId, expectedTenantId: conn.botTenantId });
+        return reply.status(403).send({ error: "tenant_not_allowed", detail: "this bot accepts activities from its pinned tenant only" });
+      }
+      if (activity.kind === "ignored") return reply.status(200).send({ ok: true, ignored: activity.reason });
+      const ack = run(await acceptInboundMessage(db, channelDeps, conn, activity.message, null, baseUrlFor(req), "courier"));
       return reply.status(ack.status).send(ack.body);
     });
   });

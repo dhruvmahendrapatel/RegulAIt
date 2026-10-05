@@ -129,3 +129,89 @@ Migrations 0143+ in order.
     outgoing-webhook path.
   - Slack interactive confirmations: "Ask first" answered from the chat with Approve/Deny buttons. The interaction payload
     is signature-verified, and only the thread's own linked person may answer.
+
+## Amendment — batch 2b built and reviewed (2026-10-05)
+
+Migrations 0143 (prompt registry, webhooks, playground feature) and 0144 (connector approvals, chat bots, Slack team pin).
+Open-source first (ADR-0176) throughout:
+- `standardwebhooks` (MIT) for signing;
+- `diff` (BSD-3-Clause) for commit diffs;
+- `jose` (MIT) for the Teams JWT;
+- `@xyflow/react` and `@dagrejs/dagre` (MIT) for the run graph;
+- `re2js` (MIT) as Ajv's linear-time regex engine.
+
+`fast-sha256` (Unlicense) comes in through `standardwebhooks`, which is why ADR-0176 now admits public-domain dedications.
+
+- **Prompt registry.**
+  - A commit's hash covers the template, the model configuration, the variables, the output schema, the tools and the
+    parent.
+  - Tags point at commits. Moving `prod` creates a `prompt_promotion` approval bound to (prompt, tag, commit hash). The
+    tag moves only in the decide hook, under a row lock, and only if that binding still holds.
+  - **Separation of duties covers the whole promoted range.** Nobody who wrote any commit between the current `prod`
+    commit and the promoted one may approve it. This is checked at request time, before deciding, and in the decide
+    hook. A broken or over-long chain fails closed.
+  - Visibility follows the builder model.
+  - `<promptId>@tag` is the stable reference for future builder links. `name@tag` resolves only the caller's visible,
+    live prompt, and names may not look like ids.
+- **Outbound webhooks.**
+  - The Standard Webhooks headers (`webhook-id`, `webhook-timestamp`, `webhook-signature`) replace the planned
+    `X-RegulAIt-Signature` header, so receivers verify with any off-the-shelf library.
+  - Secrets are encrypted with the data key and shown only on create or rotate.
+  - The egress guard applies at create and on every delivery, and redirects are refused.
+  - Payloads carry only each event's declared fields.
+  - **The retry sweep:**
+    - each attempt takes fresh time for its lease and its signature;
+    - outcomes apply only while the attempt still holds its lease;
+    - a receiver that doesn't answer is deferred for the rest of the pass;
+    - a pass has a 45-second budget.
+  - A manual sweep is audited.
+- **Playground.**
+  - It runs through governed dispatch as the caller under the `playground` model-policy feature. Tool calls are listed and
+    never executed.
+  - Output schemas are validated with a linear-time regex engine, so a user schema can't stall the gateway. Schemas using
+    lookaround or backreferences are refused.
+  - An unknown model and an unusable one get the same answer.
+  - Evaluate mode allows up to 50 rows, or an eval dataset for admins.
+- **Run graph.**
+  - It is read-only, for builder turns, orchestration runs and use cases. Who may see it is the same as for the
+    underlying object.
+  - Another person's tool results and system notes are never shown, admins included.
+- **Connector approvals.**
+  - A `require_approval` write is held as a `connector_call` approval bound to the argument digest (under PII redact, the
+    redacted digest). The approval is spent once, right before execution.
+  - Builder steps pause and resume like MCP calls. A direct caller gets 202, and a re-submit runs once.
+- **Slack "Ask first" buttons.**
+  - The signature and replay window are checked first.
+  - A prompt id is bound to its workspace, and only the thread's own person may answer.
+  - Each prompt can be claimed once; a second answer gets 409.
+  - The message is rewritten after the resume, using the stored reply and the real outcome. If the resume fails, the
+    claim is released.
+  - An optional Slack team pin is set per workspace (API only for now).
+  - **The product's chat controls are reserved.** `chat.update` is internal to the ChatOps courier, and a user's or
+    agent's message carrying our reserved control ids is refused. A Slack write grant therefore can't rewrite an
+    approval prompt or post a look-alike one.
+- **Teams Bot Framework endpoint.**
+  - JWT verification with `jose`:
+    - RS256 only;
+    - issuer and key set from OpenID metadata fetched through the egress guard;
+    - audience must be the app id;
+    - expiry is checked;
+    - the `serviceUrl` claim must match the activity's;
+    - the key's endorsements must include the activity's channel.
+  - Optional tenant pin.
+  - A failed metadata refresh keeps the last good keys.
+  - Teams keeps the link-to-web confirmation.
+
+**Review.** An adversarial review of the combined batch found nothing critical:
+- four medium findings: chat message rewriting, separation of duties laundered through a child commit, playground ReDoS,
+  and the stale sweep clock;
+- one low-to-medium finding: the run graph showing content to admins;
+- six low findings.
+
+All are fixed. Each fix has a test that fails without it. Where the sandbox refused to disable a security check in place,
+the proof was taken by switching it off in a throwaway worktree.
+
+**Not done:**
+- the web field for the Slack team pin;
+- the deferred count on the Webhooks page;
+- OpenAPI text for the `<promptId>@tag` form.

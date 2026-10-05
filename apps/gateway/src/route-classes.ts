@@ -43,6 +43,11 @@ export const AUTH_EXEMPT_ROUTES = new Set([
   // an admin-made identity link; the turn runs as that person.
   "/v1/chatops/:connectionName/events",
   "/v1/chatops/:connectionName/messages",
+  // ADR-0173 batch 2b — the Teams Bot Framework endpoint. The platform holds
+  // no RegulAIt credential; the route authenticates IN-ROUTE on the Bot
+  // Framework's Bearer JWT (keys from the workspace's OpenID metadata,
+  // audience = its bot app id), then maps the sender through an identity link.
+  "/v1/chatops/:connectionName/bot",
   // /admin and /app are 302s to /ui (ADR-0026 phase-2 swap) — a browser
   // hits a bookmark before it has any credential, so the redirect itself
   // must not require one. The legacy shells they used to serve are GONE
@@ -158,6 +163,13 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /v1/builder/integrations",
   "GET /v1/builder/toolbox-options",
   "GET /v1/builder/usage",
+  // ADR-0173 batch 2b — the run graph. Read-only, and each read is gated in the
+  // handler by exactly who may open the underlying object: a builder turn by
+  // the thread's person or an admin (404 unknown_thread otherwise), a run by
+  // GET /v1/runs/:runId's rule (404), a use case by canReadUseCase (403).
+  "GET /v1/run-graph/builder-turn/:threadId/:turn",
+  "GET /v1/run-graph/orchestration/:runId",
+  "GET /v1/run-graph/use-case/:useCaseId",
   // ADR-0065 — creating a training job. Its gate is the caller's OWN
   // entitlement to the base agent the customisation is anchored to, checked
   // inside the handler by the same `evaluateAgent` path an invoke takes: a
@@ -229,6 +241,25 @@ export const NON_ADMIN_ROUTES = new Set([
   // picker shows "Not allowed here" from it. Non-admins see binding ids only
   // for bindings they hold a grant on. The PUT stays admin-only.
   "GET /v1/model-policy",
+  // ADR-0173 batch 2b — the prompt registry and the playground are a person's
+  // own work, like the builder: visibility (owner / workspace / named people /
+  // a promotion's named approver / admin) and edit (owner or admin) are
+  // checked in-handler, an identity-less token is refused, moving `prod` goes
+  // through the approvals queue, and every playground call is a governed
+  // dispatch as the caller. The outbound-webhook routes are deliberately NOT
+  // here: what leaves the deployment, and to where, is an admin decision.
+  "GET /v1/prompts",
+  "POST /v1/prompts",
+  "GET /v1/prompts/resolve",
+  "GET /v1/prompts/:promptId",
+  "PATCH /v1/prompts/:promptId",
+  "DELETE /v1/prompts/:promptId",
+  "POST /v1/prompts/:promptId/commits",
+  "GET /v1/prompts/:promptId/commits/:hash",
+  "GET /v1/prompts/:promptId/diff",
+  "PUT /v1/prompts/:promptId/tags/:tag",
+  "POST /v1/playground/run",
+  "POST /v1/playground/evaluate",
   "PATCH /v1/use-cases/:useCaseId",
   // ADR-0171 / AER-050: the intake wizard's own drafts. Any signed-in user
   // keeps their OWN draft (the handler refuses a token with no user identity,
@@ -510,6 +541,8 @@ export const NON_ADMIN_ROUTES = new Set([
   // admin-ness, is the gate on the two inbound conversation routes
   "POST /v1/chatops/:connectionName/events",
   "POST /v1/chatops/:connectionName/messages",
+  // ADR-0173 batch 2b — the bot's token + identity link, not admin-ness, is the gate
+  "POST /v1/chatops/:connectionName/bot",
 ]);
 
 /**

@@ -555,6 +555,19 @@ async function runConnector(
   const detail = typeof b["detail"] === "string" ? (b["detail"] as string) : null;
   const decision = b["decision"] as { reason?: string; ruleId?: string; effect?: string } | undefined;
   const costUsd = typeof b["costUsd"] === "number" ? (b["costUsd"] as number) : null;
+  // ADR-0173 batch 2b — a write HELD in the approvals queue: the same ToolRun
+  // the MCP path's approval outcomes map to, so the loop pauses it, resumes it
+  // and refuses a binding mismatch through the one mechanism (runQueue/pause)
+  if (out.status === 202 && typeof b["approvalId"] === "string") {
+    const approvalId = b["approvalId"] as string;
+    const kind = b["approvalKind"];
+    const approvalKind: NonNullable<ToolRun["approvalKind"]> =
+      kind === "approval_expired" || kind === "approval_context_stale" ? kind : "approval_required";
+    return refused(approvalKind, approvalKind === "approval_required" ? `approval '${approvalId}' is pending sign-off` : (detail ?? approvalKind), {
+      approvalId,
+      approvalKind,
+    });
+  }
   if (out.status < 400) {
     const result = b["result"] as { status?: number; body?: unknown } | undefined;
     const withheld =

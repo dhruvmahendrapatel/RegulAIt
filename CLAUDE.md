@@ -103,7 +103,8 @@ every agent prompt and every review.
 2. **Existing hand-written code is replaced.** Where we already wrote something an open-source module solves, replacing ours
    with the validated module is the default, not an option. The replacement keeps or extends our tests.
 3. **"Validated" means all of these:**
-   - the licence is MIT, Apache-2.0, BSD or ISC (no GPL, AGPL, EPL, SSPL or BSL in shipped code);
+   - the licence is MIT, Apache-2.0, BSD or ISC, or a public-domain dedication (Unlicense, CC0-1.0, 0BSD); no GPL, AGPL,
+     EPL, SSPL or BSL in shipped code;
    - it is actively maintained (a release in about the last 12 months, responsive issues, no unpatched critical advisory);
    - the exact version is pinned through the lockfile;
    - it works air-gapped (no runtime downloads or CDNs);
@@ -163,6 +164,19 @@ every agent prompt and every review.
   retroactively), commit.
 - Before ending a session or if context is running low, checklist: is `STATE.md` current? Any
   decision missing an ADR? Any open question uncaptured? Is everything committed?
+
+## Branch and PR flow — one PR per batch (owner, 2026-10-05)
+
+- **One short-lived PR per batch** (an ADR batch, a review-fix round, an open-source replacement slice): a branch from
+  `main`, a draft PR against `main`, merged once CI is green and the batch's review is done. Never let one PR collect
+  weeks of work (PR #117 reached 360 commits and 530 files, so security scans re-reported old code and no review could
+  cover it).
+- `dhruv/active` stays only as an integration branch where parallel agents' branches are combined before a batch PR. It is
+  fast-forwarded to `main` after each merge.
+- Merge with a merge commit (never squash or rebase merge-bearing history, M-067). The owner approved merging batch PRs
+  once CI is green. Anything production-related still needs explicit sign-off (standing guardrail above).
+- **Local checks are proportionate:** tests for the touched code plus `demo:prepare` locally, and CI runs the full suite.
+  Security-sensitive or migration-heavy batches still run the full local gate before the PR.
 
 ## Infrastructure conventions
 

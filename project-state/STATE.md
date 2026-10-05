@@ -21,6 +21,61 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-10-05 - Open-source security items done (ADR-0176 amendment; migration 0145).**
+- **MCP manifest digest** moved from FNV-1a 64 to SHA-256, with a one-time boot re-pin:
+  - it applies only where the stored FNV digest is proven;
+  - each row is a compare-and-set;
+  - a failed re-pin stops the gateway from starting;
+  - re-pinned cleared servers are listed for re-review.
+- **`__proto__` canonicalization gap** closed in four helpers.
+- **Secret rules:** six current provider formats (from gitleaks, MIT, pinned), plus a linear-time JWT rule.
+- **Egress IP classification** uses `net.BlockList`, covering the IPv4-compatible, 6to4, translated and other special IPv6
+  ranges.
+- **Constant-time compare:** one helper.
+
+An independent review found 1 high, 2 medium and 4 low issues; all are fixed with red proofs.
+
+**2026-10-05 - ADR-0173 batch 2b built and reviewed (migrations 0143, 0144).**
+- **Shipped:** a governed prompt registry (prod promotion through the approvals queue, with separation of duties over the
+  whole commit range), outbound webhooks (Standard Webhooks signing), a playground under its own model-policy feature, a
+  read-only run graph, connector-write approvals, Slack "Ask first" buttons, and a Teams Bot Framework endpoint (`jose`).
+- **Review:** an adversarial review found 4 medium, 1 low-medium and 6 low findings, all fixed with red-without-fix proofs.
+  The fixes include reserved chat controls, a linear-time regex engine for user schemas (`re2js`) and a lease-safe
+  webhook sweep.
+- **Checks:** the full local suite was green on the combined tree before the fixes (gateway 277 files and 3811 tests;
+  web 269 tests), then re-run after the fixes. Batch PR from `main`.
+
+**2026-10-05 - ADR-0178: RegulAIt is proprietary, all rights reserved (owner).** The public repository gains a root
+`LICENSE` (viewing only; no copying, use, hosting, distribution or competing use without written permission) and
+`"license": "UNLICENSED"` in every package manifest. Third-party code keeps its own licences. Making the repository private
+is the only technical barrier; that's the owner's call.
+
+**2026-10-05 - ADR-0176 amended: public-domain dedications (Unlicense, CC0-1.0, 0BSD) are allowed licences** (owner),
+prompted by `fast-sha256` (Unlicense) under `standardwebhooks` in batch 2b. CLAUDE.md's universal build rule updated.
+
+**2026-10-05 - ADR-0177 amended: clean-room study of the rejected projects.** Fifteen features learned from what the
+rejected or limited projects do (never their code), each mapped to a PathForward item with a permissive library where one
+exists; two Phoenix patents flagged for a legal check before any PF-20 error-times-volume segment ranking.
+
+**2026-10-05 - ADR-0177: plan for 22 open-source AI security, evaluation and observability projects (docs only).** The
+owner supplied 22 projects and asked to document how they fit, without building yet. Licences were verified from the
+repositories. The owner's assumption ("all open source, keep the licence") doesn't hold for every project: Elastic (asqav,
+the Phoenix server, pipelock's `enterprise/`, the Guardrails AI server), BSL (trylonai), AGPL (Langtrace), LGPL (fickling),
+the Llama licence (Guard models), langfuse's commercial `ee/` directories; whylogs, Langtrace, the Adversarial Robustness
+Toolbox and trylonai are unmaintained. ADR-0177 sets five modes of use with licence bars, a UI rule (no new nav group;
+one "Engines" page) and an order for what to build next. PathForward gains ADR-0177 extensions and PF-23 (sidecar engine
+contract). Owner questions: fickling's LGPL exception, offensive tooling (Strix/PentestGPT), and the false-positive policy
+for vendored detection patterns.
+
+**2026-10-05 - PR #117 merged to `main` (6276f93); one PR per batch from now on.** The owner approved merging #117 (360
+commits: governance, agent builder 2a, enterprise sign-in, D1/D2, Docker demo) and switching to one short-lived PR per batch
+(CLAUDE.md "Branch and PR flow"). ADR-0176 makes open source first a universal rule (CLAUDE.md "Universal build rule").
+In flight: ADR-0173 batch 2b (prompt registry with Standard Webhooks and a playground; a run graph using React Flow and dagre;
+connector approvals, the Teams bot using jose, Slack buttons) and the open-source security batch (SHA-256 manifest digest
+with migration 0145, current secret patterns, IPv6 special ranges, one constant-time compare). Next: 2c, then the Codex
+feedback review, then D3/D4. Splitting the gateway suite across CI jobs is a later PR, after a local trial on separate
+databases.
+
 **2026-10-05 (early) - Owner's Windows Docker demo is up and prepared (18/18).** Two Docker defects surfaced on the owner's first
 Windows run and are fixed and pushed. (1) A CRLF checkout broke `docker-start.sh` (M-069): `.gitattributes` now pins `*.sh` to LF
 and the Dockerfile strips CR. (2) Docker ran only the seed, so compliance packs and demo content were missing: with

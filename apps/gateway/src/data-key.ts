@@ -259,6 +259,9 @@ export const CIPHERTEXT_COLUMNS: ReadonlyArray<{ table: string; column: string; 
   // including the RAW arguments a resume replays so the approval digest binds.
   // Short-lived (cleared when the turn finishes) but still data-key custody.
   { table: "builder_threads", column: "pending_turn_ciphertext", what: "paused builder turns" },
+  // ADR-0173 batch 2b: the Standard Webhooks signing secret of each outbound
+  // webhook subscription — receivers verify our deliveries with it.
+  { table: "webhook_subscriptions", column: "secret_ciphertext", what: "outbound webhook signing secrets" },
 ];
 
 export interface CiphertextProbe {

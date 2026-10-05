@@ -47,6 +47,16 @@ describe("ChatOpsPage — the connection body", () => {
     expect(chatOpsConnectionBody({ ...base, provider: "teams" })).toMatchObject({ signingSecret: "s3cret-value" });
   });
 
+  it("teams may register its bot; a bot-only workspace sends no signing secret; other providers never send bot fields", () => {
+    const withBot = chatOpsConnectionBody({ ...base, provider: "teams", botAppId: " app-1 ", botTenantId: "t-1", botOpenidMetadataUrl: "" });
+    expect(withBot).toMatchObject({ botAppId: "app-1", botTenantId: "t-1", signingSecret: "s3cret-value" });
+    expect(withBot).not.toHaveProperty("botOpenidMetadataUrl");
+    const botOnly = chatOpsConnectionBody({ ...base, signingSecret: "", provider: "teams", botAppId: "app-1" });
+    expect(botOnly).not.toHaveProperty("signingSecret");
+    expect(chatOpsConnectionBody({ ...base, provider: "slack", botAppId: "app-1" })).not.toHaveProperty("botAppId");
+    expect(chatOpsConnectionBody({ ...base, signingSecret: "", provider: "teams" })).toHaveProperty("signingSecret", "");
+  });
+
   it("omits it for outlook, which the API would refuse with signing_secret_not_applicable", () => {
     const body = chatOpsConnectionBody({ ...base, provider: "outlook" });
     expect(body).not.toHaveProperty("signingSecret");

@@ -97,6 +97,9 @@ const BY_ROUTE: Record<string, keyof typeof G> = {
   "/builder/integrations": "plug",
   "/builder/skills": "bolt",
   "/builder/usage": "bars",
+  // ADR-0173 batch 2b
+  "/builder/prompts": "tag",
+  "/builder/playground": "flask",
   "/runs": "run",
   "/workflows": "flow",
   "/inbox": "inbox",
@@ -152,6 +155,7 @@ const BY_ROUTE: Record<string, keyof typeof G> = {
   "/admin/regulait-llm": "spark",
   "/admin/connectors": "plug",
   "/admin/mcp-servers": "server",
+  "/admin/webhooks": "sync",
   "/admin/admission": "shield",
   "/admin/git-connections": "branch",
   "/admin/pm-connections": "kanban",

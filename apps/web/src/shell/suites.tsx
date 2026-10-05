@@ -251,6 +251,10 @@ export const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       { label: "Git connections", to: "/admin/git-connections" },
       { label: "PM connections", to: "/admin/pm-connections" },
       { label: "Deploy targets", to: "/admin/deploy-targets" },
+      // ADR-0173 batch 2b — signed outbound notifications: what leaves this
+      // deployment and to where, under the same egress guard as the endpoints
+      // above, with the delivery log as the evidence.
+      { label: "Webhooks", to: "/admin/webhooks" },
     ],
   },
   {
@@ -357,6 +361,11 @@ export const BUILDER: NavEntry[] = [
   { label: "Agent templates", to: "/builder/templates" },
   { label: "Apps & tools", to: "/builder/integrations" },
   { label: "Skills", to: "/builder/skills" },
+  // ADR-0173 batch 2b — the governed prompt registry (commits, tags, prod
+  // promotion through the approvals queue) and the playground that tries a
+  // prompt as a governed call and saves it as a commit
+  { label: "Prompts", to: "/builder/prompts" },
+  { label: "Playground", to: "/builder/playground" },
   { label: "Agent usage", to: "/builder/usage" },
 ];
 
