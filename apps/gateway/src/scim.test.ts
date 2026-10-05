@@ -25,7 +25,7 @@
  * Retry-After, and every provisioning act is in the audit trail with the
  * acting token named as the actor.
  */
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, onTestFinished } from "vitest";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -46,6 +46,7 @@ import {
 } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { installLicenseFixture, removeLicenseFixture } from "./testing/license-fixture.js";
+import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { hashToken } from "./auth.js";
 import { parseScimFilter, scimErrorBody, SCIM_TOKEN_PREFIX } from "./scim.js";
 
@@ -285,6 +286,11 @@ describe("ADR-0037 — the token is the ONLY credential", () => {
     });
     const key = await keyFor(created.json().id as string);
     const cookie = await sessionFor(key);
+    // ADR-0181: an admin session would be held at TOTP enrolment, and this app
+    // has no data key to enrol under; the subject here is the SCIM door, so
+    // the MFA dial is relaxed for this case only and restored after it
+    const restoreMfa = await relaxIdentityForTest(db, { mfaRequired: "off" });
+    onTestFinished(restoreMfa);
     // the cookie works on the normal surface
     const me = await app.inject({ method: "GET", url: "/v1/me", headers: { cookie } });
     expect(me.statusCode).toBe(200);
