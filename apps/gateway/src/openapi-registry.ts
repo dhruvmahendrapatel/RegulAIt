@@ -607,6 +607,8 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   // same reason: provider-shaped callbacks whose contract is Slack's / Teams'.
   "POST /v1/chatops/:connectionName/events": "internal",
   "POST /v1/chatops/:connectionName/messages": "internal",
+  // ADR-0173 batch 2b — the Teams Bot Framework endpoint (the platform's contract)
+  "POST /v1/chatops/:connectionName/bot": "internal",
   "GET /v1/chatops/builder-routes": "internal",
   "PUT /v1/chatops/builder-routes/:channelId": "internal",
   // ADR-0056 — the governance copilot. Internal: the tool vocabulary, the
@@ -1353,6 +1355,7 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/chatops/:connectionName/interactions": "chatops",
   "POST /v1/chatops/:connectionName/events": "chatops",
   "POST /v1/chatops/:connectionName/messages": "chatops",
+  "POST /v1/chatops/:connectionName/bot": "chatops",
   "GET /v1/chatops/builder-routes": "chatops",
   "PUT /v1/chatops/builder-routes/:channelId": "chatops",
   "GET /v1/builder/agents": "builder",

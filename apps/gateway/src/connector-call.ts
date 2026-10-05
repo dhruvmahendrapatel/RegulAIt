@@ -20,8 +20,31 @@
  * It never decides anything the route did not: every refusal is the same
  * status and body the route returns, and an unexpected failure throws (the
  * route lets Fastify answer 500, exactly as before the extraction).
+ *
+ * ADR-0173 batch 2b — CONNECTOR WRITES IN THE APPROVALS QUEUE. Under the
+ * execution dial's `require_approval` mode a connector WRITE used to be
+ * refused ("this path has no per-call approval queue"). It now gets one, and it
+ * is the MCP path's queue under the MCP path's rules, reused rather than
+ * re-derived:
+ *  - the kernel resolves ENTITLEMENT FIRST and only then holds the write
+ *    (AER-017), so an approval can never stand in for a missing grant;
+ *  - the queued row is bound to the call's ARGUMENT DIGEST (ADR-0104; the
+ *    redacted digest under PII redact mode, ADR-0144) and to its POLICY
+ *    CONTEXT — the dial's hold, the named approver and the connector target
+ *    (ADR-0105/0166) — and dies on the org's approval TTL;
+ *  - an identical pending call reuses the pending row instead of piling up;
+ *  - an approved row is spent by `consumeBoundApproval` (the MCP primitive) in
+ *    one guarded UPDATE right before the provider is called, so two re-submits
+ *    of one approved call execute ONCE; a consent that went stale or expired is
+ *    superseded visibly (`supersedeStaleConsent`) and re-queued.
+ * A caller is answered 202 with the approval id (`status: pending_approval`);
+ * a re-submit after the decision executes the identical call. A READ under the
+ * dial is still refused, as before: the hold is defined for writes.
  */
 import {
+  and,
+  approvals,
+  asc,
   auditLog,
   connectorCredentials,
   connectorGrants,
@@ -41,13 +64,21 @@ import {
   resolveConnectorProvider,
 } from "@regulait/connector-provider";
 import {
+  approvalArgumentsDigest,
+  approvalArgumentsPreview,
+  approvalContextDigest,
+  canonicalJson,
+  sha256Hex,
   guardrailCategoryList,
   guardrailWithheldMarker,
   redactPiiPayload,
   type PiiHit,
 } from "@regulait/shared";
 import { ConnectorPolicyChangedError, prepareConnectorPiiAction } from "./connector-pii.js";
-import { loadExecutionMode, postureOf } from "./execution-posture.js";
+import { loadExecutionDial, postureOf } from "./execution-posture.js";
+import { consumeBoundApproval, supersedeStaleConsent } from "./mcp-proxy.js";
+import { loadOrgSettings } from "./org-settings.js";
+import type { RetiredApproval } from "./governed-evaluate.js";
 import {
   flattenFindings,
   guardrailOutcome,
@@ -132,6 +163,96 @@ export interface GovernedConnectorCallArgs {
   detail?: Record<string, unknown> | undefined;
 }
 
+/** the approval-queue object type of a held connector write */
+export const CONNECTOR_APPROVAL_OBJECT_TYPE = "connector_call" as const;
+
+/** the fingerprint of a connector call's argument envelope, shown beside a
+ * redacted preview where an MCP tool shows its input schema's */
+const CONNECTOR_INVOCATION_SCHEMA_DIGEST = sha256Hex(
+  canonicalJson({ namespace: "regulait.connector-invocation.v1", fields: ["operation", "object", "payload"] }),
+);
+
+/**
+ * ADR-0173 batch 2b — the consent identity of one connector WRITE, computed
+ * only while the dial holds writes. Pure reads; nothing is written here.
+ */
+interface ConnectorWriteBinding {
+  argumentsDigest: string;
+  argumentsPreview: unknown;
+  argumentsPreviewKind: "arguments_v1" | "mcp_redacted_v1";
+  contextDigest: string;
+  /** a fresh, payload-matching approved row this call may spend */
+  approvedApprovalId: string | null;
+  /** payload-matching approved rows that lapsed or went stale */
+  retired: RetiredApproval[];
+}
+
+async function connectorWriteBinding(
+  db: Db,
+  input: {
+    userId: string;
+    connector: typeof connectors.$inferSelect;
+    projectId: string | null;
+    invocation: { operation: "read" | "write"; object: string | null; payload: Record<string, unknown> | null };
+    preparedPii: { argumentsDigest: string; argumentsPreview: unknown } | null;
+    approverUserId: string | null;
+  },
+): Promise<ConnectorWriteBinding> {
+  const { connector } = input;
+  const [cred] = await db
+    .select({ baseUrl: connectorCredentials.baseUrl })
+    .from(connectorCredentials)
+    .where(eq(connectorCredentials.connectorId, connector.id));
+  // ADR-0104: computed on the RAW arguments, so a credential scrub cannot move
+  // consent identity; under PII redact the redacted binding (ADR-0144) instead,
+  // and its preview never carries the original payload.
+  const argumentsDigest =
+    input.preparedPii?.argumentsDigest ??
+    approvalArgumentsDigest({ projectId: input.projectId, arguments: input.invocation });
+  const contextDigest = approvalContextDigest({
+    // the dial's hold is the one "rule" that demanded this consent
+    ruleVersions: [{ ruleId: "execution-require-approval", activeVersionId: null }],
+    requiredApproverUserId: input.approverUserId,
+    approvalScope: "action",
+    target: {
+      kind: "connector",
+      connectorId: connector.id,
+      providerKind: connector.providerKind ?? null,
+      baseUrl: cred?.baseUrl ?? connector.baseUrl ?? null,
+    },
+  });
+  const approved = await db
+    .select({ id: approvals.id, argumentsDigest: approvals.argumentsDigest, contextDigest: approvals.contextDigest, expiresAt: approvals.expiresAt })
+    .from(approvals)
+    .where(
+      and(
+        eq(approvals.userId, input.userId),
+        eq(approvals.objectType, CONNECTOR_APPROVAL_OBJECT_TYPE),
+        eq(approvals.connectorId, connector.id),
+        eq(approvals.status, "approved"),
+        eq(approvals.argumentsDigest, argumentsDigest),
+      ),
+    )
+    .orderBy(asc(approvals.requestedAt))
+    .limit(50);
+  const now = Date.now();
+  const expired = (r: (typeof approved)[number]) => r.expiresAt != null && r.expiresAt.getTime() <= now;
+  const fresh = (r: (typeof approved)[number]) => !expired(r) && r.contextDigest === contextDigest;
+  return {
+    argumentsDigest,
+    // under PII redact the preview has the redacted-action shape the approval
+    // review reads (`{prepared, schemaDigest}`, as mcp-pii.ts writes it): a
+    // connector's input "schema" is the fixed invocation envelope
+    argumentsPreview: input.preparedPii
+      ? { prepared: input.preparedPii.argumentsPreview, schemaDigest: CONNECTOR_INVOCATION_SCHEMA_DIGEST }
+      : approvalArgumentsPreview(input.invocation),
+    argumentsPreviewKind: input.preparedPii ? "mcp_redacted_v1" : "arguments_v1",
+    contextDigest,
+    approvedApprovalId: approved.find(fresh)?.id ?? null,
+    retired: approved.filter((r) => !fresh(r)).map((r) => ({ id: r.id, reason: expired(r) ? "expired" : "context_changed" })),
+  };
+}
+
 export async function executeGovernedConnectorCall(
   db: Db,
   dataKey: string | undefined,
@@ -205,6 +326,7 @@ export async function executeGovernedConnectorCall(
   /** filled at the ONE place the ledger row is written, so the span
    * REFERENCES that row rather than recomputing its figures (rule 1). */
   const sink: { usageEventId?: string | null; costUsd?: number | null } = {};
+  let binding: ConnectorWriteBinding | null = null;
   const attempt = async (out: ConnectorReplyRecorder): Promise<ConnectorAttemptResult> => {
     // pillar 5 + ADR-0011: attribution must point at a real project the caller
     // may bill to — mirror the model invoke path. Checked up front, before any
@@ -230,11 +352,27 @@ export async function executeGovernedConnectorCall(
       loadConnectorRevocations(db, userId),
     ]);
 
+    // ADR-0173 batch 2b: the dial WITH its approver, and — only while it holds
+    // writes — this write's consent binding (nothing is read otherwise).
+    const dial = await loadExecutionDial(db);
+    binding =
+      dial.mode === "require_approval" && body.operation === "write"
+        ? await connectorWriteBinding(db, {
+            userId,
+            connector,
+            projectId,
+            invocation: originalInvocation,
+            preparedPii: preparedPii ? { argumentsDigest: preparedPii.argumentsDigest, argumentsPreview: preparedPii.argumentsPreview } : null,
+            approverUserId: dial.approverUserId,
+          })
+        : null;
     const decision = evaluateConnector({
       userId,
       // ADR-0124 — the kill switch on the connector path. A connector has no
       // per-subject halt of its own; the dial governs it.
-      execution: postureOf(await loadExecutionMode(db), null),
+      execution: { ...postureOf(dial.mode, null), approverUserId: dial.approverUserId },
+      // this path CAN queue a write (ADR-0173 batch 2b)
+      writeApprovalQueue: { approvedApprovalId: binding?.approvedApprovalId ?? null },
       connectorId,
       connectorName: connector.name,
       operation: body.operation,
@@ -261,6 +399,9 @@ export async function executeGovernedConnectorCall(
           operation: body.operation,
           ...(body.object ? { object: body.object } : {}),
           projectId: projectId ?? null,
+          // ADR-0104/0105 forensic half: WHICH payload and WHICH policy, as
+          // digests, whenever the write was under the dial's hold
+          ...(binding ? { argumentsDigest: binding.argumentsDigest, approvalScope: "action", contextDigest: binding.contextDigest } : {}),
           ...(args.detail ?? {}),
         },
         effect: decision.effect,
@@ -273,7 +414,7 @@ export async function executeGovernedConnectorCall(
     if (!audited) { policyChanged = true; return out.status(409).send(policyChangedBody()); }
 
     // A DENIED call bills nothing and executes nothing (mirror the model path).
-    if (decision.effect !== "allow") {
+    if (decision.effect === "deny") {
       return out.status(403).send({ decision });
     }
 
@@ -314,10 +455,111 @@ export async function executeGovernedConnectorCall(
       });
     }
 
+    // ADR-0173 batch 2b — THE HOLD. After the entitlement deny and the budget
+    // gate (a write that cannot run is never queued), before the credential,
+    // PII, guardrails, egress and the provider: a held write executes nothing.
+    if (decision.effect === "require_approval") {
+      const b = binding!;
+      const superseded = b.retired.length
+        ? await supersedeStaleConsent(db, b.retired, { userId, connector: { id: connector.id, name: connector.name }, projectId })
+        : [];
+      const { approvalTtlHours } = await loadOrgSettings(db);
+      // an identical pending call reuses its pending row (the dedup keys on the
+      // payload: a different payload is a different consent)
+      const [pending] = await db
+        .select({ id: approvals.id })
+        .from(approvals)
+        .where(
+          and(
+            eq(approvals.userId, userId),
+            eq(approvals.objectType, CONNECTOR_APPROVAL_OBJECT_TYPE),
+            eq(approvals.connectorId, connector.id),
+            eq(approvals.status, "pending"),
+            eq(approvals.argumentsDigest, b.argumentsDigest),
+            eq(approvals.contextDigest, b.contextDigest),
+            eq(approvals.argumentsPreviewKind, b.argumentsPreviewKind),
+          ),
+        )
+        .orderBy(asc(approvals.requestedAt))
+        .limit(1);
+      const approvalId =
+        pending?.id ??
+        (
+          await db
+            .insert(approvals)
+            .values({
+              userId,
+              objectType: CONNECTOR_APPROVAL_OBJECT_TYPE,
+              connectorId: connector.id,
+              // the operation and the object a person reads in the queue
+              toolName: `${connector.name}.${body.operation}`,
+              approverUserId: decision.approverUserId!,
+              argumentsDigest: b.argumentsDigest,
+              argumentsPreview: b.argumentsPreview,
+              argumentsPreviewKind: b.argumentsPreviewKind,
+              approvalScope: "action",
+              projectId,
+              contextDigest: b.contextDigest,
+              ...(approvalTtlHours != null ? { expiresAt: new Date(Date.now() + approvalTtlHours * 3_600_000) } : {}),
+            })
+            .returning({ id: approvals.id })
+        )[0]!.id;
+      const anyContext = b.retired.some((r) => superseded.includes(r.id) && r.reason === "context_changed");
+      const approvalKind = superseded.length ? (anyContext ? "approval_context_stale" : "approval_expired") : "approval_required";
+      return out.status(202).send({
+        status: "pending_approval",
+        approvalId,
+        approvalKind,
+        ...(superseded.length ? { supersededApprovalIds: superseded } : {}),
+        decision,
+        detail:
+          `approval '${approvalId}' is pending sign-off; nothing ran. Re-submit the identical call once it is approved` +
+          (superseded.length ? ` (approval ${superseded.join(", ")} ${anyContext ? "was granted under a policy that has since changed" : "expired"} and was superseded)` : ""),
+      });
+    }
+
+    // ADR-0173 batch 2b — spend the consent this write was released by, ONCE,
+    // atomically, right before anything executes. Losing the race (a second
+    // re-submit of the same approved call) runs nothing.
+    const consumeHeld = async (): Promise<ConnectorAttemptResult | null> => {
+      const approvedId = binding?.approvedApprovalId;
+      if (!approvedId || !binding) return null;
+      const consumed = await consumeBoundApproval(db, {
+        approvalId: approvedId,
+        policyEpoch: admissionGeneration!.epoch,
+        approvalScope: "action",
+        argumentsDigest: binding.argumentsDigest,
+        contextDigest: binding.contextDigest,
+      });
+      if (consumed) return null;
+      const [row] = await db.select().from(approvals).where(eq(approvals.id, approvedId));
+      if (row && row.status === "approved") {
+        const reason: RetiredApproval["reason"] =
+          row.expiresAt != null && row.expiresAt.getTime() <= Date.now() ? "expired" : "context_changed";
+        const superseded = await supersedeStaleConsent(db, [{ id: row.id, reason }], {
+          userId, connector: { id: connector.id, name: connector.name }, projectId,
+        });
+        return out.status(409).send({
+          decision,
+          error: reason === "expired" ? "approval_expired" : "approval_context_stale",
+          supersededApprovalIds: superseded,
+          detail: `approval '${approvedId}' ${reason === "expired" ? "expired before it was used" : "was granted under a policy that has since changed"}; nothing ran — re-submit to raise a fresh one`,
+        });
+      }
+      return out.status(409).send({
+        decision,
+        error: "approval_consumed_race",
+        approvalId: approvedId,
+        detail: `approval '${approvedId}' was already used by another call; nothing ran`,
+      });
+    };
+
     // EXECUTION runs strictly INSIDE the allow branch, after the audit insert.
     // A connector with no providerKind keeps TODAY'S behaviour exactly:
     // governance-only, no execution, no cost, no usage row.
     if (!connector.providerKind) {
+      const spent = await consumeHeld();
+      if (spent) return spent;
       return out.send({ decision });
     }
     if (!isConnectorProviderKind(connector.providerKind)) {
@@ -591,6 +833,8 @@ export async function executeGovernedConnectorCall(
 
     // Execute. A FAILED call (ConnectorProviderError) bills NOTHING and
     // surfaces as 502 — the same discipline as a failed model dispatch.
+    const spent = await consumeHeld();
+    if (spent) return spent;
     let result;
     try {
       if (!await generationCurrent()) throw new ConnectorPolicyChangedError();
@@ -866,8 +1110,10 @@ export async function executeGovernedConnectorCall(
     const outDecision = outcome.body["decision"] as
       | { reason?: string; ruleId?: string }
       | undefined;
+    // a held write (202) executed nothing: it traces as a refusal, not a success
+    const held = outcome.status === 202 && typeof outcome.body["approvalId"] === "string";
     const spanStatus: "ok" | "denied" | "error" =
-      outcome.status < 400 ? "ok" : outcome.status >= 500 ? "error" : "denied";
+      held ? "denied" : outcome.status < 400 ? "ok" : outcome.status >= 500 ? "error" : "denied";
     // A refusal ABOUT the input does not store the input — storing the very
     // payload a block refused would defeat the block (ADR-0070 rule 3).
     const inputRefused = errCode === "pii_blocked" || errCode === "guardrail_blocked" || errCode === "pii_transform_refused";
@@ -900,6 +1146,7 @@ export async function executeGovernedConnectorCall(
         ...(projectId ? { projectId } : {}),
         ...(errCode ? { error: errCode } : {}),
         ...(outDecision?.ruleId ? { ruleId: outDecision.ruleId } : {}),
+        ...(held ? { approvalId: outcome.body["approvalId"] } : {}),
       },
     });
     if (ownTrace) await finishTrace(tx, traceCtx, spanStatus, spanStartedAt);

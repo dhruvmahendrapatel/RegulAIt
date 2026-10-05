@@ -3808,6 +3808,39 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           };
         }
       }
+      // ADR-0173 batch 2b: a CONNECTOR WRITE approval a builder turn is paused
+      // on — the same resume as the MCP branch above (resumeBuilderAfterApproval
+      // after commit, as tracked background work): approved -> the identical
+      // call, which the connector path matches to this approval by its argument
+      // digest and spends once; denied -> the model is told. A direct (non-
+      // builder) caller has no waiting step: it re-submits the identical call.
+      if (updated.objectType === "connector_call" && !postCommit) {
+        const waiting = await builderStepsAwaitingApproval(tx as unknown as Db, updated.id);
+        if (waiting.length) {
+          postCommit = async (d: Db) => {
+            scheduleBackgroundWork(d, async () => {
+              try {
+                await resumeBuilderAfterApproval(d, opts.dataKey, updated, binaryDecision, deciderUserId);
+              } catch (err) {
+                await d.insert(auditLog).values({
+                  userId: deciderUserId,
+                  objectType: "connector",
+                  objectId: updated.connectorId,
+                  detail: { approvalId: updated.id, phase: "builder-resume" },
+                  effect: "deny",
+                  ruleId: "builder-tool-step-resume-failed",
+                  ruleChain: [],
+                  reason: `the builder turn waiting on approval ${updated.id} could not resume: ${
+                    err instanceof Error ? (err.cause instanceof Error ? err.cause.message : err.message) : String(err)
+                  }`
+                    .replace(/\s+/g, " ")
+                    .slice(0, 1000),
+                });
+              }
+            }, app.log);
+          };
+        }
+      }
       // Pillar 5 budget escalations + §9 context-conflict resolutions.
       if (updated.objectType === "project") {
         await applyProjectApprovalDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);

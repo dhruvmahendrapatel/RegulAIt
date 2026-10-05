@@ -29,16 +29,16 @@ import {
 } from "../../../ui/kit";
 import { OutcomePanel, RemoveButton, optionEls, useAction, useApiAction, useUsers, userOpts } from "../adminKit";
 import { McpActionReview } from "../../approvals/McpActionReview";
-import { inspectApprovalAction } from "../../approvals/approvalReview";
+import { inspectApprovalAction, isBoundAction } from "../../approvals/approvalReview";
 import { ReviewPanel } from "../../approvals/ReviewPanel";
 import { intakeUseCaseName, isIntakeSignoff } from "../../approvals/reviewDecision";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
-const labelOf = (r: Approval) => isIntakeSignoff(r) ? "AI use case sign-off" : r.objectType === "mcp_tool" ? r.toolName ?? "MCP action" : approvalStageLabel(r) ?? r.stageId ?? r.objectType;
+const labelOf = (r: Approval) => isIntakeSignoff(r) ? "AI use case sign-off" : r.objectType === "mcp_tool" ? r.toolName ?? "MCP action" : r.objectType === "connector_call" ? r.toolName ?? "Connector write" : approvalStageLabel(r) ?? r.stageId ?? r.objectType;
 
 /**
- * Mirrors `APPROVAL_OBJECT_TYPES` in @regulait/shared — the twelve kinds THE ONE
+ * Mirrors `APPROVAL_OBJECT_TYPES` in @regulait/shared — the kinds THE ONE
  * QUEUE holds. The SPA deliberately does not import the shared package (the
  * convention used for every other mirrored enum here), and the gateway parses
  * this parameter with that exact enum, so a value drifting out of the shared
@@ -62,6 +62,7 @@ const OBJECT_TYPES: Array<[string, string]> = [
   ["sod_override", "separation-of-duties override"],
   ["remediation", "governance-alert remediation"],
   ["prompt_promotion", "prompt promotion to prod"],
+  ["connector_call", "connector write (execution hold)"],
 ];
 
 export default function ApprovalsAdminPage() {
@@ -106,7 +107,7 @@ export default function ApprovalsAdminPage() {
   const [rowErrors, setRowErrors] = useState<Record<string, string>>({});
 
   const decide = async (row: Approval, decision: "approved" | "denied") => {
-    if (decision === "approved" && row.objectType === "mcp_tool") {
+    if (decision === "approved" && isBoundAction(row)) {
       const blocked = inspectApprovalAction(row).blockedReason;
       if (blocked) { setRowErrors((errors) => ({ ...errors, [row.id]: blocked })); return; }
     }
@@ -203,7 +204,7 @@ export default function ApprovalsAdminPage() {
                 align: "right",
                 render: (r) => {
                   if (r.status !== "pending") {
-                    if (r.objectType === "mcp_tool") return <McpActionReview approval={r} />;
+                    if (isBoundAction(r)) return <McpActionReview approval={r} />;
                     return r.decisionReason ? (
                       <span className={v.faint} title={r.decisionReason}>
                         “{r.decisionReason.slice(0, 40)}”
@@ -235,10 +236,10 @@ export default function ApprovalsAdminPage() {
                           {rowErrors[r.id]}
                         </span>
                       )}
-                      {r.objectType === "mcp_tool" && act.error && <span role="alert">{act.error}</span>}
+                      {isBoundAction(r) && act.error && <span role="alert">{act.error}</span>}
                     </span>
                   );
-                  return r.objectType === "mcp_tool"
+                  return isBoundAction(r)
                     ? <McpActionReview approval={r} controls={controls} />
                     : controls(null);
                 },
