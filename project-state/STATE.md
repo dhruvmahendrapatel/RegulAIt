@@ -21,6 +21,11 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-10-05 - ADR-0178: RegulAIt is proprietary, all rights reserved (owner).** The public repository gains a root
+`LICENSE` (viewing only; no copying, use, hosting, distribution or competing use without written permission) and
+`"license": "UNLICENSED"` in every package manifest. Third-party code keeps its own licences. Making the repository private
+is the only technical barrier; that's the owner's call.
+
 **2026-10-05 - PR #117 merged to `main` (6276f93); one PR per batch from now on.** The owner approved merging #117 (360
 commits: governance, agent builder 2a, enterprise sign-in, D1/D2, Docker demo) and switching to one short-lived PR per batch
 (CLAUDE.md "Branch and PR flow"). ADR-0176 makes open source first a universal rule (CLAUDE.md "Universal build rule").

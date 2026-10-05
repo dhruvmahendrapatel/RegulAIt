@@ -368,3 +368,9 @@ whether the audit-prune and backup-verification schedulers are failing.
 
 Governance MVP — all eight P0 pillars have working, tested cores; see
 [project-state/STATE.md](project-state/STATE.md) for the live picture.
+
+## License
+
+**Proprietary — all rights reserved.** This repository is public for viewing only. No permission is granted to copy,
+modify, run, deploy, distribute or build on RegulAIt without the copyright holder's prior written permission. See
+[LICENSE](LICENSE). Third-party components keep their own licences, listed in the `THIRD_PARTY.md` files.
