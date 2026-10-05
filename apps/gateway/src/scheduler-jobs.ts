@@ -647,3 +647,33 @@ export function schedulerJobRegistry(opts: SchedulerJobsOptions = {}): Scheduler
 /** the type the `db` argument of a job body carries, re-exported so a test can
  * build a fake job without importing the whole registry */
 export type { Db };
+
+// ===== ADR-0180 (ADR-0175 batch D3) A10 — APPEND-ONLY BLOCK, owner A10 ======
+// The risk-acceptance expiry sweep. Everything above this line is A2's.
+// INTEGRATOR: add `riskAcceptanceExpiryJobDefinition(),` as the last element of
+// the array `schedulerJobDefinitions` returns (a hoisted function, so the call
+// works from there). The gate does not depend on it: an acceptance past its
+// expiry is never valid, swept or not.
+import { runRiskAcceptanceExpirySweep } from "./risk-tolerance.js";
+
+export const RISK_ACCEPTANCE_EXPIRY_JOB_NAME = "risk-acceptance-expiry-sweep";
+
+export function riskAcceptanceExpiryJobDefinition(): SchedulerJobDefinition {
+  return {
+    // ADR-0180 §6. Stamps lapsed residual-risk acceptances expired, reopens
+    // each risk (audited as the deployment, never as a person) and raises
+    // `risk_acceptance_expired`. The same function a test or a manual run calls.
+    name: RISK_ACCEPTANCE_EXPIRY_JOB_NAME,
+    description:
+      "Mark residual-risk acceptances past their expiry as expired (up to 500 per pass), reopen each risk so it " +
+      "needs a new decision, audit each, and raise a risk-acceptance-expired alert. The deploy gate does not depend " +
+      "on it: an acceptance past its expiry is never valid.",
+    adr: "ADR-0180",
+    defaultIntervalSeconds: HOUR,
+    run: async (ctx) => {
+      const out = await runRiskAcceptanceExpirySweep(ctx.db, { now: ctx.now, actorUserId: ctx.actorUserId });
+      return { itemsProcessed: out.expired, detail: { ...out } };
+    },
+  };
+}
+// ===== end A10 block =========================================================

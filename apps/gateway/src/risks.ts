@@ -96,6 +96,7 @@ import {
 } from "@regulait/shared";
 import { z } from "zod";
 import { runCollector, type CollectorContext } from "./compliance-packs.js";
+import { acceptorRefusal, recordRiskAcceptanceTx } from "./risk-tolerance.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 const riskIdParam = z.object({ riskId: z.string().uuid() });
@@ -1059,6 +1060,13 @@ export function registerRiskRoutes(app: FastifyInstance, db: Db): void {
   // RESIDUAL-RISK RECORD. The audit row freezes what every evidence resolver
   // measured at the moment of acceptance, so "what did they accept, on what
   // evidence?" stays answerable after the ledgers move on.
+  //
+  // ADR-0180 §6: a WRAPPER over the one acceptance write path
+  // (`recordRiskAcceptance`): it writes the same time-boxed `risk_acceptances`
+  // row (response type `accept`, rationale = the note, expiry = the strict
+  // maximum for the residual band) and keeps `ai_risks` in step, in one
+  // transaction. Its own contract is unchanged: an accepted risk is 409 here
+  // (re-accepting, which supersedes, is the new route's act).
   app.post("/v1/risks/:riskId/accept", async (req, reply) => {
     const { riskId } = riskIdParam.parse(req.params);
     const body = acceptRiskSchema.parse(req.body);
@@ -1071,19 +1079,20 @@ export function registerRiskRoutes(app: FastifyInstance, db: Db): void {
         detail: "a closed risk has nothing left to accept",
       });
     }
+    const refusal = await acceptorRefusal(db, req.authCtx, row);
+    if (refusal) return reply.status(refusal.status).send(refusal.body);
     const now = new Date();
     const evidence = await resolveRiskEvidence(db, row, now);
-    const [updated] = await db
-      .update(aiRisks)
-      .set({
-        status: "accepted",
-        acceptedByUserId: req.authCtx.userId ?? null,
-        acceptedAt: now,
-        acceptanceNote: body.note,
-        updatedAt: now,
-      })
-      .where(eq(aiRisks.id, riskId))
-      .returning();
+    const recorded = await recordRiskAcceptanceTx(db, {
+      riskId,
+      responseType: "accept",
+      rationale: body.note,
+      actorUserId: req.authCtx.userId ?? null,
+      now,
+      origin: { kind: "legacy_accept" },
+    });
+    if (!recorded.ok) return reply.status(recorded.status).send(recorded.body);
+    const [updated] = await db.select().from(aiRisks).where(eq(aiRisks.id, riskId));
     await db.insert(auditLog).values({
       userId: req.authCtx.userId ?? NO_IDENTITY,
       objectType: "ai_risk",
@@ -1106,9 +1115,16 @@ export function registerRiskRoutes(app: FastifyInstance, db: Db): void {
     return {
       ...updated,
       evidenceAtAcceptance: evidence,
+      // ADR-0180 §6: the time-boxed record the wrapper wrote
+      acceptanceRecord: {
+        id: recorded.recorded.acceptance.id,
+        residualBand: recorded.recorded.band,
+        expiresAt: recorded.recorded.acceptance.expiresAt.toISOString(),
+      },
       note:
         "acceptance is a record, not a control — nothing about enforcement changed. The " +
-        "evidence at the moment of acceptance is frozen into the audit trail.",
+        "evidence at the moment of acceptance is frozen into the audit trail. It lapses at its " +
+        "expiry, and the risk then reopens.",
     };
   });
 
