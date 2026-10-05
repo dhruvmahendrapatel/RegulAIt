@@ -441,6 +441,13 @@ describe("5. ONE detector, shared with the audit path", () => {
       "dlp.secret.assignment": 'api_key = "s3cr3t-value-goes-here"',
       "dlp.secret.provider_token": `sk-${"a1b2c3d4".repeat(5)}`,
       "dlp.secret.regulait_token": RGL_KEY,
+      // ADR-0176: assembled at runtime so this file never holds a whole key
+      "dlp.secret.anthropic_key": `sk-ant-api03-${"aZ09_-Kq".repeat(12).slice(0, 93)}AA`,
+      "dlp.secret.openai_key": `sk-proj-${"aZ09_-Kq".repeat(10)}`,
+      "dlp.secret.github_fine_grained_pat": `github_pat_${"aZ09Kq_x".repeat(11).slice(0, 82)}`,
+      "dlp.secret.stripe_key": `sk_live_${"aZ09Kq7x".repeat(3)}`,
+      "dlp.secret.google_api_key": `AIza${"Sy09_-Kq".repeat(5).slice(0, 35)}`,
+      "dlp.secret.gitlab_pat": `glpat-${"aZ09_-Kq".repeat(3)}`,
     };
     // every shipped rule has a sample here — a NEW rule added to
     // `guardrails.ts` fails this line until it is exercised on this path too

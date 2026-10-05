@@ -414,7 +414,11 @@ const DLP_RULES: readonly Rule[] = [
   {
     id: "dlp.secret.jwt",
     category: "credential_material",
-    re: /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g,
+    // ADR-0176: the start is anchored to the START of a base64url run
+    // (`(?<![A-Za-z0-9_-])`, not `\b`). With `\b`, "eyJ-eyJ-eyJ-…" offered a
+    // start every four characters, each scanning to the end of the run: 1.5 s
+    // on 50k characters, on the audit write path. One start per run is linear.
+    re: /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g,
   },
   {
     id: "dlp.secret.assignment",
@@ -424,7 +428,69 @@ const DLP_RULES: readonly Rule[] = [
   {
     id: "dlp.secret.provider_token",
     category: "credential_material",
+    // Legacy OpenAI `sk-…` (gitleaks `openai-api-key`, second alternative),
+    // GitHub classic tokens `ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_` (gitleaks
+    // `github-pat`, `github-oauth`, `github-app-token`, `github-refresh-token`:
+    // `{36}`; matched here from 20 so a truncated paste is still caught), and
+    // Slack `xox?-`.
     re: /\b(?:sk-[A-Za-z0-9]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{10,})\b/g,
+  },
+  // ADR-0176 security fix 2 — current provider token formats. Each rule is
+  // based on the gitleaks default ruleset (github.com/gitleaks/gitleaks,
+  // config/gitleaks.toml, MIT; rule ids cited per rule, read 2026-10-05) so
+  // vendoring that ruleset later is a mechanical swap. Where a rule here
+  // differs from gitleaks the difference is stated, and is always one of:
+  //   - gitleaks' trailing context `(?:[\x60'"\s;]|\\[nr]|$)` is dropped: it
+  //     exists to cut false positives in source code, and this text is prose
+  //     (an audit reason ends a key with "," or ")" as often as with a space);
+  //   - a body length is widened to a bounded range where the provider has
+  //     shipped more than one length.
+  // Every quantifier is bounded, no two adjacent quantified terms overlap in
+  // a way that can backtrack, and a start is only tried at a fixed literal
+  // prefix, so each rule is linear in the input (pinned by a timing test).
+  {
+    // gitleaks `anthropic-api-key` (`sk-ant-api03-[a-zA-Z0-9_\-]{93}AA`) and
+    // `anthropic-admin-api-key` (`sk-ant-admin01-…{93}AA`), generalised to any
+    // `sk-ant-<kind><nn>-` credential with a 32..200 character body.
+    id: "dlp.secret.anthropic_key",
+    category: "credential_material",
+    re: /\bsk-ant-[a-z]{3,8}\d{2}-[A-Za-z0-9_-]{32,200}/g,
+  },
+  {
+    // gitleaks `openai-api-key`, first alternative
+    // (`sk-(?:proj|svcacct|admin)-(?:[A-Za-z0-9_-]{74}|{58})T3BlbkFJ(?:{74}|{58})`),
+    // generalised to the prefix with a 40..250 character body, so a key
+    // without the `T3BlbkFJ` marker is caught too.
+    id: "dlp.secret.openai_key",
+    category: "credential_material",
+    re: /\bsk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{40,250}/g,
+  },
+  {
+    // gitleaks `github-fine-grained-pat`, verbatim body
+    id: "dlp.secret.github_fine_grained_pat",
+    category: "credential_material",
+    re: /\bgithub_pat_\w{82}/g,
+  },
+  {
+    // gitleaks `stripe-access-token`, verbatim body (secret and restricted
+    // keys; live, test and prod). Publishable `pk_` keys are not secrets.
+    id: "dlp.secret.stripe_key",
+    category: "credential_material",
+    re: /\b(?:sk|rk)_(?:test|live|prod)_[A-Za-z0-9]{10,99}/g,
+  },
+  {
+    // gitleaks `gcp-api-key`, verbatim body; the trailing context becomes
+    // "not followed by another key character", since the key is exactly 39
+    id: "dlp.secret.google_api_key",
+    category: "credential_material",
+    re: /\bAIza[\w-]{35}(?![\w-])/g,
+  },
+  {
+    // gitleaks `gitlab-pat` (`glpat-[\w-]{20}`) and `gitlab-pat-routable`
+    // (`glpat-[0-9a-zA-Z_-]{27,300}\.[0-9a-z]{2}[0-9a-z]{7}`), as one rule
+    id: "dlp.secret.gitlab_pat",
+    category: "credential_material",
+    re: /\bglpat-[\w-]{20,300}(?:\.[0-9a-z]{9})?/g,
   },
   // The credential shapes THIS PRODUCT mints. Every one is `rgl` + an optional
   // kind letter/word + `_` + a long hex run: `rgl_` (ADR-0025 user API key),
