@@ -50,6 +50,7 @@ import { runTraceEvaluationSweep } from "./trace-evaluation.js";
 import { runUseCaseRecertificationSweep } from "./review-policy.js";
 import { runBuilderScheduleSweep } from "./builder-runtime.js";
 import { runWebhookDeliverySweep } from "./outbound-webhooks.js";
+import { runAnnotationSlaSweep } from "./annotations.js";
 import { toRegistry, type SchedulerJobDefinition, type SchedulerJobRegistry } from "./scheduler.js";
 
 const HOUR = 3600;
@@ -82,6 +83,8 @@ export const SCHEDULER_JOB_NAMES = {
   useCaseRecertification: "use-case-recertification",
   builderAgentSchedules: "builder-agent-schedules",
   webhookDeliveries: "webhook-delivery-retry",
+  // ADR-0173 batch 2c (Q)
+  annotationSla: "annotation-sla-sweep",
 } as const;
 
 export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): SchedulerJobDefinition[] {
@@ -572,6 +575,23 @@ export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): Schedu
       run: async (ctx) => {
         const out = await runWebhookDeliverySweep(ctx.db, opts.dataKey, { now: ctx.now });
         return { itemsProcessed: out.due, detail: { ...out } };
+      },
+    },
+    {
+      // ADR-0173 batch 2c (Q). Marks open annotation items past their queue's
+      // SLA as breached, once each (a conditional update claims an item only
+      // while its breach time is unset), audits each and sends one
+      // annotation.sla.breached webhook per item. The same function the admin
+      // "run the SLA sweep now" endpoint calls.
+      name: SCHEDULER_JOB_NAMES.annotationSla,
+      description:
+        "Mark open annotation-queue items that passed their review deadline as breached (up to 500 per pass), once " +
+        "per item, with an audit row and one annotation.sla.breached webhook each.",
+      adr: "ADR-0173",
+      defaultIntervalSeconds: 15 * 60,
+      run: async (ctx) => {
+        const out = await runAnnotationSlaSweep(ctx.db, opts.dataKey, { now: ctx.now });
+        return { itemsProcessed: out.breached, detail: { breached: out.breached } };
       },
     },
   ];

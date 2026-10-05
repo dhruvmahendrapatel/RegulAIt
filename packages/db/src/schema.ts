@@ -1235,6 +1235,12 @@ export const auditLog = pgTable(
         // ADR-0173 batch 2b: a decision on a held connector write (the
         // approvals queue's object type rides the audit row). Plain text — no DDL.
         "connector_call",
+        // ADR-0173 batch 2c (Q): an annotation queue created / changed /
+        // removed or exported (objectId = the queue), and an annotation item
+        // queued, read, reviewed, removed or past its deadline (objectId = the
+        // item). Plain text column — no DDL.
+        "annotation_queue",
+        "annotation_item",
       ],
     })
       .notNull()
@@ -9701,3 +9707,158 @@ export const traceScores = pgTable(
   ],
 );
 export type TraceScoreRow = typeof traceScores.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0173 batch 2c — Q (migration 0148): annotation queues.
+// ---------------------------------------------------------------------------
+
+/**
+ * A named review queue: a rubric (versioned in `annotation_rubric_versions`),
+ * named reviewers, an N-person requirement and an optional SLA. Admin-only to
+ * create or change (apps/gateway/src/annotations.ts).
+ */
+export const annotationQueues = pgTable(
+  "annotation_queues",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    description: text("description").notNull().default(""),
+    /** the CURRENT rubric version; the rubric itself is that version's row */
+    rubricVersion: integer("rubric_version").notNull().default(1),
+    /** distinct reviewers an item needs before it completes */
+    requiredReviews: integer("required_reviews").notNull().default(1),
+    /** null = no deadline */
+    slaHours: integer("sla_hours"),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("annotation_queues_name_uq").on(sql`lower(${t.name})`),
+    check("annotation_queues_required_ck", sql`${t.requiredReviews} BETWEEN 1 AND 5`),
+    check("annotation_queues_sla_ck", sql`${t.slaHours} IS NULL OR ${t.slaHours} BETWEEN 1 AND 720`),
+  ],
+);
+export type AnnotationQueueRow = typeof annotationQueues.$inferSelect;
+
+/**
+ * Every rubric a queue has had. Editing a rubric that already has submissions
+ * under its current version writes a NEW version (old reviews keep the rubric
+ * they were made against); editing one with none replaces it in place.
+ */
+export const annotationRubricVersions = pgTable(
+  "annotation_rubric_versions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    queueId: uuid("queue_id")
+      .notNull()
+      .references(() => annotationQueues.id, { onDelete: "cascade" }),
+    version: integer("version").notNull(),
+    rubric: jsonb("rubric").$type<Record<string, unknown>>().notNull(),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("annotation_rubric_versions_queue_version_uq").on(t.queueId, t.version)],
+);
+export type AnnotationRubricVersionRow = typeof annotationRubricVersions.$inferSelect;
+
+/** the named reviewers of a queue: the only non-admins who may read its items */
+export const annotationQueueReviewers = pgTable(
+  "annotation_queue_reviewers",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    queueId: uuid("queue_id")
+      .notNull()
+      .references(() => annotationQueues.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("annotation_queue_reviewers_uq").on(t.queueId, t.userId),
+    index("annotation_queue_reviewers_user_idx").on(t.userId),
+  ],
+);
+
+/** mirrors ANNOTATION_SUBJECT_KINDS / ANNOTATION_ITEM_STATUSES in @regulait/shared */
+export const ANNOTATION_SUBJECT_KINDS_DB = ["trace", "span", "eval_result"] as const;
+export const ANNOTATION_ITEM_STATUSES_DB = ["open", "completed"] as const;
+
+/**
+ * One subject in one queue, at most once (unique on queue + subject). The
+ * subject and its trace are referenced FK-FREE on purpose: the §8.3 prune and
+ * an erasure request delete traces, and the item (with its reviews) must then
+ * say "no longer retained" rather than vanish. `subject_user_ids` is who the
+ * subject belongs to (the trace's person, the run's initiator), captured at
+ * enqueue for the no-self-review rule.
+ */
+export const annotationItems = pgTable(
+  "annotation_items",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    queueId: uuid("queue_id")
+      .notNull()
+      .references(() => annotationQueues.id, { onDelete: "cascade" }),
+    subjectKind: text("subject_kind", { enum: ANNOTATION_SUBJECT_KINDS_DB }).notNull(),
+    subjectId: uuid("subject_id").notNull(),
+    traceId: uuid("trace_id"),
+    spanId: uuid("span_id"),
+    subjectUserIds: jsonb("subject_user_ids").$type<string[]>().notNull().default([]),
+    /** the queue's N when this item was queued */
+    requiredReviews: integer("required_reviews").notNull().default(1),
+    status: text("status", { enum: ANNOTATION_ITEM_STATUSES_DB }).notNull().default("open"),
+    dueAt: timestamp("due_at", { withTimezone: true }),
+    /** set once, by the SLA sweep; the breach event fires only on that write */
+    slaBreachedAt: timestamp("sla_breached_at", { withTimezone: true }),
+    disagreement: boolean("disagreement"),
+    disagreementDetail: jsonb("disagreement_detail").$type<Array<Record<string, unknown>>>(),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    enqueuedByUserId: uuid("enqueued_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    /** an automation rule that queued it (FK-free; the rule may be deleted) */
+    ruleId: uuid("rule_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("annotation_items_queue_subject_uq").on(t.queueId, t.subjectKind, t.subjectId),
+    index("annotation_items_queue_status_idx").on(t.queueId, t.status, t.createdAt),
+    index("annotation_items_due_idx").on(t.dueAt).where(sql`${t.status} = 'open' AND ${t.slaBreachedAt} IS NULL`),
+    index("annotation_items_subject_idx").on(t.subjectKind, t.subjectId),
+    check("annotation_items_kind_ck", sql`${t.subjectKind} IN ('trace', 'span', 'eval_result')`),
+    check("annotation_items_status_ck", sql`${t.status} IN ('open', 'completed')`),
+  ],
+);
+export type AnnotationItemRow = typeof annotationItems.$inferSelect;
+
+/**
+ * One reviewer's review of one item, at most once (unique on item + reviewer).
+ * `values` maps each rubric criterion to a number or a label; `comment` is the
+ * reviewer's free text (never copied to trace_scores or a webhook).
+ */
+export const annotationSubmissions = pgTable(
+  "annotation_submissions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    itemId: uuid("item_id")
+      .notNull()
+      .references(() => annotationItems.id, { onDelete: "cascade" }),
+    queueId: uuid("queue_id")
+      .notNull()
+      .references(() => annotationQueues.id, { onDelete: "cascade" }),
+    reviewerUserId: uuid("reviewer_user_id")
+      .notNull()
+      .references(() => users.id),
+    rubricVersion: integer("rubric_version").notNull(),
+    values: jsonb("values").$type<Record<string, number | string>>().notNull(),
+    comment: text("comment"),
+    /** sha256 of (rubric version, values, comment): an identical replay is a no-op */
+    payloadHash: text("payload_hash").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("annotation_submissions_item_reviewer_uq").on(t.itemId, t.reviewerUserId),
+    index("annotation_submissions_queue_created_idx").on(t.queueId, t.createdAt, t.id),
+    check("annotation_submissions_comment_ck", sql`${t.comment} IS NULL OR char_length(${t.comment}) <= 2000`),
+  ],
+);
+export type AnnotationSubmissionRow = typeof annotationSubmissions.$inferSelect;
