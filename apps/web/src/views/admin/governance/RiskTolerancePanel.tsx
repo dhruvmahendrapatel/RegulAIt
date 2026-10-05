@@ -42,11 +42,28 @@ interface Row {
   scopeKey: string;
 }
 
+/** A response of the wrong shape (an older gateway, a proxy error page) becomes a
+ * retryable error in the card, never a render crash that unmounts the whole app. */
+function assertTolerancesView(x: unknown): TolerancesView {
+  const v = x as Partial<TolerancesView> | null;
+  const ok =
+    !!v &&
+    Array.isArray(v.tolerances) &&
+    Array.isArray(v.bands) &&
+    !!v.effective &&
+    typeof v.effective.categories === "object" &&
+    v.effective.categories !== null &&
+    typeof v.effective.tiers === "object" &&
+    v.effective.tiers !== null;
+  if (!ok) throw new Error("The risk-tolerance settings came back in an unexpected form. Retry, or check the gateway version.");
+  return v as TolerancesView;
+}
+
 export function RiskTolerancePanel() {
   const act = useAction();
   const q = useQuery({
     queryKey: ["admin", "risk-tolerances"],
-    queryFn: () => api.get<TolerancesView>("/v1/risk-tolerances"),
+    queryFn: async () => assertTolerancesView(await api.get<unknown>("/v1/risk-tolerances")),
   });
   // "" = no row: the strict default applies
   const [draft, setDraft] = useState<Record<string, string>>({});
