@@ -342,6 +342,29 @@ describe("slack adapter (fake upstream)", () => {
     );
   });
 
+  it("write op chat.update rewrites one message (ts required), channel still from the governed object (ADR-0173 2b)", async () => {
+    await withUpstream(
+      (_req, res) => reply(res, 200, { ok: true, ts: "12.34", channel: "C_OK" }),
+      async (up) => {
+        const slack = new SlackConnectorProvider({ token: "xoxb-abc", baseUrl: up.url });
+        await slack.invoke({ operation: "write", object: "C_OK", payload: { op: "chat.update", ts: "12.34", text: "answered", channel: "C_EVIL" } });
+        const sent = up.requests[0]!;
+        expect(sent.url).toBe("/chat.update");
+        expect(JSON.parse(sent.body)).toEqual({ ts: "12.34", text: "answered", channel: "C_OK" });
+        const noTs = (await slack
+          .invoke({ operation: "write", object: "C_OK", payload: { op: "chat.update", text: "x" } })
+          .catch((e: unknown) => e)) as ConnectorProviderError;
+        expect(noTs).toBeInstanceOf(ConnectorProviderError);
+        expect(noTs.status).toBe(400);
+        const other = (await slack
+          .invoke({ operation: "write", object: "C_OK", payload: { op: "chat.delete", ts: "1" } })
+          .catch((e: unknown) => e)) as ConnectorProviderError;
+        expect(other.status).toBe(400);
+        expect(up.requests.length).toBe(1);
+      },
+    );
+  });
+
   it("write without an object fails locally (channel required) — no upstream call", async () => {
     await withUpstream(
       (_req, res) => reply(res, 200, { ok: true }),

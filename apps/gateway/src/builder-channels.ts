@@ -48,8 +48,17 @@
  * fence applies to the reply exactly as to an approval card: an agent whose
  * project is in PII mode `block` gets a link, not its content, in the
  * third-party workspace. A turn that pauses (a tool marked "Ask first", or an
- * organisation approval) is announced with a link — confirmations happen in
- * the web app, never by a chat reply, in this release.
+ * organisation approval) is announced with a link. In a SLACK thread an "Ask
+ * first" pause also carries Approve / Deny buttons (ADR-0173 batch 2b): the
+ * click is signature-verified, the clicker is mapped through the identity link
+ * and must be the thread's own person, the prompt is claimed once, and the
+ * answer goes through the same confirm logic as the web route. A typed chat
+ * reply never confirms anything, and Teams keeps the link-to-web confirmation.
+ *
+ * TEAMS BOT FRAMEWORK (ADR-0173 batch 2b). A registered bot's activities are
+ * routed exactly like outgoing-webhook messages; the only difference is that
+ * the Bot Framework ignores the response body, so every reply — refusals
+ * included — goes out through the courier (`replyVia: "courier"`).
  *
  * INBOUND EMAIL STAYS REFUSED (ADR-0121): an email is an unauthenticated
  * assertion, so there is no email route here at all.
@@ -63,7 +72,9 @@ import {
   builderAgents,
   builderChannelEvents,
   builderChannelThreads,
+  builderStepChatPrompts,
   builderThreads,
+  builderToolSteps,
   chatIdentityLinks,
   chatopsConnections,
   desc,
@@ -77,10 +88,17 @@ import {
   type ChatOpsConnectionRow,
   type Db,
 } from "@regulait/db";
-import { chatContentFenced, type InboundChatMessage } from "@regulait/shared";
+import {
+  chatContentFenced,
+  chatDecidable,
+  composeStepAnsweredBlocks,
+  composeStepConfirmBlocks,
+  type InboundChatMessage,
+  type SlackStepInteraction,
+} from "@regulait/shared";
 import { scheduleBackgroundWork } from "./background-work.js";
 import { loadVisibleAgent } from "./builder-access.js";
-import { onBuilderTurnResumed, runBuilderTurn, type TurnOutcome } from "./builder-runtime.js";
+import { onBuilderTurnResumed, resumeBuilderStep, runBuilderTurn, type TurnOutcome } from "./builder-runtime.js";
 import { projectPiiMode } from "./projects.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
@@ -97,6 +115,12 @@ export const BUILDER_CHANNEL_RULE_IDS = {
   replyUndeliverable: "builder-channel-reply-undeliverable",
   turnFailed: "builder-channel-turn-failed",
   routeChanged: "builder-channel-route-changed",
+  /** ADR-0173 batch 2b — an "Ask first" answer from the Slack buttons */
+  stepAnswered: "builder-channel-step-answered",
+  stepRefusedUnlinked: "builder-channel-step-refused-unlinked-identity",
+  stepRefusedNotThreadPerson: "builder-channel-step-refused-not-thread-person",
+  stepRefusedSensitivity: "builder-channel-step-refused-sensitivity-fence",
+  stepResumeFailed: "builder-channel-step-resume-failed",
 } as const;
 
 /** a reply longer than this is cut, with a link to the whole of it */
@@ -107,7 +131,15 @@ const EVENT_RETENTION_HOURS = 24;
 /** the courier post, handed in by chatops.ts (egress-guarded, connector credential) */
 export type ChannelPoster = (
   conn: ChatOpsConnectionRow,
-  input: { target: string; threadRef: string | null; text: string },
+  input: {
+    target: string;
+    threadRef: string | null;
+    text: string;
+    /** Slack only: Block Kit blocks shown in place of `text` (which stays the notification text) */
+    blocks?: Array<Record<string, unknown>>;
+    /** Slack only: rewrite this message (chat.update) instead of posting a new one */
+    updateRef?: string;
+  },
   actorUserId: string | null,
   label: string,
 ) => Promise<{ ok: true; messageRef: string | null } | { ok: false; status: number; body: Record<string, unknown> }>;
@@ -153,6 +185,24 @@ export const threadLink = (threadId: string, origin?: string | null) =>
   `${origin ? origin.replace(/\/+$/, "") : ""}/ui/builder/inbox?tab=all&thread=${threadId}`;
 
 export type TurnPause = "confirmation" | "approval" | null;
+
+/** the "Ask first" step a turn paused on, if it did */
+export function confirmationStepOf(outcome: TurnOutcome): { id: string; displayName: string } | null {
+  if (!outcome.ok) return null;
+  if (outcome.pending?.status === "pending_confirmation") return { id: outcome.pending.stepId, displayName: outcome.pending.displayName };
+  const pools: unknown[] = [...(outcome.steps ?? [])];
+  for (const m of outcome.messages as unknown[]) {
+    const steps = (m as { steps?: unknown }).steps;
+    if (Array.isArray(steps)) pools.push(...steps);
+  }
+  for (const s of pools) {
+    const r = s && typeof s === "object" ? (s as { id?: unknown; status?: unknown; displayName?: unknown }) : null;
+    if (r?.status === "pending_confirmation" && typeof r.id === "string") {
+      return { id: r.id, displayName: typeof r.displayName === "string" ? r.displayName : "the tool" };
+    }
+  }
+  return null;
+}
 
 /**
  * A paused turn, read off the runtime's outcome without depending on its
@@ -304,11 +354,15 @@ export async function acceptInboundMessage(
   retryNum: number | null,
   /** the gateway's public origin as this request reached it (links in replies) */
   origin: string | null = null,
+  /** how a reply reaches the platform: in the HTTP response (a Teams outgoing
+   * webhook) or through the courier (Slack, and the Teams Bot Framework, which
+   * ignores the response body) */
+  replyVia: "response" | "courier" = msg.provider === "teams" ? "response" : "courier",
 ): Promise<InboundResult> {
-  const isTeams = msg.provider === "teams";
+  const isTeams = msg.provider === "teams" && replyVia === "response";
   // Teams outgoing webhooks post the RESPONSE BODY as the reply, so a refusal
-  // is said there (no outbound call needed); Slack ignores the body, so a
-  // refusal is posted afterwards through the courier.
+  // is said there (no outbound call needed); Slack and the Bot Framework ignore
+  // the body, so a refusal is posted afterwards through the courier.
   const say = (text: string, audited: () => Promise<void>): InboundResult =>
     isTeams
       ? { ack: { status: 200, body: { type: "message", text } }, work: audited }
@@ -474,18 +528,20 @@ export async function acceptInboundMessage(
     }
     const link = builderThreadId ? threadLink(builderThreadId, replyTo.linkOrigin) : null;
     let text: string;
+    let confirm: AskFirstButtons | null = null;
     if (!outcome.ok) {
       text = composeChannelRefusal(outcome.error, link);
     } else {
       const reply = [...outcome.messages].reverse().find((m) => m.role === "agent");
       const fenced = chatContentFenced(await projectPiiMode(db, visible.projectId ?? null));
       text = composeChannelReply({ replyText: reply?.content ?? null, fenced, pause: pauseOf(outcome), link: link! });
+      confirm = askFirstButtons(conn, outcome, fenced);
     }
     await postReply(db, deps, conn, msg, text, person.id, "builder-channel-reply", {
       agentId: visible.id,
       builderThreadId,
       turn: outcome.ok ? "ok" : outcome.error,
-    });
+    }, confirm);
   };
 
   return {
@@ -494,6 +550,25 @@ export async function acceptInboundMessage(
       : { status: 200, body: { ok: true, accepted: true } },
     work,
   };
+}
+
+/** the Approve / Deny buttons a reply carries, when it may carry them */
+interface AskFirstButtons {
+  stepId: string;
+  toolLabel: string;
+}
+
+/**
+ * Buttons only in a SLACK thread, only on an "Ask first" pause, and only where
+ * a chat tap may answer at all: ADR-0061's sensitivity fence applies to a
+ * confirmation exactly as to an approval card (a fenced agent's pause is
+ * answered in RegulAIt unless an admin opted this workspace in).
+ */
+function askFirstButtons(conn: ChatOpsConnectionRow, outcome: TurnOutcome, fenced: boolean): AskFirstButtons | null {
+  if (conn.provider !== "slack" || pauseOf(outcome) !== "confirmation") return null;
+  if (!chatDecidable({ fenced, allowFencedDecide: conn.allowFencedDecide })) return null;
+  const step = confirmationStepOf(outcome);
+  return step ? { stepId: step.id, toolLabel: step.displayName } : null;
 }
 
 /** post a reply into the platform thread the message came from, and audit it */
@@ -506,6 +581,7 @@ async function postReply(
   actorUserId: string | null,
   label: string,
   detail: Record<string, unknown> = {},
+  confirm: AskFirstButtons | null = null,
 ): Promise<void> {
   await postTo(
     db,
@@ -516,6 +592,7 @@ async function postReply(
     actorUserId,
     label,
     detail,
+    confirm,
   );
 }
 
@@ -529,12 +606,43 @@ async function postTo(
   actorUserId: string | null,
   label: string,
   detail: Record<string, unknown> = {},
+  confirm: AskFirstButtons | null = null,
 ): Promise<void> {
+  // the prompt record exists BEFORE the post: its id is the buttons' value.
+  // One per step and workspace (a re-post reuses it); answered at most once.
+  let promptId: string | null = null;
+  if (confirm) {
+    const [created] = await db
+      .insert(builderStepChatPrompts)
+      .values({ stepId: confirm.stepId, connectionId: conn.id, channel: where.target })
+      .onConflictDoNothing()
+      .returning({ id: builderStepChatPrompts.id });
+    const [existing] = created
+      ? [created]
+      : await db
+          .select({ id: builderStepChatPrompts.id })
+          .from(builderStepChatPrompts)
+          .where(
+            and(
+              eq(builderStepChatPrompts.stepId, confirm.stepId),
+              eq(builderStepChatPrompts.connectionId, conn.id),
+              isNull(builderStepChatPrompts.answeredAt),
+            ),
+          );
+    promptId = existing?.id ?? null;
+  }
+  const blocks = promptId && confirm ? composeStepConfirmBlocks({ text, toolLabel: confirm.toolLabel, promptId }) : undefined;
   let res: Awaited<ReturnType<ChannelPoster>>;
   try {
-    res = await deps.post(conn, { target: where.target, threadRef: where.threadRef, text }, actorUserId, label);
+    res = await deps.post(conn, { target: where.target, threadRef: where.threadRef, text, ...(blocks ? { blocks } : {}) }, actorUserId, label);
   } catch (err) {
     res = { ok: false, status: 502, body: { error: err instanceof Error ? err.message : String(err) } };
+  }
+  if (promptId && res.ok) {
+    await db
+      .update(builderStepChatPrompts)
+      .set({ messageRef: res.messageRef, channel: where.target, postedAt: new Date() })
+      .where(eq(builderStepChatPrompts.id, promptId));
   }
   await audit(
     db,
@@ -552,6 +660,7 @@ async function postTo(
       externalChannelId: where.externalChannelId,
       ...(where.eventId ? { eventId: where.eventId } : {}),
       ...(res.ok ? {} : { status: res.status }),
+      ...(promptId && confirm ? { stepPromptId: promptId, builderStepId: confirm.stepId } : {}),
     },
   );
 }
@@ -596,6 +705,7 @@ export async function postResumedChannelTurn(
   const link = threadLink(thread.id, mapped.linkOrigin);
   const outcome = event.outcome;
   let text: string;
+  let confirm: AskFirstButtons | null = null;
   if (!outcome.ok) {
     text = composeChannelRefusal(outcome.error, link);
   } else {
@@ -608,6 +718,7 @@ export async function postResumedChannelTurn(
     const note = [...outcome.messages].reverse().find((m) => m.role === "system")?.content ?? null;
     const replyText = added.trim() ? added : note;
     text = composeChannelReply({ replyText, fenced, pause: pauseOf(outcome), link });
+    confirm = askFirstButtons(conn, outcome, fenced);
   }
   await postTo(
     db,
@@ -618,7 +729,153 @@ export async function postResumedChannelTurn(
     thread.userId,
     "builder-channel-resumed-reply",
     { agentId: thread.agentId, builderThreadId: thread.id, turn: outcome.ok ? "ok" : outcome.error, resumed: true },
+    confirm,
   );
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0173 batch 2b — "Ask first" answered from the Slack buttons
+// ---------------------------------------------------------------------------
+
+/**
+ * A click on an Approve / Deny button. The interaction route has already
+ * proved the platform (walls 0–1: the workspace, the v0 signature and its
+ * replay window); everything after that is here, in this order:
+ *
+ *  1. the prompt id names a prompt ONLY on the workspace that posted it;
+ *  2. the clicking chat user becomes a person only through the admin-made
+ *     identity link (unlinked or disabled: refused, audited);
+ *  3. that person must be THE THREAD'S OWN PERSON — a confirmation is not an
+ *     approval: no other linked user and no admin answers it;
+ *  4. the sensitivity fence, as for an approval card;
+ *  5. the step must still be waiting, and the prompt is CLAIMED ONCE (a second
+ *     click, from anyone, is a 409);
+ *  6. the answer runs through `resumeBuilderStep(via: "confirmation")` — the
+ *     function the web route calls, which claims the step itself — after the
+ *     response, because Slack expects an answer within 3 seconds. Its outcome
+ *     is posted back into the thread by the resumed-turn subscriber.
+ */
+export async function acceptStepInteraction(
+  db: Db,
+  deps: ChannelDeps,
+  conn: ChatOpsConnectionRow,
+  click: SlackStepInteraction,
+): Promise<InboundResult> {
+  const refuse = (status: number, body: Record<string, unknown>, work: InboundResult["work"] = null): InboundResult => ({
+    ack: { status, body },
+    work,
+  });
+  const [prompt] = await db
+    .select()
+    .from(builderStepChatPrompts)
+    .where(and(eq(builderStepChatPrompts.id, click.promptId), eq(builderStepChatPrompts.connectionId, conn.id)));
+  const [step] = prompt ? await db.select().from(builderToolSteps).where(eq(builderToolSteps.id, prompt.stepId)) : [];
+  const [thread] = step ? await db.select().from(builderThreads).where(eq(builderThreads.id, step.threadId)) : [];
+  if (!prompt || !step || !thread) return refuse(404, { error: "unknown_prompt" });
+  const detail = {
+    connection: conn.name,
+    chatUserId: click.chatUserId,
+    stepPromptId: prompt.id,
+    builderStepId: step.id,
+    builderThreadId: thread.id,
+    answer: click.answer,
+  };
+
+  const [link] = await db
+    .select({ link: chatIdentityLinks, user: users })
+    .from(chatIdentityLinks)
+    .innerJoin(users, eq(chatIdentityLinks.userId, users.id))
+    .where(and(eq(chatIdentityLinks.connectionId, conn.id), eq(chatIdentityLinks.chatUserId, click.chatUserId)));
+  const person = link && !link.user.disabledAt ? link.user : null;
+  if (!person) {
+    await audit(db, link?.user.id ?? null, "builder_agent", thread.agentId, BUILDER_CHANNEL_RULE_IDS.stepRefusedUnlinked, "deny",
+      `${conn.provider} identity '${click.chatUserId}' tried to ${click.answer} tool step '${step.displayName}' but ${link ? "is linked to a disabled user" : "is linked to no RegulAIt user"} — nothing ran`,
+      detail);
+    return refuse(403, {
+      error: "unmapped_chat_identity",
+      detail: "this chat identity is not linked to a RegulAIt user; an admin must create the link before it can answer anything",
+    });
+  }
+  if (person.id !== thread.userId) {
+    await audit(db, person.id, "builder_agent", thread.agentId, BUILDER_CHANNEL_RULE_IDS.stepRefusedNotThreadPerson, "deny",
+      `${person.email} tried to ${click.answer} tool step '${step.displayName}' from ${conn.provider}, but the conversation runs as someone else — only that person answers it`,
+      detail);
+    return refuse(403, {
+      error: "not_thread_person",
+      detail: "only the person this conversation runs as can answer its confirmation",
+    });
+  }
+  const [agent] = await db.select({ projectId: builderAgents.projectId }).from(builderAgents).where(eq(builderAgents.id, thread.agentId));
+  const fenced = chatContentFenced(await projectPiiMode(db, agent?.projectId ?? null));
+  if (!chatDecidable({ fenced, allowFencedDecide: conn.allowFencedDecide })) {
+    await audit(db, person.id, "builder_agent", thread.agentId, BUILDER_CHANNEL_RULE_IDS.stepRefusedSensitivity, "deny",
+      `${person.email} tried to ${click.answer} tool step '${step.displayName}' from ${conn.provider}, but the agent's project makes it in-app only`,
+      detail);
+    return refuse(403, {
+      error: "chat_decide_not_permitted_for_sensitivity",
+      detail: "this confirmation must be answered in RegulAIt; the agent's project compliance classification blocks chat answers",
+    });
+  }
+
+  /** rewrite the posted message: the outcome in place of the buttons */
+  const retire = (outcome: string) => async () => {
+    if (!prompt.messageRef) return;
+    let res: Awaited<ReturnType<ChannelPoster>>;
+    try {
+      res = await deps.post(
+        conn,
+        {
+          target: prompt.channel,
+          threadRef: null,
+          text: outcome,
+          blocks: composeStepAnsweredBlocks({ sections: click.messageSections, outcome }),
+          updateRef: prompt.messageRef,
+        },
+        person.id,
+        "builder-step-prompt-retired",
+      );
+    } catch (err) {
+      res = { ok: false, status: 502, body: { error: err instanceof Error ? err.message : String(err) } };
+    }
+    await audit(db, person.id, "chatops_connection", conn.id,
+      res.ok ? BUILDER_CHANNEL_RULE_IDS.replyPosted : BUILDER_CHANNEL_RULE_IDS.replyFailed, res.ok ? "allow" : "deny",
+      res.ok
+        ? `builder-step-prompt-retired on ${conn.provider} channel ${prompt.channel}`
+        : `builder-step-prompt-retired NOT updated on '${conn.name}': ${String(res.body.error ?? res.status)}`,
+      { ...detail, label: "builder-step-prompt-retired", externalChannelId: prompt.channel, ...(res.ok ? {} : { status: res.status }) });
+  };
+
+  if (step.status !== "pending_confirmation") {
+    const state = step.status.replace(/_/g, " ");
+    return refuse(409, { error: "step_not_pending", detail: `this step is ${state}` }, retire(`No longer waiting: this step is ${state}.`));
+  }
+  const claimed = await db
+    .update(builderStepChatPrompts)
+    .set({ answeredAt: new Date(), answeredByUserId: person.id, answer: click.answer })
+    .where(and(eq(builderStepChatPrompts.id, prompt.id), isNull(builderStepChatPrompts.answeredAt)))
+    .returning({ id: builderStepChatPrompts.id });
+  if (!claimed.length) return refuse(409, { error: "already_answered", detail: "this confirmation was already answered" });
+  await audit(db, person.id, "builder_agent", thread.agentId, BUILDER_CHANNEL_RULE_IDS.stepAnswered, click.answer === "approve" ? "allow" : "deny",
+    `${person.email} ${click.answer === "approve" ? "approved" : "denied"} tool step '${step.displayName}' from ${conn.provider}; the turn resumes as them`,
+    detail);
+
+  const by = person.displayName || person.email;
+  const work = async () => {
+    await retire(click.answer === "approve" ? `Approved by ${by}. The agent continues.` : `Denied by ${by}.`)();
+    const out = await resumeBuilderStep(db, deps.dataKey, {
+      threadId: thread.id,
+      stepId: step.id,
+      via: "confirmation",
+      decision: click.answer,
+      deciderUserId: person.id,
+    });
+    if (!out.ok) {
+      await audit(db, person.id, "builder_agent", thread.agentId, BUILDER_CHANNEL_RULE_IDS.stepResumeFailed, "deny",
+        `the ${click.answer} of tool step '${step.displayName}' from ${conn.provider} did not resume the turn: ${out.error}${out.detail ? ` (${out.detail})` : ""}`,
+        { ...detail, error: out.error });
+    }
+  };
+  return { ack: { status: 200, body: { ok: true, answer: click.answer } }, work };
 }
 
 // ---------------------------------------------------------------------------

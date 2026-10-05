@@ -67,6 +67,8 @@ import {
   approvalArgumentsDigest,
   approvalArgumentsPreview,
   approvalContextDigest,
+  canonicalJson,
+  sha256Hex,
   guardrailCategoryList,
   guardrailWithheldMarker,
   redactPiiPayload,
@@ -164,6 +166,12 @@ export interface GovernedConnectorCallArgs {
 /** the approval-queue object type of a held connector write */
 export const CONNECTOR_APPROVAL_OBJECT_TYPE = "connector_call" as const;
 
+/** the fingerprint of a connector call's argument envelope, shown beside a
+ * redacted preview where an MCP tool shows its input schema's */
+const CONNECTOR_INVOCATION_SCHEMA_DIGEST = sha256Hex(
+  canonicalJson({ namespace: "regulait.connector-invocation.v1", fields: ["operation", "object", "payload"] }),
+);
+
 /**
  * ADR-0173 batch 2b — the consent identity of one connector WRITE, computed
  * only while the dial holds writes. Pure reads; nothing is written here.
@@ -232,7 +240,12 @@ async function connectorWriteBinding(
   const fresh = (r: (typeof approved)[number]) => !expired(r) && r.contextDigest === contextDigest;
   return {
     argumentsDigest,
-    argumentsPreview: input.preparedPii?.argumentsPreview ?? approvalArgumentsPreview(input.invocation),
+    // under PII redact the preview has the redacted-action shape the approval
+    // review reads (`{prepared, schemaDigest}`, as mcp-pii.ts writes it): a
+    // connector's input "schema" is the fixed invocation envelope
+    argumentsPreview: input.preparedPii
+      ? { prepared: input.preparedPii.argumentsPreview, schemaDigest: CONNECTOR_INVOCATION_SCHEMA_DIGEST }
+      : approvalArgumentsPreview(input.invocation),
     argumentsPreviewKind: input.preparedPii ? "mcp_redacted_v1" : "arguments_v1",
     contextDigest,
     approvedApprovalId: approved.find(fresh)?.id ?? null,

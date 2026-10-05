@@ -208,6 +208,30 @@ describe("a connector write under the require_approval dial", () => {
     expect(received.length).toBe(before);
   });
 
+  it("under PII redact the queued preview is the redacted action in the shape the approval review reads, never the raw payload", async () => {
+    const tag = `p2bl-redact-${k.RUN}`;
+    expect((await k.req("POST", "/v1/compliance/profiles", k.BOOT, { tag, piiMode: "warn" })).statusCode).toBeLessThan(300);
+    // internal test policy only (as connector-redaction.test.ts): the public mode is not offered
+    await k.db.execute(sql`update compliance_profiles set pii_mode = 'redact' where tag = ${tag}`);
+    const proj = await k.req("POST", "/v1/projects", k.BOOT, { name: tag, classifications: [tag] });
+    expect(proj.statusCode, proj.body).toBe(201);
+    const m = await k.req("POST", `/v1/projects/${proj.json().id}/members`, k.BOOT, { userId: owner.id, role: "contributor" });
+    expect(m.statusCode, m.body).toBeLessThan(300);
+    await setDial("require_approval");
+    const RAW = `alice-${k.RUN}@example.test`;
+    const r = await k.req("POST", `/v1/connectors/${connectorId}/invoke`, owner.auth, {
+      operation: "write", object: "inbox", payload: { note: RAW }, projectId: proj.json().id,
+    });
+    expect(r.statusCode, r.body).toBe(202);
+    const row = await approvalRow(r.json().approvalId);
+    expect(row.argumentsPreviewKind).toBe("mcp_redacted_v1");
+    const preview = row.argumentsPreview as { schemaDigest: string; prepared: { effectiveArguments: unknown; transformation: { mode: string } } };
+    expect(preview.schemaDigest).toMatch(/^[0-9a-f]{64}$/);
+    expect(preview.prepared.transformation.mode).toBe("redact");
+    expect(preview.prepared.effectiveArguments).toMatchObject({ operation: "write", object: "inbox", payload: { note: "[EMAIL]" } });
+    expect(JSON.stringify(row.argumentsPreview)).not.toContain(RAW);
+  });
+
   it("denied -> the re-submit is queued again, never run", async () => {
     await setDial("require_approval");
     const approvalId = (await invoke(owner, { note: `deny-${k.RUN}` })).json().approvalId as string;

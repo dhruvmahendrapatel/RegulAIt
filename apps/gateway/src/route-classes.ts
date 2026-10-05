@@ -43,6 +43,11 @@ export const AUTH_EXEMPT_ROUTES = new Set([
   // an admin-made identity link; the turn runs as that person.
   "/v1/chatops/:connectionName/events",
   "/v1/chatops/:connectionName/messages",
+  // ADR-0173 batch 2b — the Teams Bot Framework endpoint. The platform holds
+  // no RegulAIt credential; the route authenticates IN-ROUTE on the Bot
+  // Framework's Bearer JWT (keys from the workspace's OpenID metadata,
+  // audience = its bot app id), then maps the sender through an identity link.
+  "/v1/chatops/:connectionName/bot",
   // /admin and /app are 302s to /ui (ADR-0026 phase-2 swap) — a browser
   // hits a bookmark before it has any credential, so the redirect itself
   // must not require one. The legacy shells they used to serve are GONE
@@ -510,6 +515,8 @@ export const NON_ADMIN_ROUTES = new Set([
   // admin-ness, is the gate on the two inbound conversation routes
   "POST /v1/chatops/:connectionName/events",
   "POST /v1/chatops/:connectionName/messages",
+  // ADR-0173 batch 2b — the bot's token + identity link, not admin-ness, is the gate
+  "POST /v1/chatops/:connectionName/bot",
 ]);
 
 /**

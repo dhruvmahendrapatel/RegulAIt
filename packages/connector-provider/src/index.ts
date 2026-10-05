@@ -383,21 +383,26 @@ export class SlackConnectorProvider implements ConnectorProvider {
       // the ONLY mutating op on this surface — a read-mode grant can never
       // reach it because the kernel's mode rule runs before we do, and we never
       // mutate on operation:"read"
-      if (op !== null && op !== "chat.postMessage") {
+      // ADR-0173 batch 2b: `chat.update` rewrites one message this bot posted
+      // (payload.ts names it) — how answered "Ask first" buttons are retired
+      if (op !== null && op !== "chat.postMessage" && op !== "chat.update") {
         throw new ConnectorProviderError(
-          `slack write supports only 'chat.postMessage' (got op '${op}')`,
+          `slack write supports only 'chat.postMessage' and 'chat.update' (got op '${op}')`,
           400,
         );
       }
       if (!channel) {
         throw new ConnectorProviderError(
-          "slack write requires an object (the target channel ID) — chat.postMessage without a channel is meaningless",
+          `slack write requires an object (the target channel ID) — ${op ?? "chat.postMessage"} without a channel is meaningless`,
           400,
         );
       }
+      if (op === "chat.update" && (typeof payload.ts !== "string" || !payload.ts)) {
+        throw new ConnectorProviderError("slack chat.update requires payload.ts (the message to update)", 400);
+      }
       const { op: _op, ...rest } = payload;
       method = "POST";
-      apiCall = "chat.postMessage";
+      apiCall = op === "chat.update" ? "chat.update" : "chat.postMessage";
       // channel comes from the governed object, never the payload
       body = JSON.stringify({ ...rest, channel });
     } else if (op === "users.lookupByEmail") {

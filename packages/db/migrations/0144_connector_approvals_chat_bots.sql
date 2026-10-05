@@ -20,7 +20,7 @@
 --    answer it took. `answered_at` is claimed once, so a second click (or a
 --    second person) is refused.
 --
--- Additive and idempotent.
+-- Additive and idempotent (the one replaced CHECK is dropped and re-added).
 ALTER TABLE "approvals" ADD COLUMN IF NOT EXISTS "connector_id" uuid REFERENCES "connectors"("id") ON DELETE CASCADE;
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "approvals_connector_binding_idx"
@@ -37,6 +37,19 @@ DO $$ BEGIN
   ALTER TABLE "chatops_connections" ADD CONSTRAINT "chatops_connections_bot_teams_check"
     CHECK (("bot_app_id" IS NULL AND "bot_tenant_id" IS NULL AND "bot_openid_metadata_url" IS NULL) OR "provider" = 'teams');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+--> statement-breakpoint
+-- 0112 required a signing secret on every slack/teams row. A teams workspace
+-- reached ONLY through its registered bot verifies the platform's signed
+-- tokens instead, so for teams a secret OR a bot app id is required (still
+-- never neither: a workspace that could never be answered stays impossible).
+ALTER TABLE "chatops_connections" DROP CONSTRAINT IF EXISTS "chatops_connections_signing_secret_ck";
+--> statement-breakpoint
+ALTER TABLE "chatops_connections" ADD CONSTRAINT "chatops_connections_signing_secret_ck"
+  CHECK (
+    ("provider" = 'outlook' AND "signing_secret_ciphertext" IS NULL)
+    OR ("provider" = 'teams' AND ("signing_secret_ciphertext" IS NOT NULL OR "bot_app_id" IS NOT NULL))
+    OR ("provider" NOT IN ('outlook', 'teams') AND "signing_secret_ciphertext" IS NOT NULL)
+  );
 --> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "builder_step_chat_prompts" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
