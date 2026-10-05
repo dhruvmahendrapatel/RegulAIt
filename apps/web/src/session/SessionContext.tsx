@@ -58,6 +58,15 @@ export function SessionProvider(props: { children: ReactNode }) {
     queryClient.clear();
     cacheOwner.current = null;
   }, [queryClient]);
+  /** a 401 ends a session only if this tab held one. With no owner the cache
+   * holds only what was fetched before any sign-in (the sign-in options, a
+   * pending account link). Clearing it then protects no one and cancels those
+   * queries mid-flight: the signed-out probe (sent twice under StrictMode)
+   * could leave the sign-in page on a discarded query, showing the degraded
+   * email-only form or "no account link waiting". */
+  const forgetSession = useCallback(() => {
+    if (cacheOwner.current !== null) forget();
+  }, [forget]);
   /** a sign-in (or a probe that finds a different person) starts from an empty
    * cache — BEFORE the shell mounts, so nothing is fetched twice */
   const become = useCallback(
@@ -87,7 +96,7 @@ export function SessionProvider(props: { children: ReactNode }) {
       return a;
     } catch (e) {
       if (e instanceof ApiError && e.status === 401) {
-        forget();
+        forgetSession();
         setAuth(null);
         setMe(null);
         return null;
@@ -96,7 +105,7 @@ export function SessionProvider(props: { children: ReactNode }) {
       setAuth((cur) => (cur === undefined ? null : cur));
       return null;
     }
-  }, [become, forget]);
+  }, [become, forgetSession]);
 
   const signOut = useCallback(async () => {
     try {
@@ -126,12 +135,12 @@ export function SessionProvider(props: { children: ReactNode }) {
 
   useEffect(() => {
     setUnauthorizedHandler(() => {
-      forget();
+      forgetSession();
       setAuth(null);
     });
     void refresh();
     return () => setUnauthorizedHandler(null);
-  }, [refresh, forget]);
+  }, [refresh, forgetSession]);
 
   const value = useMemo(
     () => ({ auth, me, refresh, signOut, applyAuth }),
