@@ -117,3 +117,72 @@ Existing defaults that are not strict are listed in an audit and fixed in a foll
   admin can turn it off.
 - New metrics read existing ledgers. Guardrail hits need a partial index on `audit_log`.
 - Migration **0155** onward.
+
+## Implementation (2026-10-05)
+
+Built from five branches:
+- **P0, the foundation:** migration **0155**, the shared contract in `assurance.ts`, the monitor rules, the
+  `assurance_gate_mode` setting and route stubs.
+- **A2:** measurable conditions.
+- **A3:** required tests, the gate composition and the demo.
+- **A8:** autonomy class.
+- **A10:** risk tolerance.
+
+Two security reviews followed, with three fix rounds. No migration besides 0155 was needed, and the next migration is
+**0156**.
+
+- **Gate.**
+  - `assurance_gate_mode` is enforce by default. It is written only by the audited, admin-only
+    `PUT /v1/org/settings/assurance-gate-mode`.
+  - Each of the four checks runs inside an error guard. A check that throws or was not gathered gives
+    `assurance_check_unavailable`, which blocks under enforce. Only a `satisfied` required-test state passes
+    (allow-list).
+  - `off` skips only the D3 reasons, and the response says so.
+  - Alerts from the six assurance monitor rules are not re-read as `open_high_alert`, because their live checks
+    govern them.
+- **Measurable conditions (A2).**
+  - Nine metrics are read from the existing ledgers. Spend reads `usage_events`.
+  - Red-team and eval metrics are judged on the **weakest agent** in the stack, never pooled.
+  - Too few samples, or an agent whose newest run measured nothing, reads `insufficient`.
+  - Only the evaluator closes a measured condition; a manual `/met` returns 422. An admin waiver is audited and shows
+    as a warning.
+  - Each cadence window counts once toward the breach streak.
+  - `reopen_review` reopens review once the streak reaches 2 or more while the use case is approved, then resets the
+    streak. A skipped reopen is audited.
+  - The monitor reads stored evaluations.
+- **Required tests (A3).**
+  - Every tier requires LLM01. The high, prohibited and unscreened tiers also require LLM02, LLM06 and every agentic
+    class a red-team class measures (ASI01, ASI02, ASI06, ASI10), at 0% attack success and 30 days fresh. Eval-only
+    classes default to a minimum mean score of 0.8.
+  - An OWASP id is measurable only if the evaluator catalog cites it; otherwise the policy refuses it.
+  - Evidence must meet a fixed bar that admins cannot relax (`REQUIRED_TEST_EVIDENCE_BAR`):
+    - at least 3 trials per probe and a measured-quality label;
+    - every attack class mapped to the id covered, by trials that **reached the agent** (probes the platform held,
+      for example for budget or entitlement, never count);
+    - at least 5 results per mapped eval scorer.
+  - The newest run that meets the bar decides. Runs whose configuration hash was adopted by the legacy-pin sweep are
+    not evidence.
+- **Autonomy (A8).**
+  - Nine derivation rules set the class.
+  - The floors are cumulative:
+    - supervised: prompt-injection and jailbreak guardrails at warn or above;
+    - delegated: both at block, an approved model card, and the agentic red-team classes measured within 30 days;
+    - autonomous: a monthly spend limit, those classes passing, and Ask-first on every write tool.
+  - The floor follows the stricter of the declared and observed class. Builder agents count toward a use case by
+    project.
+- **Risk tolerance (A10).**
+  - The residual band is the register's 3×3 rating. A risk's tolerance is the stricter of its category's and its
+    tier's, and a scope with no configured row counts at the strict default (medium), so relaxing one scope never
+    relaxes another.
+  - Acceptances are recorded by an admin or a named acceptor, never the use case's owner. Every acceptance path,
+    including sign-off, writes a time-boxed row: 6 months for high or critical residual risk, 12 months otherwise.
+  - Compensating controls must name a real pack control.
+  - An expiry sweep reopens the risk. It audits as the system and records any admin who started it as `requestedBy`.
+- **Load order.** An import cycle (`inventory → … → risk-tolerance → governance-monitor → autonomy → mrm → … →
+  inventory`) crashed `demo:prepare`. `risk-tolerance.ts` now loads `review-policy` and `governance-monitor` lazily,
+  and `adr0180-load-order.test.ts` imports each built module first to keep it fixed.
+- **Demo.**
+  - `demo:prepare` passes 18/18.
+  - The seeded *Demo assurance suite* runs meet the evidence bar.
+  - Fraud Detection carries a seeded six-month `mitigate_partially` acceptance with two compensating controls.
+  - The production `demo:gate` still blocks on its two HIGH alerts.

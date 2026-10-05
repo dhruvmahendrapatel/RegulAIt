@@ -42,6 +42,7 @@
  * ADR-0012's dependency scrutiny that trade is worth one small, pinned,
  * dependency-free package.
  */
+import { decideApprovalWithMeasuredSchema } from "./condition-metrics.js";
 import type { FastifyInstance } from "fastify";
 import type { ZodTypeAny } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
@@ -51,7 +52,6 @@ import {
   createProjectSchema,
   createRoleSchema,
   createUserSchema,
-  decideApprovalSchema,
   deactivateUserSchema,
   evaluateRequestSchema,
   invokeAgentSchema,
@@ -210,7 +210,8 @@ export const ROUTE_DOCS: Readonly<Record<string, RouteDoc>> = {
   "GET /v1/approvals": { summary: "The approvals queue, scoped to what the caller may see." },
   "POST /v1/approvals/:approvalId/decide": {
     summary: "Approve or deny a pending request. Non-admin by design — the named approver is usually not an admin.",
-    body: decideApprovalSchema,
+    // ADR-0180 A2: the decide body also accepts measured conditions
+    body: decideApprovalWithMeasuredSchema,
   },
 
   "GET /v1/projects": { summary: "Projects visible to the caller." },

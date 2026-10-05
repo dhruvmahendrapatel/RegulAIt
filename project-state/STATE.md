@@ -21,6 +21,20 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-10-05 - D3 continuous assurance (ADR-0180) built, reviewed and fixed on `d3-int`.**
+- Migration 0155; the next migration is **0156**, and the next ADR is **0181** (strict defaults).
+- The gate is enforce by default and combines four checks: measurable conditions, required OWASP test classes,
+  autonomy floors and residual risk above tolerance.
+- Two security reviews were addressed:
+  - probes the platform held never count as evidence;
+  - the newest run that meets the evidence bar decides;
+  - red-team and eval results are judged on the weakest agent;
+  - a tolerance scope with no row counts at the strict default;
+  - an import-cycle crash was fixed.
+- The LICENSE copyright holder is now Dhruv Patel (ADR-0178 amendment).
+- CrawlAI (the research fetcher) lives in its own private repository, dhruvmahendrapatel/CrawlAI.
+- Next: the strict-defaults batch (ADR-0181), then D4.
+
 **2026-10-05 - PR #125 (ADR-0179) merged as c8bfc6d. ADR-0180: D3 continuous assurance; secure by default is now a standing rule.**
 - Owner rule: every setting defaults to strict, and an admin may relax it. Build as for a first load: no grandfathering.
 - D3 decisions:

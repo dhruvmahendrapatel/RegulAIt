@@ -226,7 +226,9 @@ back afterwards; a live run leaves it set — recreate the database before the n
 - **Why no required-test line (ADR-0180):** the high tier requires the OWASP prompt-injection,
   sensitive-information, excessive-agency and agentic test classes, passed within 30 days on the
   agent's current configuration. `demo:intake` runs the *Demo assurance suite* red-team library
-  against premium-mock (and balanced-mock) through the real red-team route, so those requirements
+  (one probe of every attack class the strict defaults map to, three trials per probe; a
+  single-trial run, or one the platform blocked, is not evidence) against premium-mock (and
+  balanced-mock) through the real red-team route, so those requirements
   are met and add no line. On a database prepared more than 30 days earlier, the gate truthfully adds
   **BLOCK required_test_stale**; re-run `demo:intake` to refresh the evidence. Its one HIGH residual
   risk (*Fraud model falsely blocks transactions …*) carries a seeded, time-boxed acceptance (Ada,
