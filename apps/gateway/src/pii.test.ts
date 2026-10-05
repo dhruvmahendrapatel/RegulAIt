@@ -3,6 +3,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { and, auditLog, costEvents, createDb, eq, runMigrations, usageEvents, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 /**
  * The most recent row by `at`.
@@ -102,6 +105,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
 
   const dana = await makeUser("pii-dana@example.com", "PII Dana", false);
   danaId = dana.id;
@@ -531,4 +535,8 @@ describe("§8.4 the deployment-wide floor: omitting the project is no longer an 
     expect(r.statusCode).toBe(400);
     expect(r.json().error).toBe("invalid_reference");
   });
+});
+
+afterAll(async () => {
+  await restoreSb2Gates();
 });

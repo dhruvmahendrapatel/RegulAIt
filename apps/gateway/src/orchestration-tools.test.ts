@@ -7,6 +7,9 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { z } from "zod";
 import { createDb, runMigrations, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 /**
  * PILLAR 7 DEPTH — tool-using multi-turn workers. A worker node becomes a
@@ -125,6 +128,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "a".repeat(64) });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
   upstream = await startUpstream();
   approverId = await mkUser("otools-approver@example.com", "Otools Approver");
   const server = await app.inject({
@@ -136,6 +140,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   app.server.closeAllConnections();
+  await restoreSb2Gates();
   await app.close();
   await upstream.close();
 });

@@ -39,6 +39,9 @@ import {
 } from "./builder-channels.js";
 import type { TurnOutcome } from "./builder-runtime.js";
 import { builderKit, type BuilderKit, type Person } from "./testing/builder-fixture.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 let k: BuilderKit;
 let admin: Person;
@@ -201,6 +204,7 @@ async function bind(agent: string, provider: "slack" | "teams", connectionId: st
 
 beforeAll(async () => {
   k = await builderKit("bld-chan");
+  restoreSb2Gates = await relaxGovernanceGatesForTest(k.db, { mrmEnforced: false, dispatchAttributionRequired: false });
   admin = await k.person("admin", { admin: true });
   owner = await k.person("owner");
   colleague = await k.person("colleague");
@@ -283,6 +287,7 @@ afterAll(async () => {
   }
   if (createdEgressEntry) await k.db.delete(egressAllowHosts).where(eq(egressAllowHosts.host, "127.0.0.1"));
   await new Promise<void>((resolve) => upstream.close(() => resolve()));
+  await restoreSb2Gates();
   await k.close();
 });
 

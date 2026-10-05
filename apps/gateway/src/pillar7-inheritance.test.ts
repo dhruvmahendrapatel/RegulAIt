@@ -1,8 +1,11 @@
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, afterAll } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createDb, runMigrations, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 /**
  * PILLAR 7's LOAD-BEARING SENTENCE, attacked from the outside.
@@ -103,6 +106,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "p".repeat(64) });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
 
   const ivy = await makeUser("p7-ivy@example.com");
   ivyId = ivy.id; ivyAuth = ivy.auth;
@@ -250,4 +254,8 @@ describe("pillar 7: delegation may only ever TIGHTEN", () => {
     expect(created.statusCode).toBeGreaterThanOrEqual(400);
     expect(created.statusCode).toBeLessThan(500);
   });
+});
+
+afterAll(async () => {
+  await restoreSb2Gates();
 });

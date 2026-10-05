@@ -5,6 +5,9 @@ import { and, auditLog, createDb, eq, runMigrations, type Db } from "@regulait/d
 import { buildApp } from "./app.js";
 import { buildPostureReport } from "./posture-preset.js";
 import { loadOrgSettings } from "./org-settings.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the preset is measured from a relaxed (pre-hardening) posture; the strict defaults are restored after
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 /**
  * ADR-0118 — THE HARDENED POSTURE PRESET.
@@ -71,6 +74,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "d".repeat(64) });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { useCaseGateMode: "off", dispatchAttributionRequired: false, mrmEnforced: false });
 
   const u = await app.inject({
     method: "POST",
@@ -113,6 +117,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await restoreShippedDefaults();
+  await restoreSb2Gates();
   await app.close();
 });
 

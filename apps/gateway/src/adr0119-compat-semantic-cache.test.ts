@@ -17,6 +17,9 @@ import {
 import { buildApp } from "./app.js";
 import { AGENT_HEADER, PROJECT_HEADER } from "./compat-core.js";
 import { lookupSemanticCache, semanticCacheRequestKey, storeSemanticCache } from "./semantic-cache-shared.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 /**
  * ADR-0119 — THE SEMANTIC CACHE ON THE COMPAT / IDE PATH.
@@ -141,6 +144,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "e".repeat(64) });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, useCaseGateMode: "off", requireProjectAttribution: false });
 
   const mk = async (tag: string) => {
     const u = await app.inject({
@@ -207,6 +211,7 @@ afterAll(async () => {
     method: "PUT", url: "/v1/interception/settings", headers: AUTH,
     payload: { anthropicCompatEnabled: false, openaiCompatEnabled: false },
   });
+  await restoreSb2Gates();
   await app.close();
 });
 

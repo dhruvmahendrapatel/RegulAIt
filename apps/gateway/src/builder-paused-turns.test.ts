@@ -43,6 +43,9 @@ import { escapeSlackText, slackSignature } from "@regulait/shared";
 import { builderKit, type BuilderKit, type Person } from "./testing/builder-fixture.js";
 import { backgroundWorkInFlight, drainBackgroundWork } from "./background-work.js";
 import { resolveToolbox, toolNames } from "./builder-tools.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 let k: BuilderKit;
 let owner: Person;
@@ -140,6 +143,7 @@ async function colleague(label: string, tools: ToolName[]) {
 
 beforeAll(async () => {
   k = await builderKit("bld-pause");
+  restoreSb2Gates = await relaxGovernanceGatesForTest(k.db, { mrmEnforced: false, dispatchAttributionRequired: false, requireMcpAttribution: false });
   owner = await k.person("owner");
   admin = await k.person("admin", { admin: true });
   approver = await k.person("approver");
@@ -234,6 +238,7 @@ afterAll(async () => {
   if (createdEgressEntry) await k.db.delete(egressAllowHosts).where(eq(egressAllowHosts.host, "127.0.0.1"));
   upstream.closeAllConnections();
   await new Promise<void>((r) => upstream.close(() => r()));
+  await restoreSb2Gates();
   await k.close();
 });
 

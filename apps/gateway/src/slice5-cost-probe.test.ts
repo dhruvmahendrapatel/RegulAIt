@@ -17,6 +17,9 @@ import {
 } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { executeGovernedToolCall } from "./mcp-proxy.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 /**
  * SLICE-5 ADVERSARIAL PROBE — the pillar-5/pillar-6 invariant, attacked at the
@@ -159,6 +162,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
   const up = await startUpstream();
   upstreamClose = up.close;
   const s = await app.inject({ method: "POST", headers: AUTH, url: "/v1/servers", payload: { name: "s5-server", url: up.url } });
@@ -172,6 +176,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await upstreamClose();
   app.server.closeAllConnections();
+  await restoreSb2Gates();
   await app.close();
 });
 

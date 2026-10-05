@@ -41,6 +41,9 @@ import { buildApp } from "./app.js";
 import { governedEvaluate } from "./governed-evaluate.js";
 import { abacPrincipalFromRequest } from "./abac-principal.js";
 import { assembleAbacRequest, loadActiveAbacPolicies } from "./abac.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -139,6 +142,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { requirePreviewBeforeActivate: false });
 
   userId = await mkUser("abac-pat@example.com");
   approverId = await mkUser("abac-ada@example.com");
@@ -194,6 +198,7 @@ afterAll(async () => {
   await db.delete(abacPolicies);
   if (ORIGINAL_TZ === undefined) delete process.env.TZ;
   else process.env.TZ = ORIGINAL_TZ;
+  await restoreSb2Gates();
   await app?.close();
 });
 

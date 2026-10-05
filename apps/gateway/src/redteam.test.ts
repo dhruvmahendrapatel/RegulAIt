@@ -26,6 +26,9 @@ import {
   type RedTeamProbeOutcome,
 } from "@regulait/shared";
 import { buildApp } from "./app.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 /**
  * ADR-0057 — CONTINUOUS RED-TEAMING, proved by attack.
@@ -127,6 +130,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
 
   const rhea = await makeUser("rt-rhea@example.com");
   rheaId = rhea.id;
@@ -188,6 +192,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await setSystemPrompt(subjectAgentId, null);
+  await restoreSb2Gates();
 });
 
 // ===========================================================================

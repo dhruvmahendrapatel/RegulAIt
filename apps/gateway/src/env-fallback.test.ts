@@ -11,6 +11,9 @@ import {
 } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { platformEnvKey } from "./agents-connectors.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 /**
  * The platform-key ENV FALLBACK: a self-hosted / single-tenant box can activate
@@ -95,6 +98,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, keyCustodyEnforced: false });
 
   // ADR-0034 amendment — model-credential / env `baseUrl` overrides are now
   // behind the default-deny egress guard. This suite points one at a loopback
@@ -169,6 +173,7 @@ afterAll(async () => {
   for (const name of PROVIDER_ENV_VARS) {
     if (ORIG_ENV[name] !== undefined) process.env[name] = ORIG_ENV[name];
   }
+  await restoreSb2Gates();
 });
 
 describe("platformEnvKey helper", () => {

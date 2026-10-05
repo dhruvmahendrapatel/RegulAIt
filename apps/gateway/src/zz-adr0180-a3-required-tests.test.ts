@@ -51,6 +51,9 @@ import {
 import { buildApp } from "./app.js";
 import { agentConfigHash } from "./evals.js";
 import { requiredTestStatus, requiredTestsMonitorInput } from "./required-tests.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -177,6 +180,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "a".repeat(64) });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
   for (const [k, isAdmin] of [["admin", true], ["member", false]] as const) {
     const u = await inject("POST", "/v1/users", AUTH, { email: `a3-${k}-${RUN}@example.com`, displayName: `a3 ${k} ${RUN}`, isAdmin });
     expect(u.statusCode, u.body).toBe(201);
@@ -210,6 +214,7 @@ afterAll(async () => {
   if (libraryId) await db.delete(redteamLibraries).where(eq(redteamLibraries.id, libraryId));
   if (datasetId) await db.delete(evalDatasets).where(eq(evalDatasets.id, datasetId));
   app.server.closeAllConnections();
+  await restoreSb2Gates();
   await app.close();
 });
 

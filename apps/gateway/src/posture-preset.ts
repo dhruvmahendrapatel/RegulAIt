@@ -122,8 +122,8 @@ const SETTABLE: ReadonlyArray<{
       "project. READ THE SCOPE: there are THREE independent attribution switches, and hardening " +
       "sets one. `interception_settings.require_project_attribution` guards the IDE/compat edge " +
       "and `interception_settings.require_mcp_attribution` guards the MCP proxy; neither is part " +
-      "of this preset, so a hardened deployment still accepts an unattributed MCP tool call or " +
-      "compat request until you set them too.",
+      "of this preset. All three are ON by default (ADR-0181), so an unattributed MCP tool call or " +
+      "compat request is refused unless an admin has relaxed that switch.",
   },
   {
     key: "semanticCachePolicy",

@@ -14,6 +14,9 @@ import {
 } from "@regulait/db";
 import { lineageNaturalKey } from "@regulait/shared";
 import { buildApp } from "./app.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 /**
  * ADR-0050 — the DATA-LINEAGE / PROVENANCE GRAPH, proved by attack.
@@ -167,6 +170,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "b".repeat(64) });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
 
   const o = await mkUser("lin-owner@example.com");
   ownerId = o.id;
@@ -274,6 +278,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   app.server.closeAllConnections();
+  await restoreSb2Gates();
   await app.close();
   // lineage nodes/edges cascade with the project
   const ids = [projectId, secretProjectId].filter(Boolean);

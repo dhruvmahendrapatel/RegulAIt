@@ -9,10 +9,10 @@
  * no project."* This file pins the knob that closes it, and pins the
  * composition of the two knobs so nobody has to guess at a precedence rule:
  *
- *  1. DEFAULT-OFF IS BYTE-IDENTICAL. With `dispatchAttributionRequired`
- *     untouched, the EXACT projectless dispatch that refuses when it is on
- *     succeeds, reaches the provider, and writes ZERO rows under the gate's
- *     ruleId (a delta, M-008).
+ *  1. SHIPS ON (ADR-0181); RELAXED OFF IS BYTE-IDENTICAL. With
+ *     `dispatchAttributionRequired` relaxed by an admin, the EXACT projectless
+ *     dispatch that refuses when it is on succeeds, reaches the provider, and
+ *     writes ZERO rows under the gate's ruleId (a delta, M-008).
  *  2. ON REFUSES PRE-PROVIDER. 409 `attribution_required` with a recording
  *     provider spy at ZERO calls for that attempt, and one audited deny.
  *  3. ON + ATTRIBUTED PASSES. The mandate only ever looks at calls naming NO
@@ -32,6 +32,9 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { auditLog, count, createDb, eq, orgSettings, runMigrations, type Db } from "@regulait/db";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 declare global {
   // eslint-disable-next-line no-var
@@ -131,6 +134,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false });
 
   const [org] = await db.select().from(orgSettings);
   priorAttribution = org?.dispatchAttributionRequired ?? null;
@@ -210,22 +214,24 @@ afterAll(async () => {
   await db
     .update(orgSettings)
     .set({
-      dispatchAttributionRequired: priorAttribution ?? false,
-      useCaseGateMode: (priorGateMode ?? "off") as "off" | "warn" | "enforce",
+      dispatchAttributionRequired: priorAttribution ?? true,
+      useCaseGateMode: (priorGateMode ?? "enforce") as "off" | "warn" | "enforce",
     })
     .where(eq(orgSettings.id, "singleton"));
+  await restoreSb2Gates();
   await app.close();
   await db.$client.end();
 });
 
-describe("default off — byte-identical (the entire safety argument)", () => {
-  it("ships off: the settings read reports dispatchAttributionRequired false", async () => {
+describe("ships on (ADR-0181); relaxed off — byte-identical", () => {
+  it("ships on: the settings read reports dispatchAttributionRequired true", async () => {
     const res = await app.inject({ method: "GET", url: "/v1/org/settings", headers: AUTH });
     expect(res.statusCode).toBe(200);
-    expect(res.json().settings.dispatchAttributionRequired).toBe(false);
+    expect(res.json().settings.dispatchAttributionRequired).toBe(true);
   });
 
-  it("the projectless dispatch that refuses when ON passes untouched: 200, provider called, ZERO gate audit rows", async () => {
+  it("relaxed off, the projectless dispatch that refuses when ON passes untouched: 200, provider called, ZERO gate audit rows", async () => {
+    await setKnobs({ attribution: false });
     const before = await auditCount(GATE_RULE);
     resetProviderCalls();
 
@@ -265,6 +271,9 @@ describe("on — refused BEFORE any provider work", () => {
   });
 
   it("the SAME dispatch, attributed, passes — the mandate only looks at calls naming no project", async () => {
+    // the linked project's use case is unapproved: relax the OTHER knob (ADR-0181
+    // ships it enforce) so this test is about the mandate alone
+    await setKnobs({ useCaseGateMode: "off" });
     const before = await auditCount(GATE_RULE);
     resetProviderCalls();
 

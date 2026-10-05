@@ -22,6 +22,9 @@ import {
 import { resolveModelProvider, type MockModelProvider } from "@regulait/model-provider";
 import { buildApp } from "./app.js";
 import { PROJECT_HEADER } from "./mcp-proxy.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 /**
  * ADR-0023 — the wave-3 SCHEMA-OWNING slice, end to end at the gateway edge.
@@ -214,6 +217,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, requireProjectAttribution: false, requireMcpAttribution: false });
   gatewayUrl = await app.listen({ port: 0, host: "127.0.0.1" });
   mock = resolveModelProvider({ provider: "mock" }) as MockModelProvider;
   mcpUpstream = await startMcpUpstream();
@@ -339,6 +343,7 @@ afterAll(async () => {
     .set({ anthropicCompatEnabled: false })
     .where(eq(interceptionSettings.id, INTERCEPTION_SETTINGS_ID));
   app.server.closeAllConnections();
+  await restoreSb2Gates();
   await app.close();
   await mcpUpstream.close();
   await snowUpstream.close();

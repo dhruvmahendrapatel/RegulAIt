@@ -13,6 +13,9 @@ import {
 } from "@regulait/db";
 import { resolveModelProvider, type MockModelProvider } from "@regulait/model-provider";
 import { buildApp } from "./app.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 /**
  * ADR-0020 §5 amendment (2026-07-31) — the COMPAT LONG TAIL, end to end:
@@ -99,6 +102,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, requireProjectAttribution: false });
   mock = resolveModelProvider({ provider: "mock" }) as MockModelProvider;
 
   const u = await app.inject({
@@ -144,6 +148,7 @@ afterAll(async () => {
     .set({ anthropicCompatEnabled: false, openaiCompatEnabled: false })
     .where(eq(interceptionSettings.id, INTERCEPTION_SETTINGS_ID));
   app.server.closeAllConnections();
+  await restoreSb2Gates();
   await app.close();
 });
 

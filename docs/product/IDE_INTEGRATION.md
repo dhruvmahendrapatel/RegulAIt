@@ -45,10 +45,13 @@ Everything below is in the admin portal under **Identity & Access → Client Acc
 | `openaiCompatEnabled` | **off** | Exposes `POST /v1/chat/completions` (OpenAI Chat Completions shape). |
 | `mcpInterceptionEnabled` | **on** | Exposes `POST /mcp/:serverId`. |
 | `resolutionMode` | `map_by_model` | How an IDE's `model` string resolves onto a governed agent. |
-| `enforcementPosture` | `voluntary` | Which ladder rung you declare you are on. The portal labels each rung with its **real** status — honor system / policy / enforced / declared-but-not-enforced. |
-| `requireProjectAttribution` | **off** | Reject a compat call with no `x-regulait-project-id` rather than run it unattributed. |
-| `requireMcpAttribution` | **off** | The MCP twin: reject an MCP tool call with no `x-regulait-project-id` rather than run it into the Unattributed bucket. |
-| `keyCustodyEnforced` | **off** | Make the `key_custody` rung real: per-user BYO model credentials 409 and are skipped at dispatch — org/platform credentials only. Reversible. |
+| `enforcementPosture` | `managed` | Which ladder rung you declare you are on. The portal labels each rung with its **real** status — honor system / policy / enforced / declared-but-not-enforced. |
+| `requireProjectAttribution` | **on** | Reject a compat call with no `x-regulait-project-id` rather than run it unattributed. |
+| `requireMcpAttribution` | **on** | The MCP twin: reject an MCP tool call with no `x-regulait-project-id` rather than run it into the Unattributed bucket. |
+| `keyCustodyEnforced` | **on** | Make the `key_custody` rung real: per-user BYO model credentials 409 and are skipped at dispatch — org/platform credentials only. Reversible. |
+
+The last four are strict by default (ADR-0181). An admin may relax any of them on the same `PUT`;
+the audit row records the old and the new value.
 
 **Both compat surfaces are OFF by default.** A new arrival surface is something you opt into. While
 off, the endpoint returns an ordinary 404 — indistinguishable from a route that does not exist. We
@@ -110,15 +113,16 @@ Send `x-regulait-project-id: <uuid>` — the same header on both the compat surf
 proxy. The project is validated exactly as the invoke path validates `projectId`: a malformed id
 is a 400, a project you may not bill to is a 403.
 
-Two admin toggles close the unattributed gap **entirely** for deployments that want the
-guarantee rather than the visibility:
+Two admin toggles close the unattributed gap **entirely**, and both are **on by default**
+(ADR-0181):
 
 - `requireProjectAttribution` **on** → a compat call without the header is rejected outright
-  (400 `project_attribution_required`) instead of running as unattributed spend. Only enable it
-  for clients that can send custom headers on model calls (see the coverage matrix).
+  (400 `project_attribution_required`) instead of running as unattributed spend. A client that
+  cannot send custom headers on model calls (see the coverage matrix) needs it relaxed to off — an
+  audited admin change, after which its calls land in the Unattributed bucket.
 - `requireMcpAttribution` **on** → an MCP call without the header is rejected pre-dispatch
   (400 `mcp_attribution_required`, audited). MCP clients set the header once on the transport,
-  so this one is safe for any MCP-capable client.
+  so this one suits any MCP-capable client.
 
 ---
 
@@ -239,8 +243,9 @@ MCP, in `.cursor/mcp.json`:
 }
 ```
 
-Cursor sends no custom headers on **model** calls — with `requireProjectAttribution` on, its
-completions would be rejected. Attribute its **tool** calls via the MCP header instead.
+Cursor sends no custom headers on **model** calls — with `requireProjectAttribution` on (the default),
+its completions are rejected until an admin relaxes it (audited). Attribute its **tool** calls via
+the MCP header instead.
 
 ### Cline / Roo Code
 
@@ -276,7 +281,7 @@ For the Anthropic shape use `provider: anthropic` and `apiBase: BASE`.
 ```
 
 The API key is entered in Zed's agent panel. Zed cannot attach custom headers to model calls —
-leave `requireProjectAttribution` off for it.
+`requireProjectAttribution` (on by default) has to be relaxed for it, an audited admin change.
 
 ### Generic Anthropic-compatible
 

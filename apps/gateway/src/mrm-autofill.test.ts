@@ -25,6 +25,9 @@ import {
   MRM_AUTOFILL_NOTE,
   MRM_AUTOFILL_UNMEASURED_REDTEAM,
 } from "./mrm-autofill.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 /**
  * ADR-0086 — MODEL-CARD AUTOFILL FROM THE LEDGERS, proved by attack.
@@ -166,6 +169,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
 
   const mara = await makeUser("mrmaf-mara@example.com");
   maraId = mara.id;
@@ -251,6 +255,7 @@ afterAll(async () => {
     await db.delete(modelCardApprovals).where(inArray(modelCardApprovals.cardId, myCardIds));
     await db.delete(modelCards).where(inArray(modelCards.id, myCardIds));
   }
+  await restoreSb2Gates();
 });
 
 // ---------------------------------------------------------------------------

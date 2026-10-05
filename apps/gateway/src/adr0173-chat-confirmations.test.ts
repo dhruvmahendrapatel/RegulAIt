@@ -41,6 +41,9 @@ import { builderKit, type BuilderKit, type Person } from "./testing/builder-fixt
 import { drainBackgroundWork } from "./background-work.js";
 import { resolveToolbox } from "./builder-tools.js";
 import { builderAgents, builderMessages } from "@regulait/db";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 let k: BuilderKit;
 let admin: Person;
@@ -259,6 +262,7 @@ let agent: { id: string; toolName: string };
 beforeAll(async () => {
   process.env.REGULAIT_TEAMS_BOT_JWKS_COOLDOWN_SECONDS = "0";
   k = await builderKit("p2bl-chat");
+  restoreSb2Gates = await relaxGovernanceGatesForTest(k.db, { mrmEnforced: false, dispatchAttributionRequired: false });
   APP_ID = `bot-app-${k.RUN}`;
   admin = await k.person("admin", { admin: true });
   owner = await k.person("owner");
@@ -381,6 +385,7 @@ afterAll(async () => {
   if (createdEgressEntry) await k.db.delete(egressAllowHosts).where(eq(egressAllowHosts.host, "127.0.0.1"));
   upstream.closeAllConnections();
   await new Promise<void>((resolve) => upstream.close(() => resolve()));
+  await restoreSb2Gates();
   await k.close();
 });
 

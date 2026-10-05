@@ -53,6 +53,9 @@ import {
   runMigrations,
   type Db,
 } from "@regulait/db";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 declare global {
   // eslint-disable-next-line no-var
@@ -137,6 +140,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
   // hermetic default-deny: start from the shipped empty allow-list
   await db.delete(egressAllowHosts);
 
@@ -211,6 +215,7 @@ beforeAll(async () => {
 afterAll(async () => {
   srv.closeAllConnections();
   await new Promise<void>((r) => srv.close(() => r()));
+  await restoreSb2Gates();
   await app.close();
 });
 

@@ -103,6 +103,9 @@ vi.mock("@regulait/model-provider", async (importOriginal) => {
 
 const { buildApp } = await import("./app.js");
 import { installLicenseFixture, removeLicenseFixture } from "./testing/license-fixture.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -239,6 +242,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
   // ADR-0052 §4: decompose is tier-gated on `advanced_orchestration`, now
   // enforced at the route — run under a real signed license granting it
   // (removed in afterAll; the deployment ends UNLICENSED as it started).
@@ -317,6 +321,7 @@ afterAll(async () => {
     if (ORIG_ENV[name] !== undefined) process.env[name] = ORIG_ENV[name];
     else delete process.env[name];
   }
+  await restoreSb2Gates();
 });
 
 describe("B6a — the compaction SUMMARIZER roster is mock-narrowed", () => {

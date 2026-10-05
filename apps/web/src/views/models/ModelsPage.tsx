@@ -15,11 +15,11 @@ import { Link, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api, ApiError, codeSentence } from "../../api/client";
 import type { AdminAgent } from "../../api/adminTypes";
-import type { InvokeResult, MyAgentsResponse, ProviderStatusResponse } from "../../api/types";
+import type { InvokeResult, MyAgentsResponse, Project, ProviderStatusResponse } from "../../api/types";
 import { fmtUsd } from "../../api/format";
 import { useSession } from "../../session/SessionContext";
 import { PageHeader } from "../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, ErrorState, Input, SkeletonBlock, Tabs, Textarea } from "../../ui/kit";
+import { Badge, Button, Card, EmptyState, ErrorState, Input, Select, SkeletonBlock, Tabs, Textarea } from "../../ui/kit";
 import { ModelTileBody } from "../../ui/ModelPicker";
 import { Logo } from "../../ui/logos/Logo";
 import { useToast } from "../../ui/toast";
@@ -200,6 +200,16 @@ function TryIt(props: { binding: ModelBinding | null; bindings: ModelBinding[]; 
   const [copied, setCopied] = useState<SnippetTab | null>(null);
   const [run, setRun] = useState<RunState>({ kind: "idle" });
   const [runFor, setRunFor] = useState<string | null>(null);
+  // ADR-0181: a governed dispatch must name a project unless an admin has
+  // relaxed that, so Run bills to one of the person's projects (the first, by
+  // default) and says so; "no project" stays available for a relaxed deployment
+  const projectsQ = useQuery({
+    queryKey: ["projects"],
+    queryFn: () => api.get<{ projects: Project[] }>("/v1/projects"),
+  });
+  const projects = projectsQ.data?.projects ?? [];
+  const [billTo, setBillTo] = useState<string | null>(null);
+  const projectId = billTo ?? projects[0]?.id ?? "";
 
   const snippets = useMemo(
     () => (b ? buildSnippets({ base: window.location.origin, agentId: b.id, model: b.model, name: b.name, prompt }) : null),
@@ -239,6 +249,7 @@ function TryIt(props: { binding: ModelBinding | null; bindings: ModelBinding[]; 
         mode: "execute",
         input: prompt.trim(),
         dispatch: true,
+        ...(projectId ? { projectId } : {}),
       });
       setRun({ kind: "ok", result, latencyMs: performance.now() - t0 });
     } catch (e) {
@@ -310,6 +321,22 @@ function TryIt(props: { binding: ModelBinding | null; bindings: ModelBinding[]; 
         <Textarea id="models-request" rows={3} value={prompt} onChange={(e) => setPrompt(e.target.value)} />
       </div>
 
+      {projects.length > 0 && (
+        <div className={s.fieldBlock}>
+          <label className={s.label} htmlFor="models-bill-to">
+            Bill to
+          </label>
+          <Select id="models-bill-to" value={projectId} onChange={(e) => setBillTo(e.target.value)}>
+            {projects.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+            <option value="">no project</option>
+          </Select>
+        </div>
+      )}
+
       <div className={s.codeHead}>
         <Tabs tabs={SNIPPET_TABS} active={tab} onChange={(id) => setTab(id as SnippetTab)} />
         <span className={s.grow} />
@@ -326,7 +353,9 @@ function TryIt(props: { binding: ModelBinding | null; bindings: ModelBinding[]; 
       <p className={s.hint}>
         Calls from code use your own RegulAIt API key, read from <span className={s.mono}>{KEY_ENV}</span> — no key
         is ever shown here. The <span className={s.mono}>x-regulait-agent-id</span> header pins this exact model
-        binding. These endpoints answer once an admin has enabled them under Client access.
+        binding. These endpoints answer once an admin has enabled them under Client access, and they require an{" "}
+        <span className={s.mono}>x-regulait-project-id</span> header naming one of your projects unless an admin has
+        relaxed that.
       </p>
 
       <div className={s.runRow}>

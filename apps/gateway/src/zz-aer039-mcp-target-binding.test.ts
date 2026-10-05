@@ -39,6 +39,9 @@ import { and, approvals, asc, auditLog, createDb, desc, eq, inArray, mcpServers,
 import { buildApp } from "./app.js";
 import { governedEvaluate } from "./governed-evaluate.js";
 import { executeGovernedToolCall } from "./mcp-proxy.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -217,6 +220,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "e".repeat(64) });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { requireMcpAttribution: false });
   gatewayUrl = await app.listen({ port: 0, host: "127.0.0.1" });
   upstream.A = await startUpstream("A");
   upstream.B = await startUpstream("B");
@@ -232,6 +236,7 @@ afterAll(async () => {
   // weight in every later estate-wide sweep (ADR-0100 re-scan, health probe)
   if (createdServerIds.length > 0) await db.delete(mcpServers).where(inArray(mcpServers.id, createdServerIds));
   app.server.closeAllConnections();
+  await restoreSb2Gates();
   await app.close();
   await upstream.A.close();
   await upstream.B.close();

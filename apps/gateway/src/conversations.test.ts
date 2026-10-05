@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, afterAll } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -12,6 +12,9 @@ import {
 } from "@regulait/db";
 import { resolveModelProvider, type MockModelProvider } from "@regulait/model-provider";
 import { buildApp } from "./app.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 /**
  * Multi-turn conversations end to end: create → dispatch twice with history →
@@ -87,6 +90,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
   // the gateway resolves "mock" to the module-shared instance, so the test
   // can read the exact wire shape each governed dispatch produced
   mock = resolveModelProvider({ provider: "mock" }) as MockModelProvider;
@@ -611,4 +615,8 @@ describe("S21 — listing conversations filtered by project", () => {
     const r = await app.inject({ method: "GET", headers: miaAuth, url: "/v1/conversations?projectId=not-a-uuid" });
     expect(r.statusCode).toBe(400);
   });
+});
+
+afterAll(async () => {
+  await restoreSb2Gates();
 });

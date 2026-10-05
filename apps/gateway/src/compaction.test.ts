@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, afterAll } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -17,6 +17,9 @@ import {
   type MockModelProvider,
 } from "@regulait/model-provider";
 import { buildApp } from "./app.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 /**
  * PILLAR 6 §5 — automatic context compaction, end to end: drive a thread past
@@ -131,6 +134,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
   mock = resolveModelProvider({ provider: "mock" }) as MockModelProvider;
 
   const nora = await makeUser("compact-nora@example.com", "Compact Nora");
@@ -378,4 +382,8 @@ describe("fail-open — a failing summarizer never fails the user's turn", () =>
     expect(msgs.filter((m) => m.role === "user").map((m) => m.content)[0]).toBe(poison);
     expect(msgs.length % 2).toBe(0); // strict user/assistant pairs, nothing dropped
   });
+});
+
+afterAll(async () => {
+  await restoreSb2Gates();
 });

@@ -3,10 +3,12 @@
  * ADR-0080 named out loud rather than shipping by implication ("approval
  * registers intent; it does not yet gate dispatch — the obvious next step").
  *
- * The org opt-in `org_settings.use_case_gate_mode` (migration 0098) arms it:
+ * `org_settings.use_case_gate_mode` (migration 0098) arms it. ADR-0181
+ * (migration 0158) made `enforce` the default; an admin may relax it on the
+ * audited PUT /v1/org/settings:
  *
- *   off      (default) BYTE-IDENTICAL to the shipped behaviour. An
- *            unattributed dispatch does not even read the settings row here.
+ *   off      approval registers intent and gates nothing. An unattributed
+ *            dispatch does not even read the settings row here.
  *   warn     the dispatch proceeds; the refusal-shaped fact is recorded —
  *            an `use-case-gate-warned` audit row plus a `useCaseGate`
  *            annotation on the dispatch result. Nothing is blocked.
@@ -46,11 +48,10 @@ import { loadOrgSettings } from "./org-settings.js";
  *
  * `org_settings.dispatch_attribution_required` is that mandate:
  *
- *   false  (default) BYTE-IDENTICAL to the shipped behaviour. An unattributed
- *          governed dispatch runs and its cost lands in the explicit
- *          "Unattributed" bucket (GET /v1/costs/unattributed) — pillar 5's
- *          deliberate opt-in posture, visible rather than hidden.
- *   true   a governed dispatch that names NO `projectId` is refused 409
+ *   false  (an audited admin relaxation) an unattributed governed dispatch
+ *          runs and its cost lands in the explicit "Unattributed" bucket
+ *          (GET /v1/costs/unattributed), visible rather than hidden.
+ *   true   (the ADR-0181 default) a governed dispatch that names NO `projectId` is refused 409
  *          `attribution_required`, audited, before ANY provider work, cost or
  *          content processing — the same rung, the same shape, as ADR-0045's
  *          MRM gate and the use-case gate beside it.

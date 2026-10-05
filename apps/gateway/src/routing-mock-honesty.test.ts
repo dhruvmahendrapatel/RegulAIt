@@ -13,6 +13,9 @@ import {
   usageEvents,
   type Db,
 } from "@regulait/db";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 /**
  * B1.5 F1 — MOCK-AGENT ROUTING HONESTY (owner-experienced defect,
@@ -176,6 +179,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
 
   const liv = await makeUser("rmh-liv@example.com");
   livId = liv.id;
@@ -230,6 +234,7 @@ afterAll(async () => {
     if (ORIG_ENV[name] !== undefined) process.env[name] = ORIG_ENV[name];
     else delete process.env[name];
   }
+  await restoreSb2Gates();
 });
 
 describe("F1 — a mock is not a routing candidate while a credentialed live agent can serve", () => {

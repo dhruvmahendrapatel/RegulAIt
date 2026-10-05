@@ -41,6 +41,9 @@ import {
 import { buildApp } from "./app.js";
 import { encryptSecret } from "./secrets.js";
 import { checkCredentialBaseUrl } from "./credential-egress.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -115,6 +118,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, keyCustodyEnforced: false });
   // HERMETIC DEFAULT-DENY. Every suite shares one database (fileParallelism is
   // off) and several of them now legitimately allow-list 127.0.0.1 for their
   // own fake endpoints. A file whose whole subject is "what is refused" cannot
@@ -200,6 +204,7 @@ afterAll(async () => {
   redirectSrv.closeAllConnections();
   await new Promise<void>((r) => srv.close(() => r()));
   await new Promise<void>((r) => redirectSrv.close(() => r()));
+  await restoreSb2Gates();
 });
 
 // ---------------------------------------------------------------------------

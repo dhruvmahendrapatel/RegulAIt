@@ -149,6 +149,10 @@ for (const server of servers) {
 
 // ── 2. Model cards, so mrmEnforced does not refuse the happy path ─────────
 //
+// ADR-0181: mrmEnforced is on by default, so the SEED already gives these
+// agents their cards (demo-strict-governance.ts) before its first dispatch;
+// on a seeded database this step finds them live and changes nothing.
+//
 // MRM is keyed PER AGENT, not per model string: two agents on one model need
 // two cards. It is also recomputed from `validUntil` on every dispatch rather
 // than read from a stored status, so a card that expires mid-demo really does
@@ -558,7 +562,8 @@ ${blocked
   to present that row rather than apologise for it.`
 }
 
-  THE HAPPY PATH, measured either side of the preset:
+  THE HAPPY PATH, measured either side of the preset (the use-case gate is
+  'enforce' by default, so a proposed linked use case refuses both):
     before hardening   POST /v1/agents/balanced-mock/invoke -> ${preHarden}
     after  hardening   POST /v1/agents/balanced-mock/invoke -> ${postHarden}${
       postHarden !== "200" && postHardenBody?.error
@@ -641,10 +646,11 @@ ${blocked
   DO NOT, on this environment:
     · demo the optimisation cache (deliberately left off — a cached answer
       looks like a fast model and is not one);
-    · claim hardening blocks unattributed calls everywhere. It binds the
-      NATIVE dispatch only. The MCP proxy and the compat edge have their own
-      switches and this preset sets neither — the posture page says so in the
-      attribution control's own text, so read it rather than talking past it.
+    · credit the preset with blocking unattributed calls. The native dispatch,
+      the MCP proxy and the compat edge each have their own switch; all three
+      are ON by default (ADR-0181) and the preset sets only the native one —
+      the posture page says so in the attribution control's own text. An MCP
+      call needs the x-regulait-project-id header on its transport.
 `);
 
 await app.close();

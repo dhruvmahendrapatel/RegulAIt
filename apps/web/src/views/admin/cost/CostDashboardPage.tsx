@@ -236,7 +236,7 @@ function ProjectRollup(props: { projectId: string; projectName: string }) {
               <span className={v.faint}>
                 budget window:{" "}
                 {b.period === "monthly" ? `this calendar month (${b.periodKey ?? ""})` : "lifetime"} · alert
-                at {b.alertThresholdPct ?? 100}%
+                at {b.alertThresholdPct ?? 80}%
               </span>
             </div>
           )}
@@ -440,7 +440,7 @@ function CreateProjectCard() {
           </Select>
         </Field>
         <Field label="Alert threshold %">
-          <Input type="number" value={f.alertThresholdPct} onChange={(e) => set("alertThresholdPct", e.target.value)} placeholder="e.g. 80 (default 100)" />
+          <Input type="number" value={f.alertThresholdPct} onChange={(e) => set("alertThresholdPct", e.target.value)} placeholder="default 80" />
         </Field>
         <Field label="Context arbiter">
           <Select value={f.arbiterUserId} onChange={(e) => set("arbiterUserId", e.target.value)}>

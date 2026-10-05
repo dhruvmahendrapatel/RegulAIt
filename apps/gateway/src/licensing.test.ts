@@ -27,6 +27,9 @@ import {
 } from "@regulait/db";
 import { LICENSE_SCHEMA_ID, canonicalLicenseBytes, licenseDocumentSchema } from "@regulait/shared";
 import { verifyLicenseArtifact } from "./licensing.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 /**
  * ADR-0052 — LICENSING & SEATS, proved by attack.
@@ -179,6 +182,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
 
   const u = await makeUser("lic-member@example.com");
   expect(u.statusCode).toBe(201);
@@ -206,6 +210,7 @@ afterAll(async () => {
   if (prevKeyring === undefined) delete process.env.REGULAIT_LICENSE_KEYRING;
   else process.env.REGULAIT_LICENSE_KEYRING = prevKeyring;
   rmSync(keyring, { recursive: true, force: true });
+  await restoreSb2Gates();
 });
 
 describe("ADR-0052 — a valid license verifies OFFLINE", () => {

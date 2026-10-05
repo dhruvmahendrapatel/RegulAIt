@@ -14,6 +14,9 @@ import { approvalArgumentsDigest } from "@regulait/shared";
 import { resolveModelProvider, type MockModelProvider } from "@regulait/model-provider";
 import { buildApp } from "./app.js";
 import { currentPeriodKey } from "./projects.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -143,6 +146,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "a".repeat(64) });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, requireMcpAttribution: false, keyCustodyEnforced: false });
 
   upstream = await startUpstream();
 
@@ -216,6 +220,7 @@ afterAll(async () => {
   try {
     try {
       app?.server.closeAllConnections();
+  await restoreSb2Gates();
       await app?.close();
     } finally {
       await upstream?.close();
@@ -5914,10 +5919,10 @@ describe("per-project cost rollup (pillar 5): attribution, dashboard, budget enf
       payload: { name: "patch-period", budgetUsd: 4, budgetApproverUserId: finnId },
     });
     const pId = proj.json().id;
-    // default: lifetime, threshold 100
+    // default: lifetime, threshold 80 (ADR-0181)
     const before = await app.inject({ method: "GET", headers: AUTH, url: `/v1/projects/${pId}/costs` });
     expect(before.json().budget.period).toBe("none");
-    expect(before.json().budget.alertThresholdPct).toBe(100);
+    expect(before.json().budget.alertThresholdPct).toBe(80);
 
     const patched = await app.inject({
       method: "PATCH", headers: AUTH, url: `/v1/projects/${pId}`,

@@ -168,6 +168,16 @@ export interface MrmGateContext {
   model: string | null;
   customProviderId: string | null;
   projectId?: string | null;
+  /**
+   * ADR-0181: the dispatch is an EVALUATION — an eval-suite case, its judge, or
+   * a red-team probe (the server-side `evals` model feature; no HTTP caller
+   * can set it). Staleness-forces-recertification does not refuse these: the
+   * evidence a recertification needs is exactly what they produce, and a run
+   * started after certification is itself ledger drift, so refusing them would
+   * let no certified card ever be re-tested. The base gate (an approved,
+   * unexpired card) still applies to them in full.
+   */
+  evaluation?: boolean;
 }
 
 /**
@@ -175,8 +185,8 @@ export interface MrmGateContext {
  * proceed; a refusal object (already audited) when it may not.
  *
  * The org toggle is read FIRST and short-circuits: with `mrmEnforced` false
- * this costs one settings read and nothing else changes — the byte-identical
- * default ADR-0045 §4 promises.
+ * (an audited admin relaxation; ADR-0181 made true the default) this costs
+ * one settings read and nothing else changes.
  */
 export async function mrmDispatchGate(
   db: Db,
@@ -204,8 +214,8 @@ export async function mrmDispatchGate(
   if (decision.allowed) {
     // ADR-0086 §3's named follow-up (batch B3) — STALENESS FORCES
     // RECERTIFICATION, as an org opt-in DEEPENING this same gate rather than
-    // forking a second one. Default off = ADR-0086 exactly as shipped
-    // (staleness informs, gates nothing), and the knob is meaningful only
+    // forking a second one. On by default (ADR-0181); off = ADR-0086 as first
+    // shipped (staleness informs, gates nothing), and the knob is meaningful only
     // here, inside the mrmEnforced gate — with enforcement off there is no
     // gate to deepen. When armed: the live card's ledger drift since its
     // last granting decision (computeCardStaleness — the ONE staleness
@@ -230,6 +240,32 @@ export async function mrmDispatchGate(
       0,
     );
     if (totalChanges < org.mrmStalenessRecertThreshold) return null;
+    if (ctx.evaluation) {
+      // ADR-0181: recorded, not refused — see `MrmGateContext.evaluation`
+      await db.insert(auditLog).values({
+        userId: ctx.userId,
+        objectType: "model_card",
+        objectId: liveCard.id,
+        detail: {
+          phase: "dispatch",
+          agentId: ctx.agentId,
+          agentName: ctx.agentName,
+          mrmReason: "staleness_evaluation_allowed",
+          modelCardId: liveCard.id,
+          stalenessThreshold: org.mrmStalenessRecertThreshold,
+          staleness: { lastCertifiedAt: staleness.lastCertifiedAt, totalChanges, summary: staleness.summary },
+          ...(ctx.projectId ? { projectId: ctx.projectId } : {}),
+        },
+        effect: "allow",
+        ruleId: "mrm-staleness-evaluation-allowed",
+        ruleChain: [],
+        reason:
+          `model card '${liveCard.intendedUse}' is STALE (${totalChanges} ledger change(s) since certification) — ` +
+          "this evaluation dispatch was allowed so the evidence a recertification needs can be gathered; " +
+          "production dispatch stays refused until the card is recertified",
+      });
+      return null;
+    }
     const detail =
       `the risk sign-off on model card '${liveCard.intendedUse}' is live but STALE: ` +
       `${staleness.summary} (${totalChanges} ledger change(s) since certification on ` +
@@ -568,7 +604,7 @@ export function registerMrmRoutes(app: FastifyInstance, db: Db) {
     return {
       enforced: org.mrmEnforced,
       warnDays: org.mrmExpiryWarnDays,
-      /** ADR-0086 §3's follow-up (batch B3): off by default; deepens the
+      /** ADR-0086 §3's follow-up (batch B3): ON by default (ADR-0181); deepens the
        * dispatch gate (mrmEnforced) — with enforcement off it gates nothing */
       stalenessRecertEnabled: org.mrmStalenessRecertEnabled,
       stalenessRecertThreshold: org.mrmStalenessRecertThreshold,
@@ -1057,7 +1093,7 @@ export function registerMrmRoutes(app: FastifyInstance, db: Db) {
         enforced: z.boolean(),
         warnDays: z.number().int().min(0).max(3650).optional(),
         /** ADR-0086 §3's follow-up (batch B3): staleness-forces-
-         * recertification. Per-org, default off, meaningful only while
+         * recertification. Per-org, default ON (ADR-0181), meaningful only while
          * `enforced` is on (it deepens this gate; it creates none). */
         stalenessRecertEnabled: z.boolean().optional(),
         stalenessRecertThreshold: z.number().int().min(1).max(100000).optional(),

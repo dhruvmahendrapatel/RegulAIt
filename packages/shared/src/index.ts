@@ -1268,7 +1268,8 @@ export const createProjectSchema = z
     /** pillar-5 budget window: 'none' (lifetime) or 'monthly' (calendar month) */
     budgetPeriod: z.enum(["none", "monthly"]).optional(),
     /** warn (non-blocking) when windowed spend crosses this percent of budget;
-     * the hard block stays at 100%, so 1..100 is the meaningful range */
+     * the hard block stays at 100%, so 1..100 is the meaningful range.
+     * Omitted = 80 (ADR-0181). */
     alertThresholdPct: z.number().int().min(1).max(100).optional(),
     /** §9 named arbiter for shared-context conflicts */
     arbiterUserId: z.string().uuid().nullable().optional(),
@@ -2210,8 +2211,8 @@ export const updateOrgSettingsSchema = z
      * loosens an air_gapped deployment — the enum has no such member. */
     egressCompiledDefaultPolicy: egressCompiledDefaultPolicySchema.optional(),
     /** ADR-0080 amendment (migration 0098, batch B3): does an approved AI use
-     * case gate dispatch? 'off' (default) = approval registers intent and
-     * gates nothing — the shipped honest limit, byte-identical. 'warn'
+     * case gate dispatch? 'enforce' is the ADR-0181 default; 'off' (an audited
+     * admin relaxation) = approval registers intent and gates nothing. 'warn'
      * records the refusal-shaped fact (audit row + response annotation)
      * without blocking. 'enforce' refuses a governed dispatch attributed to a
      * use-case-LINKED project (the `ai_use_cases.projectId` join — the only
@@ -2219,10 +2220,11 @@ export const updateOrgSettingsSchema = z
      * A project no use case links is untouched in every mode. */
     useCaseGateMode: z.enum(["off", "warn", "enforce"]).optional(),
     /** ADR-0080 amendment (migration 0101, batch B6b): must a governed
-     * dispatch NAME a project? false (default) = today, byte-identical — an
-     * unattributed dispatch runs and lands in the explicit "Unattributed" cost
-     * bucket. true = a governed dispatch with no `projectId` is refused 409
-     * `attribution_required`, audited, before any provider work. Independent
+     * dispatch NAME a project? true (the ADR-0181 default) = a governed
+     * dispatch with no `projectId` is refused 409 `attribution_required`,
+     * audited, before any provider work. false (an audited admin relaxation) =
+     * an unattributed dispatch runs and lands in the explicit "Unattributed"
+     * cost bucket. Independent
      * of `useCaseGateMode` by construction: this acts only where projectId is
      * null, that one only where it is not. */
     dispatchAttributionRequired: z.boolean().optional(),

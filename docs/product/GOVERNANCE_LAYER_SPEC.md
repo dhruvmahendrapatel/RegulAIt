@@ -355,7 +355,8 @@ with no separate instrumentation step.
   and never counted against any project budget. Deployments that want a hard guarantee instead
   of visibility close the gap entirely with the two admin toggles
   (`requireProjectAttribution` for the provider-compatibility surfaces,
-  `requireMcpAttribution` for the MCP proxy), which reject unattributed calls outright.
+  `requireMcpAttribution` for the MCP proxy), which reject unattributed calls outright. Both are
+  on by default (ADR-0181); relaxing either is an audited admin change.
 - **Per-project cost dashboard**: real-time spend broken down by project/Initiative/Shared
   Project (§9), with drill-down to team, user, agent/model, and connector/MCP-server level.
 - **Budget vs. actual**: admins set a budget per project (monthly or per billing cycle); the

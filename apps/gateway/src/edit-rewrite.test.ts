@@ -1,9 +1,12 @@
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, afterAll } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { costEvents, createDb, eq, runMigrations, type Db } from "@regulait/db";
 import { resolveModelProvider, type MockModelProvider } from "@regulait/model-provider";
 import { buildApp } from "./app.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 /**
  * PILLAR 6 §8 — edit vs rewrite, end to end: a dispatch carrying a large
@@ -112,6 +115,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
   mock = resolveModelProvider({ provider: "mock" }) as MockModelProvider;
 
   agentId = await makeAgent("edit-agent");
@@ -187,4 +191,8 @@ describe("edit vs rewrite estimate row + diff-directive threading", () => {
     const wire = mock.dispatches.filter((d) => d.input?.startsWith(marker)).at(-1)!;
     expect(wire.input).not.toContain(BASELINE_DELIMITER);
   });
+});
+
+afterAll(async () => {
+  await restoreSb2Gates();
 });

@@ -24,6 +24,9 @@ import {
 } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { PROJECT_HEADER } from "./compat-core.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 /**
  * ADR-0024 (ROADMAP §6 O11 / O13 / O15) — interception DEPTH, end to end.
@@ -220,6 +223,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, requireProjectAttribution: false, requireMcpAttribution: false, keyCustodyEnforced: false });
   gatewayUrl = await app.listen({ port: 0, host: "127.0.0.1" });
 
   // ADR-0034 amendment — model-credential `baseUrl` overrides are now behind
@@ -330,14 +334,16 @@ afterAll(async () => {
       openaiCompatEnabled: false,
       mcpInterceptionEnabled: true,
       resolutionMode: "map_by_model",
-      enforcementPosture: "voluntary",
-      requireProjectAttribution: false,
-      requireMcpAttribution: false,
-      keyCustodyEnforced: false,
+      // ADR-0181: the shipped defaults are strict
+      enforcementPosture: "managed",
+      requireProjectAttribution: true,
+      requireMcpAttribution: true,
+      keyCustodyEnforced: true,
     })
     .where(eq(interceptionSettings.id, INTERCEPTION_SETTINGS_ID));
   await db.delete(interceptionScopeRules);
   app.server.closeAllConnections();
+  await restoreSb2Gates();
   await app.close();
   await upstream.close();
 });

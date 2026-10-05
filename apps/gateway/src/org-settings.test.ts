@@ -41,6 +41,12 @@ import {
   type Db,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
+// resetOrg/resetInterception drop the singletons (strict defaults come back), so
+// afterEach re-applies exactly these
+const SB2_RELAXED = { mrmEnforced: false, dispatchAttributionRequired: false, requireProjectAttribution: false };
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -138,6 +144,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, SB2_RELAXED);
 
   // ADR-0034 amendment — model-credential / env `baseUrl` overrides are now
   // behind the default-deny egress guard. This suite points one at a loopback
@@ -192,6 +199,7 @@ afterEach(async () => {
   // EVERY test leaves the shared DB on the behaviour-preserving defaults
   await resetOrg();
   await resetInterception();
+  await relaxGovernanceGatesForTest(db, SB2_RELAXED);
   delete process.env.ANTHROPIC_API_KEY;
   delete process.env.ANTHROPIC_BASE_URL;
 });
@@ -203,6 +211,7 @@ afterAll(async () => {
   await db.delete(complianceProfiles).where(eq(complianceProfiles.tag, "orgset-ret"));
   if (ORIG_ANTHROPIC !== undefined) process.env.ANTHROPIC_API_KEY = ORIG_ANTHROPIC;
   if (ORIG_ANTHROPIC_BASE !== undefined) process.env.ANTHROPIC_BASE_URL = ORIG_ANTHROPIC_BASE;
+  await restoreSb2Gates();
   await app.close();
 });
 

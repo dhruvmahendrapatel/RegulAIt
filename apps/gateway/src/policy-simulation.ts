@@ -1610,10 +1610,10 @@ export function registerPolicySimulationRoutes(app: FastifyInstance, db: Db): vo
     return {
       settings: row,
       note:
-        "When OFF (the default), activating a policy version that no blast-radius preview has ever examined " +
-        "still succeeds — but the activation audit row permanently records that no preview existed. When ON, " +
-        "that activation is refused. Either way the omission is legible; the dial decides whether it is also " +
-        "blocking.",
+        "When ON (the default), activating a policy version that no blast-radius preview has examined is " +
+        "refused. When OFF (an audited admin relaxation), that activation succeeds — but the activation audit " +
+        "row permanently records that no preview existed. Either way the omission is legible; the dial decides " +
+        "whether it is also blocking.",
       defaults: {
         windowDays: POLICY_SIMULATION_DEFAULT_WINDOW_DAYS,
         rowCap: POLICY_SIMULATION_DEFAULT_ROW_CAP,
@@ -1623,7 +1623,7 @@ export function registerPolicySimulationRoutes(app: FastifyInstance, db: Db): vo
 
   app.put("/v1/policy-simulations/settings", async (req) => {
     const body = policySimulationSettingsSchema.parse(req.body ?? {});
-    await loadPolicySimulationSettings(db);
+    const before = await loadPolicySimulationSettings(db);
     const [row] = await db
       .update(policySimulationSettings)
       .set({
@@ -1641,7 +1641,13 @@ export function registerPolicySimulationRoutes(app: FastifyInstance, db: Db): vo
       userId: req.authCtx.userId ?? NIL_UUID,
       objectType: "abac_policy",
       objectId: null,
-      detail: { phase: "blast-radius-settings", ...body },
+      // ADR-0181: old -> new for the preview dial (on by default)
+      detail: {
+        phase: "blast-radius-settings",
+        ...body,
+        requirePreviewBeforeActivateFrom: before.requirePreviewBeforeActivate,
+        requirePreviewBeforeActivateTo: row!.requirePreviewBeforeActivate,
+      },
       effect: "allow",
       ruleId: "policy-simulation-settings-changed",
       ruleChain: [],

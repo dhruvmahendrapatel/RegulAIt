@@ -21,6 +21,9 @@ import {
 import { buildApp } from "./app.js";
 import { installLicenseFixture, removeLicenseFixture } from "./testing/license-fixture.js";
 import { PROJECT_HEADER } from "./mcp-proxy.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 /**
  * ADR-0019 — the four governance gaps, end to end at the gateway edge.
@@ -189,6 +192,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, requireMcpAttribution: false });
   // ADR-0052 §4: this suite exercises a route now tier-gated on
   // `advanced_orchestration` — run under a real signed license granting it
   // (removed in afterAll; the deployment ends UNLICENSED as it started).
@@ -289,6 +293,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await removeLicenseFixture(db);
   app.server.closeAllConnections();
+  await restoreSb2Gates();
   await app.close();
   await upstream.close();
 });

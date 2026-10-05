@@ -20,6 +20,9 @@ import { fileURLToPath } from "node:url";
 import { createDb, egressAllowHosts, runMigrations, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { installLicenseFixture, removeLicenseFixture } from "./testing/license-fixture.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -48,6 +51,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, requireProjectAttribution: false });
   // ADR-0052 §4: registering a custom model provider is tier-gated on
   // `custom_model_providers` and the flag is now ENFORCED at the route, so
   // this suite runs under a real signed license granting it. Removed in
@@ -115,6 +119,7 @@ afterAll(async () => {
   await removeLicenseFixture(db);
   srv.closeAllConnections();
   await new Promise<void>((r) => srv.close(() => r()));
+  await restoreSb2Gates();
 });
 
 const baseUrlFor = () => `http://127.0.0.1:${port}/v1`;

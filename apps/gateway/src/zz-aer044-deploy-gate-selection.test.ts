@@ -100,7 +100,7 @@ beforeAll(async () => {
 afterAll(async () => {
   // restore the org singleton exactly — a leaked enforced knob would fail
   // every later dispatch suite on this database
-  await db.update(orgSettings).set({ mrmEnforced: priorMrmEnforced ?? false });
+  await db.update(orgSettings).set({ mrmEnforced: priorMrmEnforced ?? true });
   const ids = Object.values(ag).filter(Boolean);
   if (ids.length) await db.delete(modelCards).where(inArray(modelCards.agentId, ids));
   app.server.closeAllConnections();

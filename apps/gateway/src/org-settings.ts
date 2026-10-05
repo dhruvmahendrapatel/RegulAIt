@@ -805,11 +805,15 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { 
         userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
         objectType: "org_settings",
         objectId: null,
+        // ADR-0181: a relaxation is legible as old -> new. `transitions` holds
+        // {from, to} per changed key; `previous` holds the (redacted) value each
+        // changed key had before this write. Both come from the same redacted row.
         detail: {
           via: req.authCtx.via,
           changed,
-          // ADR-0181: every relaxed (or tightened) dial is answerable as old -> new
           transitions: settingTransitions(redactSettings(locked), changed, ["tracingOtlpHeaders"]),
+          previous: ((prev: Record<string, unknown>) =>
+            Object.fromEntries(Object.keys(changed).map((k) => [k, prev[k] ?? null])))(redactSettings(locked)),
           after: redactSettings(after),
           approvalTtlPosture: approvalTtlPosture(after),
         },

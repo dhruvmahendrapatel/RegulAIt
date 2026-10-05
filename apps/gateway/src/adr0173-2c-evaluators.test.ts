@@ -41,6 +41,9 @@ import {
   type EvalRunRow,
 } from "@regulait/db";
 import { cohensKappa, meanScoreInterval, type EvalJudge, type EvalJudgeRequest } from "@regulait/shared";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 declare global {
   // eslint-disable-next-line no-var
@@ -211,6 +214,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
   const admin = await makeUser(`e2c-admin-${tag}@example.com`, true);
   adminId = admin.id;
   adminAuth = admin.auth;
@@ -231,6 +235,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (packId) await app.inject({ method: "DELETE", url: `/v1/compliance/packs/${packId}`, headers: AUTH });
+  await restoreSb2Gates();
   await app?.close();
 });
 

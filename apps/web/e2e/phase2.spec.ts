@@ -732,9 +732,10 @@ test("key custody enforced: the key card explains the state instead of offering 
   devTrack.assertClean("key custody — developer view");
   await dev.close();
 
-  // restore the deployment posture for anything that runs after this
+  // restore the deployment posture for anything that runs after this: key
+  // custody is ON by default (ADR-0181), so the restore is a no-op save
   await nav("Client access", "Client access");
-  await page.getByLabel("Enforce key custody").selectOption("false");
+  await page.getByLabel("Enforce key custody").selectOption("true");
   await page.getByRole("button", { name: "Save posture" }).click();
   await expect(page.getByText("Posture saved").first()).toBeVisible();
   track.assertClean("key custody — restored");

@@ -16,6 +16,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { aiRisks, aiUseCases, auditLog, and, createDb, eq, runMigrations, usageEvents, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -76,6 +79,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "d".repeat(64) });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, useCaseGateMode: "off" });
   const u = await call("/v1/users", AUTH, { email: `adr0149-${RUN}@example.com`, displayName: "Proposer" });
   user.id = u.json().id;
   user.auth = { authorization: `Bearer ${(await call(`/v1/users/${user.id}/keys`, AUTH, { name: "k" })).json().token}` };
@@ -86,6 +90,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   app.server.closeAllConnections();
+  await restoreSb2Gates();
   await app.close();
 });
 

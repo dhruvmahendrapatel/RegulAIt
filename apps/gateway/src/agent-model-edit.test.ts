@@ -13,6 +13,9 @@ import {
   type Db,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 /**
  * B1.5 F2 — `PATCH /v1/agents/:agentId`, the admin affordance the live run
@@ -109,6 +112,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
 
   const plainUser = await makeUser("ame-plain@example.com");
   plainUserAuth = plainUser.auth;
@@ -137,6 +141,7 @@ afterAll(async () => {
   await db.delete(usageEvents).where(inArray(usageEvents.agentId, ids));
   await db.delete(configActivationEvents).where(inArray(configActivationEvents.artifactId, ids));
   await db.delete(configVersions).where(inArray(configVersions.artifactId, ids));
+  await restoreSb2Gates();
 });
 
 describe("PATCH /v1/agents/:agentId — versioned agent_config edit surface", () => {

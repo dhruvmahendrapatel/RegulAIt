@@ -20,6 +20,9 @@ import {
 } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { executeGovernedToolCall, PROJECT_HEADER } from "./mcp-proxy.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 /**
  * F02 / ADR-0103 — the pillar-5 PROJECT budget on the MCP tool-call path.
@@ -147,6 +150,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "b".repeat(64) });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, requireMcpAttribution: false });
   gatewayUrl = await app.listen({ port: 0, host: "127.0.0.1" });
   const up = await startUpstream();
   upstreamClose = up.close;
@@ -191,6 +195,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   app.server.closeAllConnections();
+  await restoreSb2Gates();
   await app.close();
   await upstreamClose();
 });

@@ -64,6 +64,9 @@ import {
   setRetryConfig,
   withUpstreamRetry,
 } from "./upstream-retry.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 /** The policy Part 2 runs under. Tiny backoffs because the SCHEDULE is asserted
  *  in Part 1 and here only the attempt count matters. */
@@ -491,6 +494,7 @@ beforeAll(async () => {
     breaker: { failureThreshold: 50 },
     retry: RETRY_ON,
   });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, requireMcpAttribution: false });
   auth = await userKeyFor(app, "on");
   gatewayUrl = await app.listen({ host: "127.0.0.1", port: 0 });
 
@@ -503,6 +507,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   app.server.closeAllConnections();
+  await restoreSb2Gates();
   await app.close();
   for (const sock of blackHoleSockets) sock.destroy();
   blackHoleSockets.clear();
