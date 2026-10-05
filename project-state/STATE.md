@@ -21,6 +21,15 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-10-05 (early) - Owner's Windows Docker demo is up and prepared (18/18).** Two Docker defects surfaced on the owner's first
+Windows run and are fixed and pushed. (1) A CRLF checkout broke `docker-start.sh` (M-069): `.gitattributes` now pins `*.sh` to LF
+and the Dockerfile strips CR. (2) Docker ran only the seed, so compliance packs and demo content were missing: with
+`REGULAIT_DEMO_LICENSE=1` the start script now runs demo-mcp in the background plus setup, intake, traffic and check once per
+fresh database (the marker is the demo-traffic key; a restart skips it), creates the export-signing key in the demo volume and
+sets `REGULAIT_OFFLINE_CHECKS=1`. All of this applies in demo mode only. Also seen: a second checkout in a same-named folder
+reuses the `regulait` compose project's volumes and trips the data-key mismatch guard. `down -v` (owner's choice) or a distinct
+`COMPOSE_PROJECT_NAME` resolves it; worth a README hint. CI green on d0cb405. Next: ADR-0173 batch 2c, then ADR-0175 D3/D4.
+
 **2026-10-04 (night) - ADR-0175 D2 remainder, AER-056, Windows portability and the Docker demo password pushed.** A7: the
 Credentials admin page (18 stored credential types, flags, windowed and indexed ledger reads, paging). The `stale_credentials`
 alerts are off by default and roll up per type and flag. A15: energy and emissions estimates (admin-entered factors with no
