@@ -27,6 +27,7 @@ import {
   teamsCredentialSchema,
 } from "@regulait/connector-provider";
 import { buildApp } from "./app.js";
+import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
 import { CHATOPS_OUTBOUND_PROVIDERS } from "./chatops.js";
 import { COMPILED_DEFAULT_RULE_ID, decideCompiledDefault } from "./compiled-egress.js";
 import type { EgressAllowEntry } from "./egress-guard.js";
@@ -131,9 +132,13 @@ const rowFor = async (name: string) =>
 
 const connectionCount = async () => (await db.select().from(chatopsConnections)).length;
 
+let restoreSb1Posture: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0181: the org PII floor ships at block. This file pins behaviour unrelated to
+  // PII handling, so it sets the floor off explicitly; restored in afterAll.
+  restoreSb1Posture = await relaxDataPostureForTest(db, { org: { defaultPiiMode: "none" }, interception: false, guardrails: false });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
 
   // Outlook's own connector. `providerKind` must match the ChatOps provider —
@@ -169,6 +174,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreSb1Posture?.();
   await db
     .delete(chatopsConnections)
     .where(inArray(chatopsConnections.name, [OUTLOOK_CONNECTION, SLACK_CONNECTION]));

@@ -34,6 +34,7 @@ import {
   sql,
 } from "@regulait/db";
 import { builderKit, type BuilderKit, type Person } from "./testing/builder-fixture.js";
+import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
 import { AUTONOMY_DECLARED_RULE_ID, AUTONOMY_READ_RULE_ID, autonomyFloorFor, autonomyMonitorInput } from "./autonomy.js";
 
 /** an autonomy floor is always a measured condition; the union also admits manual ones */
@@ -112,8 +113,12 @@ const step = (agentId: string, t: { threadId: string; messageId: string }, over:
     ...over,
   });
 
+let restoreSb1Posture: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   k = await builderKit("a8-auto");
+  // ADR-0181: the shipped guardrail posture now meets the warn/block floors. This file
+  // pins each floor coming back as unmet, so it starts from the pre-strict all-log posture.
+  restoreSb1Posture = await relaxDataPostureForTest(k.db, { org: false, interception: false });
   [owner, colleague] = await Promise.all([k.person("owner"), k.person("colleague")]);
   admin = await k.person("admin", { admin: true });
   model = await k.model("m");
@@ -140,6 +145,7 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  await restoreSb1Posture?.();
   if (useCaseIds.length) await k.db.delete(aiUseCases).where(inArray(aiUseCases.id, useCaseIds));
   if (chatId) {
     await k.db.delete(builderAgentChannels).where(eq(builderAgentChannels.chatopsConnectionId, chatId));

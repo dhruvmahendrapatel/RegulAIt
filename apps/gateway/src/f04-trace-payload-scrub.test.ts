@@ -61,6 +61,7 @@ import {
 } from "@regulait/db";
 import { buildOtlpPayload, scrubAuditText } from "@regulait/shared";
 import { buildApp } from "./app.js";
+import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -181,9 +182,14 @@ function markerIn(s: string | null | undefined): string | null {
   return (s ?? "").match(/\[redacted:[^\]]+\]/)?.[0] ?? null;
 }
 
+let restoreSb1Posture: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0181: trace content capture ships OFF. This file pins the scrub of CAPTURED
+  // previews, so it opts in explicitly, with the org PII floor (block by default) off
+  // so the over-scrub guard's ordinary tool arguments reach the upstream.
+  restoreSb1Posture = await relaxDataPostureForTest(db, { org: { tracingCaptureContent: true, defaultPiiMode: "none" }, interception: false, guardrails: false });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "f".repeat(64) });
   upstream = await startUpstream();
   gatewayUrl = await app.listen({ port: 0, host: "127.0.0.1" });
@@ -228,6 +234,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreSb1Posture?.();
   app.server.closeAllConnections();
   await app.close();
   await upstream.close();

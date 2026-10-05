@@ -13,6 +13,7 @@ import {
 } from "@regulait/db";
 import { resolveModelProvider, type MockModelProvider } from "@regulait/model-provider";
 import { buildApp } from "./app.js";
+import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
 
 /**
  * ADR-0020 §5 amendment (2026-07-31) — the COMPAT LONG TAIL, end to end:
@@ -95,9 +96,13 @@ async function mkAgent(name: string, provider: string, model: string) {
   return r.json().id as string;
 }
 
+let restoreSb1Posture: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0181: this file pins the compat long tail as written against the lax posture:
+  // temperature accepted-and-disclosed, plain streams with no org PII floor.
+  restoreSb1Posture = await relaxDataPostureForTest(db, { org: { defaultPiiMode: "none" }, interception: { strictFieldRejection: false }, guardrails: false });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   mock = resolveModelProvider({ provider: "mock" }) as MockModelProvider;
 
@@ -139,6 +144,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreSb1Posture?.();
   await db
     .update(interceptionSettings)
     .set({ anthropicCompatEnabled: false, openaiCompatEnabled: false })

@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -12,6 +12,7 @@ import {
 } from "@regulait/db";
 import { resolveModelProvider, type MockModelProvider } from "@regulait/model-provider";
 import { buildApp } from "./app.js";
+import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
 
 /**
  * Multi-turn conversations end to end: create → dispatch twice with history →
@@ -83,9 +84,14 @@ async function makeUser(email: string, displayName: string, isAdmin = false) {
   return { id: user.json().id as string, auth: { authorization: `Bearer ${key.json().token}` } };
 }
 
+let restoreSb1Posture: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0181: the org PII floor ships at block. This file pins behaviour unrelated to
+  // PII handling, so it sets the floor off explicitly, and the injection and jailbreak
+  // layers to warn (a block-mode output layer never streams live); restored in afterAll.
+  restoreSb1Posture = await relaxDataPostureForTest(db, { org: { defaultPiiMode: "none" }, interception: false, guardrails: { promptInjectionMode: "warn", jailbreakMode: "warn" } });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   // the gateway resolves "mock" to the module-shared instance, so the test
   // can read the exact wire shape each governed dispatch produced
@@ -611,4 +617,8 @@ describe("S21 — listing conversations filtered by project", () => {
     const r = await app.inject({ method: "GET", headers: miaAuth, url: "/v1/conversations?projectId=not-a-uuid" });
     expect(r.statusCode).toBe(400);
   });
+});
+
+afterAll(async () => {
+  await restoreSb1Posture?.();
 });

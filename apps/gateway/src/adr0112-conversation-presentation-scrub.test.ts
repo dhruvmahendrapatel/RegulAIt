@@ -33,7 +33,7 @@
  * filtered to rows this file created; deltas, never absolute counts; the
  * `org_settings` singleton is never touched.
  */
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -41,6 +41,7 @@ import { createDb, runMigrations, sql, type Db } from "@regulait/db";
 import { scrubAuditText } from "@regulait/shared";
 import { resolveModelProvider, type MockModelProvider } from "@regulait/model-provider";
 import { buildApp } from "./app.js";
+import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
 import { PRESENTATION_SCRUB, scrubPresentedPayload } from "./conversation-presentation.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -142,9 +143,13 @@ function textTurns(wire: { messages?: ReadonlyArray<{ role: string; content: unk
   );
 }
 
+let restoreSb1Posture: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0181: this file pins how a conversation PRESENTS scrubbed content, not the inline
+  // controls: the org PII floor is set off and the injection/jailbreak layers to warn.
+  restoreSb1Posture = await relaxDataPostureForTest(db, { org: { defaultPiiMode: "none" }, interception: false, guardrails: { promptInjectionMode: "warn", jailbreakMode: "warn" } });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   mock = resolveModelProvider({ provider: "mock" }) as MockModelProvider;
 
@@ -497,4 +502,8 @@ describe("ADR-0112 §4 — the over-scrub guard", () => {
     // the original object is NOT mutated — the stored/loaded row must survive
     expect(payload.messages[0]!.content).toBe(SECRET_TURN);
   });
+});
+
+afterAll(async () => {
+  await restoreSb1Posture?.();
 });

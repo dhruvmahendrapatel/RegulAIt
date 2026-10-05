@@ -50,6 +50,7 @@ import {
   webhookSubscriptions,
 } from "@regulait/db";
 import { loadOrgSettings } from "./org-settings.js";
+import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
 import { calibrationLabelsFromAnnotations } from "./eval-judge-calibration.js";
 import { ANNOTATION_LIMITS, ANNOTATION_NOT_RETAINED, ANNOTATION_WITHHELD_MARKER } from "@regulait/shared";
 import { builderKit, type BuilderKit, type Person } from "./testing/builder-fixture.js";
@@ -127,8 +128,12 @@ const auditRows = (ruleId: string, objectId: string) =>
 const submit = (who: Person, itemId: string, body: Record<string, unknown>) =>
   k.req("POST", `/v1/annotations/items/${itemId}/submissions`, who.auth, body);
 
+let restoreSb1Posture: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   k = await builderKit("annq");
+  // ADR-0181: trace content capture ships OFF. This file pins review items built
+  // from CAPTURED content (and toggles capture itself), so it opts in explicitly.
+  restoreSb1Posture = await relaxDataPostureForTest(k.db, { org: { tracingCaptureContent: true }, interception: false, guardrails: false });
   admin = await k.person("admin", { admin: true });
   rev1 = await k.person("rev1");
   rev2 = await k.person("rev2");
@@ -146,6 +151,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreSb1Posture?.();
   await drainBackgroundWork(k.db);
   if (subId) await k.db.delete(webhookSubscriptions).where(eq(webhookSubscriptions.id, subId));
   if (queueIds.length) await k.db.delete(annotationQueues).where(inArray(annotationQueues.id, queueIds));

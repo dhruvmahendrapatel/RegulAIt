@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { auditLog, connectorGrants, connectors, createDb, egressAllowHosts, eq, guardrailConfigs, runMigrations, sql, traceSpans, usageEvents, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
 import * as connectionEgress from "./connection-egress.js";
 import { createGuardedFetch } from "./egress-guard.js";
 import { prepareConnectorPiiAction } from "./connector-pii.js";
@@ -33,9 +34,14 @@ async function post(url: string, payload: unknown) {
   return result.json();
 }
 
+let restoreSb1Posture: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../packages/db/migrations"));
+  // ADR-0181: the org PII floor ships at block and would refuse these payloads before
+  // the redaction under test runs, so the floor is set off explicitly; and it pins the
+  // scrubbed CAPTURED previews, so content capture (off by default) is switched on.
+  restoreSb1Posture = await relaxDataPostureForTest(db, { org: { defaultPiiMode: "none", tracingCaptureContent: true }, interception: false, guardrails: false });
   app = buildApp(db, { bootstrapToken: "connector-redaction-test", dataKey: "a".repeat(64) });
   upstream = http.createServer((req, res) => {
     let body = "";
@@ -60,6 +66,7 @@ beforeAll(async () => {
 beforeEach(() => { calls = []; response = { text: RAW }; upstreamStatus = 200; onCall = undefined; location = undefined; });
 afterEach(() => vi.restoreAllMocks());
 afterAll(async () => {
+  await restoreSb1Posture?.();
   if (previousAllow) await db.update(egressAllowHosts).set(previousAllow).where(eq(egressAllowHosts.id, previousAllow.id));
   else await db.delete(egressAllowHosts).where(eq(egressAllowHosts.host, "127.0.0.1"));
   await app?.close();

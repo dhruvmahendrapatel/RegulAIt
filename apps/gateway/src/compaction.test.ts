@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -17,6 +17,7 @@ import {
   type MockModelProvider,
 } from "@regulait/model-provider";
 import { buildApp } from "./app.js";
+import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
 
 /**
  * PILLAR 6 §5 — automatic context compaction, end to end: drive a thread past
@@ -127,9 +128,13 @@ async function sendTurn(auth: { authorization: string }, agentId: string, conver
   };
 }
 
+let restoreSb1Posture: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0181: this file pins compaction as written against the lax posture: fail-open
+  // on a failing summarizer, no org PII floor, and live streams (no block-mode output layer).
+  restoreSb1Posture = await relaxDataPostureForTest(db, { org: { compactionFailureMode: "fail_open", defaultPiiMode: "none" }, interception: false, guardrails: { promptInjectionMode: "warn", jailbreakMode: "warn" } });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   mock = resolveModelProvider({ provider: "mock" }) as MockModelProvider;
 
@@ -244,7 +249,7 @@ describe("threshold crossing → one governed compaction dispatch", () => {
       d.system?.includes(CONVERSATION_COMPACTION_SENTINEL) && d.input.includes("orbital-billing"),
     )!;
     expect(compactionWire).toBeDefined();
-    expect(compactionWire.input).toContain(`user: ${turnInput(0)}`);
+    expect(compactionWire.input).toContain(`[user] ${turnInput(0)}`);
   });
 
   it("each summary-riding dispatch landed a context_compaction savings row of plausible magnitude", async () => {
@@ -303,7 +308,7 @@ describe("re-compaction is cumulative", () => {
     expect(wire.input.startsWith("Prior summary:\n")).toBe(true);
     expect(wire.input).toContain(firstSummary);
     // compacted-away turn 0 is never re-read into a summarization input
-    expect(wire.input).not.toContain(`user: ${turnInput(0)}`);
+    expect(wire.input).not.toContain(`[user] ${turnInput(0)}`);
 
     const [after] = await db.select().from(conversations).where(eq(conversations.id, convoId));
     expect(after!.summaryThroughMessageId).not.toBe(firstBoundary);
@@ -378,4 +383,8 @@ describe("fail-open — a failing summarizer never fails the user's turn", () =>
     expect(msgs.filter((m) => m.role === "user").map((m) => m.content)[0]).toBe(poison);
     expect(msgs.length % 2).toBe(0); // strict user/assistant pairs, nothing dropped
   });
+});
+
+afterAll(async () => {
+  await restoreSb1Posture?.();
 });

@@ -224,6 +224,32 @@ describe("ADR-0181 SB1 — the strict posture bites on the dispatch path", () =>
     expect(status.providers.google.configured).toBe(false);
   });
 
+  it("conversation compaction still works under the strict guardrail and fail-closed defaults", async () => {
+    // the platform's own summarizer transcript must not read as a forged role
+    // turn to the injection layer (which blocks by default), or every
+    // compaction fails closed and long conversations are refused
+    const convo = await app.inject({
+      method: "POST",
+      url: "/v1/conversations",
+      headers: userAuth,
+      payload: { agentId: mockAgentId },
+    });
+    expect(convo.statusCode, convo.body).toBe(201);
+    const filler = " The migration must keep invoice numbering strictly monotonic across regions.".repeat(13);
+    let compacted = false;
+    for (let i = 0; i < 8 && !compacted; i++) {
+      const r = await app.inject({
+        method: "POST",
+        url: `/v1/agents/${mockAgentId}/invoke`,
+        headers: userAuth,
+        payload: { mode: "chat", input: `plan ledger step ${i}.${filler}`, dispatch: true, conversationId: convo.json().id },
+      });
+      expect(r.statusCode, r.body).toBe(200);
+      compacted = Boolean(r.json().compaction?.compacted);
+    }
+    expect(compacted).toBe(true);
+  });
+
   it("no prompt or output preview is stored while trace content capture is off", async () => {
     const r = await invoke(mockAgentId, { input: "Draft the release note for build 7" });
     expect(r.statusCode, r.body).toBe(200);

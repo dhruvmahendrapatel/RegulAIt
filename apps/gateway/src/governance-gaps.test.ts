@@ -19,6 +19,7 @@ import {
   type Db,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
 import { installLicenseFixture, removeLicenseFixture } from "./testing/license-fixture.js";
 import { PROJECT_HEADER } from "./mcp-proxy.js";
 
@@ -185,9 +186,13 @@ async function invokeAgent(agentId: string, extra: Record<string, unknown> = {})
   });
 }
 
+let restoreSb1Posture: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0181: this file pins the pre-strict streaming and PII-floor behaviour (G2/G3):
+  // no org PII floor, suppress-and-disclose on a block project, live deltas otherwise.
+  restoreSb1Posture = await relaxDataPostureForTest(db, { org: { defaultPiiMode: "none" }, interception: { streamingOnBlockMode: "suppress" }, guardrails: { promptInjectionMode: "warn" } });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   // ADR-0052 §4: this suite exercises a route now tier-gated on
   // `advanced_orchestration` — run under a real signed license granting it
@@ -287,6 +292,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreSb1Posture?.();
   await removeLicenseFixture(db);
   app.server.closeAllConnections();
   await app.close();
