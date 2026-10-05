@@ -299,6 +299,9 @@ export async function seedDemoIntake(
     }
   }
 
+  // --- time-boxed risk acceptance (ADR-0180 A10) for the use case the story ships -------------
+  await seedRiskAcceptances(call, ada.auth, useCaseId, report);
+
   // --- required AI tests (ADR-0180 A3): real red-team runs for the agents the story ships ---
   await seedRequiredTestRuns(call, ada, agentId, fixtures, report);
 
@@ -504,5 +507,74 @@ async function seedRequiredTestRuns(
     if (Number(run.defeated) > 0 || Number(run.notRunProbes) > 0) {
       report.notes.push(`required-test run on ${name} is not clean (${run.defeated} defeated, ${run.notRunProbes} not run): the deploy gate will say so`);
     }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0180 A10 — the residual risk the story's shipped use case carries
+// ---------------------------------------------------------------------------
+
+/**
+ * Under the strict default tolerance (residual above `medium` needs a valid
+ * acceptance), three seeded use cases carry a HIGH residual risk with none:
+ * Real-Time Fraud Detection Engine (approved), HR Resume Screening Assistant
+ * (under review) and Call-Centre Voice IVR Assistant (proposed). The story
+ * ships ONLY the fraud engine (its production gate turns ALLOW once its two
+ * alerts are acknowledged), so only its risk carries a seeded, time-boxed
+ * acceptance, recorded through the real route by Ada (an admin who is not the
+ * use case's owner) with compensating controls and the band's longest expiry
+ * (6 months for high). The other two are not approved and stay truthfully
+ * above tolerance: their alerts are real.
+ */
+export const DEMO_RISK_ACCEPTANCES: ReadonlyArray<{
+  useCaseKey: string;
+  titleStartsWith: string;
+  body: { responseType: string; rationale: string; compensatingControls: Array<{ controlRef?: string; description: string }> };
+}> = [
+  {
+    useCaseKey: "uc-6",
+    titleStartsWith: "Fraud model falsely blocks transactions",
+    body: {
+      responseType: "mitigate_partially",
+      rationale:
+        "Residual disparity risk accepted for six months while the fairness remediation ships: every automated block is " +
+        "reviewable by a person within one business day, and the disparity by segment is measured monthly. " +
+        "Re-assess at expiry or on any breach.",
+      compensatingControls: [
+        { description: "A person reviews every automated transaction block within one business day, and the customer can appeal." },
+        { description: "Monthly false-positive rate by customer segment, reported to the model-risk committee." },
+      ],
+    },
+  },
+];
+
+async function seedRiskAcceptances(
+  call: (method: string, url: string, payload?: unknown, headers?: Record<string, string>) => Promise<{ status: number; body: Json }>,
+  auth: Record<string, string>,
+  useCaseId: Map<string, string>,
+  report: DemoSeedReport,
+): Promise<void> {
+  const ok = (s: number) => s >= 200 && s < 300;
+  const risks: Json[] = (await call("GET", "/v1/risks", undefined, auth)).body.risks ?? [];
+  for (const a of DEMO_RISK_ACCEPTANCES) {
+    const ucId = useCaseId.get(a.useCaseKey);
+    const risk = risks.find((r) => r.useCaseId === ucId && String(r.title).startsWith(a.titleStartsWith));
+    if (!ucId || !risk) {
+      report.notes.push(`risk acceptance: '${a.titleStartsWith}...' not seeded`);
+      continue;
+    }
+    const history = await call("GET", `/v1/risks/${risk.id}/acceptances`, undefined, auth);
+    if (history.status === 501) {
+      // before ADR-0180 A10 lands the route is a stub: nothing to record yet
+      report.notes.push(`risk acceptance of '${risk.title}' not recorded: the acceptance route is not available (${history.status})`);
+      continue;
+    }
+    if (ok(history.status) && (history.body.acceptances ?? []).some((x: Json) => x.state === "live")) {
+      report.skipped.push(`risk acceptance ${risk.title}`);
+      continue;
+    }
+    const r = await call("POST", `/v1/risks/${risk.id}/acceptances`, a.body, auth);
+    if (ok(r.status)) report.created.push(`risk acceptance ${risk.title}`);
+    else report.failed.push(`risk acceptance ${risk.title}: ${r.status} ${String(r.body.error ?? "")} ${String(r.body.detail ?? "").slice(0, 160)}`.trim());
   }
 }
