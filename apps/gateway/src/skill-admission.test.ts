@@ -11,6 +11,11 @@ import { builderKit, type BuilderKit, type Person } from "./testing/builder-fixt
 import { buildSystemPrompt } from "./builder-runtime.js";
 import { runSkillAdmissionRescan, skillDigest } from "./skill-admission.js";
 import { runMcpAdmissionRescan } from "./mcp-admission-rescan.js";
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+
+// ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
+// seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 
 let k: BuilderKit;
 let owner: Person;
@@ -48,6 +53,7 @@ const skillRow = async (id: string) => (await k.db.select().from(builderSkills).
 
 beforeAll(async () => {
   k = await builderKit("bld-adm");
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(k.db);
   owner = await k.person("owner");
   colleague = await k.person("colleague");
   admin = await k.person("admin", { admin: true });
@@ -55,7 +61,10 @@ beforeAll(async () => {
   await k.grantModel(owner.id, model);
 }, 120_000);
 
-afterAll(async () => k.close());
+afterAll(async () => {
+  await restoreStrictAdmission?.();
+  await k.close();
+});
 
 describe("scan at create, import and update", () => {
   it("refuses a high-severity body with 422 skill_admission_refused and counts-only findings; nothing is stored", async () => {

@@ -103,6 +103,11 @@ vi.mock("@regulait/model-provider", async (importOriginal) => {
 
 const { buildApp } = await import("./app.js");
 import { installLicenseFixture, removeLicenseFixture } from "./testing/license-fixture.js";
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+
+// ADR-0181: this file pins behaviour that is not the strict compiled-egress default (a
+// vendor endpoint answered by a local double) — relaxed explicitly, restored after.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -238,6 +243,7 @@ beforeAll(async () => {
   for (const name of PROVIDER_ENV_VARS) delete process.env[name];
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(db, ["egressCompiledDefaultPolicy"]);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   // ADR-0052 §4: decompose is tier-gated on `advanced_orchestration`, now
   // enforced at the route — run under a real signed license granting it
@@ -304,6 +310,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreStrictAdmission?.();
   await putOrgSettings({
     summarizerSelection: priorSummarizerSelection ?? "cheapest",
     summarizerAgentId: priorSummarizerAgentId,

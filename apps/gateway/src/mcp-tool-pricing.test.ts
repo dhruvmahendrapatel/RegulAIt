@@ -8,6 +8,11 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { and, auditLog, createDb, desc, eq, mcpServers, runMigrations, usageEvents, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { executeGovernedToolCall } from "./mcp-proxy.js";
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+
+// ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
+// seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 
 /**
  * O10 (ADR-0027, migration 0045) — per-tool MCP pricing. The flat per-server
@@ -75,6 +80,7 @@ async function startUpstream(): Promise<{ url: string; close: () => Promise<void
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
   app = buildApp(db, { bootstrapToken: BOOT });
   const up = await startUpstream();
   upstreamClose = up.close;
@@ -94,6 +100,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreStrictAdmission?.();
   await upstreamClose();
 });
 

@@ -8,6 +8,11 @@ import { and, auditLog, builderAgents, eq } from "@regulait/db";
 import { parseSkillMarkdown } from "@regulait/shared";
 import { builderKit, type BuilderKit, type Person } from "./testing/builder-fixture.js";
 import { buildSystemPrompt } from "./builder-runtime.js";
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+
+// ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
+// seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 
 let k: BuilderKit;
 let owner: Person;
@@ -32,12 +37,16 @@ const listIds = async (who: Person) =>
 
 beforeAll(async () => {
   k = await builderKit("bld-skills");
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(k.db);
   owner = await k.person("owner");
   colleague = await k.person("colleague");
   admin = await k.person("admin", { admin: true });
 }, 120_000);
 
-afterAll(async () => k.close());
+afterAll(async () => {
+  await restoreStrictAdmission?.();
+  await k.close();
+});
 
 describe("skills library", () => {
   it("private skills are the owner's (and admins'); workspace skills are everyone's", async () => {

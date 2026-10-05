@@ -20,6 +20,7 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createDb, runMigrations, backupRuns, eq } from "@regulait/db";
+import { auditLog, mcpServers } from "@regulait/db"; // ADR-0181 (SC): seedStrictAdmission
 import { buildApp } from "./app.js";
 import { ensureEphemeralLicense } from "./ephemeral-license.js";
 import { dataKeyFormatError } from "./secrets.js";
@@ -1520,7 +1521,6 @@ ${pmWebhookSecret ? `\n    demo-pm webhook secret (shown ONCE)  ${pmWebhookSecre
 //    sync and admitted on a clean manifest, like any other server.
 // ===========================================================================
 async function seedStrictAdmission(): Promise<void> {
-  const { auditLog: scAuditLog, mcpServers: scMcpServers, eq: scEq } = await import("@regulait/db");
   const localHosts = [
     ...new Set(
       ["127.0.0.1", "127.0.0.2", process.env.REGULAIT_DEMO_MCP_HOST_REPO, process.env.REGULAIT_DEMO_MCP_HOST_WAREHOUSE].filter(
@@ -1556,16 +1556,16 @@ async function seedStrictAdmission(): Promise<void> {
   for (const [name, url] of historic) {
     const id: string = have.find((s) => s.name === name)?.id ?? (await call("POST", "/v1/servers", { name, url })).id;
     const [row] = await db
-      .select({ releaseDigest: scMcpServers.releaseDigest, releaseSeenAt: scMcpServers.releaseSeenAt })
-      .from(scMcpServers)
-      .where(scEq(scMcpServers.id, id));
+      .select({ releaseDigest: mcpServers.releaseDigest, releaseSeenAt: mcpServers.releaseSeenAt })
+      .from(mcpServers)
+      .where(eq(mcpServers.id, id));
     // once only: a server that has synced a manifest, or is already dated, is left alone
     if (!row || row.releaseDigest !== null || row.releaseSeenAt.getTime() <= registeredAt.getTime()) continue;
     await db
-      .update(scMcpServers)
+      .update(mcpServers)
       .set({ createdAt: registeredAt, releaseSeenAt: registeredAt })
-      .where(scEq(scMcpServers.id, id));
-    await db.insert(scAuditLog).values({
+      .where(eq(mcpServers.id, id));
+    await db.insert(auditLog).values({
       userId: "00000000-0000-0000-0000-000000000000",
       serverId: id,
       objectType: "mcp_server",

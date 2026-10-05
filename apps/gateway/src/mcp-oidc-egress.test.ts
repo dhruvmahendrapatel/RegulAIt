@@ -222,9 +222,8 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  // leave the shared database in the posture it FOUND (ADR-0181 ships private ranges closed)
   await restoreStrictAdmission?.();
-  // leave the shared database in the shipped posture for whatever runs next
-  await setOrgDefault(true);
   app.server.closeAllConnections();
   await app.close();
   await upstream.close();
@@ -633,7 +632,7 @@ describe("ADR-0043 — OIDC issuers behind the egress guard", () => {
     await dropAllowHost(hostId);
   });
 
-  it("(hygiene) the org toggle survives this suite at its shipped default", async () => {
+  it("(hygiene) the org toggle is back at this file's open baseline (afterAll then restores what it found)", async () => {
     const [org] = await db.select().from(orgSettings).where(eq(orgSettings.id, ORG_SETTINGS_ID));
     expect(org!.mcpPrivateRangesDefault).toBe(true);
   });

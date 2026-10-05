@@ -8,6 +8,11 @@ import { createDb, eq, mcpServers, runMigrations, sql, usageEvents, type Db } fr
 import { buildApp } from "./app.js";
 import { executeGovernedToolCall } from "./mcp-proxy.js";
 import { loadOrgSettings } from "./org-settings.js";
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+
+// ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
+// seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 
 /**
  * F03 (ADR-0179 §4) — THE PROJECT BUDGET GATE AT THE BOUNDARY, UNDER
@@ -130,6 +135,7 @@ const call = (projectId: string) =>
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "a".repeat(64) });
   const up = await startUpstream();
   upstreamClose = up.close;
@@ -169,6 +175,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreStrictAdmission?.();
   app.server.closeAllConnections();
   await app.close();
   await upstreamClose();
