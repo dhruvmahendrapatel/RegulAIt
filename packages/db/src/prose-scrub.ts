@@ -109,6 +109,13 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.releaseOverrides, ["reason"]],
   // ADR-0175 A15 — the admin's note on where an energy factor came from
   [s.energyFactors, ["sourceNote"]],
+  // ADR-0173 batch 2c — a reviewer's annotation comment (free prose typed
+  // beside a score), a judge's rationale (model output that can quote the
+  // case, which can quote a secret), and an automation rule's pause reason
+  // (fixed codes today, but an unconstrained text column)
+  [s.annotationSubmissions, ["comment"]],
+  [s.evalJudgeVerdicts, ["rationale"]],
+  [s.automationRules, ["pausedReason"]],
   // --- governance decisions and overrides (pillar 1) ---
   [s.approvals, ["decisionReason"]],
   [s.approvalDelegations, ["reason"]],
@@ -245,10 +252,14 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
  * - `usage_events.stop_reason` — the model provider's finish-reason vocabulary
  *   (`end_turn`, `max_tokens`, `cached`), not free text, on the
  *   highest-volume write path in the schema. Excluded on both grounds.
+ * - `trace_retention_holds.release_reason` — a DB CHECK limits it to
+ *   `'erasure'` or `'admin'` (ADR-0173 batch 2c); the free-text erasure
+ *   reference goes to `audit_log`, which ADR-0099 scrubs.
  */
 export const PROSE_SCRUB_EXCLUSIONS: readonly string[] = [
   "audit_log.reason",
   "mcp_registry_entries.conflict_reason",
+  "trace_retention_holds.release_reason",
   "usage_events.stop_reason",
 ];
 

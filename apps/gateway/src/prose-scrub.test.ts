@@ -482,6 +482,10 @@ describe("6. the covered / NOT-covered inventory", () => {
     "release_overrides.reason",
     // ADR-0175 A15: where an energy factor came from
     "energy_factors.source_note",
+    // ADR-0173 batch 2c: an annotation comment, a judge rationale, a rule pause reason
+    "annotation_submissions.comment",
+    "eval_judge_verdicts.rationale",
+    "automation_rules.paused_reason",
     "agents.halted_reason",
     "agents.lifecycle_reason",
     "ai_endpoint_signatures.replacement_note",
@@ -562,6 +566,7 @@ describe("6. the covered / NOT-covered inventory", () => {
     expect([...PROSE_SCRUB_EXCLUSIONS].sort()).toEqual([
       "audit_log.reason",
       "mcp_registry_entries.conflict_reason",
+      "trace_retention_holds.release_reason",
       "usage_events.stop_reason",
     ]);
     // and the excluded ones are genuinely absent from the covered set
